@@ -1,0 +1,230 @@
+import axios, {
+  AxiosError,
+  AxiosHeaders,
+  type AxiosInstance,
+  type AxiosResponse,
+  type InternalAxiosRequestConfig,
+} from "axios"
+
+import type { User } from "../types/user"
+import type {
+  CreateWorkspacePayload,
+  Workspace,
+  WorkspaceWithStages,
+} from "../types/workspace"
+import type {
+  EvalResult,
+  RefineResponse,
+  Stage,
+  StageVersion,
+} from "../types/stage"
+
+interface RetryableRequestConfig extends InternalAxiosRequestConfig {
+  _retry?: boolean
+}
+
+interface RefreshTokenResponse {
+  access_token?: string
+  accessToken?: string
+}
+
+export interface CreditBalance {
+  balance: number
+}
+
+export interface ProviderModel {
+  id: string
+  name: string
+}
+
+export interface Provider {
+  id: "anthropic" | "openai" | "google"
+  name: string
+  models: ProviderModel[]
+  judge_model?: string
+}
+
+export interface ProviderCatalog {
+  providers: Provider[]
+}
+
+let accessToken: string | null = null
+
+export function setAccessToken(token: string | null): void {
+  accessToken = token
+}
+
+export function getAccessToken(): string | null {
+  if (accessToken) {
+    return accessToken
+  }
+
+  return localStorage.getItem("access_token")
+}
+
+export function attachAuthorizationHeader(
+  config: InternalAxiosRequestConfig,
+  token: string | null,
+): InternalAxiosRequestConfig {
+  if (!token) {
+    return config
+  }
+
+  const headers = AxiosHeaders.from(config.headers)
+  headers.set("Authorization", `Bearer ${token}`)
+
+  return {
+    ...config,
+    headers,
+  }
+}
+
+export function shouldAttemptRefresh(error: AxiosError): boolean {
+  const config = error.config as RetryableRequestConfig | undefined
+
+  return error.response?.status === 401 && config?._retry !== true
+}
+
+export async function handleUnauthorizedResponse(
+  error: AxiosError,
+  client: AxiosInstance,
+  refreshClient: AxiosInstance,
+): Promise<AxiosResponse> {
+  const originalRequest = error.config as RetryableRequestConfig | undefined
+
+  if (!originalRequest || !shouldAttemptRefresh(error)) {
+    window.location.assign("/")
+    return Promise.reject(error)
+  }
+
+  originalRequest._retry = true
+
+  try {
+    const response = await refreshClient.post<RefreshTokenResponse>("/auth/refresh")
+    const refreshedToken = response.data.access_token ?? response.data.accessToken
+
+    if (!refreshedToken) {
+      window.location.assign("/")
+      return Promise.reject(error)
+    }
+
+    setAccessToken(refreshedToken)
+
+    return client(attachAuthorizationHeader(originalRequest, refreshedToken))
+  } catch (refreshError) {
+    window.location.assign("/")
+    return Promise.reject(refreshError)
+  }
+}
+
+export const api = axios.create({
+  baseURL: import.meta.env.VITE_API_URL,
+  withCredentials: true,
+})
+
+const refreshApi = axios.create({
+  baseURL: import.meta.env.VITE_API_URL,
+  withCredentials: true,
+})
+
+api.interceptors.request.use((config) =>
+  attachAuthorizationHeader(config, getAccessToken()),
+)
+
+api.interceptors.response.use(
+  (response) => response,
+  (error: AxiosError) => handleUnauthorizedResponse(error, api, refreshApi),
+)
+
+export async function getCurrentUser(): Promise<User> {
+  const response = await api.get<User>("/auth/me")
+  return response.data
+}
+
+export async function getWorkspaces(): Promise<Workspace[]> {
+  const response = await api.get<Workspace[]>("/workspaces")
+  return response.data
+}
+
+export async function createWorkspace(
+  payload: CreateWorkspacePayload,
+): Promise<WorkspaceWithStages> {
+  const response = await api.post<WorkspaceWithStages>("/workspaces", payload)
+  return response.data
+}
+
+export async function getWorkspace(id: string): Promise<WorkspaceWithStages> {
+  const response = await api.get<WorkspaceWithStages>(`/workspaces/${id}`)
+  return response.data
+}
+
+export async function getStage(id: string): Promise<Stage> {
+  const response = await api.get<Stage>(`/stages/${id}`)
+  return response.data
+}
+
+export async function generateStage(id: string): Promise<GenerateStageResponse> {
+  const response = await api.post<GenerateStageResponse>(`/stages/${id}/generate`)
+  return response.data
+}
+
+export async function refineStage(
+  id: string,
+  payload: RefineStagePayload,
+): Promise<RefineResponse> {
+  const response = await api.post<RefineResponse>(`/stages/${id}/refine`, payload)
+  return response.data
+}
+
+export async function regenerateStage(id: string): Promise<GenerateStageResponse> {
+  const response = await api.post<GenerateStageResponse>(
+    `/stages/${id}/regenerate`,
+  )
+  return response.data
+}
+
+export async function finaliseStage(id: string): Promise<Stage> {
+  const response = await api.post<Stage>(`/stages/${id}/finalise`)
+  return response.data
+}
+
+export async function rollbackStage(
+  id: string,
+  version: number,
+): Promise<Stage> {
+  const response = await api.post<Stage>(`/stages/${id}/rollback`, { version })
+  return response.data
+}
+
+export async function getStageVersions(id: string): Promise<StageVersion[]> {
+  const response = await api.get<StageVersion[]>(`/stages/${id}/versions`)
+  return response.data
+}
+
+export async function getStageEval(id: string): Promise<EvalResult> {
+  const response = await api.get<EvalResult>(`/stages/${id}/eval`)
+  return response.data
+}
+
+export async function getCredits(): Promise<CreditBalance> {
+  const response = await api.get<CreditBalance>("/credits/balance")
+  return response.data
+}
+
+export async function getProviders(): Promise<ProviderCatalog> {
+  const response = await api.get<ProviderCatalog>("/providers")
+  return response.data
+}
+
+export type GenerateStageResponse = {
+  stage_id: string
+}
+
+export interface RefineStagePayload {
+  instruction: string
+  selection: {
+    start: number
+    end: number
+    text: string
+  }
+}
