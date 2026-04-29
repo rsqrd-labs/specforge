@@ -1,0 +1,45 @@
+{
+  "name": "specforge-v1-harness",
+  "version": "1.0.0",
+  "pipeline_order": ["spec", "plan", "harness", "tasks"],
+  "purpose": "Executable red/green contract for building SpecForge V1 with agentic coding tasks.",
+  "commands": {
+    "backend": "cd backend && uv run pytest ../harness/tests/backend",
+    "frontend": "cd frontend && pnpm vitest run ../harness/tests/frontend",
+    "e2e": "cd frontend && pnpm playwright test ../harness/tests/e2e",
+    "schemas": "for f in harness/schemas/*.schema.json; do python3 -m json.tool \"$f\" > /dev/null || exit 1; done"
+  },
+  "coverage_targets": {
+    "backend_services": 80,
+    "harness_requirement_coverage": 80,
+    "task_harness_reference_validity": 100
+  },
+  "test_groups": [
+    {
+      "id": "structure",
+      "path": "harness/tests/backend/test_project_structure.py",
+      "proves": "The monorepo, backend, frontend, docker, and environment skeleton match the V1 plan."
+    },
+    {
+      "id": "backend-contracts",
+      "path": "harness/tests/backend",
+      "proves": "FastAPI app factory, health, data models, routers, stage lifecycle, credits, security, evals, and export behavior match the spec."
+    },
+    {
+      "id": "frontend-contracts",
+      "path": "harness/tests/frontend",
+      "proves": "Strict TypeScript contracts, auth token handling, API client refresh, stores, and workspace UI state match the spec."
+    },
+    {
+      "id": "e2e-smoke",
+      "path": "harness/tests/e2e/specforge-smoke.spec.ts",
+      "proves": "The core workspace pipeline can be completed through the browser once services are running."
+    }
+  ],
+  "agent_rules": [
+    "Do not skip or reorder stages: SPEC -> PLAN -> HARNESS -> TASKS.",
+    "Every implementation task must name at least one harness test that turns green.",
+    "Prefer adding production code over weakening harness tests.",
+    "If a harness expectation conflicts with a newer spec decision, update the manifest and test together."
+  ]
+}

@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://specforge.local/schemas/api-error.schema.json",
+  "title": "ApiError",
+  "type": "object",
+  "required": ["error", "message", "request_id"],
+  "additionalProperties": false,
+  "properties": {
+    "error": { "type": "string", "minLength": 1 },
+    "message": { "type": "string", "minLength": 1 },
+    "request_id": { "type": "string", "minLength": 1 }
+  }
+}

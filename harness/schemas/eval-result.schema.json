@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://specforge.local/schemas/eval-result.schema.json",
+  "title": "EvalResult",
+  "type": "object",
+  "required": [
+    "id",
+    "stage_version_id",
+    "stage_type",
+    "overall_score",
+    "completeness",
+    "clarity",
+    "coverage_percent",
+    "uncovered_reqs",
+    "tasks_without_ref",
+    "flagged",
+    "created_at"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "id": { "type": "string", "format": "uuid" },
+    "stage_version_id": { "type": "string", "format": "uuid" },
+    "stage_type": { "enum": ["spec", "plan", "harness", "tasks"] },
+    "overall_score": { "type": ["integer", "null"], "minimum": 0, "maximum": 100 },
+    "completeness": { "type": ["integer", "null"], "minimum": 0, "maximum": 100 },
+    "clarity": { "type": ["integer", "null"], "minimum": 0, "maximum": 100 },
+    "coverage_percent": { "type": ["integer", "null"], "minimum": 0, "maximum": 100 },
+    "uncovered_reqs": {
+      "oneOf": [{ "type": "null" }, { "type": "array", "items": { "type": "string" } }]
+    },
+    "tasks_without_ref": {
+      "oneOf": [{ "type": "null" }, { "type": "array", "items": { "type": "object" } }]
+    },
+    "flagged": { "type": "boolean" },
+    "created_at": { "type": "string", "format": "date-time" }
+  }
+}

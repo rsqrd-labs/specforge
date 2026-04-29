@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://specforge.local/schemas/stage.schema.json",
+  "title": "Stage",
+  "type": "object",
+  "required": [
+    "id",
+    "workspace_id",
+    "type",
+    "content",
+    "status",
+    "current_version",
+    "finalised_at",
+    "review_gate_acknowledged",
+    "created_at",
+    "updated_at"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "id": { "type": "string", "format": "uuid" },
+    "workspace_id": { "type": "string", "format": "uuid" },
+    "type": { "enum": ["spec", "plan", "harness", "tasks"] },
+    "content": { "type": ["string", "null"] },
+    "status": { "enum": ["locked", "draft", "in_progress", "finalised", "stale"] },
+    "current_version": { "type": "integer", "minimum": 0 },
+    "finalised_at": { "type": ["string", "null"], "format": "date-time" },
+    "review_gate_acknowledged": { "type": "boolean" },
+    "created_at": { "type": "string", "format": "date-time" },
+    "updated_at": { "type": "string", "format": "date-time" }
+  }
+}

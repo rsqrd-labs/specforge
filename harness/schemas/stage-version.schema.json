@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://specforge.local/schemas/stage-version.schema.json",
+  "title": "StageVersion",
+  "type": "object",
+  "required": ["id", "stage_id", "version", "content", "created_by", "created_at"],
+  "additionalProperties": false,
+  "properties": {
+    "id": { "type": "string", "format": "uuid" },
+    "stage_id": { "type": "string", "format": "uuid" },
+    "version": { "type": "integer", "minimum": 1 },
+    "content": { "type": "string", "minLength": 1 },
+    "created_by": { "enum": ["user", "ai"] },
+    "created_at": { "type": "string", "format": "date-time" }
+  }
+}

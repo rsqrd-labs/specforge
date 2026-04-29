@@ -1,0 +1,26 @@
+SpecForge V1 harness
+====================
+
+This directory is the executable contract for implementation agents. It is not
+a documentation artifact. Build tasks should reference concrete tests in this
+directory and turn them from red to green.
+
+Canonical pipeline order:
+SPEC -> PLAN -> HARNESS -> TASKS
+
+Harness workflow:
+1. Pick the next task from tasks.md.
+2. Identify the harness tests named by the task or by manifest.json.
+3. Run the narrowest relevant harness command.
+4. Implement production code in backend/ or frontend/.
+5. Re-run the harness test, then the local lint/type/test command.
+6. Do not edit harness tests unless the spec or plan has been deliberately
+   changed.
+
+Expected commands after the app exists:
+- cd backend && uv run pytest ../harness/tests/backend
+- cd frontend && pnpm vitest run ../harness/tests/frontend
+- cd frontend && pnpm playwright test ../harness/tests/e2e
+
+The harness is allowed to fail before implementation exists. That is the red
+phase.

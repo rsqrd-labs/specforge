@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://specforge.local/schemas/user.schema.json",
+  "title": "User",
+  "type": "object",
+  "required": ["id", "email", "google_id", "name", "avatar_url", "created_at", "credit_balance"],
+  "additionalProperties": false,
+  "properties": {
+    "id": { "type": "string", "format": "uuid" },
+    "email": { "type": "string", "format": "email" },
+    "google_id": { "type": "string", "minLength": 1 },
+    "name": { "type": ["string", "null"] },
+    "avatar_url": { "type": ["string", "null"], "format": "uri" },
+    "created_at": { "type": "string", "format": "date-time" },
+    "credit_balance": { "type": "integer", "minimum": 0 }
+  }
+}

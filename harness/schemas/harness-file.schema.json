@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://specforge.local/schemas/harness-file.schema.json",
+  "title": "HarnessFileMap",
+  "type": "object",
+  "minProperties": 1,
+  "propertyNames": {
+    "type": "string",
+    "pattern": "^(harness/)?(tests|types|schemas)/.+"
+  },
+  "additionalProperties": {
+    "type": "string"
+  }
+}
