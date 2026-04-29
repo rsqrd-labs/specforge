@@ -1,1 +1,3 @@
-# specforge
+# SpecForge
+
+Setup instructions coming soon.
