@@ -59,7 +59,7 @@ async def test_get_current_user_with_valid_token_returns_user(
         FakeAuthService({"sub": str(user.id)}),
     )
 
-    current_user = await auth.get_current_user("token", FakeDB(user))  # type: ignore[arg-type]
+    current_user = await auth.get_current_user("token", None, FakeDB(user))  # type: ignore[arg-type]
 
     assert current_user is user
 
@@ -75,7 +75,7 @@ async def test_get_current_user_with_expired_token_raises_401(
     )
 
     with pytest.raises(HTTPException) as exc_info:
-        await auth.get_current_user("expired", FakeDB(None))  # type: ignore[arg-type]
+        await auth.get_current_user("expired", None, FakeDB(None))  # type: ignore[arg-type]
 
     assert exc_info.value.status_code == 401
 
@@ -83,7 +83,7 @@ async def test_get_current_user_with_expired_token_raises_401(
 @pytest.mark.asyncio
 async def test_get_current_user_with_missing_token_raises_401() -> None:
     with pytest.raises(HTTPException) as exc_info:
-        await auth.get_current_user(None, FakeDB(None))  # type: ignore[arg-type]
+        await auth.get_current_user(None, None, FakeDB(None))  # type: ignore[arg-type]
 
     assert exc_info.value.status_code == 401
 
@@ -98,6 +98,6 @@ async def test_get_optional_user_returns_none_for_invalid_token(
         FakeAuthService(error=AuthError("expired")),
     )
 
-    optional_user = await auth.get_optional_user("expired", FakeDB(None))  # type: ignore[arg-type]
+    optional_user = await auth.get_optional_user("expired", None, FakeDB(None))  # type: ignore[arg-type]
 
     assert optional_user is None

@@ -1,6 +1,6 @@
 from uuid import UUID
 
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Query, status
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -14,10 +14,13 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/google", auto_error=False)
 
 async def get_current_user(
     token: str | None = Depends(oauth2_scheme),
+    token_param: str | None = Query(default=None, alias="token"),
     db: AsyncSession = Depends(get_db),
 ) -> User:
-    if not token:
+    resolved = token or token_param
+    if not resolved:
         raise _unauthorized()
+    token = resolved  # noqa: PLW0621
 
     try:
         claims = auth_service.verify_access_token(token)
@@ -34,13 +37,15 @@ async def get_current_user(
 
 async def get_optional_user(
     token: str | None = Depends(oauth2_scheme),
+    token_param: str | None = Query(default=None, alias="token"),
     db: AsyncSession = Depends(get_db),
 ) -> User | None:
-    if not token:
+    resolved = token or token_param
+    if not resolved:
         return None
 
     try:
-        return await get_current_user(token=token, db=db)
+        return await get_current_user(token=resolved, token_param=None, db=db)
     except HTTPException:
         return None
 
