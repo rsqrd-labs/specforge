@@ -70,6 +70,7 @@ class DiffResponse(BaseModel):
     diff: str
     original: str
     proposed: str
+    large_selection: bool = False
 
     model_config = ConfigDict(from_attributes=True)
 
