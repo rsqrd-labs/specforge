@@ -4,7 +4,8 @@ version = "0.1.0"
 description = "FastAPI backend for SpecForge V1."
 requires-python = ">=3.12,<3.13"
 dependencies = [
-    "fastapi==0.115.*",
+    "fastapi==0.124.*",
+    "starlette==0.50.*",
     "uvicorn[standard]==0.32.*",
     "gunicorn==23.*",
     "sqlalchemy[asyncio]==2.0.*",
@@ -20,7 +21,7 @@ dependencies = [
     "anthropic==0.40.*",
     "openai==1.57.*",
     "google-generativeai==0.8.*",
-    "cryptography==44.*",
+    "cryptography==46.*",
     "bleach==6.*",
     "stripe==11.*",
     "resend==2.*",
@@ -41,9 +42,10 @@ dependencies = [
 dev = [
     "bandit==1.*",
     "safety==3.*",
-    "pytest==8.*",
-    "pytest-asyncio==0.24.*",
-    "black==24.*",
+    "pytest==9.*",
+    "pytest-asyncio==1.*",
+    "pytest-cov==6.*",
+    "black==26.*",
     "ruff==0.8.*",
     "pytest-mock",
 ]

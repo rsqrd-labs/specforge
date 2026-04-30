@@ -4,7 +4,7 @@ Date: 2026-04-30
 
 ## Current State
 
-Work has been completed through **T-039**, with additional discrepancy fixes for streaming, stage authorization, refine API typing, and the review-gate endpoint.
+Work has been completed through **T-040**, with additional discrepancy fixes for streaming, stage authorization, refine API typing, and the review-gate endpoint.
 
 ```
 Current branch: main
@@ -28,7 +28,7 @@ SpecForge is an AI-powered 4-stage pipeline that turns a plain-English problem s
 - Auth: Google OAuth via Authlib, HttpOnly refresh cookies, Redis session tracking
 - LLM: Abstract adapter layer (Anthropic / OpenAI / Google), streaming via SSE
 
-## Completed Tasks (T-001 through T-039)
+## Completed Tasks (T-001 through T-040)
 
 ### Phase 1 — Foundation (T-001 to T-010, done by Codex)
 - T-001: Monorepo structure
@@ -58,6 +58,7 @@ SpecForge is an AI-powered 4-stage pipeline that turns a plain-English problem s
 - T-027: Export service + `POST /workspaces/{id}/export` (zip SPEC.md, PLAN.md, TASKS.md, harness/ files)
 - T-028: Credits router (`GET /credits/balance`, `GET /credits/history` paginated)
 - T-039: Observability (`structlog` JSON logs, Prometheus `/metrics`, optional Sentry and OTLP tracing)
+- T-040: CI pipeline (`.github/workflows/ci.yml` with TruffleHog, bandit, safety, ruff, black, pytest coverage, pnpm audit, tsc, vitest)
 
 ### Phase 1 — Frontend (T-029 to T-038, done)
 - T-029: SSE service (`createSSEConnection` streams the backend POST response with `fetch`)
@@ -74,6 +75,7 @@ SpecForge is an AI-powered 4-stage pipeline that turns a plain-English problem s
 ## Recent Commits
 
 ```
+fa9124e T-039: Add backend observability
 4e69282 T-038: Assemble workspace page
 ef66656 T-037: Add workspace quality panels
 5d2e6ba Fix stage streaming and authorization contracts
@@ -92,25 +94,28 @@ d97d9d6 Add prompt system and pipeline prompt builder (T-021)
 ## Current Test State
 
 ```bash
-cd backend && uv run pytest tests/ -q
-# 78 passed, 2 warnings
+cd backend && uv run pytest tests/ --cov=services --cov-fail-under=80 -q
+# 78 passed, 2 warnings, 84% services coverage
 ```
 
 All lint clean:
 ```bash
 uv run ruff check .   # All checks passed
 uv run black --check . # All done
+uv run bandit -r config.py database.py main.py middleware models prompts routers schemas services # No issues
+uv run safety check --full-report --ignore 64459 --ignore 64396 # 0 reported, 2 ecdsa ignored
 cd ../frontend && pnpm tsc --noEmit  # 0 errors
+pnpm audit --audit-level moderate     # No known vulnerabilities
+pnpm test -- --passWithNoTests        # exits 0, no test files yet
 ```
 
-## Next Task to Resume: T-040
+## Next Task to Resume: T-041
 
-T-039 is complete. The backend now configures JSON logging, exports Prometheus metrics at `/metrics`, records request count/latency metrics, and enables Sentry/OTLP tracing only when real observability URLs are configured.
+T-040 is complete. CI now runs secret scanning, backend security/lint/format/coverage checks, and frontend audit/typecheck/vitest. Dependency updates were applied to clear audit findings: FastAPI/Starlette, cryptography, Black, pytest/pytest-asyncio, Vite, and Vitest.
 
-## Remaining Tasks (T-040 to T-049)
+## Remaining Tasks (T-041 to T-049)
 
 ### Backend / Hardening
-- **T-040**: CI pipeline (`.github/workflows/ci.yml` — TruffleHog, bandit, safety, ruff, black, pytest 80% coverage, pnpm audit, tsc, vitest)
 - **T-041**: Stuck in-progress stage recovery (background task every 5min, refunds credits for stages >10min in `in_progress`)
 - **T-042**: Done early — human review gate backend (`POST /stages/{id}/acknowledge-gate` endpoint, sets `review_gate_acknowledged = True`)
 - **T-043**: Large selection warning frontend (already done in backend — `DiffResponse.large_selection` is populated. Frontend just needs to show warning in refine flow when `large_selection = true`)
@@ -122,6 +127,11 @@ T-039 is complete. The backend now configures JSON logging, exports Prometheus m
 - **T-049**: End-to-end smoke test
 
 ## Key File Map
+
+### CI
+```
+.github/workflows/ci.yml             — TruffleHog, backend security/lint/tests, frontend audit/typecheck/vitest
+```
 
 ### Backend
 ```
@@ -297,8 +307,8 @@ All other secrets in `backend/.env` are placeholders. Docker Compose runs `db` a
 
 ## Stop Point
 
-Last completed: T-039 plus discrepancy fixes. Local changes are not committed yet.
+Last completed: T-040 plus discrepancy fixes. Local changes are not committed yet.
 
-**Resume from:** T-040, then T-041...T-049 in order.
+**Resume from:** T-041, then T-042...T-049 in order.
 
 Commit and push after each task completes successfully (tests pass, `pnpm tsc --noEmit` exits 0).
