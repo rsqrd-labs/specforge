@@ -8,6 +8,7 @@ from sqlalchemy import text
 
 from config import settings
 from database import async_engine
+from routers import auth as auth_router
 
 HealthStatus = Literal["ok", "degraded"]
 DependencyStatus = Literal["ok", "error"]
@@ -74,6 +75,8 @@ def create_app() -> FastAPI:
                 "version": "1.0.0",
             },
         )
+
+    app.include_router(auth_router.router)
 
     return app
 
