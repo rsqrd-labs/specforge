@@ -4,7 +4,7 @@ Date: 2026-04-30
 
 ## Current State
 
-Work has been completed through **T-038**, with additional discrepancy fixes for streaming, stage authorization, refine API typing, and the review-gate endpoint.
+Work has been completed through **T-039**, with additional discrepancy fixes for streaming, stage authorization, refine API typing, and the review-gate endpoint.
 
 ```
 Current branch: main
@@ -28,7 +28,7 @@ SpecForge is an AI-powered 4-stage pipeline that turns a plain-English problem s
 - Auth: Google OAuth via Authlib, HttpOnly refresh cookies, Redis session tracking
 - LLM: Abstract adapter layer (Anthropic / OpenAI / Google), streaming via SSE
 
-## Completed Tasks (T-001 through T-038)
+## Completed Tasks (T-001 through T-039)
 
 ### Phase 1 — Foundation (T-001 to T-010, done by Codex)
 - T-001: Monorepo structure
@@ -57,6 +57,7 @@ SpecForge is an AI-powered 4-stage pipeline that turns a plain-English problem s
 - T-026: Online eval service (`run_eval` using `claude-haiku-4-5-20251001` as judge, fired as `asyncio.create_task` after generate)
 - T-027: Export service + `POST /workspaces/{id}/export` (zip SPEC.md, PLAN.md, TASKS.md, harness/ files)
 - T-028: Credits router (`GET /credits/balance`, `GET /credits/history` paginated)
+- T-039: Observability (`structlog` JSON logs, Prometheus `/metrics`, optional Sentry and OTLP tracing)
 
 ### Phase 1 — Frontend (T-029 to T-038, done)
 - T-029: SSE service (`createSSEConnection` streams the backend POST response with `fetch`)
@@ -73,6 +74,7 @@ SpecForge is an AI-powered 4-stage pipeline that turns a plain-English problem s
 ## Recent Commits
 
 ```
+4e69282 T-038: Assemble workspace page
 ef66656 T-037: Add workspace quality panels
 5d2e6ba Fix stage streaming and authorization contracts
 c36aaa7 T-033/T-034/T-035/T-036 partial: Stage navigator, editor, diff viewer, generate bar, credit confirm modal
@@ -91,7 +93,7 @@ d97d9d6 Add prompt system and pipeline prompt builder (T-021)
 
 ```bash
 cd backend && uv run pytest tests/ -q
-# 76 passed, 2 warnings
+# 78 passed, 2 warnings
 ```
 
 All lint clean:
@@ -101,14 +103,13 @@ uv run black --check . # All done
 cd ../frontend && pnpm tsc --noEmit  # 0 errors
 ```
 
-## Next Task to Resume: T-039
+## Next Task to Resume: T-040
 
-T-038 is complete. The workspace page now wires stage navigation, streaming generation/regeneration, human review gate acknowledgement, refine diff accept/reject, debounced content edits, eval panels, credit polling, and export.
+T-039 is complete. The backend now configures JSON logging, exports Prometheus metrics at `/metrics`, records request count/latency metrics, and enables Sentry/OTLP tracing only when real observability URLs are configured.
 
-## Remaining Tasks (T-039 to T-049)
+## Remaining Tasks (T-040 to T-049)
 
 ### Backend / Hardening
-- **T-039**: Observability (`structlog` JSON logging, OpenTelemetry, Prometheus `/metrics`, Sentry)
 - **T-040**: CI pipeline (`.github/workflows/ci.yml` — TruffleHog, bandit, safety, ruff, black, pytest 80% coverage, pnpm audit, tsc, vitest)
 - **T-041**: Stuck in-progress stage recovery (background task every 5min, refunds credits for stages >10min in `in_progress`)
 - **T-042**: Done early — human review gate backend (`POST /stages/{id}/acknowledge-gate` endpoint, sets `review_gate_acknowledged = True`)
@@ -153,6 +154,7 @@ backend/
       provider_config.py           — PROVIDER_MODELS dict
     evals/
       online_eval.py               — run_eval() (haiku judge, async background task)
+    observability.py                — structlog config, Prometheus metrics, optional Sentry/OTLP
     pipeline/
       stage_manager.py             — generate (SSE), refine, finalise, rollback, handle_content_edit
       prompt_builder.py            — build_prompt (fetches upstream from Redis)
@@ -171,6 +173,7 @@ backend/
     test_online_eval.py
     test_providers_router.py
     test_rate_limit.py
+    test_observability.py
     test_security.py
     test_stage_manager.py
     test_stage_router.py
@@ -294,8 +297,8 @@ All other secrets in `backend/.env` are placeholders. Docker Compose runs `db` a
 
 ## Stop Point
 
-Last completed: T-038 plus discrepancy fixes. Local changes are not committed yet.
+Last completed: T-039 plus discrepancy fixes. Local changes are not committed yet.
 
-**Resume from:** T-039, then T-040...T-049 in order.
+**Resume from:** T-040, then T-041...T-049 in order.
 
 Commit and push after each task completes successfully (tests pass, `pnpm tsc --noEmit` exits 0).

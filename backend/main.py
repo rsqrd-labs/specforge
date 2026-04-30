@@ -14,6 +14,7 @@ from routers import credits as credits_router
 from routers import providers as providers_router
 from routers import stage as stage_router
 from routers import workspace as workspace_router
+from services.observability import setup_observability
 
 HealthStatus = Literal["ok", "degraded"]
 DependencyStatus = Literal["ok", "error"]
@@ -49,6 +50,7 @@ async def check_redis() -> DependencyStatus:
 
 def create_app(redis_client=None) -> FastAPI:
     app = FastAPI(title="SpecForge API", version="1.0.0")
+    setup_observability(app, async_engine)
 
     app.add_middleware(RateLimitMiddleware, redis_client=redis_client)
     app.add_middleware(
