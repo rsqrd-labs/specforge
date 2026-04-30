@@ -10,6 +10,7 @@ from config import settings
 from database import async_engine
 from middleware.rate_limit import RateLimitMiddleware
 from routers import auth as auth_router
+from routers import credits as credits_router
 from routers import providers as providers_router
 from routers import stage as stage_router
 from routers import workspace as workspace_router
@@ -85,6 +86,7 @@ def create_app(redis_client=None) -> FastAPI:
     app.include_router(providers_router.router)
     app.include_router(workspace_router.router)
     app.include_router(stage_router.router)
+    app.include_router(credits_router.router)
 
     return app
 
