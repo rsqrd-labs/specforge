@@ -9,6 +9,7 @@ export interface Stage {
   content: string | null
   status: StageStatus
   current_version: number
+  eval_result?: EvalResult | null
   finalised_at: string | null
   review_gate_acknowledged: boolean
   created_at: string

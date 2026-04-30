@@ -4,14 +4,14 @@ Date: 2026-04-30
 
 ## Current State
 
-Work has been completed through **T-037**, with additional discrepancy fixes for streaming, stage authorization, refine API typing, and the review-gate endpoint.
+Work has been completed through **T-038**, with additional discrepancy fixes for streaming, stage authorization, refine API typing, and the review-gate endpoint.
 
 ```
 Current branch: main
-Last commit: c36aaa7
+Latest commit: see `git log --oneline -1`
 ```
 
-Working tree has local changes from the discrepancy fixes. Commit and push after verification.
+Working tree should be clean after committing and pushing the completed task.
 
 ## What Is Being Built
 
@@ -28,7 +28,7 @@ SpecForge is an AI-powered 4-stage pipeline that turns a plain-English problem s
 - Auth: Google OAuth via Authlib, HttpOnly refresh cookies, Redis session tracking
 - LLM: Abstract adapter layer (Anthropic / OpenAI / Google), streaming via SSE
 
-## Completed Tasks (T-001 through T-037)
+## Completed Tasks (T-001 through T-038)
 
 ### Phase 1 — Foundation (T-001 to T-010, done by Codex)
 - T-001: Monorepo structure
@@ -58,7 +58,7 @@ SpecForge is an AI-powered 4-stage pipeline that turns a plain-English problem s
 - T-027: Export service + `POST /workspaces/{id}/export` (zip SPEC.md, PLAN.md, TASKS.md, harness/ files)
 - T-028: Credits router (`GET /credits/balance`, `GET /credits/history` paginated)
 
-### Phase 1 — Frontend (T-029 to T-037, done)
+### Phase 1 — Frontend (T-029 to T-038, done)
 - T-029: SSE service (`createSSEConnection` streams the backend POST response with `fetch`)
 - T-030: Zustand stores (`userStore`, `workspaceStore`, `stageStore` with `subscribeWithSelector` for zero-re-render streaming)
 - T-031: React Router + page shell (`Landing`, `Dashboard`, `Workspace` placeholder, `ProtectedRoute`)
@@ -68,10 +68,12 @@ SpecForge is an AI-powered 4-stage pipeline that turns a plain-English problem s
 - T-035: `DiffViewer` component (manual unified diff parser, +/- line colors, accept/reject buttons)
 - T-036: `GenerateBar`, `CreditConfirmModal`, `StalenessWarning`, and `HumanReviewGate` created.
 - T-037: `QualityBadge`, `CoveragePanel`, and `TaskValidationPanel` created.
+- T-038: Full `Workspace.tsx` assembly plus `useCredits` and `useStream` hooks.
 
 ## Recent Commits
 
 ```
+ef66656 T-037: Add workspace quality panels
 5d2e6ba Fix stage streaming and authorization contracts
 c36aaa7 T-033/T-034/T-035/T-036 partial: Stage navigator, editor, diff viewer, generate bar, credit confirm modal
 5c6ac12 T-032: Implement Dashboard UI with workspace grid and create modal
@@ -99,44 +101,9 @@ uv run black --check . # All done
 cd ../frontend && pnpm tsc --noEmit  # 0 errors
 ```
 
-## Next Task to Resume: T-038
+## Next Task to Resume: T-039
 
-T-037 is complete. The backend review-gate endpoint `POST /stages/{id}/acknowledge-gate` was also added early so `HumanReviewGate` can call a real endpoint.
-
-### T-038: Workspace Page — Full Assembly
-
-This is the big one. Complete `frontend/src/pages/Workspace.tsx` and add two hooks:
-
-**`frontend/src/hooks/useCredits.ts`:**
-- Polls `GET /credits/balance` every 30 seconds
-- Returns `{balance: number | null, isLoading: boolean}`
-
-**`frontend/src/hooks/useStream.ts`:**
-- Takes `stageId: string`
-- Opens the streaming `POST /stages/{id}/generate` or `/regenerate` request via `createSSEConnection`
-- Calls `stageStore.startStream(stageId)` before streaming
-- Each token → `stageStore.appendToken(stageId, token)`
-- On done → `stageStore.finaliseStream(stageId)`, fetch updated stage from API, poll `GET /stages/{id}/eval` every 5 seconds (max 6 times = 30s) until eval is present
-- On error → call `stageStore.finaliseStream(stageId)`, surface error to user
-
-**`frontend/src/pages/Workspace.tsx` (complete):**
-- Two-panel layout: `StageNavigator` on left (240px fixed), right panel = `StageEditor` + toolbar
-- On mount: fetch workspace via `workspaceStore.fetchWorkspace(id)`, set all stages in `stageStore`
-- Active stage = first non-locked stage by default, toggled via `StageNavigator`
-- Generate flow:
-  1. Show `CreditConfirmModal` (cost 10)
-  2. If stage `review_gate_acknowledged = false` AND stage is not spec, show `HumanReviewGate`
-  3. On proceed: call `useStream`
-- Refine flow:
-  1. User selects text in editor (via `StageEditor` ref `getSelection()`)
-  2. Instruction input appears
-  3. Show `CreditConfirmModal` (cost 3)
-  4. Call `POST /stages/{id}/refine`
-  5. If `large_selection = true` in response, show inline warning (see T-043)
-  6. Show `DiffViewer`; on accept call `POST /stages/{id}/accept-diff`; on reject call `POST /stages/{id}/reject-diff` with `ledger_id` from response
-- Content edits: `StageEditor.onContentChange` → debounced `PATCH /stages/{id}/content`
-- Show `StalenessWarning` when `stage.status === "stale"`
-- Export button in header: active only when all 4 stages finalised → `POST /workspaces/{id}/export` → browser download
+T-038 is complete. The workspace page now wires stage navigation, streaming generation/regeneration, human review gate acknowledgement, refine diff accept/reject, debounced content edits, eval panels, credit polling, and export.
 
 ## Remaining Tasks (T-039 to T-049)
 
@@ -222,6 +189,9 @@ frontend/src/
   services/
     api.ts                         — Axios client with interceptors, all API calls
     sseService.ts                  — createSSEConnection (fetch POST stream parser)
+  hooks/
+    useCredits.ts                  — polls credit balance every 30 seconds
+    useStream.ts                   — manages stage streaming, store updates, and eval polling
   store/
     userStore.ts                   — user, isLoading, fetchMe
     workspaceStore.ts              — workspaces, currentWorkspace, fetchWorkspace, createWorkspace
@@ -250,7 +220,7 @@ frontend/src/
   pages/
     Landing.tsx                    — "Sign in with Google" button
     Dashboard.tsx                  — workspace grid + create modal + credit banner
-    Workspace.tsx                  — PLACEHOLDER ONLY — needs full assembly (T-038)
+    Workspace.tsx                  — full two-panel stage workspace
 ```
 
 ## Critical Implementation Details
@@ -324,8 +294,8 @@ All other secrets in `backend/.env` are placeholders. Docker Compose runs `db` a
 
 ## Stop Point
 
-Last completed: T-037 plus discrepancy fixes. Local changes are not committed yet.
+Last completed: T-038 plus discrepancy fixes. Local changes are not committed yet.
 
-**Resume from:** T-038, then T-039...T-049 in order.
+**Resume from:** T-039, then T-040...T-049 in order.
 
 Commit and push after each task completes successfully (tests pass, `pnpm tsc --noEmit` exits 0).

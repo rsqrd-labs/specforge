@@ -7,6 +7,7 @@ interface StageState {
   streamingContent: Record<string, string>
   activeStream: string | null
   setStage: (stage: Stage) => void
+  setStages: (stages: Stage[]) => void
   appendToken: (stageId: string, token: string) => void
   startStream: (stageId: string) => void
   finaliseStream: (stageId: string) => void
@@ -21,6 +22,14 @@ export const useStageStore = create<StageState>()(
     setStage: (stage) =>
       set((state) => ({
         stages: { ...state.stages, [stage.id]: stage },
+      })),
+
+    setStages: (stages) =>
+      set((state) => ({
+        stages: {
+          ...state.stages,
+          ...Object.fromEntries(stages.map((stage) => [stage.id, stage])),
+        },
       })),
 
     appendToken: (stageId, token) =>
@@ -39,7 +48,7 @@ export const useStageStore = create<StageState>()(
 
     finaliseStream: (stageId) =>
       set((state) => {
-        const accumulated = state.streamingContent[stageId] ?? ""
+        const accumulated = state.streamingContent[stageId]
         const existing = state.stages[stageId]
         const updatedStreamingContent = { ...state.streamingContent }
         delete updatedStreamingContent[stageId]
@@ -50,7 +59,10 @@ export const useStageStore = create<StageState>()(
           stages: existing
             ? {
                 ...state.stages,
-                [stageId]: { ...existing, content: accumulated },
+                [stageId]: {
+                  ...existing,
+                  content: accumulated ?? existing.content,
+                },
               }
             : state.stages,
         }
