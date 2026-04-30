@@ -34,9 +34,31 @@ async def _fake_get_db():
     yield _FakeSession()
 
 
+class _NoopPipeline:
+    def zremrangebyscore(self, *args: Any) -> "_NoopPipeline":
+        return self
+
+    def zadd(self, *args: Any) -> "_NoopPipeline":
+        return self
+
+    def zcard(self, *args: Any) -> "_NoopPipeline":
+        return self
+
+    def expire(self, *args: Any) -> "_NoopPipeline":
+        return self
+
+    async def execute(self) -> list:
+        return [0, 1, 1, 1]
+
+
+class _NoopRedis:
+    def pipeline(self) -> _NoopPipeline:
+        return _NoopPipeline()
+
+
 @pytest.fixture
 def app():
-    application = create_app()
+    application = create_app(redis_client=_NoopRedis())
     application.dependency_overrides[get_db] = _fake_get_db
     yield application
     application.dependency_overrides.clear()

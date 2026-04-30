@@ -8,6 +8,7 @@ from sqlalchemy import text
 
 from config import settings
 from database import async_engine
+from middleware.rate_limit import RateLimitMiddleware
 from routers import auth as auth_router
 
 HealthStatus = Literal["ok", "degraded"]
@@ -42,9 +43,10 @@ async def check_redis() -> DependencyStatus:
     return "ok" if pong else "error"
 
 
-def create_app() -> FastAPI:
+def create_app(redis_client=None) -> FastAPI:
     app = FastAPI(title="SpecForge API", version="1.0.0")
 
+    app.add_middleware(RateLimitMiddleware, redis_client=redis_client)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=[settings.frontend_url],
