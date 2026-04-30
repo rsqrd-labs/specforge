@@ -1,0 +1,232 @@
+from __future__ import annotations
+
+from collections.abc import AsyncGenerator
+from datetime import UTC, datetime
+from typing import Any
+from unittest.mock import AsyncMock, MagicMock, patch
+from uuid import uuid4
+
+import pytest
+from httpx import ASGITransport, AsyncClient
+
+from database import get_db
+from main import create_app
+from middleware.auth import get_current_user
+from models import Stage, User
+from services.pipeline.stage_manager import StageDependencyError
+
+_USER_ID = uuid4()
+_USER = User(
+    id=_USER_ID,
+    email="test@example.com",
+    google_id="google-123",
+    name="Test User",
+    avatar_url=None,
+    created_at=datetime.now(UTC),
+)
+
+
+class _NoopPipeline:
+    def zremrangebyscore(self, *args: Any) -> "_NoopPipeline":
+        return self
+
+    def zadd(self, *args: Any) -> "_NoopPipeline":
+        return self
+
+    def zcard(self, *args: Any) -> "_NoopPipeline":
+        return self
+
+    def expire(self, *args: Any) -> "_NoopPipeline":
+        return self
+
+    async def execute(self) -> list:
+        return [0, 1, 1, 1]
+
+
+class _NoopRedis:
+    def pipeline(self) -> _NoopPipeline:
+        return _NoopPipeline()
+
+
+def _make_stage(workspace_id=None, stage_type="spec", status="draft") -> Stage:
+    return Stage(
+        id=uuid4(),
+        workspace_id=workspace_id or uuid4(),
+        type=stage_type,
+        status=status,
+        content="some content",
+        current_version=1,
+        review_gate_acknowledged=False,
+        created_at=datetime.now(UTC),
+        updated_at=datetime.now(UTC),
+    )
+
+
+class _FakeDB:
+    def __init__(self, stage: Stage) -> None:
+        self._stage = stage
+        self.added: list[Any] = []
+
+    async def execute(self, statement: Any) -> Any:
+        result = MagicMock()
+        result.scalar_one_or_none.return_value = self._stage
+        result.scalars.return_value = iter([self._stage])
+        return result
+
+    def add(self, instance: Any) -> None:
+        self.added.append(instance)
+
+    async def flush(self) -> None:
+        pass
+
+    async def commit(self) -> None:
+        pass
+
+    async def refresh(self, instance: Any) -> None:
+        pass
+
+
+@pytest.fixture
+def app():
+    _app = create_app(redis_client=_NoopRedis())
+    _app.dependency_overrides[get_current_user] = lambda: _USER
+    return _app
+
+
+@pytest.mark.asyncio
+async def test_get_stage_returns_stage_response(app) -> None:
+    stage = _make_stage()
+
+    async def _fake_db():
+        yield _FakeDB(stage)
+
+    app.dependency_overrides[get_db] = _fake_db
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        response = await client.get(f"/stages/{stage.id}")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["id"] == str(stage.id)
+    assert data["status"] == "draft"
+
+
+@pytest.mark.asyncio
+async def test_generate_streams_tokens(app) -> None:
+    stage = _make_stage()
+
+    async def _fake_db():
+        yield _FakeDB(stage)
+
+    app.dependency_overrides[get_db] = _fake_db
+
+    async def fake_generate(*args, **kwargs) -> AsyncGenerator[str, None]:
+        yield "Hello"
+        yield " world"
+        yield '{"done": true, "stage_id": "abc"}'
+
+    with (
+        patch(
+            "routers.stage.stage_manager.generate",
+            side_effect=fake_generate,
+        ),
+        patch(
+            "services.credit_service.credit_service.get_balance",
+            new_callable=AsyncMock,
+            return_value=100,
+        ),
+    ):
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            response = await client.post(f"/stages/{stage.id}/generate")
+
+    assert response.status_code == 200
+    assert "text/event-stream" in response.headers["content-type"]
+    body = response.text
+    assert "Hello" in body
+    assert "world" in body
+    assert "done" in body
+
+
+@pytest.mark.asyncio
+async def test_generate_dependency_error_returns_error_event(app) -> None:
+    stage = _make_stage(stage_type="plan")
+
+    async def _fake_db():
+        yield _FakeDB(stage)
+
+    app.dependency_overrides[get_db] = _fake_db
+
+    async def failing_generate(*args, **kwargs) -> AsyncGenerator[str, None]:
+        raise StageDependencyError("spec is not finalised")
+        yield  # make it a generator
+
+    with (
+        patch(
+            "routers.stage.stage_manager.generate",
+            side_effect=failing_generate,
+        ),
+        patch(
+            "services.credit_service.credit_service.get_balance",
+            new_callable=AsyncMock,
+            return_value=100,
+        ),
+    ):
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            response = await client.post(f"/stages/{stage.id}/generate")
+
+    assert response.status_code == 200
+    assert "dependency_not_finalised" in response.text
+
+
+@pytest.mark.asyncio
+async def test_finalise_returns_updated_stage(app) -> None:
+    stage = _make_stage(status="draft")
+
+    async def _fake_db():
+        yield _FakeDB(stage)
+
+    app.dependency_overrides[get_db] = _fake_db
+
+    with patch(
+        "routers.stage.stage_manager.finalise",
+        new_callable=AsyncMock,
+        return_value=stage,
+    ):
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            response = await client.post(f"/stages/{stage.id}/finalise")
+
+    assert response.status_code == 200
+    assert response.json()["id"] == str(stage.id)
+
+
+@pytest.mark.asyncio
+async def test_rollback_returns_updated_stage(app) -> None:
+    stage = _make_stage()
+
+    async def _fake_db():
+        yield _FakeDB(stage)
+
+    app.dependency_overrides[get_db] = _fake_db
+
+    with patch(
+        "routers.stage.stage_manager.rollback",
+        new_callable=AsyncMock,
+        return_value=stage,
+    ):
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            response = await client.post(
+                f"/stages/{stage.id}/rollback", json={"version_number": 1}
+            )
+
+    assert response.status_code == 200
+    assert response.json()["id"] == str(stage.id)

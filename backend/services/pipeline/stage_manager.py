@@ -126,7 +126,9 @@ class StageManager:
         stage = await self._load_stage(stage_id, db)
         workspace = await self._load_workspace(stage.workspace_id, db)
 
-        await credit_service.deduct(db, user.id, CREDIT_COSTS["refine"], "refine")
+        deduction = await credit_service.deduct(
+            db, user.id, CREDIT_COSTS["refine"], "refine"
+        )
 
         content = stage.content or ""
         doc_len = len(content)
@@ -156,6 +158,7 @@ class StageManager:
             original=content,
             proposed=proposed,
             large_selection=large_selection,
+            ledger_id=deduction.id,
         )
 
     async def finalise(self, stage_id: UUID, user, db: AsyncSession) -> Stage:
