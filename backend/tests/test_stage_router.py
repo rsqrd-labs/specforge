@@ -63,14 +63,15 @@ def _make_stage(workspace_id=None, stage_type="spec", status="draft") -> Stage:
 
 
 class _FakeDB:
-    def __init__(self, stage: Stage) -> None:
+    def __init__(self, stage: Stage | None) -> None:
         self._stage = stage
         self.added: list[Any] = []
+        self.committed = False
 
     async def execute(self, statement: Any) -> Any:
         result = MagicMock()
         result.scalar_one_or_none.return_value = self._stage
-        result.scalars.return_value = iter([self._stage])
+        result.scalars.return_value = iter([self._stage] if self._stage else [])
         return result
 
     def add(self, instance: Any) -> None:
@@ -80,7 +81,7 @@ class _FakeDB:
         pass
 
     async def commit(self) -> None:
-        pass
+        self.committed = True
 
     async def refresh(self, instance: Any) -> None:
         pass
@@ -111,6 +112,21 @@ async def test_get_stage_returns_stage_response(app) -> None:
     data = response.json()
     assert data["id"] == str(stage.id)
     assert data["status"] == "draft"
+
+
+@pytest.mark.asyncio
+async def test_get_stage_returns_404_when_stage_is_not_owned(app) -> None:
+    async def _fake_db():
+        yield _FakeDB(None)
+
+    app.dependency_overrides[get_db] = _fake_db
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        response = await client.get(f"/stages/{uuid4()}")
+
+    assert response.status_code == 404
 
 
 @pytest.mark.asyncio
@@ -230,3 +246,24 @@ async def test_rollback_returns_updated_stage(app) -> None:
 
     assert response.status_code == 200
     assert response.json()["id"] == str(stage.id)
+
+
+@pytest.mark.asyncio
+async def test_acknowledge_gate_marks_stage_reviewed(app) -> None:
+    stage = _make_stage(stage_type="plan")
+    fake_db = _FakeDB(stage)
+
+    async def _fake_db():
+        yield fake_db
+
+    app.dependency_overrides[get_db] = _fake_db
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        response = await client.post(f"/stages/{stage.id}/acknowledge-gate")
+
+    assert response.status_code == 200
+    assert response.json()["review_gate_acknowledged"] is True
+    assert stage.review_gate_acknowledged is True
+    assert fake_db.committed

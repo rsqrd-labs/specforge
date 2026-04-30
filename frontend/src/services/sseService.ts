@@ -1,7 +1,5 @@
 import { getAccessToken } from "./api"
 
-const MAX_RETRIES = 3
-
 interface SSEControl {
   close: () => void
 }
@@ -22,79 +20,114 @@ interface ErrorEvent {
 
 type SSEPayload = DoneEvent | TokenEvent | ErrorEvent
 
+function resolveUrl(url: string): string {
+  if (/^https?:\/\//.test(url)) {
+    return url
+  }
+
+  const baseUrl = import.meta.env.VITE_API_URL ?? ""
+  return `${baseUrl}${url}`
+}
+
+function parseSSEChunk(chunk: string): string[] {
+  return chunk
+    .split("\n\n")
+    .map((event) =>
+      event
+        .split("\n")
+        .filter((line) => line.startsWith("data:"))
+        .map((line) => line.slice(5).trimStart())
+        .join("\n"),
+    )
+    .filter(Boolean)
+}
+
 export function createSSEConnection(
   url: string,
   onToken: (token: string) => void,
   onDone: (stageId: string) => void,
   onError: (error: Error) => void,
 ): SSEControl {
-  let retryCount = 0
   let closed = false
-  let es: EventSource | null = null
-  let retryTimeout: ReturnType<typeof setTimeout> | null = null
+  const controller = new AbortController()
 
-  function connect() {
-    if (closed) return
-
+  async function connect() {
     const token = getAccessToken()
-    const fullUrl = token ? `${url}?token=${encodeURIComponent(token)}` : url
-
-    es = new EventSource(fullUrl, { withCredentials: true })
-
-    es.onmessage = (event: MessageEvent<string>) => {
-      let data: SSEPayload
-      try {
-        data = JSON.parse(event.data) as SSEPayload
-      } catch {
-        return
-      }
-
-      if ("done" in data && data.done) {
-        retryCount = 0
-        onDone(data.stage_id)
-        close()
-        return
-      }
-
-      if ("error" in data) {
-        onError(new Error(data.detail ?? data.error))
-        close()
-        return
-      }
-
-      if ("token" in data) {
-        onToken(data.token)
-      }
+    const headers = new Headers()
+    if (token) {
+      headers.set("Authorization", `Bearer ${token}`)
     }
 
-    es.onerror = () => {
-      es?.close()
-      es = null
+    try {
+      const response = await fetch(resolveUrl(url), {
+        method: "POST",
+        headers,
+        credentials: "include",
+        signal: controller.signal,
+      })
 
-      if (closed) return
-
-      retryCount += 1
-      if (retryCount > MAX_RETRIES) {
-        onError(new Error(`SSE connection failed after ${MAX_RETRIES} retries`))
-        closed = true
+      if (!response.ok) {
+        onError(new Error(`Stream request failed with ${response.status}`))
         return
       }
 
-      const delay = Math.pow(2, retryCount - 1) * 1000
-      retryTimeout = setTimeout(connect, delay)
+      const reader = response.body?.getReader()
+      if (!reader) {
+        onError(new Error("Stream response body is unavailable"))
+        return
+      }
+
+      const decoder = new TextDecoder()
+      let buffer = ""
+
+      while (!closed) {
+        const { done, value } = await reader.read()
+        if (done) break
+
+        buffer += decoder.decode(value, { stream: true })
+        const lastBoundary = buffer.lastIndexOf("\n\n")
+        if (lastBoundary === -1) continue
+
+        const complete = buffer.slice(0, lastBoundary + 2)
+        buffer = buffer.slice(lastBoundary + 2)
+
+        for (const payload of parseSSEChunk(complete)) {
+          let data: SSEPayload
+          try {
+            data = JSON.parse(payload) as SSEPayload
+          } catch {
+            continue
+          }
+
+          if ("done" in data && data.done) {
+            onDone(data.stage_id)
+            close()
+            return
+          }
+
+          if ("error" in data) {
+            onError(new Error(data.detail ?? data.error))
+            close()
+            return
+          }
+
+          if ("token" in data) {
+            onToken(data.token)
+          }
+        }
+      }
+    } catch (error) {
+      if (!closed) {
+        onError(error instanceof Error ? error : new Error("Stream failed"))
+      }
     }
   }
 
   function close() {
     closed = true
-    if (retryTimeout !== null) {
-      clearTimeout(retryTimeout)
-      retryTimeout = null
-    }
-    es?.close()
-    es = null
+    controller.abort()
   }
 
-  connect()
+  void connect()
   return { close }
 }

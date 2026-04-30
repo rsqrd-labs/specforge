@@ -164,8 +164,7 @@ export async function getStage(id: string): Promise<Stage> {
 }
 
 export async function generateStage(id: string): Promise<GenerateStageResponse> {
-  const response = await api.post<GenerateStageResponse>(`/stages/${id}/generate`)
-  return response.data
+  return { stage_id: id, stream_url: `/stages/${id}/generate` }
 }
 
 export async function refineStage(
@@ -177,10 +176,7 @@ export async function refineStage(
 }
 
 export async function regenerateStage(id: string): Promise<GenerateStageResponse> {
-  const response = await api.post<GenerateStageResponse>(
-    `/stages/${id}/regenerate`,
-  )
-  return response.data
+  return { stage_id: id, stream_url: `/stages/${id}/regenerate` }
 }
 
 export async function finaliseStage(id: string): Promise<Stage> {
@@ -206,6 +202,47 @@ export async function getStageEval(id: string): Promise<EvalResult> {
   return response.data
 }
 
+export async function acceptStageDiff(
+  id: string,
+  proposedContent: string,
+): Promise<Stage> {
+  const response = await api.post<Stage>(`/stages/${id}/accept-diff`, {
+    proposed_content: proposedContent,
+  })
+  return response.data
+}
+
+export async function rejectStageDiff(
+  id: string,
+  ledgerId: string,
+): Promise<{ refunded: boolean }> {
+  const response = await api.post<{ refunded: boolean }>(
+    `/stages/${id}/reject-diff`,
+    { ledger_id: ledgerId },
+  )
+  return response.data
+}
+
+export async function updateStageContent(
+  id: string,
+  content: string,
+): Promise<Stage> {
+  const response = await api.patch<Stage>(`/stages/${id}/content`, { content })
+  return response.data
+}
+
+export async function acknowledgeReviewGate(id: string): Promise<Stage> {
+  const response = await api.post<Stage>(`/stages/${id}/acknowledge-gate`)
+  return response.data
+}
+
+export async function exportWorkspace(id: string): Promise<Blob> {
+  const response = await api.post<Blob>(`/workspaces/${id}/export`, undefined, {
+    responseType: "blob",
+  })
+  return response.data
+}
+
 export async function getCredits(): Promise<CreditBalance> {
   const response = await api.get<CreditBalance>("/credits/balance")
   return response.data
@@ -218,13 +255,12 @@ export async function getProviders(): Promise<ProviderCatalog> {
 
 export type GenerateStageResponse = {
   stage_id: string
+  stream_url: string
 }
 
 export interface RefineStagePayload {
   instruction: string
-  selection: {
-    start: number
-    end: number
-    text: string
-  }
+  selection_start: number
+  selection_end: number
+  selected_text: string
 }

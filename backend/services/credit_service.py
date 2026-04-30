@@ -87,12 +87,15 @@ class CreditService:
         self,
         db: AsyncSession,
         ledger_entry_id: UUID,
+        user_id: UUID | None = None,
     ) -> None:
         result = await db.execute(
             select(CreditLedger).where(CreditLedger.id == ledger_entry_id)
         )
         original = result.scalar_one_or_none()
         if original is None or original.amount >= 0:
+            return
+        if user_id is not None and original.user_id != user_id:
             return
         refund_entry = CreditLedger(
             user_id=original.user_id,

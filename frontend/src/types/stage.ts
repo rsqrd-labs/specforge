@@ -51,15 +51,9 @@ export interface GenerateResponse {
 }
 
 export interface RefineResponse {
-  stage_id: string
-  diff: DiffChunk[]
-}
-
-export interface DiffChunk {
-  type: "add" | "remove" | "context"
-  old_start?: number
-  old_lines?: number
-  new_start?: number
-  new_lines?: number
-  content: string
+  diff: string
+  original: string
+  proposed: string
+  large_selection: boolean
+  ledger_id: string | null
 }

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import AsyncGenerator
+from datetime import UTC, datetime
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -12,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from database import get_db
 from middleware.auth import get_current_user
 from middleware.credit_check import require_credits
-from models import EvalResult, Stage, StageVersion, User
+from models import EvalResult, Stage, StageVersion, User, Workspace
 from schemas.stage import (
     AcceptDiffRequest,
     ContentEditRequest,
@@ -29,8 +30,12 @@ from services.pipeline.stage_manager import StageDependencyError, stage_manager
 router = APIRouter(prefix="/stages", tags=["stages"])
 
 
-async def _load_stage(stage_id: UUID, db: AsyncSession) -> Stage:
-    result = await db.execute(select(Stage).where(Stage.id == stage_id))
+async def _load_stage(stage_id: UUID, db: AsyncSession, user_id: UUID) -> Stage:
+    result = await db.execute(
+        select(Stage)
+        .join(Workspace, Stage.workspace_id == Workspace.id)
+        .where(Stage.id == stage_id, Workspace.user_id == user_id)
+    )
     stage = result.scalar_one_or_none()
     if stage is None:
         raise HTTPException(status_code=404, detail="Stage not found")
@@ -43,7 +48,7 @@ async def get_stage(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ) -> StageResponse:
-    stage = await _load_stage(stage_id, db)
+    stage = await _load_stage(stage_id, db, user.id)
     return StageResponse.model_validate(stage)
 
 
@@ -54,6 +59,8 @@ async def generate_stage(
     user: User = Depends(get_current_user),
     _: None = Depends(require_credits(10)),
 ) -> StreamingResponse:
+    await _load_stage(stage_id, db, user.id)
+
     async def _stream() -> AsyncGenerator[str, None]:
         try:
             async for token in stage_manager.generate(stage_id, user, db):
@@ -78,6 +85,8 @@ async def regenerate_stage(
     user: User = Depends(get_current_user),
     _: None = Depends(require_credits(10)),
 ) -> StreamingResponse:
+    await _load_stage(stage_id, db, user.id)
+
     async def _stream() -> AsyncGenerator[str, None]:
         try:
             async for token in stage_manager.generate(stage_id, user, db):
@@ -103,6 +112,7 @@ async def refine_stage(
     user: User = Depends(get_current_user),
     _: None = Depends(require_credits(3)),
 ) -> DiffResponse:
+    await _load_stage(stage_id, db, user.id)
     return await stage_manager.refine(stage_id, request, user, db)
 
 
@@ -113,6 +123,7 @@ async def accept_diff(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ) -> StageResponse:
+    await _load_stage(stage_id, db, user.id)
     stage = await stage_manager.handle_content_edit(
         stage_id, body.proposed_content, user, db
     )
@@ -126,7 +137,8 @@ async def reject_diff(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ) -> dict:
-    await credit_service.refund(db, body.ledger_id)
+    await _load_stage(stage_id, db, user.id)
+    await credit_service.refund(db, body.ledger_id, user.id)
     return {"refunded": True}
 
 
@@ -136,6 +148,7 @@ async def finalise_stage(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ) -> StageResponse:
+    await _load_stage(stage_id, db, user.id)
     try:
         stage = await stage_manager.finalise(stage_id, user, db)
     except ValueError as exc:
@@ -152,7 +165,22 @@ async def rollback_stage(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ) -> StageResponse:
+    await _load_stage(stage_id, db, user.id)
     stage = await stage_manager.rollback(stage_id, body.version_number, user, db)
+    return StageResponse.model_validate(stage)
+
+
+@router.post("/{stage_id}/acknowledge-gate", response_model=StageResponse)
+async def acknowledge_gate(
+    stage_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> StageResponse:
+    stage = await _load_stage(stage_id, db, user.id)
+    stage.review_gate_acknowledged = True
+    stage.updated_at = datetime.now(UTC)
+    await db.commit()
+    await db.refresh(stage)
     return StageResponse.model_validate(stage)
 
 
@@ -162,6 +190,7 @@ async def list_versions(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ) -> list[StageVersionResponse]:
+    await _load_stage(stage_id, db, user.id)
     result = await db.execute(
         select(StageVersion)
         .where(StageVersion.stage_id == stage_id)
@@ -176,6 +205,7 @@ async def get_eval(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ) -> dict:
+    await _load_stage(stage_id, db, user.id)
     result = await db.execute(
         select(EvalResult)
         .join(StageVersion, EvalResult.stage_version_id == StageVersion.id)
@@ -208,5 +238,6 @@ async def edit_content(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ) -> StageResponse:
+    await _load_stage(stage_id, db, user.id)
     stage = await stage_manager.handle_content_edit(stage_id, body.content, user, db)
     return StageResponse.model_validate(stage)
