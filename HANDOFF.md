@@ -4,7 +4,7 @@ Date: 2026-04-30
 
 ## Current State
 
-Work has been completed through **T-036**, with additional discrepancy fixes for streaming, stage authorization, refine API typing, and the review-gate endpoint.
+Work has been completed through **T-037**, with additional discrepancy fixes for streaming, stage authorization, refine API typing, and the review-gate endpoint.
 
 ```
 Current branch: main
@@ -28,7 +28,7 @@ SpecForge is an AI-powered 4-stage pipeline that turns a plain-English problem s
 - Auth: Google OAuth via Authlib, HttpOnly refresh cookies, Redis session tracking
 - LLM: Abstract adapter layer (Anthropic / OpenAI / Google), streaming via SSE
 
-## Completed Tasks (T-001 through T-036)
+## Completed Tasks (T-001 through T-037)
 
 ### Phase 1 — Foundation (T-001 to T-010, done by Codex)
 - T-001: Monorepo structure
@@ -58,7 +58,7 @@ SpecForge is an AI-powered 4-stage pipeline that turns a plain-English problem s
 - T-027: Export service + `POST /workspaces/{id}/export` (zip SPEC.md, PLAN.md, TASKS.md, harness/ files)
 - T-028: Credits router (`GET /credits/balance`, `GET /credits/history` paginated)
 
-### Phase 1 — Frontend (T-029 to T-036, done)
+### Phase 1 — Frontend (T-029 to T-037, done)
 - T-029: SSE service (`createSSEConnection` streams the backend POST response with `fetch`)
 - T-030: Zustand stores (`userStore`, `workspaceStore`, `stageStore` with `subscribeWithSelector` for zero-re-render streaming)
 - T-031: React Router + page shell (`Landing`, `Dashboard`, `Workspace` placeholder, `ProtectedRoute`)
@@ -67,10 +67,12 @@ SpecForge is an AI-powered 4-stage pipeline that turns a plain-English problem s
 - T-034: `StageEditor` CodeMirror 6 component (streaming token insertion via `subscribeWithSelector`, debounced `onContentChange`, selection handle via `ref`)
 - T-035: `DiffViewer` component (manual unified diff parser, +/- line colors, accept/reject buttons)
 - T-036: `GenerateBar`, `CreditConfirmModal`, `StalenessWarning`, and `HumanReviewGate` created.
+- T-037: `QualityBadge`, `CoveragePanel`, and `TaskValidationPanel` created.
 
 ## Recent Commits
 
 ```
+5d2e6ba Fix stage streaming and authorization contracts
 c36aaa7 T-033/T-034/T-035/T-036 partial: Stage navigator, editor, diff viewer, generate bar, credit confirm modal
 5c6ac12 T-032: Implement Dashboard UI with workspace grid and create modal
 b93944f T-029/T-030/T-031: SSE service, Zustand stores, React Router with page shell
@@ -97,16 +99,9 @@ uv run black --check . # All done
 cd ../frontend && pnpm tsc --noEmit  # 0 errors
 ```
 
-## Next Task to Resume: T-037
+## Next Task to Resume: T-038
 
-T-036 is complete. The backend review-gate endpoint `POST /stages/{id}/acknowledge-gate` has also been added early so `HumanReviewGate` can call a real endpoint.
-
-### T-037: Coverage Panel and Task Validation Panel
-
-Create:
-- `frontend/src/components/workspace/QualityBadge.tsx` — shows `{overall_score}/100`. Green ≥80, amber 60-79, red <60. Shows "Evaluating…" if null.
-- `frontend/src/components/workspace/CoveragePanel.tsx` — only for harness stage. Shows `coverage_percent` progress bar. Lists `uncovered_reqs` as amber warning items if <80%.
-- `frontend/src/components/workspace/TaskValidationPanel.tsx` — only for tasks stage. Lists `tasks_without_ref` flagged items.
+T-037 is complete. The backend review-gate endpoint `POST /stages/{id}/acknowledge-gate` was also added early so `HumanReviewGate` can call a real endpoint.
 
 ### T-038: Workspace Page — Full Assembly
 
@@ -249,6 +244,9 @@ frontend/src/
       CreditConfirmModal.tsx       — "This will use N credits" confirmation dialog
       StalenessWarning.tsx
       HumanReviewGate.tsx
+      QualityBadge.tsx
+      CoveragePanel.tsx
+      TaskValidationPanel.tsx
   pages/
     Landing.tsx                    — "Sign in with Google" button
     Dashboard.tsx                  — workspace grid + create modal + credit banner
@@ -326,8 +324,8 @@ All other secrets in `backend/.env` are placeholders. Docker Compose runs `db` a
 
 ## Stop Point
 
-Last completed: T-036 plus discrepancy fixes. Local changes are not committed yet.
+Last completed: T-037 plus discrepancy fixes. Local changes are not committed yet.
 
-**Resume from:** T-037, then T-038, T-039...T-049 in order.
+**Resume from:** T-038, then T-039...T-049 in order.
 
 Commit and push after each task completes successfully (tests pass, `pnpm tsc --noEmit` exits 0).
