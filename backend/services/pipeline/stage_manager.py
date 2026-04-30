@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import AsyncGenerator
 from datetime import UTC, datetime
@@ -14,6 +15,7 @@ from config import settings
 from models import Stage, StageVersion, Workspace
 from schemas.stage import DiffResponse, RefineRequest
 from services.credit_service import credit_service
+from services.evals.online_eval import run_eval
 from services.llm.base import ProviderError
 from services.llm.gateway import get_llm
 from services.pipeline.diff_engine import apply_diff, compute_diff
@@ -116,8 +118,18 @@ class StageManager:
             created_by="ai",
         )
         db.add(version)
+        await db.flush()
+        version_id = version.id
+        spec_content = ""
+        if stage.type != "spec":
+            spec_content = (
+                await redis.get(f"{_STAGE_CACHE_PREFIX}{workspace.id}:spec") or ""
+            )
         await db.commit()
         await self._invalidate_stage_cache(workspace.id, stage.type, redis)
+        asyncio.create_task(
+            run_eval(version_id, stage.type, accumulated, spec_content, db)
+        )
         yield f'{{"done": true, "stage_id": "{stage_id}"}}'
 
     async def refine(
