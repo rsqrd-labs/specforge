@@ -32,6 +32,10 @@ interface CsrfTokenResponse {
   csrf_token: string
 }
 
+interface GoogleCallbackResponse {
+  access_token: string
+}
+
 export interface CreditBalance {
   balance: number
 }
@@ -200,6 +204,15 @@ api.interceptors.response.use(
 
 export async function getCurrentUser(): Promise<User> {
   const response = await api.get<User>("/auth/me")
+  return response.data
+}
+
+export async function completeGoogleCallback(
+  code: string,
+): Promise<GoogleCallbackResponse> {
+  const response = await refreshApi.get<GoogleCallbackResponse>("/auth/callback", {
+    params: { code },
+  })
   return response.data
 }
 

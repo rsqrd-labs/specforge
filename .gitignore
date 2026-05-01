@@ -217,6 +217,7 @@ __marimo__/
 
 # Node
 node_modules/
+.pnpm-store/
 
 # Secrets
 *.pem

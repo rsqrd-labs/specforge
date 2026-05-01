@@ -1,0 +1,85 @@
+@import url("https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap");
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --color-surface: #f9f9f9;
+  --color-surface-dim: #dadada;
+  --color-surface-bright: #f9f9f9;
+  --color-surface-container-lowest: #ffffff;
+  --color-surface-container-low: #f3f3f4;
+  --color-surface-container: #eeeeee;
+  --color-surface-container-high: #e8e8e8;
+  --color-surface-container-highest: #e2e2e2;
+  --color-on-surface: #1a1c1c;
+  --color-on-surface-variant: #554336;
+  --color-inverse-surface: #2f3131;
+  --color-inverse-on-surface: #f0f1f1;
+  --color-outline: #887364;
+  --color-outline-variant: #dbc2b0;
+  --color-surface-tint: #8f4e00;
+  --color-primary: #8f4e00;
+  --color-on-primary: #ffffff;
+  --color-primary-container: #ff9933;
+  --color-on-primary-container: #693800;
+  --color-inverse-primary: #ffb77a;
+  --color-secondary: #a1385f;
+  --color-on-secondary: #ffffff;
+  --color-secondary-container: #fd80a9;
+  --color-on-secondary-container: #76143e;
+  --color-tertiary: #565e74;
+  --color-on-tertiary: #ffffff;
+  --color-tertiary-container: #aab1ca;
+  --color-on-tertiary-container: #3c4459;
+  --color-error: #ba1a1a;
+  --color-on-error: #ffffff;
+  --color-error-container: #ffdad6;
+  --color-on-error-container: #93000a;
+  --color-background: #f9f9f9;
+  --color-on-background: #1a1c1c;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  min-height: 100%;
+  background: var(--color-background);
+  color: var(--color-on-background);
+  font-family: "Plus Jakarta Sans", ui-sans-serif, system-ui, sans-serif;
+}
+
+body {
+  min-height: 100vh;
+  margin: 0;
+  background:
+    radial-gradient(circle at top left, rgba(255, 153, 51, 0.18), transparent 34rem),
+    radial-gradient(circle at bottom right, rgba(161, 56, 95, 0.12), transparent 30rem),
+    var(--color-background);
+  color: var(--color-on-background);
+  font-family: "Plus Jakarta Sans", ui-sans-serif, system-ui, sans-serif;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+
+button:disabled {
+  cursor: not-allowed;
+}
+
+#root {
+  min-height: 100vh;
+}
