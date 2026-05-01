@@ -137,3 +137,27 @@ async def test_post_auth_logout_clears_cookie(
     assert response.json() == {"ok": True}
     set_cookie_header = response.headers.get("set-cookie", "")
     assert "refresh_token" in set_cookie_header
+    assert "Path=/auth/refresh" in set_cookie_header
+
+
+@pytest.mark.asyncio
+async def test_refresh_cookie_uses_strict_scoped_security_attributes(
+    app: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def fake_handle_callback(code: str, db: Any) -> tuple[str, str]:
+        return "access-token", "refresh-token"
+
+    monkeypatch.setattr(_auth_service, "handle_callback", fake_handle_callback)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/auth/callback?code=test-code")
+
+    assert response.status_code == 200
+    set_cookie_header = response.headers.get("set-cookie", "")
+    assert "refresh_token=refresh-token" in set_cookie_header
+    assert "HttpOnly" in set_cookie_header
+    assert "Secure" in set_cookie_header
+    assert "samesite=strict" in set_cookie_header.lower()
+    assert "Path=/auth/refresh" in set_cookie_header
+    assert "Max-Age=604800" in set_cookie_header

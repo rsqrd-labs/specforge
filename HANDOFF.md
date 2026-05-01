@@ -8,6 +8,7 @@ Branch: `main`
 Remote: `https://github.com/rsqrd-labs/specforge.git`
 
 Latest pushed commits:
+- `1124f15 T-058: Keep access tokens in memory only`
 - `397b035 T-057: Fix Google auth redirect contract`
 - `5610a4d T-056: Add Docker quickstart`
 - `58c082a T-055: Show eval scores in stage navigator`
@@ -28,8 +29,9 @@ Current implementation status:
 - T-055 Quality Badge in StageNavigator is complete and pushed.
 - T-056 Dockerfile and README Quickstart is complete and pushed.
 - T-057 Fix Google Login Redirect Contract is complete and pushed.
-- T-058 Remove Access Token localStorage Fallback is implemented locally and ready to commit/push after this handoff update.
-- Next task after T-058 is T-059 Harden Refresh Cookie Attributes.
+- T-058 Remove Access Token localStorage Fallback is complete and pushed.
+- T-059 Harden Refresh Cookie Attributes is implemented locally and ready to commit/push after this handoff update.
+- Next task after T-059 is T-060 Refresh Token Reuse Revokes All Sessions.
 
 Known unrelated working-tree artifacts that predate this pass and should not be reverted casually:
 - Deleted: `Design.md.md`
@@ -236,7 +238,7 @@ uv run pytest tests/test_auth_router.py::test_post_auth_google_returns_redirect_
 
 ### T-058 Remove Access Token localStorage Fallback
 
-Implemented locally:
+Commit `1124f15` implemented:
 - `frontend/src/services/api.ts`
   - `getAccessToken()` now returns only the in-memory `accessToken`.
   - No localStorage/sessionStorage fallback remains for access tokens.
@@ -251,10 +253,28 @@ pnpm tsc --noEmit
 pnpm vitest run --config vitest.harness.config.ts ../harness/tests/frontend/api.contract.test.ts
 ```
 
+### T-059 Harden Refresh Cookie Attributes
+
+Implemented locally:
+- `backend/routers/auth.py`
+  - Refresh cookie now uses `SameSite=Strict`.
+  - Refresh cookie is scoped to `Path=/auth/refresh`.
+  - Logout deletes the same scoped cookie.
+- `backend/tests/test_auth_router.py`
+  - Asserts `HttpOnly`, `Secure`, strict SameSite, path scope, and max age.
+  - Asserts logout clear-cookie uses the refresh path.
+
+Verified:
+```bash
+cd backend
+uv run pytest tests/test_auth_router.py -q
+uv run ruff check routers/auth.py tests/test_auth_router.py
+uv run black --check routers/auth.py tests/test_auth_router.py
+```
+
 ## Pending Tasks
 
 Continue in `tasks.md` order:
-- T-059: Harden Refresh Cookie Attributes
 - T-060: Refresh Token Reuse Revokes All Sessions
 - T-061: Provider-Specific Eval Judge Selection
 - T-062: Isolate Background Eval Database Session

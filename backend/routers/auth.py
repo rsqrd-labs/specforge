@@ -21,8 +21,9 @@ def _set_refresh_cookie(response: Response, token: str) -> None:
         value=token,
         httponly=True,
         secure=True,
-        samesite="lax",
+        samesite="strict",
         max_age=_COOKIE_MAX_AGE,
+        path="/auth/refresh",
     )
 
 
@@ -78,7 +79,7 @@ async def logout(
         except AuthError:
             pass
 
-    response.delete_cookie(key=_REFRESH_COOKIE)
+    response.delete_cookie(key=_REFRESH_COOKIE, path="/auth/refresh")
     return {"ok": True}
 
 
