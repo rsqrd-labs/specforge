@@ -1064,7 +1064,7 @@ VITE_SENTRY_DSN=https://xxx@sentry.io/xxx
 
 ## 10. Gap Analysis — Post-T-049 Audit (2026-05-01)
 
-After completing all T-001 through T-049 tasks, a codebase audit against the spec and plan revealed eight items that are in scope for V1 but were not tasked or implemented.
+After completing all T-001 through T-049 tasks, a codebase audit against the spec and plan revealed eighteen items that are in scope for V1 but were not tasked or implemented.
 
 ### Confirmed Gaps
 
@@ -1081,7 +1081,7 @@ The spec security table defines "Auth Login Per IP hourly: 20 attempts / 1 hour.
 _Resolution: T-052_
 
 **G4 — Sentry Initialization** _(T-039 Steps 2 & 3)_
-`sentry-sdk[fastapi]` and `@sentry/react` are both installed, but neither `sentry_sdk.init()` in `backend/main.py` nor `Sentry.init()` in `frontend/src/main.tsx` is present. T-039 explicitly specifies both.
+`sentry-sdk[fastapi]` and `@sentry/react` are both installed. Backend Sentry is already initialized through `services/observability.py` and called by `main.py`, but frontend `Sentry.init()` in `frontend/src/main.tsx` is missing. The Phase 4 backend harness check may need to be aligned with the existing observability abstraction instead of requiring initialization inline in `main.py`.
 _Resolution: T-053_
 
 **G5 — StreamingOverlay Component** _(Plan §3.2 component list)_
@@ -1100,6 +1100,46 @@ _Resolution: T-056_
 `README.md` contains only "Setup instructions coming soon." The self-hosting strategy requires: clone → copy .env → docker-compose up → open localhost:5173. Without this, the open-source product is not usable by self-hosters.
 _Resolution: T-056 (bundled with Dockerfile)_
 
+**G9 — Google Login Response Contract Mismatch** _(Spec §8 Auth Flow, T-031 Landing)_
+`POST /auth/google` returns `{"redirect_url": ...}` but `frontend/src/pages/Landing.tsx` reads `res.data.url`, so clicking "Sign in with Google" assigns `undefined` and cannot start OAuth.
+_Resolution: T-057_
+
+**G10 — Access Token LocalStorage Fallback** _(Spec §8 Token Storage, Architecture §4.4)_
+The API service does not write access tokens to localStorage, but `getAccessToken()` still reads `localStorage.getItem("access_token")`. The spec says access tokens live in JS memory only and never in localStorage or sessionStorage.
+_Resolution: T-058_
+
+**G11 — Refresh Cookie Attributes Too Weak** _(Spec §8 Token Storage, Architecture §4.4)_
+The refresh token cookie is set with `SameSite=Lax` and no `path="/auth/refresh"`. The spec requires `httpOnly`, `Secure`, `SameSite=Strict`, scoped to `/auth/refresh`.
+_Resolution: T-059_
+
+**G12 — Refresh Token Reuse Does Not Revoke All Sessions** _(Spec §8 Session Management, Architecture §4.4)_
+When a missing/reused refresh-token session is detected, `refresh_tokens()` raises an auth error but does not revoke all active sessions for that user. The spec requires full session revocation on reuse detection.
+_Resolution: T-060_
+
+**G13 — Eval Judge Ignores Workspace Provider** _(Spec §7 Online Evals, Plan §3 evals)_
+`run_eval()` always instantiates `AnthropicAdapter` with Haiku. The plan says the judge model should be the cheapest judge model for the workspace's selected provider to avoid cross-provider API key requirements.
+_Resolution: T-061_
+
+**G14 — Background Eval Uses Request-Scoped DB Session** _(Plan §3 Async Eval Trigger)_
+`stage_manager.generate()` launches `asyncio.create_task(run_eval(..., db))` with the same `AsyncSession` used by the streaming request. Background work should open its own session so it cannot operate on a closed or request-owned session.
+_Resolution: T-062_
+
+**G15 — Refine Missing Security and Refund Guards** _(Spec §6 Refine, Spec §12 Reliability/Security)_
+`refine()` does not run prompt-injection scanning on the instruction/selection, does not validate the LLM replacement, and does not refund credits if the provider call fails. Generate has these guards; refine should be bracketed by the same security and credit-safety layers.
+_Resolution: T-063_
+
+**G16 — Refine Billing Semantics Conflict** _(Spec §6 Refine)_
+The spec says refine costs 3 credits "only on acceptance", while the implementation deducts before returning a diff and refunds on reject. This is a product-contract mismatch that must be resolved explicitly before launch.
+_Resolution: T-064_
+
+**G17 — Workspace IDOR Returns 403 Instead of 404** _(Architecture §7 IDOR Prevention)_
+`WorkspaceService.get()` returns 403 when a workspace exists but belongs to another user. The architecture requires 404 to avoid confirming resource existence.
+_Resolution: T-065_
+
+**G18 — Sensitive Data Redaction Missing from Logs** _(Architecture §7 API Key Vault, Observability)_
+The architecture claims a `SensitiveDataFilter` redacts key-shaped strings before logs reach Loki or Sentry, but `configure_logging()` has no redaction processor/filter. Secrets, bearer tokens, provider keys, and private keys need a central log scrubber.
+_Resolution: T-066_
+
 ### Intentionally Deferred (not gaps)
 
 The following items appear in the spec architecture but were explicitly scoped out of V1 in tasks.md and the plan:
@@ -1111,4 +1151,4 @@ The following items appear in the spec architecture but were explicitly scoped o
 
 ---
 
-_SpecForge V1 PLAN.md · Version 1.0.2 · Updated 2026-05-01 with post-T-049 gap analysis_
+_SpecForge V1 PLAN.md · Version 1.1.0 · Updated 2026-05-01 with post-T-049 and second-pass gap analysis_

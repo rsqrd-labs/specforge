@@ -1889,7 +1889,7 @@ Add the hourly auth login rate limit (20 attempts / 1 hour per IP) to `RateLimit
 ### T-053: Sentry Initialization
 
 **Description:**
-Initialize Sentry error tracking in both backend and frontend. Both SDKs are installed (`sentry-sdk[fastapi]` and `@sentry/react`) but `init()` is never called. This was specified in T-039 steps 2 and 3 but was not completed.
+Initialize missing frontend Sentry error tracking and ensure backend Sentry remains wired through the observability abstraction. Both SDKs are installed. Backend `sentry_sdk.init()` already exists in `backend/services/observability.py` and is invoked by `setup_observability()` from `main.py`; frontend `Sentry.init()` is still missing.
 
 **Inputs:**
 - `backend/config.py` (`sentry_dsn: str` already present)
@@ -1897,22 +1897,13 @@ Initialize Sentry error tracking in both backend and frontend. Both SDKs are ins
 - Plan v1.md §2 (sentry-sdk[fastapi] + @sentry/react)
 
 **Outputs:**
-- Updated `backend/main.py`
+- Updated `harness/tests/backend/test_phase4_contract.py` if the harness still requires inline `sentry_sdk.init()` in `main.py` instead of accepting `setup_observability()`
 - Updated `frontend/src/main.tsx`
 
 **Steps:**
-1. In `backend/main.py`, inside the `lifespan` or `create_app` function, add:
-   ```python
-   import sentry_sdk
-   if settings.sentry_dsn:
-       sentry_sdk.init(
-           dsn=settings.sentry_dsn,
-           traces_sample_rate=0.1,
-           environment=settings.environment,
-       )
-   ```
-   Guard with `if settings.sentry_dsn` so local dev without DSN doesn't error.
-2. In `frontend/src/main.tsx`, add before `ReactDOM.createRoot`:
+1. Verify backend Sentry initialization remains in `services/observability.py::setup_sentry()` and is invoked by `main.py::create_app()` via `setup_observability(app, async_engine)`.
+2. If the Phase 4 backend harness still checks only `main.py`, update that harness assertion to accept the existing `setup_observability()` call and `services/observability.py::setup_sentry()`. Do not duplicate Sentry initialization in `main.py`.
+3. In `frontend/src/main.tsx`, add before `ReactDOM.createRoot`:
    ```typescript
    import * as Sentry from "@sentry/react"
    if (import.meta.env.VITE_SENTRY_DSN) {
@@ -1923,8 +1914,8 @@ Initialize Sentry error tracking in both backend and frontend. Both SDKs are ins
      })
    }
    ```
-3. Run `pnpm tsc --noEmit` to verify no type errors.
-4. Verify backend starts without error when `SENTRY_DSN` is unset.
+4. Run `pnpm tsc --noEmit` to verify no type errors.
+5. Verify backend starts without error when `SENTRY_DSN` is unset.
 
 **Acceptance Criteria:**
 - Backend starts cleanly with `SENTRY_DSN` unset (empty string or missing).
@@ -2062,4 +2053,325 @@ Add the `backend/Dockerfile` required for self-hosting and expand `README.md` wi
 
 ---
 
-_tasks.md · SpecForge V1 · Version 1.1.0 · Updated 2026-05-01 with gap-closure tasks T-050 through T-056_
+### T-057: Fix Google Login Redirect Contract
+
+**Description:**
+Fix the frontend/backend contract mismatch for Google OAuth initiation. The backend returns `redirect_url`, while the landing page reads `url`, breaking the sign-in button.
+
+**Inputs:**
+- `backend/routers/auth.py`
+- `frontend/src/pages/Landing.tsx`
+- `backend/tests/test_auth_router.py`
+
+**Outputs:**
+- Updated `frontend/src/pages/Landing.tsx`
+- Updated or added frontend test for Google sign-in redirect handling
+
+**Steps:**
+1. Update `Landing.tsx` response typing to `{ redirect_url: string }`.
+2. Change `window.location.assign(res.data.url)` to `window.location.assign(res.data.redirect_url)`.
+3. Add a focused frontend test that mocks `api.post("/auth/google")` and asserts `window.location.assign()` receives the backend `redirect_url`.
+4. Keep the backend response shape unchanged because existing backend tests and API contract use `redirect_url`.
+
+**Acceptance Criteria:**
+- Clicking "Sign in with Google" redirects to the URL returned by `POST /auth/google`.
+- Backend auth router tests still pass.
+- Frontend test covers the response field.
+- `pnpm tsc --noEmit` and relevant Vitest tests pass.
+
+**Dependencies:** T-031
+
+---
+
+### T-058: Remove Access Token localStorage Fallback
+
+**Description:**
+Enforce the spec rule that access tokens live in JS memory only. `api.ts` currently avoids writing access tokens to localStorage but still reads `localStorage.getItem("access_token")`.
+
+**Inputs:**
+- Spec §8 Token Storage
+- `frontend/src/services/api.ts`
+- `harness/tests/frontend/api.contract.test.ts`
+
+**Outputs:**
+- Updated `frontend/src/services/api.ts`
+- Updated frontend/harness API contract test to reject localStorage/sessionStorage reads for access tokens
+
+**Steps:**
+1. Remove the `localStorage.getItem("access_token")` fallback from `getAccessToken()`.
+2. Ensure `setAccessToken()` is the only way the API client receives an access token.
+3. Update tests to assert no `localStorage` or `sessionStorage` access is used for access-token storage or retrieval.
+4. Verify refresh flow still stores the refreshed token in memory via `setAccessToken(refreshedToken)`.
+
+**Acceptance Criteria:**
+- `frontend/src/services/api.ts` contains no localStorage/sessionStorage access for access tokens.
+- Existing refresh retry behavior still works.
+- `pnpm tsc --noEmit` and frontend API contract tests pass.
+
+**Dependencies:** T-005, T-031
+
+---
+
+### T-059: Harden Refresh Cookie Attributes
+
+**Description:**
+Set refresh token cookies exactly as required by the spec: `httpOnly`, `Secure`, `SameSite=Strict`, scoped to `/auth/refresh`.
+
+**Inputs:**
+- Spec §8 Token Storage
+- Plan v1.md §4.4 Authentication Token Lifecycle
+- `backend/routers/auth.py`
+- `backend/tests/test_auth_router.py`
+
+**Outputs:**
+- Updated `backend/routers/auth.py`
+- Updated backend auth router tests
+
+**Steps:**
+1. Change `_set_refresh_cookie()` from `samesite="lax"` to `samesite="strict"`.
+2. Add `path="/auth/refresh"` when setting the refresh cookie.
+3. Ensure `delete_cookie()` uses the same `path="/auth/refresh"` so logout clears the cookie.
+4. Update tests to assert `HttpOnly`, `Secure`, `SameSite=Strict`, `Path=/auth/refresh`, and `Max-Age=604800`.
+
+**Acceptance Criteria:**
+- Refresh cookie has the required security attributes.
+- Logout clears the scoped refresh cookie.
+- Backend auth router tests pass.
+
+**Dependencies:** T-011
+
+---
+
+### T-060: Refresh Token Reuse Revokes All Sessions
+
+**Description:**
+Implement full session revocation when refresh-token reuse is detected. The current flow detects a missing session key and raises an auth error, but leaves other active sessions untouched.
+
+**Inputs:**
+- Spec §8 Session Management
+- Plan v1.md §4.4 Authentication Token Lifecycle
+- `backend/services/auth_service.py`
+- `backend/tests/test_auth_service.py`
+
+**Outputs:**
+- Updated `backend/services/auth_service.py`
+- Updated auth service tests
+
+**Steps:**
+1. Store a per-user session index when creating refresh sessions, e.g. `user_sessions:{user_id}` containing active refresh JTIs.
+2. When rotating a refresh token, remove the old JTI from the user's session index and add the new JTI.
+3. If `refresh_tokens()` receives a token whose `session:{jti}` is missing, call a new helper that deletes every session key in `user_sessions:{user_id}` and clears that index.
+4. Ensure `revoke()` removes the JTI from the user session index for normal logout.
+5. Add tests for normal rotation and reuse detection revoking all sessions.
+
+**Acceptance Criteria:**
+- Reusing an already-rotated refresh token deletes all active refresh sessions for that user.
+- Normal refresh rotation keeps exactly one replacement session active for that browser.
+- Logout revokes only the presented refresh token.
+- Backend auth service tests pass.
+
+**Dependencies:** T-009, T-011
+
+---
+
+### T-061: Provider-Specific Eval Judge Selection
+
+**Description:**
+Make online evals use the judge model for the workspace provider instead of always using Anthropic Haiku. This matches the plan and avoids requiring an Anthropic key for OpenAI/Google workspaces.
+
+**Inputs:**
+- Spec §7 Online Evals
+- Plan v1.md §3 evals
+- `backend/services/evals/online_eval.py`
+- `backend/services/llm/gateway.py`
+- `backend/services/llm/provider_config.py`
+- `backend/services/pipeline/stage_manager.py`
+
+**Outputs:**
+- Updated `backend/services/evals/online_eval.py`
+- Updated `backend/services/pipeline/stage_manager.py`
+- Updated eval tests
+
+**Steps:**
+1. Extend `run_eval()` to accept `provider: str` and `judge_model: str`.
+2. Resolve `judge_model` from provider config for the workspace provider.
+3. Use `get_llm(provider, judge_model)` instead of `AnthropicAdapter(_JUDGE_MODEL)`.
+4. Pass workspace provider and judge model from `stage_manager.generate()`.
+5. Add tests proving Anthropic, OpenAI, and Google workspaces dispatch to the expected judge provider/model.
+
+**Acceptance Criteria:**
+- Evals for OpenAI workspaces use the OpenAI judge model.
+- Evals for Google workspaces use the Google judge model.
+- Evals for Anthropic workspaces use the Anthropic judge model.
+- Existing eval result persistence behavior remains unchanged.
+
+**Dependencies:** T-013, T-026
+
+---
+
+### T-062: Isolate Background Eval Database Session
+
+**Description:**
+Prevent background eval tasks from using the request-scoped `AsyncSession`. `stage_manager.generate()` currently passes `db` into `asyncio.create_task()`, which can outlive the streaming request lifecycle.
+
+**Inputs:**
+- Plan v1.md §3 Async Eval Trigger
+- `backend/services/pipeline/stage_manager.py`
+- `backend/services/evals/online_eval.py`
+- `backend/database.py`
+
+**Outputs:**
+- Updated `backend/services/evals/online_eval.py` or new eval task helper
+- Updated `backend/services/pipeline/stage_manager.py`
+- Updated tests for background eval scheduling
+
+**Steps:**
+1. Create a helper such as `run_eval_background(...)` that opens its own `AsyncSessionLocal()` inside the background task.
+2. Keep `run_eval(..., db)` usable for direct unit tests if helpful, but do not pass request-scoped sessions into `asyncio.create_task()`.
+3. Update `stage_manager.generate()` to schedule the background helper with primitive values only: version id, stage type, content, spec content, provider, judge model.
+4. Add tests that assert the background helper creates/closes its own DB session.
+
+**Acceptance Criteria:**
+- No request-scoped `AsyncSession` is captured by an eval background task.
+- Eval persistence still works.
+- Generate streaming still sends `[done]` without waiting for eval completion.
+- Backend eval/stage manager tests pass.
+
+**Dependencies:** T-026, T-061
+
+---
+
+### T-063: Secure and Refund Refine Flow
+
+**Description:**
+Bring refine up to the same security and credit-safety standard as generate. Refine currently does not scan prompt-injection input, does not validate model output, and does not refund credits on provider failure.
+
+**Inputs:**
+- Spec §6 Refine
+- Spec §12 Reliability/Security
+- `backend/services/pipeline/stage_manager.py`
+- `backend/services/security/prompt_guard.py`
+- `backend/services/security/output_validator.py`
+- `backend/tests/test_stage_manager.py`
+
+**Outputs:**
+- Updated `backend/services/pipeline/stage_manager.py`
+- Updated stage manager tests
+
+**Steps:**
+1. Run `scan()` on `request.instruction` and `request.selected_text` before the LLM call.
+2. If prompt guard rejects input, do not deduct credits and raise `SecurityError`.
+3. Wrap `adapter.complete()` in provider-error handling; refund the deduction on provider failure.
+4. Run `validate()` on the replacement text; refund and raise `SecurityError` if validation fails.
+5. Add tests for injection rejection, provider-error refund, output-validation refund, and successful diff generation.
+
+**Acceptance Criteria:**
+- Unsafe refine input is rejected before any credit deduction or LLM call.
+- Provider failure during refine refunds credits.
+- Unsafe LLM replacement output refunds credits and is not returned.
+- Stage manager tests pass.
+
+**Dependencies:** T-022, T-024
+
+---
+
+### T-064: Resolve Refine Billing Semantics
+
+**Description:**
+Align refine billing with the spec: "Cost: 3 credits (only on acceptance)." The current implementation deducts before returning the diff and refunds on reject.
+
+**Inputs:**
+- Spec §6 Refine
+- `backend/services/pipeline/stage_manager.py`
+- `backend/routers/stage.py`
+- `frontend/src/pages/Workspace.tsx`
+- `frontend/src/services/api.ts`
+
+**Outputs:**
+- Updated backend refine/accept/reject flow
+- Updated frontend diff accept/reject flow
+- Updated credit and stage manager tests
+
+**Steps:**
+1. Choose and document the final product contract in code comments/tests: refine preview is free; accepting the diff costs 3 credits.
+2. Remove pre-deduction from `stage_manager.refine()`.
+3. Deduct 3 credits in the accept-diff path before saving accepted content.
+4. If accept persistence fails after deduction, refund the deduction.
+5. Remove `ledger_id` from `DiffResponse` and frontend reject-diff payload if no longer needed.
+6. Update tests and types to reflect "deduct on accept, no refund needed on reject."
+
+**Acceptance Criteria:**
+- Rejecting a refine diff never changes credit balance.
+- Accepting a refine diff deducts exactly 3 credits.
+- Failed accept after deduction refunds credits.
+- Frontend no longer requires a refine ledger id for reject.
+- Backend and frontend tests pass.
+
+**Dependencies:** T-023, T-024, T-035, T-063
+
+---
+
+### T-065: Return 404 for Cross-User Workspace Access
+
+**Description:**
+Fix workspace ownership checks to avoid IDOR information leakage. The architecture requires 404, not 403, when a resource exists but is owned by another user.
+
+**Inputs:**
+- Architecture §7 IDOR Prevention
+- `backend/services/workspace_service.py`
+- `backend/routers/workspace.py`
+- `backend/tests/test_workspace.py`
+
+**Outputs:**
+- Updated `backend/services/workspace_service.py`
+- Updated workspace tests
+
+**Steps:**
+1. Change `WorkspaceService.get()` to raise 404 for both missing workspace and wrong owner.
+2. Ensure `update()` and `archive()` inherit the same 404 behavior.
+3. Add tests proving a user cannot distinguish "missing" from "owned by someone else."
+4. Verify stage routes already use 404 for cross-user stage access and leave them unchanged.
+
+**Acceptance Criteria:**
+- Cross-user `GET /workspaces/{id}` returns 404.
+- Cross-user `PATCH /workspaces/{id}` returns 404.
+- Cross-user `DELETE /workspaces/{id}` returns 404.
+- Workspace tests pass.
+
+**Dependencies:** T-020
+
+---
+
+### T-066: Sensitive Data Redaction for Logs and Sentry
+
+**Description:**
+Add a central redaction layer so secrets are scrubbed before reaching structlog, Loki/Grafana, or Sentry. The architecture claims a `SensitiveDataFilter`, but no such filter currently exists.
+
+**Inputs:**
+- Architecture §7 API Key Vault
+- Spec §12 Observability
+- `backend/services/observability.py`
+- `backend/tests/test_observability.py`
+
+**Outputs:**
+- Updated `backend/services/observability.py`
+- Updated observability tests
+
+**Steps:**
+1. Implement a redaction helper that masks likely secrets: bearer tokens, `sk-...` keys, Anthropic/OpenAI/Google API keys, private key PEM bodies, refresh tokens, and `Authorization` header values.
+2. Add the helper as a structlog processor before JSON rendering.
+3. Add a standard logging `Filter` if needed so non-structlog records are scrubbed too.
+4. Configure Sentry `before_send` to scrub event data using the same helper.
+5. Add tests that log representative secrets and assert output contains `[REDACTED]` rather than the original value.
+
+**Acceptance Criteria:**
+- Secrets are redacted from structlog JSON output.
+- Sentry events are scrubbed before send.
+- Non-secret log fields remain readable.
+- Observability tests pass.
+
+**Dependencies:** T-039, T-045, T-053
+
+---
+
+_tasks.md · SpecForge V1 · Version 1.2.0 · Updated 2026-05-01 with gap-closure tasks T-050 through T-066_
