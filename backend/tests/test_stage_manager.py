@@ -284,3 +284,81 @@ async def test_mark_downstream_stale_tasks_stage_marks_nothing() -> None:
     svc = StageManager(redis_client=_FakeRedis())
     db = _MultiQueryDB([[]])
     await svc._mark_downstream_stale(tasks_stage, db)
+
+
+@pytest.mark.asyncio
+async def test_refine_large_selection_85_percent_returns_true() -> None:
+    """Selection covering 85% of document sets large_selection=True."""
+    workspace_id = uuid4()
+    content = "x" * 100
+    stage = _make_stage(workspace_id, "spec", status="draft", content=content)
+    workspace = _make_workspace([stage])
+    user = _make_user()
+    deduction = CreditLedger(id=uuid4(), user_id=user.id, amount=-3, reason="refine")
+
+    from schemas.stage import RefineRequest
+
+    request = RefineRequest(
+        instruction="improve",
+        selection_start=0,
+        selection_end=85,
+        selected_text=content[:85],
+    )
+
+    svc = StageManager(redis_client=_FakeRedis())
+    db = _MultiQueryDB([stage, workspace])
+
+    with (
+        patch(
+            "services.pipeline.stage_manager.credit_service.deduct",
+            new_callable=AsyncMock,
+            return_value=deduction,
+        ),
+        patch("services.pipeline.stage_manager.get_llm") as mock_get_llm,
+    ):
+        mock_adapter = MagicMock()
+        mock_adapter.complete = AsyncMock(return_value="replacement text")
+        mock_get_llm.return_value = mock_adapter
+
+        result = await svc.refine(stage.id, request, user, db)
+
+    assert result.large_selection is True
+
+
+@pytest.mark.asyncio
+async def test_refine_large_selection_50_percent_returns_false() -> None:
+    """Selection covering 50% of document sets large_selection=False."""
+    workspace_id = uuid4()
+    content = "x" * 100
+    stage = _make_stage(workspace_id, "spec", status="draft", content=content)
+    workspace = _make_workspace([stage])
+    user = _make_user()
+    deduction = CreditLedger(id=uuid4(), user_id=user.id, amount=-3, reason="refine")
+
+    from schemas.stage import RefineRequest
+
+    request = RefineRequest(
+        instruction="improve",
+        selection_start=0,
+        selection_end=50,
+        selected_text=content[:50],
+    )
+
+    svc = StageManager(redis_client=_FakeRedis())
+    db = _MultiQueryDB([stage, workspace])
+
+    with (
+        patch(
+            "services.pipeline.stage_manager.credit_service.deduct",
+            new_callable=AsyncMock,
+            return_value=deduction,
+        ),
+        patch("services.pipeline.stage_manager.get_llm") as mock_get_llm,
+    ):
+        mock_adapter = MagicMock()
+        mock_adapter.complete = AsyncMock(return_value="replacement text")
+        mock_get_llm.return_value = mock_adapter
+
+        result = await svc.refine(stage.id, request, user, db)
+
+    assert result.large_selection is False

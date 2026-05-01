@@ -400,10 +400,36 @@ export default function Workspace() {
           />
         )}
 
-        {(error || largeSelectionWarning) && (
+        {error && (
           <div className="border-b border-amber-200 bg-amber-50 px-5 py-3 text-sm text-amber-900">
-            {error ??
-              "This refine selection covers most of the document. Review the diff carefully before accepting."}
+            {error}
+          </div>
+        )}
+
+        {largeSelectionWarning && (
+          <div className="flex items-center justify-between gap-4 border-b border-amber-200 bg-amber-50 px-5 py-3">
+            <span className="text-sm text-amber-900">
+              This selection covers most of the document. Consider using Regenerate instead.
+            </span>
+            <div className="flex shrink-0 gap-2">
+              <button
+                type="button"
+                onClick={() => setLargeSelectionWarning(false)}
+                className="text-sm text-amber-700 underline hover:text-amber-900"
+              >
+                Proceed with diff
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  void rejectDiff()
+                  void requestGeneration("regenerate")
+                }}
+                className="rounded-lg bg-amber-700 px-3 py-1 text-sm font-medium text-white hover:bg-amber-800"
+              >
+                Use Regenerate
+              </button>
+            </div>
           </div>
         )}
 
