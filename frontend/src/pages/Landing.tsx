@@ -44,9 +44,8 @@ export default function Landing({
               Shape ideas into ship-ready plans.
             </h1>
             <p className="hero-lede">
-              SpecForge turns a problem statement into a structured delivery
-              package with review gates, harness coverage, and clear execution
-              tasks.
+              Transform a problem statement into validated specs, plans, harnesses,
+              and execution-ready tasks.
             </p>
 
             <div className="auth-card">
