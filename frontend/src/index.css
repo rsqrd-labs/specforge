@@ -85,17 +85,99 @@ button:disabled {
 }
 
 .landing-shell {
+  position: relative;
+  isolation: isolate;
   min-height: 100vh;
   overflow: hidden;
   background:
-    linear-gradient(135deg, rgba(255, 153, 51, 0.18), transparent 28%),
-    radial-gradient(circle at 82% 16%, rgba(253, 128, 169, 0.18), transparent 28rem),
-    radial-gradient(circle at 8% 88%, rgba(86, 94, 116, 0.12), transparent 30rem),
+    linear-gradient(135deg, rgba(255, 220, 194, 0.78), rgba(249, 249, 249, 0.72) 34%, rgba(255, 217, 225, 0.52)),
     var(--color-background);
   color: var(--color-on-background);
 }
 
+.landing-shell::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -3;
+  background:
+    radial-gradient(circle at 18% 24%, rgba(255, 153, 51, 0.22), transparent 26rem),
+    radial-gradient(circle at 74% 18%, rgba(253, 128, 169, 0.18), transparent 30rem),
+    radial-gradient(circle at 68% 86%, rgba(170, 177, 202, 0.22), transparent 28rem);
+}
+
+.landing-shell::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -2;
+  background-image:
+    linear-gradient(rgba(143, 78, 0, 0.055) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(143, 78, 0, 0.05) 1px, transparent 1px);
+  background-size: 44px 44px;
+  mask-image: linear-gradient(to bottom, rgba(0, 0, 0, 0.72), transparent 78%);
+}
+
+.ambient-field {
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  overflow: hidden;
+}
+
+.ambient-band {
+  position: absolute;
+  width: 82rem;
+  height: 18rem;
+  filter: blur(34px);
+  opacity: 0.46;
+  mix-blend-mode: multiply;
+  animation: aurora-drift 14s ease-in-out infinite alternate;
+}
+
+.band-saffron {
+  left: -22rem;
+  top: 10rem;
+  background: linear-gradient(90deg, transparent, rgba(255, 183, 122, 0.58), transparent);
+  transform: rotate(-18deg);
+}
+
+.band-lotus {
+  right: -24rem;
+  top: 3rem;
+  background: linear-gradient(90deg, transparent, rgba(255, 177, 198, 0.5), transparent);
+  transform: rotate(17deg);
+  animation-delay: -4s;
+}
+
+.band-slate {
+  right: -14rem;
+  bottom: 0;
+  background: linear-gradient(90deg, transparent, rgba(190, 198, 224, 0.48), transparent);
+  transform: rotate(-10deg);
+  animation-delay: -8s;
+}
+
+.ambient-grid {
+  position: absolute;
+  left: 50%;
+  top: 54%;
+  width: min(86vw, 960px);
+  height: min(52vw, 520px);
+  border-radius: 999px;
+  background:
+    linear-gradient(90deg, rgba(143, 78, 0, 0.1) 1px, transparent 1px),
+    linear-gradient(rgba(143, 78, 0, 0.1) 1px, transparent 1px);
+  background-size: 34px 34px;
+  opacity: 0.22;
+  transform: translate(-50%, -50%) rotate(-7deg);
+  mask-image: radial-gradient(ellipse at center, rgba(0, 0, 0, 0.9), transparent 72%);
+  animation: grid-breathe 10s ease-in-out infinite alternate;
+}
+
 .landing-hero {
+  position: relative;
   width: min(100%, 1280px);
   min-height: 100vh;
   margin: 0 auto;
@@ -641,6 +723,28 @@ button:disabled {
   }
   to {
     transform: translate3d(-18px, 20px, 0) scale(1.08);
+  }
+}
+
+@keyframes aurora-drift {
+  from {
+    translate: 0 0;
+    scale: 1;
+  }
+  to {
+    translate: 4rem -2rem;
+    scale: 1.08;
+  }
+}
+
+@keyframes grid-breathe {
+  from {
+    opacity: 0.16;
+    transform: translate(-50%, -50%) rotate(-7deg) scale(0.98);
+  }
+  to {
+    opacity: 0.28;
+    transform: translate(-50%, -50%) rotate(-4deg) scale(1.03);
   }
 }
 

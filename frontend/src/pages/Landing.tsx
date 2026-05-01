@@ -28,6 +28,12 @@ export default function Landing({
 
   return (
     <main className="landing-shell">
+      <div className="ambient-field" aria-hidden="true">
+        <span className="ambient-band band-saffron" />
+        <span className="ambient-band band-lotus" />
+        <span className="ambient-band band-slate" />
+        <span className="ambient-grid" />
+      </div>
       <section className="landing-hero" aria-labelledby="landing-title">
         <header className="landing-nav">
           <div className="brand-lockup">
