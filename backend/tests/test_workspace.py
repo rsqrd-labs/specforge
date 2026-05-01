@@ -157,3 +157,34 @@ async def test_get_workspace_correct_owner_returns_workspace() -> None:
     db = _FakeDB(workspace=workspace)
     result = await svc.get(workspace.id, workspace.user_id, db)
     assert result.id == workspace.id
+
+
+@pytest.mark.asyncio
+async def test_update_workspace_name() -> None:
+    svc = WorkspaceService()
+    workspace = _make_workspace()
+    db = _FakeDB(workspace=workspace)
+    result = await svc.update(workspace.id, workspace.user_id, "New Name", db)
+    assert result.name == "New Name"
+    assert db._committed is True
+    assert workspace in db._refreshed
+
+
+@pytest.mark.asyncio
+async def test_archive_workspace_sets_status() -> None:
+    svc = WorkspaceService()
+    workspace = _make_workspace()
+    db = _FakeDB(workspace=workspace)
+    await svc.archive(workspace.id, workspace.user_id, db)
+    assert workspace.status == "archived"
+    assert db._committed is True
+
+
+@pytest.mark.asyncio
+async def test_list_for_user_returns_workspaces() -> None:
+    svc = WorkspaceService()
+    workspace = _make_workspace()
+    db = _FakeDB(workspace=workspace)
+    result = await svc.list_for_user(workspace.user_id, db)
+    assert len(result) == 1
+    assert result[0].id == workspace.id
