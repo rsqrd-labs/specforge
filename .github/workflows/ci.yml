@@ -99,3 +99,32 @@ jobs:
 
       - name: Vitest
         run: pnpm test -- --passWithNoTests
+
+  deploy:
+    name: Deploy
+    needs: [secrets, backend, frontend]
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Deploy backend to Railway
+        uses: railwayapp/railway-action@v1
+        with:
+          service: backend
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+
+      - name: Deploy frontend to Vercel
+        working-directory: frontend
+        run: |
+          npm install -g vercel
+          vercel --prod --token ${{ secrets.VERCEL_TOKEN }} \
+            --yes \
+            --scope ${{ secrets.VERCEL_ORG_ID }} \
+            --project-id ${{ secrets.VERCEL_PROJECT_ID }}
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
