@@ -7,6 +7,7 @@ from models import User
 from schemas.auth import UserResponse
 from services.auth_service import AuthError, auth_service
 from services.credit_service import credit_service
+from services.security.csrf import generate_csrf_token
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -95,3 +96,8 @@ async def get_me(
         credit_balance=balance,
         created_at=user.created_at,
     )
+
+
+@router.get("/csrf-token")
+async def csrf_token(user: User = Depends(get_current_user)) -> dict[str, str]:
+    return {"csrf_token": generate_csrf_token(str(user.id))}

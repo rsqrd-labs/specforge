@@ -1,4 +1,4 @@
-import { getAccessToken } from "./api"
+import { getAccessToken, getCsrfToken } from "./api"
 
 interface SSEControl {
   close: () => void
@@ -56,6 +56,10 @@ export function createSSEConnection(
     const headers = new Headers()
     if (token) {
       headers.set("Authorization", `Bearer ${token}`)
+      const csrfToken = await getCsrfToken()
+      if (csrfToken) {
+        headers.set("X-CSRF-Token", csrfToken)
+      }
     }
 
     try {

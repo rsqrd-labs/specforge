@@ -10,6 +10,7 @@ from sqlalchemy import text
 
 from config import settings
 from database import async_engine
+from middleware.csrf import CsrfMiddleware
 from middleware.rate_limit import RateLimitMiddleware
 from routers import auth as auth_router
 from routers import credits as credits_router
@@ -67,6 +68,7 @@ def create_app(redis_client=None) -> FastAPI:
     setup_observability(app, async_engine)
 
     app.add_middleware(RateLimitMiddleware, redis_client=redis_client)
+    app.add_middleware(CsrfMiddleware)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=[settings.frontend_url],

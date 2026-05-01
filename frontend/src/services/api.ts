@@ -28,6 +28,10 @@ interface RefreshTokenResponse {
   accessToken?: string
 }
 
+interface CsrfTokenResponse {
+  csrf_token: string
+}
+
 export interface CreditBalance {
   balance: number
 }
@@ -49,9 +53,11 @@ export interface ProviderCatalog {
 }
 
 let accessToken: string | null = null
+let csrfToken: string | null = null
 
 export function setAccessToken(token: string | null): void {
   accessToken = token
+  csrfToken = null
 }
 
 export function getAccessToken(): string | null {
@@ -60,6 +66,22 @@ export function getAccessToken(): string | null {
   }
 
   return localStorage.getItem("access_token")
+}
+
+function isMutatingMethod(method: string | undefined): boolean {
+  return ["post", "put", "patch", "delete"].includes(
+    (method ?? "get").toLowerCase(),
+  )
+}
+
+function isCsrfExemptUrl(url: string | undefined): boolean {
+  if (!url) {
+    return false
+  }
+
+  return ["/auth/google", "/auth/callback", "/auth/refresh", "/auth/logout"].some(
+    (path) => url.includes(path),
+  )
 }
 
 export function attachAuthorizationHeader(
@@ -77,6 +99,49 @@ export function attachAuthorizationHeader(
     ...config,
     headers,
   }
+}
+
+export async function getCsrfToken(): Promise<string | null> {
+  if (csrfToken) {
+    return csrfToken
+  }
+
+  const token = getAccessToken()
+  if (!token) {
+    return null
+  }
+
+  const config = attachAuthorizationHeader(
+    {
+      headers: new AxiosHeaders(),
+      method: "get",
+      url: "/auth/csrf-token",
+    } as InternalAxiosRequestConfig,
+    token,
+  )
+  const response = await refreshApi.get<CsrfTokenResponse>(
+    "/auth/csrf-token",
+    { headers: config.headers },
+  )
+  csrfToken = response.data.csrf_token
+  return csrfToken
+}
+
+async function attachCsrfHeader(
+  config: InternalAxiosRequestConfig,
+): Promise<InternalAxiosRequestConfig> {
+  if (!isMutatingMethod(config.method) || isCsrfExemptUrl(config.url)) {
+    return config
+  }
+
+  const token = await getCsrfToken()
+  if (!token) {
+    return config
+  }
+
+  const headers = AxiosHeaders.from(config.headers)
+  headers.set("X-CSRF-Token", token)
+  return { ...config, headers }
 }
 
 export function shouldAttemptRefresh(error: AxiosError): boolean {
@@ -127,9 +192,10 @@ const refreshApi = axios.create({
   withCredentials: true,
 })
 
-api.interceptors.request.use((config) =>
-  attachAuthorizationHeader(config, getAccessToken()),
-)
+api.interceptors.request.use(async (config) => {
+  const authorized = attachAuthorizationHeader(config, getAccessToken())
+  return attachCsrfHeader(authorized)
+})
 
 api.interceptors.response.use(
   (response) => response,
