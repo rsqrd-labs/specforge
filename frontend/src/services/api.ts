@@ -274,14 +274,8 @@ export async function acceptStageDiff(
   return response.data
 }
 
-export async function rejectStageDiff(
-  id: string,
-  ledgerId: string,
-): Promise<{ refunded: boolean }> {
-  const response = await api.post<{ refunded: boolean }>(
-    `/stages/${id}/reject-diff`,
-    { ledger_id: ledgerId },
-  )
+export async function rejectStageDiff(id: string): Promise<{ rejected: boolean }> {
+  const response = await api.post<{ rejected: boolean }>(`/stages/${id}/reject-diff`)
   return response.data
 }
 

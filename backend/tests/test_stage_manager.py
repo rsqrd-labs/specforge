@@ -316,7 +316,6 @@ async def test_refine_large_selection_85_percent_returns_true() -> None:
     stage = _make_stage(workspace_id, "spec", status="draft", content=content)
     workspace = _make_workspace([stage])
     user = _make_user()
-    deduction = CreditLedger(id=uuid4(), user_id=user.id, amount=-3, reason="refine")
 
     from schemas.stage import RefineRequest
 
@@ -330,14 +329,7 @@ async def test_refine_large_selection_85_percent_returns_true() -> None:
     svc = StageManager(redis_client=_FakeRedis())
     db = _MultiQueryDB([stage, workspace])
 
-    with (
-        patch(
-            "services.pipeline.stage_manager.credit_service.deduct",
-            new_callable=AsyncMock,
-            return_value=deduction,
-        ),
-        patch("services.pipeline.stage_manager.get_llm") as mock_get_llm,
-    ):
+    with patch("services.pipeline.stage_manager.get_llm") as mock_get_llm:
         mock_adapter = MagicMock()
         mock_adapter.complete = AsyncMock(return_value="replacement text")
         mock_get_llm.return_value = mock_adapter
@@ -355,7 +347,6 @@ async def test_refine_large_selection_50_percent_returns_false() -> None:
     stage = _make_stage(workspace_id, "spec", status="draft", content=content)
     workspace = _make_workspace([stage])
     user = _make_user()
-    deduction = CreditLedger(id=uuid4(), user_id=user.id, amount=-3, reason="refine")
 
     from schemas.stage import RefineRequest
 
@@ -369,14 +360,7 @@ async def test_refine_large_selection_50_percent_returns_false() -> None:
     svc = StageManager(redis_client=_FakeRedis())
     db = _MultiQueryDB([stage, workspace])
 
-    with (
-        patch(
-            "services.pipeline.stage_manager.credit_service.deduct",
-            new_callable=AsyncMock,
-            return_value=deduction,
-        ),
-        patch("services.pipeline.stage_manager.get_llm") as mock_get_llm,
-    ):
+    with patch("services.pipeline.stage_manager.get_llm") as mock_get_llm:
         mock_adapter = MagicMock()
         mock_adapter.complete = AsyncMock(return_value="replacement text")
         mock_get_llm.return_value = mock_adapter
@@ -483,7 +467,7 @@ async def test_refine_rejects_injection_before_credit_deduction() -> None:
 
 
 @pytest.mark.asyncio
-async def test_refine_provider_error_refunds_credits() -> None:
+async def test_refine_provider_error_does_not_charge_credits() -> None:
     from schemas.stage import RefineRequest
     from services.llm.base import ProviderError
 
@@ -491,7 +475,6 @@ async def test_refine_provider_error_refunds_credits() -> None:
     stage = _make_stage(workspace_id, "spec", status="draft", content="hello world")
     workspace = _make_workspace([stage])
     user = _make_user()
-    deduction = CreditLedger(id=uuid4(), user_id=user.id, amount=-3, reason="refine")
     svc = StageManager(redis_client=_FakeRedis())
     db = _MultiQueryDB([stage, workspace])
 
@@ -506,8 +489,7 @@ async def test_refine_provider_error_refunds_credits() -> None:
         patch(
             "services.pipeline.stage_manager.credit_service.deduct",
             new_callable=AsyncMock,
-            return_value=deduction,
-        ),
+        ) as mock_deduct,
         patch(
             "services.pipeline.stage_manager.credit_service.refund",
             new_callable=AsyncMock,
@@ -523,11 +505,12 @@ async def test_refine_provider_error_refunds_credits() -> None:
         with pytest.raises(ProviderError):
             await svc.refine(stage.id, request, user, db)
 
-    mock_refund.assert_awaited_once_with(db, deduction.id, user.id)
+    mock_deduct.assert_not_called()
+    mock_refund.assert_not_called()
 
 
 @pytest.mark.asyncio
-async def test_refine_output_validation_failure_refunds_credits() -> None:
+async def test_refine_output_validation_failure_does_not_charge_credits() -> None:
     from schemas.stage import RefineRequest
     from services.pipeline.stage_manager import SecurityError
 
@@ -535,7 +518,6 @@ async def test_refine_output_validation_failure_refunds_credits() -> None:
     stage = _make_stage(workspace_id, "spec", status="draft", content="hello world")
     workspace = _make_workspace([stage])
     user = _make_user()
-    deduction = CreditLedger(id=uuid4(), user_id=user.id, amount=-3, reason="refine")
     svc = StageManager(redis_client=_FakeRedis())
     db = _MultiQueryDB([stage, workspace])
 
@@ -550,8 +532,7 @@ async def test_refine_output_validation_failure_refunds_credits() -> None:
         patch(
             "services.pipeline.stage_manager.credit_service.deduct",
             new_callable=AsyncMock,
-            return_value=deduction,
-        ),
+        ) as mock_deduct,
         patch(
             "services.pipeline.stage_manager.credit_service.refund",
             new_callable=AsyncMock,
@@ -565,4 +546,5 @@ async def test_refine_output_validation_failure_refunds_credits() -> None:
         with pytest.raises(SecurityError):
             await svc.refine(stage.id, request, user, db)
 
-    mock_refund.assert_awaited_once_with(db, deduction.id, user.id)
+    mock_deduct.assert_not_called()
+    mock_refund.assert_not_called()

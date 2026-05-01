@@ -174,10 +174,6 @@ class StageManager:
         if not await sliding_window_check(redis, f"llm_daily:{user.id}", 200, 86400):
             raise RateLimitError(retry_after=86400)
 
-        deduction = await credit_service.deduct(
-            db, user.id, CREDIT_COSTS["refine"], "refine"
-        )
-
         content = stage.content or ""
         doc_len = len(content)
         selection_len = request.selection_end - request.selection_start
@@ -200,12 +196,10 @@ class StageManager:
                 system_prompt, user_prompt, max_tokens=4096
             )
         except Exception:
-            await credit_service.refund(db, deduction.id, user.id)
             raise
 
         validation = validate(replacement)
         if not validation.is_safe:
-            await credit_service.refund(db, deduction.id, user.id)
             raise SecurityError(f"Refine output failed validation: {validation.reason}")
 
         proposed = apply_diff(content, request.selected_text, replacement)
@@ -216,7 +210,6 @@ class StageManager:
             original=content,
             proposed=proposed,
             large_selection=large_selection,
-            ledger_id=deduction.id,
         )
 
     async def finalise(self, stage_id: UUID, user, db: AsyncSession) -> Stage:

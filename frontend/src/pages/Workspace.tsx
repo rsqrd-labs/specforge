@@ -37,7 +37,7 @@ const STAGE_LABELS: Record<StageType, string> = {
   tasks: "TASKS",
 }
 
-type CreditAction = "generate" | "regenerate" | "refine"
+type CreditAction = "generate" | "regenerate"
 
 interface PendingCreditAction {
   action: CreditAction
@@ -191,11 +191,7 @@ export default function Workspace() {
     const stage = stageMap[pendingCredit.stageId]
     if (!stage) return
 
-    if (
-      pendingCredit.action !== "refine" &&
-      stage.type !== "spec" &&
-      !stage.review_gate_acknowledged
-    ) {
+    if (stage.type !== "spec" && !stage.review_gate_acknowledged) {
       setPendingReview(pendingCredit)
       setPendingCredit(null)
       return
@@ -203,11 +199,6 @@ export default function Workspace() {
 
     const nextAction = pendingCredit.action
     setPendingCredit(null)
-
-    if (nextAction === "refine") {
-      await runRefine()
-      return
-    }
 
     await runGeneration(nextAction)
   }
@@ -275,12 +266,12 @@ export default function Workspace() {
   }
 
   async function rejectDiff() {
-    if (!activeStage || !diffResult?.ledger_id) {
+    if (!activeStage) {
       setDiffResult(null)
       return
     }
 
-    await rejectStageDiff(activeStage.id, diffResult.ledger_id)
+    await rejectStageDiff(activeStage.id)
     setDiffResult(null)
     setLargeSelectionWarning(false)
   }
@@ -449,7 +440,7 @@ export default function Workspace() {
             className="flex gap-3 border-b border-outline-variant bg-surface-container-low px-5 py-3"
             onSubmit={(event) => {
               event.preventDefault()
-              setPendingCredit({ action: "refine", stageId: activeStage.id })
+              void runRefine()
             }}
           >
             <input

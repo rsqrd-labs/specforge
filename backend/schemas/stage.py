@@ -71,19 +71,12 @@ class DiffResponse(BaseModel):
     original: str
     proposed: str
     large_selection: bool = False
-    ledger_id: UUID | None = None
 
     model_config = ConfigDict(from_attributes=True)
 
 
 class AcceptDiffRequest(BaseModel):
     proposed_content: str
-
-    model_config = ConfigDict(from_attributes=True)
-
-
-class RejectDiffRequest(BaseModel):
-    ledger_id: UUID
 
     model_config = ConfigDict(from_attributes=True)
 

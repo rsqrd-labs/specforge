@@ -56,5 +56,4 @@ export interface RefineResponse {
   original: string
   proposed: string
   large_selection: boolean
-  ledger_id: string | null
 }

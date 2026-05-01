@@ -8,6 +8,8 @@ Branch: `main`
 Remote: `https://github.com/rsqrd-labs/specforge.git`
 
 Latest pushed commits:
+- `HEAD T-064: Charge refine credits on accept`
+- `ef1694c T-063: Secure refine flow refunds`
 - `b38042b T-062: Isolate background eval sessions`
 - `a445ddf T-061: Use provider-specific eval judges`
 - `cc2808e T-060: Revoke sessions on refresh token reuse`
@@ -38,8 +40,9 @@ Current implementation status:
 - T-060 Refresh Token Reuse Revokes All Sessions is complete and pushed.
 - T-061 Provider-Specific Eval Judge Selection is complete and pushed.
 - T-062 Isolate Background Eval Database Session is complete and pushed.
-- T-063 Secure and Refund Refine Flow is implemented locally and ready to commit/push after this handoff update.
-- Next task after T-063 is T-064 Resolve Refine Billing Semantics.
+- T-063 Secure and Refund Refine Flow is complete and pushed.
+- T-064 Resolve Refine Billing Semantics is complete and will be pushed with this handoff.
+- Next task after T-064 is T-065 Return 404 for Cross-User Workspace Access.
 
 Known unrelated working-tree artifacts that predate this pass and should not be reverted casually:
 - Deleted: `Design.md.md`
@@ -349,7 +352,7 @@ uv run black --check services/evals/online_eval.py services/pipeline/stage_manag
 
 ### T-063 Secure and Refund Refine Flow
 
-Implemented locally:
+Commit `ef1694c` implemented:
 - `backend/services/pipeline/stage_manager.py`
   - Scans refine instruction and selected text before deduction.
   - Rejects unsafe refine inputs before any credit deduction or LLM call.
@@ -370,10 +373,45 @@ uv run ruff check services/pipeline/stage_manager.py routers/stage.py tests/test
 uv run black --check services/pipeline/stage_manager.py routers/stage.py tests/test_stage_manager.py tests/test_stage_router.py
 ```
 
+### T-064 Resolve Refine Billing Semantics
+
+Current `HEAD` implements:
+- `backend/services/pipeline/stage_manager.py`
+  - Makes refine preview free: no credit deduction or ledger id is created while generating the diff preview.
+  - Keeps prompt-injection scanning, rate limiting, and output validation in the preview path.
+- `backend/schemas/stage.py`
+  - Removes `ledger_id` from `DiffResponse`.
+  - Removes the obsolete reject-diff body schema.
+- `backend/routers/stage.py`
+  - Charges 3 credits in `POST /stages/{stage_id}/accept-diff`.
+  - Returns HTTP 402 with `{"code": "insufficient_credits", "required": 3}` when accept cannot be billed.
+  - Refunds the accept deduction if saving the accepted content fails.
+  - Makes `POST /stages/{stage_id}/reject-diff` a discard-only operation returning `{"rejected": true}`.
+- `frontend/src/types/stage.ts`
+  - Removes `ledger_id` from `RefineResponse`.
+- `frontend/src/services/api.ts`
+  - Calls reject-diff without a ledger payload and expects `{ rejected: boolean }`.
+- `frontend/src/pages/Workspace.tsx`
+  - Runs refine preview without the credit confirmation modal.
+  - Rejects a diff without requiring a ledger id.
+- Tests:
+  - Updated stage-manager tests so provider/output failures during preview do not charge or refund credits.
+  - Added route tests for accept billing, insufficient credits, failed-save refund, and reject-without-refund.
+
+Verified:
+```bash
+cd backend
+uv run pytest tests/test_stage_manager.py tests/test_stage_router.py -q
+uv run ruff check schemas/stage.py services/pipeline/stage_manager.py routers/stage.py tests/test_stage_manager.py tests/test_stage_router.py
+uv run black --check schemas/stage.py services/pipeline/stage_manager.py routers/stage.py tests/test_stage_manager.py tests/test_stage_router.py
+
+cd frontend
+pnpm tsc --noEmit
+```
+
 ## Pending Tasks
 
 Continue in `tasks.md` order:
-- T-064: Resolve Refine Billing Semantics
 - T-065: Return 404 for Cross-User Workspace Access
 - T-066: Sensitive Data Redaction for Logs and Sentry
 
@@ -385,23 +423,24 @@ Streaming:
 - `stageStore.appendToken()` uses Zustand `subscribeWithSelector`; do not replace it with normal React store reads in the editor.
 
 Credits:
-- Current refine behavior still deducts before diff and refunds on reject.
-- T-064 intentionally changes that to deduct on accept only.
+- Refine preview is free.
+- Accepting a refine diff deducts 3 credits.
+- Rejecting a refine diff is discard-only and does not alter credit balance.
+- If accept-diff persistence fails after deduction, the deduction is refunded.
 
 Auth:
-- Access token still has a localStorage fallback in `api.ts`; T-058 removes it.
-- Refresh cookie is still `SameSite=Lax` and not scoped to `/auth/refresh`; T-059 fixes it.
-- Refresh-token reuse detection still does not revoke every user session; T-060 fixes it.
+- Access tokens are kept in memory only; the localStorage fallback was removed in T-058.
+- Refresh cookies are `SameSite=Strict` and scoped to `/auth/refresh` from T-059.
+- Refresh-token reuse revokes all tracked sessions from T-060.
 
 Evals:
-- Online eval currently uses Anthropic Haiku regardless of workspace provider.
-- Background eval currently receives the request-scoped DB session.
-- T-061 and T-062 address those.
+- Online eval uses provider-specific judge models from T-061.
+- Background eval opens its own database session from T-062.
 
 ## Recommended Next Steps
 
-1. Commit and push T-050 with `HANDOFF.md`.
-2. Start T-051.
+1. Push T-064 if it has not already been pushed.
+2. Start T-065.
 3. After each task:
    - Run focused backend/frontend tests.
    - Update `HANDOFF.md` with task status, commands run, and next task.

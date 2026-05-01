@@ -19,12 +19,11 @@ from schemas.stage import (
     ContentEditRequest,
     DiffResponse,
     RefineRequest,
-    RejectDiffRequest,
     RollbackRequest,
     StageResponse,
     StageVersionResponse,
 )
-from services.credit_service import credit_service
+from services.credit_service import InsufficientCreditsError, credit_service
 from services.pipeline.stage_manager import (
     RateLimitError,
     SecurityError,
@@ -126,7 +125,6 @@ async def refine_stage(
     request: RefineRequest,
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
-    _: None = Depends(require_credits(3)),
 ) -> DiffResponse:
     await _load_stage(stage_id, db, user.id)
     sanitized_request = request.model_copy(
@@ -155,22 +153,32 @@ async def accept_diff(
     user: User = Depends(get_current_user),
 ) -> StageResponse:
     await _load_stage(stage_id, db, user.id)
-    stage = await stage_manager.handle_content_edit(
-        stage_id, body.proposed_content, user, db
-    )
+    try:
+        deduction = await credit_service.deduct(db, user.id, 3, "refine")
+    except InsufficientCreditsError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_402_PAYMENT_REQUIRED,
+            detail={"code": "insufficient_credits", "required": 3},
+        ) from exc
+
+    try:
+        stage = await stage_manager.handle_content_edit(
+            stage_id, body.proposed_content, user, db
+        )
+    except Exception:
+        await credit_service.refund(db, deduction.id, user.id)
+        raise
     return StageResponse.model_validate(stage)
 
 
 @router.post("/{stage_id}/reject-diff", status_code=status.HTTP_200_OK)
 async def reject_diff(
     stage_id: UUID,
-    body: RejectDiffRequest,
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ) -> dict:
     await _load_stage(stage_id, db, user.id)
-    await credit_service.refund(db, body.ledger_id, user.id)
-    return {"refunded": True}
+    return {"rejected": True}
 
 
 @router.post("/{stage_id}/finalise", response_model=StageResponse)
