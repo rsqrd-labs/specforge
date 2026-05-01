@@ -41,7 +41,7 @@ export default function Landing({
           <div className="hero-copy">
             <p className="eyebrow">AI product specification workspace</p>
             <h1 id="landing-title">
-              Forge a vague idea into an implementation-ready build plan.
+              Shape ideas into ship-ready plans.
             </h1>
             <p className="hero-lede">
               SpecForge turns a problem statement into a structured delivery
