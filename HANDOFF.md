@@ -8,6 +8,7 @@ Branch: `main`
 Remote: `https://github.com/rsqrd-labs/specforge.git`
 
 Latest pushed commits:
+- `58c082a T-055: Show eval scores in stage navigator`
 - `0f2e71f T-054: Add streaming editor overlay`
 - `93f8b24 T-053: Initialize frontend Sentry`
 - `8ad8ff9 T-052: Add hourly auth rate limit`
@@ -22,8 +23,9 @@ Current implementation status:
 - T-052 Hourly Auth Rate Limit Tier is complete and pushed.
 - T-053 Sentry Initialization is complete and pushed.
 - T-054 StreamingOverlay Component is complete and pushed.
-- T-055 Quality Badge in StageNavigator is implemented locally and ready to commit/push after this handoff update.
-- Next task after T-055 is T-056 Dockerfile and README Quickstart.
+- T-055 Quality Badge in StageNavigator is complete and pushed.
+- T-056 Dockerfile and README Quickstart is implemented locally and ready to commit/push after this handoff update.
+- Next task after T-056 is T-057 Fix Google Login Redirect Contract.
 
 Known unrelated working-tree artifacts that predate this pass and should not be reverted casually:
 - Deleted: `Design.md.md`
@@ -170,7 +172,7 @@ pnpm vitest run --config vitest.harness.config.ts ../harness/tests/frontend/phas
 
 ### T-055 Quality Badge in StageNavigator
 
-Implemented locally:
+Commit `58c082a` implemented:
 - `frontend/src/components/workspace/StageNavigator.tsx`
   - Shows `eval_result.overall_score` inline for stages with evals.
   - Keeps version display for finalised stages.
@@ -185,10 +187,31 @@ pnpm vitest run --config vitest.harness.config.ts ../harness/tests/frontend/phas
 pnpm vitest run src/__tests__/WorkspaceFlow.test.tsx
 ```
 
+### T-056 Dockerfile and README Quickstart
+
+Implemented locally:
+- `backend/Dockerfile`
+  - Uses `python:3.12-slim`.
+  - Installs `uv`, syncs from `uv.lock`, and runs gunicorn with `UvicornWorker`.
+- `backend/.dockerignore`
+  - Excludes local env/cache/venv artifacts from image context.
+- `docker-compose.yml`
+  - Adds `api` service on `localhost:8000`.
+  - Adds `frontend` service on `localhost:5173` so `docker compose up --build` provides a usable app.
+  - Keeps `db` and `redis` healthchecks.
+- `README.md`
+  - Replaces placeholder with project overview, four-step self-hosting, dev setup, env var table, and verification commands.
+
+Verified:
+```bash
+docker compose config
+cd backend
+uv run pytest ../harness/tests/backend/test_phase4_contract.py -q -k "dockerfile or docker_compose or readme"
+```
+
 ## Pending Tasks
 
 Continue in `tasks.md` order:
-- T-056: Dockerfile and README Quickstart
 - T-057: Fix Google Login Redirect Contract
 - T-058: Remove Access Token localStorage Fallback
 - T-059: Harden Refresh Cookie Attributes
