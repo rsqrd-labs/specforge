@@ -8,6 +8,7 @@ Branch: `main`
 Remote: `https://github.com/rsqrd-labs/specforge.git`
 
 Latest pushed commits:
+- `b38042b T-062: Isolate background eval sessions`
 - `a445ddf T-061: Use provider-specific eval judges`
 - `cc2808e T-060: Revoke sessions on refresh token reuse`
 - `1c94623 T-059: Harden refresh cookie attributes`
@@ -36,8 +37,9 @@ Current implementation status:
 - T-059 Harden Refresh Cookie Attributes is complete and pushed.
 - T-060 Refresh Token Reuse Revokes All Sessions is complete and pushed.
 - T-061 Provider-Specific Eval Judge Selection is complete and pushed.
-- T-062 Isolate Background Eval Database Session is implemented locally and ready to commit/push after this handoff update.
-- Next task after T-062 is T-063 Secure and Refund Refine Flow.
+- T-062 Isolate Background Eval Database Session is complete and pushed.
+- T-063 Secure and Refund Refine Flow is implemented locally and ready to commit/push after this handoff update.
+- Next task after T-063 is T-064 Resolve Refine Billing Semantics.
 
 Known unrelated working-tree artifacts that predate this pass and should not be reverted casually:
 - Deleted: `Design.md.md`
@@ -326,7 +328,7 @@ uv run black --check services/evals/online_eval.py services/pipeline/stage_manag
 
 ### T-062 Isolate Background Eval Database Session
 
-Implemented locally:
+Commit `b38042b` implemented:
 - `backend/services/evals/online_eval.py`
   - Adds `run_eval_background(...)`.
   - Opens a fresh `AsyncSessionLocal()` inside the background task.
@@ -345,10 +347,32 @@ uv run ruff check services/evals/online_eval.py services/pipeline/stage_manager.
 uv run black --check services/evals/online_eval.py services/pipeline/stage_manager.py tests/test_online_eval.py
 ```
 
+### T-063 Secure and Refund Refine Flow
+
+Implemented locally:
+- `backend/services/pipeline/stage_manager.py`
+  - Scans refine instruction and selected text before deduction.
+  - Rejects unsafe refine inputs before any credit deduction or LLM call.
+  - Refunds refine deduction if provider completion fails.
+  - Validates replacement output and refunds on system-prompt leak detection.
+- `backend/routers/stage.py`
+  - Maps refine `SecurityError` to HTTP 400 with `security_check_failed`.
+- `backend/tests/test_stage_manager.py`
+  - Covers injection rejection before deduction.
+  - Covers provider-error refund.
+  - Covers unsafe-output refund.
+
+Verified:
+```bash
+cd backend
+uv run pytest tests/test_stage_manager.py tests/test_stage_router.py -q
+uv run ruff check services/pipeline/stage_manager.py routers/stage.py tests/test_stage_manager.py tests/test_stage_router.py
+uv run black --check services/pipeline/stage_manager.py routers/stage.py tests/test_stage_manager.py tests/test_stage_router.py
+```
+
 ## Pending Tasks
 
 Continue in `tasks.md` order:
-- T-063: Secure and Refund Refine Flow
 - T-064: Resolve Refine Billing Semantics
 - T-065: Return 404 for Cross-User Workspace Access
 - T-066: Sensitive Data Redaction for Logs and Sentry

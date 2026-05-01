@@ -27,6 +27,7 @@ from schemas.stage import (
 from services.credit_service import credit_service
 from services.pipeline.stage_manager import (
     RateLimitError,
+    SecurityError,
     StageDependencyError,
     stage_manager,
 )
@@ -138,6 +139,11 @@ async def refine_stage(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail={"error": "rate_limit_exceeded", "retry_after": exc.retry_after},
             headers={"Retry-After": str(exc.retry_after)},
+        ) from exc
+    except SecurityError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": "security_check_failed", "message": str(exc)},
         ) from exc
 
 

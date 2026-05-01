@@ -158,6 +158,16 @@ class StageManager:
         stage = await self._load_stage(stage_id, db)
         workspace = await self._load_workspace(stage.workspace_id, db)
 
+        for label, text in (
+            ("instruction", request.instruction),
+            ("selected_text", request.selected_text),
+        ):
+            scan_result = scan(text)
+            if not scan_result.is_safe:
+                raise SecurityError(
+                    f"Refine {label} flagged: {scan_result.matched_pattern}"
+                )
+
         redis = await self._redis_client()
         if not await sliding_window_check(redis, f"llm:{user.id}", 10, 60):
             raise RateLimitError(retry_after=60)
@@ -185,9 +195,19 @@ class StageManager:
         )
 
         adapter = get_llm(workspace.provider, workspace.model)
-        replacement = await adapter.complete(
-            system_prompt, user_prompt, max_tokens=4096
-        )
+        try:
+            replacement = await adapter.complete(
+                system_prompt, user_prompt, max_tokens=4096
+            )
+        except Exception:
+            await credit_service.refund(db, deduction.id, user.id)
+            raise
+
+        validation = validate(replacement)
+        if not validation.is_safe:
+            await credit_service.refund(db, deduction.id, user.id)
+            raise SecurityError(f"Refine output failed validation: {validation.reason}")
+
         proposed = apply_diff(content, request.selected_text, replacement)
         diff = compute_diff(content, proposed)
 
