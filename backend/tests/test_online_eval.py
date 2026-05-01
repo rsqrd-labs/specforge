@@ -7,7 +7,7 @@ from uuid import uuid4
 import pytest
 
 from models import EvalResult
-from services.evals.online_eval import run_eval
+from services.evals.online_eval import run_eval, run_eval_background
 
 
 class _FakeDB:
@@ -36,6 +36,20 @@ class _FakeJudge:
         if isinstance(self.response, Exception):
             raise self.response
         return self.response
+
+
+class _FakeSessionContext:
+    def __init__(self, db: _FakeDB) -> None:
+        self.db = db
+        self.entered = False
+        self.exited = False
+
+    async def __aenter__(self) -> _FakeDB:
+        self.entered = True
+        return self.db
+
+    async def __aexit__(self, *args: Any) -> None:
+        self.exited = True
 
 
 @pytest.mark.asyncio
@@ -143,3 +157,37 @@ async def test_run_eval_uses_provider_specific_judge_model(
         await run_eval(uuid4(), "spec", "content", "", db, provider)
 
     get_llm.assert_called_once_with(provider, judge_model)
+
+
+@pytest.mark.asyncio
+async def test_run_eval_background_opens_its_own_session() -> None:
+    db = _FakeDB()
+    context = _FakeSessionContext(db)
+    stage_version_id = uuid4()
+
+    with (
+        patch("services.evals.online_eval.AsyncSessionLocal", return_value=context),
+        patch("services.evals.online_eval.run_eval") as run_eval_mock,
+    ):
+        run_eval_mock.return_value = None
+        result = await run_eval_background(
+            stage_version_id,
+            "spec",
+            "content",
+            "",
+            "openai",
+            "gpt-4o-mini",
+        )
+
+    assert result is None
+    assert context.entered is True
+    assert context.exited is True
+    run_eval_mock.assert_awaited_once_with(
+        stage_version_id,
+        "spec",
+        "content",
+        "",
+        db,
+        "openai",
+        "gpt-4o-mini",
+    )

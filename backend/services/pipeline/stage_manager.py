@@ -16,7 +16,7 @@ from middleware.rate_limit import sliding_window_check
 from models import Stage, StageVersion, Workspace
 from schemas.stage import DiffResponse, RefineRequest
 from services.credit_service import credit_service
-from services.evals.online_eval import run_eval
+from services.evals.online_eval import run_eval_background
 from services.llm.base import ProviderError
 from services.llm.gateway import get_llm
 from services.llm.provider_config import JUDGE_MODELS
@@ -141,12 +141,11 @@ class StageManager:
         await db.commit()
         await self._invalidate_stage_cache(workspace.id, stage.type, redis)
         asyncio.create_task(
-            run_eval(
+            run_eval_background(
                 version_id,
                 stage.type,
                 accumulated,
                 spec_content,
-                db,
                 workspace.provider,
                 JUDGE_MODELS[workspace.provider],
             )

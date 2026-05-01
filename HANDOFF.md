@@ -8,6 +8,7 @@ Branch: `main`
 Remote: `https://github.com/rsqrd-labs/specforge.git`
 
 Latest pushed commits:
+- `a445ddf T-061: Use provider-specific eval judges`
 - `cc2808e T-060: Revoke sessions on refresh token reuse`
 - `1c94623 T-059: Harden refresh cookie attributes`
 - `1124f15 T-058: Keep access tokens in memory only`
@@ -34,8 +35,9 @@ Current implementation status:
 - T-058 Remove Access Token localStorage Fallback is complete and pushed.
 - T-059 Harden Refresh Cookie Attributes is complete and pushed.
 - T-060 Refresh Token Reuse Revokes All Sessions is complete and pushed.
-- T-061 Provider-Specific Eval Judge Selection is implemented locally and ready to commit/push after this handoff update.
-- Next task after T-061 is T-062 Isolate Background Eval Database Session.
+- T-061 Provider-Specific Eval Judge Selection is complete and pushed.
+- T-062 Isolate Background Eval Database Session is implemented locally and ready to commit/push after this handoff update.
+- Next task after T-062 is T-063 Secure and Refund Refine Flow.
 
 Known unrelated working-tree artifacts that predate this pass and should not be reverted casually:
 - Deleted: `Design.md.md`
@@ -301,7 +303,7 @@ uv run black --check services/auth_service.py tests/test_auth_service.py
 
 ### T-061 Provider-Specific Eval Judge Selection
 
-Implemented locally:
+Commit `a445ddf` implemented:
 - `backend/services/llm/provider_config.py`
   - Adds `JUDGE_MODELS` for Anthropic, OpenAI, and Google.
 - `backend/services/evals/online_eval.py`
@@ -322,10 +324,30 @@ uv run ruff check services/evals/online_eval.py services/pipeline/stage_manager.
 uv run black --check services/evals/online_eval.py services/pipeline/stage_manager.py services/llm/provider_config.py routers/providers.py tests/test_online_eval.py
 ```
 
+### T-062 Isolate Background Eval Database Session
+
+Implemented locally:
+- `backend/services/evals/online_eval.py`
+  - Adds `run_eval_background(...)`.
+  - Opens a fresh `AsyncSessionLocal()` inside the background task.
+  - Calls `run_eval(...)` with that local session.
+- `backend/services/pipeline/stage_manager.py`
+  - Schedules `run_eval_background(...)` with primitive values only.
+  - No longer passes the streaming request-scoped DB session into `asyncio.create_task()`.
+- `backend/tests/test_online_eval.py`
+  - Verifies `run_eval_background()` opens and exits its own session context.
+
+Verified:
+```bash
+cd backend
+uv run pytest tests/test_online_eval.py tests/test_stage_manager.py -q
+uv run ruff check services/evals/online_eval.py services/pipeline/stage_manager.py tests/test_online_eval.py
+uv run black --check services/evals/online_eval.py services/pipeline/stage_manager.py tests/test_online_eval.py
+```
+
 ## Pending Tasks
 
 Continue in `tasks.md` order:
-- T-062: Isolate Background Eval Database Session
 - T-063: Secure and Refund Refine Flow
 - T-064: Resolve Refine Billing Semantics
 - T-065: Return 404 for Cross-User Workspace Access

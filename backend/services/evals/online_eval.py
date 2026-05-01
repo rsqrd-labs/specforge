@@ -6,6 +6,7 @@ from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from database import AsyncSessionLocal
 from models import EvalResult
 from services.llm.gateway import get_llm
 from services.llm.provider_config import JUDGE_MODELS
@@ -108,3 +109,23 @@ async def run_eval(
     await db.commit()
     await db.refresh(eval_result)
     return eval_result
+
+
+async def run_eval_background(
+    stage_version_id: UUID,
+    stage_type: str,
+    content: str,
+    spec_content: str,
+    provider: str,
+    judge_model: str,
+) -> EvalResult | None:
+    async with AsyncSessionLocal() as db:
+        return await run_eval(
+            stage_version_id,
+            stage_type,
+            content,
+            spec_content,
+            db,
+            provider,
+            judge_model,
+        )
