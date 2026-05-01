@@ -41,7 +41,7 @@ export default function Landing({
           <div className="hero-copy">
             <p className="eyebrow">AI product specification workspace</p>
             <h1 id="landing-title">
-              Idea to Implementation without Ambiguity
+              Idea to Implementation Without Ambiguity
             </h1>
             <p className="hero-lede">
               Turn product intent into a validated build roadmap.
