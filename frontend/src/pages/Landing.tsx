@@ -90,19 +90,42 @@ export default function Landing({
 
             {authError && <p className="auth-error">{authError}</p>}
 
-            <div className="flow-strip" aria-label="SpecForge workflow">
-              {[
-                ["01", "Spec"],
-                ["02", "Plan"],
-                ["03", "Harness"],
-                ["04", "Tasks"],
-              ].map(([number, label], index) => (
-                <div className="flow-step" key={label}>
-                  <span>{number}</span>
-                  <strong>{label}</strong>
-                  {index < 3 && <i aria-hidden="true" />}
+            <div className="workflow-showcase" aria-label="SpecForge workflow">
+              <div className="workflow-heading">
+                <span>Delivery pipeline</span>
+                <strong>Spec - Plan - Harness - Tasks</strong>
+              </div>
+
+              <div className="workflow-board">
+                <span className="pipeline-beam" aria-hidden="true" />
+                {[
+                  ["01", "Spec", "Define requirements, users, and acceptance criteria."],
+                  ["02", "Plan", "Map the architecture, risks, and implementation path."],
+                  ["03", "Harness", "Generate validation assets before execution begins."],
+                  ["04", "Tasks", "Break the build into clear, traceable work items."],
+                ].map(([number, label, description]) => (
+                  <div className="workflow-card" key={label}>
+                    <span className="workflow-number">{number}</span>
+                    <strong>{label}</strong>
+                    <p>{description}</p>
+                  </div>
+                ))}
+              </div>
+
+              <div className="workflow-outcomes">
+                <div>
+                  <span>Validated</span>
+                  <strong>review gates</strong>
                 </div>
-              ))}
+                <div>
+                  <span>Traceable</span>
+                  <strong>task coverage</strong>
+                </div>
+                <div>
+                  <span>Exportable</span>
+                  <strong>build package</strong>
+                </div>
+              </div>
             </div>
           </div>
 
