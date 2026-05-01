@@ -273,7 +273,7 @@ button:disabled {
 .hero-grid {
   display: grid;
   grid-template-columns: minmax(0, 1.05fr) minmax(360px, 0.78fr);
-  align-items: center;
+  align-items: stretch;
   gap: 56px;
   min-height: calc(100vh - 88px);
   padding: 44px 0 24px;
@@ -660,15 +660,30 @@ button:disabled {
 }
 
 .product-panel {
+  position: relative;
+  align-self: stretch;
+  display: flex;
+  min-height: 680px;
+  flex-direction: column;
   border: 1px solid rgba(219, 194, 176, 0.86);
   border-radius: 24px;
-  background: rgba(255, 255, 255, 0.72);
+  background:
+    linear-gradient(145deg, rgba(255, 255, 255, 0.78), rgba(255, 255, 255, 0.58)),
+    linear-gradient(180deg, rgba(255, 153, 51, 0.1), rgba(218, 226, 253, 0.14));
   padding: 18px;
   box-shadow:
     0 40px 100px rgba(47, 49, 49, 0.18),
     inset 0 1px 0 rgba(255, 255, 255, 0.8);
   backdrop-filter: blur(22px);
   animation: panel-in 680ms 120ms ease both;
+}
+
+.product-panel::before {
+  content: "";
+  position: absolute;
+  inset: 58px 18px auto;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(143, 78, 0, 0.42), transparent);
 }
 
 .panel-topbar {
@@ -734,6 +749,54 @@ button:disabled {
   color: rgba(255, 255, 255, 0.72);
 }
 
+.workspace-status {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.workspace-status div {
+  position: relative;
+  overflow: hidden;
+  border: 1px solid rgba(219, 194, 176, 0.76);
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.68);
+  padding: 16px;
+}
+
+.workspace-status div::after {
+  content: "";
+  position: absolute;
+  inset: auto 12px 10px 12px;
+  height: 4px;
+  border-radius: 999px;
+  background:
+    linear-gradient(90deg, var(--color-primary) 0 74%, rgba(219, 194, 176, 0.65) 74%),
+    rgba(219, 194, 176, 0.65);
+}
+
+.workspace-status div:nth-child(2)::after {
+  background:
+    linear-gradient(90deg, var(--color-secondary) 0 62%, rgba(219, 194, 176, 0.65) 62%),
+    rgba(219, 194, 176, 0.65);
+}
+
+.workspace-status span {
+  display: block;
+  color: var(--color-on-surface-variant);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.workspace-status strong {
+  display: block;
+  margin: 8px 0 12px;
+  color: var(--color-on-surface);
+  font-size: 28px;
+  line-height: 1;
+}
+
 .document-card {
   margin-top: 16px;
   border-radius: 18px;
@@ -790,6 +853,47 @@ button:disabled {
   width: 48%;
 }
 
+.handoff-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  margin-top: 14px;
+  border: 1px solid rgba(255, 183, 122, 0.48);
+  border-radius: 18px;
+  background:
+    linear-gradient(135deg, rgba(143, 78, 0, 0.92), rgba(161, 56, 95, 0.86)),
+    var(--color-primary);
+  padding: 16px;
+  color: #ffffff;
+  box-shadow: 0 22px 60px rgba(143, 78, 0, 0.22);
+}
+
+.handoff-card span {
+  display: block;
+  color: rgba(255, 255, 255, 0.68);
+  font-size: 11px;
+  font-weight: 900;
+  letter-spacing: 0.13em;
+  text-transform: uppercase;
+}
+
+.handoff-card strong {
+  display: block;
+  margin-top: 6px;
+  font-size: 16px;
+}
+
+.handoff-card em {
+  flex: 0 0 auto;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.16);
+  padding: 8px 10px;
+  font-size: 12px;
+  font-style: normal;
+  font-weight: 900;
+}
+
 .insight-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -816,6 +920,129 @@ button:disabled {
   margin-top: 8px;
   color: var(--color-on-surface);
   font-size: 18px;
+}
+
+.activity-feed {
+  display: grid;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.activity-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  border: 1px solid rgba(219, 194, 176, 0.68);
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.54);
+  padding: 13px 14px;
+  transition:
+    transform 180ms ease,
+    background 180ms ease,
+    border-color 180ms ease;
+}
+
+.activity-item:hover {
+  border-color: rgba(143, 78, 0, 0.42);
+  background: rgba(255, 255, 255, 0.82);
+  transform: translateX(5px);
+}
+
+.activity-item > span {
+  width: 10px;
+  height: 10px;
+  margin-top: 5px;
+  border-radius: 999px;
+  background: var(--color-primary);
+  box-shadow: 0 0 0 5px rgba(143, 78, 0, 0.1);
+}
+
+.activity-item strong {
+  color: var(--color-on-surface);
+  font-size: 14px;
+}
+
+.activity-item p {
+  margin: 4px 0 0;
+  color: var(--color-on-surface-variant);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.landing-proof-panel {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 14px;
+  margin-top: 4px;
+  padding-bottom: 18px;
+}
+
+.proof-tile {
+  position: relative;
+  overflow: hidden;
+  border: 1px solid rgba(219, 194, 176, 0.76);
+  border-radius: 20px;
+  background:
+    linear-gradient(140deg, rgba(255, 255, 255, 0.76), rgba(255, 255, 255, 0.5)),
+    linear-gradient(140deg, rgba(255, 220, 194, 0.2), rgba(218, 226, 253, 0.18));
+  padding: 18px;
+  box-shadow: 0 22px 70px rgba(47, 49, 49, 0.1);
+  transition:
+    transform 180ms ease,
+    box-shadow 180ms ease,
+    border-color 180ms ease;
+}
+
+.proof-tile::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(110deg, transparent 0%, rgba(255, 255, 255, 0.46) 44%, transparent 58%);
+  opacity: 0;
+  transform: translateX(-80%);
+  transition:
+    opacity 180ms ease,
+    transform 520ms ease;
+}
+
+.proof-tile:hover {
+  border-color: rgba(143, 78, 0, 0.45);
+  box-shadow: 0 28px 82px rgba(47, 49, 49, 0.15);
+  transform: translateY(-6px);
+}
+
+.proof-tile:hover::after {
+  opacity: 1;
+  transform: translateX(80%);
+}
+
+.proof-tile span,
+.proof-tile strong,
+.proof-tile p {
+  position: relative;
+  z-index: 1;
+}
+
+.proof-tile span {
+  color: var(--color-primary);
+  font-size: 12px;
+  font-weight: 900;
+  letter-spacing: 0.12em;
+}
+
+.proof-tile strong {
+  display: block;
+  margin-top: 12px;
+  color: var(--color-on-surface);
+  font-size: 18px;
+}
+
+.proof-tile p {
+  margin: 10px 0 0;
+  color: var(--color-on-surface-variant);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.55;
 }
 
 @keyframes rise-in {
@@ -938,7 +1165,13 @@ button:disabled {
   }
 
   .product-panel {
+    min-height: auto;
     border-radius: 18px;
     padding: 14px;
+  }
+
+  .workspace-status,
+  .landing-proof-panel {
+    grid-template-columns: 1fr;
   }
 }

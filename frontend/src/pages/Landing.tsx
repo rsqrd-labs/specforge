@@ -146,6 +146,17 @@ export default function Landing({
               ))}
             </div>
 
+            <div className="workspace-status">
+              <div>
+                <span>Readiness</span>
+                <strong>92%</strong>
+              </div>
+              <div>
+                <span>Risks closed</span>
+                <strong>14</strong>
+              </div>
+            </div>
+
             <div className="document-card">
               <div className="document-header">
                 <span>SPEC.md</span>
@@ -155,6 +166,14 @@ export default function Landing({
               <div className="doc-line wide" />
               <div className="doc-line" />
               <div className="doc-line short" />
+            </div>
+
+            <div className="handoff-card">
+              <div>
+                <span>Next handoff</span>
+                <strong>Harness coverage review</strong>
+              </div>
+              <em>3 checks waiting</em>
             </div>
 
             <div className="insight-grid">
@@ -171,7 +190,38 @@ export default function Landing({
                 <strong>Plan</strong>
               </div>
             </div>
+
+            <div className="activity-feed" aria-label="Workspace activity">
+              {[
+                ["Spec gate passed", "Acceptance criteria linked"],
+                ["Plan draft ready", "Architecture risks mapped"],
+                ["Harness queued", "Contract checks prepared"],
+              ].map(([title, detail]) => (
+                <div className="activity-item" key={title}>
+                  <span aria-hidden="true" />
+                  <div>
+                    <strong>{title}</strong>
+                    <p>{detail}</p>
+                  </div>
+                </div>
+              ))}
+            </div>
           </div>
+        </div>
+
+        <div className="landing-proof-panel" aria-label="SpecForge platform highlights">
+          {[
+            ["01", "Quality gates", "Every stage includes review checkpoints before the build moves forward."],
+            ["02", "Harness-first coverage", "Validation assets are generated alongside the plan, not after delivery."],
+            ["03", "Traceable execution", "Tasks stay connected to requirements, risks, and acceptance criteria."],
+            ["04", "Clean handoff", "Export a structured package that another engineer or agent can continue from."],
+          ].map(([number, title, copy]) => (
+            <div className="proof-tile" key={title}>
+              <span>{number}</span>
+              <strong>{title}</strong>
+              <p>{copy}</p>
+            </div>
+          ))}
         </div>
       </section>
     </main>
