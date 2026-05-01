@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from typing import Any
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 from uuid import uuid4
 
 import pytest
@@ -28,15 +28,23 @@ class _FakeDB:
             instance.id = uuid4()
 
 
+class _FakeJudge:
+    def __init__(self, response: str | Exception) -> None:
+        self.response = response
+
+    async def complete(self, *args: Any, **kwargs: Any) -> str:
+        if isinstance(self.response, Exception):
+            raise self.response
+        return self.response
+
+
 @pytest.mark.asyncio
 async def test_run_eval_returns_eval_result_with_scores() -> None:
     db = _FakeDB()
     judge_response = '{"overall_score": 85, "completeness": 90, "clarity": 80}'
 
     with patch(
-        "services.evals.online_eval.AnthropicAdapter.complete",
-        new_callable=AsyncMock,
-        return_value=judge_response,
+        "services.evals.online_eval.get_llm", return_value=_FakeJudge(judge_response)
     ):
         result = await run_eval(uuid4(), "spec", "spec content", "", db)
 
@@ -57,9 +65,7 @@ async def test_run_eval_harness_flags_when_coverage_below_80() -> None:
     )
 
     with patch(
-        "services.evals.online_eval.AnthropicAdapter.complete",
-        new_callable=AsyncMock,
-        return_value=judge_response,
+        "services.evals.online_eval.get_llm", return_value=_FakeJudge(judge_response)
     ):
         result = await run_eval(uuid4(), "harness", "harness content", "spec", db)
 
@@ -74,9 +80,8 @@ async def test_run_eval_json_parse_failure_returns_none() -> None:
     db = _FakeDB()
 
     with patch(
-        "services.evals.online_eval.AnthropicAdapter.complete",
-        new_callable=AsyncMock,
-        return_value="not valid json at all",
+        "services.evals.online_eval.get_llm",
+        return_value=_FakeJudge("not valid json at all"),
     ):
         result = await run_eval(uuid4(), "spec", "content", "", db)
 
@@ -89,9 +94,8 @@ async def test_run_eval_judge_exception_returns_none() -> None:
     db = _FakeDB()
 
     with patch(
-        "services.evals.online_eval.AnthropicAdapter.complete",
-        new_callable=AsyncMock,
-        side_effect=Exception("network error"),
+        "services.evals.online_eval.get_llm",
+        return_value=_FakeJudge(Exception("network error")),
     ):
         result = await run_eval(uuid4(), "spec", "content", "", db)
 
@@ -108,12 +112,34 @@ async def test_run_eval_tasks_flags_tasks_without_ref() -> None:
     )
 
     with patch(
-        "services.evals.online_eval.AnthropicAdapter.complete",
-        new_callable=AsyncMock,
-        return_value=judge_response,
+        "services.evals.online_eval.get_llm", return_value=_FakeJudge(judge_response)
     ):
         result = await run_eval(uuid4(), "tasks", "tasks content", "spec", db)
 
     assert result is not None
     assert result.flagged is True
     assert len(result.tasks_without_ref) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("provider", "judge_model"),
+    [
+        ("anthropic", "claude-haiku-4-5-20251001"),
+        ("openai", "gpt-4o-mini"),
+        ("google", "gemini-1.5-flash"),
+    ],
+)
+async def test_run_eval_uses_provider_specific_judge_model(
+    provider: str, judge_model: str
+) -> None:
+    db = _FakeDB()
+    judge_response = '{"overall_score": 85, "completeness": 90, "clarity": 80}'
+
+    with patch(
+        "services.evals.online_eval.get_llm",
+        return_value=_FakeJudge(judge_response),
+    ) as get_llm:
+        await run_eval(uuid4(), "spec", "content", "", db, provider)
+
+    get_llm.assert_called_once_with(provider, judge_model)

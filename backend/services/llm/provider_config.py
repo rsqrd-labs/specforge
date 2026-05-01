@@ -22,6 +22,12 @@ PROVIDER_DISPLAY: dict[str, str] = {
     "google": "Google",
 }
 
+JUDGE_MODELS: dict[str, str] = {
+    "anthropic": "claude-haiku-4-5-20251001",
+    "openai": "gpt-4o-mini",
+    "google": "gemini-1.5-flash",
+}
+
 VALID_MODELS: dict[str, set[str]] = {
     provider: {m["id"] for m in models} for provider, models in PROVIDER_MODELS.items()
 }

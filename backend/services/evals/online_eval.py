@@ -7,11 +7,10 @@ from uuid import UUID
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models import EvalResult
-from services.llm.anthropic_adapter import AnthropicAdapter
+from services.llm.gateway import get_llm
+from services.llm.provider_config import JUDGE_MODELS
 
 logger = logging.getLogger(__name__)
-
-_JUDGE_MODEL = "claude-haiku-4-5-20251001"
 
 _JUDGE_SYSTEM = (
     "You are a strict software specification evaluator. "
@@ -54,9 +53,12 @@ async def run_eval(
     content: str,
     spec_content: str,
     db: AsyncSession,
+    provider: str = "anthropic",
+    judge_model: str | None = None,
 ) -> EvalResult | None:
     try:
-        judge = AnthropicAdapter(_JUDGE_MODEL)
+        resolved_judge_model = judge_model or JUDGE_MODELS[provider]
+        judge = get_llm(provider, resolved_judge_model)
         user_prompt = _STAGE_PROMPTS[stage_type].format(
             content=content, spec_content=spec_content
         )

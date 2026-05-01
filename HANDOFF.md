@@ -8,6 +8,7 @@ Branch: `main`
 Remote: `https://github.com/rsqrd-labs/specforge.git`
 
 Latest pushed commits:
+- `cc2808e T-060: Revoke sessions on refresh token reuse`
 - `1c94623 T-059: Harden refresh cookie attributes`
 - `1124f15 T-058: Keep access tokens in memory only`
 - `397b035 T-057: Fix Google auth redirect contract`
@@ -32,8 +33,9 @@ Current implementation status:
 - T-057 Fix Google Login Redirect Contract is complete and pushed.
 - T-058 Remove Access Token localStorage Fallback is complete and pushed.
 - T-059 Harden Refresh Cookie Attributes is complete and pushed.
-- T-060 Refresh Token Reuse Revokes All Sessions is implemented locally and ready to commit/push after this handoff update.
-- Next task after T-060 is T-061 Provider-Specific Eval Judge Selection.
+- T-060 Refresh Token Reuse Revokes All Sessions is complete and pushed.
+- T-061 Provider-Specific Eval Judge Selection is implemented locally and ready to commit/push after this handoff update.
+- Next task after T-061 is T-062 Isolate Background Eval Database Session.
 
 Known unrelated working-tree artifacts that predate this pass and should not be reverted casually:
 - Deleted: `Design.md.md`
@@ -276,7 +278,7 @@ uv run black --check routers/auth.py tests/test_auth_router.py
 
 ### T-060 Refresh Token Reuse Revokes All Sessions
 
-Implemented locally:
+Commit `cc2808e` implemented:
 - `backend/services/auth_service.py`
   - Adds `user_sessions:{user_id}` Redis set index for refresh JTIs.
   - Stores each refresh JTI in both `session:{jti}` and the per-user session set.
@@ -297,10 +299,32 @@ uv run ruff check services/auth_service.py tests/test_auth_service.py
 uv run black --check services/auth_service.py tests/test_auth_service.py
 ```
 
+### T-061 Provider-Specific Eval Judge Selection
+
+Implemented locally:
+- `backend/services/llm/provider_config.py`
+  - Adds `JUDGE_MODELS` for Anthropic, OpenAI, and Google.
+- `backend/services/evals/online_eval.py`
+  - Uses `get_llm(provider, judge_model)` instead of hardcoded `AnthropicAdapter`.
+  - Defaults remain Anthropic/Haiku for direct calls that do not pass a provider.
+- `backend/services/pipeline/stage_manager.py`
+  - Passes workspace provider and configured judge model when scheduling evals.
+- `backend/routers/providers.py`
+  - Includes `judge_model` in provider catalog responses.
+- `backend/tests/test_online_eval.py`
+  - Verifies provider-specific judge dispatch.
+
+Verified:
+```bash
+cd backend
+uv run pytest tests/test_online_eval.py tests/test_stage_manager.py tests/test_llm_gateway.py -q
+uv run ruff check services/evals/online_eval.py services/pipeline/stage_manager.py services/llm/provider_config.py routers/providers.py tests/test_online_eval.py
+uv run black --check services/evals/online_eval.py services/pipeline/stage_manager.py services/llm/provider_config.py routers/providers.py tests/test_online_eval.py
+```
+
 ## Pending Tasks
 
 Continue in `tasks.md` order:
-- T-061: Provider-Specific Eval Judge Selection
 - T-062: Isolate Background Eval Database Session
 - T-063: Secure and Refund Refine Flow
 - T-064: Resolve Refine Billing Semantics

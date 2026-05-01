@@ -19,6 +19,7 @@ from services.credit_service import credit_service
 from services.evals.online_eval import run_eval
 from services.llm.base import ProviderError
 from services.llm.gateway import get_llm
+from services.llm.provider_config import JUDGE_MODELS
 from services.pipeline.diff_engine import apply_diff, compute_diff
 from services.pipeline.prompt_builder import build_prompt
 from services.security.output_validator import validate
@@ -140,7 +141,15 @@ class StageManager:
         await db.commit()
         await self._invalidate_stage_cache(workspace.id, stage.type, redis)
         asyncio.create_task(
-            run_eval(version_id, stage.type, accumulated, spec_content, db)
+            run_eval(
+                version_id,
+                stage.type,
+                accumulated,
+                spec_content,
+                db,
+                workspace.provider,
+                JUDGE_MODELS[workspace.provider],
+            )
         )
         yield f'{{"done": true, "stage_id": "{stage_id}"}}'
 
