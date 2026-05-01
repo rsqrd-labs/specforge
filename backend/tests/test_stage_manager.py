@@ -54,9 +54,31 @@ def _make_user(user_id=None):
     return user
 
 
+class _FakePipeline:
+    """Pipeline stub — always reports count=1 (under any rate limit)."""
+
+    def zremrangebyscore(self, *a, **kw) -> "_FakePipeline":
+        return self
+
+    def zadd(self, *a, **kw) -> "_FakePipeline":
+        return self
+
+    def zcard(self, *a, **kw) -> "_FakePipeline":
+        return self
+
+    def expire(self, *a, **kw) -> "_FakePipeline":
+        return self
+
+    async def execute(self) -> list:
+        return [0, 1, 1, 1]  # [removed, added, count=1, expire]
+
+
 class _FakeRedis:
     def __init__(self) -> None:
         self._store: dict[str, str] = {}
+
+    def pipeline(self) -> _FakePipeline:
+        return _FakePipeline()
 
     async def get(self, key: str) -> str | None:
         return self._store.get(key)
@@ -362,3 +384,70 @@ async def test_refine_large_selection_50_percent_returns_false() -> None:
         result = await svc.refine(stage.id, request, user, db)
 
     assert result.large_selection is False
+
+
+@pytest.mark.asyncio
+async def test_generate_raises_rate_limit_error_when_llm_limit_exceeded() -> None:
+    """11th LLM call in 60 seconds raises RateLimitError before credit deduction."""
+    from services.pipeline.stage_manager import RateLimitError
+
+    workspace_id = uuid4()
+    spec_stage = _make_stage(workspace_id, "spec", status="draft")
+    workspace = _make_workspace([spec_stage])
+    user = _make_user()
+    svc = StageManager(redis_client=_FakeRedis())
+    db = _MultiQueryDB([spec_stage, workspace, []])
+
+    with (
+        patch(
+            "services.pipeline.stage_manager.sliding_window_check",
+            new_callable=AsyncMock,
+            return_value=False,  # limit exceeded
+        ),
+        patch(
+            "services.pipeline.stage_manager.credit_service.deduct",
+            new_callable=AsyncMock,
+        ) as mock_deduct,
+    ):
+        with pytest.raises(RateLimitError):
+            async for _ in svc.generate(spec_stage.id, user, db):
+                pass
+
+    mock_deduct.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_refine_raises_rate_limit_error_when_llm_limit_exceeded() -> None:
+    """Refine raises RateLimitError before credit deduction when limit exceeded."""
+    from schemas.stage import RefineRequest
+    from services.pipeline.stage_manager import RateLimitError
+
+    workspace_id = uuid4()
+    stage = _make_stage(workspace_id, "spec", status="draft", content="hello world")
+    workspace = _make_workspace([stage])
+    user = _make_user()
+    svc = StageManager(redis_client=_FakeRedis())
+    db = _MultiQueryDB([stage, workspace])
+
+    request = RefineRequest(
+        instruction="improve",
+        selection_start=0,
+        selection_end=5,
+        selected_text="hello",
+    )
+
+    with (
+        patch(
+            "services.pipeline.stage_manager.sliding_window_check",
+            new_callable=AsyncMock,
+            return_value=False,
+        ),
+        patch(
+            "services.pipeline.stage_manager.credit_service.deduct",
+            new_callable=AsyncMock,
+        ) as mock_deduct,
+    ):
+        with pytest.raises(RateLimitError):
+            await svc.refine(stage.id, request, user, db)
+
+    mock_deduct.assert_not_called()

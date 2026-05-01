@@ -25,7 +25,11 @@ from schemas.stage import (
     StageVersionResponse,
 )
 from services.credit_service import credit_service
-from services.pipeline.stage_manager import StageDependencyError, stage_manager
+from services.pipeline.stage_manager import (
+    RateLimitError,
+    StageDependencyError,
+    stage_manager,
+)
 
 router = APIRouter(prefix="/stages", tags=["stages"])
 
@@ -74,6 +78,11 @@ async def generate_stage(
                 {"error": "dependency_not_finalised", "detail": str(exc)}
             )
             yield f"data: {error_payload}\n\n"
+        except RateLimitError as exc:
+            error_payload = json.dumps(
+                {"error": "rate_limit_exceeded", "retry_after": exc.retry_after}
+            )
+            yield f"data: {error_payload}\n\n"
 
     return StreamingResponse(_stream(), media_type="text/event-stream")
 
@@ -100,6 +109,11 @@ async def regenerate_stage(
                 {"error": "dependency_not_finalised", "detail": str(exc)}
             )
             yield f"data: {error_payload}\n\n"
+        except RateLimitError as exc:
+            error_payload = json.dumps(
+                {"error": "rate_limit_exceeded", "retry_after": exc.retry_after}
+            )
+            yield f"data: {error_payload}\n\n"
 
     return StreamingResponse(_stream(), media_type="text/event-stream")
 
@@ -113,7 +127,14 @@ async def refine_stage(
     _: None = Depends(require_credits(3)),
 ) -> DiffResponse:
     await _load_stage(stage_id, db, user.id)
-    return await stage_manager.refine(stage_id, request, user, db)
+    try:
+        return await stage_manager.refine(stage_id, request, user, db)
+    except RateLimitError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail={"error": "rate_limit_exceeded", "retry_after": exc.retry_after},
+            headers={"Retry-After": str(exc.retry_after)},
+        ) from exc
 
 
 @router.post("/{stage_id}/accept-diff", response_model=StageResponse)

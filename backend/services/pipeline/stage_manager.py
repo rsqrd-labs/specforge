@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from config import settings
+from middleware.rate_limit import sliding_window_check
 from models import Stage, StageVersion, Workspace
 from schemas.stage import DiffResponse, RefineRequest
 from services.credit_service import credit_service
@@ -45,6 +46,12 @@ class SecurityError(Exception):
     pass
 
 
+class RateLimitError(Exception):
+    def __init__(self, retry_after: int) -> None:
+        super().__init__(f"LLM rate limit exceeded. Retry after {retry_after}s.")
+        self.retry_after = retry_after
+
+
 class StageManager:
     def __init__(self, redis_client: Redis | None = None) -> None:
         self._redis: Redis | None = redis_client
@@ -71,6 +78,12 @@ class StageManager:
                 f"Problem statement flagged: {scan_result.matched_pattern}"
             )
 
+        redis = await self._redis_client()
+        if not await sliding_window_check(redis, f"llm:{user.id}", 10, 60):
+            raise RateLimitError(retry_after=60)
+        if not await sliding_window_check(redis, f"llm_daily:{user.id}", 200, 86400):
+            raise RateLimitError(retry_after=86400)
+
         deduction = await credit_service.deduct(
             db, user.id, CREDIT_COSTS["generate"], "generate"
         )
@@ -79,7 +92,6 @@ class StageManager:
         stage.updated_at = datetime.now(UTC)
         await db.commit()
 
-        redis = await self._redis_client()
         system_prompt, user_prompt = await build_prompt(
             stage.type, workspace, db, redis
         )
@@ -137,6 +149,12 @@ class StageManager:
     ) -> DiffResponse:
         stage = await self._load_stage(stage_id, db)
         workspace = await self._load_workspace(stage.workspace_id, db)
+
+        redis = await self._redis_client()
+        if not await sliding_window_check(redis, f"llm:{user.id}", 10, 60):
+            raise RateLimitError(retry_after=60)
+        if not await sliding_window_check(redis, f"llm_daily:{user.id}", 200, 86400):
+            raise RateLimitError(retry_after=86400)
 
         deduction = await credit_service.deduct(
             db, user.id, CREDIT_COSTS["refine"], "refine"

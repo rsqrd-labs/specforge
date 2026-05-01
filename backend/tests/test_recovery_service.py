@@ -41,7 +41,9 @@ def _make_workspace(user_id=None, workspace_id=None) -> Workspace:
     return w
 
 
-def _make_ledger_entry(user_id, amount: int = -10, reason: str = "generate") -> CreditLedger:
+def _make_ledger_entry(
+    user_id, amount: int = -10, reason: str = "generate"
+) -> CreditLedger:
     return CreditLedger(
         id=uuid4(),
         user_id=user_id,
@@ -103,11 +105,13 @@ async def test_recover_stage_stuck_15_minutes() -> None:
     workspace = _make_workspace(user_id=user_id, workspace_id=workspace_id)
     ledger = _make_ledger_entry(user_id)
 
-    db = _FakeDB([
-        [stage],   # stuck stages query
-        workspace, # workspace query
-        ledger,    # ledger entry query
-    ])
+    db = _FakeDB(
+        [
+            [stage],  # stuck stages query
+            workspace,  # workspace query
+            ledger,  # ledger entry query
+        ]
+    )
 
     with patch(
         "services.pipeline.recovery_service.credit_service.refund",
@@ -142,11 +146,13 @@ async def test_recover_no_ledger_entry_still_resets_stage() -> None:
     stage = _make_stuck_stage(15, workspace_id=workspace_id)
     workspace = _make_workspace(user_id=user_id, workspace_id=workspace_id)
 
-    db = _FakeDB([
-        [stage],   # stuck stages
-        workspace, # workspace
-        None,      # no ledger entry found
-    ])
+    db = _FakeDB(
+        [
+            [stage],  # stuck stages
+            workspace,  # workspace
+            None,  # no ledger entry found
+        ]
+    )
 
     with patch(
         "services.pipeline.recovery_service.credit_service.refund",
@@ -165,10 +171,12 @@ async def test_recover_missing_workspace_skips_stage() -> None:
     workspace_id = uuid4()
     stage = _make_stuck_stage(15, workspace_id=workspace_id)
 
-    db = _FakeDB([
-        [stage],  # stuck stages
-        None,     # workspace not found
-    ])
+    db = _FakeDB(
+        [
+            [stage],  # stuck stages
+            None,  # workspace not found
+        ]
+    )
 
     count = await recover_stuck_stages(db)
 
@@ -188,13 +196,15 @@ async def test_recover_multiple_stuck_stages() -> None:
     ledger1 = _make_ledger_entry(user_id)
     ledger2 = _make_ledger_entry(user_id, reason="regenerate")
 
-    db = _FakeDB([
-        [stage1, stage2],  # stuck stages
-        workspace,          # workspace for stage1
-        ledger1,            # ledger for stage1
-        workspace,          # workspace for stage2
-        ledger2,            # ledger for stage2
-    ])
+    db = _FakeDB(
+        [
+            [stage1, stage2],  # stuck stages
+            workspace,  # workspace for stage1
+            ledger1,  # ledger for stage1
+            workspace,  # workspace for stage2
+            ledger2,  # ledger for stage2
+        ]
+    )
 
     with patch(
         "services.pipeline.recovery_service.credit_service.refund",
