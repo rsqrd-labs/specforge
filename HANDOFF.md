@@ -8,17 +8,18 @@ Branch: `main`
 Remote: `https://github.com/rsqrd-labs/specforge.git`
 
 Latest pushed commits:
+- `8ad8ff9 T-052: Add hourly auth rate limit`
 - `4936f46 T-051: Sanitize persisted user text`
 - `595a1ad T-050: Add CSRF protection`
-- `c0854a8 Harden stage generation prompts`
 
 Current implementation status:
 - T-001 through T-049 are complete from the original V1 plan.
 - Prompt hardening work is complete and pushed.
 - T-050 CSRF Middleware is complete and pushed.
 - T-051 Input Sanitization with Bleach is complete and pushed.
-- T-052 Hourly Auth Rate Limit Tier is implemented locally and ready to commit/push after this handoff update.
-- Next task after T-052 is T-053 Sentry Initialization.
+- T-052 Hourly Auth Rate Limit Tier is complete and pushed.
+- T-053 Sentry Initialization is implemented locally and ready to commit/push after this handoff update.
+- Next task after T-053 is T-054 StreamingOverlay Component.
 
 Known unrelated working-tree artifacts that predate this pass and should not be reverted casually:
 - Deleted: `Design.md.md`
@@ -106,7 +107,7 @@ uv run black --check services/security/sanitizer.py services/workspace_service.p
 
 ### T-052 Hourly Auth Rate Limit Tier
 
-Implemented locally:
+Commit `8ad8ff9` implemented:
 - `backend/middleware/rate_limit.py`
   - Adds `login_hourly:{ip}` sliding-window check for `/auth/google` and `/auth/callback`.
   - Allows 20 attempts per hour and returns `429` with `Retry-After: 3600` on the 21st.
@@ -123,10 +124,31 @@ uv run ruff check middleware/rate_limit.py tests/test_rate_limit.py
 uv run black --check middleware/rate_limit.py tests/test_rate_limit.py
 ```
 
+### T-053 Sentry Initialization
+
+Implemented locally:
+- `frontend/src/main.tsx`
+  - Imports `@sentry/react`.
+  - Calls `Sentry.init()` only when `VITE_SENTRY_DSN` is configured.
+  - Enables `Sentry.browserTracingIntegration()` with `tracesSampleRate: 0.1`.
+- Backend note:
+  - Backend Sentry already exists in `backend/services/observability.py::setup_sentry()`.
+  - `backend/main.py::create_app()` invokes it via `setup_observability(app, async_engine)`.
+  - Do not duplicate backend Sentry setup inline in `main.py`.
+
+Verified:
+```bash
+cd frontend
+pnpm tsc --noEmit
+pnpm vitest run --config vitest.harness.config.ts ../harness/tests/frontend/phase4-sentry.contract.test.ts
+
+cd backend
+uv run pytest tests/test_observability.py -q
+```
+
 ## Pending Tasks
 
 Continue in `tasks.md` order:
-- T-053: Frontend Sentry initialization plus backend harness alignment
 - T-054: StreamingOverlay component
 - T-055: Quality Badge in StageNavigator
 - T-056: Dockerfile and README Quickstart
