@@ -8,6 +8,7 @@ Branch: `main`
 Remote: `https://github.com/rsqrd-labs/specforge.git`
 
 Latest pushed commits:
+- `5610a4d T-056: Add Docker quickstart`
 - `58c082a T-055: Show eval scores in stage navigator`
 - `0f2e71f T-054: Add streaming editor overlay`
 - `93f8b24 T-053: Initialize frontend Sentry`
@@ -24,8 +25,9 @@ Current implementation status:
 - T-053 Sentry Initialization is complete and pushed.
 - T-054 StreamingOverlay Component is complete and pushed.
 - T-055 Quality Badge in StageNavigator is complete and pushed.
-- T-056 Dockerfile and README Quickstart is implemented locally and ready to commit/push after this handoff update.
-- Next task after T-056 is T-057 Fix Google Login Redirect Contract.
+- T-056 Dockerfile and README Quickstart is complete and pushed.
+- T-057 Fix Google Login Redirect Contract is implemented locally and ready to commit/push after this handoff update.
+- Next task after T-057 is T-058 Remove Access Token localStorage Fallback.
 
 Known unrelated working-tree artifacts that predate this pass and should not be reverted casually:
 - Deleted: `Design.md.md`
@@ -189,7 +191,7 @@ pnpm vitest run src/__tests__/WorkspaceFlow.test.tsx
 
 ### T-056 Dockerfile and README Quickstart
 
-Implemented locally:
+Commit `5610a4d` implemented:
 - `backend/Dockerfile`
   - Uses `python:3.12-slim`.
   - Installs `uv`, syncs from `uv.lock`, and runs gunicorn with `UvicornWorker`.
@@ -209,10 +211,30 @@ cd backend
 uv run pytest ../harness/tests/backend/test_phase4_contract.py -q -k "dockerfile or docker_compose or readme"
 ```
 
+### T-057 Fix Google Login Redirect Contract
+
+Implemented locally:
+- `frontend/src/pages/Landing.tsx`
+  - Reads `redirect_url` from `POST /auth/google`.
+  - Keeps runtime redirect behavior through `window.location.assign`.
+  - Adds an injectable `assignLocation` prop for deterministic testing.
+- `frontend/src/__tests__/Landing.test.tsx`
+  - Mocks `api.post()`.
+  - Asserts the backend `redirect_url` is used for redirect.
+
+Verified:
+```bash
+cd frontend
+pnpm tsc --noEmit
+pnpm vitest run src/__tests__/Landing.test.tsx
+
+cd backend
+uv run pytest tests/test_auth_router.py::test_post_auth_google_returns_redirect_url -q
+```
+
 ## Pending Tasks
 
 Continue in `tasks.md` order:
-- T-057: Fix Google Login Redirect Contract
 - T-058: Remove Access Token localStorage Fallback
 - T-059: Harden Refresh Cookie Attributes
 - T-060: Refresh Token Reuse Revokes All Sessions

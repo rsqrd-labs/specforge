@@ -1,11 +1,17 @@
 import { api } from "../services/api"
 
-export default function Landing() {
+interface LandingProps {
+  assignLocation?: (url: string) => void
+}
+
+export default function Landing({
+  assignLocation = (url) => window.location.assign(url),
+}: LandingProps) {
   function handleGoogleSignIn() {
     api
-      .post<{ url: string }>("/auth/google")
+      .post<{ redirect_url: string }>("/auth/google")
       .then((res) => {
-        window.location.assign(res.data.url)
+        assignLocation(res.data.redirect_url)
       })
       .catch(() => {
         console.error("Failed to initiate Google auth")
