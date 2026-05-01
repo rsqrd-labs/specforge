@@ -128,3 +128,52 @@ async def test_rate_limit_middleware_returns_429_when_ip_limit_exceeded() -> Non
 
     assert response.status_code == 429
     assert "Retry-After" in response.headers
+
+
+@pytest.mark.asyncio
+async def test_rate_limit_middleware_allows_20th_hourly_login_attempt() -> None:
+    fake_redis = _FakeRedis()
+    now = time.time()
+    fake_redis._sets["ratelimit:login_hourly:test_ip"] = {
+        f"login_{i}": now - 600 - i for i in range(19)
+    }
+
+    app = FastAPI()
+    app.add_middleware(RateLimitMiddleware, redis_client=fake_redis)
+
+    @app.post("/auth/google")
+    async def google_login() -> dict:
+        return {"ok": True}
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            "/auth/google", headers={"X-Forwarded-For": "test_ip"}
+        )
+
+    assert response.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_rate_limit_middleware_blocks_21st_hourly_login_attempt() -> None:
+    fake_redis = _FakeRedis()
+    now = time.time()
+    fake_redis._sets["ratelimit:login_hourly:test_ip"] = {
+        f"login_{i}": now - 600 - i for i in range(20)
+    }
+
+    app = FastAPI()
+    app.add_middleware(RateLimitMiddleware, redis_client=fake_redis)
+
+    @app.post("/auth/google")
+    async def google_login() -> dict:
+        return {"ok": True}
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            "/auth/google", headers={"X-Forwarded-For": "test_ip"}
+        )
+
+    assert response.status_code == 429
+    assert response.headers["Retry-After"] == "3600"

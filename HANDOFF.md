@@ -8,16 +8,17 @@ Branch: `main`
 Remote: `https://github.com/rsqrd-labs/specforge.git`
 
 Latest pushed commits:
+- `4936f46 T-051: Sanitize persisted user text`
 - `595a1ad T-050: Add CSRF protection`
 - `c0854a8 Harden stage generation prompts`
-- `b9276b0 Add second-pass gap closure tasks`
 
 Current implementation status:
 - T-001 through T-049 are complete from the original V1 plan.
 - Prompt hardening work is complete and pushed.
 - T-050 CSRF Middleware is complete and pushed.
-- T-051 Input Sanitization with Bleach is implemented locally and ready to commit/push after this handoff update.
-- Next task after T-051 is T-052 Hourly Auth Rate Limit Tier.
+- T-051 Input Sanitization with Bleach is complete and pushed.
+- T-052 Hourly Auth Rate Limit Tier is implemented locally and ready to commit/push after this handoff update.
+- Next task after T-052 is T-053 Sentry Initialization.
 
 Known unrelated working-tree artifacts that predate this pass and should not be reverted casually:
 - Deleted: `Design.md.md`
@@ -81,7 +82,7 @@ pnpm tsc --noEmit
 
 ### T-051 Input Sanitization with Bleach
 
-Implemented locally:
+Commit `4936f46` implemented:
 - `backend/services/security/sanitizer.py`
   - Removes complete `<script>` and `<style>` blocks.
   - Uses `bleach.clean(..., tags=[], attributes={}, strip=True)` to strip all remaining HTML.
@@ -103,10 +104,28 @@ uv run ruff check services/security/sanitizer.py services/workspace_service.py r
 uv run black --check services/security/sanitizer.py services/workspace_service.py routers/stage.py tests/test_sanitizer.py tests/test_workspace.py tests/test_stage_router.py
 ```
 
+### T-052 Hourly Auth Rate Limit Tier
+
+Implemented locally:
+- `backend/middleware/rate_limit.py`
+  - Adds `login_hourly:{ip}` sliding-window check for `/auth/google` and `/auth/callback`.
+  - Allows 20 attempts per hour and returns `429` with `Retry-After: 3600` on the 21st.
+  - Existing 5 attempts / 5 minutes tier remains in place.
+- `backend/tests/test_rate_limit.py`
+  - Covers 20th hourly login attempt allowed.
+  - Covers 21st hourly login attempt blocked.
+
+Verified:
+```bash
+cd backend
+uv run pytest tests/test_rate_limit.py -q
+uv run ruff check middleware/rate_limit.py tests/test_rate_limit.py
+uv run black --check middleware/rate_limit.py tests/test_rate_limit.py
+```
+
 ## Pending Tasks
 
 Continue in `tasks.md` order:
-- T-052: Hourly Auth Rate Limit Tier
 - T-053: Frontend Sentry initialization plus backend harness alignment
 - T-054: StreamingOverlay component
 - T-055: Quality Badge in StageNavigator

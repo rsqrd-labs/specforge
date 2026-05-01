@@ -52,6 +52,10 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         if path in _LOGIN_PATHS:
             if not await sliding_window_check(self._redis, f"login:{ip}", 5, 300):
                 return _rate_limited(300)
+            if not await sliding_window_check(
+                self._redis, f"login_hourly:{ip}", 20, 3600
+            ):
+                return _rate_limited(3600)
 
         user_id = _extract_user_id(request)
         if user_id:
