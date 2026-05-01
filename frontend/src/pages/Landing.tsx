@@ -99,15 +99,18 @@ export default function Landing({
               <div className="workflow-board">
                 <span className="pipeline-beam" aria-hidden="true" />
                 {[
-                  ["01", "Spec", "Define requirements, users, and acceptance criteria."],
-                  ["02", "Plan", "Map the architecture, risks, and implementation path."],
-                  ["03", "Harness", "Generate validation assets before execution begins."],
-                  ["04", "Tasks", "Break the build into clear, traceable work items."],
-                ].map(([number, label, description]) => (
+                  ["01", "Spec", "Requirements, users, and acceptance criteria.", "Output: SPEC.md"],
+                  ["02", "Plan", "Architecture, risks, and implementation path.", "Output: PLAN.md"],
+                  ["03", "Harness", "Validation assets before execution begins.", "Output: tests"],
+                  ["04", "Tasks", "Traceable work items ready for delivery.", "Output: tasks.md"],
+                ].map(([number, label, description, output]) => (
                   <div className="workflow-card" key={label}>
-                    <span className="workflow-number">{number}</span>
-                    <strong>{label}</strong>
+                    <div className="workflow-card-top">
+                      <span className="workflow-number">{number}</span>
+                      <strong>{label}</strong>
+                    </div>
                     <p>{description}</p>
+                    <em>{output}</em>
                   </div>
                 ))}
               </div>
