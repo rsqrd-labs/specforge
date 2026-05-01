@@ -31,8 +31,10 @@ export default function Landing({
       <section className="landing-hero" aria-labelledby="landing-title">
         <header className="landing-nav">
           <div className="brand-lockup">
-            <span className="brand-mark">S</span>
-            <span>SpecForge</span>
+            <span className="brand-mark" aria-hidden="true">
+              <span>SF</span>
+            </span>
+            <span className="brand-wordmark">SpecForge</span>
           </div>
           <span className="landing-status">Private beta</span>
         </header>

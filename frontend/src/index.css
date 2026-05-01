@@ -110,23 +110,71 @@ button:disabled {
 }
 
 .brand-lockup {
+  position: relative;
   display: inline-flex;
   align-items: center;
-  gap: 12px;
+  gap: 14px;
   color: var(--color-on-surface);
-  font-size: 18px;
-  font-weight: 800;
+}
+
+.brand-lockup::after {
+  content: "";
+  position: absolute;
+  inset: -14px -18px;
+  z-index: -1;
+  border-radius: 24px;
+  background: linear-gradient(135deg, rgba(255, 153, 51, 0.2), rgba(253, 128, 169, 0.1));
+  filter: blur(18px);
+  opacity: 0.78;
 }
 
 .brand-mark {
+  position: relative;
   display: inline-grid;
-  width: 40px;
-  height: 40px;
+  width: 54px;
+  height: 54px;
   place-items: center;
-  border-radius: 12px;
-  background: linear-gradient(135deg, var(--color-primary), var(--color-secondary));
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.72);
+  border-radius: 18px;
+  background:
+    radial-gradient(circle at 24% 18%, rgba(255, 255, 255, 0.5), transparent 28%),
+    linear-gradient(135deg, var(--color-primary), var(--color-secondary) 72%, var(--color-tertiary));
   color: var(--color-on-primary);
-  box-shadow: 0 18px 40px rgba(143, 78, 0, 0.24);
+  box-shadow:
+    0 20px 48px rgba(143, 78, 0, 0.26),
+    inset 0 1px 0 rgba(255, 255, 255, 0.42);
+}
+
+.brand-mark::after {
+  content: "";
+  position: absolute;
+  right: -18px;
+  bottom: -20px;
+  width: 42px;
+  height: 42px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.22);
+}
+
+.brand-mark span {
+  position: relative;
+  z-index: 1;
+  font-size: 15px;
+  font-weight: 900;
+  letter-spacing: 0.04em;
+}
+
+.brand-wordmark {
+  background: linear-gradient(135deg, #0f172a, var(--color-primary) 54%, var(--color-secondary));
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  font-size: clamp(28px, 4vw, 42px);
+  font-weight: 900;
+  line-height: 1;
+  letter-spacing: -0.03em;
+  text-shadow: 0 16px 38px rgba(47, 49, 49, 0.12);
 }
 
 .landing-status {
