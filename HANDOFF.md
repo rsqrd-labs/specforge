@@ -8,7 +8,8 @@ Branch: `main`
 Remote: `https://github.com/rsqrd-labs/specforge.git`
 
 Latest pushed commits:
-- `HEAD T-065: Hide cross-user workspaces`
+- `HEAD T-066: Redact sensitive observability data`
+- `53e64b9 T-065: Hide cross-user workspaces`
 - `3103fa9 T-064: Charge refine credits on accept`
 - `ef1694c T-063: Secure refine flow refunds`
 - `b38042b T-062: Isolate background eval sessions`
@@ -43,8 +44,9 @@ Current implementation status:
 - T-062 Isolate Background Eval Database Session is complete and pushed.
 - T-063 Secure and Refund Refine Flow is complete and pushed.
 - T-064 Resolve Refine Billing Semantics is complete and pushed.
-- T-065 Return 404 for Cross-User Workspace Access is complete and will be pushed with this handoff.
-- Next task after T-065 is T-066 Sensitive Data Redaction for Logs and Sentry.
+- T-065 Return 404 for Cross-User Workspace Access is complete and pushed.
+- T-066 Sensitive Data Redaction for Logs and Sentry is complete and will be pushed with this handoff.
+- T-066 is the last currently listed pending discrepancy task in `tasks.md`.
 
 Known unrelated working-tree artifacts that predate this pass and should not be reverted casually:
 - Deleted: `Design.md.md`
@@ -413,7 +415,7 @@ pnpm tsc --noEmit
 
 ### T-065 Return 404 for Cross-User Workspace Access
 
-Current `HEAD` implements:
+Commit `53e64b9` implemented:
 - `backend/services/workspace_service.py`
   - Keeps missing workspace and wrong-owner workspace responses indistinguishable.
   - `WorkspaceService.get()` now raises HTTP 404 with `Workspace not found` for both cases.
@@ -433,10 +435,33 @@ uv run ruff check services/workspace_service.py tests/test_workspace.py tests/te
 uv run black --check services/workspace_service.py tests/test_workspace.py tests/test_stage_router.py
 ```
 
+### T-066 Sensitive Data Redaction for Logs and Sentry
+
+Current `HEAD` implements:
+- `backend/services/observability.py`
+  - Adds `redact_sensitive_data()` recursive scrubber for dictionaries, lists, tuples, and strings.
+  - Masks sensitive keys such as `authorization`, `refresh_token`, API key fields, private keys, secrets, cookies, and tokens.
+  - Masks bearer/basic authorization values, `sk-...` keys, Google `AIza...` keys, refresh token assignments, authorization assignments, and PEM private key blocks inside strings.
+  - Adds `redact_structlog_event` before JSON rendering in the structlog processor chain.
+  - Adds `SensitiveDataFilter` for standard logging records and attaches it to the root logger and current handlers.
+  - Configures Sentry `before_send` to scrub event payloads with the same helper.
+- `backend/tests/test_observability.py`
+  - Covers nested redaction payloads.
+  - Covers structlog processor redaction.
+  - Covers standard logging filter redaction for messages and extra fields.
+  - Covers Sentry `before_send` event redaction.
+
+Verified:
+```bash
+cd backend
+uv run pytest tests/test_observability.py -q
+uv run ruff check services/observability.py tests/test_observability.py
+uv run black --check services/observability.py tests/test_observability.py
+```
+
 ## Pending Tasks
 
-Continue in `tasks.md` order:
-- T-066: Sensitive Data Redaction for Logs and Sentry
+No further discrepancy tasks are currently listed after T-066 in `tasks.md`.
 
 ## Critical Implementation Notes
 
@@ -457,14 +482,17 @@ Auth:
 - Refresh-token reuse revokes all tracked sessions from T-060.
 - Cross-user workspace GET/PATCH/DELETE now returns 404 from T-065.
 
+Observability:
+- Logs and Sentry events are scrubbed through the shared redaction helper from T-066.
+
 Evals:
 - Online eval uses provider-specific judge models from T-061.
 - Background eval opens its own database session from T-062.
 
 ## Recommended Next Steps
 
-1. Push T-065 if it has not already been pushed.
-2. Start T-066.
+1. Push T-066 if it has not already been pushed.
+2. Re-scan `tasks.md`, `Design.md`, and `HANDOFF.md` for any newly added follow-up tasks before starting new implementation work.
 3. After each task:
    - Run focused backend/frontend tests.
    - Update `HANDOFF.md` with task status, commands run, and next task.

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import logging
+import re
 import time
 from collections.abc import Callable
+from typing import Any
 
 import sentry_sdk
 import structlog
@@ -29,6 +31,82 @@ REQUEST_LATENCY = Histogram(
 
 _sentry_configured = False
 _otel_configured = False
+_REDACTED = "[REDACTED]"
+_SENSITIVE_KEYS = {
+    "api_key",
+    "apikey",
+    "authorization",
+    "csrf_token",
+    "google_api_key",
+    "grafana_otlp_token",
+    "jwt_private_key",
+    "openai_api_key",
+    "anthropic_api_key",
+    "password",
+    "private_key",
+    "refresh_token",
+    "refreshtoken",
+    "secret",
+    "set-cookie",
+    "set_cookie",
+    "token",
+}
+_LOG_RECORD_BUILTINS = set(logging.LogRecord("", 0, "", 0, "", (), None).__dict__)
+_SECRET_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"Bearer\s+[A-Za-z0-9._~+/=-]+", re.IGNORECASE),
+    re.compile(r"Basic\s+[A-Za-z0-9._~+/=-]+", re.IGNORECASE),
+    re.compile(r"sk-[A-Za-z0-9_-]{8,}", re.IGNORECASE),
+    re.compile(r"AIza[0-9A-Za-z_-]{20,}"),
+    re.compile(
+        r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----",
+        re.DOTALL,
+    ),
+    re.compile(r"(?i)(refresh[_-]?token\s*[:=]\s*)['\"]?[^'\"\s,;}]+['\"]?"),
+    re.compile(r"(?i)(authorization\s*[:=]\s*)['\"]?[^'\"\s,;}]+['\"]?"),
+)
+
+
+class SensitiveDataFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        record.msg = redact_sensitive_data(record.getMessage())
+        record.args = ()
+
+        for key, value in list(record.__dict__.items()):
+            if key in _LOG_RECORD_BUILTINS:
+                continue
+            record.__dict__[key] = redact_sensitive_data({key: value})[key]
+
+        if record.exc_text:
+            record.exc_text = redact_sensitive_data(record.exc_text)
+        return True
+
+
+def redact_sensitive_data(value: Any) -> Any:
+    if isinstance(value, dict):
+        redacted: dict[Any, Any] = {}
+        for key, item in value.items():
+            if _is_sensitive_key(key):
+                redacted[key] = _REDACTED
+            else:
+                redacted[key] = redact_sensitive_data(item)
+        return redacted
+
+    if isinstance(value, list):
+        return [redact_sensitive_data(item) for item in value]
+
+    if isinstance(value, tuple):
+        return tuple(redact_sensitive_data(item) for item in value)
+
+    if isinstance(value, str):
+        return _redact_string(value)
+
+    return value
+
+
+def redact_structlog_event(
+    _logger: Any, _method_name: str, event_dict: dict[str, Any]
+) -> dict[str, Any]:
+    return redact_sensitive_data(event_dict)
 
 
 def configure_logging() -> None:
@@ -37,6 +115,7 @@ def configure_logging() -> None:
         processors=[
             structlog.contextvars.merge_contextvars,
             structlog.processors.add_log_level,
+            redact_structlog_event,
             timestamper,
             structlog.processors.StackInfoRenderer(),
             structlog.processors.format_exc_info,
@@ -49,6 +128,7 @@ def configure_logging() -> None:
         level=logging.INFO,
         format="%(message)s",
     )
+    _install_sensitive_data_filter()
 
 
 def setup_sentry() -> None:
@@ -62,6 +142,7 @@ def setup_sentry() -> None:
         environment=settings.environment,
         integrations=[FastApiIntegration()],
         traces_sample_rate=0.1,
+        before_send=_redact_sentry_event,
     )
     _sentry_configured = True
 
@@ -152,6 +233,40 @@ def setup_observability(app: FastAPI, engine: AsyncEngine) -> None:
 
 def _is_configured_url(value: str) -> bool:
     return value.startswith(("http://", "https://"))
+
+
+def _install_sensitive_data_filter() -> None:
+    root_logger = logging.getLogger()
+    if not any(isinstance(f, SensitiveDataFilter) for f in root_logger.filters):
+        root_logger.addFilter(SensitiveDataFilter())
+
+    for handler in root_logger.handlers:
+        if not any(isinstance(f, SensitiveDataFilter) for f in handler.filters):
+            handler.addFilter(SensitiveDataFilter())
+
+
+def _redact_sentry_event(
+    event: dict[str, Any], _hint: dict[str, Any]
+) -> dict[str, Any]:
+    return redact_sensitive_data(event)
+
+
+def _redact_string(value: str) -> str:
+    redacted = value
+    for pattern in _SECRET_PATTERNS:
+        redacted = pattern.sub(_replace_secret_match, redacted)
+    return redacted
+
+
+def _replace_secret_match(match: re.Match[str]) -> str:
+    if match.lastindex:
+        return f"{match.group(1)}{_REDACTED}"
+    return _REDACTED
+
+
+def _is_sensitive_key(key: Any) -> bool:
+    normalized = str(key).lower().replace("-", "_")
+    return normalized in _SENSITIVE_KEYS or normalized.endswith("_secret")
 
 
 def _route_path(request: Request) -> str:
