@@ -27,77 +27,101 @@ export default function Landing({
   }
 
   return (
-    <main className="relative min-h-screen overflow-hidden bg-background text-on-background">
-      <div className="absolute inset-0 -z-10">
-        <div className="absolute left-[-10rem] top-[-8rem] h-[32rem] w-[32rem] rounded-full bg-primary-container/30 blur-3xl" />
-        <div className="absolute bottom-[-12rem] right-[-8rem] h-[34rem] w-[34rem] rounded-full bg-secondary-container/25 blur-3xl" />
-      </div>
-
-      <section className="mx-auto grid min-h-screen w-full max-w-[1280px] grid-cols-1 items-center gap-12 px-6 py-10 lg:grid-cols-[minmax(0,1fr)_480px] lg:px-10">
-        <div className="max-w-3xl">
-          <div className="mb-8 inline-flex items-center gap-3 rounded-full border border-outline-variant bg-surface-container-lowest/80 px-4 py-2 text-sm font-semibold uppercase tracking-[0.18em] text-on-surface-variant shadow-sm backdrop-blur">
-            <span className="h-2.5 w-2.5 rounded-full bg-primary" />
-            SpecForge
+    <main className="landing-shell">
+      <section className="landing-hero" aria-labelledby="landing-title">
+        <header className="landing-nav">
+          <div className="brand-lockup">
+            <span className="brand-mark">S</span>
+            <span>SpecForge</span>
           </div>
+          <span className="landing-status">Private beta</span>
+        </header>
 
-          <h1 className="max-w-3xl text-5xl font-extrabold leading-[1.05] text-on-background sm:text-6xl lg:text-7xl">
-            Turn rough product ideas into build-ready specs.
-          </h1>
+        <div className="hero-grid">
+          <div className="hero-copy">
+            <p className="eyebrow">AI product specification workspace</p>
+            <h1 id="landing-title">
+              Forge a vague idea into an implementation-ready build plan.
+            </h1>
+            <p className="hero-lede">
+              SpecForge turns a problem statement into a structured delivery
+              package with review gates, harness coverage, and clear execution
+              tasks.
+            </p>
 
-          <p className="mt-6 max-w-2xl text-lg leading-8 text-on-surface-variant">
-            Shape a problem statement into a reviewed spec, plan, harness, and
-            implementation task list with a focused AI workflow built for teams
-            that care about precision.
-          </p>
-
-          <div className="mt-10 grid max-w-2xl grid-cols-1 gap-3 sm:grid-cols-3">
-            {["SPEC", "PLAN", "HARNESS"].map((label, index) => (
-              <div
-                key={label}
-                className="rounded-lg border border-outline-variant bg-surface-container-lowest/75 px-4 py-3 shadow-sm backdrop-blur"
+            <div className="hero-actions">
+              <button
+                type="button"
+                onClick={handleGoogleSignIn}
+                disabled={isSigningIn}
+                className="google-button"
               >
-                <div className="text-xs font-bold uppercase tracking-[0.18em] text-primary">
-                  0{index + 1}
+                <GoogleIcon />
+                {isSigningIn ? "Opening Google..." : "Sign in with Google"}
+              </button>
+              <span className="hero-note">OAuth secured workspace access</span>
+            </div>
+
+            {authError && <p className="auth-error">{authError}</p>}
+
+            <div className="flow-strip" aria-label="SpecForge workflow">
+              {[
+                ["01", "Spec"],
+                ["02", "Plan"],
+                ["03", "Harness"],
+                ["04", "Tasks"],
+              ].map(([number, label], index) => (
+                <div className="flow-step" key={label}>
+                  <span>{number}</span>
+                  <strong>{label}</strong>
+                  {index < 3 && <i aria-hidden="true" />}
                 </div>
-                <div className="mt-1 text-sm font-semibold text-on-surface">
-                  {label}
+              ))}
+            </div>
+          </div>
+
+          <div className="product-panel" aria-label="SpecForge product preview">
+            <div className="panel-topbar">
+              <span />
+              <span />
+              <span />
+              <strong>Workspace</strong>
+            </div>
+
+            <div className="stage-rail">
+              {["Spec", "Plan", "Harness", "Tasks"].map((stage, index) => (
+                <div className={index === 0 ? "stage-pill active" : "stage-pill"} key={stage}>
+                  <span>0{index + 1}</span>
+                  {stage}
                 </div>
+              ))}
+            </div>
+
+            <div className="document-card">
+              <div className="document-header">
+                <span>SPEC.md</span>
+                <em>Quality 92</em>
               </div>
-            ))}
-          </div>
-        </div>
+              <h2>Problem framing, user journeys, and acceptance criteria</h2>
+              <div className="doc-line wide" />
+              <div className="doc-line" />
+              <div className="doc-line short" />
+            </div>
 
-        <div className="rounded-2xl border border-outline-variant bg-surface-container-lowest/80 p-6 shadow-[0_24px_80px_rgba(47,49,49,0.14)] backdrop-blur-xl">
-          <div className="mb-6">
-            <h2 className="text-2xl font-bold text-on-surface">Welcome back</h2>
-            <p className="mt-2 text-sm leading-6 text-on-surface-variant">
-              Sign in to continue to your workspaces.
-            </p>
-          </div>
-
-          <button
-            type="button"
-            onClick={handleGoogleSignIn}
-            disabled={isSigningIn}
-            className="flex h-12 w-full items-center justify-center gap-3 rounded-lg border border-outline-variant bg-surface px-4 text-sm font-semibold text-on-surface shadow-sm transition hover:border-outline hover:bg-surface-container-low disabled:opacity-60"
-          >
-            <GoogleIcon />
-            {isSigningIn ? "Opening Google..." : "Sign in with Google"}
-          </button>
-
-          {authError && (
-            <p className="mt-4 rounded-lg border border-error-container bg-error-container px-3 py-2 text-sm text-on-error-container">
-              {authError}
-            </p>
-          )}
-
-          <div className="mt-6 rounded-lg bg-primary-container/20 p-4">
-            <p className="text-sm font-semibold text-on-surface">
-              Spec - Plan - Harness - Tasks
-            </p>
-            <p className="mt-1 text-sm leading-6 text-on-surface-variant">
-              A calm, structured workspace for moving from intent to execution.
-            </p>
+            <div className="insight-grid">
+              <div>
+                <span>Coverage</span>
+                <strong>87%</strong>
+              </div>
+              <div>
+                <span>Review gate</span>
+                <strong>Ready</strong>
+              </div>
+              <div>
+                <span>Next stage</span>
+                <strong>Plan</strong>
+              </div>
+            </div>
           </div>
         </div>
       </section>
