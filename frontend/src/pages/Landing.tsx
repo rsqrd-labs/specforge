@@ -44,8 +44,7 @@ export default function Landing({
               Shape ideas into ship-ready plans.
             </h1>
             <p className="hero-lede">
-              Transform a problem statement into validated specs, plans, harnesses,
-              and execution-ready tasks.
+              Turn product intent into a validated build roadmap.
             </p>
 
             <div className="auth-card">
