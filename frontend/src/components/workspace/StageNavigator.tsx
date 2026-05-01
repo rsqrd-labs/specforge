@@ -29,6 +29,12 @@ function StatusDot({ status }: { status: Stage["status"] }) {
   return <span className={`${base} bg-amber-400`} />
 }
 
+function scoreClassName(score: number): string {
+  if (score >= 80) return "text-green-600"
+  if (score >= 60) return "text-amber-600"
+  return "text-red-600"
+}
+
 export function StageNavigator({
   stages,
   activeStageId,
@@ -44,6 +50,7 @@ export function StageNavigator({
 
         const isLocked = stage.status === "locked"
         const isActive = stage.id === activeStageId
+        const score = stage.eval_result?.overall_score ?? null
 
         return (
           <button
@@ -62,9 +69,18 @@ export function StageNavigator({
           >
             <StatusDot status={stage.status} />
             <span className="truncate">{STAGE_LABELS[type]}</span>
-            {stage.status === "finalised" && (
-              <span className="ml-auto text-xs text-on-surface-variant">
-                v{stage.current_version}
+            {(score !== null || stage.status === "finalised") && (
+              <span className="ml-auto flex items-center gap-2 text-xs">
+                {score !== null && (
+                  <span className={`font-medium ${scoreClassName(score)}`}>
+                    {score}
+                  </span>
+                )}
+                {stage.status === "finalised" && (
+                  <span className="text-on-surface-variant">
+                    v{stage.current_version}
+                  </span>
+                )}
               </span>
             )}
           </button>

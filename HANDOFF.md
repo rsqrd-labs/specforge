@@ -8,6 +8,7 @@ Branch: `main`
 Remote: `https://github.com/rsqrd-labs/specforge.git`
 
 Latest pushed commits:
+- `0f2e71f T-054: Add streaming editor overlay`
 - `93f8b24 T-053: Initialize frontend Sentry`
 - `8ad8ff9 T-052: Add hourly auth rate limit`
 - `4936f46 T-051: Sanitize persisted user text`
@@ -20,8 +21,9 @@ Current implementation status:
 - T-051 Input Sanitization with Bleach is complete and pushed.
 - T-052 Hourly Auth Rate Limit Tier is complete and pushed.
 - T-053 Sentry Initialization is complete and pushed.
-- T-054 StreamingOverlay Component is implemented locally and ready to commit/push after this handoff update.
-- Next task after T-054 is T-055 Quality Badge in StageNavigator.
+- T-054 StreamingOverlay Component is complete and pushed.
+- T-055 Quality Badge in StageNavigator is implemented locally and ready to commit/push after this handoff update.
+- Next task after T-055 is T-056 Dockerfile and README Quickstart.
 
 Known unrelated working-tree artifacts that predate this pass and should not be reverted casually:
 - Deleted: `Design.md.md`
@@ -150,7 +152,7 @@ uv run pytest tests/test_observability.py -q
 
 ### T-054 StreamingOverlay Component
 
-Implemented locally:
+Commit `0f2e71f` implemented:
 - `frontend/src/components/workspace/StreamingOverlay.tsx`
   - Named export `StreamingOverlay`.
   - Renders nothing when `isVisible` is false.
@@ -166,10 +168,26 @@ pnpm tsc --noEmit
 pnpm vitest run --config vitest.harness.config.ts ../harness/tests/frontend/phase4-streaming-overlay.contract.test.tsx
 ```
 
+### T-055 Quality Badge in StageNavigator
+
+Implemented locally:
+- `frontend/src/components/workspace/StageNavigator.tsx`
+  - Shows `eval_result.overall_score` inline for stages with evals.
+  - Keeps version display for finalised stages.
+  - Applies green/amber/red score classes by threshold.
+  - Handles `overall_score: null` safely.
+
+Verified:
+```bash
+cd frontend
+pnpm tsc --noEmit
+pnpm vitest run --config vitest.harness.config.ts ../harness/tests/frontend/phase4-navigator-quality-badge.contract.test.tsx
+pnpm vitest run src/__tests__/WorkspaceFlow.test.tsx
+```
+
 ## Pending Tasks
 
 Continue in `tasks.md` order:
-- T-055: Quality Badge in StageNavigator
 - T-056: Dockerfile and README Quickstart
 - T-057: Fix Google Login Redirect Contract
 - T-058: Remove Access Token localStorage Fallback
