@@ -1,4 +1,10 @@
 import { describe, expect, it, vi, beforeEach } from "vitest"
+import { readFile } from "node:fs/promises"
+import { dirname, resolve } from "node:path"
+import { fileURLToPath } from "node:url"
+
+const __dirname = dirname(fileURLToPath(import.meta.url))
+const REPO_ROOT = resolve(__dirname, "../../..")
 
 describe("api service contract", () => {
   beforeEach(() => {
@@ -7,12 +13,13 @@ describe("api service contract", () => {
   })
 
   it("does not persist access tokens in localStorage or sessionStorage", async () => {
-    const source = await import("node:fs/promises").then(fs =>
-      fs.readFile(new URL("../../../frontend/src/services/api.ts", import.meta.url), "utf8")
+    const source = await readFile(
+      resolve(REPO_ROOT, "frontend/src/services/api.ts"),
+      "utf8",
     )
 
-    expect(source).not.toMatch(/localStorage\.setItem\(['"]access/i)
-    expect(source).not.toMatch(/sessionStorage\.setItem\(['"]access/i)
+    expect(source).not.toMatch(/localStorage\.(getItem|setItem)\(['"]access/i)
+    expect(source).not.toMatch(/sessionStorage\.(getItem|setItem)\(['"]access/i)
     expect(source).toContain("withCredentials")
   })
 

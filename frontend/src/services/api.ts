@@ -61,11 +61,7 @@ export function setAccessToken(token: string | null): void {
 }
 
 export function getAccessToken(): string | null {
-  if (accessToken) {
-    return accessToken
-  }
-
-  return localStorage.getItem("access_token")
+  return accessToken
 }
 
 function isMutatingMethod(method: string | undefined): boolean {

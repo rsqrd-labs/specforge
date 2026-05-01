@@ -8,6 +8,7 @@ Branch: `main`
 Remote: `https://github.com/rsqrd-labs/specforge.git`
 
 Latest pushed commits:
+- `397b035 T-057: Fix Google auth redirect contract`
 - `5610a4d T-056: Add Docker quickstart`
 - `58c082a T-055: Show eval scores in stage navigator`
 - `0f2e71f T-054: Add streaming editor overlay`
@@ -26,8 +27,9 @@ Current implementation status:
 - T-054 StreamingOverlay Component is complete and pushed.
 - T-055 Quality Badge in StageNavigator is complete and pushed.
 - T-056 Dockerfile and README Quickstart is complete and pushed.
-- T-057 Fix Google Login Redirect Contract is implemented locally and ready to commit/push after this handoff update.
-- Next task after T-057 is T-058 Remove Access Token localStorage Fallback.
+- T-057 Fix Google Login Redirect Contract is complete and pushed.
+- T-058 Remove Access Token localStorage Fallback is implemented locally and ready to commit/push after this handoff update.
+- Next task after T-058 is T-059 Harden Refresh Cookie Attributes.
 
 Known unrelated working-tree artifacts that predate this pass and should not be reverted casually:
 - Deleted: `Design.md.md`
@@ -213,7 +215,7 @@ uv run pytest ../harness/tests/backend/test_phase4_contract.py -q -k "dockerfile
 
 ### T-057 Fix Google Login Redirect Contract
 
-Implemented locally:
+Commit `397b035` implemented:
 - `frontend/src/pages/Landing.tsx`
   - Reads `redirect_url` from `POST /auth/google`.
   - Keeps runtime redirect behavior through `window.location.assign`.
@@ -232,10 +234,26 @@ cd backend
 uv run pytest tests/test_auth_router.py::test_post_auth_google_returns_redirect_url -q
 ```
 
+### T-058 Remove Access Token localStorage Fallback
+
+Implemented locally:
+- `frontend/src/services/api.ts`
+  - `getAccessToken()` now returns only the in-memory `accessToken`.
+  - No localStorage/sessionStorage fallback remains for access tokens.
+- `harness/tests/frontend/api.contract.test.ts`
+  - Contract now rejects both `getItem` and `setItem` access-token web-storage usage.
+  - Fixed test path resolution for harness Vitest runs.
+
+Verified:
+```bash
+cd frontend
+pnpm tsc --noEmit
+pnpm vitest run --config vitest.harness.config.ts ../harness/tests/frontend/api.contract.test.ts
+```
+
 ## Pending Tasks
 
 Continue in `tasks.md` order:
-- T-058: Remove Access Token localStorage Fallback
 - T-059: Harden Refresh Cookie Attributes
 - T-060: Refresh Token Reuse Revokes All Sessions
 - T-061: Provider-Specific Eval Judge Selection
