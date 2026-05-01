@@ -1,3 +1,5 @@
+import asyncio
+from contextlib import asynccontextmanager
 from typing import Literal
 
 from fastapi import FastAPI, status
@@ -15,6 +17,7 @@ from routers import providers as providers_router
 from routers import stage as stage_router
 from routers import workspace as workspace_router
 from services.observability import setup_observability
+from services.pipeline.recovery_service import run_recovery_loop
 
 HealthStatus = Literal["ok", "degraded"]
 DependencyStatus = Literal["ok", "error"]
@@ -48,8 +51,19 @@ async def check_redis() -> DependencyStatus:
     return "ok" if pong else "error"
 
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    task = asyncio.create_task(run_recovery_loop())
+    yield
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+
 def create_app(redis_client=None) -> FastAPI:
-    app = FastAPI(title="SpecForge API", version="1.0.0")
+    app = FastAPI(title="SpecForge API", version="1.0.0", lifespan=lifespan)
     setup_observability(app, async_engine)
 
     app.add_middleware(RateLimitMiddleware, redis_client=redis_client)
