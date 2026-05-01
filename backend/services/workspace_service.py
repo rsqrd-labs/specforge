@@ -68,7 +68,7 @@ class WorkspaceService:
             )
         if workspace.user_id != user_id:
             raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized"
+                status_code=status.HTTP_404_NOT_FOUND, detail="Workspace not found"
             )
         return workspace
 

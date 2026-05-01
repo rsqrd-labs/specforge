@@ -8,7 +8,8 @@ Branch: `main`
 Remote: `https://github.com/rsqrd-labs/specforge.git`
 
 Latest pushed commits:
-- `HEAD T-064: Charge refine credits on accept`
+- `HEAD T-065: Hide cross-user workspaces`
+- `3103fa9 T-064: Charge refine credits on accept`
 - `ef1694c T-063: Secure refine flow refunds`
 - `b38042b T-062: Isolate background eval sessions`
 - `a445ddf T-061: Use provider-specific eval judges`
@@ -41,8 +42,9 @@ Current implementation status:
 - T-061 Provider-Specific Eval Judge Selection is complete and pushed.
 - T-062 Isolate Background Eval Database Session is complete and pushed.
 - T-063 Secure and Refund Refine Flow is complete and pushed.
-- T-064 Resolve Refine Billing Semantics is complete and will be pushed with this handoff.
-- Next task after T-064 is T-065 Return 404 for Cross-User Workspace Access.
+- T-064 Resolve Refine Billing Semantics is complete and pushed.
+- T-065 Return 404 for Cross-User Workspace Access is complete and will be pushed with this handoff.
+- Next task after T-065 is T-066 Sensitive Data Redaction for Logs and Sentry.
 
 Known unrelated working-tree artifacts that predate this pass and should not be reverted casually:
 - Deleted: `Design.md.md`
@@ -375,7 +377,7 @@ uv run black --check services/pipeline/stage_manager.py routers/stage.py tests/t
 
 ### T-064 Resolve Refine Billing Semantics
 
-Current `HEAD` implements:
+Commit `3103fa9` implemented:
 - `backend/services/pipeline/stage_manager.py`
   - Makes refine preview free: no credit deduction or ledger id is created while generating the diff preview.
   - Keeps prompt-injection scanning, rate limiting, and output validation in the preview path.
@@ -409,10 +411,31 @@ cd frontend
 pnpm tsc --noEmit
 ```
 
+### T-065 Return 404 for Cross-User Workspace Access
+
+Current `HEAD` implements:
+- `backend/services/workspace_service.py`
+  - Keeps missing workspace and wrong-owner workspace responses indistinguishable.
+  - `WorkspaceService.get()` now raises HTTP 404 with `Workspace not found` for both cases.
+  - `update()` and `archive()` inherit the same behavior because they call `get()`.
+- `backend/tests/test_workspace.py`
+  - Updates wrong-owner get test from 403 to 404.
+  - Adds wrong-owner update/archive service tests that assert no commit occurs.
+  - Adds route-level GET/PATCH/DELETE tests proving cross-user access returns 404.
+- `backend/tests/test_stage_router.py`
+  - Re-run alongside workspace tests to verify stage routes still preserve 404 cross-user behavior.
+
+Verified:
+```bash
+cd backend
+uv run pytest tests/test_workspace.py tests/test_stage_router.py -q
+uv run ruff check services/workspace_service.py tests/test_workspace.py tests/test_stage_router.py
+uv run black --check services/workspace_service.py tests/test_workspace.py tests/test_stage_router.py
+```
+
 ## Pending Tasks
 
 Continue in `tasks.md` order:
-- T-065: Return 404 for Cross-User Workspace Access
 - T-066: Sensitive Data Redaction for Logs and Sentry
 
 ## Critical Implementation Notes
@@ -432,6 +455,7 @@ Auth:
 - Access tokens are kept in memory only; the localStorage fallback was removed in T-058.
 - Refresh cookies are `SameSite=Strict` and scoped to `/auth/refresh` from T-059.
 - Refresh-token reuse revokes all tracked sessions from T-060.
+- Cross-user workspace GET/PATCH/DELETE now returns 404 from T-065.
 
 Evals:
 - Online eval uses provider-specific judge models from T-061.
@@ -439,8 +463,8 @@ Evals:
 
 ## Recommended Next Steps
 
-1. Push T-064 if it has not already been pushed.
-2. Start T-065.
+1. Push T-065 if it has not already been pushed.
+2. Start T-066.
 3. After each task:
    - Run focused backend/frontend tests.
    - Update `HANDOFF.md` with task status, commands run, and next task.
