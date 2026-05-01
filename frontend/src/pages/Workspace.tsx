@@ -9,6 +9,7 @@ import { QualityBadge } from "../components/workspace/QualityBadge"
 import { StageEditor, type StageEditorHandle } from "../components/workspace/StageEditor"
 import { StageNavigator } from "../components/workspace/StageNavigator"
 import { StalenessWarning } from "../components/workspace/StalenessWarning"
+import { StreamingOverlay } from "../components/workspace/StreamingOverlay"
 import { TaskValidationPanel } from "../components/workspace/TaskValidationPanel"
 import { useCredits } from "../hooks/useCredits"
 import { useStream } from "../hooks/useStream"
@@ -474,7 +475,7 @@ export default function Workspace() {
         )}
 
         <div className="grid min-h-0 flex-1 grid-cols-1 lg:grid-cols-[minmax(0,1fr)_420px]">
-          <section className="min-h-0">
+          <section className="relative min-h-0">
             <StageEditor
               key={activeStage.id}
               ref={editorRef}
@@ -483,6 +484,7 @@ export default function Workspace() {
               readOnly={activeStage.status === "locked" || isStreaming}
               onContentChange={handleContentChange}
             />
+            <StreamingOverlay isVisible={isStreaming} />
           </section>
 
           <aside className="min-h-0 overflow-auto border-l border-outline-variant bg-surface-container-lowest">

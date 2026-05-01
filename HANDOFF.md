@@ -8,6 +8,7 @@ Branch: `main`
 Remote: `https://github.com/rsqrd-labs/specforge.git`
 
 Latest pushed commits:
+- `93f8b24 T-053: Initialize frontend Sentry`
 - `8ad8ff9 T-052: Add hourly auth rate limit`
 - `4936f46 T-051: Sanitize persisted user text`
 - `595a1ad T-050: Add CSRF protection`
@@ -18,8 +19,9 @@ Current implementation status:
 - T-050 CSRF Middleware is complete and pushed.
 - T-051 Input Sanitization with Bleach is complete and pushed.
 - T-052 Hourly Auth Rate Limit Tier is complete and pushed.
-- T-053 Sentry Initialization is implemented locally and ready to commit/push after this handoff update.
-- Next task after T-053 is T-054 StreamingOverlay Component.
+- T-053 Sentry Initialization is complete and pushed.
+- T-054 StreamingOverlay Component is implemented locally and ready to commit/push after this handoff update.
+- Next task after T-054 is T-055 Quality Badge in StageNavigator.
 
 Known unrelated working-tree artifacts that predate this pass and should not be reverted casually:
 - Deleted: `Design.md.md`
@@ -126,7 +128,7 @@ uv run black --check middleware/rate_limit.py tests/test_rate_limit.py
 
 ### T-053 Sentry Initialization
 
-Implemented locally:
+Commit `93f8b24` implemented:
 - `frontend/src/main.tsx`
   - Imports `@sentry/react`.
   - Calls `Sentry.init()` only when `VITE_SENTRY_DSN` is configured.
@@ -146,10 +148,27 @@ cd backend
 uv run pytest tests/test_observability.py -q
 ```
 
+### T-054 StreamingOverlay Component
+
+Implemented locally:
+- `frontend/src/components/workspace/StreamingOverlay.tsx`
+  - Named export `StreamingOverlay`.
+  - Renders nothing when `isVisible` is false.
+  - Renders a semi-transparent, `pointer-events-none` overlay with a pulsing cursor and `Generating...` label when visible.
+- `frontend/src/pages/Workspace.tsx`
+  - Wraps the editor section with `relative`.
+  - Mounts `<StreamingOverlay isVisible={isStreaming} />` over `StageEditor`.
+
+Verified:
+```bash
+cd frontend
+pnpm tsc --noEmit
+pnpm vitest run --config vitest.harness.config.ts ../harness/tests/frontend/phase4-streaming-overlay.contract.test.tsx
+```
+
 ## Pending Tasks
 
 Continue in `tasks.md` order:
-- T-054: StreamingOverlay component
 - T-055: Quality Badge in StageNavigator
 - T-056: Dockerfile and README Quickstart
 - T-057: Fix Google Login Redirect Contract
