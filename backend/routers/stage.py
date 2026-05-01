@@ -30,6 +30,7 @@ from services.pipeline.stage_manager import (
     StageDependencyError,
     stage_manager,
 )
+from services.security.sanitizer import sanitize_text
 
 router = APIRouter(prefix="/stages", tags=["stages"])
 
@@ -127,8 +128,11 @@ async def refine_stage(
     _: None = Depends(require_credits(3)),
 ) -> DiffResponse:
     await _load_stage(stage_id, db, user.id)
+    sanitized_request = request.model_copy(
+        update={"instruction": sanitize_text(request.instruction)}
+    )
     try:
-        return await stage_manager.refine(stage_id, request, user, db)
+        return await stage_manager.refine(stage_id, sanitized_request, user, db)
     except RateLimitError as exc:
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,

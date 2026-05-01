@@ -9,6 +9,7 @@ from sqlalchemy.orm import selectinload
 
 from models import Stage, Workspace
 from schemas.workspace import WorkspaceCreate
+from services.security.sanitizer import sanitize_text
 
 _STAGE_ORDER = ["spec", "plan", "harness", "tasks"]
 
@@ -19,8 +20,8 @@ class WorkspaceService:
     ) -> Workspace:
         workspace = Workspace(
             user_id=user_id,
-            name=payload.name,
-            problem_statement=payload.problem_statement,
+            name=sanitize_text(payload.name),
+            problem_statement=sanitize_text(payload.problem_statement),
             provider=payload.provider,
             model=payload.model,
             status="active",
@@ -75,7 +76,7 @@ class WorkspaceService:
         self, workspace_id: UUID, user_id: UUID, name: str, db: AsyncSession
     ) -> Workspace:
         workspace = await self.get(workspace_id, user_id, db)
-        workspace.name = name
+        workspace.name = sanitize_text(name)
         await db.commit()
         await db.refresh(workspace)
         return workspace

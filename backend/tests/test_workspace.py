@@ -132,6 +132,22 @@ async def test_create_workspace_spec_is_draft_others_locked() -> None:
 
 
 @pytest.mark.asyncio
+async def test_create_workspace_sanitizes_user_text() -> None:
+    svc = WorkspaceService()
+    db = _FakeDB()
+    payload = WorkspaceCreate(
+        name="<b>Test</b>",
+        problem_statement="<script>alert('xss')</script>" + ("A" * 60),
+        provider="anthropic",
+        model="claude-sonnet-4-6",
+    )
+    workspace = await svc.create(uuid4(), payload, db)
+    assert workspace.name == "Test"
+    assert "<script>" not in workspace.problem_statement
+    assert "alert" not in workspace.problem_statement
+
+
+@pytest.mark.asyncio
 async def test_get_workspace_not_found_raises_404() -> None:
     svc = WorkspaceService()
     db = _FakeDB(workspace=None)
@@ -168,6 +184,15 @@ async def test_update_workspace_name() -> None:
     assert result.name == "New Name"
     assert db._committed is True
     assert workspace in db._refreshed
+
+
+@pytest.mark.asyncio
+async def test_update_workspace_sanitizes_name() -> None:
+    svc = WorkspaceService()
+    workspace = _make_workspace()
+    db = _FakeDB(workspace=workspace)
+    result = await svc.update(workspace.id, workspace.user_id, "<i>Clean</i>", db)
+    assert result.name == "Clean"
 
 
 @pytest.mark.asyncio

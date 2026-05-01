@@ -8,14 +8,16 @@ Branch: `main`
 Remote: `https://github.com/rsqrd-labs/specforge.git`
 
 Latest pushed commits:
+- `595a1ad T-050: Add CSRF protection`
 - `c0854a8 Harden stage generation prompts`
 - `b9276b0 Add second-pass gap closure tasks`
 
 Current implementation status:
 - T-001 through T-049 are complete from the original V1 plan.
 - Prompt hardening work is complete and pushed.
-- T-050 CSRF Middleware is implemented locally and ready to commit/push after this handoff update.
-- Next task after T-050 is T-051 Input Sanitization with Bleach.
+- T-050 CSRF Middleware is complete and pushed.
+- T-051 Input Sanitization with Bleach is implemented locally and ready to commit/push after this handoff update.
+- Next task after T-051 is T-052 Hourly Auth Rate Limit Tier.
 
 Known unrelated working-tree artifacts that predate this pass and should not be reverted casually:
 - Deleted: `Design.md.md`
@@ -44,7 +46,7 @@ uv run black --check prompts services/security tests/test_security.py
 
 ### T-050 CSRF Middleware
 
-Implemented locally:
+Commit `595a1ad` implemented:
 - `backend/services/security/csrf.py`
   - `generate_csrf_token(session_id: str) -> str`
   - `verify_csrf_token(token: str, session_id: str, max_age_seconds: int = 3600) -> bool`
@@ -77,10 +79,33 @@ cd frontend
 pnpm tsc --noEmit
 ```
 
+### T-051 Input Sanitization with Bleach
+
+Implemented locally:
+- `backend/services/security/sanitizer.py`
+  - Removes complete `<script>` and `<style>` blocks.
+  - Uses `bleach.clean(..., tags=[], attributes={}, strip=True)` to strip all remaining HTML.
+- `backend/services/workspace_service.py`
+  - Sanitizes workspace `name` and `problem_statement` before create.
+  - Sanitizes workspace `name` before update.
+- `backend/routers/stage.py`
+  - Sanitizes refine `instruction` before calling `stage_manager.refine()`.
+- Tests:
+  - `backend/tests/test_sanitizer.py`
+  - Added workspace create/update sanitizer assertions.
+  - Added stage refine route sanitizer assertion.
+
+Verified:
+```bash
+cd backend
+uv run pytest tests/test_sanitizer.py tests/test_workspace.py tests/test_stage_router.py -q
+uv run ruff check services/security/sanitizer.py services/workspace_service.py routers/stage.py tests/test_sanitizer.py tests/test_workspace.py tests/test_stage_router.py
+uv run black --check services/security/sanitizer.py services/workspace_service.py routers/stage.py tests/test_sanitizer.py tests/test_workspace.py tests/test_stage_router.py
+```
+
 ## Pending Tasks
 
 Continue in `tasks.md` order:
-- T-051: Input Sanitization with Bleach
 - T-052: Hourly Auth Rate Limit Tier
 - T-053: Frontend Sentry initialization plus backend harness alignment
 - T-054: StreamingOverlay component
