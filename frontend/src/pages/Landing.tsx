@@ -49,17 +49,38 @@ export default function Landing({
               tasks.
             </p>
 
-            <div className="hero-actions">
+            <div className="auth-card">
+              <div className="auth-card-glow" aria-hidden="true" />
+              <div className="auth-card-header">
+                <div>
+                  <span className="auth-kicker">Start in seconds</span>
+                  <strong>Enter the forge</strong>
+                </div>
+                <div className="auth-pulse" aria-hidden="true">
+                  <span />
+                </div>
+              </div>
+
               <button
                 type="button"
                 onClick={handleGoogleSignIn}
                 disabled={isSigningIn}
                 className="google-button"
               >
-                <GoogleIcon />
-                {isSigningIn ? "Opening Google..." : "Sign in with Google"}
+                <span className="google-button-icon">
+                  <GoogleIcon />
+                </span>
+                <span>{isSigningIn ? "Opening Google..." : "Sign in with Google"}</span>
+                <span className="button-arrow" aria-hidden="true">
+                  &rarr;
+                </span>
               </button>
-              <span className="hero-note">OAuth secured workspace access</span>
+
+              <div className="auth-meta" aria-label="Authentication safeguards">
+                <span>OAuth secured</span>
+                <span>50 starter credits</span>
+                <span>No setup required</span>
+              </div>
             </div>
 
             {authError && <p className="auth-error">{authError}</p>}
