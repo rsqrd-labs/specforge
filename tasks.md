@@ -1770,4 +1770,296 @@ Define and execute the manual smoke test checklist against the staging environme
 
 ---
 
-_tasks.md · SpecForge V1 · Version 1.0.0 · Derived from SPEC v1.0.0 + PLAN v1.0.1_
+---
+
+## Phase 4 — Gap Closure (Post-Audit)
+
+_Identified during codebase audit on 2026-05-01. All items are in scope per spec/plan but were not tasked. See Plan v1.md §10 for rationale._
+
+---
+
+### T-050: CSRF Middleware
+
+**Description:**
+Implement HMAC-based CSRF token generation, verification, and middleware as required by the spec security architecture. `csrf_secret` is already in config but no implementation exists.
+
+**Inputs:**
+- `backend/config.py` (`csrf_secret: str` already present)
+- spec.md §7 Security Architecture ("CSRF: SameSite=Strict cookies · HMAC CSRF tokens on mutations")
+- Plan v1.md §3.1 (`services/security/csrf.py`)
+
+**Outputs:**
+- `backend/services/security/csrf.py`
+- Updated `backend/main.py` (register CSRF middleware)
+- `backend/tests/test_csrf.py`
+
+**Steps:**
+1. Create `backend/services/security/csrf.py`:
+   - `generate_csrf_token(session_id: str) -> str`: HMAC-SHA256 of `session_id + timestamp` using `settings.csrf_secret`. Return `{timestamp}.{hmac}` signed token.
+   - `verify_csrf_token(token: str, session_id: str, max_age_seconds: int = 3600) -> bool`: Parse token, check HMAC, check timestamp not older than `max_age_seconds`.
+2. Create `backend/middleware/csrf.py`:
+   - `CsrfMiddleware(BaseHTTPMiddleware)`: skip safe methods (GET, HEAD, OPTIONS). For mutating methods (POST, PUT, PATCH, DELETE): read `X-CSRF-Token` header; extract session identifier from the access token sub claim (from `Authorization` header); call `verify_csrf_token()`; return 403 if invalid.
+   - Exempt paths: `/auth/google`, `/auth/callback`, `/auth/refresh` (OAuth callbacks can't set custom headers).
+3. Register `CsrfMiddleware` in `main.py` after `RateLimitMiddleware`.
+4. Update `frontend/src/services/api.ts`: add request interceptor that fetches a CSRF token from `GET /auth/csrf-token` and attaches it as `X-CSRF-Token` header on all mutating requests.
+5. Add `GET /auth/csrf-token` endpoint to `routers/auth.py`: requires `get_current_user`, returns `{"csrf_token": generate_csrf_token(str(user.id))}`.
+6. Write `backend/tests/test_csrf.py`:
+   - Test: `generate_csrf_token` and `verify_csrf_token` roundtrip passes.
+   - Test: tampered HMAC fails verification.
+   - Test: expired token (age > max_age) fails.
+
+**Acceptance Criteria:**
+- `POST /workspaces` without `X-CSRF-Token` returns 403.
+- `POST /workspaces` with valid `X-CSRF-Token` returns 201.
+- Auth callback endpoints are exempt.
+- `ruff check .` and `black --check .` pass.
+
+**Dependencies:** T-011
+
+---
+
+### T-051: Input Sanitization with Bleach
+
+**Description:**
+Apply `bleach.clean()` to all user-supplied text fields before persistence, as required by the plan. The `bleach==6.*` package is already installed but never called.
+
+**Inputs:**
+- `backend/pyproject.toml` (`bleach==6.*` already present)
+- Plan v1.md §2 ("bleach: HTML stripping on all user text fields before persistence")
+
+**Outputs:**
+- `backend/services/security/sanitizer.py`
+- Updated `backend/services/workspace_service.py`
+- Updated `backend/routers/stage.py` (refine instruction)
+- `backend/tests/test_sanitizer.py`
+
+**Steps:**
+1. Create `backend/services/security/sanitizer.py`:
+   - `sanitize_text(text: str) -> str`: calls `bleach.clean(text, tags=[], strip=True)`. Strips all HTML tags. Returns plain text.
+2. Apply in `workspace_service.create()`: sanitize `name` and `problem_statement` before creating the `Workspace` record.
+3. Apply in `workspace_service.update()`: sanitize `name` before update.
+4. Apply in `stage.py` refine endpoint: sanitize `instruction` before passing to `stage_manager.refine()`.
+5. Write `backend/tests/test_sanitizer.py`:
+   - Test: `sanitize_text("<script>alert('xss')</script>hello")` returns `"hello"`.
+   - Test: plain text is unchanged.
+   - Test: nested tags stripped: `"<b><i>text</i></b>"` returns `"text"`.
+
+**Acceptance Criteria:**
+- `<script>` tags in workspace name or problem statement are stripped before DB insert.
+- `sanitize_text` is called on all user text inputs in service methods.
+- `ruff check .` and `black --check .` pass.
+
+**Dependencies:** T-020
+
+---
+
+### T-052: Hourly Auth Rate Limit Tier
+
+**Description:**
+Add the hourly auth login rate limit (20 attempts / 1 hour per IP) to `RateLimitMiddleware`, as explicitly listed in the spec security table. Only the 5-per-5-minute tier is currently implemented.
+
+**Inputs:**
+- spec.md §7 Security Table ("Auth Login Per IP hourly: 20 attempts / 1 hour")
+- `backend/middleware/rate_limit.py`
+
+**Outputs:**
+- Updated `backend/middleware/rate_limit.py`
+- Updated `backend/tests/test_rate_limit.py`
+
+**Steps:**
+1. In `RateLimitMiddleware.__call__()`, after the existing 5/300s login check, add:
+   ```python
+   if not await sliding_window_check(self._redis, f"login_hourly:{ip}", 20, 3600):
+       return Response("Rate limit exceeded", status_code=429, headers={"Retry-After": "3600"})
+   ```
+   Apply only on `/auth/google` and `/auth/callback` paths (same as the 5/5min check).
+2. Add unit test in `test_rate_limit.py`:
+   - Test: 21st login attempt within 1 hour returns 429.
+   - Test: 20th attempt is allowed.
+
+**Acceptance Criteria:**
+- 21 login attempts within 1 hour from the same IP result in 429 on the 21st.
+- Existing 5/5min tier continues to function independently.
+- `ruff check .` and `black --check .` pass.
+
+**Dependencies:** T-012
+
+---
+
+### T-053: Sentry Initialization
+
+**Description:**
+Initialize Sentry error tracking in both backend and frontend. Both SDKs are installed (`sentry-sdk[fastapi]` and `@sentry/react`) but `init()` is never called. This was specified in T-039 steps 2 and 3 but was not completed.
+
+**Inputs:**
+- `backend/config.py` (`sentry_dsn: str` already present)
+- `frontend/.env.example` (`VITE_SENTRY_DSN` already present)
+- Plan v1.md §2 (sentry-sdk[fastapi] + @sentry/react)
+
+**Outputs:**
+- Updated `backend/main.py`
+- Updated `frontend/src/main.tsx`
+
+**Steps:**
+1. In `backend/main.py`, inside the `lifespan` or `create_app` function, add:
+   ```python
+   import sentry_sdk
+   if settings.sentry_dsn:
+       sentry_sdk.init(
+           dsn=settings.sentry_dsn,
+           traces_sample_rate=0.1,
+           environment=settings.environment,
+       )
+   ```
+   Guard with `if settings.sentry_dsn` so local dev without DSN doesn't error.
+2. In `frontend/src/main.tsx`, add before `ReactDOM.createRoot`:
+   ```typescript
+   import * as Sentry from "@sentry/react"
+   if (import.meta.env.VITE_SENTRY_DSN) {
+     Sentry.init({
+       dsn: import.meta.env.VITE_SENTRY_DSN,
+       integrations: [Sentry.browserTracingIntegration()],
+       tracesSampleRate: 0.1,
+     })
+   }
+   ```
+3. Run `pnpm tsc --noEmit` to verify no type errors.
+4. Verify backend starts without error when `SENTRY_DSN` is unset.
+
+**Acceptance Criteria:**
+- Backend starts cleanly with `SENTRY_DSN` unset (empty string or missing).
+- Frontend builds cleanly with `VITE_SENTRY_DSN` unset.
+- `pnpm tsc --noEmit` exits 0.
+- `ruff check .` and `black --check .` pass.
+
+**Dependencies:** T-039
+
+---
+
+### T-054: StreamingOverlay Component
+
+**Description:**
+Implement the `StreamingOverlay` component that renders over the `StageEditor` while an SSE stream is active. Listed in the plan's component directory but not yet built. The editor is already `readOnly` during streaming; this adds the required visual feedback (animated cursor, generating label).
+
+**Inputs:**
+- Plan v1.md §3.2 ("StreamingOverlay.tsx — Mounted over editor during active stream. Shows cursor animation. Prevents user edits during generation.")
+- `frontend/src/pages/Workspace.tsx` (`isStreaming` state available)
+
+**Outputs:**
+- `frontend/src/components/workspace/StreamingOverlay.tsx`
+- Updated `frontend/src/pages/Workspace.tsx` (mount overlay when streaming)
+
+**Steps:**
+1. Create `frontend/src/components/workspace/StreamingOverlay.tsx`:
+   - Props: `isVisible: boolean`.
+   - When `isVisible=true`: render a semi-transparent overlay `div` positioned `absolute inset-0` over the editor container. Show a blinking cursor animation (CSS `animate-pulse`) and a "Generating…" label at the bottom-right. Use `pointer-events: none` so the overlay does not intercept scroll.
+   - When `isVisible=false`: return `null`.
+2. In `Workspace.tsx`, wrap the editor container in a `relative` positioned div. Mount `<StreamingOverlay isVisible={isStreaming} />` inside it.
+3. Run `pnpm tsc --noEmit` to verify no type errors.
+
+**Acceptance Criteria:**
+- Overlay appears over editor when `isStreaming=true`.
+- Overlay disappears when streaming completes.
+- Underlying editor is still visible through the overlay (semi-transparent).
+- `pnpm tsc --noEmit` exits 0.
+
+**Dependencies:** T-034, T-038
+
+---
+
+### T-055: Quality Badge in StageNavigator
+
+**Description:**
+Display the eval quality score next to each stage name in the `StageNavigator`, as required by T-033's acceptance criteria: "Quality badge (score number) shown if eval_result present on stage." Currently the badge only appears in the workspace header for the active stage.
+
+**Inputs:**
+- `frontend/src/components/workspace/StageNavigator.tsx`
+- `frontend/src/components/workspace/QualityBadge.tsx`
+- `frontend/src/types/stage.ts` (`Stage.eval_result: EvalResult | null`)
+
+**Outputs:**
+- Updated `frontend/src/components/workspace/StageNavigator.tsx`
+- Updated `frontend/src/__tests__/WorkspaceFlow.test.tsx` (add test for badge visibility)
+
+**Steps:**
+1. Update `StageNavigator.tsx`:
+   - If `stage.eval_result` is non-null, render a small score badge in the stage row alongside the status dot and label.
+   - Badge: `<span className="ml-auto text-xs font-medium text-on-surface-variant">{stage.eval_result.overall_score}</span>`.
+   - Color: green if ≥ 80, amber if 60–79, red if < 60 (mirror the `QualityBadge` thresholds).
+   - Do not import `QualityBadge` — render inline to avoid circular component coupling. The navigator badge is text-only (number), not the full badge component.
+2. Add test in `WorkspaceFlow.test.tsx`:
+   - Test: stage with `eval_result.overall_score = 85` shows `"85"` in the navigator.
+   - Test: stage with `eval_result = null` does not show a score.
+3. Run `pnpm tsc --noEmit` and `pnpm test` to verify.
+
+**Acceptance Criteria:**
+- Eval score number visible in StageNavigator when `eval_result` is present.
+- No score shown when `eval_result` is null.
+- Score color matches quality thresholds (green/amber/red).
+- All Vitest tests pass.
+
+**Dependencies:** T-033, T-026
+
+---
+
+### T-056: Dockerfile and README Quickstart
+
+**Description:**
+Add the `backend/Dockerfile` required for self-hosting and expand `README.md` with a working quickstart guide. Both are specified in the spec's open-source strategy but are missing. Without them the self-hosting flow described in the spec ("clone → copy .env → docker-compose up → open localhost:5173") does not work.
+
+**Inputs:**
+- spec.md §12 open-source strategy ("Self-Hosting in Four Steps")
+- `docker-compose.yml` (already exists with db + redis services)
+- `backend/Procfile` (gunicorn command already defined)
+
+**Outputs:**
+- `backend/Dockerfile`
+- Updated `docker-compose.yml` (add `api` service)
+- Updated `README.md`
+
+**Steps:**
+1. Create `backend/Dockerfile`:
+   ```dockerfile
+   FROM python:3.12-slim
+   WORKDIR /app
+   RUN pip install uv
+   COPY pyproject.toml uv.lock ./
+   RUN uv sync --frozen --no-dev
+   COPY . .
+   EXPOSE 8000
+   CMD ["uv", "run", "gunicorn", "main:app", "--worker-class", "uvicorn.workers.UvicornWorker", "--workers", "2", "--bind", "0.0.0.0:8000"]
+   ```
+2. Update `docker-compose.yml`: add `api` service:
+   ```yaml
+   api:
+     build: ./backend
+     ports: ["8000:8000"]
+     env_file: backend/.env
+     depends_on:
+       db:
+         condition: service_healthy
+       redis:
+         condition: service_healthy
+     volumes:
+       - ./backend:/app
+     command: uv run uvicorn main:app --reload --host 0.0.0.0 --port 8000
+   ```
+3. Rewrite `README.md` with:
+   - Project title + one-line description.
+   - Screenshot or ASCII diagram of the 4-stage pipeline.
+   - **Self-Hosting (4 steps)**: clone, copy `.env.example` to `.env` and fill API keys, `docker-compose up`, open `localhost:5173`.
+   - **Development Setup**: separate backend (`uv run uvicorn`) and frontend (`pnpm dev`) commands.
+   - Required environment variables table.
+   - Link to `docs/SMOKE_TEST_CHECKLIST.md` for verification.
+
+**Acceptance Criteria:**
+- `docker-compose up --build` starts all three services (db, redis, api) without error.
+- `GET localhost:8000/health` returns 200 after `docker-compose up`.
+- `README.md` contains self-hosting instructions that match the spec's four-step flow.
+- Frontend `pnpm dev` still works (no regression to existing dev setup).
+
+**Dependencies:** T-003, T-044
+
+---
+
+_tasks.md · SpecForge V1 · Version 1.1.0 · Updated 2026-05-01 with gap-closure tasks T-050 through T-056_

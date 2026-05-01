@@ -1060,4 +1060,55 @@ VITE_SENTRY_DSN=https://xxx@sentry.io/xxx
 
 ---
 
-_SpecForge V1 PLAN.md · Version 1.0.1 · Derived from SPEC v1.0.0 · 2026-04-25_
+---
+
+## 10. Gap Analysis — Post-T-049 Audit (2026-05-01)
+
+After completing all T-001 through T-049 tasks, a codebase audit against the spec and plan revealed eight items that are in scope for V1 but were not tasked or implemented.
+
+### Confirmed Gaps
+
+**G1 — CSRF Middleware** _(Spec §7, Plan §3.1)_
+`csrf_secret` is present in `config.py` and `.env.example` but `services/security/csrf.py` does not exist and no CSRF middleware is registered in `main.py`. The spec lists "HMAC CSRF tokens on mutations" as a required defence.
+_Resolution: T-050_
+
+**G2 — Input Sanitization (bleach)** _(Plan §2 Tech Stack)_
+`bleach==6.*` is installed in `pyproject.toml` but `bleach.clean()` is never called. The plan says "HTML stripping on all user text fields before persistence." Problem statements and workspace names bypass sanitization.
+_Resolution: T-051_
+
+**G3 — Hourly Auth Rate Limit** _(Spec §7 Security Table)_
+The spec security table defines "Auth Login Per IP hourly: 20 attempts / 1 hour." Only the 5-attempt-per-5-minute tier is implemented in `RateLimitMiddleware`.
+_Resolution: T-052_
+
+**G4 — Sentry Initialization** _(T-039 Steps 2 & 3)_
+`sentry-sdk[fastapi]` and `@sentry/react` are both installed, but neither `sentry_sdk.init()` in `backend/main.py` nor `Sentry.init()` in `frontend/src/main.tsx` is present. T-039 explicitly specifies both.
+_Resolution: T-053_
+
+**G5 — StreamingOverlay Component** _(Plan §3.2 component list)_
+`StreamingOverlay.tsx` is listed in the plan's component directory. The `StageEditor` is marked `readOnly` during streaming (preventing edits), but there is no visual overlay with cursor animation over the editor while the LLM is generating.
+_Resolution: T-054_
+
+**G6 — Quality Badge in StageNavigator** _(T-033 acceptance criteria)_
+T-033 states: "Quality badge (score number) shown if eval_result present on stage." `QualityBadge` is shown in the workspace header for the active stage but not inside the `StageNavigator` items.
+_Resolution: T-055_
+
+**G7 — Dockerfile** _(Spec §12 package structure, §12 open-source self-hosting)_
+`backend/Dockerfile` is listed in the plan's full directory structure and is required for the self-hosting quickstart ("docker-compose up"). Not present.
+_Resolution: T-056_
+
+**G8 — README Quickstart** _(Spec §12 open-source strategy)_
+`README.md` contains only "Setup instructions coming soon." The self-hosting strategy requires: clone → copy .env → docker-compose up → open localhost:5173. Without this, the open-source product is not usable by self-hosters.
+_Resolution: T-056 (bundled with Dockerfile)_
+
+### Intentionally Deferred (not gaps)
+
+The following items appear in the spec architecture but were explicitly scoped out of V1 in tasks.md and the plan:
+- Stripe billing, subscriptions, webhook handler (Phase 3 — no V1 tasks)
+- Chat panel and WebSocket service (explicitly deferred to V2 in plan §1 diagram note)
+- Per-user API key storage in `user_api_keys` table (vault is ready; per-user keys are V2)
+- `Pricing.tsx`, `Settings.tsx` pages (no V1 tasks)
+- Offline evals pipeline (separate CLI, Phase 6)
+
+---
+
+_SpecForge V1 PLAN.md · Version 1.0.2 · Updated 2026-05-01 with post-T-049 gap analysis_
