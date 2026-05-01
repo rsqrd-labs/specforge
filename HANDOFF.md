@@ -8,6 +8,7 @@ Branch: `main`
 Remote: `https://github.com/rsqrd-labs/specforge.git`
 
 Latest pushed commits:
+- `1c94623 T-059: Harden refresh cookie attributes`
 - `1124f15 T-058: Keep access tokens in memory only`
 - `397b035 T-057: Fix Google auth redirect contract`
 - `5610a4d T-056: Add Docker quickstart`
@@ -30,8 +31,9 @@ Current implementation status:
 - T-056 Dockerfile and README Quickstart is complete and pushed.
 - T-057 Fix Google Login Redirect Contract is complete and pushed.
 - T-058 Remove Access Token localStorage Fallback is complete and pushed.
-- T-059 Harden Refresh Cookie Attributes is implemented locally and ready to commit/push after this handoff update.
-- Next task after T-059 is T-060 Refresh Token Reuse Revokes All Sessions.
+- T-059 Harden Refresh Cookie Attributes is complete and pushed.
+- T-060 Refresh Token Reuse Revokes All Sessions is implemented locally and ready to commit/push after this handoff update.
+- Next task after T-060 is T-061 Provider-Specific Eval Judge Selection.
 
 Known unrelated working-tree artifacts that predate this pass and should not be reverted casually:
 - Deleted: `Design.md.md`
@@ -255,7 +257,7 @@ pnpm vitest run --config vitest.harness.config.ts ../harness/tests/frontend/api.
 
 ### T-059 Harden Refresh Cookie Attributes
 
-Implemented locally:
+Commit `1c94623` implemented:
 - `backend/routers/auth.py`
   - Refresh cookie now uses `SameSite=Strict`.
   - Refresh cookie is scoped to `Path=/auth/refresh`.
@@ -272,10 +274,32 @@ uv run ruff check routers/auth.py tests/test_auth_router.py
 uv run black --check routers/auth.py tests/test_auth_router.py
 ```
 
+### T-060 Refresh Token Reuse Revokes All Sessions
+
+Implemented locally:
+- `backend/services/auth_service.py`
+  - Adds `user_sessions:{user_id}` Redis set index for refresh JTIs.
+  - Stores each refresh JTI in both `session:{jti}` and the per-user session set.
+  - Removes old JTI from the session set during normal rotation.
+  - On refresh-token reuse/missing session, deletes every indexed `session:{jti}` for that user and clears the set.
+  - Logout removes only the presented refresh session from the user session set.
+- `backend/tests/test_auth_service.py`
+  - Extends fake Redis with set operations.
+  - Tests normal rotation index updates.
+  - Tests reuse detection revokes all active user sessions.
+  - Tests logout revokes only the presented session.
+
+Verified:
+```bash
+cd backend
+uv run pytest tests/test_auth_service.py -q
+uv run ruff check services/auth_service.py tests/test_auth_service.py
+uv run black --check services/auth_service.py tests/test_auth_service.py
+```
+
 ## Pending Tasks
 
 Continue in `tasks.md` order:
-- T-060: Refresh Token Reuse Revokes All Sessions
 - T-061: Provider-Specific Eval Judge Selection
 - T-062: Isolate Background Eval Database Session
 - T-063: Secure and Refund Refine Flow

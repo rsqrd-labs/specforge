@@ -22,6 +22,7 @@ GOOGLE_SCOPES = ("openid", "email", "profile")
 ACCESS_TOKEN_MINUTES = 15
 REFRESH_TOKEN_DAYS = 7
 SESSION_PREFIX = "session:"
+USER_SESSIONS_PREFIX = "user_sessions:"
 
 
 class AuthError(Exception):
@@ -34,6 +35,14 @@ class RedisSessionStore(Protocol):
     async def get(self, name: str) -> Any: ...
 
     async def delete(self, *names: str) -> Any: ...
+
+    async def sadd(self, name: str, *values: str) -> Any: ...
+
+    async def srem(self, name: str, *values: str) -> Any: ...
+
+    async def smembers(self, name: str) -> Any: ...
+
+    async def expire(self, name: str, time: int) -> Any: ...
 
 
 class AuthService:
@@ -109,9 +118,11 @@ class AuthService:
         session_key = self._session_key(old_jti)
 
         if await self.redis.get(session_key) is None:
+            await self._revoke_all_user_sessions(user_id)
             raise AuthError("Refresh token has been revoked")
 
         await self.redis.delete(session_key)
+        await self.redis.srem(self._user_sessions_key(user_id), old_jti)
         user = await self._get_user_by_id(UUID(user_id), db)
         if user is None:
             raise AuthError("User not found")
@@ -132,7 +143,10 @@ class AuthService:
 
     async def revoke(self, refresh_token: str) -> None:
         claims = self._decode_refresh_token(refresh_token)
+        user_id = claims["sub"]
+        jti = claims["jti"]
         await self.redis.delete(self._session_key(claims["jti"]))
+        await self.redis.srem(self._user_sessions_key(user_id), jti)
 
     def verify_access_token(self, token: str) -> dict[str, Any]:
         claims = self._decode_token(token)
@@ -214,9 +228,23 @@ class AuthService:
             user_id,
             ex=REFRESH_TOKEN_DAYS * 24 * 60 * 60,
         )
+        user_sessions_key = self._user_sessions_key(user_id)
+        await self.redis.sadd(user_sessions_key, jti)
+        await self.redis.expire(user_sessions_key, REFRESH_TOKEN_DAYS * 24 * 60 * 60)
 
     def _session_key(self, jti: str) -> str:
         return f"{SESSION_PREFIX}{jti}"
+
+    def _user_sessions_key(self, user_id: str) -> str:
+        return f"{USER_SESSIONS_PREFIX}{user_id}"
+
+    async def _revoke_all_user_sessions(self, user_id: str) -> None:
+        user_sessions_key = self._user_sessions_key(user_id)
+        session_ids = await self.redis.smembers(user_sessions_key)
+        session_keys = [self._session_key(str(jti)) for jti in session_ids]
+        if session_keys:
+            await self.redis.delete(*session_keys)
+        await self.redis.delete(user_sessions_key)
 
     def _required_claim(self, user_info: dict[str, Any], key: str) -> str:
         value = user_info.get(key)

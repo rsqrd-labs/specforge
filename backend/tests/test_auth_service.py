@@ -64,6 +64,7 @@ class FakeCreditService:
 class FakeRedis:
     def __init__(self) -> None:
         self.values: dict[str, str] = {}
+        self.sets: dict[str, set[str]] = {}
 
     async def set(self, name: str, value: str, ex: int) -> None:
         self.values[name] = value
@@ -74,6 +75,23 @@ class FakeRedis:
     async def delete(self, *names: str) -> None:
         for name in names:
             self.values.pop(name, None)
+            self.sets.pop(name, None)
+
+    async def sadd(self, name: str, *values: str) -> None:
+        self.sets.setdefault(name, set()).update(values)
+
+    async def srem(self, name: str, *values: str) -> None:
+        existing = self.sets.get(name)
+        if existing is None:
+            return
+        for value in values:
+            existing.discard(value)
+
+    async def smembers(self, name: str) -> set[str]:
+        return set(self.sets.get(name, set()))
+
+    async def expire(self, name: str, time: int) -> None:
+        return None
 
 
 class FakeResponse:
@@ -159,6 +177,7 @@ async def test_refresh_tokens_rotates_jti(signing_keys: tuple[str, str]) -> None
     refresh_token = service._create_token(user.id, "refresh", 60)
     old_jti = service._decode_refresh_token(refresh_token)["jti"]
     await redis.set(service._session_key(old_jti), str(user.id), ex=60)
+    await redis.sadd(service._user_sessions_key(str(user.id)), old_jti)
 
     access_token, new_refresh_token = await service.refresh_tokens(
         refresh_token,
@@ -168,8 +187,10 @@ async def test_refresh_tokens_rotates_jti(signing_keys: tuple[str, str]) -> None
     assert access_token
     assert new_refresh_token != refresh_token
     assert await redis.get(service._session_key(old_jti)) is None
+    assert old_jti not in await redis.smembers(service._user_sessions_key(str(user.id)))
     new_jti = service._decode_refresh_token(new_refresh_token)["jti"]
     assert await redis.get(service._session_key(new_jti)) == str(user.id)
+    assert new_jti in await redis.smembers(service._user_sessions_key(str(user.id)))
 
 
 @pytest.mark.asyncio
@@ -188,6 +209,53 @@ async def test_refresh_tokens_with_revoked_token_raises(
 
     with pytest.raises(AuthError):
         await service.refresh_tokens(refresh_token, FakeDB(user))  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_refresh_token_reuse_revokes_all_user_sessions(
+    signing_keys: tuple[str, str],
+) -> None:
+    redis = FakeRedis()
+    service = make_service(signing_keys, redis)
+    user = User(
+        id=uuid4(),
+        email="dev@example.com",
+        google_id="google-user-id",
+        name="Dev User",
+        avatar_url=None,
+    )
+    reused_token = service._create_token(user.id, "refresh", 60)
+    reused_jti = service._decode_refresh_token(reused_token)["jti"]
+    active_jti = str(uuid4())
+    await redis.set(service._session_key(active_jti), str(user.id), ex=60)
+    await redis.sadd(service._user_sessions_key(str(user.id)), reused_jti, active_jti)
+
+    with pytest.raises(AuthError):
+        await service.refresh_tokens(reused_token, FakeDB(user))  # type: ignore[arg-type]
+
+    assert await redis.get(service._session_key(active_jti)) is None
+    assert await redis.smembers(service._user_sessions_key(str(user.id))) == set()
+
+
+@pytest.mark.asyncio
+async def test_revoke_removes_only_presented_refresh_session(
+    signing_keys: tuple[str, str],
+) -> None:
+    redis = FakeRedis()
+    service = make_service(signing_keys, redis)
+    user_id = uuid4()
+    token = service._create_token(user_id, "refresh", 60)
+    jti = service._decode_refresh_token(token)["jti"]
+    other_jti = str(uuid4())
+    await redis.set(service._session_key(jti), str(user_id), ex=60)
+    await redis.set(service._session_key(other_jti), str(user_id), ex=60)
+    await redis.sadd(service._user_sessions_key(str(user_id)), jti, other_jti)
+
+    await service.revoke(token)
+
+    assert await redis.get(service._session_key(jti)) is None
+    assert await redis.get(service._session_key(other_jti)) == str(user_id)
+    assert await redis.smembers(service._user_sessions_key(str(user_id))) == {other_jti}
 
 
 def test_verify_access_token_with_expired_token_raises(
