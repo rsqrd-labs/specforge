@@ -39,7 +39,6 @@ export default function Landing({
 
         <div className="hero-grid">
           <div className="hero-copy">
-            <p className="eyebrow">AI product specification workspace</p>
             <h1 id="landing-title">
               Idea to Implementation Without Ambiguity
             </h1>
