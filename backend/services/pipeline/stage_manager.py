@@ -28,6 +28,11 @@ from services.security.prompt_guard import scan
 logger = logging.getLogger(__name__)
 
 STAGE_ORDER = ["spec", "plan", "harness", "tasks"]
+
+
+def _log_eval_error(task: asyncio.Task) -> None:
+    if not task.cancelled() and (exc := task.exception()):
+        logger.error("eval_background_failed", extra={"error": str(exc)})
 STAGE_DEPENDENCIES: dict[str, list[str]] = {
     "spec": [],
     "plan": ["spec"],
@@ -149,7 +154,7 @@ class StageManager:
                 workspace.provider,
                 JUDGE_MODELS[workspace.provider],
             )
-        )
+        ).add_done_callback(_log_eval_error)
         yield f'{{"done": true, "stage_id": "{stage_id}"}}'
 
     async def refine(
