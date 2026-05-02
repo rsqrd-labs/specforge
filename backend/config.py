@@ -24,6 +24,9 @@ class Settings(BaseSettings):
 
     environment: str
 
+    # Empty string disables token auth; fall back to localhost-only IP check
+    metrics_token: str = ""
+
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
 

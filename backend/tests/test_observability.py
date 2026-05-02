@@ -37,9 +37,11 @@ class _NoopRedis:
 
 
 def test_metrics_endpoint_exposes_prometheus_metrics() -> None:
-    client = TestClient(create_app(redis_client=_NoopRedis()))
-
-    response = client.get("/metrics")
+    with patch.object(observability.settings, "metrics_token", "test-metrics-token"):
+        client = TestClient(create_app(redis_client=_NoopRedis()))
+        response = client.get(
+            "/metrics", headers={"Authorization": "Bearer test-metrics-token"}
+        )
 
     assert response.status_code == 200
     assert "text/plain" in response.headers["content-type"]
@@ -47,11 +49,20 @@ def test_metrics_endpoint_exposes_prometheus_metrics() -> None:
     assert "http_request_duration_seconds" in response.text
 
 
-def test_metrics_use_route_templates() -> None:
-    client = TestClient(create_app(redis_client=_NoopRedis()))
+def test_metrics_endpoint_rejects_unauthenticated() -> None:
+    with patch.object(observability.settings, "metrics_token", "secret"):
+        client = TestClient(create_app(redis_client=_NoopRedis()))
+        response = client.get("/metrics")
+    assert response.status_code == 401
 
-    client.get("/stages/not-a-uuid")
-    metrics = client.get("/metrics")
+
+def test_metrics_use_route_templates() -> None:
+    with patch.object(observability.settings, "metrics_token", "test-metrics-token"):
+        client = TestClient(create_app(redis_client=_NoopRedis()))
+        client.get("/stages/not-a-uuid")
+        metrics = client.get(
+            "/metrics", headers={"Authorization": "Bearer test-metrics-token"}
+        )
 
     assert 'path="/stages/{stage_id}"' in metrics.text
 
