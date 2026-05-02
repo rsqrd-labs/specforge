@@ -2,9 +2,10 @@ from datetime import datetime
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from schemas.stage import StageStatus, StageType
+from services.llm.provider_config import VALID_MODELS
 
 Provider = Literal["anthropic", "openai", "google"]
 WorkspaceStatus = Literal["active", "archived"]
@@ -17,6 +18,19 @@ class WorkspaceCreate(BaseModel):
     model: str = Field(min_length=1)
 
     model_config = ConfigDict(from_attributes=True)
+
+    @field_validator("model")
+    @classmethod
+    def model_must_be_valid(cls, v: str, info: object) -> str:
+        provider = getattr(info, "data", {}).get("provider")
+        if provider:
+            allowed = VALID_MODELS.get(provider, set())
+            if v not in allowed:
+                raise ValueError(
+                    f"model {v!r} is not supported for provider {provider!r}. "
+                    f"Allowed: {sorted(allowed)}"
+                )
+        return v
 
 
 class WorkspaceUpdate(BaseModel):
