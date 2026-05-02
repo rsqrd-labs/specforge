@@ -2374,4 +2374,633 @@ Add a central redaction layer so secrets are scrubbed before reaching structlog,
 
 ---
 
-_tasks.md · SpecForge V1 · Version 1.2.0 · Updated 2026-05-01 with gap-closure tasks T-050 through T-066_
+---
+
+## Phase 5: Code Review Mitigation Tasks
+
+---
+
+### T-067: Fix Credit Service SELECT SUM + FOR UPDATE PostgreSQL Crash
+
+**Description:**
+`credit_service.deduct()` calls `.with_for_update()` on a `select(func.sum(...))` aggregate query. PostgreSQL rejects `SELECT SUM(...) FOR UPDATE` at runtime — aggregate queries cannot hold row locks. Every concurrent deduction crashes in production; tests pass only because fakes ignore the clause.
+
+**Severity:** Critical (C1)
+
+**Inputs:**
+- `backend/services/credit_service.py` — `deduct()` method
+- `backend/tests/test_credit_service.py`
+
+**Outputs:**
+- Fixed `credit_service.py` using a two-step select-then-lock pattern
+- Updated or new unit/integration tests that exercise concurrent deductions
+
+**Steps:**
+1. Replace the `select(func.sum(...)).with_for_update()` call with a two-step approach: first lock a sentinel row (or use an advisory lock), then sum.
+2. Preferred pattern: select all `CreditLedger` rows `FOR UPDATE` for the user, compute the sum in Python, then insert the debit row — all within one transaction.
+3. Alternatively, lock a `users` row (`SELECT ... FOR UPDATE`) before computing the sum to serialize concurrent deductions.
+4. Ensure `refund()` runs in the same transaction scope so over-refund cannot race.
+5. Add an integration test using two concurrent `asyncio` tasks to verify no double-spend.
+
+**Acceptance Criteria:**
+- No `with_for_update()` on any aggregate (`func.sum`, `func.count`, etc.) in `credit_service.py`.
+- Integration test simulating concurrent deductions passes without raising a PostgreSQL error.
+- Existing credit service tests continue to pass.
+
+**Finding:** C1 — `backend/services/credit_service.py`
+
+**Dependencies:** T-081
+
+---
+
+### T-068: Implement OAuth State Parameter CSRF Protection
+
+**Description:**
+`auth_service.get_google_auth_url()` discards the OAuth `state` parameter (`authorization_url, _state = ...`). Without storing and verifying `state`, any attacker can craft a callback URL and log in as an arbitrary Google user (login-CSRF). The callback endpoint has no `state` parameter at all.
+
+**Severity:** Critical (C2)
+
+**Inputs:**
+- `backend/services/auth_service.py` — `get_google_auth_url()`, `handle_callback()`
+- `backend/routers/auth.py` — `/auth/google` and `/auth/callback` handlers
+- Redis (already available for session storage)
+
+**Outputs:**
+- Updated `auth_service.py` storing `state` in Redis with TTL
+- Updated `/auth/callback` route that accepts and verifies `state`
+- Tests asserting mismatched / missing state returns 401
+
+**Steps:**
+1. In `get_google_auth_url()`, capture `_state` and store it in Redis with a 10-minute TTL: `await redis.setex(f"oauth:state:{state}", 600, "1")`.
+2. Return `state` alongside the URL (or embed it so the frontend can pass it back).
+3. Add `state: str` to the `/auth/callback` query parameters.
+4. In `handle_callback()`, look up `oauth:state:{state}` in Redis; raise `AuthError` if missing or expired, then delete the key.
+5. Add tests: valid state succeeds; missing state → 401; reused state → 401.
+
+**Acceptance Criteria:**
+- `get_google_auth_url()` stores `state` in Redis.
+- `/auth/callback` requires a matching `state` parameter.
+- Replayed or forged state returns HTTP 401.
+- Unit tests cover all three cases.
+
+**Finding:** C2 — `backend/services/auth_service.py`
+
+**Dependencies:** none
+
+---
+
+### T-069: Remove JWT Token Query Parameter from Auth Middleware
+
+**Description:**
+`backend/middleware/auth.py` accepts `?token=<JWT>` as a query parameter fallback. Query parameters are written to every proxy log, browser history, and server access log — effectively leaking the access token in plaintext to every intermediary.
+
+**Severity:** Critical (C3)
+
+**Inputs:**
+- `backend/middleware/auth.py` — `token_param` / `alias="token"` extraction
+
+**Outputs:**
+- Updated middleware that only reads the `Authorization: Bearer` header
+- Updated tests confirming query-param tokens are rejected
+
+**Steps:**
+1. Remove the `token_param: str | None = Query(default=None, alias="token")` extraction.
+2. Remove the fallback `token = token_param or header_token` logic.
+3. Return 401 if no `Authorization: Bearer` header is present.
+4. Update any test that sends tokens as query parameters to use the header instead.
+
+**Acceptance Criteria:**
+- No `Query(... alias="token")` or `token_param` reference in `auth.py`.
+- Requests with `?token=...` and no `Authorization` header receive HTTP 401.
+- Existing bearer-header tests still pass.
+
+**Finding:** C3 — `backend/middleware/auth.py`
+
+**Dependencies:** none
+
+---
+
+### T-070: Fix Rollback API Field Name Mismatch
+
+**Description:**
+`frontend/src/services/api.ts` calls `POST /stages/{id}/rollback` with body `{ version }`, but the backend `RollbackRequest` schema expects `{ version_number }`. The rollback feature is completely broken end-to-end — every call returns HTTP 422.
+
+**Severity:** Critical (C4)
+
+**Inputs:**
+- `frontend/src/services/api.ts` — `rollbackStage()` function
+- `backend/schemas/stage.py` — `RollbackRequest` model
+
+**Outputs:**
+- Fixed `api.ts` sending `version_number`
+- Smoke test or existing harness test going green
+
+**Steps:**
+1. In `api.ts`, change `{ version }` to `{ version_number: version }` in the `rollbackStage()` call.
+2. Verify no other callers pass `{ version }` to the rollback endpoint.
+3. Confirm the Phase 5 harness test for C4 passes.
+
+**Acceptance Criteria:**
+- `api.ts` sends `version_number` in the rollback request body.
+- No HTTP 422 from the rollback endpoint when called with a valid version number.
+- Harness test `test_c4_rollback_field_name` passes.
+
+**Finding:** C4 — `frontend/src/services/api.ts`
+
+**Dependencies:** none
+
+---
+
+### T-071: Add Missing Database Indexes
+
+**Description:**
+The initial Alembic migration (`0001_initial_schema.py`) creates no indexes beyond primary keys. Foreign-key columns and frequently-queried columns are unindexed, causing full table scans as data grows: `credit_ledger(user_id)`, `stages(workspace_id)`, `stage_versions(stage_id)`, `workspaces(user_id)`, `eval_results(stage_version_id)`, `stages(status)`, `stages(updated_at)`.
+
+**Severity:** Critical (C5)
+
+**Inputs:**
+- `backend/migrations/versions/0001_initial_schema.py`
+- `backend/models/` — all model definitions
+
+**Outputs:**
+- New migration `backend/migrations/versions/0002_add_indexes.py`
+- All listed indexes created
+
+**Steps:**
+1. Run `alembic revision --autogenerate -m "add_indexes"` or write the migration manually.
+2. Add `op.create_index` calls for: `ix_credit_ledger_user_id`, `ix_stages_workspace_id`, `ix_stage_versions_stage_id`, `ix_workspaces_user_id`, `ix_eval_results_stage_version_id`, `ix_stages_status`, `ix_stages_updated_at`.
+3. Add corresponding `op.drop_index` in the `downgrade()` function.
+4. Run `alembic upgrade head` against a test DB to confirm migration applies cleanly.
+5. Add a harness test that inspects the migration file for the expected index names.
+
+**Acceptance Criteria:**
+- `0002_add_indexes.py` migration exists and is auto-discovered by Alembic.
+- All seven indexes are created in `upgrade()` and dropped in `downgrade()`.
+- `alembic upgrade head` succeeds on a clean database.
+- Harness test `test_c5_index_migration_exists` passes.
+
+**Finding:** C5 — `backend/migrations/versions/`
+
+**Dependencies:** none
+
+---
+
+### T-072: Protect Prometheus /metrics Endpoint
+
+**Description:**
+The `/metrics` endpoint is public — any external party can scrape internal performance data, error rates, and queue depths. This leaks operational intelligence and is a PCI/SOC2 finding.
+
+**Severity:** Critical (C6)
+
+**Inputs:**
+- `backend/services/observability.py` — `/metrics` route registration
+- `backend/middleware/auth.py` or a new IP-allowlist middleware
+
+**Outputs:**
+- `/metrics` returns HTTP 401/403 without valid credentials
+- Tests verifying unauthorized access is rejected
+
+**Steps:**
+1. Add a `metrics_token` to `config.py` (env var `METRICS_TOKEN`); default to a random secret at startup.
+2. In the `/metrics` handler, require either: (a) `Authorization: Bearer <metrics_token>` header, or (b) source IP in an allowlist (`METRICS_ALLOWLIST` env var, defaults to `127.0.0.1`).
+3. Return HTTP 401 if neither condition is met.
+4. Update Docker Compose / Railway config to set `METRICS_TOKEN`.
+5. Add tests: unauthenticated → 401; correct token → 200.
+
+**Acceptance Criteria:**
+- Unauthenticated GET `/metrics` returns HTTP 401.
+- Request with correct `METRICS_TOKEN` returns 200 with Prometheus text.
+- Unit tests cover both cases.
+
+**Finding:** C6 — `backend/services/observability.py`
+
+**Dependencies:** none
+
+---
+
+### T-073: Add Content Size Limits to Diff and Edit Schemas
+
+**Description:**
+`AcceptDiffRequest.proposed_content` and `ContentEditRequest.content` are unbounded strings. An attacker can POST megabytes of content, causing memory exhaustion and DoS during diff computation.
+
+**Severity:** Critical (C7)
+
+**Inputs:**
+- `backend/schemas/stage.py` — `AcceptDiffRequest`, `ContentEditRequest`
+
+**Outputs:**
+- Both fields annotated with `max_length` (e.g., 500,000 characters / ~500 KB)
+- Tests verifying oversized payloads return HTTP 422
+
+**Steps:**
+1. Add `max_length=500_000` (or a config-driven constant) to `proposed_content` and `content` fields using Pydantic `Field(max_length=...)`.
+2. Add a similar limit to `WorkspaceCreate.description` and `StageGenerateRequest.user_input` if not already present.
+3. Add tests posting payloads of 500,001 characters and asserting HTTP 422.
+
+**Acceptance Criteria:**
+- `AcceptDiffRequest.proposed_content` and `ContentEditRequest.content` have `max_length` constraints.
+- Oversized payloads are rejected with HTTP 422 before reaching any service layer.
+- Tests pass.
+
+**Finding:** C7 — `backend/schemas/stage.py`
+
+**Dependencies:** none
+
+---
+
+### T-074: Catch SecurityError and ProviderError in SSE Stream Generators
+
+**Description:**
+The `_stream()` inner generators inside `generate_stage` and `regenerate_stage` only catch `StageDependencyError` and `RateLimitError`. If `SecurityError` (prompt injection) or `ProviderError` (LLM timeout, quota exceeded) are raised, they propagate uncaught, leaving the SSE stream open with the client hanging until timeout.
+
+**Severity:** Critical (C8)
+
+**Inputs:**
+- `backend/routers/stage.py` — `generate_stage`, `regenerate_stage` `_stream()` generators
+
+**Outputs:**
+- Both generators catch `SecurityError` and `ProviderError`
+- SSE stream emits a structured `{"event": "error", "data": "..."}` chunk before closing
+- Tests confirming error events are emitted
+
+**Steps:**
+1. In both `_stream()` generators, expand the `except` clause (or add additional handlers) to catch `SecurityError` and `ProviderError`.
+2. On catch, yield a final SSE chunk `{"event": "error", "data": str(exc)}` and return.
+3. Also catch the bare `Exception` as a safety net, yielding a generic error chunk.
+4. Add tests mocking the pipeline to raise each exception type and asserting the streamed response contains an `error` event.
+
+**Acceptance Criteria:**
+- `SecurityError` and `ProviderError` produce an SSE error event rather than an unclosed stream.
+- SSE connection closes cleanly after the error event.
+- Existing happy-path streaming tests continue to pass.
+
+**Finding:** C8 — `backend/routers/stage.py`
+
+**Dependencies:** T-085
+
+---
+
+### T-075: Fix Rate Limiter and CSRF Middleware to Use Verified JWT Claims
+
+**Description:**
+`backend/middleware/rate_limit.py` and `backend/middleware/csrf.py` call `jose_jwt.get_unverified_claims(token)` to extract the user ID for rate-limit bucketing and CSRF validation. An attacker can forge any user ID in the token payload (without knowing the signing key) to bypass per-user rate limits or steal another user's CSRF bucket.
+
+**Severity:** Critical (C9)
+
+**Inputs:**
+- `backend/middleware/rate_limit.py`
+- `backend/middleware/csrf.py`
+- `backend/services/security/csrf.py`
+
+**Outputs:**
+- Both middlewares call a shared `verify_and_decode_access_token()` helper (or reuse the one in `auth.py`)
+- Forged tokens are rejected before any claim is used
+- Tests confirming tampered tokens receive HTTP 401/429 rather than operating on the forged identity
+
+**Steps:**
+1. Extract (or reuse) a `decode_access_token(token) -> dict` helper that calls `jose_jwt.decode()` with signature verification.
+2. Replace all `get_unverified_claims()` calls in rate_limit and csrf middlewares with the verified version.
+3. If token verification fails, return HTTP 401 immediately.
+4. Add tests: valid token uses correct bucket; tampered payload token → 401.
+
+**Acceptance Criteria:**
+- No `get_unverified_claims` calls in `rate_limit.py` or `csrf.py`.
+- A token with a forged `sub` claim (but invalid signature) is rejected before claim extraction.
+- Tests pass.
+
+**Finding:** C9 — `backend/middleware/rate_limit.py`, `backend/middleware/csrf.py`
+
+**Dependencies:** T-069
+
+---
+
+### T-076: Cache LLM Adapter Instances in Gateway
+
+**Description:**
+`services/llm/gateway.py`'s `get_llm(provider, model)` instantiates a new adapter (and a new `AsyncAnthropic` / `AsyncOpenAI` HTTP client) on every call. Each client opens a new connection pool, wasting resources and adding latency. Singletons should be created once and reused.
+
+**Severity:** Important (I1)
+
+**Inputs:**
+- `backend/services/llm/gateway.py`
+- `backend/services/llm/anthropic_adapter.py`
+- `backend/services/llm/openai_adapter.py`
+- `backend/services/llm/gemini_adapter.py`
+
+**Outputs:**
+- `gateway.py` maintains a `_INSTANCES` / `_CACHE` dict keyed by `(provider, model)`
+- Each adapter is instantiated at most once per process lifetime
+- Tests verifying the same object is returned on repeated calls
+
+**Steps:**
+1. Add a module-level `_INSTANCES: dict[tuple[str, str], BaseLLMAdapter] = {}` in `gateway.py`.
+2. In `get_llm()`, check `_INSTANCES.get((provider, model))` first; create and cache only on miss.
+3. Ensure adapters are thread/task-safe (HTTP clients from Anthropic/OpenAI SDKs are async-safe by default).
+4. Add a test asserting `get_llm("anthropic", "claude-3-5-sonnet") is get_llm("anthropic", "claude-3-5-sonnet")`.
+
+**Acceptance Criteria:**
+- `gateway.py` has a `_INSTANCES` or `_CACHE` module-level dict.
+- `get_llm()` returns the same object on repeated calls with identical arguments.
+- No new HTTP client is created on the second call.
+
+**Finding:** I1 — `backend/services/llm/gateway.py`
+
+**Dependencies:** none
+
+---
+
+### T-077: Configure SQLAlchemy Connection Pool for Production
+
+**Description:**
+`backend/database.py` uses `create_async_engine` with no pool configuration, defaulting to `pool_size=5, max_overflow=10`. Under load (e.g., 50 concurrent SSE streams), the app exhausts the pool and queues requests, causing cascading latency. Production should be sized to the expected concurrency.
+
+**Severity:** Important (I2)
+
+**Inputs:**
+- `backend/database.py`
+- `backend/config.py`
+
+**Outputs:**
+- `database.py` reads `DB_POOL_SIZE` and `DB_MAX_OVERFLOW` from settings
+- `config.py` exposes these as env-configurable settings with sensible defaults (20/10)
+- Tests or local dev config demonstrating the values are respected
+
+**Steps:**
+1. Add `db_pool_size: int = 20` and `db_max_overflow: int = 10` to `Settings` in `config.py`.
+2. Pass `pool_size=settings.db_pool_size, max_overflow=settings.db_max_overflow` to `create_async_engine`.
+3. Add `pool_recycle=3600` to handle stale connections after long idle periods.
+4. Document the env vars in the README and Docker Compose `.env.example`.
+
+**Acceptance Criteria:**
+- `database.py` passes `pool_size` and `max_overflow` to the engine.
+- Both values are configurable via environment variables.
+- `pool_recycle` is set to prevent stale connection errors.
+
+**Finding:** I2 — `backend/database.py`
+
+**Dependencies:** none
+
+---
+
+### T-078: Validate WorkspaceCreate Model Field Against Allowlist
+
+**Description:**
+`WorkspaceCreate.model` is a free-form string with only `min_length=1`. Any string is accepted, including non-existent model IDs. The LLM gateway should reject unknown models before attempting an API call, not fail mid-generation with an opaque provider error.
+
+**Severity:** Important (I3)
+
+**Inputs:**
+- `backend/schemas/workspace.py` — `WorkspaceCreate`
+- `backend/services/llm/gateway.py` — `VALID_MODELS` or equivalent registry
+
+**Outputs:**
+- `WorkspaceCreate` rejects model values not in `VALID_MODELS`
+- HTTP 422 returned immediately on invalid model
+- Tests for valid and invalid model values
+
+**Steps:**
+1. Export a `VALID_MODELS: frozenset[str]` constant from `gateway.py` (or `config.py`) listing all supported model IDs.
+2. Add a `@field_validator("model")` in `WorkspaceCreate` that checks `v in VALID_MODELS` and raises `ValueError` on failure.
+3. Add tests: valid model ID → 201; unknown model ID → 422.
+
+**Acceptance Criteria:**
+- `WorkspaceCreate` has a Pydantic validator for the `model` field.
+- Requests with unknown model IDs are rejected with HTTP 422.
+- `VALID_MODELS` is the single source of truth used by both the schema and the gateway.
+
+**Finding:** I3 — `backend/schemas/workspace.py`
+
+**Dependencies:** T-076
+
+---
+
+### T-079: Fix apply_diff to Use Index Positions Instead of str.find
+
+**Description:**
+`services/pipeline/diff_engine.py`'s `apply_diff(original, selected_text, replacement)` uses `str.find` to locate the selection. When the document contains duplicate text, `find` always matches the first occurrence regardless of where the user's cursor was. Edits to the second or later occurrence silently modify the wrong section.
+
+**Severity:** Important (I4)
+
+**Inputs:**
+- `backend/services/pipeline/diff_engine.py` — `apply_diff()`
+- `backend/tests/test_diff_engine.py`
+
+**Outputs:**
+- `apply_diff` signature extended with `start: int` and `end: int` index parameters
+- Implementation uses `original[start:end]` check instead of `str.find`
+- Tests covering duplicate-text documents
+
+**Steps:**
+1. Change the signature to `apply_diff(original: str, selected_text: str, replacement: str, start: int, end: int) -> str`.
+2. Verify `original[start:end] == selected_text`; raise `ValueError` if not.
+3. Return `original[:start] + replacement + original[end:]`.
+4. Update all callers to pass cursor positions (the frontend already tracks `selectionStart`/`selectionEnd`).
+5. Add tests: (a) unique text → correct replacement; (b) duplicate text with second-occurrence start/end → second occurrence replaced; (c) mismatch → ValueError.
+
+**Acceptance Criteria:**
+- `apply_diff` no longer calls `.find(`.
+- Duplicate-text test confirms correct occurrence is replaced.
+- All existing diff engine tests pass.
+
+**Finding:** I4 — `backend/services/pipeline/diff_engine.py`
+
+**Dependencies:** none
+
+---
+
+### T-080: Add Error Callbacks to Background Eval asyncio Tasks
+
+**Description:**
+`services/pipeline/stage_manager.py` fires eval tasks with `asyncio.create_task(run_eval_background(...))` and no `add_done_callback`. Exceptions raised inside the task are silently swallowed; there is no log entry, no metric increment, and no way to know evals are failing in production.
+
+**Severity:** Important (I5)
+
+**Inputs:**
+- `backend/services/pipeline/stage_manager.py` — `asyncio.create_task` call sites
+
+**Outputs:**
+- Each `create_task` call followed by `.add_done_callback(_log_eval_error)`
+- `_log_eval_error` logs the exception via structlog and increments a Prometheus counter
+- Tests asserting exceptions are surfaced to the callback
+
+**Steps:**
+1. Define a module-level callback: `def _log_eval_error(task: asyncio.Task) -> None: if exc := task.exception(): logger.error("eval_background_failed", error=str(exc))`.
+2. After each `asyncio.create_task(...)` call, chain `.add_done_callback(_log_eval_error)`.
+3. Optionally increment a `eval_errors_total` Prometheus counter inside the callback.
+4. Add a test that makes the eval coroutine raise, then asserts the callback fired (check log output or mock).
+
+**Acceptance Criteria:**
+- All `asyncio.create_task` calls for eval tasks are followed by `add_done_callback`.
+- Eval exceptions appear in structured logs rather than disappearing silently.
+- Tests pass.
+
+**Finding:** I5 — `backend/services/pipeline/stage_manager.py`
+
+**Dependencies:** none
+
+---
+
+### T-081: Add Double-Refund Guard to credit_service.refund()
+
+**Description:**
+`credit_service.refund()` has no idempotency check. Calling it twice (e.g., retry storm, duplicate webhook) double-credits the user's balance. Each refund should be keyed by a unique `refund_id` stored in the ledger so duplicates are detected and rejected.
+
+**Severity:** Important (I8)
+
+**Inputs:**
+- `backend/services/credit_service.py` — `refund()`
+- `backend/models/credit_ledger.py` — `CreditLedger` model
+
+**Outputs:**
+- `refund()` accepts an optional `idempotency_key: str` parameter
+- Duplicate `idempotency_key` returns the existing ledger entry without inserting a new row
+- Tests confirming double-refund is a no-op
+
+**Steps:**
+1. Add an optional `idempotency_key` column (or a dedicated `refunds` table) to `CreditLedger`; create migration `0003_credit_idempotency.py`.
+2. In `refund()`, before inserting, query for an existing entry with the same `idempotency_key` within the transaction.
+3. If found, return early without inserting.
+4. If not found, insert the new credit row with the key.
+5. Add tests: first call inserts and returns the amount; second call with the same key is a no-op; balance unchanged.
+
+**Acceptance Criteria:**
+- `refund()` accepts an `idempotency_key` parameter.
+- A duplicate key does not create a second ledger entry.
+- Unit tests verify idempotency behavior.
+
+**Finding:** I8 — `backend/services/credit_service.py`
+
+**Dependencies:** T-067
+
+---
+
+### T-082: Fix WorkspaceService.get to Prevent Authorization Timing Oracle
+
+**Description:**
+`workspace_service.get()` fetches the workspace by ID first, then checks `workspace.user_id != user_id` in Python. This creates a timing oracle: authorized requests return quickly; unauthorized requests for non-existent workspaces are also fast; but unauthorized requests for existing workspaces are slightly slower (ORM hydration). An attacker can enumerate valid workspace IDs by measuring response time.
+
+**Severity:** Important (I9)
+
+**Inputs:**
+- `backend/services/workspace_service.py` — `get()` method
+
+**Outputs:**
+- `get()` filters `user_id` in the SQL WHERE clause, not in Python
+- Unauthorized and non-existent workspace requests are indistinguishable
+- Tests confirming correct behavior
+
+**Steps:**
+1. Change the query to `WHERE id = :id AND user_id = :user_id` so the DB returns nothing if the workspace belongs to a different user.
+2. Remove the Python-level `if workspace.user_id != user_id` check.
+3. Return 404 (not 403) when no row is returned — do not distinguish "not found" from "not authorized".
+4. Add tests: owner can fetch; other user gets 404; nonexistent ID gets 404.
+
+**Acceptance Criteria:**
+- The SQL query includes both `id` and `user_id` in the WHERE clause.
+- No Python-level `user_id` comparison exists in `get()`.
+- Unauthorized access and missing resource both return HTTP 404.
+
+**Finding:** I9 — `backend/services/workspace_service.py`
+
+**Dependencies:** none
+
+---
+
+### T-083: Sanitize selected_text in Refine Stage Router Path
+
+**Description:**
+In the refine stage handler (`routers/stage.py`), only `instruction` is passed through `sanitize_text()`. The `selected_text` field — user-supplied text that is injected directly into the LLM prompt context — is not sanitized. This is a prompt injection vector: a user could embed instructions inside their selected text that override the system prompt.
+
+**Severity:** Important (I10)
+
+**Inputs:**
+- `backend/routers/stage.py` — refine handler / `RefineRequest` processing
+- `backend/services/security/sanitizer.py` — `sanitize_text()`
+
+**Outputs:**
+- `selected_text` passed through `sanitize_text()` before use in the pipeline
+- Tests asserting that injection attempts in `selected_text` are stripped
+
+**Steps:**
+1. In the refine stage handler, apply `sanitize_text(request.selected_text)` and pass the result to the pipeline.
+2. Verify the prompt injection guard (`PromptInjectionScanner`) also runs on `selected_text` (add call if missing).
+3. Add tests with representative injection strings in `selected_text` and assert they are sanitized or rejected.
+
+**Acceptance Criteria:**
+- `selected_text` is passed through `sanitize_text()` before reaching the LLM pipeline.
+- The prompt injection scanner is applied to `selected_text`.
+- Tests for injection strings in `selected_text` pass.
+
+**Finding:** I10 — `backend/routers/stage.py`
+
+**Dependencies:** none
+
+---
+
+### T-084: Wrap Workspace.tsx Async Handlers in useCallback
+
+**Description:**
+`frontend/src/pages/Workspace.tsx` defines 9+ async event handlers inline in the component body with no `useCallback` memoization. Every state update (including token appends during streaming) re-creates all handlers, causing cascading child re-renders. During streaming (high-frequency updates), this produces thousands of unnecessary renders and degrades UI responsiveness.
+
+**Severity:** Important (I11)
+
+**Inputs:**
+- `frontend/src/pages/Workspace.tsx`
+
+**Outputs:**
+- All async handlers (`handleGenerate`, `handleRegenerate`, `handleAcceptDiff`, `handleRollback`, `handleRefine`, etc.) wrapped in `useCallback`
+- Correct dependency arrays that don't cause stale closure bugs
+- No measurable regression in feature behavior
+
+**Steps:**
+1. Identify all inline `async () => { ... }` handlers assigned to props or event listeners.
+2. Wrap each with `useCallback((args) => { ... }, [dep1, dep2])`.
+3. Add the minimum necessary dependencies to each array — avoid over-capturing.
+4. Run `pnpm tsc` to confirm no type errors.
+5. Run `pnpm test` to confirm no behavioral regressions.
+
+**Acceptance Criteria:**
+- `Workspace.tsx` contains ≥5 `useCallback` calls covering the primary action handlers.
+- `pnpm tsc` passes.
+- `pnpm test` passes.
+
+**Finding:** I11 — `frontend/src/pages/Workspace.tsx`
+
+**Dependencies:** none
+
+---
+
+### T-085: Extract Shared Stream Helper from generate_stage and regenerate_stage
+
+**Description:**
+`backend/routers/stage.py` contains two handlers — `generate_stage` and `regenerate_stage` — each with an identical or near-identical 30-line `_stream()` inner generator. The duplication means any fix (e.g., error handling in T-074) must be applied twice, and the two implementations will inevitably diverge. Extract the shared logic into a single helper.
+
+**Severity:** Important (I14)
+
+**Inputs:**
+- `backend/routers/stage.py` — `generate_stage`, `regenerate_stage`
+
+**Outputs:**
+- A shared `_build_stage_stream(pipeline_coro, stage_id, db, user)` helper (or similar)
+- Both handlers delegate to the helper
+- Existing streaming behavior unchanged
+
+**Steps:**
+1. Identify the divergent parameters between the two `_stream()` implementations (typically the pipeline call and the stage ID source).
+2. Extract a `async def _stream_stage(pipeline_call: Callable, ...) -> AsyncGenerator[str, None]` helper at module level.
+3. Replace both `_stream()` closures with calls to the shared helper.
+4. Ensure the helper handles `StageDependencyError`, `RateLimitError`, `SecurityError`, and `ProviderError` (aligning with T-074).
+5. Run existing streaming tests to confirm no regression.
+
+**Acceptance Criteria:**
+- `generate_stage` and `regenerate_stage` share a single stream generator helper.
+- No `StageDependencyError` handling duplication between the two handlers.
+- All existing stage streaming tests pass.
+
+**Finding:** I14 — `backend/routers/stage.py`
+
+**Dependencies:** none
+
+---
+
+_tasks.md · SpecForge V1 · Version 1.3.0 · Updated 2026-05-02 with Phase 5 code review mitigation tasks T-067 through T-085_

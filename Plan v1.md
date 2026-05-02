@@ -1152,3 +1152,209 @@ The following items appear in the spec architecture but were explicitly scoped o
 ---
 
 _SpecForge V1 PLAN.md · Version 1.1.0 · Updated 2026-05-01 with post-T-049 and second-pass gap analysis_
+
+---
+
+## 11. Phase 5 — Code Review Mitigation (2026-05-02)
+
+> [!note] Source This phase is derived from `docs/CODE_REVIEW.md` produced by a staff-level deep scan of the full codebase on 2026-05-02. Every sub-stage maps directly to findings in that document. References are in the form **[Cx]** (Critical) and **[Ix]** (Important).
+
+---
+
+### 11.1 Goal
+
+Eliminate all correctness bugs and security vulnerabilities identified in the code review before the V1 public launch. Reduce the high-priority architectural and performance risks to an acceptable level. Leave medium/low items tracked but not blocking launch.
+
+**Inputs:**
+- `docs/CODE_REVIEW.md` (all findings, C1–C9, I1–I14)
+- Existing codebase at post-T-066 state
+
+**Outputs:**
+- Patched backend code (credit service, schemas, routers, middleware, migrations)
+- Patched frontend code (api.ts, stage router, Workspace.tsx, sseService.ts)
+- New Alembic migration `0002_indexes.py`
+- New harness contract tests `harness/tests/backend/test_phase5_contract.py`
+- All existing tests still passing
+
+---
+
+### 11.2 Sub-Stages
+
+#### Sub-stage 5.1 — Triage and Ordering
+
+All nine critical findings are launch-blocking. The important findings are ordered by production impact: data correctness first, then security, then performance.
+
+**Execution order:**
+
+| Priority | Task | Finding | Rationale |
+|----------|------|---------|-----------|
+| 1 | T-067 | C1 | App crashes in prod on first concurrent user |
+| 2 | T-071 | C5 | Full table scans degrade at ~1k users |
+| 3 | T-074 | C8 | SSE stream leaves clients hanging on errors |
+| 4 | T-070 | C4 | Rollback feature 100% broken end-to-end |
+| 5 | T-073 | C7 | Unbounded POST body enables DoS |
+| 6 | T-069 | C3 | JWT tokens in server access logs |
+| 7 | T-072 | C6 | Prometheus metrics publicly readable |
+| 8 | T-075 | C9 | Rate limit identity spoofing |
+| 9 | T-068 | C2 | OAuth CSRF on login flow |
+| 10 | T-077 | I2 | DB pool exhaustion under real load |
+| 11 | T-076 | I1 | File descriptor leak from per-request HTTP clients |
+| 12 | T-078 | I3 | Malformed model crashes at generation time |
+| 13 | T-079 | I4 | Wrong occurrence replaced on duplicate text |
+| 14 | T-081 | I8 | Double-refund corrupts credit ledger |
+| 15 | T-082 | I9 | Timing oracle leaks workspace existence |
+| 16 | T-083 | I10 | selected_text bypasses injection sanitization |
+| 17 | T-080 | I5 | Background eval failures silently disappear |
+| 18 | T-084 | I11 | 8k re-renders per generation (streaming perf) |
+| 19 | T-085 | I14 | 30-line code duplication in stream handlers |
+
+---
+
+#### Sub-stage 5.2 — Critical Fixes
+
+**5.2.1 — Credit Service: Replace Aggregate Lock (T-067)**
+
+The current `SELECT SUM(...) ... FOR UPDATE` is invalid PostgreSQL syntax. Replace with a pattern that achieves the same mutual exclusion correctly: fetch and lock the individual rows, sum in Python, then insert the deduction entry — all within a single `async with db.begin()` block so the lock is held for the minimum duration.
+
+**5.2.2 — Database Indexes Migration (T-071)**
+
+Single Alembic migration `0002_indexes.py` adds B-tree indexes on all FK columns and the status/updated_at columns queried by the recovery service. No data migration required. Safe to run on a live database.
+
+**5.2.3 — SSE Stream Error Propagation (T-074)**
+
+Both `generate_stage` and `regenerate_stage` `_stream()` generators must catch `SecurityError` and `ProviderError` and emit a structured `{"error": ..., "detail": ...}` SSE event before terminating. The client already handles `"error"` in SSE payloads — this is a backend-only fix.
+
+**5.2.4 — Rollback Field Name Fix (T-070)**
+
+One-line change: `{ version }` → `{ version_number: version }` in `frontend/src/services/api.ts:265`. No backend changes needed.
+
+**5.2.5 — Content Size Limits (T-073)**
+
+Add `Field(max_length=100_000)` to `AcceptDiffRequest.proposed_content` and `ContentEditRequest.content` in `backend/schemas/stage.py`. FastAPI / Pydantic v2 enforces this at the boundary before any service code runs.
+
+**5.2.6 — Remove JWT Query Parameter (T-069)**
+
+Remove the `token_param = Query(...)` parameter from `get_current_user` in `backend/middleware/auth.py`. The SSE client uses `Authorization` headers via `fetch()` — no callers depend on `?token=`.
+
+**5.2.7 — Protect /metrics Endpoint (T-072)**
+
+Add a bearer token check to the `/metrics` route using a `METRICS_TOKEN` environment variable (added to `config.py` as `metrics_token: str = ""`). If unset, metrics remains accessible (dev convenience); if set, the header must match. Aligns with Railway's ability to inject secrets at deploy time.
+
+**5.2.8 — Secure Rate Limit User-ID Extraction (T-075)**
+
+Replace `get_unverified_claims()` in both `rate_limit.py` and `csrf.py` with a function that validates the JWT signature before extracting the subject. Reuse `auth_service.verify_access_token()`. Wrap in a try/except — invalid tokens fall back to IP-only rate limiting (no user bucket).
+
+**5.2.9 — OAuth State Parameter (T-068)**
+
+In `auth_service.get_google_auth_url()`, generate a `secrets.token_urlsafe(32)` state value, store it in Redis with a 10-minute TTL keyed by `oauth_state:{state}`. In `handle_callback(code, state, db)`, verify the state key exists in Redis and delete it before proceeding. Return `AuthError` if missing or expired. The `/auth/callback` router must accept `state` as a query parameter alongside `code`.
+
+---
+
+#### Sub-stage 5.3 — Important Fixes
+
+**5.3.1 — DB Connection Pool (T-077)**
+Set `pool_size=10, max_overflow=20, pool_timeout=30, pool_recycle=1800` on `create_async_engine`. Matches Supabase/Railway's default connection limits.
+
+**5.3.2 — LLM Adapter Singletons (T-076)**
+Register adapter instances at module load in `gateway.py` using a `_INSTANCES` dict keyed by `(provider, model)`. `get_llm()` checks the dict before instantiating. Adapters are stateless beyond the model name — sharing is safe.
+
+**5.3.3 — Model Allowlist Validation (T-078)**
+Add a Pydantic `@field_validator("model")` to `WorkspaceCreate` that cross-checks against `VALID_MODELS[provider]`. Fails at the API boundary with a clear 422 before any workspace record is created.
+
+**5.3.4 — apply_diff Index-Based (T-079)**
+`diff_engine.apply_diff(original, selected_text, replacement)` uses `str.find` which returns the first occurrence. Replace with `apply_diff(original, start, end, replacement)` that uses the explicit character indices from `RefineRequest.selection_start`/`selection_end`. Update all callers in `stage_manager.refine()`.
+
+**5.3.5 — Background Task Error Callbacks (T-080)**
+Attach a `done_callback` to every `asyncio.create_task(run_eval_background(...))` call in `stage_manager.py`. The callback logs at `ERROR` level and reports to Sentry. No functional change — improves observability of silent failures.
+
+**5.3.6 — Double-Refund Guard (T-081)**
+Before inserting a new `CreditLedger` entry in `credit_service.refund()`, query for an existing entry with `reason = f"refund:{ledger_entry_id}"`. If found, log a warning and return without inserting. Makes `refund()` idempotent.
+
+**5.3.7 — Workspace Authorization Timing Fix (T-082)**
+Add `Workspace.user_id == user_id` to the DB `WHERE` clause in `WorkspaceService.get()`. Both "not found" and "wrong owner" now take the same execution path — single DB query, no Python-side ownership check required.
+
+**5.3.8 — Sanitize selected_text in Refine (T-083)**
+Extend the `sanitized_request` in `routers/stage.py` to include `selected_text: sanitize_text(request.selected_text)` alongside the existing `instruction` sanitization.
+
+**5.3.9 — useCallback on Workspace Handlers (T-084)**
+Wrap all async event handlers in `Workspace.tsx` (`requestGeneration`, `runRefine`, `acceptDiff`, `rejectDiff`, `handleFinalise`, `handleContentChange`, `handleExport`, `confirmCredits`, `proceedThroughReviewGate`) in `useCallback` with appropriate dependency arrays. Prevents 8,000+ unnecessary child re-renders per generation at 8,192 max tokens.
+
+**5.3.10 — Deduplicate SSE Stream Handler (T-085)**
+Extract the common `_stream()` body from `generate_stage` and `regenerate_stage` in `routers/stage.py` into a shared `_build_generation_stream(stage_id, user, db)` helper. Both endpoints call the helper, eliminating 30 lines of copy-paste and ensuring both benefit from all future fixes (including T-074).
+
+---
+
+#### Sub-stage 5.4 — Test Coverage Expansion
+
+The harness file `harness/tests/backend/test_phase5_contract.py` provides contract-level tests for every backend change in Phase 5. Tests are written red-first (fail before the fix, pass after).
+
+Covered assertions:
+- Credit service `deduct()` does not use `with_for_update()` on an aggregate query
+- `AcceptDiffRequest.proposed_content` enforces `max_length`
+- `ContentEditRequest.content` enforces `max_length`
+- `get_current_user` does not accept a `token` query parameter
+- `/metrics` returns 401/403 when a `METRICS_TOKEN` is configured and header is absent
+- `WorkspaceCreate.model` validator rejects unknown models
+- `apply_diff` uses index positions, not `str.find`
+- `credit_service.refund` is idempotent (double-call does not double-credit)
+- `WorkspaceService.get` query includes `user_id` in the WHERE clause
+- `stage.py` router sanitizes `selected_text` in the refine path
+- `generate_stage` and `regenerate_stage` are not duplicated (share a helper)
+
+---
+
+#### Sub-stage 5.5 — Regression Validation
+
+After all task implementations:
+
+1. Run `uv run pytest tests/ --cov=services --cov-fail-under=80 -q` — all must pass.
+2. Run `npx vitest run --config ../frontend/vitest.harness.config.ts` — all must pass.
+3. Run `pytest harness/tests/backend/ -q` — all phase 5 contracts must be green.
+4. Run `docker compose up --build` and execute the manual smoke test checklist in `docs/SMOKE_TEST_CHECKLIST.md`.
+5. Verify rollback feature works end-to-end from the browser.
+6. Verify generating a stage with a concurrent second tab does not produce a double-deduction.
+
+---
+
+### 11.3 Dependencies and Sequencing
+
+```
+T-067 (credit fix) ──────────────────────────────────┐
+T-070 (rollback field) ───────────────────────────────┤
+T-071 (indexes) ──────────────────────────────────────┤
+T-073 (size limits) ──────────────────────────────────┤
+T-074 (SSE errors) ─── needs T-085 (dedup) first ────┤
+T-069 (remove ?token) ───────────────────────────────┤
+T-072 (metrics auth) ────────────────────────────────┤
+T-075 (rate limit JWT) ──────────────────────────────┤
+T-068 (OAuth state) ─── needs Redis helpers ─────────┤
+                                                       ▼
+                                              T-077 (pool)
+                                              T-076 (adapter cache)
+                                              T-078 (model validation)
+                                              T-079 (apply_diff)
+                                              T-080 (eval callbacks)
+                                              T-081 (double-refund)
+                                              T-082 (workspace auth)
+                                              T-083 (selected_text)
+                                              T-084 (useCallback)
+                                              T-085 (dedup stream)
+```
+
+T-085 should be completed before T-074 so the fix only needs to be applied once to the shared helper.
+
+---
+
+### 11.4 Non-Goals for Phase 5
+
+The following review findings are acknowledged but explicitly deferred beyond V1 launch:
+
+- **I6** (frontend eval polling) — requires SSE protocol change; deferred to V2 WebSocket work.
+- **I12** (SSE retry backoff) — spec originally planned this; scheduling separately.
+- **I13** (modal focus trap) — a11y improvement; post-launch sprint.
+- **M4** (health check Redis reuse) — no user impact; tech debt sprint.
+- **A1–A5** (architectural refactors) — none are blocking correctness.
+
+---
+
+_SpecForge V1 PLAN.md · Version 1.2.0 · Updated 2026-05-02 with Phase 5 code review mitigation_
