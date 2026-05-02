@@ -6,6 +6,7 @@ if TYPE_CHECKING:
     from services.llm.base import BaseLLMAdapter
 
 _REGISTRY: dict[str, type] = {}
+_INSTANCES: dict[tuple[str, str], "BaseLLMAdapter"] = {}
 
 
 def _register(provider: str, cls: type) -> None:
@@ -15,7 +16,10 @@ def _register(provider: str, cls: type) -> None:
 def get_llm(provider: str, model: str) -> "BaseLLMAdapter":
     if provider not in _REGISTRY:
         raise ValueError(f"Unknown LLM provider: {provider!r}")
-    return _REGISTRY[provider](model)
+    key = (provider, model)
+    if key not in _INSTANCES:
+        _INSTANCES[key] = _REGISTRY[provider](model)
+    return _INSTANCES[key]
 
 
 def _load_adapters() -> None:
