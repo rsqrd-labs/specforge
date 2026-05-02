@@ -65,23 +65,22 @@ def app():
 
 
 @pytest.mark.asyncio
-async def test_post_auth_google_returns_redirect_url(
+async def test_get_auth_google_redirects_to_google(
     app: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(
-        _auth_service,
-        "get_google_auth_url",
-        lambda: "https://accounts.google.com/o/oauth2/v2/auth?client_id=test",
-    )
+    async def fake_get_url() -> str:
+        return "https://accounts.google.com/o/oauth2/v2/auth?client_id=test"
+
+    monkeypatch.setattr(_auth_service, "get_google_auth_url", fake_get_url)
 
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        response = await client.post("/auth/google")
+    async with AsyncClient(
+        transport=transport, base_url="http://test", follow_redirects=False
+    ) as client:
+        response = await client.get("/auth/google")
 
-    assert response.status_code == 200
-    data = response.json()
-    assert "redirect_url" in data
-    assert "accounts.google.com" in data["redirect_url"]
+    assert response.status_code in (302, 307)
+    assert "accounts.google.com" in response.headers["location"]
 
 
 @pytest.mark.asyncio
@@ -144,14 +143,14 @@ async def test_post_auth_logout_clears_cookie(
 async def test_refresh_cookie_uses_strict_scoped_security_attributes(
     app: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    async def fake_handle_callback(code: str, db: Any) -> tuple[str, str]:
+    async def fake_handle_callback(code: str, state: str, db: Any) -> tuple[str, str]:
         return "access-token", "refresh-token"
 
     monkeypatch.setattr(_auth_service, "handle_callback", fake_handle_callback)
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
-        response = await client.get("/auth/callback?code=test-code")
+        response = await client.get("/auth/callback?code=test-code&state=test-state")
 
     assert response.status_code == 200
     set_cookie_header = response.headers.get("set-cookie", "")
