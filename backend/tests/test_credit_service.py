@@ -29,14 +29,23 @@ class _FakeDB:
         self,
         ledger: list[CreditLedger] | None = None,
         entity_lookup: CreditLedger | None = None,
+        existing_refund: CreditLedger | None = None,
     ) -> None:
         self._ledger: list[CreditLedger] = ledger or []
         self._entity_lookup = entity_lookup
+        self._existing_refund = existing_refund
+        self._execute_count = 0
         self.added: list[Any] = []
 
     async def execute(self, statement: Any) -> Any:
-        if self._entity_lookup is not None:
+        call = self._execute_count
+        self._execute_count += 1
+        # First call in refund() looks up the original deduction by ID
+        if call == 0 and self._entity_lookup is not None:
             return _EntityResult(self._entity_lookup)
+        # Second call in refund() checks for an existing refund (idempotency)
+        if call == 1 and self._entity_lookup is not None:
+            return _EntityResult(self._existing_refund)
         return _LedgerQueryResult(list(self._ledger))
 
     def add(self, instance: Any) -> None:
@@ -144,6 +153,21 @@ async def test_refund_inserts_positive_entry(svc: CreditService) -> None:
     refund_entries = [e for e in db._ledger if e.amount > 0 and "refund" in e.reason]
     assert len(refund_entries) == 1
     assert refund_entries[0].amount == 10
+
+
+@pytest.mark.asyncio
+async def test_refund_is_idempotent(svc: CreditService) -> None:
+    user_id = uuid4()
+    deduction = CreditLedger(id=uuid4(), user_id=user_id, amount=-10, reason="gen")
+    existing = CreditLedger(
+        id=uuid4(), user_id=user_id, amount=10, reason=f"refund:{deduction.id}"
+    )
+    db = _FakeDB(entity_lookup=deduction, existing_refund=existing)
+
+    await svc.refund(db, deduction.id)
+
+    # No new entry added — refund was already recorded
+    assert not db.added
 
 
 @pytest.mark.asyncio

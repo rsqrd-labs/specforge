@@ -99,10 +99,21 @@ class CreditService:
             return
         if user_id is not None and original.user_id != user_id:
             return
+
+        idempotency_reason = f"refund:{ledger_entry_id}"
+        existing = await db.execute(
+            select(CreditLedger).where(
+                CreditLedger.user_id == original.user_id,
+                CreditLedger.reason == idempotency_reason,
+            )
+        )
+        if existing.scalar_one_or_none() is not None:
+            return
+
         refund_entry = CreditLedger(
             user_id=original.user_id,
             amount=abs(original.amount),
-            reason=f"refund:{ledger_entry_id}",
+            reason=idempotency_reason,
         )
         db.add(refund_entry)
         await db.flush()
