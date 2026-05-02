@@ -75,8 +75,11 @@ class DiffResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+_MAX_CONTENT_LENGTH = 500_000  # ~500 KB; prevents memory-exhaustion DoS
+
+
 class AcceptDiffRequest(BaseModel):
-    proposed_content: str
+    proposed_content: str = Field(max_length=_MAX_CONTENT_LENGTH)
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -88,6 +91,6 @@ class RollbackRequest(BaseModel):
 
 
 class ContentEditRequest(BaseModel):
-    content: str
+    content: str = Field(max_length=_MAX_CONTENT_LENGTH)
 
     model_config = ConfigDict(from_attributes=True)
