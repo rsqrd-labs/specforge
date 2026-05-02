@@ -9,9 +9,9 @@ function scoreClasses(score: number): string {
     return "border-green-200 bg-green-50 text-green-700"
   }
   if (score >= 60) {
-    return "border-amber-200 bg-amber-50 text-amber-700"
+    return "border-tertiary-container/60 bg-tertiary-container/20 text-on-tertiary-container"
   }
-  return "border-red-200 bg-red-50 text-red-700"
+  return "border-error/30 bg-error-container text-on-error-container"
 }
 
 export function QualityBadge({ evalResult }: QualityBadgeProps) {

@@ -15,7 +15,7 @@ export function CoveragePanel({ stage, evalResult }: CoveragePanelProps) {
   const hasLowCoverage = coverage !== null && coverage !== undefined && coverage < 80
 
   return (
-    <section className="border-t border-outline-variant bg-surface px-4 py-4">
+    <section className="border-b border-outline-variant bg-surface px-4 py-4">
       <div className="mb-3 flex items-center justify-between gap-3">
         <h2 className="text-sm font-semibold text-on-surface">Coverage</h2>
         <span className="text-sm font-medium text-on-surface-variant">
@@ -27,8 +27,8 @@ export function CoveragePanel({ stage, evalResult }: CoveragePanelProps) {
 
       <div className="h-2 overflow-hidden rounded-full bg-surface-container-highest">
         <div
-          className={`h-full rounded-full ${
-            hasLowCoverage ? "bg-amber-500" : "bg-green-500"
+          className={`h-full rounded-full transition-all ${
+            hasLowCoverage ? "bg-secondary" : "bg-green-500"
           }`}
           style={{ width: `${coverage ?? 0}%` }}
         />
@@ -39,7 +39,7 @@ export function CoveragePanel({ stage, evalResult }: CoveragePanelProps) {
           {uncoveredReqs.map((requirement) => (
             <li
               key={requirement}
-              className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900"
+              className="rounded-lg border border-primary-container/40 bg-primary-container/10 px-3 py-2 text-sm text-on-primary-container"
             >
               {requirement}
             </li>

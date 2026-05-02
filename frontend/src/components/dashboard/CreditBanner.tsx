@@ -9,10 +9,10 @@ export function CreditBanner({ balance }: CreditBannerProps) {
 
   return (
     <div
-      className={`flex items-center justify-between px-4 py-2 rounded-lg text-sm ${
+      className={`flex items-center rounded-lg border px-4 py-3 text-sm ${
         isLow
-          ? "bg-error-container text-on-error-container"
-          : "bg-surface-container text-on-surface"
+          ? "border-error/30 bg-error-container text-on-error-container"
+          : "border-primary-container/40 bg-primary-container/10 text-on-primary-container"
       }`}
     >
       <CreditMeter balance={balance} />

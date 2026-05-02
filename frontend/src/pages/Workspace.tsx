@@ -339,12 +339,18 @@ export default function Workspace() {
 
   return (
     <div className="flex min-h-screen bg-background text-on-background">
-      <aside className="w-[240px] shrink-0 border-r border-outline-variant bg-surface">
-        <div className="border-b border-outline-variant px-4 py-4">
-          <div className="text-sm font-semibold text-on-surface">
+      <aside className="w-[240px] shrink-0 border-r border-outline-variant bg-surface-container-lowest/80 backdrop-blur-sm">
+        <div className="border-b border-outline-variant px-4 py-3">
+          <div className="mb-3 flex items-center gap-2">
+            <span className="brand-mark brand-mark-sm">
+              <span>SF</span>
+            </span>
+            <span className="brand-wordmark brand-wordmark-sm">SpecForge</span>
+          </div>
+          <div className="truncate text-sm font-semibold text-on-surface">
             {currentWorkspace.name}
           </div>
-          <div className="mt-1 text-xs text-on-surface-variant">
+          <div className="mt-0.5 text-xs text-on-surface-variant">
             {balance === null ? "Credits unavailable" : `${balance} credits`}
           </div>
         </div>
@@ -356,7 +362,7 @@ export default function Workspace() {
       </aside>
 
       <main className="flex min-w-0 flex-1 flex-col">
-        <header className="flex min-h-16 items-center justify-between gap-4 border-b border-outline-variant bg-surface px-5">
+        <header className="flex min-h-16 items-center justify-between gap-4 border-b border-outline-variant bg-surface-container-lowest/80 px-5 backdrop-blur-sm">
           <div className="min-w-0">
             <div className="text-xs font-medium uppercase text-on-surface-variant">
               {STAGE_LABELS[activeStage.type]}
@@ -371,7 +377,7 @@ export default function Workspace() {
               type="button"
               disabled={!allFinalised || isExporting}
               onClick={handleExport}
-              className="rounded-lg border border-outline-variant px-3 py-1.5 text-sm font-medium text-on-surface disabled:cursor-not-allowed disabled:opacity-40 hover:bg-surface-container"
+              className="rounded-lg border border-outline-variant px-3 py-1.5 text-sm font-semibold text-on-surface transition-colors disabled:cursor-not-allowed disabled:opacity-40 hover:bg-surface-container"
             >
               Export
             </button>
@@ -393,21 +399,21 @@ export default function Workspace() {
         )}
 
         {error && (
-          <div className="border-b border-amber-200 bg-amber-50 px-5 py-3 text-sm text-amber-900">
+          <div className="border-b border-error/30 bg-error-container px-5 py-3 text-sm text-on-error-container">
             {error}
           </div>
         )}
 
         {largeSelectionWarning && (
-          <div className="flex items-center justify-between gap-4 border-b border-amber-200 bg-amber-50 px-5 py-3">
-            <span className="text-sm text-amber-900">
+          <div className="flex items-center justify-between gap-4 border-b border-primary-container/40 bg-primary-container/10 px-5 py-3">
+            <span className="text-sm text-on-primary-container">
               This selection covers most of the document. Consider using Regenerate instead.
             </span>
             <div className="flex shrink-0 gap-2">
               <button
                 type="button"
                 onClick={() => setLargeSelectionWarning(false)}
-                className="text-sm text-amber-700 underline hover:text-amber-900"
+                className="text-sm text-primary underline hover:text-on-primary-container"
               >
                 Proceed with diff
               </button>
@@ -417,7 +423,7 @@ export default function Workspace() {
                   void rejectDiff()
                   void requestGeneration("regenerate")
                 }}
-                className="rounded-lg bg-amber-700 px-3 py-1 text-sm font-medium text-white hover:bg-amber-800"
+                className="rounded-lg bg-primary px-3 py-1 text-sm font-medium text-on-primary hover:opacity-90"
               >
                 Use Regenerate
               </button>
@@ -425,7 +431,7 @@ export default function Workspace() {
           </div>
         )}
 
-        <div className="flex items-center justify-between gap-3 border-b border-outline-variant bg-surface px-5 py-3">
+        <div className="flex items-center justify-between gap-3 border-b border-outline-variant bg-surface-container-lowest/60 px-5 py-3">
           <GenerateBar
             stage={activeStage}
             onGenerate={() => requestGeneration("generate")}
@@ -437,7 +443,7 @@ export default function Workspace() {
 
         {showRefineInput && (
           <form
-            className="flex gap-3 border-b border-outline-variant bg-surface-container-low px-5 py-3"
+            className="flex gap-3 border-b border-outline-variant bg-surface-container-lowest/80 px-5 py-3 backdrop-blur-sm"
             onSubmit={(event) => {
               event.preventDefault()
               void runRefine()
@@ -447,7 +453,7 @@ export default function Workspace() {
               value={refineInstruction}
               onChange={(event) => setRefineInstruction(event.target.value)}
               placeholder="Refine the selected text..."
-              className="min-w-0 flex-1 rounded-lg border border-outline-variant bg-surface px-3 py-2 text-sm text-on-surface outline-none focus:border-primary"
+              className="min-w-0 flex-1 rounded-lg border border-outline-variant bg-surface px-3 py-2 text-sm text-on-surface outline-none transition-all focus:border-primary focus:ring-2 focus:ring-primary/10"
             />
             <button
               type="button"
@@ -458,7 +464,7 @@ export default function Workspace() {
             </button>
             <button
               type="submit"
-              className="rounded-lg bg-primary px-4 py-2 text-sm font-medium text-on-primary hover:opacity-90"
+              className="rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-on-primary shadow-[0_4px_12px_rgba(143,78,0,0.2)] hover:opacity-90"
             >
               Refine
             </button>
@@ -478,7 +484,7 @@ export default function Workspace() {
             <StreamingOverlay isVisible={isStreaming} />
           </section>
 
-          <aside className="min-h-0 overflow-auto border-l border-outline-variant bg-surface-container-lowest">
+          <aside className="min-h-0 overflow-auto border-l border-outline-variant bg-surface">
             {diffResult ? (
               <div className="h-full p-4">
                 <DiffViewer

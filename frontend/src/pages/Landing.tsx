@@ -1,7 +1,3 @@
-import { useState } from "react"
-
-import { api } from "../services/api"
-
 interface LandingProps {
   assignLocation?: (url: string) => void
 }
@@ -9,21 +5,8 @@ interface LandingProps {
 export default function Landing({
   assignLocation = (url) => window.location.assign(url),
 }: LandingProps) {
-  const [authError, setAuthError] = useState<string | null>(null)
-  const [isSigningIn, setIsSigningIn] = useState(false)
-
   function handleGoogleSignIn() {
-    setAuthError(null)
-    setIsSigningIn(true)
-    api
-      .post<{ redirect_url: string }>("/auth/google")
-      .then((res) => {
-        assignLocation(res.data.redirect_url)
-      })
-      .catch(() => {
-        setIsSigningIn(false)
-        setAuthError("Google sign-in could not be started. Check the OAuth setup.")
-      })
+    assignLocation(`${import.meta.env.VITE_API_URL}/auth/google`)
   }
 
   return (
@@ -69,13 +52,12 @@ export default function Landing({
               <button
                 type="button"
                 onClick={handleGoogleSignIn}
-                disabled={isSigningIn}
                 className="google-button"
               >
                 <span className="google-button-icon">
                   <GoogleIcon />
                 </span>
-                <span>{isSigningIn ? "Opening Google..." : "Sign in with Google"}</span>
+                <span>Sign in with Google</span>
                 <span className="button-arrow" aria-hidden="true">
                   &rarr;
                 </span>
@@ -87,8 +69,6 @@ export default function Landing({
                 <span>No setup required</span>
               </div>
             </div>
-
-            {authError && <p className="auth-error">{authError}</p>}
 
             <div className="workflow-showcase" aria-label="SpecForge workflow">
               <div className="workflow-heading">

@@ -22,17 +22,17 @@ function StatusDot({ status }: { status: Stage["status"] }) {
   if (status === "stale")
     return (
       <span className="flex items-center gap-0.5">
-        <span className={`${base} bg-amber-400`} />
-        <span className="text-amber-400 text-xs leading-none">⚠</span>
+        <span className={`${base} bg-secondary-container`} />
+        <span className="text-xs leading-none text-secondary">⚠</span>
       </span>
     )
-  return <span className={`${base} bg-amber-400`} />
+  return <span className={`${base} bg-primary-container`} />
 }
 
 function scoreClassName(score: number): string {
   if (score >= 80) return "text-green-600"
-  if (score >= 60) return "text-amber-600"
-  return "text-red-600"
+  if (score >= 60) return "text-on-surface-variant"
+  return "text-error"
 }
 
 export function StageNavigator({
@@ -58,12 +58,12 @@ export function StageNavigator({
             disabled={isLocked}
             onClick={() => !isLocked && onSelectStage(stage.id)}
             className={[
-              "flex items-center gap-2 px-3 py-2 rounded-lg text-sm text-left transition-colors",
+              "flex items-center gap-2 rounded-lg px-3 py-2 text-sm text-left transition-colors",
               isLocked
-                ? "opacity-40 cursor-not-allowed text-on-surface-variant"
+                ? "cursor-not-allowed opacity-40 text-on-surface-variant"
                 : "cursor-pointer hover:bg-surface-container",
               isActive
-                ? "bg-primary-container text-on-primary-container font-medium"
+                ? "bg-primary/10 text-on-surface font-medium ring-1 ring-primary/20"
                 : "text-on-surface",
             ].join(" ")}
           >

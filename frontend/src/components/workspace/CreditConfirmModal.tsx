@@ -19,32 +19,49 @@ export function CreditConfirmModal({
   onConfirm,
   onCancel,
 }: CreditConfirmModalProps) {
+  const isInsufficient = currentBalance < creditCost
+
   return (
     <div
-      className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-[#0f172a]/60 p-4 backdrop-blur-sm"
       onClick={(e) => e.target === e.currentTarget && onCancel()}
     >
-      <div className="bg-surface rounded-xl w-full max-w-sm shadow-xl p-6">
-        <h2 className="text-lg font-semibold text-on-surface mb-2 capitalize">
+      <div className="w-full max-w-sm rounded-xl border border-outline-variant bg-surface-container-lowest/90 p-6 shadow-[0_40px_100px_rgba(47,49,49,0.22)] backdrop-blur-xl">
+        <div className="mb-1 text-xs font-semibold uppercase tracking-widest text-primary">
+          Credit usage
+        </div>
+        <h2 className="mb-2 text-lg font-semibold capitalize text-on-surface">
           {action}
         </h2>
-        <p className="text-sm text-on-surface-variant mb-6">
+        <p className="mb-6 text-sm leading-6 text-on-surface-variant">
           This will use{" "}
           <span className="font-semibold text-on-surface">{creditCost}</span>{" "}
           credits. You have{" "}
-          <span className="font-semibold text-on-surface">{currentBalance}</span>{" "}
-          remaining. Proceed?
+          <span
+            className={`font-semibold ${
+              isInsufficient ? "text-error" : "text-on-surface"
+            }`}
+          >
+            {currentBalance}
+          </span>{" "}
+          remaining.
+          {isInsufficient && (
+            <span className="mt-2 block text-error">
+              Insufficient credits to proceed.
+            </span>
+          )}
         </p>
         <div className="flex justify-end gap-3">
           <button
             onClick={onCancel}
-            className="px-4 py-2 text-sm text-on-surface-variant hover:text-on-surface"
+            className="rounded-lg border border-outline-variant px-4 py-2 text-sm font-medium text-on-surface-variant transition-colors hover:bg-surface-container hover:text-on-surface"
           >
             Cancel
           </button>
           <button
             onClick={onConfirm}
-            className="px-4 py-2 text-sm font-medium bg-primary text-on-primary rounded-lg hover:opacity-90"
+            disabled={isInsufficient}
+            className="rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-on-primary shadow-[0_4px_16px_rgba(143,78,0,0.22)] hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
           >
             Confirm
           </button>

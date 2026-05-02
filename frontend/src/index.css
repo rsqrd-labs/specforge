@@ -1168,6 +1168,20 @@ button:disabled {
   }
 }
 
+/* Compact brand mark used in app nav bars */
+.brand-mark-sm {
+  width: 36px;
+  height: 36px;
+  border-radius: 11px;
+  box-shadow: 0 8px 24px rgba(143, 78, 0, 0.22), inset 0 1px 0 rgba(255, 255, 255, 0.42);
+}
+.brand-mark-sm span {
+  font-size: 12px;
+}
+.brand-wordmark-sm {
+  font-size: clamp(18px, 2vw, 22px);
+}
+
 @media (max-width: 720px) {
   .landing-hero {
     padding: 20px 16px 32px;

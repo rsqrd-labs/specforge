@@ -63,53 +63,56 @@ export function CreateWorkspaceModal({ onClose }: CreateWorkspaceModalProps) {
     }
   }
 
+  const inputClass =
+    "w-full rounded-lg border border-outline-variant bg-surface px-3 py-2.5 text-sm text-on-surface outline-none transition-all focus:border-primary focus:ring-2 focus:ring-primary/10"
+
   return (
     <div
-      className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-[#0f172a]/60 p-4 backdrop-blur-sm"
       onClick={(e) => e.target === e.currentTarget && onClose()}
     >
-      <div className="bg-surface rounded-xl w-full max-w-lg shadow-xl">
-        <div className="flex items-center justify-between p-6 border-b border-outline-variant">
-          <h2 className="text-lg font-semibold text-on-surface">
+      <div className="w-full max-w-lg rounded-xl border border-outline-variant bg-surface-container-lowest/90 shadow-[0_40px_100px_rgba(47,49,49,0.22)] backdrop-blur-xl">
+        <div className="flex items-center justify-between border-b border-outline-variant px-6 py-4">
+          <h2 className="text-base font-semibold text-on-surface">
             New Workspace
           </h2>
           <button
             onClick={onClose}
-            className="text-on-surface-variant hover:text-on-surface"
+            className="flex h-7 w-7 items-center justify-center rounded-lg text-on-surface-variant transition-colors hover:bg-surface-container hover:text-on-surface"
           >
             ✕
           </button>
         </div>
 
-        <form onSubmit={(e) => void handleSubmit(e)} className="p-6 space-y-4">
+        <form onSubmit={(e) => void handleSubmit(e)} className="space-y-4 p-6">
           <div>
-            <label className="block text-sm font-medium text-on-surface mb-1">
+            <label className="mb-1.5 block text-xs font-semibold uppercase tracking-wide text-on-surface-variant">
               Workspace Name
             </label>
             <input
               type="text"
               value={name}
               onChange={(e) => setName(e.target.value)}
-              className="w-full px-3 py-2 rounded-lg border border-outline-variant bg-surface-container text-on-surface focus:outline-none focus:border-primary"
+              className={inputClass}
               placeholder="My Todo App"
             />
             {errors.name && (
-              <p className="text-xs text-error mt-1">{errors.name}</p>
+              <p className="mt-1 text-xs text-error">{errors.name}</p>
             )}
           </div>
 
           <div>
-            <label className="block text-sm font-medium text-on-surface mb-1">
+            <label className="mb-1.5 block text-xs font-semibold uppercase tracking-wide text-on-surface-variant">
               Problem Statement
             </label>
             <textarea
               value={statement}
               onChange={(e) => setStatement(e.target.value)}
               rows={4}
-              className="w-full px-3 py-2 rounded-lg border border-outline-variant bg-surface-container text-on-surface focus:outline-none focus:border-primary resize-none"
+              className={`${inputClass} resize-none`}
               placeholder="Describe what you want to build..."
             />
-            <div className="flex justify-between items-center mt-1">
+            <div className="mt-1 flex items-center justify-between">
               {errors.statement ? (
                 <p className="text-xs text-error">{errors.statement}</p>
               ) : (
@@ -129,7 +132,7 @@ export function CreateWorkspaceModal({ onClose }: CreateWorkspaceModalProps) {
 
           <div className="grid grid-cols-2 gap-3">
             <div>
-              <label className="block text-sm font-medium text-on-surface mb-1">
+              <label className="mb-1.5 block text-xs font-semibold uppercase tracking-wide text-on-surface-variant">
                 Provider
               </label>
               <select
@@ -137,7 +140,7 @@ export function CreateWorkspaceModal({ onClose }: CreateWorkspaceModalProps) {
                 onChange={(e) =>
                   handleProviderChange(e.target.value as AIProvider)
                 }
-                className="w-full px-3 py-2 rounded-lg border border-outline-variant bg-surface-container text-on-surface focus:outline-none focus:border-primary"
+                className={inputClass}
               >
                 {PROVIDERS.map((p) => (
                   <option key={p.id} value={p.id}>
@@ -147,13 +150,13 @@ export function CreateWorkspaceModal({ onClose }: CreateWorkspaceModalProps) {
               </select>
             </div>
             <div>
-              <label className="block text-sm font-medium text-on-surface mb-1">
+              <label className="mb-1.5 block text-xs font-semibold uppercase tracking-wide text-on-surface-variant">
                 Model
               </label>
               <select
                 value={model}
                 onChange={(e) => setModel(e.target.value)}
-                className="w-full px-3 py-2 rounded-lg border border-outline-variant bg-surface-container text-on-surface focus:outline-none focus:border-primary"
+                className={inputClass}
               >
                 {availableModels.map((m) => (
                   <option key={m.id} value={m.id}>
@@ -172,14 +175,14 @@ export function CreateWorkspaceModal({ onClose }: CreateWorkspaceModalProps) {
             <button
               type="button"
               onClick={onClose}
-              className="px-4 py-2 text-sm text-on-surface-variant hover:text-on-surface"
+              className="rounded-lg border border-outline-variant px-4 py-2 text-sm font-medium text-on-surface-variant transition-colors hover:bg-surface-container hover:text-on-surface"
             >
               Cancel
             </button>
             <button
               type="submit"
               disabled={isSubmitting}
-              className="px-4 py-2 text-sm font-medium bg-primary text-on-primary rounded-lg hover:opacity-90 disabled:opacity-50"
+              className="rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-on-primary shadow-[0_4px_16px_rgba(143,78,0,0.22)] transition-opacity hover:opacity-90 disabled:opacity-50"
             >
               {isSubmitting ? "Creating..." : "Create Workspace"}
             </button>

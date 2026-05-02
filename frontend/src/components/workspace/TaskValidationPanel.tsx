@@ -16,7 +16,7 @@ export function TaskValidationPanel({
   const issues = evalResult?.tasks_without_ref ?? []
 
   return (
-    <section className="border-t border-outline-variant bg-surface px-4 py-4">
+    <section className="border-b border-outline-variant bg-surface px-4 py-4">
       <div className="mb-3 flex items-center justify-between gap-3">
         <h2 className="text-sm font-semibold text-on-surface">
           Task Validation
@@ -37,12 +37,12 @@ export function TaskValidationPanel({
           {issues.map((issue) => (
             <li
               key={`${issue.task_number}-${issue.task_title}`}
-              className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900"
+              className="rounded-lg border border-primary-container/40 bg-primary-container/10 px-3 py-2 text-sm text-on-primary-container"
             >
               <div className="font-medium">
                 T-{issue.task_number}: {issue.task_title}
               </div>
-              <div className="mt-1 text-amber-800">{issue.reason}</div>
+              <div className="mt-1 text-xs opacity-80">{issue.reason}</div>
             </li>
           ))}
         </ul>

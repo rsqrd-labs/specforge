@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Cookie, Depends, HTTPException, Response, status
+from fastapi.responses import RedirectResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database import get_db
@@ -27,10 +28,10 @@ def _set_refresh_cookie(response: Response, token: str) -> None:
     )
 
 
-@router.post("/google")
-async def google_login() -> dict:
+@router.get("/google")
+async def google_login() -> RedirectResponse:
     url = auth_service.get_google_auth_url()
-    return {"redirect_url": url}
+    return RedirectResponse(url)
 
 
 @router.get("/callback")
