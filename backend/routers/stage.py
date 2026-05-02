@@ -24,6 +24,7 @@ from schemas.stage import (
     StageVersionResponse,
 )
 from services.credit_service import InsufficientCreditsError, credit_service
+from services.llm.base import ProviderError
 from services.pipeline.stage_manager import (
     RateLimitError,
     SecurityError,
@@ -33,6 +34,29 @@ from services.pipeline.stage_manager import (
 from services.security.sanitizer import sanitize_text
 
 router = APIRouter(prefix="/stages", tags=["stages"])
+
+
+async def _stream_stage(
+    stage_id: UUID,
+    user: User,
+    db: AsyncSession,
+) -> AsyncGenerator[str, None]:
+    try:
+        async for token in stage_manager.generate(stage_id, user, db):
+            if token.startswith('{"done"'):
+                yield f"data: {token}\n\n"
+            else:
+                yield f"data: {json.dumps({'token': token})}\n\n"
+    except StageDependencyError as exc:
+        yield f"data: {json.dumps({'error': 'dependency_not_finalised', 'detail': str(exc)})}\n\n"
+    except RateLimitError as exc:
+        yield f"data: {json.dumps({'error': 'rate_limit_exceeded', 'retry_after': exc.retry_after})}\n\n"
+    except SecurityError as exc:
+        yield f"data: {json.dumps({'error': 'security_check_failed', 'detail': str(exc)})}\n\n"
+    except ProviderError as exc:
+        yield f"data: {json.dumps({'error': 'provider_error', 'detail': str(exc)})}\n\n"
+    except Exception as exc:
+        yield f"data: {json.dumps({'error': 'internal_error', 'detail': str(exc)})}\n\n"
 
 
 async def _load_stage(stage_id: UUID, db: AsyncSession, user_id: UUID) -> Stage:
@@ -65,27 +89,7 @@ async def generate_stage(
     _: None = Depends(require_credits(10)),
 ) -> StreamingResponse:
     await _load_stage(stage_id, db, user.id)
-
-    async def _stream() -> AsyncGenerator[str, None]:
-        try:
-            async for token in stage_manager.generate(stage_id, user, db):
-                if token.startswith('{"done"'):
-                    yield f"data: {token}\n\n"
-                else:
-                    payload = json.dumps({"token": token})
-                    yield f"data: {payload}\n\n"
-        except StageDependencyError as exc:
-            error_payload = json.dumps(
-                {"error": "dependency_not_finalised", "detail": str(exc)}
-            )
-            yield f"data: {error_payload}\n\n"
-        except RateLimitError as exc:
-            error_payload = json.dumps(
-                {"error": "rate_limit_exceeded", "retry_after": exc.retry_after}
-            )
-            yield f"data: {error_payload}\n\n"
-
-    return StreamingResponse(_stream(), media_type="text/event-stream")
+    return StreamingResponse(_stream_stage(stage_id, user, db), media_type="text/event-stream")
 
 
 @router.post("/{stage_id}/regenerate")
@@ -96,27 +100,7 @@ async def regenerate_stage(
     _: None = Depends(require_credits(10)),
 ) -> StreamingResponse:
     await _load_stage(stage_id, db, user.id)
-
-    async def _stream() -> AsyncGenerator[str, None]:
-        try:
-            async for token in stage_manager.generate(stage_id, user, db):
-                if token.startswith('{"done"'):
-                    yield f"data: {token}\n\n"
-                else:
-                    payload = json.dumps({"token": token})
-                    yield f"data: {payload}\n\n"
-        except StageDependencyError as exc:
-            error_payload = json.dumps(
-                {"error": "dependency_not_finalised", "detail": str(exc)}
-            )
-            yield f"data: {error_payload}\n\n"
-        except RateLimitError as exc:
-            error_payload = json.dumps(
-                {"error": "rate_limit_exceeded", "retry_after": exc.retry_after}
-            )
-            yield f"data: {error_payload}\n\n"
-
-    return StreamingResponse(_stream(), media_type="text/event-stream")
+    return StreamingResponse(_stream_stage(stage_id, user, db), media_type="text/event-stream")
 
 
 @router.post("/{stage_id}/refine", response_model=DiffResponse)
