@@ -27,6 +27,9 @@ class Settings(BaseSettings):
     # Empty string disables token auth; fall back to localhost-only IP check
     metrics_token: str = ""
 
+    db_pool_size: int = 20
+    db_max_overflow: int = 10
+
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
 
