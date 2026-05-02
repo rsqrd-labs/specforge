@@ -17,18 +17,19 @@ export default function AuthCallback() {
 
     const error = searchParams.get("error")
     const code = searchParams.get("code")
+    const state = searchParams.get("state")
 
     if (error) {
       setMessage("Google sign-in was cancelled or rejected.")
       return
     }
 
-    if (!code) {
+    if (!code || !state) {
       setMessage("Google did not return a sign-in code.")
       return
     }
 
-    completeGoogleCallback(code)
+    completeGoogleCallback(code, state)
       .then(async ({ access_token }) => {
         setAccessToken(access_token)
         await fetchMe()

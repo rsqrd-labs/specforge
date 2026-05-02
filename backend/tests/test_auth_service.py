@@ -149,10 +149,13 @@ def make_service(
 
 @pytest.mark.asyncio
 async def test_handle_callback_creates_new_user(signing_keys: tuple[str, str]) -> None:
-    service = make_service(signing_keys)
+    redis = FakeRedis()
+    service = make_service(signing_keys, redis)
     db = FakeDB()
+    # Pre-seed the OAuth state as the login flow would
+    await redis.set("oauth:state:test-state", "1", ex=600)
 
-    access_token, refresh_token = await service.handle_callback("code", db)  # type: ignore[arg-type]
+    access_token, refresh_token = await service.handle_callback("code", "test-state", db)  # type: ignore[arg-type]
 
     assert access_token
     assert refresh_token
@@ -161,6 +164,37 @@ async def test_handle_callback_creates_new_user(signing_keys: tuple[str, str]) -
     assert db.user.google_id == "google-user-id"
     assert db.committed is True
     assert service.credit_service.calls == [(db.user.id, 50, "signup_bonus")]
+
+
+@pytest.mark.asyncio
+async def test_handle_callback_rejects_missing_state(signing_keys: tuple[str, str]) -> None:
+    service = make_service(signing_keys)
+    db = FakeDB()
+    with pytest.raises(AuthError, match="OAuth state"):
+        await service.handle_callback("code", "nonexistent-state", db)  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_handle_callback_rejects_replayed_state(signing_keys: tuple[str, str]) -> None:
+    redis = FakeRedis()
+    service = make_service(signing_keys, redis)
+    db = FakeDB()
+    await redis.set("oauth:state:one-time", "1", ex=600)
+    # First call consumes the state
+    await service.handle_callback("code", "one-time", db)  # type: ignore[arg-type]
+    # Second call with the same state must be rejected
+    with pytest.raises(AuthError, match="OAuth state"):
+        await service.handle_callback("code", "one-time", FakeDB())  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_get_google_auth_url_stores_state_in_redis(signing_keys: tuple[str, str]) -> None:
+    redis = FakeRedis()
+    service = make_service(signing_keys, redis)
+    url = await service.get_google_auth_url()
+    assert url.startswith("https://accounts.google.com")
+    # The FakeOAuthClient always returns "state" as the state value
+    assert "oauth:state:state" in redis.values
 
 
 @pytest.mark.asyncio

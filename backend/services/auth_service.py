@@ -23,6 +23,8 @@ ACCESS_TOKEN_MINUTES = 15
 REFRESH_TOKEN_DAYS = 7
 SESSION_PREFIX = "session:"
 USER_SESSIONS_PREFIX = "user_sessions:"
+OAUTH_STATE_PREFIX = "oauth:state:"
+OAUTH_STATE_TTL = 600  # 10 minutes
 
 
 class AuthError(Exception):
@@ -72,15 +74,21 @@ class AuthService:
     def _redirect_uri(self) -> str:
         return f"{settings.frontend_url.rstrip('/')}/auth/callback"
 
-    def get_google_auth_url(self) -> str:
-        authorization_url, _state = self.oauth_client.create_authorization_url(
+    async def get_google_auth_url(self) -> str:
+        authorization_url, state = self.oauth_client.create_authorization_url(
             GOOGLE_AUTHORIZE_URL,
             scope=" ".join(GOOGLE_SCOPES),
             redirect_uri=self._redirect_uri,
         )
+        await self.redis.set(f"{OAUTH_STATE_PREFIX}{state}", "1", ex=OAUTH_STATE_TTL)
         return authorization_url
 
-    async def handle_callback(self, code: str, db: AsyncSession) -> tuple[str, str]:
+    async def handle_callback(self, code: str, state: str, db: AsyncSession) -> tuple[str, str]:
+        state_key = f"{OAUTH_STATE_PREFIX}{state}"
+        if not await self.redis.get(state_key):
+            raise AuthError("Invalid or expired OAuth state")
+        await self.redis.delete(state_key)
+
         await self._maybe_await(
             self.oauth_client.fetch_token(
                 GOOGLE_TOKEN_URL,

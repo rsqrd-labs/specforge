@@ -30,18 +30,19 @@ def _set_refresh_cookie(response: Response, token: str) -> None:
 
 @router.get("/google")
 async def google_login() -> RedirectResponse:
-    url = auth_service.get_google_auth_url()
+    url = await auth_service.get_google_auth_url()
     return RedirectResponse(url)
 
 
 @router.get("/callback")
 async def google_callback(
     code: str,
+    state: str,
     response: Response,
     db: AsyncSession = Depends(get_db),
 ) -> dict:
     try:
-        access_token, refresh_token = await auth_service.handle_callback(code, db)
+        access_token, refresh_token = await auth_service.handle_callback(code, state, db)
     except AuthError as exc:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail=str(exc)) from exc
 

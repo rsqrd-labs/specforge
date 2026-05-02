@@ -209,9 +209,10 @@ export async function getCurrentUser(): Promise<User> {
 
 export async function completeGoogleCallback(
   code: string,
+  state: string,
 ): Promise<GoogleCallbackResponse> {
   const response = await refreshApi.get<GoogleCallbackResponse>("/auth/callback", {
-    params: { code },
+    params: { code, state },
   })
   return response.data
 }
