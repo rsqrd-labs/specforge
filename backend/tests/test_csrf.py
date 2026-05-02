@@ -6,8 +6,8 @@ from uuid import uuid4
 
 import pytest
 from httpx import ASGITransport, AsyncClient
-from jose import jwt
 
+import middleware.csrf as csrf_module
 from database import get_db
 from main import create_app
 from middleware.auth import get_current_user
@@ -79,9 +79,15 @@ async def test_csrf_endpoint_returns_token_for_current_user() -> None:
 
 
 @pytest.mark.asyncio
-async def test_mutating_request_with_valid_auth_without_csrf_returns_403() -> None:
+async def test_mutating_request_with_valid_auth_without_csrf_returns_403(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     user = _make_user()
-    token = jwt.encode({"sub": str(user.id)}, "test-secret")
+    monkeypatch.setattr(
+        csrf_module,
+        "decode_access_token_claims",
+        lambda t: {"sub": str(user.id), "type": "access"} if t == "valid-token" else None,
+    )
     app = create_app(redis_client=_NoopRedis())
     app.dependency_overrides[get_db] = _fake_get_db
     app.dependency_overrides[get_current_user] = lambda: user
@@ -90,7 +96,7 @@ async def test_mutating_request_with_valid_auth_without_csrf_returns_403() -> No
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         response = await client.post(
             "/workspaces",
-            headers={"Authorization": f"Bearer {token}"},
+            headers={"Authorization": "Bearer valid-token"},
             json={
                 "name": "Test",
                 "problem_statement": "A" * 60,
@@ -105,10 +111,16 @@ async def test_mutating_request_with_valid_auth_without_csrf_returns_403() -> No
 
 
 @pytest.mark.asyncio
-async def test_mutating_request_with_valid_csrf_reaches_route() -> None:
+async def test_mutating_request_with_valid_csrf_reaches_route(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     user = _make_user()
-    token = jwt.encode({"sub": str(user.id)}, "test-secret")
     csrf_token = generate_csrf_token(str(user.id))
+    monkeypatch.setattr(
+        csrf_module,
+        "decode_access_token_claims",
+        lambda t: {"sub": str(user.id), "type": "access"} if t == "valid-token" else None,
+    )
     app = create_app(redis_client=_NoopRedis())
     app.dependency_overrides[get_db] = _fake_get_db
     app.dependency_overrides[get_current_user] = lambda: user
@@ -118,7 +130,7 @@ async def test_mutating_request_with_valid_csrf_reaches_route() -> None:
         response = await client.post(
             "/workspaces",
             headers={
-                "Authorization": f"Bearer {token}",
+                "Authorization": "Bearer valid-token",
                 "X-CSRF-Token": csrf_token,
             },
             json={

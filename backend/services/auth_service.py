@@ -267,3 +267,16 @@ class AuthService:
 
 
 auth_service = AuthService()
+
+
+def decode_access_token_claims(token: str) -> dict[str, Any] | None:
+    """Verify token signature and return claims, or None if invalid/expired."""
+    try:
+        claims = jwt.decode(
+            token, settings.jwt_public_key, algorithms=["RS256"]
+        )
+        if claims.get("type") != "access":
+            return None
+        return claims
+    except JWTError:
+        return None

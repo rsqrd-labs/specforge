@@ -4,11 +4,11 @@ from collections.abc import Callable
 
 from fastapi import status
 from fastapi.responses import JSONResponse
-from jose import JWTError, jwt
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import Response
 
+from services.auth_service import decode_access_token_claims
 from services.security.csrf import verify_csrf_token
 
 _SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
@@ -47,11 +47,9 @@ def _session_id_from_authorization(request: Request) -> str | None:
         return None
 
     token = auth_header.removeprefix("Bearer ").strip()
-    try:
-        claims = jwt.get_unverified_claims(token)
-    except JWTError:
+    claims = decode_access_token_claims(token)
+    if claims is None:
         return None
-
     subject = claims.get("sub")
     return subject if isinstance(subject, str) and subject else None
 

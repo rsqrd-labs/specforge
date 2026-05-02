@@ -3,13 +3,13 @@ from collections.abc import Callable
 
 from fastapi import status
 from fastapi.responses import JSONResponse
-from jose import jwt as jose_jwt
 from redis.asyncio import Redis
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import Response
 
 from config import settings
+from services.auth_service import decode_access_token_claims
 
 _LOGIN_PATHS = frozenset({"/auth/google", "/auth/callback"})
 
@@ -79,11 +79,10 @@ def _extract_user_id(request: Request) -> str | None:
     if not auth_header.startswith("Bearer "):
         return None
     token = auth_header.removeprefix("Bearer ").strip()
-    try:
-        claims = jose_jwt.get_unverified_claims(token)
-        return claims.get("sub")
-    except Exception:
+    claims = decode_access_token_claims(token)
+    if claims is None:
         return None
+    return claims.get("sub")
 
 
 def _rate_limited(retry_after: int) -> JSONResponse:
