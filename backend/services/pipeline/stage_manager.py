@@ -202,7 +202,12 @@ class StageManager:
         if not validation.is_safe:
             raise SecurityError(f"Refine output failed validation: {validation.reason}")
 
-        proposed = apply_diff(content, request.selected_text, replacement)
+        proposed = apply_diff(
+            content,
+            request.selection_start,
+            request.selection_end,
+            replacement,
+        )
         diff = compute_diff(content, proposed)
 
         return DiffResponse(

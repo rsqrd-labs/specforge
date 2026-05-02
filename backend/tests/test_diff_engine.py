@@ -1,3 +1,5 @@
+import pytest
+
 from services.pipeline.diff_engine import apply_diff, compute_diff
 
 
@@ -11,17 +13,24 @@ def test_compute_diff_returns_unified_diff() -> None:
 
 def test_apply_diff_replaces_selected_text() -> None:
     original = "The quick brown fox jumps over the lazy dog"
-    result = apply_diff(original, "brown fox", "red cat")
+    start = original.index("brown fox")
+    end = start + len("brown fox")
+    result = apply_diff(original, start, end, "red cat")
     assert result == "The quick red cat jumps over the lazy dog"
 
 
 def test_apply_diff_multiline() -> None:
     original = "line one\nline two\nline three"
-    result = apply_diff(original, "line two", "line TWO")
+    start = original.index("line two")
+    end = start + len("line two")
+    result = apply_diff(original, start, end, "line TWO")
     assert result == "line one\nline TWO\nline three"
 
 
-def test_apply_diff_selection_not_found_returns_original() -> None:
-    original = "hello world"
-    result = apply_diff(original, "does not exist", "replacement")
-    assert result == original
+def test_apply_diff_second_occurrence_with_explicit_positions() -> None:
+    original = "foo bar foo bar"
+    # Replace the SECOND "foo", not the first
+    second_start = original.index("foo", 8)
+    second_end = second_start + len("foo")
+    result = apply_diff(original, second_start, second_end, "baz")
+    assert result == "foo bar baz bar"
