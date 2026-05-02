@@ -37,8 +37,7 @@ class _FakeDB:
     async def execute(self, statement: Any) -> Any:
         if self._entity_lookup is not None:
             return _EntityResult(self._entity_lookup)
-        total = sum(e.amount for e in self._ledger)
-        return _SumResult(total)
+        return _LedgerQueryResult(list(self._ledger))
 
     def add(self, instance: Any) -> None:
         if isinstance(instance, CreditLedger):
@@ -54,15 +53,28 @@ class _FakeDB:
         pass
 
 
-class _SumResult:
-    def __init__(self, value: int) -> None:
-        self._value = value
+class _Scalars:
+    def __init__(self, rows: list[Any]) -> None:
+        self._rows = rows
+
+    def all(self) -> list[Any]:
+        return list(self._rows)
+
+
+class _LedgerQueryResult:
+    """Supports both scalar_one() (for get_balance) and scalars().all() (for deduct)."""
+
+    def __init__(self, rows: list[CreditLedger]) -> None:
+        self._rows = rows
 
     def scalar_one(self) -> int:
-        return self._value
+        return sum(r.amount for r in self._rows)
 
     def scalar_one_or_none(self) -> int:
-        return self._value
+        return self.scalar_one()
+
+    def scalars(self) -> _Scalars:
+        return _Scalars(self._rows)
 
 
 class _EntityResult:

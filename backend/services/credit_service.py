@@ -67,12 +67,14 @@ class CreditService:
         amount: int,
         reason: str,
     ) -> CreditLedger:
+        # Lock rows individually — SELECT SUM(...) FOR UPDATE is invalid in PostgreSQL
         result = await db.execute(
-            select(func.coalesce(func.sum(CreditLedger.amount), 0))
+            select(CreditLedger)
             .where(CreditLedger.user_id == user_id)
             .with_for_update()
         )
-        balance = int(result.scalar_one())
+        rows = result.scalars().all()
+        balance = sum(r.amount for r in rows)
         if balance < amount:
             raise InsufficientCreditsError(
                 f"Balance {balance} is less than required {amount}"
