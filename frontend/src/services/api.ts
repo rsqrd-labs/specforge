@@ -264,7 +264,7 @@ export async function rollbackStage(
   id: string,
   version: number,
 ): Promise<Stage> {
-  const response = await api.post<Stage>(`/stages/${id}/rollback`, { version })
+  const response = await api.post<Stage>(`/stages/${id}/rollback`, { version_number: version })
   return response.data
 }
 
