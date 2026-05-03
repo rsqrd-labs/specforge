@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { useParams } from "react-router-dom"
 import { CoveragePanel } from "../components/workspace/CoveragePanel"
 import { CreditConfirmModal, CREDIT_COSTS } from "../components/workspace/CreditConfirmModal"
@@ -160,19 +160,41 @@ export default function Workspace() {
     }
   }, [streamError])
 
-  async function refreshWorkspace() {
+  const refreshWorkspace = useCallback(async () => {
     if (!id) return
     const workspace = await getWorkspace(id)
     setCurrentWorkspace(workspace)
     setStages(workspace.stages)
-  }
+  }, [id, setCurrentWorkspace, setStages])
 
-  function requestGeneration(action: "generate" | "regenerate") {
-    if (!activeStage) return
-    setPendingCredit({ action, stageId: activeStage.id })
-  }
+  // Declared before confirmCredits/proceedThroughReviewGate which call it
+  const runGeneration = useCallback(
+    async (action: "generate" | "regenerate") => {
+      setError(null)
+      const result = await startStream(action)
+      if (!result) return
 
-  function requestRefine() {
+      setStage(result.stage)
+      if (result.evalResult) {
+        setEvalResults((existing) => ({
+          ...existing,
+          [result.stage.id]: result.evalResult,
+        }))
+      }
+      await refreshWorkspace()
+    },
+    [startStream, setStage, refreshWorkspace],
+  )
+
+  const requestGeneration = useCallback(
+    (action: "generate" | "regenerate") => {
+      if (!activeStage) return
+      setPendingCredit({ action, stageId: activeStage.id })
+    },
+    [activeStage],
+  )
+
+  const requestRefine = useCallback(() => {
     const currentSelection = editorRef.current?.getSelection()
     if (!activeStage || !currentSelection) {
       setError("Select text in the editor before refining.")
@@ -183,9 +205,9 @@ export default function Workspace() {
     setRefineInstruction("")
     setShowRefineInput(true)
     setError(null)
-  }
+  }, [activeStage])
 
-  async function confirmCredits() {
+  const confirmCredits = useCallback(async () => {
     if (!pendingCredit) return
 
     const stage = stageMap[pendingCredit.stageId]
@@ -201,9 +223,9 @@ export default function Workspace() {
     setPendingCredit(null)
 
     await runGeneration(nextAction)
-  }
+  }, [pendingCredit, stageMap, runGeneration])
 
-  async function proceedThroughReviewGate() {
+  const proceedThroughReviewGate = useCallback(async () => {
     if (!pendingReview) return
 
     const stage = stageMap[pendingReview.stageId]
@@ -219,24 +241,9 @@ export default function Workspace() {
     } catch {
       setError("Could not acknowledge the review gate.")
     }
-  }
+  }, [pendingReview, stageMap, setStage, runGeneration])
 
-  async function runGeneration(action: "generate" | "regenerate") {
-    setError(null)
-    const result = await startStream(action)
-    if (!result) return
-
-    setStage(result.stage)
-    if (result.evalResult) {
-      setEvalResults((existing) => ({
-        ...existing,
-        [result.stage.id]: result.evalResult,
-      }))
-    }
-    await refreshWorkspace()
-  }
-
-  async function runRefine() {
+  const runRefine = useCallback(async () => {
     if (!activeStage || !selection || !refineInstruction.trim()) {
       setError("Add an instruction before refining.")
       return
@@ -255,17 +262,20 @@ export default function Workspace() {
     } catch {
       setError("Refine failed. Check your selection and try again.")
     }
-  }
+  }, [activeStage, selection, refineInstruction])
 
-  async function acceptDiff(proposed: string) {
-    if (!activeStage) return
-    const updatedStage = await acceptStageDiff(activeStage.id, proposed)
-    setStage(updatedStage)
-    setDiffResult(null)
-    setLargeSelectionWarning(false)
-  }
+  const acceptDiff = useCallback(
+    async (proposed: string) => {
+      if (!activeStage) return
+      const updatedStage = await acceptStageDiff(activeStage.id, proposed)
+      setStage(updatedStage)
+      setDiffResult(null)
+      setLargeSelectionWarning(false)
+    },
+    [activeStage, setStage],
+  )
 
-  async function rejectDiff() {
+  const rejectDiff = useCallback(async () => {
     if (!activeStage) {
       setDiffResult(null)
       return
@@ -274,9 +284,9 @@ export default function Workspace() {
     await rejectStageDiff(activeStage.id)
     setDiffResult(null)
     setLargeSelectionWarning(false)
-  }
+  }, [activeStage])
 
-  async function handleFinalise() {
+  const handleFinalise = useCallback(async () => {
     if (!activeStage) return
     try {
       const updatedStage = await finaliseStage(activeStage.id)
@@ -285,19 +295,22 @@ export default function Workspace() {
     } catch {
       setError("Only draft stages can be finalised.")
     }
-  }
+  }, [activeStage, setStage, refreshWorkspace])
 
-  async function handleContentChange(content: string) {
-    if (!activeStage || isStreaming) return
-    try {
-      const updatedStage = await updateStageContent(activeStage.id, content)
-      setStage(updatedStage)
-    } catch {
-      setError("Could not save the latest edit.")
-    }
-  }
+  const handleContentChange = useCallback(
+    async (content: string) => {
+      if (!activeStage || isStreaming) return
+      try {
+        const updatedStage = await updateStageContent(activeStage.id, content)
+        setStage(updatedStage)
+      } catch {
+        setError("Could not save the latest edit.")
+      }
+    },
+    [activeStage, isStreaming, setStage],
+  )
 
-  async function handleExport() {
+  const handleExport = useCallback(async () => {
     if (!id || !allFinalised || isExporting) return
 
     setIsExporting(true)
@@ -314,7 +327,7 @@ export default function Workspace() {
     } finally {
       setIsExporting(false)
     }
-  }
+  }, [id, allFinalised, isExporting])
 
   if (isLoading) {
     return (
