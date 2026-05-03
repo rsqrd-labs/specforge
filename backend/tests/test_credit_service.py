@@ -4,6 +4,7 @@ from typing import Any
 from uuid import uuid4
 
 import pytest
+from sqlalchemy.exc import IntegrityError
 
 from models import CreditLedger
 from services.credit_service import CreditService, InsufficientCreditsError
@@ -29,23 +30,21 @@ class _FakeDB:
         self,
         ledger: list[CreditLedger] | None = None,
         entity_lookup: CreditLedger | None = None,
-        existing_refund: CreditLedger | None = None,
+        raise_integrity_error_on_flush: bool = False,
     ) -> None:
         self._ledger: list[CreditLedger] = ledger or []
         self._entity_lookup = entity_lookup
-        self._existing_refund = existing_refund
+        self._raise_integrity_error = raise_integrity_error_on_flush
         self._execute_count = 0
         self.added: list[Any] = []
+        self.rolled_back = False
 
     async def execute(self, statement: Any) -> Any:
         call = self._execute_count
         self._execute_count += 1
-        # First call in refund() looks up the original deduction by ID
+        # refund() first looks up the original deduction by ID
         if call == 0 and self._entity_lookup is not None:
             return _EntityResult(self._entity_lookup)
-        # Second call in refund() checks for an existing refund (idempotency)
-        if call == 1 and self._entity_lookup is not None:
-            return _EntityResult(self._existing_refund)
         return _LedgerQueryResult(list(self._ledger))
 
     def add(self, instance: Any) -> None:
@@ -56,7 +55,11 @@ class _FakeDB:
         self.added.append(instance)
 
     async def flush(self) -> None:
-        pass
+        if self._raise_integrity_error:
+            raise IntegrityError(None, None, Exception("duplicate"))
+
+    async def rollback(self) -> None:
+        self.rolled_back = True
 
     async def commit(self) -> None:
         pass
@@ -159,15 +162,26 @@ async def test_refund_inserts_positive_entry(svc: CreditService) -> None:
 async def test_refund_is_idempotent(svc: CreditService) -> None:
     user_id = uuid4()
     deduction = CreditLedger(id=uuid4(), user_id=user_id, amount=-10, reason="gen")
-    existing = CreditLedger(
-        id=uuid4(), user_id=user_id, amount=10, reason=f"refund:{deduction.id}"
-    )
-    db = _FakeDB(entity_lookup=deduction, existing_refund=existing)
+    # Simulate DB enforcing the unique constraint by raising IntegrityError on flush
+    db = _FakeDB(entity_lookup=deduction, raise_integrity_error_on_flush=True)
 
+    # Must not raise — duplicate refund is silently swallowed
     await svc.refund(db, deduction.id)
 
-    # No new entry added — refund was already recorded
-    assert not db.added
+    assert db.rolled_back
+
+
+@pytest.mark.asyncio
+async def test_refund_is_race_safe_via_integrity_error(svc: CreditService) -> None:
+    user_id = uuid4()
+    deduction = CreditLedger(id=uuid4(), user_id=user_id, amount=-10, reason="gen")
+    db = _FakeDB(entity_lookup=deduction, raise_integrity_error_on_flush=True)
+
+    # Concurrent call: db.flush() raises IntegrityError — must return silently
+    await svc.refund(db, deduction.id)
+
+    # db.rollback() must have been called to clear the failed transaction
+    assert db.rolled_back
 
 
 @pytest.mark.asyncio

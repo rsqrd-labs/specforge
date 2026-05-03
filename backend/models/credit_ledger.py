@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Any
 from uuid import UUID as PythonUUID
 
-from sqlalchemy import ForeignKey, Integer, Text, func, text
+from sqlalchemy import ForeignKey, Integer, Text, UniqueConstraint, func, text
 from sqlalchemy.dialects.postgresql import JSONB, TIMESTAMP, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -16,6 +16,9 @@ if TYPE_CHECKING:
 
 class CreditLedger(Base):
     __tablename__ = "credit_ledger"
+    __table_args__ = (
+        UniqueConstraint("user_id", "reason", name="uq_credit_ledger_user_reason"),
+    )
 
     id: Mapped[PythonUUID] = mapped_column(
         UUID(as_uuid=True),

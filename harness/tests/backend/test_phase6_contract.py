@@ -252,6 +252,9 @@ def test_credit_service_refund_removes_pre_check_select() -> None:
     After adding the DB-level constraint, the application-level pre-check SELECT
     in refund() is redundant overhead and must be removed.
     The constraint is the sole guard; the app catches IntegrityError.
+    The remaining SELECT in refund() is for looking up the original deduction entry
+    by ID — that is still necessary. The removed pre-check was a second SELECT that
+    queried for an existing refund row by (user_id, reason).
     """
     source = read_backend_file("services", "credit_service.py")
 
@@ -261,14 +264,15 @@ def test_credit_service_refund_removes_pre_check_select() -> None:
     next_method = source.find("\n    async def ", refund_start + 1)
     refund_body = source[refund_start:next_method] if next_method != -1 else source[refund_start:]
 
-    # The pre-check pattern: a SELECT to look for existing refund before inserting
-    has_pre_check_select = (
-        ("select(" in refund_body or "execute(" in refund_body)
-        and ("existing" in refund_body or "idempotency" in refund_body or "scalar_one_or_none" in refund_body)
-    )
-    assert not has_pre_check_select, (
-        "credit_service.refund() still contains the pre-check SELECT. "
-        "Remove it — the UniqueConstraint + IntegrityError catch is the sole guard. "
+    # The pre-check pattern: a SELECT that looks for existing refund rows by reason field.
+    # This is distinguishable from the necessary original-entry lookup (by ID).
+    # After T-088, there must be only ONE execute() call (to find the original by ID),
+    # not a second one searching by reason/existing.
+    execute_count = refund_body.count("await db.execute(")
+    assert execute_count <= 1, (
+        f"credit_service.refund() contains {execute_count} db.execute() calls. "
+        "The pre-check SELECT (second execute) must be removed. "
+        "The UniqueConstraint + IntegrityError catch is the sole guard. "
         "See T-088."
     )
 
