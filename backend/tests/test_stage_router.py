@@ -522,3 +522,53 @@ async def test_refine_rejects_injection_in_selected_text(app) -> None:
 
     assert response.status_code == 400
     assert response.json()["detail"]["error"] == "security_check_failed"
+
+
+@pytest.mark.asyncio
+async def test_generate_internal_error_does_not_expose_detail(app) -> None:
+    stage = _make_stage()
+
+    async def _fake_db():
+        yield _FakeDB(stage)
+
+    app.dependency_overrides[get_db] = _fake_db
+
+    async def raising_generate(*args, **kwargs) -> AsyncGenerator[str, None]:
+        raise RuntimeError("secret db://user:pass@host/db detail")
+        yield  # make it a generator
+
+    with (
+        patch(
+            "routers.stage.stage_manager.generate",
+            side_effect=raising_generate,
+        ),
+        patch(
+            "services.credit_service.credit_service.get_balance",
+            new_callable=AsyncMock,
+            return_value=100,
+        ),
+    ):
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            response = await client.post(f"/stages/{stage.id}/generate")
+
+    assert response.status_code == 200
+    body = response.text
+    assert "internal_error" in body
+    assert "detail" not in response.json() if response.headers.get(
+        "content-type", ""
+    ).startswith("application/json") else True
+    # The raw exception message must not appear in the SSE stream
+    assert "secret db://" not in body
+    assert "pass@host" not in body
+    # Verify the event only has the error key, no detail
+    import json as _json
+
+    for line in body.splitlines():
+        if line.startswith("data:"):
+            data = _json.loads(line[5:].strip())
+            if data.get("error") == "internal_error":
+                assert "detail" not in data, (
+                    "catch-all error event must not include 'detail' key"
+                )

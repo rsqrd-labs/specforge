@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import AsyncGenerator
 from datetime import UTC, datetime
 from uuid import UUID
@@ -33,6 +34,7 @@ from services.pipeline.stage_manager import (
 )
 from services.security.sanitizer import sanitize_text
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/stages", tags=["stages"])
 
 
@@ -61,8 +63,11 @@ async def _stream_stage(
     except ProviderError as exc:
         payload = json.dumps({"error": "provider_error", "detail": str(exc)})
         yield f"data: {payload}\n\n"
-    except Exception as exc:
-        payload = json.dumps({"error": "internal_error", "detail": str(exc)})
+    except Exception:
+        logger.exception(
+            "stage_stream_internal_error", extra={"stage_id": str(stage_id)}
+        )
+        payload = json.dumps({"error": "internal_error"})
         yield f"data: {payload}\n\n"
 
 
