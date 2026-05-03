@@ -112,7 +112,10 @@ async def refine_stage(
 ) -> DiffResponse:
     await _load_stage(stage_id, db, user.id)
     sanitized_request = request.model_copy(
-        update={"instruction": sanitize_text(request.instruction)}
+        update={
+            "instruction": sanitize_text(request.instruction),
+            "selected_text": sanitize_text(request.selected_text),
+        }
     )
     try:
         return await stage_manager.refine(stage_id, sanitized_request, user, db)
