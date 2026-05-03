@@ -58,15 +58,11 @@ class WorkspaceService:
     ) -> Workspace:
         result = await db.execute(
             select(Workspace)
-            .where(Workspace.id == workspace_id)
+            .where(Workspace.id == workspace_id, Workspace.user_id == user_id)
             .options(selectinload(Workspace.stages))
         )
         workspace = result.scalar_one_or_none()
         if workspace is None:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND, detail="Workspace not found"
-            )
-        if workspace.user_id != user_id:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND, detail="Workspace not found"
             )

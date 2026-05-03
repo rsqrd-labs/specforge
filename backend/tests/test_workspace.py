@@ -68,7 +68,18 @@ class _FakeDB:
         self._refreshed: list[Any] = []
 
     async def execute(self, statement: Any) -> "_FakeScalars":
-        return _FakeScalars(self._workspace)
+        workspace = self._workspace
+        # Simulate SQL-level user_id filtering (mirrors T-082 WHERE id AND user_id fix)
+        if workspace is not None and hasattr(statement, "_where_criteria"):
+            for criterion in statement._where_criteria:
+                try:
+                    if getattr(criterion.left, "key", None) == "user_id":
+                        if workspace.user_id != criterion.right.value:
+                            workspace = None
+                        break
+                except AttributeError:
+                    pass
+        return _FakeScalars(workspace)
 
     def add(self, instance: Any) -> None:
         if isinstance(instance, (Workspace, Stage)):
