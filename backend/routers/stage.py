@@ -48,15 +48,22 @@ async def _stream_stage(
             else:
                 yield f"data: {json.dumps({'token': token})}\n\n"
     except StageDependencyError as exc:
-        yield f"data: {json.dumps({'error': 'dependency_not_finalised', 'detail': str(exc)})}\n\n"
+        payload = json.dumps({"error": "dependency_not_finalised", "detail": str(exc)})
+        yield f"data: {payload}\n\n"
     except RateLimitError as exc:
-        yield f"data: {json.dumps({'error': 'rate_limit_exceeded', 'retry_after': exc.retry_after})}\n\n"
+        payload = json.dumps(
+            {"error": "rate_limit_exceeded", "retry_after": exc.retry_after}
+        )
+        yield f"data: {payload}\n\n"
     except SecurityError as exc:
-        yield f"data: {json.dumps({'error': 'security_check_failed', 'detail': str(exc)})}\n\n"
+        payload = json.dumps({"error": "security_check_failed", "detail": str(exc)})
+        yield f"data: {payload}\n\n"
     except ProviderError as exc:
-        yield f"data: {json.dumps({'error': 'provider_error', 'detail': str(exc)})}\n\n"
+        payload = json.dumps({"error": "provider_error", "detail": str(exc)})
+        yield f"data: {payload}\n\n"
     except Exception as exc:
-        yield f"data: {json.dumps({'error': 'internal_error', 'detail': str(exc)})}\n\n"
+        payload = json.dumps({"error": "internal_error", "detail": str(exc)})
+        yield f"data: {payload}\n\n"
 
 
 async def _load_stage(stage_id: UUID, db: AsyncSession, user_id: UUID) -> Stage:
@@ -89,7 +96,9 @@ async def generate_stage(
     _: None = Depends(require_credits(10)),
 ) -> StreamingResponse:
     await _load_stage(stage_id, db, user.id)
-    return StreamingResponse(_stream_stage(stage_id, user, db), media_type="text/event-stream")
+    return StreamingResponse(
+        _stream_stage(stage_id, user, db), media_type="text/event-stream"
+    )
 
 
 @router.post("/{stage_id}/regenerate")
@@ -100,7 +109,9 @@ async def regenerate_stage(
     _: None = Depends(require_credits(10)),
 ) -> StreamingResponse:
     await _load_stage(stage_id, db, user.id)
-    return StreamingResponse(_stream_stage(stage_id, user, db), media_type="text/event-stream")
+    return StreamingResponse(
+        _stream_stage(stage_id, user, db), media_type="text/event-stream"
+    )
 
 
 @router.post("/{stage_id}/refine", response_model=DiffResponse)

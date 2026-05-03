@@ -83,7 +83,9 @@ class AuthService:
         await self.redis.set(f"{OAUTH_STATE_PREFIX}{state}", "1", ex=OAUTH_STATE_TTL)
         return authorization_url
 
-    async def handle_callback(self, code: str, state: str, db: AsyncSession) -> tuple[str, str]:
+    async def handle_callback(
+        self, code: str, state: str, db: AsyncSession
+    ) -> tuple[str, str]:
         state_key = f"{OAUTH_STATE_PREFIX}{state}"
         if not await self.redis.get(state_key):
             raise AuthError("Invalid or expired OAuth state")
@@ -272,9 +274,7 @@ auth_service = AuthService()
 def decode_access_token_claims(token: str) -> dict[str, Any] | None:
     """Verify token signature and return claims, or None if invalid/expired."""
     try:
-        claims = jwt.decode(
-            token, settings.jwt_public_key, algorithms=["RS256"]
-        )
+        claims = jwt.decode(token, settings.jwt_public_key, algorithms=["RS256"])
         if claims.get("type") != "access":
             return None
         return claims

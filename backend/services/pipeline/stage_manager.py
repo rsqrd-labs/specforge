@@ -33,6 +33,8 @@ STAGE_ORDER = ["spec", "plan", "harness", "tasks"]
 def _log_eval_error(task: asyncio.Task) -> None:
     if not task.cancelled() and (exc := task.exception()):
         logger.error("eval_background_failed", extra={"error": str(exc)})
+
+
 STAGE_DEPENDENCIES: dict[str, list[str]] = {
     "spec": [],
     "plan": ["spec"],

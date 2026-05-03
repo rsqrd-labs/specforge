@@ -86,7 +86,9 @@ async def test_mutating_request_with_valid_auth_without_csrf_returns_403(
     monkeypatch.setattr(
         csrf_module,
         "decode_access_token_claims",
-        lambda t: {"sub": str(user.id), "type": "access"} if t == "valid-token" else None,
+        lambda t: (
+            {"sub": str(user.id), "type": "access"} if t == "valid-token" else None
+        ),
     )
     app = create_app(redis_client=_NoopRedis())
     app.dependency_overrides[get_db] = _fake_get_db
@@ -119,7 +121,9 @@ async def test_mutating_request_with_valid_csrf_reaches_route(
     monkeypatch.setattr(
         csrf_module,
         "decode_access_token_claims",
-        lambda t: {"sub": str(user.id), "type": "access"} if t == "valid-token" else None,
+        lambda t: (
+            {"sub": str(user.id), "type": "access"} if t == "valid-token" else None
+        ),
     )
     app = create_app(redis_client=_NoopRedis())
     app.dependency_overrides[get_db] = _fake_get_db

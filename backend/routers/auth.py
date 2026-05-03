@@ -42,7 +42,9 @@ async def google_callback(
     db: AsyncSession = Depends(get_db),
 ) -> dict:
     try:
-        access_token, refresh_token = await auth_service.handle_callback(code, state, db)
+        access_token, refresh_token = await auth_service.handle_callback(
+            code, state, db
+        )
     except AuthError as exc:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail=str(exc)) from exc
 

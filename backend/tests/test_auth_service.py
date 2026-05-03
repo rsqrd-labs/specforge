@@ -155,7 +155,9 @@ async def test_handle_callback_creates_new_user(signing_keys: tuple[str, str]) -
     # Pre-seed the OAuth state as the login flow would
     await redis.set("oauth:state:test-state", "1", ex=600)
 
-    access_token, refresh_token = await service.handle_callback("code", "test-state", db)  # type: ignore[arg-type]
+    access_token, refresh_token = await service.handle_callback(  # type: ignore[arg-type]
+        "code", "test-state", db
+    )
 
     assert access_token
     assert refresh_token
@@ -167,7 +169,9 @@ async def test_handle_callback_creates_new_user(signing_keys: tuple[str, str]) -
 
 
 @pytest.mark.asyncio
-async def test_handle_callback_rejects_missing_state(signing_keys: tuple[str, str]) -> None:
+async def test_handle_callback_rejects_missing_state(
+    signing_keys: tuple[str, str],
+) -> None:
     service = make_service(signing_keys)
     db = FakeDB()
     with pytest.raises(AuthError, match="OAuth state"):
@@ -175,7 +179,9 @@ async def test_handle_callback_rejects_missing_state(signing_keys: tuple[str, st
 
 
 @pytest.mark.asyncio
-async def test_handle_callback_rejects_replayed_state(signing_keys: tuple[str, str]) -> None:
+async def test_handle_callback_rejects_replayed_state(
+    signing_keys: tuple[str, str],
+) -> None:
     redis = FakeRedis()
     service = make_service(signing_keys, redis)
     db = FakeDB()
@@ -188,7 +194,9 @@ async def test_handle_callback_rejects_replayed_state(signing_keys: tuple[str, s
 
 
 @pytest.mark.asyncio
-async def test_get_google_auth_url_stores_state_in_redis(signing_keys: tuple[str, str]) -> None:
+async def test_get_google_auth_url_stores_state_in_redis(
+    signing_keys: tuple[str, str],
+) -> None:
     redis = FakeRedis()
     service = make_service(signing_keys, redis)
     url = await service.get_google_auth_url()

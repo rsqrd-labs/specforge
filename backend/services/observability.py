@@ -221,7 +221,8 @@ def setup_metrics(app: FastAPI) -> None:
 
     @app.get("/metrics", include_in_schema=False)
     async def metrics(request: Request) -> StarletteResponse:
-        token = (request.headers.get("Authorization") or "").removeprefix("Bearer ").strip()
+        auth_header = request.headers.get("Authorization") or ""
+        token = auth_header.removeprefix("Bearer ").strip()
         if settings.metrics_token:
             if token != settings.metrics_token:
                 return StarletteResponse("Unauthorized", status_code=401)
