@@ -3003,4 +3003,701 @@ In the refine stage handler (`routers/stage.py`), only `instruction` is passed t
 
 ---
 
-_tasks.md · SpecForge V1 · Version 1.3.0 · Updated 2026-05-02 with Phase 5 code review mitigation tasks T-067 through T-085_
+---
+
+## Phase 6 — Second-Pass Code Review Remediations
+
+> Issues identified in the post-mitigation second-pass review (2026-05-03). Every item is a confirmed defect or confirmed gap from that review — not hypothetical. Tasks are ordered by severity: blocking CI/correctness first, security/reliability second, quality/architecture last.
+
+---
+
+### T-086: Fix CI Lint Failures — Black Formatting and Ruff E501 Violations
+
+**Description:**
+The mitigation commits introduced formatting and line-length violations that break CI. `black --check .` reports 7 files would be reformatted; `ruff check .` reports 15 errors, the majority being E501 (line too long > 88 chars) in `routers/stage.py` and `routers/auth.py`. The most visible structural violation is a missing two-blank-line separator after `_log_eval_error()` in `stage_manager.py` (line 36), which black would insert. Because CI runs both checks on every push, these failures prevent merging.
+
+**Severity:** Blocking (CI failure)
+
+**Inputs:**
+- `backend/routers/stage.py` — SSE yield strings in `_stream_stage()` exceed 88 chars (lines 51, 53, 55, 92, 103)
+- `backend/routers/auth.py` — line 45 exceeds 88 chars
+- `backend/services/pipeline/stage_manager.py` — missing blank lines after `_log_eval_error` definition
+- All other files flagged by `black --check .`
+
+**Outputs:**
+- `black .` passes with zero changes
+- `ruff check .` passes with zero errors
+- `uv run pytest tests/ -q` still passes (lint-only changes, no logic)
+
+**Steps:**
+1. Run `uv run black .` from `backend/` to auto-format all 7 files.
+2. Fix the E501 violations in `routers/stage.py`: extract the long JSON payload dicts into local variables before the `yield` so each line fits within 88 characters. Example for `_stream_stage`:
+   ```python
+   except StageDependencyError as exc:
+       payload = json.dumps({"error": "dependency_not_finalised", "detail": str(exc)})
+       yield f"data: {payload}\n\n"
+   ```
+   Apply the same pattern to the `RateLimitError`, `SecurityError`, `ProviderError`, and `Exception` branches, and to the two long lines in `generate_stage` / `regenerate_stage`.
+3. Fix `routers/auth.py:45`: split the long assignment across two lines using a temporary variable.
+4. Re-run `uv run ruff check .` and confirm zero errors.
+5. Re-run `uv run black --check .` and confirm zero reformats.
+6. Run `uv run pytest tests/ -q` to confirm no regressions.
+
+**Acceptance Criteria:**
+- `uv run black --check .` exits 0.
+- `uv run ruff check .` exits 0.
+- `uv run pytest tests/ -q` passes (≥142 tests).
+
+**Finding:** Second-pass review — CI breakage from Phase 5 commits
+
+**Dependencies:** none
+
+---
+
+### T-087: Remove Raw Exception Detail from SSE Catch-All Error Event
+
+**Description:**
+The `_stream_stage()` shared helper in `routers/stage.py` includes a catch-all `except Exception as exc:` branch that yields `str(exc)` — the raw Python exception message — as the `detail` field in the SSE error event. This is an information-disclosure regression: DB connection strings, SQLAlchemy internals, ORM stack hints, and unexpected attribute errors can all appear verbatim in the browser. The SSE error payload should carry a fixed error code; real exception details belong in the server-side structured log.
+
+**Severity:** Security regression (information disclosure)
+
+**Inputs:**
+- `backend/routers/stage.py` — `_stream_stage()`, the `except Exception` branch (lines 58–59)
+- `backend/services/pipeline/stage_manager.py` — `logger` is already imported
+
+**Outputs:**
+- The catch-all branch yields `{"error": "internal_error"}` with no `detail` field
+- The exception is logged server-side with full context via `logger.exception()`
+- The `sseService.ts` `ErrorEvent` interface's `detail` field remains optional (no frontend changes needed beyond confirming the field is already optional)
+
+**Steps:**
+1. In `_stream_stage()`, replace:
+   ```python
+   except Exception as exc:
+       yield f"data: {json.dumps({'error': 'internal_error', 'detail': str(exc)})}\n\n"
+   ```
+   with:
+   ```python
+   except Exception:
+       logger.exception("stage_stream_internal_error", extra={"stage_id": str(stage_id)})
+       yield f"data: {json.dumps({'error': 'internal_error'})}\n\n"
+   ```
+2. Confirm that `logger` is already imported at module level in `routers/stage.py`. If not, add `import logging` and `logger = logging.getLogger(__name__)`.
+3. Confirm that `sseService.ts:18` declares `detail?: string` (already optional) — no frontend change needed.
+4. Add a test in `test_stage_router.py` that patches `stage_manager.generate` to raise a bare `RuntimeError`, triggers the generate endpoint, and asserts: (a) the SSE event contains `{"error": "internal_error"}` with no `detail` key, and (b) the error is not completely silent (confirm logger.exception was called via `caplog` or a mock).
+
+**Acceptance Criteria:**
+- `except Exception` branch in `_stream_stage()` does not include `str(exc)` in the yielded event.
+- A test confirms the `detail` key is absent from the catch-all error event.
+- `uv run pytest tests/test_stage_router.py -q` passes.
+
+**Finding:** Second-pass review — regression from T-074/T-085
+
+**Dependencies:** T-086 (lint must pass first so this commit doesn't re-introduce formatting issues)
+
+---
+
+### T-088: Add DB-Level Unique Constraint to Complete Double-Refund Protection
+
+**Description:**
+T-081 added an application-level idempotency check in `credit_service.refund()` that queries for an existing refund row before inserting. This check-then-act pattern has a race window: two concurrent `refund()` calls (e.g., the recovery service and a router exception handler firing simultaneously) can both pass the `SELECT` check before either `INSERT` commits, causing a double-credit. The fix must close this at the database level with a `UNIQUE` constraint and handle the resulting `IntegrityError` gracefully in the application layer.
+
+**Severity:** High (financial integrity — race condition in credit accounting)
+
+**Inputs:**
+- `backend/models/credit_ledger.py` — `CreditLedger` model
+- `backend/services/credit_service.py` — `refund()` method
+- `backend/migrations/versions/` — new migration needed
+
+**Outputs:**
+- `UNIQUE(user_id, reason)` constraint on the `credit_ledger` table
+- `refund()` wraps the insert in a `try/except IntegrityError` and returns silently on duplicate
+- Alembic migration `0003_credit_ledger_unique_refund.py`
+- Tests covering the race-safe path
+
+**Steps:**
+1. In `models/credit_ledger.py`, add a `UniqueConstraint` to `__table_args__`:
+   ```python
+   from sqlalchemy import UniqueConstraint
+   __table_args__ = (
+       UniqueConstraint("user_id", "reason", name="uq_credit_ledger_user_reason"),
+   )
+   ```
+2. Create `backend/migrations/versions/0003_credit_ledger_unique_refund.py`:
+   ```python
+   def upgrade() -> None:
+       op.create_unique_constraint(
+           "uq_credit_ledger_user_reason", "credit_ledger", ["user_id", "reason"]
+       )
+   def downgrade() -> None:
+       op.drop_constraint("uq_credit_ledger_user_reason", "credit_ledger")
+   ```
+3. In `credit_service.py`, wrap the insert in `refund()` with `IntegrityError` handling:
+   ```python
+   from sqlalchemy.exc import IntegrityError
+   
+   # Keep the existing SELECT-based pre-check (fast path for non-race case)
+   # Then:
+   try:
+       db.add(refund_entry)
+       await db.flush()
+   except IntegrityError:
+       await db.rollback()
+       return  # concurrent refund beat us; this call is a no-op
+   ```
+4. Update `_FakeDB` in `test_credit_service.py` to simulate `IntegrityError` on duplicate reason (add an `_existing_reasons: set` that raises on duplicate add). Write a new test `test_refund_is_race_safe_via_integrity_error` that calls `refund()` when `db.flush()` raises `IntegrityError` and asserts no entry is added and no exception propagates.
+5. Remove the now-redundant pre-check SELECT from `refund()` — the DB constraint makes it unnecessary overhead. The only guard needed is the `try/except IntegrityError`.
+6. Run `uv run pytest tests/test_credit_service.py -q`.
+
+**Acceptance Criteria:**
+- `credit_ledger` table has `UNIQUE(user_id, reason)` constraint in the migration.
+- `refund()` does not raise when `db.flush()` raises `IntegrityError`; it returns silently.
+- The pre-check SELECT is removed (the constraint is the sole guard).
+- `test_refund_is_idempotent` and `test_refund_is_race_safe_via_integrity_error` both pass.
+
+**Finding:** Second-pass review — I8 fix incomplete (no DB-level enforcement)
+
+**Dependencies:** none
+
+---
+
+### T-089: Fix Recovery Service Credit Heuristic — Store Deduction ID on Stage
+
+**Description:**
+`recovery_service.py` locates the credit deduction to refund by searching for ledger entries within a 60-second window of `stage.updated_at`. This heuristic misfires under clock drift, high DB load, or when a user has multiple concurrent stuck stages (the wrong entry gets refunded). The correct fix is to store the exact `credit_ledger_entry_id` on the `Stage` row at deduction time, making the recovery lookup exact and eliminating the window entirely.
+
+**Severity:** High (financial integrity — wrong refunds during recovery)
+
+**Inputs:**
+- `backend/models/stage.py` — `Stage` model
+- `backend/services/pipeline/stage_manager.py` — `generate()` method where deduction happens
+- `backend/services/pipeline/recovery_service.py` — `recover_stuck_stages()`
+- `backend/migrations/versions/` — new migration needed
+
+**Outputs:**
+- `Stage.deduction_ledger_id: UUID | None` nullable FK column
+- Alembic migration `0004_stage_deduction_ledger_id.py`
+- `stage_manager.generate()` sets `stage.deduction_ledger_id = deduction.id` before committing
+- `recovery_service.recover_stuck_stages()` uses `stage.deduction_ledger_id` directly
+- Existing recovery tests updated; new test for exact-ID path added
+
+**Steps:**
+1. In `models/stage.py`, add the nullable FK column:
+   ```python
+   from uuid import UUID as PythonUUID
+   deduction_ledger_id: Mapped[PythonUUID | None] = mapped_column(
+       UUID(as_uuid=True),
+       ForeignKey("credit_ledger.id", ondelete="SET NULL"),
+       nullable=True,
+   )
+   ```
+2. Create `migrations/versions/0004_stage_deduction_ledger_id.py`:
+   ```python
+   import sqlalchemy as sa
+   from sqlalchemy.dialects.postgresql import UUID
+
+   def upgrade() -> None:
+       op.add_column(
+           "stages",
+           sa.Column(
+               "deduction_ledger_id",
+               UUID(as_uuid=True),
+               sa.ForeignKey("credit_ledger.id", ondelete="SET NULL"),
+               nullable=True,
+           ),
+       )
+   def downgrade() -> None:
+       op.drop_column("stages", "deduction_ledger_id")
+   ```
+3. In `stage_manager.generate()`, immediately after `deduction = await credit_service.deduct(...)`, add:
+   ```python
+   stage.deduction_ledger_id = deduction.id
+   ```
+   (This is already within the `stage.status = "in_progress"` block that commits to DB.)
+4. In `recovery_service.recover_stuck_stages()`, replace the time-window ledger query:
+   ```python
+   # Remove the 60-second window query entirely.
+   # Use the stored ID instead:
+   if stage.deduction_ledger_id is not None:
+       await credit_service.refund(db, stage.deduction_ledger_id)
+       credits_refunded = 10  # standard generate cost; or look it up from the ledger entry
+   ```
+   To get the actual amount without an extra query, fetch the entry: call `credit_service.refund()` (which already loads the entry to get `original.amount`) — no change needed there since `refund()` already handles the amount lookup.
+5. Update `test_recovery_service.py`: remove tests that rely on the 60-second window heuristic; add `test_recovery_uses_stored_deduction_id` that creates a stuck stage with `deduction_ledger_id` set and asserts `credit_service.refund` is called with exactly that ID.
+6. Run `uv run pytest tests/test_recovery_service.py -q`.
+
+**Acceptance Criteria:**
+- `Stage.deduction_ledger_id` column exists in the model and migration.
+- `stage_manager.generate()` sets `stage.deduction_ledger_id` before the commit.
+- `recover_stuck_stages()` uses `stage.deduction_ledger_id` directly; no time-window query remains.
+- Recovery service test covers the exact-ID path and passes.
+
+**Finding:** Second-pass review — I7 not addressed in Phase 5
+
+**Dependencies:** T-088 (migration numbering; run after 0003)
+
+---
+
+### T-090: Make Observability Env Vars Optional in config.py
+
+**Description:**
+`config.py` declares `sentry_dsn`, `grafana_otlp_endpoint`, and `grafana_otlp_token` as required `str` fields with no defaults. Pydantic raises a `ValidationError` at application startup if any of these are absent from `.env`. This is incorrect: `observability.py` already guards all three with `_is_configured_url()` and skips initialisation when the values are empty or placeholder strings. The application must start correctly in environments where observability sinks are not configured (local development, basic staging).
+
+**Severity:** Important (deployment reliability — app crashes on fresh deploy without Sentry/OTLP)
+
+**Inputs:**
+- `backend/config.py` — `Settings` class
+- `backend/.env.example` — must reflect the new optional semantics
+- `backend/services/observability.py` — `_is_configured_url()` guard (confirm it handles empty string)
+
+**Outputs:**
+- Three fields have `str = ""` defaults in `Settings`
+- `.env.example` uses empty string as placeholder for these three vars
+- A startup test confirms the app creates successfully when all three are empty strings
+
+**Steps:**
+1. In `config.py`, change the three fields:
+   ```python
+   sentry_dsn: str = ""
+   grafana_otlp_endpoint: str = ""
+   grafana_otlp_token: str = ""
+   ```
+2. Verify that `observability.py:_is_configured_url("")` returns `False` (it checks `.startswith(("http://", "https://"))`; an empty string fails this check). Confirm via a quick unit test or inspection.
+3. Update `backend/.env.example`: change the placeholder values for these three keys to empty strings (remove the dummy URL placeholders that forced operators to replace them).
+4. Add a test `test_app_starts_without_observability_config` in `test_app_contract.py` (or `test_observability.py`) that calls `create_app()` with `SENTRY_DSN=""`, `GRAFANA_OTLP_ENDPOINT=""`, `GRAFANA_OTLP_TOKEN=""` and asserts no exception is raised.
+5. Run `uv run pytest tests/ -q`.
+
+**Acceptance Criteria:**
+- `Settings()` initialises successfully when the three vars are absent from `.env`.
+- `.env.example` shows these as optional (empty default).
+- Test confirms `create_app()` succeeds without observability env vars set.
+
+**Finding:** Second-pass review — M1 not addressed in Phase 5
+
+**Dependencies:** none
+
+---
+
+### T-091: Eliminate Frontend Eval Polling — Deliver via Follow-On SSE Event
+
+**Description:**
+`useStream.ts` calls `pollEval()` after every generation: up to 6 attempts × 5 seconds = 30 seconds of polling per generation. The polling drives unnecessary DB queries (600/minute at 100 concurrent users) and couples the frontend to a server-side async timing detail it cannot know. The correct fix is to have the backend emit a second SSE `eval` event once the background eval task resolves, then have the frontend consume it directly. No polling of any kind remains.
+
+**Severity:** Important (scalability + correctness — frontend timing is non-deterministic)
+
+**Inputs:**
+- `backend/services/evals/online_eval.py` — `run_eval_background()` and `run_eval()`
+- `backend/services/pipeline/stage_manager.py` — `generate()`, `_log_eval_error()`
+- `backend/routers/stage.py` — `_stream_stage()`
+- `frontend/src/services/sseService.ts` — event type definitions
+- `frontend/src/hooks/useStream.ts` — `pollEval()` and stream result handling
+
+**Outputs:**
+- `run_eval_background()` returns `EvalResult | None` (currently returns `None` implicitly)
+- `stage_manager.generate()` emits a second `{"eval": {...}}` SSE event after the done event once the eval task resolves (with a 30-second timeout guard)
+- `sseService.ts` parses and forwards the `eval` event type
+- `useStream.ts` removes `pollEval()` entirely; the `evalResult` in `StreamResult` is populated from the SSE eval event
+- Tests confirm the eval event is emitted and parsed
+
+**Steps:**
+1. In `online_eval.py`, change `run_eval_background` to return the `EvalResult | None` produced by `run_eval()`. Currently it returns nothing; add `return result` at the end of the try block (already calls `run_eval()` and stores `result`).
+2. In `stage_manager.generate()`, capture the task result after yielding `done`:
+   ```python
+   eval_task = asyncio.create_task(
+       run_eval_background(version_id, stage.type, accumulated, spec_content,
+                           workspace.provider, JUDGE_MODELS[workspace.provider])
+   )
+   eval_task.add_done_callback(_log_eval_error)
+   yield f'{{"done": true, "stage_id": "{stage_id}"}}'
+
+   # Await eval with a 30-second hard timeout; emit result as a second event
+   try:
+       eval_result = await asyncio.wait_for(asyncio.shield(eval_task), timeout=30.0)
+       if eval_result is not None:
+           yield f"data: {json.dumps({'eval': _eval_to_dict(eval_result)})}\n\n"
+   except (asyncio.TimeoutError, Exception):
+       pass  # Eval timeout or failure — client just won't get the badge update
+   ```
+   Define `_eval_to_dict(result: EvalResult) -> dict` as a module-level helper that serialises the eval fields.
+3. In `sseService.ts`, add the `eval` event type to `SSEPayload`:
+   ```typescript
+   interface EvalEvent {
+     eval: EvalResult
+   }
+   type SSEPayload = DoneEvent | TokenEvent | ErrorEvent | EvalEvent
+   ```
+   In the payload dispatch loop, add:
+   ```typescript
+   if ("eval" in data) {
+     onEval(data.eval)
+     return
+   }
+   ```
+   Update `createSSEConnection` to accept an `onEval: (eval: EvalResult) => void` callback. Pass a no-op default so existing call sites are unaffected.
+4. In `useStream.ts`:
+   - Remove the `pollEval` function entirely.
+   - In `createSSEConnection(...)`, pass an `onEval` callback that stores the eval result in a local `ref` that is resolved into `StreamResult`.
+   - Update `StreamResult` population to use the eval from the SSE event (or `null` if the 30s timeout expired).
+5. Add a test in `test_stage_router.py` (or a new `test_stage_streaming.py`) that asserts: when `run_eval_background` resolves within timeout, the SSE stream contains a `{"eval": {...}}` event after the `done` event. Assert that the stream contains no polling-dependent behaviour.
+6. Run `pnpm tsc` and `pnpm test` in `frontend/`; run `uv run pytest tests/ -q` in `backend/`.
+
+**Acceptance Criteria:**
+- `pollEval` function does not exist in `useStream.ts`.
+- The backend SSE stream emits an `eval` event after `done` when the eval task resolves within 30 seconds.
+- `pnpm tsc` passes; `pnpm test` passes.
+- `uv run pytest tests/ -q` passes.
+
+**Finding:** Second-pass review — I6 not addressed in Phase 5
+
+**Dependencies:** none
+
+---
+
+### T-092: Add Exponential Backoff Retry to SSE Connection
+
+**Description:**
+Any transient network error (WiFi drop, proxy timeout, brief server restart) in `sseService.ts` immediately calls `onError()` and terminates the generation stream, forcing the user to start over and spend another 10 credits. The service should transparently retry up to 3 times with exponential backoff (1 s, 2 s, 4 s) before surfacing the error. Retries apply only to network/transport errors, not to application-level error events (`{"error": ...}`) or intentional cancellations.
+
+**Severity:** Important (UX reliability + credit integrity — users lose credits on transient failures)
+
+**Inputs:**
+- `frontend/src/services/sseService.ts` — `connect()` function and `createSSEConnection` signature
+
+**Outputs:**
+- On transport failure (network error or non-200 HTTP), `connect()` retries up to 3 times before calling `onError()`
+- Backoff delays: attempt 1 → 1 000 ms, attempt 2 → 2 000 ms, attempt 3 → 4 000 ms
+- Application-level errors (server emits `{"error": "..."}` in the SSE stream) are not retried — they propagate immediately to `onError()`
+- Cancellation via `close()` stops retry attempts immediately
+- Retry attempt count is visible in a structured log at `console.warn` level
+
+**Steps:**
+1. Extract the `connect()` body into an inner `attempt(tryNumber: number)` function. In the outer `connect()`, implement a loop:
+   ```typescript
+   const MAX_RETRIES = 3
+   const BACKOFF_MS = [1000, 2000, 4000]
+
+   async function connect() {
+     for (let attempt = 0; attempt <= MAX_RETRIES; attempt += 1) {
+       if (closed) return
+       const succeeded = await tryConnect()
+       if (succeeded || closed) return
+       if (attempt < MAX_RETRIES) {
+         const delay = BACKOFF_MS[attempt] ?? 4000
+         console.warn(`SSE retry ${attempt + 1}/${MAX_RETRIES} in ${delay}ms`)
+         await new Promise((resolve) => window.setTimeout(resolve, delay))
+       } else {
+         onError(lastError ?? new Error("Stream failed after retries"))
+       }
+     }
+   }
+   ```
+   `tryConnect()` returns `true` if the stream completed normally (done or application error event), `false` on transport failure. It sets a `lastError` variable on transport failure.
+2. Application-level error events (`"error" in data`) still call `onError()` and return `true` from `tryConnect()` (they are not retried — the server already handled the failure).
+3. `close()` sets `closed = true` and aborts any in-progress `AbortController`, which also cancels any pending `setTimeout` via the `closed` guard in the loop.
+4. Add a test in the frontend test suite that stubs `fetch` to fail twice then succeed, and asserts: (a) `onError` is not called, (b) `onDone` is called, (c) `console.warn` was called twice. Also test that a third failure calls `onError`.
+
+**Acceptance Criteria:**
+- Transient network errors cause silent retry with backoff; `onError` is not called on the first failure.
+- After 3 consecutive failures, `onError` is called once.
+- Application-level `{"error": ...}` events immediately call `onError` without retrying.
+- `close()` during a retry delay stops further attempts immediately.
+- `pnpm tsc` and `pnpm test` pass.
+
+**Finding:** Second-pass review — I12 not addressed in Phase 5
+
+**Dependencies:** none
+
+---
+
+### T-093: Add Focus Trap and ARIA Semantics to All Three Modals
+
+**Description:**
+`CreditConfirmModal`, `HumanReviewGate`, and `CreateWorkspaceModal` render as floating overlays with no `role="dialog"`, no `aria-modal="true"`, no `aria-labelledby`, and no focus trap. Keyboard-only users can Tab past the overlay backdrop into the inert background content. Screen readers cannot identify the modal boundary. All three modals must be made fully accessible without third-party dependencies: use a native focus-trap implementation via `useEffect` and `keydown` event handling.
+
+**Severity:** Important (accessibility — keyboard users cannot safely use core product flows)
+
+**Inputs:**
+- `frontend/src/components/workspace/CreditConfirmModal.tsx`
+- `frontend/src/components/workspace/HumanReviewGate.tsx`
+- `frontend/src/components/dashboard/CreateWorkspaceModal.tsx`
+
+**Outputs:**
+- A shared `useFocusTrap(ref, onClose)` hook in `frontend/src/hooks/useFocusTrap.ts`
+- All three modals apply the hook, add `role="dialog"`, `aria-modal="true"`, and `aria-labelledby` pointing to their `<h2>`
+- Focus moves to the first focusable element on mount; Escape key calls the close handler; Tab cycles within the dialog
+
+**Steps:**
+1. Create `frontend/src/hooks/useFocusTrap.ts`:
+   ```typescript
+   import { useEffect } from "react"
+
+   const FOCUSABLE = [
+     'button:not([disabled])',
+     'input:not([disabled])',
+     'select:not([disabled])',
+     'textarea:not([disabled])',
+     '[tabindex]:not([tabindex="-1"])',
+     'a[href]',
+   ].join(", ")
+
+   export function useFocusTrap(
+     ref: React.RefObject<HTMLElement | null>,
+     onClose: () => void,
+   ) {
+     useEffect(() => {
+       const el = ref.current
+       if (!el) return
+       const focusable = Array.from(el.querySelectorAll<HTMLElement>(FOCUSABLE))
+       focusable[0]?.focus()
+
+       function handleKeyDown(event: KeyboardEvent) {
+         if (event.key === "Escape") {
+           onClose()
+           return
+         }
+         if (event.key !== "Tab") return
+         if (focusable.length === 0) { event.preventDefault(); return }
+         const first = focusable[0]
+         const last = focusable[focusable.length - 1]
+         if (event.shiftKey) {
+           if (document.activeElement === first) {
+             event.preventDefault()
+             last.focus()
+           }
+         } else {
+           if (document.activeElement === last) {
+             event.preventDefault()
+             first.focus()
+           }
+         }
+       }
+
+       el.addEventListener("keydown", handleKeyDown)
+       return () => el.removeEventListener("keydown", handleKeyDown)
+     }, [ref, onClose])
+   }
+   ```
+2. In `CreditConfirmModal.tsx`:
+   - Add `import { useRef } from "react"` and `import { useFocusTrap } from "../../hooks/useFocusTrap"`.
+   - Create `const dialogRef = useRef<HTMLDivElement>(null)`.
+   - Call `useFocusTrap(dialogRef, onCancel)`.
+   - Add to the inner `<div>`: `ref={dialogRef}`, `role="dialog"`, `aria-modal="true"`, `aria-labelledby="credit-modal-title"`.
+   - Add `id="credit-modal-title"` to the `<h2>`.
+3. Apply the same pattern to `HumanReviewGate.tsx` (labelledby `"review-gate-title"`, close handler is `onClose`).
+4. Apply to `CreateWorkspaceModal.tsx` (labelledby `"create-workspace-title"`, close handler is whatever closes the modal).
+5. Write tests for `useFocusTrap`: render a dialog with 3 focusable buttons, assert Tab wraps from last to first, Shift+Tab wraps from first to last, Escape calls `onClose`.
+6. Run `pnpm tsc` and `pnpm test`.
+
+**Acceptance Criteria:**
+- All three modals have `role="dialog"`, `aria-modal="true"`, `aria-labelledby`.
+- `useFocusTrap` is the single implementation used by all three.
+- Focus is on the first focusable element on open; Tab cycles within; Escape calls the close handler.
+- No focus escapes to the background during Tab navigation.
+- `pnpm tsc` and `pnpm test` pass.
+
+**Finding:** Second-pass review — I13 not addressed in Phase 5
+
+**Dependencies:** none
+
+---
+
+### T-094: Eliminate WorkspaceService._load() Footgun
+
+**Description:**
+`workspace_service.py` has two workspace-loading paths: `get(workspace_id, user_id, db)` which correctly filters by both `id` and `user_id` in SQL (fixed in T-082), and `_load(workspace_id, db)` which queries by `id` alone without any ownership check. `_load()` is currently called only by `create()` to return the freshly-created workspace — a safe use. But the existence of a user_id-free query path on the service class is a footgun: any future code that reaches for `_load()` instead of `get()` silently bypasses the security fix. Remove `_load()` by inlining its query into `create()`.
+
+**Severity:** Code quality / security posture (defensive: eliminate the footgun before it is misused)
+
+**Inputs:**
+- `backend/services/workspace_service.py` — `create()` and `_load()`
+- `backend/tests/test_workspace.py` — confirm no tests reference `_load()` directly
+
+**Outputs:**
+- `_load()` method is deleted
+- `create()` loads the workspace inline after insert, without a separate helper
+- All existing workspace tests pass
+
+**Steps:**
+1. In `create()`, replace `return await self._load(workspace.id, db)` with an inline load:
+   ```python
+   result = await db.execute(
+       select(Workspace)
+       .where(Workspace.id == workspace.id)
+       .options(selectinload(Workspace.stages))
+   )
+   return result.scalar_one()
+   ```
+   This is identical to what `_load()` did, but the code is now co-located with its only caller and the method no longer exists as a callable footgun.
+2. Delete the `_load()` method entirely.
+3. Run `grep -rn "_load\b" backend/` to confirm no remaining references to the deleted method.
+4. Run `uv run pytest tests/test_workspace.py -q` to confirm all tests pass.
+
+**Acceptance Criteria:**
+- `_load()` does not exist in `workspace_service.py`.
+- `create()` returns a correctly loaded workspace with stages.
+- `grep -n "_load" backend/services/workspace_service.py` returns no matches.
+- All workspace tests pass.
+
+**Finding:** Second-pass review — regression footgun introduced by T-082
+
+**Dependencies:** none
+
+---
+
+### T-095: Eliminate Double RS256 Decode per Request
+
+**Description:**
+Every authenticated request currently performs two full RS256 JWT signature verifications: once in `RateLimitMiddleware._extract_user_id()` and again in `get_current_user()`. RS256 involves asymmetric key operations and is measurably slower than HMAC under load. The fix is to store the verified claims in `request.state` when the rate limiter first decodes them, and have the auth dependency consume those cached claims instead of re-decoding.
+
+**Severity:** Code quality / performance (eliminates redundant cryptographic work on every request)
+
+**Inputs:**
+- `backend/middleware/rate_limit.py` — `_extract_user_id()` and `dispatch()`
+- `backend/middleware/auth.py` — `get_current_user()`
+- `backend/middleware/csrf.py` — `_session_id_from_authorization()` (also decodes the token)
+
+**Outputs:**
+- `RateLimitMiddleware.dispatch()` stores verified claims in `request.state.jwt_claims` after decoding
+- `CsrfMiddleware._session_id_from_authorization()` reads `request.state.jwt_claims` if present, skips its own decode
+- `get_current_user()` reads `request.state.jwt_claims` if present, skips its own decode
+- Each request performs exactly one RS256 decode regardless of middleware depth
+- Tests confirm each path (cache hit, cache miss) behaves correctly
+
+**Steps:**
+1. In `rate_limit.py`, update `_extract_user_id` to accept `request: Request` and return `tuple[str | None, dict | None]` (user_id and full claims):
+   ```python
+   def _extract_user_id(request: Request) -> tuple[str | None, dict | None]:
+       auth_header = request.headers.get("Authorization", "")
+       if not auth_header.startswith("Bearer "):
+           return None, None
+       token = auth_header.removeprefix("Bearer ").strip()
+       claims = decode_access_token_claims(token)
+       if claims is None:
+           return None, None
+       return claims.get("sub"), claims
+   ```
+   In `dispatch()`, after calling `_extract_user_id`:
+   ```python
+   user_id, claims = _extract_user_id(request)
+   if claims is not None:
+       request.state.jwt_claims = claims
+   ```
+2. In `csrf.py`, update `_session_id_from_authorization` to check `request.state` first:
+   ```python
+   def _session_id_from_authorization(request: Request) -> str | None:
+       claims = getattr(request.state, "jwt_claims", None)
+       if claims is None:
+           auth_header = request.headers.get("Authorization", "")
+           if not auth_header.startswith("Bearer "):
+               return None
+           token = auth_header.removeprefix("Bearer ").strip()
+           claims = decode_access_token_claims(token)
+       if claims is None:
+           return None
+       subject = claims.get("sub")
+       return subject if isinstance(subject, str) and subject else None
+   ```
+3. In `middleware/auth.py`, update `get_current_user` to accept `Request` and read from state:
+   ```python
+   from starlette.requests import Request
+
+   async def get_current_user(
+       request: Request,
+       token: str | None = Depends(oauth2_scheme),
+       db: AsyncSession = Depends(get_db),
+   ) -> User:
+       cached_claims = getattr(request.state, "jwt_claims", None)
+       if cached_claims is not None:
+           claims = cached_claims
+       else:
+           if not token:
+               raise _unauthorized()
+           try:
+               claims = auth_service.verify_access_token(token)
+           except (AuthError, KeyError, TypeError, ValueError) as exc:
+               raise _unauthorized() from exc
+       try:
+           user_id = UUID(claims["sub"])
+       except (KeyError, ValueError) as exc:
+           raise _unauthorized() from exc
+       user = await _load_user(db, user_id)
+       if user is None:
+           raise _unauthorized()
+       return user
+   ```
+4. Add tests to `test_auth_middleware.py`: (a) with a valid JWT, `get_current_user` with pre-populated `request.state.jwt_claims` does not call `verify_access_token`; (b) without cached claims, it falls back to full verification.
+5. Run `uv run pytest tests/ -q`.
+
+**Acceptance Criteria:**
+- A request with a valid JWT triggers exactly one `decode_access_token_claims` call across all middleware and dependencies (verify with a `patch` counter in tests).
+- `request.state.jwt_claims` is populated by `RateLimitMiddleware` for valid-token requests.
+- All existing auth, CSRF, and rate-limit tests pass.
+
+**Finding:** Second-pass review — code quality concern introduced by C9 fix (T-075)
+
+**Dependencies:** none
+
+---
+
+### T-096: Replace Fragile `_where_criteria` Introspection in Workspace Test Mock
+
+**Description:**
+The `_FakeDB.execute()` mock in `test_workspace.py` (added in T-082) introspects `statement._where_criteria` — a `_`-prefixed SQLAlchemy internal — to simulate SQL-level `user_id` filtering. While this works in SQLAlchemy 2.x and passes tests, it couples the test infrastructure to a private implementation detail of the ORM. A safer approach is to replace the implicit statement-parsing with an explicit `requesting_user_id` parameter on `_FakeDB` that the mock uses to decide whether to return the workspace. This makes the mock's filtering behaviour obvious from the test code, not inferred from ORM internals.
+
+**Severity:** Code quality / test maintainability
+
+**Inputs:**
+- `backend/tests/test_workspace.py` — `_FakeDB` class and all tests that instantiate it
+
+**Outputs:**
+- `_FakeDB.__init__` accepts an optional `requesting_user_id: UUID | None = None` parameter
+- `_FakeDB.execute()` applies a simple equality check (`workspace.user_id == requesting_user_id`) instead of parsing the SQLAlchemy statement
+- All existing tests updated to pass `requesting_user_id` where ownership filtering is the behaviour under test
+- No `_where_criteria` reference remains in the test file
+
+**Steps:**
+1. Update `_FakeDB.__init__`:
+   ```python
+   def __init__(
+       self,
+       workspace: Workspace | None = None,
+       requesting_user_id: UUID | None = None,
+   ) -> None:
+       self._workspace = workspace
+       self._requesting_user_id = requesting_user_id
+       ...
+   ```
+2. Update `_FakeDB.execute()`:
+   ```python
+   async def execute(self, statement: Any) -> "_FakeScalars":
+       workspace = self._workspace
+       if (
+           workspace is not None
+           and self._requesting_user_id is not None
+           and workspace.user_id != self._requesting_user_id
+       ):
+           workspace = None
+       return _FakeScalars(workspace)
+   ```
+3. Update each test that previously relied on the implicit WHERE-clause filtering:
+   - `test_get_workspace_wrong_owner_raises_404`: pass `requesting_user_id=uuid4()` (a different UUID from `workspace.user_id`).
+   - `test_get_workspace_correct_owner_returns_workspace`: pass `requesting_user_id=workspace.user_id`.
+   - `test_update_workspace_wrong_owner_raises_404`, `test_archive_workspace_wrong_owner_raises_404`: same pattern.
+   - Route-level tests that inject `_FakeDB` via `dependency_overrides`: pass `requesting_user_id=_USER_ID` (since the app fixture hardcodes `get_current_user` to return `_USER`). When the workspace belongs to a different user, `_USER_ID != workspace.user_id` and the mock returns `None`.
+4. Tests that do not test ownership (e.g., `test_create_workspace_adds_four_stages`, `test_list_for_user_returns_workspaces`) should not pass `requesting_user_id` — the parameter defaults to `None`, which means no filtering (existing behaviour for non-ownership tests).
+5. Run `grep -n "_where_criteria" backend/tests/test_workspace.py` and confirm zero matches.
+6. Run `uv run pytest tests/test_workspace.py -q` and confirm all 15 tests pass.
+
+**Acceptance Criteria:**
+- No `_where_criteria` reference exists in `test_workspace.py`.
+- `_FakeDB.execute()` does not parse the SQLAlchemy statement object in any way.
+- All 15 workspace tests pass.
+- The ownership-filtering behaviour is evident from reading the test instantiation (e.g., `_FakeDB(workspace=ws, requesting_user_id=other_user_id)`).
+
+**Finding:** Second-pass review — test fragility introduced by T-082
+
+**Dependencies:** none
+
+---
+
+_tasks.md · SpecForge V1 · Version 1.4.0 · Updated 2026-05-03 with Phase 6 second-pass review remediations T-086 through T-096_
