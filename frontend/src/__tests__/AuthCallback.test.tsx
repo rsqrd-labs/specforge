@@ -27,7 +27,9 @@ describe("AuthCallback", () => {
     })
 
     render(
-      <MemoryRouter initialEntries={["/auth/callback?code=google-code"]}>
+      <MemoryRouter
+        initialEntries={["/auth/callback?code=google-code&state=test-state"]}
+      >
         <Routes>
           <Route path="/auth/callback" element={<AuthCallback />} />
           <Route path="/dashboard" element={<div>Dashboard loaded</div>} />
@@ -36,7 +38,10 @@ describe("AuthCallback", () => {
     )
 
     await waitFor(() => {
-      expect(completeGoogleCallback).toHaveBeenCalledWith("google-code")
+      expect(completeGoogleCallback).toHaveBeenCalledWith(
+        "google-code",
+        "test-state",
+      )
     })
     expect(setAccessToken).toHaveBeenCalledWith("access-token")
     expect(await screen.findByText("Dashboard loaded")).toBeInTheDocument()
