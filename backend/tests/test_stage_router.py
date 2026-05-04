@@ -225,9 +225,9 @@ async def test_generate_emits_eval_event_after_done(app) -> None:
     assert '"eval"' in body
     assert "overall_score" in body
 
-    lines = [l for l in body.splitlines() if l.startswith("data:")]
-    done_idx = next(i for i, l in enumerate(lines) if '"done"' in l)
-    eval_idx = next(i for i, l in enumerate(lines) if '"eval"' in l)
+    lines = [ln for ln in body.splitlines() if ln.startswith("data:")]
+    done_idx = next(i for i, ln in enumerate(lines) if '"done"' in ln)
+    eval_idx = next(i for i, ln in enumerate(lines) if '"eval"' in ln)
     assert eval_idx > done_idx, "eval event must come after done event"
 
 

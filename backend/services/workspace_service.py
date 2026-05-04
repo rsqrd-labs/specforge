@@ -89,4 +89,5 @@ class WorkspaceService:
         workspace.status = "archived"
         await db.commit()
 
+
 workspace_service = WorkspaceService()

@@ -142,7 +142,7 @@ def test_sentry_before_send_redacts_event(monkeypatch) -> None:
 
 
 def test_app_starts_without_observability_config() -> None:
-    """create_app() must not raise when Sentry/OTLP env vars are absent (empty string)."""
+    """create_app() must not raise when Sentry/OTLP env vars are absent."""
     with (
         patch.object(observability.settings, "sentry_dsn", ""),
         patch.object(observability.settings, "grafana_otlp_endpoint", ""),

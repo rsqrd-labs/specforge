@@ -125,7 +125,7 @@ async def test_stages_stuck_9_minutes_not_recovered() -> None:
 
 @pytest.mark.asyncio
 async def test_recover_no_deduction_ledger_id_still_resets_stage() -> None:
-    """Stage is reset to draft even if deduction_ledger_id is None (credits not refunded)."""
+    """Stage is reset to draft even if deduction_ledger_id is None."""
     stage = _make_stuck_stage(15, deduction_ledger_id=None)
 
     db = _FakeDB([[stage]])
