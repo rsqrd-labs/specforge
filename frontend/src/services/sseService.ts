@@ -25,6 +25,9 @@ interface EvalEvent {
 
 type SSEPayload = DoneEvent | TokenEvent | ErrorEvent | EvalEvent
 
+const MAX_RETRIES = 3
+const BACKOFF_MS = [1000, 2000, 4000]
+
 function resolveUrl(url: string): string {
   if (/^https?:\/\//.test(url)) {
     return url
@@ -55,9 +58,15 @@ export function createSSEConnection(
   onEval: (result: EvalResult | null) => void = () => {},
 ): SSEControl {
   let closed = false
-  const controller = new AbortController()
+  let currentController = new AbortController()
+  let lastError: Error | undefined
 
-  async function connect() {
+  function close() {
+    closed = true
+    currentController.abort()
+  }
+
+  async function tryConnect(): Promise<boolean> {
     const token = getAccessToken()
     const headers = new Headers()
     if (token) {
@@ -68,23 +77,25 @@ export function createSSEConnection(
       }
     }
 
+    let doneReceived = false
+
     try {
       const response = await fetch(resolveUrl(url), {
         method: "POST",
         headers,
         credentials: "include",
-        signal: controller.signal,
+        signal: currentController.signal,
       })
 
       if (!response.ok) {
-        onError(new Error(`Stream request failed with ${response.status}`))
-        return
+        lastError = new Error(`Stream request failed with ${response.status}`)
+        return false
       }
 
       const reader = response.body?.getReader()
       if (!reader) {
-        onError(new Error("Stream response body is unavailable"))
-        return
+        lastError = new Error("Stream response body is unavailable")
+        return false
       }
 
       const decoder = new TextDecoder()
@@ -112,19 +123,24 @@ export function createSSEConnection(
           if ("eval" in data) {
             onEval((data as EvalEvent).eval)
             close()
-            return
+            return true
           }
 
           if ("done" in data && data.done) {
+            doneReceived = true
             onDone((data as DoneEvent).stage_id)
             // Keep connection open to receive the follow-on eval event
             continue
           }
 
           if ("error" in data) {
-            onError(new Error((data as ErrorEvent).detail ?? (data as ErrorEvent).error))
+            onError(
+              new Error(
+                (data as ErrorEvent).detail ?? (data as ErrorEvent).error,
+              ),
+            )
             close()
-            return
+            return true // application-level error — do not retry
           }
 
           if ("token" in data) {
@@ -133,18 +149,38 @@ export function createSSEConnection(
         }
       }
     } catch (error) {
-      if (!closed) {
-        onError(error instanceof Error ? error : new Error("Stream failed"))
+      if (closed) {
+        if (doneReceived) onEval(null)
+        return true
       }
+      if (doneReceived) {
+        // Transport error after done — resolve eval as null rather than retry
+        onEval(null)
+        return true
+      }
+      lastError = error instanceof Error ? error : new Error("Stream failed")
+      return false
     }
 
-    // Stream ended naturally (done event received but no eval followed, or connection closed)
+    // Natural stream end (done received, eval not emitted by backend)
     onEval(null)
+    return true
   }
 
-  function close() {
-    closed = true
-    controller.abort()
+  async function connect() {
+    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+      if (closed) return
+      currentController = new AbortController()
+      const succeeded = await tryConnect()
+      if (succeeded || closed) return
+      if (attempt < MAX_RETRIES) {
+        const delay = BACKOFF_MS[attempt] ?? 4000
+        console.warn(`SSE retry ${attempt + 1}/${MAX_RETRIES} in ${delay}ms`)
+        await new Promise<void>((resolve) => window.setTimeout(resolve, delay))
+      } else {
+        onError(lastError ?? new Error("Stream failed after retries"))
+      }
+    }
   }
 
   void connect()
