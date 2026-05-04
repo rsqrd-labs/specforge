@@ -15,6 +15,28 @@ from services.auth_service import decode_access_token_claims
 _LOGIN_PATHS = frozenset({"/auth/google", "/auth/callback"})
 IpNetwork = IPv4Network | IPv6Network
 
+# Lua script: atomically checks the sliding window count BEFORE adding the
+# new member. Returns 1 (allowed) or 0 (rejected). Because the ZCARD check
+# happens before ZADD inside a single Lua call, no two concurrent requests
+# can both read "count < limit" and then both write past the limit.
+_SLIDING_WINDOW_LUA = """
+local key = KEYS[1]
+local now = tonumber(ARGV[1])
+local window_start = tonumber(ARGV[2])
+local limit = tonumber(ARGV[3])
+local member = ARGV[4]
+local ttl = tonumber(ARGV[5])
+
+redis.call('ZREMRANGEBYSCORE', key, '-inf', window_start)
+local count = redis.call('ZCARD', key)
+if count >= limit then
+  return 0
+end
+redis.call('ZADD', key, now, member)
+redis.call('EXPIRE', key, ttl)
+return 1
+"""
+
 
 async def sliding_window_check(
     redis_client: Redis,
@@ -27,14 +49,17 @@ async def sliding_window_check(
     ratelimit_key = f"ratelimit:{key}"
     member = str(time.time_ns())
 
-    pipe = redis_client.pipeline()
-    pipe.zremrangebyscore(ratelimit_key, "-inf", window_start)
-    pipe.zadd(ratelimit_key, {member: now})
-    pipe.zcard(ratelimit_key)
-    pipe.expire(ratelimit_key, window_seconds)
-    results = await pipe.execute()
-    count = results[2]
-    return count <= limit
+    result = await redis_client.eval(
+        _SLIDING_WINDOW_LUA,
+        1,
+        ratelimit_key,
+        str(now),
+        str(window_start),
+        str(limit),
+        member,
+        str(window_seconds),
+    )
+    return bool(result)
 
 
 class RateLimitMiddleware(BaseHTTPMiddleware):

@@ -14,8 +14,58 @@ from middleware.rate_limit import (
 )
 
 
+class _FakeRedis:
+    """In-memory Redis stub implementing eval() with Lua sliding-window semantics."""
+
+    def __init__(self) -> None:
+        self._sets: dict[str, dict[str, float]] = {}
+
+    async def eval(self, script: str, num_keys: int, *args: Any) -> int:
+        # args order matches _SLIDING_WINDOW_LUA KEYS/ARGV:
+        #   args[0]=key, args[1]=now, args[2]=window_start,
+        #   args[3]=limit, args[4]=member, args[5]=ttl
+        key = args[0]
+        window_start = float(args[2])
+        limit = int(args[3])
+        member = args[4]
+        now_score = float(args[1])
+
+        ss = self._sets.setdefault(key, {})
+        # ZREMRANGEBYSCORE -inf window_start
+        expired = [m for m, s in ss.items() if s <= window_start]
+        for m in expired:
+            del ss[m]
+        # ZCARD → conditional ZADD
+        if len(ss) >= limit:
+            return 0
+        ss[member] = now_score
+        return 1
+
+    # Keep pipeline() so harness stubs that still use the old API don't crash
+    def pipeline(self) -> "_FakePipeline":
+        return _FakePipeline(self)
+
+    def _zremrangebyscore(self, key: str, min_val: Any, max_val: Any) -> int:
+        ss = self._sets.get(key, {})
+        min_f = float("-inf") if str(min_val) == "-inf" else float(min_val)
+        max_f = float("inf") if str(max_val) == "+inf" else float(max_val)
+        to_remove = [m for m, s in ss.items() if min_f <= s <= max_f]
+        for m in to_remove:
+            del ss[m]
+        return len(to_remove)
+
+    def _zadd(self, key: str, mapping: dict[str, float]) -> int:
+        ss = self._sets.setdefault(key, {})
+        added = sum(1 for m in mapping if m not in ss)
+        ss.update(mapping)
+        return added
+
+    def _zcard(self, key: str) -> int:
+        return len(self._sets.get(key, {}))
+
+
 class _FakePipeline:
-    def __init__(self, redis: "_FakeRedis") -> None:
+    def __init__(self, redis: _FakeRedis) -> None:
         self._redis = redis
         self._ops: list[tuple] = []
 
@@ -48,32 +98,6 @@ class _FakePipeline:
             elif cmd == "expire":
                 results.append(1)
         return results
-
-
-class _FakeRedis:
-    def __init__(self) -> None:
-        self._sets: dict[str, dict[str, float]] = {}
-
-    def pipeline(self) -> _FakePipeline:
-        return _FakePipeline(self)
-
-    def _zremrangebyscore(self, key: str, min_val: Any, max_val: Any) -> int:
-        ss = self._sets.get(key, {})
-        min_f = float("-inf") if str(min_val) == "-inf" else float(min_val)
-        max_f = float("inf") if str(max_val) == "+inf" else float(max_val)
-        to_remove = [m for m, s in ss.items() if min_f <= s <= max_f]
-        for m in to_remove:
-            del ss[m]
-        return len(to_remove)
-
-    def _zadd(self, key: str, mapping: dict[str, float]) -> int:
-        ss = self._sets.setdefault(key, {})
-        added = sum(1 for m in mapping if m not in ss)
-        ss.update(mapping)
-        return added
-
-    def _zcard(self, key: str) -> int:
-        return len(self._sets.get(key, {}))
 
 
 @pytest.fixture
@@ -110,6 +134,30 @@ async def test_sliding_window_check_resets_after_window_expires(
 
     result = await sliding_window_check(fake_redis, "test_key", 5, 60)
     assert result is True
+
+
+@pytest.mark.asyncio
+async def test_sliding_window_check_is_atomic_does_not_exceed_limit() -> None:
+    """The Lua-based check must never let count exceed the configured limit.
+
+    With the old pipeline approach, N concurrent requests could all read
+    count < limit and all write past it. The Lua script prevents this:
+    the (limit+1)th call must be rejected even if it races the limit-th.
+    """
+    fake_redis = _FakeRedis()
+    limit = 3
+    # Fill to exactly the limit
+    for _ in range(limit):
+        allowed = await sliding_window_check(fake_redis, "burst_key", limit, 60)
+        assert allowed is True
+
+    # The next request must be rejected
+    rejected = await sliding_window_check(fake_redis, "burst_key", limit, 60)
+    assert rejected is False
+
+    # Confirm the stored count is exactly the limit, not limit+1
+    actual_count = len(fake_redis._sets.get("ratelimit:burst_key", {}))
+    assert actual_count == limit
 
 
 @pytest.mark.asyncio
