@@ -1,3 +1,6 @@
+import { useRef } from "react"
+import { useFocusTrap } from "../../hooks/useFocusTrap"
+
 interface CreditConfirmModalProps {
   action: "generate" | "regenerate" | "refine"
   creditCost: number
@@ -20,17 +23,28 @@ export function CreditConfirmModal({
   onCancel,
 }: CreditConfirmModalProps) {
   const isInsufficient = currentBalance < creditCost
+  const dialogRef = useRef<HTMLDivElement>(null)
+  useFocusTrap(dialogRef, onCancel)
 
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-[#0f172a]/60 p-4 backdrop-blur-sm"
       onClick={(e) => e.target === e.currentTarget && onCancel()}
     >
-      <div className="w-full max-w-sm rounded-xl border border-outline-variant bg-surface-container-lowest/90 p-6 shadow-[0_40px_100px_rgba(47,49,49,0.22)] backdrop-blur-xl">
+      <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="credit-modal-title"
+        className="w-full max-w-sm rounded-xl border border-outline-variant bg-surface-container-lowest/90 p-6 shadow-[0_40px_100px_rgba(47,49,49,0.22)] backdrop-blur-xl"
+      >
         <div className="mb-1 text-xs font-semibold uppercase tracking-widest text-primary">
           Credit usage
         </div>
-        <h2 className="mb-2 text-lg font-semibold capitalize text-on-surface">
+        <h2
+          id="credit-modal-title"
+          className="mb-2 text-lg font-semibold capitalize text-on-surface"
+        >
           {action}
         </h2>
         <p className="mb-6 text-sm leading-6 text-on-surface-variant">

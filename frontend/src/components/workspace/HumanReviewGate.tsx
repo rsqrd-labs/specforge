@@ -1,3 +1,6 @@
+import { useRef } from "react"
+import { useFocusTrap } from "../../hooks/useFocusTrap"
+
 interface HumanReviewGateProps {
   fromStageType: string
   toStageType: string
@@ -11,16 +14,28 @@ export function HumanReviewGate({
   onProceed,
   onClose,
 }: HumanReviewGateProps) {
+  const dialogRef = useRef<HTMLDivElement>(null)
+  useFocusTrap(dialogRef, onClose)
+
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-[#0f172a]/60 p-4 backdrop-blur-sm"
       onClick={(event) => event.target === event.currentTarget && onClose()}
     >
-      <div className="w-full max-w-md rounded-xl border border-outline-variant bg-surface-container-lowest/90 p-6 shadow-[0_40px_100px_rgba(47,49,49,0.22)] backdrop-blur-xl">
+      <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="review-gate-title"
+        className="w-full max-w-md rounded-xl border border-outline-variant bg-surface-container-lowest/90 p-6 shadow-[0_40px_100px_rgba(47,49,49,0.22)] backdrop-blur-xl"
+      >
         <div className="mb-1 text-xs font-semibold uppercase tracking-widest text-primary">
           Review gate
         </div>
-        <h2 className="mb-2 text-lg font-semibold text-on-surface">
+        <h2
+          id="review-gate-title"
+          className="mb-2 text-lg font-semibold text-on-surface"
+        >
           Review before generating
         </h2>
         <p className="mb-6 text-sm leading-6 text-on-surface-variant">

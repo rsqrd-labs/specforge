@@ -1,6 +1,7 @@
-import { useState } from "react"
+import { useRef, useState } from "react"
 import { useNavigate } from "react-router-dom"
 import { PROVIDERS } from "../../config/providers"
+import { useFocusTrap } from "../../hooks/useFocusTrap"
 import { useWorkspaceStore } from "../../store/workspaceStore"
 import type { AIProvider } from "../../types/workspace"
 
@@ -21,6 +22,8 @@ export function CreateWorkspaceModal({ onClose }: CreateWorkspaceModalProps) {
   const [model, setModel] = useState("claude-sonnet-4-6")
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [errors, setErrors] = useState<Record<string, string>>({})
+  const dialogRef = useRef<HTMLDivElement>(null)
+  useFocusTrap(dialogRef, onClose)
 
   const availableModels =
     PROVIDERS.find((p) => p.id === provider)?.models ?? []
@@ -71,9 +74,18 @@ export function CreateWorkspaceModal({ onClose }: CreateWorkspaceModalProps) {
       className="fixed inset-0 z-50 flex items-center justify-center bg-[#0f172a]/60 p-4 backdrop-blur-sm"
       onClick={(e) => e.target === e.currentTarget && onClose()}
     >
-      <div className="w-full max-w-lg rounded-xl border border-outline-variant bg-surface-container-lowest/90 shadow-[0_40px_100px_rgba(47,49,49,0.22)] backdrop-blur-xl">
+      <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="create-workspace-title"
+        className="w-full max-w-lg rounded-xl border border-outline-variant bg-surface-container-lowest/90 shadow-[0_40px_100px_rgba(47,49,49,0.22)] backdrop-blur-xl"
+      >
         <div className="flex items-center justify-between border-b border-outline-variant px-6 py-4">
-          <h2 className="text-base font-semibold text-on-surface">
+          <h2
+            id="create-workspace-title"
+            className="text-base font-semibold text-on-surface"
+          >
             New Workspace
           </h2>
           <button
