@@ -76,6 +76,24 @@ def test_security_headers_are_set_on_unhandled_500_responses() -> None:
     assert response.headers["Referrer-Policy"] == "strict-origin-when-cross-origin"
 
 
+def test_docs_are_disabled_in_production() -> None:
+    with (
+        patch.object(settings, "environment", "production"),
+        patch.object(settings, "metrics_token", "metrics-token"),
+        patch.object(settings, "frontend_url", "https://app.example.com"),
+    ):
+        client = TestClient(create_app(redis_client=_NoopRedis()))
+        assert client.get("/docs").status_code == 404
+        assert client.get("/redoc").status_code == 404
+        assert client.get("/openapi.json").status_code == 404
+
+
+def test_docs_are_accessible_in_development() -> None:
+    with patch.object(settings, "environment", "development"):
+        client = TestClient(create_app(redis_client=_NoopRedis()))
+        assert client.get("/openapi.json").status_code == 200
+
+
 def test_health_hides_dependency_detail_in_production() -> None:
     with (
         patch.object(settings, "environment", "production"),

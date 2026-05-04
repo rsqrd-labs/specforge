@@ -86,7 +86,15 @@ async def lifespan(app: FastAPI):
 
 def create_app(redis_client=None) -> FastAPI:
     validate_production_settings()
-    app = FastAPI(title="SpecForge API", version="1.0.0", lifespan=lifespan)
+    _production = settings.environment.lower() == "production"
+    app = FastAPI(
+        title="SpecForge API",
+        version="1.0.0",
+        lifespan=lifespan,
+        docs_url=None if _production else "/docs",
+        redoc_url=None if _production else "/redoc",
+        openapi_url=None if _production else "/openapi.json",
+    )
     setup_observability(app, async_engine)
 
     app.add_middleware(RateLimitMiddleware, redis_client=redis_client)
