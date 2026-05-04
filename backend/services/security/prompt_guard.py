@@ -9,6 +9,9 @@ logger = logging.getLogger(__name__)
 _PATTERNS: list[re.Pattern] = [
     re.compile(r"ignore\s+(?:all\s+)?previous\s+instructions?", re.I),
     re.compile(r"disregard\s+(?:all\s+)?(?:previous\s+)?instructions?", re.I),
+    re.compile(r"forget\s+(?:everything|what)\s+you\s+(?:were\s+)?told", re.I),
+    re.compile(r"(?:prior|previous|above)\s+rules?\s+no\s+longer\s+apply", re.I),
+    re.compile(r"do\s+not\s+obey\s+(?:the\s+)?(?:above|previous)", re.I),
     re.compile(
         r"bypass\s+(?:the\s+)?(?:system|developer|safety)\s+instructions?",
         re.I,
@@ -31,6 +34,8 @@ _PATTERNS: list[re.Pattern] = [
     re.compile(r"<\s*/?\s*(?:developer|assistant|tool)\s*>", re.I),
     re.compile(r"<\|im_start\|>", re.I),
     re.compile(r"```(?:system|developer|assistant)\b", re.I),
+    re.compile(r"aWdub3JlIHByZXZpb3VzIGluc3RydWN0aW9ucw==", re.I),
+    re.compile(r"summarize\s+(?:your\s+)?(?:hidden|internal)\s+(?:policy|rules)", re.I),
 ]
 
 
@@ -44,10 +49,9 @@ def scan(text: str) -> ScanResult:
     for pattern in _PATTERNS:
         match = pattern.search(text)
         if match:
-            excerpt = text[:100].replace("\n", " ")
             logger.warning(
                 "prompt_injection_attempt_detected",
-                extra={"pattern": pattern.pattern, "excerpt": excerpt},
+                extra={"pattern": pattern.pattern},
             )
             return ScanResult(is_safe=False, matched_pattern=pattern.pattern)
     return ScanResult(is_safe=True)

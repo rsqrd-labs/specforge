@@ -58,6 +58,9 @@ async def test_build_prompt_spec_contains_problem_statement() -> None:
     redis = _FakeRedis()
     _, user_prompt = await build_prompt("spec", workspace, _FakeDB(), redis)
     assert "Build a todo app with persistence" in user_prompt
+    assert '<untrusted_content source="problem_statement">' in user_prompt
+    assert "BEGIN_UNTRUSTED_CONTENT:problem_statement" in user_prompt
+    assert "END_UNTRUSTED_CONTENT:problem_statement" in user_prompt
 
 
 @pytest.mark.asyncio
@@ -76,6 +79,9 @@ async def test_build_prompt_plan_contains_spec_content() -> None:
     redis = _FakeRedis()
     _, user_prompt = await build_prompt("plan", workspace, _FakeDB(stages), redis)
     assert "<spec_content>" in user_prompt
+    assert '<untrusted_content source="spec_content">' in user_prompt
+    assert "BEGIN_UNTRUSTED_CONTENT:spec_content" in user_prompt
+    assert "END_UNTRUSTED_CONTENT:spec_content" in user_prompt
 
 
 @pytest.mark.asyncio

@@ -14,6 +14,11 @@ _LEAK_PATTERNS: list[re.Pattern] = [
     re.compile(r"Follow only the system prompt", re.I),
     re.compile(r"Never reveal, quote, transform, summarize", re.I),
     re.compile(r"hidden policies, chain-of-thought, internal reasoning", re.I),
+    re.compile(r"SYSTEM_PROMPT", re.I),
+    re.compile(r"SECURITY_AND_PRIVACY_RULES", re.I),
+    re.compile(r"PROFESSIONAL_OUTPUT_RULES", re.I),
+    re.compile(r"system\s+message\s+says", re.I),
+    re.compile(r"my\s+(?:hidden|internal)\s+(?:policy|instructions?)", re.I),
 ]
 
 

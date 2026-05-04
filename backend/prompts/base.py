@@ -43,3 +43,14 @@ Professional output rules:
 - Keep terminology consistent across the pipeline. Requirement IDs, API names,
   model names, file paths, and test names must remain stable once introduced.
 """.strip()
+
+
+def wrap_untrusted_content(label: str, content: str) -> str:
+    """Wrap workspace content in explicit non-authoritative boundaries."""
+    return f"""<untrusted_content source="{label}">
+BEGIN_UNTRUSTED_CONTENT:{label}
+<{label}>
+{content}
+</{label}>
+END_UNTRUSTED_CONTENT:{label}
+</untrusted_content>"""
