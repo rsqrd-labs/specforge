@@ -4272,3 +4272,376 @@ The refine path sanitized instruction and selected text, but still placed the fu
 ---
 
 _tasks.md · SpecForge V1 · Version 1.7.0 · Updated 2026-05-04 with Phase 9 final production hardening T-109 through T-113_
+
+---
+
+## Phase 10 — Final Production Readiness Audit Remediations
+
+> Issues identified in the principal-engineer production readiness audit (2026-05-04). Ordered by severity: the blocker must ship first, high-risk items second. Each task maps to a contract test in `harness/tests/backend/test_production_readiness_contract.py`.
+
+---
+
+### T-114: Fix Credit Ledger Unique Constraint to Prevent Repeat-Operation Failures
+
+**Description:**
+Migration `0003_credit_ledger_unique_refund.py` adds `UNIQUE(user_id, reason)` to the `credit_ledger` table. The intent was to prevent double-refunds (refund reasons are `f"refund:{ledger_entry_id}"` — unique UUIDs). But the constraint applies to **every row**, including normal deductions. Because `credit_service.deduct()` is called with `reason="generate"` or `reason="refine"` on every LLM call, the second generation or refinement by any user triggers a `UniqueViolation` that propagates as a 500. The core product flow — generating content — breaks after the first use.
+
+**Severity:** BLOCKER — primary product feature is non-functional after first use per user.
+
+**Inputs:**
+- `backend/migrations/versions/0003_credit_ledger_unique_refund.py`
+- `backend/services/credit_service.py` — `refund()`
+- `harness/tests/backend/test_production_readiness_contract.py` — `test_credit_ledger_constraint_is_not_broad_unique_on_user_reason`, `test_credit_service_can_deduct_multiple_times_with_same_reason`
+
+**Outputs:**
+- `backend/migrations/versions/0005_fix_credit_refund_partial_index.py` — new migration
+- Updated `0003` is no longer applied as a broad unique constraint (superseded by 0005)
+- `credit_service.refund()` idempotency preserved via application-layer `IntegrityError` catch + partial DB index
+
+**Steps:**
+1. Create `backend/migrations/versions/0005_fix_credit_refund_partial_index.py`:
+   ```python
+   """Replace broad UNIQUE(user_id, reason) with partial index on refund rows only.
+
+   Revision ID: 0005
+   Revises: 0004
+   """
+   from alembic import op
+
+   revision = "0005"
+   down_revision = "0004"
+
+   def upgrade() -> None:
+       # Drop the overly-broad unique constraint added in 0003
+       op.drop_constraint(
+           "uq_credit_ledger_user_reason", "credit_ledger", type_="unique"
+       )
+       # Replace with a partial unique index scoped to refund rows only
+       op.execute("""
+           CREATE UNIQUE INDEX uq_credit_ledger_refund_reason
+           ON credit_ledger (user_id, reason)
+           WHERE reason LIKE 'refund:%'
+       """)
+
+   def downgrade() -> None:
+       op.execute("DROP INDEX IF EXISTS uq_credit_ledger_refund_reason")
+       op.create_unique_constraint(
+           "uq_credit_ledger_user_reason", "credit_ledger", ["user_id", "reason"]
+       )
+   ```
+2. Verify `credit_service.refund()` still catches `IntegrityError` on flush — the partial index is now the enforcement mechanism for double-refunds.
+3. Add a CI backend job step that starts a real PostgreSQL service and runs `uv run alembic upgrade head` before pytest, so schema-level bugs like this are caught automatically. In `.github/workflows/ci.yml`, add `services: postgres: ...` to the backend job and a migration step.
+4. Run `uv run pytest tests/test_credit_service.py -q` to confirm all tests pass.
+5. Run the harness: `uv run pytest ../harness/tests/backend/test_production_readiness_contract.py -k "credit" -q`.
+
+**Acceptance Criteria:**
+- A user can call `deduct()` with `reason="generate"` more than once without error.
+- `refund()` with a duplicate `ledger_entry_id` is still silently swallowed (idempotency preserved).
+- Migration 0005 applies cleanly to a fresh database (drops the broad constraint, adds the partial index).
+- Harness contract tests `test_credit_ledger_constraint_is_not_broad_unique_on_user_reason` and `test_credit_service_can_deduct_multiple_times_with_same_reason` pass.
+- All existing credit service tests pass.
+
+**Finding:** B-1 — `backend/migrations/versions/0003_credit_ledger_unique_refund.py`
+
+**Dependencies:** T-113
+
+---
+
+### T-115: Bind Docker Compose API Port to Localhost
+
+**Description:**
+`docker-compose.yml` binds the API service port as `"8000:8000"` (listens on all interfaces). The database and Redis ports are correctly bound to `127.0.0.1`. For self-hosted deployments — the stated use case in the README — this exposes the API directly to any host on the network, bypassing any intended reverse-proxy layer. The API port must follow the same localhost-binding pattern as the datastores.
+
+**Severity:** High — network-level exposure of the API in self-hosted Docker environments.
+
+**Inputs:**
+- `docker-compose.yml`
+- `harness/tests/backend/test_production_readiness_contract.py` — `test_compose_does_not_expose_api_port_on_all_interfaces`
+
+**Outputs:**
+- Updated `docker-compose.yml` with `127.0.0.1:8000:8000`
+
+**Steps:**
+1. In `docker-compose.yml`, change the `api` service port mapping:
+   ```yaml
+   api:
+     ports:
+       - "127.0.0.1:8000:8000"
+   ```
+2. Update `README.md` if it references `localhost:8000` (the change is backward-compatible — local browser access still works via `http://localhost:8000`).
+3. Run `docker compose up --build` locally and confirm `GET http://localhost:8000/health` returns 200.
+4. Run harness: `uv run pytest ../harness/tests/backend/test_production_readiness_contract.py -k "api_port" -q`.
+
+**Acceptance Criteria:**
+- `docker-compose.yml` does not contain `"8000:8000"` (unbound).
+- `"127.0.0.1:8000:8000"` is present in `docker-compose.yml`.
+- Harness test `test_compose_does_not_expose_api_port_on_all_interfaces` passes.
+- Existing harness test `test_compose_does_not_publish_datastores_on_all_interfaces` still passes.
+
+**Finding:** H-3 — `docker-compose.yml`
+
+**Dependencies:** T-100 (datastores already bound; this extends the same pattern to the API)
+
+---
+
+### T-116: Disable FastAPI Documentation Endpoints in Production
+
+**Description:**
+`FastAPI(title="SpecForge API", ...)` enables `/docs`, `/redoc`, and `/openapi.json` by default. In production, unauthenticated users can enumerate the full API surface including all endpoint paths, parameters, and schema shapes. These endpoints must be suppressed when `settings.environment == "production"`.
+
+**Severity:** High — API surface enumeration by unauthenticated users in production.
+
+**Inputs:**
+- `backend/main.py` — `create_app()`
+- `harness/tests/backend/test_production_readiness_contract.py` — `test_fastapi_docs_are_disabled_in_production`, `test_fastapi_app_does_not_expose_openapi_schema_in_production`
+
+**Outputs:**
+- Updated `backend/main.py` — `FastAPI()` call passes `docs_url`, `redoc_url`, `openapi_url` conditionally
+
+**Steps:**
+1. In `create_app()`, determine whether to expose docs based on the environment:
+   ```python
+   is_production = settings.environment.lower() == "production"
+   app = FastAPI(
+       title="SpecForge API",
+       version="1.0.0",
+       lifespan=lifespan,
+       docs_url=None if is_production else "/docs",
+       redoc_url=None if is_production else "/redoc",
+       openapi_url=None if is_production else "/openapi.json",
+   )
+   ```
+2. Add a test in `test_security_headers.py` (or a new file) that creates the app with `environment="production"` and asserts `GET /docs`, `GET /redoc`, and `GET /openapi.json` all return 404.
+3. Confirm development (`environment="development"`) still serves docs normally.
+4. Run `uv run pytest tests/ -q` to confirm no regressions.
+5. Run harness: `uv run pytest ../harness/tests/backend/test_production_readiness_contract.py -k "docs" -q`.
+
+**Acceptance Criteria:**
+- `GET /docs`, `GET /redoc`, `GET /openapi.json` return 404 when `ENVIRONMENT=production`.
+- Both endpoints remain accessible in development/test environments.
+- Harness tests `test_fastapi_docs_are_disabled_in_production` and `test_fastapi_app_does_not_expose_openapi_schema_in_production` pass.
+- All existing tests pass.
+
+**Finding:** H-4 — `backend/main.py`
+
+**Dependencies:** T-109 (production settings validation already in place)
+
+---
+
+### T-117: Harden Production Startup Validation for Critical Secrets
+
+**Description:**
+`validate_production_settings()` in `config.py` only checks `METRICS_TOKEN` and `FRONTEND_URL`. A production deploy with `JWT_PRIVATE_KEY="ci-test-private-key"` or `ENCRYPTION_MASTER_KEY="AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA..."` (the CI fixture values) passes startup validation silently. The validator must reject placeholder or structurally invalid values for the two most critical secrets: the JWT signing key (must be a real RSA/EC private key) and the Fernet encryption master key (must not be the known CI placeholder).
+
+**Severity:** High — production deploy with CI stub keys would compromise all JWTs and all encrypted user API keys.
+
+**Inputs:**
+- `backend/config.py` — `validate_production_settings()`
+- `harness/tests/backend/test_production_readiness_contract.py` — `test_production_validation_checks_jwt_key_strength`, `test_production_validation_checks_encryption_key_is_not_default`
+
+**Outputs:**
+- Updated `backend/config.py` with two additional production checks
+
+**Steps:**
+1. In `validate_production_settings()`, add:
+   ```python
+   if not settings.jwt_private_key.strip().startswith("-----BEGIN"):
+       errors.append(
+           "JWT_PRIVATE_KEY must be a PEM-encoded RSA or EC private key "
+           "(must start with '-----BEGIN'). The CI stub value is not valid for production."
+       )
+   _CI_ENCRYPTION_KEY = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+   if settings.encryption_master_key == _CI_ENCRYPTION_KEY:
+       errors.append(
+           "ENCRYPTION_MASTER_KEY is set to the known CI placeholder value. "
+           "Generate a unique Fernet key: python -c \"from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())\""
+       )
+   ```
+2. Add unit tests in `test_security_headers.py` or a new `test_config.py`:
+   - Test: `validate_production_settings()` raises with a stub JWT key.
+   - Test: raises with the CI placeholder encryption key.
+   - Test: passes with a real PEM header on the JWT key.
+3. Run `uv run pytest tests/ -q`.
+4. Run harness: `uv run pytest ../harness/tests/backend/test_production_readiness_contract.py -k "validation" -q`.
+
+**Acceptance Criteria:**
+- `validate_production_settings()` raises `RuntimeError` if `JWT_PRIVATE_KEY` does not start with `-----BEGIN`.
+- Raises if `ENCRYPTION_MASTER_KEY` equals the CI placeholder.
+- Both checks are bypassed for non-production environments.
+- Harness tests `test_production_validation_checks_jwt_key_strength` and `test_production_validation_checks_encryption_key_is_not_default` pass.
+
+**Finding:** H-2 — `backend/config.py`
+
+**Dependencies:** T-109
+
+---
+
+### T-118: Make Rate Limiter Count Check Atomic with a Lua Script
+
+**Description:**
+`sliding_window_check()` in `rate_limit.py` uses a Redis pipeline that adds the current request (`ZADD`) before checking the count (`ZCARD`). Because the pipeline is not a Lua script, multiple concurrent requests can each add themselves and read a count that already includes all of them — allowing up to ~2× the configured limit to pass simultaneously before any rejection fires. Under a coordinated burst attack, this headroom is meaningful. The fix is a Lua script that atomically checks the window count before conditionally adding the new member.
+
+**Severity:** High — rate limit enforcement is non-strict under concurrent load.
+
+**Inputs:**
+- `backend/middleware/rate_limit.py` — `sliding_window_check()`
+- `backend/tests/test_rate_limit.py`
+- `harness/tests/backend/test_production_readiness_contract.py` — `test_rate_limiter_uses_atomic_count_before_add`
+
+**Outputs:**
+- Updated `sliding_window_check()` using a Lua script via `redis_client.eval()` or `redis_client.register_script()`
+
+**Steps:**
+1. Replace the pipeline in `sliding_window_check()` with a Lua script:
+   ```python
+   _SLIDING_WINDOW_LUA = """
+   local key = KEYS[1]
+   local now = tonumber(ARGV[1])
+   local window_start = tonumber(ARGV[2])
+   local limit = tonumber(ARGV[3])
+   local member = ARGV[4]
+   local ttl = tonumber(ARGV[5])
+
+   redis.call('ZREMRANGEBYSCORE', key, '-inf', window_start)
+   local count = redis.call('ZCARD', key)
+   if count >= limit then
+     return 0
+   end
+   redis.call('ZADD', key, now, member)
+   redis.call('EXPIRE', key, ttl)
+   return 1
+   """
+
+   async def sliding_window_check(
+       redis_client: Redis,
+       key: str,
+       limit: int,
+       window_seconds: int,
+   ) -> bool:
+       now = time.time()
+       window_start = now - window_seconds
+       ratelimit_key = f"ratelimit:{key}"
+       member = str(time.time_ns())
+       result = await redis_client.eval(
+           _SLIDING_WINDOW_LUA,
+           1,
+           ratelimit_key,
+           str(now),
+           str(window_start),
+           str(limit),
+           member,
+           str(window_seconds),
+       )
+       return bool(result)
+   ```
+2. Remove the old pipeline-based implementation.
+3. Update `test_rate_limit.py`: the `_NoopRedis` / `_FakeRedis` stubs must now implement `eval()`. Replace with a real in-memory Redis stub that returns `1` (allowed) or `0` (rejected) based on the limit argument passed.
+4. Run `uv run pytest tests/test_rate_limit.py -q`.
+5. Run harness: `uv run pytest ../harness/tests/backend/test_production_readiness_contract.py -k "rate_limiter" -q`.
+
+**Acceptance Criteria:**
+- `sliding_window_check` uses `redis_client.eval()` (Lua) rather than a pipeline of ZADD+ZCARD.
+- The Lua script checks the count BEFORE adding the new member.
+- Concurrent requests at the exact limit boundary: only requests up to the limit are accepted; the (limit+1)th request is rejected.
+- Harness test `test_rate_limiter_uses_atomic_count_before_add` passes.
+- All existing rate limit tests pass.
+
+**Finding:** H-1 — `backend/middleware/rate_limit.py`
+
+**Dependencies:** T-075
+
+---
+
+### T-119: Run Database Migrations Before App Start in Docker
+
+**Description:**
+`docker-compose.yml` starts the API with `uvicorn main:app` directly without first running `alembic upgrade head`. A fresh deployment against an empty database, or any re-deploy that introduces a new migration, will start the app against a stale schema. SQLAlchemy errors will occur mid-request rather than at startup, making the failure mode confusing and slow to diagnose. Migrations must run and succeed before uvicorn accepts traffic.
+
+**Severity:** Medium — every fresh deployment or migration deploy fails silently at the request level.
+
+**Inputs:**
+- `docker-compose.yml` — `api.command`
+- `backend/Dockerfile`
+- `harness/tests/backend/test_production_readiness_contract.py` — `test_docker_compose_or_dockerfile_runs_migrations_on_startup`
+
+**Outputs:**
+- Updated `docker-compose.yml` api command, OR new `backend/entrypoint.sh` referenced by Dockerfile
+
+**Steps:**
+1. **Option A (simplest)** — update `docker-compose.yml` api command:
+   ```yaml
+   api:
+     command: >
+       sh -c "uv sync --frozen --no-dev &&
+              uv run --no-sync alembic upgrade head &&
+              uv run --no-sync uvicorn main:app --reload --host 0.0.0.0 --port 8000"
+   ```
+2. **Option B (production Dockerfile)** — create `backend/entrypoint.sh`:
+   ```bash
+   #!/bin/sh
+   set -e
+   uv run alembic upgrade head
+   exec uv run gunicorn main:app --worker-class uvicorn.workers.UvicornWorker \
+     --workers 2 --bind 0.0.0.0:8000
+   ```
+   Update `backend/Dockerfile` CMD to `["./entrypoint.sh"]` and `chmod +x entrypoint.sh`.
+3. Implement both Option A (for local dev compose) and Option B (for production Dockerfile).
+4. Test locally: `docker compose down -v && docker compose up --build` — app must start healthy with all migrations applied.
+5. Run harness: `uv run pytest ../harness/tests/backend/test_production_readiness_contract.py -k "migrations" -q`.
+
+**Acceptance Criteria:**
+- `docker compose up --build` on a fresh volume applies all migrations before accepting requests.
+- `GET /health` returns 200 after `docker compose up` without manual migration steps.
+- Harness test `test_docker_compose_or_dockerfile_runs_migrations_on_startup` passes.
+- README self-hosting instructions (4-step flow) remain accurate.
+
+**Finding:** M-2 — `docker-compose.yml`, `backend/Dockerfile`
+
+**Dependencies:** T-056
+
+---
+
+### T-120: Reference CREDIT_COSTS Constant in Recovery Service
+
+**Description:**
+`recovery_service.py` logs `credits_refunded = 10` as a hardcoded integer. The actual refund via `credit_service.refund()` is correct (uses the original ledger entry amount). But the log line is wrong if the generate cost ever changes from 10. Import `CREDIT_COSTS` from `stage_manager` and use `CREDIT_COSTS["generate"]` so the log value stays in sync automatically.
+
+**Severity:** Minor — log inaccuracy if credit costs change; no functional impact.
+
+**Inputs:**
+- `backend/services/pipeline/recovery_service.py` — `recover_stuck_stages()`
+- `backend/services/pipeline/stage_manager.py` — `CREDIT_COSTS`
+- `harness/tests/backend/test_production_readiness_contract.py` — `test_recovery_service_uses_credit_costs_constant`
+
+**Outputs:**
+- Updated `backend/services/pipeline/recovery_service.py`
+
+**Steps:**
+1. Add import at the top of `recovery_service.py`:
+   ```python
+   from services.pipeline.stage_manager import CREDIT_COSTS
+   ```
+2. Replace:
+   ```python
+   credits_refunded = 10  # standard generate cost
+   ```
+   with:
+   ```python
+   credits_refunded = CREDIT_COSTS["generate"]
+   ```
+3. Run `uv run pytest tests/test_recovery_service.py -q`.
+4. Run harness: `uv run pytest ../harness/tests/backend/test_production_readiness_contract.py -k "recovery" -q`.
+
+**Acceptance Criteria:**
+- `recovery_service.py` contains no literal `credits_refunded = 10`.
+- `CREDIT_COSTS` is imported from `stage_manager`.
+- Harness test `test_recovery_service_uses_credit_costs_constant` passes.
+- All existing recovery service tests pass.
+
+**Finding:** M-4 — `backend/services/pipeline/recovery_service.py`
+
+**Dependencies:** none
+
+---
+
+_tasks.md · SpecForge V1 · Version 1.8.0 · Updated 2026-05-04 with Phase 10 production readiness audit remediations T-114 through T-120_
