@@ -310,12 +310,19 @@ def test_production_validation_checks_encryption_key_is_not_default() -> None:
 
     assert fn_body, "validate_production_settings() must exist in config.py"
 
-    # The function body must reference encryption_master_key AND the known
-    # CI placeholder string so the check is specific rather than symbolic.
-    has_encryption_check = (
+    # The function body must reference encryption_master_key AND either the
+    # literal CI placeholder string or a named constant that holds it
+    # (defined at module level).
+    literal_in_fn = (
         "encryption_master_key" in fn_body.lower()
         and "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" in fn_body
     )
+    constant_in_fn = (
+        "encryption_master_key" in fn_body.lower()
+        and "_CI_ENCRYPTION_KEY" in fn_body
+        and "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" in config_source
+    )
+    has_encryption_check = literal_in_fn or constant_in_fn
 
     assert has_encryption_check, (
         "validate_production_settings() does not check ENCRYPTION_MASTER_KEY. "

@@ -84,6 +84,56 @@ def test_production_app_requires_https_frontend_url() -> None:
             raise AssertionError("production app started with non-HTTPS FRONTEND_URL")
 
 
+def test_production_app_rejects_stub_jwt_private_key() -> None:
+    with (
+        patch.object(observability.settings, "environment", "production"),
+        patch.object(observability.settings, "frontend_url", "https://app.example.com"),
+        patch.object(observability.settings, "metrics_token", "metrics-token"),
+        patch.object(observability.settings, "jwt_private_key", "ci-test-private-key"),
+    ):
+        try:
+            create_app(redis_client=_NoopRedis())
+        except RuntimeError as exc:
+            assert "JWT_PRIVATE_KEY" in str(exc)
+        else:
+            raise AssertionError("production app started with stub JWT_PRIVATE_KEY")
+
+
+def test_production_app_rejects_ci_placeholder_encryption_key() -> None:
+    with (
+        patch.object(observability.settings, "environment", "production"),
+        patch.object(observability.settings, "frontend_url", "https://app.example.com"),
+        patch.object(observability.settings, "metrics_token", "metrics-token"),
+        patch.object(
+            observability.settings,
+            "encryption_master_key",
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+        ),
+    ):
+        try:
+            create_app(redis_client=_NoopRedis())
+        except RuntimeError as exc:
+            assert "ENCRYPTION_MASTER_KEY" in str(exc)
+        else:
+            raise AssertionError("production app started with CI placeholder encryption key")
+
+
+def test_production_app_accepts_valid_pem_jwt_key() -> None:
+    fake_pem = "-----BEGIN RSA PRIVATE KEY-----\nMIIEow...\n-----END RSA PRIVATE KEY-----"
+    with (
+        patch.object(observability.settings, "environment", "production"),
+        patch.object(observability.settings, "frontend_url", "https://app.example.com"),
+        patch.object(observability.settings, "metrics_token", "metrics-token"),
+        patch.object(observability.settings, "jwt_private_key", fake_pem),
+    ):
+        try:
+            create_app(redis_client=_NoopRedis())
+        except RuntimeError as exc:
+            assert "JWT_PRIVATE_KEY" not in str(exc), (
+                f"Startup rejected a valid PEM key: {exc}"
+            )
+
+
 def test_metrics_use_route_templates() -> None:
     with patch.object(observability.settings, "metrics_token", "test-metrics-token"):
         client = TestClient(create_app(redis_client=_NoopRedis()))
