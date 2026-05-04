@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from collections.abc import AsyncGenerator
 from datetime import UTC, datetime
@@ -13,7 +14,7 @@ from sqlalchemy.orm import selectinload
 
 from config import settings
 from middleware.rate_limit import sliding_window_check
-from models import Stage, StageVersion, Workspace
+from models import EvalResult, Stage, StageVersion, Workspace
 from schemas.stage import DiffResponse, RefineRequest
 from services.credit_service import credit_service
 from services.evals.online_eval import run_eval_background
@@ -33,6 +34,22 @@ STAGE_ORDER = ["spec", "plan", "harness", "tasks"]
 def _log_eval_error(task: asyncio.Task) -> None:
     if not task.cancelled() and (exc := task.exception()):
         logger.error("eval_background_failed", extra={"error": str(exc)})
+
+
+def _eval_to_dict(result: EvalResult) -> dict:
+    return {
+        "id": str(result.id),
+        "stage_version_id": str(result.stage_version_id),
+        "stage_type": result.stage_type,
+        "overall_score": result.overall_score,
+        "completeness": result.completeness,
+        "clarity": result.clarity,
+        "coverage_percent": result.coverage_percent,
+        "uncovered_reqs": result.uncovered_reqs,
+        "tasks_without_ref": result.tasks_without_ref,
+        "flagged": result.flagged,
+        "created_at": result.created_at.isoformat(),
+    }
 
 
 STAGE_DEPENDENCIES: dict[str, list[str]] = {
@@ -148,7 +165,7 @@ class StageManager:
             )
         await db.commit()
         await self._invalidate_stage_cache(workspace.id, stage.type, redis)
-        asyncio.create_task(
+        eval_task = asyncio.create_task(
             run_eval_background(
                 version_id,
                 stage.type,
@@ -157,8 +174,18 @@ class StageManager:
                 workspace.provider,
                 JUDGE_MODELS[workspace.provider],
             )
-        ).add_done_callback(_log_eval_error)
+        )
+        eval_task.add_done_callback(_log_eval_error)
         yield f'{{"done": true, "stage_id": "{stage_id}"}}'
+
+        try:
+            eval_result = await asyncio.wait_for(
+                asyncio.shield(eval_task), timeout=30.0
+            )
+            if eval_result is not None:
+                yield json.dumps({"eval": _eval_to_dict(eval_result)})
+        except (asyncio.TimeoutError, Exception):
+            pass
 
     async def refine(
         self, stage_id: UUID, request: RefineRequest, user, db: AsyncSession

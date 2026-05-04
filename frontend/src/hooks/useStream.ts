@@ -2,7 +2,6 @@ import { useCallback, useEffect, useRef, useState } from "react"
 import {
   generateStage,
   getStage,
-  getStageEval,
   regenerateStage,
 } from "../services/api"
 import { createSSEConnection } from "../services/sseService"
@@ -14,18 +13,6 @@ type StreamAction = "generate" | "regenerate"
 interface StreamResult {
   stage: Stage
   evalResult: EvalResult | null
-}
-
-async function pollEval(stageId: string): Promise<EvalResult | null> {
-  for (let attempt = 0; attempt < 6; attempt += 1) {
-    try {
-      return await getStageEval(stageId)
-    } catch {
-      await new Promise((resolve) => window.setTimeout(resolve, 5_000))
-    }
-  }
-
-  return null
 }
 
 export function useStream(stageId: string | null) {
@@ -61,19 +48,25 @@ export function useStream(stageId: string | null) {
             ? await regenerateStage(stageId)
             : await generateStage(stageId)
 
+        let resolveEval!: (result: EvalResult | null) => void
+        const evalPromise = new Promise<EvalResult | null>((resolve) => {
+          resolveEval = resolve
+        })
+
         const doneStageId = await new Promise<string>((resolve, reject) => {
           streamRef.current = createSSEConnection(
             response.stream_url,
             (token) => useStageStore.getState().appendToken(stageId, token),
             resolve,
             reject,
+            resolveEval,
           )
         })
 
         useStageStore.getState().finaliseStream(stageId)
         const updatedStage = await getStage(doneStageId)
         useStageStore.getState().setStage(updatedStage)
-        const evalResult = await pollEval(doneStageId)
+        const evalResult = await evalPromise
 
         return { stage: updatedStage, evalResult }
       } catch (streamError) {

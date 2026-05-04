@@ -169,6 +169,69 @@ async def test_generate_streams_tokens(app) -> None:
 
 
 @pytest.mark.asyncio
+async def test_generate_emits_eval_event_after_done(app) -> None:
+    """SSE stream contains an eval event after the done event when eval resolves."""
+    import json as _json
+
+    stage = _make_stage()
+
+    async def _fake_db():
+        yield _FakeDB(stage)
+
+    app.dependency_overrides[get_db] = _fake_db
+
+    eval_payload = _json.dumps(
+        {
+            "eval": {
+                "id": "eval-id",
+                "stage_version_id": "ver-id",
+                "stage_type": "spec",
+                "overall_score": 85,
+                "completeness": 90,
+                "clarity": 80,
+                "coverage_percent": None,
+                "uncovered_reqs": None,
+                "tasks_without_ref": None,
+                "flagged": False,
+                "created_at": "2026-01-01T00:00:00+00:00",
+            }
+        }
+    )
+
+    async def fake_generate(*args, **kwargs) -> AsyncGenerator[str, None]:
+        yield "Hello"
+        yield '{"done": true, "stage_id": "abc"}'
+        yield eval_payload
+
+    with (
+        patch(
+            "routers.stage.stage_manager.generate",
+            side_effect=fake_generate,
+        ),
+        patch(
+            "services.credit_service.credit_service.get_balance",
+            new_callable=AsyncMock,
+            return_value=100,
+        ),
+    ):
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            response = await client.post(f"/stages/{stage.id}/generate")
+
+    assert response.status_code == 200
+    body = response.text
+    assert "done" in body
+    assert '"eval"' in body
+    assert "overall_score" in body
+
+    lines = [l for l in body.splitlines() if l.startswith("data:")]
+    done_idx = next(i for i, l in enumerate(lines) if '"done"' in l)
+    eval_idx = next(i for i, l in enumerate(lines) if '"eval"' in l)
+    assert eval_idx > done_idx, "eval event must come after done event"
+
+
+@pytest.mark.asyncio
 async def test_generate_dependency_error_returns_error_event(app) -> None:
     stage = _make_stage(stage_type="plan")
 

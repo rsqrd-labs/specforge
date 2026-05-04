@@ -1,3 +1,4 @@
+import type { EvalResult } from "../types/stage"
 import { getAccessToken, getCsrfToken } from "./api"
 
 interface SSEControl {
@@ -18,7 +19,11 @@ interface ErrorEvent {
   detail?: string
 }
 
-type SSEPayload = DoneEvent | TokenEvent | ErrorEvent
+interface EvalEvent {
+  eval: EvalResult
+}
+
+type SSEPayload = DoneEvent | TokenEvent | ErrorEvent | EvalEvent
 
 function resolveUrl(url: string): string {
   if (/^https?:\/\//.test(url)) {
@@ -47,6 +52,7 @@ export function createSSEConnection(
   onToken: (token: string) => void,
   onDone: (stageId: string) => void,
   onError: (error: Error) => void,
+  onEval: (result: EvalResult | null) => void = () => {},
 ): SSEControl {
   let closed = false
   const controller = new AbortController()
@@ -103,20 +109,26 @@ export function createSSEConnection(
             continue
           }
 
-          if ("done" in data && data.done) {
-            onDone(data.stage_id)
+          if ("eval" in data) {
+            onEval((data as EvalEvent).eval)
             close()
             return
           }
 
+          if ("done" in data && data.done) {
+            onDone((data as DoneEvent).stage_id)
+            // Keep connection open to receive the follow-on eval event
+            continue
+          }
+
           if ("error" in data) {
-            onError(new Error(data.detail ?? data.error))
+            onError(new Error((data as ErrorEvent).detail ?? (data as ErrorEvent).error))
             close()
             return
           }
 
           if ("token" in data) {
-            onToken(data.token)
+            onToken((data as TokenEvent).token)
           }
         }
       }
@@ -125,6 +137,9 @@ export function createSSEConnection(
         onError(error instanceof Error ? error : new Error("Stream failed"))
       }
     }
+
+    // Stream ended naturally (done event received but no eval followed, or connection closed)
+    onEval(null)
   }
 
   function close() {

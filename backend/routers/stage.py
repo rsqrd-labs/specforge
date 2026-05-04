@@ -45,7 +45,7 @@ async def _stream_stage(
 ) -> AsyncGenerator[str, None]:
     try:
         async for token in stage_manager.generate(stage_id, user, db):
-            if token.startswith('{"done"'):
+            if token.startswith('{"done"') or token.startswith('{"eval"'):
                 yield f"data: {token}\n\n"
             else:
                 yield f"data: {json.dumps({'token': token})}\n\n"
