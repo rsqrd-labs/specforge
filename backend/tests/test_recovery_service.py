@@ -7,11 +7,15 @@ from uuid import uuid4
 
 import pytest
 
-from models import CreditLedger, Stage, Workspace
+from models import Stage
 from services.pipeline.recovery_service import recover_stuck_stages
 
 
-def _make_stuck_stage(minutes_old: int, workspace_id=None) -> Stage:
+def _make_stuck_stage(
+    minutes_old: int,
+    workspace_id=None,
+    deduction_ledger_id=None,
+) -> Stage:
     return Stage(
         id=uuid4(),
         workspace_id=workspace_id or uuid4(),
@@ -20,36 +24,9 @@ def _make_stuck_stage(minutes_old: int, workspace_id=None) -> Stage:
         content=None,
         current_version=0,
         review_gate_acknowledged=False,
+        deduction_ledger_id=deduction_ledger_id,
         created_at=datetime.now(UTC),
         updated_at=datetime.now(UTC) - timedelta(minutes=minutes_old),
-    )
-
-
-def _make_workspace(user_id=None, workspace_id=None) -> Workspace:
-    w = Workspace(
-        id=workspace_id or uuid4(),
-        user_id=user_id or uuid4(),
-        name="WS",
-        problem_statement="build a todo app with authentication",
-        provider="anthropic",
-        model="claude-sonnet-4-6",
-        status="active",
-        created_at=datetime.now(UTC),
-        updated_at=datetime.now(UTC),
-    )
-    w.stages = []
-    return w
-
-
-def _make_ledger_entry(
-    user_id, amount: int = -10, reason: str = "generate"
-) -> CreditLedger:
-    return CreditLedger(
-        id=uuid4(),
-        user_id=user_id,
-        amount=amount,
-        reason=reason,
-        created_at=datetime.now(UTC),
     )
 
 
@@ -97,21 +74,12 @@ class _FakeDB:
 
 
 @pytest.mark.asyncio
-async def test_recover_stage_stuck_15_minutes() -> None:
-    """Stage stuck 15 min is reset to draft and credits refunded."""
-    user_id = uuid4()
-    workspace_id = uuid4()
-    stage = _make_stuck_stage(15, workspace_id=workspace_id)
-    workspace = _make_workspace(user_id=user_id, workspace_id=workspace_id)
-    ledger = _make_ledger_entry(user_id)
+async def test_recovery_uses_stored_deduction_id() -> None:
+    """Stage recovery uses stage.deduction_ledger_id directly — no time-window query."""
+    ledger_id = uuid4()
+    stage = _make_stuck_stage(15, deduction_ledger_id=ledger_id)
 
-    db = _FakeDB(
-        [
-            [stage],  # stuck stages query
-            workspace,  # workspace query
-            ledger,  # ledger entry query
-        ]
-    )
+    db = _FakeDB([[stage]])  # only the stuck-stages query
 
     with patch(
         "services.pipeline.recovery_service.credit_service.refund",
@@ -122,15 +90,32 @@ async def test_recover_stage_stuck_15_minutes() -> None:
     assert count == 1
     assert stage.status == "draft"
     assert db._committed is True
-    mock_refund.assert_awaited_once_with(db, ledger.id)
+    mock_refund.assert_awaited_once_with(db, ledger_id)
+
+
+@pytest.mark.asyncio
+async def test_recover_stage_stuck_15_minutes() -> None:
+    """Stage stuck 15 min is reset to draft and credits refunded via stored ID."""
+    ledger_id = uuid4()
+    stage = _make_stuck_stage(15, deduction_ledger_id=ledger_id)
+
+    db = _FakeDB([[stage]])
+
+    with patch(
+        "services.pipeline.recovery_service.credit_service.refund",
+        new=AsyncMock(),
+    ) as mock_refund:
+        count = await recover_stuck_stages(db)
+
+    assert count == 1
+    assert stage.status == "draft"
+    mock_refund.assert_awaited_once_with(db, ledger_id)
 
 
 @pytest.mark.asyncio
 async def test_stages_stuck_9_minutes_not_recovered() -> None:
     """When DB returns no stuck stages (9-min stage filtered by SQL), count is 0."""
-    # The actual time-based filter happens in SQL. This test simulates the DB
-    # correctly returning no results for a stage that is only 9 minutes old.
-    db = _FakeDB([[]])  # empty result — DB filtered out the recent stage
+    db = _FakeDB([[]])
 
     count = await recover_stuck_stages(db)
 
@@ -139,20 +124,11 @@ async def test_stages_stuck_9_minutes_not_recovered() -> None:
 
 
 @pytest.mark.asyncio
-async def test_recover_no_ledger_entry_still_resets_stage() -> None:
-    """Stage is reset to draft even if no matching ledger entry is found."""
-    user_id = uuid4()
-    workspace_id = uuid4()
-    stage = _make_stuck_stage(15, workspace_id=workspace_id)
-    workspace = _make_workspace(user_id=user_id, workspace_id=workspace_id)
+async def test_recover_no_deduction_ledger_id_still_resets_stage() -> None:
+    """Stage is reset to draft even if deduction_ledger_id is None (credits not refunded)."""
+    stage = _make_stuck_stage(15, deduction_ledger_id=None)
 
-    db = _FakeDB(
-        [
-            [stage],  # stuck stages
-            workspace,  # workspace
-            None,  # no ledger entry found
-        ]
-    )
+    db = _FakeDB([[stage]])
 
     with patch(
         "services.pipeline.recovery_service.credit_service.refund",
@@ -166,53 +142,25 @@ async def test_recover_no_ledger_entry_still_resets_stage() -> None:
 
 
 @pytest.mark.asyncio
-async def test_recover_missing_workspace_skips_stage() -> None:
-    """Stage is skipped (not counted) if its workspace cannot be loaded."""
-    workspace_id = uuid4()
-    stage = _make_stuck_stage(15, workspace_id=workspace_id)
-
-    db = _FakeDB(
-        [
-            [stage],  # stuck stages
-            None,  # workspace not found
-        ]
-    )
-
-    count = await recover_stuck_stages(db)
-
-    assert count == 0
-    assert stage.status == "in_progress"  # unchanged
-    assert db._committed is False
-
-
-@pytest.mark.asyncio
 async def test_recover_multiple_stuck_stages() -> None:
-    """Multiple stuck stages are all recovered in one pass."""
-    user_id = uuid4()
-    workspace_id = uuid4()
-    stage1 = _make_stuck_stage(20, workspace_id=workspace_id)
-    stage2 = _make_stuck_stage(30, workspace_id=workspace_id)
-    workspace = _make_workspace(user_id=user_id, workspace_id=workspace_id)
-    ledger1 = _make_ledger_entry(user_id)
-    ledger2 = _make_ledger_entry(user_id, reason="regenerate")
+    """Multiple stuck stages are all recovered in one pass using their stored IDs."""
+    ledger_id1 = uuid4()
+    ledger_id2 = uuid4()
+    stage1 = _make_stuck_stage(20, deduction_ledger_id=ledger_id1)
+    stage2 = _make_stuck_stage(30, deduction_ledger_id=ledger_id2)
 
-    db = _FakeDB(
-        [
-            [stage1, stage2],  # stuck stages
-            workspace,  # workspace for stage1
-            ledger1,  # ledger for stage1
-            workspace,  # workspace for stage2
-            ledger2,  # ledger for stage2
-        ]
-    )
+    db = _FakeDB([[stage1, stage2]])
 
     with patch(
         "services.pipeline.recovery_service.credit_service.refund",
         new=AsyncMock(),
-    ):
+    ) as mock_refund:
         count = await recover_stuck_stages(db)
 
     assert count == 2
     assert stage1.status == "draft"
     assert stage2.status == "draft"
     assert db._committed is True
+    assert mock_refund.await_count == 2
+    calls = {c.args[1] for c in mock_refund.await_args_list}
+    assert calls == {ledger_id1, ledger_id2}

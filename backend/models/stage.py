@@ -71,6 +71,11 @@ class Stage(Base):
         nullable=False,
         server_default=func.now(),
     )
+    deduction_ledger_id: Mapped[PythonUUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("credit_ledger.id", ondelete="SET NULL"),
+        nullable=True,
+    )
 
     workspace: Mapped["Workspace"] = relationship(back_populates="stages")
     versions: Mapped[list["StageVersion"]] = relationship(

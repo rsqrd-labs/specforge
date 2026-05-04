@@ -97,6 +97,7 @@ class StageManager:
         )
 
         stage.status = "in_progress"
+        stage.deduction_ledger_id = deduction.id
         stage.updated_at = datetime.now(UTC)
         await db.commit()
 

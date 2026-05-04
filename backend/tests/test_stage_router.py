@@ -556,9 +556,11 @@ async def test_generate_internal_error_does_not_expose_detail(app) -> None:
     assert response.status_code == 200
     body = response.text
     assert "internal_error" in body
-    assert "detail" not in response.json() if response.headers.get(
-        "content-type", ""
-    ).startswith("application/json") else True
+    assert (
+        "detail" not in response.json()
+        if response.headers.get("content-type", "").startswith("application/json")
+        else True
+    )
     # The raw exception message must not appear in the SSE stream
     assert "secret db://" not in body
     assert "pass@host" not in body
@@ -569,6 +571,6 @@ async def test_generate_internal_error_does_not_expose_detail(app) -> None:
         if line.startswith("data:"):
             data = _json.loads(line[5:].strip())
             if data.get("error") == "internal_error":
-                assert "detail" not in data, (
-                    "catch-all error event must not include 'detail' key"
-                )
+                assert (
+                    "detail" not in data
+                ), "catch-all error event must not include 'detail' key"

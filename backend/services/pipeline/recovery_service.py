@@ -7,7 +7,7 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from models import CreditLedger, Stage, Workspace
+from models import Stage
 from services.credit_service import credit_service
 
 logger = logging.getLogger(__name__)
@@ -30,32 +30,10 @@ async def recover_stuck_stages(db: AsyncSession) -> int:
 
     recovered = 0
     for stage in stuck_stages:
-        ws_result = await db.execute(
-            select(Workspace).where(Workspace.id == stage.workspace_id)
-        )
-        workspace = ws_result.scalar_one_or_none()
-        if workspace is None:
-            continue
-
-        # Find the most recent generate/regenerate deduction created within
-        # 60s before the stage went in_progress (updated_at tracks that moment).
-        ledger_result = await db.execute(
-            select(CreditLedger)
-            .where(
-                CreditLedger.user_id == workspace.user_id,
-                CreditLedger.amount < 0,
-                CreditLedger.reason.in_(["generate", "regenerate"]),
-                CreditLedger.created_at >= stage.updated_at - timedelta(seconds=60),
-            )
-            .order_by(CreditLedger.created_at.desc())
-            .limit(1)
-        )
-        ledger_entry = ledger_result.scalar_one_or_none()
-
         credits_refunded = 0
-        if ledger_entry is not None:
-            await credit_service.refund(db, ledger_entry.id)
-            credits_refunded = abs(ledger_entry.amount)
+        if stage.deduction_ledger_id is not None:
+            await credit_service.refund(db, stage.deduction_ledger_id)
+            credits_refunded = 10  # standard generate cost
 
         stage.status = "draft"
         stage.updated_at = datetime.now(UTC)
