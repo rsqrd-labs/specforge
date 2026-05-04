@@ -184,6 +184,11 @@ cp frontend/.env.example frontend/.env
 
 This is the fastest way to run the whole app locally.
 
+The compose file is for local development only. It uses development datastore
+credentials and binds PostgreSQL and Redis to `127.0.0.1` so they are not
+published on every host interface. Production and shared environments must use
+managed/private datastores with secrets injected by the deployment platform.
+
 ```bash
 docker compose up --build
 ```
