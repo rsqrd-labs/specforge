@@ -10,7 +10,11 @@ from uuid import uuid4
 import pytest
 
 from models import Stage, Workspace
-from services.pipeline.export_service import ExportNotReadyError, build_export
+from services.pipeline.export_service import (
+    ExportNotReadyError,
+    build_export,
+    parse_harness_files,
+)
 
 
 def _make_workspace(user_id=None) -> Workspace:
@@ -127,3 +131,29 @@ async def test_build_export_harness_fallback_when_no_code_fences() -> None:
     zf = zipfile.ZipFile(io.BytesIO(result))
     names = zf.namelist()
     assert "harness/HARNESS.md" in names
+
+
+def test_parse_harness_files_rejects_unsafe_filenames() -> None:
+    files = parse_harness_files(
+        """```python tests/test_ok.py
+def test_ok():
+    assert True
+```
+
+```python ../../tmp/pwned.py
+print("owned")
+```
+
+```python /absolute/path.py
+print("owned")
+```
+
+```python C:\\Users\\attacker\\pwned.py
+print("owned")
+```
+"""
+    )
+
+    assert files == {
+        "harness/tests/test_ok.py": "def test_ok():\n    assert True\n"
+    }

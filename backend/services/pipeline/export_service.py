@@ -4,6 +4,7 @@ import io
 import logging
 import re
 import zipfile
+from pathlib import PurePosixPath
 from uuid import UUID
 
 from sqlalchemy import select
@@ -29,14 +30,37 @@ class ExportNotReadyError(Exception):
     pass
 
 
-def _parse_harness_files(harness_content: str) -> dict[str, str]:
+def _safe_harness_path(filename: str) -> str | None:
+    normalized = filename.strip().replace("\\", "/")
+    if not normalized:
+        return None
+
+    path = PurePosixPath(normalized)
+    if path.is_absolute() or ".." in path.parts:
+        return None
+    if not path.parts or path.parts[0].endswith(":"):
+        return None
+
+    safe_path = PurePosixPath("harness", path)
+    if len(safe_path.parts) <= 1:
+        return None
+    return safe_path.as_posix()
+
+
+def _parse_labelled_harness_files(harness_content: str) -> dict[str, str]:
     files: dict[str, str] = {}
     for match in _CODE_FENCE_RE.finditer(harness_content):
         filename = match.group("filename").strip()
         content = match.group("content")
-        if filename:
-            files[f"harness/{filename}"] = content
+        path = _safe_harness_path(filename)
+        if path:
+            files[path] = content
     return files
+
+
+def parse_harness_files(harness_content: str) -> dict[str, str]:
+    files = _parse_labelled_harness_files(harness_content)
+    return files or {_HARNESS_FALLBACK: harness_content}
 
 
 async def build_export(workspace_id: UUID, user_id: UUID, db: AsyncSession) -> bytes:
@@ -63,15 +87,14 @@ async def build_export(workspace_id: UUID, user_id: UUID, db: AsyncSession) -> b
             zf.writestr(filename, stages[stage_type].content or "")
 
         harness_content = stages["harness"].content or ""
-        harness_files = _parse_harness_files(harness_content)
-        if harness_files:
-            for path, content in harness_files.items():
-                zf.writestr(path, content)
-        else:
+        harness_files = parse_harness_files(harness_content)
+        if harness_files.keys() == {_HARNESS_FALLBACK}:
             logger.warning(
                 "harness parse yielded no files for workspace_id=%s, using fallback",
                 workspace_id,
             )
-            zf.writestr(_HARNESS_FALLBACK, harness_content)
+
+        for path, content in harness_files.items():
+            zf.writestr(path, content)
 
     return buf.getvalue()
