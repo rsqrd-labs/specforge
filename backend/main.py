@@ -37,6 +37,14 @@ _HSTS_HEADER = "Strict-Transport-Security"
 _HSTS_VALUE = "max-age=31536000; includeSubDomains"
 
 
+def _apply_security_headers(response: Response) -> Response:
+    for header, value in _SECURITY_HEADERS.items():
+        response.headers.setdefault(header, value)
+    if settings.environment == "production":
+        response.headers.setdefault(_HSTS_HEADER, _HSTS_VALUE)
+    return response
+
+
 async def check_database() -> DependencyStatus:
     try:
         async with async_engine.connect() as connection:
@@ -96,11 +104,19 @@ def create_app(redis_client=None) -> FastAPI:
         call_next,
     ) -> Response:
         response = await call_next(request)
-        for header, value in _SECURITY_HEADERS.items():
-            response.headers.setdefault(header, value)
-        if settings.environment == "production":
-            response.headers.setdefault(_HSTS_HEADER, _HSTS_VALUE)
-        return response
+        return _apply_security_headers(response)
+
+    @app.exception_handler(Exception)
+    async def unhandled_exception_handler(
+        request: Request,
+        exc: Exception,
+    ) -> JSONResponse:
+        return _apply_security_headers(
+            JSONResponse(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                content={"detail": "Internal Server Error"},
+            )
+        )
 
     @app.get("/health", include_in_schema=False)
     async def health() -> JSONResponse:

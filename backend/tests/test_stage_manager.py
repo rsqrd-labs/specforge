@@ -428,6 +428,43 @@ async def test_refine_rejects_stale_selected_text_before_llm_call() -> None:
 
 
 @pytest.mark.asyncio
+async def test_refine_matches_raw_selection_but_sanitizes_prompt_fields() -> None:
+    from schemas.stage import RefineRequest
+
+    workspace_id = uuid4()
+    content = "hello <b>world</b>"
+    selected_text = "<b>world</b>"
+    stage = _make_stage(workspace_id, "spec", status="draft", content=content)
+    workspace = _make_workspace([stage])
+    user = _make_user()
+    request = RefineRequest(
+        instruction="<i>tighten</i>",
+        selection_start=6,
+        selection_end=18,
+        selected_text=selected_text,
+    )
+
+    svc = StageManager(redis_client=_FakeRedis())
+    db = _MultiQueryDB([stage, workspace])
+
+    with patch("services.pipeline.stage_manager.get_llm") as mock_get_llm:
+        mock_adapter = MagicMock()
+        mock_adapter.complete = AsyncMock(return_value="earth")
+        mock_get_llm.return_value = mock_adapter
+
+        result = await svc.refine(stage.id, request, user, db)
+
+    assert result.proposed == "hello earth"
+    _, user_prompt = mock_adapter.complete.await_args.args[:2]
+    selected_prompt = user_prompt.split("Selected text:\n", 1)[1].split(
+        "\n\nInstruction:", 1
+    )[0]
+    instruction_prompt = user_prompt.split("Instruction: ", 1)[1].split("\n\n", 1)[0]
+    assert selected_prompt == "world"
+    assert instruction_prompt == "tighten"
+
+
+@pytest.mark.asyncio
 async def test_generate_raises_rate_limit_error_when_llm_limit_exceeded() -> None:
     """11th LLM call in 60 seconds raises RateLimitError before credit deduction."""
     from services.pipeline.stage_manager import RateLimitError

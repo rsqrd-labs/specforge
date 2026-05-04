@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import PurePosixPath
 
 import pytest
-from conftest import REPO_ROOT, import_backend, read_backend_file
+from harness_utils import REPO_ROOT, import_backend, read_backend_file
 from pydantic import ValidationError
 
 
@@ -26,8 +26,7 @@ def test_export_service_rejects_zip_slip_harness_filenames() -> None:
     )
     assert parse_harness_files is not None
 
-    files = parse_harness_files(
-        """```python tests/test_ok.py
+    files = parse_harness_files("""```python tests/test_ok.py
 def test_ok():
     assert True
 ```
@@ -43,8 +42,7 @@ print("owned")
 ```python nested/../escape.py
 print("owned")
 ```
-"""
-    )
+""")
 
     assert "harness/tests/test_ok.py" in files
     assert all(_is_safe_zip_member(path) for path in files), (

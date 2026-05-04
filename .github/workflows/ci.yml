@@ -80,6 +80,23 @@ jobs:
           CSRF_SECRET: "ci-test-csrf-secret-value-long-enough"
           ENVIRONMENT: "test"
 
+      - name: Security harness contracts
+        run: uv run pytest ../harness/tests/backend/test_security_audit_contract.py ../harness/tests/backend/test_second_pass_security_contract.py -q
+        env:
+          DATABASE_URL: "postgresql+asyncpg://postgres:postgres@localhost:5432/test"
+          REDIS_URL: "redis://localhost:6379/0"
+          JWT_PRIVATE_KEY: "ci-test-private-key"
+          JWT_PUBLIC_KEY: "ci-test-public-key"
+          GOOGLE_CLIENT_ID: "ci-test-client-id"
+          GOOGLE_CLIENT_SECRET: "ci-test-client-secret"
+          FRONTEND_URL: "http://localhost:5173"
+          ANTHROPIC_API_KEY: "ci-test-anthropic-key"
+          OPENAI_API_KEY: "ci-test-openai-key"
+          GOOGLE_API_KEY: "ci-test-google-key"
+          ENCRYPTION_MASTER_KEY: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+          CSRF_SECRET: "ci-test-csrf-secret-value-long-enough"
+          ENVIRONMENT: "test"
+
   frontend:
     name: Frontend
     runs-on: ubuntu-latest

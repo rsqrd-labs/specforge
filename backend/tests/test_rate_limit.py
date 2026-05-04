@@ -7,7 +7,11 @@ import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
-from middleware.rate_limit import RateLimitMiddleware, sliding_window_check
+from middleware.rate_limit import (
+    RateLimitMiddleware,
+    _parse_trusted_proxy_networks,
+    sliding_window_check,
+)
 
 
 class _FakePipeline:
@@ -237,3 +241,13 @@ async def test_rate_limit_middleware_ignores_malformed_forwarded_for() -> None:
         response = await client.get("/", headers={"X-Forwarded-For": "not-an-ip"})
 
     assert response.status_code == 200
+
+
+def test_trusted_proxy_config_rejects_ipv4_universal_trust() -> None:
+    with pytest.raises(ValueError, match="universal trust"):
+        _parse_trusted_proxy_networks("0.0.0.0/0")
+
+
+def test_trusted_proxy_config_rejects_ipv6_universal_trust() -> None:
+    with pytest.raises(ValueError, match="universal trust"):
+        _parse_trusted_proxy_networks("::/0")

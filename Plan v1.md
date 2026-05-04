@@ -1437,4 +1437,71 @@ After Phase 7 is implemented:
 
 ---
 
-_SpecForge V1 PLAN.md · Version 1.3.0 · Updated 2026-05-04 with Phase 7 security audit hardening_
+---
+
+## 13. Phase 8 — Second-Pass Security Verification Fixes (2026-05-04)
+
+> [!note] Source This phase is derived from the post-mitigation attacker-minded verification pass. It focuses only on incomplete fixes, bypasses, regression risk, and security test reliability.
+
+---
+
+### 13.1 Goal
+
+Close every confirmed Phase 7 bypass and incomplete mitigation before production exposure. The fixes must be systemic: error responses receive the same browser security headers as normal responses, refine validates raw document consistency before sanitizing prompt fields, proxy trust cannot be globally misconfigured, security harness contracts are import-stable and CI-enforced, and exported ZIP filenames are safe for Windows extraction.
+
+**Inputs:**
+- Second-pass security review findings from 2026-05-04
+- `harness/tests/backend/test_security_audit_contract.py`
+- `harness/tests/backend/test_second_pass_security_contract.py`
+- Backend tests for security headers, refine, rate limiting, and exports
+
+**Outputs:**
+- Security headers applied to unhandled 500 responses
+- Raw refine selection matching with prompt-boundary sanitization
+- Rejection of universal trusted proxy ranges
+- Import-stable security harness helpers
+- CI execution of focused security harness contracts
+- Windows-safe exported harness filenames
+
+---
+
+### 13.2 Sub-Stages
+
+| Priority | Task | Finding | Rationale |
+|----------|------|---------|-----------|
+| 1 | T-104 | Headers missing on unhandled 500s | Error paths must not lose browser hardening or leak internals. |
+| 2 | T-105 | Refine raw-vs-sanitized mismatch | Stale-selection defense must compare raw document text while sanitizing LLM prompt inputs. |
+| 3 | T-106 | Universal trusted proxy bypass | `0.0.0.0/0` and `::/0` fully re-enable `X-Forwarded-For` spoofing. |
+| 4 | T-107 | Harness import/CI reliability gap | Security contracts must run reliably from CI and mixed pytest roots. |
+| 5 | T-108 | Windows archive filename gap | Exported archives must be safe for cross-platform extraction. |
+
+---
+
+### 13.3 Contract Coverage
+
+`harness/tests/backend/test_second_pass_security_contract.py` verifies:
+
+- Unhandled application exceptions return generic 500 JSON with the standard security header baseline.
+- Universal IPv4 and IPv6 trusted proxy ranges are rejected.
+- Refine preserves raw selected text for document matching and sanitizes instruction/selection at the prompt boundary.
+- Export parsing rejects Windows-reserved filenames and alternate data stream syntax.
+
+The backend CI job runs both focused security contract files:
+
+1. `../harness/tests/backend/test_security_audit_contract.py`
+2. `../harness/tests/backend/test_second_pass_security_contract.py`
+
+---
+
+### 13.4 Validation
+
+After Phase 8 is implemented:
+
+1. `cd backend && uv run pytest ../harness/tests/backend/test_security_audit_contract.py ../harness/tests/backend/test_second_pass_security_contract.py -q`
+2. `cd backend && uv run pytest tests/test_security_headers.py tests/test_rate_limit.py tests/test_export_service.py tests/test_stage_router.py tests/test_stage_manager.py -q`
+3. `cd backend && uv run ruff check .`
+4. `cd backend && uv run black --check .`
+
+---
+
+_SpecForge V1 PLAN.md · Version 1.4.0 · Updated 2026-05-04 with Phase 8 second-pass security fixes_

@@ -134,8 +134,7 @@ async def test_build_export_harness_fallback_when_no_code_fences() -> None:
 
 
 def test_parse_harness_files_rejects_unsafe_filenames() -> None:
-    files = parse_harness_files(
-        """```python tests/test_ok.py
+    files = parse_harness_files("""```python tests/test_ok.py
 def test_ok():
     assert True
 ```
@@ -151,9 +150,18 @@ print("owned")
 ```python C:\\Users\\attacker\\pwned.py
 print("owned")
 ```
-"""
-    )
 
-    assert files == {
-        "harness/tests/test_ok.py": "def test_ok():\n    assert True\n"
-    }
+```python CON
+print("reserved")
+```
+
+```python file.txt:ads
+print("alternate data stream")
+```
+
+```python tests/bad\u0001name.py
+print("control char")
+```
+""")
+
+    assert files == {"harness/tests/test_ok.py": "def test_ok():\n    assert True\n"}

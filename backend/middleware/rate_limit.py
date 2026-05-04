@@ -102,9 +102,14 @@ def _parse_trusted_proxy_networks(value: str) -> tuple[IpNetwork, ...]:
         if not entry:
             continue
         try:
-            networks.append(ip_network(entry, strict=False))
+            network = ip_network(entry, strict=False)
         except ValueError:
             continue
+        if network.prefixlen == 0:
+            raise ValueError(
+                "trusted_proxy_ips must not include universal trust ranges"
+            )
+        networks.append(network)
     return tuple(networks)
 
 

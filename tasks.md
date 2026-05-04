@@ -3976,4 +3976,173 @@ Frontend `pnpm audit --audit-level moderate` completed clean during the audit. P
 
 ---
 
-_tasks.md · SpecForge V1 · Version 1.5.0 · Updated 2026-05-04 with Phase 7 security audit hardening T-097 through T-103_
+## Phase 8 — Second-Pass Security Verification Fixes
+
+> Issues identified in the post-mitigation security verification pass on 2026-05-04. These are bypasses or incomplete fixes in the Phase 7 mitigations and must be handled as production blockers.
+
+---
+
+### T-104: Apply Security Headers to Unhandled 500 Responses
+
+**Description:**
+The Phase 7 security headers middleware adds headers to normal responses, but unhandled application exceptions can be converted into 500 responses without the same browser hardening headers. The error response must also avoid leaking internal exception text.
+
+**Severity:** Medium — production error paths lose defense-in-depth and can disclose internals if handled incorrectly.
+
+**Inputs:**
+- `backend/main.py`
+- `backend/tests/test_security_headers.py`
+- `harness/tests/backend/test_second_pass_security_contract.py`
+
+**Outputs:**
+- Shared security-header helper used by middleware and unhandled exception responses
+- Generic 500 JSON response without raw exception details
+- Backend and harness tests proving 500 responses carry CSP, XFO, XCTO, and Referrer-Policy
+
+**Steps:**
+1. Extract centralized security-header application logic in `main.py`.
+2. Register an unhandled exception handler that returns a generic 500 response.
+3. Apply the same header helper to that exception response.
+4. Add a route-level failure test using `TestClient(..., raise_server_exceptions=False)`.
+5. Run `cd backend && uv run pytest tests/test_security_headers.py ../harness/tests/backend/test_second_pass_security_contract.py -q`.
+
+**Acceptance Criteria:**
+- Normal and unhandled-error responses include the same security header baseline.
+- Raw exception messages are not returned to clients.
+- Harness coverage prevents this error-path gap from re-entering.
+
+**Finding:** 2026-05-04 second-pass review — security headers missing on unhandled 500s
+
+---
+
+### T-105: Preserve Raw Refine Selection Matching While Sanitizing Prompt Inputs
+
+**Description:**
+The router sanitizes `selected_text` before `StageManager.refine()` verifies it against the current document. Harmless markup in the actual selected document text can be stripped before comparison, causing valid refine requests to fail and encouraging callers to bypass the safety check. Raw text must be used for document consistency checks; sanitized text must be used only when constructing the LLM prompt.
+
+**Severity:** High — incomplete mitigation in a security-sensitive LLM edit path.
+
+**Inputs:**
+- `backend/routers/stage.py`
+- `backend/services/pipeline/stage_manager.py`
+- `backend/tests/test_stage_router.py`
+- `backend/tests/test_stage_manager.py`
+- `harness/tests/backend/test_second_pass_security_contract.py`
+
+**Outputs:**
+- Router passes raw `RefineRequest` to the stage manager
+- Stage manager scans raw inputs, compares raw selected text to raw document slice, then sanitizes instruction and selection at the prompt boundary
+- Tests for raw markup selection success and sanitized prompt fields
+
+**Steps:**
+1. Remove router-level selected text mutation.
+2. Keep prompt-injection scanning before any LLM call.
+3. Compare `content[selection_start:selection_end]` to raw `request.selected_text`.
+4. Sanitize `request.instruction` and `request.selected_text` immediately before prompt construction.
+5. Update router tests to assert raw preservation.
+6. Add service tests that valid markup selections still refine and prompt fields are sanitized.
+
+**Acceptance Criteria:**
+- Stale-selection protection remains enforced.
+- Valid raw selections containing harmless markup are accepted.
+- User-controlled instruction and selected text are sanitized before entering the LLM prompt.
+
+**Finding:** 2026-05-04 second-pass review — refine sanitization broke raw selection consistency
+
+---
+
+### T-106: Reject Universal Trusted Proxy Ranges
+
+**Description:**
+`trusted_proxy_ips` fixed default `X-Forwarded-For` spoofing, but accepting `0.0.0.0/0` or `::/0` silently turns every client into a trusted proxy. That single misconfiguration fully reintroduces the rate-limit bypass.
+
+**Severity:** High — one environment variable can disable IP-based throttling.
+
+**Inputs:**
+- `backend/middleware/rate_limit.py`
+- `backend/tests/test_rate_limit.py`
+- `harness/tests/backend/test_second_pass_security_contract.py`
+
+**Outputs:**
+- Trusted proxy parser rejects universal IPv4 and IPv6 ranges
+- Unit and harness tests for unsafe proxy configuration
+
+**Steps:**
+1. Parse proxy entries with `ip_network(..., strict=False)`.
+2. Raise `ValueError` for any network with prefix length `0`.
+3. Keep malformed non-universal entries ignored as before.
+4. Add tests for `0.0.0.0/0` and `::/0`.
+
+**Acceptance Criteria:**
+- Universal proxy trust cannot be configured accidentally.
+- Legitimate specific proxy IPs/CIDRs still work.
+- Spoofed `X-Forwarded-For` remains ignored by default.
+
+**Finding:** 2026-05-04 second-pass review — bypassable trusted proxy configuration
+
+---
+
+### T-107: Make Security Harness Contracts Import-Stable and CI-Enforced
+
+**Description:**
+The security harness imported helpers from bare `conftest`, which collides with `backend/tests/conftest.py` when backend and harness tests are collected together. CI also ran backend tests but did not run the focused security harness contracts.
+
+**Severity:** Medium — security regression tests can be skipped or fail for the wrong reason.
+
+**Inputs:**
+- `harness/tests/backend/conftest.py`
+- `harness/tests/backend/harness_utils.py`
+- `harness/tests/backend/test_security_audit_contract.py`
+- `.github/workflows/ci.yml`
+
+**Outputs:**
+- Import-stable harness utility module
+- Security audit and second-pass harness contracts run in CI
+
+**Steps:**
+1. Move shared harness helpers into `harness_utils.py`.
+2. Update security harness tests to import from `harness_utils`.
+3. Keep `conftest.py` as a thin compatibility re-export.
+4. Add a backend CI step that runs the focused security harness contract files.
+
+**Acceptance Criteria:**
+- `cd backend && uv run pytest ../harness/tests/backend/test_security_audit_contract.py ../harness/tests/backend/test_second_pass_security_contract.py -q` passes.
+- The security harness no longer depends on pytest's `conftest` import resolution.
+- CI fails if focused security contracts regress.
+
+**Finding:** 2026-05-04 second-pass review — security harness reliability gap
+
+---
+
+### T-108: Harden Export Filenames for Windows Extraction
+
+**Description:**
+Zip Slip traversal was fixed, but exported harness filenames could still include Windows-reserved device names or alternate data stream syntax. These do not escape the `harness/` prefix on POSIX, but they are unsafe for Windows consumers extracting the archive.
+
+**Severity:** Medium — cross-platform archive extraction hardening gap.
+
+**Inputs:**
+- `backend/services/pipeline/export_service.py`
+- `backend/tests/test_export_service.py`
+- `harness/tests/backend/test_second_pass_security_contract.py`
+
+**Outputs:**
+- Harness filenames reject `CON`, `PRN`, `AUX`, `NUL`, `COM1`-`COM9`, `LPT1`-`LPT9`, colon-delimited names, and control characters
+- Backend and harness tests for Windows-unsafe names
+
+**Steps:**
+1. Extend `_safe_harness_path()` with Windows reserved-name checks per path part.
+2. Reject `:` anywhere in a path part.
+3. Reject ASCII control characters before creating ZIP members.
+4. Add export parser tests for reserved names and alternate data streams.
+
+**Acceptance Criteria:**
+- Exported ZIP member paths remain safe for POSIX and Windows extraction.
+- Valid relative harness paths continue to export normally.
+- Security harness covers the cross-platform filename hardening.
+
+**Finding:** 2026-05-04 second-pass review — Windows archive extraction hardening gap
+
+---
+
+_tasks.md · SpecForge V1 · Version 1.6.0 · Updated 2026-05-04 with Phase 8 second-pass security fixes T-104 through T-108_

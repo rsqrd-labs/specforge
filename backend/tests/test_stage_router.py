@@ -265,7 +265,7 @@ async def test_generate_dependency_error_returns_error_event(app) -> None:
 
 
 @pytest.mark.asyncio
-async def test_refine_sanitizes_instruction_before_stage_manager(app) -> None:
+async def test_refine_preserves_raw_instruction_for_stage_manager(app) -> None:
     stage = _make_stage()
     captured = {}
 
@@ -305,7 +305,7 @@ async def test_refine_sanitizes_instruction_before_stage_manager(app) -> None:
             )
 
     assert response.status_code == 200
-    assert captured["instruction"] == "Improve"
+    assert captured["instruction"] == "<b>Improve</b>"
 
 
 @pytest.mark.asyncio
@@ -512,7 +512,7 @@ async def test_acknowledge_gate_marks_stage_reviewed(app) -> None:
 
 
 @pytest.mark.asyncio
-async def test_refine_sanitizes_selected_text_before_stage_manager(app) -> None:
+async def test_refine_preserves_raw_selected_text_for_stage_manager(app) -> None:
     stage = _make_stage()
     captured = {}
 
@@ -552,8 +552,7 @@ async def test_refine_sanitizes_selected_text_before_stage_manager(app) -> None:
             )
 
     assert response.status_code == 200
-    assert "<script>" not in captured["selected_text"]
-    assert "alert" not in captured["selected_text"]
+    assert captured["selected_text"] == "<script>alert(1)</script>selected"
 
 
 @pytest.mark.asyncio

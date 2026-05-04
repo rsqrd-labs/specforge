@@ -25,6 +25,7 @@ from services.pipeline.diff_engine import apply_diff, compute_diff
 from services.pipeline.prompt_builder import build_prompt
 from services.security.output_validator import validate
 from services.security.prompt_guard import scan
+from services.security.sanitizer import sanitize_text
 
 logger = logging.getLogger(__name__)
 
@@ -217,7 +218,7 @@ class StageManager:
         if request.selection_end > len(content):
             raise RefineSelectionError("Selected range is outside the current document")
         if (
-            content[request.selection_start:request.selection_end]
+            content[request.selection_start : request.selection_end]
             != request.selected_text
         ):
             raise RefineSelectionError("Selected text no longer matches the document")
@@ -230,10 +231,12 @@ class StageManager:
             "You are SpecForge. Rewrite only the selected text per the instruction. "
             "Return ONLY the replacement text, nothing else."
         )
+        sanitized_instruction = sanitize_text(request.instruction)
+        sanitized_selected_text = sanitize_text(request.selected_text)
         user_prompt = (
             f"Current document:\n{content}\n\n"
-            f"Selected text:\n{request.selected_text}\n\n"
-            f"Instruction: {request.instruction}\n\n"
+            f"Selected text:\n{sanitized_selected_text}\n\n"
+            f"Instruction: {sanitized_instruction}\n\n"
             "Provide the replacement text only."
         )
 

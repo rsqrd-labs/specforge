@@ -24,6 +24,11 @@ _CODE_FENCE_RE = re.compile(
     r"```(?:\w+)?\s+(?P<filename>[^\n]+)\n(?P<content>.*?)```",
     re.DOTALL,
 )
+_WINDOWS_RESERVED_NAMES = frozenset(
+    {"CON", "PRN", "AUX", "NUL"}
+    | {f"COM{i}" for i in range(1, 10)}
+    | {f"LPT{i}" for i in range(1, 10)}
+)
 
 
 class ExportNotReadyError(Exception):
@@ -34,12 +39,18 @@ def _safe_harness_path(filename: str) -> str | None:
     normalized = filename.strip().replace("\\", "/")
     if not normalized:
         return None
+    if any(ord(char) < 32 for char in normalized):
+        return None
 
     path = PurePosixPath(normalized)
     if path.is_absolute() or ".." in path.parts:
         return None
-    if not path.parts or path.parts[0].endswith(":"):
+    if not path.parts or any(":" in part for part in path.parts):
         return None
+    for part in path.parts:
+        stem = part.split(".", 1)[0].upper()
+        if stem in _WINDOWS_RESERVED_NAMES:
+            return None
 
     safe_path = PurePosixPath("harness", path)
     if len(safe_path.parts) <= 1:

@@ -50,6 +50,23 @@ def test_hsts_is_set_in_production() -> None:
         response = client.get("/providers")
 
     assert response.status_code == 200
-    assert response.headers["Strict-Transport-Security"].startswith(
-        "max-age=31536000"
-    )
+    assert response.headers["Strict-Transport-Security"].startswith("max-age=31536000")
+
+
+def test_security_headers_are_set_on_unhandled_500_responses() -> None:
+    app = create_app(redis_client=_NoopRedis())
+
+    @app.get("/boom")
+    async def boom() -> None:
+        raise RuntimeError("sensitive internal detail")
+
+    with patch.object(settings, "environment", "development"):
+        client = TestClient(app, raise_server_exceptions=False)
+        response = client.get("/boom")
+
+    assert response.status_code == 500
+    assert response.json() == {"detail": "Internal Server Error"}
+    assert response.headers["Content-Security-Policy"]
+    assert response.headers["X-Frame-Options"] == "DENY"
+    assert response.headers["X-Content-Type-Options"] == "nosniff"
+    assert response.headers["Referrer-Policy"] == "strict-origin-when-cross-origin"
