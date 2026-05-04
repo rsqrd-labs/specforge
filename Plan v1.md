@@ -1358,3 +1358,83 @@ The following review findings are acknowledged but explicitly deferred beyond V1
 ---
 
 _SpecForge V1 PLAN.md · Version 1.2.0 · Updated 2026-05-02 with Phase 5 code review mitigation_
+
+---
+
+## 12. Phase 7 — Security Audit Hardening (2026-05-04)
+
+> [!note] Source This phase is derived from the deep repository security audit performed on 2026-05-04. It tracks practical exploitability first: archive extraction abuse, authenticated resource exhaustion, proxy-sensitive rate-limit bypasses, and production deployment hardening.
+
+---
+
+### 12.1 Goal
+
+Close every confirmed security issue from the audit and add red-first harness coverage so the same classes of bugs do not re-enter the codebase. The primary launch blocker is the exported harness ZIP path traversal issue. The remaining items harden production readiness and reduce abuse surface.
+
+**Inputs:**
+- Audit findings from 2026-05-04
+- New harness file `harness/tests/backend/test_security_audit_contract.py`
+- Existing backend tests for export, stage schemas, rate limiting, observability, and Docker configuration
+
+**Outputs:**
+- Safe ZIP member path normalization in `export_service.py`
+- Bounded and internally consistent refine payload validation
+- Refine selection verification against current stage content before LLM calls
+- Trusted-proxy handling for `X-Forwarded-For`
+- Local-only datastore bindings in Docker Compose
+- Standard security headers on backend responses
+- Updated CI/security scanning posture for dependency and SAST checks
+
+---
+
+### 12.2 Sub-Stages
+
+| Priority | Task | Finding | Rationale |
+|----------|------|---------|-----------|
+| 1 | T-097 | Export Zip Slip | Authenticated users can create dangerous ZIP members through harness content. |
+| 2 | T-098 | Refine request DoS and selection mismatch | Large or inconsistent refine payloads increase provider spend and can mutate unintended content. |
+| 3 | T-099 | Spoofable `X-Forwarded-For` | IP rate limits can be bypassed if the app is exposed without a trusted proxy boundary. |
+| 4 | T-100 | Public dev datastore ports | Compose exposes Postgres and Redis to all host interfaces with dev credentials. |
+| 5 | T-101 | Missing security headers | Production responses lack common browser-side hardening headers. |
+| 6 | T-102 | Regex-only AI security controls | Prompt injection and output leakage controls are useful but too brittle to be the only guardrail. |
+| 7 | T-103 | Dependency scanning gap | Frontend audit passed, but Python dependency scanning must be non-interactive and CI-enforced. |
+
+---
+
+### 12.3 Contract Coverage
+
+`harness/tests/backend/test_security_audit_contract.py` is the red/green contract for Phase 7. It asserts:
+
+- Exported harness file paths stay under `harness/` and reject absolute or parent-traversal filenames.
+- `RefineRequest` enforces maximum lengths and rejects `selection_end < selection_start`.
+- `StageManager.refine()` verifies the requested selection against the current document before calling an LLM.
+- `RateLimitMiddleware` only trusts `X-Forwarded-For` from configured trusted proxies.
+- Backend responses define CSP, HSTS, frame, content-type, and referrer headers.
+- Docker Compose binds Postgres and Redis to localhost rather than all interfaces.
+
+---
+
+### 12.4 Implementation Notes
+
+Zip path safety must be enforced before `zipfile.ZipFile.writestr()`, not after export. The accepted path format is `harness/<relative-posix-path>` with no absolute paths, empty path parts, Windows drive prefixes, or `..` segments.
+
+Refine validation must happen at two layers: Pydantic bounds at the API boundary, and content consistency in `StageManager.refine()` after loading the current stage content. The service must reject a stale client selection instead of silently applying replacement text to arbitrary indices.
+
+Proxy header handling must default closed. If no trusted proxy list is configured, use `request.client.host`. Only honor `X-Forwarded-For` when the immediate client is a configured trusted proxy.
+
+Security headers should be centralized in middleware so all backend routes, including errors and SSE setup responses, receive consistent policy. HSTS must only be emitted in production or when HTTPS is guaranteed.
+
+---
+
+### 12.5 Validation
+
+After Phase 7 is implemented:
+
+1. `cd backend && uv run pytest ../harness/tests/backend/test_security_audit_contract.py -q`
+2. `cd backend && uv run pytest tests/test_export_service.py tests/test_stage_router.py tests/test_rate_limit.py tests/test_observability.py -q`
+3. `cd frontend && pnpm audit --audit-level moderate`
+4. Run the Python dependency scanner in CI using a non-interactive command/token configuration.
+
+---
+
+_SpecForge V1 PLAN.md · Version 1.3.0 · Updated 2026-05-04 with Phase 7 security audit hardening_

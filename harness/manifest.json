@@ -26,6 +26,11 @@
       "proves": "FastAPI app factory, health, data models, routers, stage lifecycle, credits, security, evals, and export behavior match the spec."
     },
     {
+      "id": "security-audit-contracts",
+      "path": "harness/tests/backend/test_security_audit_contract.py",
+      "proves": "The post-audit security fixes block Zip Slip exports, bound refine inputs, validate selected text, trust proxy headers safely, emit security headers, and keep dev datastores off public interfaces."
+    },
+    {
       "id": "frontend-contracts",
       "path": "harness/tests/frontend",
       "proves": "Strict TypeScript contracts, auth token handling, API client refresh, stores, and workspace UI state match the spec."

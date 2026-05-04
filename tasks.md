@@ -3700,4 +3700,280 @@ The `_FakeDB.execute()` mock in `test_workspace.py` (added in T-082) introspects
 
 ---
 
-_tasks.md · SpecForge V1 · Version 1.4.0 · Updated 2026-05-03 with Phase 6 second-pass review remediations T-086 through T-096_
+## Phase 7 — Security Audit Hardening
+
+> Issues identified in the deep security audit on 2026-05-04. Each task maps to at least one contract in `harness/tests/backend/test_security_audit_contract.py`. Complete these before treating V1 as production-ready.
+
+---
+
+### T-097: Prevent Zip Slip in Workspace Exports
+
+**Description:**
+`backend/services/pipeline/export_service.py` parses file names from AI/user-controlled harness code fences and writes them directly into a ZIP. Filenames like `../../tmp/pwned.py` or `/absolute/path.py` become dangerous archive members. Any unsafe extractor can write outside the intended extraction directory.
+
+**Severity:** High — exploitable by any authenticated user who can edit/finalise harness content and convince a developer or CI job to extract the export.
+
+**Inputs:**
+- `backend/services/pipeline/export_service.py`
+- `backend/tests/test_export_service.py`
+- `harness/tests/backend/test_security_audit_contract.py::test_export_service_rejects_zip_slip_harness_filenames`
+
+**Outputs:**
+- Safe harness filename normalization helper
+- Unsafe harness filenames rejected or skipped before `ZipFile.writestr()`
+- Tests for `..`, absolute paths, empty paths, and valid nested paths
+
+**Steps:**
+1. Add a helper in `export_service.py` that accepts a raw filename and returns a safe `harness/<relative-posix-path>` or `None`.
+2. Use `pathlib.PurePosixPath` after converting backslashes to `/`.
+3. Reject absolute paths, `..` path parts, empty path parts, Windows drive prefixes, and filenames that normalize to only `harness/`.
+4. Update `_parse_harness_files()` to call this helper before adding a file to the export map.
+5. Preserve valid nested paths such as `tests/unit/test_auth.py` as `harness/tests/unit/test_auth.py`.
+6. Add backend unit tests covering traversal and valid filenames.
+7. Run `cd backend && uv run pytest tests/test_export_service.py ../harness/tests/backend/test_security_audit_contract.py -q`.
+
+**Acceptance Criteria:**
+- No ZIP member name can escape the `harness/` prefix.
+- The security audit harness Zip Slip test passes.
+- Existing export behavior for normal labelled code fences still works.
+
+**Finding:** 2026-05-04 security audit — Zip Slip in exported harness files
+
+**Dependencies:** none
+
+---
+
+### T-098: Bound and Verify Refine Requests
+
+**Description:**
+`RefineRequest.instruction` and `selected_text` are unbounded, and `StageManager.refine()` does not verify that the client-provided selection range matches the current stage content. An authenticated attacker can send oversized refine payloads or stale/mismatched indices, causing unnecessary parsing, LLM prompt growth, provider spend, and unintended content replacement.
+
+**Severity:** Medium — authenticated resource exhaustion and content integrity risk.
+
+**Inputs:**
+- `backend/schemas/stage.py`
+- `backend/services/pipeline/stage_manager.py`
+- `backend/services/pipeline/diff_engine.py`
+- `backend/tests/test_stage_router.py`
+- `backend/tests/test_diff_engine.py`
+- `harness/tests/backend/test_security_audit_contract.py::test_refine_request_enforces_size_and_selection_bounds`
+- `harness/tests/backend/test_security_audit_contract.py::test_refine_flow_verifies_selection_matches_current_content`
+
+**Outputs:**
+- `RefineRequest` max-length constraints
+- Cross-field validation for `selection_end >= selection_start`
+- Service-level validation that indices are within current content and match `selected_text`
+- Clear 400/409 response for stale or invalid selections
+
+**Steps:**
+1. Add conservative max lengths to `RefineRequest`: `instruction` at 20,000 characters and `selected_text` at 100,000 characters.
+2. Add a Pydantic model validator that rejects `selection_end < selection_start`.
+3. In `StageManager.refine()`, after loading `content`, reject if `selection_end > len(content)`.
+4. Compare `content[selection_start:selection_end]` to `request.selected_text`; reject stale or mismatched selections before calling the LLM.
+5. Raise a typed exception or `ValueError` and map it in the router to a non-500 response.
+6. Add tests for oversized instruction, oversized selected text, reversed indices, out-of-range indices, and mismatched selected text.
+7. Run `cd backend && uv run pytest tests/test_stage_router.py tests/test_diff_engine.py ../harness/tests/backend/test_security_audit_contract.py -q`.
+
+**Acceptance Criteria:**
+- Invalid refine payloads fail before any LLM provider call.
+- Stale client selections are rejected instead of being applied to current content.
+- The two refine security audit harness tests pass.
+
+**Finding:** 2026-05-04 security audit — unbounded refine payloads and missing selection consistency checks
+
+**Dependencies:** none
+
+---
+
+### T-099: Trust X-Forwarded-For Only from Known Proxies
+
+**Description:**
+`RateLimitMiddleware._get_client_ip()` trusts `X-Forwarded-For` unconditionally. If the app is exposed directly or a proxy does not strip user-supplied headers, attackers can rotate spoofed IPs and bypass IP-based login and request rate limits.
+
+**Severity:** Medium — rate-limit bypass under common misdeployment conditions.
+
+**Inputs:**
+- `backend/config.py`
+- `backend/middleware/rate_limit.py`
+- `backend/tests/test_rate_limit.py`
+- `harness/tests/backend/test_security_audit_contract.py::test_rate_limiter_only_trusts_forwarded_for_from_known_proxies`
+
+**Outputs:**
+- Configured trusted proxy list
+- Default behavior that ignores `X-Forwarded-For`
+- Tests for direct clients, untrusted clients with spoofed headers, and trusted proxy clients
+
+**Steps:**
+1. Add `trusted_proxy_ips: str = ""` or equivalent typed config to `Settings`.
+2. Parse the configured list into exact IPs/CIDRs in `rate_limit.py`.
+3. Update `_get_client_ip(request)` to use `request.client.host` unless the immediate client is a trusted proxy.
+4. Only when the immediate client is trusted, use the first valid IP from `X-Forwarded-For`.
+5. Treat malformed forwarded values as absent and fall back to the immediate client host.
+6. Add unit tests for spoofed untrusted headers and trusted proxy behavior.
+7. Run `cd backend && uv run pytest tests/test_rate_limit.py ../harness/tests/backend/test_security_audit_contract.py -q`.
+
+**Acceptance Criteria:**
+- Spoofed `X-Forwarded-For` from an untrusted client has no effect.
+- A configured trusted proxy can pass the real client IP.
+- The rate-limit security audit harness test passes.
+
+**Finding:** 2026-05-04 security audit — unconditional trust in `X-Forwarded-For`
+
+**Dependencies:** none
+
+---
+
+### T-100: Bind Dev Datastores to Localhost in Docker Compose
+
+**Description:**
+`docker-compose.yml` publishes Postgres and Redis to all host interfaces while using development credentials. This is acceptable only on a private developer machine and becomes dangerous on shared hosts, remote dev boxes, or copied staging configs.
+
+**Severity:** Medium/Low — deployment hardening; high impact if the compose file is reused outside local-only development.
+
+**Inputs:**
+- `docker-compose.yml`
+- `README.md`
+- `harness/tests/backend/test_security_audit_contract.py::test_compose_does_not_publish_datastores_on_all_interfaces`
+
+**Outputs:**
+- Postgres bound to `127.0.0.1:5432:5432`
+- Redis bound to `127.0.0.1:6379:6379`
+- README note that compose is development-only
+
+**Steps:**
+1. Change the Postgres port mapping from `"5432:5432"` to `"127.0.0.1:5432:5432"`.
+2. Change the Redis port mapping from `"6379:6379"` to `"127.0.0.1:6379:6379"`.
+3. Add a README note that production must use managed/private datastores and injected secrets, not the dev compose credentials.
+4. Run `docker compose config` to validate syntax.
+5. Run `cd backend && uv run pytest ../harness/tests/backend/test_security_audit_contract.py -q`.
+
+**Acceptance Criteria:**
+- Compose no longer publishes Postgres or Redis on all host interfaces.
+- The compose security audit harness test passes.
+- Local quickstart still works.
+
+**Finding:** 2026-05-04 security audit — exposed dev datastore ports
+
+**Dependencies:** none
+
+---
+
+### T-101: Add Backend Security Headers Middleware
+
+**Description:**
+Backend responses do not set standard browser security headers. Add centralized middleware so routes and error responses receive a consistent baseline policy.
+
+**Severity:** Low/Medium — defense-in-depth required for production readiness.
+
+**Inputs:**
+- `backend/main.py`
+- `backend/config.py`
+- `backend/tests/test_observability.py` or a new `backend/tests/test_security_headers.py`
+- `harness/tests/backend/test_security_audit_contract.py::test_backend_sets_standard_security_headers`
+
+**Outputs:**
+- Security headers middleware
+- Tests verifying headers on representative API responses
+
+**Steps:**
+1. Add middleware that sets:
+   - `Content-Security-Policy`
+   - `X-Frame-Options: DENY`
+   - `X-Content-Type-Options: nosniff`
+   - `Referrer-Policy: strict-origin-when-cross-origin`
+   - `Permissions-Policy` with a restrictive baseline
+2. Add `Strict-Transport-Security` only when `settings.environment == "production"` or an explicit HTTPS setting is enabled.
+3. Keep the CSP API-appropriate; do not break JSON or SSE responses.
+4. Register the middleware in `create_app()`.
+5. Add tests for `/health` and one authenticated route if feasible.
+6. Run `cd backend && uv run pytest tests/test_observability.py ../harness/tests/backend/test_security_audit_contract.py -q`.
+
+**Acceptance Criteria:**
+- Standard security headers are present on backend responses.
+- HSTS is not accidentally emitted for local HTTP development unless explicitly enabled.
+- The security headers audit harness test passes.
+
+**Finding:** 2026-05-04 security audit — missing production security headers
+
+**Dependencies:** none
+
+---
+
+### T-102: Strengthen AI Prompt-Injection and Output-Leak Guardrails
+
+**Description:**
+The current prompt guard and output validator are regex-based. They catch obvious payloads but can be bypassed by paraphrase, indirection, or encoded instructions. Treat them as one layer, not as the full AI security boundary.
+
+**Severity:** Medium/Low — AI-specific data leakage and integrity risk.
+
+**Inputs:**
+- `backend/services/security/prompt_guard.py`
+- `backend/services/security/output_validator.py`
+- `backend/services/pipeline/prompt_builder.py`
+- `backend/tests/test_security.py`
+
+**Outputs:**
+- Stronger prompt boundary instructions
+- Structured untrusted-content delimiters in prompt builder output
+- Expanded prompt-injection and output-leak tests
+- Clear comments documenting regex guard limitations
+
+**Steps:**
+1. Update prompt builder templates so user problem statements and upstream stage content are wrapped in explicit untrusted-data delimiters.
+2. Add system prompt language requiring the model to treat delimited user content as data, not instructions.
+3. Expand prompt guard samples with paraphrased, encoded, and indirect injection attempts.
+4. Expand output validator tests for partial prompt leakage and policy summaries.
+5. Ensure rejected prompt/output events are logged without raw sensitive content.
+6. Run `cd backend && uv run pytest tests/test_security.py tests/test_prompt_builder.py -q`.
+
+**Acceptance Criteria:**
+- AI guardrails are layered: prompt boundaries, input scan, output validation, and safe logging.
+- Tests document the regex layer as best-effort rather than complete protection.
+- Prompt builder output clearly separates trusted instructions from untrusted content.
+
+**Finding:** 2026-05-04 security audit — false sense of security from regex-only AI controls
+
+**Dependencies:** T-098
+
+---
+
+### T-103: Make Dependency Security Scanning Non-Interactive in CI
+
+**Description:**
+Frontend `pnpm audit --audit-level moderate` completed clean during the audit. Python dependency scanning could not be completed because the local Safety CLI required interactive login. CI needs a non-interactive dependency scan so backend vulnerabilities are checked continuously.
+
+**Severity:** Low/Medium — supply-chain visibility gap.
+
+**Inputs:**
+- `.github/workflows/`
+- `backend/pyproject.toml`
+- `backend/uv.lock`
+- `frontend/package.json`
+- `frontend/pnpm-lock.yaml`
+- `tasks.md`
+
+**Outputs:**
+- Non-interactive Python dependency scan in CI
+- Frontend audit remains in CI
+- Documentation for required scanner token/secret if the selected scanner needs one
+
+**Steps:**
+1. Choose the CI scanner path: Safety with `SAFETY_API_KEY`, `pip-audit`, or another non-interactive Python advisory scanner.
+2. Add a CI job that installs/syncs backend dependencies from `uv.lock` and scans them without prompts.
+3. Ensure the job fails on high/critical advisories and reports moderate advisories.
+4. Keep `pnpm audit --audit-level moderate` in the frontend CI path.
+5. Document any required CI secret in README/deployment notes.
+6. Run the selected scanner locally if possible and confirm CI syntax.
+
+**Acceptance Criteria:**
+- Dependency scans can run in CI without human input.
+- Python and frontend dependency advisories are both covered.
+- The audit limitation is resolved and documented.
+
+**Finding:** 2026-05-04 security audit — Python dependency scan blocked by interactive Safety login
+
+**Dependencies:** none
+
+---
+
+_tasks.md · SpecForge V1 · Version 1.5.0 · Updated 2026-05-04 with Phase 7 security audit hardening T-097 through T-103_
