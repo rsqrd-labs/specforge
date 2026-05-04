@@ -28,6 +28,7 @@ from services.credit_service import InsufficientCreditsError, credit_service
 from services.llm.base import ProviderError
 from services.pipeline.stage_manager import (
     RateLimitError,
+    RefineSelectionError,
     SecurityError,
     StageDependencyError,
     stage_manager,
@@ -145,6 +146,11 @@ async def refine_stage(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail={"error": "security_check_failed", "message": str(exc)},
+        ) from exc
+    except RefineSelectionError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"error": "selection_mismatch", "message": str(exc)},
         ) from exc
 
 

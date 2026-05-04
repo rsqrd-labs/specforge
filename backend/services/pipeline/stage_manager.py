@@ -71,6 +71,10 @@ class SecurityError(Exception):
     pass
 
 
+class RefineSelectionError(Exception):
+    pass
+
+
 class RateLimitError(Exception):
     def __init__(self, retry_after: int) -> None:
         super().__init__(f"LLM rate limit exceeded. Retry after {retry_after}s.")
@@ -210,6 +214,14 @@ class StageManager:
             raise RateLimitError(retry_after=86400)
 
         content = stage.content or ""
+        if request.selection_end > len(content):
+            raise RefineSelectionError("Selected range is outside the current document")
+        if (
+            content[request.selection_start:request.selection_end]
+            != request.selected_text
+        ):
+            raise RefineSelectionError("Selected text no longer matches the document")
+
         doc_len = len(content)
         selection_len = request.selection_end - request.selection_start
         large_selection = doc_len > 0 and (selection_len / doc_len) > 0.80

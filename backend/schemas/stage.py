@@ -2,7 +2,7 @@ from datetime import datetime
 from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 StageType = Literal["spec", "plan", "harness", "tasks"]
 StageStatus = Literal["locked", "draft", "in_progress", "finalised", "stale"]
@@ -15,12 +15,20 @@ class GenerateRequest(BaseModel):
 
 
 class RefineRequest(BaseModel):
-    instruction: str = Field(min_length=1)
+    instruction: str = Field(min_length=1, max_length=20_000)
     selection_start: int = Field(ge=0)
     selection_end: int = Field(ge=0)
-    selected_text: str = Field(min_length=1)
+    selected_text: str = Field(min_length=1, max_length=100_000)
 
     model_config = ConfigDict(from_attributes=True)
+
+    @model_validator(mode="after")
+    def selection_end_must_not_precede_start(self) -> "RefineRequest":
+        if self.selection_end < self.selection_start:
+            raise ValueError(
+                "selection_end must be greater than or equal to selection_start"
+            )
+        return self
 
 
 class EvalResponse(BaseModel):

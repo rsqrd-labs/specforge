@@ -371,6 +371,63 @@ async def test_refine_large_selection_50_percent_returns_false() -> None:
 
 
 @pytest.mark.asyncio
+async def test_refine_rejects_selection_outside_current_content() -> None:
+    from schemas.stage import RefineRequest
+    from services.pipeline.stage_manager import RefineSelectionError
+
+    workspace_id = uuid4()
+    content = "hello"
+    stage = _make_stage(workspace_id, "spec", status="draft", content=content)
+    workspace = _make_workspace([stage])
+    user = _make_user()
+    request = RefineRequest(
+        instruction="improve",
+        selection_start=0,
+        selection_end=10,
+        selected_text=content,
+    )
+
+    svc = StageManager(redis_client=_FakeRedis())
+    db = _MultiQueryDB([stage, workspace])
+
+    with (
+        pytest.raises(RefineSelectionError),
+        patch("services.pipeline.stage_manager.get_llm") as mock_get_llm,
+    ):
+        await svc.refine(stage.id, request, user, db)
+
+    mock_get_llm.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_refine_rejects_stale_selected_text_before_llm_call() -> None:
+    from schemas.stage import RefineRequest
+    from services.pipeline.stage_manager import RefineSelectionError
+
+    workspace_id = uuid4()
+    stage = _make_stage(workspace_id, "spec", status="draft", content="hello world")
+    workspace = _make_workspace([stage])
+    user = _make_user()
+    request = RefineRequest(
+        instruction="improve",
+        selection_start=0,
+        selection_end=5,
+        selected_text="world",
+    )
+
+    svc = StageManager(redis_client=_FakeRedis())
+    db = _MultiQueryDB([stage, workspace])
+
+    with (
+        pytest.raises(RefineSelectionError),
+        patch("services.pipeline.stage_manager.get_llm") as mock_get_llm,
+    ):
+        await svc.refine(stage.id, request, user, db)
+
+    mock_get_llm.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_generate_raises_rate_limit_error_when_llm_limit_exceeded() -> None:
     """11th LLM call in 60 seconds raises RateLimitError before credit deduction."""
     from services.pipeline.stage_manager import RateLimitError
