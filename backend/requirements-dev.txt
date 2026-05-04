@@ -1,4 +1,5 @@
 bandit==1.*
+pip-audit==2.*
 safety==3.*
 pytest==9.*
 pytest-asyncio==1.*

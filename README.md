@@ -313,6 +313,8 @@ SpecForge includes several controls intended for AI-assisted workflows:
 - Prompt guard checks reject prompt-injection attempts before LLM calls.
 - Output validation blocks system-prompt leakage and unsafe model output.
 - Logs and Sentry events are scrubbed for likely secrets before export.
+- CI runs TruffleHog, Bandit, non-interactive `pip-audit`, and
+  `pnpm audit --audit-level moderate`; no dependency scanner token is required.
 
 Production deployments should also enforce HTTPS, secure cookies, strict CORS, strong secrets, provider key rotation, and database backups.
 

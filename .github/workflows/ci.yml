@@ -60,10 +60,8 @@ jobs:
       - name: Bandit
         run: uv run bandit -r config.py database.py main.py middleware models prompts routers schemas services
 
-      - name: Safety
-        # ecdsa is pulled by python-jose; SpecForge signs/verifies RS256 JWTs via
-        # cryptography, not ECDSA keys. Track replacement under T-045 hardening.
-        run: uv run safety check --full-report --ignore 64459 --ignore 64396
+      - name: Python dependency audit
+        run: uv run pip-audit --strict
 
       - name: Pytest
         run: uv run pytest tests/ --cov=services --cov-fail-under=80 -q
