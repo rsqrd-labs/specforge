@@ -15,6 +15,7 @@ from sqlalchemy.orm import selectinload
 from config import settings
 from middleware.rate_limit import sliding_window_check
 from models import EvalResult, Stage, StageVersion, Workspace
+from prompts.base import SECURITY_AND_PRIVACY_RULES, wrap_untrusted_content
 from schemas.stage import DiffResponse, RefineRequest
 from services.credit_service import credit_service
 from services.evals.online_eval import run_eval_background
@@ -229,14 +230,18 @@ class StageManager:
 
         system_prompt = (
             "You are SpecForge. Rewrite only the selected text per the instruction. "
-            "Return ONLY the replacement text, nothing else."
+            "Return ONLY the replacement text, nothing else.\n\n"
+            f"{SECURITY_AND_PRIVACY_RULES}"
         )
         sanitized_instruction = sanitize_text(request.instruction)
         sanitized_selected_text = sanitize_text(request.selected_text)
         user_prompt = (
-            f"Current document:\n{content}\n\n"
-            f"Selected text:\n{sanitized_selected_text}\n\n"
-            f"Instruction: {sanitized_instruction}\n\n"
+            f"Current document:\n"
+            f"{wrap_untrusted_content('current_document', content)}\n\n"
+            f"Selected text:\n"
+            f"{wrap_untrusted_content('selected_text', sanitized_selected_text)}\n\n"
+            f"Instruction:\n"
+            f"{wrap_untrusted_content('instruction', sanitized_instruction)}\n\n"
             "Provide the replacement text only."
         )
 

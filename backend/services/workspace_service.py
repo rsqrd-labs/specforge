@@ -3,10 +3,11 @@ from __future__ import annotations
 from uuid import UUID
 
 from fastapi import HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from config import settings
 from models import Stage, Workspace
 from schemas.workspace import WorkspaceCreate
 from services.security.sanitizer import sanitize_text
@@ -18,6 +19,16 @@ class WorkspaceService:
     async def create(
         self, user_id: UUID, payload: WorkspaceCreate, db: AsyncSession
     ) -> Workspace:
+        active_count = await self._active_workspace_count(user_id, db)
+        if active_count >= settings.max_active_workspaces_per_user:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail={
+                    "code": "workspace_quota_exceeded",
+                    "limit": settings.max_active_workspaces_per_user,
+                },
+            )
+
         workspace = Workspace(
             user_id=user_id,
             name=sanitize_text(payload.name),
@@ -88,6 +99,14 @@ class WorkspaceService:
         workspace = await self.get(workspace_id, user_id, db)
         workspace.status = "archived"
         await db.commit()
+
+    async def _active_workspace_count(self, user_id: UUID, db: AsyncSession) -> int:
+        result = await db.execute(
+            select(func.count())
+            .select_from(Workspace)
+            .where(Workspace.user_id == user_id, Workspace.status == "active")
+        )
+        return int(result.scalar() or 0)
 
 
 workspace_service = WorkspaceService()

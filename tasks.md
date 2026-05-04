@@ -4145,4 +4145,130 @@ Zip Slip traversal was fixed, but exported harness filenames could still include
 
 ---
 
-_tasks.md · SpecForge V1 · Version 1.6.0 · Updated 2026-05-04 with Phase 8 second-pass security fixes T-104 through T-108_
+## Phase 9 — Final Production Hardening
+
+> Items from the final security sign-off before production exposure. These address high-risk deployment assumptions, residual abuse paths, and the most likely realistic attack chain.
+
+---
+
+### T-109: Fail Closed on Unsafe Production Configuration
+
+**Description:**
+The final gate identified metrics exposure and non-HTTPS frontend configuration as the most important deployment-time risks. Production must not start unless metrics are token-protected and the browser origin is HTTPS.
+
+**Severity:** High — reverse proxy topology can make localhost-only metrics checks unsafe, and non-HTTPS frontend origins weaken cookie/session assumptions.
+
+**Inputs:**
+- `backend/config.py`
+- `backend/main.py`
+- `backend/services/observability.py`
+- `backend/.env.example`
+- `backend/tests/test_observability.py`
+
+**Outputs:**
+- `validate_production_settings()` called during app creation
+- Production requires `METRICS_TOKEN`
+- Production requires HTTPS `FRONTEND_URL`
+- `.env.example` documents `METRICS_TOKEN`
+
+**Acceptance Criteria:**
+- Production app startup fails without `METRICS_TOKEN`.
+- Production app startup fails with non-HTTPS `FRONTEND_URL`.
+- Metrics remain token-protected in production.
+
+---
+
+### T-110: Reduce Public Health Information in Production
+
+**Description:**
+`/health` exposed dependency-level status. That is useful in development but unnecessary public infrastructure detail in production.
+
+**Severity:** Low/Medium — information disclosure reduction.
+
+**Inputs:**
+- `backend/main.py`
+- `backend/tests/test_security_headers.py`
+
+**Outputs:**
+- Production health response includes only overall status and version
+- Development/test health response keeps dependency detail
+
+**Acceptance Criteria:**
+- Production `/health` omits `db` and `redis` keys.
+- Health checks still work for deployment readiness.
+
+---
+
+### T-111: Add Active Workspace Abuse Quota
+
+**Description:**
+Authenticated users are rate-limited, but they can still accumulate many active workspaces over time. Add a per-user active workspace quota to reduce storage, LLM workflow, and export abuse.
+
+**Severity:** Medium — cost and service disruption risk.
+
+**Inputs:**
+- `backend/config.py`
+- `backend/services/workspace_service.py`
+- `backend/tests/test_workspace.py`
+
+**Outputs:**
+- `max_active_workspaces_per_user` setting
+- Workspace creation rejects quota overflow with `429`
+- `.env.example` documents the quota
+
+**Acceptance Criteria:**
+- Users cannot create more than the configured number of active workspaces.
+- Archived workspaces do not count against future active-workspace creation.
+
+---
+
+### T-112: Treat Refine Current Document as Untrusted LLM Input
+
+**Description:**
+The refine path sanitized instruction and selected text, but still placed the full current document in the LLM prompt without explicit untrusted-data boundaries. Prior generated content or manual edits can carry indirect prompt injection into future refine calls.
+
+**Severity:** Medium — AI integrity and data leakage defense-in-depth.
+
+**Inputs:**
+- `backend/services/pipeline/stage_manager.py`
+- `backend/tests/test_stage_manager.py`
+- `harness/tests/backend/test_final_hardening_contract.py`
+
+**Outputs:**
+- Refine system prompt includes the shared security/privacy rules
+- Current document, selected text, and instruction are wrapped with untrusted-content delimiters
+- Tests assert the prompt boundary
+
+**Acceptance Criteria:**
+- The refine prompt no longer presents current document content as authoritative instructions.
+- Sanitized selected text and instruction remain wrapped as untrusted content.
+
+---
+
+### T-113: Migrate Gemini Adapter to Supported Google Gen AI SDK
+
+**Description:**
+`google-generativeai` is deprecated. Replace it with the supported `google-genai` SDK to avoid shipping a stale provider integration into production.
+
+**Severity:** Low/Medium — dependency lifecycle and provider reliability risk.
+
+**Inputs:**
+- `backend/pyproject.toml`
+- `backend/requirements.txt`
+- `backend/uv.lock`
+- `backend/services/llm/google_adapter.py`
+- `backend/tests/test_llm_gateway.py`
+
+**Outputs:**
+- Dependency uses `google-genai`
+- Google adapter uses `google.genai.Client`
+- Deprecated import warning is eliminated
+
+**Acceptance Criteria:**
+- No `google.generativeai` import remains.
+- Backend tests run without the prior deprecation warning.
+- `pip-audit` remains clean.
+
+---
+
+_tasks.md · SpecForge V1 · Version 1.7.0 · Updated 2026-05-04 with Phase 9 final production hardening T-109 through T-113_

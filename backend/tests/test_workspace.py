@@ -65,14 +65,18 @@ class _FakeDB:
         self,
         workspace: Workspace | None = None,
         requesting_user_id: UUID | None = None,
+        active_count: int = 0,
     ) -> None:
         self._workspace = workspace
         self._requesting_user_id = requesting_user_id
+        self._active_count = active_count
         self._added: list[Any] = []
         self._committed = False
         self._refreshed: list[Any] = []
 
     async def execute(self, statement: Any) -> "_FakeScalars":
+        if "count" in str(statement).lower():
+            return _FakeScalars(self._workspace, scalar_value=self._active_count)
         workspace = self._workspace
         if (
             workspace is not None
@@ -107,8 +111,14 @@ class _FakeDB:
 
 
 class _FakeScalars:
-    def __init__(self, workspace: Workspace | None) -> None:
+    def __init__(
+        self, workspace: Workspace | None, scalar_value: int | None = None
+    ) -> None:
         self._workspace = workspace
+        self._scalar_value = scalar_value
+
+    def scalar(self) -> int | None:
+        return self._scalar_value
 
     def scalar_one_or_none(self) -> Workspace | None:
         return self._workspace
@@ -200,6 +210,31 @@ async def test_create_workspace_sanitizes_user_text() -> None:
     assert workspace.name == "Test"
     assert "<script>" not in workspace.problem_statement
     assert "alert" not in workspace.problem_statement
+
+
+@pytest.mark.asyncio
+async def test_create_workspace_rejects_when_active_workspace_quota_is_reached(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    svc = WorkspaceService()
+    db = _FakeDB(active_count=2)
+    payload = WorkspaceCreate(
+        name="Test",
+        problem_statement="A" * 60,
+        provider="anthropic",
+        model="claude-sonnet-4-6",
+    )
+    monkeypatch.setattr(
+        "services.workspace_service.settings.max_active_workspaces_per_user",
+        2,
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        await svc.create(uuid4(), payload, db)
+
+    assert exc_info.value.status_code == 429
+    assert exc_info.value.detail == {"code": "workspace_quota_exceeded", "limit": 2}
+    assert db._added == []
 
 
 @pytest.mark.asyncio

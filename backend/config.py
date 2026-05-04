@@ -27,6 +27,7 @@ class Settings(BaseSettings):
     # Empty string disables token auth; fall back to localhost-only IP check
     metrics_token: str = ""
     trusted_proxy_ips: str = ""
+    max_active_workspaces_per_user: int = 50
 
     db_pool_size: int = 20
     db_max_overflow: int = 10
@@ -35,3 +36,17 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+
+def validate_production_settings() -> None:
+    if settings.environment.lower() != "production":
+        return
+
+    errors = []
+    if not settings.metrics_token:
+        errors.append("METRICS_TOKEN must be set in production")
+    if not settings.frontend_url.startswith("https://"):
+        errors.append("FRONTEND_URL must use HTTPS in production")
+
+    if errors:
+        raise RuntimeError("; ".join(errors))

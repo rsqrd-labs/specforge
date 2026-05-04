@@ -1504,4 +1504,68 @@ After Phase 8 is implemented:
 
 ---
 
-_SpecForge V1 PLAN.md · Version 1.4.0 · Updated 2026-05-04 with Phase 8 second-pass security fixes_
+---
+
+## 14. Phase 9 — Final Production Hardening (2026-05-04)
+
+> [!note] Source This phase closes the final gatekeeper concerns before production deployment: deployment fail-closed behavior, residual information disclosure, authenticated abuse controls, LLM prompt-boundary depth, and dependency lifecycle risk.
+
+---
+
+### 14.1 Goal
+
+Make production deployment fail closed when security-critical environment variables are absent, reduce public infrastructure detail, cap authenticated workspace growth, harden the most likely LLM abuse path, and remove the deprecated Gemini SDK before launch.
+
+**Outputs:**
+- Production startup requires `METRICS_TOKEN`.
+- Production startup requires HTTPS `FRONTEND_URL`.
+- Production `/health` omits dependency-level details.
+- Active workspace quota limits long-running authenticated abuse.
+- Refine prompt wraps current document, selected text, and instruction as untrusted content.
+- Gemini integration uses `google-genai` instead of deprecated `google-generativeai`.
+- CI runs final hardening harness contracts.
+
+---
+
+### 14.2 Sub-Stages
+
+| Priority | Task | Finding | Rationale |
+|----------|------|---------|-----------|
+| 1 | T-109 | Unsafe production config | Metrics and browser origin assumptions must fail closed. |
+| 2 | T-110 | Health detail exposure | Production health should reveal only readiness, not dependency topology. |
+| 3 | T-111 | Workspace accumulation abuse | Rate limits need a longer-horizon storage/cost guard. |
+| 4 | T-112 | Refine indirect prompt injection | Prior content must be treated as untrusted in future LLM prompts. |
+| 5 | T-113 | Deprecated Gemini SDK | Avoid stale provider SDKs in production. |
+
+---
+
+### 14.3 Contract Coverage
+
+`harness/tests/backend/test_final_hardening_contract.py` verifies:
+
+- Production config validation is wired into app startup.
+- `google-genai` replaces `google-generativeai`.
+- Workspace creation has an active quota.
+- Refine wraps the current document, selected text, and instruction as untrusted content.
+
+The backend CI security harness step now runs:
+
+1. `../harness/tests/backend/test_security_audit_contract.py`
+2. `../harness/tests/backend/test_second_pass_security_contract.py`
+3. `../harness/tests/backend/test_final_hardening_contract.py`
+
+---
+
+### 14.4 Validation
+
+After Phase 9 is implemented:
+
+1. `cd backend && uv run pytest ../harness/tests/backend/test_security_audit_contract.py ../harness/tests/backend/test_second_pass_security_contract.py ../harness/tests/backend/test_final_hardening_contract.py -q`
+2. `cd backend && uv run pytest tests/ -q`
+3. `cd backend && uv run pip-audit --strict`
+4. `cd frontend && pnpm audit --audit-level moderate`
+5. `cd backend && uv run bandit -r config.py database.py main.py middleware models prompts routers schemas services`
+
+---
+
+_SpecForge V1 PLAN.md · Version 1.5.0 · Updated 2026-05-04 with Phase 9 final production hardening_

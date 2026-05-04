@@ -45,7 +45,11 @@ def test_security_headers_are_set_on_api_responses() -> None:
 
 
 def test_hsts_is_set_in_production() -> None:
-    with patch.object(settings, "environment", "production"):
+    with (
+        patch.object(settings, "environment", "production"),
+        patch.object(settings, "metrics_token", "metrics-token"),
+        patch.object(settings, "frontend_url", "https://app.example.com"),
+    ):
         client = TestClient(create_app(redis_client=_NoopRedis()))
         response = client.get("/providers")
 
@@ -70,3 +74,18 @@ def test_security_headers_are_set_on_unhandled_500_responses() -> None:
     assert response.headers["X-Frame-Options"] == "DENY"
     assert response.headers["X-Content-Type-Options"] == "nosniff"
     assert response.headers["Referrer-Policy"] == "strict-origin-when-cross-origin"
+
+
+def test_health_hides_dependency_detail_in_production() -> None:
+    with (
+        patch.object(settings, "environment", "production"),
+        patch.object(settings, "metrics_token", "metrics-token"),
+        patch.object(settings, "frontend_url", "https://app.example.com"),
+        patch("main.check_database", return_value="ok"),
+        patch("main.check_redis", return_value="ok"),
+    ):
+        client = TestClient(create_app(redis_client=_NoopRedis()))
+        response = client.get("/health")
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok", "version": "1.0.0"}

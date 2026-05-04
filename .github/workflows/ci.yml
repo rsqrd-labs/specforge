@@ -81,7 +81,7 @@ jobs:
           ENVIRONMENT: "test"
 
       - name: Security harness contracts
-        run: uv run pytest ../harness/tests/backend/test_security_audit_contract.py ../harness/tests/backend/test_second_pass_security_contract.py -q
+        run: uv run pytest ../harness/tests/backend/test_security_audit_contract.py ../harness/tests/backend/test_second_pass_security_contract.py ../harness/tests/backend/test_final_hardening_contract.py -q
         env:
           DATABASE_URL: "postgresql+asyncpg://postgres:postgres@localhost:5432/test"
           REDIS_URL: "redis://localhost:6379/0"

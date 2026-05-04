@@ -455,11 +455,17 @@ async def test_refine_matches_raw_selection_but_sanitizes_prompt_fields() -> Non
         result = await svc.refine(stage.id, request, user, db)
 
     assert result.proposed == "hello earth"
-    _, user_prompt = mock_adapter.complete.await_args.args[:2]
-    selected_prompt = user_prompt.split("Selected text:\n", 1)[1].split(
-        "\n\nInstruction:", 1
+    system_prompt, user_prompt = mock_adapter.complete.await_args.args[:2]
+    assert "Non-negotiable security and privacy rules:" in system_prompt
+    assert '<untrusted_content source="current_document">' in user_prompt
+    assert '<untrusted_content source="selected_text">' in user_prompt
+    assert '<untrusted_content source="instruction">' in user_prompt
+    selected_prompt = user_prompt.split("<selected_text>\n", 1)[1].split(
+        "\n</selected_text>", 1
     )[0]
-    instruction_prompt = user_prompt.split("Instruction: ", 1)[1].split("\n\n", 1)[0]
+    instruction_prompt = user_prompt.split("<instruction>\n", 1)[1].split(
+        "\n</instruction>", 1
+    )[0]
     assert selected_prompt == "world"
     assert instruction_prompt == "tighten"
 

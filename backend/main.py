@@ -10,7 +10,7 @@ from sqlalchemy import text
 from starlette.requests import Request
 from starlette.responses import Response
 
-from config import settings
+from config import settings, validate_production_settings
 from database import async_engine
 from middleware.csrf import CsrfMiddleware
 from middleware.rate_limit import RateLimitMiddleware
@@ -85,6 +85,7 @@ async def lifespan(app: FastAPI):
 
 
 def create_app(redis_client=None) -> FastAPI:
+    validate_production_settings()
     app = FastAPI(title="SpecForge API", version="1.0.0", lifespan=lifespan)
     setup_observability(app, async_engine)
 
@@ -131,15 +132,11 @@ def create_app(redis_client=None) -> FastAPI:
             else status.HTTP_503_SERVICE_UNAVAILABLE
         )
 
-        return JSONResponse(
-            status_code=status_code,
-            content={
-                "status": overall_status,
-                "db": db_status,
-                "redis": redis_status,
-                "version": "1.0.0",
-            },
-        )
+        content = {"status": overall_status, "version": "1.0.0"}
+        if settings.environment.lower() != "production":
+            content.update({"db": db_status, "redis": redis_status})
+
+        return JSONResponse(status_code=status_code, content=content)
 
     app.include_router(auth_router.router)
     app.include_router(providers_router.router)

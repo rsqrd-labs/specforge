@@ -56,6 +56,34 @@ def test_metrics_endpoint_rejects_unauthenticated() -> None:
     assert response.status_code == 401
 
 
+def test_metrics_endpoint_requires_token_in_production() -> None:
+    with (
+        patch.object(observability.settings, "environment", "production"),
+        patch.object(observability.settings, "frontend_url", "https://app.example.com"),
+        patch.object(observability.settings, "metrics_token", ""),
+    ):
+        try:
+            create_app(redis_client=_NoopRedis())
+        except RuntimeError as exc:
+            assert "METRICS_TOKEN" in str(exc)
+        else:
+            raise AssertionError("production app started without METRICS_TOKEN")
+
+
+def test_production_app_requires_https_frontend_url() -> None:
+    with (
+        patch.object(observability.settings, "environment", "production"),
+        patch.object(observability.settings, "frontend_url", "http://app.example.com"),
+        patch.object(observability.settings, "metrics_token", "metrics-token"),
+    ):
+        try:
+            create_app(redis_client=_NoopRedis())
+        except RuntimeError as exc:
+            assert "FRONTEND_URL" in str(exc)
+        else:
+            raise AssertionError("production app started with non-HTTPS FRONTEND_URL")
+
+
 def test_metrics_use_route_templates() -> None:
     with patch.object(observability.settings, "metrics_token", "test-metrics-token"):
         client = TestClient(create_app(redis_client=_NoopRedis()))

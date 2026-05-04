@@ -226,6 +226,8 @@ def setup_metrics(app: FastAPI) -> None:
         if settings.metrics_token:
             if token != settings.metrics_token:
                 return StarletteResponse("Unauthorized", status_code=401)
+        elif settings.environment.lower() == "production":
+            return StarletteResponse("Metrics token required", status_code=503)
         else:
             # When no token is configured, restrict to loopback addresses only
             client_host = (request.client.host if request.client else "") or ""
