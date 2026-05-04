@@ -57,7 +57,9 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             ):
                 return _rate_limited(3600)
 
-        user_id = _extract_user_id(request)
+        user_id, claims = _extract_user_id(request)
+        if claims is not None:
+            request.state.jwt_claims = claims
         if user_id:
             if not await sliding_window_check(self._redis, f"user:{user_id}", 100, 60):
                 return _rate_limited(60)
@@ -74,15 +76,15 @@ def _get_client_ip(request: Request) -> str:
     return "unknown"
 
 
-def _extract_user_id(request: Request) -> str | None:
+def _extract_user_id(request: Request) -> tuple[str | None, dict | None]:
     auth_header = request.headers.get("Authorization", "")
     if not auth_header.startswith("Bearer "):
-        return None
+        return None, None
     token = auth_header.removeprefix("Bearer ").strip()
     claims = decode_access_token_claims(token)
     if claims is None:
-        return None
-    return claims.get("sub")
+        return None, None
+    return claims.get("sub"), claims
 
 
 def _rate_limited(retry_after: int) -> JSONResponse:

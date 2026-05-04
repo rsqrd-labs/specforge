@@ -42,12 +42,13 @@ class CsrfMiddleware(BaseHTTPMiddleware):
 
 
 def _session_id_from_authorization(request: Request) -> str | None:
-    auth_header = request.headers.get("Authorization", "")
-    if not auth_header.startswith("Bearer "):
-        return None
-
-    token = auth_header.removeprefix("Bearer ").strip()
-    claims = decode_access_token_claims(token)
+    claims = getattr(request.state, "jwt_claims", None)
+    if claims is None:
+        auth_header = request.headers.get("Authorization", "")
+        if not auth_header.startswith("Bearer "):
+            return None
+        token = auth_header.removeprefix("Bearer ").strip()
+        claims = decode_access_token_claims(token)
     if claims is None:
         return None
     subject = claims.get("sub")
