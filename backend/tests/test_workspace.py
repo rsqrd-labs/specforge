@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from typing import Any
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from fastapi import HTTPException
@@ -61,24 +61,25 @@ def _make_workspace(user_id=None, status="active", with_stages=True) -> Workspac
 
 
 class _FakeDB:
-    def __init__(self, workspace: Workspace | None = None) -> None:
+    def __init__(
+        self,
+        workspace: Workspace | None = None,
+        requesting_user_id: UUID | None = None,
+    ) -> None:
         self._workspace = workspace
+        self._requesting_user_id = requesting_user_id
         self._added: list[Any] = []
         self._committed = False
         self._refreshed: list[Any] = []
 
     async def execute(self, statement: Any) -> "_FakeScalars":
         workspace = self._workspace
-        # Simulate SQL-level user_id filtering (mirrors T-082 WHERE id AND user_id fix)
-        if workspace is not None and hasattr(statement, "_where_criteria"):
-            for criterion in statement._where_criteria:
-                try:
-                    if getattr(criterion.left, "key", None) == "user_id":
-                        if workspace.user_id != criterion.right.value:
-                            workspace = None
-                        break
-                except AttributeError:
-                    pass
+        if (
+            workspace is not None
+            and self._requesting_user_id is not None
+            and workspace.user_id != self._requesting_user_id
+        ):
+            workspace = None
         return _FakeScalars(workspace)
 
     def add(self, instance: Any) -> None:
@@ -214,9 +215,10 @@ async def test_get_workspace_not_found_raises_404() -> None:
 async def test_get_workspace_wrong_owner_raises_404() -> None:
     svc = WorkspaceService()
     workspace = _make_workspace()
-    db = _FakeDB(workspace=workspace)
+    wrong_user_id = uuid4()
+    db = _FakeDB(workspace=workspace, requesting_user_id=wrong_user_id)
     with pytest.raises(HTTPException) as exc_info:
-        await svc.get(workspace.id, uuid4(), db)
+        await svc.get(workspace.id, wrong_user_id, db)
     assert exc_info.value.status_code == 404
     assert exc_info.value.detail == "Workspace not found"
 
@@ -225,9 +227,10 @@ async def test_get_workspace_wrong_owner_raises_404() -> None:
 async def test_update_workspace_wrong_owner_raises_404() -> None:
     svc = WorkspaceService()
     workspace = _make_workspace()
-    db = _FakeDB(workspace=workspace)
+    wrong_user_id = uuid4()
+    db = _FakeDB(workspace=workspace, requesting_user_id=wrong_user_id)
     with pytest.raises(HTTPException) as exc_info:
-        await svc.update(workspace.id, uuid4(), "New Name", db)
+        await svc.update(workspace.id, wrong_user_id, "New Name", db)
     assert exc_info.value.status_code == 404
     assert exc_info.value.detail == "Workspace not found"
     assert db._committed is False
@@ -237,9 +240,10 @@ async def test_update_workspace_wrong_owner_raises_404() -> None:
 async def test_archive_workspace_wrong_owner_raises_404() -> None:
     svc = WorkspaceService()
     workspace = _make_workspace()
-    db = _FakeDB(workspace=workspace)
+    wrong_user_id = uuid4()
+    db = _FakeDB(workspace=workspace, requesting_user_id=wrong_user_id)
     with pytest.raises(HTTPException) as exc_info:
-        await svc.archive(workspace.id, uuid4(), db)
+        await svc.archive(workspace.id, wrong_user_id, db)
     assert exc_info.value.status_code == 404
     assert exc_info.value.detail == "Workspace not found"
     assert db._committed is False
@@ -249,7 +253,7 @@ async def test_archive_workspace_wrong_owner_raises_404() -> None:
 async def test_get_workspace_correct_owner_returns_workspace() -> None:
     svc = WorkspaceService()
     workspace = _make_workspace()
-    db = _FakeDB(workspace=workspace)
+    db = _FakeDB(workspace=workspace, requesting_user_id=workspace.user_id)
     result = await svc.get(workspace.id, workspace.user_id, db)
     assert result.id == workspace.id
 
@@ -299,7 +303,7 @@ async def test_get_workspace_route_wrong_owner_returns_404(app) -> None:
     workspace = _make_workspace()
 
     async def _fake_db():
-        yield _FakeDB(workspace=workspace)
+        yield _FakeDB(workspace=workspace, requesting_user_id=_USER_ID)
 
     app.dependency_overrides[get_db] = _fake_db
 
@@ -317,7 +321,7 @@ async def test_update_workspace_route_wrong_owner_returns_404(app) -> None:
     workspace = _make_workspace()
 
     async def _fake_db():
-        yield _FakeDB(workspace=workspace)
+        yield _FakeDB(workspace=workspace, requesting_user_id=_USER_ID)
 
     app.dependency_overrides[get_db] = _fake_db
 
@@ -337,7 +341,7 @@ async def test_archive_workspace_route_wrong_owner_returns_404(app) -> None:
     workspace = _make_workspace()
 
     async def _fake_db():
-        yield _FakeDB(workspace=workspace)
+        yield _FakeDB(workspace=workspace, requesting_user_id=_USER_ID)
 
     app.dependency_overrides[get_db] = _fake_db
 
