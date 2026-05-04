@@ -139,3 +139,14 @@ def test_sentry_before_send_redacts_event(monkeypatch) -> None:
     assert redacted["message"] == "provider key [REDACTED]"
 
     monkeypatch.setattr(observability, "_sentry_configured", False)
+
+
+def test_app_starts_without_observability_config() -> None:
+    """create_app() must not raise when Sentry/OTLP env vars are absent (empty string)."""
+    with (
+        patch.object(observability.settings, "sentry_dsn", ""),
+        patch.object(observability.settings, "grafana_otlp_endpoint", ""),
+        patch.object(observability.settings, "grafana_otlp_token", ""),
+    ):
+        app = create_app(redis_client=_NoopRedis())
+    assert app is not None

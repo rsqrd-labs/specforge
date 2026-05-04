@@ -18,9 +18,9 @@ class Settings(BaseSettings):
     encryption_master_key: str
     csrf_secret: str
 
-    sentry_dsn: str
-    grafana_otlp_endpoint: str
-    grafana_otlp_token: str
+    sentry_dsn: str = ""
+    grafana_otlp_endpoint: str = ""
+    grafana_otlp_token: str = ""
 
     environment: str
 
