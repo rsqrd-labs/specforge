@@ -7,6 +7,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from redis.asyncio import Redis
 from sqlalchemy import text
+from starlette.requests import Request
+from starlette.responses import Response
 
 from config import settings
 from database import async_engine
@@ -22,6 +24,17 @@ from services.pipeline.recovery_service import run_recovery_loop
 
 HealthStatus = Literal["ok", "degraded"]
 DependencyStatus = Literal["ok", "error"]
+_SECURITY_HEADERS = {
+    "Content-Security-Policy": (
+        "default-src 'none'; frame-ancestors 'none'; base-uri 'none'"
+    ),
+    "X-Frame-Options": "DENY",
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "strict-origin-when-cross-origin",
+    "Permissions-Policy": "camera=(), microphone=(), geolocation=()",
+}
+_HSTS_HEADER = "Strict-Transport-Security"
+_HSTS_VALUE = "max-age=31536000; includeSubDomains"
 
 
 async def check_database() -> DependencyStatus:
@@ -76,6 +89,18 @@ def create_app(redis_client=None) -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    @app.middleware("http")
+    async def security_headers_middleware(
+        request: Request,
+        call_next,
+    ) -> Response:
+        response = await call_next(request)
+        for header, value in _SECURITY_HEADERS.items():
+            response.headers.setdefault(header, value)
+        if settings.environment == "production":
+            response.headers.setdefault(_HSTS_HEADER, _HSTS_VALUE)
+        return response
 
     @app.get("/health", include_in_schema=False)
     async def health() -> JSONResponse:
