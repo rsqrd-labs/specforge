@@ -1,5 +1,6 @@
 import time
 from collections.abc import Callable
+from ipaddress import IPv4Network, IPv6Network, ip_address, ip_network
 
 from fastapi import status
 from fastapi.responses import JSONResponse
@@ -12,6 +13,7 @@ from config import settings
 from services.auth_service import decode_access_token_claims
 
 _LOGIN_PATHS = frozenset({"/auth/google", "/auth/callback"})
+IpNetwork = IPv4Network | IPv6Network
 
 
 async def sliding_window_check(
@@ -36,14 +38,25 @@ async def sliding_window_check(
 
 
 class RateLimitMiddleware(BaseHTTPMiddleware):
-    def __init__(self, app, redis_client: Redis | None = None) -> None:
+    def __init__(
+        self,
+        app,
+        redis_client: Redis | None = None,
+        trusted_proxy_ips: str | None = None,
+    ) -> None:
         super().__init__(app)
         self._redis: Redis = redis_client or Redis.from_url(
             settings.redis_url, decode_responses=True
         )
+        configured_proxies = (
+            settings.trusted_proxy_ips
+            if trusted_proxy_ips is None
+            else trusted_proxy_ips
+        )
+        self._trusted_proxy_networks = _parse_trusted_proxy_networks(configured_proxies)
 
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
-        ip = _get_client_ip(request)
+        ip = _get_client_ip(request, self._trusted_proxy_networks)
         path = request.url.path
 
         if not await sliding_window_check(self._redis, f"ip:{ip}", 1000, 60):
@@ -67,13 +80,50 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         return await call_next(request)
 
 
-def _get_client_ip(request: Request) -> str:
+def _get_client_ip(
+    request: Request,
+    trusted_proxy_networks: tuple[IpNetwork, ...] = (),
+) -> str:
+    client_host = request.client.host if request.client else ""
     forwarded = request.headers.get("X-Forwarded-For")
-    if forwarded:
-        return forwarded.split(",")[0].strip()
-    if request.client:
-        return request.client.host
+    if forwarded and _is_trusted_proxy(client_host, trusted_proxy_networks):
+        forwarded_ip = _first_forwarded_ip(forwarded)
+        if forwarded_ip:
+            return forwarded_ip
+    if client_host:
+        return client_host
     return "unknown"
+
+
+def _parse_trusted_proxy_networks(value: str) -> tuple[IpNetwork, ...]:
+    networks = []
+    for raw_entry in value.split(","):
+        entry = raw_entry.strip()
+        if not entry:
+            continue
+        try:
+            networks.append(ip_network(entry, strict=False))
+        except ValueError:
+            continue
+    return tuple(networks)
+
+
+def _is_trusted_proxy(host: str, trusted_proxy_networks: tuple[IpNetwork, ...]) -> bool:
+    if not host or not trusted_proxy_networks:
+        return False
+    try:
+        client_ip = ip_address(host)
+    except ValueError:
+        return False
+    return any(client_ip in network for network in trusted_proxy_networks)
+
+
+def _first_forwarded_ip(forwarded: str) -> str | None:
+    candidate = forwarded.split(",", 1)[0].strip()
+    try:
+        return str(ip_address(candidate))
+    except ValueError:
+        return None
 
 
 def _extract_user_id(request: Request) -> tuple[str | None, dict | None]:
