@@ -77,6 +77,9 @@ class _FakeRedis:
     def __init__(self) -> None:
         self._store: dict[str, str] = {}
 
+    async def eval(self, *args, **kwargs) -> int:
+        return 1
+
     def pipeline(self) -> _FakePipeline:
         return _FakePipeline()
 

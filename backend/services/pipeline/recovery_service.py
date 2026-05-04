@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from models import Stage
 from services.credit_service import credit_service
+from services.pipeline.stage_manager import CREDIT_COSTS
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +34,7 @@ async def recover_stuck_stages(db: AsyncSession) -> int:
         credits_refunded = 0
         if stage.deduction_ledger_id is not None:
             await credit_service.refund(db, stage.deduction_ledger_id)
-            credits_refunded = 10  # standard generate cost
+            credits_refunded = CREDIT_COSTS["generate"]
 
         stage.status = "draft"
         stage.updated_at = datetime.now(UTC)

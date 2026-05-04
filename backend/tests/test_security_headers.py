@@ -7,6 +7,17 @@ from fastapi.testclient import TestClient
 from config import settings
 from main import create_app
 
+_FAKE_PEM = "-----BEGIN RSA PRIVATE KEY-----\nMIIEow...\n-----END RSA PRIVATE KEY-----"
+_REAL_ENCRYPTION_KEY = "cmVhbC1rZXktZm9yLXRlc3RpbmctbXVzdC1iZS1sb25n"
+
+_PRODUCTION_PATCHES = {
+    "environment": "production",
+    "metrics_token": "metrics-token",
+    "frontend_url": "https://app.example.com",
+    "jwt_private_key": _FAKE_PEM,
+    "encryption_master_key": _REAL_ENCRYPTION_KEY,
+}
+
 
 class _NoopPipeline:
     def zremrangebyscore(self, *args):
@@ -26,6 +37,9 @@ class _NoopPipeline:
 
 
 class _NoopRedis:
+    async def eval(self, *args, **kwargs) -> int:
+        return 1
+
     def pipeline(self) -> _NoopPipeline:
         return _NoopPipeline()
 
@@ -46,9 +60,11 @@ def test_security_headers_are_set_on_api_responses() -> None:
 
 def test_hsts_is_set_in_production() -> None:
     with (
-        patch.object(settings, "environment", "production"),
-        patch.object(settings, "metrics_token", "metrics-token"),
-        patch.object(settings, "frontend_url", "https://app.example.com"),
+        patch.object(settings, "environment", _PRODUCTION_PATCHES["environment"]),
+        patch.object(settings, "metrics_token", _PRODUCTION_PATCHES["metrics_token"]),
+        patch.object(settings, "frontend_url", _PRODUCTION_PATCHES["frontend_url"]),
+        patch.object(settings, "jwt_private_key", _PRODUCTION_PATCHES["jwt_private_key"]),
+        patch.object(settings, "encryption_master_key", _PRODUCTION_PATCHES["encryption_master_key"]),
     ):
         client = TestClient(create_app(redis_client=_NoopRedis()))
         response = client.get("/providers")
@@ -78,9 +94,11 @@ def test_security_headers_are_set_on_unhandled_500_responses() -> None:
 
 def test_docs_are_disabled_in_production() -> None:
     with (
-        patch.object(settings, "environment", "production"),
-        patch.object(settings, "metrics_token", "metrics-token"),
-        patch.object(settings, "frontend_url", "https://app.example.com"),
+        patch.object(settings, "environment", _PRODUCTION_PATCHES["environment"]),
+        patch.object(settings, "metrics_token", _PRODUCTION_PATCHES["metrics_token"]),
+        patch.object(settings, "frontend_url", _PRODUCTION_PATCHES["frontend_url"]),
+        patch.object(settings, "jwt_private_key", _PRODUCTION_PATCHES["jwt_private_key"]),
+        patch.object(settings, "encryption_master_key", _PRODUCTION_PATCHES["encryption_master_key"]),
     ):
         client = TestClient(create_app(redis_client=_NoopRedis()))
         assert client.get("/docs").status_code == 404
@@ -96,9 +114,11 @@ def test_docs_are_accessible_in_development() -> None:
 
 def test_health_hides_dependency_detail_in_production() -> None:
     with (
-        patch.object(settings, "environment", "production"),
-        patch.object(settings, "metrics_token", "metrics-token"),
-        patch.object(settings, "frontend_url", "https://app.example.com"),
+        patch.object(settings, "environment", _PRODUCTION_PATCHES["environment"]),
+        patch.object(settings, "metrics_token", _PRODUCTION_PATCHES["metrics_token"]),
+        patch.object(settings, "frontend_url", _PRODUCTION_PATCHES["frontend_url"]),
+        patch.object(settings, "jwt_private_key", _PRODUCTION_PATCHES["jwt_private_key"]),
+        patch.object(settings, "encryption_master_key", _PRODUCTION_PATCHES["encryption_master_key"]),
         patch("main.check_database", return_value="ok"),
         patch("main.check_redis", return_value="ok"),
     ):

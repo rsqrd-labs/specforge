@@ -42,6 +42,9 @@ class _NoopPipeline:
 
 
 class _NoopRedis:
+    async def eval(self, *args, **kwargs) -> int:
+        return 1
+
     def pipeline(self) -> _NoopPipeline:
         return _NoopPipeline()
 
