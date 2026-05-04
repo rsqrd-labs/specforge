@@ -42,7 +42,12 @@ class WorkspaceService:
             )
 
         await db.commit()
-        return await self._load(workspace.id, db)
+        result = await db.execute(
+            select(Workspace)
+            .where(Workspace.id == workspace.id)
+            .options(selectinload(Workspace.stages))
+        )
+        return result.scalar_one()
 
     async def list_for_user(self, user_id: UUID, db: AsyncSession) -> list[Workspace]:
         result = await db.execute(
@@ -83,14 +88,5 @@ class WorkspaceService:
         workspace = await self.get(workspace_id, user_id, db)
         workspace.status = "archived"
         await db.commit()
-
-    async def _load(self, workspace_id: UUID, db: AsyncSession) -> Workspace:
-        result = await db.execute(
-            select(Workspace)
-            .where(Workspace.id == workspace_id)
-            .options(selectinload(Workspace.stages))
-        )
-        return result.scalar_one()
-
 
 workspace_service = WorkspaceService()
