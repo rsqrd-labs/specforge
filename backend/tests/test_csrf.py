@@ -153,6 +153,74 @@ async def test_mutating_request_with_valid_csrf_reaches_route(
     assert response.status_code != 403
 
 
+@pytest.mark.asyncio
+async def test_logout_with_bearer_token_but_no_csrf_returns_403(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """POST /auth/logout must be CSRF-protected when an access token is present."""
+    user = _make_user()
+    monkeypatch.setattr(
+        csrf_module,
+        "decode_access_token_claims",
+        lambda t: (
+            {"sub": str(user.id), "type": "access"} if t == "valid-token" else None
+        ),
+    )
+    app = create_app(redis_client=_NoopRedis())
+    app.dependency_overrides[get_db] = _fake_get_db
+    app.dependency_overrides[get_current_user] = lambda: user
+
+    transport = ASGITransport(app=app, raise_app_exceptions=False)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            "/auth/logout",
+            headers={"Authorization": "Bearer valid-token"},
+            cookies={"refresh_token": "some_token"},
+        )
+
+    app.dependency_overrides.clear()
+
+    assert response.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_logout_with_bearer_token_and_valid_csrf_succeeds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """POST /auth/logout passes CSRF check when a valid token is supplied."""
+    from services.auth_service import auth_service as _auth_service_instance
+
+    user = _make_user()
+    csrf_token = generate_csrf_token(str(user.id))
+    monkeypatch.setattr(
+        csrf_module,
+        "decode_access_token_claims",
+        lambda t: (
+            {"sub": str(user.id), "type": "access"} if t == "valid-token" else None
+        ),
+    )
+    monkeypatch.setattr(_auth_service_instance, "revoke", lambda t: None)
+
+    app = create_app(redis_client=_NoopRedis())
+    app.dependency_overrides[get_db] = _fake_get_db
+    app.dependency_overrides[get_current_user] = lambda: user
+
+    transport = ASGITransport(app=app, raise_app_exceptions=False)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            "/auth/logout",
+            headers={
+                "Authorization": "Bearer valid-token",
+                "X-CSRF-Token": csrf_token,
+            },
+            cookies={"refresh_token": "some_token"},
+        )
+
+    app.dependency_overrides.clear()
+
+    assert response.status_code != 403
+
+
 def _make_user() -> User:
     return User(
         id=uuid4(),

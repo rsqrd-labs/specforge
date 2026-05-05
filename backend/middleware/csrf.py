@@ -17,7 +17,6 @@ _EXEMPT_PATHS = frozenset(
         "/auth/google",
         "/auth/callback",
         "/auth/refresh",
-        "/auth/logout",
     }
 )
 
