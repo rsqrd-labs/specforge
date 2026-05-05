@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import Awaitable, Callable
 
@@ -66,7 +67,8 @@ def _replay(messages: list[Message]) -> Callable[[], Awaitable[Message]]:
     async def receive() -> Message:
         if messages:
             return messages.pop(0)
-        return {"type": "http.request", "body": b"", "more_body": False}
+        await asyncio.Event().wait()
+        return {"type": "http.disconnect"}
 
     return receive
 
