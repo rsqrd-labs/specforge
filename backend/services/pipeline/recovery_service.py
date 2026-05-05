@@ -24,7 +24,7 @@ _RECOVERY_LOCK_TTL = 60
 
 
 async def recover_stuck_stages(db: AsyncSession) -> int:
-    """Reset stages stuck in_progress for >10 min and refund credits. Returns count."""
+    """Reset stages stuck in_progress for >3 min and refund credits. Returns count."""
     cutoff = datetime.now(UTC) - timedelta(minutes=_STUCK_THRESHOLD_MINUTES)
 
     result = await db.execute(
