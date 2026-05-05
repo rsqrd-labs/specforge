@@ -9,6 +9,8 @@ RUN uv sync --frozen --no-dev
 
 COPY . .
 
+RUN chmod +x entrypoint.sh
+
 EXPOSE 8000
 
-CMD ["uv", "run", "--no-sync", "gunicorn", "main:app", "--worker-class", "uvicorn.workers.UvicornWorker", "--workers", "2", "--bind", "0.0.0.0:8000"]
+ENTRYPOINT ["sh", "entrypoint.sh"]
