@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncGenerator
 from datetime import UTC, datetime
 from typing import Any
@@ -635,6 +636,103 @@ async def test_refine_provider_error_refunds_credits() -> None:
             await svc.refine(stage.id, request, user, db)
 
     mock_deduct.assert_awaited_once_with(db, user.id, 3, "refine")
+    mock_refund.assert_awaited_once_with(db, deduction.id, user.id)
+
+
+@pytest.mark.asyncio
+async def test_generate_stream_timeout_refunds_credits() -> None:
+    from services.llm.base import ProviderError
+    from services.pipeline import stage_manager as stage_manager_module
+
+    workspace_id = uuid4()
+    stage = _make_stage(workspace_id, "spec", status="draft")
+    workspace = _make_workspace([stage])
+    user = _make_user()
+    svc = StageManager(redis_client=_FakeRedis())
+    db = _MultiQueryDB([stage, workspace])
+    deduction = CreditLedger(id=uuid4(), user_id=user.id, amount=-10, reason="generate")
+
+    async def hanging_stream(*args, **kwargs) -> AsyncGenerator[str, None]:
+        await asyncio.sleep(1)
+        yield "late"
+
+    with (
+        patch.object(
+            stage_manager_module.settings,
+            "llm_stream_timeout_seconds",
+            0.001,
+        ),
+        patch(
+            "services.pipeline.stage_manager.credit_service.deduct",
+            new_callable=AsyncMock,
+            return_value=deduction,
+        ),
+        patch(
+            "services.pipeline.stage_manager.credit_service.refund",
+            new_callable=AsyncMock,
+        ) as mock_refund,
+        patch("services.pipeline.stage_manager.get_llm") as mock_get_llm,
+    ):
+        mock_adapter = MagicMock()
+        mock_adapter.stream = hanging_stream
+        mock_get_llm.return_value = mock_adapter
+
+        with pytest.raises(ProviderError):
+            async for _ in svc.generate(stage.id, user, db):
+                pass
+
+    assert stage.status == "draft"
+    mock_refund.assert_awaited_once_with(db, deduction.id)
+
+
+@pytest.mark.asyncio
+async def test_refine_timeout_refunds_credits() -> None:
+    from schemas.stage import RefineRequest
+    from services.llm.base import ProviderError
+    from services.pipeline import stage_manager as stage_manager_module
+
+    workspace_id = uuid4()
+    stage = _make_stage(workspace_id, "spec", status="draft", content="hello world")
+    workspace = _make_workspace([stage])
+    user = _make_user()
+    svc = StageManager(redis_client=_FakeRedis())
+    db = _MultiQueryDB([stage, workspace])
+    request = RefineRequest(
+        instruction="improve",
+        selection_start=0,
+        selection_end=5,
+        selected_text="hello",
+    )
+    deduction = CreditLedger(id=uuid4(), user_id=user.id, amount=-3, reason="refine")
+
+    async def hanging_complete(*args, **kwargs) -> str:
+        await asyncio.sleep(1)
+        return "late"
+
+    with (
+        patch.object(
+            stage_manager_module.settings,
+            "llm_complete_timeout_seconds",
+            0.001,
+        ),
+        patch(
+            "services.pipeline.stage_manager.credit_service.deduct",
+            new_callable=AsyncMock,
+            return_value=deduction,
+        ),
+        patch(
+            "services.pipeline.stage_manager.credit_service.refund",
+            new_callable=AsyncMock,
+        ) as mock_refund,
+        patch("services.pipeline.stage_manager.get_llm") as mock_get_llm,
+    ):
+        mock_adapter = MagicMock()
+        mock_adapter.complete = hanging_complete
+        mock_get_llm.return_value = mock_adapter
+
+        with pytest.raises(ProviderError):
+            await svc.refine(stage.id, request, user, db)
+
     mock_refund.assert_awaited_once_with(db, deduction.id, user.id)
 
 

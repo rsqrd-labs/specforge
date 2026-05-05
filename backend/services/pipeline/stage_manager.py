@@ -143,17 +143,20 @@ class StageManager:
         try:
             try:
                 adapter = get_llm(workspace.provider, workspace.model)
-                async for token in adapter.stream(
-                    system_prompt, user_prompt, max_tokens=8192
-                ):
-                    accumulated += token
-                    yield token
-            except ProviderError as exc:
+                async with asyncio.timeout(settings.llm_stream_timeout_seconds):
+                    async for token in adapter.stream(
+                        system_prompt, user_prompt, max_tokens=8192
+                    ):
+                        accumulated += token
+                        yield token
+            except (ProviderError, TimeoutError) as exc:
                 await credit_service.refund(db, deduction.id)
                 stage.status = "draft"
                 stage.updated_at = datetime.now(UTC)
                 await db.commit()
                 _cleanup_done = True
+                if isinstance(exc, TimeoutError):
+                    raise ProviderError(workspace.provider, exc) from exc
                 raise exc
 
             validation = validate(accumulated)
@@ -288,8 +291,9 @@ class StageManager:
 
         try:
             adapter = get_llm(workspace.provider, workspace.model)
-            replacement = await adapter.complete(
-                system_prompt, user_prompt, max_tokens=4096
+            replacement = await asyncio.wait_for(
+                adapter.complete(system_prompt, user_prompt, max_tokens=4096),
+                timeout=settings.llm_complete_timeout_seconds,
             )
 
             validation = validate(replacement)
@@ -297,8 +301,10 @@ class StageManager:
                 raise SecurityError(
                     f"Refine output failed validation: {validation.reason}"
                 )
-        except (ProviderError, SecurityError):
+        except (ProviderError, SecurityError, TimeoutError) as exc:
             await credit_service.refund(db, deduction.id, user.id)
+            if isinstance(exc, TimeoutError):
+                raise ProviderError(workspace.provider, exc) from exc
             raise
 
         proposed = apply_diff(

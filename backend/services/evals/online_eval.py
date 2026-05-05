@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from config import settings
 from database import AsyncSessionLocal
 from models import EvalResult
 from services.llm.gateway import get_llm
@@ -63,7 +65,10 @@ async def run_eval(
         user_prompt = _STAGE_PROMPTS[stage_type].format(
             content=content, spec_content=spec_content
         )
-        raw = await judge.complete(_JUDGE_SYSTEM, user_prompt, max_tokens=1024)
+        raw = await asyncio.wait_for(
+            judge.complete(_JUDGE_SYSTEM, user_prompt, max_tokens=1024),
+            timeout=settings.llm_complete_timeout_seconds,
+        )
     except Exception:
         logger.exception(
             "eval judge call failed for stage_version_id=%s", stage_version_id

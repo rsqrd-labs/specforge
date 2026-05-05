@@ -31,6 +31,8 @@ class Settings(BaseSettings):
 
     db_pool_size: int = 20
     db_max_overflow: int = 10
+    llm_stream_timeout_seconds: int = 120
+    llm_complete_timeout_seconds: int = 45
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
