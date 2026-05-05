@@ -55,38 +55,53 @@ async def check_database() -> DependencyStatus:
     return "ok"
 
 
-async def check_redis() -> DependencyStatus:
-    redis = Redis.from_url(
-        settings.redis_url,
-        decode_responses=True,
-        socket_connect_timeout=2,
-        socket_timeout=2,
-    )
-
+async def check_redis(redis: Redis | None = None) -> DependencyStatus:
+    _owns = redis is None
+    if _owns:
+        redis = Redis.from_url(
+            settings.redis_url,
+            decode_responses=True,
+            socket_connect_timeout=2,
+            socket_timeout=2,
+        )
     try:
         pong = await redis.ping()
     except Exception:
         return "error"
     finally:
-        await redis.aclose()
+        if _owns:
+            await redis.aclose()
 
     return "ok" if pong else "error"
 
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    task = asyncio.create_task(run_recovery_loop())
-    yield
-    task.cancel()
-    try:
-        await task
-    except asyncio.CancelledError:
-        pass
-
-
-def create_app(redis_client=None) -> FastAPI:
+def create_app(redis_client: Redis | None = None) -> FastAPI:
     validate_production_settings()
     _production = settings.environment.lower() == "production"
+
+    # Lifespan is defined inside create_app so it closes over redis_client.
+    # In tests redis_client is injected (FakeRedis); in production we create
+    # one shared connection pool and store it on app.state for the health check.
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        _owns_redis = redis_client is None
+        redis = redis_client or Redis.from_url(
+            settings.redis_url,
+            decode_responses=True,
+            socket_connect_timeout=2,
+            socket_timeout=2,
+        )
+        app.state.redis = redis
+        task = asyncio.create_task(run_recovery_loop())
+        yield
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        if _owns_redis:
+            await redis.aclose()
+
     app = FastAPI(
         title="SpecForge API",
         version="1.0.0",
@@ -128,9 +143,12 @@ def create_app(redis_client=None) -> FastAPI:
         )
 
     @app.get("/health", include_in_schema=False)
-    async def health() -> JSONResponse:
+    async def health(request: Request) -> JSONResponse:
         db_status = await check_database()
-        redis_status = await check_redis()
+        # Use the shared pool from lifespan when available; fall back to a
+        # short-lived connection if lifespan hasn't run (e.g. unit tests).
+        redis = getattr(request.app.state, "redis", None)
+        redis_status = await check_redis(redis)
         overall_status: HealthStatus = (
             "ok" if db_status == "ok" and redis_status == "ok" else "degraded"
         )
