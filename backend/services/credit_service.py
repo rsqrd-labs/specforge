@@ -112,10 +112,7 @@ class CreditService:
         ledger_entry_id: UUID,
         user_id: UUID | None = None,
     ) -> None:
-        result = await db.execute(
-            select(CreditLedger).where(CreditLedger.id == ledger_entry_id)
-        )
-        original = result.scalar_one_or_none()
+        original = await self._get_ledger_entry(db, ledger_entry_id)
         if original is None:
             logger.error(
                 "credit.refund.missing_entry ledger_entry_id=%s user_id=%s",
@@ -142,14 +139,11 @@ class CreditService:
             return
 
         refund_reason = f"refund:{ledger_entry_id}"
-        execute = getattr(db, "execute")
-        existing_result = await execute(
-            select(CreditLedger).where(
-                CreditLedger.user_id == original.user_id,
-                CreditLedger.reason == refund_reason,
-            )
+        existing_refund = await self._get_refund_entry(
+            db,
+            original.user_id,
+            refund_reason,
         )
-        existing_refund = existing_result.scalar_one_or_none()
         if existing_refund is not None:
             return
 
@@ -163,7 +157,6 @@ class CreditService:
             return
 
         refund_amount = abs(original.amount)
-        user.credit_balance = int(user.credit_balance or 0) + refund_amount
         refund_entry = CreditLedger(
             user_id=original.user_id,
             amount=refund_amount,
@@ -175,7 +168,33 @@ class CreditService:
         except IntegrityError:
             await db.rollback()
             return
+        user.credit_balance = int(user.credit_balance or 0) + refund_amount
+        await db.flush()
         await self._invalidate(original.user_id)
+
+    async def _get_ledger_entry(
+        self,
+        db: AsyncSession,
+        ledger_entry_id: UUID,
+    ) -> CreditLedger | None:
+        result = await db.execute(
+            select(CreditLedger).where(CreditLedger.id == ledger_entry_id)
+        )
+        return result.scalar_one_or_none()
+
+    async def _get_refund_entry(
+        self,
+        db: AsyncSession,
+        user_id: UUID,
+        refund_reason: str,
+    ) -> CreditLedger | None:
+        result = await db.execute(
+            select(CreditLedger).where(
+                CreditLedger.user_id == user_id,
+                CreditLedger.reason == refund_reason,
+            )
+        )
+        return result.scalar_one_or_none()
 
     async def _invalidate(self, user_id: UUID) -> None:
         redis = await self._get_redis()

@@ -7,8 +7,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import anthropic
 import pytest
 
+from services.llm import gateway
 from services.llm.base import BaseLLMAdapter, ProviderError
-from services.llm.gateway import get_llm
+from services.llm.gateway import clear_llm_cache, get_llm
 
 
 def test_get_llm_unknown_provider_raises() -> None:
@@ -34,6 +35,21 @@ def test_get_llm_openai_returns_adapter() -> None:
 def test_get_llm_google_returns_adapter() -> None:
     adapter = get_llm("google", "gemini-1.5-pro")
     assert adapter.__class__.__name__ == "GoogleAdapter"
+
+
+def test_get_llm_rebuilds_adapter_when_provider_key_changes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clear_llm_cache()
+    monkeypatch.setenv("OPENAI_API_KEY", "first-key")
+    first = get_llm("openai", "gpt-4o")
+
+    monkeypatch.setenv("OPENAI_API_KEY", "second-key")
+    second = get_llm("openai", "gpt-4o")
+
+    assert first is not second
+    assert len(gateway._INSTANCES) == 2
+    clear_llm_cache()
 
 
 @pytest.mark.asyncio

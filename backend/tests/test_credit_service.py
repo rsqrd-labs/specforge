@@ -184,15 +184,8 @@ async def test_refund_is_idempotent(svc: CreditService) -> None:
         amount=10,
         reason=f"refund:{deduction.id}",
     )
-    # Simulate DB enforcing the unique constraint by raising IntegrityError on flush
-    db = _FakeDB(
-        user=user,
-        entity_lookup=deduction,
-        existing_refund=existing,
-        raise_integrity_error_on_flush=True,
-    )
+    db = _FakeDB(user=user, entity_lookup=deduction, existing_refund=existing)
 
-    # Must not raise — duplicate refund is silently swallowed
     await svc.refund(db, deduction.id)
 
     assert not db.rolled_back
@@ -201,6 +194,27 @@ async def test_refund_is_idempotent(svc: CreditService) -> None:
 
 @pytest.mark.asyncio
 async def test_refund_is_race_safe_via_integrity_error(svc: CreditService) -> None:
+    user_id = uuid4()
+    user = _user(user_id, balance=40)
+    deduction = CreditLedger(id=uuid4(), user_id=user_id, amount=-10, reason="gen")
+    # Simulate DB enforcing the unique constraint by raising IntegrityError on flush
+    db = _FakeDB(
+        user=user,
+        entity_lookup=deduction,
+        raise_integrity_error_on_flush=True,
+    )
+
+    # Must not raise — duplicate refund is silently swallowed
+    await svc.refund(db, deduction.id)
+
+    assert db.rolled_back
+    assert user.credit_balance == 40
+
+
+@pytest.mark.asyncio
+async def test_refund_integrity_error_clears_failed_transaction(
+    svc: CreditService,
+) -> None:
     user_id = uuid4()
     user = _user(user_id, balance=40)
     deduction = CreditLedger(id=uuid4(), user_id=user_id, amount=-10, reason="gen")

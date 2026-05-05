@@ -9,9 +9,9 @@ from services.llm.base import BaseLLMAdapter, ProviderError
 
 
 class OpenAIAdapter(BaseLLMAdapter):
-    def __init__(self, model: str) -> None:
+    def __init__(self, model: str, api_key: str | None = None) -> None:
         self.model = model
-        self._client = openai.AsyncOpenAI(api_key=settings.openai_api_key)
+        self._client = openai.AsyncOpenAI(api_key=api_key or settings.openai_api_key)
 
     async def stream(
         self, system: str, user: str, max_tokens: int

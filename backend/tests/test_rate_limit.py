@@ -6,9 +6,11 @@ from typing import Any
 import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
+from redis.exceptions import RedisError
 
 from middleware.rate_limit import (
     RateLimitMiddleware,
+    _local_sliding_window_check,
     _parse_trusted_proxy_networks,
     sliding_window_check,
 )
@@ -62,6 +64,11 @@ class _FakeRedis:
 
     def _zcard(self, key: str) -> int:
         return len(self._sets.get(key, {}))
+
+
+class _FailingRedis:
+    async def eval(self, *args: Any, **kwargs: Any) -> int:
+        raise RedisError("redis unavailable")
 
 
 class _FakePipeline:
@@ -289,6 +296,33 @@ async def test_rate_limit_middleware_ignores_malformed_forwarded_for() -> None:
         response = await client.get("/", headers={"X-Forwarded-For": "not-an-ip"})
 
     assert response.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_rate_limit_middleware_uses_local_fallback_when_redis_fails() -> None:
+    app = FastAPI()
+    app.add_middleware(
+        RateLimitMiddleware,
+        redis_client=_FailingRedis(),
+        trusted_proxy_ips="127.0.0.1",
+    )
+
+    @app.get("/")
+    async def root() -> dict:
+        return {"ok": True}
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/", headers={"X-Forwarded-For": "203.0.113.10"})
+
+    assert response.status_code == 200
+
+
+def test_local_fallback_limiter_blocks_over_limit() -> None:
+    windows: dict[str, list[float]] = {}
+    assert _local_sliding_window_check(windows, "ip:203.0.113.10", 2, 60) is True
+    assert _local_sliding_window_check(windows, "ip:203.0.113.10", 2, 60) is True
+    assert _local_sliding_window_check(windows, "ip:203.0.113.10", 2, 60) is False
 
 
 def test_trusted_proxy_config_rejects_ipv4_universal_trust() -> None:

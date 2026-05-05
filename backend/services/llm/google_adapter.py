@@ -11,9 +11,9 @@ from services.llm.base import BaseLLMAdapter, ProviderError
 
 
 class GoogleAdapter(BaseLLMAdapter):
-    def __init__(self, model: str) -> None:
+    def __init__(self, model: str, api_key: str | None = None) -> None:
         self.model = model
-        self._client = genai.Client(api_key=settings.google_api_key)
+        self._client = genai.Client(api_key=api_key or settings.google_api_key)
 
     def _config(self, system: str, max_tokens: int) -> types.GenerateContentConfig:
         return types.GenerateContentConfig(

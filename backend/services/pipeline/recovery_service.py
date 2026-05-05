@@ -60,7 +60,7 @@ async def recover_stuck_stages(db: AsyncSession) -> int:
 
 
 async def run_recovery_loop() -> None:
-    """Background task: polls every 5 minutes and recovers stuck stages.
+    """Background task: polls every 60 seconds and recovers stuck stages.
 
     Uses a Redis NX lock so only one gunicorn worker runs recovery per cycle.
     Workers that don't acquire the lock skip the cycle silently.

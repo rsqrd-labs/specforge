@@ -1,5 +1,6 @@
+import logging
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from ipaddress import IPv4Network, IPv6Network, ip_address, ip_network
 
 from fastapi import status
@@ -13,9 +14,13 @@ from starlette.responses import Response
 from config import settings
 from services.auth_service import decode_access_token_claims
 
+logger = logging.getLogger(__name__)
+
 _LOGIN_PATHS = frozenset({"/auth/google", "/auth/callback"})
 _BYPASS_PATHS = frozenset({"/health"})
+_LOCAL_FALLBACK_MAX_KEYS = 10_000
 IpNetwork = IPv4Network | IPv6Network
+RateLimitCheck = Callable[[str, int, int], Awaitable[bool]]
 
 # Lua script: atomically checks the sliding window count BEFORE adding the
 # new member. Returns 1 (allowed) or 0 (rejected). Because the ZCARD check
@@ -81,6 +86,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             else trusted_proxy_ips
         )
         self._trusted_proxy_networks = _parse_trusted_proxy_networks(configured_proxies)
+        self._local_fallback_windows: dict[str, list[float]] = {}
 
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
         ip = _get_client_ip(request, self._trusted_proxy_networks)
@@ -90,29 +96,90 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
 
         try:
-            if not await sliding_window_check(self._redis, f"ip:{ip}", 1000, 60):
-                return _rate_limited(60)
-
-            if path in _LOGIN_PATHS:
-                if not await sliding_window_check(self._redis, f"login:{ip}", 5, 300):
-                    return _rate_limited(300)
-                if not await sliding_window_check(
-                    self._redis, f"login_hourly:{ip}", 20, 3600
-                ):
-                    return _rate_limited(3600)
-
-            user_id, claims = _extract_user_id(request)
-            if claims is not None:
-                request.state.jwt_claims = claims
-            if user_id:
-                if not await sliding_window_check(
-                    self._redis, f"user:{user_id}", 100, 60
-                ):
-                    return _rate_limited(60)
+            limited_response = await self._enforce_limits(
+                request,
+                ip,
+                path,
+                self._redis_check,
+            )
         except RedisError:
-            return _rate_limit_unavailable()
+            logger.warning("rate_limit.redis_unavailable_fallback", exc_info=True)
+            limited_response = await self._enforce_limits(
+                request,
+                ip,
+                path,
+                self._local_fallback_check,
+            )
+
+        if limited_response is not None:
+            return limited_response
 
         return await call_next(request)
+
+    async def _redis_check(
+        self,
+        key: str,
+        limit: int,
+        window_seconds: int,
+    ) -> bool:
+        return await sliding_window_check(self._redis, key, limit, window_seconds)
+
+    async def _local_fallback_check(
+        self,
+        key: str,
+        limit: int,
+        window_seconds: int,
+    ) -> bool:
+        return _local_sliding_window_check(
+            self._local_fallback_windows,
+            key,
+            limit,
+            window_seconds,
+        )
+
+    async def _enforce_limits(
+        self,
+        request: Request,
+        ip: str,
+        path: str,
+        check: RateLimitCheck,
+    ) -> Response | None:
+        if not await check(f"ip:{ip}", 1000, 60):
+            return _rate_limited(60)
+
+        if path in _LOGIN_PATHS:
+            if not await check(f"login:{ip}", 5, 300):
+                return _rate_limited(300)
+            if not await check(f"login_hourly:{ip}", 20, 3600):
+                return _rate_limited(3600)
+
+        user_id, claims = _extract_user_id(request)
+        if claims is not None:
+            request.state.jwt_claims = claims
+        if user_id and not await check(f"user:{user_id}", 100, 60):
+            return _rate_limited(60)
+        return None
+
+
+def _local_sliding_window_check(
+    windows: dict[str, list[float]],
+    key: str,
+    limit: int,
+    window_seconds: int,
+) -> bool:
+    now = time.time()
+    window_start = now - window_seconds
+    ratelimit_key = f"ratelimit:{key}"
+    timestamps = [ts for ts in windows.get(ratelimit_key, []) if ts > window_start]
+    if len(timestamps) >= limit:
+        windows[ratelimit_key] = timestamps
+        return False
+
+    timestamps.append(now)
+    windows[ratelimit_key] = timestamps
+    if len(windows) > _LOCAL_FALLBACK_MAX_KEYS:
+        windows.pop(next(iter(windows)))
+    return True
 
 
 def _get_client_ip(
@@ -182,12 +249,4 @@ def _rate_limited(retry_after: int) -> JSONResponse:
         status_code=status.HTTP_429_TOO_MANY_REQUESTS,
         content={"detail": "Rate limit exceeded"},
         headers={"Retry-After": str(retry_after)},
-    )
-
-
-def _rate_limit_unavailable() -> JSONResponse:
-    return JSONResponse(
-        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-        content={"detail": "Rate limit service unavailable"},
-        headers={"Retry-After": "30"},
     )
