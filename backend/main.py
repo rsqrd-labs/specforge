@@ -12,6 +12,7 @@ from starlette.responses import Response
 
 from config import settings, validate_production_settings
 from database import async_engine
+from middleware.body_size import BodySizeLimitMiddleware
 from middleware.csrf import CsrfMiddleware
 from middleware.rate_limit import RateLimitMiddleware
 from routers import auth as auth_router
@@ -115,6 +116,10 @@ def create_app(redis_client: Redis | None = None) -> FastAPI:
     )
     setup_observability(app, async_engine)
 
+    app.add_middleware(
+        BodySizeLimitMiddleware,
+        max_body_bytes=settings.max_request_body_bytes,
+    )
     app.add_middleware(RateLimitMiddleware, redis_client=redis_client)
     app.add_middleware(CsrfMiddleware)
     app.add_middleware(

@@ -58,6 +58,24 @@ def test_security_headers_are_set_on_api_responses() -> None:
     assert "Strict-Transport-Security" not in response.headers
 
 
+def test_oversized_request_body_is_rejected_before_route_parsing() -> None:
+    with (
+        patch.object(settings, "environment", "development"),
+        patch.object(settings, "max_request_body_bytes", 16),
+    ):
+        app = create_app(redis_client=_NoopRedis())
+
+        @app.post("/echo")
+        async def echo(payload: dict) -> dict:
+            return payload
+
+        client = TestClient(app)
+        response = client.post("/echo", content=b"x" * 17)
+
+    assert response.status_code == 413
+    assert response.json() == {"detail": "Request body too large"}
+
+
 def test_hsts_is_set_in_production() -> None:
     with (
         patch.object(settings, "environment", _PRODUCTION_PATCHES["environment"]),
