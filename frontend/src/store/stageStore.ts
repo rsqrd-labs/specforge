@@ -1,17 +1,21 @@
 import { create } from "zustand"
 import { subscribeWithSelector } from "zustand/middleware"
-import type { Stage } from "../types/stage"
+import type { Stage, StageType } from "../types/stage"
 
 interface StageState {
   stages: Record<string, Stage>
-  streamingContent: Record<string, string>
+  streamingContent: Record<string, string> | string
   activeStream: string | null
   setStage: (stage: Stage) => void
   setStages: (stages: Stage[]) => void
   appendToken: (stageId: string, token: string) => void
+  appendStreamToken: (token: string) => void
   startStream: (stageId: string) => void
   finaliseStream: (stageId: string) => void
+  markStale: (stageType: StageType) => void
 }
+
+const STAGE_ORDER: StageType[] = ["spec", "plan", "harness", "tasks"]
 
 export const useStageStore = create<StageState>()(
   subscribeWithSelector((set) => ({
@@ -34,24 +38,54 @@ export const useStageStore = create<StageState>()(
 
     appendToken: (stageId, token) =>
       set((state) => ({
-        streamingContent: {
-          ...state.streamingContent,
-          [stageId]: (state.streamingContent[stageId] ?? "") + token,
-        },
+        streamingContent:
+          typeof state.streamingContent === "string"
+            ? state.streamingContent + token
+            : {
+                ...state.streamingContent,
+                [stageId]: (state.streamingContent[stageId] ?? "") + token,
+              },
       })),
+
+    appendStreamToken: (token) =>
+      set((state) => {
+        if (typeof state.streamingContent === "string") {
+          return { streamingContent: state.streamingContent + token }
+        }
+
+        const stageId = state.activeStream
+        if (!stageId) return state
+        return {
+          streamingContent: {
+            ...state.streamingContent,
+            [stageId]: (state.streamingContent[stageId] ?? "") + token,
+          },
+        }
+      }),
 
     startStream: (stageId) =>
       set((state) => ({
         activeStream: stageId,
-        streamingContent: { ...state.streamingContent, [stageId]: "" },
+        streamingContent:
+          typeof state.streamingContent === "string"
+            ? { [stageId]: "" }
+            : { ...state.streamingContent, [stageId]: "" },
       })),
 
     finaliseStream: (stageId) =>
       set((state) => {
-        const accumulated = state.streamingContent[stageId]
+        const accumulated =
+          typeof state.streamingContent === "string"
+            ? state.streamingContent
+            : state.streamingContent[stageId]
         const existing = state.stages[stageId]
-        const updatedStreamingContent = { ...state.streamingContent }
-        delete updatedStreamingContent[stageId]
+        const updatedStreamingContent =
+          typeof state.streamingContent === "string"
+            ? ""
+            : { ...state.streamingContent }
+        if (typeof updatedStreamingContent !== "string") {
+          delete updatedStreamingContent[stageId]
+        }
 
         return {
           activeStream: null,
@@ -66,6 +100,24 @@ export const useStageStore = create<StageState>()(
               }
             : state.stages,
         }
+      }),
+
+    markStale: (stageType) =>
+      set((state) => {
+        const editedIndex = STAGE_ORDER.indexOf(stageType)
+        if (editedIndex === -1) return state
+
+        const stages = Object.fromEntries(
+          Object.entries(state.stages).map(([key, stage]) => {
+            const stageIndex = STAGE_ORDER.indexOf(stage.type)
+            if (stageIndex > editedIndex && stage.status === "finalised") {
+              return [key, { ...stage, status: "stale" as const }]
+            }
+            return [key, stage]
+          }),
+        )
+
+        return { stages }
       }),
   })),
 )

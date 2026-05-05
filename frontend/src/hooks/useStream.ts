@@ -48,19 +48,19 @@ export function useStream(stageId: string | null) {
             ? await regenerateStage(stageId)
             : await generateStage(stageId)
 
-        let resolveEval!: (result: EvalResult | null) => void
+        let onEval!: (result: EvalResult | null) => void
         const evalPromise = new Promise<EvalResult | null>((resolve) => {
-          resolveEval = resolve
+          onEval = resolve
         })
 
         const doneStageId = await new Promise<string>((resolve, reject) => {
           streamRef.current = createSSEConnection(
             response.stream_url,
-            (token) => useStageStore.getState().appendToken(stageId, token),
-            resolve,
-            reject,
-            resolveEval,
-          )
+             (token) => useStageStore.getState().appendToken(stageId, token),
+             resolve,
+             reject,
+             onEval,
+           )
         })
 
         useStageStore.getState().finaliseStream(stageId)

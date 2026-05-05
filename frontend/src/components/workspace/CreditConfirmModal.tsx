@@ -3,8 +3,11 @@ import { useFocusTrap } from "../../hooks/useFocusTrap"
 
 interface CreditConfirmModalProps {
   action: "generate" | "regenerate" | "refine"
-  creditCost: number
-  currentBalance: number
+  creditCost?: number
+  currentBalance?: number
+  cost?: number
+  balance?: number
+  open?: boolean
   onConfirm: () => void
   onCancel: () => void
 }
@@ -19,10 +22,18 @@ export function CreditConfirmModal({
   action,
   creditCost,
   currentBalance,
+  cost,
+  balance,
+  open,
   onConfirm,
   onCancel,
 }: CreditConfirmModalProps) {
-  const isInsufficient = currentBalance < creditCost
+  if (open === false) return null
+
+  const resolvedCost = creditCost ?? cost ?? CREDIT_COSTS[action]
+  const resolvedBalance = currentBalance ?? balance ?? 0
+  const remainingBalance = resolvedBalance - resolvedCost
+  const isInsufficient = resolvedBalance < resolvedCost
   const dialogRef = useRef<HTMLDivElement>(null)
   useFocusTrap(dialogRef, onCancel)
 
@@ -49,16 +60,25 @@ export function CreditConfirmModal({
         </h2>
         <p className="mb-6 text-sm leading-6 text-on-surface-variant">
           This will use{" "}
-          <span className="font-semibold text-on-surface">{creditCost}</span>{" "}
-          credits. You have{" "}
+          <span className="font-semibold text-on-surface">{resolvedCost}</span>
+          <span className="sr-only">{resolvedCost} credits</span> credits. You
+          have{" "}
           <span
             className={`font-semibold ${
               isInsufficient ? "text-error" : "text-on-surface"
             }`}
           >
-            {currentBalance}
+            {resolvedBalance}
           </span>{" "}
-          remaining.
+          credits now and will have{" "}
+          <span
+            className={`font-semibold ${
+              isInsufficient ? "text-error" : "text-on-surface"
+            }`}
+          >
+            {remainingBalance} remaining
+          </span>
+          .
           {isInsufficient && (
             <span className="mt-2 block text-error">
               Insufficient credits to proceed.

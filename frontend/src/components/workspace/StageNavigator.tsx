@@ -1,9 +1,11 @@
 import type { Stage, StageType } from "../../types/stage"
 
 interface StageNavigatorProps {
-  stages: Stage[]
-  activeStageId: string
-  onSelectStage: (stageId: string) => void
+  stages: Stage[] | Partial<Record<StageType, Stage>>
+  activeStageId?: string
+  activeStage?: StageType
+  onSelectStage?: (stageId: string) => void
+  onSelect?: (stageType: StageType) => void
 }
 
 const STAGE_ORDER: StageType[] = ["spec", "plan", "harness", "tasks"]
@@ -32,15 +34,19 @@ function StatusDot({ status }: { status: Stage["status"] }) {
 function scoreClassName(score: number): string {
   if (score >= 80) return "text-green-600"
   if (score >= 60) return "text-on-surface-variant"
-  return "text-error"
+  return "text-error text-red-600"
 }
 
 export function StageNavigator({
   stages,
   activeStageId,
+  activeStage,
   onSelectStage,
+  onSelect,
 }: StageNavigatorProps) {
-  const stageMap = Object.fromEntries(stages.map((s) => [s.type, s]))
+  const stageMap = Array.isArray(stages)
+    ? Object.fromEntries(stages.map((s) => [s.type, s]))
+    : stages
 
   return (
     <nav className="flex flex-col gap-1 p-2">
@@ -49,14 +55,18 @@ export function StageNavigator({
         if (!stage) return null
 
         const isLocked = stage.status === "locked"
-        const isActive = stage.id === activeStageId
+        const isActive = stage.id === activeStageId || stage.type === activeStage
         const score = stage.eval_result?.overall_score ?? null
 
         return (
           <button
             key={type}
             disabled={isLocked}
-            onClick={() => !isLocked && onSelectStage(stage.id)}
+            onClick={() => {
+              if (isLocked) return
+              if (onSelectStage) onSelectStage(stage.id)
+              else onSelect?.(type)
+            }}
             className={[
               "flex items-center gap-2 rounded-lg px-3 py-2 text-sm text-left transition-colors",
               isLocked
