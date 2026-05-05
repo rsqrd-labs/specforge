@@ -68,6 +68,13 @@ class StageDependencyError(Exception):
     pass
 
 
+class StageStateError(Exception):
+    """Raised when generate() is called on a stage whose current status
+    does not permit generation (e.g. already in_progress, finalised, locked)."""
+
+    pass
+
+
 class SecurityError(Exception):
     pass
 
@@ -106,7 +113,7 @@ class StageManager:
         workspace = await self._load_workspace(stage.workspace_id, db)
 
         if stage.status not in ("draft", "stale"):
-            raise ValueError(f"Stage status {stage.status!r} is not generatable")
+            raise StageStateError(f"Stage status {stage.status!r} is not generatable")
 
         await self._assert_dependencies_finalised(stage.type, workspace.id, db)
 
@@ -131,16 +138,16 @@ class StageManager:
         stage.updated_at = datetime.now(UTC)
         await db.commit()
 
-        system_prompt, user_prompt = await build_prompt(
-            stage.type, workspace, db, redis
-        )
-
-        accumulated = ""
-        # Tracks whether we completed a normal terminal path (success, ProviderError,
-        # SecurityError). False when we reach finally means client disconnected
-        # mid-stream and we need to reset the stage ourselves.
+        # _cleanup_done starts False immediately after the commit so that any
+        # exception — including a build_prompt() failure — enters the finally
+        # cleanup path and refunds credits + resets the stage to draft.
         _cleanup_done = False
         try:
+            system_prompt, user_prompt = await build_prompt(
+                stage.type, workspace, db, redis
+            )
+
+            accumulated = ""
             try:
                 adapter = get_llm(workspace.provider, workspace.model)
                 async with asyncio.timeout(settings.llm_stream_timeout_seconds):

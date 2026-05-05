@@ -794,9 +794,11 @@ async def test_generate_rejects_already_in_progress_stage() -> None:
     """A stage whose status is 'in_progress' must not generate again.
 
     This is the invariant enforced once the SELECT FOR UPDATE lock is held:
-    the second concurrent request sees in_progress and raises ValueError
+    the second concurrent request sees in_progress and raises StageStateError
     instead of double-deducting credits.
     """
+    from services.pipeline.stage_manager import StageStateError
+
     workspace_id = uuid4()
     in_progress_stage = _make_stage(workspace_id, "spec", status="in_progress")
     workspace = _make_workspace([in_progress_stage])
@@ -808,11 +810,77 @@ async def test_generate_rejects_already_in_progress_stage() -> None:
         "services.pipeline.stage_manager.credit_service.deduct",
         new_callable=AsyncMock,
     ) as mock_deduct:
-        with pytest.raises(ValueError, match="in_progress"):
+        with pytest.raises(StageStateError, match="in_progress"):
             async for _ in svc.generate(in_progress_stage.id, user, db):
                 pass
 
     mock_deduct.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_generate_build_prompt_failure_refunds_credits_and_resets_stage() -> None:
+    """If build_prompt() raises after credits are committed, the finally
+    cleanup block must refund the deduction and reset the stage to draft.
+
+    Without the A-1 fix (_cleanup_done assigned before build_prompt), the
+    finally block was never entered for this failure mode and the stage
+    stayed in_progress until the recovery loop ran.
+    """
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    workspace_id = uuid4()
+    spec_stage = _make_stage(workspace_id, "spec", status="draft")
+    workspace = _make_workspace([spec_stage])
+    user = _make_user()
+    deduction = CreditLedger(id=uuid4(), user_id=user.id, amount=-10, reason="generate")
+
+    # Fake cleanup_db returned by the AsyncSessionLocal context manager.
+    # It must respond to execute() with a Stage in in_progress status so
+    # the finally block decides to refund.
+    cleanup_stage = _make_stage(workspace_id, "spec", status="in_progress")
+    cleanup_stage.id = spec_stage.id
+
+    class _FakeCleanupResult:
+        def scalar_one_or_none(self):
+            return cleanup_stage
+
+    fake_cleanup_db = MagicMock()
+    fake_cleanup_db.execute = AsyncMock(return_value=_FakeCleanupResult())
+    fake_cleanup_db.commit = AsyncMock()
+    fake_cleanup_db.__aenter__ = AsyncMock(return_value=fake_cleanup_db)
+    fake_cleanup_db.__aexit__ = AsyncMock(return_value=False)
+
+    fake_session_local = MagicMock(return_value=fake_cleanup_db)
+
+    svc = StageManager(redis_client=_FakeRedis())
+    db = _MultiQueryDB([spec_stage, workspace, []])
+
+    with (
+        patch(
+            "services.pipeline.stage_manager.credit_service.deduct",
+            new_callable=AsyncMock,
+            return_value=deduction,
+        ),
+        patch(
+            "services.pipeline.stage_manager.credit_service.refund",
+            new_callable=AsyncMock,
+        ) as mock_refund,
+        patch(
+            "services.pipeline.stage_manager.build_prompt",
+            new_callable=AsyncMock,
+            side_effect=RuntimeError("prompt cache miss"),
+        ),
+        patch(
+            "database.AsyncSessionLocal",
+            fake_session_local,
+        ),
+    ):
+        with pytest.raises(RuntimeError, match="prompt cache miss"):
+            async for _ in svc.generate(spec_stage.id, user, db):
+                pass
+
+    mock_refund.assert_awaited_once_with(fake_cleanup_db, deduction.id)
+    assert cleanup_stage.status == "draft"
 
 
 @pytest.mark.asyncio

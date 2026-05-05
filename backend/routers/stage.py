@@ -31,6 +31,7 @@ from services.pipeline.stage_manager import (
     RefineSelectionError,
     SecurityError,
     StageDependencyError,
+    StageStateError,
     stage_manager,
 )
 
@@ -51,6 +52,9 @@ async def _stream_stage(
                 yield f"data: {json.dumps({'token': token})}\n\n"
     except StageDependencyError as exc:
         payload = json.dumps({"error": "dependency_not_finalised", "detail": str(exc)})
+        yield f"data: {payload}\n\n"
+    except StageStateError as exc:
+        payload = json.dumps({"error": "stage_not_generatable", "detail": str(exc)})
         yield f"data: {payload}\n\n"
     except RateLimitError as exc:
         payload = json.dumps(
@@ -128,6 +132,7 @@ async def refine_stage(
     request: RefineRequest,
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
+    _: None = Depends(require_credits(3)),
 ) -> DiffResponse:
     # StageManager raw-matches selected_text before its prompt layer calls
     # sanitize_text(request.selected_text) and sanitize_text(request.instruction).

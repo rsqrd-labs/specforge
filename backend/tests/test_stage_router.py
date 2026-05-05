@@ -656,3 +656,84 @@ async def test_generate_internal_error_does_not_expose_detail(app) -> None:
                 assert (
                     "detail" not in data
                 ), "catch-all error event must not include 'detail' key"
+
+
+@pytest.mark.asyncio
+async def test_generate_in_progress_stage_emits_stage_not_generatable(app) -> None:
+    """When generate() raises StageStateError (e.g. stage already in_progress),
+    _stream_stage must emit stage_not_generatable — not internal_error — so that
+    concurrent-generate alerts are not triggered as unhandled exceptions."""
+    import json as _json
+
+    from services.pipeline.stage_manager import StageStateError
+
+    stage = _make_stage(status="in_progress")
+
+    async def _fake_db():
+        yield _FakeDB(stage)
+
+    app.dependency_overrides[get_db] = _fake_db
+
+    async def already_running(*args, **kwargs) -> AsyncGenerator[str, None]:
+        raise StageStateError("Stage status 'in_progress' is not generatable")
+        yield
+
+    with (
+        patch(
+            "routers.stage.stage_manager.generate",
+            side_effect=already_running,
+        ),
+        patch(
+            "services.credit_service.credit_service.get_balance",
+            new_callable=AsyncMock,
+            return_value=100,
+        ),
+    ):
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            response = await client.post(f"/stages/{stage.id}/generate")
+
+    assert response.status_code == 200
+    body = response.text
+    assert "stage_not_generatable" in body
+    assert "internal_error" not in body
+    for line in body.splitlines():
+        if line.startswith("data:"):
+            data = _json.loads(line[5:].strip())
+            if data.get("error") == "stage_not_generatable":
+                assert "in_progress" in data["detail"]
+
+
+@pytest.mark.asyncio
+async def test_refine_requires_credits_returns_402_when_balance_zero(app) -> None:
+    """refine_stage must reject requests with insufficient credits before
+    any LLM work starts, returning HTTP 402."""
+    stage = _make_stage()
+
+    async def _fake_db():
+        yield _FakeDB(stage)
+
+    app.dependency_overrides[get_db] = _fake_db
+
+    with patch(
+        "services.credit_service.credit_service.get_balance",
+        new_callable=AsyncMock,
+        return_value=0,
+    ):
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            response = await client.post(
+                f"/stages/{stage.id}/refine",
+                json={
+                    "instruction": "improve",
+                    "selection_start": 0,
+                    "selection_end": 4,
+                    "selected_text": "some",
+                },
+            )
+
+    assert response.status_code == 402
+    body = response.json()
+    assert body["detail"]["code"] == "insufficient_credits"
