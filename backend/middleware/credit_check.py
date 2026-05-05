@@ -12,6 +12,8 @@ def require_credits(amount: int):
         user: User = Depends(get_current_user),
         db: AsyncSession = Depends(get_db),
     ) -> None:
+        # Optimistic pre-check for fast UX rejection (TOCTOU). The actual
+        # balance is enforced atomically by SELECT FOR UPDATE inside deduct().
         balance = await credit_service.get_balance(db, user.id)
         if balance < amount:
             raise HTTPException(
