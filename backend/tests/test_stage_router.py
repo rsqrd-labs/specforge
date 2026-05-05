@@ -591,7 +591,7 @@ async def test_refine_rejects_injection_in_selected_text(app) -> None:
 
 @pytest.mark.asyncio
 async def test_generate_insufficient_credits_emits_structured_event(app) -> None:
-    """InsufficientCreditsError inside generate() must surface as insufficient_credits, not internal_error."""
+    """InsufficientCreditsError in generate() must surface as insufficient_credits."""
     from services.credit_service import InsufficientCreditsError as _ICE
 
     stage = _make_stage()
