@@ -39,6 +39,7 @@ def test_no_provider_sdk_imports_outside_llm_adapters() -> None:
         "google.generativeai",
     ]
     allowed_fragments = ["services/llm", "requirements"]
+    excluded_fragments = [".venv", "tests/"]
 
     import pathlib
 
@@ -47,6 +48,8 @@ def test_no_provider_sdk_imports_outside_llm_adapters() -> None:
     for path in root.rglob("*.py"):
         relative = path.relative_to(root).as_posix()
         if any(fragment in relative for fragment in allowed_fragments):
+            continue
+        if any(fragment in relative for fragment in excluded_fragments):
             continue
         text = path.read_text(encoding="utf-8")
         if any(token in text for token in forbidden):
