@@ -150,7 +150,7 @@ class CreditService:
             )
         )
         existing_refund = existing_result.scalar_one_or_none()
-        if existing_refund is not None and not isinstance(existing_refund, int):
+        if existing_refund is not None:
             return
 
         user = await self._get_user(db, original.user_id, lock=True)
