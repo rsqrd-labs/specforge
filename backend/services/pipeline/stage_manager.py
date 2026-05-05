@@ -102,7 +102,7 @@ class StageManager:
     async def generate(
         self, stage_id: UUID, user, db: AsyncSession
     ) -> AsyncGenerator[str, None]:
-        stage = await self._load_stage(stage_id, db)
+        stage = await self._load_stage(stage_id, db, lock=True)
         workspace = await self._load_workspace(stage.workspace_id, db)
 
         if stage.status not in ("draft", "stale"):
@@ -455,8 +455,13 @@ class StageManager:
         )
         return result.scalar_one_or_none()
 
-    async def _load_stage(self, stage_id: UUID, db: AsyncSession) -> Stage:
-        result = await db.execute(select(Stage).where(Stage.id == stage_id))
+    async def _load_stage(
+        self, stage_id: UUID, db: AsyncSession, *, lock: bool = False
+    ) -> Stage:
+        stmt = select(Stage).where(Stage.id == stage_id)
+        if lock:
+            stmt = stmt.with_for_update()
+        result = await db.execute(stmt)
         stage = result.scalar_one_or_none()
         if stage is None:
             from fastapi import HTTPException

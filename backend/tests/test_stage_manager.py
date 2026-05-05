@@ -737,6 +737,83 @@ async def test_refine_timeout_refunds_credits() -> None:
 
 
 @pytest.mark.asyncio
+async def test_generate_uses_select_for_update_on_stage_row() -> None:
+    """generate() must acquire a row lock before status check and credit deduction
+    to prevent two concurrent requests from both deducting credits."""
+    workspace_id = uuid4()
+    spec_stage = _make_stage(workspace_id, "spec", status="draft")
+    user = _make_user()
+    svc = StageManager(redis_client=_FakeRedis())
+    db = _MultiQueryDB([])
+
+    locked_called_with: list[bool] = []
+
+    async def fake_load_stage(stage_id: UUID, db_: object, *, lock: bool = False) -> Stage:
+        locked_called_with.append(lock)
+        return spec_stage
+
+    with (
+        patch.object(svc, "_load_stage", side_effect=fake_load_stage),
+        patch.object(
+            svc,
+            "_load_workspace",
+            new=AsyncMock(return_value=_make_workspace([spec_stage])),
+        ),
+        patch(
+            "services.pipeline.stage_manager.credit_service.deduct",
+            new_callable=AsyncMock,
+            return_value=CreditLedger(id=uuid4(), user_id=user.id, amount=-10, reason="generate"),
+        ),
+        patch(
+            "services.pipeline.stage_manager.build_prompt",
+            new_callable=AsyncMock,
+            return_value=("sys", "user"),
+        ),
+        patch("services.pipeline.stage_manager.get_llm") as mock_get_llm,
+    ):
+        async def fake_stream(*a, **kw) -> AsyncGenerator[str, None]:
+            yield "tok"
+
+        mock_adapter = MagicMock()
+        mock_adapter.stream = fake_stream
+        mock_get_llm.return_value = mock_adapter
+
+        async for _ in svc.generate(spec_stage.id, user, db):
+            pass
+
+    assert locked_called_with and locked_called_with[0] is True, (
+        "generate() must call _load_stage with lock=True so the status check "
+        "and credit deduction are serialized on the stage row"
+    )
+
+
+@pytest.mark.asyncio
+async def test_generate_rejects_already_in_progress_stage() -> None:
+    """A stage whose status is 'in_progress' must not generate again.
+
+    This is the invariant enforced once the SELECT FOR UPDATE lock is held:
+    the second concurrent request sees in_progress and raises ValueError
+    instead of double-deducting credits.
+    """
+    workspace_id = uuid4()
+    in_progress_stage = _make_stage(workspace_id, "spec", status="in_progress")
+    workspace = _make_workspace([in_progress_stage])
+    user = _make_user()
+    svc = StageManager(redis_client=_FakeRedis())
+    db = _MultiQueryDB([in_progress_stage, workspace, []])
+
+    with patch(
+        "services.pipeline.stage_manager.credit_service.deduct",
+        new_callable=AsyncMock,
+    ) as mock_deduct:
+        with pytest.raises(ValueError, match="in_progress"):
+            async for _ in svc.generate(in_progress_stage.id, user, db):
+                pass
+
+    mock_deduct.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_refine_output_validation_failure_refunds_credits() -> None:
     from schemas.stage import RefineRequest
     from services.pipeline.stage_manager import SecurityError
