@@ -748,10 +748,11 @@ async def test_generate_uses_select_for_update_on_stage_row() -> None:
 
     locked_called_with: list[bool] = []
 
-    async def fake_load_stage(stage_id: UUID, db_: object, *, lock: bool = False) -> Stage:
+    async def fake_load_stage(stage_id, db_: object, *, lock: bool = False) -> Stage:
         locked_called_with.append(lock)
         return spec_stage
 
+    deduction = CreditLedger(id=uuid4(), user_id=user.id, amount=-10, reason="generate")
     with (
         patch.object(svc, "_load_stage", side_effect=fake_load_stage),
         patch.object(
@@ -762,7 +763,7 @@ async def test_generate_uses_select_for_update_on_stage_row() -> None:
         patch(
             "services.pipeline.stage_manager.credit_service.deduct",
             new_callable=AsyncMock,
-            return_value=CreditLedger(id=uuid4(), user_id=user.id, amount=-10, reason="generate"),
+            return_value=deduction,
         ),
         patch(
             "services.pipeline.stage_manager.build_prompt",
@@ -771,6 +772,7 @@ async def test_generate_uses_select_for_update_on_stage_row() -> None:
         ),
         patch("services.pipeline.stage_manager.get_llm") as mock_get_llm,
     ):
+
         async def fake_stream(*a, **kw) -> AsyncGenerator[str, None]:
             yield "tok"
 
