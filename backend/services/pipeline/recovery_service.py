@@ -15,8 +15,8 @@ from services.pipeline.stage_manager import CREDIT_COSTS
 
 logger = logging.getLogger(__name__)
 
-_STUCK_THRESHOLD_MINUTES = 10
-_POLL_INTERVAL_SECONDS = 300  # 5 minutes
+_STUCK_THRESHOLD_MINUTES = 3
+_POLL_INTERVAL_SECONDS = 60
 # Redis lock prevents all gunicorn workers from running recovery simultaneously.
 # TTL must exceed the maximum recovery duration; 60 s is generous.
 _RECOVERY_LOCK_KEY = "recovery:leader_lock"

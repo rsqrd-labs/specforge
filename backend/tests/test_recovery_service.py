@@ -114,7 +114,7 @@ async def test_recover_stage_stuck_15_minutes() -> None:
 
 @pytest.mark.asyncio
 async def test_stages_stuck_9_minutes_not_recovered() -> None:
-    """When DB returns no stuck stages (9-min stage filtered by SQL), count is 0."""
+    """When DB returns no stuck stages, count is 0."""
     db = _FakeDB([[]])
 
     count = await recover_stuck_stages(db)
