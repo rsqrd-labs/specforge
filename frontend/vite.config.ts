@@ -4,6 +4,17 @@ import { defineConfig } from "vite"
 
 export default defineConfig({
   plugins: [react()],
+  build: {
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          codemirror: ["@codemirror/lang-markdown", "@codemirror/view"],
+          react: ["react", "react-dom", "react-router-dom"],
+          vendor: ["axios", "zustand"],
+        },
+      },
+    },
+  },
   server: {
     proxy: {
       "/api": {
