@@ -1,9 +1,16 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { createSSEConnection } from "../services/sseService"
 
+const apiMocks = vi.hoisted(() => ({
+  accessToken: null as string | null,
+  csrfToken: null as string | null,
+  refreshAccessToken: vi.fn<() => Promise<string | null>>(),
+}))
+
 vi.mock("../services/api", () => ({
-  getAccessToken: () => null,
-  getCsrfToken: () => Promise.resolve(null),
+  getAccessToken: () => apiMocks.accessToken,
+  getCsrfToken: () => Promise.resolve(apiMocks.csrfToken),
+  refreshAccessToken: apiMocks.refreshAccessToken,
 }))
 
 function makeStream(text: string): ReadableStream<Uint8Array> {
@@ -32,6 +39,9 @@ function mockFetchFail(status = 503) {
 beforeEach(() => {
   vi.useFakeTimers()
   vi.spyOn(console, "warn").mockImplementation(() => {})
+  apiMocks.accessToken = null
+  apiMocks.csrfToken = null
+  apiMocks.refreshAccessToken.mockReset()
 })
 
 afterEach(() => {
@@ -100,6 +110,38 @@ describe("createSSEConnection retry behaviour", () => {
     await vi.runAllTimersAsync()
 
     expect(onError).toHaveBeenCalledTimes(1)
+    expect(console.warn).not.toHaveBeenCalled()
+  })
+
+  it("refreshes the access token once when the stream request gets a 401", async () => {
+    const doneBody = 'data: {"done":true,"stage_id":"s1"}\n\n'
+    apiMocks.accessToken = "expired"
+    apiMocks.csrfToken = "csrf-1"
+    apiMocks.refreshAccessToken.mockImplementation(async () => {
+      apiMocks.accessToken = "fresh"
+      apiMocks.csrfToken = "csrf-2"
+      return "fresh"
+    })
+
+    vi.spyOn(globalThis, "fetch")
+      .mockImplementationOnce(() => mockFetchFail(401))
+      .mockImplementationOnce(() => mockFetchOk(doneBody))
+
+    const onDone = vi.fn()
+    const onError = vi.fn()
+
+    createSSEConnection("/stream", vi.fn(), onDone, onError, vi.fn())
+
+    await vi.runAllTimersAsync()
+
+    const secondHeaders = (
+      vi.mocked(globalThis.fetch).mock.calls[1][1] as RequestInit
+    ).headers as Headers
+    expect(apiMocks.refreshAccessToken).toHaveBeenCalledTimes(1)
+    expect(secondHeaders.get("Authorization")).toBe("Bearer fresh")
+    expect(secondHeaders.get("X-CSRF-Token")).toBe("csrf-2")
+    expect(onDone).toHaveBeenCalledWith("s1")
+    expect(onError).not.toHaveBeenCalled()
     expect(console.warn).not.toHaveBeenCalled()
   })
 

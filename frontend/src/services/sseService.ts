@@ -1,5 +1,5 @@
 import type { EvalResult } from "../types/stage"
-import { getAccessToken, getCsrfToken } from "./api"
+import { getAccessToken, getCsrfToken, refreshAccessToken } from "./api"
 
 interface SSEControl {
   close: () => void
@@ -50,6 +50,21 @@ function parseSSEChunk(chunk: string): string[] {
     .filter(Boolean)
 }
 
+async function buildStreamHeaders(): Promise<Headers> {
+  const headers = new Headers()
+  const token = getAccessToken()
+  if (!token) {
+    return headers
+  }
+
+  headers.set("Authorization", `Bearer ${token}`)
+  const csrfToken = await getCsrfToken()
+  if (csrfToken) {
+    headers.set("X-CSRF-Token", csrfToken)
+  }
+  return headers
+}
+
 export function createSSEConnection(
   url: string,
   onToken: (token: string) => void,
@@ -67,25 +82,28 @@ export function createSSEConnection(
   }
 
   async function tryConnect(): Promise<boolean> {
-    const token = getAccessToken()
-    const headers = new Headers()
-    if (token) {
-      headers.set("Authorization", `Bearer ${token}`)
-      const csrfToken = await getCsrfToken()
-      if (csrfToken) {
-        headers.set("X-CSRF-Token", csrfToken)
-      }
-    }
-
     let doneReceived = false
 
     try {
-      const response = await fetch(resolveUrl(url), {
+      const requestUrl = resolveUrl(url)
+      let response = await fetch(requestUrl, {
         method: "POST",
-        headers,
+        headers: await buildStreamHeaders(),
         credentials: "include",
         signal: currentController.signal,
       })
+
+      if (response.status === 401 && !closed) {
+        const refreshedToken = await refreshAccessToken()
+        if (refreshedToken) {
+          response = await fetch(requestUrl, {
+            method: "POST",
+            headers: await buildStreamHeaders(),
+            credentials: "include",
+            signal: currentController.signal,
+          })
+        }
+      }
 
       if (!response.ok) {
         lastError = new Error(`Stream request failed with ${response.status}`)

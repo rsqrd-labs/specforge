@@ -127,6 +127,17 @@ export async function getCsrfToken(): Promise<string | null> {
   return csrfToken
 }
 
+export async function refreshAccessToken(): Promise<string | null> {
+  const response = await refreshApi.post<RefreshTokenResponse>("/auth/refresh")
+  const refreshedToken = response.data.access_token ?? response.data.accessToken
+  if (!refreshedToken) {
+    return null
+  }
+
+  setAccessToken(refreshedToken)
+  return refreshedToken
+}
+
 async function attachCsrfHeader(
   config: InternalAxiosRequestConfig,
 ): Promise<InternalAxiosRequestConfig> {
