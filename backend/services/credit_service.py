@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from uuid import UUID
 
 from redis.asyncio import Redis
@@ -9,6 +10,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from config import settings
 from models import CreditLedger
+
+logger = logging.getLogger(__name__)
 
 _CACHE_PREFIX = "credits:"
 _CACHE_TTL = 300  # 5 minutes
@@ -96,7 +99,20 @@ class CreditService:
             select(CreditLedger).where(CreditLedger.id == ledger_entry_id)
         )
         original = result.scalar_one_or_none()
-        if original is None or original.amount >= 0:
+        if original is None:
+            logger.error(
+                "credit.refund.missing_entry ledger_entry_id=%s user_id=%s",
+                ledger_entry_id,
+                user_id,
+            )
+            return
+        if original.amount >= 0:
+            logger.error(
+                "credit.refund.not_a_deduction ledger_entry_id=%s amount=%d user_id=%s",
+                ledger_entry_id,
+                original.amount,
+                original.user_id,
+            )
             return
         if user_id is not None and original.user_id != user_id:
             return
