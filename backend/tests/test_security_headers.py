@@ -63,8 +63,16 @@ def test_hsts_is_set_in_production() -> None:
         patch.object(settings, "environment", _PRODUCTION_PATCHES["environment"]),
         patch.object(settings, "metrics_token", _PRODUCTION_PATCHES["metrics_token"]),
         patch.object(settings, "frontend_url", _PRODUCTION_PATCHES["frontend_url"]),
-        patch.object(settings, "jwt_private_key", _PRODUCTION_PATCHES["jwt_private_key"]),
-        patch.object(settings, "encryption_master_key", _PRODUCTION_PATCHES["encryption_master_key"]),
+        patch.object(
+            settings,
+            "jwt_private_key",
+            _PRODUCTION_PATCHES["jwt_private_key"],
+        ),
+        patch.object(
+            settings,
+            "encryption_master_key",
+            _PRODUCTION_PATCHES["encryption_master_key"],
+        ),
     ):
         client = TestClient(create_app(redis_client=_NoopRedis()))
         response = client.get("/providers")
@@ -97,8 +105,16 @@ def test_docs_are_disabled_in_production() -> None:
         patch.object(settings, "environment", _PRODUCTION_PATCHES["environment"]),
         patch.object(settings, "metrics_token", _PRODUCTION_PATCHES["metrics_token"]),
         patch.object(settings, "frontend_url", _PRODUCTION_PATCHES["frontend_url"]),
-        patch.object(settings, "jwt_private_key", _PRODUCTION_PATCHES["jwt_private_key"]),
-        patch.object(settings, "encryption_master_key", _PRODUCTION_PATCHES["encryption_master_key"]),
+        patch.object(
+            settings,
+            "jwt_private_key",
+            _PRODUCTION_PATCHES["jwt_private_key"],
+        ),
+        patch.object(
+            settings,
+            "encryption_master_key",
+            _PRODUCTION_PATCHES["encryption_master_key"],
+        ),
     ):
         client = TestClient(create_app(redis_client=_NoopRedis()))
         assert client.get("/docs").status_code == 404
@@ -117,8 +133,16 @@ def test_health_hides_dependency_detail_in_production() -> None:
         patch.object(settings, "environment", _PRODUCTION_PATCHES["environment"]),
         patch.object(settings, "metrics_token", _PRODUCTION_PATCHES["metrics_token"]),
         patch.object(settings, "frontend_url", _PRODUCTION_PATCHES["frontend_url"]),
-        patch.object(settings, "jwt_private_key", _PRODUCTION_PATCHES["jwt_private_key"]),
-        patch.object(settings, "encryption_master_key", _PRODUCTION_PATCHES["encryption_master_key"]),
+        patch.object(
+            settings,
+            "jwt_private_key",
+            _PRODUCTION_PATCHES["jwt_private_key"],
+        ),
+        patch.object(
+            settings,
+            "encryption_master_key",
+            _PRODUCTION_PATCHES["encryption_master_key"],
+        ),
         patch("main.check_database", return_value="ok"),
         patch("main.check_redis", return_value="ok"),
     ):

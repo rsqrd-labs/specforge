@@ -31,13 +31,11 @@ def upgrade() -> None:
         type_="unique",
     )
     # Replace with a partial index scoped to refund rows only
-    op.execute(
-        """
+    op.execute("""
         CREATE UNIQUE INDEX uq_credit_ledger_refund_reason
         ON credit_ledger (user_id, reason)
         WHERE reason LIKE 'refund:%'
-        """
-    )
+        """)
 
 
 def downgrade() -> None:

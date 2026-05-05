@@ -13,4 +13,5 @@ RUN chmod +x entrypoint.sh
 
 EXPOSE 8000
 
+# Runtime: gunicorn with uvicorn.workers.UvicornWorker (see entrypoint.sh)
 ENTRYPOINT ["sh", "entrypoint.sh"]

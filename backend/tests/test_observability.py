@@ -118,11 +118,15 @@ def test_production_app_rejects_ci_placeholder_encryption_key() -> None:
         except RuntimeError as exc:
             assert "ENCRYPTION_MASTER_KEY" in str(exc)
         else:
-            raise AssertionError("production app started with CI placeholder encryption key")
+            raise AssertionError(
+                "production app started with CI placeholder encryption key"
+            )
 
 
 def test_production_app_accepts_valid_pem_jwt_key() -> None:
-    fake_pem = "-----BEGIN RSA PRIVATE KEY-----\nMIIEow...\n-----END RSA PRIVATE KEY-----"
+    fake_pem = (
+        "-----BEGIN RSA PRIVATE KEY-----\nMIIEow...\n-----END RSA PRIVATE KEY-----"
+    )
     with (
         patch.object(observability.settings, "environment", "production"),
         patch.object(observability.settings, "frontend_url", "https://app.example.com"),
@@ -132,9 +136,9 @@ def test_production_app_accepts_valid_pem_jwt_key() -> None:
         try:
             create_app(redis_client=_NoopRedis())
         except RuntimeError as exc:
-            assert "JWT_PRIVATE_KEY" not in str(exc), (
-                f"Startup rejected a valid PEM key: {exc}"
-            )
+            assert "JWT_PRIVATE_KEY" not in str(
+                exc
+            ), f"Startup rejected a valid PEM key: {exc}"
 
 
 def test_metrics_use_route_templates() -> None:

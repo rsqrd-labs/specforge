@@ -115,6 +115,13 @@ class CreditService:
             )
             return
         if user_id is not None and original.user_id != user_id:
+            logger.error(
+                "credit.refund.user_mismatch ledger_entry_id=%s "
+                "expected_user_id=%s actual_user_id=%s",
+                ledger_entry_id,
+                user_id,
+                original.user_id,
+            )
             return
 
         refund_reason = f"refund:{ledger_entry_id}"

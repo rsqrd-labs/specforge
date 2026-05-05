@@ -53,13 +53,15 @@ def validate_production_settings() -> None:
     if not settings.jwt_private_key.strip().startswith("-----BEGIN"):
         errors.append(
             "JWT_PRIVATE_KEY must be a PEM-encoded RSA or EC private key "
-            "(must start with '-----BEGIN'). The CI stub value is not valid for production."
+            "(must start with '-----BEGIN'). "
+            "The CI stub value is not valid for production."
         )
     if settings.encryption_master_key == _CI_ENCRYPTION_KEY:
         errors.append(
             "ENCRYPTION_MASTER_KEY is set to the known CI placeholder value. "
             "Generate a real key: "
-            "python -c \"from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())\""
+            'python -c "from cryptography.fernet import '
+            'Fernet; print(Fernet.generate_key().decode())"'
         )
 
     if errors:
