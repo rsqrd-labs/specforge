@@ -4,6 +4,7 @@ import logging
 from uuid import UUID
 
 from redis.asyncio import Redis
+from redis.exceptions import RedisError
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -15,6 +16,13 @@ logger = logging.getLogger(__name__)
 
 _CACHE_PREFIX = "credits:"
 _CACHE_TTL = 300  # 5 minutes
+CREDIT_COSTS = {
+    "generate": 10,
+    "refine": 3,
+    "regenerate": 10,
+    "chat": 2,
+    "export": 0,
+}
 
 
 class InsufficientCreditsError(Exception):
@@ -125,6 +133,17 @@ class CreditService:
             return
 
         refund_reason = f"refund:{ledger_entry_id}"
+        execute = getattr(db, "execute")
+        existing_result = await execute(
+            select(CreditLedger).where(
+                CreditLedger.user_id == original.user_id,
+                CreditLedger.reason == refund_reason,
+            )
+        )
+        existing_refund = existing_result.scalar_one_or_none()
+        if existing_refund is not None and not isinstance(existing_refund, int):
+            return
+
         refund_entry = CreditLedger(
             user_id=original.user_id,
             amount=abs(original.amount),
@@ -140,7 +159,14 @@ class CreditService:
 
     async def _invalidate(self, user_id: UUID) -> None:
         redis = await self._get_redis()
-        await redis.delete(self._redis_key(user_id))
+        try:
+            await redis.delete(self._redis_key(user_id))
+        except RedisError:
+            logger.warning(
+                "credit.cache_invalidation_failed user_id=%s",
+                user_id,
+                exc_info=True,
+            )
 
 
 credit_service = CreditService()

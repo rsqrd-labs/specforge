@@ -139,7 +139,7 @@ async def test_post_auth_logout_clears_cookie(
     assert response.json() == {"ok": True}
     set_cookie_header = response.headers.get("set-cookie", "")
     assert "refresh_token" in set_cookie_header
-    assert "Path=/auth/refresh" in set_cookie_header
+    assert "Path=/auth" in set_cookie_header
 
 
 @pytest.mark.asyncio
@@ -161,5 +161,5 @@ async def test_refresh_cookie_uses_strict_scoped_security_attributes(
     assert "HttpOnly" in set_cookie_header
     assert "Secure" in set_cookie_header
     assert "samesite=strict" in set_cookie_header.lower()
-    assert "Path=/auth/refresh" in set_cookie_header
+    assert "Path=/auth" in set_cookie_header
     assert "Max-Age=604800" in set_cookie_header

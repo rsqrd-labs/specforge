@@ -12,8 +12,7 @@ from httpx import ASGITransport, AsyncClient
 from database import get_db
 from main import create_app
 from middleware.auth import get_current_user
-from models import CreditLedger, Stage, User
-from services.credit_service import InsufficientCreditsError
+from models import Stage, User
 from services.pipeline.stage_manager import StageDependencyError
 
 _USER_ID = uuid4()
@@ -312,9 +311,8 @@ async def test_refine_preserves_raw_instruction_for_stage_manager(app) -> None:
 
 
 @pytest.mark.asyncio
-async def test_accept_diff_deducts_refine_credits(app) -> None:
+async def test_accept_diff_persists_prepaid_refine_preview(app) -> None:
     stage = _make_stage()
-    deduction = CreditLedger(id=uuid4(), user_id=_USER.id, amount=-3, reason="refine")
     fake_db = _FakeDB(stage)
 
     async def _fake_db():
@@ -322,18 +320,11 @@ async def test_accept_diff_deducts_refine_credits(app) -> None:
 
     app.dependency_overrides[get_db] = _fake_db
 
-    with (
-        patch(
-            "routers.stage.credit_service.deduct",
-            new_callable=AsyncMock,
-            return_value=deduction,
-        ) as mock_deduct,
-        patch(
-            "routers.stage.stage_manager.handle_content_edit",
-            new_callable=AsyncMock,
-            return_value=stage,
-        ) as mock_handle_content_edit,
-    ):
+    with patch(
+        "routers.stage.stage_manager.handle_content_edit",
+        new_callable=AsyncMock,
+        return_value=stage,
+    ) as mock_handle_content_edit:
         async with AsyncClient(
             transport=ASGITransport(app=app), base_url="http://test"
         ) as client:
@@ -343,14 +334,13 @@ async def test_accept_diff_deducts_refine_credits(app) -> None:
             )
 
     assert response.status_code == 200
-    mock_deduct.assert_awaited_once_with(fake_db, _USER.id, 3, "refine")
     mock_handle_content_edit.assert_awaited_once_with(
         stage.id, "accepted content", _USER, fake_db
     )
 
 
 @pytest.mark.asyncio
-async def test_accept_diff_returns_402_when_refine_credits_are_insufficient(
+async def test_accept_diff_does_not_charge_again_when_balance_is_low(
     app,
 ) -> None:
     stage = _make_stage()
@@ -362,10 +352,10 @@ async def test_accept_diff_returns_402_when_refine_credits_are_insufficient(
     app.dependency_overrides[get_db] = _fake_db
 
     with patch(
-        "routers.stage.credit_service.deduct",
+        "routers.stage.stage_manager.handle_content_edit",
         new_callable=AsyncMock,
-        side_effect=InsufficientCreditsError("low balance"),
-    ) as mock_deduct:
+        return_value=stage,
+    ) as mock_handle_content_edit:
         async with AsyncClient(
             transport=ASGITransport(app=app), base_url="http://test"
         ) as client:
@@ -374,18 +364,17 @@ async def test_accept_diff_returns_402_when_refine_credits_are_insufficient(
                 json={"proposed_content": "accepted content"},
             )
 
-    assert response.status_code == 402
-    assert response.json()["detail"] == {
-        "code": "insufficient_credits",
-        "required": 3,
-    }
-    mock_deduct.assert_awaited_once_with(fake_db, _USER.id, 3, "refine")
+    assert response.status_code == 200
+    mock_handle_content_edit.assert_awaited_once_with(
+        stage.id, "accepted content", _USER, fake_db
+    )
 
 
 @pytest.mark.asyncio
-async def test_accept_diff_refunds_when_saving_content_fails(app) -> None:
+async def test_accept_diff_does_not_refund_prepaid_refine_when_saving_content_fails(
+    app,
+) -> None:
     stage = _make_stage()
-    deduction = CreditLedger(id=uuid4(), user_id=_USER.id, amount=-3, reason="refine")
     fake_db = _FakeDB(stage)
 
     async def _fake_db():
@@ -393,21 +382,10 @@ async def test_accept_diff_refunds_when_saving_content_fails(app) -> None:
 
     app.dependency_overrides[get_db] = _fake_db
 
-    with (
-        patch(
-            "routers.stage.credit_service.deduct",
-            new_callable=AsyncMock,
-            return_value=deduction,
-        ),
-        patch(
-            "routers.stage.credit_service.refund",
-            new_callable=AsyncMock,
-        ) as mock_refund,
-        patch(
-            "routers.stage.stage_manager.handle_content_edit",
-            new_callable=AsyncMock,
-            side_effect=RuntimeError("save failed"),
-        ),
+    with patch(
+        "routers.stage.stage_manager.handle_content_edit",
+        new_callable=AsyncMock,
+        side_effect=RuntimeError("save failed"),
     ):
         async with AsyncClient(
             transport=ASGITransport(app=app, raise_app_exceptions=False),
@@ -419,7 +397,6 @@ async def test_accept_diff_refunds_when_saving_content_fails(app) -> None:
             )
 
     assert response.status_code == 500
-    mock_refund.assert_awaited_once_with(fake_db, deduction.id, _USER.id)
 
 
 @pytest.mark.asyncio
@@ -431,18 +408,13 @@ async def test_reject_diff_discards_preview_without_refund(app) -> None:
 
     app.dependency_overrides[get_db] = _fake_db
 
-    with patch(
-        "routers.stage.credit_service.refund",
-        new_callable=AsyncMock,
-    ) as mock_refund:
-        async with AsyncClient(
-            transport=ASGITransport(app=app), base_url="http://test"
-        ) as client:
-            response = await client.post(f"/stages/{stage.id}/reject-diff")
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        response = await client.post(f"/stages/{stage.id}/reject-diff")
 
     assert response.status_code == 200
     assert response.json() == {"rejected": True}
-    mock_refund.assert_not_called()
 
 
 @pytest.mark.asyncio

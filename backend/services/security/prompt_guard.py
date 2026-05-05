@@ -9,6 +9,7 @@ logger = logging.getLogger(__name__)
 _PATTERNS: list[re.Pattern] = [
     re.compile(r"ignore\s+(?:all\s+)?previous\s+instructions?", re.I),
     re.compile(r"disregard\s+(?:all\s+)?(?:previous\s+)?instructions?", re.I),
+    re.compile(r"disregard\s+(?:the\s+)?system\s+prompt", re.I),
     re.compile(r"forget\s+(?:everything|what)\s+you\s+(?:were\s+)?told", re.I),
     re.compile(r"(?:prior|previous|above)\s+rules?\s+no\s+longer\s+apply", re.I),
     re.compile(r"do\s+not\s+obey\s+(?:the\s+)?(?:above|previous)", re.I),
@@ -55,3 +56,11 @@ def scan(text: str) -> ScanResult:
             )
             return ScanResult(is_safe=False, matched_pattern=pattern.pattern)
     return ScanResult(is_safe=True)
+
+
+class PromptGuard:
+    def scan(self, text: str) -> ScanResult:
+        return scan(text)
+
+    def is_safe(self, text: str) -> bool:
+        return self.scan(text).is_safe

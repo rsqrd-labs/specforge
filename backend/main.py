@@ -22,6 +22,9 @@ from routers import workspace as workspace_router
 from services.observability import setup_observability
 from services.pipeline.recovery_service import run_recovery_loop
 
+# setup_observability() owns the guarded sentry_sdk.init call and only enables
+# it when settings.sentry_dsn is configured.
+
 HealthStatus = Literal["ok", "degraded"]
 DependencyStatus = Literal["ok", "error"]
 _SECURITY_HEADERS = {

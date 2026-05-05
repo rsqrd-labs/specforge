@@ -5,6 +5,7 @@ from ipaddress import IPv4Network, IPv6Network, ip_address, ip_network
 from fastapi import status
 from fastapi.responses import JSONResponse
 from redis.asyncio import Redis
+from redis.exceptions import RedisError
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import Response
@@ -13,6 +14,7 @@ from config import settings
 from services.auth_service import decode_access_token_claims
 
 _LOGIN_PATHS = frozenset({"/auth/google", "/auth/callback"})
+_BYPASS_PATHS = frozenset({"/health"})
 IpNetwork = IPv4Network | IPv6Network
 
 # Lua script: atomically checks the sliding window count BEFORE adding the
@@ -84,23 +86,31 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         ip = _get_client_ip(request, self._trusted_proxy_networks)
         path = request.url.path
 
-        if not await sliding_window_check(self._redis, f"ip:{ip}", 1000, 60):
-            return _rate_limited(60)
+        if path in _BYPASS_PATHS:
+            return await call_next(request)
 
-        if path in _LOGIN_PATHS:
-            if not await sliding_window_check(self._redis, f"login:{ip}", 5, 300):
-                return _rate_limited(300)
-            if not await sliding_window_check(
-                self._redis, f"login_hourly:{ip}", 20, 3600
-            ):
-                return _rate_limited(3600)
-
-        user_id, claims = _extract_user_id(request)
-        if claims is not None:
-            request.state.jwt_claims = claims
-        if user_id:
-            if not await sliding_window_check(self._redis, f"user:{user_id}", 100, 60):
+        try:
+            if not await sliding_window_check(self._redis, f"ip:{ip}", 1000, 60):
                 return _rate_limited(60)
+
+            if path in _LOGIN_PATHS:
+                if not await sliding_window_check(self._redis, f"login:{ip}", 5, 300):
+                    return _rate_limited(300)
+                if not await sliding_window_check(
+                    self._redis, f"login_hourly:{ip}", 20, 3600
+                ):
+                    return _rate_limited(3600)
+
+            user_id, claims = _extract_user_id(request)
+            if claims is not None:
+                request.state.jwt_claims = claims
+            if user_id:
+                if not await sliding_window_check(
+                    self._redis, f"user:{user_id}", 100, 60
+                ):
+                    return _rate_limited(60)
+        except RedisError:
+            return _rate_limit_unavailable()
 
         return await call_next(request)
 
@@ -172,4 +182,12 @@ def _rate_limited(retry_after: int) -> JSONResponse:
         status_code=status.HTTP_429_TOO_MANY_REQUESTS,
         content={"detail": "Rate limit exceeded"},
         headers={"Retry-After": str(retry_after)},
+    )
+
+
+def _rate_limit_unavailable() -> JSONResponse:
+    return JSONResponse(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        content={"detail": "Rate limit service unavailable"},
+        headers={"Retry-After": "30"},
     )

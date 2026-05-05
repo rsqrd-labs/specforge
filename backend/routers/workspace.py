@@ -32,44 +32,44 @@ async def list_workspaces(
     return [WorkspaceResponse.model_validate(w) for w in workspaces]
 
 
-@router.get("/{workspace_id}", response_model=WorkspaceResponse)
+@router.get("/{id}", response_model=WorkspaceResponse)
 async def get_workspace(
-    workspace_id: UUID,
+    id: UUID,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> WorkspaceResponse:
-    workspace = await workspace_service.get(workspace_id, user.id, db)
+    workspace = await workspace_service.get(id, user.id, db)
     return WorkspaceResponse.model_validate(workspace)
 
 
-@router.patch("/{workspace_id}", response_model=WorkspaceResponse)
+@router.patch("/{id}", response_model=WorkspaceResponse)
 async def update_workspace(
-    workspace_id: UUID,
+    id: UUID,
     payload: WorkspaceUpdate,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> WorkspaceResponse:
-    workspace = await workspace_service.update(workspace_id, user.id, payload.name, db)
+    workspace = await workspace_service.update(id, user.id, payload.name, db)
     return WorkspaceResponse.model_validate(workspace)
 
 
-@router.delete("/{workspace_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/{id}", status_code=status.HTTP_204_NO_CONTENT)
 async def archive_workspace(
-    workspace_id: UUID,
+    id: UUID,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> None:
-    await workspace_service.archive(workspace_id, user.id, db)
+    await workspace_service.archive(id, user.id, db)
 
 
-@router.post("/{workspace_id}/export")
+@router.post("/{id}/export")
 async def export_workspace(
-    workspace_id: UUID,
+    id: UUID,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> Response:
     try:
-        zip_bytes = await build_export(workspace_id, user.id, db)
+        zip_bytes = await build_export(id, user.id, db)
     except ExportNotReadyError as exc:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT, detail=str(exc)
@@ -77,9 +77,5 @@ async def export_workspace(
     return Response(
         content=zip_bytes,
         media_type="application/zip",
-        headers={
-            "Content-Disposition": (
-                f'attachment; filename="specforge-{workspace_id}.zip"'
-            )
-        },
+        headers={"Content-Disposition": (f'attachment; filename="specforge-{id}.zip"')},
     )

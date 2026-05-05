@@ -149,7 +149,7 @@ def test_metrics_use_route_templates() -> None:
             "/metrics", headers={"Authorization": "Bearer test-metrics-token"}
         )
 
-    assert 'path="/stages/{stage_id}"' in metrics.text
+    assert 'path="/stages/{id}"' in metrics.text
 
 
 def test_redact_sensitive_data_masks_nested_secrets() -> None:

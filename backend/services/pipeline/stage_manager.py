@@ -17,7 +17,7 @@ from middleware.rate_limit import sliding_window_check
 from models import EvalResult, Stage, StageVersion, Workspace
 from prompts.base import SECURITY_AND_PRIVACY_RULES, wrap_untrusted_content
 from schemas.stage import DiffResponse, RefineRequest
-from services.credit_service import credit_service
+from services.credit_service import CREDIT_COSTS, credit_service
 from services.evals.online_eval import run_eval_background
 from services.llm.base import ProviderError
 from services.llm.gateway import get_llm
@@ -60,7 +60,6 @@ STAGE_DEPENDENCIES: dict[str, list[str]] = {
     "harness": ["spec", "plan"],
     "tasks": ["spec", "plan", "harness"],
 }
-CREDIT_COSTS = {"generate": 10, "refine": 3, "regenerate": 10}
 _STAGE_CACHE_PREFIX = "stage:"
 _STAGE_CACHE_TTL = 3600
 
@@ -84,6 +83,14 @@ class RateLimitError(Exception):
 
 
 class StageManager:
+    STAGE_ORDER = STAGE_ORDER
+    STAGE_DEPENDENCIES = {
+        "spec": ["problem_statement"],
+        "plan": ["spec"],
+        "harness": ["spec", "plan"],
+        "tasks": ["spec", "plan", "harness"],
+    }
+
     def __init__(self, redis_client: Redis | None = None) -> None:
         self._redis: Redis | None = redis_client
 
@@ -275,14 +282,24 @@ class StageManager:
             "Provide the replacement text only."
         )
 
-        adapter = get_llm(workspace.provider, workspace.model)
-        replacement = await adapter.complete(
-            system_prompt, user_prompt, max_tokens=4096
+        deduction = await credit_service.deduct(
+            db, user.id, CREDIT_COSTS["refine"], "refine"
         )
 
-        validation = validate(replacement)
-        if not validation.is_safe:
-            raise SecurityError(f"Refine output failed validation: {validation.reason}")
+        try:
+            adapter = get_llm(workspace.provider, workspace.model)
+            replacement = await adapter.complete(
+                system_prompt, user_prompt, max_tokens=4096
+            )
+
+            validation = validate(replacement)
+            if not validation.is_safe:
+                raise SecurityError(
+                    f"Refine output failed validation: {validation.reason}"
+                )
+        except (ProviderError, SecurityError):
+            await credit_service.refund(db, deduction.id, user.id)
+            raise
 
         proposed = apply_diff(
             content,
