@@ -10,6 +10,11 @@ _PATTERNS: list[re.Pattern] = [
     re.compile(r"ignore\s+(?:all\s+)?previous\s+instructions?", re.I),
     re.compile(r"disregard\s+(?:all\s+)?(?:previous\s+)?instructions?", re.I),
     re.compile(r"disregard\s+(?:the\s+)?system\s+prompt", re.I),
+    re.compile(
+        r"override\s+(?:the\s+)?(?:system|developer)\s+"
+        r"(?:prompt|instructions?)",
+        re.I,
+    ),
     re.compile(r"forget\s+(?:everything|what)\s+you\s+(?:were\s+)?told", re.I),
     re.compile(r"(?:prior|previous|above)\s+rules?\s+no\s+longer\s+apply", re.I),
     re.compile(r"do\s+not\s+obey\s+(?:the\s+)?(?:above|previous)", re.I),
@@ -21,7 +26,10 @@ _PATTERNS: list[re.Pattern] = [
     re.compile(r"act\s+as\s+(?:a\s+)?(?:different|unrestricted|uncensored)", re.I),
     re.compile(r"pretend\s+(?:you\s+are|to\s+be)", re.I),
     re.compile(r"jailbreak\b", re.I),
+    re.compile(r"developer\s+mode\b", re.I),
+    re.compile(r"DAN\s+mode\b", re.I),
     re.compile(r"new\s+instructions?\s*:", re.I),
+    re.compile(r"role\s*:\s*(?:system|developer|tool|assistant)", re.I),
     re.compile(r"print\s+your\s+system\s+prompt", re.I),
     re.compile(r"output\s+(?:the\s+|your\s+)?system\s+prompt", re.I),
     re.compile(r"reveal\s+your\s+(?:system\s+)?instructions?", re.I),
@@ -31,11 +39,18 @@ _PATTERNS: list[re.Pattern] = [
         re.I,
     ),
     re.compile(r"exfiltrate|leak\s+(?:secrets?|tokens?|keys?|credentials?)", re.I),
+    re.compile(
+        r"(?:api[_ -]?keys?|tokens?|credentials?)\s+(?:from|in)\s+"
+        r"(?:memory|environment|env)",
+        re.I,
+    ),
     re.compile(r"<\s*system\s*>", re.I),
     re.compile(r"<\s*/?\s*(?:developer|assistant|tool)\s*>", re.I),
     re.compile(r"<\|im_start\|>", re.I),
+    re.compile(r"<\|system\|>", re.I),
     re.compile(r"```(?:system|developer|assistant)\b", re.I),
     re.compile(r"aWdub3JlIHByZXZpb3VzIGluc3RydWN0aW9ucw==", re.I),
+    re.compile(r"aWdub3JlIGFsbCBwcmV2aW91cyBpbnN0cnVjdGlvbnM=", re.I),
     re.compile(r"summarize\s+(?:your\s+)?(?:hidden|internal)\s+(?:policy|rules)", re.I),
 ]
 
