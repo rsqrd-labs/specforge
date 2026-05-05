@@ -4,9 +4,11 @@ import asyncio
 import logging
 from datetime import UTC, datetime, timedelta
 
+from redis.asyncio import Redis
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from config import settings
 from models import Stage
 from services.credit_service import credit_service
 from services.pipeline.stage_manager import CREDIT_COSTS
@@ -15,6 +17,10 @@ logger = logging.getLogger(__name__)
 
 _STUCK_THRESHOLD_MINUTES = 10
 _POLL_INTERVAL_SECONDS = 300  # 5 minutes
+# Redis lock prevents all gunicorn workers from running recovery simultaneously.
+# TTL must exceed the maximum recovery duration; 60 s is generous.
+_RECOVERY_LOCK_KEY = "recovery:leader_lock"
+_RECOVERY_LOCK_TTL = 60
 
 
 async def recover_stuck_stages(db: AsyncSession) -> int:
@@ -54,15 +60,28 @@ async def recover_stuck_stages(db: AsyncSession) -> int:
 
 
 async def run_recovery_loop() -> None:
-    """Background task: polls every 5 minutes and recovers stuck stages."""
+    """Background task: polls every 5 minutes and recovers stuck stages.
+
+    Uses a Redis NX lock so only one gunicorn worker runs recovery per cycle.
+    Workers that don't acquire the lock skip the cycle silently.
+    """
     from database import AsyncSessionLocal
 
-    while True:
-        await asyncio.sleep(_POLL_INTERVAL_SECONDS)
-        try:
-            async with AsyncSessionLocal() as db:
-                count = await recover_stuck_stages(db)
-                if count > 0:
-                    logger.info("stage.recovery.complete recovered=%d", count)
-        except Exception:
-            logger.exception("stage.recovery.error")
+    redis = Redis.from_url(settings.redis_url, decode_responses=True)
+    try:
+        while True:
+            await asyncio.sleep(_POLL_INTERVAL_SECONDS)
+            try:
+                acquired = await redis.set(
+                    _RECOVERY_LOCK_KEY, "1", nx=True, ex=_RECOVERY_LOCK_TTL
+                )
+                if not acquired:
+                    continue
+                async with AsyncSessionLocal() as db:
+                    count = await recover_stuck_stages(db)
+                    if count > 0:
+                        logger.info("stage.recovery.complete recovered=%d", count)
+            except Exception:
+                logger.exception("stage.recovery.error")
+    finally:
+        await redis.aclose()
