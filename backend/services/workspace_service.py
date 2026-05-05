@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from config import settings
-from models import Stage, Workspace
+from models import Stage, User, Workspace
 from schemas.workspace import WorkspaceCreate
 from services.security.sanitizer import sanitize_text
 
@@ -19,6 +19,9 @@ class WorkspaceService:
     async def create(
         self, user_id: UUID, payload: WorkspaceCreate, db: AsyncSession
     ) -> Workspace:
+        # Lock the user row so concurrent create requests are serialized and
+        # the quota check + insert are atomic within this transaction.
+        await db.execute(select(User).where(User.id == user_id).with_for_update())
         active_count = await self._active_workspace_count(user_id, db)
         if active_count >= settings.max_active_workspaces_per_user:
             raise HTTPException(
