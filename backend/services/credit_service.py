@@ -77,7 +77,7 @@ class CreditService:
         if user is None:
             raise ValueError(f"User {user_id} not found")
 
-        user.credit_balance += amount
+        user.credit_balance = int(user.credit_balance or 0) + amount
         entry = CreditLedger(
             user_id=user_id, amount=amount, reason=reason, metadata_=metadata
         )
@@ -94,12 +94,12 @@ class CreditService:
         reason: str,
     ) -> CreditLedger:
         user = await self._get_user(db, user_id, lock=True)
-        balance = int(user.credit_balance) if user is not None else 0
+        balance = int(user.credit_balance or 0) if user is not None else 0
         if user is None or balance < amount:
             raise InsufficientCreditsError(
                 f"Balance {balance} is less than required {amount}"
             )
-        user.credit_balance -= amount
+        user.credit_balance = balance - amount
         entry = CreditLedger(user_id=user_id, amount=-amount, reason=reason)
         db.add(entry)
         await db.flush()
@@ -163,7 +163,7 @@ class CreditService:
             return
 
         refund_amount = abs(original.amount)
-        user.credit_balance += refund_amount
+        user.credit_balance = int(user.credit_balance or 0) + refund_amount
         refund_entry = CreditLedger(
             user_id=original.user_id,
             amount=refund_amount,
