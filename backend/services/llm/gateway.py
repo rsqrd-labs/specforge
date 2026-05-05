@@ -6,9 +6,9 @@ if TYPE_CHECKING:
     from services.llm.base import BaseLLMAdapter
 
 _REGISTRY: dict[str, type] = {}
-# Adapter instances are cached for the lifetime of the process. If a platform
-# API key is rotated in settings (e.g. after a leak), all gunicorn workers must
-# be restarted to pick up the new key — there is no live reload path.
+# Adapter instances are cached for the lifetime of each gunicorn worker. After
+# rotating ANTHROPIC_API_KEY, OPENAI_API_KEY, or GOOGLE_API_KEY, restart all API
+# workers so every cached provider client is rebuilt with the new secret.
 _INSTANCES: dict[tuple[str, str], "BaseLLMAdapter"] = {}
 
 

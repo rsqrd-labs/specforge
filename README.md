@@ -318,6 +318,12 @@ SpecForge includes several controls intended for AI-assisted workflows:
 
 Production deployments should also enforce HTTPS, secure cookies, strict CORS, strong secrets, provider key rotation, and database backups.
 
+### Provider Key Rotation
+
+LLM provider clients are cached inside each API worker for connection reuse.
+After rotating `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, or `GOOGLE_API_KEY`,
+restart all API workers so cached clients are recreated with the new secret.
+
 ## Deployment Overview
 
 SpecForge can be deployed as two application services plus managed PostgreSQL and Redis:
