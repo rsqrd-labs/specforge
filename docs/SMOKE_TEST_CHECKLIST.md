@@ -5,6 +5,22 @@ Tester: ________________  Date: ________________  Environment URL: _____________
 
 Legend: ✅ Pass  ❌ Fail  ⚠️ Pass with notes  🔲 Not tested
 
+Automated gate:
+
+```bash
+SPECFORGE_API_URL=https://api.example.com \
+SPECFORGE_ACCESS_TOKEN=<short-lived smoke-user access token> \
+SPECFORGE_METRICS_TOKEN=<metrics token> \
+SPECFORGE_RUN_LLM_SMOKE=1 \
+python3 scripts/production_smoke.py
+```
+
+The automated smoke must pass against staging before production deploy. It checks
+health, provider catalog, metrics, authenticated user lookup, credits,
+workspace create/read/update/archive, and live SPEC streaming when
+`SPECFORGE_RUN_LLM_SMOKE=1`. Keep the manual checklist below for browser-only
+OAuth and UI interaction coverage.
+
 ---
 
 ## Authentication

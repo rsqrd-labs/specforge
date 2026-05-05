@@ -1,0 +1,31 @@
+name: Production Smoke
+
+on:
+  workflow_dispatch:
+    inputs:
+      api_url:
+        description: "SpecForge API URL"
+        required: true
+        type: string
+      run_llm_smoke:
+        description: "Exercise live LLM streaming"
+        required: true
+        default: false
+        type: boolean
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Run production smoke
+        env:
+          SPECFORGE_API_URL: ${{ inputs.api_url }}
+          SPECFORGE_ACCESS_TOKEN: ${{ secrets.SPECFORGE_SMOKE_ACCESS_TOKEN }}
+          SPECFORGE_METRICS_TOKEN: ${{ secrets.SPECFORGE_METRICS_TOKEN }}
+          SPECFORGE_RUN_LLM_SMOKE: ${{ inputs.run_llm_smoke }}
+        run: python3 scripts/production_smoke.py
