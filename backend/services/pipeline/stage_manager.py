@@ -276,12 +276,9 @@ class StageManager:
         )
 
         adapter = get_llm(workspace.provider, workspace.model)
-        try:
-            replacement = await adapter.complete(
-                system_prompt, user_prompt, max_tokens=4096
-            )
-        except Exception:
-            raise
+        replacement = await adapter.complete(
+            system_prompt, user_prompt, max_tokens=4096
+        )
 
         validation = validate(replacement)
         if not validation.is_safe:
