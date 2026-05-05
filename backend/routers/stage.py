@@ -63,6 +63,9 @@ async def _stream_stage(
     except ProviderError as exc:
         payload = json.dumps({"error": "provider_error", "detail": str(exc)})
         yield f"data: {payload}\n\n"
+    except InsufficientCreditsError:
+        payload = json.dumps({"error": "insufficient_credits", "required": 10})
+        yield f"data: {payload}\n\n"
     except Exception:
         logger.exception(
             "stage_stream_internal_error", extra={"stage_id": str(stage_id)}

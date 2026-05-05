@@ -590,6 +590,51 @@ async def test_refine_rejects_injection_in_selected_text(app) -> None:
 
 
 @pytest.mark.asyncio
+async def test_generate_insufficient_credits_emits_structured_event(app) -> None:
+    """InsufficientCreditsError inside generate() must surface as insufficient_credits, not internal_error."""
+    from services.credit_service import InsufficientCreditsError as _ICE
+
+    stage = _make_stage()
+
+    async def _fake_db():
+        yield _FakeDB(stage)
+
+    app.dependency_overrides[get_db] = _fake_db
+
+    async def credits_exhausted(*args, **kwargs) -> AsyncGenerator[str, None]:
+        raise _ICE("Balance 5 is less than required 10")
+        yield
+
+    with (
+        patch(
+            "routers.stage.stage_manager.generate",
+            side_effect=credits_exhausted,
+        ),
+        patch(
+            "services.credit_service.credit_service.get_balance",
+            new_callable=AsyncMock,
+            return_value=100,
+        ),
+    ):
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            response = await client.post(f"/stages/{stage.id}/generate")
+
+    assert response.status_code == 200
+    body = response.text
+    assert "insufficient_credits" in body
+    assert "internal_error" not in body
+    import json as _json
+
+    for line in body.splitlines():
+        if line.startswith("data:"):
+            data = _json.loads(line[5:].strip())
+            if data.get("error") == "insufficient_credits":
+                assert data["required"] == 10
+
+
+@pytest.mark.asyncio
 async def test_generate_internal_error_does_not_expose_detail(app) -> None:
     stage = _make_stage()
 
