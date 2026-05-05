@@ -129,69 +129,99 @@ class StageManager:
         )
 
         accumulated = ""
+        # Tracks whether we completed a normal terminal path (success, ProviderError,
+        # SecurityError). False when we reach finally means client disconnected
+        # mid-stream and we need to reset the stage ourselves.
+        _cleanup_done = False
         try:
-            adapter = get_llm(workspace.provider, workspace.model)
-            async for token in adapter.stream(
-                system_prompt, user_prompt, max_tokens=8192
-            ):
-                accumulated += token
-                yield token
-        except ProviderError as exc:
-            await credit_service.refund(db, deduction.id)
+            try:
+                adapter = get_llm(workspace.provider, workspace.model)
+                async for token in adapter.stream(
+                    system_prompt, user_prompt, max_tokens=8192
+                ):
+                    accumulated += token
+                    yield token
+            except ProviderError as exc:
+                await credit_service.refund(db, deduction.id)
+                stage.status = "draft"
+                stage.updated_at = datetime.now(UTC)
+                await db.commit()
+                _cleanup_done = True
+                raise exc
+
+            validation = validate(accumulated)
+            if not validation.is_safe:
+                await credit_service.refund(db, deduction.id)
+                stage.status = "draft"
+                stage.updated_at = datetime.now(UTC)
+                await db.commit()
+                _cleanup_done = True
+                raise SecurityError(f"Output failed validation: {validation.reason}")
+
+            stage.content = accumulated
+            stage.current_version += 1
             stage.status = "draft"
             stage.updated_at = datetime.now(UTC)
+            version = StageVersion(
+                stage_id=stage.id,
+                version=stage.current_version,
+                content=accumulated,
+                created_by="ai",
+            )
+            db.add(version)
+            await db.flush()
+            version_id = version.id
+            spec_content = ""
+            if stage.type != "spec":
+                spec_content = (
+                    await redis.get(f"{_STAGE_CACHE_PREFIX}{workspace.id}:spec") or ""
+                )
             await db.commit()
-            raise exc
-
-        validation = validate(accumulated)
-        if not validation.is_safe:
-            await credit_service.refund(db, deduction.id)
-            stage.status = "draft"
-            stage.updated_at = datetime.now(UTC)
-            await db.commit()
-            raise SecurityError(f"Output failed validation: {validation.reason}")
-
-        stage.content = accumulated
-        stage.current_version += 1
-        stage.status = "draft"
-        stage.updated_at = datetime.now(UTC)
-        version = StageVersion(
-            stage_id=stage.id,
-            version=stage.current_version,
-            content=accumulated,
-            created_by="ai",
-        )
-        db.add(version)
-        await db.flush()
-        version_id = version.id
-        spec_content = ""
-        if stage.type != "spec":
-            spec_content = (
-                await redis.get(f"{_STAGE_CACHE_PREFIX}{workspace.id}:spec") or ""
+            _cleanup_done = True
+            await self._invalidate_stage_cache(workspace.id, stage.type, redis)
+            eval_task = asyncio.create_task(
+                run_eval_background(
+                    version_id,
+                    stage.type,
+                    accumulated,
+                    spec_content,
+                    workspace.provider,
+                    JUDGE_MODELS[workspace.provider],
+                )
             )
-        await db.commit()
-        await self._invalidate_stage_cache(workspace.id, stage.type, redis)
-        eval_task = asyncio.create_task(
-            run_eval_background(
-                version_id,
-                stage.type,
-                accumulated,
-                spec_content,
-                workspace.provider,
-                JUDGE_MODELS[workspace.provider],
-            )
-        )
-        eval_task.add_done_callback(_log_eval_error)
-        yield f'{{"done": true, "stage_id": "{stage_id}"}}'
+            eval_task.add_done_callback(_log_eval_error)
+            yield f'{{"done": true, "stage_id": "{stage_id}"}}'
 
-        try:
-            eval_result = await asyncio.wait_for(
-                asyncio.shield(eval_task), timeout=30.0
-            )
-            if eval_result is not None:
-                yield json.dumps({"eval": _eval_to_dict(eval_result)})
-        except (asyncio.TimeoutError, Exception):
-            pass
+            try:
+                eval_result = await asyncio.wait_for(
+                    asyncio.shield(eval_task), timeout=30.0
+                )
+                if eval_result is not None:
+                    yield json.dumps({"eval": _eval_to_dict(eval_result)})
+            except (asyncio.TimeoutError, Exception):
+                pass
+        finally:
+            if not _cleanup_done:
+                # Client disconnected before generation completed. The request-scoped
+                # db session may be torn down, so open a fresh one for cleanup.
+                from database import AsyncSessionLocal
+
+                try:
+                    async with AsyncSessionLocal() as cleanup_db:
+                        result = await cleanup_db.execute(
+                            select(Stage).where(Stage.id == stage_id)
+                        )
+                        stuck = result.scalar_one_or_none()
+                        if stuck is not None and stuck.status == "in_progress":
+                            await credit_service.refund(cleanup_db, deduction.id)
+                            stuck.status = "draft"
+                            stuck.updated_at = datetime.now(UTC)
+                            await cleanup_db.commit()
+                except Exception:
+                    logger.exception(
+                        "stage.disconnect_cleanup_error",
+                        extra={"stage_id": str(stage_id)},
+                    )
 
     async def refine(
         self, stage_id: UUID, request: RefineRequest, user, db: AsyncSession
