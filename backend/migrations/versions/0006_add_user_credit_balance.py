@@ -26,8 +26,7 @@ def upgrade() -> None:
             nullable=False,
         ),
     )
-    op.execute(
-        """
+    op.execute("""
         UPDATE users
         SET credit_balance = COALESCE(ledger.balance, 0)
         FROM (
@@ -36,8 +35,7 @@ def upgrade() -> None:
             GROUP BY user_id
         ) AS ledger
         WHERE users.id = ledger.user_id
-        """
-    )
+        """)
     op.create_check_constraint(
         "ck_users_credit_balance_nonnegative",
         "users",

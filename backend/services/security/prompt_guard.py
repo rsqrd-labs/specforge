@@ -26,8 +26,7 @@ _PATTERNS: list[re.Pattern] = [
     re.compile(r"disregard\s+(?:all\s+)?(?:previous\s+)?instructions?", re.I),
     re.compile(r"disregard\s+(?:the\s+)?system\s+prompt", re.I),
     re.compile(
-        r"override\s+(?:the\s+)?(?:system|developer)\s+"
-        r"(?:prompt|instructions?)",
+        r"override\s+(?:the\s+)?(?:system|developer)\s+" r"(?:prompt|instructions?)",
         re.I,
     ),
     re.compile(r"forget\s+(?:everything|what)\s+you\s+(?:were\s+)?told", re.I),
