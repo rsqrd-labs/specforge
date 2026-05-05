@@ -170,34 +170,34 @@ def test_stream_stage_catch_all_logs_exception_server_side() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_credit_ledger_model_has_unique_constraint_on_user_reason() -> None:
+def test_credit_ledger_model_has_unique_refund_index_on_user_reason() -> None:
     """
-    CreditLedger must declare a UniqueConstraint on (user_id, reason) in __table_args__.
+    CreditLedger must declare a unique refund-scoped index on (user_id, reason).
     Without a DB-level constraint, two concurrent refund() calls can both pass the
     application-level pre-check and double-insert, creating a double-credit.
     """
     source = read_backend_file("models", "credit_ledger.py")
 
-    assert "UniqueConstraint" in source, (
-        "models/credit_ledger.py does not import or use UniqueConstraint. "
-        "Add UniqueConstraint('user_id', 'reason', name='uq_credit_ledger_user_reason') "
-        "to __table_args__. See T-088."
+    assert "Index" in source, (
+        "models/credit_ledger.py does not import or use Index. "
+        "Add a unique partial Index on ('user_id', 'reason') for refund rows."
     )
 
     assert "__table_args__" in source, (
         "CreditLedger model has no __table_args__. "
-        "Add __table_args__ with the unique constraint. See T-088."
+        "Add __table_args__ with the unique refund index."
     )
 
-    # Both user_id and reason must appear together with UniqueConstraint
-    constraint_area_match = re.search(r"UniqueConstraint\([^)]+\)", source)
-    assert constraint_area_match is not None, (
-        "UniqueConstraint is imported but no UniqueConstraint(...) call found. See T-088."
+    index_area_match = re.search(r"Index\([^)]+\)", source, re.DOTALL)
+    assert index_area_match is not None, (
+        "Index is imported but no Index(...) call found."
     )
-    constraint_call = constraint_area_match.group(0)
-    assert "user_id" in constraint_call and "reason" in constraint_call, (
-        f"UniqueConstraint does not cover both user_id and reason: {constraint_call!r}. "
-        "See T-088."
+    index_call = index_area_match.group(0)
+    assert "user_id" in index_call and "reason" in index_call, (
+        f"Refund index does not cover both user_id and reason: {index_call!r}."
+    )
+    assert "postgresql_where" in index_call and "refund" in index_call, (
+        f"Refund index must be partial and scoped to refund rows: {index_call!r}."
     )
 
 

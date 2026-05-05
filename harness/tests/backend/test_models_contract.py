@@ -6,7 +6,15 @@ from conftest import import_backend
 
 
 EXPECTED_COLUMNS = {
-    "User": {"id", "email", "google_id", "name", "avatar_url", "created_at"},
+    "User": {
+        "id",
+        "email",
+        "google_id",
+        "name",
+        "avatar_url",
+        "credit_balance",
+        "created_at",
+    },
     "Workspace": {
         "id",
         "user_id",

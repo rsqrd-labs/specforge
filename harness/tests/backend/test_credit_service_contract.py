@@ -8,7 +8,7 @@ def test_credit_service_is_append_only_ledger_based() -> None:
     assert hasattr(module, "CreditService")
 
     source = read_backend_file("services", "credit_service.py").lower()
-    assert "sum(" in source or "func.sum" in source
+    assert "credit_balance" in source
     assert "for update" in source or "with_for_update" in source
     assert "credit_ledger" in source or "creditledger" in source
 

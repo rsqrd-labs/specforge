@@ -122,6 +122,7 @@ def test_credit_service_can_deduct_multiple_times_with_same_reason() -> None:
     CreditService = credit_service_mod.CreditService
     models_mod = import_backend("models")
     CreditLedger = models_mod.CreditLedger
+    User = models_mod.User
 
     from uuid import uuid4
 
@@ -134,7 +135,8 @@ def test_credit_service_can_deduct_multiple_times_with_same_reason() -> None:
             for k in keys: self._s.pop(k, None)
 
     class _DB:
-        def __init__(self, rows):
+        def __init__(self, user, rows):
+            self._user = user
             self._rows = list(rows)
             self.added = []
         async def execute(self, _stmt):
@@ -142,7 +144,7 @@ def test_credit_service_can_deduct_multiple_times_with_same_reason() -> None:
         def scalars(self): return self
         def all(self): return list(self._rows)
         def scalar_one(self): return sum(r.amount for r in self._rows)
-        def scalar_one_or_none(self): return self.scalar_one()
+        def scalar_one_or_none(self): return self._user
         def add(self, obj):
             if isinstance(obj, CreditLedger):
                 if not hasattr(obj, "id") or obj.id is None:
@@ -157,8 +159,14 @@ def test_credit_service_can_deduct_multiple_times_with_same_reason() -> None:
     async def _run():
         user_id = uuid4()
         svc = CreditService(redis_client=_Redis())
+        user = User(
+            id=user_id,
+            email=f"{user_id}@example.com",
+            google_id=f"google-{user_id}",
+            credit_balance=100,
+        )
         ledger = [CreditLedger(id=uuid4(), user_id=user_id, amount=100, reason="signup")]
-        db = _DB(ledger)
+        db = _DB(user, ledger)
 
         # First deduction — must succeed
         e1 = await svc.deduct(db, user_id, 10, "generate")

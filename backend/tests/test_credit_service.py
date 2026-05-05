@@ -6,7 +6,7 @@ from uuid import uuid4
 import pytest
 from sqlalchemy.exc import IntegrityError
 
-from models import CreditLedger
+from models import CreditLedger, User
 from services.credit_service import CreditService, InsufficientCreditsError
 
 
@@ -28,12 +28,16 @@ class _FakeRedis:
 class _FakeDB:
     def __init__(
         self,
+        user: User | None = None,
         ledger: list[CreditLedger] | None = None,
         entity_lookup: CreditLedger | None = None,
+        existing_refund: CreditLedger | None = None,
         raise_integrity_error_on_flush: bool = False,
     ) -> None:
+        self.user = user
         self._ledger: list[CreditLedger] = ledger or []
         self._entity_lookup = entity_lookup
+        self._existing_refund = existing_refund
         self._raise_integrity_error = raise_integrity_error_on_flush
         self._execute_count = 0
         self.added: list[Any] = []
@@ -45,7 +49,10 @@ class _FakeDB:
         # refund() first looks up the original deduction by ID
         if call == 0 and self._entity_lookup is not None:
             return _EntityResult(self._entity_lookup)
-        return _LedgerQueryResult(list(self._ledger))
+        # refund() next checks whether a refund row already exists
+        if call == 1 and self._entity_lookup is not None:
+            return _EntityResult(self._existing_refund)
+        return _EntityResult(self.user)
 
     def add(self, instance: Any) -> None:
         if isinstance(instance, CreditLedger):
@@ -105,14 +112,19 @@ def svc() -> CreditService:
     return CreditService(redis_client=_FakeRedis())
 
 
+def _user(user_id: Any, balance: int = 0) -> User:
+    return User(
+        id=user_id,
+        email=f"{user_id}@example.com",
+        google_id=f"google-{user_id}",
+        credit_balance=balance,
+    )
+
+
 @pytest.mark.asyncio
-async def test_get_balance_returns_sum(svc: CreditService) -> None:
+async def test_get_balance_returns_user_balance(svc: CreditService) -> None:
     user_id = uuid4()
-    ledger = [
-        CreditLedger(id=uuid4(), user_id=user_id, amount=50, reason="signup"),
-        CreditLedger(id=uuid4(), user_id=user_id, amount=-10, reason="gen"),
-    ]
-    db = _FakeDB(ledger)
+    db = _FakeDB(user=_user(user_id, balance=40))
     assert await svc.get_balance(db, user_id) == 40
 
 
@@ -130,7 +142,7 @@ async def test_get_balance_uses_cache_on_second_call(svc: CreditService) -> None
 @pytest.mark.asyncio
 async def test_deduct_raises_on_insufficient_balance(svc: CreditService) -> None:
     user_id = uuid4()
-    db = _FakeDB()
+    db = _FakeDB(user=_user(user_id, balance=0))
     with pytest.raises(InsufficientCreditsError):
         await svc.deduct(db, user_id, 10, "gen")
 
@@ -138,44 +150,65 @@ async def test_deduct_raises_on_insufficient_balance(svc: CreditService) -> None
 @pytest.mark.asyncio
 async def test_deduct_succeeds_when_balance_sufficient(svc: CreditService) -> None:
     user_id = uuid4()
-    ledger = [CreditLedger(id=uuid4(), user_id=user_id, amount=50, reason="signup")]
-    db = _FakeDB(ledger)
+    user = _user(user_id, balance=50)
+    db = _FakeDB(user=user)
     entry = await svc.deduct(db, user_id, 10, "gen")
     assert entry.amount == -10
+    assert user.credit_balance == 40
     assert any(e.amount == -10 for e in db._ledger)
 
 
 @pytest.mark.asyncio
 async def test_refund_inserts_positive_entry(svc: CreditService) -> None:
     user_id = uuid4()
+    user = _user(user_id, balance=40)
     deduction = CreditLedger(id=uuid4(), user_id=user_id, amount=-10, reason="gen")
-    db = _FakeDB(entity_lookup=deduction)
+    db = _FakeDB(user=user, entity_lookup=deduction)
 
     await svc.refund(db, deduction.id)
 
     refund_entries = [e for e in db._ledger if e.amount > 0 and "refund" in e.reason]
     assert len(refund_entries) == 1
     assert refund_entries[0].amount == 10
+    assert user.credit_balance == 50
 
 
 @pytest.mark.asyncio
 async def test_refund_is_idempotent(svc: CreditService) -> None:
     user_id = uuid4()
+    user = _user(user_id, balance=40)
     deduction = CreditLedger(id=uuid4(), user_id=user_id, amount=-10, reason="gen")
+    existing = CreditLedger(
+        id=uuid4(),
+        user_id=user_id,
+        amount=10,
+        reason=f"refund:{deduction.id}",
+    )
     # Simulate DB enforcing the unique constraint by raising IntegrityError on flush
-    db = _FakeDB(entity_lookup=deduction, raise_integrity_error_on_flush=True)
+    db = _FakeDB(
+        user=user,
+        entity_lookup=deduction,
+        existing_refund=existing,
+        raise_integrity_error_on_flush=True,
+    )
 
     # Must not raise — duplicate refund is silently swallowed
     await svc.refund(db, deduction.id)
 
-    assert db.rolled_back
+    assert not db.rolled_back
+    assert user.credit_balance == 40
 
 
 @pytest.mark.asyncio
 async def test_refund_is_race_safe_via_integrity_error(svc: CreditService) -> None:
     user_id = uuid4()
+    user = _user(user_id, balance=40)
     deduction = CreditLedger(id=uuid4(), user_id=user_id, amount=-10, reason="gen")
-    db = _FakeDB(entity_lookup=deduction, raise_integrity_error_on_flush=True)
+    db = _FakeDB(
+        user=user,
+        entity_lookup=deduction,
+        raise_integrity_error_on_flush=True,
+    )
 
     # Concurrent call: db.flush() raises IntegrityError — must return silently
     await svc.refund(db, deduction.id)
@@ -190,6 +223,6 @@ async def test_credit_invalidates_cache(svc: CreditService) -> None:
     redis = svc._redis
     assert isinstance(redis, _FakeRedis)
     redis._store[f"credits:{user_id}"] = "50"
-    db = _FakeDB()
+    db = _FakeDB(user=_user(user_id, balance=50))
     await svc.credit(db, user_id, 20, "bonus")
     assert f"credits:{user_id}" not in redis._store

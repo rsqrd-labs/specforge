@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING
 from uuid import UUID as PythonUUID
 
-from sqlalchemy import Text, func, text
+from sqlalchemy import CheckConstraint, Integer, Text, func, text
 from sqlalchemy.dialects.postgresql import TIMESTAMP, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -17,6 +17,12 @@ if TYPE_CHECKING:
 
 class User(Base):
     __tablename__ = "users"
+    __table_args__ = (
+        CheckConstraint(
+            "credit_balance >= 0",
+            name="ck_users_credit_balance_nonnegative",
+        ),
+    )
 
     id: Mapped[PythonUUID] = mapped_column(
         UUID(as_uuid=True),
@@ -27,6 +33,11 @@ class User(Base):
     google_id: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
     name: Mapped[str | None] = mapped_column(Text)
     avatar_url: Mapped[str | None] = mapped_column(Text)
+    credit_balance: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        server_default=text("0"),
+    )
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True),
         nullable=False,
