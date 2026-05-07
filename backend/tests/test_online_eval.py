@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
@@ -76,6 +77,7 @@ async def test_run_eval_scores_langfuse_generation_when_id_present() -> None:
     judge_response = '{"overall_score": 85, "completeness": 90, "clarity": 80}'
     langfuse_client = MagicMock()
     langfuse_client.score_generation = AsyncMock()
+    langfuse_client.add_to_dataset = AsyncMock()
 
     with (
         patch(
@@ -95,11 +97,13 @@ async def test_run_eval_scores_langfuse_generation_when_id_present() -> None:
             db,
             content_generation_id="g-123",
         )
+        await asyncio.sleep(0)
 
     assert result is not None
     langfuse_client.score_generation.assert_awaited_once_with(
         generation_id="g-123", name="overall", value=85.0
     )
+    langfuse_client.add_to_dataset.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -108,6 +112,7 @@ async def test_run_eval_skips_langfuse_score_without_generation_id() -> None:
     judge_response = '{"overall_score": 85, "completeness": 90, "clarity": 80}'
     langfuse_client = MagicMock()
     langfuse_client.score_generation = AsyncMock()
+    langfuse_client.add_to_dataset = AsyncMock()
 
     with (
         patch(
@@ -133,6 +138,7 @@ async def test_run_eval_returns_result_when_langfuse_score_fails() -> None:
     langfuse_client.score_generation = AsyncMock(
         side_effect=RuntimeError("langfuse down")
     )
+    langfuse_client.add_to_dataset = AsyncMock()
 
     with (
         patch(
@@ -152,10 +158,97 @@ async def test_run_eval_returns_result_when_langfuse_score_fails() -> None:
             db,
             content_generation_id="g-123",
         )
+        await asyncio.sleep(0)
 
     assert result is not None
     assert result.overall_score == 85
     assert db._committed
+    langfuse_client.add_to_dataset.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("score", "expected_dataset"),
+    [
+        (90, "high_quality_generations"),
+        (59, "low_quality_generations"),
+        (60, None),
+        (84, None),
+    ],
+)
+async def test_run_eval_collects_datasets_at_score_thresholds(
+    score: int, expected_dataset: str | None
+) -> None:
+    db = _FakeDB()
+    judge_response = f'{{"overall_score": {score}, "completeness": 90, "clarity": 80}}'
+    langfuse_client = MagicMock()
+    langfuse_client.score_generation = AsyncMock()
+    langfuse_client.add_to_dataset = AsyncMock()
+
+    with (
+        patch(
+            "services.evals.online_eval.get_llm",
+            return_value=_FakeJudge(judge_response),
+        ),
+        patch(
+            "services.evals.online_eval.langfuse_service.get_langfuse_client",
+            return_value=langfuse_client,
+        ),
+    ):
+        result = await run_eval(
+            uuid4(),
+            "spec",
+            "spec content",
+            "",
+            db,
+            content_generation_id="g-123",
+        )
+        await asyncio.sleep(0)
+
+    assert result is not None
+    if expected_dataset is None:
+        langfuse_client.add_to_dataset.assert_not_awaited()
+    else:
+        langfuse_client.add_to_dataset.assert_awaited_once()
+        kwargs = langfuse_client.add_to_dataset.await_args.kwargs
+        assert kwargs["dataset_name"] == expected_dataset
+        assert kwargs["source_observation_id"] == "g-123"
+
+
+@pytest.mark.asyncio
+async def test_run_eval_dataset_write_is_fire_and_forget() -> None:
+    db = _FakeDB()
+    judge_response = '{"overall_score": 90, "completeness": 90, "clarity": 80}'
+    langfuse_client = MagicMock()
+    langfuse_client.score_generation = AsyncMock()
+    fake_task = MagicMock()
+
+    def fake_create_task(coro):
+        coro.close()
+        return fake_task
+
+    with (
+        patch(
+            "services.evals.online_eval.get_llm",
+            return_value=_FakeJudge(judge_response),
+        ),
+        patch(
+            "services.evals.online_eval.langfuse_service.get_langfuse_client",
+            return_value=langfuse_client,
+        ),
+        patch("services.evals.online_eval.asyncio.create_task", fake_create_task),
+    ):
+        result = await run_eval(
+            uuid4(),
+            "spec",
+            "spec content",
+            "",
+            db,
+            content_generation_id="g-123",
+        )
+
+    assert result is not None
+    fake_task.add_done_callback.assert_called_once()
 
 
 @pytest.mark.asyncio

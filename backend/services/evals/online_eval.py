@@ -51,6 +51,41 @@ _STAGE_PROMPTS: dict[str, str] = {
 }
 
 
+def _log_dataset_error(task: asyncio.Task) -> None:
+    if not task.cancelled() and (exc := task.exception()):
+        logger.error("langfuse_dataset_background_failed", extra={"error": str(exc)})
+
+
+def _dataset_for_score(score: int | float | None) -> str | None:
+    if score is None:
+        return None
+    if score >= 85:
+        return "high_quality_generations"
+    if score < 60:
+        return "low_quality_generations"
+    return None
+
+
+async def _add_generation_to_dataset(
+    *,
+    dataset_name: str,
+    content_generation_id: str,
+    eval_result: EvalResult,
+    content: str,
+) -> None:
+    await langfuse_service.get_langfuse_client().add_to_dataset(
+        dataset_name=dataset_name,
+        item={
+            "stage_type": eval_result.stage_type,
+            "overall_score": eval_result.overall_score,
+            "completeness": eval_result.completeness,
+            "clarity": eval_result.clarity,
+            "content": content,
+        },
+        source_observation_id=content_generation_id,
+    )
+
+
 async def run_eval(
     stage_version_id: UUID,
     stage_type: str,
@@ -127,6 +162,17 @@ async def run_eval(
                 "eval score link failed for stage_version_id=%s",
                 stage_version_id,
             )
+        dataset_name = _dataset_for_score(eval_result.overall_score)
+        if dataset_name:
+            dataset_task = asyncio.create_task(
+                _add_generation_to_dataset(
+                    dataset_name=dataset_name,
+                    content_generation_id=content_generation_id,
+                    eval_result=eval_result,
+                    content=content,
+                )
+            )
+            dataset_task.add_done_callback(_log_dataset_error)
     return eval_result
 
 
