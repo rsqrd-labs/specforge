@@ -222,6 +222,24 @@ Reset local database and Redis volumes:
 docker compose down -v
 ```
 
+### Optional: Langfuse Self-Hosted Observability
+
+To run Langfuse locally and capture LLM traces from your dev workspace:
+
+```bash
+docker compose --profile langfuse up
+```
+
+Then set in `backend/.env`:
+
+```bash
+LANGFUSE_HOST=http://localhost:3000
+LANGFUSE_SECRET_KEY=...   # from Langfuse UI after first signup
+LANGFUSE_PUBLIC_KEY=...
+```
+
+Without these set, the application runs identically with no Langfuse integration.
+
 ## Local Development Without Docker
 
 Run PostgreSQL and Redis yourself, then configure `backend/.env` with their URLs.
