@@ -4,7 +4,7 @@ from collections.abc import AsyncGenerator
 from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -274,8 +274,9 @@ async def test_refine_preserves_raw_instruction_for_stage_manager(app) -> None:
     async def _fake_db():
         yield _FakeDB(stage)
 
-    async def fake_refine(stage_id, request, user, db):
+    async def fake_refine(stage_id, request, user, db, *, trace_id=None):
         captured["instruction"] = request.instruction
+        captured["trace_id"] = trace_id
         return {
             "diff": "",
             "original": "some content",
@@ -308,6 +309,7 @@ async def test_refine_preserves_raw_instruction_for_stage_manager(app) -> None:
 
     assert response.status_code == 200
     assert captured["instruction"] == "<b>Improve</b>"
+    assert UUID(captured["trace_id"])
 
 
 @pytest.mark.asyncio
@@ -494,8 +496,9 @@ async def test_refine_preserves_raw_selected_text_for_stage_manager(app) -> None
     async def _fake_db():
         yield _FakeDB(stage)
 
-    async def fake_refine(stage_id, request, user, db):
+    async def fake_refine(stage_id, request, user, db, *, trace_id=None):
         captured["selected_text"] = request.selected_text
+        captured["trace_id"] = trace_id
         return {
             "diff": "",
             "original": "some content",
@@ -528,6 +531,7 @@ async def test_refine_preserves_raw_selected_text_for_stage_manager(app) -> None
 
     assert response.status_code == 200
     assert captured["selected_text"] == "<script>alert(1)</script>selected"
+    assert UUID(captured["trace_id"])
 
 
 @pytest.mark.asyncio

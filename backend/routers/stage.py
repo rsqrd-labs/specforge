@@ -4,7 +4,7 @@ import json
 import logging
 from collections.abc import AsyncGenerator
 from datetime import UTC, datetime
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import StreamingResponse
@@ -43,9 +43,12 @@ async def _stream_stage(
     stage_id: UUID,
     user: User,
     db: AsyncSession,
+    trace_id: str,
 ) -> AsyncGenerator[str, None]:
     try:
-        async for token in stage_manager.generate(stage_id, user, db):
+        async for token in stage_manager.generate(
+            stage_id, user, db, trace_id=trace_id
+        ):
             if token.startswith('{"done"') or token.startswith('{"eval"'):
                 yield f"data: {token}\n\n"
             else:
@@ -108,8 +111,9 @@ async def generate_stage(
     _: None = Depends(require_credits(10)),
 ) -> StreamingResponse:
     await _load_stage(id, db, user.id)
+    trace_id = str(uuid4())
     return StreamingResponse(
-        _stream_stage(id, user, db), media_type="text/event-stream"
+        _stream_stage(id, user, db, trace_id), media_type="text/event-stream"
     )
 
 
@@ -121,8 +125,9 @@ async def regenerate_stage(
     _: None = Depends(require_credits(10)),
 ) -> StreamingResponse:
     await _load_stage(id, db, user.id)
+    trace_id = str(uuid4())
     return StreamingResponse(
-        _stream_stage(id, user, db), media_type="text/event-stream"
+        _stream_stage(id, user, db, trace_id), media_type="text/event-stream"
     )
 
 
@@ -137,8 +142,9 @@ async def refine_stage(
     # StageManager raw-matches selected_text before its prompt layer calls
     # sanitize_text(request.selected_text) and sanitize_text(request.instruction).
     await _load_stage(id, db, user.id)
+    trace_id = str(uuid4())
     try:
-        return await stage_manager.refine(id, request, user, db)
+        return await stage_manager.refine(id, request, user, db, trace_id=trace_id)
     except RateLimitError as exc:
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,

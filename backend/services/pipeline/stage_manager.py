@@ -107,7 +107,12 @@ class StageManager:
         return self._redis
 
     async def generate(
-        self, stage_id: UUID, user, db: AsyncSession
+        self,
+        stage_id: UUID,
+        user,
+        db: AsyncSession,
+        *,
+        trace_id: str | None = None,
     ) -> AsyncGenerator[str, None]:
         stage = await self._load_stage(stage_id, db, lock=True)
         workspace = await self._load_workspace(stage.workspace_id, db)
@@ -150,6 +155,18 @@ class StageManager:
             accumulated = ""
             try:
                 adapter = get_llm(workspace.provider, workspace.model)
+                if trace_id:
+                    from services.llm.instrumented_adapter import InstrumentedAdapter
+
+                    adapter = InstrumentedAdapter(
+                        adapter,
+                        span_id=None,
+                        trace_id=trace_id,
+                        provider=workspace.provider,
+                        model=workspace.model,
+                        stage_type=stage.type,
+                        action="generate",
+                    )
                 async with asyncio.timeout(settings.llm_stream_timeout_seconds):
                     async for token in adapter.stream(
                         system_prompt, user_prompt, max_tokens=8192
@@ -241,7 +258,13 @@ class StageManager:
                     )
 
     async def refine(
-        self, stage_id: UUID, request: RefineRequest, user, db: AsyncSession
+        self,
+        stage_id: UUID,
+        request: RefineRequest,
+        user,
+        db: AsyncSession,
+        *,
+        trace_id: str | None = None,
     ) -> DiffResponse:
         stage = await self._load_stage(stage_id, db)
         workspace = await self._load_workspace(stage.workspace_id, db)
@@ -298,6 +321,18 @@ class StageManager:
 
         try:
             adapter = get_llm(workspace.provider, workspace.model)
+            if trace_id:
+                from services.llm.instrumented_adapter import InstrumentedAdapter
+
+                adapter = InstrumentedAdapter(
+                    adapter,
+                    span_id=None,
+                    trace_id=trace_id,
+                    provider=workspace.provider,
+                    model=workspace.model,
+                    stage_type=stage.type,
+                    action="refine",
+                )
             replacement = await asyncio.wait_for(
                 adapter.complete(system_prompt, user_prompt, max_tokens=4096),
                 timeout=settings.llm_complete_timeout_seconds,
