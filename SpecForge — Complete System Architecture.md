@@ -1,12 +1,12 @@
 ---
-
 tags:
-
-- architecture
-- saas
-- specforge
-- asdd created: 2026-04-25 status: final version: 1.1.0
-
+  - architecture
+  - saas
+  - specforge
+  - asdd
+created: 2026-04-25
+status: final
+version: 1.1.0
 ---
 
 # SpecForge — Complete System Architecture
