@@ -28,6 +28,7 @@ Required runtime integrations:
 | Google Gemini | Yes for Google provider | LLM generation/evaluation | `backend/services/llm/google_adapter.py` |
 | Sentry | Optional | Backend/frontend error reporting | `backend/services/observability.py`, `frontend/src/main.tsx` |
 | Grafana OTLP | Optional | Distributed tracing | `backend/services/observability.py` |
+| Langfuse | Optional | LLM traces, prompt-version fallback, eval score links, dataset collection | `backend/services/langfuse_service.py`, `backend/services/llm/instrumented_adapter.py`, `backend/services/evals/online_eval.py`, `backend/prompts/*` |
 | Prometheus-compatible metrics | Built in | `/metrics` endpoint | `backend/services/observability.py` |
 | Railway | Production backend deploy | API, Postgres, Redis hosting | `.github/workflows/ci.yml` |
 | Vercel | Production frontend deploy | Static frontend hosting | `.github/workflows/ci.yml` |
@@ -427,6 +428,95 @@ Common errors:
 - No traces: endpoint wrong, token missing, or outbound traffic blocked.
 - Backend still starts if these vars are empty by design.
 
+### Langfuse
+
+Purpose: optional LLM observability for generation traces, prompt template
+lookup, eval-score linking, and high/low quality dataset collection.
+
+Used in:
+
+- `backend/services/langfuse_service.py`
+- `backend/services/llm/instrumented_adapter.py`
+- `backend/services/pipeline/stage_manager.py`
+- `backend/services/evals/online_eval.py`
+- `backend/prompts/base.py`
+
+Optional settings:
+
+```env
+LANGFUSE_SECRET_KEY=
+LANGFUSE_PUBLIC_KEY=
+LANGFUSE_HOST=https://cloud.langfuse.com
+LANGFUSE_PROMPT_CACHE_TTL=300
+```
+
+Important behavior:
+
+- Langfuse is disabled when `LANGFUSE_SECRET_KEY` is blank.
+- In disabled mode, the SDK is not imported and no Langfuse network calls are
+  made.
+- All Langfuse calls are exception-swallowing. A Langfuse outage must not break
+  generation, refine, eval scoring, credits, or prompt fallback.
+- Provider adapters do not import Langfuse. Instrumentation is composed through
+  `InstrumentedAdapter`.
+- Prompt lookup always falls back to local `SYSTEM_PROMPT` constants.
+- Eval scores `>=85` are added to `high_quality_generations`; scores `<60` are
+  added to `low_quality_generations`; scores 60 through 84 are not collected.
+
+Cloud setup:
+
+1. Create or log into a Langfuse account.
+2. Create a project.
+3. Copy the project's public and secret keys.
+4. Set `LANGFUSE_SECRET_KEY`, `LANGFUSE_PUBLIC_KEY`, and optionally
+   `LANGFUSE_HOST` in Railway backend variables.
+
+Self-hosted local setup:
+
+```bash
+docker compose --profile langfuse up
+```
+
+Then open:
+
+```text
+http://localhost:3000
+```
+
+Set backend local env:
+
+```env
+LANGFUSE_HOST=http://localhost:3000
+LANGFUSE_SECRET_KEY=...
+LANGFUSE_PUBLIC_KEY=...
+```
+
+Validation:
+
+1. With `LANGFUSE_SECRET_KEY` blank, start the backend and generate a SPEC.
+   Expected: generation, eval, and credits behave normally with zero Langfuse
+   traffic.
+2. With Langfuse configured, generate a SPEC.
+3. In Langfuse, confirm a trace exists with `workspace_id`, `user_id`,
+   `stage_type`, and `action` metadata.
+4. Confirm one generation is recorded for the full accumulated stream, not one
+   observation per token.
+5. Wait for eval completion and confirm the `overall` score is attached to the
+   same generation.
+6. Generate content that scores `>=85` or `<60` and confirm a dataset item is
+   created in the corresponding dataset.
+
+Common errors:
+
+- No traces: `LANGFUSE_SECRET_KEY` is blank, public/secret key pair is wrong,
+  `LANGFUSE_HOST` is wrong, or backend outbound traffic is blocked.
+- App works but prompts do not update from Langfuse: check prompt names
+  (`specforge.spec.system`, `specforge.plan.system`,
+  `specforge.harness.system`, `specforge.tasks.system`) and
+  `LANGFUSE_PROMPT_CACHE_TTL`.
+- Langfuse down: expected user-facing behavior is no change; inspect backend
+  logs for `langfuse.*.failed`.
+
 ### Prometheus Metrics
 
 Purpose: internal metrics endpoint at `/metrics`.
@@ -614,6 +704,10 @@ METRICS_TOKEN=
 SENTRY_DSN=
 GRAFANA_OTLP_ENDPOINT=
 GRAFANA_OTLP_TOKEN=
+LANGFUSE_SECRET_KEY=
+LANGFUSE_PUBLIC_KEY=
+LANGFUSE_HOST=https://cloud.langfuse.com
+LANGFUSE_PROMPT_CACHE_TTL=300
 
 ENVIRONMENT=development
 MAX_ACTIVE_WORKSPACES_PER_USER=50
@@ -668,6 +762,8 @@ Production-only requirements enforced by `backend/config.py`:
 - `FRONTEND_URL` must be HTTPS.
 - `JWT_PRIVATE_KEY` must be a real PEM key.
 - `ENCRYPTION_MASTER_KEY` must not be the CI placeholder.
+- Langfuse variables are optional in production. Leave `LANGFUSE_SECRET_KEY`
+  blank to keep the exact no-op behavior enforced by CI.
 
 ## 4. End-to-End Test Guide
 
@@ -795,6 +891,11 @@ Expected:
 [smoke] production smoke passed
 ```
 
+The automated smoke does not require Langfuse credentials. Langfuse is verified
+manually because production smoke runs should remain green when
+`LANGFUSE_SECRET_KEY` is unset. Use the optional Langfuse validation steps above
+for staging or local observability checks.
+
 ## 5. Troubleshooting Guide
 
 ### Backend fails at startup
@@ -883,7 +984,7 @@ uv run alembic upgrade head
 If migrations fail, verify `DATABASE_URL` and that Postgres has required
 permissions.
 
-### Sentry or Grafana not receiving data
+### Sentry, Grafana, or Langfuse not receiving data
 
 Check:
 
@@ -891,6 +992,10 @@ Check:
 - Token is present for Grafana OTLP if required.
 - Outbound network access from backend is allowed.
 - `SENTRY_DSN` is backend-only; `VITE_SENTRY_DSN` is frontend build-time.
+- For Langfuse, both `LANGFUSE_SECRET_KEY` and `LANGFUSE_PUBLIC_KEY` must match
+  the same Langfuse project. `LANGFUSE_HOST` must point to Cloud or your
+  self-hosted instance.
+- For prompt templates, remember the in-process cache defaults to 300 seconds.
 
 ### Deployment failures
 
