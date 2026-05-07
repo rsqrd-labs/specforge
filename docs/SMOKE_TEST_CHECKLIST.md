@@ -15,11 +15,26 @@ SPECFORGE_RUN_LLM_SMOKE=1 \
 python3 scripts/production_smoke.py
 ```
 
+Public-only smoke, useful before a smoke access token is available:
+
+```bash
+SPECFORGE_API_URL=https://api.example.com \
+SPECFORGE_METRICS_TOKEN=<metrics token> \
+SPECFORGE_PUBLIC_ONLY_SMOKE=1 \
+python3 scripts/production_smoke.py
+```
+
+The same automated smoke can also be launched from GitHub Actions through the
+`Production Smoke` workflow in `.github/workflows/production-smoke.yml`.
+
 The automated smoke must pass against staging before production deploy. It checks
 health, provider catalog, metrics, authenticated user lookup, credits,
 workspace create/read/update/archive, and live SPEC streaming when
 `SPECFORGE_RUN_LLM_SMOKE=1`. Keep the manual checklist below for browser-only
 OAuth and UI interaction coverage.
+
+Use this checklist with `docs/PRODUCTION_RELEASE_GATE.md`. For observability
+troubleshooting during smoke, use `docs/OBSERVABILITY_RUNBOOK.md`.
 
 ---
 
@@ -162,7 +177,19 @@ OAuth and UI interaction coverage.
 ## Langfuse Integration (optional)
 
 With Langfuse configured (`docker compose --profile langfuse up` and the
-four `LANGFUSE_*` env vars set in `backend/.env`):
+required `LANGFUSE_*` env vars set in `backend/.env`):
+
+```env
+LANGFUSE_HOST=http://localhost:3000
+LANGFUSE_SECRET_KEY=...
+LANGFUSE_PUBLIC_KEY=...
+LANGFUSE_PROMPT_CACHE_TTL=300
+LANGFUSE_CONTENT_CAPTURE_ACK=true
+```
+
+`LANGFUSE_CONTENT_CAPTURE_ACK=true` is required for production enablement when
+`LANGFUSE_SECRET_KEY` is set. It acknowledges prompt/output telemetry export
+after secret-shaped redaction.
 
 - [ ] Sign in and create a workspace.
 - [ ] Generate a SPEC stage. Confirm streaming works normally.
@@ -204,6 +231,13 @@ With Langfuse unconfigured (`LANGFUSE_SECRET_KEY` blank):
 | Infrastructure | 4 | | | |
 | Sign-out | 2 | | | |
 | **Total** | **45** | | | |
+
+Optional/additional checks:
+
+| Category | Total | Pass | Fail | Notes |
+|----------|-------|------|------|-------|
+| Langfuse configured mode | 7 | | | |
+| Langfuse disabled mode | 3 | | | |
 
 **Sign-off:** ________________  **Date:** ________________
 
