@@ -159,6 +159,33 @@ OAuth and UI interaction coverage.
 
 ---
 
+## Langfuse Integration (optional)
+
+With Langfuse configured (`docker compose --profile langfuse up` and the
+four `LANGFUSE_*` env vars set in `backend/.env`):
+
+- [ ] Sign in and create a workspace.
+- [ ] Generate a SPEC stage. Confirm streaming works normally.
+- [ ] Open Langfuse UI at `http://localhost:3000`.
+- [ ] Confirm a trace appears with the `workspace_id` and `user_id` metadata.
+- [ ] Confirm one generation is recorded inside the trace with provider,
+      model, full system prompt, full user prompt, and accumulated output.
+- [ ] Wait for the eval to complete. Confirm the overall score is attached
+      to the same generation in the Langfuse UI.
+- [ ] Trigger a generation that scores `>=85` or `<60`. Confirm a dataset item
+      appears in the corresponding Langfuse dataset.
+
+With Langfuse unconfigured (`LANGFUSE_SECRET_KEY` blank):
+
+- [ ] Sign in, create a workspace, generate a SPEC stage.
+- [ ] Confirm the application behaves identically: same streaming, same eval
+      scoring, same credit accounting, and no user-visible dependency on
+      Langfuse availability.
+- [ ] Confirm zero requests to any Langfuse host appear in `tcpdump` or proxy
+      logs during the generation.
+
+---
+
 ## Results Summary
 
 | Category | Total | Pass | Fail | Notes |

@@ -146,3 +146,33 @@ These tests exist in harness files **not** in the CI gate. They represent aspira
 - **Prompt guard**: Current implementation is regex-only. A `PromptGuard` class wrapping an LLM-based secondary classifier is a V2 hardening item.
 - **Ledger `SELECT FOR UPDATE` scaling**: Under high concurrency, locking all ledger rows per user will serialize. Partition the ledger table by user or add a shadow balance column for V2.
 - **`_INSTANCES` live key reload**: Requires process restart for API key rotation. Add a cache TTL or a `/admin/reload-keys` endpoint in V2.
+
+---
+
+## Phase 11 — Langfuse LLM Observability
+
+**Date:** 2026-05-07 | **CI status:** Green locally (229 backend unit tests,
+51 backend harness CI contracts, and `test_langfuse_contract.py` pass)
+
+Phase 11 added an optional LLM observability layer using Langfuse, alongside
+the existing Grafana Cloud and Sentry stack. Grafana/Sentry behavior remains
+unchanged.
+
+Key design decisions:
+
+1. The integration is gated by `LANGFUSE_SECRET_KEY`. With it unset, the
+   application behaves identically to the pre-Phase-11 baseline.
+2. The no-op branch lives in exactly one place: `services/langfuse_service.py`.
+3. `BaseLLMAdapter` was not modified. Instrumentation is composed via
+   `InstrumentedAdapter` above the adapters, not inside provider adapters.
+4. Every Langfuse call is exception-swallowing. A Langfuse outage cannot break
+   stage generation, refine, eval, or credit accounting.
+5. Sensitive data redaction reuses
+   `services.observability.redact_sensitive_data`. No new regex patterns were
+   introduced for Langfuse.
+6. Streams are accumulated and recorded once per call, never per token.
+7. Dataset collection thresholds: scores `>=85` go to
+   `high_quality_generations`, scores `<60` go to `low_quality_generations`.
+   Mid-quality scores from 60 through 84 are not collected.
+8. CI runs the contract tests with `LANGFUSE_SECRET_KEY` unset to enforce the
+   no-op invariant. No user-facing feature depends on Langfuse availability.

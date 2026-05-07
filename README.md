@@ -464,6 +464,15 @@ Optional integrations:
   Langfuse SDK is never imported and the application behaves identically to a
   build without Langfuse. No user-facing feature depends on Langfuse availability.
 
+Optional LLM observability via Langfuse:
+
+- Set `LANGFUSE_SECRET_KEY`, `LANGFUSE_PUBLIC_KEY`, and `LANGFUSE_HOST` to
+  enable per-generation trace, prompt-version, and eval-score capture.
+- Run a self-hosted Langfuse locally with
+  `docker compose --profile langfuse up`.
+- Without these variables set, the application runs identically with zero
+  Langfuse traffic. No user-facing feature depends on Langfuse availability.
+
 Sensitive values are redacted before they are emitted through logging, Sentry, or Langfuse paths.
 
 ## Operational Notes
