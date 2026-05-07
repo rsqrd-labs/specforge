@@ -148,6 +148,58 @@ def test_production_app_requires_langfuse_content_capture_ack() -> None:
             )
 
 
+def test_production_app_rejects_langfuse_host_without_https() -> None:
+    """Plaintext HTTP to Langfuse would leak the public/secret keys, the
+    full prompts, and the full model outputs to anyone on the network
+    path. The production gate must reject any non-HTTPS Langfuse host."""
+    fake_pem = (
+        "-----BEGIN RSA PRIVATE KEY-----\nMIIEow...\n-----END RSA PRIVATE KEY-----"
+    )
+    with (
+        patch.object(observability.settings, "environment", "production"),
+        patch.object(observability.settings, "frontend_url", "https://app.example.com"),
+        patch.object(observability.settings, "metrics_token", "metrics-token"),
+        patch.object(observability.settings, "jwt_private_key", fake_pem),
+        patch.object(observability.settings, "encryption_master_key", "real-key"),
+        patch.object(observability.settings, "langfuse_secret_key", "sk-langfuse"),
+        patch.object(observability.settings, "langfuse_public_key", "pk-langfuse"),
+        patch.object(
+            observability.settings, "langfuse_host", "http://langfuse.internal:3000"
+        ),
+        patch.object(observability.settings, "langfuse_content_capture_ack", True),
+    ):
+        try:
+            create_app(redis_client=_NoopRedis())
+        except RuntimeError as exc:
+            assert "LANGFUSE_HOST" in str(exc) and "HTTPS" in str(exc)
+        else:
+            raise AssertionError(
+                "production app started with a plaintext Langfuse host"
+            )
+
+
+def test_production_app_accepts_langfuse_host_with_https() -> None:
+    """The default https://cloud.langfuse.com host must pass the gate."""
+    fake_pem = (
+        "-----BEGIN RSA PRIVATE KEY-----\nMIIEow...\n-----END RSA PRIVATE KEY-----"
+    )
+    with (
+        patch.object(observability.settings, "environment", "production"),
+        patch.object(observability.settings, "frontend_url", "https://app.example.com"),
+        patch.object(observability.settings, "metrics_token", "metrics-token"),
+        patch.object(observability.settings, "jwt_private_key", fake_pem),
+        patch.object(observability.settings, "encryption_master_key", "real-key"),
+        patch.object(observability.settings, "langfuse_secret_key", "sk-langfuse"),
+        patch.object(observability.settings, "langfuse_public_key", "pk-langfuse"),
+        patch.object(
+            observability.settings, "langfuse_host", "https://cloud.langfuse.com"
+        ),
+        patch.object(observability.settings, "langfuse_content_capture_ack", True),
+    ):
+        # Must not raise — every Langfuse production requirement is satisfied.
+        create_app(redis_client=_NoopRedis())
+
+
 def test_production_app_rejects_langfuse_secret_without_public_key() -> None:
     fake_pem = (
         "-----BEGIN RSA PRIVATE KEY-----\nMIIEow...\n-----END RSA PRIVATE KEY-----"

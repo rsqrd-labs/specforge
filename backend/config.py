@@ -87,6 +87,13 @@ def validate_production_settings() -> None:
             errors.append(
                 "LANGFUSE_PUBLIC_KEY must be set when LANGFUSE_SECRET_KEY is set"
             )
+        if not settings.langfuse_host.lower().startswith("https://"):
+            errors.append(
+                "LANGFUSE_HOST must use HTTPS in production. Plaintext HTTP "
+                "exposes the Langfuse public/secret keys, full prompts, and "
+                "full model outputs to anyone on the network path. Use "
+                "https://cloud.langfuse.com or an HTTPS self-hosted endpoint."
+            )
         if not settings.langfuse_content_capture_ack:
             errors.append(
                 "LANGFUSE_CONTENT_CAPTURE_ACK must be true when enabling "

@@ -45,6 +45,7 @@ Production startup validation is enforced in `backend/config.py`:
 - `JWT_PRIVATE_KEY` must be a real PEM key.
 - `ENCRYPTION_MASTER_KEY` must not be the CI placeholder.
 - If `LANGFUSE_SECRET_KEY` is set, `LANGFUSE_PUBLIC_KEY` must also be set.
+- If Langfuse is enabled in production, `LANGFUSE_HOST` must use HTTPS.
 - If Langfuse is enabled in production,
   `LANGFUSE_CONTENT_CAPTURE_ACK=true` is required.
 

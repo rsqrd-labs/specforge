@@ -83,7 +83,7 @@ Langfuse production requirements:
 |---|---|
 | `LANGFUSE_SECRET_KEY` | Blank to disable; non-empty to enable |
 | `LANGFUSE_PUBLIC_KEY` | Required when `LANGFUSE_SECRET_KEY` is set |
-| `LANGFUSE_HOST` | Cloud or approved self-hosted endpoint |
+| `LANGFUSE_HOST` | HTTPS URL (cloud or approved self-hosted endpoint) |
 | `LANGFUSE_PROMPT_CACHE_TTL` | Positive TTL, default `300` |
 | `LANGFUSE_CONTENT_CAPTURE_ACK` | Required as `true` when Langfuse is enabled in production |
 
