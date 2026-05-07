@@ -123,6 +123,55 @@ def test_production_app_rejects_ci_placeholder_encryption_key() -> None:
             )
 
 
+def test_production_app_requires_langfuse_content_capture_ack() -> None:
+    fake_pem = (
+        "-----BEGIN RSA PRIVATE KEY-----\nMIIEow...\n-----END RSA PRIVATE KEY-----"
+    )
+    with (
+        patch.object(observability.settings, "environment", "production"),
+        patch.object(observability.settings, "frontend_url", "https://app.example.com"),
+        patch.object(observability.settings, "metrics_token", "metrics-token"),
+        patch.object(observability.settings, "jwt_private_key", fake_pem),
+        patch.object(observability.settings, "encryption_master_key", "real-key"),
+        patch.object(observability.settings, "langfuse_secret_key", "sk-langfuse"),
+        patch.object(observability.settings, "langfuse_public_key", "pk-langfuse"),
+        patch.object(observability.settings, "langfuse_content_capture_ack", False),
+    ):
+        try:
+            create_app(redis_client=_NoopRedis())
+        except RuntimeError as exc:
+            assert "LANGFUSE_CONTENT_CAPTURE_ACK" in str(exc)
+        else:
+            raise AssertionError(
+                "production app started with Langfuse enabled but no content "
+                "capture acknowledgement"
+            )
+
+
+def test_production_app_rejects_langfuse_secret_without_public_key() -> None:
+    fake_pem = (
+        "-----BEGIN RSA PRIVATE KEY-----\nMIIEow...\n-----END RSA PRIVATE KEY-----"
+    )
+    with (
+        patch.object(observability.settings, "environment", "production"),
+        patch.object(observability.settings, "frontend_url", "https://app.example.com"),
+        patch.object(observability.settings, "metrics_token", "metrics-token"),
+        patch.object(observability.settings, "jwt_private_key", fake_pem),
+        patch.object(observability.settings, "encryption_master_key", "real-key"),
+        patch.object(observability.settings, "langfuse_secret_key", "sk-langfuse"),
+        patch.object(observability.settings, "langfuse_public_key", ""),
+        patch.object(observability.settings, "langfuse_content_capture_ack", True),
+    ):
+        try:
+            create_app(redis_client=_NoopRedis())
+        except RuntimeError as exc:
+            assert "LANGFUSE_PUBLIC_KEY" in str(exc)
+        else:
+            raise AssertionError(
+                "production app started with Langfuse secret but no public key"
+            )
+
+
 def test_production_app_accepts_valid_pem_jwt_key() -> None:
     fake_pem = (
         "-----BEGIN RSA PRIVATE KEY-----\nMIIEow...\n-----END RSA PRIVATE KEY-----"

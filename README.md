@@ -175,6 +175,7 @@ cp frontend/.env.example frontend/.env
 | `LANGFUSE_PUBLIC_KEY` | Optional. Required only when `LANGFUSE_SECRET_KEY` is set. |
 | `LANGFUSE_HOST` | Optional. Defaults to `https://cloud.langfuse.com`. Point to a self-hosted Langfuse instance to keep prompts on-premises. |
 | `LANGFUSE_PROMPT_CACHE_TTL` | Optional. In-process TTL (seconds) for Langfuse-managed prompt templates. Defaults to `300`. |
+| `LANGFUSE_CONTENT_CAPTURE_ACK` | Required in production only when Langfuse is enabled. Set to `true` to acknowledge prompt/output telemetry export after redaction. |
 | `ENVIRONMENT` | Runtime environment name, for example `development` or `production`. |
 
 ### Frontend Variables
@@ -468,6 +469,9 @@ Optional LLM observability via Langfuse:
 
 - Set `LANGFUSE_SECRET_KEY`, `LANGFUSE_PUBLIC_KEY`, and `LANGFUSE_HOST` to
   enable per-generation trace, prompt-version, and eval-score capture.
+- In production, also set `LANGFUSE_CONTENT_CAPTURE_ACK=true` after approving
+  that prompts and model outputs may be sent to Langfuse after secret-shaped
+  redaction.
 - Run a self-hosted Langfuse locally with
   `docker compose --profile langfuse up`.
 - Without these variables set, the application runs identically with zero

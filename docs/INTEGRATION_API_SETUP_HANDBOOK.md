@@ -448,6 +448,7 @@ LANGFUSE_SECRET_KEY=
 LANGFUSE_PUBLIC_KEY=
 LANGFUSE_HOST=https://cloud.langfuse.com
 LANGFUSE_PROMPT_CACHE_TTL=300
+LANGFUSE_CONTENT_CAPTURE_ACK=false
 ```
 
 Important behavior:
@@ -455,6 +456,10 @@ Important behavior:
 - Langfuse is disabled when `LANGFUSE_SECRET_KEY` is blank.
 - In disabled mode, the SDK is not imported and no Langfuse network calls are
   made.
+- In production, setting `LANGFUSE_SECRET_KEY` also requires
+  `LANGFUSE_CONTENT_CAPTURE_ACK=true`. This is an explicit acknowledgement that
+  prompts and model outputs can leave the SpecForge trust boundary after
+  secret-shaped redaction.
 - All Langfuse calls are exception-swallowing. A Langfuse outage must not break
   generation, refine, eval scoring, credits, or prompt fallback.
 - Provider adapters do not import Langfuse. Instrumentation is composed through
@@ -470,6 +475,8 @@ Cloud setup:
 3. Copy the project's public and secret keys.
 4. Set `LANGFUSE_SECRET_KEY`, `LANGFUSE_PUBLIC_KEY`, and optionally
    `LANGFUSE_HOST` in Railway backend variables.
+5. For production, set `LANGFUSE_CONTENT_CAPTURE_ACK=true` only after privacy
+   and data-retention approval for prompt/output telemetry export.
 
 Self-hosted local setup:
 
@@ -708,6 +715,7 @@ LANGFUSE_SECRET_KEY=
 LANGFUSE_PUBLIC_KEY=
 LANGFUSE_HOST=https://cloud.langfuse.com
 LANGFUSE_PROMPT_CACHE_TTL=300
+LANGFUSE_CONTENT_CAPTURE_ACK=false
 
 ENVIRONMENT=development
 MAX_ACTIVE_WORKSPACES_PER_USER=50
@@ -763,7 +771,9 @@ Production-only requirements enforced by `backend/config.py`:
 - `JWT_PRIVATE_KEY` must be a real PEM key.
 - `ENCRYPTION_MASTER_KEY` must not be the CI placeholder.
 - Langfuse variables are optional in production. Leave `LANGFUSE_SECRET_KEY`
-  blank to keep the exact no-op behavior enforced by CI.
+  blank to keep the exact no-op behavior enforced by CI. If
+  `LANGFUSE_SECRET_KEY` is set, `LANGFUSE_PUBLIC_KEY` and
+  `LANGFUSE_CONTENT_CAPTURE_ACK=true` are required at startup.
 
 ## 4. End-to-End Test Guide
 

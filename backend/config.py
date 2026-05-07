@@ -29,6 +29,7 @@ class Settings(BaseSettings):
     langfuse_public_key: str = ""
     langfuse_host: str = "https://cloud.langfuse.com"
     langfuse_prompt_cache_ttl: int = 300
+    langfuse_content_capture_ack: bool = False
 
     environment: str
 
@@ -74,6 +75,18 @@ def validate_production_settings() -> None:
             'python -c "from cryptography.fernet import '
             'Fernet; print(Fernet.generate_key().decode())"'
         )
+    if settings.langfuse_secret_key.strip():
+        if not settings.langfuse_public_key.strip():
+            errors.append(
+                "LANGFUSE_PUBLIC_KEY must be set when LANGFUSE_SECRET_KEY is set"
+            )
+        if not settings.langfuse_content_capture_ack:
+            errors.append(
+                "LANGFUSE_CONTENT_CAPTURE_ACK must be true when enabling "
+                "Langfuse in production. Langfuse receives prompt and model "
+                "output content after secret-shaped redaction; only enable it "
+                "after approving that telemetry data flow."
+            )
 
     if errors:
         raise RuntimeError("; ".join(errors))
