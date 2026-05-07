@@ -336,3 +336,31 @@ def test_app_starts_without_observability_config() -> None:
     ):
         app = create_app(redis_client=_NoopRedis())
     assert app is not None
+
+
+def test_lifespan_flushes_langfuse_on_shutdown() -> None:
+    """Application shutdown must drain the Langfuse SDK's event queue. A
+    rolling deploy or SIGTERM during a Railway restart otherwise drops the
+    final batch of traces silently."""
+    from unittest.mock import AsyncMock
+
+    from services import langfuse_service
+
+    flushed = AsyncMock()
+
+    class _StubClient:
+        async def flush(self) -> None:
+            await flushed()
+
+    with (
+        patch.object(observability.settings, "metrics_token", "test-metrics-token"),
+        patch.object(
+            langfuse_service, "get_langfuse_client", return_value=_StubClient()
+        ),
+    ):
+        # Entering the TestClient context fires lifespan startup; exiting
+        # fires lifespan teardown, which is where flush() must run.
+        with TestClient(create_app(redis_client=_NoopRedis())):
+            pass
+
+    flushed.assert_awaited_once()

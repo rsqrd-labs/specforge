@@ -264,6 +264,27 @@ class LangfuseClient:
             logger.error("langfuse.add_to_dataset.failed", exc_info=True)
             return None
 
+    async def flush(self) -> None:
+        """Drain queued events to Langfuse before the consumer thread is
+        torn down. Best-effort; never raises.
+
+        The Langfuse v2 SDK queues trace/span/generation/score/dataset
+        events on a background consumer thread that flushes in batches
+        (default ``LANGFUSE_FLUSH_AT=15`` events or every ``0.5s``). On
+        graceful shutdown — rolling deploys, SIGTERM during a Railway
+        restart, or test process exit — anything still in the queue is
+        dropped when the interpreter unloads. Calling ``client.flush()``
+        forces a synchronous drain. We dispatch it to a worker thread
+        because the SDK call is blocking; we never want shutdown to
+        stall on a slow Langfuse host.
+        """
+        if not self._enabled or self._client is None:
+            return
+        try:
+            await asyncio.to_thread(self._client.flush)
+        except Exception:
+            logger.error("langfuse.flush.failed", exc_info=True)
+
     async def get_prompt(
         self,
         name: str,

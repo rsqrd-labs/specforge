@@ -20,6 +20,7 @@ from routers import credits as credits_router
 from routers import providers as providers_router
 from routers import stage as stage_router
 from routers import workspace as workspace_router
+from services import langfuse_service
 from services.observability import setup_observability
 from services.pipeline.recovery_service import run_recovery_loop
 
@@ -103,6 +104,9 @@ def create_app(redis_client: Redis | None = None) -> FastAPI:
             await task
         except asyncio.CancelledError:
             pass
+        # Drain any queued Langfuse events before the consumer thread is
+        # dropped by interpreter shutdown. No-op when Langfuse is disabled.
+        await langfuse_service.get_langfuse_client().flush()
         if _owns_redis:
             await redis.aclose()
 

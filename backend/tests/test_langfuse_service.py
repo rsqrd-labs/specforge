@@ -510,6 +510,81 @@ async def test_create_trace_redacts_metadata(
 
 
 # ---------------------------------------------------------------------------
+# flush() — graceful-shutdown drain of the SDK consumer-thread queue
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_flush_is_noop_when_unconfigured(monkeypatch: pytest.MonkeyPatch) -> None:
+    """flush() must be safe to call on the disabled client; it must not
+    construct the SDK or raise."""
+    _configure_settings(monkeypatch, langfuse_secret_key="")
+    client = langfuse_service.get_langfuse_client()
+    await client.flush()  # must not raise
+    assert client._client is None
+
+
+@pytest.mark.asyncio
+async def test_flush_is_noop_when_sdk_not_yet_constructed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A configured-but-unused client (no events yet) must flush without
+    forcing SDK construction. There is nothing to drain."""
+    _configure_settings(
+        monkeypatch,
+        langfuse_secret_key="sk-test",
+        langfuse_public_key="pk-test",
+    )
+    with patch("langfuse.Langfuse") as ctor:
+        client = langfuse_service.get_langfuse_client()
+        await client.flush()
+        ctor.assert_not_called()
+        assert client._client is None
+
+
+@pytest.mark.asyncio
+async def test_flush_drains_sdk_when_constructed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """After the SDK has been constructed (e.g. by a prior create_trace),
+    flush must call into client.flush() so queued events are drained
+    before shutdown."""
+    _configure_settings(
+        monkeypatch,
+        langfuse_secret_key="sk-test",
+        langfuse_public_key="pk-test",
+    )
+    fake_sdk = MagicMock()
+    with patch("langfuse.Langfuse", return_value=fake_sdk):
+        client = langfuse_service.get_langfuse_client()
+        # Force SDK construction by issuing one event.
+        await client.create_trace(name="t")
+        fake_sdk.flush.assert_not_called()
+
+        await client.flush()
+        fake_sdk.flush.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_flush_swallows_sdk_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A flush failure during shutdown must never propagate — the worker
+    is already on its way out and re-raising would mask the real reason
+    we're shutting down."""
+    _configure_settings(
+        monkeypatch,
+        langfuse_secret_key="sk-test",
+        langfuse_public_key="pk-test",
+    )
+    fake_sdk = MagicMock()
+    fake_sdk.flush.side_effect = RuntimeError("network down")
+    with patch("langfuse.Langfuse", return_value=fake_sdk):
+        client = langfuse_service.get_langfuse_client()
+        await client.create_trace(name="t")  # construct SDK
+        await client.flush()  # must not raise
+        fake_sdk.flush.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
 # Singleton semantics
 # ---------------------------------------------------------------------------
 
