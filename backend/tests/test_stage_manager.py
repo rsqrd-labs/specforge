@@ -272,6 +272,9 @@ async def test_generate_with_trace_id_creates_langfuse_trace_and_span() -> None:
     span_kwargs = langfuse_client.create_span.await_args.kwargs
     assert span_kwargs["trace_id"] == "trace-1"
     assert span_kwargs["name"] == "stage.spec.generate"
+    generation_kwargs = langfuse_client.create_generation.await_args.kwargs
+    assert generation_kwargs["span_id"] == "span-1"
+    assert generation_kwargs["trace_id"] == "trace-1"
     langfuse_client.end_span.assert_awaited_once_with("span-1")
     langfuse_client.mark_span_failed.assert_not_awaited()
     assert run_eval_background.await_args.kwargs["content_generation_id"] == (
@@ -397,6 +400,57 @@ async def test_generate_marks_langfuse_span_failed_on_client_disconnect() -> Non
     langfuse_client.mark_span_failed.assert_awaited_once()
     assert langfuse_client.mark_span_failed.await_args.args[0] == "span-1"
     assert "interrupted" in str(langfuse_client.mark_span_failed.await_args.args[1])
+
+
+@pytest.mark.asyncio
+async def test_refine_with_trace_id_records_generation_under_stage_span() -> None:
+    from schemas.stage import RefineRequest
+
+    workspace_id = uuid4()
+    stage = _make_stage(workspace_id, "spec", status="draft", content="hello world")
+    workspace = _make_workspace([stage])
+    user = _make_user()
+    svc = StageManager(redis_client=_FakeRedis())
+    db = _MultiQueryDB([stage, workspace])
+    request = RefineRequest(
+        instruction="improve",
+        selection_start=0,
+        selection_end=5,
+        selected_text="hello",
+    )
+    deduction = CreditLedger(id=uuid4(), user_id=user.id, amount=-3, reason="refine")
+
+    langfuse_client = MagicMock()
+    langfuse_client.create_trace = AsyncMock(return_value="trace-1")
+    langfuse_client.create_span = AsyncMock(return_value="span-1")
+    langfuse_client.create_generation = AsyncMock(return_value="generation-1")
+    langfuse_client.end_span = AsyncMock()
+    langfuse_client.mark_span_failed = AsyncMock()
+
+    with (
+        patch(
+            "services.pipeline.stage_manager.credit_service.deduct",
+            new_callable=AsyncMock,
+            return_value=deduction,
+        ),
+        patch("services.pipeline.stage_manager.get_llm") as mock_get_llm,
+        patch(
+            "services.pipeline.stage_manager.langfuse_service.get_langfuse_client",
+            return_value=langfuse_client,
+        ),
+    ):
+        mock_adapter = MagicMock()
+        mock_adapter.complete = AsyncMock(return_value="hi")
+        mock_get_llm.return_value = mock_adapter
+
+        diff = await svc.refine(stage.id, request, user, db, trace_id="trace-1")
+
+    assert diff.proposed == "hi world"
+    generation_kwargs = langfuse_client.create_generation.await_args.kwargs
+    assert generation_kwargs["span_id"] == "span-1"
+    assert generation_kwargs["trace_id"] == "trace-1"
+    langfuse_client.end_span.assert_awaited_once_with("span-1")
+    langfuse_client.mark_span_failed.assert_not_awaited()
 
 
 @pytest.mark.asyncio

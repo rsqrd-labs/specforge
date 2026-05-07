@@ -226,7 +226,7 @@ class StageManager:
 
                     adapter = InstrumentedAdapter(
                         adapter,
-                        span_id=None,
+                        span_id=span_id,
                         trace_id=trace_id,
                         provider=workspace.provider,
                         model=workspace.model,
@@ -425,7 +425,7 @@ class StageManager:
 
                 adapter = InstrumentedAdapter(
                     adapter,
-                    span_id=None,
+                    span_id=span_id,
                     trace_id=trace_id,
                     provider=workspace.provider,
                     model=workspace.model,
