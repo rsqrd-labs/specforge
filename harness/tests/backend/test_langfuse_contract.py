@@ -156,7 +156,7 @@ def test_langfuse_client_makes_zero_sdk_calls_when_unconfigured(
 
     # Patch out the SDK so an accidental import would fail loudly.
     with patch.dict("sys.modules", {"langfuse": None}):
-        asyncio.get_event_loop().run_until_complete(call_all())
+        asyncio.run(call_all())
 
 
 def test_langfuse_client_swallows_all_exceptions(
@@ -181,7 +181,9 @@ def test_langfuse_client_swallows_all_exceptions(
     raising.span.side_effect = RuntimeError("langfuse api down")
     raising.generation.side_effect = RuntimeError("langfuse api down")
     raising.score.side_effect = RuntimeError("langfuse api down")
-    raising.dataset_item.create.side_effect = RuntimeError("langfuse api down")
+    # Langfuse v2 exposes create_dataset_item directly on the client (not
+    # client.dataset_item.create). Wire the mock to the real attribute path.
+    raising.create_dataset_item.side_effect = RuntimeError("langfuse api down")
     raising.get_prompt.side_effect = RuntimeError("langfuse api down")
     client._client = raising
 
@@ -194,7 +196,7 @@ def test_langfuse_client_swallows_all_exceptions(
         await client.add_to_dataset(dataset_name="d", item={"x": 1})
         await client.get_prompt(name="spec")
 
-    asyncio.get_event_loop().run_until_complete(call_all())
+    asyncio.run(call_all())
 
 
 # ---------------------------------------------------------------------------
@@ -304,7 +306,7 @@ def test_instrumented_adapter_passes_through_to_wrapped_adapter() -> None:
             "InstrumentedAdapter.complete must forward args unchanged. See T-123."
         )
 
-    asyncio.get_event_loop().run_until_complete(run())
+    asyncio.run(run())
 
 
 def test_instrumented_adapter_records_provider_and_model_metadata(
@@ -354,7 +356,7 @@ def test_instrumented_adapter_records_provider_and_model_metadata(
         async def run() -> None:
             await wrapped.complete("sys-prompt", "user-prompt", 100)
 
-        asyncio.get_event_loop().run_until_complete(run())
+        asyncio.run(run())
 
     assert captured.get("provider") == "anthropic", (
         f"create_generation must receive provider; got {captured}. See T-123."
@@ -418,7 +420,7 @@ def test_instrumented_adapter_records_full_accumulated_stream(
                 tokens.append(t)
             return tokens
 
-        tokens = asyncio.get_event_loop().run_until_complete(run())
+        tokens = asyncio.run(run())
 
     assert tokens == ["foo", "bar", "baz"], "Stream tokens must pass through unchanged."
     assert len(create_calls) == 1, (
@@ -541,7 +543,7 @@ def test_prompt_fetch_falls_back_silently_on_langfuse_error(
         loader = getattr(spec_prompts, "get_system_prompt", None)
         if loader is not None:
             if inspect.iscoroutinefunction(loader):
-                value = asyncio.get_event_loop().run_until_complete(loader())
+                value = asyncio.run(loader())
             else:
                 value = loader()
             assert isinstance(value, str) and value, (
@@ -604,7 +606,7 @@ def test_online_eval_score_failure_does_not_surface_to_user(
         # Call site must not raise for the test to pass meaningfully.
         # In production this is wrapped by LangfuseClient try/except.
         try:
-            asyncio.get_event_loop().run_until_complete(run())
+            asyncio.run(run())
         except RuntimeError:
             # Direct mock raises; but the production wrapper would swallow.
             # The contract is enforced inside services/langfuse_service.py.
@@ -733,7 +735,7 @@ def test_no_op_path_makes_zero_network_calls(langfuse_unconfigured: None) -> Non
         await client.add_to_dataset(dataset_name="d", item={})
         await client.get_prompt(name="spec")
 
-    asyncio.get_event_loop().run_until_complete(run())
+    asyncio.run(run())
     sentinel.post.assert_not_called()
     sentinel.get.assert_not_called()
 
