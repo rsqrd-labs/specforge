@@ -59,7 +59,7 @@ async def build_prompt(
                 content = content[:_MAX_UPSTREAM_CHARS]
             deps[dep_type] = content
 
-    return module.SYSTEM_PROMPT, module.build_user_prompt(deps)
+    return await module.get_system_prompt(), module.build_user_prompt(deps)
 
 
 async def _fetch_stage_content(

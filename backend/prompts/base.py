@@ -1,3 +1,10 @@
+from __future__ import annotations
+
+import time
+
+from config import settings
+from services import langfuse_service
+
 ASDD_METHODOLOGY_OVERVIEW = """
 ASDD (AI-Spec-Driven Development) is a methodology where every implementation
 decision flows from a canonical specification pipeline: Spec → Plan → Harness →
@@ -43,6 +50,22 @@ Professional output rules:
 - Keep terminology consistent across the pipeline. Requirement IDs, API names,
   model names, file paths, and test names must remain stable once introduced.
 """.strip()
+
+_PROMPT_CACHE: dict[str, tuple[float, str]] = {}
+
+
+async def load_prompt(name: str, fallback: str) -> str:
+    now = time.time()
+    cached = _PROMPT_CACHE.get(name)
+    if cached and now - cached[0] < settings.langfuse_prompt_cache_ttl:
+        return cached[1]
+    try:
+        remote = await langfuse_service.get_langfuse_client().get_prompt(name)
+    except Exception:
+        remote = None
+    value = remote if isinstance(remote, str) and remote else fallback
+    _PROMPT_CACHE[name] = (now, value)
+    return value
 
 
 def wrap_untrusted_content(label: str, content: str) -> str:

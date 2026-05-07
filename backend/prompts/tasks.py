@@ -2,6 +2,7 @@ from prompts.base import (
     ASDD_METHODOLOGY_OVERVIEW,
     PROFESSIONAL_OUTPUT_RULES,
     SECURITY_AND_PRIVACY_RULES,
+    load_prompt,
     wrap_untrusted_content,
 )
 
@@ -48,6 +49,10 @@ Task design rules:
 - Preserve traceability: requirement IDs, test names, file paths, and dependencies
   should be stable and easy to audit.
 """
+
+
+async def get_system_prompt() -> str:
+    return await load_prompt("specforge.tasks.system", SYSTEM_PROMPT)
 
 
 def build_user_prompt(dependencies: dict[str, str]) -> str:

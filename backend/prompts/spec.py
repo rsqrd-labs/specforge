@@ -2,6 +2,7 @@ from prompts.base import (
     ASDD_METHODOLOGY_OVERVIEW,
     PROFESSIONAL_OUTPUT_RULES,
     SECURITY_AND_PRIVACY_RULES,
+    load_prompt,
     wrap_untrusted_content,
 )
 
@@ -46,6 +47,10 @@ Specification rules:
 - Do not include code, framework choices, database engines, cloud vendors, or file
   structures unless the user explicitly states them as product constraints.
 """
+
+
+async def get_system_prompt() -> str:
+    return await load_prompt("specforge.spec.system", SYSTEM_PROMPT)
 
 
 def build_user_prompt(dependencies: dict[str, str]) -> str:
