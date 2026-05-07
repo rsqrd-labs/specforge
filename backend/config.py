@@ -22,6 +22,14 @@ class Settings(BaseSettings):
     grafana_otlp_endpoint: str = ""
     grafana_otlp_token: str = ""
 
+    # LLM observability (optional). Leave langfuse_secret_key empty to disable
+    # the Langfuse integration entirely; when empty the SDK is never imported
+    # and zero network traffic is sent to a Langfuse host.
+    langfuse_secret_key: str = ""
+    langfuse_public_key: str = ""
+    langfuse_host: str = "https://cloud.langfuse.com"
+    langfuse_prompt_cache_ttl: int = 300
+
     environment: str
 
     # Empty string disables token auth; fall back to localhost-only IP check

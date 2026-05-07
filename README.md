@@ -171,6 +171,10 @@ cp frontend/.env.example frontend/.env
 | `SENTRY_DSN` | Optional backend Sentry DSN. |
 | `GRAFANA_OTLP_ENDPOINT` | Optional OTLP trace endpoint. |
 | `GRAFANA_OTLP_TOKEN` | Optional OTLP auth token. |
+| `LANGFUSE_SECRET_KEY` | Optional. Enables LLM-observability traces via Langfuse. Leave blank to disable. |
+| `LANGFUSE_PUBLIC_KEY` | Optional. Required only when `LANGFUSE_SECRET_KEY` is set. |
+| `LANGFUSE_HOST` | Optional. Defaults to `https://cloud.langfuse.com`. Point to a self-hosted Langfuse instance to keep prompts on-premises. |
+| `LANGFUSE_PROMPT_CACHE_TTL` | Optional. In-process TTL (seconds) for Langfuse-managed prompt templates. Defaults to `300`. |
 | `ENVIRONMENT` | Runtime environment name, for example `development` or `production`. |
 
 ### Frontend Variables
@@ -437,8 +441,12 @@ Optional integrations:
 - Frontend Sentry through `VITE_SENTRY_DSN`.
 - OTLP tracing through `GRAFANA_OTLP_ENDPOINT` and `GRAFANA_OTLP_TOKEN`.
 - Prometheus scraping through `/metrics`.
+- LLM-call observability through Langfuse (`LANGFUSE_SECRET_KEY`,
+  `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_HOST`). With `LANGFUSE_SECRET_KEY` blank the
+  Langfuse SDK is never imported and the application behaves identically to a
+  build without Langfuse. No user-facing feature depends on Langfuse availability.
 
-Sensitive values are redacted before they are emitted through logging and Sentry paths.
+Sensitive values are redacted before they are emitted through logging, Sentry, or Langfuse paths.
 
 ## Operational Notes
 

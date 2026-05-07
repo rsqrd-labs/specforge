@@ -4688,8 +4688,8 @@ Install the Langfuse Python SDK and add four optional configuration fields to `S
 - `README.md` Observability section mentions optional Langfuse integration
 
 **Steps:**
-1. Add `langfuse==2.*` to `backend/pyproject.toml` `[project] dependencies` (or `requirements.txt`).
-2. Run `uv sync` in `backend/` and confirm `uv run python -c "import langfuse"` exits 0.
+1. Add `langfuse>=2.60,<3` to `backend/pyproject.toml` `[project] dependencies` (use `uv add 'langfuse>=2.60,<3'`). Pin rationale: see Plan §15.9 Q5. v3/v4 moved to an OTel context-manager API and require bumping `opentelemetry-instrumentation-* == 0.49.*`; both are deferred follow-ups.
+2. Run `uv sync` in `backend/` and confirm `uv run python -c "import langfuse; print(langfuse.__version__)"` prints `2.60.x`.
 3. In `backend/config.py`, append the four new fields to `Settings` after the existing observability fields (`grafana_otlp_token`). Each must have a safe default and never be required.
 4. In `backend/.env.example`, add the four variables under a new `# LLM Observability (optional)` section. Comment: `# Leave LANGFUSE_SECRET_KEY blank to disable instrumentation.`
 5. In `README.md`, add four rows to the Backend Variables table and add a paragraph in the Observability section explaining: "Langfuse is an optional LLM-observability sink. With `LANGFUSE_SECRET_KEY` unset the application runs identically to today."

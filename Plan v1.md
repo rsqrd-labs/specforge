@@ -1821,6 +1821,8 @@ LANGFUSE_PROMPT_CACHE_TTL=300
 
 **Q4 — Are eval-judge calls themselves traced?** Yes — they go through `get_llm()` and so are wrapped by the same `InstrumentedAdapter` pattern. The eval generation is recorded as a child of the same span as the content it scored, so the score lands on the right generation in the Langfuse view.
 
+**Q5 — Why pin to `langfuse>=2.60,<3` rather than the latest v4 line?** The v2 line exposes the imperative `client.trace() / .span() / .generation() / .score() / .get_prompt() / .create_dataset_item()` API that the `LangfuseClient` wrapper and `InstrumentedAdapter` are built on. v3 and v4 moved the SDK to an OpenTelemetry context-manager pattern (`with langfuse.start_as_current_observation(...) as span:`), which would require redesigning the wrapper and changing every call site. Additionally, v3+ requires `opentelemetry-api>=1.33.1`, which conflicts with the project's pinned `opentelemetry-instrumentation-fastapi==0.49.*` and `opentelemetry-instrumentation-sqlalchemy==0.49.*`. v2.60 is actively maintained (last release Sept 2025). Migration to v3/v4 is a separate, deferred follow-up that requires (a) bumping the OpenTelemetry instrumentation packages with their own validation cycle in production traces, and (b) reshaping `InstrumentedAdapter` to use OTel context managers. Out of scope for Phase 11.
+
 ---
 
-_SpecForge V1 PLAN.md · Version 1.6.0 · Updated 2026-05-07 with Phase 11 Langfuse LLM observability_
+_SpecForge V1 PLAN.md · Version 1.6.0 · Updated 2026-05-07 with Phase 11 Langfuse LLM observability (langfuse v2.60 line)_

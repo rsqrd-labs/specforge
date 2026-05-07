@@ -1023,7 +1023,12 @@ structlog==24.*
 sentry-sdk[fastapi]==2.*
 
 # LLM observability (optional — no-op when LANGFUSE_SECRET_KEY is unset)
-langfuse==2.*
+# Pinned to the v2 line: v2 exposes the imperative trace/span/generation/score
+# API the wrapper composes around. v3+ moved to an OpenTelemetry context-manager
+# API and pulls a newer opentelemetry-api that conflicts with the project's
+# pinned opentelemetry-instrumentation-* 0.49.* line. v3/v4 migration is tracked
+# as a Plan §15.9 follow-up.
+langfuse>=2.60,<3
 
 # Utilities
 httpx==0.28.*
