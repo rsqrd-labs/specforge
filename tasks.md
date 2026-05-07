@@ -4645,3 +4645,678 @@ Migration `0003_credit_ledger_unique_refund.py` adds `UNIQUE(user_id, reason)` t
 ---
 
 _tasks.md · SpecForge V1 · Version 1.8.0 · Updated 2026-05-04 with Phase 10 production readiness audit remediations T-114 through T-120_
+
+---
+
+## Phase 11 — Langfuse LLM Observability
+
+> Adds an **optional** complementary LLM observability layer alongside the existing Grafana Cloud + Sentry stack. Architecture lives in `SpecForge — Complete System Architecture.md` §8a. Plan rationale lives in `Plan v1.md` §15. Every task here maps to a contract in `harness/tests/backend/test_langfuse_contract.py`.
+>
+> **Non-negotiables for every task in this phase:**
+> 1. The integration is gated by `LANGFUSE_SECRET_KEY`. When unset/empty, zero Langfuse SDK calls are made. The check lives only in `services/langfuse_service.py`.
+> 2. `BaseLLMAdapter` interface remains unchanged. Provider adapters never import Langfuse.
+> 3. All Langfuse calls are exception-swallowing — a Langfuse outage cannot break stage generation, refine, eval, or credits.
+> 4. Sensitive data redaction reuses `services.observability.redact_sensitive_data()`. No new regex patterns.
+> 5. Streams are accumulated and recorded once per call, never per token.
+> 6. CI must remain green: 172+ unit tests + 26 harness CI tests + new Langfuse contract tests.
+
+---
+
+### T-121: Add Langfuse to Requirements and Config
+
+**Description:**
+Install the Langfuse Python SDK and add four optional configuration fields to `Settings`. Document the new variables in `.env.example` and the README. The application must continue to start and operate normally when none of the new variables are set.
+
+**Severity:** Setup — prerequisite for all subsequent Phase 11 work.
+
+**Inputs:**
+- `backend/pyproject.toml` (or `backend/requirements.txt`)
+- `backend/config.py` — `Settings`
+- `backend/.env.example`
+- `README.md` — Backend Variables table and Observability section
+- `harness/tests/backend/test_langfuse_contract.py` — `test_langfuse_is_in_backend_requirements`, `test_settings_has_optional_langfuse_fields`
+
+**Outputs:**
+- `langfuse==2.*` added to `pyproject.toml` / `requirements.txt`
+- Four new optional fields on `Settings`:
+  - `langfuse_secret_key: str = ""`
+  - `langfuse_public_key: str = ""`
+  - `langfuse_host: str = "https://cloud.langfuse.com"`
+  - `langfuse_prompt_cache_ttl: int = 300`
+- `.env.example` updated with documented blanks for each
+- `README.md` Backend Variables table extended
+- `README.md` Observability section mentions optional Langfuse integration
+
+**Steps:**
+1. Add `langfuse==2.*` to `backend/pyproject.toml` `[project] dependencies` (or `requirements.txt`).
+2. Run `uv sync` in `backend/` and confirm `uv run python -c "import langfuse"` exits 0.
+3. In `backend/config.py`, append the four new fields to `Settings` after the existing observability fields (`grafana_otlp_token`). Each must have a safe default and never be required.
+4. In `backend/.env.example`, add the four variables under a new `# LLM Observability (optional)` section. Comment: `# Leave LANGFUSE_SECRET_KEY blank to disable instrumentation.`
+5. In `README.md`, add four rows to the Backend Variables table and add a paragraph in the Observability section explaining: "Langfuse is an optional LLM-observability sink. With `LANGFUSE_SECRET_KEY` unset the application runs identically to today."
+6. Run `uv run python -c "from main import app; print('ok')"` with **all four Langfuse variables unset** to confirm the app starts.
+7. Run `uv run pytest tests/ -q` — all 172+ existing tests must pass.
+
+**Acceptance Criteria:**
+- `uv run python -c "import langfuse"` exits 0.
+- `Settings.model_fields` contains `langfuse_secret_key`, `langfuse_public_key`, `langfuse_host`, `langfuse_prompt_cache_ttl`.
+- The app starts cleanly with no Langfuse env vars set.
+- All existing 172+ unit tests pass.
+- Harness tests `test_langfuse_is_in_backend_requirements` and `test_settings_has_optional_langfuse_fields` pass.
+
+**Dependencies:** none (entrypoint for Phase 11)
+
+---
+
+### T-122: Implement LangfuseClient Service Wrapper
+
+**Description:**
+Create the single integration point `backend/services/langfuse_service.py` containing `LangfuseClient` and a `get_langfuse_client()` singleton factory. The client provides one no-op implementation when `LANGFUSE_SECRET_KEY` is empty and a real SDK-backed implementation when configured. Every public method is async-safe and exception-swallowing — errors are logged via structlog and never re-raised.
+
+**Severity:** Foundational — every subsequent task depends on this module.
+
+**Inputs:**
+- `backend/services/observability.py` — `redact_sensitive_data()`
+- `backend/config.py` — `settings.langfuse_*` (from T-121)
+- `harness/tests/backend/test_langfuse_contract.py` — `test_langfuse_service_module_exists`, `test_langfuse_client_makes_zero_sdk_calls_when_unconfigured`, `test_langfuse_client_swallows_all_exceptions`, `test_langfuse_service_redacts_sensitive_data_via_observability_helper`, `test_no_op_path_makes_zero_network_calls`
+
+**Outputs:**
+- New `backend/services/langfuse_service.py` exporting `LangfuseClient` and `get_langfuse_client()`
+- Six public async methods, each redacting input via `redact_sensitive_data()` and wrapped in `try/except Exception:` with a `logger.error(...)`:
+  - `create_trace(name, metadata) -> str | None`
+  - `create_span(trace_id, name, metadata) -> str | None`
+  - `create_generation(span_id, **kwargs) -> str | None`
+  - `score_generation(generation_id, name, value) -> None`
+  - `add_to_dataset(dataset_name, item) -> None`
+  - `get_prompt(name, version=None) -> str | None`
+- Unit tests in `backend/tests/test_langfuse_service.py` covering both configured and unconfigured paths
+
+**Steps:**
+1. Create `backend/services/langfuse_service.py`:
+   - Import `redact_sensitive_data` from `services.observability`.
+   - Define `class LangfuseClient` with `_enabled = bool(settings.langfuse_secret_key)`. SDK client is constructed lazily inside `_ensure_client()`; when disabled, return `None` and never import `langfuse`.
+   - Each public method: redact inputs first, then `client = self._ensure_client(); if client is None: return None`, then `try/except Exception:` around the SDK call.
+   - Module-level `_INSTANCE: LangfuseClient | None = None` and `def get_langfuse_client() -> LangfuseClient` returning the singleton.
+2. Create `backend/tests/test_langfuse_service.py`:
+   - Test the no-op path: `monkeypatch.setenv("LANGFUSE_SECRET_KEY", "")`, reload config, assert all six methods return without raising and never construct the SDK client.
+   - Test the configured path: replace `client._client` with a `MagicMock` whose methods raise. Assert all six public methods still return without raising.
+   - Test redaction: pass a string containing `sk-ant-abc123def456` to `create_generation` as part of `user`. Assert the SDK call (mocked) receives a redacted version.
+3. Run `uv run pytest tests/test_langfuse_service.py -q` — must pass.
+4. Run `uv run pytest tests/ -q` — all 172+ existing tests must pass (new tests bring the count up).
+5. Run `uv run ruff check . && uv run black --check .`.
+6. Run harness: `uv run pytest ../harness/tests/backend/test_langfuse_contract.py -k "langfuse_service or langfuse_client or no_op" -q`.
+
+**Acceptance Criteria:**
+- `services/langfuse_service.py` exists, defines `LangfuseClient` and `get_langfuse_client()`.
+- With `LANGFUSE_SECRET_KEY=""`, every public method returns without raising and `_client` remains `None` after the calls (proving the SDK is never imported).
+- With a configured key but a raising SDK mock, every public method returns without raising.
+- The module imports `redact_sensitive_data` from `services.observability`. It does not redefine `_SECRET_PATTERNS` or any redaction regex.
+- All existing tests pass; ruff and black are clean.
+- Harness tests `test_langfuse_service_module_exists`, `test_langfuse_client_makes_zero_sdk_calls_when_unconfigured`, `test_langfuse_client_swallows_all_exceptions`, `test_langfuse_service_redacts_sensitive_data_via_observability_helper`, and `test_no_op_path_makes_zero_network_calls` all pass.
+
+**Dependencies:** T-121
+
+---
+
+### T-123: Implement InstrumentedAdapter
+
+**Description:**
+Create `backend/services/llm/instrumented_adapter.py` defining `InstrumentedAdapter`, a `BaseLLMAdapter` subclass that composes any other `BaseLLMAdapter` and records each call as a Langfuse `generation`. The wrapper must be a true pass-through: `stream()` yields identical tokens, `complete()` returns the identical string, both methods preserve their existing signatures. For `stream()`, the full response is accumulated and recorded **once** after the stream closes — never token-by-token.
+
+**Severity:** Critical — this is the integration point where prompts and outputs are captured.
+
+**Inputs:**
+- `backend/services/llm/base.py` — `BaseLLMAdapter`
+- `backend/services/langfuse_service.py` (from T-122)
+- `backend/services/observability.py` — `redact_sensitive_data()`
+- `harness/tests/backend/test_langfuse_contract.py` — `test_base_llm_adapter_signature_unchanged`, `test_provider_adapters_do_not_import_langfuse`, `test_instrumented_adapter_module_exists`, `test_instrumented_adapter_passes_through_to_wrapped_adapter`, `test_instrumented_adapter_records_provider_and_model_metadata`, `test_instrumented_adapter_records_full_accumulated_stream`, `test_existing_adapter_tests_remain_green_when_instrumentation_enabled`
+
+**Outputs:**
+- New `backend/services/llm/instrumented_adapter.py` exporting `InstrumentedAdapter(BaseLLMAdapter)`
+- Constructor: `(wrapped: BaseLLMAdapter, *, span_id: str | None, provider: str, model: str, stage_type: str, action: str)`
+- `stream()`: accumulates all tokens, yields each unchanged, calls `langfuse_service.create_generation(...)` once after the stream closes with the full accumulated output, model, provider, system+user prompts (redacted), latency, and token counts (when available)
+- `complete()`: records latency around the wrapped call, calls `create_generation(...)` once with the input/output and metadata
+- Unit tests in `backend/tests/test_instrumented_adapter.py`
+
+**Steps:**
+1. Create `backend/services/llm/instrumented_adapter.py`:
+   - Subclass `BaseLLMAdapter`. **Do not modify `BaseLLMAdapter` itself.**
+   - In `stream()`: open a `try/finally` block. Record `t0 = time.perf_counter()`. Iterate the wrapped adapter's stream, append each token to a list, `yield` each token to the caller. On stream completion (or in `finally` on early exit), call `await langfuse_service.create_generation(span_id=..., model=..., provider=..., input={"system": ..., "user": ...}, output="".join(accumulated), latency_ms=..., metadata={"stage_type": ..., "action": ...})`. Wrap that call in its own `try/except Exception:` so a Langfuse failure cannot bleed into the generator path.
+   - In `complete()`: same recording pattern, no streaming.
+   - Inputs (system, user, output) must be passed through `redact_sensitive_data()` before being submitted (this is also done inside `LangfuseClient`, but defense-in-depth here keeps the wrapper safe even if `LangfuseClient` is bypassed).
+2. Verify provider adapter files are unchanged: `git diff backend/services/llm/anthropic_adapter.py backend/services/llm/openai_adapter.py backend/services/llm/google_adapter.py` must return no output.
+3. Create `backend/tests/test_instrumented_adapter.py`:
+   - Define a `FakeAdapter` subclass of `BaseLLMAdapter` with deterministic outputs.
+   - Test pass-through: stream yields identical tokens; complete returns identical string.
+   - Test single-recording: with `stream()` over 5 tokens, exactly one `create_generation` call is made with `output == "".join(tokens)`.
+   - Test span_id forwarding, provider/model metadata, stage_type, action.
+   - Test that an exception inside `create_generation` does not break the stream.
+4. Run `uv run pytest tests/test_instrumented_adapter.py -q`.
+5. Run `uv run pytest tests/ -q` — all 172+ existing tests + new tests pass.
+6. Run `uv run ruff check . && uv run black --check .`.
+7. Run harness tests: `uv run pytest ../harness/tests/backend/test_langfuse_contract.py -k "instrumented or base_llm or provider_adapters or accumulated" -q`.
+
+**Acceptance Criteria:**
+- `BaseLLMAdapter.stream()` and `.complete()` signatures unchanged (parameters: `self, system, user, max_tokens`).
+- No reference to "langfuse" in `anthropic_adapter.py`, `openai_adapter.py`, or `google_adapter.py`.
+- `InstrumentedAdapter.stream()` yields the same token sequence as the wrapped adapter.
+- `InstrumentedAdapter.complete()` returns the same string as the wrapped adapter and forwards args unchanged.
+- For a stream that yields N tokens, `create_generation` is called exactly **once** with the full accumulated output.
+- Exceptions inside `create_generation` do not propagate to the caller.
+- All existing tests pass; ruff and black are clean.
+- All listed harness contract tests pass.
+
+**Dependencies:** T-122
+
+---
+
+### T-124: Wire Trace ID Propagation Through Stage Manager
+
+**Description:**
+Add an optional `trace_id: str | None = None` keyword parameter to `StageManager.generate()`, `.refine()`, and `.regenerate()`. Generate the `trace_id` (a `uuid4()` string) at the start of each request inside `routers/stage.py`. Pass it through to the stage manager. When a `trace_id` is present, the stage manager wraps the adapter returned by `get_llm()` with `InstrumentedAdapter` before calling `stream()` or `complete()`. When `trace_id` is `None`, behaviour is unchanged.
+
+**Severity:** Critical — this is how Langfuse traces get associated with the right adapter calls.
+
+**Inputs:**
+- `backend/services/pipeline/stage_manager.py` — `generate`, `refine`, `regenerate`
+- `backend/routers/stage.py` — `_stream_stage()` and any helper that currently calls `stage_manager.generate/refine/regenerate`
+- `backend/services/llm/instrumented_adapter.py` (from T-123)
+- `harness/tests/backend/test_langfuse_contract.py` — `test_stage_manager_generate_accepts_trace_id`, `test_stage_manager_refine_accepts_trace_id`
+
+**Outputs:**
+- Updated `StageManager.generate(self, stage_id, user, db, *, trace_id: str | None = None)`
+- Updated `StageManager.refine(self, stage_id, request, user, db, *, trace_id: str | None = None)`
+- Updated `StageManager.regenerate(...)` (if a separate method exists; otherwise the same generate path)
+- `routers/stage.py` generates `trace_id = str(uuid4())` at the top of each handler and passes it to the manager
+- Existing test suite passes unchanged because `trace_id` defaults to `None`
+
+**Steps:**
+1. In `backend/services/pipeline/stage_manager.py`:
+   - Add `trace_id: str | None = None` as a keyword-only parameter (after `db`) to `generate`, `refine`, and any `regenerate` method.
+   - Inside `generate()`, after `adapter = get_llm(workspace.provider, workspace.model)`, add:
+     ```python
+     if trace_id:
+         from services.llm.instrumented_adapter import InstrumentedAdapter
+         adapter = InstrumentedAdapter(
+             adapter,
+             span_id=None,  # populated by T-125
+             provider=workspace.provider,
+             model=workspace.model,
+             stage_type=stage.type,
+             action="generate",
+         )
+     ```
+   - Apply the same pattern in `refine` (action="refine") and `regenerate` (action="regenerate").
+2. In `backend/routers/stage.py`:
+   - At the top of the `generate_stage`, `regenerate_stage`, and `refine_stage` handlers (or the shared `_stream_stage` helper), generate `trace_id = str(uuid4())`.
+   - Pass `trace_id=trace_id` to the corresponding `stage_manager` call.
+3. Run `uv run pytest tests/ -q` — all 172+ existing tests must pass unchanged because `trace_id` is optional.
+4. Run `uv run ruff check . && uv run black --check .`.
+5. Run harness: `uv run pytest ../harness/tests/backend/test_langfuse_contract.py -k "trace_id" -q`.
+
+**Acceptance Criteria:**
+- `inspect.signature(StageManager.generate).parameters` includes `trace_id` with default `None`.
+- `inspect.signature(StageManager.refine).parameters` includes `trace_id` with default `None`.
+- All 172+ existing tests pass without modification (because `trace_id` is optional).
+- When called with `trace_id=None` (the existing call sites in tests), the wrapped `InstrumentedAdapter` is **not** instantiated — verified by mocking `InstrumentedAdapter` and asserting it was not called.
+- Harness tests `test_stage_manager_generate_accepts_trace_id` and `test_stage_manager_refine_accepts_trace_id` pass.
+
+**Dependencies:** T-123
+
+---
+
+### T-125: Create Langfuse Traces and Spans Per Stage Generation
+
+**Description:**
+Inside `StageManager.generate()`, when `trace_id` is present, call `langfuse_service.create_trace()` once at generation start with `workspace_id`, `user_id`, `stage_type`, and `action` as metadata. Then call `create_span()` for the stage and pass the resulting `span_id` into `InstrumentedAdapter` so each generation lands inside the right span. On stream completion, mark the span as ended. On stream failure, mark the span as failed. All Langfuse calls must be exception-swallowing — a Langfuse failure cannot break the streaming flow.
+
+**Severity:** Critical — completes the trace hierarchy described in Architecture §8a.
+
+**Inputs:**
+- `backend/services/pipeline/stage_manager.py` — `generate`, `refine`, `regenerate`
+- `backend/services/langfuse_service.py` (from T-122)
+- `backend/services/llm/instrumented_adapter.py` (from T-123)
+- `harness/tests/backend/test_langfuse_contract.py` — `test_stage_manager_creates_langfuse_trace_when_trace_id_present`
+
+**Outputs:**
+- `StageManager.generate()` calls `create_trace()` and `create_span()` when `trace_id` is present
+- Span ID is forwarded into `InstrumentedAdapter`
+- Span end / failure mark on completion / error
+- Updated unit tests in `backend/tests/test_stage_manager.py` covering the happy path and the Langfuse-failure path
+
+**Steps:**
+1. In `backend/services/pipeline/stage_manager.py`:
+   - Import `langfuse_service` (a top-level module import is fine because the no-op path is free).
+   - At the top of `generate()` after the dependency assertion and credit deduction, when `trace_id` is present:
+     ```python
+     await langfuse_service.get_langfuse_client().create_trace(
+         name=f"workspace.{workspace.id}",
+         metadata={
+             "trace_id": trace_id,
+             "workspace_id": str(workspace.id),
+             "user_id": str(user.id),
+             "stage_type": stage.type,
+             "action": "generate",
+         },
+     )
+     span_id = await langfuse_service.get_langfuse_client().create_span(
+         trace_id=trace_id,
+         name=f"stage.{stage.type}.generate",
+         metadata={"workspace_id": str(workspace.id)},
+     )
+     ```
+   - Pass `span_id` into `InstrumentedAdapter(...)`.
+   - On generation success, the LangfuseClient SDK call (e.g. `span.end()`) is best wrapped inside the LangfuseClient itself; the manager just calls a fire-and-forget `langfuse_service.get_langfuse_client().end_span(span_id)` if implemented, or relies on the SDK's auto-end.
+   - On exception inside the streaming block, a similar `mark_span_failed(span_id, exc)` call (best-effort).
+2. Apply the same pattern to `refine` and `regenerate`.
+3. Add a unit test in `backend/tests/test_stage_manager.py`:
+   - Patch `langfuse_service.get_langfuse_client` to return a `MagicMock` whose `create_trace` and `create_span` are `AsyncMock`s.
+   - Call `stage_manager.generate(..., trace_id="t-1")` against the existing fake DB/redis fixtures.
+   - Assert `create_trace.assert_awaited_once()` with the correct metadata.
+   - Assert `create_span.assert_awaited_once()`.
+   - Add a separate test where `create_trace` raises `RuntimeError("langfuse down")` — the generation must still complete successfully (the Langfuse error is swallowed inside `LangfuseClient`).
+4. Run `uv run pytest tests/test_stage_manager.py -q`.
+5. Run `uv run pytest tests/ -q` — all existing tests pass.
+6. Run `uv run ruff check . && uv run black --check .`.
+7. Run harness: `uv run pytest ../harness/tests/backend/test_langfuse_contract.py -k "creates_langfuse_trace" -q`.
+
+**Acceptance Criteria:**
+- When `trace_id` is non-`None`, `create_trace` is called exactly once with `workspace_id`, `user_id`, `stage_type`, and `action` in metadata.
+- When `trace_id` is non-`None`, `create_span` is called exactly once for the stage.
+- A simulated Langfuse failure (e.g. `create_trace` raises) does **not** abort the stream — the generation still completes and content is persisted.
+- All existing tests pass; ruff and black are clean.
+- Harness test `test_stage_manager_creates_langfuse_trace_when_trace_id_present` passes.
+
+**Dependencies:** T-124
+
+---
+
+### T-126: Register Prompt Templates with Langfuse
+
+**Description:**
+Add a runtime prompt-loader pattern that consults Langfuse on first use, caches the result in process memory for `LANGFUSE_PROMPT_CACHE_TTL` seconds, and falls back **silently** to the local `SYSTEM_PROMPT` constant when Langfuse is unconfigured, returns a non-200, or returns `None`. The fallback is invisible to callers — they always receive a string. Build a small loader in `prompts/base.py` and use it from each stage's prompt module.
+
+**Severity:** Medium — enables the prompt-versioning story but the local fallback ensures the system works without it.
+
+**Inputs:**
+- `backend/prompts/base.py`, `prompts/spec.py`, `prompts/plan.py`, `prompts/harness.py`, `prompts/tasks.py`
+- `backend/services/langfuse_service.py` (from T-122)
+- `backend/config.py` — `langfuse_prompt_cache_ttl`
+- `harness/tests/backend/test_langfuse_contract.py` — `test_prompt_builders_use_langfuse_with_local_fallback`, `test_prompt_fetch_falls_back_silently_on_langfuse_error`
+
+**Outputs:**
+- `prompts/base.py` exports `async def load_prompt(name: str, fallback: str) -> str` with TTL cache
+- Each `prompts/{stage}.py` keeps `SYSTEM_PROMPT = "..."` as the local fallback **and** exposes `async def get_system_prompt() -> str` that returns `await load_prompt("specforge.{stage}.system", SYSTEM_PROMPT)`
+- Callers (`prompts/__init__.py`, `prompt_builder.py`, etc.) updated to use `get_system_prompt()` where appropriate; otherwise `SYSTEM_PROMPT` continues to work
+- Unit tests covering both the cache-hit path and the Langfuse-unavailable path
+
+**Steps:**
+1. In `backend/prompts/base.py`:
+   - Add a module-level `_PROMPT_CACHE: dict[str, tuple[float, str]] = {}` for in-memory TTL caching.
+   - Define:
+     ```python
+     async def load_prompt(name: str, fallback: str) -> str:
+         now = time.time()
+         cached = _PROMPT_CACHE.get(name)
+         if cached and now - cached[0] < settings.langfuse_prompt_cache_ttl:
+             return cached[1]
+         remote = await get_langfuse_client().get_prompt(name)
+         value = remote if isinstance(remote, str) and remote else fallback
+         _PROMPT_CACHE[name] = (now, value)
+         return value
+     ```
+2. In each `backend/prompts/{stage}.py`:
+   - Keep the existing `SYSTEM_PROMPT = "..."` constant (this is the canonical fallback).
+   - Add `async def get_system_prompt() -> str: return await load_prompt(f"specforge.{stage}.system", SYSTEM_PROMPT)`.
+3. In `backend/services/pipeline/prompt_builder.py` (or wherever the system prompt is composed), use the async loader. If the call site is currently sync, switch it to await the loader; the build_prompt call is already async.
+4. Add unit tests in `backend/tests/test_prompts.py`:
+   - With Langfuse unconfigured, `get_system_prompt()` returns the local `SYSTEM_PROMPT`.
+   - With Langfuse configured but `get_prompt` returning `None`, the local fallback is used.
+   - With Langfuse configured and `get_prompt` returning `"REMOTE"`, the loader returns `"REMOTE"`.
+   - The cache is honoured (a second call within TTL does not invoke `get_prompt` again).
+5. Run `uv run pytest tests/test_prompts.py -q`.
+6. Run `uv run pytest tests/ -q` — all 172+ existing tests still pass.
+7. Run `uv run ruff check . && uv run black --check .`.
+8. Run harness: `uv run pytest ../harness/tests/backend/test_langfuse_contract.py -k "prompt" -q`.
+
+**Acceptance Criteria:**
+- `prompts/base.py` defines `load_prompt(name, fallback)` with TTL caching.
+- Each stage prompt module still exports `SYSTEM_PROMPT` (the fallback) and additionally exports `get_system_prompt()`.
+- A simulated Langfuse 503 (raises inside `get_prompt`) results in the local fallback being returned. No exception reaches the caller.
+- Cache TTL respects `settings.langfuse_prompt_cache_ttl` (default 300s).
+- All existing tests pass; ruff and black are clean.
+- Harness tests `test_prompt_builders_use_langfuse_with_local_fallback` and `test_prompt_fetch_falls_back_silently_on_langfuse_error` pass.
+
+**Dependencies:** T-122
+
+---
+
+### T-127: Link Eval Scores Back to Langfuse Generations
+
+**Description:**
+After `online_eval.run_eval()` produces an `EvalResult`, submit `overall_score` to Langfuse via `score_generation()` so the score appears on the same generation that produced the content. The generation ID must be threaded from the `InstrumentedAdapter` (T-123) through the stage manager (T-125) into the eval call so the score lands on the correct generation. A failure inside `score_generation()` must not surface to the user — `LangfuseClient` already swallows the exception, but `online_eval.py` must also be defensive.
+
+**Severity:** Medium — closes the loop between content and score in Langfuse.
+
+**Inputs:**
+- `backend/services/evals/online_eval.py`
+- `backend/services/pipeline/stage_manager.py` (passes generation_id into eval)
+- `backend/services/llm/instrumented_adapter.py` (returns generation_id from create_generation)
+- `backend/services/langfuse_service.py` (from T-122)
+- `harness/tests/backend/test_langfuse_contract.py` — `test_online_eval_links_score_to_generation`, `test_online_eval_score_failure_does_not_surface_to_user`
+
+**Outputs:**
+- Updated `run_eval` and `run_eval_background` accepting an optional `content_generation_id: str | None = None`
+- After `EvalResult` is computed and committed, `await langfuse_service.get_langfuse_client().score_generation(generation_id=content_generation_id, name="overall", value=overall_score)` is called when both are present
+- Updated `stage_manager.generate()` captures the generation_id returned by `InstrumentedAdapter` and passes it into the background eval task
+- `redact_sensitive_data` is applied to anything submitted (already done inside `LangfuseClient`)
+
+**Steps:**
+1. In `backend/services/llm/instrumented_adapter.py`, expose the generation_id that `create_generation()` returns. Cache the most recent value on the wrapper instance: `self.last_generation_id: str | None = None`. Set it after each `create_generation` call.
+2. In `backend/services/pipeline/stage_manager.py`, after the streaming block completes, capture `content_generation_id = adapter.last_generation_id if isinstance(adapter, InstrumentedAdapter) else None` and pass it through `run_eval_background(..., content_generation_id=content_generation_id)`.
+3. In `backend/services/evals/online_eval.py`:
+   - Add `content_generation_id: str | None = None` to `run_eval` and `run_eval_background`.
+   - After the EvalResult is committed and the row has its `overall_score`, call:
+     ```python
+     if content_generation_id and eval_result.overall_score is not None:
+         await get_langfuse_client().score_generation(
+             generation_id=content_generation_id,
+             name="overall",
+             value=float(eval_result.overall_score),
+         )
+     ```
+   - The LangfuseClient already swallows exceptions; do not add an extra try/except (single-source-of-truth principle).
+4. Add unit tests in `backend/tests/test_online_eval.py`:
+   - Patch the LangfuseClient. Call `run_eval(..., content_generation_id="g-123")` with a successful judge response. Assert `score_generation.assert_awaited_once()` with value matching `overall_score`.
+   - With `content_generation_id=None`, `score_generation` is **not** called.
+   - With `score_generation` raising, the EvalResult is still returned to the caller.
+5. Run `uv run pytest tests/test_online_eval.py tests/test_stage_manager.py -q`.
+6. Run `uv run pytest tests/ -q` — all 172+ existing tests pass.
+7. Run `uv run ruff check . && uv run black --check .`.
+8. Run harness: `uv run pytest ../harness/tests/backend/test_langfuse_contract.py -k "eval or score" -q`.
+
+**Acceptance Criteria:**
+- `online_eval.run_eval()` and `run_eval_background()` accept `content_generation_id: str | None = None`.
+- When `content_generation_id` is present and the judge produced an `overall_score`, `score_generation` is called exactly once with `name="overall"` and `value=overall_score`.
+- When `content_generation_id` is `None`, `score_generation` is not called.
+- A failure inside `score_generation` does not prevent the EvalResult from being returned or persisted.
+- All existing tests pass; ruff and black are clean.
+- Harness tests `test_online_eval_links_score_to_generation` and `test_online_eval_score_failure_does_not_surface_to_user` pass.
+
+**Dependencies:** T-123, T-125
+
+---
+
+### T-128: Implement Automatic Dataset Collection
+
+**Description:**
+After `online_eval.py` scores a generation, fire-and-forget add it to a Langfuse dataset based on score thresholds: `>= 85` → `high_quality_generations`, `< 60` → `low_quality_generations`. Generations in the 60–84 range are not collected. The dataset write is a background `asyncio.create_task` with the same `_log_eval_error`-style done-callback used elsewhere in `stage_manager.py`. It must never block the user-facing flow.
+
+**Severity:** Low — quality-of-life enhancement for offline eval improvement.
+
+**Inputs:**
+- `backend/services/evals/online_eval.py`
+- `backend/services/langfuse_service.py` (from T-122)
+- `harness/tests/backend/test_langfuse_contract.py` — `test_dataset_call_only_at_correct_thresholds`, `test_dataset_call_is_fire_and_forget`
+
+**Outputs:**
+- Updated `run_eval` (or `run_eval_background`) calls `add_to_dataset` only for outlier scores
+- Background task with done-callback that logs failures via structlog at `logger.error`
+
+**Steps:**
+1. In `backend/services/evals/online_eval.py`, after the EvalResult commit and the score_generation call (T-127):
+   ```python
+   if eval_result.overall_score is not None:
+       if eval_result.overall_score >= 85:
+           dataset = "high_quality_generations"
+       elif eval_result.overall_score < 60:
+           dataset = "low_quality_generations"
+       else:
+           dataset = None
+       if dataset:
+           item = {
+               "generation_id": content_generation_id,
+               "stage_type": stage_type,
+               "score": eval_result.overall_score,
+               "content": content,
+           }
+           task = asyncio.create_task(
+               get_langfuse_client().add_to_dataset(dataset, item)
+           )
+           task.add_done_callback(_log_dataset_error)
+   ```
+   Define `_log_dataset_error` matching the existing `_log_eval_error` pattern in `stage_manager.py`.
+2. Add unit tests in `backend/tests/test_online_eval.py`:
+   - Score 90 → `add_to_dataset` called with `"high_quality_generations"`.
+   - Score 50 → `add_to_dataset` called with `"low_quality_generations"`.
+   - Score 70 → `add_to_dataset` is **not** called.
+   - Verify the call is wrapped in `asyncio.create_task` (use `inspect.getsource` or a structural check).
+3. Run `uv run pytest tests/test_online_eval.py -q`.
+4. Run `uv run pytest tests/ -q` — all 172+ existing tests pass.
+5. Run `uv run ruff check . && uv run black --check .`.
+6. Run harness: `uv run pytest ../harness/tests/backend/test_langfuse_contract.py -k "dataset" -q`.
+
+**Acceptance Criteria:**
+- `add_to_dataset` is called exactly when `overall_score >= 85` or `overall_score < 60`. Never for 60–84 inclusive.
+- The dataset write happens via `asyncio.create_task` and never awaits in the eval flow.
+- A failure inside the dataset task is captured by `_log_dataset_error` and logged at ERROR level.
+- All existing tests pass; ruff and black are clean.
+- Harness tests `test_dataset_call_only_at_correct_thresholds` and `test_dataset_call_is_fire_and_forget` pass.
+
+**Dependencies:** T-127
+
+---
+
+### T-129: Add Langfuse to Docker Compose Under Optional Profile
+
+**Description:**
+Add a `langfuse` service and its required `langfuse-db` PostgreSQL service to `docker-compose.yml`, both gated by a `langfuse` Compose profile so they do **not** start by default. Document `docker compose --profile langfuse up` in the README. The default `docker compose up` invocation must continue to start exactly the same containers it does today.
+
+**Severity:** Low — operational convenience for self-hosted local dev.
+
+**Inputs:**
+- `docker-compose.yml`
+- `README.md`
+- `harness/tests/backend/test_langfuse_contract.py` — `test_docker_compose_langfuse_is_under_optional_profile`
+
+**Outputs:**
+- New `langfuse` and `langfuse-db` services in `docker-compose.yml` with `profiles: ["langfuse"]`
+- README updated with a `## Optional: Langfuse Self-Hosted Observability` subsection
+
+**Steps:**
+1. Append to `docker-compose.yml`:
+   ```yaml
+   langfuse:
+     image: langfuse/langfuse:latest
+     profiles: ["langfuse"]
+     ports:
+       - "127.0.0.1:3000:3000"
+     environment:
+       DATABASE_URL: postgresql://langfuse:langfuse@langfuse-db:5432/langfuse
+       NEXTAUTH_SECRET: dev-secret-change-me
+       SALT: dev-salt-change-me
+       NEXTAUTH_URL: http://localhost:3000
+     depends_on:
+       langfuse-db:
+         condition: service_healthy
+
+   langfuse-db:
+     image: postgres:16-alpine
+     profiles: ["langfuse"]
+     environment:
+       POSTGRES_USER: langfuse
+       POSTGRES_PASSWORD: langfuse
+       POSTGRES_DB: langfuse
+     volumes:
+       - langfuse_data:/var/lib/postgresql/data
+     healthcheck:
+       test: ["CMD-SHELL", "pg_isready -U langfuse -d langfuse"]
+       interval: 5s
+       timeout: 5s
+       retries: 5
+   ```
+   Also add `langfuse_data:` to the top-level `volumes:` block.
+2. In `README.md`, add a section under **Local Development With Docker**:
+   ```markdown
+   ### Optional: Langfuse Self-Hosted Observability
+
+   To run Langfuse locally and capture LLM traces from your dev workspace:
+
+       docker compose --profile langfuse up
+
+   Then set in `backend/.env`:
+
+       LANGFUSE_HOST=http://localhost:3000
+       LANGFUSE_SECRET_KEY=...   # from Langfuse UI after first signup
+       LANGFUSE_PUBLIC_KEY=...
+
+   Without these set, the application runs identically with no Langfuse integration.
+   ```
+3. Verify default behaviour: `docker compose config --services` must NOT list `langfuse` or `langfuse-db`. `docker compose --profile langfuse config --services` must list them.
+4. Run `docker compose up -d db redis` (default) and confirm only db and redis (and api/frontend) start, no Langfuse containers.
+5. Run harness: `uv run pytest ../harness/tests/backend/test_langfuse_contract.py -k "compose" -q`.
+
+**Acceptance Criteria:**
+- `docker compose config --services` (no profile) does not include `langfuse` or `langfuse-db`.
+- `docker compose --profile langfuse config --services` includes both.
+- `docker compose up` (default) starts the same containers as today.
+- README documents the opt-in command.
+- Harness test `test_docker_compose_langfuse_is_under_optional_profile` passes.
+
+**Dependencies:** T-121
+
+---
+
+### T-130: Update CI Pipeline for Langfuse
+
+**Description:**
+Update `.github/workflows/ci.yml` so the backend job installs `langfuse` (covered by T-121's `pyproject.toml` change + `uv sync --frozen --all-groups`) and runs `harness/tests/backend/test_langfuse_contract.py` with `LANGFUSE_SECRET_KEY` **unset** to enforce the no-op contract. All 172+ existing unit tests and 26+ harness CI tests must continue to pass.
+
+**Severity:** High — without CI enforcement the no-op invariant can silently regress.
+
+**Inputs:**
+- `.github/workflows/ci.yml`
+- `harness/tests/backend/test_langfuse_contract.py`
+- `harness/tests/backend/test_langfuse_contract.py` — `test_ci_runs_langfuse_contract_tests`
+
+**Outputs:**
+- Updated `.github/workflows/ci.yml` with `test_langfuse_contract.py` added to the security harness step (or a new "LLM observability harness" step)
+- No `LANGFUSE_SECRET_KEY` env var is exported in CI (the no-op path must be the one verified in CI)
+
+**Steps:**
+1. In `.github/workflows/ci.yml`, locate the `Security harness contracts` step in the `backend` job. Append `../harness/tests/backend/test_langfuse_contract.py` to its `pytest` command. Do NOT add `LANGFUSE_SECRET_KEY` to the env block — the contract tests deliberately exercise the unconfigured no-op path.
+2. Confirm `uv sync --frozen --all-groups` (already in the workflow) installs `langfuse` because T-121 added it to `pyproject.toml`.
+3. Locally, run the exact CI command:
+   ```
+   cd backend && uv run pytest ../harness/tests/backend/test_security_audit_contract.py ../harness/tests/backend/test_second_pass_security_contract.py ../harness/tests/backend/test_final_hardening_contract.py ../harness/tests/backend/test_production_readiness_contract.py ../harness/tests/backend/test_langfuse_contract.py -q
+   ```
+   All must pass.
+4. Locally, run `uv run pytest tests/ --cov=services --cov-fail-under=80 -q`. Coverage must remain ≥80%.
+5. Push the change on a branch and verify the GitHub Actions run is green.
+
+**Acceptance Criteria:**
+- `.github/workflows/ci.yml` references `test_langfuse_contract.py` in the security harness step.
+- The CI workflow does not export `LANGFUSE_SECRET_KEY`.
+- All 172+ unit tests still pass under CI.
+- All harness CI tests (security_audit + second_pass + final_hardening + production_readiness + langfuse) pass under CI.
+- Backend coverage remains ≥80%.
+- Harness test `test_ci_runs_langfuse_contract_tests` passes.
+
+**Dependencies:** T-122, T-123, T-124, T-125, T-126, T-127, T-128
+
+---
+
+### T-131: End-to-End Smoke Test and Documentation
+
+**Description:**
+Update the manual smoke-test checklist with Langfuse verification steps. Update the README observability section. Update HANDOFF.md to document the Langfuse integration, the no-op design decision, the dataset-collection thresholds, and the explicit invariant that no user-facing feature depends on Langfuse availability.
+
+**Severity:** Operational — closes out Phase 11 with reproducible verification and documented design decisions.
+
+**Inputs:**
+- `docs/SMOKE_TEST_CHECKLIST.md`
+- `README.md`
+- `HANDOFF.md`
+
+**Outputs:**
+- New section in `docs/SMOKE_TEST_CHECKLIST.md`: "Langfuse Integration"
+- Updated README Observability section
+- New addendum in HANDOFF.md describing Phase 11
+
+**Steps:**
+1. In `docs/SMOKE_TEST_CHECKLIST.md`, append a new section:
+   ```markdown
+   ## Langfuse Integration (optional)
+
+   With Langfuse configured (`docker compose --profile langfuse up` and the
+   four LANGFUSE_* env vars set in backend/.env):
+
+   - [ ] Sign in and create a workspace.
+   - [ ] Generate a SPEC stage. Confirm streaming works normally.
+   - [ ] Open Langfuse UI at http://localhost:3000.
+   - [ ] Confirm a trace appears with the workspace_id and user_id metadata.
+   - [ ] Confirm one generation is recorded inside the trace with provider,
+         model, full system prompt, full user prompt, and accumulated output.
+   - [ ] Wait for the eval to complete. Confirm the overall score is attached
+         to the same generation in the Langfuse UI.
+   - [ ] Trigger a generation that scores >=85 or <60. Confirm a dataset item
+         appears in the corresponding Langfuse dataset.
+
+   With Langfuse unconfigured (LANGFUSE_SECRET_KEY blank):
+
+   - [ ] Sign in, create a workspace, generate a SPEC stage.
+   - [ ] Confirm the application behaves identically — same latency, same
+         streaming, same eval scoring, same credit accounting.
+   - [ ] Confirm zero requests to any Langfuse host appear in `tcpdump`/proxy
+         logs during the generation.
+   ```
+2. In `README.md`, update the **Observability** section to add a paragraph:
+   ```markdown
+   Optional LLM observability via Langfuse:
+
+   - Set `LANGFUSE_SECRET_KEY`, `LANGFUSE_PUBLIC_KEY`, and `LANGFUSE_HOST` to
+     enable per-generation trace, prompt-version, and eval-score capture.
+   - Run a self-hosted Langfuse locally with `docker compose --profile langfuse up`.
+   - Without these variables set, the application runs identically with zero
+     Langfuse traffic. No user-facing feature depends on Langfuse availability.
+   ```
+3. In `HANDOFF.md`, append a new section after the existing post-audit addendum:
+   ```markdown
+   ## Phase 11 — Langfuse LLM Observability
+
+   **Date:** 2026-05-07 | **CI status:** ✅ Green (existing 172 unit tests, 26+
+   harness CI tests, plus new test_langfuse_contract.py all pass)
+
+   Phase 11 added an **optional** LLM observability layer using Langfuse,
+   alongside the existing Grafana Cloud + Sentry stack which remains unchanged.
+
+   Key design decisions:
+
+   1. The integration is gated by `LANGFUSE_SECRET_KEY`. With it unset, the
+      application behaves identically to the pre-Phase-11 baseline.
+   2. The no-op branch lives in exactly one place: `services/langfuse_service.py`.
+   3. `BaseLLMAdapter` was not modified. Instrumentation is composed via
+      `InstrumentedAdapter` above the adapters, not inside them.
+   4. Every Langfuse call is exception-swallowing. A Langfuse outage cannot
+      break stage generation, refine, eval, or credit accounting.
+   5. Sensitive data redaction reuses `services.observability.redact_sensitive_data`.
+      No new regex patterns were introduced.
+   6. Streams are accumulated and recorded once per call, never per token.
+   7. Dataset collection thresholds: scores >=85 go to `high_quality_generations`,
+      scores <60 go to `low_quality_generations`. Mid-quality (60-84) is not
+      collected.
+   8. CI runs the contract tests with LANGFUSE_SECRET_KEY unset to enforce the
+      no-op invariant.
+   ```
+4. Manual verification: walk through both checklists end-to-end on a clean checkout.
+
+**Acceptance Criteria:**
+- `docs/SMOKE_TEST_CHECKLIST.md` includes the Langfuse section.
+- `README.md` Observability section documents Langfuse as optional.
+- `HANDOFF.md` includes the Phase 11 addendum capturing the eight key design decisions.
+- A reviewer can read HANDOFF.md and understand: (a) Langfuse is optional; (b) the no-op design; (c) the dataset thresholds; (d) the invariant that no user-facing feature depends on Langfuse.
+
+**Dependencies:** T-130
+
+---
+
+_tasks.md · SpecForge V1 · Version 1.9.0 · Updated 2026-05-07 with Phase 11 Langfuse LLM observability T-121 through T-131_

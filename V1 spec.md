@@ -6,7 +6,7 @@ tags:
 - specforge
 - spec
 - v1
-- asdd created: 2026-04-25 status: final version: 1.0.0 stage: spec
+- asdd created: 2026-04-25 status: final version: 1.1.0 stage: spec
 
 ---
 
@@ -689,6 +689,11 @@ V1 is designed for hundreds of concurrent users, not thousands. Railway's defaul
 - Prometheus metrics at `/metrics` covering LLM call duration, token counts, credit deductions, active SSE streams, pipeline action counts
 - Sentry on both frontend and backend for error tracking
 - Grafana Cloud connected from day one for log aggregation and dashboards
+- LLM call traces (full system prompt, full user prompt, raw model output, input and output token counts, latency, provider, model) captured per generation via Langfuse
+- Eval scores linked to the specific generation that produced the content, so prompt quality and model output quality can be inspected together
+- Prompt version tracking across deployments, so prompt edits can be correlated with eval-score trends over time
+- All LLM observability is **optional** and degrades gracefully when Langfuse is unavailable or unconfigured. The platform falls back to local prompt templates and skips trace/score submission silently.
+- **No user-facing feature depends on Langfuse availability.** Stage generation, refine, finalise, eval scoring, credit accounting, and export work identically with or without Langfuse configured.
 
 ---
 
@@ -707,6 +712,8 @@ V1 is designed for hundreds of concurrent users, not thousands. Railway's defaul
 **Assumption 5 — Google OAuth is sufficient.** GitHub OAuth is not needed yet. Enterprise SSO is explicitly out of scope.
 
 **Assumption 6 — A Pro waitlist is an acceptable credit exhaustion state.** If conversion intent is high, moving payments into V1 may be worth the additional build time.
+
+**Assumption 7 — Langfuse is an optional observability enhancement.** Its unavailability must never surface to users or affect credit accounting, stage generation, or eval scoring. The system runs identically with `LANGFUSE_SECRET_KEY` unset; when it is set, Langfuse becomes an additional sink for prompt-level traces, prompt versions, eval scores, and dataset items. If a Langfuse call fails for any reason — network error, auth failure, rate limit, schema rejection — the failure is logged and swallowed. No user-facing flow may raise on a Langfuse error.
 
 ---
 
@@ -742,4 +749,4 @@ V1 is designed for hundreds of concurrent users, not thousands. Railway's defaul
 
 ---
 
-_SpecForge V1 SPEC.md · Version 1.0.0 · 2026-04-25_
+_SpecForge V1 SPEC.md · Version 1.1.0 · 2026-05-07 — added Langfuse-backed LLM observability under §12 and Assumption 7. No product-flow changes._

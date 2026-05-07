@@ -5,7 +5,7 @@ tags:
 - architecture
 - saas
 - specforge
-- asdd created: 2026-04-25 status: final version: 1.0.0
+- asdd created: 2026-04-25 status: final version: 1.1.0
 
 ---
 
@@ -25,6 +25,7 @@ tags:
 - [[#6. Database Schema]]
 - [[#7. Security Architecture]]
 - [[#8. Observability Architecture]]
+- [[#8a. LLM Observability Architecture]]
 - [[#9. Evals Architecture]]
 - [[#10. Deployment Architecture]]
 - [[#11. Complete Package List]]
@@ -103,7 +104,10 @@ SpecForge is a production-grade SaaS platform that transforms a raw problem stat
 │    Anthropic API · OpenAI API · Google AI API                    │
 │    Stripe · Google OAuth · Resend                                │
 │    Grafana Cloud · Sentry · TruffleHog CI                        │
+│    Langfuse (optional · self-hosted or Cloud · LLM traces)       │
 └──────────────────────────────────────────────────────────────────┘
+
+> [!note] Langfuse is an **optional** sink. The platform reads `LANGFUSE_SECRET_KEY` at startup. When unset, all Langfuse calls become no-ops and zero network traffic flows to a Langfuse instance. No user-facing feature depends on Langfuse availability.
 ```
 
 ---
@@ -695,6 +699,100 @@ credits_deducted_total = Counter(
 
 ---
 
+## 8a. LLM Observability Architecture
+
+> [!note] Role of this layer Section 8 covers **infrastructure observability** — is the API healthy, are pods alive, are queries fast. This section covers **LLM observability** — what prompts went out, what came back, how good was it, which prompt version produced it. The two layers are complementary, not competing. Grafana + Sentry remain unchanged. Langfuse adds a new lens that the existing stack cannot offer (full prompt content, generation-level diffs, prompt-version correlation with eval scores).
+
+### Why a separate layer
+
+Prometheus knows how many LLM calls were made and how long they took. Grafana Loki has structured log lines. Sentry catches exceptions. None of them store the prompt or the model output, and none can answer "did our v3 spec prompt produce higher eval scores than v2?" — that is the problem Langfuse solves.
+
+### Trace Hierarchy Model
+
+A workspace generation session maps to **one Langfuse trace**. Within that trace:
+
+```
+trace: workspace_generation (workspace_id, user_id)
+├── span: stage.spec.generate
+│   ├── generation: anthropic.claude-sonnet (system + user prompt, tokens, latency)
+│   └── generation: anthropic.claude-haiku-judge (eval score)
+├── span: stage.plan.generate
+│   ├── generation: anthropic.claude-sonnet
+│   └── generation: anthropic.claude-haiku-judge
+├── span: stage.harness.generate
+│   └── ...
+└── span: stage.tasks.generate
+    └── ...
+```
+
+Each `stream()` and `complete()` call through the LLM gateway becomes a Langfuse `generation` inside the active stage span. The eval judge call is a child generation in the same span as the content it scored — so the score and the content live together in the trace.
+
+### Trace ID Propagation
+
+The trace ID is generated as a UUID at the start of each stage generation request inside the stage router, and threaded explicitly through:
+
+```
+routers/stage.py        ← trace_id = uuid4() at request entry
+   ↓ passed as kwarg
+services/pipeline/stage_manager.generate(trace_id=...)
+   ↓ used to build span context
+services/llm/instrumented_adapter.InstrumentedAdapter(adapter, span_ctx)
+   ↓ delegates to wrapped adapter; records around each call
+services/llm/anthropic_adapter (etc.) ← unchanged
+```
+
+The `BaseLLMAdapter` abstract interface stays exactly as it is today. Provider adapters never import Langfuse. The `InstrumentedAdapter` wrapper is composed at gateway level when `LANGFUSE_SECRET_KEY` is configured.
+
+### What gets captured per generation
+
+| Field | Source |
+|---|---|
+| Full system prompt | First arg to `stream()` / `complete()` |
+| Full user prompt | Second arg to `stream()` / `complete()` |
+| Raw model output | Accumulated tokens (streams) or return value (complete) |
+| Input token count | Provider response metadata |
+| Output token count | Provider response metadata |
+| First-byte and last-byte latency | Wall clock around the adapter call |
+| Provider name and model name | Workspace settings |
+| Stage type | `spec` / `plan` / `harness` / `tasks` / `eval-judge` |
+| Action type | `generate` / `refine` / `regenerate` / `judge` |
+| Workspace ID and user ID | Trace metadata |
+| Eval score (when available) | Linked back to the generation that produced the content |
+
+### Prompt Versioning
+
+Prompt templates in `backend/prompts/` are registered with Langfuse so prompt edits can be tracked over time and correlated with eval-score trends. Builders attempt to fetch the prompt from Langfuse on first use (with a short in-memory TTL) and fall back **silently** to the local template string if Langfuse is unreachable, returns a non-200, or is not configured. The user never sees a degraded experience because of a Langfuse outage.
+
+### Eval Score Linking
+
+After `online_eval.py` produces an `EvalResult`, its `overall_score` is submitted to Langfuse as a score on the `generation` that produced the content. The generation ID is threaded from the instrumented adapter call through to the eval result, closing the loop between **what was generated** and **how good it was** in a single Langfuse view.
+
+### Dataset Collection
+
+Generations are auto-added to Langfuse datasets based on score thresholds, used for future prompt regression testing and offline eval improvement:
+
+| Eval score | Dataset |
+|---|---|
+| ≥ 85 | `high_quality_generations` |
+| 60–84 | (not collected) |
+| < 60 | `low_quality_generations` |
+
+Dataset writes are background `asyncio.create_task` operations with the same `_log_eval_error`-style done-callback used elsewhere. They never block the user-facing flow.
+
+### No-op Fallback Design
+
+A single integration point — `services/langfuse_service.py` — owns the configured-versus-unconfigured branch. When `LANGFUSE_SECRET_KEY` is empty, every public method on `LangfuseClient` returns immediately without importing or initialising the SDK. All instrumentation in the rest of the codebase calls these methods unconditionally. This keeps the optional path explicit in one file rather than scattered across services.
+
+### Sensitive Data Handling
+
+Anything sent to Langfuse passes through the existing `redact_sensitive_data()` helper in `services/observability.py`. The same pattern that scrubs logs and Sentry events scrubs Langfuse payloads — there is no separate redaction code path. Problem statements, prompt content, and LLM outputs are inspected for API-key-shaped strings, JWT tokens, and the other patterns already enumerated in `_SECRET_PATTERNS` before any payload leaves the process.
+
+### Self-Hosted versus Cloud
+
+For local development the recommended deployment is **self-hosted** Langfuse, run as a `langfuse` service in `docker-compose.yml` under an optional Compose profile so it does not start by default. For production, operators choose either a self-hosted instance (typically alongside the API in a private network) or Langfuse Cloud, configured by pointing `LANGFUSE_HOST` at the chosen target. Either choice is invisible to the rest of the system.
+
+---
+
 ## 9. Evals Architecture
 
 > [!note] Evals vs Observability Observability asks: **is the system running?** Evals ask: **is the AI output actually good?**
@@ -785,6 +883,7 @@ offline_evals/
 |Secrets|Railway Secrets|Injected at runtime, never in codebase|
 |Observability|Grafana Cloud|Logs + Metrics + Traces on one platform|
 |Error tracking|Sentry|Frontend + backend errors, source maps|
+|LLM observability (optional)|Langfuse (self-hosted or Cloud)|Prompt-level traces, prompt versioning, eval-score correlation, dataset collection|
 |Payments|Stripe|Subscriptions, webhooks, customer portal|
 |Email|Resend|Transactional — welcome, credit warnings, billing events|
 
@@ -833,9 +932,24 @@ services:
 
   redis:
     image: redis:7-alpine
+
+  # Langfuse runs only when the operator opts in:
+  #   docker compose --profile langfuse up
+  langfuse:
+    image: langfuse/langfuse:latest
+    profiles: ["langfuse"]
+    environment:
+      DATABASE_URL: postgresql://langfuse:langfuse@langfuse-db:5432/langfuse
+    depends_on: [langfuse-db]
+
+  langfuse-db:
+    image: postgres:16-alpine
+    profiles: ["langfuse"]
 ```
 
 Frontend runs separately with Vite on port 5173 for HMR.
+
+> [!note] Production Langfuse In production, Langfuse is configured per environment via `LANGFUSE_SECRET_KEY`, `LANGFUSE_PUBLIC_KEY`, and `LANGFUSE_HOST`. Whether the host is a self-hosted instance or Langfuse Cloud is invisible to the SpecForge code. If none of these variables are set, the application runs identically to today with no Langfuse instrumentation.
 
 ### CI/CD Pipeline
 
@@ -907,6 +1021,9 @@ opentelemetry-exporter-otlp==1.*
 prometheus-client==0.21.*
 structlog==24.*
 sentry-sdk[fastapi]==2.*
+
+# LLM observability (optional — no-op when LANGFUSE_SECRET_KEY is unset)
+langfuse==2.*
 
 # Utilities
 httpx==0.28.*
@@ -1049,4 +1166,4 @@ specforge/
 
 ---
 
-_SpecForge Architecture v1.0.0 — Last updated 2026-04-25_
+_SpecForge Architecture v1.1.0 — Last updated 2026-05-07 with optional Langfuse LLM observability layer (Section 8a)_
