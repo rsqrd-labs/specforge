@@ -36,6 +36,7 @@ uv run pytest \
   ../harness/tests/backend/test_final_hardening_contract.py \
   ../harness/tests/backend/test_production_readiness_contract.py \
   ../harness/tests/backend/test_langfuse_contract.py \
+  ../harness/tests/backend/test_langfuse_live_traffic_contract.py \
   -q
 uv run bandit -r config.py database.py main.py middleware models prompts routers schemas services
 uv run pip-audit --strict
