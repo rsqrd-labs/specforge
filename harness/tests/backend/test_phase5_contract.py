@@ -607,15 +607,57 @@ def test_stage_manager_eval_task_has_done_callback() -> None:
     """
     asyncio.create_task(run_eval_background(...)) must have a done_callback
     attached to log exceptions. Silent task failures are invisible in production.
+
+    Implementation note: this used to be a fixed-width text scan (look for
+    ``add_done_callback`` within 400 chars after ``asyncio.create_task(``).
+    That broke as soon as Phase 11 added the ``content_generation_id`` kwarg
+    to the ``run_eval_background(...)`` call, even though the callback was
+    still attached on the very next statement. We now walk the AST so the
+    invariant ("the create_task is followed in the same function body by an
+    add_done_callback call") is enforced regardless of formatting, kwargs,
+    or line count.
     """
+    import ast
+
     source = read_backend_file("services", "pipeline", "stage_manager.py")
+    tree = ast.parse(source)
 
-    task_create_idx = source.find("asyncio.create_task(")
-    assert task_create_idx != -1, "stage_manager.py must use asyncio.create_task for eval"
+    # Find every async function in stage_manager.py that issues
+    # asyncio.create_task(run_eval_background(...)). For each such function,
+    # the same body must contain a call to <something>.add_done_callback(...).
+    found_callbacks: list[bool] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.AsyncFunctionDef):
+            continue
+        creates_eval_task = False
+        attaches_callback = False
+        for inner in ast.walk(node):
+            if not isinstance(inner, ast.Call):
+                continue
+            func = inner.func
+            # Match: asyncio.create_task(run_eval_background(...))
+            if (
+                isinstance(func, ast.Attribute)
+                and func.attr == "create_task"
+                and isinstance(func.value, ast.Name)
+                and func.value.id == "asyncio"
+                and inner.args
+                and isinstance(inner.args[0], ast.Call)
+                and isinstance(inner.args[0].func, ast.Name)
+                and inner.args[0].func.id == "run_eval_background"
+            ):
+                creates_eval_task = True
+            # Match: <anything>.add_done_callback(<anything>)
+            if isinstance(func, ast.Attribute) and func.attr == "add_done_callback":
+                attaches_callback = True
+        if creates_eval_task:
+            found_callbacks.append(attaches_callback)
 
-    # Look for add_done_callback within 10 lines after create_task
-    post_task = source[task_create_idx:task_create_idx + 400]
-    assert "add_done_callback" in post_task, (
+    assert found_callbacks, (
+        "stage_manager.py must call asyncio.create_task(run_eval_background(...)) "
+        "from at least one async function. See T-080."
+    )
+    assert all(found_callbacks), (
         "asyncio.create_task(run_eval_background(...)) has no done_callback. "
         "Exceptions from background eval tasks are silently swallowed. "
         "Add task.add_done_callback(...) to log failures. "
