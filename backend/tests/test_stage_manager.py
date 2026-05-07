@@ -331,6 +331,75 @@ async def test_generate_continues_when_langfuse_trace_creation_fails() -> None:
 
 
 @pytest.mark.asyncio
+async def test_generate_marks_langfuse_span_failed_on_client_disconnect() -> None:
+    workspace_id = uuid4()
+    spec_stage = _make_stage(workspace_id, "spec", status="draft")
+    workspace = _make_workspace([spec_stage])
+    user = _make_user()
+    deduction = CreditLedger(id=uuid4(), user_id=user.id, amount=-10, reason="generate")
+    db = _MultiQueryDB([spec_stage, workspace, [], deduction])
+
+    async def fake_stream(*args, **kwargs) -> AsyncGenerator[str, None]:
+        yield "partial"
+        await asyncio.sleep(10)
+
+    class _FakeCleanupResult:
+        def scalar_one_or_none(self):
+            return spec_stage
+
+    fake_cleanup_db = MagicMock()
+    fake_cleanup_db.execute = AsyncMock(return_value=_FakeCleanupResult())
+    fake_cleanup_db.commit = AsyncMock()
+    fake_cleanup_db.__aenter__ = AsyncMock(return_value=fake_cleanup_db)
+    fake_cleanup_db.__aexit__ = AsyncMock(return_value=False)
+    fake_session_local = MagicMock(return_value=fake_cleanup_db)
+
+    langfuse_client = MagicMock()
+    langfuse_client.create_trace = AsyncMock(return_value="trace-1")
+    langfuse_client.create_span = AsyncMock(return_value="span-1")
+    langfuse_client.create_generation = AsyncMock(return_value="generation-1")
+    langfuse_client.end_span = AsyncMock()
+    langfuse_client.mark_span_failed = AsyncMock()
+
+    svc = StageManager(redis_client=_FakeRedis())
+
+    with (
+        patch(
+            "services.pipeline.stage_manager.credit_service.deduct",
+            new_callable=AsyncMock,
+            return_value=deduction,
+        ),
+        patch(
+            "services.pipeline.stage_manager.credit_service.refund",
+            new_callable=AsyncMock,
+        ),
+        patch(
+            "services.pipeline.stage_manager.build_prompt",
+            new_callable=AsyncMock,
+            return_value=("sys", "user"),
+        ),
+        patch("services.pipeline.stage_manager.get_llm") as mock_get_llm,
+        patch(
+            "services.pipeline.stage_manager.langfuse_service.get_langfuse_client",
+            return_value=langfuse_client,
+        ),
+        patch("database.AsyncSessionLocal", fake_session_local),
+    ):
+        mock_adapter = MagicMock()
+        mock_adapter.stream = fake_stream
+        mock_get_llm.return_value = mock_adapter
+
+        stream = svc.generate(spec_stage.id, user, db, trace_id="trace-1")
+        assert await anext(stream) == "partial"
+        await stream.aclose()
+
+    langfuse_client.end_span.assert_not_awaited()
+    langfuse_client.mark_span_failed.assert_awaited_once()
+    assert langfuse_client.mark_span_failed.await_args.args[0] == "span-1"
+    assert "interrupted" in str(langfuse_client.mark_span_failed.await_args.args[1])
+
+
+@pytest.mark.asyncio
 async def test_generate_provider_error_refunds_credits() -> None:
     workspace_id = uuid4()
     spec_stage = _make_stage(workspace_id, "spec", status="draft")

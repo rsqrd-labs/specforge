@@ -319,6 +319,12 @@ class StageManager:
             raise
         finally:
             if not _cleanup_done:
+                if span_id and not span_finished:
+                    await self._mark_langfuse_span_failed(
+                        span_id,
+                        RuntimeError("stage generation interrupted before completion"),
+                    )
+                    span_finished = True
                 # Client disconnected before generation completed. The request-scoped
                 # db session may be torn down, so open a fresh one for cleanup.
                 from database import AsyncSessionLocal
