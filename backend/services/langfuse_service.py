@@ -28,6 +28,7 @@ around. See Plan §15.9 Q5.
 
 from __future__ import annotations
 
+import asyncio
 import threading
 from datetime import UTC, datetime
 from typing import Any
@@ -271,20 +272,46 @@ class LangfuseClient:
         """Fetch the latest (or pinned) prompt template body for ``name``.
 
         Returns ``None`` when the client is disabled, the prompt does not
-        exist, or any error occurs. Callers must always have a local fallback.
-        Uses the SDK's built-in TTL cache via ``cache_ttl_seconds``.
+        exist, the fetch times out, or any error occurs. Callers must always
+        have a local fallback. Uses the SDK's built-in TTL cache via
+        ``cache_ttl_seconds``.
+
+        The Langfuse v2 SDK's ``get_prompt`` is synchronous: on a cache miss
+        it issues a blocking HTTP call with up to 3 retries × ~10s timeout.
+        Calling it directly from an async context would block the event loop
+        and stall every concurrent request on the worker. We dispatch the
+        call to a worker thread and bound the wait with
+        ``langfuse_prompt_fetch_timeout_seconds`` so a slow or unreachable
+        Langfuse host degrades gracefully to the local fallback rather than
+        wedging stage generation.
+
+        On timeout the worker thread continues running until the SDK's own
+        timeout fires; we drop its eventual result. This is acceptable
+        because the application-level prompt cache (``prompts/base.py``)
+        ensures we make at most one such call per prompt name per TTL.
         """
         client = self._ensure_client()
         if client is None:
             return None
         try:
-            prompt = client.get_prompt(
-                name,
-                version=version,
-                cache_ttl_seconds=settings.langfuse_prompt_cache_ttl,
+            prompt = await asyncio.wait_for(
+                asyncio.to_thread(
+                    client.get_prompt,
+                    name,
+                    version=version,
+                    cache_ttl_seconds=settings.langfuse_prompt_cache_ttl,
+                ),
+                timeout=settings.langfuse_prompt_fetch_timeout_seconds,
             )
             body = getattr(prompt, "prompt", None)
             return body if isinstance(body, str) and body else None
+        except asyncio.TimeoutError:
+            logger.warning(
+                "langfuse.get_prompt.timeout",
+                prompt_name=name,
+                timeout_seconds=settings.langfuse_prompt_fetch_timeout_seconds,
+            )
+            return None
         except Exception:
             logger.error("langfuse.get_prompt.failed", exc_info=True)
             return None

@@ -17,6 +17,7 @@ In both modes, payloads are redacted via
 
 from __future__ import annotations
 
+import asyncio
 import sys
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -31,6 +32,7 @@ _LANGFUSE_FIELD_DEFAULTS = {
     "langfuse_public_key": "",
     "langfuse_host": "https://cloud.langfuse.com",
     "langfuse_prompt_cache_ttl": 300,
+    "langfuse_prompt_fetch_timeout_seconds": 5.0,
 }
 
 
@@ -282,6 +284,107 @@ async def test_get_prompt_returns_none_when_body_missing(
         client = langfuse_service.get_langfuse_client()
         body = await client.get_prompt(name="missing")
         assert body is None
+
+
+@pytest.mark.asyncio
+async def test_get_prompt_does_not_block_event_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A slow synchronous SDK call must not stall the event loop. While
+    get_prompt waits on the worker thread, other coroutines must keep
+    making progress on the loop.
+    """
+    import time
+
+    _configure_settings(
+        monkeypatch,
+        langfuse_secret_key="sk-test",
+        langfuse_public_key="pk-test",
+        langfuse_prompt_fetch_timeout_seconds=2.0,
+    )
+
+    fake_prompt = MagicMock()
+    fake_prompt.prompt = "REMOTE BODY"
+    fake_sdk = MagicMock()
+
+    def _slow_get_prompt(*_args: Any, **_kwargs: Any) -> Any:
+        # Simulate the SDK's blocking HTTP call.
+        time.sleep(0.4)
+        return fake_prompt
+
+    fake_sdk.get_prompt.side_effect = _slow_get_prompt
+
+    with patch("langfuse.Langfuse", return_value=fake_sdk):
+        client = langfuse_service.get_langfuse_client()
+
+        # Sentinel coroutine that proves the loop is responsive while
+        # get_prompt is in flight: it sleeps for 0.05s repeatedly and
+        # records each tick. If the loop were blocked by the synchronous
+        # SDK call, no ticks would advance for 0.4s.
+        ticks: list[float] = []
+
+        async def heartbeat() -> None:
+            start = asyncio.get_running_loop().time()
+            while asyncio.get_running_loop().time() - start < 0.35:
+                ticks.append(asyncio.get_running_loop().time())
+                await asyncio.sleep(0.05)
+
+        body, _ = await asyncio.gather(
+            client.get_prompt(name="specforge.spec.system"),
+            heartbeat(),
+        )
+
+        assert body == "REMOTE BODY"
+        # Heartbeat ticked roughly every 50ms during the 400ms SDK call.
+        # If the loop had been blocked, len(ticks) would be ~1 (only the
+        # initial tick before the await).
+        assert len(ticks) >= 4, (
+            f"Event loop appears blocked during get_prompt: only {len(ticks)} "
+            "heartbeat ticks fired."
+        )
+
+
+@pytest.mark.asyncio
+async def test_get_prompt_times_out_when_sdk_hangs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If the SDK takes longer than langfuse_prompt_fetch_timeout_seconds,
+    we must give up and return None so callers fall back to the local
+    template instead of wedging stage generation.
+    """
+    import time
+
+    _configure_settings(
+        monkeypatch,
+        langfuse_secret_key="sk-test",
+        langfuse_public_key="pk-test",
+        langfuse_prompt_fetch_timeout_seconds=0.1,
+    )
+
+    fake_sdk = MagicMock()
+
+    def _hang(*_args: Any, **_kwargs: Any) -> Any:
+        # Block well past the configured timeout; never returns within
+        # the test's relevant window.
+        time.sleep(2.0)
+        return MagicMock(prompt="never returned")
+
+    fake_sdk.get_prompt.side_effect = _hang
+
+    with patch("langfuse.Langfuse", return_value=fake_sdk):
+        client = langfuse_service.get_langfuse_client()
+
+        loop = asyncio.get_running_loop()
+        start = loop.time()
+        body = await client.get_prompt(name="specforge.spec.system")
+        elapsed = loop.time() - start
+
+        assert body is None
+        # Must return shortly after the timeout, not after the SDK's
+        # internal 2s sleep.
+        assert (
+            elapsed < 1.0
+        ), f"get_prompt did not respect the timeout: returned in {elapsed:.2f}s"
 
 
 # ---------------------------------------------------------------------------

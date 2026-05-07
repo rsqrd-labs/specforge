@@ -29,6 +29,13 @@ class Settings(BaseSettings):
     langfuse_public_key: str = ""
     langfuse_host: str = "https://cloud.langfuse.com"
     langfuse_prompt_cache_ttl: int = 300
+    # Hard upper bound on how long a single Langfuse prompt fetch may take.
+    # The SDK's get_prompt is synchronous and on a cache miss issues a
+    # blocking HTTP call (default ~10s × 3 retries). We dispatch it to a
+    # worker thread and bound the await with this timeout so a slow or
+    # unreachable Langfuse host cannot stall the event loop or stage
+    # generation. On timeout the local fallback prompt is used.
+    langfuse_prompt_fetch_timeout_seconds: float = 5.0
     langfuse_content_capture_ack: bool = False
 
     environment: str
