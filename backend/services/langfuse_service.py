@@ -29,6 +29,7 @@ around. See Plan §15.9 Q5.
 from __future__ import annotations
 
 import threading
+from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
 
@@ -47,6 +48,7 @@ class LangfuseClient:
         self._enabled: bool = bool(settings.langfuse_secret_key.strip())
         self._client: Any | None = None
         self._init_lock = threading.Lock()
+        self._spans: dict[str, Any] = {}
 
     @property
     def enabled(self) -> bool:
@@ -119,15 +121,57 @@ class LangfuseClient:
             return None
         try:
             span_id = str(uuid4())
-            client.span(
+            span = client.span(
                 id=span_id,
                 trace_id=trace_id,
                 name=name,
                 metadata=redact_sensitive_data(metadata or {}),
             )
+            if span is not None:
+                self._spans[span_id] = span
             return span_id
         except Exception:
             logger.error("langfuse.create_span.failed", exc_info=True)
+            return None
+
+    async def end_span(self, span_id: str | None) -> None:
+        """Best-effort span completion. Never raises."""
+        if span_id is None:
+            return None
+        client = self._ensure_client()
+        if client is None:
+            return None
+        try:
+            span = self._spans.pop(span_id, None)
+            if span is not None and hasattr(span, "end"):
+                span.end()
+                return None
+            client.span(id=span_id, end_time=datetime.now(UTC))
+        except Exception:
+            logger.error("langfuse.end_span.failed", exc_info=True)
+            return None
+
+    async def mark_span_failed(self, span_id: str | None, exc: Exception) -> None:
+        """Best-effort span failure marker. Never raises."""
+        if span_id is None:
+            return None
+        client = self._ensure_client()
+        if client is None:
+            return None
+        try:
+            span = self._spans.pop(span_id, None)
+            metadata = redact_sensitive_data({"error": str(exc)})
+            if span is not None and hasattr(span, "end"):
+                span.end(level="ERROR", status_message=str(metadata["error"]))
+                return None
+            client.span(
+                id=span_id,
+                end_time=datetime.now(UTC),
+                level="ERROR",
+                status_message=str(metadata["error"]),
+            )
+        except Exception:
+            logger.error("langfuse.mark_span_failed.failed", exc_info=True)
             return None
 
     async def create_generation(

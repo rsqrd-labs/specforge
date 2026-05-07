@@ -17,6 +17,7 @@ from middleware.rate_limit import sliding_window_check
 from models import EvalResult, Stage, StageVersion, Workspace
 from prompts.base import SECURITY_AND_PRIVACY_RULES, wrap_untrusted_content
 from schemas.stage import DiffResponse, RefineRequest
+from services import langfuse_service
 from services.credit_service import CREDIT_COSTS, credit_service
 from services.evals.online_eval import run_eval_background
 from services.llm.base import ProviderError
@@ -106,6 +107,59 @@ class StageManager:
             self._redis = Redis.from_url(settings.redis_url, decode_responses=True)
         return self._redis
 
+    async def _start_langfuse_span(
+        self,
+        *,
+        trace_id: str,
+        workspace: Workspace,
+        user,
+        stage: Stage,
+        action: str,
+    ) -> str | None:
+        try:
+            client = langfuse_service.get_langfuse_client()
+            await client.create_trace(
+                name=f"workspace.{workspace.id}",
+                trace_id=trace_id,
+                user_id=str(user.id),
+                metadata={
+                    "trace_id": trace_id,
+                    "workspace_id": str(workspace.id),
+                    "user_id": str(user.id),
+                    "stage_type": stage.type,
+                    "action": action,
+                },
+            )
+            return await client.create_span(
+                trace_id=trace_id,
+                name=f"stage.{stage.type}.{action}",
+                metadata={
+                    "workspace_id": str(workspace.id),
+                    "stage_type": stage.type,
+                    "action": action,
+                },
+            )
+        except Exception:
+            logger.exception(
+                "langfuse.stage_span_start_failed",
+                extra={"stage_id": str(stage.id), "trace_id": trace_id},
+            )
+            return None
+
+    async def _end_langfuse_span(self, span_id: str | None) -> None:
+        try:
+            await langfuse_service.get_langfuse_client().end_span(span_id)
+        except Exception:
+            logger.exception("langfuse.stage_span_end_failed")
+
+    async def _mark_langfuse_span_failed(
+        self, span_id: str | None, exc: Exception
+    ) -> None:
+        try:
+            await langfuse_service.get_langfuse_client().mark_span_failed(span_id, exc)
+        except Exception:
+            logger.exception("langfuse.stage_span_failure_mark_failed")
+
     async def generate(
         self,
         stage_id: UUID,
@@ -147,7 +201,18 @@ class StageManager:
         # exception — including a build_prompt() failure — enters the finally
         # cleanup path and refunds credits + resets the stage to draft.
         _cleanup_done = False
+        span_id: str | None = None
+        span_finished = False
         try:
+            if trace_id:
+                span_id = await self._start_langfuse_span(
+                    trace_id=trace_id,
+                    workspace=workspace,
+                    user=user,
+                    stage=stage,
+                    action="generate",
+                )
+
             system_prompt, user_prompt = await build_prompt(
                 stage.type, workspace, db, redis
             )
@@ -179,6 +244,9 @@ class StageManager:
                 stage.updated_at = datetime.now(UTC)
                 await db.commit()
                 _cleanup_done = True
+                if span_id:
+                    await self._mark_langfuse_span_failed(span_id, exc)
+                    span_finished = True
                 if isinstance(exc, TimeoutError):
                     raise ProviderError(workspace.provider, exc) from exc
                 raise exc
@@ -190,6 +258,11 @@ class StageManager:
                 stage.updated_at = datetime.now(UTC)
                 await db.commit()
                 _cleanup_done = True
+                if span_id:
+                    await self._mark_langfuse_span_failed(
+                        span_id, SecurityError(validation.reason)
+                    )
+                    span_finished = True
                 raise SecurityError(f"Output failed validation: {validation.reason}")
 
             stage.content = accumulated
@@ -212,6 +285,9 @@ class StageManager:
                 )
             await db.commit()
             _cleanup_done = True
+            if span_id:
+                await self._end_langfuse_span(span_id)
+                span_finished = True
             await self._invalidate_stage_cache(workspace.id, stage.type, redis)
             eval_task = asyncio.create_task(
                 run_eval_background(
@@ -234,6 +310,10 @@ class StageManager:
                     yield json.dumps({"eval": _eval_to_dict(eval_result)})
             except (asyncio.TimeoutError, Exception):
                 pass
+        except Exception as exc:
+            if span_id and not span_finished:
+                await self._mark_langfuse_span_failed(span_id, exc)
+            raise
         finally:
             if not _cleanup_done:
                 # Client disconnected before generation completed. The request-scoped
@@ -319,7 +399,17 @@ class StageManager:
             db, user.id, CREDIT_COSTS["refine"], "refine"
         )
 
+        span_id: str | None = None
+        span_finished = False
         try:
+            if trace_id:
+                span_id = await self._start_langfuse_span(
+                    trace_id=trace_id,
+                    workspace=workspace,
+                    user=user,
+                    stage=stage,
+                    action="refine",
+                )
             adapter = get_llm(workspace.provider, workspace.model)
             if trace_id:
                 from services.llm.instrumented_adapter import InstrumentedAdapter
@@ -345,8 +435,15 @@ class StageManager:
                 )
         except (ProviderError, SecurityError, TimeoutError) as exc:
             await credit_service.refund(db, deduction.id, user.id)
+            if span_id:
+                await self._mark_langfuse_span_failed(span_id, exc)
+                span_finished = True
             if isinstance(exc, TimeoutError):
                 raise ProviderError(workspace.provider, exc) from exc
+            raise
+        except Exception as exc:
+            if span_id and not span_finished:
+                await self._mark_langfuse_span_failed(span_id, exc)
             raise
 
         proposed = apply_diff(
@@ -356,6 +453,8 @@ class StageManager:
             replacement,
         )
         diff = compute_diff(content, proposed)
+        if span_id:
+            await self._end_langfuse_span(span_id)
 
         return DiffResponse(
             diff=diff,
