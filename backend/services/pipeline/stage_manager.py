@@ -218,6 +218,7 @@ class StageManager:
             )
 
             accumulated = ""
+            content_generation_id: str | None = None
             try:
                 adapter = get_llm(workspace.provider, workspace.model)
                 if trace_id:
@@ -238,6 +239,7 @@ class StageManager:
                     ):
                         accumulated += token
                         yield token
+                content_generation_id = getattr(adapter, "last_generation_id", None)
             except (ProviderError, TimeoutError) as exc:
                 await credit_service.refund(db, deduction.id)
                 stage.status = "draft"
@@ -297,6 +299,7 @@ class StageManager:
                     spec_content,
                     workspace.provider,
                     JUDGE_MODELS[workspace.provider],
+                    content_generation_id=content_generation_id,
                 )
             )
             eval_task.add_done_callback(_log_eval_error)

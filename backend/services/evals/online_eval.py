@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from config import settings
 from database import AsyncSessionLocal
 from models import EvalResult
+from services import langfuse_service
 from services.llm.gateway import get_llm
 from services.llm.provider_config import JUDGE_MODELS
 
@@ -58,6 +59,7 @@ async def run_eval(
     db: AsyncSession,
     provider: str = "anthropic",
     judge_model: str | None = None,
+    content_generation_id: str | None = None,
 ) -> EvalResult | None:
     try:
         resolved_judge_model = judge_model or JUDGE_MODELS[provider]
@@ -113,6 +115,18 @@ async def run_eval(
     db.add(eval_result)
     await db.commit()
     await db.refresh(eval_result)
+    if content_generation_id and eval_result.overall_score is not None:
+        try:
+            await langfuse_service.get_langfuse_client().score_generation(
+                generation_id=content_generation_id,
+                name="overall",
+                value=float(eval_result.overall_score),
+            )
+        except Exception:
+            logger.exception(
+                "eval score link failed for stage_version_id=%s",
+                stage_version_id,
+            )
     return eval_result
 
 
@@ -123,6 +137,7 @@ async def run_eval_background(
     spec_content: str,
     provider: str,
     judge_model: str,
+    content_generation_id: str | None = None,
 ) -> EvalResult | None:
     async with AsyncSessionLocal() as db:
         return await run_eval(
@@ -133,4 +148,5 @@ async def run_eval_background(
             db,
             provider,
             judge_model,
+            content_generation_id,
         )

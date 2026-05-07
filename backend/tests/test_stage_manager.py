@@ -245,6 +245,11 @@ async def test_generate_with_trace_id_creates_langfuse_trace_and_span() -> None:
             "services.pipeline.stage_manager.langfuse_service.get_langfuse_client",
             return_value=langfuse_client,
         ),
+        patch(
+            "services.pipeline.stage_manager.run_eval_background",
+            new_callable=AsyncMock,
+            return_value=None,
+        ) as run_eval_background,
     ):
         mock_adapter = MagicMock()
         mock_adapter.stream = fake_stream
@@ -269,6 +274,9 @@ async def test_generate_with_trace_id_creates_langfuse_trace_and_span() -> None:
     assert span_kwargs["name"] == "stage.spec.generate"
     langfuse_client.end_span.assert_awaited_once_with("span-1")
     langfuse_client.mark_span_failed.assert_not_awaited()
+    assert run_eval_background.await_args.kwargs["content_generation_id"] == (
+        "generation-1"
+    )
 
 
 @pytest.mark.asyncio

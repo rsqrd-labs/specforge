@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
@@ -67,6 +67,94 @@ async def test_run_eval_returns_eval_result_with_scores() -> None:
     assert result.completeness == 90
     assert result.clarity == 80
     assert result.flagged is False
+    assert db._committed
+
+
+@pytest.mark.asyncio
+async def test_run_eval_scores_langfuse_generation_when_id_present() -> None:
+    db = _FakeDB()
+    judge_response = '{"overall_score": 85, "completeness": 90, "clarity": 80}'
+    langfuse_client = MagicMock()
+    langfuse_client.score_generation = AsyncMock()
+
+    with (
+        patch(
+            "services.evals.online_eval.get_llm",
+            return_value=_FakeJudge(judge_response),
+        ),
+        patch(
+            "services.evals.online_eval.langfuse_service.get_langfuse_client",
+            return_value=langfuse_client,
+        ),
+    ):
+        result = await run_eval(
+            uuid4(),
+            "spec",
+            "spec content",
+            "",
+            db,
+            content_generation_id="g-123",
+        )
+
+    assert result is not None
+    langfuse_client.score_generation.assert_awaited_once_with(
+        generation_id="g-123", name="overall", value=85.0
+    )
+
+
+@pytest.mark.asyncio
+async def test_run_eval_skips_langfuse_score_without_generation_id() -> None:
+    db = _FakeDB()
+    judge_response = '{"overall_score": 85, "completeness": 90, "clarity": 80}'
+    langfuse_client = MagicMock()
+    langfuse_client.score_generation = AsyncMock()
+
+    with (
+        patch(
+            "services.evals.online_eval.get_llm",
+            return_value=_FakeJudge(judge_response),
+        ),
+        patch(
+            "services.evals.online_eval.langfuse_service.get_langfuse_client",
+            return_value=langfuse_client,
+        ),
+    ):
+        result = await run_eval(uuid4(), "spec", "spec content", "", db)
+
+    assert result is not None
+    langfuse_client.score_generation.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_run_eval_returns_result_when_langfuse_score_fails() -> None:
+    db = _FakeDB()
+    judge_response = '{"overall_score": 85, "completeness": 90, "clarity": 80}'
+    langfuse_client = MagicMock()
+    langfuse_client.score_generation = AsyncMock(
+        side_effect=RuntimeError("langfuse down")
+    )
+
+    with (
+        patch(
+            "services.evals.online_eval.get_llm",
+            return_value=_FakeJudge(judge_response),
+        ),
+        patch(
+            "services.evals.online_eval.langfuse_service.get_langfuse_client",
+            return_value=langfuse_client,
+        ),
+    ):
+        result = await run_eval(
+            uuid4(),
+            "spec",
+            "spec content",
+            "",
+            db,
+            content_generation_id="g-123",
+        )
+
+    assert result is not None
+    assert result.overall_score == 85
     assert db._committed
 
 
@@ -190,4 +278,5 @@ async def test_run_eval_background_opens_its_own_session() -> None:
         db,
         "openai",
         "gpt-4o-mini",
+        None,
     )
