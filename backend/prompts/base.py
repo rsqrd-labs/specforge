@@ -2,8 +2,12 @@ from __future__ import annotations
 
 import time
 
+import structlog
+
 from config import settings
 from services import langfuse_service
+
+logger = structlog.get_logger(__name__)
 
 ASDD_METHODOLOGY_OVERVIEW = """
 ASDD (AI-Spec-Driven Development) is a methodology where every implementation
@@ -54,6 +58,32 @@ Professional output rules:
 _PROMPT_CACHE: dict[str, tuple[float, str]] = {}
 
 
+def _enforce_security_rules(name: str, body: str) -> str:
+    """Guarantee SECURITY_AND_PRIVACY_RULES are present in any prompt body
+    served from a remote source.
+
+    A remote prompt fetched from Langfuse is functionally a system prompt
+    edit, executed inside our process, with the privileges of whoever can
+    edit prompts in the Langfuse dashboard. Without this gate, a compromised
+    or sloppily-edited remote template could ship without our role-pinning,
+    no-secret-disclosure, and untrusted-content rules — and we would silently
+    use it. Local fallback prompts already embed the rules; the gate only
+    fires for content originating outside the repository.
+
+    If the canonical rules string is already present verbatim in the remote
+    body, return it unchanged. Otherwise, append the rules and emit a
+    warning so operators have a signal that a remote prompt was missing
+    them.
+    """
+    if SECURITY_AND_PRIVACY_RULES in body:
+        return body
+    logger.warning(
+        "langfuse.prompt.security_rules_appended",
+        prompt_name=name,
+    )
+    return f"{body}\n\n{SECURITY_AND_PRIVACY_RULES}"
+
+
 async def load_prompt(name: str, fallback: str) -> str:
     now = time.time()
     cached = _PROMPT_CACHE.get(name)
@@ -63,7 +93,10 @@ async def load_prompt(name: str, fallback: str) -> str:
         remote = await langfuse_service.get_langfuse_client().get_prompt(name)
     except Exception:
         remote = None
-    value = remote if isinstance(remote, str) and remote else fallback
+    if isinstance(remote, str) and remote:
+        value = _enforce_security_rules(name, remote)
+    else:
+        value = fallback
     _PROMPT_CACHE[name] = (now, value)
     return value
 
