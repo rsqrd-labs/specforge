@@ -1,12 +1,14 @@
 ---
-
 tags:
-
-- specforge
-- plan
-- v1
-- asdd created: 2026-04-25 status: final version: 1.0.1 stage: plan depends-on: "[[SpecForge V1 SPEC]]"
-
+  - specforge
+  - plan
+  - v1
+  - asdd
+created: 2026-04-25
+status: final
+version: 1.6.1
+stage: plan
+depends-on: "[[SpecForge V1 SPEC]]"
 ---
 
 # SpecForge V1 — PLAN.md
@@ -968,6 +970,12 @@ CSRF_SECRET=xxx
 SENTRY_DSN=https://xxx@sentry.io/xxx
 GRAFANA_OTLP_ENDPOINT=https://xxx.grafana.net/otlp
 GRAFANA_OTLP_TOKEN=xxx
+METRICS_TOKEN=
+LANGFUSE_SECRET_KEY=
+LANGFUSE_PUBLIC_KEY=
+LANGFUSE_HOST=https://cloud.langfuse.com
+LANGFUSE_PROMPT_CACHE_TTL=300
+LANGFUSE_CONTENT_CAPTURE_ACK=false
 
 # App
 ENVIRONMENT=development
@@ -1583,7 +1591,7 @@ _SpecForge V1 PLAN.md · Version 1.5.0 · Updated 2026-05-04 with Phase 9 final 
 Add Langfuse as an optional LLM observability layer that captures prompt-level traces, prompt versions, eval scores linked to the generation that produced them, and dataset items at score thresholds — all without affecting any existing functionality or any user-facing flow.
 
 **Inputs:**
-- Existing post-T-120 codebase (172 unit tests passing, 26/26 harness CI tests passing, production approval)
+- Existing post-T-120 codebase and production approval baseline
 - Architecture §8a (LLM Observability Architecture)
 - Spec §12 Observability + Assumption 7
 - New harness file `harness/tests/backend/test_langfuse_contract.py`
@@ -1591,12 +1599,12 @@ Add Langfuse as an optional LLM observability layer that captures prompt-level t
 **Outputs:**
 - New `backend/services/langfuse_service.py` (single integration point)
 - New `backend/services/llm/instrumented_adapter.py` (composes around `BaseLLMAdapter`)
-- `LANGFUSE_SECRET_KEY`, `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_HOST`, `LANGFUSE_PROMPT_CACHE_TTL` added to `config.py` (all optional)
+- `LANGFUSE_SECRET_KEY`, `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_HOST`, `LANGFUSE_PROMPT_CACHE_TTL`, and `LANGFUSE_CONTENT_CAPTURE_ACK` added to `config.py`
 - Trace ID propagation from `routers/stage.py` through `stage_manager.generate/refine/regenerate`
 - Eval score linking in `services/evals/online_eval.py`
 - Dataset collection at score thresholds (≥85, <60)
 - Optional `langfuse` + `langfuse-db` services in `docker-compose.yml` under a `langfuse` profile
-- Updated `requirements.txt` with `langfuse==2.*`
+- Updated backend dependency set with `langfuse>=2.60,<3`
 - Updated CI to install Langfuse and run `test_langfuse_contract.py` with the var unset
 
 ---
@@ -1607,7 +1615,7 @@ These are non-negotiable. Every task must respect them.
 
 1. **The integration is entirely optional.** The `LANGFUSE_SECRET_KEY` env var gates everything. When unset/empty, a no-op client is used and **zero** Langfuse SDK calls are made. The check lives in **one** place — `services/langfuse_service.py` — not scattered across services.
 
-2. **No new required environment variables.** All four new variables default to safe values. The app starts and serves traffic without any Langfuse configuration.
+2. **No new required environment variables in disabled mode.** The Langfuse variables default to safe values and the app starts and serves traffic without Langfuse configuration. In production, enabling Langfuse by setting `LANGFUSE_SECRET_KEY` also requires `LANGFUSE_PUBLIC_KEY` and `LANGFUSE_CONTENT_CAPTURE_ACK=true`.
 
 3. **`BaseLLMAdapter` interface stays unchanged.** Anthropic, OpenAI, Google adapters never import Langfuse. The `InstrumentedAdapter` wraps an existing adapter and is composed at the gateway level when a trace context is present.
 
@@ -1617,7 +1625,7 @@ These are non-negotiable. Every task must respect them.
 
 6. **Streams are accumulated, not recorded token-by-token.** A Langfuse `generation` is created once per `stream()` or `complete()` call, with the full accumulated response submitted after the stream closes. This avoids per-token network chatter and matches Langfuse's expected granularity.
 
-7. **Every new task has a verification step that runs the existing 172 unit tests + 26 harness CI tests.** No regressions are tolerated.
+7. **Every new task has a verification step that runs the existing unit tests and harness CI contracts.** No regressions are tolerated.
 
 ---
 
@@ -1700,9 +1708,10 @@ langfuse_secret_key: str = ""
 langfuse_public_key: str = ""
 langfuse_host: str = "https://cloud.langfuse.com"
 langfuse_prompt_cache_ttl: int = 300
+langfuse_content_capture_ack: bool = False
 ```
 
-`.env.example` documents all four with comment "Optional — leave blank to disable Langfuse instrumentation."
+`.env.example` documents the Langfuse variables with comments explaining that `LANGFUSE_SECRET_KEY` blank disables the integration entirely, and that production enablement requires `LANGFUSE_CONTENT_CAPTURE_ACK=true`.
 
 ---
 
@@ -1771,6 +1780,7 @@ LANGFUSE_SECRET_KEY=
 LANGFUSE_PUBLIC_KEY=
 LANGFUSE_HOST=https://cloud.langfuse.com
 LANGFUSE_PROMPT_CACHE_TTL=300
+LANGFUSE_CONTENT_CAPTURE_ACK=false
 ```
 
 ---
@@ -1783,7 +1793,7 @@ LANGFUSE_PROMPT_CACHE_TTL=300
 
 **Impact:** High.
 
-**Mitigation:** All Langfuse calls are async and non-blocking. `create_trace()` and `create_span()` are issued via `asyncio.create_task` so they run concurrently with prompt building. The streaming loop never awaits a Langfuse call. If Langfuse is slow, traces may arrive out of order or with stale timestamps — never blocks the stream.
+**Mitigation:** Langfuse span setup is best-effort and exception-swallowing, and generation recording happens after the wrapped stream closes rather than token-by-token. The SDK is imported lazily only when enabled, and the disabled path performs zero SDK calls. The streaming loop does not perform per-token telemetry work.
 
 #### Risk B — Sensitive prompt content sent to Langfuse Cloud
 
@@ -1791,7 +1801,7 @@ LANGFUSE_PROMPT_CACHE_TTL=300
 
 **Impact:** High — leaked API keys or PII in prompts is a data-exposure incident.
 
-**Mitigation:** The existing `redact_sensitive_data()` runs over every payload before it leaves the process. Sentry already uses this — the same code path is reused. Operators who want stronger isolation are documented as preferring self-hosted.
+**Mitigation:** The existing `redact_sensitive_data()` runs over every payload before it leaves the process. Sentry already uses this — the same code path is reused. Production enablement also requires `LANGFUSE_CONTENT_CAPTURE_ACK=true`, making prompt/output export an explicit operator decision. Operators who want stronger isolation are documented as preferring self-hosted.
 
 #### Risk C — Langfuse outage breaks the user-facing flow
 
@@ -1807,7 +1817,7 @@ LANGFUSE_PROMPT_CACHE_TTL=300
 
 **Impact:** Medium (Langfuse Cloud charges by trace volume).
 
-**Mitigation:** Dataset writes are bounded by the eval-score thresholds (≥85 or <60). Mid-quality generations (60–84) are not added. The thresholds are configurable via two additional settings if observed volume needs tuning post-launch.
+**Mitigation:** Dataset writes are bounded by the eval-score thresholds (≥85 or <60). Mid-quality generations (60–84) are not added. Dataset writes run as background tasks with error logging, so dataset collection cannot block eval completion.
 
 ---
 
@@ -1819,10 +1829,10 @@ LANGFUSE_PROMPT_CACHE_TTL=300
 
 **Q3 — What about refine and rollback flows?** Refine produces an LLM call that the operator may want traced. **Proposed:** T-124 wires trace propagation into `generate`, `refine`, and `regenerate`. Rollback does not call any LLM, so no Langfuse instrumentation is needed.
 
-**Q4 — Are eval-judge calls themselves traced?** Yes — they go through `get_llm()` and so are wrapped by the same `InstrumentedAdapter` pattern. The eval generation is recorded as a child of the same span as the content it scored, so the score lands on the right generation in the Langfuse view.
+**Q4 — Are eval-judge calls themselves traced?** No for V1. The implemented integration traces user-facing generation/refine calls and attaches the eval `overall` score to the content generation that produced the stage output. Judge calls remain internal background work and are not recorded as separate Langfuse generations.
 
 **Q5 — Why pin to `langfuse>=2.60,<3` rather than the latest v4 line?** The v2 line exposes the imperative `client.trace() / .span() / .generation() / .score() / .get_prompt() / .create_dataset_item()` API that the `LangfuseClient` wrapper and `InstrumentedAdapter` are built on. v3 and v4 moved the SDK to an OpenTelemetry context-manager pattern (`with langfuse.start_as_current_observation(...) as span:`), which would require redesigning the wrapper and changing every call site. Additionally, v3+ requires `opentelemetry-api>=1.33.1`, which conflicts with the project's pinned `opentelemetry-instrumentation-fastapi==0.49.*` and `opentelemetry-instrumentation-sqlalchemy==0.49.*`. v2.60 is actively maintained (last release Sept 2025). Migration to v3/v4 is a separate, deferred follow-up that requires (a) bumping the OpenTelemetry instrumentation packages with their own validation cycle in production traces, and (b) reshaping `InstrumentedAdapter` to use OTel context managers. Out of scope for Phase 11.
 
 ---
 
-_SpecForge V1 PLAN.md · Version 1.6.0 · Updated 2026-05-07 with Phase 11 Langfuse LLM observability (langfuse v2.60 line)_
+_SpecForge V1 PLAN.md · Version 1.6.1 · Updated 2026-05-07 with Phase 11 Langfuse production-gate corrections_
