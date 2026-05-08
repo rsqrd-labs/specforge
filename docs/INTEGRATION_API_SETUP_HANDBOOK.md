@@ -57,12 +57,20 @@ production, Railway and Vercel have a settings UI where you type them in — no
 `.env` file is deployed. This is how you safely pass API keys, database URLs,
 and secrets to a running service.
 
+**What is GitHub Actions?**
+GitHub Actions is an automation system built into GitHub. You define workflows
+as YAML files in `.github/workflows/` and GitHub runs them automatically in
+response to events — for example, every time you push code. SpecForge's
+workflow (`.github/workflows/ci.yml`) runs the test suite, lints the code, and
+then deploys the backend to Railway and the frontend to Vercel, all without
+you doing anything manually. You can watch it run in real time under the
+**Actions** tab of your GitHub repository.
+
 **What are GitHub Secrets?**
 GitHub Secrets are a secure way to store credentials inside your GitHub
-repository without putting them in code. GitHub Actions (the automated
-build-and-deploy pipeline in `.github/workflows/ci.yml`) reads these secrets
+repository without putting them in code. GitHub Actions reads these secrets
 to push deployments to Railway and Vercel. You add them once in your repo's
-Settings page and they never appear in your code.
+Settings page and they never appear in your code or in the workflow logs.
 
 **What is the deployment flow?**
 When you push code to the `main` branch on GitHub:
