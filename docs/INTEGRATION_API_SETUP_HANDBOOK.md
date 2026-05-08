@@ -1,693 +1,640 @@
 # Integration & API Setup Handbook
 
-## 1. Overview of Required Services
+This handbook walks you through everything needed to run SpecForge — both
+locally and live on the internet. No prior deployment experience is assumed.
 
-SpecForge is a React/Vite frontend plus FastAPI backend that turns a user
-problem statement into a staged AI workflow:
+---
+
+## How SpecForge is structured
+
+SpecForge has two application pieces plus two data stores:
 
 ```text
-SPEC -> PLAN -> HARNESS -> TASKS
+┌─────────────────────────────────────────────────────────┐
+│  User's browser                                          │
+│  Opens the frontend URL → signs in → generates stages   │
+└───────────────────────┬─────────────────────────────────┘
+                        │ HTTP / SSE
+┌───────────────────────▼─────────────────────────────────┐
+│  Frontend  (React app, static files)                     │
+│  Served by Vercel — a URL like https://specforge.vercel.app │
+└───────────────────────┬─────────────────────────────────┘
+                        │ API calls
+┌───────────────────────▼─────────────────────────────────┐
+│  Backend  (FastAPI Python server)                        │
+│  Hosted on Railway — a URL like https://specforge.railway.app │
+│                                                          │
+│  ┌──────────────┐  ┌──────────────┐                     │
+│  │  PostgreSQL  │  │    Redis     │                      │
+│  │  (database)  │  │   (cache)    │                      │
+│  │  on Railway  │  │  on Railway  │                      │
+│  └──────────────┘  └──────────────┘                     │
+└─────────────────────────────────────────────────────────┘
 ```
 
-Runtime configuration is loaded from:
+**Locally** everything runs in Docker on your machine at `localhost` URLs.
 
-- Backend: `backend/.env`, parsed by `backend/config.py`
-- Frontend: `frontend/.env`, consumed by Vite
-- Local Docker overrides: `docker-compose.yml`
-- Production deployment secrets: Railway, Vercel, and GitHub Actions
+**In production** the backend and databases live on Railway (a cloud hosting
+platform), and the frontend lives on Vercel (a static-site hosting platform).
+Both are free to start and require no server management on your part.
 
-Required runtime integrations:
+---
 
-| Service | Required? | Purpose | Main code paths |
-| --- | --- | --- | --- |
-| PostgreSQL | Yes | Primary relational DB | `backend/database.py`, `backend/models/*`, `backend/migrations/*` |
-| Redis | Yes | OAuth state, refresh sessions, rate limits, cache, recovery lock | `backend/services/auth_service.py`, `backend/middleware/rate_limit.py`, `backend/services/pipeline/stage_manager.py` |
-| Google OAuth | Yes | User sign-in | `backend/services/auth_service.py`, `backend/routers/auth.py`, `frontend/src/pages/Landing.tsx`, `frontend/src/pages/AuthCallback.tsx` |
-| Anthropic | Yes for Anthropic provider | LLM generation/evaluation | `backend/services/llm/anthropic_adapter.py`, `backend/services/llm/gateway.py` |
-| OpenAI | Yes for OpenAI provider | LLM generation/evaluation | `backend/services/llm/openai_adapter.py` |
-| Google Gemini | Yes for Google provider | LLM generation/evaluation | `backend/services/llm/google_adapter.py` |
-| Sentry | Optional | Backend/frontend error reporting | `backend/services/observability.py`, `frontend/src/main.tsx` |
-| Grafana OTLP | Optional | Distributed tracing | `backend/services/observability.py` |
-| Langfuse | Optional | LLM traces, prompt-version fallback, eval score links, dataset collection | `backend/services/langfuse_service.py`, `backend/services/llm/instrumented_adapter.py`, `backend/services/evals/online_eval.py`, `backend/prompts/*` |
-| Prometheus-compatible metrics | Built in | `/metrics` endpoint | `backend/services/observability.py` |
-| Railway | Production backend deploy | API, Postgres, Redis hosting | `.github/workflows/ci.yml` |
-| Vercel | Production frontend deploy | Static frontend hosting | `.github/workflows/ci.yml` |
-| GitHub Actions secrets | Production CI/CD | Deploy and smoke credentials | `.github/workflows/ci.yml`, `.github/workflows/production-smoke.yml` |
+## Deployment concepts for first-timers
 
-Installed but not currently wired into runtime credentials:
+**What is Railway?**
+Railway is a platform that runs your backend server and databases in the cloud.
+You give it your code and some configuration, and it gives you a public URL
+like `https://specforge-api.up.railway.app`. You do not manage any servers —
+Railway handles that. It also provides managed PostgreSQL and Redis databases,
+meaning you get a database URL without having to install or maintain the
+database software yourself.
 
-- `stripe`, `@stripe/stripe-js`: dependencies exist, but no Stripe environment
-  variables are consumed by `backend/config.py`.
-- `resend`: dependency exists, but no Resend environment variables are consumed.
-- `supabase`: dependency exists, but no Supabase environment variables are
-  consumed.
+**What is Vercel?**
+Vercel is a platform that hosts frontend web apps. You run `pnpm build` to
+turn your React code into plain HTML, CSS, and JavaScript files, and Vercel
+serves those files from a global CDN. You get a public URL like
+`https://specforge.vercel.app`. No servers to manage.
 
-## 2. API Setup Service-by-Service
+**What are environment variables?**
+Environment variables are configuration values that your app reads at runtime.
+Locally they live in `.env` files (`backend/.env`, `frontend/.env`). In
+production, Railway and Vercel have a settings UI where you type them in — no
+`.env` file is deployed. This is how you safely pass API keys, database URLs,
+and secrets to a running service.
+
+**What are GitHub Secrets?**
+GitHub Secrets are a secure way to store credentials inside your GitHub
+repository without putting them in code. GitHub Actions (the automated
+build-and-deploy pipeline in `.github/workflows/ci.yml`) reads these secrets
+to push deployments to Railway and Vercel. You add them once in your repo's
+Settings page and they never appear in your code.
+
+**What is the deployment flow?**
+When you push code to the `main` branch on GitHub:
+
+1. GitHub Actions runs tests automatically.
+2. If tests pass, it deploys the backend to Railway.
+3. It also deploys the frontend to Vercel.
+
+This is called continuous deployment — the app updates automatically whenever
+you merge to `main`.
+
+---
+
+## 1. Overview of Required Services
+
+| Service | Required? | Purpose |
+| --- | --- | --- |
+| PostgreSQL | Yes | Stores users, workspaces, stages, credits, and evals |
+| Redis | Yes | Stores login sessions, rate-limit counters, and stage cache |
+| Google OAuth | Yes | User sign-in ("Sign in with Google") |
+| Anthropic / OpenAI / Google Gemini | At least one | LLM generation — you need a key for whichever provider(s) you want to offer |
+| Railway | Production | Hosts the backend server, PostgreSQL, and Redis in the cloud |
+| Vercel | Production | Hosts the frontend website |
+| GitHub Actions secrets | Production | Lets the automated pipeline deploy to Railway and Vercel |
+| Sentry | Optional | Error reporting if something breaks in production |
+| Grafana OTLP | Optional | Distributed tracing (advanced observability) |
+| Langfuse | Optional | LLM call logging and prompt management |
+| Prometheus metrics | Built in | `/metrics` endpoint — no setup needed |
+
+Dependencies installed but not yet wired to credentials (safe to ignore):
+`stripe`, `resend`, `supabase` — these packages exist but SpecForge does not
+read any corresponding environment variables for them.
+
+---
+
+## 2. Service Setup
 
 ### PostgreSQL
 
-Purpose: primary database for users, workspaces, stages, credit ledger, versions,
-and evals.
+**What it is:** the primary relational database. Every user account, workspace,
+stage, credit transaction, and eval result is stored here.
 
-Used in:
+**Locally:** Docker Compose starts a PostgreSQL container automatically. No
+setup needed.
 
-- `backend/database.py`
-- `backend/models/*.py`
-- `backend/migrations/versions/*.py`
-- `backend/routers/*`
-- `backend/services/*`
+**In production on Railway:**
 
-Required setting:
+1. Go to [railway.app](https://railway.app) and sign up or log in.
+2. Click **New Project**.
+3. Click **Add a service** → **Database** → **Add PostgreSQL**.
+4. Railway creates a PostgreSQL instance and shows you its connection details.
+5. Click the PostgreSQL service, go to the **Connect** tab.
+6. Copy the **Private URL** — it looks like:
+   `postgresql://postgres:PASSWORD@HOST.railway.internal:5432/railway`
+7. You will need to prefix this with `+asyncpg` for SpecForge. Change
+   `postgresql://` to `postgresql+asyncpg://`. The final value goes into the
+   backend service's `DATABASE_URL` variable (covered in the Railway section
+   below).
+
+Required variable:
 
 ```env
 DATABASE_URL=postgresql+asyncpg://USER:PASSWORD@HOST:PORT/DB_NAME
 ```
 
-Local Docker value is supplied by `docker-compose.yml`:
+**Local Docker value** (set automatically by `docker-compose.yml`):
 
 ```env
 DATABASE_URL=postgresql+asyncpg://specforge:specforge@db:5432/specforge
 ```
 
-How to obtain production credentials:
-
-1. Create a managed PostgreSQL database. Railway Postgres is already implied by
-   the CI/deploy flow. Railway docs: https://docs.railway.com/guides/postgresql
-2. In Railway, add a PostgreSQL service to the project.
-3. Copy the private/internal connection URL for the backend service.
-4. Ensure it uses the async SQLAlchemy driver prefix in SpecForge:
-   `postgresql+asyncpg://...`
-
-Validation:
-
-```bash
-cd backend
-uv run alembic upgrade head
-uv run python - <<'PY'
-from database import async_engine
-import asyncio
-from sqlalchemy import text
-
-async def main():
-    async with async_engine.connect() as c:
-        print((await c.execute(text("SELECT 1"))).scalar())
-
-asyncio.run(main())
-PY
-```
-
 Common errors:
 
-- `No module named asyncpg`: run `uv sync`.
-- Connection refused: wrong host/port or DB is not running.
-- `password authentication failed`: wrong database password.
-- Migration failure: run from `backend/` and verify `DATABASE_URL`.
+- `No module named asyncpg`: run `uv sync` in `backend/`.
+- Connection refused: wrong host/port or the database is not running.
+- `password authentication failed`: wrong password in the URL.
+- Migration failure: make sure you run `alembic upgrade head` from `backend/`.
+
+---
 
 ### Redis
 
-Purpose: OAuth state storage, refresh-token session store, rate limiting, stage
-cache, credit balance cache, and stuck-stage recovery lock.
+**What it is:** an in-memory data store used for login session state, OAuth
+handshake state, rate-limit counters, and temporary stage data. If Redis is
+unavailable, sign-in and rate limiting degrade gracefully but some features
+may behave oddly.
 
-Used in:
+**Locally:** Docker Compose starts Redis automatically. No setup needed.
 
-- `backend/services/auth_service.py`
-- `backend/middleware/rate_limit.py`
-- `backend/services/pipeline/stage_manager.py`
-- `backend/services/pipeline/prompt_builder.py`
-- `backend/services/pipeline/recovery_service.py`
-- `backend/services/credit_service.py`
-- `backend/main.py`
+**In production on Railway:**
 
-Required setting:
+1. In your Railway project, click **Add a service** → **Database** → **Add Redis**.
+2. Click the Redis service, go to the **Connect** tab.
+3. Copy the **Private URL** — it looks like `redis://default:PASSWORD@HOST.railway.internal:6379`.
+4. This value goes into the backend service's `REDIS_URL` variable.
+
+> If your Railway Redis requires TLS, use `rediss://` instead of `redis://`
+> at the start of the URL. Railway's internal network typically does not
+> require TLS, so `redis://` is usually correct.
+
+Required variable:
 
 ```env
 REDIS_URL=redis://HOST:PORT/0
 ```
 
-Use `rediss://...` for managed TLS Redis if your provider requires TLS.
-
-Local Docker value:
+**Local Docker value:**
 
 ```env
 REDIS_URL=redis://redis:6379/0
 ```
 
-How to obtain production credentials:
-
-1. Create a managed Redis instance. Railway Redis docs:
-   https://docs.railway.com/databases/redis
-2. Copy the internal/private Redis URL into Railway backend variables.
-3. Prefer private networking between API and Redis.
-
-Validation:
-
-```bash
-redis-cli -u "$REDIS_URL" ping
-```
-
-Expected:
-
-```text
-PONG
-```
-
 Common errors:
 
-- `/health` returns degraded: Redis is unreachable or URL is wrong.
-- Login callback fails with OAuth state error: Redis may not be storing OAuth
-  state.
-- Rate limits behave oddly: check Redis connectivity and backend logs for
+- `/health` returns `degraded`: Redis is unreachable or the URL is wrong.
+- Sign-in fails with "OAuth state error": Redis is down — the login handshake
+  stores short-lived state there.
+- Rate limits behave strangely: check backend logs for
   `rate_limit.redis_unavailable_fallback`.
+
+---
 
 ### Google OAuth
 
-Purpose: user login. The backend starts the OAuth flow; Google redirects back to
-the frontend `/auth/callback`; the frontend then calls backend `/auth/callback`.
+**What it is:** the "Sign in with Google" button. Google handles the password
+check and tells SpecForge who the user is. SpecForge never sees or stores
+passwords.
 
-Used in:
+**How the flow works:**
 
-- `backend/services/auth_service.py`
-- `backend/routers/auth.py`
-- `frontend/src/pages/Landing.tsx`
-- `frontend/src/pages/AuthCallback.tsx`
+1. User clicks "Sign in with Google" on the frontend.
+2. They are redirected to Google's consent page.
+3. After approving, Google redirects back to `{FRONTEND_URL}/auth/callback`
+   with a one-time code.
+4. The frontend sends that code to the SpecForge backend, which exchanges it
+   with Google for the user's identity.
+5. SpecForge issues its own login tokens and sets a session cookie.
 
-Required settings:
+**How to set up credentials:**
+
+1. Go to [Google Cloud Console](https://console.cloud.google.com/) and sign in
+   with your Google account.
+2. Click the project selector at the top → **New Project**. Give it any name
+   (e.g. `specforge`).
+3. In the left sidebar, go to **APIs & Services** → **OAuth consent screen**.
+   - Choose **External** as the user type.
+   - Fill in the app name (e.g. `SpecForge`) and your email for the support
+     and developer contact fields.
+   - Click through the remaining steps and save.
+4. Go to **APIs & Services** → **Credentials** → **Create Credentials** →
+   **OAuth client ID**.
+5. Application type: **Web application**.
+6. Under **Authorized JavaScript origins** add:
+   - `http://localhost:5173` (for local development)
+   - `https://your-vercel-url.vercel.app` (your production frontend URL — add
+     this once you know it from Vercel)
+7. Under **Authorized redirect URIs** add:
+   - `http://localhost:5173/auth/callback` (for local development)
+   - `https://your-vercel-url.vercel.app/auth/callback` (production — add
+     after Vercel is set up)
+8. Click **Create**. Google shows you a **Client ID** and **Client Secret**.
+   Copy both — you will not be able to see the secret again without
+   regenerating it.
+9. Put these into `backend/.env` for local development, and into Railway
+   backend variables for production.
+
+> The redirect URI must be the **frontend** URL (`/auth/callback` on Vercel),
+> not the backend URL. Google sends the user back to the frontend, which then
+> calls the backend. This is a common source of confusion.
+
+Required variables:
 
 ```env
 GOOGLE_CLIENT_ID=your-client-id.apps.googleusercontent.com
 GOOGLE_CLIENT_SECRET=your-client-secret
-FRONTEND_URL=http://localhost:5173
+FRONTEND_URL=http://localhost:5173   # change to your Vercel URL in production
 ```
-
-Official Google OAuth docs:
-https://developers.google.com/identity/protocols/oauth2/web-server
-
-How to get credentials:
-
-1. Go to Google Cloud Console: https://console.cloud.google.com/
-2. Create or select a project.
-3. Configure the OAuth consent screen.
-4. Create an OAuth Client ID.
-5. Application type: `Web application`.
-6. Add Authorized JavaScript origins:
-   - Local: `http://localhost:5173`
-   - Production: `https://your-frontend-domain`
-7. Add Authorized redirect URIs:
-   - Local: `http://localhost:5173/auth/callback`
-   - Production: `https://your-frontend-domain/auth/callback`
-8. Copy client ID and secret into backend env.
-
-Important repo-specific detail: `backend/services/auth_service.py` sets the
-OAuth redirect URI to:
-
-```python
-f"{settings.frontend_url.rstrip('/')}/auth/callback"
-```
-
-So the Google redirect URI must be the frontend callback URL, not
-`/auth/callback` on the backend.
-
-Validation:
-
-1. Start backend and frontend.
-2. Visit `http://localhost:5173`.
-3. Click `Sign in with Google`.
-4. After consent, the browser should land on `/dashboard`.
-5. Backend should create/update a `User` row and issue a refresh cookie.
 
 Common errors:
 
-- `redirect_uri_mismatch`: Google Console redirect URI does not exactly match
-  `FRONTEND_URL/auth/callback`.
-- “Google sign-in failed”: check backend logs, `GOOGLE_CLIENT_SECRET`, and
-  `FRONTEND_URL`.
-- OAuth state error: Redis is down or state expired.
+- `redirect_uri_mismatch`: the URI you registered in Google Console does not
+  exactly match `FRONTEND_URL + /auth/callback`. Check for trailing slashes
+  and `http` vs `https`.
+- "Google sign-in failed": check backend logs, verify `GOOGLE_CLIENT_SECRET`,
+  and verify `FRONTEND_URL` matches the browser origin.
+- "OAuth state error": Redis is down.
 
-### Anthropic
+---
 
-Purpose: Anthropic model generation/evaluation.
+### LLM Providers
 
-Used in:
+SpecForge needs at least one LLM provider key to generate stages. You can
+enable one or all three; users pick their provider in the UI.
 
-- `backend/services/llm/anthropic_adapter.py`
-- `backend/services/llm/provider_config.py`
-- `backend/services/llm/gateway.py`
+#### Anthropic (Claude)
 
-Required setting:
+1. Go to [console.anthropic.com](https://console.anthropic.com/) and sign up.
+2. Add billing details under **Plans & Billing**. Anthropic requires a payment
+   method before issuing production keys (there is a free tier for testing).
+3. Go to **API Keys** → **Create Key**. Copy the key (starts with `sk-ant-`).
+4. Store it in `ANTHROPIC_API_KEY`.
 
 ```env
 ANTHROPIC_API_KEY=sk-ant-...
 ```
 
-Official console/docs:
+#### OpenAI
 
-- https://console.anthropic.com/
-- https://docs.anthropic.com/
-
-How to get credentials:
-
-1. Create/log into an Anthropic Console account.
-2. Enable billing/usage as required.
-3. Create an API key in the Console.
-4. Copy it into `backend/.env` or Railway backend variables.
-
-Validation:
-
-1. Start the app.
-2. Create a workspace using provider `anthropic`.
-3. Generate SPEC.
-4. Expected: SSE token stream appears; credit balance decreases by 10.
-
-Common errors:
-
-- Provider error in SSE stream: invalid key, model unavailable, rate limit, or
-  billing issue.
-- Model mismatch: check allowed Anthropic model IDs in
-  `backend/services/llm/provider_config.py`.
-
-### OpenAI
-
-Purpose: OpenAI model generation/evaluation.
-
-Used in:
-
-- `backend/services/llm/openai_adapter.py`
-- `backend/services/llm/provider_config.py`
-- `backend/services/llm/gateway.py`
-
-Required setting:
+1. Go to [platform.openai.com](https://platform.openai.com/) and sign up.
+2. Add a payment method under **Billing**.
+3. Go to **API Keys** → **Create new secret key**. Copy the key (starts with
+   `sk-`).
+4. Store it in `OPENAI_API_KEY`.
 
 ```env
 OPENAI_API_KEY=sk-...
 ```
 
-Official setup docs:
+#### Google Gemini
 
-- https://platform.openai.com/docs/quickstart
-- https://help.openai.com/en/articles/4936850-how-to-create-and-use-an-api-key
-
-How to get credentials:
-
-1. Go to https://platform.openai.com/
-2. Create or select a project.
-3. Ensure billing and usage limits are configured.
-4. Create an API key.
-5. Store it only in backend environment variables.
-
-Validation:
-
-1. Create a workspace with provider `openai`.
-2. Select an allowed model from `backend/services/llm/provider_config.py`.
-3. Generate SPEC.
-
-Common errors:
-
-- `401`: wrong key or key revoked.
-- `429`: rate limit or quota exhaustion.
-- Empty/failed stream: inspect backend logs for `ProviderError("openai", ...)`.
-
-### Google Gemini
-
-Purpose: Gemini model generation/evaluation.
-
-Used in:
-
-- `backend/services/llm/google_adapter.py`
-- `backend/services/llm/provider_config.py`
-- `backend/services/llm/gateway.py`
-
-Required setting:
+1. Go to [aistudio.google.com](https://aistudio.google.com/) and sign in.
+2. Click **Get API key** → **Create API key**.
+3. Copy the key and store it in `GOOGLE_API_KEY`.
 
 ```env
 GOOGLE_API_KEY=...
 ```
 
-Official Gemini API key docs:
+Common errors for all providers:
 
-- https://ai.google.dev/gemini-api/docs/api-key
-- https://ai.google.dev/aistudio
+- Provider error during generation: check the key is valid and the account has
+  billing enabled.
+- Model not found: the allowed models per provider are listed in
+  `backend/services/llm/provider_config.py`.
 
-How to get credentials:
+---
 
-1. Go to Google AI Studio.
-2. Create/select a Google Cloud project.
-3. Generate a Gemini API key.
-4. Enable billing/quota controls for production.
-5. Put the key in backend environment only.
+### Sentry (optional — skip for first deploy)
 
-Validation:
+Sentry catches and reports errors from the running app. Useful once you have
+real users. Skip it on your first deployment — SpecForge works without it.
 
-1. Create a workspace with provider `google`.
-2. Select `gemini-1.5-pro`, `gemini-1.5-flash`, or `gemini-2.0-flash` as
-   configured.
-3. Generate SPEC.
+If you want to set it up later:
 
-Common errors:
-
-- Key works in AI Studio but not app: confirm the key belongs to the same project
-  and Gemini API access is enabled.
-- Large bill risk: set quota/billing alerts; never expose `GOOGLE_API_KEY` to
-  the frontend.
-
-### Sentry
-
-Purpose: optional backend and frontend error reporting.
-
-Used in:
-
-- Backend: `backend/services/observability.py`
-- Frontend: `frontend/src/main.tsx`
-
-Required settings:
+1. Go to [sentry.io](https://sentry.io) and create an account.
+2. Create a project for **Python/FastAPI** (for the backend) and another for
+   **React** (for the frontend).
+3. Each project gives you a **DSN** (a URL starting with `https://`).
+4. Set `SENTRY_DSN` in the backend and `VITE_SENTRY_DSN` in the frontend build
+   environment.
 
 ```env
-SENTRY_DSN=https://...
-VITE_SENTRY_DSN=https://...
+SENTRY_DSN=https://...       # backend variable
+VITE_SENTRY_DSN=https://...  # frontend build variable (set in Vercel)
 ```
 
-Official docs:
+Leave both blank to disable Sentry. No errors or warnings will appear.
 
-- https://docs.sentry.io/
-- https://sentry.zendesk.com/hc/en-us/articles/17407166516635-Sentry-DSN-Data-Source-Name
+---
 
-How to get credentials:
+### Grafana OTLP / OpenTelemetry (optional — skip for first deploy)
 
-1. Create a Sentry organization/project.
-2. Create one backend project and optionally one frontend project.
-3. Copy each project DSN.
-4. Set backend `SENTRY_DSN`.
-5. Set frontend `VITE_SENTRY_DSN`.
-
-Validation:
-
-- Backend starts without Sentry if unset.
-- Frontend builds without Sentry if unset.
-- With DSN set, force an error in staging and confirm a Sentry event arrives.
-
-Common errors:
-
-- No events: DSN missing, environment blocked, ad blocker for frontend, or Sentry
-  project mismatch.
-- Sensitive data: this repo redacts common secrets in
-  `backend/services/observability.py`.
-
-### Grafana OTLP / OpenTelemetry
-
-Purpose: optional distributed tracing.
-
-Used in:
-
-- `backend/services/observability.py`
-
-Required settings:
+Advanced distributed tracing. Skip this entirely unless you specifically need
+to trace requests across services.
 
 ```env
 GRAFANA_OTLP_ENDPOINT=https://...
 GRAFANA_OTLP_TOKEN=...
 ```
 
-Official Grafana OTLP docs: https://grafana.com/docs/grafana-cloud/send-data/otlp/
+Leave both blank. The backend starts normally without them.
 
-How to get credentials:
+---
 
-1. Create/log into Grafana Cloud.
-2. Open OpenTelemetry / OTLP integration.
-3. Copy the OTLP endpoint.
-4. Generate an access token with telemetry ingest permissions.
-5. Configure backend env.
+### Langfuse (optional — skip for first deploy)
 
-Validation:
-
-1. Set `GRAFANA_OTLP_ENDPOINT`.
-2. Set `GRAFANA_OTLP_TOKEN` if the endpoint requires bearer auth.
-3. Start backend and make API requests.
-4. Confirm traces in Grafana Cloud.
-
-Common errors:
-
-- No traces: endpoint wrong, token missing, or outbound traffic blocked.
-- Backend still starts if these vars are empty by design.
-
-### Langfuse
-
-Purpose: optional LLM observability for generation traces, prompt template
-lookup, eval-score linking, and high/low quality dataset collection.
-
-Used in:
-
-- `backend/services/langfuse_service.py`
-- `backend/services/llm/instrumented_adapter.py`
-- `backend/services/pipeline/stage_manager.py`
-- `backend/services/evals/online_eval.py`
-- `backend/prompts/base.py`
-
-Optional settings:
+Langfuse records every LLM call so you can inspect what prompts and outputs
+were produced. Useful for debugging generation quality. Not required for the
+app to work.
 
 ```env
-LANGFUSE_SECRET_KEY=
+LANGFUSE_SECRET_KEY=     # leave blank to disable entirely
 LANGFUSE_PUBLIC_KEY=
 LANGFUSE_HOST=https://cloud.langfuse.com
-LANGFUSE_PROMPT_CACHE_TTL=300
-LANGFUSE_CONTENT_CAPTURE_ACK=false
 ```
 
-Important behavior:
+When `LANGFUSE_SECRET_KEY` is blank, the SDK is never loaded and zero network
+traffic goes to Langfuse. Leave it blank on your first deploy.
 
-- Langfuse is disabled when `LANGFUSE_SECRET_KEY` is blank.
-- In disabled mode, the SDK is not imported and no Langfuse network calls are
-  made.
-- In production, setting `LANGFUSE_SECRET_KEY` also requires
-  `LANGFUSE_CONTENT_CAPTURE_ACK=true`. This is an explicit acknowledgement that
-  prompts and model outputs can leave the SpecForge trust boundary after
-  secret-shaped redaction.
-- All Langfuse calls are exception-swallowing. A Langfuse outage must not break
-  generation, refine, eval scoring, credits, or prompt fallback.
-- Provider adapters do not import Langfuse. Instrumentation is composed through
-  `InstrumentedAdapter`.
-- Prompt lookup always falls back to local `SYSTEM_PROMPT` constants.
-- Eval scores `>=85` are added to `high_quality_generations`; scores `<60` are
-  added to `low_quality_generations`; scores 60 through 84 are not collected.
-
-Cloud setup:
-
-1. Create or log into a Langfuse account.
-2. Create a project.
-3. Copy the project's public and secret keys.
-4. Set `LANGFUSE_SECRET_KEY`, `LANGFUSE_PUBLIC_KEY`, and optionally
-   `LANGFUSE_HOST` in Railway backend variables.
-5. For production, set `LANGFUSE_CONTENT_CAPTURE_ACK=true` only after privacy
-   and data-retention approval for prompt/output telemetry export.
-
-Self-hosted local setup:
-
-```bash
-docker compose --profile langfuse up
-```
-
-Then open:
-
-```text
-http://localhost:3000
-```
-
-Set backend local env:
+If you enable Langfuse in production later, also set:
 
 ```env
-LANGFUSE_HOST=http://localhost:3000
-LANGFUSE_SECRET_KEY=...
-LANGFUSE_PUBLIC_KEY=...
+LANGFUSE_CONTENT_CAPTURE_ACK=true
 ```
 
-Validation:
+This is an explicit acknowledgement that prompts and model outputs will be
+sent to Langfuse after redaction. The backend refuses to start in production
+with Langfuse enabled unless this is set.
 
-1. With `LANGFUSE_SECRET_KEY` blank, start the backend and generate a SPEC.
-   Expected: generation, eval, and credits behave normally with zero Langfuse
-   traffic.
-2. With Langfuse configured, generate a SPEC.
-3. In Langfuse, confirm a trace exists with `workspace_id`, `user_id`,
-   `stage_type`, and `action` metadata.
-4. Confirm one generation is recorded for the full accumulated stream, not one
-   observation per token.
-5. Wait for eval completion and confirm the `overall` score is attached to the
-   same generation.
-6. Generate content that scores `>=85` or `<60` and confirm a dataset item is
-   created in the corresponding dataset.
-
-Common errors:
-
-- No traces: `LANGFUSE_SECRET_KEY` is blank, public/secret key pair is wrong,
-  `LANGFUSE_HOST` is wrong, or backend outbound traffic is blocked.
-- App works but prompts do not update from Langfuse: check prompt names
-  (`specforge.spec.system`, `specforge.plan.system`,
-  `specforge.harness.system`, `specforge.tasks.system`) and
-  `LANGFUSE_PROMPT_CACHE_TTL`.
-- Langfuse down: expected user-facing behavior is no change; inspect backend
-  logs for `langfuse.*.failed`.
+---
 
 ### Prometheus Metrics
 
-Purpose: internal metrics endpoint at `/metrics`.
-
-Used in:
-
-- `backend/services/observability.py`
-- `scripts/production_smoke.py`
-
-Required production token:
-
-```env
-METRICS_TOKEN=long-random-token
-```
-
-Generate:
+The `/metrics` endpoint is built in — no setup needed. In production, requests
+to it require a bearer token to prevent public access to internal metrics data.
+Generate a token and set it:
 
 ```bash
 python3 -c "import secrets; print(secrets.token_urlsafe(32))"
 ```
 
-Validation:
+```env
+METRICS_TOKEN=the-random-value-you-generated
+```
+
+Leave `METRICS_TOKEN` empty in local development. The backend only requires it
+when `ENVIRONMENT=production`.
+
+---
+
+## 3. Production Deployment
+
+This section walks you through putting SpecForge live on the internet for the
+first time. Work through these steps in order.
+
+### What you need before starting
+
+- A GitHub account with this repository pushed to it.
+- A Railway account ([railway.app](https://railway.app)) — free to sign up.
+- A Vercel account ([vercel.com](https://vercel.com)) — free to sign up.
+- Your Google OAuth credentials (from section 2 above).
+- At least one LLM provider API key.
+
+### Step 1 — Set up Railway (backend + databases)
+
+Railway will host the FastAPI server, PostgreSQL, and Redis.
+
+**Create a project:**
+
+1. Log into [railway.app](https://railway.app).
+2. Click **New Project** → **Empty Project**. Name it `specforge`.
+
+**Add PostgreSQL:**
+
+3. Click **Add a service** → **Database** → **Add PostgreSQL**.
+4. Railway creates the database. Click the PostgreSQL service tile to see its
+   details.
+5. Go to the **Connect** tab → copy the **Private URL**.
+
+**Add Redis:**
+
+6. Click **Add a service** → **Database** → **Add Redis**.
+7. Click the Redis tile → **Connect** tab → copy the **Private URL**.
+
+**Add the backend service:**
+
+8. Click **Add a service** → **GitHub Repo**.
+9. Connect Railway to your GitHub account if prompted, then select this
+   repository.
+10. Railway detects the `Dockerfile` inside `backend/`. Set the **Root
+    directory** to `backend`.
+11. Railway may start a first build automatically — that is fine.
+
+**Set environment variables on the backend service:**
+
+12. Click your backend service tile → go to the **Variables** tab.
+13. Add each variable listed below. Click **Add Variable** for each one.
+
+    | Variable | Value |
+    | --- | --- |
+    | `ENVIRONMENT` | `production` |
+    | `DATABASE_URL` | The PostgreSQL Private URL from step 5, with `postgresql://` changed to `postgresql+asyncpg://` |
+    | `REDIS_URL` | The Redis Private URL from step 7 |
+    | `FRONTEND_URL` | Your Vercel URL — come back and fill this in after step 2. For now leave it blank or use a placeholder. |
+    | `JWT_PRIVATE_KEY` | Generated below |
+    | `JWT_PUBLIC_KEY` | Generated below |
+    | `GOOGLE_CLIENT_ID` | From Google Cloud Console |
+    | `GOOGLE_CLIENT_SECRET` | From Google Cloud Console |
+    | `ANTHROPIC_API_KEY` | Your Anthropic key (or leave blank if not using Anthropic) |
+    | `OPENAI_API_KEY` | Your OpenAI key (or leave blank if not using OpenAI) |
+    | `GOOGLE_API_KEY` | Your Gemini key (or leave blank if not using Gemini) |
+    | `ENCRYPTION_MASTER_KEY` | Generated below |
+    | `CSRF_SECRET` | Generated below |
+    | `METRICS_TOKEN` | Generated below |
+
+**Generate the JWT key pair** (run this on your local machine):
 
 ```bash
-curl -H "Authorization: Bearer $METRICS_TOKEN" http://localhost:8000/metrics
+openssl genrsa -out jwt_private.pem 2048
+openssl rsa -in jwt_private.pem -pubout -out jwt_public.pem
 ```
 
-Expected output includes:
+Then convert the PEM files to single-line strings for pasting into Railway:
 
-```text
-http_requests_total
+```bash
+python3 - <<'PY'
+from pathlib import Path
+for name, file in [("JWT_PRIVATE_KEY", "jwt_private.pem"), ("JWT_PUBLIC_KEY", "jwt_public.pem")]:
+    value = Path(file).read_text().replace("\n", "\\n")
+    print(f'{name}="{value}"')
+PY
 ```
 
-Production rule: `backend/config.py` rejects production startup if
-`METRICS_TOKEN` is empty.
+Copy the output for each variable into Railway. The value will look like a
+long string with `\n` characters inside it — that is correct.
 
-### Railway
+**Generate the remaining secrets** (run each command and copy the output):
 
-Purpose: backend/API deployment and likely managed PostgreSQL/Redis hosting.
+```bash
+# ENCRYPTION_MASTER_KEY
+cd backend && uv run python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
 
-Used in:
+# CSRF_SECRET
+python3 -c "import secrets; print(secrets.token_urlsafe(32))"
 
-- `.github/workflows/ci.yml`
-- `docker-compose.yml` for local analog
-
-Required GitHub secret:
-
-```text
-RAILWAY_TOKEN
+# METRICS_TOKEN
+python3 -c "import secrets; print(secrets.token_urlsafe(32))"
 ```
 
-Official Railway docs: https://docs.railway.com/
+14. Once all variables are set, go to the backend service → **Settings** →
+    **Networking** → **Generate Domain**. Railway gives you a public URL like
+    `https://specforge-backend-production.up.railway.app`. Copy it — you need
+    it for Vercel.
 
-How to get credentials:
+15. Check the **Deployments** tab and confirm the backend started successfully.
+    Visit `https://your-railway-url/health` — you should see
+    `{"status":"ok","version":"1.0.0"}`.
 
-1. Create Railway account and project.
-2. Add backend service.
-3. Add PostgreSQL and Redis services.
-4. In Railway service variables, set all backend env vars from section 3.
-5. Generate Railway token from Railway account/project settings.
-6. Add it to GitHub repository secrets as `RAILWAY_TOKEN`.
+> **If the deployment fails:** go to the **Deployments** tab, click the failed
+> deploy, and read the build/runtime logs. The most common issues are a missing
+> environment variable or a wrong `DATABASE_URL` format.
 
-Validation:
+---
 
-- Push to `main`.
-- GitHub Actions `Deploy backend to Railway` should pass.
-- Visit backend `/health`.
+### Step 2 — Set up Vercel (frontend)
 
-### Vercel
+Vercel will build and host the React frontend.
 
-Purpose: frontend deployment.
+1. Go to [vercel.com](https://vercel.com) and sign up (you can use your GitHub
+   account to sign in).
+2. Click **Add New Project**.
+3. Import your GitHub repository. If it does not appear, click **Adjust GitHub
+   App Permissions** to grant Vercel access.
+4. Vercel will detect the frontend. Set:
+   - **Root Directory**: `frontend`
+   - **Framework Preset**: Vite (Vercel usually detects this automatically)
+5. Under **Environment Variables**, add:
 
-Used in:
+   | Variable | Value |
+   | --- | --- |
+   | `VITE_API_URL` | Your Railway backend URL from step 1 (e.g. `https://specforge-backend-production.up.railway.app`) |
+   | `VITE_SENTRY_DSN` | Leave blank unless you set up Sentry |
 
-- `.github/workflows/ci.yml`
+6. Click **Deploy**. Vercel builds the frontend and gives you a URL like
+   `https://specforge-abc123.vercel.app`.
 
-Required GitHub secrets:
+7. Copy your Vercel URL. Go back to Railway and set `FRONTEND_URL` on the
+   backend service to this URL (it must start with `https://`).
 
-```text
-VERCEL_TOKEN
-VERCEL_ORG_ID
-VERCEL_PROJECT_ID
+8. Go back to Google Cloud Console and add your Vercel URL to **Authorized
+   JavaScript origins** and `https://your-vercel-url.vercel.app/auth/callback`
+   to **Authorized redirect URIs**.
+
+9. Redeploy the Railway backend so it picks up the updated `FRONTEND_URL` (in
+   Railway → your backend service → **Deployments** → **Deploy**).
+
+10. Visit your Vercel URL and try signing in.
+
+---
+
+### Step 3 — Set up GitHub Secrets (automated deployment)
+
+Right now, deployments only happen when you manually trigger them in Railway or
+Vercel. To make deploys automatic on every push to `main`, configure GitHub
+Actions.
+
+**What you need:**
+
+- A Railway token
+- Three Vercel identifiers (token, org ID, project ID)
+
+**Get a Railway token:**
+
+1. In Railway, click your avatar (top right) → **Account Settings** →
+   **Tokens** → **New Token**. Name it `github-actions`. Copy the token.
+
+**Get Vercel credentials:**
+
+2. In Vercel, go to **Account Settings** → **Tokens** → **Create Token**. Name
+   it `github-actions`. Copy the token.
+3. Your **Vercel Org ID** is shown in **Account Settings** under your profile.
+   It looks like `team_xxxxxxx` or just a string of characters.
+4. Your **Vercel Project ID** is shown in the project's **Settings** →
+   **General** at the top of the page.
+
+**Add the secrets to GitHub:**
+
+5. Go to your GitHub repository → **Settings** → **Secrets and variables** →
+   **Actions** → **New repository secret**. Add one at a time:
+
+   | Secret name | Value |
+   | --- | --- |
+   | `RAILWAY_TOKEN` | The Railway token |
+   | `VERCEL_TOKEN` | The Vercel token |
+   | `VERCEL_ORG_ID` | Your Vercel org/account ID |
+   | `VERCEL_PROJECT_ID` | Your Vercel project ID |
+
+6. Push any small change to `main`. Watch the **Actions** tab in GitHub — you
+   should see a workflow run that ends with a deploy step pushing to both
+   Railway and Vercel.
+
+---
+
+### Step 4 — Verify the live deployment
+
+1. Visit your Vercel URL. The landing page should load.
+2. Click **Sign in with Google** and complete the flow. You should land on
+   `/dashboard` with 50 credits.
+3. Create a workspace and run a SPEC generation. Tokens should stream in.
+4. Check the Railway backend logs (Deployments → the running deploy →
+   **View Logs**) for any errors.
+
+If something is wrong, the [Troubleshooting Guide](#5-troubleshooting-guide)
+at the bottom of this document covers the most common issues.
+
+---
+
+### Step 5 — Set up the production smoke test (optional but recommended)
+
+After each deploy you can run an automated check that hits the live app:
+
+```bash
+SPECFORGE_API_URL=https://your-railway-url \
+SPECFORGE_ACCESS_TOKEN=<your access token — see below> \
+SPECFORGE_METRICS_TOKEN=<your METRICS_TOKEN value> \
+SPECFORGE_RUN_LLM_SMOKE=1 \
+python3 scripts/production_smoke.py
 ```
 
-Required Vercel env vars:
+To get a temporary access token for the smoke test:
 
-```env
-VITE_API_URL=https://your-api-domain
-VITE_SENTRY_DSN=https://... # optional
-```
+1. Open your Vercel URL in a browser and sign in.
+2. Open browser DevTools → **Network** tab.
+3. Look for the request to `/auth/callback` on the backend.
+4. In the response JSON, copy the `access_token` value.
+5. Use it as `SPECFORGE_ACCESS_TOKEN` above. The token expires quickly so run
+   the smoke test immediately after copying it.
 
-Official Vercel docs:
+You can also run this from GitHub Actions via the **Production Smoke** workflow
+(`.github/workflows/production-smoke.yml`). Add `SPECFORGE_SMOKE_ACCESS_TOKEN`
+and `SPECFORGE_METRICS_TOKEN` as GitHub Secrets to enable it.
 
-- https://vercel.com/docs/projects/environment-variables
-- https://vercel.com/docs/cli
+---
 
-How to get credentials:
+## 4. Environment Configuration
 
-1. Create/import project in Vercel.
-2. Set project root to `frontend` if deploying from this monorepo.
-3. Add frontend env vars in Vercel Project Settings.
-4. Create a Vercel token from account settings.
-5. Get org/team ID and project ID from Vercel project settings or
-   `.vercel/project.json`.
-6. Add GitHub secrets.
+### Local development
 
-Validation:
-
-- GitHub Actions deploy step succeeds.
-- Open frontend URL.
-- Browser can call `${VITE_API_URL}/health`.
-
-### GitHub Actions Production Smoke
-
-Purpose: live post-deploy smoke test.
-
-Used in:
-
-- `.github/workflows/production-smoke.yml`
-- `scripts/production_smoke.py`
-
-Required GitHub secrets:
-
-```text
-SPECFORGE_SMOKE_ACCESS_TOKEN
-SPECFORGE_METRICS_TOKEN
-```
-
-How to obtain `SPECFORGE_SMOKE_ACCESS_TOKEN`:
-
-1. Create or designate a smoke-test Google account.
-2. Sign into the deployed frontend.
-3. In browser DevTools Network tab, inspect the backend `/auth/callback`
-   response.
-4. Copy the short-lived `access_token`.
-5. Store temporarily as `SPECFORGE_SMOKE_ACCESS_TOKEN` before running the smoke
-   workflow.
-
-Because access tokens are short-lived, refresh this secret immediately before a
-production smoke run.
-
-Run manually from GitHub Actions:
-
-1. Open Actions.
-2. Select `Production Smoke`.
-3. Enter API URL.
-4. Enable `run_llm_smoke` if you want a live paid LLM generation check.
-5. Run workflow.
-
-## 3. Environment Configuration
-
-Backend file:
+Copy the example files:
 
 ```bash
 cp backend/.env.example backend/.env
-```
-
-Frontend file:
-
-```bash
 cp frontend/.env.example frontend/.env
 ```
 
-Minimum local backend `.env`:
+Minimum `backend/.env` for local development:
 
 ```env
 DATABASE_URL=postgresql+asyncpg://specforge:specforge@localhost:5432/specforge
@@ -721,106 +668,73 @@ ENVIRONMENT=development
 MAX_ACTIVE_WORKSPACES_PER_USER=50
 ```
 
-Frontend `.env`:
+Frontend `frontend/.env`:
 
 ```env
 VITE_API_URL=http://localhost:8000
 VITE_SENTRY_DSN=
 ```
 
-Generate JWT keys:
+### Generating secrets locally
+
+JWT key pair:
 
 ```bash
 openssl genrsa -out jwt_private.pem 2048
 openssl rsa -in jwt_private.pem -pubout -out jwt_public.pem
-```
 
-Convert PEMs to `.env`-friendly escaped values:
-
-```bash
 python3 - <<'PY'
 from pathlib import Path
-
-for name, file in [
-    ("JWT_PRIVATE_KEY", "jwt_private.pem"),
-    ("JWT_PUBLIC_KEY", "jwt_public.pem"),
-]:
+for name, file in [("JWT_PRIVATE_KEY", "jwt_private.pem"), ("JWT_PUBLIC_KEY", "jwt_public.pem")]:
     value = Path(file).read_text().replace("\n", "\\n")
     print(f'{name}="{value}"')
 PY
 ```
 
-Generate Fernet encryption key:
+Fernet encryption key:
 
 ```bash
 cd backend
 uv run python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
 ```
 
-Generate CSRF and metrics secrets:
+CSRF secret and metrics token:
 
 ```bash
 python3 -c "import secrets; print(secrets.token_urlsafe(32))"
 ```
 
-Production-only requirements enforced by `backend/config.py`:
+Run the command twice — once for `CSRF_SECRET`, once for `METRICS_TOKEN`.
 
-- `ENVIRONMENT=production`
-- `METRICS_TOKEN` must be set.
-- `FRONTEND_URL` must be HTTPS.
-- `JWT_PRIVATE_KEY` must be a real PEM key.
-- `ENCRYPTION_MASTER_KEY` must not be the CI placeholder.
-- Langfuse variables are optional in production. Leave `LANGFUSE_SECRET_KEY`
-  blank to keep the exact no-op behavior enforced by CI. If
-  `LANGFUSE_SECRET_KEY` is set, `LANGFUSE_PUBLIC_KEY` and
-  `LANGFUSE_CONTENT_CAPTURE_ACK=true` are required at startup.
+### Production-only requirements
 
-## 4. End-to-End Test Guide
+The backend enforces these rules at startup when `ENVIRONMENT=production`:
 
-### Local Setup
+- `METRICS_TOKEN` must be non-empty.
+- `FRONTEND_URL` must start with `https://`.
+- `JWT_PRIVATE_KEY` must be a real PEM key (not the CI placeholder).
+- `ENCRYPTION_MASTER_KEY` must not be the CI placeholder value.
+- If `LANGFUSE_SECRET_KEY` is set, `LANGFUSE_PUBLIC_KEY` must also be set,
+  `LANGFUSE_HOST` must use `https://`, and `LANGFUSE_CONTENT_CAPTURE_ACK`
+  must be `true`.
 
-1. Install tooling:
+If any of these fail, the backend refuses to start and prints an error
+message describing what is wrong.
 
-```bash
-pip install uv
-corepack enable
-```
+---
 
-1. Create env files:
+## 5. Local Validation
 
-```bash
-cp backend/.env.example backend/.env
-cp frontend/.env.example frontend/.env
-```
-
-1. Fill all backend keys listed above.
-
-1. Start everything with Docker:
+### Start everything with Docker
 
 ```bash
 docker compose up --build
 ```
 
-1. Apply migrations if running backend manually:
+This starts PostgreSQL, Redis, the FastAPI backend, and the Vite frontend
+together. Wait until you see `Uvicorn running on http://0.0.0.0:8000`.
 
-```bash
-cd backend
-uv sync
-uv run alembic upgrade head
-uv run uvicorn main:app --reload
-```
-
-1. Run frontend manually if not using Docker:
-
-```bash
-cd frontend
-pnpm install
-pnpm dev
-```
-
-### Basic Validation
-
-Backend health:
+### Check backend health
 
 ```bash
 curl http://localhost:8000/health
@@ -832,85 +746,34 @@ Expected in development:
 {"status":"ok","version":"1.0.0","db":"ok","redis":"ok"}
 ```
 
-Provider catalog:
+### Check provider list
 
 ```bash
 curl http://localhost:8000/providers
 ```
 
-Expected: providers array containing `anthropic`, `openai`, and `google`.
+Expected: a JSON object with a `providers` array containing `anthropic`,
+`openai`, and `google`.
 
-Metrics:
-
-```bash
-curl http://localhost:8000/metrics
-```
-
-In development from localhost this should return Prometheus text. In production
-use:
-
-```bash
-curl -H "Authorization: Bearer $METRICS_TOKEN" https://api.example.com/metrics
-```
-
-### Browser Workflow
+### Browser walkthrough
 
 1. Open `http://localhost:5173`.
-2. Click `Sign in with Google`.
-3. Complete Google OAuth.
-4. Expect redirect to `/dashboard`.
-5. Confirm user has 50 starter credits.
-6. Create a workspace:
-   - Name: `Smoke Workspace`
-   - Problem statement: at least 50 characters
-   - Provider: choose one with a valid key
-   - Model: choose a model listed in the UI
-7. Open SPEC stage.
-8. Click Generate.
-9. Confirm:
-   - token stream appears
-   - SPEC becomes draft
-   - quality/eval appears
-   - credits decrease by 10
-10. Finalise SPEC.
-11. Confirm PLAN unlocks.
+2. Click **Sign in with Google** and complete the sign-in.
+3. You should land on `/dashboard` with 50 starter credits.
+4. Create a workspace with a name and a problem statement of at least 50
+   characters. Choose a provider with a valid key.
+5. Open the **SPEC** stage and click **Generate**.
+6. Tokens should stream into the editor. When it finishes, a quality badge
+   appears and your credit balance decreases by 10.
+7. Click **Finalise** on SPEC. The **PLAN** stage should unlock.
 
-### Automated Production Smoke
+---
 
-From repo root:
+## 6. Troubleshooting Guide
 
-```bash
-SPECFORGE_API_URL=https://api.example.com \
-SPECFORGE_ACCESS_TOKEN=short-lived-smoke-access-token \
-SPECFORGE_METRICS_TOKEN=your-metrics-token \
-SPECFORGE_RUN_LLM_SMOKE=1 \
-python3 scripts/production_smoke.py
-```
+### Backend does not start
 
-Expected:
-
-```text
-[smoke] health
-[smoke] provider catalog
-[smoke] metrics
-[smoke] authenticated user
-[smoke] credit balance
-[smoke] workspace persistence
-[smoke] live LLM stream
-[smoke] workspace archive
-[smoke] production smoke passed
-```
-
-The automated smoke does not require Langfuse credentials. Langfuse is verified
-manually because production smoke runs should remain green when
-`LANGFUSE_SECRET_KEY` is unset. Use the optional Langfuse validation steps above
-for staging or local observability checks.
-
-## 5. Troubleshooting Guide
-
-### Backend fails at startup
-
-Check:
+Run this to print which config value is missing or wrong:
 
 ```bash
 cd backend
@@ -919,117 +782,79 @@ uv run python -c "from config import settings; print(settings.environment)"
 
 Common causes:
 
-- Missing required env var.
-- Invalid `JWT_PRIVATE_KEY` formatting.
-- `ENVIRONMENT=production` with non-HTTPS `FRONTEND_URL`.
-- `ENVIRONMENT=production` without `METRICS_TOKEN`.
-- Invalid Fernet `ENCRYPTION_MASTER_KEY`.
+- A required environment variable is missing from `.env`.
+- `JWT_PRIVATE_KEY` has formatting errors (missing `\n` escapes).
+- `ENVIRONMENT=production` is set but `FRONTEND_URL` is not `https://`, or
+  `METRICS_TOKEN` is empty, or `ENCRYPTION_MASTER_KEY` is the CI placeholder.
 
-### Google sign-in fails
-
-Check:
-
-- `GOOGLE_CLIENT_ID`
-- `GOOGLE_CLIENT_SECRET`
-- `FRONTEND_URL`
-- Google OAuth redirect URI exactly equals `FRONTEND_URL/auth/callback`
-- Redis is reachable for OAuth state storage
-- Browser URL includes both `code` and `state` on `/auth/callback`
-
-### Frontend cannot call API
+### Google sign-in does not work
 
 Check:
 
-- `frontend/.env`: `VITE_API_URL=http://localhost:8000`
-- Backend CORS uses `FRONTEND_URL`
-- `curl http://localhost:8000/health`
-- Browser console/network tab for CORS or 401 errors
+- `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` are correct.
+- The redirect URI in Google Console exactly matches
+  `{FRONTEND_URL}/auth/callback` — no trailing slash, correct `http` vs
+  `https`.
+- `FRONTEND_URL` matches the URL you are opening in the browser.
+- Redis is running (the login flow stores short-lived state there).
 
-### CSRF failures
-
-Symptoms: mutating requests return `403`.
-
-Fix:
-
-- Ensure frontend has a valid access token.
-- Ensure frontend can call `GET /auth/csrf-token`.
-- Do not manually POST without `X-CSRF-Token`.
-- Confirm `CSRF_SECRET` is stable across backend restarts.
-
-### LLM generation fails
+### Frontend cannot reach the backend
 
 Check:
 
-- Correct provider API key.
-- Provider billing/quota.
-- Model is allowed in `backend/services/llm/provider_config.py`.
-- Redis and Postgres are healthy.
-- Backend logs for `ProviderError`.
+- `VITE_API_URL` in `frontend/.env` points to the correct backend URL.
+- The backend is running: `curl http://localhost:8000/health`.
+- Look in the browser DevTools console and Network tab for CORS errors or 401
+  responses.
 
-### Redis problems
-
-Symptoms:
-
-- `/health` degraded.
-- OAuth state failures.
-- Rate limiter logs fallback warning.
-- Stage cache/recovery issues.
+### LLM generation fails or streams nothing
 
 Check:
 
-```bash
-redis-cli -u "$REDIS_URL" ping
-```
+- The provider API key is valid and the account has billing enabled.
+- The model name is in the allowed list in
+  `backend/services/llm/provider_config.py`.
+- Redis and PostgreSQL are reachable (`/health` shows both as `ok`).
+- Backend logs for a line containing `ProviderError`.
 
-### Database problems
-
-Check:
-
-```bash
-cd backend
-uv run alembic current
-uv run alembic upgrade head
-```
-
-If migrations fail, verify `DATABASE_URL` and that Postgres has required
-permissions.
-
-### Sentry, Grafana, or Langfuse not receiving data
+### CSRF failures (requests return 403)
 
 Check:
 
-- DSN/endpoint starts with `http://` or `https://`.
-- Token is present for Grafana OTLP if required.
-- Outbound network access from backend is allowed.
-- `SENTRY_DSN` is backend-only; `VITE_SENTRY_DSN` is frontend build-time.
-- For Langfuse, both `LANGFUSE_SECRET_KEY` and `LANGFUSE_PUBLIC_KEY` must match
-  the same Langfuse project. `LANGFUSE_HOST` must point to Cloud or your
-  self-hosted instance.
-- For prompt templates, remember the in-process cache defaults to 300 seconds.
+- The frontend successfully obtained an access token after sign-in.
+- The frontend can call `GET /auth/csrf-token` (check the Network tab).
+- `CSRF_SECRET` is the same across backend restarts.
 
-### Deployment failures
+### Railway deploy fails
 
-Railway:
+- Open the failed deployment in the Railway dashboard and read the build logs.
+- Verify all required environment variables are set in Railway (the backend
+  prints which ones are missing on startup).
+- Verify `DATABASE_URL` starts with `postgresql+asyncpg://` not `postgresql://`.
+- Verify `FRONTEND_URL` starts with `https://`.
 
-- Verify `RAILWAY_TOKEN` GitHub secret.
-- Verify backend service exists and name matches workflow.
-- Verify Railway env vars include all backend required vars.
+### Vercel deploy fails
 
-Vercel:
+- Check the build logs in the Vercel dashboard.
+- Verify `VITE_API_URL` is set in Vercel's environment variable settings.
+- After changing any Vercel environment variable, redeploy (the value is baked
+  in at build time — changes only take effect on the next build).
 
-- Verify `VERCEL_TOKEN`, `VERCEL_ORG_ID`, `VERCEL_PROJECT_ID`.
-- Verify Vercel project has `VITE_API_URL`.
-- Rebuild frontend after changing Vite env vars.
+### Something worked locally but fails in production
 
-### Secret safety
+The most common cause is a missing or wrong environment variable in Railway.
+Compare every variable in `backend/.env` (working locally) against the
+variables set in Railway. The backend's startup log will print an error if a
+production-required variable fails validation.
+
+### Keep secrets out of Git
 
 Never commit:
 
-- `backend/.env`
-- `frontend/.env`
-- JWT PEM files
-- API keys
-- Railway/Vercel/GitHub tokens
+- `backend/.env` or `frontend/.env`
+- The `jwt_private.pem` / `jwt_public.pem` files you generated
+- Any API keys or tokens
 
-CI runs TruffleHog with verified secret detection in `.github/workflows/ci.yml`,
-but do not rely on CI as the first line of defense.
+The CI pipeline runs TruffleHog on every push to detect accidentally committed
+secrets. It is safest to add `*.pem` and `.env` to `.gitignore` immediately
+after creating them.
