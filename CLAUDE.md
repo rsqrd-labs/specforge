@@ -81,7 +81,7 @@ React 18 + TypeScript SPA. State via Zustand; routing via React Router 6.
 
 ### Key Cross-Cutting Concerns
 
-**Auth flow**: Google OAuth → `/api/auth/callback` → JWT access token (in-memory on frontend) + refresh token (HTTP-only cookie). CSRF tokens required on all mutating requests.
+**Auth flow**: Google OAuth → frontend `/auth/callback` → frontend calls backend `/auth/callback` → JWT access token (in-memory on frontend) + refresh token (HTTP-only cookie). CSRF tokens required on all mutating requests.
 
 **Stage generation flow**: Frontend calls POST to trigger generation → backend streams progress via SSE → frontend `StreamingOverlay` updates in real time → `HumanReviewGate` blocks progression until user approves.
 
@@ -93,13 +93,13 @@ React 18 + TypeScript SPA. State via Zustand; routing via React Router 6.
 
 Backend uses `.env` (see `backend/config.py` for all keys):
 - `DATABASE_URL`, `REDIS_URL`
-- `JWT_SECRET_KEY`, `JWT_REFRESH_SECRET_KEY`
+- `JWT_PRIVATE_KEY`, `JWT_PUBLIC_KEY` (RS256 PEM keys)
 - `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`
-- `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GOOGLE_AI_API_KEY`
-- `ENCRYPTION_KEY` (Fernet, for stored user API keys)
-- `CSRF_SECRET`
-- `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`
-- Optional: `SENTRY_DSN`, `OTLP_ENDPOINT`
+- `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GOOGLE_API_KEY`
+- `ENCRYPTION_MASTER_KEY` (Fernet, for stored user API keys)
+- `CSRF_SECRET`, `METRICS_TOKEN`
+- Optional: `SENTRY_DSN`, `GRAFANA_OTLP_ENDPOINT`, `GRAFANA_OTLP_TOKEN`
+- Optional: `LANGFUSE_SECRET_KEY`, `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_HOST`
 
 Frontend uses `.env`:
 - `VITE_API_URL` (defaults to `http://localhost:8000` via proxy in dev)
@@ -109,7 +109,7 @@ Frontend uses `.env`:
 
 `.github/workflows/ci.yml` runs on every push:
 1. TruffleHog secret scan
-2. Backend: ruff → black → bandit → safety → pytest (80% coverage)
+2. Backend: ruff → black → bandit → pip-audit → pytest (80% coverage)
 3. Frontend: pnpm audit → tsc → vitest → vite build
 4. On `main` push: deploy backend to Railway, frontend to Vercel
 

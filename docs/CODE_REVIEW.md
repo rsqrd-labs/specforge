@@ -586,7 +586,7 @@ All three adapters (`anthropic_adapter.py`, `openai_adapter.py`, `google_adapter
 - **Credit accounting is principled.** Ledger-based double-entry with row locking (intent is correct even if the PostgreSQL aggregate syntax is broken), automatic refunds on provider failure, middleware pre-check — the design is sound.
 - **Security defence-in-depth is real.** Prompt injection scanning, output validation for system prompt leakage, `bleach` HTML sanitization, Fernet encryption for user API keys, structured log scrubbing with secret redaction, Sentry event redaction — someone thought carefully about all of these.
 - **Test structure is mature.** Isolated service tests with hand-rolled fakes (not fragile mocks), testing refund paths on LLM failure, rate limit enforcement, injection detection. The test philosophy is right.
-- **CI is production-grade.** TruffleHog secret scanning, Bandit, Safety, 80% coverage threshold, `pnpm audit`. Rare to see this at MVP stage.
+- **CI is production-grade.** TruffleHog secret scanning, Bandit, pip-audit, 80% coverage threshold, `pnpm audit`. Rare to see this at MVP stage.
 - **Observability is first-class.** Prometheus metrics, structured logging with `structlog`, OTLP traces, Sentry with secret scrubbing. Most companies don't get here until Series B.
 - **Streaming architecture is clean.** SSE with fetch-based client, proper token accumulation, correct backpressure, credit refund on stream failure.
 

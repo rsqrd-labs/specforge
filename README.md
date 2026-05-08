@@ -85,7 +85,7 @@ Backend:
 - Authlib and python-jose for OAuth/JWT flows
 - Anthropic, OpenAI, and Google Generative AI SDKs
 - Structlog, Prometheus, Sentry, and OpenTelemetry
-- Pytest, Ruff, Black, Bandit, Safety
+- Pytest, Ruff, Black, Bandit, pip-audit
 
 Frontend:
 
@@ -378,15 +378,6 @@ Build:
 docker build -t specforge-api ./backend
 ```
 
-Run migrations against the production database:
-
-```bash
-docker run --rm \
-  --env-file backend/.env \
-  specforge-api \
-  uv run --no-sync alembic upgrade head
-```
-
 Run API:
 
 ```bash
@@ -394,6 +385,16 @@ docker run --rm \
   --env-file backend/.env \
   -p 8000:8000 \
   specforge-api
+```
+
+`entrypoint.sh` runs `alembic upgrade head` automatically before starting Gunicorn, so migrations apply on every container start. To run migrations separately without starting the server, override the entrypoint:
+
+```bash
+docker run --rm \
+  --env-file backend/.env \
+  --entrypoint uv \
+  specforge-api \
+  run --no-sync alembic upgrade head
 ```
 
 The Dockerfile starts Gunicorn with Uvicorn workers:
@@ -434,7 +435,7 @@ In Google Cloud Console:
 
 1. Create an OAuth 2.0 web client.
 2. Add the frontend origin to authorized JavaScript origins.
-3. Add the backend callback URL to authorized redirect URIs.
+3. Add the **frontend** callback URL to authorized redirect URIs (`{FRONTEND_URL}/auth/callback`). Google redirects back to the frontend, which then exchanges the code with the backend. Do not use the backend URL here.
 4. Set `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` in backend secrets.
 
 For local development, the expected frontend origin is:
@@ -443,7 +444,11 @@ For local development, the expected frontend origin is:
 http://localhost:5173
 ```
 
-The backend callback route is implemented by the auth router. Match the deployed callback URL to the route configured in the backend.
+The local redirect URI to register in Google Console:
+
+```text
+http://localhost:5173/auth/callback
+```
 
 ## Observability
 
