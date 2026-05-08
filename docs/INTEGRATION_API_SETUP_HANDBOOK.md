@@ -10,26 +10,20 @@ locally and live on the internet. No prior deployment experience is assumed.
 SpecForge has two application pieces plus two data stores:
 
 ```text
-┌─────────────────────────────────────────────────────────┐
-│  User's browser                                          │
-│  Opens the frontend URL → signs in → generates stages   │
-└───────────────────────┬─────────────────────────────────┘
-                        │ HTTP / SSE
-┌───────────────────────▼─────────────────────────────────┐
-│  Frontend  (React app, static files)                     │
-│  Served by Vercel — a URL like https://specforge.vercel.app │
-└───────────────────────┬─────────────────────────────────┘
-                        │ API calls
-┌───────────────────────▼─────────────────────────────────┐
-│  Backend  (FastAPI Python server)                        │
-│  Hosted on Railway — a URL like https://specforge.railway.app │
-│                                                          │
-│  ┌──────────────┐  ┌──────────────┐                     │
-│  │  PostgreSQL  │  │    Redis     │                      │
-│  │  (database)  │  │   (cache)    │                      │
-│  │  on Railway  │  │  on Railway  │                      │
-│  └──────────────┘  └──────────────┘                     │
-└─────────────────────────────────────────────────────────┘
+User's browser
+  |
+  | (opens the app, signs in, generates stages)
+  v
+Frontend — React app, static files
+  Hosted on Vercel  (e.g. https://specforge.vercel.app)
+  |
+  | API calls
+  v
+Backend — FastAPI Python server
+  Hosted on Railway  (e.g. https://specforge-api.up.railway.app)
+  |
+  +-- PostgreSQL  database, hosted on Railway
+  +-- Redis       cache/sessions, hosted on Railway
 ```
 
 **Locally** everything runs in Docker on your machine at `localhost` URLs.
