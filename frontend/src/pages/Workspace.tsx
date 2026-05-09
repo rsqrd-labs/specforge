@@ -499,8 +499,8 @@ export default function Workspace() {
   const upstreamType = previousStageType(activeStage.type)
   const showRightPanel =
     Boolean(diffResult) ||
-    activeStage.type === "harness" ||
-    activeStage.type === "tasks"
+    (activeStage.type === "harness" && evalResult !== null) ||
+    (activeStage.type === "tasks" && evalResult !== null)
 
   return (
     <div className="workspace-shell">
