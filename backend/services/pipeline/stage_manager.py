@@ -34,6 +34,15 @@ logger = logging.getLogger(__name__)
 STAGE_ORDER = ["spec", "plan", "harness", "tasks"]
 
 
+def _strip_code_fence(text: str) -> str:
+    """Strip a wrapping code fence if the LLM wrapped its entire response in one."""
+    stripped = text.strip()
+    lines = stripped.split("\n")
+    if len(lines) >= 2 and lines[0].startswith("```") and lines[-1].strip() == "```":
+        return "\n".join(lines[1:-1]).strip()
+    return stripped
+
+
 def _log_eval_error(task: asyncio.Task) -> None:
     if not task.cancelled() and (exc := task.exception()):
         logger.error("eval_background_failed", extra={"error": str(exc)})
@@ -252,6 +261,8 @@ class StageManager:
                 if isinstance(exc, TimeoutError):
                     raise ProviderError(workspace.provider, exc) from exc
                 raise exc
+
+            accumulated = _strip_code_fence(accumulated)
 
             validation = validate(accumulated)
             if not validation.is_safe:
