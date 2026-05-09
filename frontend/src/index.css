@@ -3479,14 +3479,42 @@ button:disabled {
 }
 
 .md-prose h1 { font-size: 1.65em; }
-.md-prose h2 { font-size: 1.35em; border-bottom: 1px solid rgba(143,78,0,0.12); padding-bottom: 0.3em; }
-.md-prose h3 { font-size: 1.15em; }
+.md-prose h2 {
+  font-size: 1.35em;
+  border-bottom: 1px solid rgba(143,78,0,0.14);
+  padding-bottom: 0.35em;
+}
+.md-prose h3 {
+  font-size: 1.2em;
+  padding-left: 10px;
+  border-left: 3px solid var(--color-primary);
+  color: var(--color-on-surface);
+  background: linear-gradient(90deg, rgba(143,78,0,0.04), transparent 72%);
+  border-radius: 0 4px 4px 0;
+  padding-top: 2px;
+  padding-bottom: 2px;
+}
 .md-prose h4 { font-size: 1em; color: var(--color-on-surface-variant); }
 .md-prose h5, .md-prose h6 { font-size: 0.9em; color: var(--color-on-surface-variant); }
 
 .md-prose p {
   margin-top: 0;
   margin-bottom: 0.85em;
+}
+
+/* Field-label pattern: **Bold:** value — style the label as a small amber tag */
+.md-prose p > strong:first-child {
+  display: inline-block;
+  color: var(--color-primary);
+  font-size: 0.8em;
+  font-weight: 800;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  background: rgba(143,78,0,0.07);
+  border-radius: 4px;
+  padding: 1px 6px;
+  margin-right: 4px;
+  vertical-align: baseline;
 }
 
 .md-prose a {
@@ -3496,7 +3524,7 @@ button:disabled {
 }
 .md-prose a:hover { color: var(--color-secondary); }
 
-.md-prose strong { font-weight: 700; color: var(--color-on-surface); }
+.md-prose strong { font-weight: 700; color: #0f172a; }
 .md-prose em { font-style: italic; }
 
 .md-prose ul {
