@@ -15,26 +15,21 @@ export function GenerateBar({
   onRefine,
   onFinalise,
 }: GenerateBarProps) {
-  const btnBase =
-    "px-3 py-1.5 text-sm font-medium rounded-lg transition-opacity"
-  const primary = `${btnBase} bg-primary text-on-primary hover:opacity-90`
-  const secondary = `${btnBase} border border-outline-variant text-on-surface hover:bg-surface-container`
-
   if (stage.status === "locked") return null
 
   if (stage.status === "in_progress") {
     return (
-      <div className="flex items-center gap-2 text-sm text-on-surface-variant">
-        <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-primary" />
+      <div className="gen-btn-streaming">
+        <div className="loading-ring" />
         <span>Generating…</span>
       </div>
     )
   }
 
   return (
-    <div className="flex items-center gap-2">
+    <div className="workspace-action-row">
       {(stage.status === "draft" || stage.status === "stale") && !stage.content && (
-        <button onClick={onGenerate} className={primary}>
+        <button onClick={onGenerate} className="gen-btn-primary">
           Generate
         </button>
       )}
@@ -42,23 +37,22 @@ export function GenerateBar({
       {(stage.status === "finalised" ||
         stage.status === "stale" ||
         (stage.status === "draft" && stage.content)) && (
-        <button onClick={onRegenerate} className={secondary}>
+        <button onClick={onRegenerate} className="gen-btn-secondary">
           Regenerate
         </button>
       )}
 
       {stage.content && (
-        <button onClick={onRefine} className={secondary}>
+        <button onClick={onRefine} className="gen-btn-secondary">
           Refine
         </button>
       )}
 
-      {(stage.status === "draft" || stage.status === "stale") &&
-        stage.content && (
-          <button onClick={onFinalise} className={primary}>
-            Finalise
-          </button>
-        )}
+      {(stage.status === "draft" || stage.status === "stale") && stage.content && (
+        <button onClick={onFinalise} className="gen-btn-primary">
+          Finalise
+        </button>
+      )}
     </div>
   )
 }

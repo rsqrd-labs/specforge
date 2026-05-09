@@ -62,9 +62,9 @@ export default function Dashboard() {
   return (
     <div className="dashboard-shell">
       <div className="ambient-field" aria-hidden="true">
-        <div className="ambient-band" />
-        <div className="ambient-band" />
-        <div className="ambient-band" />
+        <div className="ambient-band band-saffron" />
+        <div className="ambient-band band-lotus" />
+        <div className="ambient-band band-slate" />
       </div>
 
       {/* Nav */}
@@ -108,12 +108,6 @@ export default function Dashboard() {
             Turn ideas into engineering specs with a four-stage AI pipeline.
             Each generation brings you closer to shipping.
           </p>
-          <div className="hero-actions">
-            <button className="forge-button" onClick={() => setShowCreate(true)}>
-              <span className="forge-button-icon">+</span>
-              New Workspace
-            </button>
-          </div>
         </div>
 
         {/* Credit card */}

@@ -13,30 +13,24 @@ export function StalenessWarning({
   onRegenerate,
   onDismiss,
 }: StalenessWarningProps) {
-  if (stage.status !== "stale") {
-    return null
-  }
+  if (stage.status !== "stale") return null
 
   return (
-    <div className="flex items-center justify-between gap-4 border-b border-primary-container/40 bg-primary-container/10 px-5 py-3 text-sm text-on-primary-container">
-      <p>
-        This stage was generated from a previous version of {upstreamStageType}.
-        Regenerate or keep as-is?
-      </p>
-      <div className="flex shrink-0 items-center gap-2">
+    <div className="ws-banner ws-warning">
+      <span>
+        This stage was generated from an older version of {upstreamStageType}.
+      </span>
+      <div className="flex shrink-0 items-center gap-3">
         <button
           type="button"
           onClick={onDismiss}
-          className="font-medium text-on-primary-container hover:text-primary"
+          className="text-xs font-medium opacity-70 hover:opacity-100"
         >
           Keep as-is
         </button>
-        <button
-          type="button"
-          onClick={onRegenerate}
-          className="rounded-lg bg-primary px-3 py-1.5 font-medium text-on-primary hover:opacity-90"
-        >
-          Regenerate
+        <button type="button" onClick={onRegenerate} className="gen-btn-primary"
+          style={{ padding: "5px 14px", fontSize: 12 }}>
+          ↺ Regenerate
         </button>
       </div>
     </div>

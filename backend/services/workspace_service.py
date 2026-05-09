@@ -88,13 +88,29 @@ class WorkspaceService:
         return workspace
 
     async def update(
-        self, workspace_id: UUID, user_id: UUID, name: str, db: AsyncSession
+        self,
+        workspace_id: UUID,
+        user_id: UUID,
+        name: str | None,
+        db: AsyncSession,
+        problem_statement: str | None = None,
     ) -> Workspace:
         workspace = await self.get(workspace_id, user_id, db)
-        workspace.name = sanitize_text(name)
+        if name is not None:
+            workspace.name = sanitize_text(name)
+        if problem_statement is not None:
+            workspace.problem_statement = sanitize_text(problem_statement)
+            self._mark_problem_statement_dependents_stale(workspace)
         await db.commit()
         await db.refresh(workspace)
         return workspace
+
+    def _mark_problem_statement_dependents_stale(self, workspace: Workspace) -> None:
+        for stage in workspace.stages:
+            if stage.type == "spec" and stage.content and stage.status == "finalised":
+                stage.status = "stale"
+            elif stage.type != "spec" and stage.status == "finalised":
+                stage.status = "stale"
 
     async def archive(
         self, workspace_id: UUID, user_id: UUID, db: AsyncSession
