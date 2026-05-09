@@ -133,6 +133,7 @@ export default function Workspace() {
     {},
   )
   const [error, setError] = useState<string | null>(null)
+  const [showRefineHint, setShowRefineHint] = useState(false)
   const [isExporting, setIsExporting] = useState(false)
   const [isEditMode, setIsEditMode] = useState(false)
   const [specViewMode, setSpecViewMode] = useState<"preview" | "edit">("preview")
@@ -210,6 +211,12 @@ export default function Workspace() {
       setError(streamError)
     }
   }, [streamError])
+
+  useEffect(() => {
+    if (!showRefineHint) return
+    const t = setTimeout(() => setShowRefineHint(false), 5000)
+    return () => clearTimeout(t)
+  }, [showRefineHint])
 
   useEffect(() => {
     setIsEditMode(false)
@@ -295,7 +302,7 @@ export default function Workspace() {
       } else {
         setIsEditMode(true)
       }
-      setError("Select text in Edit mode, then click Refine.")
+      setShowRefineHint(true)
       return
     }
 
@@ -788,6 +795,48 @@ export default function Workspace() {
           onProceed={proceedThroughReviewGate}
           onClose={() => setPendingReview(null)}
         />
+      )}
+
+      {showRefineHint && (
+        <div className="refine-hint-backdrop" onClick={() => setShowRefineHint(false)}>
+          <div className="refine-hint-popup" onClick={(e) => e.stopPropagation()}>
+            <div className="refine-hint-header">
+              <div className="refine-hint-icon">✦</div>
+              <div>
+                <div className="refine-hint-title">Highlight text to refine</div>
+                <div className="refine-hint-subtitle">Tell SpecForge exactly what to improve</div>
+              </div>
+              <button
+                type="button"
+                className="refine-hint-close"
+                onClick={() => setShowRefineHint(false)}
+              >
+                ✕
+              </button>
+            </div>
+            <div className="refine-hint-steps">
+              <div className="refine-hint-step">
+                <div className="refine-hint-step-num">1</div>
+                <div className="refine-hint-step-text">
+                  Switch to <strong>Edit mode</strong> using the toggle in the toolbar above
+                </div>
+              </div>
+              <div className="refine-hint-step-divider" />
+              <div className="refine-hint-step">
+                <div className="refine-hint-step-num">2</div>
+                <div className="refine-hint-step-text">
+                  <strong>Click and drag</strong> to select the sentence or section you want to improve, then hit <strong>Refine</strong>
+                </div>
+              </div>
+            </div>
+            <div className="refine-hint-tip">
+              Tip — smaller selections give more targeted improvements
+            </div>
+            <div className="refine-hint-progress">
+              <div className="refine-hint-progress-bar" />
+            </div>
+          </div>
+        </div>
       )}
     </div>
   )
