@@ -497,10 +497,11 @@ export default function Workspace() {
   const showStaleWarning =
     activeStage.status === "stale" && !dismissedStale[activeStage.id]
   const upstreamType = previousStageType(activeStage.type)
+  const taskIssues = evalResult?.tasks_without_ref ?? []
   const showRightPanel =
     Boolean(diffResult) ||
     (activeStage.type === "harness" && evalResult !== null) ||
-    (activeStage.type === "tasks" && evalResult !== null)
+    (activeStage.type === "tasks" && taskIssues.length > 0)
 
   return (
     <div className="workspace-shell">
@@ -732,15 +733,20 @@ export default function Workspace() {
                     {isEditMode ? "Edit this stage document." : "Rendered markdown preview."}
                   </p>
                 </div>
-                {activeStage.status !== "locked" && !isStreaming && (
-                  <button
-                    type="button"
-                    onClick={() => setIsEditMode((m) => !m)}
-                    className="ws-view-toggle"
-                  >
-                    {isEditMode ? "Preview" : "Edit"}
-                  </button>
-                )}
+                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                  {activeStage.type === "tasks" && evalResult !== null && taskIssues.length === 0 && (
+                    <span className="ws-validation-ok-chip">✓ All tasks valid</span>
+                  )}
+                  {activeStage.status !== "locked" && !isStreaming && (
+                    <button
+                      type="button"
+                      onClick={() => setIsEditMode((m) => !m)}
+                      className="ws-view-toggle"
+                    >
+                      {isEditMode ? "Preview" : "Edit"}
+                    </button>
+                  )}
+                </div>
               </div>
               <div className="stage-card-body">
                 {isEditMode || isStreaming ? (
