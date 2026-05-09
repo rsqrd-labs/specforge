@@ -3499,12 +3499,20 @@ button:disabled {
 .md-prose strong { font-weight: 700; color: var(--color-on-surface); }
 .md-prose em { font-style: italic; }
 
-.md-prose ul,
-.md-prose ol {
+.md-prose ul {
+  list-style: disc;
   margin: 0.5em 0 0.85em 0;
   padding-left: 1.5em;
 }
+.md-prose ol {
+  list-style: decimal;
+  margin: 0.5em 0 0.85em 0;
+  padding-left: 1.5em;
+}
+.md-prose ul ul { list-style: circle; }
+.md-prose ul ul ul { list-style: square; }
 .md-prose li { margin-bottom: 0.3em; }
+.md-prose li::marker { color: var(--color-primary); }
 .md-prose li > ul,
 .md-prose li > ol { margin: 0.2em 0 0.2em 0; }
 
