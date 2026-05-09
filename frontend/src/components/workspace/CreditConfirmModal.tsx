@@ -53,8 +53,7 @@ export function CreditConfirmModal({
         role="dialog"
         aria-modal="true"
         aria-labelledby="credit-modal-title"
-        className="create-modal"
-        style={{ maxWidth: 400 }}
+        className="create-modal workspace-credit-modal"
       >
         <div className="create-modal-header">
           <h2 id="credit-modal-title" className="create-modal-title">
@@ -64,45 +63,18 @@ export function CreditConfirmModal({
         </div>
 
         <div className="create-modal-body">
-          <div
-            style={{
-              padding: "14px 16px",
-              borderRadius: 12,
-              border: "1px solid rgba(143,78,0,0.12)",
-              background: "rgba(143,78,0,0.05)",
-              display: "flex",
-              flexDirection: "column",
-              gap: 8,
-            }}
-          >
-            <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13 }}>
-              <span style={{ color: "var(--color-on-surface-variant)" }}>Cost</span>
-              <span style={{ fontWeight: 700, color: "var(--color-primary)" }}>
-                {resolvedCost} credits
-              </span>
+          <div className="workspace-credit-summary">
+            <div>
+              <span>Cost</span>
+              <strong>{resolvedCost} credits</strong>
             </div>
-            <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13 }}>
-              <span style={{ color: "var(--color-on-surface-variant)" }}>Balance</span>
-              <span style={{ fontWeight: 600 }}>{resolvedBalance} credits</span>
+            <div>
+              <span>Balance</span>
+              <strong>{resolvedBalance} credits</strong>
             </div>
-            <div
-              style={{
-                borderTop: "1px solid rgba(143,78,0,0.10)",
-                paddingTop: 8,
-                display: "flex",
-                justifyContent: "space-between",
-                fontSize: 13,
-              }}
-            >
-              <span style={{ color: "var(--color-on-surface-variant)" }}>After</span>
-              <span
-                style={{
-                  fontWeight: 700,
-                  color: isInsufficient ? "#dc2626" : "var(--color-on-surface)",
-                }}
-              >
-                {remaining} credits
-              </span>
+            <div className="workspace-credit-after">
+              <span>After</span>
+              <strong className={isInsufficient ? "danger" : ""}>{remaining} credits</strong>
             </div>
           </div>
 

@@ -27,7 +27,13 @@ export function DiffViewer({ diff, proposed, onAccept, onReject }: DiffViewerPro
 
   return (
     <div className="diff-viewer">
-      <div className="ws-panel-title">Proposed changes</div>
+      <div className="diff-viewer-header">
+        <div>
+          <div className="ws-panel-title">Proposed changes</div>
+          <p>Review the patch before applying it.</p>
+        </div>
+        <span>{lines.length} lines</span>
+      </div>
 
       <div className="diff-content">
         {lines.map((line, i) => (
@@ -47,7 +53,7 @@ export function DiffViewer({ diff, proposed, onAccept, onReject }: DiffViewerPro
           Reject
         </button>
         <button onClick={() => onAccept(proposed)} className="gen-btn-primary">
-          ✓ Accept changes
+          Accept changes
         </button>
       </div>
     </div>

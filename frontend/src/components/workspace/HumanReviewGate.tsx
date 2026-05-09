@@ -27,8 +27,7 @@ export function HumanReviewGate({
         role="dialog"
         aria-modal="true"
         aria-labelledby="review-gate-title"
-        className="create-modal"
-        style={{ maxWidth: 440 }}
+        className="create-modal workspace-review-modal"
       >
         <div className="create-modal-header">
           <h2 id="review-gate-title" className="create-modal-title">
@@ -38,19 +37,9 @@ export function HumanReviewGate({
         </div>
 
         <div className="create-modal-body">
-          <div
-            style={{
-              padding: "14px 16px",
-              borderRadius: 12,
-              border: "1px solid rgba(143,78,0,0.12)",
-              background: "rgba(143,78,0,0.05)",
-              fontSize: 13,
-              lineHeight: 1.6,
-              color: "var(--color-on-surface-variant)",
-            }}
-          >
-            You are about to generate <strong style={{ color: "var(--color-primary)" }}>{toStageType}</strong> from{" "}
-            <strong style={{ color: "var(--color-on-surface)" }}>{fromStageType}</strong>. Take a moment to review the
+          <div className="workspace-review-card">
+            You are about to generate <strong>{toStageType}</strong> from{" "}
+            <em>{fromStageType}</em>. Take a moment to review the
             source stage before continuing — this will consume credits.
           </div>
 

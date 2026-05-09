@@ -12,25 +12,28 @@ export function TaskValidationPanel({ stage, evalResult }: TaskValidationPanelPr
 
   return (
     <div className="ws-panel-section">
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
-        <span className="ws-panel-title" style={{ marginBottom: 0 }}>Task Validation</span>
+      <div className="ws-panel-section-header">
+        <div>
+          <div className="ws-panel-title">Task Validation</div>
+          <p>Traceability between tasks and tests.</p>
+        </div>
         {evalResult && (
-          <span style={{ fontSize: 11, fontWeight: 600, color: issues.length === 0 ? "#16a34a" : "#dc2626" }}>
+          <span className={`ws-panel-chip ${issues.length === 0 ? "success" : "warning"}`}>
             {issues.length === 0 ? "All clear" : `${issues.length} flagged`}
           </span>
         )}
       </div>
 
       {!evalResult && (
-        <p style={{ fontSize: 12, color: "var(--color-on-surface-variant)" }}>Evaluating…</p>
+        <p className="ws-panel-muted">Evaluating task references...</p>
       )}
 
       {evalResult && issues.length === 0 && (
-        <p className="ws-panel-ok">✓ Every task references a test.</p>
+        <p className="ws-panel-ok">Every task references a test.</p>
       )}
 
       {issues.length > 0 && (
-        <ul style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+        <ul className="ws-issue-list">
           {issues.map((issue) => (
             <li key={`${issue.task_number}-${issue.task_title}`} className="ws-issue-item">
               <div className="ws-issue-title">

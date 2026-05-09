@@ -29,7 +29,7 @@ export function GenerateBar({
   return (
     <div className="workspace-action-row">
       {(stage.status === "draft" || stage.status === "stale") && !stage.content && (
-        <button onClick={onGenerate} className="gen-btn-primary">
+        <button type="button" onClick={onGenerate} className="gen-btn-primary">
           Generate
         </button>
       )}
@@ -37,19 +37,19 @@ export function GenerateBar({
       {(stage.status === "finalised" ||
         stage.status === "stale" ||
         (stage.status === "draft" && stage.content)) && (
-        <button onClick={onRegenerate} className="gen-btn-secondary">
+        <button type="button" onClick={onRegenerate} className="gen-btn-secondary">
           Regenerate
         </button>
       )}
 
       {stage.content && (
-        <button onClick={onRefine} className="gen-btn-secondary">
+        <button type="button" onClick={onRefine} className="gen-btn-secondary">
           Refine
         </button>
       )}
 
       {(stage.status === "draft" || stage.status === "stale") && stage.content && (
-        <button onClick={onFinalise} className="gen-btn-primary">
+        <button type="button" onClick={onFinalise} className="gen-btn-primary">
           Finalise
         </button>
       )}

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react"
 import { useParams } from "react-router-dom"
 import { CoveragePanel } from "../components/workspace/CoveragePanel"
 import { CreditConfirmModal, CREDIT_COSTS } from "../components/workspace/CreditConfirmModal"
@@ -502,6 +502,44 @@ export default function Workspace() {
     Boolean(diffResult) ||
     (activeStage.type === "harness" && evalResult !== null) ||
     (activeStage.type === "tasks" && taskIssues.length > 0)
+  const finalisedCount = stages.filter((stage) => stage.status === "finalised").length
+  const readiness = stages.length === 0 ? 0 : Math.round((finalisedCount / stages.length) * 100)
+  const currentStageIndex = STAGE_ORDER.indexOf(activeStage.type)
+  const nextStage =
+    stages.find((stage) => STAGE_ORDER.indexOf(stage.type) > currentStageIndex) ??
+    activeStage
+  const nextStageLabel =
+    activeStage.type === "tasks" && activeStage.status === "finalised"
+      ? "EXPORT"
+      : STAGE_LABELS[nextStage.type]
+  const activeIssueCount =
+    activeStage.type === "harness"
+      ? evalResult?.uncovered_reqs?.length ?? 0
+      : activeStage.type === "tasks"
+        ? taskIssues.length
+        : evalResult?.flagged
+          ? 1
+          : 0
+  const sidebarGateLabel =
+    activeStage.status === "finalised"
+      ? "Gate passed"
+      : activeIssueCount > 0
+        ? `${activeIssueCount} flagged`
+        : activeStage.status === "in_progress"
+          ? "Generating"
+          : "Ready"
+  const activeWordCount = activeStage.content?.trim()
+    ? activeStage.content.trim().split(/\s+/).length
+    : 0
+  const sidebarSignals = [
+    [
+      "Quality",
+      evalResult?.overall_score === null || evalResult?.overall_score === undefined
+        ? "Awaiting eval"
+        : `${evalResult.overall_score}/100`,
+    ],
+    ["Output", activeWordCount === 0 ? "No draft yet" : `${activeWordCount.toLocaleString()} words`],
+  ]
 
   return (
     <div className="workspace-shell">
@@ -524,6 +562,72 @@ export default function Workspace() {
           activeStageId={activeStage.id}
           onSelectStage={setActiveStageId}
         />
+        <div className="workspace-sidebar-insight" aria-label="Workspace progress summary">
+          <div className="sidebar-insight-glow" aria-hidden="true" />
+          <div className="sidebar-insight-topbar">
+            <span />
+            <span />
+            <span />
+            <strong>Workspace pulse</strong>
+          </div>
+
+          <div className="sidebar-readiness-card">
+            <div>
+              <span>Readiness</span>
+              <strong>{readiness}%</strong>
+            </div>
+            <div
+              className="sidebar-readiness-ring"
+              style={{ "--readiness": readiness } as CSSProperties}
+            >
+              <span>{finalisedCount}/{stages.length}</span>
+            </div>
+          </div>
+
+          <div className="sidebar-mini-grid">
+            <div>
+              <span>Now</span>
+              <strong>{STAGE_LABELS[activeStage.type]}</strong>
+            </div>
+            <div>
+              <span>Next</span>
+              <strong>{nextStageLabel}</strong>
+            </div>
+          </div>
+
+          <div className="sidebar-handoff-card">
+            <div>
+              <span>Review gate</span>
+              <strong>{sidebarGateLabel}</strong>
+            </div>
+            <em>{formatStageStatus(activeStage.status)}</em>
+          </div>
+
+          <div className="sidebar-signal-stack">
+            {sidebarSignals.map(([label, value]) => (
+              <div key={label} className="sidebar-signal-row">
+                <span aria-hidden="true" />
+                <div>
+                  <strong>{label}</strong>
+                  <p>{value}</p>
+                </div>
+              </div>
+            ))}
+          </div>
+
+          <div className="sidebar-pipeline-trace" aria-hidden="true">
+            {stages.map((stage, index) => (
+              <span
+                key={stage.id}
+                className={[
+                  stage.status === "finalised" ? "done" : "",
+                  stage.id === activeStage.id ? "active" : "",
+                ].filter(Boolean).join(" ")}
+                style={{ animationDelay: `${index * 0.08}s` }}
+              />
+            ))}
+          </div>
+        </div>
       </aside>
 
       {/* Main */}
@@ -560,7 +664,7 @@ export default function Workspace() {
               type="button"
               disabled={!canExport || isExporting}
               onClick={handleExport}
-              className="workspace-export-btn"
+              className={`workspace-export-btn ${allFinalised ? "ready" : ""}`}
             >
               {isExporting ? "Exporting…" : "Export"}
             </button>
@@ -651,6 +755,24 @@ export default function Workspace() {
           </form>
         )}
 
+        {showRefineHint && (
+          <div className="refine-hint-inline">
+            <div className="refine-hint-icon" aria-hidden="true">✦</div>
+            <div>
+              <strong>Highlight text to refine</strong>
+              <span>Switch to Edit mode, select the exact sentence or section, then run Refine.</span>
+            </div>
+            <button
+              type="button"
+              className="refine-hint-close"
+              onClick={() => setShowRefineHint(false)}
+              aria-label="Dismiss refine hint"
+            >
+              ✕
+            </button>
+          </div>
+        )}
+
         {/* Editor + comparison panels */}
         {activeStage.type === "spec" ? (
           <div className="spec-compare-grid">
@@ -733,7 +855,7 @@ export default function Workspace() {
                     {isEditMode ? "Edit this stage document." : "Rendered markdown preview."}
                   </p>
                 </div>
-                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                <div className="workspace-pane-actions">
                   {activeStage.type === "tasks" && evalResult !== null && taskIssues.length === 0 && (
                     <span className="ws-validation-ok-chip">✓ All tasks valid</span>
                   )}
@@ -770,7 +892,7 @@ export default function Workspace() {
             {showRightPanel && (
               <aside className="workspace-right-panel min-h-0">
                 {diffResult ? (
-                  <div className="h-full p-4">
+                  <div className="workspace-diff-panel">
                     <DiffViewer
                       diff={diffResult.diff}
                       original={diffResult.original}
@@ -812,47 +934,6 @@ export default function Workspace() {
         />
       )}
 
-      {showRefineHint && (
-        <div className="refine-hint-backdrop" onClick={() => setShowRefineHint(false)}>
-          <div className="refine-hint-popup" onClick={(e) => e.stopPropagation()}>
-            <div className="refine-hint-header">
-              <div className="refine-hint-icon">✦</div>
-              <div>
-                <div className="refine-hint-title">Highlight text to refine</div>
-                <div className="refine-hint-subtitle">Tell SpecForge exactly what to improve</div>
-              </div>
-              <button
-                type="button"
-                className="refine-hint-close"
-                onClick={() => setShowRefineHint(false)}
-              >
-                ✕
-              </button>
-            </div>
-            <div className="refine-hint-steps">
-              <div className="refine-hint-step">
-                <div className="refine-hint-step-num">1</div>
-                <div className="refine-hint-step-text">
-                  Switch to <strong>Edit mode</strong> using the toggle in the toolbar above
-                </div>
-              </div>
-              <div className="refine-hint-step-divider" />
-              <div className="refine-hint-step">
-                <div className="refine-hint-step-num">2</div>
-                <div className="refine-hint-step-text">
-                  <strong>Click and drag</strong> to select the sentence or section you want to improve, then hit <strong>Refine</strong>
-                </div>
-              </div>
-            </div>
-            <div className="refine-hint-tip">
-              Tip — smaller selections give more targeted improvements
-            </div>
-            <div className="refine-hint-progress">
-              <div className="refine-hint-progress-bar" />
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   )
 }

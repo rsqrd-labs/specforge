@@ -14,18 +14,21 @@ export function CoveragePanel({ stage, evalResult }: CoveragePanelProps) {
 
   return (
     <div className="ws-panel-section">
-      <div className="ws-panel-title">Coverage</div>
-
-      <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8, fontSize: 13 }}>
-        <span style={{ color: "var(--color-on-surface-variant)" }}>
-          {coverage === null || coverage === undefined ? "Evaluating…" : "Requirement coverage"}
-        </span>
+      <div className="ws-panel-section-header">
+        <div>
+          <div className="ws-panel-title">Coverage</div>
+          <p>Harness coverage across requirements.</p>
+        </div>
         {coverage !== null && coverage !== undefined && (
-          <span style={{ fontWeight: 700, color: isLow ? "#dc2626" : "#16a34a" }}>
+          <span className={`ws-panel-chip ${isLow ? "warning" : "success"}`}>
             {coverage}%
           </span>
         )}
       </div>
+
+      {coverage === null || coverage === undefined && (
+        <p className="ws-panel-muted">Evaluating requirement coverage...</p>
+      )}
 
       {coverage !== null && coverage !== undefined && (
         <div className="ws-progress-track">
@@ -37,7 +40,7 @@ export function CoveragePanel({ stage, evalResult }: CoveragePanelProps) {
       )}
 
       {uncoveredReqs.length > 0 && (
-        <ul style={{ marginTop: 12, display: "flex", flexDirection: "column", gap: 6 }}>
+        <ul className="ws-issue-list">
           {uncoveredReqs.map((req) => (
             <li key={req} className="ws-issue-item">
               <div className="ws-issue-title">{req}</div>
@@ -47,7 +50,7 @@ export function CoveragePanel({ stage, evalResult }: CoveragePanelProps) {
       )}
 
       {coverage !== null && coverage !== undefined && !isLow && (
-        <p className="ws-panel-ok" style={{ marginTop: 8 }}>✓ Full coverage</p>
+        <p className="ws-panel-ok">Full coverage</p>
       )}
     </div>
   )

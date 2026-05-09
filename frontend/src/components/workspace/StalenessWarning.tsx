@@ -24,13 +24,12 @@ export function StalenessWarning({
         <button
           type="button"
           onClick={onDismiss}
-          className="text-xs font-medium opacity-70 hover:opacity-100"
+          className="ws-banner-link"
         >
           Keep as-is
         </button>
-        <button type="button" onClick={onRegenerate} className="gen-btn-primary"
-          style={{ padding: "5px 14px", fontSize: 12 }}>
-          ↺ Regenerate
+        <button type="button" onClick={onRegenerate} className="gen-btn-primary gen-btn-compact">
+          Regenerate
         </button>
       </div>
     </div>
