@@ -25,8 +25,7 @@ export function CreateWorkspaceModal({ onClose }: CreateWorkspaceModalProps) {
   const dialogRef = useRef<HTMLDivElement>(null)
   useFocusTrap(dialogRef, onClose)
 
-  const availableModels =
-    PROVIDERS.find((p) => p.id === provider)?.models ?? []
+  const availableModels = PROVIDERS.find((p) => p.id === provider)?.models ?? []
 
   function handleProviderChange(newProvider: AIProvider) {
     setProvider(newProvider)
@@ -66,12 +65,9 @@ export function CreateWorkspaceModal({ onClose }: CreateWorkspaceModalProps) {
     }
   }
 
-  const inputClass =
-    "w-full rounded-lg border border-outline-variant bg-surface px-3 py-2.5 text-sm text-on-surface outline-none transition-all focus:border-primary focus:ring-2 focus:ring-primary/10"
-
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-[#0f172a]/60 p-4 backdrop-blur-sm"
+      className="create-modal-backdrop"
       onClick={(e) => e.target === e.currentTarget && onClose()}
     >
       <div
@@ -79,124 +75,96 @@ export function CreateWorkspaceModal({ onClose }: CreateWorkspaceModalProps) {
         role="dialog"
         aria-modal="true"
         aria-labelledby="create-workspace-title"
-        className="w-full max-w-lg rounded-xl border border-outline-variant bg-surface-container-lowest/90 shadow-[0_40px_100px_rgba(47,49,49,0.22)] backdrop-blur-xl"
+        className="create-modal"
       >
-        <div className="flex items-center justify-between border-b border-outline-variant px-6 py-4">
-          <h2
-            id="create-workspace-title"
-            className="text-base font-semibold text-on-surface"
-          >
+        <div className="create-modal-header">
+          <h2 id="create-workspace-title" className="create-modal-title">
             New Workspace
           </h2>
-          <button
-            onClick={onClose}
-            className="flex h-7 w-7 items-center justify-center rounded-lg text-on-surface-variant transition-colors hover:bg-surface-container hover:text-on-surface"
-          >
+          <button onClick={onClose} className="create-modal-close" aria-label="Close">
             ✕
           </button>
         </div>
 
-        <form onSubmit={(e) => void handleSubmit(e)} className="space-y-4 p-6">
+        <form onSubmit={(e) => void handleSubmit(e)} className="create-modal-body">
           <div>
-            <label className="mb-1.5 block text-xs font-semibold uppercase tracking-wide text-on-surface-variant">
-              Workspace Name
-            </label>
+            <label className="modal-label">Workspace Name</label>
             <input
               type="text"
               value={name}
-              onChange={(e) => setName(e.target.value)}
-              className={inputClass}
+              onChange={(e) => {
+                setName(e.target.value)
+                if (errors.name) setErrors((prev) => ({ ...prev, name: "" }))
+              }}
+              className={`modal-input${errors.name ? " error" : ""}`}
               placeholder="My Todo App"
             />
-            {errors.name && (
-              <p className="mt-1 text-xs text-error">{errors.name}</p>
-            )}
+            {errors.name && <p className="modal-error">{errors.name}</p>}
           </div>
 
           <div>
-            <label className="mb-1.5 block text-xs font-semibold uppercase tracking-wide text-on-surface-variant">
-              Problem Statement
-            </label>
+            <label className="modal-label">Problem Statement</label>
             <textarea
               value={statement}
-              onChange={(e) => setStatement(e.target.value)}
-              rows={4}
-              className={`${inputClass} resize-none`}
-              placeholder="Describe what you want to build..."
+              onChange={(e) => {
+                setStatement(e.target.value)
+                if (errors.statement) setErrors((prev) => ({ ...prev, statement: "" }))
+              }}
+              rows={5}
+              className={`modal-input resize-none${errors.statement ? " error" : ""}`}
+              placeholder="Describe what you want to build in detail — the more context, the better the spec…"
             />
-            <div className="mt-1 flex items-center justify-between">
+            <div className="mt-1.5 flex items-center justify-between">
               {errors.statement ? (
-                <p className="text-xs text-error">{errors.statement}</p>
+                <p className="modal-error">{errors.statement}</p>
               ) : (
                 <span />
               )}
-              <p
-                className={`text-xs ${
-                  statement.length > MAX_STATEMENT
-                    ? "text-error"
-                    : "text-on-surface-variant"
-                }`}
-              >
+              <p className={`modal-char-count${statement.length > MAX_STATEMENT ? " over" : ""}`}>
                 {statement.length}/{MAX_STATEMENT}
               </p>
             </div>
           </div>
 
-          <div className="grid grid-cols-2 gap-3">
-            <div>
-              <label className="mb-1.5 block text-xs font-semibold uppercase tracking-wide text-on-surface-variant">
-                Provider
-              </label>
-              <select
-                value={provider}
-                onChange={(e) =>
-                  handleProviderChange(e.target.value as AIProvider)
-                }
-                className={inputClass}
-              >
-                {PROVIDERS.map((p) => (
-                  <option key={p.id} value={p.id}>
-                    {p.name}
-                  </option>
-                ))}
-              </select>
-            </div>
-            <div>
-              <label className="mb-1.5 block text-xs font-semibold uppercase tracking-wide text-on-surface-variant">
-                Model
-              </label>
-              <select
-                value={model}
-                onChange={(e) => setModel(e.target.value)}
-                className={inputClass}
-              >
-                {availableModels.map((m) => (
-                  <option key={m.id} value={m.id}>
-                    {m.name}
-                  </option>
-                ))}
-              </select>
+          <div>
+            <label className="modal-label">Provider</label>
+            <div className="provider-grid">
+              {PROVIDERS.map((p) => (
+                <button
+                  key={p.id}
+                  type="button"
+                  onClick={() => handleProviderChange(p.id as AIProvider)}
+                  className={`provider-pill${provider === p.id ? " selected" : ""}`}
+                >
+                  {p.name}
+                </button>
+              ))}
             </div>
           </div>
 
-          {errors.submit && (
-            <p className="text-xs text-error">{errors.submit}</p>
-          )}
-
-          <div className="flex justify-end gap-3 pt-2">
-            <button
-              type="button"
-              onClick={onClose}
-              className="rounded-lg border border-outline-variant px-4 py-2 text-sm font-medium text-on-surface-variant transition-colors hover:bg-surface-container hover:text-on-surface"
+          <div>
+            <label className="modal-label">Model</label>
+            <select
+              value={model}
+              onChange={(e) => setModel(e.target.value)}
+              className="modal-input"
             >
+              {availableModels.map((m) => (
+                <option key={m.id} value={m.id}>
+                  {m.name}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          {errors.submit && <p className="modal-error">{errors.submit}</p>}
+
+          <div className="modal-footer">
+            <button type="button" onClick={onClose} className="modal-cancel">
               Cancel
             </button>
-            <button
-              type="submit"
-              disabled={isSubmitting}
-              className="rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-on-primary shadow-[0_4px_16px_rgba(143,78,0,0.22)] transition-opacity hover:opacity-90 disabled:opacity-50"
-            >
-              {isSubmitting ? "Creating..." : "Create Workspace"}
+            <button type="submit" disabled={isSubmitting} className="modal-submit">
+              {isSubmitting ? "Creating…" : "Create Workspace"}
             </button>
           </div>
         </form>
