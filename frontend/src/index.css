@@ -2038,7 +2038,10 @@ button:disabled {
   position: relative;
   isolation: isolate;
   background:
-    linear-gradient(135deg, rgba(255, 220, 194, 0.56), rgba(249, 249, 249, 0.82) 38%, rgba(255, 217, 225, 0.38)),
+    radial-gradient(circle at 12% 18%, rgba(255, 153, 51, 0.22), transparent 28rem),
+    radial-gradient(circle at 82% 8%, rgba(253, 128, 169, 0.15), transparent 24rem),
+    radial-gradient(circle at 62% 88%, rgba(170, 177, 202, 0.16), transparent 22rem),
+    linear-gradient(135deg, rgba(255, 220, 194, 0.62), rgba(249, 249, 249, 0.88) 42%, rgba(255, 217, 225, 0.44)),
     var(--color-surface);
 }
 
@@ -2119,6 +2122,7 @@ button:disabled {
 }
 
 .workspace-nav-item {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 11px;
@@ -2130,14 +2134,33 @@ button:disabled {
   color: var(--color-on-surface-variant);
   text-align: left;
   cursor: pointer;
-  transition: background 0.15s, color 0.15s, border-color 0.15s;
+  transition: background 0.18s, color 0.18s, border-color 0.18s, box-shadow 0.18s, transform 0.18s;
   width: 100%;
   background: rgba(255, 255, 255, 0.46);
+  overflow: hidden;
+}
+
+.workspace-nav-item::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(110deg, transparent 30%, rgba(255, 255, 255, 0.54) 50%, transparent 70%);
+  background-size: 200% 100%;
+  background-position: 200% 0;
+  transition: background-position 0.5s ease;
+  pointer-events: none;
 }
 
 .workspace-nav-item:hover:not(:disabled) {
-  background: rgba(143, 78, 0, 0.06);
+  background: rgba(143, 78, 0, 0.07);
+  border-color: rgba(143, 78, 0, 0.18);
   color: var(--color-on-surface);
+  box-shadow: 0 4px 14px rgba(143, 78, 0, 0.08);
+  transform: translateX(2px);
+}
+
+.workspace-nav-item:hover:not(:disabled)::after {
+  background-position: -100% 0;
 }
 
 .workspace-nav-item.ws-active {
@@ -2442,21 +2465,49 @@ button:disabled {
 
 /* Export button */
 .workspace-export-btn {
+  position: relative;
   height: 46px;
   padding: 0 22px;
   border-radius: 14px;
   border: 1px solid rgba(143, 78, 0, 0.18);
-  background: rgba(255, 255, 255, 0.56);
+  background:
+    linear-gradient(135deg, rgba(255, 248, 240, 0.96), rgba(255, 240, 248, 0.84)),
+    rgba(255, 255, 255, 0.72);
   font-size: 15px;
   font-weight: 800;
   color: var(--color-on-surface);
   cursor: pointer;
-  transition: background 0.15s, border-color 0.15s;
+  transition: background 0.18s, border-color 0.18s, box-shadow 0.18s, transform 0.18s;
+  box-shadow: 0 2px 8px rgba(143, 78, 0, 0.07);
+  overflow: hidden;
+}
+
+.workspace-export-btn::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(110deg, transparent 30%, rgba(255, 255, 255, 0.62) 50%, transparent 70%);
+  background-size: 200% 100%;
+  background-position: 200% 0;
+  transition: background-position 0.45s ease;
+  pointer-events: none;
 }
 
 .workspace-export-btn:hover:not(:disabled) {
-  background: rgba(143, 78, 0, 0.06);
-  border-color: rgba(143, 78, 0, 0.28);
+  background:
+    linear-gradient(135deg, rgba(143, 78, 0, 0.10), rgba(161, 56, 95, 0.06)),
+    rgba(255, 255, 255, 0.88);
+  border-color: rgba(143, 78, 0, 0.30);
+  box-shadow: 0 6px 18px rgba(143, 78, 0, 0.14);
+  transform: translateY(-1px);
+}
+
+.workspace-export-btn:hover:not(:disabled)::after {
+  background-position: -100% 0;
+}
+
+.workspace-export-btn:active:not(:disabled) {
+  transform: translateY(0);
 }
 
 .workspace-export-btn:disabled {
@@ -2465,22 +2516,50 @@ button:disabled {
 }
 
 .ws-view-toggle {
+  position: relative;
   height: 46px;
   padding: 0 20px;
   border-radius: 14px;
   border: 1px solid rgba(143, 78, 0, 0.22);
-  background: rgba(143, 78, 0, 0.06);
+  background:
+    linear-gradient(135deg, rgba(143, 78, 0, 0.10), rgba(161, 56, 95, 0.07)),
+    rgba(255, 255, 255, 0.72);
   font-size: 15px;
   font-weight: 800;
   letter-spacing: 0.02em;
   color: var(--color-primary);
   cursor: pointer;
-  transition: background 0.15s, border-color 0.15s, color 0.15s;
+  transition: background 0.18s, border-color 0.18s, box-shadow 0.18s, transform 0.18s;
+  box-shadow: 0 2px 8px rgba(143, 78, 0, 0.08);
+  overflow: hidden;
+}
+
+.ws-view-toggle::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(110deg, transparent 28%, rgba(255, 255, 255, 0.62) 50%, transparent 72%);
+  background-size: 200% 100%;
+  background-position: 200% 0;
+  transition: background-position 0.45s ease;
+  pointer-events: none;
 }
 
 .ws-view-toggle:hover {
-  background: rgba(143, 78, 0, 0.12);
-  border-color: rgba(143, 78, 0, 0.38);
+  background:
+    linear-gradient(135deg, rgba(143, 78, 0, 0.16), rgba(161, 56, 95, 0.11)),
+    rgba(255, 255, 255, 0.84);
+  border-color: rgba(143, 78, 0, 0.40);
+  box-shadow: 0 6px 18px rgba(143, 78, 0, 0.16), 0 0 0 3px rgba(143, 78, 0, 0.06);
+  transform: translateY(-1px);
+}
+
+.ws-view-toggle:hover::after {
+  background-position: -100% 0;
+}
+
+.ws-view-toggle:active {
+  transform: translateY(0);
 }
 
 @media (max-width: 1180px) {
@@ -2540,12 +2619,15 @@ button:disabled {
   justify-content: space-between;
   gap: 12px;
   padding: 12px 24px;
-  border-bottom: 1px solid rgba(143, 78, 0, 0.08);
-  background: rgba(253, 246, 238, 0.48);
+  border-bottom: 1px solid rgba(143, 78, 0, 0.10);
+  background:
+    linear-gradient(135deg, rgba(255, 240, 220, 0.72), rgba(253, 246, 238, 0.56) 50%, rgba(255, 230, 240, 0.54)),
+    rgba(253, 246, 238, 0.62);
   backdrop-filter: blur(12px);
   -webkit-backdrop-filter: blur(12px);
   min-height: 68px;
   flex-shrink: 0;
+  box-shadow: 0 2px 12px rgba(143, 78, 0, 0.05);
 }
 
 .workspace-action-row {
@@ -2556,6 +2638,7 @@ button:disabled {
 }
 
 .gen-btn-primary {
+  position: relative;
   display: inline-flex;
   align-items: center;
   min-height: 44px;
@@ -2568,13 +2651,29 @@ button:disabled {
   font-weight: 900;
   border: none;
   cursor: pointer;
-  box-shadow: 0 4px 14px rgba(143, 78, 0, 0.24), inset 0 1px 0 rgba(255, 255, 255, 0.15);
-  transition: transform 0.15s cubic-bezier(0.16, 1, 0.3, 1), box-shadow 0.15s ease;
+  box-shadow: 0 4px 14px rgba(143, 78, 0, 0.28), inset 0 1px 0 rgba(255, 255, 255, 0.18);
+  transition: transform 0.18s cubic-bezier(0.16, 1, 0.3, 1), box-shadow 0.18s ease;
+  overflow: hidden;
+}
+
+.gen-btn-primary::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(110deg, transparent 25%, rgba(255, 255, 255, 0.30) 50%, transparent 75%);
+  background-size: 200% 100%;
+  background-position: 200% 0;
+  transition: background-position 0.5s ease;
+  pointer-events: none;
 }
 
 .gen-btn-primary:hover {
-  transform: translateY(-1px);
-  box-shadow: 0 8px 20px rgba(143, 78, 0, 0.30), inset 0 1px 0 rgba(255, 255, 255, 0.15);
+  transform: translateY(-2px);
+  box-shadow: 0 10px 28px rgba(143, 78, 0, 0.36), inset 0 1px 0 rgba(255, 255, 255, 0.18);
+}
+
+.gen-btn-primary:hover::after {
+  background-position: -100% 0;
 }
 
 .gen-btn-primary:active { transform: translateY(0); }
@@ -2586,6 +2685,7 @@ button:disabled {
 }
 
 .gen-btn-secondary {
+  position: relative;
   display: inline-flex;
   align-items: center;
   min-height: 44px;
@@ -2593,17 +2693,44 @@ button:disabled {
   padding: 0 18px 0 12px;
   border-radius: 8px;
   border: 1px solid rgba(143, 78, 0, 0.18);
-  background: rgba(255, 255, 255, 0.60);
+  background:
+    linear-gradient(135deg, rgba(255, 248, 240, 0.96), rgba(255, 240, 248, 0.82)),
+    rgba(255, 255, 255, 0.78);
   color: var(--color-on-surface);
   font-size: 14px;
   font-weight: 800;
   cursor: pointer;
-  transition: background 0.15s, border-color 0.15s;
+  transition: background 0.18s, border-color 0.18s, box-shadow 0.18s, transform 0.18s;
+  box-shadow: 0 2px 8px rgba(143, 78, 0, 0.07);
+  overflow: hidden;
+}
+
+.gen-btn-secondary::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(110deg, transparent 28%, rgba(255, 255, 255, 0.60) 50%, transparent 72%);
+  background-size: 200% 100%;
+  background-position: 200% 0;
+  transition: background-position 0.45s ease;
+  pointer-events: none;
 }
 
 .gen-btn-secondary:hover {
-  background: rgba(143, 78, 0, 0.06);
-  border-color: rgba(143, 78, 0, 0.28);
+  background:
+    linear-gradient(135deg, rgba(143, 78, 0, 0.10), rgba(161, 56, 95, 0.06)),
+    rgba(255, 255, 255, 0.92);
+  border-color: rgba(143, 78, 0, 0.30);
+  box-shadow: 0 6px 18px rgba(143, 78, 0, 0.12);
+  transform: translateY(-1px);
+}
+
+.gen-btn-secondary:hover::after {
+  background-position: -100% 0;
+}
+
+.gen-btn-secondary:active {
+  transform: translateY(0);
 }
 
 .gen-btn-streaming {
@@ -2905,12 +3032,15 @@ button:disabled {
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  border: 1px solid rgba(143, 78, 0, 0.14);
+  border: 1px solid rgba(143, 78, 0, 0.16);
   border-radius: 8px;
   background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.90), rgba(255, 255, 255, 0.76)),
+    linear-gradient(180deg, rgba(255, 250, 244, 0.96), rgba(255, 255, 255, 0.82)),
     var(--color-surface-container-lowest);
-  box-shadow: 0 16px 38px rgba(47, 49, 49, 0.08);
+  box-shadow:
+    0 16px 48px rgba(143, 78, 0, 0.10),
+    0 4px 16px rgba(47, 49, 49, 0.06),
+    inset 0 1px 0 rgba(255, 255, 255, 0.80);
 }
 
 .workspace-document-card::before {
@@ -2929,16 +3059,20 @@ button:disabled {
   gap: 12px;
   min-height: 74px;
   padding: 14px 16px 12px;
-  border-bottom: 1px solid rgba(143, 78, 0, 0.08);
+  border-bottom: 1px solid rgba(143, 78, 0, 0.10);
   background:
-    linear-gradient(135deg, rgba(255, 247, 238, 0.94), rgba(255, 235, 241, 0.62)),
-    rgba(253, 246, 238, 0.74);
+    linear-gradient(135deg, rgba(255, 244, 230, 0.98), rgba(255, 232, 241, 0.74)),
+    rgba(253, 246, 238, 0.86);
   flex-shrink: 0;
+  box-shadow: 0 2px 10px rgba(143, 78, 0, 0.04);
 }
 
 .workspace-pane-title {
   margin: 3px 0 0;
-  color: var(--color-on-surface);
+  background: linear-gradient(135deg, var(--color-on-surface) 30%, var(--color-primary) 78%, var(--color-secondary));
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
   font-size: 18px;
   font-weight: 900;
   letter-spacing: 0;
@@ -3097,21 +3231,29 @@ button:disabled {
   flex: 1;
   min-height: 0;
   overflow: hidden;
-  background: var(--color-surface);
+  background:
+    linear-gradient(180deg, rgba(255, 247, 238, 0.60) 0%, rgba(249, 249, 249, 0.18)),
+    var(--color-surface);
 }
 
 .stage-editor-shell {
   height: 100%;
   width: 100%;
   overflow: auto;
-  background: var(--color-surface);
+  background:
+    linear-gradient(180deg, rgba(255, 247, 238, 0.60) 0%, rgba(249, 249, 249, 0.18)),
+    var(--color-surface);
 }
 
 .document-markdown-scroll {
   height: 100%;
   overflow: auto;
   padding: 24px 28px;
-  background: var(--color-surface);
+  background:
+    radial-gradient(circle at 92% 6%, rgba(255, 153, 51, 0.07), transparent 22rem),
+    radial-gradient(circle at 4% 88%, rgba(161, 56, 95, 0.05), transparent 18rem),
+    linear-gradient(180deg, rgba(255, 247, 238, 0.72) 0%, rgba(253, 246, 238, 0.38) 40%, rgba(249, 249, 249, 0.22)),
+    var(--color-surface);
 }
 
 .document-markdown-scroll .md-prose {
