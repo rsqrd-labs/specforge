@@ -155,6 +155,36 @@ export default function Dashboard() {
         </div>
       </div>
 
+      {/* Pipeline overview */}
+      <div className="pipeline-strip">
+        <span className="pipeline-strip-label">How it works</span>
+        <div className="pipeline-stages">
+          <div className="pipeline-stage">
+            <div className="pipeline-stage-num">01</div>
+            <div className="pipeline-stage-name">Spec</div>
+            <div className="pipeline-stage-desc">Functional requirements, constraints, and architecture decisions</div>
+          </div>
+          <div className="pipeline-arrow">→</div>
+          <div className="pipeline-stage">
+            <div className="pipeline-stage-num">02</div>
+            <div className="pipeline-stage-name">Plan</div>
+            <div className="pipeline-stage-desc">Implementation blueprint with a full traceability matrix</div>
+          </div>
+          <div className="pipeline-arrow">→</div>
+          <div className="pipeline-stage">
+            <div className="pipeline-stage-num">03</div>
+            <div className="pipeline-stage-name">Harness</div>
+            <div className="pipeline-stage-desc">Contract test suite that covers every requirement</div>
+          </div>
+          <div className="pipeline-arrow">→</div>
+          <div className="pipeline-stage">
+            <div className="pipeline-stage-num">04</div>
+            <div className="pipeline-stage-name">Tasks</div>
+            <div className="pipeline-stage-desc">Granular implementation playbook for agents and engineers</div>
+          </div>
+        </div>
+      </div>
+
       {/* Workspace list */}
       <div className="ws-section">
         <div className="ws-section-header">
