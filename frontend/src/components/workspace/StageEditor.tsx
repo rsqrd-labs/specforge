@@ -10,6 +10,7 @@ import { useStageStore } from "../../store/stageStore"
 
 export interface StageEditorHandle {
   getSelection: () => { start: number; end: number; text: string } | null
+  getContent: () => string
 }
 
 interface StageEditorProps {
@@ -37,6 +38,9 @@ export const StageEditor = forwardRef<StageEditorHandle, StageEditorProps>(
         if (from === to) return null
         const text = view.state.sliceDoc(from, to)
         return { start: from, end: to, text }
+      },
+      getContent() {
+        return viewRef.current?.state.doc.toString() ?? initialContent
       },
     }))
 
@@ -105,7 +109,7 @@ export const StageEditor = forwardRef<StageEditorHandle, StageEditorProps>(
     return (
       <div
         ref={containerRef}
-        className="h-full w-full bg-surface overflow-auto"
+        className="stage-editor-shell"
       />
     )
   },

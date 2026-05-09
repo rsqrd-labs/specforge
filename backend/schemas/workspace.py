@@ -2,9 +2,9 @@ from datetime import datetime
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from schemas.stage import StageStatus, StageType
+from schemas.stage import StageResponse
 from services.llm.provider_config import VALID_MODELS
 
 Provider = Literal["anthropic", "openai", "google"]
@@ -34,18 +34,20 @@ class WorkspaceCreate(BaseModel):
 
 
 class WorkspaceUpdate(BaseModel):
-    name: str = Field(min_length=1, max_length=200)
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+    problem_statement: str | None = Field(
+        default=None,
+        min_length=50,
+        max_length=10_000,
+    )
 
     model_config = ConfigDict(from_attributes=True)
 
-
-class StageSummary(BaseModel):
-    id: UUID
-    type: StageType
-    status: StageStatus
-    current_version: int
-
-    model_config = ConfigDict(from_attributes=True)
+    @model_validator(mode="after")
+    def at_least_one_field(self) -> "WorkspaceUpdate":
+        if self.name is None and self.problem_statement is None:
+            raise ValueError("At least one workspace field must be provided")
+        return self
 
 
 class WorkspaceResponse(BaseModel):
@@ -56,7 +58,7 @@ class WorkspaceResponse(BaseModel):
     provider: Provider
     model: str
     status: WorkspaceStatus
-    stages: list[StageSummary] = Field(default_factory=list)
+    stages: list[StageResponse] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime
 

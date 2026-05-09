@@ -11,30 +11,16 @@ interface StageNavigatorProps {
 const STAGE_ORDER: StageType[] = ["spec", "plan", "harness", "tasks"]
 
 const STAGE_LABELS: Record<StageType, string> = {
-  spec: "SPEC.md",
-  plan: "PLAN.md",
-  harness: "HARNESS",
-  tasks: "TASKS.md",
+  spec: "Spec",
+  plan: "Plan",
+  harness: "Harness",
+  tasks: "Tasks",
 }
 
-function StatusDot({ status }: { status: Stage["status"] }) {
-  const base = "w-2 h-2 rounded-full shrink-0"
-  if (status === "finalised") return <span className={`${base} bg-green-500`} />
-  if (status === "locked") return <span className={`${base} bg-outline-variant`} />
-  if (status === "stale")
-    return (
-      <span className="flex items-center gap-0.5">
-        <span className={`${base} bg-secondary-container`} />
-        <span className="text-xs leading-none text-secondary">⚠</span>
-      </span>
-    )
-  return <span className={`${base} bg-primary-container`} />
-}
-
-function scoreClassName(score: number): string {
-  if (score >= 80) return "text-green-600"
-  if (score >= 60) return "text-on-surface-variant"
-  return "text-error text-red-600"
+function scoreClass(score: number): string {
+  if (score >= 80) return "good"
+  if (score >= 60) return "ok"
+  return "poor"
 }
 
 export function StageNavigator({
@@ -49,14 +35,22 @@ export function StageNavigator({
     : stages
 
   return (
-    <nav className="flex flex-col gap-1 p-2">
-      {STAGE_ORDER.map((type) => {
+    <nav className="workspace-nav">
+      {STAGE_ORDER.map((type, i) => {
         const stage = stageMap[type]
         if (!stage) return null
 
         const isLocked = stage.status === "locked"
         const isActive = stage.id === activeStageId || stage.type === activeStage
         const score = stage.eval_result?.overall_score ?? null
+
+        const cls = [
+          "workspace-nav-item",
+          isActive ? "ws-active" : "",
+          isLocked ? "ws-locked" : "",
+        ]
+          .filter(Boolean)
+          .join(" ")
 
         return (
           <button
@@ -67,31 +61,16 @@ export function StageNavigator({
               if (onSelectStage) onSelectStage(stage.id)
               else onSelect?.(type)
             }}
-            className={[
-              "flex items-center gap-2 rounded-lg px-3 py-2 text-sm text-left transition-colors",
-              isLocked
-                ? "cursor-not-allowed opacity-40 text-on-surface-variant"
-                : "cursor-pointer hover:bg-surface-container",
-              isActive
-                ? "bg-primary/10 text-on-surface font-medium ring-1 ring-primary/20"
-                : "text-on-surface",
-            ].join(" ")}
+            className={cls}
+            style={{ animationDelay: `${i * 0.06}s` }}
           >
-            <StatusDot status={stage.status} />
-            <span className="truncate">{STAGE_LABELS[type]}</span>
-            {(score !== null || stage.status === "finalised") && (
-              <span className="ml-auto flex items-center gap-2 text-xs">
-                {score !== null && (
-                  <span className={`font-medium ${scoreClassName(score)}`}>
-                    {score}
-                  </span>
-                )}
-                {stage.status === "finalised" && (
-                  <span className="text-on-surface-variant">
-                    v{stage.current_version}
-                  </span>
-                )}
-              </span>
+            <span className={`ws-nav-dot ${stage.status}`} />
+            <span className="ws-nav-label">{STAGE_LABELS[type]}</span>
+            {score !== null && (
+              <span className={`ws-nav-score ${scoreClass(score)}`}>{score}</span>
+            )}
+            {score === null && stage.status === "finalised" && (
+              <span className="ws-nav-score good">✓</span>
             )}
           </button>
         )

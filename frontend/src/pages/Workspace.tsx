@@ -10,6 +10,8 @@ import { StageEditor, type StageEditorHandle } from "../components/workspace/Sta
 import { StageNavigator } from "../components/workspace/StageNavigator"
 import { StalenessWarning } from "../components/workspace/StalenessWarning"
 import { StreamingOverlay } from "../components/workspace/StreamingOverlay"
+import { MarkdownRenderer } from "../components/workspace/MarkdownRenderer"
+import { ProblemStatementPanel } from "../components/workspace/ProblemStatementPanel"
 import { TaskValidationPanel } from "../components/workspace/TaskValidationPanel"
 import { useCredits } from "../hooks/useCredits"
 import { useStream } from "../hooks/useStream"
@@ -22,6 +24,7 @@ import {
   getWorkspace,
   refineStage,
   rejectStageDiff,
+  updateWorkspace,
   updateStageContent,
 } from "../services/api"
 import { useStageStore } from "../store/stageStore"
@@ -63,6 +66,41 @@ function previousStageType(type: StageType): StageType {
   return STAGE_ORDER[Math.max(0, index - 1)]
 }
 
+function formatStageStatus(status: Stage["status"]): string {
+  return status.replace("_", " ")
+}
+
+function useAnimatedNumber(value: number | null, duration = 750) {
+  const [displayValue, setDisplayValue] = useState(value ?? 0)
+  const previousValue = useRef(value ?? 0)
+
+  useEffect(() => {
+    if (value === null) return
+
+    const from = previousValue.current
+    const to = value
+    const startedAt = performance.now()
+    let frame = 0
+
+    function tick(now: number) {
+      const progress = Math.min((now - startedAt) / duration, 1)
+      const eased = 1 - Math.pow(1 - progress, 3)
+      setDisplayValue(Math.round(from + (to - from) * eased))
+
+      if (progress < 1) {
+        frame = requestAnimationFrame(tick)
+      } else {
+        previousValue.current = to
+      }
+    }
+
+    frame = requestAnimationFrame(tick)
+    return () => cancelAnimationFrame(frame)
+  }, [value, duration])
+
+  return displayValue
+}
+
 export default function Workspace() {
   const { id } = useParams<{ id: string }>()
   const editorRef = useRef<StageEditorHandle>(null)
@@ -70,6 +108,7 @@ export default function Workspace() {
     useWorkspaceStore()
   const { stages: stageMap, setStage, setStages } = useStageStore()
   const { balance } = useCredits()
+  const animatedBalance = useAnimatedNumber(balance)
 
   const [activeStageId, setActiveStageId] = useState<string | null>(null)
   const [pendingCredit, setPendingCredit] = useState<PendingCreditAction | null>(
@@ -95,6 +134,10 @@ export default function Workspace() {
   )
   const [error, setError] = useState<string | null>(null)
   const [isExporting, setIsExporting] = useState(false)
+  const [isEditMode, setIsEditMode] = useState(false)
+  const [specViewMode, setSpecViewMode] = useState<"preview" | "edit">("preview")
+  const [problemDraft, setProblemDraft] = useState("")
+  const [problemDirty, setProblemDirty] = useState(false)
 
   const activeStage = activeStageId ? stageMap[activeStageId] : null
   const { start: startStream, isStreaming, error: streamError } = useStream(
@@ -113,6 +156,12 @@ export default function Workspace() {
   const allFinalised =
     stages.length === STAGE_ORDER.length &&
     stages.every((stage) => stage.status === "finalised")
+  const canExport =
+    allFinalised ||
+    stages.some((stage) => Boolean(stage.content?.trim())) ||
+    Boolean(problemDraft.trim())
+  const creditFillPercent =
+    balance === null ? 0 : Math.max(0, Math.min((balance / 100) * 100, 100))
 
   useEffect(() => {
     if (id) {
@@ -135,6 +184,8 @@ export default function Workspace() {
       currentWorkspace.stages.map((stage) => [stage.id, stage.eval_result ?? null]),
     )
     setEvalResults((existing) => ({ ...seededEvalResults, ...existing }))
+    setProblemDraft(currentWorkspace.problem_statement)
+    setProblemDirty(false)
   }, [currentWorkspace, setStages])
 
   useEffect(() => {
@@ -160,12 +211,47 @@ export default function Workspace() {
     }
   }, [streamError])
 
+  useEffect(() => {
+    setIsEditMode(false)
+    setSpecViewMode("preview")
+  }, [activeStageId])
+
   const refreshWorkspace = useCallback(async () => {
     if (!id) return
     const workspace = await getWorkspace(id)
     setCurrentWorkspace(workspace)
     setStages(workspace.stages)
   }, [id, setCurrentWorkspace, setStages])
+
+  const saveProblemStatement = useCallback(async () => {
+    if (!id || !currentWorkspace || !problemDirty) return true
+
+    const trimmed = problemDraft.trim()
+    if (trimmed.length < 50) {
+      setError("Problem statement needs at least 50 characters before saving.")
+      return false
+    }
+
+    try {
+      const workspace = await updateWorkspace(id, {
+        problem_statement: problemDraft,
+      })
+      setCurrentWorkspace(workspace)
+      setStages(workspace.stages)
+      setProblemDirty(false)
+      return true
+    } catch {
+      setError("Could not save the problem statement.")
+      return false
+    }
+  }, [
+    id,
+    currentWorkspace,
+    problemDirty,
+    problemDraft,
+    setCurrentWorkspace,
+    setStages,
+  ])
 
   // Declared before confirmCredits/proceedThroughReviewGate which call it
   const runGeneration = useCallback(
@@ -175,6 +261,9 @@ export default function Workspace() {
       if (!result) return
 
       setStage(result.stage)
+      if (result.stage.type === "spec") {
+        setSpecViewMode("preview")
+      }
       if (result.evalResult) {
         setEvalResults((existing) => ({
           ...existing,
@@ -187,17 +276,26 @@ export default function Workspace() {
   )
 
   const requestGeneration = useCallback(
-    (action: "generate" | "regenerate") => {
+    async (action: "generate" | "regenerate") => {
       if (!activeStage) return
+      if (activeStage.type === "spec") {
+        const saved = await saveProblemStatement()
+        if (!saved) return
+      }
       setPendingCredit({ action, stageId: activeStage.id })
     },
-    [activeStage],
+    [activeStage, saveProblemStatement],
   )
 
   const requestRefine = useCallback(() => {
     const currentSelection = editorRef.current?.getSelection()
     if (!activeStage || !currentSelection) {
-      setError("Select text in the editor before refining.")
+      if (activeStage?.type === "spec") {
+        setSpecViewMode("edit")
+      } else {
+        setIsEditMode(true)
+      }
+      setError("Select text in Edit mode, then click Refine.")
       return
     }
 
@@ -250,6 +348,11 @@ export default function Workspace() {
     }
 
     try {
+      const currentContent = editorRef.current?.getContent()
+      if (currentContent !== undefined && currentContent !== activeStage.content) {
+        const savedStage = await updateStageContent(activeStage.id, currentContent)
+        setStage(savedStage)
+      }
       const result = await refineStage(activeStage.id, {
         instruction: refineInstruction.trim(),
         selection_start: selection.start,
@@ -262,7 +365,7 @@ export default function Workspace() {
     } catch {
       setError("Refine failed. Check your selection and try again.")
     }
-  }, [activeStage, selection, refineInstruction])
+  }, [activeStage, selection, refineInstruction, setStage])
 
   const acceptDiff = useCallback(
     async (proposed: string) => {
@@ -287,19 +390,33 @@ export default function Workspace() {
   }, [activeStage])
 
   const handleFinalise = useCallback(async () => {
-    if (!activeStage) return
+    if (!activeStage || !id) return
+    const finalisedType = activeStage.type
     try {
       const updatedStage = await finaliseStage(activeStage.id)
       setStage(updatedStage)
-      await refreshWorkspace()
+      const workspace = await getWorkspace(id)
+      setCurrentWorkspace(workspace)
+      setStages(workspace.stages)
+      // Auto-advance to the next stage now that it's unlocked
+      const nextIndex = STAGE_ORDER.indexOf(finalisedType) + 1
+      if (nextIndex < STAGE_ORDER.length) {
+        const nextStage = workspace.stages.find(
+          (s) => s.type === STAGE_ORDER[nextIndex],
+        )
+        if (nextStage && nextStage.status !== "locked") {
+          setActiveStageId(nextStage.id)
+        }
+      }
     } catch {
       setError("Only draft stages can be finalised.")
     }
-  }, [activeStage, setStage, refreshWorkspace])
+  }, [activeStage, id, setStage, setCurrentWorkspace, setStages])
 
   const handleContentChange = useCallback(
     async (content: string) => {
       if (!activeStage || isStreaming) return
+      setStage({ ...activeStage, content })
       try {
         const updatedStage = await updateStageContent(activeStage.id, content)
         setStage(updatedStage)
@@ -311,35 +428,59 @@ export default function Workspace() {
   )
 
   const handleExport = useCallback(async () => {
-    if (!id || !allFinalised || isExporting) return
+    if (!id || !canExport || isExporting) return
 
     setIsExporting(true)
     try {
-      const blob = await exportWorkspace(id)
+      let blob: Blob
+      let filename: string
+      if (allFinalised) {
+        blob = await exportWorkspace(id)
+        filename = `specforge-${id}.zip`
+      } else {
+        const content = [
+          `# ${currentWorkspace?.name ?? "SpecForge Workspace"}`,
+          "",
+          "## Problem Statement",
+          "",
+          problemDraft,
+          "",
+          ...stages
+            .filter((stage) => stage.content?.trim())
+            .flatMap((stage) => [
+              `## ${STAGE_LABELS[stage.type]}`,
+              "",
+              stage.content ?? "",
+              "",
+            ]),
+        ].join("\n")
+        blob = new Blob([content], { type: "text/markdown;charset=utf-8" })
+        filename = `specforge-${id}-draft.md`
+      }
       const url = URL.createObjectURL(blob)
       const link = document.createElement("a")
       link.href = url
-      link.download = `specforge-${id}.zip`
+      link.download = filename
       link.click()
       URL.revokeObjectURL(url)
     } catch {
-      setError("Export is unavailable until all stages are finalised.")
+      setError("Export failed. Try again after saving the latest edits.")
     } finally {
       setIsExporting(false)
     }
-  }, [id, allFinalised, isExporting])
+  }, [id, canExport, isExporting, allFinalised, currentWorkspace?.name, problemDraft, stages])
 
   if (isLoading) {
     return (
-      <div className="flex min-h-screen items-center justify-center bg-background">
-        <div className="h-8 w-8 animate-spin rounded-full border-b-2 border-primary" />
+      <div className="workspace-center">
+        <div className="loading-ring" />
       </div>
     )
   }
 
   if (!currentWorkspace || !activeStage) {
     return (
-      <div className="flex min-h-screen items-center justify-center bg-background">
+      <div className="workspace-center">
         <p className="text-sm text-on-surface-variant">Workspace unavailable.</p>
       </div>
     )
@@ -351,20 +492,19 @@ export default function Workspace() {
   const upstreamType = previousStageType(activeStage.type)
 
   return (
-    <div className="flex min-h-screen bg-background text-on-background">
-      <aside className="w-[240px] shrink-0 border-r border-outline-variant bg-surface-container-lowest/80 backdrop-blur-sm">
-        <div className="border-b border-outline-variant px-4 py-3">
-          <div className="mb-3 flex items-center gap-2">
-            <span className="brand-mark brand-mark-sm">
-              <span>SF</span>
-            </span>
+    <div className="workspace-shell">
+      {/* Ambient background */}
+      <div className="ambient-field" style={{ opacity: 0.35 }} aria-hidden="true">
+        <div className="ambient-band band-saffron" />
+        <div className="ambient-band band-lotus" />
+      </div>
+
+      {/* Sidebar */}
+      <aside className="workspace-sidebar">
+        <div className="workspace-sidebar-header">
+          <div className="workspace-brand-lockup">
+            <span className="brand-mark brand-mark-sm"><span>SF</span></span>
             <span className="brand-wordmark brand-wordmark-sm">SpecForge</span>
-          </div>
-          <div className="truncate text-sm font-semibold text-on-surface">
-            {currentWorkspace.name}
-          </div>
-          <div className="mt-0.5 text-xs text-on-surface-variant">
-            {balance === null ? "Credits unavailable" : `${balance} credits`}
           </div>
         </div>
         <StageNavigator
@@ -374,148 +514,259 @@ export default function Workspace() {
         />
       </aside>
 
-      <main className="flex min-w-0 flex-1 flex-col">
-        <header className="flex min-h-16 items-center justify-between gap-4 border-b border-outline-variant bg-surface-container-lowest/80 px-5 backdrop-blur-sm">
-          <div className="min-w-0">
-            <div className="text-xs font-medium uppercase text-on-surface-variant">
-              {STAGE_LABELS[activeStage.type]}
-            </div>
-            <h1 className="truncate text-lg font-semibold text-on-surface">
-              {currentWorkspace.name}
-            </h1>
+      {/* Main */}
+      <main className="workspace-main">
+        {/* Header */}
+        <header className="workspace-header">
+          <div className="workspace-heading">
+            <h1 className="workspace-title">{currentWorkspace.name}</h1>
           </div>
-          <div className="flex items-center gap-3">
+          <div className="workspace-header-actions">
+            <div className="workspace-action-meta">
+              <div className="workspace-stage-tag">{STAGE_LABELS[activeStage.type]}</div>
+              <span className={`workspace-status-chip ${activeStage.status}`}>
+                {formatStageStatus(activeStage.status)}
+              </span>
+              <span
+                className="workspace-model-chip"
+                title={`${currentWorkspace.provider} / ${currentWorkspace.model}`}
+              >
+                {currentWorkspace.provider} / {currentWorkspace.model}
+              </span>
+            </div>
             <QualityBadge evalResult={evalResult} />
+            <div className="workspace-credit-pill" aria-label="Available credits">
+              <div>
+                <span>Credits</span>
+                <strong>{balance === null ? "—" : animatedBalance}</strong>
+              </div>
+              <div className="workspace-credit-meter" aria-hidden="true">
+                <span style={{ width: `${creditFillPercent}%` }} />
+              </div>
+            </div>
+            {activeStage.type !== "spec" && activeStage.status !== "locked" && !isStreaming && (
+              <button
+                type="button"
+                onClick={() => setIsEditMode((m) => !m)}
+                className="ws-view-toggle"
+              >
+                {isEditMode ? "Preview" : "Edit"}
+              </button>
+            )}
             <button
               type="button"
-              disabled={!allFinalised || isExporting}
+              disabled={!canExport || isExporting}
               onClick={handleExport}
-              className="rounded-lg border border-outline-variant px-3 py-1.5 text-sm font-semibold text-on-surface transition-colors disabled:cursor-not-allowed disabled:opacity-40 hover:bg-surface-container"
+              className="workspace-export-btn"
             >
-              Export
+              {isExporting ? "Exporting…" : "Export"}
             </button>
           </div>
         </header>
 
+        {/* Banners */}
         {showStaleWarning && (
           <StalenessWarning
             stage={activeStage}
             upstreamStageType={STAGE_LABELS[upstreamType]}
-            onRegenerate={() => requestGeneration("regenerate")}
+            onRegenerate={() => void requestGeneration("regenerate")}
             onDismiss={() =>
-              setDismissedStale((existing) => ({
-                ...existing,
-                [activeStage.id]: true,
-              }))
+              setDismissedStale((existing) => ({ ...existing, [activeStage.id]: true }))
             }
           />
         )}
 
         {error && (
-          <div className="border-b border-error/30 bg-error-container px-5 py-3 text-sm text-on-error-container">
-            {error}
+          <div className="ws-banner ws-error">
+            <span>{error}</span>
+            <button
+              type="button"
+              onClick={() => setError(null)}
+              className="text-xs opacity-60 hover:opacity-100"
+            >
+              ✕
+            </button>
           </div>
         )}
 
         {largeSelectionWarning && (
-          <div className="flex items-center justify-between gap-4 border-b border-primary-container/40 bg-primary-container/10 px-5 py-3">
-            <span className="text-sm text-on-primary-container">
-              This selection covers most of the document. Consider using Regenerate instead.
-            </span>
-            <div className="flex shrink-0 gap-2">
+          <div className="ws-banner ws-warning">
+            <span>Large selection — consider Regenerate instead of Refine.</span>
+            <div className="flex shrink-0 gap-3">
               <button
                 type="button"
                 onClick={() => setLargeSelectionWarning(false)}
-                className="text-sm text-primary underline hover:text-on-primary-container"
+                className="text-xs underline opacity-75 hover:opacity-100"
               >
-                Proceed with diff
+                Proceed
               </button>
               <button
                 type="button"
-                onClick={() => {
-                  void rejectDiff()
-                  void requestGeneration("regenerate")
-                }}
-                className="rounded-lg bg-primary px-3 py-1 text-sm font-medium text-on-primary hover:opacity-90"
+                onClick={() => { void rejectDiff(); void requestGeneration("regenerate") }}
+                className="gen-btn-primary gen-btn-compact"
               >
-                Use Regenerate
+                Regenerate
               </button>
             </div>
           </div>
         )}
 
-        <div className="flex items-center justify-between gap-3 border-b border-outline-variant bg-surface-container-lowest/60 px-5 py-3">
+        {/* Generate bar */}
+        <div className="generate-bar">
           <GenerateBar
             stage={activeStage}
-            onGenerate={() => requestGeneration("generate")}
-            onRegenerate={() => requestGeneration("regenerate")}
+            onGenerate={() => void requestGeneration("generate")}
+            onRegenerate={() => void requestGeneration("regenerate")}
             onRefine={requestRefine}
             onFinalise={handleFinalise}
           />
         </div>
 
+        {/* Refine input */}
         {showRefineInput && (
           <form
-            className="flex gap-3 border-b border-outline-variant bg-surface-container-lowest/80 px-5 py-3 backdrop-blur-sm"
-            onSubmit={(event) => {
-              event.preventDefault()
-              void runRefine()
-            }}
+            className="refine-bar"
+            onSubmit={(e) => { e.preventDefault(); void runRefine() }}
           >
             <input
               value={refineInstruction}
-              onChange={(event) => setRefineInstruction(event.target.value)}
-              placeholder="Refine the selected text..."
-              className="min-w-0 flex-1 rounded-lg border border-outline-variant bg-surface px-3 py-2 text-sm text-on-surface outline-none transition-all focus:border-primary focus:ring-2 focus:ring-primary/10"
+              onChange={(e) => setRefineInstruction(e.target.value)}
+              placeholder="Describe how to refine the selected text…"
+              className="refine-input"
+              autoFocus
             />
             <button
               type="button"
               onClick={() => setShowRefineInput(false)}
-              className="px-3 py-2 text-sm text-on-surface-variant hover:text-on-surface"
+              className="gen-btn-secondary refine-cancel-btn"
             >
               Cancel
             </button>
-            <button
-              type="submit"
-              className="rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-on-primary shadow-[0_4px_12px_rgba(143,78,0,0.2)] hover:opacity-90"
-            >
+            <button type="submit" className="gen-btn-primary">
               Refine
             </button>
           </form>
         )}
 
-        <div className="grid min-h-0 flex-1 grid-cols-1 lg:grid-cols-[minmax(0,1fr)_420px]">
-          <section className="relative min-h-0">
-            <StageEditor
-              key={activeStage.id}
-              ref={editorRef}
-              stageId={activeStage.id}
-              initialContent={activeStage.content ?? ""}
-              readOnly={activeStage.status === "locked" || isStreaming}
-              onContentChange={handleContentChange}
+        {/* Editor + comparison panels */}
+        {activeStage.type === "spec" ? (
+          <div className="spec-compare-grid">
+            <ProblemStatementPanel
+              stage={activeStage}
+              problemStatement={problemDraft}
+              isDirty={problemDirty}
+              readOnly={isStreaming}
+              onChange={(value) => {
+                setProblemDraft(value)
+                setProblemDirty(true)
+              }}
+              onBlur={() => void saveProblemStatement()}
             />
-            <StreamingOverlay isVisible={isStreaming} />
-          </section>
 
-          <aside className="min-h-0 overflow-auto border-l border-outline-variant bg-surface">
-            {diffResult ? (
-              <div className="h-full p-4">
-                <DiffViewer
-                  diff={diffResult.diff}
-                  original={diffResult.original}
-                  proposed={diffResult.proposed}
-                  onAccept={acceptDiff}
-                  onReject={rejectDiff}
-                />
+            <section className="workspace-document-card spec-document-card">
+              <div className="workspace-pane-header">
+                <div>
+                  <h2 className="workspace-pane-title spec-pane-title">Generated Spec</h2>
+                  <p className="workspace-pane-subtitle">
+                    Preview markdown, or edit/select text to refine.
+                  </p>
+                </div>
+                {!isStreaming && !diffResult && (
+                  <div className="document-mode-toggle" aria-label="Spec view mode">
+                    <button
+                      type="button"
+                      className={specViewMode === "preview" ? "active" : ""}
+                      onClick={() => setSpecViewMode("preview")}
+                    >
+                      Preview
+                    </button>
+                    <button
+                      type="button"
+                      className={specViewMode === "edit" ? "active" : ""}
+                      onClick={() => setSpecViewMode("edit")}
+                    >
+                      Edit
+                    </button>
+                  </div>
+                )}
               </div>
-            ) : (
-              <>
-                <CoveragePanel stage={activeStage} evalResult={evalResult} />
-                <TaskValidationPanel stage={activeStage} evalResult={evalResult} />
-              </>
-            )}
-          </aside>
-        </div>
+              <div className="spec-card-body">
+                {diffResult ? (
+                  <DiffViewer
+                    diff={diffResult.diff}
+                    original={diffResult.original}
+                    proposed={diffResult.proposed}
+                    onAccept={acceptDiff}
+                    onReject={rejectDiff}
+                  />
+                ) : isStreaming || specViewMode === "edit" ? (
+                  <StageEditor
+                    key={`${activeStage.id}-${activeStage.status}`}
+                    ref={editorRef}
+                    stageId={activeStage.id}
+                    initialContent={activeStage.content ?? ""}
+                    readOnly={isStreaming}
+                    onContentChange={handleContentChange}
+                  />
+                ) : (
+                  <div className="document-markdown-scroll">
+                    <MarkdownRenderer content={activeStage.content ?? ""} />
+                  </div>
+                )}
+                <StreamingOverlay isVisible={isStreaming} />
+              </div>
+            </section>
+          </div>
+        ) : (
+          <div className="workspace-stage-grid">
+            <section className="workspace-document-card workspace-stage-document">
+              <div className="workspace-pane-header">
+                <div>
+                  <div className="ws-panel-title">{STAGE_LABELS[activeStage.type]}</div>
+                  <p className="workspace-pane-subtitle">
+                    {isEditMode ? "Edit this stage document." : "Rendered markdown preview."}
+                  </p>
+                </div>
+              </div>
+              <div className="stage-card-body">
+                {isEditMode || isStreaming ? (
+                  <StageEditor
+                    key={`${activeStage.id}-${activeStage.status}`}
+                    ref={editorRef}
+                    stageId={activeStage.id}
+                    initialContent={activeStage.content ?? ""}
+                    readOnly={isStreaming}
+                    onContentChange={handleContentChange}
+                  />
+                ) : (
+                  <div className="document-markdown-scroll">
+                    <MarkdownRenderer content={activeStage.content ?? ""} />
+                  </div>
+                )}
+                <StreamingOverlay isVisible={isStreaming} />
+              </div>
+            </section>
+
+            <aside className="workspace-right-panel min-h-0">
+              {diffResult ? (
+                <div className="h-full p-4">
+                  <DiffViewer
+                    diff={diffResult.diff}
+                    original={diffResult.original}
+                    proposed={diffResult.proposed}
+                    onAccept={acceptDiff}
+                    onReject={rejectDiff}
+                  />
+                </div>
+              ) : (
+                <>
+                  <CoveragePanel stage={activeStage} evalResult={evalResult} />
+                  <TaskValidationPanel stage={activeStage} evalResult={evalResult} />
+                </>
+              )}
+            </aside>
+          </div>
+        )}
       </main>
 
       {pendingCredit && (

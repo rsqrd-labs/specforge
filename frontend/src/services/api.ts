@@ -245,6 +245,14 @@ export async function getWorkspace(id: string): Promise<WorkspaceWithStages> {
   return response.data
 }
 
+export async function updateWorkspace(
+  id: string,
+  payload: Partial<Pick<Workspace, "name" | "problem_statement">>,
+): Promise<WorkspaceWithStages> {
+  const response = await api.patch<WorkspaceWithStages>(`/workspaces/${id}`, payload)
+  return response.data
+}
+
 export async function getStage(id: string): Promise<Stage> {
   const response = await api.get<Stage>(`/stages/${id}`)
   return response.data

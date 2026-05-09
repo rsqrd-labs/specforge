@@ -6,46 +6,49 @@ interface CoveragePanelProps {
 }
 
 export function CoveragePanel({ stage, evalResult }: CoveragePanelProps) {
-  if (stage.type !== "harness") {
-    return null
-  }
+  if (stage.type !== "harness") return null
 
   const coverage = evalResult?.coverage_percent
   const uncoveredReqs = evalResult?.uncovered_reqs ?? []
-  const hasLowCoverage = coverage !== null && coverage !== undefined && coverage < 80
+  const isLow = coverage !== null && coverage !== undefined && coverage < 80
 
   return (
-    <section className="border-b border-outline-variant bg-surface px-4 py-4">
-      <div className="mb-3 flex items-center justify-between gap-3">
-        <h2 className="text-sm font-semibold text-on-surface">Coverage</h2>
-        <span className="text-sm font-medium text-on-surface-variant">
-          {coverage === null || coverage === undefined
-            ? "Evaluating..."
-            : `${coverage}%`}
+    <div className="ws-panel-section">
+      <div className="ws-panel-title">Coverage</div>
+
+      <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8, fontSize: 13 }}>
+        <span style={{ color: "var(--color-on-surface-variant)" }}>
+          {coverage === null || coverage === undefined ? "Evaluating…" : "Requirement coverage"}
         </span>
+        {coverage !== null && coverage !== undefined && (
+          <span style={{ fontWeight: 700, color: isLow ? "#dc2626" : "#16a34a" }}>
+            {coverage}%
+          </span>
+        )}
       </div>
 
-      <div className="h-2 overflow-hidden rounded-full bg-surface-container-highest">
-        <div
-          className={`h-full rounded-full transition-all ${
-            hasLowCoverage ? "bg-secondary" : "bg-green-500"
-          }`}
-          style={{ width: `${coverage ?? 0}%` }}
-        />
-      </div>
+      {coverage !== null && coverage !== undefined && (
+        <div className="ws-progress-track">
+          <div
+            className={`ws-progress-fill ${isLow ? "low" : "good"}`}
+            style={{ width: `${coverage}%` }}
+          />
+        </div>
+      )}
 
-      {hasLowCoverage && uncoveredReqs.length > 0 && (
-        <ul className="mt-3 space-y-2">
-          {uncoveredReqs.map((requirement) => (
-            <li
-              key={requirement}
-              className="rounded-lg border border-primary-container/40 bg-primary-container/10 px-3 py-2 text-sm text-on-primary-container"
-            >
-              {requirement}
+      {uncoveredReqs.length > 0 && (
+        <ul style={{ marginTop: 12, display: "flex", flexDirection: "column", gap: 6 }}>
+          {uncoveredReqs.map((req) => (
+            <li key={req} className="ws-issue-item">
+              <div className="ws-issue-title">{req}</div>
             </li>
           ))}
         </ul>
       )}
-    </section>
+
+      {coverage !== null && coverage !== undefined && !isLow && (
+        <p className="ws-panel-ok" style={{ marginTop: 8 }}>✓ Full coverage</p>
+      )}
+    </div>
   )
 }

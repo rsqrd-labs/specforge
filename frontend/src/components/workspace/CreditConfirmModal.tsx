@@ -18,6 +18,12 @@ const CREDIT_COSTS = {
   refine: 3,
 }
 
+const ACTION_LABELS: Record<string, string> = {
+  generate: "Generate",
+  regenerate: "Regenerate",
+  refine: "Refine",
+}
+
 export function CreditConfirmModal({
   action,
   creditCost,
@@ -32,14 +38,14 @@ export function CreditConfirmModal({
 
   const resolvedCost = creditCost ?? cost ?? CREDIT_COSTS[action]
   const resolvedBalance = currentBalance ?? balance ?? 0
-  const remainingBalance = resolvedBalance - resolvedCost
+  const remaining = resolvedBalance - resolvedCost
   const isInsufficient = resolvedBalance < resolvedCost
   const dialogRef = useRef<HTMLDivElement>(null)
   useFocusTrap(dialogRef, onCancel)
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-[#0f172a]/60 p-4 backdrop-blur-sm"
+      className="create-modal-backdrop"
       onClick={(e) => e.target === e.currentTarget && onCancel()}
     >
       <div
@@ -47,58 +53,78 @@ export function CreditConfirmModal({
         role="dialog"
         aria-modal="true"
         aria-labelledby="credit-modal-title"
-        className="w-full max-w-sm rounded-xl border border-outline-variant bg-surface-container-lowest/90 p-6 shadow-[0_40px_100px_rgba(47,49,49,0.22)] backdrop-blur-xl"
+        className="create-modal"
+        style={{ maxWidth: 400 }}
       >
-        <div className="mb-1 text-xs font-semibold uppercase tracking-widest text-primary">
-          Credit usage
+        <div className="create-modal-header">
+          <h2 id="credit-modal-title" className="create-modal-title">
+            {ACTION_LABELS[action] ?? action}
+          </h2>
+          <button onClick={onCancel} className="create-modal-close" aria-label="Close">✕</button>
         </div>
-        <h2
-          id="credit-modal-title"
-          className="mb-2 text-lg font-semibold capitalize text-on-surface"
-        >
-          {action}
-        </h2>
-        <p className="mb-6 text-sm leading-6 text-on-surface-variant">
-          This will use{" "}
-          <span className="font-semibold text-on-surface">{resolvedCost}</span>
-          <span className="sr-only">{resolvedCost} credits</span> credits. You
-          have{" "}
-          <span
-            className={`font-semibold ${
-              isInsufficient ? "text-error" : "text-on-surface"
-            }`}
+
+        <div className="create-modal-body">
+          <div
+            style={{
+              padding: "14px 16px",
+              borderRadius: 12,
+              border: "1px solid rgba(143,78,0,0.12)",
+              background: "rgba(143,78,0,0.05)",
+              display: "flex",
+              flexDirection: "column",
+              gap: 8,
+            }}
           >
-            {resolvedBalance}
-          </span>{" "}
-          credits now and will have{" "}
-          <span
-            className={`font-semibold ${
-              isInsufficient ? "text-error" : "text-on-surface"
-            }`}
-          >
-            {remainingBalance} remaining
-          </span>
-          .
+            <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13 }}>
+              <span style={{ color: "var(--color-on-surface-variant)" }}>Cost</span>
+              <span style={{ fontWeight: 700, color: "var(--color-primary)" }}>
+                {resolvedCost} credits
+              </span>
+            </div>
+            <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13 }}>
+              <span style={{ color: "var(--color-on-surface-variant)" }}>Balance</span>
+              <span style={{ fontWeight: 600 }}>{resolvedBalance} credits</span>
+            </div>
+            <div
+              style={{
+                borderTop: "1px solid rgba(143,78,0,0.10)",
+                paddingTop: 8,
+                display: "flex",
+                justifyContent: "space-between",
+                fontSize: 13,
+              }}
+            >
+              <span style={{ color: "var(--color-on-surface-variant)" }}>After</span>
+              <span
+                style={{
+                  fontWeight: 700,
+                  color: isInsufficient ? "#dc2626" : "var(--color-on-surface)",
+                }}
+              >
+                {remaining} credits
+              </span>
+            </div>
+          </div>
+
           {isInsufficient && (
-            <span className="mt-2 block text-error">
+            <p className="modal-error" style={{ marginTop: 0 }}>
               Insufficient credits to proceed.
-            </span>
+            </p>
           )}
-        </p>
-        <div className="flex justify-end gap-3">
-          <button
-            onClick={onCancel}
-            className="rounded-lg border border-outline-variant px-4 py-2 text-sm font-medium text-on-surface-variant transition-colors hover:bg-surface-container hover:text-on-surface"
-          >
-            Cancel
-          </button>
-          <button
-            onClick={onConfirm}
-            disabled={isInsufficient}
-            className="rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-on-primary shadow-[0_4px_16px_rgba(143,78,0,0.22)] hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            Confirm
-          </button>
+
+          <div className="modal-footer">
+            <button type="button" onClick={onCancel} className="modal-cancel">
+              Cancel
+            </button>
+            <button
+              type="button"
+              onClick={onConfirm}
+              disabled={isInsufficient}
+              className="modal-submit"
+            >
+              Confirm
+            </button>
+          </div>
         </div>
       </div>
     </div>

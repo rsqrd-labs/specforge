@@ -49,7 +49,13 @@ async def update_workspace(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> WorkspaceResponse:
-    workspace = await workspace_service.update(id, user.id, payload.name, db)
+    workspace = await workspace_service.update(
+        id,
+        user.id,
+        payload.name,
+        db,
+        problem_statement=payload.problem_statement,
+    )
     return WorkspaceResponse.model_validate(workspace)
 
 
