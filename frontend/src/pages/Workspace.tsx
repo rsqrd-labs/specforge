@@ -497,6 +497,10 @@ export default function Workspace() {
   const showStaleWarning =
     activeStage.status === "stale" && !dismissedStale[activeStage.id]
   const upstreamType = previousStageType(activeStage.type)
+  const showRightPanel =
+    Boolean(diffResult) ||
+    activeStage.type === "harness" ||
+    activeStage.type === "tasks"
 
   return (
     <div className="workspace-shell">
@@ -551,15 +555,6 @@ export default function Workspace() {
                 <span style={{ width: `${creditFillPercent}%` }} />
               </div>
             </div>
-            {activeStage.type !== "spec" && activeStage.status !== "locked" && !isStreaming && (
-              <button
-                type="button"
-                onClick={() => setIsEditMode((m) => !m)}
-                className="ws-view-toggle"
-              >
-                {isEditMode ? "Preview" : "Edit"}
-              </button>
-            )}
             <button
               type="button"
               disabled={!canExport || isExporting}
@@ -725,15 +720,27 @@ export default function Workspace() {
             </section>
           </div>
         ) : (
-          <div className="workspace-stage-grid">
+          <div
+            className="workspace-stage-grid"
+            style={!showRightPanel ? { gridTemplateColumns: "minmax(0, 1fr)" } : undefined}
+          >
             <section className="workspace-document-card workspace-stage-document">
               <div className="workspace-pane-header">
                 <div>
-                  <div className="ws-panel-title">{STAGE_LABELS[activeStage.type]}</div>
+                  <h2 className="workspace-pane-title">{STAGE_LABELS[activeStage.type]}</h2>
                   <p className="workspace-pane-subtitle">
                     {isEditMode ? "Edit this stage document." : "Rendered markdown preview."}
                   </p>
                 </div>
+                {activeStage.status !== "locked" && !isStreaming && (
+                  <button
+                    type="button"
+                    onClick={() => setIsEditMode((m) => !m)}
+                    className="ws-view-toggle"
+                  >
+                    {isEditMode ? "Preview" : "Edit"}
+                  </button>
+                )}
               </div>
               <div className="stage-card-body">
                 {isEditMode || isStreaming ? (
@@ -754,24 +761,26 @@ export default function Workspace() {
               </div>
             </section>
 
-            <aside className="workspace-right-panel min-h-0">
-              {diffResult ? (
-                <div className="h-full p-4">
-                  <DiffViewer
-                    diff={diffResult.diff}
-                    original={diffResult.original}
-                    proposed={diffResult.proposed}
-                    onAccept={acceptDiff}
-                    onReject={rejectDiff}
-                  />
-                </div>
-              ) : (
-                <>
-                  <CoveragePanel stage={activeStage} evalResult={evalResult} />
-                  <TaskValidationPanel stage={activeStage} evalResult={evalResult} />
-                </>
-              )}
-            </aside>
+            {showRightPanel && (
+              <aside className="workspace-right-panel min-h-0">
+                {diffResult ? (
+                  <div className="h-full p-4">
+                    <DiffViewer
+                      diff={diffResult.diff}
+                      original={diffResult.original}
+                      proposed={diffResult.proposed}
+                      onAccept={acceptDiff}
+                      onReject={rejectDiff}
+                    />
+                  </div>
+                ) : (
+                  <>
+                    <CoveragePanel stage={activeStage} evalResult={evalResult} />
+                    <TaskValidationPanel stage={activeStage} evalResult={evalResult} />
+                  </>
+                )}
+              </aside>
+            )}
           </div>
         )}
       </main>
