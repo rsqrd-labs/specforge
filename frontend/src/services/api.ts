@@ -58,6 +58,7 @@ export interface ProviderCatalog {
 
 let accessToken: string | null = null
 let csrfToken: string | null = null
+let refreshPromise: Promise<string | null> | null = null
 
 export function setAccessToken(token: string | null): void {
   accessToken = token
@@ -66,6 +67,35 @@ export function setAccessToken(token: string | null): void {
 
 export function getAccessToken(): string | null {
   return accessToken
+}
+
+export function getApiErrorMessage(
+  error: unknown,
+  fallback = "Something went wrong. Please try again.",
+): string {
+  if (!axios.isAxiosError(error)) {
+    return fallback
+  }
+
+  const detail = error.response?.data?.detail
+  if (
+    detail &&
+    typeof detail === "object" &&
+    "message" in detail &&
+    typeof detail.message === "string"
+  ) {
+    const rawHints = "hints" in detail ? detail.hints : null
+    const hints = Array.isArray(rawHints)
+      ? rawHints.filter((hint): hint is string => typeof hint === "string")
+      : []
+    return [detail.message, ...hints].join(" ")
+  }
+
+  if (typeof detail === "string") {
+    return detail
+  }
+
+  return fallback
 }
 
 function isMutatingMethod(method: string | undefined): boolean {
@@ -128,14 +158,24 @@ export async function getCsrfToken(): Promise<string | null> {
 }
 
 export async function refreshAccessToken(): Promise<string | null> {
-  const response = await refreshApi.post<RefreshTokenResponse>("/auth/refresh")
-  const refreshedToken = response.data.access_token ?? response.data.accessToken
-  if (!refreshedToken) {
-    return null
+  if (!refreshPromise) {
+    refreshPromise = refreshApi
+      .post<RefreshTokenResponse>("/auth/refresh")
+      .then((response) => {
+        const refreshedToken = response.data.access_token ?? response.data.accessToken
+        if (!refreshedToken) {
+          return null
+        }
+
+        setAccessToken(refreshedToken)
+        return refreshedToken
+      })
+      .finally(() => {
+        refreshPromise = null
+      })
   }
 
-  setAccessToken(refreshedToken)
-  return refreshedToken
+  return refreshPromise
 }
 
 async function attachCsrfHeader(
@@ -176,15 +216,23 @@ export async function handleUnauthorizedResponse(
   originalRequest._retry = true
 
   try {
-    const response = await refreshClient.post<RefreshTokenResponse>("/auth/refresh")
-    const refreshedToken = response.data.access_token ?? response.data.accessToken
+    const refreshedToken =
+      refreshClient === refreshApi
+        ? await refreshAccessToken()
+        : await refreshClient
+            .post<RefreshTokenResponse>("/auth/refresh")
+            .then((response) => {
+              const token = response.data.access_token ?? response.data.accessToken
+              if (token) {
+                setAccessToken(token)
+              }
+              return token ?? null
+            })
 
     if (!refreshedToken) {
       window.location.assign("/")
       return Promise.reject(error)
     }
-
-    setAccessToken(refreshedToken)
 
     return client(attachAuthorizationHeader(originalRequest, refreshedToken))
   } catch (refreshError) {

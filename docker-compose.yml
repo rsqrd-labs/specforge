@@ -37,6 +37,8 @@ services:
       DATABASE_URL: postgresql+asyncpg://specforge:specforge@db:5432/specforge
       REDIS_URL: redis://redis:6379/0
       FRONTEND_URL: http://localhost:5173
+      AUTH_LOGIN_BURST_LIMIT: 60
+      AUTH_LOGIN_HOURLY_LIMIT: 240
     depends_on:
       db:
         condition: service_healthy
@@ -44,7 +46,7 @@ services:
         condition: service_healthy
     volumes:
       - ./backend:/app
-    entrypoint: ["/bin/sh", "-c", "uv sync --frozen --no-dev && uv run --no-sync alembic upgrade head && uv run --no-sync uvicorn main:app --reload --reload-dir /app/routers --reload-dir /app/services --reload-dir /app/models --reload-dir /app/middleware --reload-dir /app/prompts --reload-dir /app/schemas --reload-dir /app/config --host 0.0.0.0 --port 8000"]
+    entrypoint: ["/bin/sh", "-c", "uv sync --frozen --no-dev && uv run --no-sync alembic upgrade head && uv run --no-sync uvicorn main:app --reload --reload-dir /app/routers --reload-dir /app/services --reload-dir /app/models --reload-dir /app/middleware --reload-dir /app/prompts --reload-dir /app/schemas --reload-dir /app/config --reload-exclude '.venv/*' --reload-exclude 'tests/*' --reload-exclude '.pytest_cache/*' --reload-exclude '.ruff_cache/*' --host 0.0.0.0 --port 8000"]
 
   frontend:
     image: node:22-alpine

@@ -38,7 +38,10 @@ def _make_workspace(stages: list[Stage] | None = None) -> Workspace:
         id=uuid4(),
         user_id=uuid4(),
         name="WS",
-        problem_statement="build a todo app with authentication",
+        problem_statement=(
+            "I want to build a todo app for teams to create tasks, assign owners, "
+            "track project status, and authenticate users."
+        ),
         provider="anthropic",
         model="claude-sonnet-4-6",
         status="active",

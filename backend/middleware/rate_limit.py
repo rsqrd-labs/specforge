@@ -148,10 +148,18 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             return _rate_limited(60)
 
         if path in _LOGIN_PATHS:
-            if not await check(f"login:{ip}", 5, 300):
-                return _rate_limited(300)
-            if not await check(f"login_hourly:{ip}", 20, 3600):
-                return _rate_limited(3600)
+            if not await check(
+                f"login:{ip}",
+                settings.auth_login_burst_limit,
+                settings.auth_login_burst_window_seconds,
+            ):
+                return _rate_limited(settings.auth_login_burst_window_seconds)
+            if not await check(
+                f"login_hourly:{ip}",
+                settings.auth_login_hourly_limit,
+                settings.auth_login_hourly_window_seconds,
+            ):
+                return _rate_limited(settings.auth_login_hourly_window_seconds)
 
         user_id, claims = _extract_user_id(request)
         if claims is not None:

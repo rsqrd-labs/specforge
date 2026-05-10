@@ -49,7 +49,7 @@ def _make_workspace(user_id=None, status="active", with_stages=True) -> Workspac
         id=wid,
         user_id=uid,
         name="My WS",
-        problem_statement="A" * 60,
+        problem_statement="I want to build a task management web app for teams to create projects, assign tasks, track status, and notify users.",
         provider="anthropic",
         model="claude-sonnet-4-6",
         status=status,
@@ -173,7 +173,7 @@ async def test_create_workspace_adds_four_stages() -> None:
     db = _FakeDB()
     payload = WorkspaceCreate(
         name="Test",
-        problem_statement="A" * 60,
+        problem_statement="I want to build a task management web app for teams to create projects, assign tasks, track status, and notify users.",
         provider="anthropic",
         model="claude-sonnet-4-6",
     )
@@ -188,7 +188,7 @@ async def test_create_workspace_spec_is_draft_others_locked() -> None:
     db = _FakeDB()
     payload = WorkspaceCreate(
         name="Test",
-        problem_statement="A" * 60,
+        problem_statement="I want to build a task management web app for teams to create projects, assign tasks, track status, and notify users.",
         provider="anthropic",
         model="claude-sonnet-4-6",
     )
@@ -205,7 +205,10 @@ async def test_create_workspace_sanitizes_user_text() -> None:
     db = _FakeDB()
     payload = WorkspaceCreate(
         name="<b>Test</b>",
-        problem_statement="<script>alert('xss')</script>" + ("A" * 60),
+        problem_statement=(
+            "<script>alert('xss')</script>I want to build a task management web "
+            "app for teams to create projects, assign tasks, track status, and notify users."
+        ),
         provider="anthropic",
         model="claude-sonnet-4-6",
     )
@@ -223,7 +226,7 @@ async def test_create_workspace_rejects_when_active_workspace_quota_is_reached(
     db = _FakeDB(active_count=2)
     payload = WorkspaceCreate(
         name="Test",
-        problem_statement="A" * 60,
+        problem_statement="I want to build a task management web app for teams to create projects, assign tasks, track status, and notify users.",
         provider="anthropic",
         model="claude-sonnet-4-6",
     )

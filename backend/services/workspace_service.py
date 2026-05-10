@@ -10,6 +10,10 @@ from sqlalchemy.orm import selectinload
 from config import settings
 from models import Stage, User, Workspace
 from schemas.workspace import WorkspaceCreate
+from services.security.problem_statement_gate import (
+    ProblemStatementValidationError,
+    assert_valid_problem_statement,
+)
 from services.security.sanitizer import sanitize_text
 
 _STAGE_ORDER = ["spec", "plan", "harness", "tasks"]
@@ -19,6 +23,8 @@ class WorkspaceService:
     async def create(
         self, user_id: UUID, payload: WorkspaceCreate, db: AsyncSession
     ) -> Workspace:
+        self._assert_problem_statement_is_valid(payload.problem_statement)
+
         # Lock the user row so concurrent create requests are serialized and
         # the quota check + insert are atomic within this transaction.
         await db.execute(select(User).where(User.id == user_id).with_for_update())
@@ -99,6 +105,7 @@ class WorkspaceService:
         if name is not None:
             workspace.name = sanitize_text(name)
         if problem_statement is not None:
+            self._assert_problem_statement_is_valid(problem_statement)
             workspace.problem_statement = sanitize_text(problem_statement)
             self._mark_problem_statement_dependents_stale(workspace)
         await db.commit()
@@ -126,6 +133,19 @@ class WorkspaceService:
             .where(Workspace.user_id == user_id, Workspace.status == "active")
         )
         return int(result.scalar() or 0)
+
+    def _assert_problem_statement_is_valid(self, problem_statement: str) -> None:
+        try:
+            assert_valid_problem_statement(problem_statement)
+        except ProblemStatementValidationError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail={
+                    "code": exc.result.code,
+                    "message": exc.result.message,
+                    "hints": exc.result.hints,
+                },
+            ) from exc
 
 
 workspace_service = WorkspaceService()

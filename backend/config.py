@@ -44,6 +44,10 @@ class Settings(BaseSettings):
     metrics_token: str = ""
     trusted_proxy_ips: str = ""
     max_active_workspaces_per_user: int = 50
+    auth_login_burst_limit: int = 5
+    auth_login_burst_window_seconds: int = 300
+    auth_login_hourly_limit: int = 20
+    auth_login_hourly_window_seconds: int = 3600
 
     db_pool_size: int = 20
     db_max_overflow: int = 10

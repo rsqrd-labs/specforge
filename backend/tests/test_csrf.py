@@ -104,7 +104,10 @@ async def test_mutating_request_with_valid_auth_without_csrf_returns_403(
             headers={"Authorization": "Bearer valid-token"},
             json={
                 "name": "Test",
-                "problem_statement": "A" * 60,
+                "problem_statement": (
+                    "I want to build a task management web app for teams to create "
+                    "projects, assign tasks, track status, and notify users."
+                ),
                 "provider": "anthropic",
                 "model": "claude-sonnet-4-6",
             },
@@ -142,7 +145,10 @@ async def test_mutating_request_with_valid_csrf_reaches_route(
             },
             json={
                 "name": "Test",
-                "problem_statement": "A" * 60,
+                "problem_statement": (
+                    "I want to build a task management web app for teams to create "
+                    "projects, assign tasks, track status, and notify users."
+                ),
                 "provider": "anthropic",
                 "model": "claude-sonnet-4-6",
             },

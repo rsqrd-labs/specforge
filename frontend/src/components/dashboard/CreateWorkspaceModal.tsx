@@ -2,6 +2,7 @@ import { useRef, useState } from "react"
 import { useNavigate } from "react-router-dom"
 import { PROVIDERS } from "../../config/providers"
 import { useFocusTrap } from "../../hooks/useFocusTrap"
+import { getApiErrorMessage } from "../../services/api"
 import { useWorkspaceStore } from "../../store/workspaceStore"
 import type { AIProvider } from "../../types/workspace"
 
@@ -59,8 +60,13 @@ export function CreateWorkspaceModal({ onClose }: CreateWorkspaceModalProps) {
         model,
       })
       navigate(`/workspace/${ws.id}`)
-    } catch {
-      setErrors({ submit: "Failed to create workspace. Please try again." })
+    } catch (error) {
+      setErrors({
+        submit: getApiErrorMessage(
+          error,
+          "Failed to create workspace. Please try again.",
+        ),
+      })
       setIsSubmitting(false)
     }
   }

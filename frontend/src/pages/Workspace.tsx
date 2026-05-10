@@ -21,6 +21,7 @@ import {
   exportWorkspace,
   finaliseStage,
   getStageEval,
+  getApiErrorMessage,
   getWorkspace,
   refineStage,
   rejectStageDiff,
@@ -247,8 +248,10 @@ export default function Workspace() {
       setStages(workspace.stages)
       setProblemDirty(false)
       return true
-    } catch {
-      setError("Could not save the problem statement.")
+    } catch (error) {
+      setError(
+        getApiErrorMessage(error, "Could not save the problem statement."),
+      )
       return false
     }
   }, [

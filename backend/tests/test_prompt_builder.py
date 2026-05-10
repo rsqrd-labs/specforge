@@ -38,7 +38,12 @@ class _FakeDB:
         return _FakeResult(None)
 
 
-def _make_workspace(problem: str = "A" * 60) -> Workspace:
+def _make_workspace(
+    problem: str = (
+        "I want to build a task management web app for teams to create projects, "
+        "assign tasks, track status, and notify users."
+    ),
+) -> Workspace:
     w = Workspace(
         id=uuid4(),
         user_id=uuid4(),

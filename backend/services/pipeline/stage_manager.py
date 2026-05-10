@@ -26,6 +26,10 @@ from services.llm.provider_config import JUDGE_MODELS
 from services.pipeline.diff_engine import apply_diff, compute_diff
 from services.pipeline.prompt_builder import build_prompt
 from services.security.output_validator import validate
+from services.security.problem_statement_gate import (
+    ProblemStatementValidationError,
+    assert_valid_problem_statement,
+)
 from services.security.prompt_guard import scan
 from services.security.sanitizer import sanitize_text
 
@@ -184,6 +188,12 @@ class StageManager:
             raise StageStateError(f"Stage status {stage.status!r} is not generatable")
 
         await self._assert_dependencies_finalised(stage.type, workspace.id, db)
+
+        if stage.type == "spec":
+            try:
+                assert_valid_problem_statement(workspace.problem_statement)
+            except ProblemStatementValidationError as exc:
+                raise SecurityError(exc.result.message or str(exc)) from exc
 
         scan_result = scan(workspace.problem_statement)
         if not scan_result.is_safe:
