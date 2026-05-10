@@ -6,7 +6,7 @@ tags:
   - asdd
 created: 2026-04-25
 status: final
-version: 1.6.1
+version: 1.7.1
 stage: plan
 depends-on: "[[SpecForge V1 SPEC]]"
 ---
@@ -28,6 +28,7 @@ depends-on: "[[SpecForge V1 SPEC]]"
 - [[#7. Environment Configuration]]
 - [[#8. Risks and Mitigations]]
 - [[#9. Open Questions]]
+- [[#16. Phase 12 — LLM API Cost Optimization Plan]]
 
 ---
 
@@ -1835,4 +1836,417 @@ LANGFUSE_CONTENT_CAPTURE_ACK=false
 
 ---
 
-_SpecForge V1 PLAN.md · Version 1.6.1 · Updated 2026-05-07 with Phase 11 Langfuse production-gate corrections_
+## 16. Phase 12 — Provider-Agnostic LLM API Cost Optimization Plan
+
+> [!note] Source This phase responds to local OpenAI cost observations: 13 requests cost approximately `$0.90`, or about `$0.069` per request. OpenAI is only the current test provider; the product architecture must remain provider agnostic because Anthropic and Google models will also be supported. The objective is to reduce LLM API spend across all providers without degrading the ASDD artifact quality that differentiates SpecForge from generic chat.
+
+### 16.1 Goal
+
+Reduce average provider LLM cost per completed workspace by at least 50% while preserving or improving artifact quality, security posture, and user trust.
+
+The target is not to blindly choose cheaper models. The target is to spend premium reasoning only where it changes the quality of the final artifact.
+
+This plan must apply to OpenAI, Anthropic, Google, and any future provider integrated behind `BaseLLMAdapter`. Provider-specific pricing, token accounting, prompt caching behavior, context limits, batch features, and model names belong in a configuration/registry layer, not in the ASDD pipeline logic.
+
+### 16.2 Cost Model Assumptions
+
+The current cost pressure likely comes from four sources:
+
+1. Large static system prompts are resent on every call.
+2. Full upstream artifacts are passed forward between stages.
+3. Expensive models may be used for stages that are mostly structural.
+4. Refinement and regeneration can produce more output than the user actually needs.
+
+The OpenAI test spend is the first concrete signal, but the underlying cost pattern is provider-agnostic: large prompts, large outputs, repeated static instructions, full-document regeneration, and unbounded downstream context are expensive on every hosted LLM provider. Some providers expose explicit cached-input or batch discounts; others may not. SpecForge should detect and exploit provider capabilities where available, while still reducing cost through universal controls:
+
+- reducing output tokens,
+- maximizing reusable/static prompt prefixes,
+- routing work by task difficulty,
+- avoiding unnecessary LLM calls,
+- using asynchronous cheaper processing where the selected provider supports it and latency is not user-facing,
+- and normalizing cost telemetry across providers.
+
+### 16.3 Design Principles
+
+**Quality is protected by contracts, not by always using the largest model.** Each ASDD stage must keep its strict artifact contract, traceability rules, completeness requirements, and security checks. Model selection may vary, but the acceptance bar does not.
+
+**Premium models are reserved for synthesis and architectural judgment.** Expensive models should be used when the system must reconcile ambiguous requirements, make architecture tradeoffs, or produce the first high-quality SPEC/PLAN. They should not be the default for classification, validation, title generation, basic summaries, or mechanical task expansion.
+
+**Every LLM call must have a cost reason.** A call should be able to answer: why is an LLM needed, why this model, why this context size, why this max output size, and why now?
+
+**Provider differences are handled below the pipeline.** Stage Manager, prompt builders, and ASDD artifact contracts should speak in provider-neutral tiers and capabilities. Provider adapters and registries translate those tiers into concrete models, token accounting, and supported cost features.
+
+**The user should see value, not cost mechanics.** The UI can expose focused refine, full regenerate, and quality modes, but should not feel like the product is nickel-and-diming the user.
+
+### 16.4 Provider Capability and Cost Registry
+
+Create a provider capability registry that lives beside `config/providers.py` and is consumed by the LLM gateway, cost telemetry, and routing policy.
+
+The registry should define every supported provider/model with provider-neutral metadata:
+
+```yaml
+providers:
+  openai:
+    supports_streaming: true
+    supports_prompt_cache_accounting: true
+    supports_batch: true
+    supports_usage_tokens: true
+    models:
+      gpt-example-strong:
+        tier: strong
+        input_cost_per_million: ...
+        cached_input_cost_per_million: ...
+        output_cost_per_million: ...
+        max_context_tokens: ...
+        default_max_output_tokens: ...
+        recommended_operations: [spec, plan, full_regenerate]
+  anthropic:
+    supports_streaming: true
+    supports_prompt_cache_accounting: provider_specific
+    supports_batch: provider_specific
+    supports_usage_tokens: true
+    models: ...
+  google:
+    supports_streaming: true
+    supports_prompt_cache_accounting: provider_specific
+    supports_batch: provider_specific
+    supports_usage_tokens: true
+    models: ...
+```
+
+Do not hard-code OpenAI model names, Anthropic model names, or Google model names in stage logic. Stage logic should request a tier and operation, for example:
+
+```text
+operation=tasks.generate
+preferred_provider=workspace.provider
+requested_tier=mini
+fallback_tier=mid
+latency_class=interactive
+```
+
+The router resolves that into a concrete provider/model based on availability, cost, quality score, and user/provider constraints.
+
+### 16.5 Model Routing Strategy
+
+Introduce a model-routing policy controlled server-side. The user can still select a preferred provider/model for primary generation, but SpecForge should internally route supporting tasks to cheaper models.
+
+| Operation | Recommended Tier | Rationale |
+|---|---|---|
+| Problem statement validation | deterministic code first, cheapest small tier only if ambiguous | Most invalid input can be rejected without an LLM. |
+| Prompt injection and abuse scan | deterministic regex/rules plus small model fallback | Security should not depend solely on a large model. |
+| Workspace title generation | cheapest small tier or local heuristic | Low-risk, low-depth task. |
+| SPEC generation | strong model | Highest ambiguity and product-shaping value. |
+| PLAN generation | strong or mid model | Architecture decisions require deeper synthesis. |
+| HARNESS generation | mini or mid model | Mostly structured output from prior contracts. |
+| TASKS generation | mini model | Mechanical decomposition if SPEC/PLAN/HARNESS are good. |
+| LLM-as-judge eval | cheapest reliable judge model per provider | Scoring should be consistent and bounded, not premium. |
+| Small refine selection | mini or mid model | Context is narrow and quality can be validated. |
+| Full artifact regenerate | selected strong model | User explicitly requests broad rewrite. |
+| Artifact summarization | cheapest small or mini tier | Compression task, not final user-facing artifact. |
+
+Routing must prefer the workspace's selected provider unless:
+
+- that provider lacks a required capability,
+- the user has not configured that provider key,
+- the selected provider/model fails quality gates for the operation,
+- or an internal system task is explicitly configured to use a different provider.
+
+Cross-provider fallback must be visible in telemetry and should never silently use a provider for user content if the operator has not configured and approved it.
+
+### 16.6 Prompt Reuse and Provider Caching Plan
+
+The ASDD methodology and security rules are product moat. They should stay rich, but must be structured to benefit from reusable prompt prefixes and provider-side caching where the provider supports it.
+
+Prompt order should be stable:
+
+1. ASDD methodology overview
+2. Security and privacy rules
+3. Professional output rules
+4. Stage-specific artifact contract
+5. Dynamic workspace context
+6. User instruction
+
+The first four blocks should be byte-identical for the same prompt version. Do not interpolate workspace names, dates, user names, or stage content into the static prefix. Put all variable content after the static prefix.
+
+Add a `prompt_version` field to every LLM trace and cost log. Any prompt change that affects the static prefix should intentionally bump the version, so cache effectiveness can be measured rather than guessed.
+
+Provider-specific caching rules belong in the adapter/capability layer. For example, one provider may report cached input tokens directly, another may require explicit cache-control markers, and another may offer no cache discount. The pipeline should still keep stable prefixes because it improves portability and makes future provider caching easier.
+
+### 16.7 Context Compression Between Stages
+
+Do not always pass full upstream artifacts forward.
+
+After each finalized stage, create a structured stage summary using a cheap same-provider model, a configured internal utility model, or deterministic parser where possible:
+
+```markdown
+## Decisions
+## Entities
+## APIs
+## Security Requirements
+## Data Constraints
+## Open Questions
+## Downstream Constraints
+```
+
+Default downstream prompts should use these summaries plus targeted excerpts. Full upstream artifacts should be included only when:
+
+- generating the immediate next stage for the first time,
+- the user requests a full regeneration,
+- the downstream stage has failed validation,
+- or the artifact is below a safe token threshold.
+
+This prevents SPEC → PLAN → HARNESS → TASKS from compounding into increasingly expensive prompts.
+
+### 16.8 Output Budgeting
+
+Each stage should have explicit output budgets. The model should be instructed to prefer dense, requirement-backed statements over long explanatory prose.
+
+Proposed budgets:
+
+| Stage | Budget Rule |
+|---|---|
+| SPEC | Complete requirements, but avoid tutorial prose and repeated rationale. |
+| PLAN | Include required architecture detail, but cap alternatives to two per major decision. |
+| HARNESS | Generate file tree and representative tests first; avoid excessive comments. |
+| TASKS | Cap task granularity to implementable units, not line-by-line instructions. |
+| Refine | Return only the replacement text or patch target, not the full artifact. |
+| Eval | Return structured JSON only. |
+
+Longer output should require either an explicit user action or an internal validation reason.
+
+### 16.9 Refinement Cost Controls
+
+Refinement should be patch-based by default.
+
+Modes:
+
+| Mode | Behavior | Cost Profile |
+|---|---|---|
+| Focused refine | Send selected text plus minimal surrounding context; return replacement only. | Lowest |
+| Section refine | Send one markdown section and relevant dependencies; return section replacement. | Medium |
+| Full regenerate | Send full artifact and dependencies; stream full replacement. | Highest |
+
+If the user selects more than 80% of the document, the UI should recommend full regenerate, but still allow the user to proceed deliberately.
+
+The default refine path should never resend every artifact unless the selected section depends on global consistency.
+
+### 16.10 Deterministic Gates Before LLM Calls
+
+The backend should keep moving validation out of LLM calls wherever possible.
+
+No LLM should be called for:
+
+- too-short problem statements,
+- non-product prompts,
+- obvious prompt-injection attempts,
+- missing required stage dependencies,
+- duplicate generation requests while a stage is already in progress,
+- invalid provider/model combinations,
+- unauthenticated requests,
+- zero-credit requests,
+- or unchanged refine submissions.
+
+These checks reduce spend and improve security at the same time.
+
+### 16.11 Request and Output Caching
+
+Add a cache for repeatable generation inputs, especially during local testing and prompt iteration.
+
+Cache key:
+
+```text
+prompt_version
+stage_type
+operation
+provider
+model
+model_tier
+problem_statement_hash
+upstream_artifact_hashes
+user_instruction_hash
+output_contract_version
+```
+
+Cache should be disabled for streaming by default unless the full response has already been completed and stored. On a cache hit, the UI may replay the cached output quickly as a stream-like experience.
+
+Cache invalidation is hash-based. If the problem statement, prompt version, selected provider/model, or upstream finalized artifact changes, the cache misses.
+
+The cache key must include both concrete `provider/model` and provider-neutral `model_tier`. Concrete model identity prevents accidental cross-provider replay. Tier identity enables aggregate analytics such as "mini-tier summaries are cache-effective."
+
+### 16.12 Batch and Background Processing
+
+Use lower-cost asynchronous processing only for work that does not block the user's active flow.
+
+Good candidates:
+
+- background eval scoring,
+- nightly prompt regression tests,
+- dataset generation for Langfuse,
+- artifact quality audits,
+- non-interactive summaries,
+- consistency checks across finalized stages.
+
+Do not assume every provider supports the same batch mechanism or pricing discount. Add a `supports_batch` capability flag and a provider-specific batch executor interface. If a provider does not support batch, the same work remains eligible for background execution, but not for a provider discount.
+
+Do not use batch processing for first-token streaming generation, interactive refine, or any action where the user is waiting on the current screen.
+
+### 16.13 Cost Telemetry
+
+Before deeper optimization, record cost data per LLM call.
+
+Every generation/refine/eval trace should include provider-normalized usage fields:
+
+| Field | Purpose |
+|---|---|
+| `workspace_id` | Attribute cost to product workflow. |
+| `user_id` | Detect abusive or accidental usage. |
+| `stage_type` | Find expensive stages. |
+| `operation` | Separate generate, regenerate, refine, eval, summarize. |
+| `provider` / `model` | Compare price-performance. |
+| `model_tier` | Compare strong/mid/mini/small behavior across providers. |
+| `prompt_version` | Detect cost regressions from prompt changes. |
+| `input_tokens` | Measure context growth where provider reports tokens. |
+| `cached_input_tokens` | Measure cache effectiveness where provider reports it. |
+| `output_tokens` | Primary cost-control target where provider reports tokens. |
+| `provider_usage_raw` | Store raw usage payload for provider-specific debugging. |
+| `usage_estimation_method` | `provider_reported`, `tokenizer_estimated`, or `unknown`. |
+| `estimated_cost_usd` | Product/business metric normalized through the cost registry. |
+| `latency_ms` | Ensure cost savings do not harm UX. |
+| `quality_score` | Correlate cost and artifact quality. |
+
+Add dashboards:
+
+- average cost per completed workspace,
+- cost per stage,
+- cost by provider,
+- cost by provider-neutral model tier,
+- P95 cost per request,
+- output tokens by prompt version,
+- cached-input ratio,
+- cost per accepted artifact,
+- refine cost per accepted patch.
+
+Provider usage reporting is not perfectly uniform. If a provider does not return token usage for streaming calls, estimate tokens with the closest maintained tokenizer and mark the estimate clearly. Cost dashboards must separate provider-reported numbers from estimates.
+
+### 16.14 Quality Guardrails
+
+Cost reduction must be gated by quality checks.
+
+For each cheaper routing decision, compare against the current baseline using:
+
+- deterministic artifact validators,
+- LLM-as-judge score,
+- requirement traceability completeness,
+- security requirement coverage,
+- markdown/code fence validity,
+- human review for a small golden dataset.
+
+A cheaper model or provider-tier route can become default only when it meets one of these criteria:
+
+- equal or better quality score at lower cost,
+- slightly lower automated score but better human acceptance,
+- or equivalent final quality after a cheap draft plus strong review pass.
+
+Quality baselines must be per operation and per provider family. A cheap model from one provider should not be promoted simply because a different provider's cheap model performed well.
+
+### 16.15 Two-Pass Generation Pattern
+
+For expensive stages, evaluate a two-pass pattern:
+
+1. Mini/mid model creates a structured draft following the artifact contract.
+2. Strong model reviews the draft against ASDD/security rubrics and returns only corrections or missing sections.
+
+This can reduce total cost if the strong model receives compressed context and produces targeted output rather than a full artifact from scratch.
+
+The default two-pass path should stay within the workspace's selected provider. Cross-provider two-pass is allowed only for internal experiments or explicitly configured deployments, because it may send the same user content to multiple vendors.
+
+This pattern should be tested first on HARNESS and TASKS, then on PLAN. SPEC should remain strong-model-first until there is enough quality data.
+
+### 16.16 Product UX Controls
+
+Expose cost-aware choices as quality and scope controls, not billing anxiety.
+
+Recommended UX:
+
+- “Focused refine” as the default.
+- “Regenerate full stage” as an explicit heavier action.
+- “Deep architecture pass” for premium PLAN review.
+- “Fast draft” for early exploration.
+- “Final quality pass” before export.
+
+Credit modals should explain value in product terms:
+
+- focused patch,
+- full rewrite,
+- architecture review,
+- test harness generation.
+
+Avoid showing raw token counts to normal users.
+
+Provider selection belongs in settings/workspace configuration, not in normal user-facing cost controls. The user should choose desired quality/scope; SpecForge resolves the provider/model according to configured keys and routing policy.
+
+### 16.17 Implementation Roadmap
+
+**Phase A — Measurement**
+
+- Add token and estimated-cost logging to every LLM adapter response.
+- Add `prompt_version` and `operation` metadata to Langfuse traces.
+- Build an internal cost dashboard by stage, provider, model, and model tier.
+- Add provider capability/cost registry entries for OpenAI, Anthropic, and Google.
+
+**Phase B — Low-Risk Savings**
+
+- Route title generation, validation fallbacks, summaries, and evals to cheap models.
+- Add deterministic no-LLM gates before all stage operations.
+- Add max output budgets per stage.
+- Make refine return patch/section output only.
+
+**Phase C — Prompt and Context Efficiency**
+
+- Reorder prompt builders for stable cacheable prefixes.
+- Add finalized-stage summaries.
+- Use summaries by default for downstream stages.
+- Add hash-based cache keys for repeat local/dev generations.
+
+**Phase D — Quality-Preserving Model Routing**
+
+- Build a golden dataset of product prompts and expected artifact traits.
+- Compare strong, mid, mini, small, and two-pass routes per provider.
+- Promote cheaper routes only when quality gates pass.
+
+**Phase E — Background Cost Optimization**
+
+- Move evals, audits, and prompt regression runs to batch/asynchronous processing where supported.
+- Add cost alerts for abnormal usage spikes.
+- Add workspace-level cost budget warnings for internal operators.
+
+### 16.18 Risks and Mitigations
+
+| Risk | Impact | Mitigation |
+|---|---|---|
+| Cheaper model produces shallow artifacts | Product moat weakens | Require artifact validators, eval scores, and golden-set checks before routing changes ship. |
+| Provider-specific routing leaks into stage logic | Hard to support Anthropic/Google cleanly | Keep stage logic tier/capability-based; provider specifics live in adapters and registry. |
+| Prompt caching breaks due dynamic prefix content | Expected savings do not appear | Keep static methodology/security blocks byte-identical and versioned; measure cache effectiveness per provider. |
+| Summaries omit important constraints | Downstream artifacts drift | Include full artifact when validation fails or when summary confidence is low. |
+| Cache serves stale output | User sees wrong artifact | Use hash keys over prompt version, upstream artifacts, model, operation, and user instruction. |
+| Output budgets make artifacts incomplete | Quality regression | Budgets must cap verbosity, not required sections. Validators reject missing sections. |
+| Cross-provider fallback sends content to an unexpected vendor | Privacy and trust issue | Require operator-approved provider keys and log provider used on every call. |
+| Batch processing hurts perceived latency | User trust drops | Use batch only for non-interactive work and only through provider capability checks. |
+
+### 16.19 Success Metrics
+
+| Metric | Target |
+|---|---|
+| Average LLM cost per completed workspace | Down 50% or more from baseline |
+| Average cost per provider request | Down 40% or more from each provider baseline |
+| OpenAI test request cost | Down 40% or more from observed `$0.069` |
+| Artifact eval score | No regression from baseline |
+| Human accepted refine rate | Same or higher |
+| Cache/reuse effectiveness | Increasing over time where provider supports measurement |
+| Provider routing coverage | OpenAI, Anthropic, and Google all represented through the same tier/capability policy |
+| Full-regenerate rate | Lower as focused refine improves |
+| First-token latency | No regression for streaming generation |
+
+---
+
+_SpecForge V1 PLAN.md · Version 1.7.1 · Updated 2026-05-10 with provider-agnostic Phase 12 LLM API cost optimization plan_
