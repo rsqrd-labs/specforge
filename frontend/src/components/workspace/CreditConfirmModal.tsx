@@ -19,9 +19,18 @@ const CREDIT_COSTS = {
 }
 
 const ACTION_LABELS: Record<string, string> = {
-  generate: "Generate",
-  regenerate: "Regenerate",
-  refine: "Refine",
+  generate: "Fast draft",
+  regenerate: "Full stage regenerate",
+  refine: "Focused patch",
+}
+
+const ACTION_COPY: Record<string, string> = {
+  generate:
+    "Create the next ASDD artifact with the right level of architectural depth.",
+  regenerate:
+    "Replace this full stage with a fresh pass. Best for stale or oversized changes.",
+  refine:
+    "Preview a focused patch for the selected text before accepting changes.",
 }
 
 export function CreditConfirmModal({
@@ -63,18 +72,23 @@ export function CreditConfirmModal({
         </div>
 
         <div className="create-modal-body">
+          <p className="workspace-credit-value-copy">
+            {ACTION_COPY[action] ?? "Review this action before spending credits."}
+          </p>
           <div className="workspace-credit-summary">
             <div>
               <span>Cost</span>
-              <strong>{resolvedCost} credits</strong>
+              <strong><span>{resolvedCost}</span> credits</strong>
             </div>
             <div>
               <span>Balance</span>
-              <strong>{resolvedBalance} credits</strong>
+              <strong><span>{resolvedBalance}</span> credits</strong>
             </div>
             <div className="workspace-credit-after">
               <span>After</span>
-              <strong className={isInsufficient ? "danger" : ""}>{remaining} credits</strong>
+              <strong className={isInsufficient ? "danger" : ""}>
+                <span>{remaining}</span> remaining
+              </strong>
             </div>
           </div>
 

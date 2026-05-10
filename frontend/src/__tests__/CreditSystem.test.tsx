@@ -61,8 +61,17 @@ describe("CreditConfirmModal", () => {
   it("shows the action name capitalised in the heading", () => {
     render(<CreditConfirmModal {...defaults} action="regenerate" />)
     expect(
-      screen.getByRole("heading", { name: /regenerate/i }),
+      screen.getByRole("heading", { name: /full stage regenerate/i }),
     ).toBeInTheDocument()
+  })
+
+  it("describes the selected action as value instead of token details", () => {
+    render(<CreditConfirmModal {...defaults} action="refine" creditCost={3} />)
+    expect(
+      screen.getByRole("heading", { name: /focused patch/i }),
+    ).toBeInTheDocument()
+    expect(screen.getByText(/preview a focused patch/i)).toBeInTheDocument()
+    expect(screen.queryByText(/token/i)).not.toBeInTheDocument()
   })
 
   it("calls onConfirm when Confirm button is clicked", async () => {

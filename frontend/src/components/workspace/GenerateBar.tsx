@@ -17,6 +17,11 @@ export function GenerateBar({
 }: GenerateBarProps) {
   if (stage.status === "locked") return null
 
+  const generateLabel =
+    stage.type === "spec" || stage.type === "plan"
+      ? "Generate deep architecture pass"
+      : "Generate fast draft"
+
   if (stage.status === "in_progress") {
     return (
       <div className="gen-btn-streaming">
@@ -30,27 +35,36 @@ export function GenerateBar({
     <div className="workspace-action-row">
       {(stage.status === "draft" || stage.status === "stale") && !stage.content && (
         <button type="button" onClick={onGenerate} className="gen-btn-primary">
-          Generate
+          {generateLabel}
         </button>
       )}
 
       {(stage.status === "finalised" ||
         stage.status === "stale" ||
         (stage.status === "draft" && stage.content)) && (
-        <button type="button" onClick={onRegenerate} className="gen-btn-secondary">
-          Regenerate
+        <button
+          type="button"
+          onClick={onRegenerate}
+          className="gen-btn-secondary gen-btn-deliberate"
+        >
+          Full stage regenerate
         </button>
       )}
 
       {stage.content && (
-        <button type="button" onClick={onRefine} className="gen-btn-secondary">
-          Refine
+        <button
+          type="button"
+          onClick={onRefine}
+          className="gen-btn-secondary"
+          aria-label="Focused patch refine"
+        >
+          Focused patch
         </button>
       )}
 
       {(stage.status === "draft" || stage.status === "stale") && stage.content && (
         <button type="button" onClick={onFinalise} className="gen-btn-primary">
-          Finalise
+          Final quality pass
         </button>
       )}
     </div>

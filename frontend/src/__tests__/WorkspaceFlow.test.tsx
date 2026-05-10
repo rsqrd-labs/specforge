@@ -41,9 +41,9 @@ describe("StageNavigator", () => {
       />,
     )
 
-    expect(screen.getByRole("button", { name: /PLAN\.md/i })).toBeDisabled()
-    expect(screen.getByRole("button", { name: /HARNESS/i })).toBeDisabled()
-    expect(screen.getByRole("button", { name: /TASKS\.md/i })).toBeDisabled()
+    expect(screen.getByRole("button", { name: /plan/i })).toBeDisabled()
+    expect(screen.getByRole("button", { name: /harness/i })).toBeDisabled()
+    expect(screen.getByRole("button", { name: /tasks/i })).toBeDisabled()
   })
 
   it("does not fire onSelectStage when a locked stage is clicked", async () => {
@@ -61,7 +61,7 @@ describe("StageNavigator", () => {
       />,
     )
 
-    await user.click(screen.getByRole("button", { name: /PLAN\.md/i }))
+    await user.click(screen.getByRole("button", { name: /plan/i }))
     expect(onSelectStage).not.toHaveBeenCalled()
   })
 
@@ -80,7 +80,7 @@ describe("StageNavigator", () => {
       />,
     )
 
-    await user.click(screen.getByRole("button", { name: /PLAN\.md/i }))
+    await user.click(screen.getByRole("button", { name: /plan/i }))
     expect(onSelectStage).toHaveBeenCalledWith("s2")
   })
 })
@@ -114,6 +114,28 @@ describe("GenerateBar", () => {
       />,
     )
     expect(screen.getByRole("button", { name: /generate/i })).toBeInTheDocument()
+  })
+
+  it("labels regenerate as a deliberate full-stage action", () => {
+    const stage = makeStage({ status: "draft", content: "Existing spec" })
+    render(
+      <GenerateBar
+        stage={stage}
+        onGenerate={noop}
+        onRegenerate={noop}
+        onRefine={noop}
+        onFinalise={noop}
+      />,
+    )
+    expect(
+      screen.getByRole("button", { name: /full stage regenerate/i }),
+    ).toHaveClass("gen-btn-deliberate")
+    expect(
+      screen.getByRole("button", { name: /focused patch refine/i }),
+    ).toBeInTheDocument()
+    expect(
+      screen.getByRole("button", { name: /final quality pass/i }),
+    ).toBeInTheDocument()
   })
 
   it("returns null when stage is locked", () => {
@@ -217,7 +239,7 @@ describe("HumanReviewGate", () => {
         onClose={onClose}
       />,
     )
-    await user.click(screen.getByRole("button", { name: /cancel/i }))
+    await user.click(screen.getByRole("button", { name: /go back/i }))
     expect(onClose).toHaveBeenCalledOnce()
   })
 })

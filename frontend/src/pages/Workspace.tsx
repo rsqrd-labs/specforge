@@ -41,6 +41,24 @@ const STAGE_LABELS: Record<StageType, string> = {
   tasks: "TASKS",
 }
 
+const REFINE_MODE_OPTIONS = [
+  {
+    mode: "focused",
+    label: "Focused patch",
+    detail: "Smallest safe edit",
+  },
+  {
+    mode: "section",
+    label: "Section rewrite",
+    detail: "Broader local pass",
+  },
+  {
+    mode: "full",
+    label: "Full stage regenerate",
+    detail: "Deliberate replacement",
+  },
+] as const
+
 type CreditAction = "generate" | "regenerate"
 
 interface PendingCreditAction {
@@ -539,6 +557,14 @@ export default function Workspace() {
   const activeWordCount = activeStage.content?.trim()
     ? activeStage.content.trim().split(/\s+/).length
     : 0
+  const selectedContentRatio =
+    selection && activeStage.content
+      ? selection.text.length / Math.max(activeStage.content.length, 1)
+      : 0
+  const isLargeRefineSelection = selectedContentRatio > 0.8
+  const activeRefineMode =
+    REFINE_MODE_OPTIONS.find((option) => option.mode === refineMode) ??
+    REFINE_MODE_OPTIONS[0]
   const sidebarSignals = [
     [
       "Quality",
@@ -655,7 +681,7 @@ export default function Workspace() {
                 className="workspace-model-chip"
                 title={`${currentWorkspace.provider} / ${currentWorkspace.model}`}
               >
-                {currentWorkspace.provider} / {currentWorkspace.model}
+                Model route
               </span>
             </div>
             <QualityBadge evalResult={evalResult} />
@@ -744,21 +770,24 @@ export default function Workspace() {
             onSubmit={(e) => { e.preventDefault(); void runRefine() }}
           >
             <div className="refine-mode-toggle" aria-label="Refine scope">
-              {(["focused", "section", "full"] as const).map((mode) => (
+              {REFINE_MODE_OPTIONS.map((option) => (
                 <button
-                  key={mode}
+                  key={option.mode}
                   type="button"
-                  className={refineMode === mode ? "active" : ""}
-                  onClick={() => setRefineMode(mode)}
+                  className={refineMode === option.mode ? "active" : ""}
+                  onClick={() => setRefineMode(option.mode)}
                 >
-                  {mode === "focused"
-                    ? "Focused"
-                    : mode === "section"
-                      ? "Section"
-                      : "Full"}
+                  <strong>{option.label}</strong>
+                  <span>{option.detail}</span>
                 </button>
               ))}
             </div>
+            {isLargeRefineSelection && refineMode !== "full" && (
+              <div className="refine-selection-advice" role="status">
+                <strong>Large selection</strong>
+                <span>Full stage regenerate may produce a cleaner result.</span>
+              </div>
+            )}
             <input
               value={refineInstruction}
               onChange={(e) => setRefineInstruction(e.target.value)}
@@ -774,7 +803,7 @@ export default function Workspace() {
               Cancel
             </button>
             <button type="submit" className="gen-btn-primary">
-              Refine
+              {activeRefineMode.label}
             </button>
           </form>
         )}
