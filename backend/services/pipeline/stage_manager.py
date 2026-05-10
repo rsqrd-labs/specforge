@@ -23,6 +23,7 @@ from services.evals.online_eval import run_eval_background
 from services.llm.base import ProviderError
 from services.llm.gateway import get_llm
 from services.llm.provider_config import JUDGE_MODELS
+from services.llm.routing import LLMRoute, resolve_llm_route
 from services.pipeline.diff_engine import apply_diff, compute_diff
 from services.pipeline.prompt_builder import build_prompt
 from services.security.output_validator import validate
@@ -36,6 +37,12 @@ from services.security.sanitizer import sanitize_text
 logger = logging.getLogger(__name__)
 
 STAGE_ORDER = ["spec", "plan", "harness", "tasks"]
+STAGE_GENERATION_TIERS = {
+    "spec": ("strong", "mid"),
+    "plan": ("strong", "mid"),
+    "harness": ("mini", "mid"),
+    "tasks": ("mini", "small"),
+}
 
 
 def _strip_code_fence(text: str) -> str:
@@ -66,6 +73,29 @@ def _eval_to_dict(result: EvalResult) -> dict:
         "flagged": result.flagged,
         "created_at": result.created_at.isoformat(),
     }
+
+
+def _route_for_stage_generation(stage_type: str, workspace: Workspace) -> LLMRoute:
+    requested_tier, fallback_tier = STAGE_GENERATION_TIERS[stage_type]
+    return resolve_llm_route(
+        operation=f"{stage_type}.generate",
+        preferred_provider=workspace.provider,
+        preferred_model=workspace.model,
+        requested_tier=requested_tier,
+        fallback_tier=fallback_tier,
+        latency_class="interactive",
+    )
+
+
+def _route_for_refine(workspace: Workspace) -> LLMRoute:
+    return resolve_llm_route(
+        operation="refine.focused",
+        preferred_provider=workspace.provider,
+        preferred_model=workspace.model,
+        requested_tier="mini",
+        fallback_tier="mid",
+        latency_class="interactive",
+    )
 
 
 STAGE_DEPENDENCIES: dict[str, list[str]] = {
@@ -239,7 +269,8 @@ class StageManager:
             accumulated = ""
             content_generation_id: str | None = None
             try:
-                adapter = get_llm(workspace.provider, workspace.model)
+                route = _route_for_stage_generation(stage.type, workspace)
+                adapter = get_llm(route.provider, route.model)
                 if trace_id:
                     from services.llm.instrumented_adapter import InstrumentedAdapter
 
@@ -247,8 +278,8 @@ class StageManager:
                         adapter,
                         span_id=span_id,
                         trace_id=trace_id,
-                        provider=workspace.provider,
-                        model=workspace.model,
+                        provider=route.provider,
+                        model=route.model,
                         stage_type=stage.type,
                         action="generate",
                     )
@@ -269,7 +300,7 @@ class StageManager:
                     await self._mark_langfuse_span_failed(span_id, exc)
                     span_finished = True
                 if isinstance(exc, TimeoutError):
-                    raise ProviderError(workspace.provider, exc) from exc
+                    raise ProviderError(route.provider, exc) from exc
                 raise exc
 
             accumulated = _strip_code_fence(accumulated)
@@ -440,7 +471,8 @@ class StageManager:
                     stage=stage,
                     action="refine",
                 )
-            adapter = get_llm(workspace.provider, workspace.model)
+            route = _route_for_refine(workspace)
+            adapter = get_llm(route.provider, route.model)
             if trace_id:
                 from services.llm.instrumented_adapter import InstrumentedAdapter
 
@@ -448,8 +480,8 @@ class StageManager:
                     adapter,
                     span_id=span_id,
                     trace_id=trace_id,
-                    provider=workspace.provider,
-                    model=workspace.model,
+                    provider=route.provider,
+                    model=route.model,
                     stage_type=stage.type,
                     action="refine",
                 )
@@ -469,7 +501,7 @@ class StageManager:
                 await self._mark_langfuse_span_failed(span_id, exc)
                 span_finished = True
             if isinstance(exc, TimeoutError):
-                raise ProviderError(workspace.provider, exc) from exc
+                raise ProviderError(route.provider, exc) from exc
             raise
         except Exception as exc:
             if span_id and not span_finished:
