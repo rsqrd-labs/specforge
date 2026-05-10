@@ -27,6 +27,7 @@ from schemas.stage import (
 from services.credit_service import InsufficientCreditsError
 from services.llm.base import ProviderError
 from services.pipeline.stage_manager import (
+    PreflightError,
     RateLimitError,
     RefineSelectionError,
     SecurityError,
@@ -66,6 +67,9 @@ async def _stream_stage(
         yield f"data: {payload}\n\n"
     except SecurityError as exc:
         payload = json.dumps({"error": "security_check_failed", "detail": str(exc)})
+        yield f"data: {payload}\n\n"
+    except PreflightError as exc:
+        payload = json.dumps({"error": exc.code, "detail": exc.message})
         yield f"data: {payload}\n\n"
     except ProviderError as exc:
         payload = json.dumps({"error": "provider_error", "detail": str(exc)})
@@ -160,6 +164,11 @@ async def refine_stage(
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail={"error": "selection_mismatch", "message": str(exc)},
+        ) from exc
+    except PreflightError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": exc.code, "message": exc.message},
         ) from exc
     except InsufficientCreditsError as exc:
         raise HTTPException(

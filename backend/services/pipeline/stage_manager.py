@@ -23,7 +23,7 @@ from prompts.base import (
 )
 from schemas.stage import DiffResponse, RefineRequest
 from services import langfuse_service
-from services.credit_service import CREDIT_COSTS, credit_service
+from services.credit_service import CREDIT_COSTS, InsufficientCreditsError, credit_service
 from services.evals.online_eval import run_eval_background
 from services.llm.base import ProviderError
 from services.llm.cost_cache import (
@@ -34,7 +34,7 @@ from services.llm.cost_cache import (
 from services.llm.gateway import get_llm
 from services.llm.output_budget import output_budget_for_operation
 from services.llm.provider_config import JUDGE_MODELS
-from services.llm.routing import LLMRoute, resolve_llm_route
+from services.llm.routing import LLMRoute, LLMRoutingError, resolve_llm_route
 from services.pipeline.diff_engine import apply_diff, compute_diff
 from services.pipeline.prompt_builder import build_prompt
 from services.security.output_validator import validate
@@ -53,6 +53,18 @@ STAGE_GENERATION_TIERS = {
     "plan": ("strong", "mid"),
     "harness": ("mini", "mid"),
     "tasks": ("mini", "small"),
+}
+_NOOP_REFINE_INSTRUCTIONS = {
+    "no change",
+    "no changes",
+    "nothing",
+    "do nothing",
+    "leave as is",
+    "leave it as is",
+    "keep as is",
+    "keep it as is",
+    "unchanged",
+    "same",
 }
 
 
@@ -124,6 +136,16 @@ def _route_for_refine(workspace: Workspace, mode: str) -> LLMRoute:
     )
 
 
+def _resolve_preflight_route(route_factory) -> LLMRoute:
+    try:
+        return route_factory()
+    except LLMRoutingError as exc:
+        raise PreflightError(
+            "invalid_llm_route",
+            "The selected provider/model is not available for this operation.",
+        ) from exc
+
+
 def _refine_document_context(
     content: str,
     selection_start: int,
@@ -142,6 +164,33 @@ def _refine_document_context(
 
 def _hash_text(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _normalized_refine_text(value: str) -> str:
+    return " ".join(sanitize_text(value).lower().split())
+
+
+def _assert_visible_credit_balance(user, required: int) -> None:
+    balance = getattr(user, "credit_balance", None)
+    if isinstance(balance, int) and balance < required:
+        raise InsufficientCreditsError(
+            f"Balance {balance} is less than required {required}"
+        )
+
+
+def _assert_refine_instruction_meaningful(request: RefineRequest) -> None:
+    instruction = _normalized_refine_text(request.instruction)
+    selected_text = _normalized_refine_text(request.selected_text)
+    if not instruction:
+        raise PreflightError(
+            "refine_instruction_empty",
+            "Refine instruction must describe the requested change.",
+        )
+    if instruction in _NOOP_REFINE_INSTRUCTIONS or instruction == selected_text:
+        raise PreflightError(
+            "refine_noop",
+            "Refine instruction does not request a meaningful change.",
+        )
 
 
 def _upstream_artifact_hashes(workspace: Workspace, stage_type: str) -> dict[str, str]:
@@ -166,6 +215,13 @@ _STAGE_CACHE_TTL = 3600
 
 class StageDependencyError(Exception):
     pass
+
+
+class PreflightError(Exception):
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+        self.message = message
 
 
 class StageStateError(Exception):
@@ -293,7 +349,10 @@ class StageManager:
         if not await sliding_window_check(redis, f"llm_daily:{user.id}", 200, 86400):
             raise RateLimitError(retry_after=86400)
 
-        route = _route_for_stage_generation(stage.type, workspace)
+        _assert_visible_credit_balance(user, CREDIT_COSTS["generate"])
+        route = _resolve_preflight_route(
+            lambda: _route_for_stage_generation(stage.type, workspace)
+        )
         system_prompt, user_prompt = await build_prompt(stage.type, workspace, db, redis)
         cache_key = build_generation_cache_key(
             prompt_version=STAGE_PROMPT_VERSIONS[stage.type],
@@ -531,6 +590,8 @@ class StageManager:
         doc_len = len(content)
         selection_len = request.selection_end - request.selection_start
         large_selection = doc_len > 0 and (selection_len / doc_len) > 0.80
+        _assert_refine_instruction_meaningful(request)
+        _assert_visible_credit_balance(user, CREDIT_COSTS["refine"])
 
         system_prompt = (
             "You are SpecForge. Rewrite only the selected text per the instruction. "
@@ -539,7 +600,9 @@ class StageManager:
         )
         sanitized_instruction = sanitize_text(request.instruction)
         sanitized_selected_text = sanitize_text(request.selected_text)
-        route = _route_for_refine(workspace, request.mode)
+        route = _resolve_preflight_route(
+            lambda: _route_for_refine(workspace, request.mode)
+        )
         document_context = _refine_document_context(
             content,
             request.selection_start,

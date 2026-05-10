@@ -168,6 +168,71 @@ async def test_generate_raises_when_dependency_not_finalised() -> None:
 
 
 @pytest.mark.asyncio
+async def test_generate_invalid_route_skips_credit_and_provider_call() -> None:
+    from services.pipeline.stage_manager import PreflightError
+
+    workspace_id = uuid4()
+    spec_stage = _make_stage(workspace_id, "spec", status="draft")
+    workspace = _make_workspace([spec_stage])
+    workspace.provider = "unknown-provider"
+    user = _make_user()
+    svc = StageManager(redis_client=_FakeRedis())
+    db = _MultiQueryDB([spec_stage, workspace, []])
+
+    with (
+        patch(
+            "services.pipeline.stage_manager.credit_service.deduct",
+            new_callable=AsyncMock,
+        ) as mock_deduct,
+        patch(
+            "services.pipeline.stage_manager.build_prompt",
+            new_callable=AsyncMock,
+        ) as mock_build_prompt,
+        patch("services.pipeline.stage_manager.get_llm") as mock_get_llm,
+    ):
+        with pytest.raises(PreflightError) as exc_info:
+            async for _ in svc.generate(spec_stage.id, user, db):
+                pass
+
+    assert exc_info.value.code == "invalid_llm_route"
+    mock_deduct.assert_not_called()
+    mock_build_prompt.assert_not_called()
+    mock_get_llm.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_generate_zero_visible_credits_skips_credit_and_provider_call() -> None:
+    from services.credit_service import InsufficientCreditsError
+
+    workspace_id = uuid4()
+    spec_stage = _make_stage(workspace_id, "spec", status="draft")
+    workspace = _make_workspace([spec_stage])
+    user = _make_user()
+    user.credit_balance = 0
+    svc = StageManager(redis_client=_FakeRedis())
+    db = _MultiQueryDB([spec_stage, workspace, []])
+
+    with (
+        patch(
+            "services.pipeline.stage_manager.credit_service.deduct",
+            new_callable=AsyncMock,
+        ) as mock_deduct,
+        patch(
+            "services.pipeline.stage_manager.build_prompt",
+            new_callable=AsyncMock,
+        ) as mock_build_prompt,
+        patch("services.pipeline.stage_manager.get_llm") as mock_get_llm,
+    ):
+        with pytest.raises(InsufficientCreditsError):
+            async for _ in svc.generate(spec_stage.id, user, db):
+                pass
+
+    mock_deduct.assert_not_called()
+    mock_build_prompt.assert_not_called()
+    mock_get_llm.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_generate_success_deducts_credits_and_saves_version() -> None:
     workspace_id = uuid4()
     spec_stage = _make_stage(workspace_id, "spec", status="draft")
@@ -620,6 +685,72 @@ async def test_refine_cache_miss_writes_replacement() -> None:
         await svc.refine(stage.id, request, user, db)
 
     assert redis._store["refine-cache-key"] == "hi"
+
+
+@pytest.mark.asyncio
+async def test_refine_noop_instruction_skips_credit_and_provider_call() -> None:
+    from schemas.stage import RefineRequest
+    from services.pipeline.stage_manager import PreflightError
+
+    workspace_id = uuid4()
+    stage = _make_stage(workspace_id, "spec", status="draft", content="hello world")
+    workspace = _make_workspace([stage])
+    user = _make_user()
+    svc = StageManager(redis_client=_FakeRedis())
+    db = _MultiQueryDB([stage, workspace])
+    request = RefineRequest(
+        instruction="leave as is",
+        selection_start=0,
+        selection_end=5,
+        selected_text="hello",
+    )
+
+    with (
+        patch(
+            "services.pipeline.stage_manager.credit_service.deduct",
+            new_callable=AsyncMock,
+        ) as mock_deduct,
+        patch("services.pipeline.stage_manager.get_llm") as mock_get_llm,
+    ):
+        with pytest.raises(PreflightError) as exc_info:
+            await svc.refine(stage.id, request, user, db)
+
+    assert exc_info.value.code == "refine_noop"
+    mock_deduct.assert_not_called()
+    mock_get_llm.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_refine_zero_visible_credits_skips_credit_and_provider_call() -> None:
+    from schemas.stage import RefineRequest
+    from services.credit_service import InsufficientCreditsError
+
+    workspace_id = uuid4()
+    stage = _make_stage(workspace_id, "spec", status="draft", content="hello world")
+    workspace = _make_workspace([stage])
+    user = _make_user()
+    user.credit_balance = 0
+    svc = StageManager(redis_client=_FakeRedis())
+    db = _MultiQueryDB([stage, workspace])
+    request = RefineRequest(
+        instruction="make this warmer",
+        selection_start=0,
+        selection_end=5,
+        selected_text="hello",
+    )
+
+    with (
+        patch(
+            "services.pipeline.stage_manager.credit_service.deduct",
+            new_callable=AsyncMock,
+        ) as mock_deduct,
+        patch("services.pipeline.stage_manager.get_llm") as mock_get_llm,
+    ):
+        with pytest.raises(InsufficientCreditsError):
+            await svc.refine(stage.id, request, user, db)
+
+    mock_deduct.assert_not_called()
+    mock_get_llm.assert_not_called()
 
 
 @pytest.mark.asyncio
