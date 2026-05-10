@@ -12,6 +12,7 @@ import prompts.spec as spec_prompts
 import prompts.tasks as tasks_prompts
 from config import settings
 from models import Stage, Workspace
+from services.pipeline.stage_summary_service import summarize_stage_content
 
 logger = logging.getLogger(__name__)
 
@@ -53,10 +54,16 @@ async def build_prompt(
             content = await _fetch_stage_content(dep_type, workspace.id, db, redis)
             if len(content) > _MAX_UPSTREAM_CHARS:
                 logger.warning(
-                    "upstream_content_truncated",
+                    "upstream_content_summarized",
                     extra={"stage": dep_type, "original_len": len(content)},
                 )
-                content = content[:_MAX_UPSTREAM_CHARS]
+                content = summarize_stage_content(dep_type, content).content
+                if len(content) > _MAX_UPSTREAM_CHARS:
+                    logger.warning(
+                        "upstream_summary_truncated",
+                        extra={"stage": dep_type, "summary_len": len(content)},
+                    )
+                    content = content[:_MAX_UPSTREAM_CHARS]
             deps[dep_type] = content
 
     return await module.get_system_prompt(), module.build_user_prompt(deps)

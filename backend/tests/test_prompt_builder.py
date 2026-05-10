@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import re
 from typing import Any
 from uuid import uuid4
 
@@ -101,7 +100,15 @@ async def test_build_prompt_plan_contains_spec_content() -> None:
 @pytest.mark.asyncio
 async def test_build_prompt_truncates_long_upstream_content() -> None:
     workspace = _make_workspace()
-    long_content = "x" * (_MAX_UPSTREAM_CHARS + 1000)
+    long_content = "\n".join(
+        [
+            "# Requirements",
+            "FR-001 The system stores projects.",
+            "SEC-001 The system validates prompt injection.",
+            "GET /projects",
+            "x" * (_MAX_UPSTREAM_CHARS + 1000),
+        ]
+    )
     spec_stage = Stage(
         id=uuid4(),
         workspace_id=workspace.id,
@@ -115,10 +122,11 @@ async def test_build_prompt_truncates_long_upstream_content() -> None:
     _, user_prompt = await build_prompt(
         "plan", workspace, _FakeDB({"spec": spec_stage}), redis
     )
-    longest_payload_run = max(
-        len(match.group(0)) for match in re.finditer(r"x+", user_prompt)
-    )
-    assert longest_payload_run <= _MAX_UPSTREAM_CHARS
+    assert "## Downstream Constraints" in user_prompt
+    assert "FR-001" in user_prompt
+    assert "SEC-001" in user_prompt
+    assert "GET /projects" in user_prompt
+    assert "x" * 1000 not in user_prompt
 
 
 @pytest.mark.asyncio
