@@ -15,7 +15,11 @@ from sqlalchemy.orm import selectinload
 from config import settings
 from middleware.rate_limit import sliding_window_check
 from models import EvalResult, Stage, StageVersion, Workspace
-from prompts.base import SECURITY_AND_PRIVACY_RULES, wrap_untrusted_content
+from prompts.base import (
+    SECURITY_AND_PRIVACY_RULES,
+    STAGE_PROMPT_VERSIONS,
+    wrap_untrusted_content,
+)
 from schemas.stage import DiffResponse, RefineRequest
 from services import langfuse_service
 from services.credit_service import CREDIT_COSTS, credit_service
@@ -283,7 +287,7 @@ class StageManager:
                         stage_type=stage.type,
                         action="generate",
                         model_tier=route.model_tier,
-                        prompt_version="local",
+                        prompt_version=STAGE_PROMPT_VERSIONS[stage.type],
                         operation=route.operation,
                         cache_hit=False,
                         batch=False,
@@ -491,7 +495,7 @@ class StageManager:
                     stage_type=stage.type,
                     action="refine",
                     model_tier=route.model_tier,
-                    prompt_version="local",
+                    prompt_version=STAGE_PROMPT_VERSIONS[stage.type],
                     operation=route.operation,
                     cache_hit=False,
                     batch=False,
