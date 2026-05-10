@@ -36,6 +36,11 @@
       "proves": "Strict TypeScript contracts, auth token handling, API client refresh, stores, and workspace UI state match the spec."
     },
     {
+      "id": "provider-agnostic-llm-cost-contracts",
+      "path": "harness/tests/backend/test_phase12_llm_cost_contract.py",
+      "proves": "Phase 12 provider-agnostic LLM cost controls: capability registry, tier routing, prompt reuse, normalized telemetry, cache keys, and explicit cross-provider fallback."
+    },
+    {
       "id": "e2e-smoke",
       "path": "harness/tests/e2e/specforge-smoke.spec.ts",
       "proves": "The core workspace pipeline can be completed through the browser once services are running."

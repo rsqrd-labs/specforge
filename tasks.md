@@ -5319,4 +5319,910 @@ Update the manual smoke-test checklist with Langfuse verification steps. Update 
 
 ---
 
-_tasks.md · SpecForge V1 · Version 1.9.0 · Updated 2026-05-07 with Phase 11 Langfuse LLM observability T-121 through T-131_
+---
+
+## Phase 12 — Provider-Agnostic LLM API Cost Optimization
+
+> Source: `Plan v1.md` §16 and `harness/tests/backend/test_phase12_llm_cost_contract.py`.
+>
+> Objective: reduce average LLM API cost per completed workspace by at least 50%
+> without weakening ASDD artifact quality. OpenAI is the current test provider,
+> but the implementation must be provider agnostic across OpenAI, Anthropic, and
+> Google. Provider-specific pricing, token usage, batch behavior, prompt caching,
+> and model names belong in LLM registry/adapter layers — never in pipeline logic.
+
+---
+
+### T-132: Add Provider Capability and Cost Registry
+
+**Description:**
+Create a provider-agnostic capability and cost registry for OpenAI, Anthropic, and Google. The registry maps concrete provider models to provider-neutral tiers (`strong`, `mid`, `mini`, `small`, plus optional `judge` / `embedding`) and declares the cost/capability fields needed by routing, telemetry, cache, and dashboards.
+
+**Severity:** Critical — every later cost optimization depends on a single source of truth for provider capabilities and pricing.
+
+**Inputs:**
+- `Plan v1.md` §16.4
+- `backend/services/llm/provider_config.py`
+- `harness/tests/backend/test_phase12_llm_cost_contract.py` — `test_provider_capability_cost_registry_exists_for_all_llm_providers`
+
+**Outputs:**
+- New `backend/services/llm/cost_registry.py`
+- Optional update to `backend/services/llm/provider_config.py` to share model IDs/display names with the cost registry
+- Unit tests for registry shape, provider coverage, and cost validation
+
+**Steps:**
+1. Create `backend/services/llm/cost_registry.py`.
+2. Define typed constants:
+   - `MODEL_TIERS = {"strong", "mid", "mini", "small", "judge", "embedding"}`
+   - `PROVIDER_CAPABILITY_REGISTRY`
+3. For each provider (`openai`, `anthropic`, `google`), define:
+   - `supports_streaming`
+   - `supports_prompt_cache_accounting`
+   - `supports_batch`
+   - `supports_usage_tokens`
+   - `models`
+4. For each model entry, define:
+   - `tier`
+   - `input_cost_per_million`
+   - `cached_input_cost_per_million` (`None` if unsupported/unknown)
+   - `output_cost_per_million`
+   - `max_context_tokens`
+   - `default_max_output_tokens`
+   - `recommended_operations`
+5. Do not encode provider secrets or environment-specific availability in this registry. It is static capability/cost metadata.
+6. Add helper functions:
+   - `get_provider_capabilities(provider: str) -> dict`
+   - `get_model_cost(provider: str, model: str) -> dict`
+   - `models_for_tier(provider: str, tier: str) -> list[str]`
+   - `model_tier(provider: str, model: str) -> str`
+7. Make registry validation fail at import time if:
+   - a required provider is missing,
+   - a model is missing cost fields,
+   - a tier is invalid,
+   - or a recommended operation is malformed.
+8. Add unit tests under `backend/tests/test_llm_cost_registry.py`.
+9. Run the narrow harness test:
+   ```
+   cd backend && uv run pytest ../harness/tests/backend/test_phase12_llm_cost_contract.py -k "registry" -q
+   ```
+
+**Acceptance Criteria:**
+- `services.llm.cost_registry.PROVIDER_CAPABILITY_REGISTRY` exists.
+- OpenAI, Anthropic, and Google are all represented.
+- At least one model exists for every required tier: `strong`, `mid`, `mini`, `small`.
+- Every model entry has all required cost-routing fields.
+- Harness test `test_provider_capability_cost_registry_exists_for_all_llm_providers` passes.
+
+**Dependencies:** T-131
+
+---
+
+### T-133: Implement Provider-Neutral Routing Policy
+
+**Description:**
+Create a routing layer that resolves an operation/tier request into a concrete provider/model using the registry from T-132. The routing policy must prefer the workspace's selected provider, require explicit permission for cross-provider fallback, and keep concrete model names out of Stage Manager logic.
+
+**Severity:** Critical — this is the core mechanism that lets SpecForge optimize cost without coupling ASDD stages to OpenAI/Anthropic/Google details.
+
+**Inputs:**
+- `Plan v1.md` §16.3, §16.5, §16.15
+- `backend/services/llm/cost_registry.py` from T-132
+- `backend/services/pipeline/stage_manager.py`
+- `harness/tests/backend/test_phase12_llm_cost_contract.py` — `test_llm_routing_policy_requires_explicit_cross_provider_fallback`, `test_stage_logic_uses_provider_neutral_routing_not_model_names`
+
+**Outputs:**
+- New `backend/services/llm/routing.py`
+- Updated `backend/services/pipeline/stage_manager.py`
+- Unit tests for routing behavior and fallback safety
+
+**Steps:**
+1. Create `backend/services/llm/routing.py`.
+2. Define a dataclass:
+   ```python
+   @dataclass(frozen=True)
+   class LLMRoute:
+       provider: str
+       model: str
+       model_tier: str
+       operation: str
+       latency_class: str
+       cross_provider_fallback: bool
+       reason: str
+   ```
+3. Implement:
+   ```python
+   def resolve_llm_route(
+       *,
+       operation: str,
+       preferred_provider: str,
+       requested_tier: str,
+       fallback_tier: str | None = None,
+       latency_class: str,
+       allow_cross_provider: bool = False,
+       preferred_model: str | None = None,
+   ) -> LLMRoute:
+       ...
+   ```
+4. Routing rules:
+   - If `preferred_model` is provided and supports the operation/tier, use it.
+   - Otherwise choose the cheapest model in the preferred provider that supports the operation and requested tier.
+   - If no model matches and `fallback_tier` is provided, try the fallback tier within the same provider.
+   - If still no match and `allow_cross_provider=False`, raise a routing error.
+   - Cross-provider fallback may only happen when `allow_cross_provider=True`; the returned route must set `cross_provider_fallback=True`.
+5. Add `LLMRoutingError` with a user-safe message and internal details for logging.
+6. Update Stage Manager generation/refine/eval entry points to call `resolve_llm_route()` before `get_llm()`.
+7. Stage Manager must pass `route.provider` and `route.model` into `get_llm()`. It must not contain hard-coded fragments like `gpt-`, `claude-`, `gemini-`, or `o1-`.
+8. Operation mapping:
+   - `spec.generate` → strong
+   - `plan.generate` → strong or mid
+   - `harness.generate` → mini or mid
+   - `tasks.generate` → mini
+   - `refine.focused` → mini or mid
+   - `refine.section` → mid
+   - `regenerate.full` → strong
+   - `eval.score` → judge/small
+   - `summary.create` → small/mini
+9. Add unit tests for:
+   - same-provider preferred route,
+   - fallback tier in same provider,
+   - cross-provider fallback rejected by default,
+   - cross-provider fallback explicit and visible,
+   - invalid provider/model rejected.
+10. Run:
+   ```
+   cd backend && uv run pytest tests/test_llm_routing.py ../harness/tests/backend/test_phase12_llm_cost_contract.py -k "routing or stage_logic" -q
+   ```
+
+**Acceptance Criteria:**
+- `services.llm.routing.resolve_llm_route()` exists with required parameters.
+- `allow_cross_provider` exists and defaults to `False`.
+- Stage Manager delegates provider/model selection to routing.
+- Stage Manager contains no hard-coded provider model names.
+- Harness tests `test_llm_routing_policy_requires_explicit_cross_provider_fallback` and `test_stage_logic_uses_provider_neutral_routing_not_model_names` pass.
+
+**Dependencies:** T-132
+
+---
+
+### T-134: Add Provider-Normalized Usage and Cost Estimation
+
+**Description:**
+Implement provider-normalized usage accounting so all LLM calls can produce comparable cost events regardless of whether the provider reports exact token usage, partial usage, cached-token usage, or no usage for streaming calls.
+
+**Severity:** Critical — without normalized cost telemetry, there is no way to prove cost optimization works.
+
+**Inputs:**
+- `Plan v1.md` §16.13
+- `backend/services/llm/cost_registry.py`
+- Existing provider adapters
+- `harness/schemas/llm-cost-event.schema.json`
+- `harness/tests/backend/test_phase12_llm_cost_contract.py` — `test_adapters_expose_or_normalize_usage_without_changing_base_interface`
+
+**Outputs:**
+- New `backend/services/llm/usage.py`
+- Unit tests for usage normalization and cost estimation
+- No change to `BaseLLMAdapter.stream()` / `.complete()` signatures
+
+**Steps:**
+1. Create `backend/services/llm/usage.py`.
+2. Define:
+   ```python
+   @dataclass(frozen=True)
+   class NormalizedUsage:
+       input_tokens: int | None
+       cached_input_tokens: int | None
+       output_tokens: int | None
+       provider_usage_raw: dict | None
+       usage_estimation_method: Literal["provider_reported", "tokenizer_estimated", "unknown"]
+   ```
+3. Implement:
+   - `normalize_provider_usage(provider: str, raw_usage: Any) -> NormalizedUsage`
+   - `estimate_tokens(provider: str, model: str, text: str) -> int | None`
+   - `estimate_cost_usd(provider: str, model: str, usage: NormalizedUsage) -> Decimal | None`
+4. Provider usage rules:
+   - Use provider-reported input/output/cached tokens when available.
+   - For streaming calls where usage is unavailable, estimate output tokens from accumulated output and mark `usage_estimation_method="tokenizer_estimated"`.
+   - If no reliable tokenizer/usage is available, return `None` token fields and `usage_estimation_method="unknown"` rather than pretending precision.
+5. Cost rules:
+   - Use `input_cost_per_million`, `cached_input_cost_per_million`, and `output_cost_per_million` from the registry.
+   - If token usage is unknown, `estimated_cost_usd=None`.
+   - Use `Decimal` internally to avoid floating point drift.
+6. Keep `BaseLLMAdapter` unchanged. Any raw provider usage capture must be done in adapter internals, wrapper metadata, or a side-channel that does not change the abstract interface.
+7. Add unit tests for OpenAI-shaped, Anthropic-shaped, Google-shaped, estimated, and unknown usage payloads.
+8. Run:
+   ```
+   cd backend && uv run pytest tests/test_llm_usage.py ../harness/tests/backend/test_phase12_llm_cost_contract.py -k "usage or adapters" -q
+   ```
+
+**Acceptance Criteria:**
+- `services.llm.usage` exports `normalize_provider_usage`, `estimate_tokens`, and `estimate_cost_usd`.
+- Usage events can distinguish provider-reported, tokenizer-estimated, and unknown values.
+- `BaseLLMAdapter` signatures remain exactly `(system, user, max_tokens)`.
+- Harness test `test_adapters_expose_or_normalize_usage_without_changing_base_interface` passes.
+
+**Dependencies:** T-132
+
+---
+
+### T-135: Add Generation Cache Key Builder and Cache Service
+
+**Description:**
+Add a provider-safe cache key builder for repeatable LLM generation inputs. The key must include prompt version, stage type, operation, concrete provider/model, provider-neutral model tier, problem statement hash, upstream artifact hashes, user instruction hash, and output contract version.
+
+**Severity:** High — prevents repeated local/dev and duplicate production generations from wasting provider spend while avoiding stale or cross-provider replay.
+
+**Inputs:**
+- `Plan v1.md` §16.11
+- `harness/tests/backend/test_phase12_llm_cost_contract.py` — `test_generation_cache_key_includes_provider_model_tier_and_prompt_version`
+
+**Outputs:**
+- New `backend/services/llm/cost_cache.py`
+- Optional Redis-backed cache methods for completed outputs
+- Unit tests for key isolation and invalidation
+
+**Steps:**
+1. Create `backend/services/llm/cost_cache.py`.
+2. Implement:
+   ```python
+   def build_generation_cache_key(
+       *,
+       prompt_version: str,
+       stage_type: str,
+       operation: str,
+       provider: str,
+       model: str,
+       model_tier: str,
+       problem_statement_hash: str,
+       upstream_artifact_hashes: Mapping[str, str],
+       user_instruction_hash: str,
+       output_contract_version: str,
+   ) -> str:
+       ...
+   ```
+3. Canonicalize inputs:
+   - sort `upstream_artifact_hashes` keys,
+   - JSON encode with stable separators,
+   - hash the canonical payload using SHA-256,
+   - prefix with `llmcache:v1:`.
+4. Implement optional helpers:
+   - `async get_cached_generation(redis, key: str) -> str | None`
+   - `async set_cached_generation(redis, key: str, output: str, ttl_seconds: int) -> None`
+5. Do not cache partial streaming output. Cache only after a full response completes and passes validation.
+6. Add tests proving the key changes when any of these change:
+   - provider,
+   - model,
+   - model tier,
+   - prompt version,
+   - upstream artifact hash,
+   - instruction hash,
+   - output contract version.
+7. Run:
+   ```
+   cd backend && uv run pytest tests/test_llm_cost_cache.py ../harness/tests/backend/test_phase12_llm_cost_contract.py -k "cache_key" -q
+   ```
+
+**Acceptance Criteria:**
+- `build_generation_cache_key()` exists with all required parameters.
+- Cache keys are stable for identical input and different for any semantic change.
+- Concrete provider/model and provider-neutral tier are both included.
+- Harness test `test_generation_cache_key_includes_provider_model_tier_and_prompt_version` passes.
+
+**Dependencies:** T-132
+
+---
+
+### T-136: Extend InstrumentedAdapter With Provider-Normalized Cost Metadata
+
+**Description:**
+Update `InstrumentedAdapter` so every LLM call records provider-normalized cost metadata in Langfuse and structured logs. Preserve pass-through behavior and keep provider adapters Langfuse-free. The wrapper should record usage/cost metadata even when Langfuse is disabled, via structured logs or an internal telemetry hook.
+
+**Severity:** Critical — this makes cost visible and measurable without changing user-facing generation behavior.
+
+**Inputs:**
+- `Plan v1.md` §16.12-§16.13
+- `backend/services/llm/instrumented_adapter.py`
+- `backend/services/llm/usage.py` from T-134
+- `backend/services/llm/routing.py` from T-133
+- `harness/tests/backend/test_phase12_llm_cost_contract.py` — `test_instrumented_adapter_records_provider_normalized_cost_metadata`
+
+**Outputs:**
+- Updated `backend/services/llm/instrumented_adapter.py`
+- Unit tests covering cost metadata on `stream()` and `complete()`
+
+**Steps:**
+1. Extend `InstrumentedAdapter.__init__` with optional metadata:
+   - `model_tier`
+   - `prompt_version`
+   - `operation`
+   - `cache_hit`
+   - `batch`
+   - `cross_provider_fallback`
+2. Preserve backward compatibility for existing call sites by providing safe defaults where needed, then update Stage Manager to pass real values from `LLMRoute`.
+3. During `stream()`, accumulate output as today. After stream close, estimate or normalize usage using `services.llm.usage`.
+4. During `complete()`, normalize usage if raw provider usage is available; otherwise estimate from input/output text.
+5. Add metadata fields to every generation record:
+   - `model_tier`
+   - `prompt_version`
+   - `input_tokens`
+   - `cached_input_tokens`
+   - `output_tokens`
+   - `provider_usage_raw`
+   - `usage_estimation_method`
+   - `estimated_cost_usd`
+   - `cache_hit`
+   - `batch`
+   - `cross_provider_fallback`
+6. Emit a structured log event `llm.cost_recorded` with the same metadata, redacting prompts/content.
+7. Ensure all Langfuse and logging failures are exception-swallowing and cannot break streaming.
+8. Add tests proving:
+   - stream tokens are unchanged,
+   - complete output is unchanged,
+   - metadata includes all required cost fields,
+   - a metadata/logging failure does not interrupt generation.
+9. Run:
+   ```
+   cd backend && uv run pytest tests/test_instrumented_adapter.py ../harness/tests/backend/test_phase12_llm_cost_contract.py -k "instrumented_adapter" -q
+   ```
+
+**Acceptance Criteria:**
+- InstrumentedAdapter includes all provider-normalized cost fields.
+- Existing Langfuse behavior still works.
+- Provider adapters still do not import Langfuse.
+- Streaming pass-through remains unchanged.
+- Harness test `test_instrumented_adapter_records_provider_normalized_cost_metadata` passes.
+
+**Dependencies:** T-133, T-134
+
+---
+
+### T-137: Reorder Prompt Builders for Stable Cacheable Prefixes
+
+**Description:**
+Audit and enforce the prompt-builder structure so ASDD methodology, security rules, professional output rules, and stage contracts remain a stable static prefix before any dynamic workspace context. This improves provider-side prompt caching where available and keeps the product moat portable across providers.
+
+**Severity:** High — prompt caching/reuse only works if static content is stable and separated from dynamic content.
+
+**Inputs:**
+- `Plan v1.md` §16.6
+- `backend/prompts/base.py`
+- `backend/prompts/spec.py`
+- `backend/prompts/plan.py`
+- `backend/prompts/harness.py`
+- `backend/prompts/tasks.py`
+- `harness/tests/backend/test_phase12_llm_cost_contract.py` — `test_prompt_builders_keep_static_moat_prefix_before_dynamic_context`
+
+**Outputs:**
+- Updated prompt modules if any dynamic interpolation exists in static system prompts
+- New prompt-version constants
+- Unit tests for prompt prefix stability
+
+**Steps:**
+1. Add prompt version constants in `backend/prompts/base.py`, for example:
+   ```python
+   ASDD_PROMPT_VERSION = "asdd-v1.7.1"
+   ```
+2. Confirm each stage prompt builds `SYSTEM_PROMPT` from static blocks only:
+   - `ASDD_METHODOLOGY_OVERVIEW`
+   - `SECURITY_AND_PRIVACY_RULES`
+   - `PROFESSIONAL_OUTPUT_RULES`
+   - stage-specific static contract
+3. Move all workspace names, problem statements, prior stage content, user refinements, timestamps, and provider/model data into `build_user_prompt()`.
+4. Ensure every dependency block uses `wrap_untrusted_content()`.
+5. Add tests that call each `get_system_prompt()` twice with different dependencies and assert the system prompt is identical.
+6. Add tests that dynamic content appears only in user prompts.
+7. Run:
+   ```
+   cd backend && uv run pytest tests/test_prompt_builder.py ../harness/tests/backend/test_phase12_llm_cost_contract.py -k "prompt_builders" -q
+   ```
+
+**Acceptance Criteria:**
+- Static prompt prefixes are byte-stable for the same prompt version.
+- Dynamic workspace content appears only in user prompt blocks.
+- Prompt version is available for telemetry.
+- Harness test `test_prompt_builders_keep_static_moat_prefix_before_dynamic_context` passes.
+
+**Dependencies:** T-126
+
+---
+
+### T-138: Add Finalized Stage Summaries for Context Compression
+
+**Description:**
+Create a stage-summary service that compresses finalized artifacts into structured, downstream-safe summaries. Later stages should prefer summaries and targeted excerpts over always passing full upstream artifacts, reducing provider context cost while preserving traceability.
+
+**Severity:** High — downstream prompt bloat is one of the main cost drivers in ASDD.
+
+**Inputs:**
+- `Plan v1.md` §16.7
+- `backend/services/pipeline/stage_manager.py`
+- `backend/prompts/*`
+- Existing stage models/version tables
+
+**Outputs:**
+- New `backend/services/pipeline/stage_summary_service.py`
+- Optional DB field/table for persisted summaries, or Redis cache if summaries are deterministic and recoverable
+- Tests for summary creation, invalidation, and downstream prompt usage
+
+**Steps:**
+1. Define summary schema:
+   ```markdown
+   ## Decisions
+   ## Entities
+   ## APIs
+   ## Security Requirements
+   ## Data Constraints
+   ## Open Questions
+   ## Downstream Constraints
+   ```
+2. Implement deterministic extraction where possible:
+   - parse markdown headings,
+   - collect requirement IDs,
+   - collect API endpoint blocks,
+   - collect security sections.
+3. For content that cannot be summarized deterministically, use the routing policy with `operation="summary.create"` and tier `small` or `mini`.
+4. Store summary metadata:
+   - source stage id,
+   - source stage version,
+   - source content hash,
+   - prompt version,
+   - provider/model used if an LLM was needed.
+5. Invalidate summaries whenever a finalized stage changes or rolls back.
+6. Update downstream prompt builders to accept either:
+   - full artifact,
+   - summary + targeted excerpts,
+   - or full artifact fallback when validation fails.
+7. Add tests for:
+   - summary structure,
+   - summary invalidation on content hash change,
+   - downstream prompt uses summary when full artifact exceeds threshold,
+   - downstream prompt falls back to full content when below threshold.
+
+**Acceptance Criteria:**
+- Finalized stages can produce structured summaries.
+- Summaries are invalidated by stage version/content changes.
+- PLAN/HARNESS/TASKS prompt building can use summaries by default when upstream context is large.
+- No requirement IDs are silently dropped from summary metadata.
+
+**Dependencies:** T-133, T-137
+
+---
+
+### T-139: Add Output Budgets and Patch-Based Refine Modes
+
+**Description:**
+Implement per-operation output budgets and make refinement patch-based by default. Focused refine should send selected text plus minimal surrounding context and return replacement text only; section refine should return one section; full regenerate remains explicit and more expensive.
+
+**Severity:** High — output tokens are a major cost driver and full-document refine is wasteful.
+
+**Inputs:**
+- `Plan v1.md` §16.8-§16.9
+- `backend/services/pipeline/stage_manager.py`
+- `backend/prompts/*`
+- `frontend/src/pages/Workspace.tsx`
+- `frontend/src/components/workspace/*`
+
+**Outputs:**
+- Output-budget configuration per operation
+- Refine mode selection in backend request handling
+- UI copy/actions for focused refine vs full regenerate
+- Tests for budget selection and patch-only refine output
+
+**Steps:**
+1. Define output budget config in backend, keyed by operation:
+   - `spec.generate`
+   - `plan.generate`
+   - `harness.generate`
+   - `tasks.generate`
+   - `refine.focused`
+   - `refine.section`
+   - `regenerate.full`
+   - `eval.score`
+   - `summary.create`
+2. Route Stage Manager calls through the operation budget instead of ad hoc `max_tokens`.
+3. Extend refine request schema with `mode: "focused" | "section" | "full"` defaulting to `"focused"`.
+4. Focused refine prompt:
+   - include selected text,
+   - include small surrounding context,
+   - include relevant stage summary/dependency snippets,
+   - require replacement text only.
+5. Section refine prompt:
+   - include the selected markdown section,
+   - return the full replacement section only.
+6. Full regenerate remains a separate action, not the default refine path.
+7. If the user selects more than 80% of the artifact, frontend recommends full regenerate but allows deliberate focused refine.
+8. Add tests for:
+   - output budget lookup,
+   - focused refine uses smaller budget than full regenerate,
+   - focused refine does not send all upstream artifacts,
+   - focused refine returns replacement only,
+   - frontend displays full-regenerate recommendation on whole-document selection.
+
+**Acceptance Criteria:**
+- All LLM calls use operation-specific output budgets.
+- Focused refine is the default.
+- Full artifact regeneration is explicit.
+- Selection >80% triggers a UI recommendation.
+- Existing refine safety tests still pass.
+
+**Dependencies:** T-133, T-138
+
+---
+
+### T-140: Wire Generation Cache Into Stage Operations
+
+**Description:**
+Use the cache key builder from T-135 to avoid repeated identical generation/refine/summary calls. Cache only completed, validated outputs. Do not cache partial streams. On a cache hit, replay cached content through the existing stage update path and mark telemetry with `cache_hit=True`.
+
+**Severity:** Medium-High — especially valuable for local testing, prompt iteration, accidental double-clicks, and repeated generation attempts.
+
+**Inputs:**
+- `Plan v1.md` §16.10-§16.11
+- `backend/services/llm/cost_cache.py`
+- `backend/services/pipeline/stage_manager.py`
+- Redis dependency
+
+**Outputs:**
+- Stage Manager cache lookup/write integration
+- Cache hit telemetry
+- Tests for cache hit/miss/invalidation behavior
+
+**Steps:**
+1. Before calling a provider, build a generation cache key from:
+   - prompt version,
+   - stage type,
+   - operation,
+   - provider,
+   - model,
+   - model tier,
+   - problem statement hash,
+   - upstream artifact hashes,
+   - user instruction hash,
+   - output contract version.
+2. Check Redis for a completed cached output.
+3. On cache hit:
+   - skip provider call,
+   - apply cached output to the stage through the same persistence/validation path,
+   - emit telemetry with `cache_hit=True`,
+   - do not deduct provider-cost credits if the product credit model distinguishes cached output.
+4. On cache miss:
+   - call provider,
+   - validate output,
+   - persist output,
+   - then cache full completed output with TTL.
+5. Do not cache failed, partial, rejected, or security-flagged outputs.
+6. Include `prompt_version` and output contract version in the key to avoid stale cache after prompt changes.
+7. Add tests for:
+   - cache hit skips adapter call,
+   - cache miss calls adapter once,
+   - prompt version change misses cache,
+   - provider/model/tier change misses cache,
+   - partial stream failure does not write cache.
+
+**Acceptance Criteria:**
+- Identical repeat calls can hit cache safely.
+- Cache keys isolate provider/model/tier/prompt/artifact changes.
+- Partial or failed generations are never cached.
+- Telemetry distinguishes cache hits from provider calls.
+
+**Dependencies:** T-135, T-136, T-139
+
+---
+
+### T-141: Add Deterministic Pre-LLM Cost Gates
+
+**Description:**
+Consolidate all no-LLM gates before provider calls. The system must reject invalid or unnecessary work before spending tokens: invalid problem statements, prompt injection, missing dependencies, duplicate in-progress generation, invalid provider/model, zero credits, unchanged refine submissions, and stale selections.
+
+**Severity:** High — no-call gates save cost and strengthen security.
+
+**Inputs:**
+- `Plan v1.md` §16.10
+- Existing `backend/services/security/problem_statement_gate.py`
+- Existing prompt guard, stage dependency checks, credit checks, refine selection checks
+
+**Outputs:**
+- Shared preflight service or clearly ordered Stage Manager preflight functions
+- Tests proving provider adapters are not called when gates fail
+
+**Steps:**
+1. Create or consolidate a preflight function:
+   ```python
+   async def assert_llm_call_allowed(...): ...
+   ```
+2. Ensure this function runs before credit deduction and before provider adapter lookup wherever possible.
+3. Check:
+   - authentication already resolved,
+   - workspace ownership,
+   - problem statement valid,
+   - prompt guard clean,
+   - stage dependencies finalized,
+   - stage not already in progress,
+   - provider/model route valid,
+   - credit balance sufficient,
+   - refine selected text matches current content,
+   - refine instruction changes something meaningful.
+4. On failure, return structured error codes that frontend can render clearly.
+5. Add tests using adapter mocks that assert the adapter is never called on each failure path.
+6. Preserve refund behavior for failures that happen after credit deduction/provider start.
+
+**Acceptance Criteria:**
+- Invalid/duplicate/no-op requests do not call any provider.
+- Existing security and problem-statement gate tests still pass.
+- Refine stale-selection and unchanged-selection cases are blocked before provider spend.
+- Error messages are user-safe and actionable.
+
+**Dependencies:** T-133, T-139
+
+---
+
+### T-142: Add Provider Cost Dashboards, Logs, and Alerts
+
+**Description:**
+Expose normalized LLM cost metrics through structured logs and Prometheus metrics. Dashboards must answer: cost per workspace, cost per stage, cost by provider, cost by tier, cache-hit savings, output-token growth, and cost per accepted artifact.
+
+**Severity:** High — optimization without measurement will regress.
+
+**Inputs:**
+- `Plan v1.md` §16.13, §16.18-§16.19
+- `backend/services/observability.py`
+- `backend/services/llm/usage.py`
+- `backend/services/llm/instrumented_adapter.py`
+
+**Outputs:**
+- New Prometheus metrics for normalized LLM usage/cost
+- Structured log event `llm.cost_recorded`
+- README/internal docs for cost dashboards
+- Tests for metric labels and no prompt-content leakage
+
+**Steps:**
+1. Add Prometheus metrics:
+   - `llm_request_total{provider,model_tier,operation,stage_type,cache_hit}`
+   - `llm_estimated_cost_usd_total{provider,model_tier,operation,stage_type}`
+   - `llm_input_tokens_total{provider,model_tier,operation,stage_type,method}`
+   - `llm_output_tokens_total{provider,model_tier,operation,stage_type,method}`
+   - `llm_cached_input_tokens_total{provider,model_tier,operation,stage_type}`
+   - `llm_latency_seconds_bucket{provider,model_tier,operation,stage_type}`
+2. Emit structured logs with the normalized cost event fields but no prompt text, output text, API keys, bearer tokens, or PII.
+3. Add cost anomaly alert suggestions:
+   - P95 request cost above provider baseline,
+   - output tokens above budget,
+   - cache-hit ratio unexpectedly drops,
+   - cross-provider fallback occurs.
+4. Add tests proving:
+   - metrics are emitted on provider calls,
+   - cache hits are labelled,
+   - prompt/output content is not logged,
+   - cost fields match the normalized usage/cost service.
+5. Update README Observability section with the cost metrics.
+
+**Acceptance Criteria:**
+- Cost metrics are emitted for every instrumented LLM call.
+- Logs contain provider/model/tier/operation/cost fields but no prompt or output content.
+- Dashboards can aggregate by provider and tier.
+- Cross-provider fallback is observable.
+
+**Dependencies:** T-136, T-140
+
+---
+
+### T-143: Add Golden Dataset and Quality Gates for Routing Changes
+
+**Description:**
+Build an evaluation harness that compares provider/model tiers on a golden dataset of product prompts. Cheaper routes may become defaults only when they meet quality gates for the specific operation and provider family.
+
+**Severity:** Critical — cost reduction must not erode the prompt moat or ASDD artifact quality.
+
+**Inputs:**
+- `Plan v1.md` §16.14-§16.15
+- Existing eval service
+- Langfuse optional dataset support from Phase 11
+
+**Outputs:**
+- `backend/tests/fixtures/golden_prompts/*.json` or `docs/evals/golden_prompts/*.json`
+- Script `scripts/run_llm_route_eval.py`
+- Quality-gate config per operation/provider/tier
+- Documentation for promoting cheaper routes
+
+**Steps:**
+1. Create a golden dataset with representative product prompts:
+   - simple CRUD SaaS,
+   - multi-tenant B2B workflow,
+   - AI-heavy product,
+   - regulated/security-sensitive product,
+   - vague prompt that should be rejected,
+   - prompt-injection attempt,
+   - large upstream artifact chain.
+2. For each prompt, define expected traits:
+   - required sections,
+   - requirement traceability,
+   - security coverage,
+   - API/schema specificity,
+   - markdown/code fence validity,
+   - max verbosity/length constraints.
+3. Implement `scripts/run_llm_route_eval.py`:
+   - runs selected operation/provider/tier routes,
+   - records cost,
+   - records latency,
+   - runs deterministic validators,
+   - optionally runs LLM-as-judge,
+   - outputs JSON/Markdown report.
+4. Add promotion rules:
+   - no deterministic validator regressions,
+   - average quality score no worse than baseline threshold,
+   - human acceptance on sampled outputs,
+   - cost reduction target met,
+   - no security coverage regression.
+5. Add CI-safe tests that validate the dataset and script structure without making live provider calls.
+6. Document that live route promotion is manual/operator-approved, not automatic.
+
+**Acceptance Criteria:**
+- Golden dataset exists and covers all major ASDD operations.
+- Eval script can run in dry-run mode without provider calls.
+- Promotion rules are explicit and provider-specific.
+- Cheaper provider/tier defaults cannot be promoted without quality evidence.
+
+**Dependencies:** T-132, T-133, T-142
+
+---
+
+### T-144: Add Batch/Background Cost Optimization for Non-Interactive Work
+
+**Description:**
+Move eligible non-interactive LLM work behind a provider-capability-aware background/batch executor. Use provider batch discounts where available; otherwise run background work normally with the same telemetry and safety controls.
+
+**Severity:** Medium — useful savings for evals, audits, summaries, and prompt regression runs, but must not affect interactive first-token latency.
+
+**Inputs:**
+- `Plan v1.md` §16.12
+- `backend/services/llm/cost_registry.py`
+- Existing eval/summary/prompt regression flows
+
+**Outputs:**
+- New `backend/services/llm/batch_executor.py`
+- Background execution path for eligible operations
+- Tests proving interactive operations never use batch
+
+**Steps:**
+1. Define eligible operations:
+   - `eval.score`
+   - `summary.create`
+   - `audit.artifact_quality`
+   - `prompt_regression.run`
+2. Define ineligible operations:
+   - `spec.generate`
+   - `plan.generate`
+   - `harness.generate`
+   - `tasks.generate`
+   - `refine.focused`
+   - `refine.section`
+   - `regenerate.full`
+3. Implement provider capability check:
+   - if `supports_batch=True`, use provider-specific batch adapter,
+   - if `supports_batch=False` or provider-specific unsupported, enqueue normal background task,
+   - always emit telemetry with `batch=True/False`.
+4. Add dead-letter/error handling for failed background jobs.
+5. Add tests proving:
+   - interactive operations reject batch path,
+   - eligible operations use batch only when provider supports it,
+   - unsupported providers fall back to normal background execution,
+   - telemetry marks batch state.
+
+**Acceptance Criteria:**
+- Batch is capability-aware, not OpenAI-specific.
+- Interactive operations never go through batch.
+- Background jobs remain observable and failure-tolerant.
+- Cost telemetry distinguishes batch vs non-batch.
+
+**Dependencies:** T-132, T-136, T-142
+
+---
+
+### T-145: Add Product UX Controls for Cost-Aware Generation
+
+**Description:**
+Add frontend affordances that expose cost-aware behavior as quality/scope choices, not raw token anxiety. Users should see focused refine, full regenerate, deep architecture pass, fast draft, and final quality pass where appropriate.
+
+**Severity:** Medium — improves user trust and reduces accidental expensive actions.
+
+**Inputs:**
+- `Plan v1.md` §16.16
+- `frontend/src/pages/Workspace.tsx`
+- `frontend/src/components/workspace/*`
+- Backend refine mode and routing support from T-139
+
+**Outputs:**
+- UI controls for focused refine and full regenerate
+- Optional quality/scope mode controls
+- Updated credit confirmation copy
+- Frontend tests for mode selection and warnings
+
+**Steps:**
+1. Make focused refine the default UI action for selected text.
+2. Keep full regenerate as a visually distinct, deliberate action.
+3. Add selection-size warning when selected text exceeds 80% of artifact content.
+4. Update credit modal copy to describe value:
+   - "Focused patch"
+   - "Section rewrite"
+   - "Full stage regenerate"
+   - "Final quality pass"
+5. Do not expose raw token counts to normal users.
+6. Include provider/model details only in internal/debug surfaces, not the main workflow.
+7. Add frontend tests for:
+   - focused refine default,
+   - full regenerate confirmation,
+   - large-selection warning,
+   - request payload includes refine mode,
+   - credit modal copy matches selected mode.
+
+**Acceptance Criteria:**
+- Users can choose focused refine vs full regenerate.
+- Large selection prompts a recommendation, not a hard block.
+- Cost-aware actions feel product-native and value-based.
+- Frontend sends refine mode to backend.
+
+**Dependencies:** T-139
+
+---
+
+### T-146: Update CI, Documentation, and Smoke Tests for Phase 12
+
+**Description:**
+Wire the Phase 12 harness into CI and document how to validate provider-agnostic LLM cost optimization locally and in production. Include smoke-test steps for OpenAI now and Anthropic/Google when keys are configured.
+
+**Severity:** High — prevents the cost layer from drifting or becoming OpenAI-only again.
+
+**Inputs:**
+- `.github/workflows/ci.yml`
+- `harness/manifest.json`
+- `harness/tests/backend/test_phase12_llm_cost_contract.py`
+- `harness/schemas/llm-cost-event.schema.json`
+- `README.md`
+- `docs/SMOKE_TEST_CHECKLIST.md`
+- `HANDOFF.md`
+
+**Outputs:**
+- CI step for Phase 12 harness
+- README section for provider-agnostic cost optimization
+- Smoke-test checklist section
+- HANDOFF Phase 12 addendum
+
+**Steps:**
+1. Add `../harness/tests/backend/test_phase12_llm_cost_contract.py` to the backend harness CI command.
+2. Add schema validation for `harness/schemas/llm-cost-event.schema.json`.
+3. README: document:
+   - provider capability registry,
+   - route tiers,
+   - cost telemetry fields,
+   - cache behavior,
+   - cross-provider fallback policy,
+   - required env vars for OpenAI/Anthropic/Google.
+4. Smoke-test checklist:
+   - run with OpenAI key only,
+   - generate SPEC/PLAN/HARNESS/TASKS,
+   - verify `llm.cost_recorded` logs,
+   - verify provider/tier/cost fields,
+   - verify no cross-provider fallback,
+   - repeat with Anthropic/Google when keys exist.
+5. HANDOFF: add Phase 12 summary with invariants:
+   - provider agnostic,
+   - stage logic tier-based,
+   - no silent cross-provider fallback,
+   - prompt moat remains static/cacheable,
+   - quality gates required before cheaper default promotion.
+6. Run:
+   ```
+   cd backend && uv run pytest ../harness/tests/backend/test_phase12_llm_cost_contract.py -q
+   python3 -m json.tool harness/schemas/llm-cost-event.schema.json >/dev/null
+   ```
+
+**Acceptance Criteria:**
+- CI references the Phase 12 harness file.
+- Documentation explains provider-agnostic operation clearly.
+- Smoke checklist covers OpenAI now and Anthropic/Google later.
+- All Phase 12 harness tests pass after T-132 through T-145 are complete.
+
+**Dependencies:** T-132, T-133, T-134, T-135, T-136, T-137, T-138, T-139, T-140, T-141, T-142, T-143, T-144, T-145
+
+---
+
+_tasks.md · SpecForge V1 · Version 2.0.0 · Updated 2026-05-10 with Phase 12 provider-agnostic LLM API cost optimization T-132 through T-146_
