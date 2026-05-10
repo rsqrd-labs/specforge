@@ -218,6 +218,11 @@ export async function getCurrentUser(): Promise<User> {
   return response.data
 }
 
+export async function logout(): Promise<void> {
+  await refreshApi.post("/auth/logout")
+  setAccessToken(null)
+}
+
 export async function completeGoogleCallback(
   code: string,
   state: string,

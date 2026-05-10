@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from "react"
+import { useNavigate } from "react-router-dom"
 import { CreateWorkspaceModal } from "../components/dashboard/CreateWorkspaceModal"
 import { WorkspaceCard } from "../components/dashboard/WorkspaceCard"
-import { getCredits } from "../services/api"
+import { getCredits, logout } from "../services/api"
 import { useUserStore } from "../store/userStore"
 import { useWorkspaceStore } from "../store/workspaceStore"
 import type { WorkspaceWithStages } from "../types/workspace"
@@ -35,11 +36,64 @@ function greeting() {
 
 const CREDIT_FULL = 100
 
+function emailName(email: string): string {
+  const localPart = email.split("@")[0] ?? email
+  return localPart
+    .replace(/[._-]+/g, " ")
+    .trim()
+}
+
+function displayName(user: { name: string | null; email: string }): string {
+  return user.name?.trim() || emailName(user.email) || user.email
+}
+
+function firstDisplayName(user: { name: string | null; email: string }): string {
+  return displayName(user).split(/\s+/)[0] ?? "there"
+}
+
+function initialsFor(user: { name: string | null; email: string }): string {
+  const parts = displayName(user)
+    .split(/\s+/)
+    .map((part) => part[0])
+    .filter((part): part is string => Boolean(part))
+
+  const fallback = user.email.match(/[a-zA-Z0-9]/g)?.slice(0, 2).join("") ?? "SF"
+  return (parts.length > 1 ? `${parts[0]}${parts[1]}` : parts[0] ?? fallback).toUpperCase()
+}
+
+function UserAvatar({
+  avatarUrl,
+  initials,
+}: {
+  avatarUrl: string | null
+  initials: string
+}) {
+  const [imageFailed, setImageFailed] = useState(false)
+  const cleanAvatarUrl = avatarUrl?.trim() || null
+
+  if (cleanAvatarUrl && !imageFailed) {
+    return (
+      <img
+        src={cleanAvatarUrl}
+        alt=""
+        className="user-avatar-img"
+        referrerPolicy="no-referrer"
+        onError={() => setImageFailed(true)}
+      />
+    )
+  }
+
+  return <div className="user-avatar-fallback">{initials}</div>
+}
+
 export default function Dashboard() {
+  const navigate = useNavigate()
   const { workspaces, isLoading, fetchWorkspaces } = useWorkspaceStore()
   const user = useUserStore((state) => state.user)
+  const clearUser = useUserStore((state) => state.clearUser)
   const [balance, setBalance] = useState<number | null>(null)
   const [showCreate, setShowCreate] = useState(false)
+  const [isLoggingOut, setIsLoggingOut] = useState(false)
 
   useEffect(() => {
     void fetchWorkspaces()
@@ -49,8 +103,9 @@ export default function Dashboard() {
   }, [fetchWorkspaces])
 
   const animatedBalance = useCountUp(balance)
-  const firstName = user ? (user.name ?? user.email).split(" ")[0] : null
-  const initials = user ? (user.name ?? user.email).charAt(0).toUpperCase() : "?"
+  const userDisplayName = user ? displayName(user) : null
+  const firstName = user ? firstDisplayName(user) : null
+  const initials = user ? initialsFor(user) : "?"
   const isLow = balance !== null && balance <= 10
 
   const totalDone = (workspaces as WorkspaceWithStages[]).reduce(
@@ -58,6 +113,19 @@ export default function Dashboard() {
     0,
   )
   const fillPct = balance !== null ? Math.min((balance / CREDIT_FULL) * 100, 100) : 0
+
+  async function handleLogout() {
+    if (isLoggingOut) return
+    setIsLoggingOut(true)
+    try {
+      await logout()
+    } catch {
+      // Local auth state still needs to be cleared if the server session is gone.
+    } finally {
+      clearUser()
+      navigate("/", { replace: true })
+    }
+  }
 
   return (
     <div className="dashboard-shell">
@@ -77,13 +145,29 @@ export default function Dashboard() {
             <span className="brand-wordmark brand-wordmark-sm">SpecForge</span>
           </div>
           {user && (
-            <div className="user-nav-pill">
-              {user.avatar_url ? (
-                <img src={user.avatar_url} alt="" className="user-avatar-img" />
-              ) : (
-                <div className="user-avatar-fallback">{initials}</div>
-              )}
-              <span className="user-name hidden sm:block">{user.name ?? user.email}</span>
+            <div className="dashboard-user-actions">
+              <div className="user-nav-pill">
+                <UserAvatar avatarUrl={user.avatar_url} initials={initials} />
+                <span className="user-name hidden sm:block" title={userDisplayName ?? undefined}>
+                  {userDisplayName}
+                </span>
+              </div>
+              <button
+                type="button"
+                className="logout-button"
+                onClick={() => void handleLogout()}
+                disabled={isLoggingOut}
+                aria-label="Sign out"
+              >
+                <span className="logout-button-icon" aria-hidden="true">
+                  <svg viewBox="0 0 20 20" focusable="false">
+                    <path d="M8.4 3.2H5.7c-.9 0-1.6.7-1.6 1.6v10.4c0 .9.7 1.6 1.6 1.6h2.7" />
+                    <path d="M11.7 6.2 15.5 10l-3.8 3.8" />
+                    <path d="M15.1 10H7.8" />
+                  </svg>
+                </span>
+                <span>{isLoggingOut ? "Signing out" : "Sign out"}</span>
+              </button>
             </div>
           )}
         </div>

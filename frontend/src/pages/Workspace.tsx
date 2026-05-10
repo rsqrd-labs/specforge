@@ -882,7 +882,10 @@ export default function Workspace() {
                   />
                 ) : (
                   <div className="document-markdown-scroll">
-                    <MarkdownRenderer content={activeStage.content ?? ""} />
+                    <MarkdownRenderer
+                      content={activeStage.content ?? ""}
+                      variant={activeStage.type === "harness" ? "harness" : "default"}
+                    />
                   </div>
                 )}
                 <StreamingOverlay isVisible={isStreaming} />
