@@ -28,6 +28,41 @@ REQUEST_LATENCY = Histogram(
     "HTTP request duration in seconds",
     ["method", "path"],
 )
+LLM_REQUEST_COUNT = Counter(
+    "llm_request_total",
+    "Total instrumented LLM requests",
+    ["provider", "model_tier", "operation", "stage_type", "cache_hit"],
+)
+LLM_ESTIMATED_COST_USD = Counter(
+    "llm_estimated_cost_usd_total",
+    "Estimated LLM API cost in USD",
+    ["provider", "model_tier", "operation", "stage_type"],
+)
+LLM_INPUT_TOKENS = Counter(
+    "llm_input_tokens_total",
+    "LLM input tokens",
+    ["provider", "model_tier", "operation", "stage_type", "method"],
+)
+LLM_OUTPUT_TOKENS = Counter(
+    "llm_output_tokens_total",
+    "LLM output tokens",
+    ["provider", "model_tier", "operation", "stage_type", "method"],
+)
+LLM_CACHED_INPUT_TOKENS = Counter(
+    "llm_cached_input_tokens_total",
+    "LLM cached input tokens",
+    ["provider", "model_tier", "operation", "stage_type"],
+)
+LLM_LATENCY_SECONDS = Histogram(
+    "llm_latency_seconds",
+    "LLM request latency in seconds",
+    ["provider", "model_tier", "operation", "stage_type"],
+)
+LLM_CROSS_PROVIDER_FALLBACK_COUNT = Counter(
+    "llm_cross_provider_fallback_total",
+    "LLM requests that used an explicit cross-provider fallback route",
+    ["provider", "model_tier", "operation", "stage_type"],
+)
 
 _sentry_configured = False
 _otel_configured = False
@@ -241,6 +276,54 @@ def setup_observability(app: FastAPI, engine: AsyncEngine) -> None:
     setup_sentry()
     setup_opentelemetry(app, engine)
     setup_metrics(app)
+
+
+def record_llm_cost_event(metadata: dict[str, Any]) -> None:
+    provider = str(metadata.get("provider") or "unknown")
+    model_tier = str(metadata.get("model_tier") or "unknown")
+    operation = str(metadata.get("operation") or "unknown")
+    stage_type = str(metadata.get("stage_type") or "unknown")
+    method = str(metadata.get("usage_estimation_method") or "unknown")
+    cache_hit = "true" if bool(metadata.get("cache_hit")) else "false"
+
+    labels = (provider, model_tier, operation, stage_type)
+    LLM_REQUEST_COUNT.labels(*labels, cache_hit).inc()
+    _inc_counter(
+        LLM_ESTIMATED_COST_USD.labels(*labels),
+        metadata.get("estimated_cost_usd"),
+    )
+    _inc_counter(
+        LLM_INPUT_TOKENS.labels(*labels, method),
+        metadata.get("input_tokens"),
+    )
+    _inc_counter(
+        LLM_OUTPUT_TOKENS.labels(*labels, method),
+        metadata.get("output_tokens"),
+    )
+    _inc_counter(
+        LLM_CACHED_INPUT_TOKENS.labels(*labels),
+        metadata.get("cached_input_tokens"),
+    )
+    latency_ms = _as_float(metadata.get("latency_ms"))
+    if latency_ms is not None and latency_ms >= 0:
+        LLM_LATENCY_SECONDS.labels(*labels).observe(latency_ms / 1000)
+    if bool(metadata.get("cross_provider_fallback")):
+        LLM_CROSS_PROVIDER_FALLBACK_COUNT.labels(*labels).inc()
+
+
+def _inc_counter(counter, value: Any) -> None:
+    numeric = _as_float(value)
+    if numeric is not None and numeric > 0:
+        counter.inc(numeric)
+
+
+def _as_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _is_configured_url(value: str) -> bool:

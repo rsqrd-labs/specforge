@@ -34,8 +34,8 @@ import structlog
 
 from services import langfuse_service
 from services.llm.base import BaseLLMAdapter
-from services.llm.usage import estimated_usage_from_text, estimate_cost_usd
-from services.observability import redact_sensitive_data
+from services.llm.usage import estimate_cost_usd, estimated_usage_from_text
+from services.observability import record_llm_cost_event, redact_sensitive_data
 
 logger = structlog.get_logger(__name__)
 
@@ -129,6 +129,8 @@ class InstrumentedAdapter(BaseLLMAdapter):
                 output=str(output),
                 latency_ms=latency_ms,
             )
+            record_llm_cost_event(cost_metadata)
+            logger.info("llm.cost_recorded", **cost_metadata)
             client = langfuse_service.get_langfuse_client()
             generation_id = await client.create_generation(
                 span_id=self._span_id,
@@ -145,7 +147,6 @@ class InstrumentedAdapter(BaseLLMAdapter):
                     **cost_metadata,
                 },
             )
-            logger.info("llm.cost_recorded", **cost_metadata)
             self.last_generation_id = generation_id
         except Exception:
             # Defensive: a bug in the wrapper itself must never break the

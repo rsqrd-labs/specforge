@@ -470,6 +470,23 @@ Optional integrations:
   Langfuse SDK is never imported and the application behaves identically to a
   build without Langfuse. No user-facing feature depends on Langfuse availability.
 
+Provider-agnostic LLM cost metrics are emitted for instrumented calls:
+
+- `llm_request_total{provider,model_tier,operation,stage_type,cache_hit}`
+- `llm_estimated_cost_usd_total{provider,model_tier,operation,stage_type}`
+- `llm_input_tokens_total{provider,model_tier,operation,stage_type,method}`
+- `llm_output_tokens_total{provider,model_tier,operation,stage_type,method}`
+- `llm_cached_input_tokens_total{provider,model_tier,operation,stage_type}`
+- `llm_latency_seconds_bucket{provider,model_tier,operation,stage_type}`
+- `llm_cross_provider_fallback_total{provider,model_tier,operation,stage_type}`
+
+Suggested alerts:
+
+- P95 LLM request cost rises above the provider/tier baseline.
+- Output tokens approach or exceed the operation budget.
+- Cache-hit ratio drops unexpectedly for repeated stage operations.
+- Any cross-provider fallback occurs outside an approved rollout window.
+
 Optional LLM observability via Langfuse:
 
 - Set `LANGFUSE_SECRET_KEY`, `LANGFUSE_PUBLIC_KEY`, and `LANGFUSE_HOST` to

@@ -21,10 +21,12 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from prometheus_client import generate_latest
 
 from services import langfuse_service
 from services.llm.base import BaseLLMAdapter
 from services.llm.instrumented_adapter import InstrumentedAdapter
+from services.llm.usage import estimate_cost_usd, estimated_usage_from_text
 
 
 class _FakeAdapter(BaseLLMAdapter):
@@ -338,3 +340,76 @@ async def test_span_id_and_trace_id_optional_default_none() -> None:
     kwargs = mock_client.create_generation.await_args.kwargs
     assert kwargs["span_id"] is None
     assert kwargs["trace_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_cost_metrics_and_logs_exclude_prompt_and_output_content() -> None:
+    system_prompt = "SYSTEM-CONTENT-NEVER-LOG"
+    user_prompt = "USER-CONTENT-NEVER-LOG"
+    output = "MODEL-OUTPUT-NEVER-LOG"
+    adapter = _FakeAdapter(complete_response=output)
+    wrapped = InstrumentedAdapter(
+        adapter,
+        provider="openai",
+        model="gpt-4o-mini",
+        stage_type="spec",
+        action="refine",
+        model_tier="mini",
+        operation="refine.focused",
+        prompt_version="test-cost-metrics-v1",
+        cache_hit=True,
+        cross_provider_fallback=True,
+    )
+    mock_client = _mock_langfuse()
+
+    with (
+        patch.object(
+            langfuse_service, "get_langfuse_client", return_value=mock_client
+        ),
+        patch("services.llm.instrumented_adapter.logger.info") as mock_log,
+    ):
+        await wrapped.complete(system_prompt, user_prompt, 50)
+
+    usage = estimated_usage_from_text(
+        provider="openai",
+        model="gpt-4o-mini",
+        system=system_prompt,
+        user=user_prompt,
+        output=output,
+    )
+    expected_cost = estimate_cost_usd("openai", "gpt-4o-mini", usage)
+    mock_log.assert_called_once()
+    assert mock_log.call_args.args == ("llm.cost_recorded",)
+    log_fields = mock_log.call_args.kwargs
+    assert log_fields["provider"] == "openai"
+    assert log_fields["model_tier"] == "mini"
+    assert log_fields["operation"] == "refine.focused"
+    assert log_fields["stage_type"] == "spec"
+    assert log_fields["cache_hit"] is True
+    assert log_fields["cross_provider_fallback"] is True
+    assert log_fields["input_tokens"] == usage.input_tokens
+    assert log_fields["output_tokens"] == usage.output_tokens
+    assert log_fields["cached_input_tokens"] == usage.cached_input_tokens
+    assert log_fields["estimated_cost_usd"] == float(expected_cost)
+
+    serialized_log = str(mock_log.call_args)
+    assert system_prompt not in serialized_log
+    assert user_prompt not in serialized_log
+    assert output not in serialized_log
+
+    metrics = generate_latest().decode("utf-8")
+    assert "llm_request_total" in metrics
+    assert "llm_estimated_cost_usd_total" in metrics
+    assert "llm_input_tokens_total" in metrics
+    assert "llm_output_tokens_total" in metrics
+    assert "llm_cached_input_tokens_total" in metrics
+    assert "llm_latency_seconds_bucket" in metrics
+    assert "llm_cross_provider_fallback_total" in metrics
+    assert 'provider="openai"' in metrics
+    assert 'model_tier="mini"' in metrics
+    assert 'operation="refine.focused"' in metrics
+    assert 'stage_type="spec"' in metrics
+    assert 'cache_hit="true"' in metrics
+    assert system_prompt not in metrics
+    assert user_prompt not in metrics
+    assert output not in metrics
