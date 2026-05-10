@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 from collections.abc import AsyncGenerator
@@ -25,6 +26,11 @@ from services import langfuse_service
 from services.credit_service import CREDIT_COSTS, credit_service
 from services.evals.online_eval import run_eval_background
 from services.llm.base import ProviderError
+from services.llm.cost_cache import (
+    build_generation_cache_key,
+    get_cached_generation,
+    set_cached_generation,
+)
 from services.llm.gateway import get_llm
 from services.llm.output_budget import output_budget_for_operation
 from services.llm.provider_config import JUDGE_MODELS
@@ -132,6 +138,20 @@ def _refine_document_context(
     prefix = "[...]\n" if start > 0 else ""
     suffix = "\n[...]" if end < len(content) else ""
     return f"{prefix}{content[start:end]}{suffix}"
+
+
+def _hash_text(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _upstream_artifact_hashes(workspace: Workspace, stage_type: str) -> dict[str, str]:
+    dependencies = STAGE_DEPENDENCIES[stage_type]
+    stages_by_type = {stage.type: stage for stage in workspace.stages}
+    return {
+        dep_type: _hash_text(stages_by_type.get(dep_type).content or "")
+        for dep_type in dependencies
+        if stages_by_type.get(dep_type) is not None
+    }
 
 
 STAGE_DEPENDENCIES: dict[str, list[str]] = {
@@ -273,6 +293,39 @@ class StageManager:
         if not await sliding_window_check(redis, f"llm_daily:{user.id}", 200, 86400):
             raise RateLimitError(retry_after=86400)
 
+        route = _route_for_stage_generation(stage.type, workspace)
+        system_prompt, user_prompt = await build_prompt(stage.type, workspace, db, redis)
+        cache_key = build_generation_cache_key(
+            prompt_version=STAGE_PROMPT_VERSIONS[stage.type],
+            stage_type=stage.type,
+            operation=route.operation,
+            provider=route.provider,
+            model=route.model,
+            model_tier=route.model_tier,
+            problem_statement_hash=_hash_text(workspace.problem_statement),
+            upstream_artifact_hashes=_upstream_artifact_hashes(workspace, stage.type),
+            user_instruction_hash=_hash_text(""),
+            output_contract_version=f"{stage.type}-v1",
+        )
+        cached_output = await get_cached_generation(redis, cache_key)
+        if cached_output is not None:
+            stage.content = cached_output
+            stage.current_version += 1
+            stage.status = "draft"
+            stage.updated_at = datetime.now(UTC)
+            version = StageVersion(
+                stage_id=stage.id,
+                version=stage.current_version,
+                content=cached_output,
+                created_by="ai",
+            )
+            db.add(version)
+            await db.commit()
+            await self._invalidate_stage_cache(workspace.id, stage.type, redis)
+            yield cached_output
+            yield f'{{"done": true, "stage_id": "{stage_id}"}}'
+            return
+
         deduction = await credit_service.deduct(
             db, user.id, CREDIT_COSTS["generate"], "generate"
         )
@@ -283,8 +336,8 @@ class StageManager:
         await db.commit()
 
         # _cleanup_done starts False immediately after the commit so that any
-        # exception — including a build_prompt() failure — enters the finally
-        # cleanup path and refunds credits + resets the stage to draft.
+        # exception enters the finally cleanup path and refunds credits + resets
+        # the stage to draft.
         _cleanup_done = False
         span_id: str | None = None
         span_finished = False
@@ -298,14 +351,9 @@ class StageManager:
                     action="generate",
                 )
 
-            system_prompt, user_prompt = await build_prompt(
-                stage.type, workspace, db, redis
-            )
-
             accumulated = ""
             content_generation_id: str | None = None
             try:
-                route = _route_for_stage_generation(stage.type, workspace)
                 adapter = get_llm(route.provider, route.model)
                 if trace_id:
                     from services.llm.instrumented_adapter import InstrumentedAdapter
@@ -383,6 +431,7 @@ class StageManager:
                 )
             await db.commit()
             _cleanup_done = True
+            await set_cached_generation(redis, cache_key, accumulated)
             if span_id:
                 await self._end_langfuse_span(span_id)
                 span_finished = True
@@ -507,6 +556,38 @@ class StageManager:
             f"Refine mode: {request.mode}\n"
             "Provide the replacement text only."
         )
+        cache_key = build_generation_cache_key(
+            prompt_version=STAGE_PROMPT_VERSIONS[stage.type],
+            stage_type=stage.type,
+            operation=route.operation,
+            provider=route.provider,
+            model=route.model,
+            model_tier=route.model_tier,
+            problem_statement_hash=_hash_text(workspace.problem_statement),
+            upstream_artifact_hashes={
+                stage.type: _hash_text(content),
+                "selection": _hash_text(request.selected_text),
+            },
+            user_instruction_hash=_hash_text(
+                f"{request.mode}:{request.selection_start}:{request.selection_end}:"
+                f"{request.instruction}"
+            ),
+            output_contract_version="refine-v1",
+        )
+        cached_replacement = await get_cached_generation(redis, cache_key)
+        if cached_replacement is not None:
+            proposed = apply_diff(
+                content,
+                request.selection_start,
+                request.selection_end,
+                cached_replacement,
+            )
+            return DiffResponse(
+                diff=compute_diff(content, proposed),
+                original=content,
+                proposed=proposed,
+                large_selection=large_selection,
+            )
 
         deduction = await credit_service.deduct(
             db, user.id, CREDIT_COSTS["refine"], "refine"
@@ -556,6 +637,7 @@ class StageManager:
                 raise SecurityError(
                     f"Refine output failed validation: {validation.reason}"
                 )
+            await set_cached_generation(redis, cache_key, replacement)
         except (ProviderError, SecurityError, TimeoutError) as exc:
             await credit_service.refund(db, deduction.id, user.id)
             if span_id:
