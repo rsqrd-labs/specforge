@@ -11,7 +11,9 @@ from config import settings
 from database import AsyncSessionLocal
 from models import EvalResult
 from services import langfuse_service
+from services.llm.batch_executor import complete_background_llm
 from services.llm.gateway import get_llm
+from services.llm.output_budget import output_budget_for_operation
 from services.llm.provider_config import JUDGE_MODELS
 
 logger = logging.getLogger(__name__)
@@ -98,14 +100,24 @@ async def run_eval(
 ) -> EvalResult | None:
     try:
         resolved_judge_model = judge_model or JUDGE_MODELS[provider]
-        judge = get_llm(provider, resolved_judge_model)
         user_prompt = _STAGE_PROMPTS[stage_type].format(
             content=content, spec_content=spec_content
         )
-        raw = await asyncio.wait_for(
-            judge.complete(_JUDGE_SYSTEM, user_prompt, max_tokens=1024),
+        result = await asyncio.wait_for(
+            complete_background_llm(
+                operation="eval.score",
+                provider=provider,
+                model=resolved_judge_model,
+                system=_JUDGE_SYSTEM,
+                user=user_prompt,
+                max_tokens=output_budget_for_operation("eval.score"),
+                stage_type="eval",
+                prompt_version="eval-v1",
+                adapter_factory=get_llm,
+            ),
             timeout=settings.llm_complete_timeout_seconds,
         )
+        raw = result.output
     except Exception:
         logger.exception(
             "eval judge call failed for stage_version_id=%s", stage_version_id
