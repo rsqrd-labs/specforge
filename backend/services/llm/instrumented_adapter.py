@@ -34,6 +34,7 @@ import structlog
 
 from services import langfuse_service
 from services.llm.base import BaseLLMAdapter
+from services.llm.usage import estimated_usage_from_text, estimate_cost_usd
 from services.observability import redact_sensitive_data
 
 logger = structlog.get_logger(__name__)
@@ -50,6 +51,12 @@ class InstrumentedAdapter(BaseLLMAdapter):
         model: str,
         stage_type: str,
         action: str,
+        model_tier: str | None = None,
+        prompt_version: str = "local",
+        operation: str | None = None,
+        cache_hit: bool = False,
+        batch: bool = False,
+        cross_provider_fallback: bool = False,
     ) -> None:
         self._wrapped = wrapped
         self._span_id = span_id
@@ -58,6 +65,12 @@ class InstrumentedAdapter(BaseLLMAdapter):
         self._model = model
         self._stage_type = stage_type
         self._action = action
+        self._model_tier = model_tier or "unknown"
+        self._prompt_version = prompt_version
+        self._operation = operation or action
+        self._cache_hit = cache_hit
+        self._batch = batch
+        self._cross_provider_fallback = cross_provider_fallback
         # Set after each recorded generation so downstream code (T-127 eval
         # score linking) can attach scores or dataset items to the same id.
         self.last_generation_id: str | None = None
@@ -110,6 +123,12 @@ class InstrumentedAdapter(BaseLLMAdapter):
             latency_ms = int((time.perf_counter() - start) * 1000)
             redacted_input = redact_sensitive_data({"system": system, "user": user})
             redacted_output = redact_sensitive_data(output)
+            cost_metadata = self._cost_metadata(
+                system=system,
+                user=user,
+                output=str(output),
+                latency_ms=latency_ms,
+            )
             client = langfuse_service.get_langfuse_client()
             generation_id = await client.create_generation(
                 span_id=self._span_id,
@@ -123,8 +142,10 @@ class InstrumentedAdapter(BaseLLMAdapter):
                     "stage_type": self._stage_type,
                     "action": self._action,
                     "latency_ms": latency_ms,
+                    **cost_metadata,
                 },
             )
+            logger.info("llm.cost_recorded", **cost_metadata)
             self.last_generation_id = generation_id
         except Exception:
             # Defensive: a bug in the wrapper itself must never break the
@@ -132,3 +153,44 @@ class InstrumentedAdapter(BaseLLMAdapter):
             # used in tests can raise; this final guard preserves the
             # streaming contract.
             logger.error("instrumented_adapter.record.failed", exc_info=True)
+
+    def _cost_metadata(
+        self,
+        *,
+        system: str,
+        user: str,
+        output: str,
+        latency_ms: int,
+    ) -> dict[str, Any]:
+        usage = estimated_usage_from_text(
+            provider=self._provider,
+            model=self._model,
+            system=system,
+            user=user,
+            output=output,
+        )
+        try:
+            estimated_cost = estimate_cost_usd(self._provider, self._model, usage)
+        except Exception:
+            estimated_cost = None
+
+        return {
+            "provider": self._provider,
+            "model": self._model,
+            "model_tier": self._model_tier,
+            "prompt_version": self._prompt_version,
+            "stage_type": self._stage_type,
+            "operation": self._operation,
+            "input_tokens": usage.input_tokens,
+            "cached_input_tokens": usage.cached_input_tokens,
+            "output_tokens": usage.output_tokens,
+            "provider_usage_raw": usage.provider_usage_raw,
+            "usage_estimation_method": usage.usage_estimation_method,
+            "estimated_cost_usd": (
+                float(estimated_cost) if estimated_cost is not None else None
+            ),
+            "latency_ms": latency_ms,
+            "cache_hit": self._cache_hit,
+            "batch": self._batch,
+            "cross_provider_fallback": self._cross_provider_fallback,
+        }

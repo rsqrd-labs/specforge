@@ -282,6 +282,12 @@ class StageManager:
                         model=route.model,
                         stage_type=stage.type,
                         action="generate",
+                        model_tier=route.model_tier,
+                        prompt_version="local",
+                        operation=route.operation,
+                        cache_hit=False,
+                        batch=False,
+                        cross_provider_fallback=route.cross_provider_fallback,
                     )
                 async with asyncio.timeout(settings.llm_stream_timeout_seconds):
                     async for token in adapter.stream(
@@ -484,6 +490,12 @@ class StageManager:
                     model=route.model,
                     stage_type=stage.type,
                     action="refine",
+                    model_tier=route.model_tier,
+                    prompt_version="local",
+                    operation=route.operation,
+                    cache_hit=False,
+                    batch=False,
+                    cross_provider_fallback=route.cross_provider_fallback,
                 )
             replacement = await asyncio.wait_for(
                 adapter.complete(system_prompt, user_prompt, max_tokens=4096),
