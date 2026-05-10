@@ -26,6 +26,7 @@ from services.credit_service import CREDIT_COSTS, credit_service
 from services.evals.online_eval import run_eval_background
 from services.llm.base import ProviderError
 from services.llm.gateway import get_llm
+from services.llm.output_budget import output_budget_for_operation
 from services.llm.provider_config import JUDGE_MODELS
 from services.llm.routing import LLMRoute, resolve_llm_route
 from services.pipeline.diff_engine import apply_diff, compute_diff
@@ -91,15 +92,46 @@ def _route_for_stage_generation(stage_type: str, workspace: Workspace) -> LLMRou
     )
 
 
-def _route_for_refine(workspace: Workspace) -> LLMRoute:
+def _route_for_refine(workspace: Workspace, mode: str) -> LLMRoute:
+    operation = {
+        "focused": "refine.focused",
+        "section": "refine.section",
+        "full": "regenerate.full",
+    }[mode]
+    requested_tier = {
+        "focused": "mini",
+        "section": "mid",
+        "full": "strong",
+    }[mode]
+    fallback_tier = {
+        "focused": "mid",
+        "section": "mini",
+        "full": "mid",
+    }[mode]
     return resolve_llm_route(
-        operation="refine.focused",
+        operation=operation,
         preferred_provider=workspace.provider,
         preferred_model=workspace.model,
-        requested_tier="mini",
-        fallback_tier="mid",
+        requested_tier=requested_tier,
+        fallback_tier=fallback_tier,
         latency_class="interactive",
     )
+
+
+def _refine_document_context(
+    content: str,
+    selection_start: int,
+    selection_end: int,
+    mode: str,
+) -> str:
+    if mode in {"section", "full"}:
+        return content
+    window = 2000
+    start = max(selection_start - window, 0)
+    end = min(selection_end + window, len(content))
+    prefix = "[...]\n" if start > 0 else ""
+    suffix = "\n[...]" if end < len(content) else ""
+    return f"{prefix}{content[start:end]}{suffix}"
 
 
 STAGE_DEPENDENCIES: dict[str, list[str]] = {
@@ -295,7 +327,9 @@ class StageManager:
                     )
                 async with asyncio.timeout(settings.llm_stream_timeout_seconds):
                     async for token in adapter.stream(
-                        system_prompt, user_prompt, max_tokens=8192
+                        system_prompt,
+                        user_prompt,
+                        max_tokens=output_budget_for_operation(route.operation),
                     ):
                         accumulated += token
                         yield token
@@ -456,13 +490,21 @@ class StageManager:
         )
         sanitized_instruction = sanitize_text(request.instruction)
         sanitized_selected_text = sanitize_text(request.selected_text)
+        route = _route_for_refine(workspace, request.mode)
+        document_context = _refine_document_context(
+            content,
+            request.selection_start,
+            request.selection_end,
+            request.mode,
+        )
         user_prompt = (
             f"Current document:\n"
-            f"{wrap_untrusted_content('current_document', content)}\n\n"
+            f"{wrap_untrusted_content('current_document', document_context)}\n\n"
             f"Selected text:\n"
             f"{wrap_untrusted_content('selected_text', sanitized_selected_text)}\n\n"
             f"Instruction:\n"
             f"{wrap_untrusted_content('instruction', sanitized_instruction)}\n\n"
+            f"Refine mode: {request.mode}\n"
             "Provide the replacement text only."
         )
 
@@ -481,7 +523,6 @@ class StageManager:
                     stage=stage,
                     action="refine",
                 )
-            route = _route_for_refine(workspace)
             adapter = get_llm(route.provider, route.model)
             if trace_id:
                 from services.llm.instrumented_adapter import InstrumentedAdapter
@@ -502,7 +543,11 @@ class StageManager:
                     cross_provider_fallback=route.cross_provider_fallback,
                 )
             replacement = await asyncio.wait_for(
-                adapter.complete(system_prompt, user_prompt, max_tokens=4096),
+                adapter.complete(
+                    system_prompt,
+                    user_prompt,
+                    max_tokens=output_budget_for_operation(route.operation),
+                ),
                 timeout=settings.llm_complete_timeout_seconds,
             )
 

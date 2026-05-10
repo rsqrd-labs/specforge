@@ -119,6 +119,9 @@ export default function Workspace() {
     null,
   )
   const [refineInstruction, setRefineInstruction] = useState("")
+  const [refineMode, setRefineMode] = useState<"focused" | "section" | "full">(
+    "focused",
+  )
   const [showRefineInput, setShowRefineInput] = useState(false)
   const [selection, setSelection] = useState<{
     start: number
@@ -311,6 +314,7 @@ export default function Workspace() {
 
     setSelection(currentSelection)
     setRefineInstruction("")
+    setRefineMode("focused")
     setShowRefineInput(true)
     setError(null)
   }, [activeStage])
@@ -368,6 +372,7 @@ export default function Workspace() {
         selection_start: selection.start,
         selection_end: selection.end,
         selected_text: selection.text,
+        mode: refineMode,
       })
       setDiffResult(result)
       setLargeSelectionWarning(result.large_selection)
@@ -375,7 +380,7 @@ export default function Workspace() {
     } catch {
       setError("Refine failed. Check your selection and try again.")
     }
-  }, [activeStage, selection, refineInstruction, setStage])
+  }, [activeStage, selection, refineInstruction, refineMode, setStage])
 
   const acceptDiff = useCallback(
     async (proposed: string) => {
@@ -738,6 +743,22 @@ export default function Workspace() {
             className="refine-bar"
             onSubmit={(e) => { e.preventDefault(); void runRefine() }}
           >
+            <div className="refine-mode-toggle" aria-label="Refine scope">
+              {(["focused", "section", "full"] as const).map((mode) => (
+                <button
+                  key={mode}
+                  type="button"
+                  className={refineMode === mode ? "active" : ""}
+                  onClick={() => setRefineMode(mode)}
+                >
+                  {mode === "focused"
+                    ? "Focused"
+                    : mode === "section"
+                      ? "Section"
+                      : "Full"}
+                </button>
+              ))}
+            </div>
             <input
               value={refineInstruction}
               onChange={(e) => setRefineInstruction(e.target.value)}

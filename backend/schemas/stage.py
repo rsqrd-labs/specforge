@@ -19,6 +19,7 @@ class RefineRequest(BaseModel):
     selection_start: int = Field(ge=0)
     selection_end: int = Field(ge=0)
     selected_text: str = Field(min_length=1, max_length=100_000)
+    mode: Literal["focused", "section", "full"] = "focused"
 
     model_config = ConfigDict(from_attributes=True)
 

@@ -405,4 +405,5 @@ export interface RefineStagePayload {
   selection_start: number
   selection_end: number
   selected_text: string
+  mode?: "focused" | "section" | "full"
 }

@@ -747,6 +747,83 @@ async def test_refine_matches_raw_selection_but_sanitizes_prompt_fields() -> Non
 
 
 @pytest.mark.asyncio
+async def test_focused_refine_uses_small_budget_and_context_window() -> None:
+    from schemas.stage import RefineRequest
+
+    workspace_id = uuid4()
+    content = f"{'a' * 3000}hello{'b' * 3000}"
+    stage = _make_stage(workspace_id, "spec", status="draft", content=content)
+    workspace = _make_workspace([stage])
+    user = _make_user()
+    request = RefineRequest(
+        instruction="improve",
+        selection_start=3000,
+        selection_end=3005,
+        selected_text="hello",
+    )
+
+    svc = StageManager(redis_client=_FakeRedis())
+    db = _MultiQueryDB([stage, workspace])
+    deduction = CreditLedger(id=uuid4(), user_id=user.id, amount=-3, reason="refine")
+    with (
+        patch(
+            "services.pipeline.stage_manager.credit_service.deduct",
+            new_callable=AsyncMock,
+            return_value=deduction,
+        ),
+        patch("services.pipeline.stage_manager.get_llm") as mock_get_llm,
+    ):
+        mock_adapter = MagicMock()
+        mock_adapter.complete = AsyncMock(return_value="hi")
+        mock_get_llm.return_value = mock_adapter
+
+        await svc.refine(stage.id, request, user, db)
+
+    _, user_prompt = mock_adapter.complete.await_args.args[:2]
+    assert mock_adapter.complete.await_args.kwargs["max_tokens"] == 2048
+    assert "Refine mode: focused" in user_prompt
+    assert content not in user_prompt
+    assert "[...]" in user_prompt
+
+
+@pytest.mark.asyncio
+async def test_section_refine_uses_section_budget() -> None:
+    from schemas.stage import RefineRequest
+
+    workspace_id = uuid4()
+    content = "hello world"
+    stage = _make_stage(workspace_id, "spec", status="draft", content=content)
+    workspace = _make_workspace([stage])
+    user = _make_user()
+    request = RefineRequest(
+        instruction="improve",
+        selection_start=0,
+        selection_end=5,
+        selected_text="hello",
+        mode="section",
+    )
+
+    svc = StageManager(redis_client=_FakeRedis())
+    db = _MultiQueryDB([stage, workspace])
+    deduction = CreditLedger(id=uuid4(), user_id=user.id, amount=-3, reason="refine")
+    with (
+        patch(
+            "services.pipeline.stage_manager.credit_service.deduct",
+            new_callable=AsyncMock,
+            return_value=deduction,
+        ),
+        patch("services.pipeline.stage_manager.get_llm") as mock_get_llm,
+    ):
+        mock_adapter = MagicMock()
+        mock_adapter.complete = AsyncMock(return_value="hi")
+        mock_get_llm.return_value = mock_adapter
+
+        await svc.refine(stage.id, request, user, db)
+
+    assert mock_adapter.complete.await_args.kwargs["max_tokens"] == 4096
+
+
+@pytest.mark.asyncio
 async def test_generate_raises_rate_limit_error_when_llm_limit_exceeded() -> None:
     """11th LLM call in 60 seconds raises RateLimitError before credit deduction."""
     from services.pipeline.stage_manager import RateLimitError
