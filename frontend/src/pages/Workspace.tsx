@@ -13,6 +13,7 @@ import { StreamingOverlay } from "../components/workspace/StreamingOverlay"
 import { MarkdownRenderer } from "../components/workspace/MarkdownRenderer"
 import { ProblemStatementPanel } from "../components/workspace/ProblemStatementPanel"
 import { TaskValidationPanel } from "../components/workspace/TaskValidationPanel"
+import { PROVIDERS } from "../config/providers"
 import { useCredits } from "../hooks/useCredits"
 import { useStream } from "../hooks/useStream"
 import {
@@ -87,6 +88,23 @@ function previousStageType(type: StageType): StageType {
 
 function formatStageStatus(status: Stage["status"]): string {
   return status.replace("_", " ")
+}
+
+function formatProviderModel(providerId: string, modelId: string): string {
+  const provider = PROVIDERS.find((candidate) => candidate.id === providerId)
+  const model = provider?.models.find((candidate) => candidate.id === modelId)
+
+  return `${provider?.name ?? titleCaseIdentifier(providerId)} / ${
+    model?.name ?? modelId
+  }`
+}
+
+function titleCaseIdentifier(value: string): string {
+  return value
+    .split(/[-_\s]+/)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ")
 }
 
 function useAnimatedNumber(value: number | null, duration = 750) {
@@ -185,6 +203,9 @@ export default function Workspace() {
     Boolean(problemDraft.trim())
   const creditFillPercent =
     balance === null ? 0 : Math.max(0, Math.min((balance / 100) * 100, 100))
+  const providerModelLabel = currentWorkspace
+    ? formatProviderModel(currentWorkspace.provider, currentWorkspace.model)
+    : ""
 
   useEffect(() => {
     if (id) {
@@ -679,9 +700,9 @@ export default function Workspace() {
               </span>
               <span
                 className="workspace-model-chip"
-                title={`${currentWorkspace.provider} / ${currentWorkspace.model}`}
+                title={providerModelLabel}
               >
-                Model route
+                {providerModelLabel}
               </span>
             </div>
             <QualityBadge evalResult={evalResult} />
