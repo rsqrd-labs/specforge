@@ -176,3 +176,42 @@ Key design decisions:
    Mid-quality scores from 60 through 84 are not collected.
 8. CI runs the contract tests with `LANGFUSE_SECRET_KEY` unset to enforce the
    no-op invariant. No user-facing feature depends on Langfuse availability.
+
+---
+
+## Phase 12 — Provider-Agnostic LLM Cost Optimization
+
+**Date:** 2026-05-10 | **CI status:** Phase 12 harness wired into CI.
+
+Phase 12 adds provider-neutral cost controls across routing, caching,
+telemetry, output budgets, preflight gates, route quality gates, background
+batch execution, and cost-aware UX.
+
+Non-negotiable invariants:
+
+1. Provider metadata lives in `services.llm.cost_registry`; stage logic must
+   route by operation and tier, not by hard-coded OpenAI/Anthropic/Google model
+   names.
+2. Cross-provider fallback is never silent. It requires an explicit policy flag
+   and must remain visible in logs and Prometheus metrics.
+3. Prompt moat prefixes remain static, versioned, and cacheable. Dynamic user
+   or upstream context belongs after the stable ASDD/security prefix.
+4. Generation cache keys must include provider, model, tier, operation, prompt
+   version, problem hash, upstream artifact hashes, user instruction hash, and
+   output contract version.
+5. `llm.cost_recorded` and Prometheus metrics must never include prompt text,
+   model output text, API keys, bearer tokens, or PII.
+6. Interactive operations (`spec.generate`, `plan.generate`, `harness.generate`,
+   `tasks.generate`, `refine.*`, `regenerate.full`) must not use the batch path.
+7. Cheaper defaults require golden-dataset evidence from
+   `scripts/run_llm_route_eval.py`, no deterministic regression, no security
+   coverage regression, and human/operator approval.
+
+Validation commands:
+
+```bash
+cd backend
+uv run pytest ../harness/tests/backend/test_phase12_llm_cost_contract.py -q
+python3 -m json.tool ../harness/schemas/llm-cost-event.schema.json >/dev/null
+uv run python ../scripts/run_llm_route_eval.py --operation all --provider openai --format markdown
+```

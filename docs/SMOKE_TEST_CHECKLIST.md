@@ -71,6 +71,24 @@ troubleshooting during smoke, use `docs/OBSERVABILITY_RUNBOOK.md`.
 
 ---
 
+## Phase 12 — Provider-Agnostic Cost Smoke
+
+Run first with only the OpenAI key configured in staging. Repeat with Anthropic
+and Google keys when those providers are enabled for the environment.
+
+| # | Test | Result | Notes |
+|---|------|--------|-------|
+| P12-1 | OpenAI-only: generate SPEC, PLAN, HARNESS, and TASKS successfully | 🔲 | |
+| P12-2 | Logs contain `llm.cost_recorded` for each provider call | 🔲 | |
+| P12-3 | Cost log fields include provider, model_tier, operation, stage_type, prompt_version, input/output tokens, estimated_cost_usd, cache_hit, batch, and cross_provider_fallback | 🔲 | |
+| P12-4 | Prometheus `/metrics` includes `llm_request_total`, `llm_estimated_cost_usd_total`, token totals, latency buckets, and cross-provider fallback counter | 🔲 | |
+| P12-5 | Cross-provider fallback remains `false` during OpenAI-only smoke unless an explicit fallback test is being run | 🔲 | |
+| P12-6 | Repeat SPEC/PLAN/HARNESS/TASKS generation with Anthropic key configured | 🔲 | |
+| P12-7 | Repeat SPEC/PLAN/HARNESS/TASKS generation with Google key configured | 🔲 | |
+| P12-8 | Run dry route eval: `cd backend && uv run python ../scripts/run_llm_route_eval.py --operation all --provider openai --format markdown` | 🔲 | |
+
+---
+
 ## SPEC Stage — Refine Flow
 
 | # | Test | Result | Notes |

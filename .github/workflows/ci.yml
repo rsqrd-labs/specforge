@@ -105,6 +105,26 @@ jobs:
           CSRF_SECRET: "ci-test-csrf-secret-value-long-enough"
           ENVIRONMENT: "test"
 
+      - name: Phase 12 provider-agnostic cost harness
+        run: uv run pytest ../harness/tests/backend/test_phase12_llm_cost_contract.py -q
+        env:
+          DATABASE_URL: "postgresql+asyncpg://postgres:postgres@localhost:5432/test"
+          REDIS_URL: "redis://localhost:6379/0"
+          JWT_PRIVATE_KEY: "ci-test-private-key"
+          JWT_PUBLIC_KEY: "ci-test-public-key"
+          GOOGLE_CLIENT_ID: "ci-test-client-id"
+          GOOGLE_CLIENT_SECRET: "ci-test-client-secret"
+          FRONTEND_URL: "http://localhost:5173"
+          ANTHROPIC_API_KEY: "ci-test-anthropic-key"
+          OPENAI_API_KEY: "ci-test-openai-key"
+          GOOGLE_API_KEY: "ci-test-google-key"
+          ENCRYPTION_MASTER_KEY: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+          CSRF_SECRET: "ci-test-csrf-secret-value-long-enough"
+          ENVIRONMENT: "test"
+
+      - name: Phase 12 cost event schema
+        run: python3 -m json.tool ../harness/schemas/llm-cost-event.schema.json >/dev/null
+
   frontend:
     name: Frontend
     runs-on: ubuntu-latest

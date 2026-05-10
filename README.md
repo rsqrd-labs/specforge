@@ -322,6 +322,40 @@ Smoke-test guidance:
 docs/SMOKE_TEST_CHECKLIST.md
 ```
 
+Phase 12 provider-agnostic cost checks:
+
+```bash
+cd backend
+uv run pytest ../harness/tests/backend/test_phase12_llm_cost_contract.py -q
+python3 -m json.tool ../harness/schemas/llm-cost-event.schema.json >/dev/null
+uv run python ../scripts/run_llm_route_eval.py --operation all --provider openai --format markdown
+```
+
+## Provider-Agnostic LLM Cost Optimization
+
+SpecForge keeps cost optimization provider-neutral. `services.llm.cost_registry`
+is the static source of truth for OpenAI, Anthropic, and Google model tiers,
+costs, context limits, usage support, prompt-cache accounting, and batch support.
+Stage logic routes by operation and tier (`strong`, `mid`, `mini`, `small`) via
+`resolve_llm_route()` instead of hard-coding provider model names.
+
+Key invariants:
+
+- OpenAI, Anthropic, and Google keys are optional per environment, but configured
+  providers must use `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, and `GOOGLE_API_KEY`.
+- Cross-provider fallback is never silent. It requires an explicit
+  `allow_cross_provider=True` policy decision and is reported in telemetry.
+- Prompt moat prefixes are versioned and stable so dynamic context can be cached
+  and summarized without rewriting core ASDD instructions.
+- Generation/refine cache keys include provider, model, tier, prompt version,
+  operation, problem hash, upstream hashes, instruction hash, and output contract.
+- `llm.cost_recorded` logs and Prometheus metrics include provider, model tier,
+  operation, stage type, prompt version, token counts, estimated cost, cache hit,
+  batch flag, latency, and cross-provider fallback. They must not include prompt
+  or output text.
+- Cheaper defaults require evidence from `scripts/run_llm_route_eval.py`, the
+  golden prompt dataset, and manual operator approval.
+
 ## Security Model
 
 SpecForge includes several controls intended for AI-assisted workflows:
