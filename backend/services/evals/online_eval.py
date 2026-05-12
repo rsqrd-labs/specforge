@@ -18,6 +18,19 @@ from services.llm.output_budget import output_budget_for_operation
 from services.llm.provider_config import JUDGE_MODELS
 
 logger = logging.getLogger(__name__)
+_EVAL_TIMEOUT_SECONDS = 90.0
+_PROMPT_LIMITS: dict[str, tuple[int, int]] = {
+    "spec": (0, 28_000),
+    "plan": (10_000, 18_000),
+    "harness": (10_000, 20_000),
+    "tasks": (10_000, 14_000),
+}
+_COMPACT_RETRY_LIMITS: dict[str, tuple[int, int]] = {
+    "spec": (0, 14_000),
+    "plan": (5_000, 9_000),
+    "harness": (5_000, 10_000),
+    "tasks": (5_000, 8_000),
+}
 
 _JUDGE_SYSTEM = (
     "You are an independent senior product and software engineering evaluator. "
@@ -101,7 +114,7 @@ _STAGE_PROMPTS: dict[str, str] = {
         '"referenced_test": string or null}} for any task that lacks a clear test or '
         "harness reference.\n\n"
         f"{_RUBRIC}\n\n"
-        "Spec:\n{spec_content}\n\nTasks:\n{content}"
+        "Reference context:\n{spec_content}\n\nTasks:\n{content}"
     ),
 }
 
@@ -267,12 +280,90 @@ def _normalise_eval_payload(stage_type: str, data: dict[str, Any]) -> dict[str, 
     }
 
 
-def _build_eval_prompt(stage_type: str, content: str, spec_content: str) -> str:
+def _compact_text(value: str, limit: int) -> str:
+    if limit <= 0 or len(value) <= limit:
+        return value
+    head = max(0, int(limit * 0.65))
+    tail = max(0, limit - head)
+    omitted = len(value) - head - tail
+    return (
+        value[:head].rstrip()
+        + f"\n\n[... {omitted} characters omitted for eval budget ...]\n\n"
+        + value[-tail:].lstrip()
+    )
+
+
+def _build_eval_prompt(
+    stage_type: str,
+    content: str,
+    spec_content: str,
+    *,
+    compact: bool = False,
+) -> str:
+    context_limit, content_limit = (
+        _COMPACT_RETRY_LIMITS if compact else _PROMPT_LIMITS
+    ).get(stage_type, _PROMPT_LIMITS["spec"])
+    context = _compact_text(spec_content, context_limit)
+    artifact = _compact_text(content, content_limit)
     return (
         _STAGE_PROMPTS[stage_type]
-        .replace("{spec_content}", spec_content)
-        .replace("{content}", content)
+        .replace("{spec_content}", context)
+        .replace("{content}", artifact)
     )
+
+
+async def _call_eval_judge(
+    *,
+    provider: str,
+    model: str,
+    user_prompt: str,
+) -> str:
+    result = await asyncio.wait_for(
+        complete_background_llm(
+            operation="eval.score",
+            provider=provider,
+            model=model,
+            system=_JUDGE_SYSTEM,
+            user=user_prompt,
+            max_tokens=output_budget_for_operation("eval.score"),
+            stage_type="eval",
+            prompt_version="eval-v2",
+            adapter_factory=get_llm,
+        ),
+        timeout=max(settings.llm_complete_timeout_seconds, _EVAL_TIMEOUT_SECONDS),
+    )
+    return result.output
+
+
+async def _score_with_retry(
+    *,
+    stage_version_id: UUID,
+    stage_type: str,
+    content: str,
+    spec_content: str,
+    provider: str,
+    model: str,
+) -> str | None:
+    for compact in (False, True):
+        user_prompt = _build_eval_prompt(
+            stage_type,
+            content,
+            spec_content,
+            compact=compact,
+        )
+        try:
+            return await _call_eval_judge(
+                provider=provider,
+                model=model,
+                user_prompt=user_prompt,
+            )
+        except Exception:
+            logger.exception(
+                "eval judge call failed for stage_version_id=%s compact=%s",
+                stage_version_id,
+                compact,
+            )
+    return None
 
 
 async def _add_generation_to_dataset(
@@ -305,28 +396,16 @@ async def run_eval(
     judge_model: str | None = None,
     content_generation_id: str | None = None,
 ) -> EvalResult | None:
-    try:
-        resolved_judge_model = judge_model or JUDGE_MODELS[provider]
-        user_prompt = _build_eval_prompt(stage_type, content, spec_content)
-        result = await asyncio.wait_for(
-            complete_background_llm(
-                operation="eval.score",
-                provider=provider,
-                model=resolved_judge_model,
-                system=_JUDGE_SYSTEM,
-                user=user_prompt,
-                max_tokens=output_budget_for_operation("eval.score"),
-                stage_type="eval",
-                prompt_version="eval-v2",
-                adapter_factory=get_llm,
-            ),
-            timeout=settings.llm_complete_timeout_seconds,
-        )
-        raw = result.output
-    except Exception:
-        logger.exception(
-            "eval judge call failed for stage_version_id=%s", stage_version_id
-        )
+    resolved_judge_model = judge_model or JUDGE_MODELS[provider]
+    raw = await _score_with_retry(
+        stage_version_id=stage_version_id,
+        stage_type=stage_type,
+        content=content,
+        spec_content=spec_content,
+        provider=provider,
+        model=resolved_judge_model,
+    )
+    if raw is None:
         return None
 
     try:
@@ -337,7 +416,25 @@ async def run_eval(
             stage_version_id,
             raw[:200],
         )
-        return None
+        retry_raw = await _score_with_retry(
+            stage_version_id=stage_version_id,
+            stage_type=stage_type,
+            content=content,
+            spec_content=spec_content,
+            provider=provider,
+            model=resolved_judge_model,
+        )
+        if retry_raw is None:
+            return None
+        try:
+            data = json.loads(retry_raw)
+        except json.JSONDecodeError:
+            logger.error(
+                "eval judge retry returned non-JSON for stage_version_id=%s: %r",
+                stage_version_id,
+                retry_raw[:200],
+            )
+            return None
 
     normalised = _normalise_eval_payload(stage_type, data)
     coverage_percent: int | None = normalised["coverage_percent"]

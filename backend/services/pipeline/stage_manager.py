@@ -487,10 +487,10 @@ class StageManager:
             db.add(version)
             await db.flush()
             version_id = version.id
-            spec_content = ""
+            eval_context = ""
             if stage.type != "spec":
-                spec_content = (
-                    await redis.get(f"{_STAGE_CACHE_PREFIX}{workspace.id}:spec") or ""
+                eval_context = await self._eval_context_for_stage(
+                    workspace.id, stage.type
                 )
             await db.commit()
             _cleanup_done = True
@@ -504,7 +504,7 @@ class StageManager:
                     version_id,
                     stage.type,
                     accumulated,
-                    spec_content,
+                    eval_context,
                     workspace.provider,
                     JUDGE_MODELS[workspace.provider],
                     content_generation_id=content_generation_id,
@@ -925,6 +925,23 @@ class StageManager:
         self, workspace_id: UUID, stage_type: str, redis: Redis
     ) -> None:
         await redis.delete(f"{_STAGE_CACHE_PREFIX}{workspace_id}:{stage_type}")
+
+    async def _eval_context_for_stage(self, workspace_id: UUID, stage_type: str) -> str:
+        redis = await self._redis_client()
+        if stage_type == "tasks":
+            spec = await redis.get(f"{_STAGE_CACHE_PREFIX}{workspace_id}:spec") or ""
+            harness = (
+                await redis.get(f"{_STAGE_CACHE_PREFIX}{workspace_id}:harness") or ""
+            )
+            return "\n\n".join(
+                part
+                for part in (
+                    f"Specification:\n{spec}" if spec else "",
+                    f"Test harness:\n{harness}" if harness else "",
+                )
+                if part
+            )
+        return await redis.get(f"{_STAGE_CACHE_PREFIX}{workspace_id}:spec") or ""
 
 
 stage_manager = StageManager()

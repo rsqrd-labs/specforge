@@ -865,6 +865,20 @@ async def test_mark_downstream_stale_tasks_stage_marks_nothing() -> None:
 
 
 @pytest.mark.asyncio
+async def test_eval_context_for_tasks_includes_spec_and_harness() -> None:
+    workspace_id = uuid4()
+    redis = _FakeRedis()
+    await redis.set(f"stage:{workspace_id}:spec", "spec content")
+    await redis.set(f"stage:{workspace_id}:harness", "harness content")
+    svc = StageManager(redis_client=redis)
+
+    context = await svc._eval_context_for_stage(workspace_id, "tasks")
+
+    assert "Specification:\nspec content" in context
+    assert "Test harness:\nharness content" in context
+
+
+@pytest.mark.asyncio
 async def test_refine_large_selection_85_percent_returns_true() -> None:
     """Selection covering 85% of document sets large_selection=True."""
     workspace_id = uuid4()

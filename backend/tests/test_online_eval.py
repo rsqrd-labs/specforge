@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
@@ -346,6 +347,31 @@ async def test_run_eval_tasks_flags_tasks_without_ref() -> None:
     assert result is not None
     assert result.flagged is True
     assert len(result.tasks_without_ref) == 1
+
+
+@pytest.mark.asyncio
+async def test_run_eval_retries_tasks_with_compact_prompt_after_timeout() -> None:
+    db = _FakeDB()
+    success = SimpleNamespace(
+        output='{"overall_score": 72, "completeness": 76, "clarity": 80}'
+    )
+    content = "Task details.\n" + ("x" * 30_000)
+    context = "Specification and harness.\n" + ("h" * 20_000)
+
+    with patch(
+        "services.evals.online_eval.complete_background_llm",
+        new_callable=AsyncMock,
+        side_effect=[TimeoutError(), success],
+    ) as complete_background_llm:
+        result = await run_eval(uuid4(), "tasks", content, context, db)
+
+    assert result is not None
+    assert result.overall_score == 72
+    assert complete_background_llm.await_count == 2
+    first_prompt = complete_background_llm.await_args_list[0].kwargs["user"]
+    retry_prompt = complete_background_llm.await_args_list[1].kwargs["user"]
+    assert "[..." in retry_prompt
+    assert len(retry_prompt) < len(first_prompt)
 
 
 @pytest.mark.asyncio
