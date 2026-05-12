@@ -262,11 +262,14 @@ async def get_eval(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ) -> dict:
-    await _load_stage(id, db, user.id)
+    stage = await _load_stage(id, db, user.id)
     result = await db.execute(
         select(EvalResult)
         .join(StageVersion, EvalResult.stage_version_id == StageVersion.id)
-        .where(StageVersion.stage_id == id)
+        .where(
+            StageVersion.stage_id == id,
+            StageVersion.version == stage.current_version,
+        )
         .order_by(desc(EvalResult.created_at))
         .limit(1)
     )

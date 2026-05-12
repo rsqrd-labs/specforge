@@ -213,6 +213,7 @@ export async function handleUnauthorizedResponse(
   const originalRequest = error.config as RetryableRequestConfig | undefined
 
   if (!originalRequest || !shouldAttemptRefresh(error)) {
+    setAccessToken(null)
     window.location.assign("/")
     return Promise.reject(error)
   }
@@ -234,12 +235,14 @@ export async function handleUnauthorizedResponse(
             })
 
     if (!refreshedToken) {
+      setAccessToken(null)
       window.location.assign("/")
       return Promise.reject(error)
     }
 
     return client(attachAuthorizationHeader(originalRequest, refreshedToken))
   } catch (refreshError) {
+    setAccessToken(null)
     window.location.assign("/")
     return Promise.reject(refreshError)
   }

@@ -113,6 +113,28 @@ describe("createSSEConnection retry behaviour", () => {
     expect(console.warn).not.toHaveBeenCalled()
   })
 
+  it("treats a stream ending before done as a retryable failure", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(() =>
+      mockFetchOk('data: {"token":"partial"}\n\n'),
+    )
+
+    const onToken = vi.fn()
+    const onDone = vi.fn()
+    const onError = vi.fn()
+
+    createSSEConnection("/stream", onToken, onDone, onError, vi.fn())
+
+    await vi.advanceTimersByTimeAsync(1000)
+    await vi.advanceTimersByTimeAsync(2000)
+    await vi.advanceTimersByTimeAsync(4000)
+    await vi.runAllTimersAsync()
+
+    expect(onToken).toHaveBeenCalled()
+    expect(onDone).not.toHaveBeenCalled()
+    expect(onError).toHaveBeenCalledTimes(1)
+    expect(onError.mock.calls[0][0].message).toMatch(/before generation completed/i)
+  })
+
   it("refreshes the access token once when the stream request gets a 401", async () => {
     const doneBody = 'data: {"done":true,"stage_id":"s1"}\n\n'
     apiMocks.accessToken = "expired"

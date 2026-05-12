@@ -32,8 +32,10 @@ class _FakeDB:
 class _FakeJudge:
     def __init__(self, response: str | Exception) -> None:
         self.response = response
+        self.calls: list[dict[str, Any]] = []
 
-    async def complete(self, *args: Any, **kwargs: Any) -> str:
+    async def complete(self, system: str, user: str, max_tokens: int) -> str:
+        self.calls.append({"system": system, "user": user, "max_tokens": max_tokens})
         if isinstance(self.response, Exception):
             raise self.response
         return self.response
@@ -56,19 +58,49 @@ class _FakeSessionContext:
 @pytest.mark.asyncio
 async def test_run_eval_returns_eval_result_with_scores() -> None:
     db = _FakeDB()
-    judge_response = '{"overall_score": 85, "completeness": 90, "clarity": 80}'
+    judge_response = (
+        '{"scores": {"goal_alignment": 90, "requirements_coverage": 80, '
+        '"specificity_testability": 70, "user_flow_coverage": 60, '
+        '"non_functional_coverage": 50, "traceability": 65, '
+        '"feasibility": 75, "clarity": 70}, "coverage_percent": null, '
+        '"uncovered_reqs": [], "tasks_without_ref": [], "risks": []}'
+    )
+    judge = _FakeJudge(judge_response)
+
+    with patch("services.evals.online_eval.get_llm", return_value=judge):
+        result = await run_eval(uuid4(), "spec", "spec content", "", db)
+
+    assert result is not None
+    assert result.overall_score == 71
+    assert result.completeness == 64
+    assert result.clarity == 70
+    assert result.flagged is False
+    assert db._committed
+    assert "Do not default to 85" in judge.calls[0]["user"]
+
+
+@pytest.mark.asyncio
+async def test_run_eval_computes_overall_from_rubric_scores_not_claimed_score() -> None:
+    db = _FakeDB()
+    judge_response = (
+        '{"overall_score": 85, "scores": {"goal_alignment": 40, '
+        '"requirements_coverage": 50, "specificity_testability": 60, '
+        '"user_flow_coverage": 70, "non_functional_coverage": 80, '
+        '"traceability": 90, "feasibility": 100, "clarity": 50}, '
+        '"coverage_percent": null, "uncovered_reqs": [], '
+        '"tasks_without_ref": [], "risks": ["missing acceptance criteria"]}'
+    )
 
     with patch(
-        "services.evals.online_eval.get_llm", return_value=_FakeJudge(judge_response)
+        "services.evals.online_eval.get_llm",
+        return_value=_FakeJudge(judge_response),
     ):
         result = await run_eval(uuid4(), "spec", "spec content", "", db)
 
     assert result is not None
-    assert result.overall_score == 85
-    assert result.completeness == 90
-    assert result.clarity == 80
-    assert result.flagged is False
-    assert db._committed
+    assert result.overall_score == 58
+    assert result.overall_score != 85
+    assert result.clarity == 50
 
 
 @pytest.mark.asyncio

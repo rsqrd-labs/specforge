@@ -12,7 +12,7 @@ from httpx import ASGITransport, AsyncClient
 from database import get_db
 from main import create_app
 from middleware.auth import get_current_user
-from models import Stage, User
+from models import EvalResult, Stage, User
 from services.pipeline.stage_manager import StageDependencyError
 
 _USER_ID = uuid4()
@@ -90,6 +90,22 @@ class _FakeDB:
         pass
 
 
+class _EvalLookupDB:
+    def __init__(self, stage: Stage, eval_result: EvalResult) -> None:
+        self._stage = stage
+        self._eval_result = eval_result
+        self.statements: list[Any] = []
+
+    async def execute(self, statement: Any) -> Any:
+        self.statements.append(statement)
+        result = MagicMock()
+        if len(self.statements) == 1:
+            result.scalar_one_or_none.return_value = self._stage
+        else:
+            result.scalar_one_or_none.return_value = self._eval_result
+        return result
+
+
 @pytest.fixture
 def app():
     _app = create_app(redis_client=_NoopRedis())
@@ -130,6 +146,43 @@ async def test_get_stage_returns_404_when_stage_is_not_owned(app) -> None:
         response = await client.get(f"/stages/{uuid4()}")
 
     assert response.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_get_eval_only_returns_current_stage_version(app) -> None:
+    stage = _make_stage()
+    stage.current_version = 3
+    eval_result = EvalResult(
+        id=uuid4(),
+        stage_version_id=uuid4(),
+        stage_type="spec",
+        overall_score=87,
+        completeness=90,
+        clarity=84,
+        coverage_percent=None,
+        uncovered_reqs=None,
+        tasks_without_ref=None,
+        flagged=False,
+        created_at=datetime.now(UTC),
+    )
+    db = _EvalLookupDB(stage, eval_result)
+
+    async def _fake_db():
+        yield db
+
+    app.dependency_overrides[get_db] = _fake_db
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        response = await client.get(f"/stages/{stage.id}/eval")
+
+    assert response.status_code == 200
+    assert response.json()["overall_score"] == 87
+    assert len(db.statements) == 2
+    compiled = db.statements[1].compile()
+    assert "stage_versions.version" in str(compiled)
+    assert stage.current_version in compiled.params.values()
 
 
 @pytest.mark.asyncio

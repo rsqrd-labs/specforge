@@ -404,6 +404,7 @@ class StageManager:
         _cleanup_done = False
         span_id: str | None = None
         span_finished = False
+        accumulated = ""
         try:
             if trace_id:
                 span_id = await self._start_langfuse_span(
@@ -414,7 +415,6 @@ class StageManager:
                     action="generate",
                 )
 
-            accumulated = ""
             content_generation_id: str | None = None
             try:
                 adapter = get_llm(route.provider, route.model)
@@ -545,9 +545,34 @@ class StageManager:
                         stuck = result.scalar_one_or_none()
                         if stuck is not None and stuck.status == "in_progress":
                             await credit_service.refund(cleanup_db, deduction.id)
+                            partial_content = _strip_code_fence(accumulated).strip()
+                            if partial_content:
+                                validation = validate(partial_content)
+                                if validation.is_safe:
+                                    stuck.content = partial_content
+                                    stuck.current_version += 1
+                                    cleanup_db.add(
+                                        StageVersion(
+                                            stage_id=stuck.id,
+                                            version=stuck.current_version,
+                                            content=partial_content,
+                                            created_by="ai",
+                                        )
+                                    )
+                                else:
+                                    logger.warning(
+                                        "stage.interrupted_partial_discarded",
+                                        extra={
+                                            "stage_id": str(stage_id),
+                                            "reason": validation.reason,
+                                        },
+                                    )
                             stuck.status = "draft"
                             stuck.updated_at = datetime.now(UTC)
                             await cleanup_db.commit()
+                            await redis.delete(
+                                f"{_STAGE_CACHE_PREFIX}{workspace.id}:{stage.type}"
+                            )
                 except Exception:
                     logger.exception(
                         "stage.disconnect_cleanup_error",

@@ -180,9 +180,14 @@ export function createSSEConnection(
       return false
     }
 
-    // Natural stream end (done received, eval not emitted by backend)
-    onEval(null)
-    return true
+    if (doneReceived) {
+      // Natural stream end after done (eval not emitted by backend)
+      onEval(null)
+      return true
+    }
+
+    lastError = new Error("Stream ended before generation completed")
+    return false
   }
 
   async function connect() {

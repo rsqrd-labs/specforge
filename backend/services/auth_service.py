@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+import json
 from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
 from uuid import UUID, uuid4
@@ -21,7 +22,9 @@ GOOGLE_USERINFO_URL = "https://openidconnect.googleapis.com/v1/userinfo"
 GOOGLE_SCOPES = ("openid", "email", "profile")
 ACCESS_TOKEN_MINUTES = 15
 REFRESH_TOKEN_DAYS = 7
+REFRESH_REPLAY_GRACE_SECONDS = 30
 SESSION_PREFIX = "session:"
+CONSUMED_SESSION_PREFIX = "session_consumed:"
 USER_SESSIONS_PREFIX = "user_sessions:"
 OAUTH_STATE_PREFIX = "oauth:state:"
 OAUTH_STATE_TTL = 600  # 10 minutes
@@ -128,6 +131,9 @@ class AuthService:
         session_key = self._session_key(old_jti)
 
         if await self.redis.get(session_key) is None:
+            replayed = await self._maybe_replay_recent_refresh(old_jti, user_id, db)
+            if replayed is not None:
+                return replayed
             await self._revoke_all_user_sessions(user_id)
             raise AuthError("Refresh token has been revoked")
 
@@ -147,6 +153,11 @@ class AuthService:
         await self._store_refresh_session(
             new_refresh_claims["jti"],
             str(user.id),
+        )
+        await self._store_consumed_refresh(
+            old_jti,
+            str(user.id),
+            new_refresh_token,
         )
 
         return access_token, new_refresh_token
@@ -245,8 +256,61 @@ class AuthService:
     def _session_key(self, jti: str) -> str:
         return f"{SESSION_PREFIX}{jti}"
 
+    def _consumed_session_key(self, jti: str) -> str:
+        return f"{CONSUMED_SESSION_PREFIX}{jti}"
+
     def _user_sessions_key(self, user_id: str) -> str:
         return f"{USER_SESSIONS_PREFIX}{user_id}"
+
+    async def _store_consumed_refresh(
+        self,
+        old_jti: str,
+        user_id: str,
+        new_refresh_token: str,
+    ) -> None:
+        await self.redis.set(
+            self._consumed_session_key(old_jti),
+            json.dumps(
+                {
+                    "user_id": user_id,
+                    "refresh_token": new_refresh_token,
+                }
+            ),
+            ex=REFRESH_REPLAY_GRACE_SECONDS,
+        )
+
+    async def _maybe_replay_recent_refresh(
+        self,
+        old_jti: str,
+        user_id: str,
+        db: AsyncSession,
+    ) -> tuple[str, str] | None:
+        raw = await self.redis.get(self._consumed_session_key(old_jti))
+        if raw is None:
+            return None
+
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError:
+            return None
+        if payload.get("user_id") != user_id:
+            return None
+
+        refresh_token = payload.get("refresh_token")
+        if not isinstance(refresh_token, str) or not refresh_token:
+            return None
+
+        claims = self._decode_refresh_token(refresh_token)
+        if claims.get("sub") != user_id:
+            return None
+        if await self.redis.get(self._session_key(claims["jti"])) is None:
+            return None
+
+        user = await self._get_user_by_id(UUID(user_id), db)
+        if user is None:
+            raise AuthError("User not found")
+        access_token = self._create_token(user.id, "access", ACCESS_TOKEN_MINUTES)
+        return access_token, refresh_token
 
     async def _revoke_all_user_sessions(self, user_id: str) -> None:
         user_sessions_key = self._user_sessions_key(user_id)

@@ -191,6 +191,14 @@ export default function Workspace() {
       Object.values(stageMap).filter((stage) => workspaceStageIds.has(stage.id)),
     )
   }, [currentWorkspace?.stages, stageMap])
+  const stagesWithEval = useMemo(
+    () =>
+      stages.map((stage) => ({
+        ...stage,
+        eval_result: evalResults[stage.id] ?? stage.eval_result ?? null,
+      })),
+    [stages, evalResults],
+  )
 
   const allFinalised =
     stages.length === STAGE_ORDER.length &&
@@ -237,16 +245,30 @@ export default function Workspace() {
       return firstUnlockedStage(currentWorkspace.stages)?.id ?? null
     })
 
-    const seededEvalResults = Object.fromEntries(
-      currentWorkspace.stages.map((stage) => [stage.id, stage.eval_result ?? null]),
-    )
-    setEvalResults((existing) => ({ ...seededEvalResults, ...existing }))
+    setEvalResults((existing) => {
+      const next = { ...existing }
+      currentWorkspace.stages.forEach((stage) => {
+        if (stage.eval_result) {
+          next[stage.id] = stage.eval_result
+        } else if (!(stage.id in next)) {
+          next[stage.id] = null
+        }
+      })
+      return next
+    })
     setProblemDraft(currentWorkspace.problem_statement)
     setProblemDirty(false)
   }, [currentWorkspace, setStages])
 
   useEffect(() => {
-    if (!activeStage || activeStage.status !== "finalised") return
+    if (
+      !activeStage ||
+      activeStage.status === "locked" ||
+      activeStage.status === "in_progress" ||
+      !activeStage.content?.trim()
+    ) {
+      return
+    }
 
     let cancelled = false
     getStageEval(activeStage.id)
@@ -255,12 +277,21 @@ export default function Workspace() {
           setEvalResults((existing) => ({ ...existing, [activeStage.id]: result }))
         }
       })
-      .catch(() => undefined)
+      .catch(() => {
+        if (!cancelled) {
+          setEvalResults((existing) => ({ ...existing, [activeStage.id]: null }))
+        }
+      })
 
     return () => {
       cancelled = true
     }
-  }, [activeStage?.id, activeStage?.status])
+  }, [
+    activeStage?.id,
+    activeStage?.status,
+    activeStage?.current_version,
+    activeStage?.content,
+  ])
 
   useEffect(() => {
     if (streamError) {
@@ -322,6 +353,9 @@ export default function Workspace() {
   const runGeneration = useCallback(
     async (action: "generate" | "regenerate") => {
       setError(null)
+      if (activeStage) {
+        setEvalResults((existing) => ({ ...existing, [activeStage.id]: null }))
+      }
       const result = await startStream(action)
       if (!result) return
 
@@ -337,7 +371,7 @@ export default function Workspace() {
       }
       await refreshWorkspace()
     },
-    [startStream, setStage, refreshWorkspace],
+    [activeStage, startStream, setStage, refreshWorkspace],
   )
 
   const requestGeneration = useCallback(
@@ -418,6 +452,7 @@ export default function Workspace() {
       if (currentContent !== undefined && currentContent !== activeStage.content) {
         const savedStage = await updateStageContent(activeStage.id, currentContent)
         setStage(savedStage)
+        setEvalResults((existing) => ({ ...existing, [savedStage.id]: null }))
       }
       const result = await refineStage(activeStage.id, {
         instruction: refineInstruction.trim(),
@@ -439,6 +474,7 @@ export default function Workspace() {
       if (!activeStage) return
       const updatedStage = await acceptStageDiff(activeStage.id, proposed)
       setStage(updatedStage)
+      setEvalResults((existing) => ({ ...existing, [updatedStage.id]: null }))
       setDiffResult(null)
       setLargeSelectionWarning(false)
     },
@@ -484,6 +520,7 @@ export default function Workspace() {
     async (content: string) => {
       if (!activeStage || isStreaming) return
       setStage({ ...activeStage, content })
+      setEvalResults((existing) => ({ ...existing, [activeStage.id]: null }))
       try {
         const updatedStage = await updateStageContent(activeStage.id, content)
         setStage(updatedStage)
@@ -626,7 +663,7 @@ export default function Workspace() {
           </div>
         </div>
         <StageNavigator
-          stages={stages}
+          stages={stagesWithEval}
           activeStageId={activeStage.id}
           onSelectStage={setActiveStageId}
         />

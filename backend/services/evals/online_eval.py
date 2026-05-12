@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from typing import Any
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -19,37 +20,122 @@ from services.llm.provider_config import JUDGE_MODELS
 logger = logging.getLogger(__name__)
 
 _JUDGE_SYSTEM = (
-    "You are a strict software specification evaluator. "
-    "Respond ONLY with valid JSON matching the requested schema. No other text."
+    "You are an independent senior product and software engineering evaluator. "
+    "Score only what is present in the submitted artifact and provided context. "
+    "Do not reward implied intent, brand polish, verbosity, or architectural detail "
+    "that is not appropriate for the current stage. Be calibrated and conservative: "
+    "85+ requires strong, concrete evidence across almost every rubric dimension. "
+    "Respond ONLY with valid JSON matching the requested schema. No markdown."
 )
+
+_RUBRIC = """
+Score each dimension from 0 to 100 using this calibration:
+- 0-39: unusable or mostly missing
+- 40-59: partial, vague, or materially risky
+- 60-74: usable but has notable gaps
+- 75-84: good, specific, and mostly complete
+- 85-94: excellent with only minor gaps
+- 95-100: exceptional, comprehensive, and immediately actionable
+
+Rules:
+- Use the full range. Do not default to 85.
+- Penalize vague placeholders, contradictions, missing acceptance criteria,
+  missing non-functional expectations, and untestable language.
+- Prefer concrete, stakeholder-readable requirements over deep implementation
+  detail unless the stage explicitly calls for implementation work.
+- If a requirement, flow, test, or task cannot be found in the text, list it
+  as a gap instead of assuming it exists.
+
+Return exactly this JSON shape:
+{
+  "scores": {
+    "goal_alignment": 0-100,
+    "requirements_coverage": 0-100,
+    "specificity_testability": 0-100,
+    "user_flow_coverage": 0-100,
+    "non_functional_coverage": 0-100,
+    "traceability": 0-100,
+    "feasibility": 0-100,
+    "clarity": 0-100
+  },
+  "coverage_percent": null or 0-100,
+  "uncovered_reqs": [],
+  "tasks_without_ref": [],
+  "risks": []
+}
+""".strip()
 
 _STAGE_PROMPTS: dict[str, str] = {
     "spec": (
-        "Evaluate this software specification.\n"
-        'Return JSON: {{"overall_score": int (0-100), "completeness": int (0-100), '
-        '"clarity": int (0-100)}}\n\n'
+        "Evaluate this software specification as a product specification, not an "
+        "implementation design. A strong spec defines product goals, user problems, "
+        "functional requirements, non-functional requirements, user flows, acceptance "
+        "criteria, constraints, success metrics, and high-level system expectations. "
+        "It may include high-level conceptual diagrams, but should avoid deep "
+        "implementation details.\n\n"
+        f"{_RUBRIC}\n\n"
         "Content:\n{content}"
     ),
     "plan": (
-        "Evaluate this implementation plan against the specification.\n"
-        'Return JSON: {{"overall_score": int (0-100), "completeness": int (0-100), '
-        '"clarity": int (0-100)}}\n\n'
+        "Evaluate this implementation plan against the specification. A strong plan "
+        "translates spec requirements into coherent work areas, sequencing, risks, "
+        "dependencies, validation strategy, and delivery boundaries without losing "
+        "traceability to the product goals.\n\n"
+        f"{_RUBRIC}\n\n"
         "Spec:\n{spec_content}\n\nPlan:\n{content}"
     ),
     "harness": (
-        "Evaluate this test harness against the specification.\n"
-        'Return JSON: {{"overall_score": int (0-100), "completeness": int (0-100), '
-        '"clarity": int (0-100), "coverage_percent": int (0-100), '
-        '"uncovered_reqs": list[str]}}\n\n'
+        "Evaluate this test harness against the specification. A strong harness "
+        "covers critical functional requirements, user flows, acceptance criteria, "
+        "edge cases, and major non-functional expectations. Set coverage_percent to "
+        "your best evidence-based estimate of requirement coverage, and list specific "
+        "uncovered requirements.\n\n"
+        f"{_RUBRIC}\n\n"
         "Spec:\n{spec_content}\n\nHarness:\n{content}"
     ),
     "tasks": (
-        "Evaluate this task list against the test harness.\n"
-        'Return JSON: {{"overall_score": int (0-100), "completeness": int (0-100), '
-        '"clarity": int (0-100), "tasks_without_ref": list[{{"task": str, '
-        '"reason": str}}]}}\n\n'
+        "Evaluate this task list against the test harness and specification. A strong "
+        "task list is complete, sequenced, independently actionable, test-linked, and "
+        "traceable. In tasks_without_ref, include objects shaped as "
+        '{{"task_number": int or null, "task_title": string, "reason": string, '
+        '"referenced_test": string or null}} for any task that lacks a clear test or '
+        "harness reference.\n\n"
+        f"{_RUBRIC}\n\n"
         "Spec:\n{spec_content}\n\nTasks:\n{content}"
     ),
+}
+
+_SCORE_WEIGHTS: dict[str, dict[str, float]] = {
+    "spec": {
+        "goal_alignment": 0.15,
+        "requirements_coverage": 0.25,
+        "specificity_testability": 0.20,
+        "user_flow_coverage": 0.15,
+        "non_functional_coverage": 0.15,
+        "clarity": 0.10,
+    },
+    "plan": {
+        "goal_alignment": 0.10,
+        "requirements_coverage": 0.20,
+        "specificity_testability": 0.15,
+        "traceability": 0.20,
+        "feasibility": 0.20,
+        "clarity": 0.15,
+    },
+    "harness": {
+        "requirements_coverage": 0.30,
+        "specificity_testability": 0.20,
+        "traceability": 0.20,
+        "coverage_percent": 0.20,
+        "clarity": 0.10,
+    },
+    "tasks": {
+        "requirements_coverage": 0.20,
+        "specificity_testability": 0.20,
+        "traceability": 0.25,
+        "feasibility": 0.20,
+        "clarity": 0.15,
+    },
 }
 
 
@@ -66,6 +152,127 @@ def _dataset_for_score(score: int | float | None) -> str | None:
     if score < 60:
         return "low_quality_generations"
     return None
+
+
+def _clamp_score(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        score = round(float(value))
+    except (TypeError, ValueError):
+        return None
+    return max(0, min(100, score))
+
+
+def _weighted_score(
+    values: dict[str, int | None], weights: dict[str, float]
+) -> int | None:
+    weighted_total = 0.0
+    weight_total = 0.0
+    for key, weight in weights.items():
+        score = values.get(key)
+        if score is None:
+            continue
+        weighted_total += score * weight
+        weight_total += weight
+    if weight_total == 0:
+        return None
+    return round(weighted_total / weight_total)
+
+
+def _average_score(*scores: int | None) -> int | None:
+    present = [score for score in scores if score is not None]
+    if not present:
+        return None
+    return round(sum(present) / len(present))
+
+
+def _normalise_task_issues(raw: Any) -> list[dict[str, Any]] | None:
+    if not isinstance(raw, list):
+        return None
+    issues: list[dict[str, Any]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        task_number = item.get("task_number")
+        if task_number is not None:
+            try:
+                task_number = int(task_number)
+            except (TypeError, ValueError):
+                task_number = None
+        task_title = item.get("task_title") or item.get("task") or "Unspecified task"
+        reason = item.get("reason") or "No clear test or harness reference."
+        referenced_test = item.get("referenced_test")
+        issues.append(
+            {
+                "task_number": task_number,
+                "task_title": str(task_title),
+                "reason": str(reason),
+                "referenced_test": (
+                    str(referenced_test) if referenced_test is not None else None
+                ),
+            }
+        )
+    return issues
+
+
+def _normalise_eval_payload(stage_type: str, data: dict[str, Any]) -> dict[str, Any]:
+    scores = data.get("scores")
+    if not isinstance(scores, dict):
+        overall_score = _clamp_score(data.get("overall_score"))
+        completeness = _clamp_score(data.get("completeness"))
+        clarity = _clamp_score(data.get("clarity"))
+        coverage_percent = _clamp_score(data.get("coverage_percent"))
+        return {
+            "overall_score": overall_score,
+            "completeness": completeness,
+            "clarity": clarity,
+            "coverage_percent": coverage_percent,
+            "uncovered_reqs": data.get("uncovered_reqs"),
+            "tasks_without_ref": _normalise_task_issues(data.get("tasks_without_ref")),
+        }
+
+    score_values = {
+        key: _clamp_score(value)
+        for key, value in scores.items()
+        if isinstance(key, str)
+    }
+    coverage_percent = _clamp_score(data.get("coverage_percent"))
+    if coverage_percent is not None:
+        score_values["coverage_percent"] = coverage_percent
+
+    completeness = _average_score(
+        score_values.get("requirements_coverage"),
+        score_values.get("user_flow_coverage"),
+        score_values.get("non_functional_coverage"),
+        score_values.get("traceability"),
+    )
+    clarity = score_values.get("clarity")
+    overall_score = _weighted_score(
+        score_values,
+        _SCORE_WEIGHTS.get(stage_type, _SCORE_WEIGHTS["spec"]),
+    )
+
+    uncovered_reqs = data.get("uncovered_reqs")
+    if not isinstance(uncovered_reqs, list):
+        uncovered_reqs = None
+
+    return {
+        "overall_score": overall_score,
+        "completeness": completeness,
+        "clarity": clarity,
+        "coverage_percent": coverage_percent,
+        "uncovered_reqs": uncovered_reqs,
+        "tasks_without_ref": _normalise_task_issues(data.get("tasks_without_ref")),
+    }
+
+
+def _build_eval_prompt(stage_type: str, content: str, spec_content: str) -> str:
+    return (
+        _STAGE_PROMPTS[stage_type]
+        .replace("{spec_content}", spec_content)
+        .replace("{content}", content)
+    )
 
 
 async def _add_generation_to_dataset(
@@ -100,9 +307,7 @@ async def run_eval(
 ) -> EvalResult | None:
     try:
         resolved_judge_model = judge_model or JUDGE_MODELS[provider]
-        user_prompt = _STAGE_PROMPTS[stage_type].format(
-            content=content, spec_content=spec_content
-        )
+        user_prompt = _build_eval_prompt(stage_type, content, spec_content)
         result = await asyncio.wait_for(
             complete_background_llm(
                 operation="eval.score",
@@ -112,7 +317,7 @@ async def run_eval(
                 user=user_prompt,
                 max_tokens=output_budget_for_operation("eval.score"),
                 stage_type="eval",
-                prompt_version="eval-v1",
+                prompt_version="eval-v2",
                 adapter_factory=get_llm,
             ),
             timeout=settings.llm_complete_timeout_seconds,
@@ -134,9 +339,10 @@ async def run_eval(
         )
         return None
 
-    coverage_percent: int | None = data.get("coverage_percent")
-    uncovered_reqs: list[str] | None = data.get("uncovered_reqs")
-    tasks_without_ref: list | None = data.get("tasks_without_ref")
+    normalised = _normalise_eval_payload(stage_type, data)
+    coverage_percent: int | None = normalised["coverage_percent"]
+    uncovered_reqs: list[str] | None = normalised["uncovered_reqs"]
+    tasks_without_ref: list[dict[str, Any]] | None = normalised["tasks_without_ref"]
 
     flagged = False
     if (
@@ -151,9 +357,9 @@ async def run_eval(
     eval_result = EvalResult(
         stage_version_id=stage_version_id,
         stage_type=stage_type,
-        overall_score=data.get("overall_score"),
-        completeness=data.get("completeness"),
-        clarity=data.get("clarity"),
+        overall_score=normalised["overall_score"],
+        completeness=normalised["completeness"],
+        clarity=normalised["clarity"],
         coverage_percent=coverage_percent,
         uncovered_reqs=uncovered_reqs,
         tasks_without_ref=tasks_without_ref,

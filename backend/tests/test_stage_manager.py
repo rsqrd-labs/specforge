@@ -556,6 +556,13 @@ async def test_generate_marks_langfuse_span_failed_on_client_disconnect() -> Non
     langfuse_client.mark_span_failed.assert_awaited_once()
     assert langfuse_client.mark_span_failed.await_args.args[0] == "span-1"
     assert "interrupted" in str(langfuse_client.mark_span_failed.await_args.args[1])
+    assert spec_stage.status == "draft"
+    assert spec_stage.content == "partial"
+    assert spec_stage.current_version == 1
+    assert any(
+        isinstance(item, StageVersion) and item.content == "partial"
+        for item in fake_cleanup_db.add.call_args_list[0].args
+    )
 
 
 @pytest.mark.asyncio

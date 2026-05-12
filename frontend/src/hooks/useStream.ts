@@ -75,8 +75,13 @@ export function useStream(stageId: string | null) {
           streamError instanceof Error ? streamError.message : "Streaming failed"
         setError(message)
 
-        if (existing) {
-          useStageStore.getState().setStage(existing)
+        try {
+          const latestStage = await getStage(stageId)
+          useStageStore.getState().setStage(latestStage)
+        } catch {
+          if (existing) {
+            useStageStore.getState().setStage(existing)
+          }
         }
 
         return null

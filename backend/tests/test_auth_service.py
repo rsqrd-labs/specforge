@@ -233,6 +233,41 @@ async def test_refresh_tokens_rotates_jti(signing_keys: tuple[str, str]) -> None
     new_jti = service._decode_refresh_token(new_refresh_token)["jti"]
     assert await redis.get(service._session_key(new_jti)) == str(user.id)
     assert new_jti in await redis.smembers(service._user_sessions_key(str(user.id)))
+    assert await redis.get(service._consumed_session_key(old_jti)) is not None
+
+
+@pytest.mark.asyncio
+async def test_refresh_tokens_allows_recent_rotation_replay(
+    signing_keys: tuple[str, str],
+) -> None:
+    redis = FakeRedis()
+    service = make_service(signing_keys, redis)
+    user = User(
+        id=uuid4(),
+        email="dev@example.com",
+        google_id="google-user-id",
+        name="Dev User",
+        avatar_url=None,
+    )
+    refresh_token = service._create_token(user.id, "refresh", 60)
+    old_jti = service._decode_refresh_token(refresh_token)["jti"]
+    await redis.set(service._session_key(old_jti), str(user.id), ex=60)
+    await redis.sadd(service._user_sessions_key(str(user.id)), old_jti)
+
+    _access_token, new_refresh_token = await service.refresh_tokens(
+        refresh_token,
+        FakeDB(user),  # type: ignore[arg-type]
+    )
+    replay_access_token, replay_refresh_token = await service.refresh_tokens(
+        refresh_token,
+        FakeDB(user),  # type: ignore[arg-type]
+    )
+
+    assert replay_access_token
+    assert replay_refresh_token == new_refresh_token
+    new_jti = service._decode_refresh_token(new_refresh_token)["jti"]
+    assert await redis.get(service._session_key(new_jti)) == str(user.id)
+    assert new_jti in await redis.smembers(service._user_sessions_key(str(user.id)))
 
 
 @pytest.mark.asyncio
