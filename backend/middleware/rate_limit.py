@@ -19,6 +19,10 @@ logger = logging.getLogger(__name__)
 _LOGIN_PATHS = frozenset({"/auth/google", "/auth/callback"})
 _BYPASS_PATHS = frozenset({"/health"})
 _LOCAL_FALLBACK_MAX_KEYS = 10_000
+_LOGIN_BURST_LIMIT = 5
+_LOGIN_BURST_WINDOW_SECONDS = 300
+_LOGIN_HOURLY_LIMIT = 20
+_LOGIN_HOURLY_WINDOW_SECONDS = 3600
 IpNetwork = IPv4Network | IPv6Network
 RateLimitCheck = Callable[[str, int, int], Awaitable[bool]]
 
@@ -150,16 +154,38 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         if path in _LOGIN_PATHS:
             if not await check(
                 f"login:{ip}",
-                settings.auth_login_burst_limit,
-                settings.auth_login_burst_window_seconds,
+                _positive_int(
+                    settings.auth_login_burst_limit,
+                    _LOGIN_BURST_LIMIT,
+                ),
+                _positive_int(
+                    settings.auth_login_burst_window_seconds,
+                    _LOGIN_BURST_WINDOW_SECONDS,
+                ),
             ):
-                return _rate_limited(settings.auth_login_burst_window_seconds)
+                return _rate_limited(
+                    _positive_int(
+                        settings.auth_login_burst_window_seconds,
+                        _LOGIN_BURST_WINDOW_SECONDS,
+                    )
+                )
             if not await check(
                 f"login_hourly:{ip}",
-                settings.auth_login_hourly_limit,
-                settings.auth_login_hourly_window_seconds,
+                _positive_int(
+                    settings.auth_login_hourly_limit,
+                    _LOGIN_HOURLY_LIMIT,
+                ),
+                _positive_int(
+                    settings.auth_login_hourly_window_seconds,
+                    _LOGIN_HOURLY_WINDOW_SECONDS,
+                ),
             ):
-                return _rate_limited(settings.auth_login_hourly_window_seconds)
+                return _rate_limited(
+                    _positive_int(
+                        settings.auth_login_hourly_window_seconds,
+                        _LOGIN_HOURLY_WINDOW_SECONDS,
+                    )
+                )
 
         user_id, claims = _extract_user_id(request)
         if claims is not None:
@@ -188,6 +214,10 @@ def _local_sliding_window_check(
     if len(windows) > _LOCAL_FALLBACK_MAX_KEYS:
         windows.pop(next(iter(windows)))
     return True
+
+
+def _positive_int(value: int, default: int) -> int:
+    return value if value > 0 else default
 
 
 def _get_client_ip(

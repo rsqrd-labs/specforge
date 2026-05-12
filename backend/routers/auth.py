@@ -2,7 +2,6 @@ from fastapi import APIRouter, Cookie, Depends, HTTPException, Response, status
 from fastapi.responses import RedirectResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from config import settings
 from database import get_db
 from middleware.auth import get_current_user
 from models import User
@@ -16,8 +15,8 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 _REFRESH_COOKIE = "refresh_token"
 _COOKIE_MAX_AGE = 604800  # 7 days
 _REFRESH_COOKIE_PATH = "/auth"
-
-_IS_PRODUCTION = settings.environment.lower() == "production"
+_REFRESH_COOKIE_SECURE = True
+_REFRESH_COOKIE_SAMESITE = "strict"
 
 
 def _set_refresh_cookie(response: Response, token: str) -> None:
@@ -25,8 +24,8 @@ def _set_refresh_cookie(response: Response, token: str) -> None:
         key=_REFRESH_COOKIE,
         value=token,
         httponly=True,
-        secure=_IS_PRODUCTION,
-        samesite="strict" if _IS_PRODUCTION else "lax",
+        secure=_REFRESH_COOKIE_SECURE,
+        samesite=_REFRESH_COOKIE_SAMESITE,
         max_age=_COOKIE_MAX_AGE,
         path=_REFRESH_COOKIE_PATH,
     )
@@ -87,8 +86,18 @@ async def logout(
         except AuthError:
             pass
 
-    response.delete_cookie(key=_REFRESH_COOKIE, path=_REFRESH_COOKIE_PATH)
-    response.delete_cookie(key=_REFRESH_COOKIE, path="/auth/refresh")
+    response.delete_cookie(
+        key=_REFRESH_COOKIE,
+        path=_REFRESH_COOKIE_PATH,
+        secure=_REFRESH_COOKIE_SECURE,
+        samesite=_REFRESH_COOKIE_SAMESITE,
+    )
+    response.delete_cookie(
+        key=_REFRESH_COOKIE,
+        path="/auth/refresh",
+        secure=_REFRESH_COOKIE_SECURE,
+        samesite=_REFRESH_COOKIE_SAMESITE,
+    )
     return {"ok": True}
 
 

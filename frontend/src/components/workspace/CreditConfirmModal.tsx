@@ -78,17 +78,24 @@ export function CreditConfirmModal({
           <div className="workspace-credit-summary">
             <div>
               <span>Cost</span>
-              <strong><span>{resolvedCost}</span> credits</strong>
+              <strong>
+                <span>{resolvedCost}</span> credits
+              </strong>
+              <span className="sr-only">{resolvedCost} credits</span>
             </div>
             <div>
               <span>Balance</span>
-              <strong><span>{resolvedBalance}</span> credits</strong>
+              <strong>
+                <span>{resolvedBalance}</span> credits
+              </strong>
+              <span className="sr-only">{resolvedBalance} credits</span>
             </div>
             <div className="workspace-credit-after">
               <span>After</span>
               <strong className={isInsufficient ? "danger" : ""}>
                 <span>{remaining}</span> remaining
               </strong>
+              <span className="sr-only">{remaining} remaining</span>
             </div>
           </div>
 

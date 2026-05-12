@@ -18,9 +18,9 @@ const STAGE_LABELS: Record<StageType, string> = {
 }
 
 function scoreClass(score: number): string {
-  if (score >= 80) return "good"
-  if (score >= 60) return "ok"
-  return "poor"
+  if (score >= 80) return "good green"
+  if (score >= 60) return "ok amber"
+  return "poor red"
 }
 
 export function StageNavigator({

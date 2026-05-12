@@ -23,7 +23,11 @@ from prompts.base import (
 )
 from schemas.stage import DiffResponse, RefineRequest
 from services import langfuse_service
-from services.credit_service import CREDIT_COSTS, InsufficientCreditsError, credit_service
+from services.credit_service import (
+    CREDIT_COSTS,
+    InsufficientCreditsError,
+    credit_service,
+)
 from services.evals.online_eval import run_eval_background
 from services.llm.base import ProviderError
 from services.llm.cost_cache import (
@@ -353,7 +357,9 @@ class StageManager:
         route = _resolve_preflight_route(
             lambda: _route_for_stage_generation(stage.type, workspace)
         )
-        system_prompt, user_prompt = await build_prompt(stage.type, workspace, db, redis)
+        system_prompt, user_prompt = await build_prompt(
+            stage.type, workspace, db, redis
+        )
         cache_key = build_generation_cache_key(
             prompt_version=STAGE_PROMPT_VERSIONS[stage.type],
             stage_type=stage.type,
@@ -587,7 +593,8 @@ class StageManager:
         ):
             raise RefineSelectionError("Selected text no longer matches the document")
 
-        doc_len = len(content)
+        stage_content = content
+        doc_len = len(stage_content)
         selection_len = request.selection_end - request.selection_start
         large_selection = doc_len > 0 and (selection_len / doc_len) > 0.80
         _assert_refine_instruction_meaningful(request)
@@ -603,15 +610,15 @@ class StageManager:
         route = _resolve_preflight_route(
             lambda: _route_for_refine(workspace, request.mode)
         )
-        document_context = _refine_document_context(
-            content,
+        content = _refine_document_context(
+            stage_content,
             request.selection_start,
             request.selection_end,
             request.mode,
         )
         user_prompt = (
             f"Current document:\n"
-            f"{wrap_untrusted_content('current_document', document_context)}\n\n"
+            f"{wrap_untrusted_content('current_document', content)}\n\n"
             f"Selected text:\n"
             f"{wrap_untrusted_content('selected_text', sanitized_selected_text)}\n\n"
             f"Instruction:\n"
@@ -628,7 +635,7 @@ class StageManager:
             model_tier=route.model_tier,
             problem_statement_hash=_hash_text(workspace.problem_statement),
             upstream_artifact_hashes={
-                stage.type: _hash_text(content),
+                stage.type: _hash_text(stage_content),
                 "selection": _hash_text(request.selected_text),
             },
             user_instruction_hash=_hash_text(
@@ -640,14 +647,14 @@ class StageManager:
         cached_replacement = await get_cached_generation(redis, cache_key)
         if cached_replacement is not None:
             proposed = apply_diff(
-                content,
+                stage_content,
                 request.selection_start,
                 request.selection_end,
                 cached_replacement,
             )
             return DiffResponse(
-                diff=compute_diff(content, proposed),
-                original=content,
+                diff=compute_diff(stage_content, proposed),
+                original=stage_content,
                 proposed=proposed,
                 large_selection=large_selection,
             )
@@ -715,18 +722,18 @@ class StageManager:
             raise
 
         proposed = apply_diff(
-            content,
+            stage_content,
             request.selection_start,
             request.selection_end,
             replacement,
         )
-        diff = compute_diff(content, proposed)
+        diff = compute_diff(stage_content, proposed)
         if span_id:
             await self._end_langfuse_span(span_id)
 
         return DiffResponse(
             diff=diff,
-            original=content,
+            original=stage_content,
             proposed=proposed,
             large_selection=large_selection,
         )
