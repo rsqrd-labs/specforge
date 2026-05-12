@@ -28,6 +28,30 @@ type SSEPayload = DoneEvent | TokenEvent | ErrorEvent | EvalEvent
 const MAX_RETRIES = 3
 const BACKOFF_MS = [1000, 2000, 4000]
 
+function streamErrorMessage(event: ErrorEvent): string {
+  switch (event.error) {
+    case "stage_not_generatable":
+      return (
+        "This stage is already complete. Use rollback or edit the draft before " +
+        "generating again."
+      )
+    case "dependency_not_finalised":
+      return "Finish the previous stage before generating this one."
+    case "rate_limit_exceeded":
+      return "Generation is temporarily busy. Please try again in a moment."
+    case "security_check_failed":
+      return "Generation stopped because the output did not pass safety checks."
+    case "provider_error":
+      return "The selected model provider failed to respond. Please try again."
+    case "insufficient_credits":
+      return "You need more credits before generating this stage."
+    case "internal_error":
+      return "Something went wrong while generating. Please try again."
+    default:
+      return event.detail ?? event.error
+  }
+}
+
 function resolveUrl(url: string): string {
   if (/^https?:\/\//.test(url)) {
     return url
@@ -152,11 +176,7 @@ export function createSSEConnection(
           }
 
           if ("error" in data) {
-            onError(
-              new Error(
-                (data as ErrorEvent).detail ?? (data as ErrorEvent).error,
-              ),
-            )
+            onError(new Error(streamErrorMessage(data as ErrorEvent)))
             close()
             return true // application-level error — do not retry
           }

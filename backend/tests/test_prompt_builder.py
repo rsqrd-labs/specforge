@@ -5,15 +5,15 @@ from uuid import uuid4
 
 import pytest
 
+from models import Stage, Workspace
 from prompts import harness, plan, spec, tasks
 from prompts.base import (
-    ASDD_PROMPT_VERSION,
     ASDD_METHODOLOGY_OVERVIEW,
+    ASDD_PROMPT_VERSION,
     PROFESSIONAL_OUTPUT_RULES,
     SECURITY_AND_PRIVACY_RULES,
     STAGE_PROMPT_VERSIONS,
 )
-from models import Stage, Workspace
 from services.pipeline.prompt_builder import _MAX_UPSTREAM_CHARS, build_prompt
 
 
@@ -183,3 +183,73 @@ def test_dynamic_content_stays_in_user_prompts() -> None:
     assert plan_text in tasks_user
     assert harness_text in tasks_user
     assert harness_text not in tasks.SYSTEM_PROMPT
+
+
+def test_spec_prompt_stays_product_level_not_implementation_blueprint() -> None:
+    prompt = spec.SYSTEM_PROMPT
+
+    assert "Product Goals" in prompt
+    assert "User Problems" in prompt
+    assert "High-Level System Context" in prompt
+    assert "Acceptance Criteria" in prompt
+    assert "Success Metrics" in prompt
+    assert "Do not include exact API endpoints" in prompt
+    assert "database tables" in prompt
+    assert "vendor choices" in prompt
+    assert "deployment topology" in prompt
+    assert "those belong in PLAN.md" in spec.build_user_prompt(
+        {"problem_statement": "Build a collaborative project tracker."}
+    )
+
+
+def test_plan_prompt_is_implementation_ready_without_scope_creep() -> None:
+    prompt = plan.SYSTEM_PROMPT
+
+    assert "Requirement Traceability Matrix" in prompt
+    assert "Technology Stack and Rationale" in prompt
+    assert "Data Model and Persistence" in prompt
+    assert "API Design" in prompt
+    assert "Observability and Audit Logging" in prompt
+    assert "Rollout and Migration Plan" in prompt
+    assert "Never invent product scope beyond the spec" in prompt
+    assert "smallest safe technical assumption" in prompt
+    assert "Prefer fewer well-justified components" in prompt
+    assert "Prefer simple, production-grade architecture" in plan.build_user_prompt(
+        {"spec": "FR-001 Users can create projects."}
+    )
+
+
+def test_harness_prompt_is_traceable_executable_and_plan_aligned() -> None:
+    prompt = harness.SYSTEM_PROMPT
+
+    assert "verification contract" in prompt
+    assert "Requirement-to-Test Matrix" in prompt
+    assert "Coverage Plan" in prompt
+    assert "Do not invent private" in prompt
+    assert "functions, classes, endpoints" in prompt
+    assert "failing gap test" in prompt
+    assert "Never write `pass`, `TODO`, skipped tests" in prompt
+    assert "Observability tests" in prompt
+    assert "Follow the plan's chosen stack and interfaces" in harness.build_user_prompt(
+        {"spec": "FR-001 Users can create projects.", "plan": "Use FastAPI."}
+    )
+
+
+def test_tasks_prompt_is_ordered_traceable_and_agent_executable() -> None:
+    prompt = tasks.SYSTEM_PROMPT
+
+    assert "Execution Overview" in prompt
+    assert "Traceability Overview" in prompt
+    assert "Dependency Graph" in prompt
+    assert "**Plan refs:**" in prompt
+    assert "**Rollback / Recovery**" in prompt
+    assert "topologically ordered" in prompt
+    assert "Every harness test must be referenced" in prompt
+    assert "Do not invent files, modules, endpoints" in prompt
+    assert "For each plan section or contract" in tasks.build_user_prompt(
+        {
+            "spec": "FR-001 Users can create projects.",
+            "plan": "Use FastAPI.",
+            "harness": "harness/tests/test_projects.py::test_create_project",
+        }
+    )

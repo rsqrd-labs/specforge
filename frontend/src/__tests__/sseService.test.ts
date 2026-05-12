@@ -113,6 +113,27 @@ describe("createSSEConnection retry behaviour", () => {
     expect(console.warn).not.toHaveBeenCalled()
   })
 
+  it("maps finalised stage errors to product-facing copy", async () => {
+    const errorBody =
+      'data: {"error":"stage_not_generatable","detail":"Stage status ' +
+      "'finalised' is not generatable\"}\n\n"
+    vi.spyOn(globalThis, "fetch").mockImplementation(() =>
+      mockFetchOk(errorBody),
+    )
+
+    const onError = vi.fn()
+
+    createSSEConnection("/stream", vi.fn(), vi.fn(), onError, vi.fn())
+
+    await vi.runAllTimersAsync()
+
+    expect(onError).toHaveBeenCalledTimes(1)
+    expect(onError.mock.calls[0][0].message).toBe(
+      "This stage is already complete. Use rollback or edit the draft before " +
+        "generating again.",
+    )
+  })
+
   it("treats a stream ending before done as a retryable failure", async () => {
     vi.spyOn(globalThis, "fetch").mockImplementation(() =>
       mockFetchOk('data: {"token":"partial"}\n\n'),
