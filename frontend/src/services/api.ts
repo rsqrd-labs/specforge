@@ -214,7 +214,6 @@ export async function handleUnauthorizedResponse(
 
   if (!originalRequest || !shouldAttemptRefresh(error)) {
     setAccessToken(null)
-    window.location.assign("/")
     return Promise.reject(error)
   }
 
@@ -236,14 +235,12 @@ export async function handleUnauthorizedResponse(
 
     if (!refreshedToken) {
       setAccessToken(null)
-      window.location.assign("/")
       return Promise.reject(error)
     }
 
     return client(attachAuthorizationHeader(originalRequest, refreshedToken))
   } catch (refreshError) {
     setAccessToken(null)
-    window.location.assign("/")
     return Promise.reject(refreshError)
   }
 }
@@ -269,6 +266,12 @@ api.interceptors.response.use(
 )
 
 export async function getCurrentUser(): Promise<User> {
+  if (!getAccessToken()) {
+    const refreshedToken = await refreshAccessToken()
+    if (!refreshedToken) {
+      throw new Error("Not authenticated")
+    }
+  }
   const response = await api.get<User>("/auth/me")
   return response.data
 }

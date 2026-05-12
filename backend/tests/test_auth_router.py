@@ -7,6 +7,7 @@ from uuid import uuid4
 import pytest
 from httpx import ASGITransport, AsyncClient
 
+from config import settings
 from database import get_db
 from main import create_app
 from middleware.auth import get_current_user
@@ -143,13 +144,14 @@ async def test_post_auth_logout_clears_cookie(
 
 
 @pytest.mark.asyncio
-async def test_refresh_cookie_uses_strict_scoped_security_attributes(
+async def test_refresh_cookie_uses_local_dev_security_attributes(
     app: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     async def fake_handle_callback(code: str, state: str, db: Any) -> tuple[str, str]:
         return "access-token", "refresh-token"
 
     monkeypatch.setattr(_auth_service, "handle_callback", fake_handle_callback)
+    monkeypatch.setattr(settings, "environment", "development")
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
@@ -159,7 +161,31 @@ async def test_refresh_cookie_uses_strict_scoped_security_attributes(
     set_cookie_header = response.headers.get("set-cookie", "")
     assert "refresh_token=refresh-token" in set_cookie_header
     assert "HttpOnly" in set_cookie_header
+    assert "Secure" not in set_cookie_header
+    assert "samesite=lax" in set_cookie_header.lower()
+    assert "Path=/auth" in set_cookie_header
+    assert "Max-Age=604800" in set_cookie_header
+
+
+@pytest.mark.asyncio
+async def test_refresh_cookie_uses_cross_site_production_attributes(
+    app: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def fake_handle_callback(code: str, state: str, db: Any) -> tuple[str, str]:
+        return "access-token", "refresh-token"
+
+    monkeypatch.setattr(_auth_service, "handle_callback", fake_handle_callback)
+    monkeypatch.setattr(settings, "environment", "production")
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="https://api.test") as client:
+        response = await client.get("/auth/callback?code=test-code&state=test-state")
+
+    assert response.status_code == 200
+    set_cookie_header = response.headers.get("set-cookie", "")
+    assert "refresh_token=refresh-token" in set_cookie_header
+    assert "HttpOnly" in set_cookie_header
     assert "Secure" in set_cookie_header
-    assert "samesite=strict" in set_cookie_header.lower()
+    assert "samesite=none" in set_cookie_header.lower()
     assert "Path=/auth" in set_cookie_header
     assert "Max-Age=604800" in set_cookie_header
