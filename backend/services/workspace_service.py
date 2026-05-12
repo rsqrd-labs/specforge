@@ -10,6 +10,7 @@ from sqlalchemy.orm import selectinload
 from config import settings
 from models import Stage, User, Workspace
 from schemas.workspace import WorkspaceCreate
+from services.llm.routing import LLMRoutingError, resolve_llm_route
 from services.security.problem_statement_gate import (
     ProblemStatementValidationError,
     assert_valid_problem_statement,
@@ -24,6 +25,7 @@ class WorkspaceService:
         self, user_id: UUID, payload: WorkspaceCreate, db: AsyncSession
     ) -> Workspace:
         self._assert_problem_statement_is_valid(payload.problem_statement)
+        server_model = self._server_default_model(payload.provider)
 
         # Lock the user row so concurrent create requests are serialized and
         # the quota check + insert are atomic within this transaction.
@@ -43,7 +45,7 @@ class WorkspaceService:
             name=sanitize_text(payload.name),
             problem_statement=sanitize_text(payload.problem_statement),
             provider=payload.provider,
-            model=payload.model,
+            model=server_model,
             status="active",
         )
         db.add(workspace)
@@ -146,6 +148,25 @@ class WorkspaceService:
                     "hints": exc.result.hints,
                 },
             ) from exc
+
+    def _server_default_model(self, provider: str) -> str:
+        try:
+            route = resolve_llm_route(
+                operation="spec.generate",
+                preferred_provider=provider,
+                requested_tier="strong",
+                fallback_tier="mid",
+                latency_class="interactive",
+            )
+        except LLMRoutingError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail={
+                    "code": "provider_route_unavailable",
+                    "message": "This provider cannot currently route generation work.",
+                },
+            ) from exc
+        return route.model
 
 
 workspace_service = WorkspaceService()

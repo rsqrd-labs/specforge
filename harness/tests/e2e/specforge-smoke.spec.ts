@@ -13,8 +13,8 @@ test("new user can create a workspace and see the locked stage pipeline", async 
   await page.getByLabel(/problem statement/i).fill(
     "Build a small project planning application that turns a user problem statement into specification, plan, harness, and tasks with quality checks.",
   )
-  await page.getByLabel(/provider/i).selectOption("openai")
-  await page.getByLabel(/model/i).selectOption({ index: 0 })
+  await page.getByRole("button", { name: /openai/i }).click()
+  await expect(page.getByLabel(/model/i)).toHaveCount(0)
   await page.getByRole("button", { name: /^create$/i }).click()
 
   await expect(page.getByRole("button", { name: /spec/i })).toBeEnabled()

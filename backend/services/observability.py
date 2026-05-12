@@ -9,7 +9,13 @@ from typing import Any
 import sentry_sdk
 import structlog
 from fastapi import FastAPI, Request, Response
-from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
+from prometheus_client import (
+    CONTENT_TYPE_LATEST,
+    Counter,
+    Gauge,
+    Histogram,
+    generate_latest,
+)
 from sentry_sdk.integrations.fastapi import FastApiIntegration
 from sqlalchemy.ext.asyncio import AsyncEngine
 from starlette.responses import Response as StarletteResponse
@@ -62,6 +68,21 @@ LLM_CROSS_PROVIDER_FALLBACK_COUNT = Counter(
     "llm_cross_provider_fallback_total",
     "LLM requests that used an explicit cross-provider fallback route",
     ["provider", "model_tier", "operation", "stage_type"],
+)
+LLM_PROVIDER_ERROR_COUNT = Counter(
+    "llm_provider_errors_total",
+    "LLM provider call failures",
+    ["provider", "error_type"],
+)
+LLM_PROVIDER_CONFIGURED = Gauge(
+    "llm_provider_configured",
+    "Whether a provider API key is configured",
+    ["provider"],
+)
+LLM_PROVIDER_HEALTH = Gauge(
+    "llm_provider_health",
+    "Provider health state: 0 not configured, 1 unhealthy, 2 degraded, 3 healthy",
+    ["provider"],
 )
 
 _sentry_configured = False
@@ -309,6 +330,24 @@ def record_llm_cost_event(metadata: dict[str, Any]) -> None:
         LLM_LATENCY_SECONDS.labels(*labels).observe(latency_ms / 1000)
     if bool(metadata.get("cross_provider_fallback")):
         LLM_CROSS_PROVIDER_FALLBACK_COUNT.labels(*labels).inc()
+
+
+def record_llm_provider_failure(provider: str, error_type: str) -> None:
+    LLM_PROVIDER_ERROR_COUNT.labels(provider, error_type or "unknown").inc()
+
+
+def record_llm_provider_configured(provider: str, configured: bool) -> None:
+    LLM_PROVIDER_CONFIGURED.labels(provider).set(1 if configured else 0)
+
+
+def record_llm_provider_health(provider: str, health: str) -> None:
+    values = {
+        "not_configured": 0,
+        "unhealthy": 1,
+        "degraded": 2,
+        "healthy": 3,
+    }
+    LLM_PROVIDER_HEALTH.labels(provider).set(values.get(health, 0))
 
 
 def _inc_counter(counter, value: Any) -> None:

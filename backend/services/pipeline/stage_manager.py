@@ -107,7 +107,6 @@ def _route_for_stage_generation(stage_type: str, workspace: Workspace) -> LLMRou
     return resolve_llm_route(
         operation=f"{stage_type}.generate",
         preferred_provider=workspace.provider,
-        preferred_model=workspace.model,
         requested_tier=requested_tier,
         fallback_tier=fallback_tier,
         latency_class="interactive",
@@ -126,14 +125,13 @@ def _route_for_refine(workspace: Workspace, mode: str) -> LLMRoute:
         "full": "strong",
     }[mode]
     fallback_tier = {
-        "focused": "mid",
-        "section": "mini",
+        "focused": "small",
+        "section": "small",
         "full": "mid",
     }[mode]
     return resolve_llm_route(
         operation=operation,
         preferred_provider=workspace.provider,
-        preferred_model=workspace.model,
         requested_tier=requested_tier,
         fallback_tier=fallback_tier,
         latency_class="interactive",

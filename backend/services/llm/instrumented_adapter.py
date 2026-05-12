@@ -34,6 +34,10 @@ import structlog
 
 from services import langfuse_service
 from services.llm.base import BaseLLMAdapter
+from services.llm.provider_status import (
+    record_provider_failure,
+    record_provider_success,
+)
 from services.llm.usage import estimate_cost_usd, estimated_usage_from_text
 from services.observability import record_llm_cost_event, redact_sensitive_data
 
@@ -84,6 +88,11 @@ class InstrumentedAdapter(BaseLLMAdapter):
             async for token in self._wrapped.stream(system, user, max_tokens):
                 accumulated.append(token)
                 yield token
+        except Exception as exc:
+            record_provider_failure(self._provider, exc)
+            raise
+        else:
+            record_provider_success(self._provider)
         finally:
             await self._record_generation(
                 system=system,
@@ -97,7 +106,11 @@ class InstrumentedAdapter(BaseLLMAdapter):
         response: str = ""
         try:
             response = await self._wrapped.complete(system, user, max_tokens)
+            record_provider_success(self._provider)
             return response
+        except Exception as exc:
+            record_provider_failure(self._provider, exc)
+            raise
         finally:
             # response stays "" if the wrapped call raised; recording an empty
             # output preserves trace context without re-raising the error.

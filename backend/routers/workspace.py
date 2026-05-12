@@ -7,6 +7,7 @@ from database import get_db
 from middleware.auth import get_current_user
 from models import User
 from schemas.workspace import WorkspaceCreate, WorkspaceResponse, WorkspaceUpdate
+from services.llm.provider_status import is_provider_configured
 from services.pipeline.export_service import ExportNotReadyError, build_export
 from services.workspace_service import workspace_service
 
@@ -19,6 +20,14 @@ async def create_workspace(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> WorkspaceResponse:
+    if not is_provider_configured(payload.provider):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "code": "provider_not_configured",
+                "message": "This provider is not configured on the backend.",
+            },
+        )
     workspace = await workspace_service.create(user.id, payload, db)
     return WorkspaceResponse.model_validate(workspace)
 

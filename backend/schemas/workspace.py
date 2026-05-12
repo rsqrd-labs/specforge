@@ -15,13 +15,17 @@ class WorkspaceCreate(BaseModel):
     name: str = Field(min_length=1, max_length=200)
     problem_statement: str = Field(min_length=50, max_length=10_000)
     provider: Provider
-    model: str = Field(min_length=1)
+    # Deprecated public input. Concrete model routing is server-owned; this
+    # optional field remains only to reject invalid legacy clients cleanly.
+    model: str | None = Field(default=None, min_length=1)
 
     model_config = ConfigDict(from_attributes=True)
 
     @field_validator("model")
     @classmethod
-    def model_must_be_valid(cls, v: str, info: object) -> str:
+    def model_must_be_valid(cls, v: str | None, info: object) -> str | None:
+        if v is None:
+            return v
         provider = getattr(info, "data", {}).get("provider")
         if provider:
             allowed = VALID_MODELS.get(provider, set())

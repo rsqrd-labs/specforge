@@ -2417,6 +2417,7 @@ button:disabled {
 }
 
 .provider-pill {
+  min-height: 50px;
   padding: 9px 10px;
   border-radius: 10px;
   border: 1.5px solid rgba(143, 78, 0, 0.14);
@@ -2427,6 +2428,19 @@ button:disabled {
   cursor: pointer;
   text-align: center;
   transition: border-color 0.18s, background 0.18s, color 0.18s, box-shadow 0.18s;
+}
+
+.provider-pill span,
+.provider-pill small {
+  display: block;
+}
+
+.provider-pill small {
+  margin-top: 3px;
+  font-size: 10px;
+  font-weight: 800;
+  line-height: 1.1;
+  text-transform: uppercase;
 }
 
 .provider-pill:hover {
@@ -2440,6 +2454,28 @@ button:disabled {
   background: linear-gradient(135deg, rgba(143, 78, 0, 0.10), rgba(161, 56, 95, 0.08));
   color: var(--color-primary);
   box-shadow: 0 0 0 3px rgba(143, 78, 0, 0.10);
+}
+
+.provider-pill.disabled {
+  cursor: not-allowed;
+  opacity: 0.42;
+  filter: grayscale(1);
+}
+
+.provider-pill.disabled:hover {
+  border-color: rgba(143, 78, 0, 0.14);
+  background: rgba(255, 255, 255, 0.55);
+  color: var(--color-on-surface-variant);
+}
+
+.provider-pill.degraded {
+  border-color: rgba(143, 78, 0, 0.28);
+  background: rgba(143, 78, 0, 0.06);
+}
+
+.provider-pill.unhealthy {
+  border-color: rgba(192, 57, 43, 0.24);
+  background: rgba(192, 57, 43, 0.06);
 }
 
 .modal-footer {
@@ -3086,6 +3122,18 @@ button:disabled {
   font-weight: 800;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.workspace-model-chip.degraded {
+  border-color: rgba(143, 78, 0, 0.24);
+  background: rgba(143, 78, 0, 0.07);
+  color: var(--color-primary);
+}
+
+.workspace-model-chip.unhealthy {
+  border-color: rgba(192, 57, 43, 0.24);
+  background: rgba(192, 57, 43, 0.07);
+  color: #c0392b;
 }
 
 .workspace-title {

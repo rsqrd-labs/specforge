@@ -23,5 +23,4 @@ export interface CreateWorkspacePayload {
   name: string
   problem_statement: string
   provider: AIProvider
-  model: string
 }

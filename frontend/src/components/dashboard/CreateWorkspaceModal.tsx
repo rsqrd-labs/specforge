@@ -1,10 +1,11 @@
-import { useRef, useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import { useNavigate } from "react-router-dom"
 import { PROVIDERS } from "../../config/providers"
 import { useFocusTrap } from "../../hooks/useFocusTrap"
-import { getApiErrorMessage } from "../../services/api"
+import { getApiErrorMessage, getProviders } from "../../services/api"
 import { useWorkspaceStore } from "../../store/workspaceStore"
 import type { AIProvider } from "../../types/workspace"
+import type { Provider } from "../../services/api"
 
 interface CreateWorkspaceModalProps {
   onClose: () => void
@@ -19,20 +20,37 @@ export function CreateWorkspaceModal({ onClose }: CreateWorkspaceModalProps) {
 
   const [name, setName] = useState("")
   const [statement, setStatement] = useState("")
-  const [provider, setProvider] = useState<AIProvider>("anthropic")
-  const [model, setModel] = useState("claude-sonnet-4-6")
+  const [providers, setProviders] = useState<Provider[]>(PROVIDERS)
+  const [provider, setProvider] = useState<AIProvider>("openai")
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [errors, setErrors] = useState<Record<string, string>>({})
   const dialogRef = useRef<HTMLDivElement>(null)
   useFocusTrap(dialogRef, onClose)
 
-  const availableModels = PROVIDERS.find((p) => p.id === provider)?.models ?? []
+  const selectableProviders = providers.filter((p) => p.selectable)
 
   function handleProviderChange(newProvider: AIProvider) {
+    const candidate = providers.find((p) => p.id === newProvider)
+    if (!candidate?.selectable) return
     setProvider(newProvider)
-    const models = PROVIDERS.find((p) => p.id === newProvider)?.models ?? []
-    setModel(models[0]?.id ?? "")
   }
+
+  useEffect(() => {
+    let cancelled = false
+    getProviders()
+      .then((catalog) => {
+        if (cancelled) return
+        setProviders(catalog.providers)
+        const firstSelectable = catalog.providers.find((p) => p.selectable)
+        if (firstSelectable && !catalog.providers.find((p) => p.id === provider)?.selectable) {
+          setProvider(firstSelectable.id)
+        }
+      })
+      .catch(() => undefined)
+    return () => {
+      cancelled = true
+    }
+  }, [provider])
 
   function validate() {
     const errs: Record<string, string> = {}
@@ -57,7 +75,6 @@ export function CreateWorkspaceModal({ onClose }: CreateWorkspaceModalProps) {
         name: name.trim(),
         problem_statement: statement,
         provider,
-        model,
       })
       navigate(`/workspace/${ws.id}`)
     } catch (error) {
@@ -135,32 +152,35 @@ export function CreateWorkspaceModal({ onClose }: CreateWorkspaceModalProps) {
           <div>
             <label className="modal-label">Provider</label>
             <div className="provider-grid">
-              {PROVIDERS.map((p) => (
+              {providers.map((p) => (
                 <button
                   key={p.id}
                   type="button"
-                  onClick={() => handleProviderChange(p.id as AIProvider)}
-                  className={`provider-pill${provider === p.id ? " selected" : ""}`}
+                  onClick={() => handleProviderChange(p.id)}
+                  disabled={!p.selectable}
+                  title={p.message}
+                  className={[
+                    "provider-pill",
+                    provider === p.id ? "selected" : "",
+                    !p.selectable ? "disabled" : "",
+                    p.health === "degraded" ? "degraded" : "",
+                    p.health === "unhealthy" ? "unhealthy" : "",
+                  ].filter(Boolean).join(" ")}
                 >
-                  {p.name}
+                  <span>{p.name}</span>
+                  {!p.configured && <small>Not configured</small>}
+                  {p.configured && p.health !== "healthy" && (
+                    <small>{p.health}</small>
+                  )}
                 </button>
               ))}
             </div>
-          </div>
-
-          <div>
-            <label className="modal-label">Model</label>
-            <select
-              value={model}
-              onChange={(e) => setModel(e.target.value)}
-              className="modal-input"
-            >
-              {availableModels.map((m) => (
-                <option key={m.id} value={m.id}>
-                  {m.name}
-                </option>
-              ))}
-            </select>
+            {selectableProviders.length === 0 && (
+              <p className="modal-error">
+                No model providers are configured. Add at least one provider API key
+                on the backend.
+              </p>
+            )}
           </div>
 
           {errors.submit && <p className="modal-error">{errors.submit}</p>}
@@ -169,7 +189,11 @@ export function CreateWorkspaceModal({ onClose }: CreateWorkspaceModalProps) {
             <button type="button" onClick={onClose} className="modal-cancel">
               Cancel
             </button>
-            <button type="submit" disabled={isSubmitting} className="modal-submit">
+            <button
+              type="submit"
+              disabled={isSubmitting || selectableProviders.length === 0}
+              className="modal-submit"
+            >
               {isSubmitting ? "Creating…" : "Create Workspace"}
             </button>
           </div>

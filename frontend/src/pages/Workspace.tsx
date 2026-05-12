@@ -13,7 +13,6 @@ import { StreamingOverlay } from "../components/workspace/StreamingOverlay"
 import { MarkdownRenderer } from "../components/workspace/MarkdownRenderer"
 import { ProblemStatementPanel } from "../components/workspace/ProblemStatementPanel"
 import { TaskValidationPanel } from "../components/workspace/TaskValidationPanel"
-import { PROVIDERS } from "../config/providers"
 import { useCredits } from "../hooks/useCredits"
 import { useStream } from "../hooks/useStream"
 import {
@@ -23,6 +22,7 @@ import {
   finaliseStage,
   getStageEval,
   getApiErrorMessage,
+  getProviders,
   getWorkspace,
   refineStage,
   rejectStageDiff,
@@ -31,6 +31,7 @@ import {
 } from "../services/api"
 import { useStageStore } from "../store/stageStore"
 import { useWorkspaceStore } from "../store/workspaceStore"
+import type { Provider } from "../services/api"
 import type { EvalResult, RefineResponse, Stage, StageType } from "../types/stage"
 
 const STAGE_ORDER: StageType[] = ["spec", "plan", "harness", "tasks"]
@@ -90,13 +91,9 @@ function formatStageStatus(status: Stage["status"]): string {
   return status.replace("_", " ")
 }
 
-function formatProviderModel(providerId: string, modelId: string): string {
-  const provider = PROVIDERS.find((candidate) => candidate.id === providerId)
-  const model = provider?.models.find((candidate) => candidate.id === modelId)
-
-  return `${provider?.name ?? titleCaseIdentifier(providerId)} / ${
-    model?.name ?? modelId
-  }`
+function formatProvider(providerId: string, providers: Provider[]): string {
+  const provider = providers.find((candidate) => candidate.id === providerId)
+  return provider?.name ?? titleCaseIdentifier(providerId)
 }
 
 function titleCaseIdentifier(value: string): string {
@@ -179,6 +176,7 @@ export default function Workspace() {
   const [specViewMode, setSpecViewMode] = useState<"preview" | "edit">("preview")
   const [problemDraft, setProblemDraft] = useState("")
   const [problemDirty, setProblemDirty] = useState(false)
+  const [providers, setProviders] = useState<Provider[]>([])
 
   const activeStage = activeStageId ? stageMap[activeStageId] : null
   const { start: startStream, isStreaming, error: streamError } = useStream(
@@ -203,15 +201,30 @@ export default function Workspace() {
     Boolean(problemDraft.trim())
   const creditFillPercent =
     balance === null ? 0 : Math.max(0, Math.min((balance / 100) * 100, 100))
-  const providerModelLabel = currentWorkspace
-    ? formatProviderModel(currentWorkspace.provider, currentWorkspace.model)
+  const providerLabel = currentWorkspace
+    ? formatProvider(currentWorkspace.provider, providers)
     : ""
+  const currentProviderStatus = currentWorkspace
+    ? providers.find((provider) => provider.id === currentWorkspace.provider)
+    : null
 
   useEffect(() => {
     if (id) {
       void fetchWorkspace(id)
     }
   }, [id, fetchWorkspace])
+
+  useEffect(() => {
+    let cancelled = false
+    getProviders()
+      .then((catalog) => {
+        if (!cancelled) setProviders(catalog.providers)
+      })
+      .catch(() => undefined)
+    return () => {
+      cancelled = true
+    }
+  }, [])
 
   useEffect(() => {
     if (!currentWorkspace) return
@@ -699,10 +712,14 @@ export default function Workspace() {
                 {formatStageStatus(activeStage.status)}
               </span>
               <span
-                className="workspace-model-chip"
-                title={providerModelLabel}
+                className={[
+                  "workspace-model-chip",
+                  currentProviderStatus?.health === "degraded" ? "degraded" : "",
+                  currentProviderStatus?.health === "unhealthy" ? "unhealthy" : "",
+                ].filter(Boolean).join(" ")}
+                title={currentProviderStatus?.message ?? providerLabel}
               >
-                {providerModelLabel}
+                {providerLabel}
               </span>
             </div>
             <QualityBadge evalResult={evalResult} />

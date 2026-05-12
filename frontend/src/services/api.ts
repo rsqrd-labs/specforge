@@ -45,11 +45,15 @@ export interface ProviderModel {
   name: string
 }
 
+export type ProviderHealth = "not_configured" | "healthy" | "degraded" | "unhealthy"
+
 export interface Provider {
   id: "anthropic" | "openai" | "google"
   name: string
-  models: ProviderModel[]
-  judge_model?: string
+  configured: boolean
+  selectable: boolean
+  health: ProviderHealth
+  message: string
 }
 
 export interface ProviderCatalog {
