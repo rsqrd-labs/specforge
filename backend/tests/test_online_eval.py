@@ -318,6 +318,32 @@ async def test_run_eval_json_parse_failure_returns_none() -> None:
 
 
 @pytest.mark.asyncio
+async def test_run_eval_extracts_json_from_fenced_judge_response() -> None:
+    db = _FakeDB()
+    judge_response = (
+        "Here is the evaluation:\n"
+        "```json\n"
+        '{"scores": {"requirements_coverage": 80, '
+        '"specificity_testability": 75, "traceability": 70, "clarity": 85}, '
+        '"coverage_percent": 78, "uncovered_reqs": ["FR-009"], '
+        '"tasks_without_ref": [], "risks": []}'
+        "\n```"
+    )
+
+    with patch(
+        "services.evals.online_eval.get_llm",
+        return_value=_FakeJudge(judge_response),
+    ):
+        result = await run_eval(uuid4(), "harness", "harness content", "spec", db)
+
+    assert result is not None
+    assert result.coverage_percent == 78
+    assert result.overall_score == 77
+    assert result.flagged is True
+    assert db._committed
+
+
+@pytest.mark.asyncio
 async def test_run_eval_judge_exception_returns_none() -> None:
     db = _FakeDB()
 

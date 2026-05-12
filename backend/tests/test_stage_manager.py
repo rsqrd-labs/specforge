@@ -200,6 +200,24 @@ async def test_generate_invalid_route_skips_credit_and_provider_call() -> None:
     mock_get_llm.assert_not_called()
 
 
+def test_harness_generation_uses_stronger_route_and_long_timeout() -> None:
+    from services.pipeline import stage_manager as stage_manager_module
+
+    workspace = _make_workspace()
+    workspace.provider = "openai"
+
+    route = stage_manager_module._route_for_stage_generation("harness", workspace)
+
+    assert route.provider == "openai"
+    assert route.model == "gpt-4o"
+    assert route.model_tier == "strong"
+    assert route.reason == "fallback_tier"
+    assert (
+        stage_manager_module._stream_timeout_for_stage("harness")
+        >= stage_manager_module.settings.llm_long_stream_timeout_seconds
+    )
+
+
 @pytest.mark.asyncio
 async def test_generate_zero_visible_credits_skips_credit_and_provider_call() -> None:
     from services.credit_service import InsufficientCreditsError
@@ -695,6 +713,48 @@ async def test_refine_cache_miss_writes_replacement() -> None:
 
 
 @pytest.mark.asyncio
+async def test_refine_normalizes_markdown_wrapped_replacement() -> None:
+    from schemas.stage import RefineRequest
+
+    workspace_id = uuid4()
+    content = "# Title\n\nOld paragraph\n\n## Next\n"
+    start = content.index("Old paragraph")
+    end = start + len("Old paragraph")
+    stage = _make_stage(workspace_id, "spec", status="draft", content=content)
+    workspace = _make_workspace([stage])
+    user = _make_user()
+    redis = _FakeRedis()
+    svc = StageManager(redis_client=redis)
+    db = _MultiQueryDB([stage, workspace])
+    request = RefineRequest(
+        instruction="improve",
+        selection_start=start,
+        selection_end=end,
+        selected_text="Old paragraph",
+    )
+    deduction = CreditLedger(id=uuid4(), user_id=user.id, amount=-3, reason="refine")
+
+    with (
+        patch(
+            "services.pipeline.stage_manager.credit_service.deduct",
+            new_callable=AsyncMock,
+            return_value=deduction,
+        ),
+        patch("services.pipeline.stage_manager.get_llm") as mock_get_llm,
+    ):
+        mock_adapter = MagicMock()
+        mock_adapter.complete = AsyncMock(
+            return_value="```markdown\nImproved paragraph\n```"
+        )
+        mock_get_llm.return_value = mock_adapter
+
+        result = await svc.refine(stage.id, request, user, db)
+
+    assert "```markdown" not in result.proposed
+    assert result.proposed == "# Title\n\nImproved paragraph\n\n## Next\n"
+
+
+@pytest.mark.asyncio
 async def test_refine_noop_instruction_skips_credit_and_provider_call() -> None:
     from schemas.stage import RefineRequest
     from services.pipeline.stage_manager import PreflightError
@@ -876,6 +936,51 @@ async def test_eval_context_for_tasks_includes_spec_and_harness() -> None:
 
     assert "Specification:\nspec content" in context
     assert "Test harness:\nharness content" in context
+
+
+@pytest.mark.asyncio
+async def test_handle_content_edit_schedules_eval_for_new_version() -> None:
+    workspace_id = uuid4()
+    stage = _make_stage(
+        workspace_id,
+        "harness",
+        status="draft",
+        content="old harness",
+        version=2,
+    )
+    workspace = _make_workspace([stage])
+    user = _make_user()
+    redis = _FakeRedis()
+    await redis.set(f"stage:{workspace_id}:spec", "spec content")
+    svc = StageManager(redis_client=redis)
+    db = _MultiQueryDB([stage, workspace])
+
+    with patch(
+        "services.pipeline.stage_manager.run_eval_background",
+        new_callable=AsyncMock,
+        return_value=None,
+    ) as run_eval_background:
+        updated = await svc.handle_content_edit(
+            stage.id,
+            "new harness",
+            user,
+            db,
+        )
+        await asyncio.sleep(0)
+
+    version = next(item for item in db.added if isinstance(item, StageVersion))
+    assert updated.current_version == 3
+    assert version.content == "new harness"
+    run_eval_background.assert_awaited_once()
+    args = run_eval_background.await_args.args
+    assert args[:6] == (
+        version.id,
+        "harness",
+        "new harness",
+        "spec content",
+        workspace.provider,
+        "claude-haiku-4-5-20251001",
+    )
 
 
 @pytest.mark.asyncio
@@ -1097,9 +1202,11 @@ async def test_focused_refine_uses_small_budget_and_context_window() -> None:
 
         await svc.refine(stage.id, request, user, db)
 
-    _, user_prompt = mock_adapter.complete.await_args.args[:2]
-    assert mock_adapter.complete.await_args.kwargs["max_tokens"] == 2048
+    system_prompt, user_prompt = mock_adapter.complete.await_args.args[:2]
+    assert mock_adapter.complete.await_args.kwargs["max_tokens"] == 768
+    assert "keep the replacement tightly scoped" in system_prompt
     assert "Refine mode: focused" in user_prompt
+    assert "Do not rewrite surrounding content" in user_prompt
     assert content not in user_prompt
     assert "[...]" in user_prompt
 
@@ -1284,7 +1391,7 @@ async def test_refine_provider_error_refunds_credits() -> None:
 
 @pytest.mark.asyncio
 async def test_generate_stream_timeout_refunds_credits() -> None:
-    from services.llm.base import ProviderError
+    from services.llm.base import ProviderTimeoutError
     from services.pipeline import stage_manager as stage_manager_module
 
     workspace_id = uuid4()
@@ -1320,7 +1427,7 @@ async def test_generate_stream_timeout_refunds_credits() -> None:
         mock_adapter.stream = hanging_stream
         mock_get_llm.return_value = mock_adapter
 
-        with pytest.raises(ProviderError):
+        with pytest.raises(ProviderTimeoutError):
             async for _ in svc.generate(stage.id, user, db):
                 pass
 
@@ -1533,6 +1640,54 @@ async def test_refine_output_validation_failure_refunds_credits() -> None:
         mock_get_llm.return_value = mock_adapter
 
         with pytest.raises(SecurityError):
+            await svc.refine(stage.id, request, user, db)
+
+    mock_deduct.assert_awaited_once_with(db, user.id, 3, "refine")
+    mock_refund.assert_awaited_once_with(db, deduction.id, user.id)
+
+
+@pytest.mark.asyncio
+async def test_refine_unbalanced_markdown_fence_refunds_credits() -> None:
+    from schemas.stage import RefineRequest
+    from services.pipeline.stage_manager import SecurityError
+
+    workspace_id = uuid4()
+    stage = _make_stage(
+        workspace_id,
+        "spec",
+        status="draft",
+        content="# Title\n\nOld paragraph\n\n## Next\n",
+    )
+    workspace = _make_workspace([stage])
+    user = _make_user()
+    svc = StageManager(redis_client=_FakeRedis())
+    db = _MultiQueryDB([stage, workspace])
+    start = stage.content.index("Old paragraph")
+    request = RefineRequest(
+        instruction="turn into code example",
+        selection_start=start,
+        selection_end=start + len("Old paragraph"),
+        selected_text="Old paragraph",
+    )
+
+    deduction = CreditLedger(id=uuid4(), user_id=user.id, amount=-3, reason="refine")
+    with (
+        patch(
+            "services.pipeline.stage_manager.credit_service.deduct",
+            new_callable=AsyncMock,
+            return_value=deduction,
+        ) as mock_deduct,
+        patch(
+            "services.pipeline.stage_manager.credit_service.refund",
+            new_callable=AsyncMock,
+        ) as mock_refund,
+        patch("services.pipeline.stage_manager.get_llm") as mock_get_llm,
+    ):
+        mock_adapter = MagicMock()
+        mock_adapter.complete = AsyncMock(return_value="```python\nprint('oops')")
+        mock_get_llm.return_value = mock_adapter
+
+        with pytest.raises(SecurityError, match="Markdown code fences"):
             await svc.refine(stage.id, request, user, db)
 
     mock_deduct.assert_awaited_once_with(db, user.id, 3, "refine")

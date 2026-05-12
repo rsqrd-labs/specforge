@@ -9,6 +9,15 @@ class ProviderError(Exception):
         super().__init__(f"{provider} error: {original}")
 
 
+class ProviderTimeoutError(ProviderError):
+    def __init__(self, provider: str, timeout_seconds: float) -> None:
+        self.timeout_seconds = timeout_seconds
+        super().__init__(
+            provider,
+            TimeoutError(f"generation exceeded {timeout_seconds:g} seconds"),
+        )
+
+
 class BaseLLMAdapter(ABC):
     @abstractmethod
     async def stream(

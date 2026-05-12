@@ -5,7 +5,7 @@ OUTPUT_TOKEN_BUDGETS: dict[str, int] = {
     "plan.generate": 8192,
     "harness.generate": 8192,
     "tasks.generate": 6144,
-    "refine.focused": 2048,
+    "refine.focused": 768,
     "refine.section": 4096,
     "regenerate.full": 8192,
     "summary.create": 2048,

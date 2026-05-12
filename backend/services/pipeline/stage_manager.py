@@ -29,7 +29,7 @@ from services.credit_service import (
     credit_service,
 )
 from services.evals.online_eval import run_eval_background
-from services.llm.base import ProviderError
+from services.llm.base import ProviderError, ProviderTimeoutError
 from services.llm.cost_cache import (
     build_generation_cache_key,
     get_cached_generation,
@@ -39,7 +39,12 @@ from services.llm.gateway import get_llm
 from services.llm.output_budget import output_budget_for_operation
 from services.llm.provider_config import JUDGE_MODELS
 from services.llm.routing import LLMRoute, LLMRoutingError, resolve_llm_route
-from services.pipeline.diff_engine import apply_diff, compute_diff
+from services.pipeline.diff_engine import (
+    apply_diff,
+    compute_diff,
+    markdown_fences_balanced,
+    normalize_refine_replacement,
+)
 from services.pipeline.prompt_builder import build_prompt
 from services.security.output_validator import validate
 from services.security.problem_statement_gate import (
@@ -55,9 +60,10 @@ STAGE_ORDER = ["spec", "plan", "harness", "tasks"]
 STAGE_GENERATION_TIERS = {
     "spec": ("strong", "mid"),
     "plan": ("strong", "mid"),
-    "harness": ("mini", "mid"),
+    "harness": ("mid", "strong"),
     "tasks": ("mini", "small"),
 }
+LONG_GENERATION_STAGES = frozenset({"harness", "tasks"})
 _NOOP_REFINE_INSTRUCTIONS = {
     "no change",
     "no changes",
@@ -102,6 +108,30 @@ def _eval_to_dict(result: EvalResult) -> dict:
     }
 
 
+def _schedule_stage_eval(
+    *,
+    version_id: UUID,
+    stage_type: str,
+    content: str,
+    eval_context: str,
+    provider: str,
+    content_generation_id: str | None = None,
+) -> asyncio.Task[EvalResult | None]:
+    eval_task = asyncio.create_task(
+        run_eval_background(
+            version_id,
+            stage_type,
+            content,
+            eval_context,
+            provider,
+            JUDGE_MODELS[provider],
+            content_generation_id=content_generation_id,
+        )
+    )
+    eval_task.add_done_callback(_log_eval_error)
+    return eval_task
+
+
 def _route_for_stage_generation(stage_type: str, workspace: Workspace) -> LLMRoute:
     requested_tier, fallback_tier = STAGE_GENERATION_TIERS[stage_type]
     return resolve_llm_route(
@@ -111,6 +141,15 @@ def _route_for_stage_generation(stage_type: str, workspace: Workspace) -> LLMRou
         fallback_tier=fallback_tier,
         latency_class="interactive",
     )
+
+
+def _stream_timeout_for_stage(stage_type: str) -> float:
+    if stage_type in LONG_GENERATION_STAGES:
+        return max(
+            settings.llm_stream_timeout_seconds,
+            settings.llm_long_stream_timeout_seconds,
+        )
+    return settings.llm_stream_timeout_seconds
 
 
 def _route_for_refine(workspace: Workspace, mode: str) -> LLMRoute:
@@ -436,7 +475,8 @@ class StageManager:
                         batch=False,
                         cross_provider_fallback=route.cross_provider_fallback,
                     )
-                async with asyncio.timeout(settings.llm_stream_timeout_seconds):
+                stream_timeout = _stream_timeout_for_stage(stage.type)
+                async with asyncio.timeout(stream_timeout):
                     async for token in adapter.stream(
                         system_prompt,
                         user_prompt,
@@ -455,7 +495,7 @@ class StageManager:
                     await self._mark_langfuse_span_failed(span_id, exc)
                     span_finished = True
                 if isinstance(exc, TimeoutError):
-                    raise ProviderError(route.provider, exc) from exc
+                    raise ProviderTimeoutError(route.provider, stream_timeout) from exc
                 raise exc
 
             accumulated = _strip_code_fence(accumulated)
@@ -499,18 +539,14 @@ class StageManager:
                 await self._end_langfuse_span(span_id)
                 span_finished = True
             await self._invalidate_stage_cache(workspace.id, stage.type, redis)
-            eval_task = asyncio.create_task(
-                run_eval_background(
-                    version_id,
-                    stage.type,
-                    accumulated,
-                    eval_context,
-                    workspace.provider,
-                    JUDGE_MODELS[workspace.provider],
-                    content_generation_id=content_generation_id,
-                )
+            eval_task = _schedule_stage_eval(
+                version_id=version_id,
+                stage_type=stage.type,
+                content=accumulated,
+                eval_context=eval_context,
+                provider=workspace.provider,
+                content_generation_id=content_generation_id,
             )
-            eval_task.add_done_callback(_log_eval_error)
             yield f'{{"done": true, "stage_id": "{stage_id}"}}'
 
             try:
@@ -625,7 +661,9 @@ class StageManager:
 
         system_prompt = (
             "You are SpecForge. Rewrite only the selected text per the instruction. "
-            "Return ONLY the replacement text, nothing else.\n\n"
+            "Return ONLY the replacement text, nothing else. For focused mode, keep "
+            "the replacement tightly scoped and close to the selected text length "
+            "unless the instruction explicitly asks for expansion.\n\n"
             f"{SECURITY_AND_PRIVACY_RULES}"
         )
         sanitized_instruction = sanitize_text(request.instruction)
@@ -647,7 +685,7 @@ class StageManager:
             f"Instruction:\n"
             f"{wrap_untrusted_content('instruction', sanitized_instruction)}\n\n"
             f"Refine mode: {request.mode}\n"
-            "Provide the replacement text only."
+            "Provide the replacement text only. Do not rewrite surrounding content."
         )
         cache_key = build_generation_cache_key(
             prompt_version=STAGE_PROMPT_VERSIONS[stage.type],
@@ -669,12 +707,20 @@ class StageManager:
         )
         cached_replacement = await get_cached_generation(redis, cache_key)
         if cached_replacement is not None:
+            cached_replacement = normalize_refine_replacement(
+                request.selected_text,
+                cached_replacement,
+            )
             proposed = apply_diff(
                 stage_content,
                 request.selection_start,
                 request.selection_end,
                 cached_replacement,
             )
+            if not markdown_fences_balanced(proposed):
+                raise SecurityError(
+                    "Refine output would leave Markdown code fences unbalanced."
+                )
             return DiffResponse(
                 diff=compute_diff(stage_content, proposed),
                 original=stage_content,
@@ -730,6 +776,20 @@ class StageManager:
                 raise SecurityError(
                     f"Refine output failed validation: {validation.reason}"
                 )
+            replacement = normalize_refine_replacement(
+                request.selected_text,
+                replacement,
+            )
+            proposed = apply_diff(
+                stage_content,
+                request.selection_start,
+                request.selection_end,
+                replacement,
+            )
+            if not markdown_fences_balanced(proposed):
+                raise SecurityError(
+                    "Refine output would leave Markdown code fences unbalanced."
+                )
             await set_cached_generation(redis, cache_key, replacement)
         except (ProviderError, SecurityError, TimeoutError) as exc:
             await credit_service.refund(db, deduction.id, user.id)
@@ -744,12 +804,6 @@ class StageManager:
                 await self._mark_langfuse_span_failed(span_id, exc)
             raise
 
-        proposed = apply_diff(
-            stage_content,
-            request.selection_start,
-            request.selection_end,
-            replacement,
-        )
         diff = compute_diff(stage_content, proposed)
         if span_id:
             await self._end_langfuse_span(span_id)
@@ -821,6 +875,7 @@ class StageManager:
         self, stage_id: UUID, new_content: str, user, db: AsyncSession
     ) -> Stage:
         stage = await self._load_stage(stage_id, db)
+        workspace = await self._load_workspace(stage.workspace_id, db)
         was_finalised = stage.status == "finalised"
 
         stage.content = new_content
@@ -835,6 +890,14 @@ class StageManager:
             created_by="user",
         )
         db.add(version)
+        await db.flush()
+        version_id = version.id
+        eval_context = ""
+        if stage.type != "spec":
+            eval_context = await self._eval_context_for_stage(
+                stage.workspace_id,
+                stage.type,
+            )
 
         if was_finalised:
             stage.status = "stale"
@@ -844,6 +907,13 @@ class StageManager:
         await self._invalidate_stage_cache(stage.workspace_id, stage.type, redis)
         await db.commit()
         await db.refresh(stage)
+        _schedule_stage_eval(
+            version_id=version_id,
+            stage_type=stage.type,
+            content=new_content,
+            eval_context=eval_context,
+            provider=workspace.provider,
+        )
         return stage
 
     async def _mark_downstream_stale(self, stage: Stage, db: AsyncSession) -> None:

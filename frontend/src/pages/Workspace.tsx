@@ -43,6 +43,9 @@ const STAGE_LABELS: Record<StageType, string> = {
   tasks: "TASKS",
 }
 
+const EVAL_POLL_ATTEMPTS = 12
+const EVAL_POLL_DELAY_MS = 2500
+
 const REFINE_MODE_OPTIONS = [
   {
     mode: "focused",
@@ -67,6 +70,9 @@ interface PendingCreditAction {
   action: CreditAction
   stageId: string
 }
+
+const sleep = (ms: number) =>
+  new Promise<void>((resolve) => window.setTimeout(resolve, ms))
 
 function firstUnlockedStage(stages: Stage[]): Stage | null {
   return (
@@ -155,6 +161,8 @@ export default function Workspace() {
   const [refineMode, setRefineMode] = useState<"focused" | "section" | "full">(
     "focused",
   )
+  const [isRefining, setIsRefining] = useState(false)
+  const refineInFlightRef = useRef(false)
   const [showRefineInput, setShowRefineInput] = useState(false)
   const [selection, setSelection] = useState<{
     start: number
@@ -270,18 +278,31 @@ export default function Workspace() {
       return
     }
 
+    const stageId = activeStage.id
     let cancelled = false
-    getStageEval(activeStage.id)
-      .then((result) => {
-        if (!cancelled) {
-          setEvalResults((existing) => ({ ...existing, [activeStage.id]: result }))
+
+    const loadEval = async () => {
+      for (let attempt = 0; attempt < EVAL_POLL_ATTEMPTS; attempt += 1) {
+        try {
+          const result = await getStageEval(stageId)
+          if (!cancelled) {
+            setEvalResults((existing) => ({ ...existing, [stageId]: result }))
+          }
+          return
+        } catch {
+          if (cancelled) {
+            return
+          }
+          if (attempt === EVAL_POLL_ATTEMPTS - 1) {
+            setEvalResults((existing) => ({ ...existing, [stageId]: null }))
+            return
+          }
+          await sleep(EVAL_POLL_DELAY_MS)
         }
-      })
-      .catch(() => {
-        if (!cancelled) {
-          setEvalResults((existing) => ({ ...existing, [activeStage.id]: null }))
-        }
-      })
+      }
+    }
+
+    void loadEval()
 
     return () => {
       cancelled = true
@@ -442,11 +463,16 @@ export default function Workspace() {
   }, [pendingReview, stageMap, setStage, runGeneration])
 
   const runRefine = useCallback(async () => {
+    if (refineInFlightRef.current) {
+      return
+    }
     if (!activeStage || !selection || !refineInstruction.trim()) {
       setError("Add an instruction before refining.")
       return
     }
 
+    refineInFlightRef.current = true
+    setIsRefining(true)
     try {
       const currentContent = editorRef.current?.getContent()
       if (currentContent !== undefined && currentContent !== activeStage.content) {
@@ -466,6 +492,9 @@ export default function Workspace() {
       setShowRefineInput(false)
     } catch {
       setError("Refine failed. Check your selection and try again.")
+    } finally {
+      refineInFlightRef.current = false
+      setIsRefining(false)
     }
   }, [activeStage, selection, refineInstruction, refineMode, setStage])
 
@@ -851,6 +880,7 @@ export default function Workspace() {
                   type="button"
                   className={refineMode === option.mode ? "active" : ""}
                   onClick={() => setRefineMode(option.mode)}
+                  disabled={isRefining}
                 >
                   <strong>{option.label}</strong>
                   <span>{option.detail}</span>
@@ -868,17 +898,19 @@ export default function Workspace() {
               onChange={(e) => setRefineInstruction(e.target.value)}
               placeholder="Describe how to refine the selected text…"
               className="refine-input"
+              disabled={isRefining}
               autoFocus
             />
             <button
               type="button"
               onClick={() => setShowRefineInput(false)}
               className="gen-btn-secondary refine-cancel-btn"
+              disabled={isRefining}
             >
               Cancel
             </button>
-            <button type="submit" className="gen-btn-primary">
-              {activeRefineMode.label}
+            <button type="submit" className="gen-btn-primary" disabled={isRefining}>
+              {isRefining ? "Refining..." : activeRefineMode.label}
             </button>
           </form>
         )}

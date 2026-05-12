@@ -134,6 +134,24 @@ describe("createSSEConnection retry behaviour", () => {
     )
   })
 
+  it("maps provider timeouts separately from provider failures", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(() =>
+      mockFetchOk('data: {"error":"provider_timeout","timeout_seconds":300}\n\n'),
+    )
+
+    const onError = vi.fn()
+
+    createSSEConnection("/stream", vi.fn(), vi.fn(), onError, vi.fn())
+
+    await vi.runAllTimersAsync()
+
+    expect(onError).toHaveBeenCalledTimes(1)
+    expect(onError.mock.calls[0][0].message).toBe(
+      "Generation took longer than expected. Please try again; longer stages " +
+        "may need another attempt.",
+    )
+  })
+
   it("treats a stream ending before done as a retryable failure", async () => {
     vi.spyOn(globalThis, "fetch").mockImplementation(() =>
       mockFetchOk('data: {"token":"partial"}\n\n'),

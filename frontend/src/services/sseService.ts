@@ -43,6 +43,11 @@ function streamErrorMessage(event: ErrorEvent): string {
       return "Generation stopped because the output did not pass safety checks."
     case "provider_error":
       return "The selected model provider failed to respond. Please try again."
+    case "provider_timeout":
+      return (
+        "Generation took longer than expected. Please try again; longer stages " +
+        "may need another attempt."
+      )
     case "insufficient_credits":
       return "You need more credits before generating this stage."
     case "internal_error":

@@ -716,6 +716,50 @@ async def test_generate_internal_error_does_not_expose_detail(app) -> None:
 
 
 @pytest.mark.asyncio
+async def test_generate_timeout_emits_provider_timeout(app) -> None:
+    import json as _json
+
+    from services.llm.base import ProviderTimeoutError
+
+    stage = _make_stage()
+
+    async def _fake_db():
+        yield _FakeDB(stage)
+
+    app.dependency_overrides[get_db] = _fake_db
+
+    async def timeout_generate(*args, **kwargs) -> AsyncGenerator[str, None]:
+        raise ProviderTimeoutError("openai", 300)
+        yield
+
+    with (
+        patch(
+            "routers.stage.stage_manager.generate",
+            side_effect=timeout_generate,
+        ),
+        patch(
+            "services.credit_service.credit_service.get_balance",
+            new_callable=AsyncMock,
+            return_value=100,
+        ),
+    ):
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            response = await client.post(f"/stages/{stage.id}/generate")
+
+    assert response.status_code == 200
+    body = response.text
+    assert "provider_timeout" in body
+    assert "provider_error" not in body
+    for line in body.splitlines():
+        if line.startswith("data:"):
+            data = _json.loads(line[5:].strip())
+            if data.get("error") == "provider_timeout":
+                assert data["timeout_seconds"] == 300
+
+
+@pytest.mark.asyncio
 async def test_generate_in_progress_stage_emits_stage_not_generatable(app) -> None:
     """When generate() raises StageStateError (e.g. stage already in_progress),
     _stream_stage must emit stage_not_generatable — not internal_error — so that

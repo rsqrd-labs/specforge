@@ -58,6 +58,7 @@ PROVIDER_CAPABILITY_REGISTRY: dict[str, dict[str, Any]] = {
                 "recommended_operations": [
                     "spec.generate",
                     "plan.generate",
+                    "harness.generate",
                     "regenerate.full",
                 ],
             },
@@ -106,6 +107,7 @@ PROVIDER_CAPABILITY_REGISTRY: dict[str, dict[str, Any]] = {
                 "recommended_operations": [
                     "spec.generate",
                     "plan.generate",
+                    "harness.generate",
                     "regenerate.full",
                 ],
             },
@@ -155,6 +157,7 @@ PROVIDER_CAPABILITY_REGISTRY: dict[str, dict[str, Any]] = {
                 "recommended_operations": [
                     "spec.generate",
                     "plan.generate",
+                    "harness.generate",
                     "regenerate.full",
                 ],
             },

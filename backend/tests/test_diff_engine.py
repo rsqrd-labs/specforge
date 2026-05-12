@@ -1,4 +1,9 @@
-from services.pipeline.diff_engine import apply_diff, compute_diff
+from services.pipeline.diff_engine import (
+    apply_diff,
+    compute_diff,
+    markdown_fences_balanced,
+    normalize_refine_replacement,
+)
 
 
 def test_compute_diff_returns_unified_diff() -> None:
@@ -32,3 +37,27 @@ def test_apply_diff_second_occurrence_with_explicit_positions() -> None:
     second_end = second_start + len("foo")
     result = apply_diff(original, second_start, second_end, "baz")
     assert result == "foo bar baz bar"
+
+
+def test_normalize_refine_replacement_strips_model_markdown_wrapper() -> None:
+    replacement = "```markdown\n## Better heading\n\n- Item\n```"
+
+    assert (
+        normalize_refine_replacement("## Old heading", replacement)
+        == "## Better heading\n\n- Item"
+    )
+
+
+def test_normalize_refine_replacement_preserves_selected_boundary_whitespace() -> None:
+    selected = "\n- old bullet\n"
+    replacement = " - improved bullet "
+
+    assert (
+        normalize_refine_replacement(selected, replacement)
+        == "\n- improved bullet\n"
+    )
+
+
+def test_markdown_fences_balanced_detects_broken_patch() -> None:
+    assert markdown_fences_balanced("before\n```python\nprint('ok')\n```\nafter")
+    assert not markdown_fences_balanced("before\n```python\nprint('oops')\nafter")

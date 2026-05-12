@@ -25,7 +25,7 @@ from schemas.stage import (
     StageVersionResponse,
 )
 from services.credit_service import InsufficientCreditsError
-from services.llm.base import ProviderError
+from services.llm.base import ProviderError, ProviderTimeoutError
 from services.pipeline.stage_manager import (
     PreflightError,
     RateLimitError,
@@ -70,6 +70,15 @@ async def _stream_stage(
         yield f"data: {payload}\n\n"
     except PreflightError as exc:
         payload = json.dumps({"error": exc.code, "detail": exc.message})
+        yield f"data: {payload}\n\n"
+    except ProviderTimeoutError as exc:
+        payload = json.dumps(
+            {
+                "error": "provider_timeout",
+                "detail": str(exc),
+                "timeout_seconds": exc.timeout_seconds,
+            }
+        )
         yield f"data: {payload}\n\n"
     except ProviderError as exc:
         payload = json.dumps({"error": "provider_error", "detail": str(exc)})

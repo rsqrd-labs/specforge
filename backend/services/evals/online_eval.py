@@ -280,6 +280,27 @@ def _normalise_eval_payload(stage_type: str, data: dict[str, Any]) -> dict[str, 
     }
 
 
+def _parse_eval_json(raw: str) -> dict[str, Any] | None:
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        data = None
+    if isinstance(data, dict):
+        return data
+
+    decoder = json.JSONDecoder()
+    for idx, char in enumerate(raw):
+        if char != "{":
+            continue
+        try:
+            candidate, _ = decoder.raw_decode(raw[idx:])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(candidate, dict):
+            return candidate
+    return None
+
+
 def _compact_text(value: str, limit: int) -> str:
     if limit <= 0 or len(value) <= limit:
         return value
@@ -408,9 +429,8 @@ async def run_eval(
     if raw is None:
         return None
 
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError:
+    data = _parse_eval_json(raw)
+    if data is None:
         logger.error(
             "eval judge returned non-JSON for stage_version_id=%s: %r",
             stage_version_id,
@@ -426,9 +446,8 @@ async def run_eval(
         )
         if retry_raw is None:
             return None
-        try:
-            data = json.loads(retry_raw)
-        except json.JSONDecodeError:
+        data = _parse_eval_json(retry_raw)
+        if data is None:
             logger.error(
                 "eval judge retry returned non-JSON for stage_version_id=%s: %r",
                 stage_version_id,
