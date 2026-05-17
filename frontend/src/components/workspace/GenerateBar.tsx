@@ -56,7 +56,7 @@ export function GenerateBar({
         </button>
       ) : null}
 
-      {stage.content && (
+      {stage.content && stage.status !== "finalised" && (
         <button
           type="button"
           onClick={onRefine}
