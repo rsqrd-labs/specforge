@@ -6,6 +6,7 @@ import { WorkspaceCard } from "../components/dashboard/WorkspaceCard"
 import { getApiErrorMessage, getCredits, logout } from "../services/api"
 import { useUserStore } from "../store/userStore"
 import { useWorkspaceStore } from "../store/workspaceStore"
+import type { Stage, StageStatus } from "../types/stage"
 import type { Workspace, WorkspaceWithStages } from "../types/workspace"
 
 function useCountUp(target: number | null, duration = 950) {
@@ -88,6 +89,34 @@ const PIPELINE_STAGE_DETAILS: Record<
 }
 
 const PIPELINE_STAGE_ORDER: PipelineStageId[] = ["spec", "plan", "harness", "tasks"]
+const STARTER_WORKSPACES = [
+  {
+    name: "AI onboarding coach",
+    description: "Personalized onboarding for new users",
+    statement:
+      "Build an AI onboarding coach for a B2B SaaS product. It should understand a new user's role, guide them through the first important setup steps, answer product questions, and surface success milestones for customer success teams.",
+  },
+  {
+    name: "Customer feedback hub",
+    description: "Turn user feedback into roadmap signals",
+    statement:
+      "Create a customer feedback hub that collects feedback from support tickets, calls, and surveys. Product managers should be able to cluster themes, identify priority requests, track customer impact, and turn validated insights into roadmap-ready work.",
+  },
+  {
+    name: "Internal support copilot",
+    description: "Help teams resolve operational questions",
+    statement:
+      "Design an internal support copilot for company operations. Employees should ask policy, tooling, and process questions, receive source-backed answers, and escalate unclear requests while administrators maintain approved knowledge sources.",
+  },
+]
+const STAGE_LABELS: Record<PipelineStageId, string> = {
+  spec: "Spec",
+  plan: "Plan",
+  harness: "Harness",
+  tasks: "Tasks",
+}
+
+const ACTIVE_STAGE_STATUSES: StageStatus[] = ["draft", "in_progress", "stale"]
 
 function emailName(email: string): string {
   const localPart = email.split("@")[0] ?? email
@@ -112,6 +141,53 @@ function initialsFor(user: { name: string | null; email: string }): string {
 
   const fallback = user.email.match(/[a-zA-Z0-9]/g)?.slice(0, 2).join("") ?? "SF"
   return (parts.length > 1 ? `${parts[0]}${parts[1]}` : parts[0] ?? fallback).toUpperCase()
+}
+
+function progressForWorkspace(workspace: WorkspaceWithStages): number {
+  const finalised = workspace.stages?.filter((stage) => stage.status === "finalised").length ?? 0
+  return Math.round((finalised / PIPELINE_STAGE_ORDER.length) * 100)
+}
+
+function nextStageForWorkspace(workspace: WorkspaceWithStages): Stage | null {
+  const stageMap = Object.fromEntries(workspace.stages.map((stage) => [stage.type, stage]))
+  const activeStage = PIPELINE_STAGE_ORDER
+    .map((stageId) => stageMap[stageId])
+    .find((stage): stage is Stage =>
+      Boolean(stage && ACTIVE_STAGE_STATUSES.includes(stage.status)),
+    )
+
+  if (activeStage) return activeStage
+
+  return PIPELINE_STAGE_ORDER
+    .map((stageId) => stageMap[stageId])
+    .find((stage): stage is Stage => Boolean(stage)) ?? null
+}
+
+function nextActionForStage(stage: Stage | null): string {
+  if (!stage) return "Open Workspace"
+  const stageName = STAGE_LABELS[stage.type]
+  if (stage.type === "tasks" && stage.status === "finalised") return "Review Export"
+  if (stage.status === "stale") return `Refresh ${stageName}`
+  if (stage.status === "in_progress") return `Resume ${stageName}`
+  if (stage.status === "finalised") return `Review ${stageName}`
+  return `Continue ${stageName}`
+}
+
+function statusTextForStage(stage: Stage | null): string {
+  if (!stage) return "Workspace ready"
+  if (stage.type === "tasks" && stage.status === "finalised") return "Ready to export"
+  if (stage.status === "stale") return `${STAGE_LABELS[stage.type]} needs refresh`
+  if (stage.status === "in_progress") return `${STAGE_LABELS[stage.type]} in progress`
+  if (stage.status === "draft") return `${STAGE_LABELS[stage.type]} waiting`
+  if (stage.status === "locked") return `${STAGE_LABELS[stage.type]} locked`
+  return `${STAGE_LABELS[stage.type]} complete`
+}
+
+function formatUpdatedDate(value: string): string {
+  return new Intl.DateTimeFormat(undefined, {
+    month: "short",
+    day: "numeric",
+  }).format(new Date(value))
 }
 
 function UserAvatar({
@@ -146,6 +222,9 @@ export default function Dashboard() {
   const clearUser = useUserStore((state) => state.clearUser)
   const [balance, setBalance] = useState<number | null>(null)
   const [showCreate, setShowCreate] = useState(false)
+  const [starterWorkspace, setStarterWorkspace] = useState<
+    (typeof STARTER_WORKSPACES)[number] | null
+  >(null)
   const [isLoggingOut, setIsLoggingOut] = useState(false)
   const [workspaceToDelete, setWorkspaceToDelete] = useState<Workspace | null>(null)
   const [deletingWorkspaceId, setDeletingWorkspaceId] = useState<string | null>(null)
@@ -175,11 +254,23 @@ export default function Dashboard() {
   const firstName = user ? firstDisplayName(user) : null
   const initials = user ? initialsFor(user) : "?"
   const isLow = balance !== null && balance <= 10
+  const typedWorkspaces = workspaces as WorkspaceWithStages[]
 
-  const totalDone = (workspaces as WorkspaceWithStages[]).reduce(
+  const totalDone = typedWorkspaces.reduce(
     (n, ws) => n + (ws.stages?.filter((s) => s.status === "finalised").length ?? 0),
     0,
   )
+  const activeDrafts = typedWorkspaces.filter((ws) =>
+    ws.stages?.some((stage) => ["draft", "in_progress", "stale"].includes(stage.status)),
+  ).length
+  const readyToExport = typedWorkspaces.filter((ws) =>
+    ws.stages?.some((stage) => stage.type === "tasks" && stage.status === "finalised"),
+  ).length
+  const latestWorkspace = [...typedWorkspaces].sort(
+    (a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime(),
+  )[0]
+  const latestStage = latestWorkspace ? nextStageForWorkspace(latestWorkspace) : null
+  const latestProgress = latestWorkspace ? progressForWorkspace(latestWorkspace) : 0
   const fillPct = balance !== null ? Math.min((balance / CREDIT_FULL) * 100, 100) : 0
   const activePipelineDetail = activePipelineInfo
     ? PIPELINE_STAGE_DETAILS[activePipelineInfo]
@@ -212,6 +303,11 @@ export default function Dashboard() {
     } finally {
       setDeletingWorkspaceId(null)
     }
+  }
+
+  function openCreateWorkspace(starter: (typeof STARTER_WORKSPACES)[number] | null = null) {
+    setStarterWorkspace(starter)
+    setShowCreate(true)
   }
 
   return (
@@ -301,6 +397,46 @@ export default function Dashboard() {
         </div>
       </div>
 
+      {latestWorkspace && (
+        <section className="continue-panel" aria-labelledby="continue-title">
+          <div className="continue-panel-main">
+            <div className="continue-panel-kicker">Continue where you left off</div>
+            <h2 id="continue-title" className="continue-panel-title">
+              {latestWorkspace.name}
+            </h2>
+            <p className="continue-panel-copy">
+              {statusTextForStage(latestStage)}. Last touched {formatUpdatedDate(latestWorkspace.updated_at)}.
+            </p>
+            <div className="continue-progress" aria-label={`${latestProgress}% complete`}>
+              <div className="continue-progress-track">
+                <div
+                  className="continue-progress-fill"
+                  style={{ width: `${latestProgress}%` }}
+                />
+              </div>
+              <span>{latestProgress}% complete</span>
+            </div>
+          </div>
+
+          <div className="continue-panel-meta">
+            <div className="continue-stage-orbit" aria-hidden="true">
+              <span>{latestStage ? STAGE_LABELS[latestStage.type][0] : "W"}</span>
+            </div>
+            <div className="continue-stage-label">
+              <span>Current focus</span>
+              <strong>{latestStage ? STAGE_LABELS[latestStage.type] : "Workspace"}</strong>
+            </div>
+            <button
+              type="button"
+              className="continue-button"
+              onClick={() => navigate(`/workspace/${latestWorkspace.id}`)}
+            >
+              {nextActionForStage(latestStage)}
+            </button>
+          </div>
+        </section>
+      )}
+
       {/* Stats */}
       <div className="stats-strip">
         <div className="stat-chip">
@@ -386,8 +522,29 @@ export default function Dashboard() {
       {/* Workspace list */}
       <div className="ws-section">
         <div className="ws-section-header">
-          <h2 className="ws-section-title">Ideas in Motion</h2>
-          <button className="forge-button" onClick={() => setShowCreate(true)}>
+          <div className="ws-section-copy">
+            <span className="ws-section-eyebrow">Workspace foundry</span>
+            <h2 className="ws-section-title">
+              Ideas in <span>Motion</span>
+            </h2>
+            <p className="ws-section-subtitle">
+              {workspaces.length === 0
+                ? "Start with a rough thought and turn it into a buildable brief."
+                : "Keep the strongest threads moving from spark to shipped plan."}
+            </p>
+          </div>
+          <div className="ws-section-actions">
+            <div className="ws-section-pulse" aria-hidden="true">
+              <span />
+              <span />
+              <span />
+            </div>
+            <div className="ws-section-mini-stats" aria-label="Workspace status summary">
+              <span>{activeDrafts} active</span>
+              <span>{readyToExport} ready</span>
+            </div>
+          </div>
+          <button className="forge-button" onClick={() => openCreateWorkspace()}>
             <span className="forge-button-icon">+</span>
             Start a Workspace
           </button>
@@ -405,7 +562,20 @@ export default function Dashboard() {
               Bring the messy version of the idea. SpecForge will help you
               sharpen it into a path your team can actually build.
             </p>
-            <button className="forge-button" onClick={() => setShowCreate(true)}>
+            <div className="starter-grid" aria-label="Starter workspace ideas">
+              {STARTER_WORKSPACES.map((starter) => (
+                <button
+                  type="button"
+                  key={starter.name}
+                  className="starter-card"
+                  onClick={() => openCreateWorkspace(starter)}
+                >
+                  <strong>{starter.name}</strong>
+                  <span>{starter.description}</span>
+                </button>
+              ))}
+            </div>
+            <button className="forge-button" onClick={() => openCreateWorkspace()}>
               <span className="forge-button-icon">+</span>
               Draft the first workspace
             </button>
@@ -428,7 +598,16 @@ export default function Dashboard() {
         )}
       </div>
 
-      {showCreate && <CreateWorkspaceModal onClose={() => setShowCreate(false)} />}
+      {showCreate && (
+        <CreateWorkspaceModal
+          initialName={starterWorkspace?.name}
+          initialStatement={starterWorkspace?.statement}
+          onClose={() => {
+            setShowCreate(false)
+            setStarterWorkspace(null)
+          }}
+        />
+      )}
       {workspaceToDelete && (
         <DeleteWorkspaceModal
           workspace={workspaceToDelete}

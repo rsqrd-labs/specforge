@@ -1,6 +1,6 @@
 import { useRef } from "react"
 import { Link } from "react-router-dom"
-import type { Stage } from "../../types/stage"
+import type { Stage, StageStatus, StageType } from "../../types/stage"
 import type { Workspace } from "../../types/workspace"
 
 interface WorkspaceCardProps {
@@ -11,11 +11,53 @@ interface WorkspaceCardProps {
 }
 
 const STAGE_ORDER = ["spec", "plan", "harness", "tasks"] as const
+const ACTIVE_STAGE_STATUSES: StageStatus[] = ["draft", "in_progress", "stale"]
+
+const STAGE_LABELS: Record<StageType, string> = {
+  spec: "Spec",
+  plan: "Plan",
+  harness: "Harness",
+  tasks: "Tasks",
+}
 
 const PROVIDER_LABELS: Record<string, string> = {
   anthropic: "Anthropic",
   openai: "OpenAI",
   google: "Google",
+}
+
+function nextStageForCard(stageMap: Partial<Record<StageType, Stage>>): Stage | null {
+  const activeStage = STAGE_ORDER
+    .map((type) => stageMap[type])
+    .find((stage): stage is Stage =>
+      Boolean(stage && ACTIVE_STAGE_STATUSES.includes(stage.status)),
+    )
+
+  if (activeStage) return activeStage
+
+  return STAGE_ORDER
+    .map((type) => stageMap[type])
+    .find((stage): stage is Stage => Boolean(stage)) ?? null
+}
+
+function actionForStage(stage: Stage | null): string {
+  if (!stage) return "Open workspace"
+  const stageName = STAGE_LABELS[stage.type]
+  if (stage.type === "tasks" && stage.status === "finalised") return "Review export"
+  if (stage.status === "stale") return `Refresh ${stageName}`
+  if (stage.status === "in_progress") return `Resume ${stageName}`
+  if (stage.status === "finalised") return `Review ${stageName}`
+  return `Continue ${stageName}`
+}
+
+function statusLabelForStage(stage: Stage | null): string {
+  if (!stage) return "Ready"
+  if (stage.type === "tasks" && stage.status === "finalised") return "Ready to export"
+  if (stage.status === "stale") return "Needs refresh"
+  if (stage.status === "in_progress") return "In progress"
+  if (stage.status === "draft") return "Draft"
+  if (stage.status === "locked") return "Locked"
+  return "Complete"
 }
 
 export function WorkspaceCard({
@@ -52,11 +94,13 @@ export function WorkspaceCard({
 
   const stageMap = Object.fromEntries(
     (workspace.stages ?? []).map((s) => [s.type, s]),
-  )
+  ) as Partial<Record<StageType, Stage>>
 
   const finalisedCount = STAGE_ORDER.filter(
     (type) => stageMap[type]?.status === "finalised",
   ).length
+  const nextStage = nextStageForCard(stageMap)
+  const progressPct = Math.round((finalisedCount / STAGE_ORDER.length) * 100)
 
   const createdDate = new Date(workspace.created_at).toLocaleDateString(
     undefined,
@@ -105,6 +149,18 @@ export function WorkspaceCard({
           <span className="workspace-stages-count">
             {finalisedCount}/{STAGE_ORDER.length} done
           </span>
+        </div>
+
+        <div className="workspace-card-next">
+          <div>
+            <span>{statusLabelForStage(nextStage)}</span>
+            <strong>{actionForStage(nextStage)}</strong>
+          </div>
+          <em>{progressPct}%</em>
+        </div>
+
+        <div className="workspace-card-progress" aria-hidden="true">
+          <span style={{ width: `${progressPct}%` }} />
         </div>
 
         <div className="workspace-card-footer">

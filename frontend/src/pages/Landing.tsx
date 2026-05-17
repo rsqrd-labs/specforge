@@ -25,24 +25,32 @@ export default function Landing({
             </span>
             <span className="brand-wordmark">SpecForge</span>
           </div>
-          <span className="landing-status">Private beta</span>
+          <span className="landing-status">AI spec-to-build workspace</span>
         </header>
 
         <div className="hero-grid">
           <div className="hero-copy">
             <h1 id="landing-title">
-              Idea to Implementation Without Ambiguity
+              Turn rough product ideas into build-ready specs, tests, and tasks.
             </h1>
             <p className="hero-lede">
-              Turn product intent into a validated build roadmap.
+              SpecForge helps founders, product teams, and engineers turn messy
+              intent into a structured build package: requirements, plans,
+              validation harnesses, and traceable implementation tasks.
             </p>
+
+            <div className="hero-value-row" aria-label="SpecForge outcomes">
+              <span>Less ambiguity</span>
+              <span>Earlier validation</span>
+              <span>Cleaner AI handoffs</span>
+            </div>
 
             <div className="auth-card">
               <div className="auth-card-glow" aria-hidden="true" />
               <div className="auth-card-header">
                 <div>
-                  <span className="auth-kicker">Start in seconds</span>
-                  <strong>Enter the forge</strong>
+                  <span className="auth-kicker">Start with one idea</span>
+                  <strong>Build your first spec</strong>
                 </div>
                 <div className="auth-pulse" aria-hidden="true">
                   <span />
@@ -53,11 +61,12 @@ export default function Landing({
                 type="button"
                 onClick={handleGoogleSignIn}
                 className="google-button"
+                aria-label="Sign in with Google"
               >
                 <span className="google-button-icon">
                   <GoogleIcon />
                 </span>
-                <span>Sign in with Google</span>
+                <span>Start your first workspace</span>
                 <span className="button-arrow" aria-hidden="true">
                   &rarr;
                 </span>
@@ -129,6 +138,17 @@ export default function Landing({
               ))}
             </div>
 
+            <div className="before-after-panel" aria-label="Before and after SpecForge">
+              <div>
+                <span>Rough input</span>
+                <p>“Build an onboarding assistant for new SaaS users.”</p>
+              </div>
+              <div>
+                <span>Build package</span>
+                <p>SPEC.md, PLAN.md, validation harness, and implementation tasks.</p>
+              </div>
+            </div>
+
             <div className="workspace-status">
               <div>
                 <span>Readiness</span>
@@ -192,6 +212,28 @@ export default function Landing({
           </div>
         </div>
 
+        <section className="landing-problem-section" aria-labelledby="problem-title">
+          <div className="section-copy">
+            <span>Why teams lose momentum</span>
+            <h2 id="problem-title">
+              Product ideas usually break between “we should build this” and
+              “here is exactly how.”
+            </h2>
+          </div>
+          <div className="problem-grid">
+            {[
+              ["Requirements stay vague", "Everyone agrees on the idea, then discovers different assumptions during implementation."],
+              ["Tests arrive too late", "Validation often starts after decisions are already embedded in code."],
+              ["AI agents need better context", "Coding agents move faster when the brief, constraints, and acceptance checks are explicit."],
+            ].map(([title, copy]) => (
+              <div className="problem-card" key={title}>
+                <strong>{title}</strong>
+                <p>{copy}</p>
+              </div>
+            ))}
+          </div>
+        </section>
+
         <div className="landing-proof-panel" aria-label="SpecForge platform highlights">
           {[
             ["01", "Quality gates", "Every stage includes review checkpoints before the build moves forward."],
@@ -206,6 +248,44 @@ export default function Landing({
             </div>
           ))}
         </div>
+
+        <section className="audience-section" aria-labelledby="audience-title">
+          <div className="section-copy">
+            <span>Built for execution-minded teams</span>
+            <h2 id="audience-title">Use it when the next step needs to be clearer than the idea.</h2>
+          </div>
+          <div className="audience-grid">
+            {[
+              ["Founders", "Turn a promising product idea into a brief engineers can challenge and build."],
+              ["Product teams", "Convert intent, edge cases, and user journeys into requirements and review gates."],
+              ["Engineers", "Start with architecture, risks, tests, and traceable tasks instead of a vague ticket."],
+              ["AI agent teams", "Give coding agents cleaner instructions, stronger constraints, and validation targets."],
+            ].map(([title, copy]) => (
+              <div className="audience-card" key={title}>
+                <strong>{title}</strong>
+                <p>{copy}</p>
+              </div>
+            ))}
+          </div>
+        </section>
+
+        <section className="landing-final-cta" aria-labelledby="final-cta-title">
+          <div>
+            <span>Bring one messy idea</span>
+            <h2 id="final-cta-title">Leave with a build plan your team can act on.</h2>
+            <p>
+              Start with Google, use your starter credits, and turn the first
+              product thought into a structured SpecForge workspace.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={handleGoogleSignIn}
+            className="final-cta-button"
+          >
+            Start your first workspace
+          </button>
+        </section>
       </section>
     </main>
   )

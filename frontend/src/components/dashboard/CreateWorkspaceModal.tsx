@@ -9,17 +9,23 @@ import type { Provider } from "../../services/api"
 
 interface CreateWorkspaceModalProps {
   onClose: () => void
+  initialName?: string
+  initialStatement?: string
 }
 
 const MIN_STATEMENT = 50
 const MAX_STATEMENT = 10000
 
-export function CreateWorkspaceModal({ onClose }: CreateWorkspaceModalProps) {
+export function CreateWorkspaceModal({
+  onClose,
+  initialName = "",
+  initialStatement = "",
+}: CreateWorkspaceModalProps) {
   const navigate = useNavigate()
   const { createWorkspace } = useWorkspaceStore()
 
-  const [name, setName] = useState("")
-  const [statement, setStatement] = useState("")
+  const [name, setName] = useState(initialName)
+  const [statement, setStatement] = useState(initialStatement)
   const [providers, setProviders] = useState<Provider[]>(PROVIDERS)
   const [provider, setProvider] = useState<AIProvider>("openai")
   const [isSubmitting, setIsSubmitting] = useState(false)
