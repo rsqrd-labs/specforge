@@ -5,7 +5,7 @@ import {
   regenerateStage,
   regenerateStageForGaps,
 } from "../services/api"
-import { createSSEConnection } from "../services/sseService"
+import { StreamError, createSSEConnection } from "../services/sseService"
 import { useStageStore } from "../store/stageStore"
 import type { EvalResult, Stage } from "../types/stage"
 
@@ -16,9 +16,14 @@ interface StreamResult {
   evalResult: EvalResult | null
 }
 
+export interface StreamErrorState {
+  code: string
+  message: string
+}
+
 export function useStream(stageId: string | null) {
   const [isStreaming, setIsStreaming] = useState(false)
-  const [error, setError] = useState<string | null>(null)
+  const [error, setError] = useState<StreamErrorState | null>(null)
   const streamRef = useRef<{ close: () => void } | null>(null)
 
   useEffect(() => {
@@ -76,7 +81,9 @@ export function useStream(stageId: string | null) {
         useStageStore.getState().finaliseStream(stageId)
         const message =
           streamError instanceof Error ? streamError.message : "Streaming failed"
-        setError(message)
+        const code =
+          streamError instanceof StreamError ? streamError.code : "internal_error"
+        setError({ code, message })
 
         try {
           const latestStage = await getStage(stageId)

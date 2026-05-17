@@ -25,6 +25,16 @@ interface EvalEvent {
 
 type SSEPayload = DoneEvent | TokenEvent | ErrorEvent | EvalEvent
 
+export class StreamError extends Error {
+  constructor(
+    public readonly code: string,
+    message: string,
+  ) {
+    super(message)
+    this.name = "StreamError"
+  }
+}
+
 const MAX_RETRIES = 3
 const BACKOFF_MS = [1000, 2000, 4000]
 
@@ -181,7 +191,8 @@ export function createSSEConnection(
           }
 
           if ("error" in data) {
-            onError(new Error(streamErrorMessage(data as ErrorEvent)))
+            const ev = data as ErrorEvent
+            onError(new StreamError(ev.error, streamErrorMessage(ev)))
             close()
             return true // application-level error — do not retry
           }

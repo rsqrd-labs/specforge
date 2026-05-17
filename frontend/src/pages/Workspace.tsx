@@ -14,7 +14,7 @@ import { MarkdownRenderer } from "../components/workspace/MarkdownRenderer"
 import { ProblemStatementPanel } from "../components/workspace/ProblemStatementPanel"
 import { TaskValidationPanel } from "../components/workspace/TaskValidationPanel"
 import { useCredits } from "../hooks/useCredits"
-import { useStream } from "../hooks/useStream"
+import { type StreamErrorState, useStream } from "../hooks/useStream"
 import {
   acceptStageDiff,
   acknowledgeReviewGate,
@@ -177,7 +177,8 @@ export default function Workspace() {
   const [dismissedStale, setDismissedStale] = useState<Record<string, boolean>>(
     {},
   )
-  const [error, setError] = useState<string | null>(null)
+  const [error, setError] = useState<StreamErrorState | null>(null)
+  const setGenericError = (message: string) => setError({ code: "generic", message })
   const [showRefineHint, setShowRefineHint] = useState(false)
   const [isExporting, setIsExporting] = useState(false)
   const [isEditMode, setIsEditMode] = useState(false)
@@ -316,7 +317,7 @@ export default function Workspace() {
 
   useEffect(() => {
     if (streamError) {
-      setError(streamError)
+      if (streamError) setError(streamError)
     }
   }, [streamError])
 
@@ -343,7 +344,7 @@ export default function Workspace() {
 
     const trimmed = problemDraft.trim()
     if (trimmed.length < 50) {
-      setError("Problem statement needs at least 50 characters before saving.")
+      setGenericError("Problem statement needs at least 50 characters before saving.")
       return false
     }
 
@@ -356,7 +357,7 @@ export default function Workspace() {
       setProblemDirty(false)
       return true
     } catch (error) {
-      setError(
+      setGenericError(
         getApiErrorMessage(error, "Could not save the problem statement."),
       )
       return false
@@ -463,7 +464,7 @@ export default function Workspace() {
         pendingReview.action === "regenerate" ? "regenerate" : "generate",
       )
     } catch {
-      setError("Could not acknowledge the review gate.")
+      setGenericError("Could not acknowledge the review gate.")
     }
   }, [pendingReview, stageMap, setStage, runGeneration])
 
@@ -472,7 +473,7 @@ export default function Workspace() {
       return
     }
     if (!activeStage || !selection || !refineInstruction.trim()) {
-      setError("Add an instruction before refining.")
+      setGenericError("Add an instruction before refining.")
       return
     }
 
@@ -496,7 +497,7 @@ export default function Workspace() {
       setLargeSelectionWarning(result.large_selection)
       setShowRefineInput(false)
     } catch {
-      setError("Refine failed. Check your selection and try again.")
+      setGenericError("Refine failed. Check your selection and try again.")
     } finally {
       refineInFlightRef.current = false
       setIsRefining(false)
@@ -546,7 +547,7 @@ export default function Workspace() {
         }
       }
     } catch {
-      setError("Only draft stages can be finalised.")
+      setGenericError("Only draft stages can be finalised.")
     }
   }, [activeStage, id, setStage, setCurrentWorkspace, setStages])
 
@@ -559,7 +560,7 @@ export default function Workspace() {
         const updatedStage = await updateStageContent(activeStage.id, content)
         setStage(updatedStage)
       } catch {
-        setError("Could not save the latest edit.")
+        setGenericError("Could not save the latest edit.")
       }
     },
     [activeStage, isStreaming, setStage],
@@ -602,7 +603,7 @@ export default function Workspace() {
       link.click()
       URL.revokeObjectURL(url)
     } catch {
-      setError("Export failed. Try again after saving the latest edits.")
+      setGenericError("Export failed. Try again after saving the latest edits.")
     } finally {
       setIsExporting(false)
     }
@@ -826,18 +827,29 @@ export default function Workspace() {
           />
         )}
 
-        {error && (
-          <div className="ws-banner ws-error">
-            <span>{error}</span>
+        {error && error.code === "stage_not_generatable" ? (
+          <div className="ws-banner ws-warning">
+            <span>This stage is finalised — unlock it with Rollback before regenerating.</span>
             <button
               type="button"
               onClick={() => setError(null)}
-              className="text-xs opacity-60 hover:opacity-100"
+              className="ws-banner-link"
+            >
+              Dismiss
+            </button>
+          </div>
+        ) : error ? (
+          <div className="ws-banner ws-error">
+            <span>{error.message}</span>
+            <button
+              type="button"
+              onClick={() => setError(null)}
+              className="ws-banner-link"
             >
               ✕
             </button>
           </div>
-        )}
+        ) : null}
 
         {largeSelectionWarning && (
           <div className="ws-banner ws-warning">
