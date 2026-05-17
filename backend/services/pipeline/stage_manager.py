@@ -64,6 +64,36 @@ STAGE_GENERATION_TIERS = {
     "tasks": ("mini", "small"),
 }
 LONG_GENERATION_STAGES = frozenset({"harness", "tasks"})
+
+_REFINE_STAGE_RULES: dict[str, str] = {
+    "spec": (
+        "Stage boundary — SPEC.md is implementation-neutral. Do not introduce API "
+        "paths, database schemas, class names, library names, framework choices, file "
+        "paths, or deployment topology into the rewritten text. Requirements must "
+        "remain expressed as observable product behaviours, not engineering designs."
+    ),
+    "plan": (
+        "Stage boundary — PLAN.md must stay traceable to the spec. Preserve all "
+        "FR/NFR/SEC IDs exactly as written in the surrounding text. Do not change "
+        "endpoint paths, schema field names, module names, or table names unless the "
+        "instruction explicitly requests a rename — these identifiers are referenced "
+        "verbatim by the harness and tasks artifacts."
+    ),
+    "harness": (
+        "Stage boundary — test harness artifacts must remain executable. Preserve "
+        "test function names exactly as written — they are referenced by TASKS.md. "
+        "Do not remove or weaken assertions, loosen expected status codes, delete "
+        "# Tests: requirement markers, or replace real test logic with pass bodies, "
+        "TODOs, or raise NotImplementedError stubs."
+    ),
+    "tasks": (
+        "Stage boundary — TASKS.md must remain traceable. Preserve harness test "
+        "paths exactly as written in Harness refs — they are the delivery evidence "
+        "for each task. Do not change task IDs that appear in other tasks' "
+        "Dependencies fields. Maintain the ### T-NNN: format for any modified task "
+        "header so dependency references stay valid."
+    ),
+}
 _NOOP_REFINE_INSTRUCTIONS = {
     "no change",
     "no changes",
@@ -659,11 +689,23 @@ class StageManager:
         _assert_refine_instruction_meaningful(request)
         _assert_visible_credit_balance(user, CREDIT_COSTS["refine"])
 
+        stage_refine_rules = _REFINE_STAGE_RULES.get(stage.type, "")
         system_prompt = (
             "You are SpecForge. Rewrite only the selected text per the instruction. "
             "Return ONLY the replacement text, nothing else. For focused mode, keep "
             "the replacement tightly scoped and close to the selected text length "
             "unless the instruction explicitly asks for expansion.\n\n"
+            "Cross-cutting rules:\n"
+            "- Preserve all stable identifiers in and immediately around the "
+            "selection: requirement IDs (FR-NNN, NFR-NNN, SEC-NNN), test paths "
+            "(file::class::method), task IDs (T-NNN), endpoint paths, schema field "
+            "names, and defined entity names. Change an identifier only when the "
+            "instruction explicitly requests the rename.\n"
+            "- Do not alter section headings, heading levels, or document structure "
+            "outside the selected text.\n"
+            "- Use the same terminology as the surrounding document. Do not introduce "
+            "synonyms for defined domain terms or entities.\n"
+            f"{stage_refine_rules}\n\n"
             f"{SECURITY_AND_PRIVACY_RULES}"
         )
         sanitized_instruction = sanitize_text(request.instruction)
