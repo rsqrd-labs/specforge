@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react"
+import { Fragment, useEffect, useRef, useState } from "react"
 import { useNavigate } from "react-router-dom"
 import { CreateWorkspaceModal } from "../components/dashboard/CreateWorkspaceModal"
 import { DeleteWorkspaceModal } from "../components/dashboard/DeleteWorkspaceModal"
@@ -36,6 +36,58 @@ function greeting() {
 }
 
 const CREDIT_FULL = 100
+type PipelineStageId = "spec" | "plan" | "harness" | "tasks"
+
+const PIPELINE_STAGE_DETAILS: Record<
+  PipelineStageId,
+  {
+    number: string
+    name: string
+    description: string
+    kicker: string
+    copy: string
+    points: string[]
+  }
+> = {
+  spec: {
+    number: "01",
+    name: "Spec",
+    description: "Turn the spark into crisp requirements and decisions",
+    kicker: "What is a spec?",
+    copy:
+      "A spec is the product blueprint: what you are building, who it is for, how it should behave, and which tradeoffs matter before code starts moving.",
+    points: ["Requirements", "Constraints", "Decisions"],
+  },
+  plan: {
+    number: "02",
+    name: "Plan",
+    description: "Map the work before the work starts drifting",
+    kicker: "What is a plan?",
+    copy:
+      "A plan turns the spec into an implementation route: the sequence of work, dependencies, risks, and checkpoints that keep the build from becoming guesswork.",
+    points: ["Milestones", "Dependencies", "Risks"],
+  },
+  harness: {
+    number: "03",
+    name: "Harness",
+    description: "Lock in proof that every promise is covered",
+    kicker: "What is a harness?",
+    copy:
+      "A harness is the test scaffold for the product promise. It captures the behaviors the system must prove, so quality is designed into the workflow instead of inspected at the end.",
+    points: ["Contracts", "Coverage", "Regression checks"],
+  },
+  tasks: {
+    number: "04",
+    name: "Tasks",
+    description: "Hand engineers and agents a build list they can act on",
+    kicker: "What are tasks?",
+    copy:
+      "Tasks break the plan into concrete implementation steps with enough context for engineers or agents to pick up the next move and keep shipping.",
+    points: ["Action items", "Owners", "Next steps"],
+  },
+}
+
+const PIPELINE_STAGE_ORDER: PipelineStageId[] = ["spec", "plan", "harness", "tasks"]
 
 function emailName(email: string): string {
   const localPart = email.split("@")[0] ?? email
@@ -98,6 +150,7 @@ export default function Dashboard() {
   const [workspaceToDelete, setWorkspaceToDelete] = useState<Workspace | null>(null)
   const [deletingWorkspaceId, setDeletingWorkspaceId] = useState<string | null>(null)
   const [deleteError, setDeleteError] = useState<string | null>(null)
+  const [activePipelineInfo, setActivePipelineInfo] = useState<PipelineStageId | null>(null)
 
   useEffect(() => {
     void fetchWorkspaces()
@@ -105,6 +158,17 @@ export default function Dashboard() {
       .then((d) => setBalance(d.balance))
       .catch(() => setBalance(null))
   }, [fetchWorkspaces])
+
+  useEffect(() => {
+    if (!activePipelineInfo) return
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        setActivePipelineInfo(null)
+      }
+    }
+    window.addEventListener("keydown", handleKeyDown)
+    return () => window.removeEventListener("keydown", handleKeyDown)
+  }, [activePipelineInfo])
 
   const animatedBalance = useCountUp(balance)
   const userDisplayName = user ? displayName(user) : null
@@ -117,6 +181,9 @@ export default function Dashboard() {
     0,
   )
   const fillPct = balance !== null ? Math.min((balance / CREDIT_FULL) * 100, 100) : 0
+  const activePipelineDetail = activePipelineInfo
+    ? PIPELINE_STAGE_DETAILS[activePipelineInfo]
+    : null
 
   async function handleLogout() {
     if (isLoggingOut) return
@@ -263,30 +330,57 @@ export default function Dashboard() {
       <div className="pipeline-strip">
         <span className="pipeline-strip-label">Your launch path</span>
         <div className="pipeline-stages">
-          <div className="pipeline-stage">
-            <div className="pipeline-stage-num">01</div>
-            <div className="pipeline-stage-name">Spec</div>
-            <div className="pipeline-stage-desc">Turn the spark into crisp requirements and decisions</div>
-          </div>
-          <div className="pipeline-arrow">→</div>
-          <div className="pipeline-stage">
-            <div className="pipeline-stage-num">02</div>
-            <div className="pipeline-stage-name">Plan</div>
-            <div className="pipeline-stage-desc">Map the work before the work starts drifting</div>
-          </div>
-          <div className="pipeline-arrow">→</div>
-          <div className="pipeline-stage">
-            <div className="pipeline-stage-num">03</div>
-            <div className="pipeline-stage-name">Harness</div>
-            <div className="pipeline-stage-desc">Lock in proof that every promise is covered</div>
-          </div>
-          <div className="pipeline-arrow">→</div>
-          <div className="pipeline-stage">
-            <div className="pipeline-stage-num">04</div>
-            <div className="pipeline-stage-name">Tasks</div>
-            <div className="pipeline-stage-desc">Hand engineers and agents a build list they can act on</div>
-          </div>
+          {PIPELINE_STAGE_ORDER.map((stageId, index) => {
+            const stage = PIPELINE_STAGE_DETAILS[stageId]
+            const isActive = activePipelineInfo === stageId
+
+            return (
+              <Fragment key={stageId}>
+                {index > 0 && <div className="pipeline-arrow">→</div>}
+                <div className="pipeline-stage-wrap">
+                  <button
+                    type="button"
+                    className={`pipeline-stage pipeline-stage-button${isActive ? " active" : ""}`}
+                    onClick={() =>
+                      setActivePipelineInfo((active) =>
+                        active === stageId ? null : stageId,
+                      )
+                    }
+                    aria-expanded={isActive}
+                    aria-controls="pipeline-stage-info"
+                  >
+                    <div className="pipeline-stage-num">{stage.number}</div>
+                    <div className="pipeline-stage-name">{stage.name}</div>
+                    <div className="pipeline-stage-desc">{stage.description}</div>
+                  </button>
+                </div>
+              </Fragment>
+            )
+          })}
         </div>
+        {activePipelineDetail && (
+          <div
+            id="pipeline-stage-info"
+            role="status"
+            className="spec-info-panel"
+          >
+            <div className="spec-info-beam" aria-hidden="true" />
+            <div className="spec-info-icon" aria-hidden="true">
+              {activePipelineDetail.number}
+            </div>
+            <div>
+              <p className="spec-info-kicker">{activePipelineDetail.kicker}</p>
+              <p className="spec-info-copy">
+                {activePipelineDetail.copy}
+              </p>
+              <div className="spec-info-points">
+                {activePipelineDetail.points.map((point) => (
+                  <span key={point}>{point}</span>
+                ))}
+              </div>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Workspace list */}
