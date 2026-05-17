@@ -4621,6 +4621,111 @@ button:disabled {
   color: var(--color-secondary);
 }
 
+/* Staleness warning strip */
+.staleness-strip {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 11px 20px;
+  flex-shrink: 0;
+  overflow: hidden;
+  border-bottom: 1px solid rgba(143, 78, 0, 0.13);
+  background: linear-gradient(
+    102deg,
+    rgba(255, 153, 51, 0.07) 0%,
+    rgba(255, 180, 80, 0.03) 55%,
+    transparent 100%
+  );
+  animation: staleness-enter 0.3s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.staleness-strip::before {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 3px;
+  background: linear-gradient(180deg, var(--color-primary-container), var(--color-primary));
+  box-shadow: 2px 0 10px rgba(255, 153, 51, 0.35);
+}
+
+@keyframes staleness-enter {
+  from { opacity: 0; transform: translateY(-8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+.staleness-icon-wrap {
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  background: rgba(143, 78, 0, 0.09);
+  color: var(--color-primary);
+  border: 1px solid rgba(143, 78, 0, 0.14);
+}
+
+.staleness-icon-wrap svg {
+  width: 15px;
+  height: 15px;
+}
+
+.staleness-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.staleness-label {
+  font-size: 10.5px;
+  font-weight: 800;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--color-primary);
+}
+
+.staleness-detail {
+  font-size: 13px;
+  color: var(--color-on-surface-variant);
+  font-weight: 500;
+  line-height: 1.4;
+  margin: 0;
+}
+
+.staleness-detail strong {
+  color: var(--color-on-surface);
+  font-weight: 700;
+}
+
+.staleness-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.staleness-dismiss {
+  border: none;
+  background: transparent;
+  padding: 5px 10px;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--color-on-surface-variant);
+  border-radius: 6px;
+  cursor: pointer;
+  opacity: 0.7;
+  transition: opacity 0.15s ease, background 0.15s ease;
+}
+
+.staleness-dismiss:hover {
+  opacity: 1;
+  background: rgba(143, 78, 0, 0.07);
+}
+
 /* Refine hint popup */
 .refine-hint-inline {
   display: flex;

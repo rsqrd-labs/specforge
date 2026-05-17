@@ -16,20 +16,40 @@ export function StalenessWarning({
   if (stage.status !== "stale") return null
 
   return (
-    <div className="ws-banner ws-warning">
-      <span>
-        This stage was generated from an older version of {upstreamStageType}.
-      </span>
-      <div className="flex shrink-0 items-center gap-3">
-        <button
-          type="button"
-          onClick={onDismiss}
-          className="ws-banner-link"
+    <div className="staleness-strip">
+      <div className="staleness-icon-wrap" aria-hidden="true">
+        <svg
+          viewBox="0 0 16 16"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.75"
+          strokeLinecap="round"
+          strokeLinejoin="round"
         >
+          <circle cx="8" cy="8" r="6.5" />
+          <path d="M8 5v3.5l2 1.5" />
+        </svg>
+      </div>
+
+      <div className="staleness-body">
+        <span className="staleness-label">Out of sync</span>
+        <p className="staleness-detail">
+          Generated from an older version of{" "}
+          <strong>{upstreamStageType}</strong> — upstream changes may not be
+          reflected here.
+        </p>
+      </div>
+
+      <div className="staleness-actions">
+        <button type="button" onClick={onDismiss} className="staleness-dismiss">
           Keep as-is
         </button>
-        <button type="button" onClick={onRegenerate} className="gen-btn-primary gen-btn-compact">
-          Regenerate
+        <button
+          type="button"
+          onClick={onRegenerate}
+          className="gen-btn-primary gen-btn-compact"
+        >
+          Regenerate →
         </button>
       </div>
     </div>
