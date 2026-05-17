@@ -4401,6 +4401,30 @@ button:disabled {
   font-weight: 700;
 }
 
+.ws-action-btn {
+  display: block;
+  width: 100%;
+  margin-top: 12px;
+  padding: 8px 14px;
+  border-radius: 8px;
+  border: 1px solid rgba(143, 78, 0, 0.30);
+  background: rgba(143, 78, 0, 0.08);
+  color: var(--color-primary);
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.ws-action-btn:hover {
+  background: rgba(143, 78, 0, 0.14);
+  border-color: rgba(143, 78, 0, 0.45);
+}
+
+.ws-action-btn + .ws-panel-muted {
+  margin-top: 10px;
+}
+
 .ws-validation-ok-chip {
   display: inline-flex;
   align-items: center;

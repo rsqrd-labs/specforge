@@ -372,7 +372,7 @@ export default function Workspace() {
 
   // Declared before confirmCredits/proceedThroughReviewGate which call it
   const runGeneration = useCallback(
-    async (action: "generate" | "regenerate") => {
+    async (action: "generate" | "regenerate" | "regenerate-gaps") => {
       setError(null)
       if (activeStage) {
         setEvalResults((existing) => ({ ...existing, [activeStage.id]: null }))
@@ -406,6 +406,11 @@ export default function Workspace() {
     },
     [activeStage, saveProblemStatement],
   )
+
+  const requestFreeRegeneration = useCallback(async () => {
+    if (!activeStage) return
+    await runGeneration("regenerate-gaps")
+  }, [activeStage, runGeneration])
 
   const requestRefine = useCallback(() => {
     const currentSelection = editorRef.current?.getSelection()
@@ -1066,7 +1071,11 @@ export default function Workspace() {
                   </div>
                 ) : (
                   <>
-                    <CoveragePanel stage={activeStage} evalResult={evalResult} />
+                    <CoveragePanel
+                      stage={activeStage}
+                      evalResult={evalResult}
+                      onRegenerate={() => void requestFreeRegeneration()}
+                    />
                     <TaskValidationPanel stage={activeStage} evalResult={evalResult} />
                   </>
                 )}

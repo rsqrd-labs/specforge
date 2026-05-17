@@ -45,10 +45,11 @@ async def _stream_stage(
     user: User,
     db: AsyncSession,
     trace_id: str,
+    free: bool = False,
 ) -> AsyncGenerator[str, None]:
     try:
         async for token in stage_manager.generate(
-            stage_id, user, db, trace_id=trace_id
+            stage_id, user, db, trace_id=trace_id, free=free
         ):
             if token.startswith('{"done"') or token.startswith('{"eval"'):
                 yield f"data: {token}\n\n"
@@ -141,6 +142,44 @@ async def regenerate_stage(
     trace_id = str(uuid4())
     return StreamingResponse(
         _stream_stage(id, user, db, trace_id), media_type="text/event-stream"
+    )
+
+
+@router.post("/{id}/regenerate-gaps")
+async def regenerate_stage_for_gaps(
+    id: UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> StreamingResponse:
+    """Free regeneration for harness stages where our eval detected coverage gaps.
+
+    No credits are charged — coverage gaps are a generation quality failure on our
+    side, not the user's fault.
+    """
+    stage = await _load_stage(id, db, user.id)
+    if stage.type != "harness":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": "not_harness_stage"},
+        )
+
+    result = await db.execute(
+        select(EvalResult)
+        .where(EvalResult.stage_id == stage.id)
+        .order_by(desc(EvalResult.created_at))
+        .limit(1)
+    )
+    latest_eval = result.scalar_one_or_none()
+    if not latest_eval or not latest_eval.uncovered_reqs:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": "no_coverage_gaps"},
+        )
+
+    trace_id = str(uuid4())
+    return StreamingResponse(
+        _stream_stage(stage.id, user, db, trace_id, free=True),
+        media_type="text/event-stream",
     )
 
 

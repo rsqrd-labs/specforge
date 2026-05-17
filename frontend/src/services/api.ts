@@ -337,6 +337,10 @@ export async function regenerateStage(id: string): Promise<GenerateStageResponse
   return { stage_id: id, stream_url: `/stages/${id}/regenerate` }
 }
 
+export async function regenerateStageForGaps(id: string): Promise<GenerateStageResponse> {
+  return { stage_id: id, stream_url: `/stages/${id}/regenerate-gaps` }
+}
+
 export async function finaliseStage(id: string): Promise<Stage> {
   const response = await api.post<Stage>(`/stages/${id}/finalise`)
   return response.data

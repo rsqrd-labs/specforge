@@ -393,6 +393,7 @@ class StageManager:
         db: AsyncSession,
         *,
         trace_id: str | None = None,
+        free: bool = False,
     ) -> AsyncGenerator[str, None]:
         stage = await self._load_stage(stage_id, db, lock=True)
         workspace = await self._load_workspace(stage.workspace_id, db)
@@ -420,7 +421,8 @@ class StageManager:
         if not await sliding_window_check(redis, f"llm_daily:{user.id}", 200, 86400):
             raise RateLimitError(retry_after=86400)
 
-        _assert_visible_credit_balance(user, CREDIT_COSTS["generate"])
+        if not free:
+            _assert_visible_credit_balance(user, CREDIT_COSTS["generate"])
         route = _resolve_preflight_route(
             lambda: _route_for_stage_generation(stage.type, workspace)
         )
@@ -439,7 +441,7 @@ class StageManager:
             user_instruction_hash=_hash_text(""),
             output_contract_version=f"{stage.type}-v1",
         )
-        cached_output = await get_cached_generation(redis, cache_key)
+        cached_output = None if free else await get_cached_generation(redis, cache_key)
         if cached_output is not None:
             stage.content = cached_output
             stage.current_version += 1
@@ -458,12 +460,16 @@ class StageManager:
             yield f'{{"done": true, "stage_id": "{stage_id}"}}'
             return
 
-        deduction = await credit_service.deduct(
-            db, user.id, CREDIT_COSTS["generate"], "generate"
+        deduction = (
+            None
+            if free
+            else await credit_service.deduct(
+                db, user.id, CREDIT_COSTS["generate"], "generate"
+            )
         )
 
         stage.status = "in_progress"
-        stage.deduction_ledger_id = deduction.id
+        stage.deduction_ledger_id = deduction.id if deduction else None
         stage.updated_at = datetime.now(UTC)
         await db.commit()
 
@@ -516,7 +522,8 @@ class StageManager:
                         yield token
                 content_generation_id = getattr(adapter, "last_generation_id", None)
             except (ProviderError, TimeoutError) as exc:
-                await credit_service.refund(db, deduction.id)
+                if deduction is not None:
+                    await credit_service.refund(db, deduction.id)
                 stage.status = "draft"
                 stage.updated_at = datetime.now(UTC)
                 await db.commit()
@@ -610,7 +617,8 @@ class StageManager:
                         )
                         stuck = result.scalar_one_or_none()
                         if stuck is not None and stuck.status == "in_progress":
-                            await credit_service.refund(cleanup_db, deduction.id)
+                            if deduction is not None:
+                                await credit_service.refund(cleanup_db, deduction.id)
                             partial_content = _strip_code_fence(accumulated).strip()
                             if partial_content:
                                 validation = validate(partial_content)

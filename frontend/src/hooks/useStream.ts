@@ -3,12 +3,13 @@ import {
   generateStage,
   getStage,
   regenerateStage,
+  regenerateStageForGaps,
 } from "../services/api"
 import { createSSEConnection } from "../services/sseService"
 import { useStageStore } from "../store/stageStore"
 import type { EvalResult, Stage } from "../types/stage"
 
-type StreamAction = "generate" | "regenerate"
+type StreamAction = "generate" | "regenerate" | "regenerate-gaps"
 
 interface StreamResult {
   stage: Stage
@@ -46,7 +47,9 @@ export function useStream(stageId: string | null) {
         const response =
           action === "regenerate"
             ? await regenerateStage(stageId)
-            : await generateStage(stageId)
+            : action === "regenerate-gaps"
+              ? await regenerateStageForGaps(stageId)
+              : await generateStage(stageId)
 
         let onEval!: (result: EvalResult | null) => void
         const evalPromise = new Promise<EvalResult | null>((resolve) => {
