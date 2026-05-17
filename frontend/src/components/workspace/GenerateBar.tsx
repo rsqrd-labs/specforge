@@ -6,6 +6,7 @@ interface GenerateBarProps {
   onRegenerate: () => void
   onRefine: () => void
   onFinalise: () => void
+  onUnlock: () => void
 }
 
 export function GenerateBar({
@@ -14,6 +15,7 @@ export function GenerateBar({
   onRegenerate,
   onRefine,
   onFinalise,
+  onUnlock,
 }: GenerateBarProps) {
   if (stage.status === "locked") return null
 
@@ -39,9 +41,12 @@ export function GenerateBar({
         </button>
       )}
 
-      {(stage.status === "finalised" ||
-        stage.status === "stale" ||
-        (stage.status === "draft" && stage.content)) && (
+      {stage.status === "finalised" ? (
+        <button type="button" onClick={onUnlock} className="gen-btn-secondary">
+          Unlock stage
+        </button>
+      ) : (stage.status === "stale" ||
+        (stage.status === "draft" && stage.content)) ? (
         <button
           type="button"
           onClick={onRegenerate}
@@ -49,7 +54,7 @@ export function GenerateBar({
         >
           Full stage regenerate
         </button>
-      )}
+      ) : null}
 
       {stage.content && (
         <button

@@ -13,7 +13,6 @@ import { StreamingOverlay } from "../components/workspace/StreamingOverlay"
 import { MarkdownRenderer } from "../components/workspace/MarkdownRenderer"
 import { ProblemStatementPanel } from "../components/workspace/ProblemStatementPanel"
 import { TaskValidationPanel } from "../components/workspace/TaskValidationPanel"
-import { VersionHistoryPanel } from "../components/workspace/VersionHistoryPanel"
 import { useCredits } from "../hooks/useCredits"
 import { type StreamErrorState, useStream } from "../hooks/useStream"
 import {
@@ -179,6 +178,7 @@ export default function Workspace() {
   const [dismissedStale, setDismissedStale] = useState<Record<string, boolean>>(
     {},
   )
+  const [freeRegenUsed, setFreeRegenUsed] = useState<Record<string, boolean>>({});
   const [error, setError] = useState<StreamErrorState | null>(null)
   const setGenericError = (message: string) => setError({ code: "generic", message })
   const [showRefineHint, setShowRefineHint] = useState(false)
@@ -412,7 +412,9 @@ export default function Workspace() {
 
   const requestFreeRegeneration = useCallback(async () => {
     if (!activeStage) return
+    const stageId = activeStage.id
     await runGeneration("regenerate-gaps")
+    setFreeRegenUsed((prev) => ({ ...prev, [stageId]: true }))
   }, [activeStage, runGeneration])
 
   const performRollback = useCallback(async (version: number) => {
@@ -891,6 +893,7 @@ export default function Workspace() {
             onRegenerate={() => void requestGeneration("regenerate")}
             onRefine={requestRefine}
             onFinalise={handleFinalise}
+            onUnlock={() => void performRollback(activeStage.current_version)}
           />
         </div>
 
@@ -1096,13 +1099,14 @@ export default function Workspace() {
                     <CoveragePanel
                       stage={activeStage}
                       evalResult={evalResult}
-                      onRegenerate={() => void requestFreeRegeneration()}
+                      freeRegenUsed={!!freeRegenUsed[activeStage.id]}
+                      onRegenerate={
+                        freeRegenUsed[activeStage.id]
+                          ? () => void requestGeneration("regenerate")
+                          : () => void requestFreeRegeneration()
+                      }
                     />
                     <TaskValidationPanel stage={activeStage} evalResult={evalResult} />
-                    <VersionHistoryPanel
-                      stage={activeStage}
-                      onRollback={performRollback}
-                    />
                   </>
                 )}
               </aside>

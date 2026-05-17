@@ -97,6 +97,7 @@ describe("GenerateBar", () => {
         onRegenerate={noop}
         onRefine={noop}
         onFinalise={noop}
+        onUnlock={noop}
       />,
     )
     expect(screen.getByText("Generating…")).toBeInTheDocument()
@@ -111,6 +112,7 @@ describe("GenerateBar", () => {
         onRegenerate={noop}
         onRefine={noop}
         onFinalise={noop}
+        onUnlock={noop}
       />,
     )
     expect(screen.getByRole("button", { name: /generate/i })).toBeInTheDocument()
@@ -125,6 +127,7 @@ describe("GenerateBar", () => {
         onRegenerate={noop}
         onRefine={noop}
         onFinalise={noop}
+        onUnlock={noop}
       />,
     )
     expect(
@@ -147,6 +150,7 @@ describe("GenerateBar", () => {
         onRegenerate={noop}
         onRefine={noop}
         onFinalise={noop}
+        onUnlock={noop}
       />,
     )
     expect(container.firstChild).toBeNull()

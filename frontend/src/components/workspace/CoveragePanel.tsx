@@ -3,10 +3,11 @@ import type { EvalResult, Stage } from "../../types/stage"
 interface CoveragePanelProps {
   stage: Stage
   evalResult: EvalResult | null | undefined
+  freeRegenUsed: boolean
   onRegenerate: () => void
 }
 
-export function CoveragePanel({ stage, evalResult, onRegenerate }: CoveragePanelProps) {
+export function CoveragePanel({ stage, evalResult, freeRegenUsed, onRegenerate }: CoveragePanelProps) {
   if (stage.type !== "harness") return null
 
   const uncoveredReqs = evalResult?.uncovered_reqs ?? []
@@ -34,13 +35,13 @@ export function CoveragePanel({ stage, evalResult, onRegenerate }: CoveragePanel
       </ul>
 
       <button className="ws-action-btn" onClick={onRegenerate}>
-        Regenerate harness — free
+        {freeRegenUsed ? "Regenerate harness — 10 credits" : "Regenerate harness — free"}
       </button>
 
       <p className="ws-panel-muted">
-        These gaps are on us, so this regeneration costs no credits. If gaps
-        remain afterwards, your Plan needs more detail — use Refine on the Plan
-        to add the missing context, then regenerate.
+        {freeRegenUsed
+          ? "These gaps are genuine — the harness cannot infer them from the current Plan. Refine the Plan to add the missing context, then regenerate."
+          : "These gaps are on us, so this regeneration costs no credits. If gaps remain afterwards, your Plan needs more detail — use Refine on the Plan to add the missing context, then regenerate."}
       </p>
     </div>
   )
