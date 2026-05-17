@@ -209,8 +209,8 @@ export default function Dashboard() {
             )}
           </h1>
           <p className="dashboard-subtitle">
-            Turn ideas into engineering specs with a four-stage AI pipeline.
-            Each generation brings you closer to shipping.
+            Shape a rough idea into a spec your team can trust, then carry it
+            through plans, tests, and build-ready tasks without losing momentum.
           </p>
         </div>
 
@@ -223,7 +223,7 @@ export default function Dashboard() {
             {balance !== null ? animatedBalance : "—"}
           </p>
           <p className="credit-card-sub">
-            {isLow ? "Running low — top up soon" : "Ready to forge"}
+            {isLow ? "A few focused runs left" : "Fuel for the next breakthrough"}
           </p>
           <div className="credit-card-bar-track">
             <div
@@ -261,30 +261,30 @@ export default function Dashboard() {
 
       {/* Pipeline overview */}
       <div className="pipeline-strip">
-        <span className="pipeline-strip-label">How it works</span>
+        <span className="pipeline-strip-label">Your launch path</span>
         <div className="pipeline-stages">
           <div className="pipeline-stage">
             <div className="pipeline-stage-num">01</div>
             <div className="pipeline-stage-name">Spec</div>
-            <div className="pipeline-stage-desc">Functional requirements, constraints, and architecture decisions</div>
+            <div className="pipeline-stage-desc">Turn the spark into crisp requirements and decisions</div>
           </div>
           <div className="pipeline-arrow">→</div>
           <div className="pipeline-stage">
             <div className="pipeline-stage-num">02</div>
             <div className="pipeline-stage-name">Plan</div>
-            <div className="pipeline-stage-desc">Implementation blueprint with a full traceability matrix</div>
+            <div className="pipeline-stage-desc">Map the work before the work starts drifting</div>
           </div>
           <div className="pipeline-arrow">→</div>
           <div className="pipeline-stage">
             <div className="pipeline-stage-num">03</div>
             <div className="pipeline-stage-name">Harness</div>
-            <div className="pipeline-stage-desc">Contract test suite that covers every requirement</div>
+            <div className="pipeline-stage-desc">Lock in proof that every promise is covered</div>
           </div>
           <div className="pipeline-arrow">→</div>
           <div className="pipeline-stage">
             <div className="pipeline-stage-num">04</div>
             <div className="pipeline-stage-name">Tasks</div>
-            <div className="pipeline-stage-desc">Granular implementation playbook for agents and engineers</div>
+            <div className="pipeline-stage-desc">Hand engineers and agents a build list they can act on</div>
           </div>
         </div>
       </div>
@@ -292,10 +292,10 @@ export default function Dashboard() {
       {/* Workspace list */}
       <div className="ws-section">
         <div className="ws-section-header">
-          <h2 className="ws-section-title">Your Workspaces</h2>
+          <h2 className="ws-section-title">Ideas in Motion</h2>
           <button className="forge-button" onClick={() => setShowCreate(true)}>
             <span className="forge-button-icon">+</span>
-            New Workspace
+            Start a Workspace
           </button>
         </div>
 
@@ -306,13 +306,14 @@ export default function Dashboard() {
         ) : workspaces.length === 0 ? (
           <div className="workspace-empty">
             <div className="workspace-empty-icon">⚡</div>
-            <p className="workspace-empty-heading">No workspaces yet</p>
+            <p className="workspace-empty-heading">Your first great brief starts here</p>
             <p className="workspace-empty-body">
-              Create one to start building your spec pipeline.
+              Bring the messy version of the idea. SpecForge will help you
+              sharpen it into a path your team can actually build.
             </p>
             <button className="forge-button" onClick={() => setShowCreate(true)}>
               <span className="forge-button-icon">+</span>
-              Create your first workspace
+              Draft the first workspace
             </button>
           </div>
         ) : (

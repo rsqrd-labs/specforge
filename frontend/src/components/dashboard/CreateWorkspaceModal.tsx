@@ -102,7 +102,7 @@ export function CreateWorkspaceModal({ onClose }: CreateWorkspaceModalProps) {
       >
         <div className="create-modal-header">
           <h2 id="create-workspace-title" className="create-modal-title">
-            New Workspace
+            Start a Workspace
           </h2>
           <button onClick={onClose} className="create-modal-close" aria-label="Close">
             ✕
@@ -111,7 +111,7 @@ export function CreateWorkspaceModal({ onClose }: CreateWorkspaceModalProps) {
 
         <form onSubmit={(e) => void handleSubmit(e)} className="create-modal-body">
           <div>
-            <label className="modal-label">Workspace Name</label>
+            <label className="modal-label">Idea Name</label>
             <input
               type="text"
               value={name}
@@ -120,13 +120,13 @@ export function CreateWorkspaceModal({ onClose }: CreateWorkspaceModalProps) {
                 if (errors.name) setErrors((prev) => ({ ...prev, name: "" }))
               }}
               className={`modal-input${errors.name ? " error" : ""}`}
-              placeholder="My Todo App"
+              placeholder="AI onboarding coach"
             />
             {errors.name && <p className="modal-error">{errors.name}</p>}
           </div>
 
           <div>
-            <label className="modal-label">Problem Statement</label>
+            <label className="modal-label">What should this become?</label>
             <textarea
               value={statement}
               onChange={(e) => {
@@ -135,7 +135,7 @@ export function CreateWorkspaceModal({ onClose }: CreateWorkspaceModalProps) {
               }}
               rows={5}
               className={`modal-input resize-none${errors.statement ? " error" : ""}`}
-              placeholder="Describe what you want to build in detail — the more context, the better the spec…"
+              placeholder="Describe the user, the problem, the rough shape of the solution, and what would make it worth shipping."
             />
             <div className="mt-1.5 flex items-center justify-between">
               {errors.statement ? (
@@ -194,7 +194,7 @@ export function CreateWorkspaceModal({ onClose }: CreateWorkspaceModalProps) {
               disabled={isSubmitting || selectableProviders.length === 0}
               className="modal-submit"
             >
-              {isSubmitting ? "Creating…" : "Create Workspace"}
+              {isSubmitting ? "Shaping..." : "Start shaping it"}
             </button>
           </div>
         </form>
