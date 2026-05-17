@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import re
 from collections.abc import AsyncGenerator
 from datetime import UTC, datetime
 from uuid import UUID
@@ -282,6 +283,29 @@ STAGE_DEPENDENCIES: dict[str, list[str]] = {
 }
 _STAGE_CACHE_PREFIX = "stage:"
 _STAGE_CACHE_TTL = 3600
+
+_FILE_HEADING_RE = re.compile(r"^(#{2,3})\s+File:\s+(.+?)$", re.MULTILINE)
+
+
+def _merge_harness_patch(existing: str, patch: str) -> str:
+    """Append new ## File: sections from patch into existing harness.
+
+    Only appends files whose paths are not already present — never overwrites
+    existing test files so there is no regression risk.
+    """
+    existing_paths = {m.group(2).strip() for m in _FILE_HEADING_RE.finditer(existing)}
+    matches = list(_FILE_HEADING_RE.finditer(patch))
+    new_sections: list[str] = []
+    for i, m in enumerate(matches):
+        path = m.group(2).strip()
+        if path in existing_paths:
+            continue
+        start = m.start()
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(patch)
+        new_sections.append(patch[start:end].rstrip())
+    if not new_sections:
+        return existing
+    return existing.rstrip() + "\n\n" + "\n\n".join(new_sections)
 
 
 class StageDependencyError(Exception):
@@ -1062,6 +1086,134 @@ class StageManager:
                 if part
             )
         return await redis.get(f"{_STAGE_CACHE_PREFIX}{workspace_id}:spec") or ""
+
+    async def generate_harness_patch(
+        self,
+        stage_id: UUID,
+        user,
+        db: AsyncSession,
+        uncovered_reqs: list[str],
+        *,
+        trace_id: str | None = None,
+    ) -> AsyncGenerator[str, None]:
+        """Stream a focused patch for uncovered requirements, free of charge.
+
+        Generates only the new test files needed to cover the listed requirements
+        and merges them into the existing harness, preserving all existing tests.
+        """
+        from prompts.harness_patch import (  # noqa: PLC0415
+            build_patch_user_prompt,
+            get_patch_system_prompt,
+        )
+
+        stage = await self._load_stage(stage_id, db, lock=True)
+        workspace = await self._load_workspace(stage.workspace_id, db)
+
+        if stage.status not in ("draft", "stale", "final", "in_progress"):
+            raise StageStateError(f"Stage status {stage.status!r} cannot be patched")
+        if stage.status == "final":
+            stage.status = "stale"
+
+        redis = await self._redis_client()
+        if not await sliding_window_check(redis, f"llm:{user.id}", 10, 60):
+            raise RateLimitError(retry_after=60)
+        if not await sliding_window_check(redis, f"llm_daily:{user.id}", 200, 86400):
+            raise RateLimitError(retry_after=86400)
+
+        existing_content = stage.content or ""
+        system_prompt = await get_patch_system_prompt()
+        user_prompt = build_patch_user_prompt(existing_content, uncovered_reqs)
+
+        route = _resolve_preflight_route(
+            lambda: _route_for_stage_generation("harness", workspace)
+        )
+
+        stage.status = "in_progress"
+        stage.deduction_ledger_id = None
+        stage.updated_at = datetime.now(UTC)
+        await db.commit()
+
+        _cleanup_done = False
+        accumulated = ""
+        try:
+            adapter = get_llm(route.provider, route.model)
+            stream_timeout = _stream_timeout_for_stage("harness")
+            async with asyncio.timeout(stream_timeout):
+                async for token in adapter.stream(
+                    system_prompt, user_prompt, max_tokens=2048
+                ):
+                    accumulated += token
+                    yield token
+
+            merged = _merge_harness_patch(existing_content, accumulated)
+
+            stage.content = merged
+            stage.current_version += 1
+            stage.status = "draft"
+            stage.updated_at = datetime.now(UTC)
+            version = StageVersion(
+                stage_id=stage.id,
+                version=stage.current_version,
+                content=merged,
+                created_by="ai",
+            )
+            db.add(version)
+            await db.flush()
+            version_id = version.id
+            eval_context = await self._eval_context_for_stage(workspace.id, "harness")
+            await db.commit()
+            _cleanup_done = True
+            await self._invalidate_stage_cache(workspace.id, "harness", redis)
+
+            eval_task = _schedule_stage_eval(
+                version_id=version_id,
+                stage_type="harness",
+                content=merged,
+                eval_context=eval_context,
+                provider=workspace.provider,
+                content_generation_id=None,
+            )
+            yield f'{{"done": true, "stage_id": "{stage_id}"}}'
+
+            try:
+                eval_result = await asyncio.wait_for(
+                    asyncio.shield(eval_task), timeout=30.0
+                )
+                if eval_result is not None:
+                    yield json.dumps({"eval": _eval_to_dict(eval_result)})
+            except (asyncio.TimeoutError, Exception):
+                pass
+
+        except (ProviderError, TimeoutError) as exc:
+            stage.status = "draft"
+            stage.updated_at = datetime.now(UTC)
+            await db.commit()
+            _cleanup_done = True
+            if isinstance(exc, TimeoutError):
+                raise ProviderTimeoutError(route.provider, stream_timeout) from exc
+            raise
+        finally:
+            if not _cleanup_done:
+                from database import AsyncSessionLocal
+
+                try:
+                    async with AsyncSessionLocal() as cleanup_db:
+                        result = await cleanup_db.execute(
+                            select(Stage).where(Stage.id == stage_id)
+                        )
+                        stuck = result.scalar_one_or_none()
+                        if stuck is not None and stuck.status == "in_progress":
+                            stuck.status = "draft"
+                            stuck.updated_at = datetime.now(UTC)
+                            await cleanup_db.commit()
+                            await redis.delete(
+                                f"{_STAGE_CACHE_PREFIX}{workspace.id}:harness"
+                            )
+                except Exception:
+                    logger.exception(
+                        "harness_patch_cleanup_failed",
+                        extra={"stage_id": str(stage_id)},
+                    )
 
 
 stage_manager = StageManager()

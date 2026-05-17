@@ -145,16 +145,58 @@ async def regenerate_stage(
     )
 
 
+async def _stream_harness_patch(
+    stage_id: UUID,
+    user: User,
+    db: AsyncSession,
+    uncovered_reqs: list[str],
+    trace_id: str,
+) -> AsyncGenerator[str, None]:
+    try:
+        async for token in stage_manager.generate_harness_patch(
+            stage_id, user, db, uncovered_reqs, trace_id=trace_id
+        ):
+            if token.startswith('{"done"') or token.startswith('{"eval"'):
+                yield f"data: {token}\n\n"
+            else:
+                yield f"data: {json.dumps({'token': token})}\n\n"
+    except StageStateError as exc:
+        payload = json.dumps({"error": "stage_not_generatable", "detail": str(exc)})
+        yield f"data: {payload}\n\n"
+    except RateLimitError as exc:
+        payload = json.dumps(
+            {"error": "rate_limit_exceeded", "retry_after": exc.retry_after}
+        )
+        yield f"data: {payload}\n\n"
+    except ProviderTimeoutError as exc:
+        payload = json.dumps(
+            {
+                "error": "provider_timeout",
+                "detail": str(exc),
+                "timeout_seconds": exc.timeout_seconds,
+            }
+        )
+        yield f"data: {payload}\n\n"
+    except ProviderError as exc:
+        payload = json.dumps({"error": "provider_error", "detail": str(exc)})
+        yield f"data: {payload}\n\n"
+    except Exception:
+        logger.exception(
+            "harness_patch_stream_error", extra={"stage_id": str(stage_id)}
+        )
+        yield f"data: {json.dumps({'error': 'internal_error'})}\n\n"
+
+
 @router.post("/{id}/regenerate-gaps")
 async def regenerate_stage_for_gaps(
     id: UUID,
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ) -> StreamingResponse:
-    """Free regeneration for harness stages where our eval detected coverage gaps.
+    """Targeted free patch for harness stages with eval-detected coverage gaps.
 
-    No credits are charged — coverage gaps are a generation quality failure on our
-    side, not the user's fault.
+    Generates only the new test files needed for uncovered requirements and merges
+    them into the existing harness. No credits charged — gaps are our failure.
     """
     stage = await _load_stage(id, db, user.id)
     if stage.type != "harness":
@@ -165,7 +207,8 @@ async def regenerate_stage_for_gaps(
 
     result = await db.execute(
         select(EvalResult)
-        .where(EvalResult.stage_id == stage.id)
+        .join(StageVersion, EvalResult.stage_version_id == StageVersion.id)
+        .where(StageVersion.stage_id == stage.id)
         .order_by(desc(EvalResult.created_at))
         .limit(1)
     )
@@ -176,9 +219,10 @@ async def regenerate_stage_for_gaps(
             detail={"error": "no_coverage_gaps"},
         )
 
+    uncovered_reqs: list[str] = latest_eval.uncovered_reqs
     trace_id = str(uuid4())
     return StreamingResponse(
-        _stream_stage(stage.id, user, db, trace_id, free=True),
+        _stream_harness_patch(stage.id, user, db, uncovered_reqs, trace_id),
         media_type="text/event-stream",
     )
 
