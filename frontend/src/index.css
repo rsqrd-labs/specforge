@@ -2105,12 +2105,25 @@ button:disabled {
   -webkit-backdrop-filter: blur(16px);
   padding: 20px 20px 16px;
   text-align: left;
-  cursor: pointer;
   box-shadow: 0 4px 24px rgba(47, 49, 49, 0.06);
   /* transform intentionally omitted — JS handles tilt */
   transition: box-shadow 0.22s ease, border-color 0.22s;
   animation: rise-in 0.55s cubic-bezier(0.16, 1, 0.3, 1) both;
   will-change: transform;
+}
+
+.workspace-card-open {
+  position: relative;
+  z-index: 1;
+  display: block;
+  width: 100%;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  text-decoration: none;
+  cursor: pointer;
 }
 
 /* Mouse-position spotlight */
@@ -2179,6 +2192,7 @@ button:disabled {
   align-items: flex-start;
   justify-content: space-between;
   gap: 8px;
+  padding-right: 40px;
   margin-top: 6px;
   margin-bottom: 14px;
 }
@@ -2275,6 +2289,55 @@ button:disabled {
   transform: translateX(0);
 }
 
+.workspace-card-delete {
+  position: absolute;
+  top: 14px;
+  right: 14px;
+  z-index: 2;
+  display: inline-grid;
+  width: 30px;
+  height: 30px;
+  place-items: center;
+  border: 1px solid rgba(186, 26, 26, 0.14);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.58);
+  color: var(--color-error);
+  opacity: 0;
+  transform: translateY(-2px);
+  transition: opacity 0.18s, transform 0.18s, background 0.18s, border-color 0.18s;
+}
+
+.workspace-card:hover .workspace-card-delete,
+.workspace-card-delete:focus-visible,
+.workspace-card-delete:disabled {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.workspace-card-delete:hover:not(:disabled) {
+  border-color: rgba(186, 26, 26, 0.34);
+  background: var(--color-error-container);
+}
+
+.workspace-card-delete svg {
+  width: 17px;
+  height: 17px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.6;
+}
+
+.workspace-card-delete-spinner {
+  width: 15px;
+  height: 15px;
+  border: 2px solid rgba(186, 26, 26, 0.22);
+  border-top-color: var(--color-error);
+  border-radius: 999px;
+  animation: rotate-360 0.75s linear infinite;
+}
+
 /* ─── Create Workspace Modal ─────────────────────────────────────────────── */
 
 .create-modal-backdrop {
@@ -2329,6 +2392,12 @@ button:disabled {
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
   background-clip: text;
+}
+
+.create-modal-title.danger {
+  background: none;
+  color: var(--color-error);
+  -webkit-text-fill-color: currentColor;
 }
 
 .create-modal-close {
@@ -2524,6 +2593,31 @@ button:disabled {
 .modal-submit:disabled {
   opacity: 0.55;
   cursor: not-allowed;
+}
+
+.modal-submit.danger {
+  background: linear-gradient(135deg, var(--color-error) 0%, #8b1a1a 100%);
+  box-shadow: 0 6px 20px rgba(186, 26, 26, 0.22), inset 0 1px 0 rgba(255, 255, 255, 0.18);
+}
+
+.modal-submit.danger:hover:not(:disabled) {
+  box-shadow: 0 10px 28px rgba(186, 26, 26, 0.3), inset 0 1px 0 rgba(255, 255, 255, 0.18);
+}
+
+.delete-workspace-modal {
+  max-width: 460px;
+}
+
+.delete-workspace-copy {
+  margin: 0;
+  color: var(--color-on-surface-variant);
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+.delete-workspace-copy strong {
+  color: var(--color-on-surface);
+  font-weight: 800;
 }
 
 /* ─── Workspace ──────────────────────────────────────────────────────────── */

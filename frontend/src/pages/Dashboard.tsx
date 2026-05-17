@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState } from "react"
 import { useNavigate } from "react-router-dom"
 import { CreateWorkspaceModal } from "../components/dashboard/CreateWorkspaceModal"
+import { DeleteWorkspaceModal } from "../components/dashboard/DeleteWorkspaceModal"
 import { WorkspaceCard } from "../components/dashboard/WorkspaceCard"
-import { getCredits, logout } from "../services/api"
+import { getApiErrorMessage, getCredits, logout } from "../services/api"
 import { useUserStore } from "../store/userStore"
 import { useWorkspaceStore } from "../store/workspaceStore"
-import type { WorkspaceWithStages } from "../types/workspace"
+import type { Workspace, WorkspaceWithStages } from "../types/workspace"
 
 function useCountUp(target: number | null, duration = 950) {
   const [value, setValue] = useState(0)
@@ -88,12 +89,15 @@ function UserAvatar({
 
 export default function Dashboard() {
   const navigate = useNavigate()
-  const { workspaces, isLoading, fetchWorkspaces } = useWorkspaceStore()
+  const { workspaces, isLoading, fetchWorkspaces, deleteWorkspace } = useWorkspaceStore()
   const user = useUserStore((state) => state.user)
   const clearUser = useUserStore((state) => state.clearUser)
   const [balance, setBalance] = useState<number | null>(null)
   const [showCreate, setShowCreate] = useState(false)
   const [isLoggingOut, setIsLoggingOut] = useState(false)
+  const [workspaceToDelete, setWorkspaceToDelete] = useState<Workspace | null>(null)
+  const [deletingWorkspaceId, setDeletingWorkspaceId] = useState<string | null>(null)
+  const [deleteError, setDeleteError] = useState<string | null>(null)
 
   useEffect(() => {
     void fetchWorkspaces()
@@ -124,6 +128,22 @@ export default function Dashboard() {
     } finally {
       clearUser()
       navigate("/", { replace: true })
+    }
+  }
+
+  async function handleConfirmDelete() {
+    if (!workspaceToDelete || deletingWorkspaceId) return
+    setDeletingWorkspaceId(workspaceToDelete.id)
+    setDeleteError(null)
+    try {
+      await deleteWorkspace(workspaceToDelete.id)
+      setWorkspaceToDelete(null)
+    } catch (error) {
+      setDeleteError(
+        getApiErrorMessage(error, "Failed to delete workspace. Please try again."),
+      )
+    } finally {
+      setDeletingWorkspaceId(null)
     }
   }
 
@@ -298,13 +318,35 @@ export default function Dashboard() {
         ) : (
           <div className="workspace-grid">
             {workspaces.map((ws, i) => (
-              <WorkspaceCard key={ws.id} workspace={ws} index={i} />
+              <WorkspaceCard
+                key={ws.id}
+                workspace={ws}
+                index={i}
+                isDeleting={deletingWorkspaceId === ws.id}
+                onDelete={(workspace) => {
+                  setDeleteError(null)
+                  setWorkspaceToDelete(workspace)
+                }}
+              />
             ))}
           </div>
         )}
       </div>
 
       {showCreate && <CreateWorkspaceModal onClose={() => setShowCreate(false)} />}
+      {workspaceToDelete && (
+        <DeleteWorkspaceModal
+          workspace={workspaceToDelete}
+          error={deleteError}
+          isDeleting={deletingWorkspaceId === workspaceToDelete.id}
+          onCancel={() => {
+            if (deletingWorkspaceId) return
+            setWorkspaceToDelete(null)
+            setDeleteError(null)
+          }}
+          onConfirm={() => void handleConfirmDelete()}
+        />
+      )}
     </div>
   )
 }

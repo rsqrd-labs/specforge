@@ -1,11 +1,13 @@
 import { useRef } from "react"
-import { useNavigate } from "react-router-dom"
+import { Link } from "react-router-dom"
 import type { Stage } from "../../types/stage"
 import type { Workspace } from "../../types/workspace"
 
 interface WorkspaceCardProps {
   workspace: Workspace & { stages?: Stage[] }
   index?: number
+  isDeleting?: boolean
+  onDelete?: (workspace: Workspace) => void
 }
 
 const STAGE_ORDER = ["spec", "plan", "harness", "tasks"] as const
@@ -16,11 +18,15 @@ const PROVIDER_LABELS: Record<string, string> = {
   google: "Google",
 }
 
-export function WorkspaceCard({ workspace, index = 0 }: WorkspaceCardProps) {
-  const navigate = useNavigate()
-  const cardRef = useRef<HTMLButtonElement>(null)
+export function WorkspaceCard({
+  workspace,
+  index = 0,
+  isDeleting = false,
+  onDelete,
+}: WorkspaceCardProps) {
+  const cardRef = useRef<HTMLDivElement>(null)
 
-  function handleMouseMove(e: React.MouseEvent<HTMLButtonElement>) {
+  function handleMouseMove(e: React.MouseEvent<HTMLDivElement>) {
     const el = cardRef.current
     if (!el) return
     const rect = el.getBoundingClientRect()
@@ -58,9 +64,8 @@ export function WorkspaceCard({ workspace, index = 0 }: WorkspaceCardProps) {
   )
 
   return (
-    <button
+    <article
       ref={cardRef}
-      onClick={() => navigate(`/workspace/${workspace.id}`)}
       onMouseMove={handleMouseMove}
       onMouseLeave={handleMouseLeave}
       className="workspace-card"
@@ -68,39 +73,68 @@ export function WorkspaceCard({ workspace, index = 0 }: WorkspaceCardProps) {
     >
       <div className="workspace-card-bar" />
 
-      <div className="workspace-card-head">
-        <span className="workspace-card-name">{workspace.name}</span>
-        <span className="workspace-card-provider">
-          {PROVIDER_LABELS[workspace.provider] ?? workspace.provider}
-        </span>
-      </div>
+      <Link
+        to={`/workspace/${workspace.id}`}
+        className="workspace-card-open"
+        aria-label={`Open ${workspace.name}`}
+      >
+        <div className="workspace-card-head">
+          <span className="workspace-card-name">{workspace.name}</span>
+          <span className="workspace-card-provider">
+            {PROVIDER_LABELS[workspace.provider] ?? workspace.provider}
+          </span>
+        </div>
 
-      <div className="workspace-card-pipeline">
-        {STAGE_ORDER.map((type, i) => {
-          const status = stageMap[type]?.status
-          const pipClass =
-            status === "finalised"
-              ? "ws-stage-pip done"
-              : status && status !== "locked"
-                ? "ws-stage-pip active"
-                : "ws-stage-pip"
-          return (
-            <div
-              key={type}
-              className={pipClass}
-              style={{ animationDelay: `${index * 0.07 + i * 0.09 + 0.1}s` }}
-            />
-          )
-        })}
-        <span className="workspace-stages-count">
-          {finalisedCount}/{STAGE_ORDER.length} done
-        </span>
-      </div>
+        <div className="workspace-card-pipeline">
+          {STAGE_ORDER.map((type, i) => {
+            const status = stageMap[type]?.status
+            const pipClass =
+              status === "finalised"
+                ? "ws-stage-pip done"
+                : status && status !== "locked"
+                  ? "ws-stage-pip active"
+                  : "ws-stage-pip"
+            return (
+              <div
+                key={type}
+                className={pipClass}
+                style={{ animationDelay: `${index * 0.07 + i * 0.09 + 0.1}s` }}
+              />
+            )
+          })}
+          <span className="workspace-stages-count">
+            {finalisedCount}/{STAGE_ORDER.length} done
+          </span>
+        </div>
 
-      <div className="workspace-card-footer">
-        <span className="workspace-card-date">{createdDate}</span>
-        <span className="workspace-card-arrow">→</span>
-      </div>
-    </button>
+        <div className="workspace-card-footer">
+          <span className="workspace-card-date">{createdDate}</span>
+          <span className="workspace-card-arrow">→</span>
+        </div>
+      </Link>
+
+      {onDelete && (
+        <button
+          type="button"
+          className="workspace-card-delete"
+          onClick={() => onDelete(workspace)}
+          disabled={isDeleting}
+          aria-label={`Delete ${workspace.name}`}
+          title="Delete workspace"
+        >
+          {isDeleting ? (
+            <span className="workspace-card-delete-spinner" aria-hidden="true" />
+          ) : (
+            <svg viewBox="0 0 20 20" focusable="false" aria-hidden="true">
+              <path d="M7.2 4.4V3.6c0-.5.4-.9.9-.9h3.8c.5 0 .9.4.9.9v.8" />
+              <path d="M4.4 5.2h11.2" />
+              <path d="M6 7.2l.5 8.2c.1.7.6 1.2 1.3 1.2h4.4c.7 0 1.2-.5 1.3-1.2l.5-8.2" />
+              <path d="M8.8 8.9v4.8" />
+              <path d="M11.2 8.9v4.8" />
+            </svg>
+          )}
+        </button>
+      )}
+    </article>
   )
 }

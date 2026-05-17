@@ -1,6 +1,7 @@
 import { create } from "zustand"
 import {
   createWorkspace,
+  deleteWorkspace as deleteWorkspaceRequest,
   getWorkspace,
   getWorkspaces,
 } from "../services/api"
@@ -14,7 +15,7 @@ interface WorkspaceState {
   fetchWorkspace: (id: string) => Promise<void>
   setCurrentWorkspace: (workspace: WorkspaceWithStages | null) => void
   createWorkspace: (payload: CreateWorkspacePayload) => Promise<WorkspaceWithStages>
-  archiveWorkspace: (id: string) => void
+  deleteWorkspace: (id: string) => Promise<void>
 }
 
 export const useWorkspaceStore = create<WorkspaceState>((set) => ({
@@ -50,10 +51,12 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
     return workspace
   },
 
-  archiveWorkspace: (id) =>
+  deleteWorkspace: async (id) => {
+    await deleteWorkspaceRequest(id)
     set((state) => ({
       workspaces: state.workspaces.filter((w) => w.id !== id),
       currentWorkspace:
         state.currentWorkspace?.id === id ? null : state.currentWorkspace,
-    })),
+    }))
+  },
 }))

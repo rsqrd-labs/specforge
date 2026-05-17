@@ -31,6 +31,7 @@ describe("api service contract", () => {
       "getWorkspaces",
       "createWorkspace",
       "getWorkspace",
+      "deleteWorkspace",
       "getStage",
       "generateStage",
       "refineStage",

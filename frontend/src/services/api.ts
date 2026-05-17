@@ -308,6 +308,10 @@ export async function getWorkspace(id: string): Promise<WorkspaceWithStages> {
   return response.data
 }
 
+export async function deleteWorkspace(id: string): Promise<void> {
+  await api.delete(`/workspaces/${id}`)
+}
+
 export async function updateWorkspace(
   id: string,
   payload: Partial<Pick<Workspace, "name" | "problem_statement">>,
