@@ -13,6 +13,7 @@ import { StreamingOverlay } from "../components/workspace/StreamingOverlay"
 import { MarkdownRenderer } from "../components/workspace/MarkdownRenderer"
 import { ProblemStatementPanel } from "../components/workspace/ProblemStatementPanel"
 import { TaskValidationPanel } from "../components/workspace/TaskValidationPanel"
+import { VersionHistoryPanel } from "../components/workspace/VersionHistoryPanel"
 import { useCredits } from "../hooks/useCredits"
 import { type StreamErrorState, useStream } from "../hooks/useStream"
 import {
@@ -26,6 +27,7 @@ import {
   getWorkspace,
   refineStage,
   rejectStageDiff,
+  rollbackStage,
   updateWorkspace,
   updateStageContent,
 } from "../services/api"
@@ -412,6 +414,14 @@ export default function Workspace() {
     if (!activeStage) return
     await runGeneration("regenerate-gaps")
   }, [activeStage, runGeneration])
+
+  const performRollback = useCallback(async (version: number) => {
+    if (!activeStage) return
+    const updated = await rollbackStage(activeStage.id, version)
+    setStage(updated)
+    setEvalResults((existing) => ({ ...existing, [activeStage.id]: null }))
+    await refreshWorkspace()
+  }, [activeStage, setStage, refreshWorkspace])
 
   const requestRefine = useCallback(() => {
     const currentSelection = editorRef.current?.getSelection()
@@ -1089,6 +1099,10 @@ export default function Workspace() {
                       onRegenerate={() => void requestFreeRegeneration()}
                     />
                     <TaskValidationPanel stage={activeStage} evalResult={evalResult} />
+                    <VersionHistoryPanel
+                      stage={activeStage}
+                      onRollback={performRollback}
+                    />
                   </>
                 )}
               </aside>
