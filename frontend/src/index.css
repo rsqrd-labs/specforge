@@ -3656,16 +3656,6 @@ button:disabled {
   text-transform: uppercase;
 }
 
-.ws-nav-score {
-  font-size: 11px;
-  font-weight: 700;
-  flex-shrink: 0;
-}
-
-.ws-nav-score.good { color: #22c55e; }
-.ws-nav-score.ok   { color: var(--color-on-surface-variant); }
-.ws-nav-score.poor { color: #ef4444; }
-
 .workspace-sidebar-insight {
   position: relative;
   isolation: isolate;

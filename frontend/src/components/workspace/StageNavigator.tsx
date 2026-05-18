@@ -17,12 +17,6 @@ const STAGE_LABELS: Record<StageType, string> = {
   tasks: "Tasks",
 }
 
-function scoreClass(score: number): string {
-  if (score >= 80) return "good green"
-  if (score >= 60) return "ok amber"
-  return "poor red"
-}
-
 export function StageNavigator({
   stages,
   activeStageId,
@@ -42,7 +36,6 @@ export function StageNavigator({
 
         const isLocked = stage.status === "locked"
         const isActive = stage.id === activeStageId || stage.type === activeStage
-        const score = stage.eval_result?.overall_score ?? null
 
         const cls = [
           "workspace-nav-item",
@@ -66,12 +59,6 @@ export function StageNavigator({
           >
             <span className={`ws-nav-dot ${stage.status}`} />
             <span className="ws-nav-label">{STAGE_LABELS[type]}</span>
-            {score !== null && (
-              <span className={`ws-nav-score ${scoreClass(score)}`}>{score}</span>
-            )}
-            {score === null && stage.status === "finalised" && (
-              <span className="ws-nav-score good">✓</span>
-            )}
           </button>
         )
       })}
