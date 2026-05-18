@@ -3,12 +3,17 @@ from __future__ import annotations
 from conftest import import_backend, read_backend_file
 
 
-HARNESS_CONTENT = """```python tests/unit/test_auth.py
+HARNESS_CONTENT = """\
+## File: harness/tests/unit/test_auth.py
+
+```python
 def test_login_returns_jwt():
     assert True
 ```
 
-```typescript types/stage.ts
+## File: harness/types/stage.ts
+
+```typescript
 export type StageType = "spec" | "plan" | "harness" | "tasks"
 ```
 """
@@ -21,7 +26,7 @@ def test_export_service_parses_file_path_labelled_code_fences() -> None:
 
     files = parse_harness_files(HARNESS_CONTENT)
 
-    assert "harness/tests/unit/test_auth.py" in files or "tests/unit/test_auth.py" in files
+    assert "harness/tests/unit/test_auth.py" in files
     assert any(path.endswith("types/stage.ts") for path in files)
 
 

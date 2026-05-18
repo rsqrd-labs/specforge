@@ -20,10 +20,8 @@ _STAGE_FILES = {
     "tasks": "TASKS.md",
 }
 _HARNESS_FALLBACK = "harness/HARNESS.md"
-_CODE_FENCE_RE = re.compile(
-    r"```(?:\w+)?\s+(?P<filename>[^\n]+)\n(?P<content>.*?)```",
-    re.DOTALL,
-)
+_FILE_HEADING_RE = re.compile(r"^#{2,3}\s+File:\s+(?P<filename>.+)$")
+_FENCE_OPEN_RE = re.compile(r"^(?P<fence>`{3,})[a-zA-Z0-9]*$")
 _WINDOWS_RESERVED_NAMES = frozenset(
     {"CON", "PRN", "AUX", "NUL"}
     | {f"COM{i}" for i in range(1, 10)}
@@ -40,6 +38,13 @@ def _safe_harness_path(filename: str) -> str | None:
     if not normalized:
         return None
     if any(ord(char) < 32 for char in normalized):
+        return None
+
+    # Strip a leading "harness/" prefix the LLM includes in headings — we
+    # always re-add it below via PurePosixPath("harness", path).
+    if normalized.startswith("harness/"):
+        normalized = normalized[len("harness/"):]
+    if not normalized:
         return None
 
     path = PurePosixPath(normalized)
@@ -59,13 +64,39 @@ def _safe_harness_path(filename: str) -> str | None:
 
 
 def _parse_labelled_harness_files(harness_content: str) -> dict[str, str]:
+    """State-machine parser: finds ## / ### File: headings and captures the
+    immediately-following fenced code block as the file's content.
+
+    Uses the fence string itself (backtick count) as the block delimiter so
+    files whose content contains ``` (e.g. README.md) are handled correctly.
+    """
     files: dict[str, str] = {}
-    for match in _CODE_FENCE_RE.finditer(harness_content):
-        filename = match.group("filename").strip()
-        content = match.group("content")
-        path = _safe_harness_path(filename)
-        if path:
-            files[path] = content
+    lines = harness_content.split("\n")
+    i = 0
+    while i < len(lines):
+        heading_match = _FILE_HEADING_RE.match(lines[i])
+        if heading_match:
+            filename = heading_match.group("filename").strip()
+            # Skip blank lines between heading and fence opener
+            j = i + 1
+            while j < len(lines) and lines[j].strip() == "":
+                j += 1
+            if j < len(lines):
+                fence_match = _FENCE_OPEN_RE.match(lines[j].rstrip())
+                if fence_match:
+                    fence = fence_match.group("fence")  # e.g. "```"
+                    content_start = j + 1
+                    k = content_start
+                    while k < len(lines) and lines[k].rstrip() != fence:
+                        k += 1
+                    if k < len(lines):  # found matching closing fence
+                        content = "\n".join(lines[content_start:k]) + "\n"
+                        path = _safe_harness_path(filename)
+                        if path:
+                            files[path] = content
+                        i = k + 1
+                        continue
+        i += 1
     return files
 
 

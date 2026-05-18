@@ -45,17 +45,27 @@ def _make_stage(workspace_id, stage_type, status="finalised", content="") -> Sta
     )
 
 
+# Matches the format the LLM actually emits: ## File: <path> heading followed
+# by a fenced code block.
 _HARNESS_WITH_FILES = """\
-## Test Harness
+## Harness Overview
 
-```python tests/test_auth.py
+Overview text.
+
+## Files
+
+## File: harness/tests/test_auth.py
+
+```python
 def test_login():
     assert True
 ```
 
-```python tests/test_spec.py
+## File: harness/tests/test_spec.py
+
+```python
 def test_spec():
-    pass
+    assert True
 ```
 """
 
@@ -96,7 +106,8 @@ async def test_build_export_returns_valid_zip() -> None:
     assert "SPEC.md" in names
     assert "PLAN.md" in names
     assert "TASKS.md" in names
-    assert any(n.startswith("harness/") for n in names)
+    assert "harness/tests/test_auth.py" in names
+    assert "harness/tests/test_spec.py" in names
 
 
 @pytest.mark.asyncio
@@ -133,35 +144,109 @@ async def test_build_export_harness_fallback_when_no_code_fences() -> None:
     assert "harness/HARNESS.md" in names
 
 
+def test_parse_harness_files_parses_file_headings() -> None:
+    # Three-file harness with harness/ prefix on filenames (as LLM emits)
+    content = """\
+## File: harness/conftest.py
+
+```python
+import pytest
+
+@pytest.fixture
+def client():
+    return None
+```
+
+## File: harness/tests/unit/test_core.py
+
+```python
+def test_something():
+    assert True
+```
+
+## File: harness/schemas/api.json
+
+```json
+{"type": "object"}
+```
+"""
+    files = parse_harness_files(content)
+
+    assert files == {
+        "harness/conftest.py": "import pytest\n\n@pytest.fixture\ndef client():\n    return None\n",
+        "harness/tests/unit/test_core.py": "def test_something():\n    assert True\n",
+        "harness/schemas/api.json": '{"type": "object"}\n',
+    }
+
+
+def test_parse_harness_files_strips_redundant_harness_prefix() -> None:
+    # LLM sometimes includes harness/ prefix, sometimes omits it — both should
+    # produce the same harness/ path in the zip.
+    with_prefix = "## File: harness/tests/test_a.py\n\n```python\nx = 1\n```\n"
+    without_prefix = "## File: tests/test_a.py\n\n```python\nx = 1\n```\n"
+
+    assert parse_harness_files(with_prefix) == parse_harness_files(without_prefix)
+    assert "harness/tests/test_a.py" in parse_harness_files(with_prefix)
+
+
+def test_parse_harness_files_handles_nested_fences_in_readme() -> None:
+    # README.md contains markdown with its own ``` blocks; the state machine
+    # must track the outer fence and not terminate early on an inner one.
+    content = (
+        "## File: harness/README.md\n\n"
+        "````markdown\n"
+        "# Harness\n\n"
+        "Run with:\n\n"
+        "```bash\n"
+        "pytest harness/\n"
+        "```\n"
+        "````\n"
+        "\n"
+        "## File: harness/conftest.py\n\n"
+        "```python\n"
+        "pass\n"
+        "```\n"
+    )
+    files = parse_harness_files(content)
+
+    assert "harness/README.md" in files
+    assert "```bash" in files["harness/README.md"]
+    assert "harness/conftest.py" in files
+
+
 def test_parse_harness_files_rejects_unsafe_filenames() -> None:
-    files = parse_harness_files("""```python tests/test_ok.py
+    content = """\
+## File: harness/tests/test_ok.py
+
+```python
 def test_ok():
     assert True
 ```
 
-```python ../../tmp/pwned.py
-print("owned")
+## File: ../../tmp/pwned.py
+
+```python
+print("path traversal")
 ```
 
-```python /absolute/path.py
-print("owned")
+## File: /absolute/path.py
+
+```python
+print("absolute")
 ```
 
-```python C:\\Users\\attacker\\pwned.py
-print("owned")
+## File: harness/CON
+
+```python
+print("windows reserved")
 ```
 
-```python CON
-print("reserved")
-```
+## File: harness/file.txt:ads
 
-```python file.txt:ads
+```python
 print("alternate data stream")
 ```
-
-```python tests/bad\u0001name.py
-print("control char")
-```
-""")
+"""
+    files = parse_harness_files(content)
 
     assert files == {"harness/tests/test_ok.py": "def test_ok():\n    assert True\n"}
