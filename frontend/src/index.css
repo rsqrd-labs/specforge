@@ -5656,6 +5656,33 @@ button:disabled {
   background: rgba(161, 56, 95, 0.08);
 }
 
+.ws-issue-file-tag {
+  display: inline-block;
+  margin: 5px 0 4px;
+  padding: 2px 7px;
+  font-size: 10px;
+  font-family: var(--font-mono, monospace);
+  font-weight: 600;
+  color: var(--color-primary);
+  background: rgba(161, 56, 95, 0.08);
+  border: 1px solid rgba(161, 56, 95, 0.2);
+  border-radius: 4px;
+}
+
+.ws-issue-code-stub {
+  margin: 8px 0 0;
+  padding: 8px 10px;
+  font-size: 11px;
+  font-family: var(--font-mono, monospace);
+  line-height: 1.55;
+  color: var(--color-on-surface);
+  background: rgba(0, 0, 0, 0.18);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 6px;
+  white-space: pre;
+  overflow-x: auto;
+}
+
 .ws-issue-action {
   display: inline-flex;
   align-items: center;

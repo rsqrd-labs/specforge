@@ -284,6 +284,54 @@ def _ref_matches_harness(ref: str, known_refs: set[str]) -> bool:
     return bool(parts) and parts[-1] in known_refs
 
 
+def _build_gap_details(
+    missing_ref: str,
+) -> tuple[str | None, str | None, str, str, str]:
+    """Parse a missing test ref into actionable details.
+
+    Returns (harness_file, class_name, fn_name, code_stub, remediation_text).
+    """
+    normalized = missing_ref.strip().replace("\\", "/")
+    if normalized.startswith("harness/"):
+        normalized = normalized[len("harness/"):]
+
+    parts = normalized.split("::")
+
+    if len(parts) == 3 and "/" in parts[0]:
+        # file::Class::method
+        file_path, class_name, fn_name = parts[0], parts[1], parts[2]
+        harness_file = f"harness/{file_path}"
+        code_stub = f"class {class_name}:\n    def {fn_name}(self):\n        pass"
+        remediation = (
+            f"In `{harness_file}`, add `def {fn_name}(self)` "
+            f"to the `{class_name}` class."
+        )
+    elif len(parts) == 2 and "/" in parts[0]:
+        # file::function
+        file_path, fn_name = parts[0], parts[1]
+        harness_file = f"harness/{file_path}"
+        class_name = None
+        code_stub = f"def {fn_name}():\n    pass"
+        remediation = f"In `{harness_file}`, add `def {fn_name}()`."
+    elif len(parts) == 2:
+        # Class::method (no file path)
+        class_name, fn_name = parts[0], parts[1]
+        harness_file = None
+        code_stub = f"class {class_name}:\n    def {fn_name}(self):\n        pass"
+        remediation = (
+            f"Add `def {fn_name}(self)` to the `{class_name}` class in your harness."
+        )
+    else:
+        # bare function name
+        fn_name = parts[0]
+        harness_file = None
+        class_name = None
+        code_stub = f"def {fn_name}():\n    pass"
+        remediation = f"Add `def {fn_name}()` to a test file in your harness."
+
+    return harness_file, class_name, fn_name, code_stub, remediation
+
+
 def _validate_task_references(
     tasks_content: str, harness_content: str
 ) -> list[dict[str, Any]]:
@@ -314,29 +362,27 @@ def _validate_task_references(
                     "referenced_test": None,
                     "gap_type": "GENERATION_FAILURE",
                     "remediation": None,
+                    "harness_file": None,
+                    "code_stub": None,
                 }
             )
         elif refs:
             unmatched = [r for r in refs if not _ref_matches_harness(r, known_refs)]
             if unmatched:
                 missing = unmatched[0]
-                parts = missing.split("::")
-                test_name = parts[-1]
-                location = (
-                    f"in `{parts[0]}`"
-                    if len(parts) > 1 and "/" in parts[0]
-                    else "in your harness test directory"
+                harness_file, class_name, fn_name, code_stub, remediation = (
+                    _build_gap_details(missing)
                 )
                 issues.append(
                     {
                         "task_number": task_num,
                         "task_title": task_title,
-                        "reason": f"References `{missing}` but this test is not in the harness.",
+                        "reason": f"`{missing}` is referenced but not found in the harness.",
                         "referenced_test": missing,
                         "gap_type": "GENUINE_GAP",
-                        "remediation": (
-                            f"Add `{test_name}` {location}, then regenerate tasks."
-                        ),
+                        "remediation": remediation,
+                        "harness_file": harness_file,
+                        "code_stub": code_stub,
                     }
                 )
         # refs == [] means setup-only — not an issue
@@ -425,6 +471,8 @@ def _normalise_task_issues(raw: Any) -> list[dict[str, Any]] | None:
                 ),
                 "gap_type": item.get("gap_type"),
                 "remediation": item.get("remediation"),
+                "harness_file": item.get("harness_file"),
+                "code_stub": item.get("code_stub"),
             }
         )
     return issues
