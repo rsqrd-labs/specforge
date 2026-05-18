@@ -1,4 +1,4 @@
-import { Component, type ReactNode } from "react"
+import { Children, Component, isValidElement, type ReactNode } from "react"
 import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
 import rehypeHighlight from "rehype-highlight"
@@ -64,6 +64,7 @@ function looksLikeDirectoryTree(value: string): boolean {
 
   if (lines.length < 2) return false
 
+  // Unicode box-drawing characters used by `tree` command
   return lines.some((line) => /[─-╿]/.test(line)) || lines[0].endsWith("/")
 }
 
@@ -80,6 +81,10 @@ function looksLikeDirectoryTree(value: string): boolean {
  * 2. Unclosed fence — generation was interrupted or the LLM simply forgot the
  *    closing ```. Everything after the opening fence renders as a code block.
  *    Fixed by appending the missing closing fence at the end of the document.
+ *
+ * 3. Orphaned closer — a lone ``` with no language appears outside any fence
+ *    block before a section heading. Treating it as an opener would swallow the
+ *    entire section below it into a code block. Detected and skipped.
  *
  * Uses a line-by-line state machine so fence context is never ambiguous.
  */
@@ -98,6 +103,18 @@ export function normalizeDoubledFences(content: string): string {
       if (m) {
         const fullFence = (m[1] + m[2]).trimEnd()
         const closeFence = m[1].trimEnd() // closing fence carries no language
+
+        // Orphaned closer: no language tag and the next non-blank line is a
+        // section heading (2+ hashes). This ``` is a stray from the LLM and
+        // must not be treated as a fence opener — skip it.
+        if (m[2] === "") {
+          let j = i + 1
+          while (j < lines.length && lines[j].trim() === "") j++
+          if (j < lines.length && /^#{2,}\s/.test(lines[j])) {
+            continue
+          }
+        }
+
         const nextTrimmed = lines[i + 1]?.trimEnd()
         if (nextTrimmed !== undefined && nextTrimmed === fullFence) {
           // Doubled opening — emit once, skip the duplicate
@@ -138,15 +155,58 @@ export function normalizeDoubledFences(content: string): string {
   return out.join("\n")
 }
 
+/**
+ * Normalises harness markdown into a form that renders correctly.
+ *
+ * The harness LLM prompt instructs the model to output:
+ *   ## File Tree        — unfenced or fenced directory listing
+ *   ## Files
+ *   ### File: path/to/file — per-file heading (three hashes)
+ *   ```lang ... ```
+ *
+ * Two normalisation passes run here so that normalizeDoubledFences never
+ * sees ambiguous lone ``` markers:
+ *
+ * Pass 1 — "## File Tree" section: if the tree is bare text (not yet fenced),
+ * wrap it in ```text … ```.
+ *
+ * Pass 2 — Legacy format: bare tree before the first file heading (## or ###),
+ * possibly ending with a lone ```. Wrap the tree and emit a directory heading.
+ *
+ * In both cases an already-fenced tree (any opening ```) is left untouched.
+ */
 export function normalizeHarnessMarkdown(content: string): string {
-  const fileHeadingMatch = content.match(/^##\s+File:\s+/m)
-  if (!fileHeadingMatch || fileHeadingMatch.index === undefined) return content
+  // Pass 1: handle "## File Tree" section
+  const fileTreeMatch = content.match(/^##\s+File\s+Tree\s*$/m)
+  if (fileTreeMatch?.index !== undefined) {
+    const headingEnd = fileTreeMatch.index + fileTreeMatch[0].length
+    const afterHeading = content.slice(headingEnd)
+    const nextSection = afterHeading.match(/^##\s+\S/m)
+    const treeSectionLen = nextSection?.index ?? afterHeading.length
+    const treeSection = afterHeading.slice(0, treeSectionLen)
+    const treeTrimmed = treeSection.trim()
+
+    if (!treeTrimmed.startsWith("`")) {
+      // Remove a trailing lone ``` left by the LLM, then wrap
+      const treeText = treeTrimmed.replace(/`{3}\s*$/, "").trim()
+      if (looksLikeDirectoryTree(treeText)) {
+        const before = content.slice(0, headingEnd)
+        const after = afterHeading.slice(treeSectionLen)
+        return `${before}\n\n\`\`\`text\n${treeText}\n\`\`\`\n\n${after.trimStart()}`
+      }
+    }
+    return content
+  }
+
+  // Pass 2: legacy — bare tree before the first file heading (## or ###)
+  const fileHeadingMatch = content.match(/^#{2,3}\s+File:\s+\S/m)
+  if (!fileHeadingMatch?.index) return content
 
   const prefix = content.slice(0, fileHeadingMatch.index).trim()
   const rest = content.slice(fileHeadingMatch.index).trimStart()
-  if (!prefix || prefix.startsWith("```")) return content
+  if (!prefix || prefix.startsWith("`")) return content
 
-  const tree = prefix.replace(/```\s*$/, "").trim()
+  const tree = prefix.replace(/`{3}\s*$/, "").trim()
   if (!looksLikeDirectoryTree(tree)) return content
 
   return `## Directory structure\n\n\`\`\`text\n${tree}\n\`\`\`\n\n${rest}`
@@ -166,13 +226,20 @@ function textFromChildren(children: unknown): string {
   return ""
 }
 
+// Returns true for "File: path/to/file" but not "File Tree" or "Files".
+function isFileHeadingLabel(label: string): boolean {
+  return /^file:\s+\S/i.test(label.trim())
+}
+
 export function MarkdownRenderer({
   content,
   variant = "default",
 }: MarkdownRendererProps) {
-  const fixed = normalizeDoubledFences(content)
-  const renderedContent =
-    variant === "harness" ? normalizeHarnessMarkdown(fixed) : fixed
+  // Harness normalisation must run BEFORE fence repair so that orphaned ```
+  // markers from the LLM are removed before normalizeDoubledFences sees them.
+  const harnessFixed =
+    variant === "harness" ? normalizeHarnessMarkdown(content) : content
+  const renderedContent = normalizeDoubledFences(harnessFixed)
 
   return (
     <RendererErrorBoundary content={content}>
@@ -183,19 +250,39 @@ export function MarkdownRenderer({
           components={{
             h2({ children, node: _node, ...props }) {
               const label = textFromChildren(children)
-              const isFileHeading = label.trim().toLowerCase().startsWith("file:")
               return (
                 <h2
                   {...props}
-                  className={isFileHeading ? "md-file-heading" : undefined}
+                  className={isFileHeadingLabel(label) ? "md-file-heading" : undefined}
                 >
                   {children}
                 </h2>
               )
             },
+            h3({ children, node: _node, ...props }) {
+              // The harness prompt uses ### File: for per-file headings
+              const label = textFromChildren(children)
+              return (
+                <h3
+                  {...props}
+                  className={isFileHeadingLabel(label) ? "md-file-heading" : undefined}
+                >
+                  {children}
+                </h3>
+              )
+            },
             pre({ children, node: _node, ...props }) {
-              const value = textFromChildren(children)
-              const isTree = looksLikeDirectoryTree(value)
+              // Use the language class added by rehype-highlight rather than
+              // inspecting text content — more reliable and no false positives.
+              // After normalisation, directory trees are always in ```text blocks
+              // so they receive class="language-text" on the inner code element.
+              const isTree = Children.toArray(children).some(
+                (c) =>
+                  isValidElement(c) &&
+                  String(
+                    (c.props as Record<string, unknown>).className ?? ""
+                  ).includes("language-text"),
+              )
               return (
                 <pre {...props} className={isTree ? "md-directory-tree" : undefined}>
                   {children}
