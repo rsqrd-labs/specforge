@@ -26,6 +26,7 @@ import {
   getWorkspace,
   refineStage,
   rejectStageDiff,
+  revalidateTasks,
   rollbackStage,
   updateWorkspace,
   updateStageContent,
@@ -578,6 +579,16 @@ export default function Workspace() {
     [activeStage, isStreaming, setStage],
   )
 
+  const handleRevalidateTasks = useCallback(async () => {
+    if (!activeStage || activeStage.type !== "tasks") return
+    try {
+      const fresh = await revalidateTasks(activeStage.id)
+      setEvalResults((existing) => ({ ...existing, [activeStage.id]: fresh }))
+    } catch {
+      setGenericError("Could not re-validate tasks.")
+    }
+  }, [activeStage])
+
   const handleExport = useCallback(async () => {
     if (!id || !canExport || isExporting) return
 
@@ -1051,6 +1062,15 @@ export default function Workspace() {
                 <div className="workspace-pane-actions">
                   {activeStage.type === "tasks" && evalResult !== null && genuineGapIssues.length === 0 && (
                     <span className="ws-validation-ok-chip">✓ All tasks valid</span>
+                  )}
+                  {activeStage.type === "tasks" && !isStreaming && (
+                    <button
+                      type="button"
+                      className="ws-view-toggle"
+                      onClick={handleRevalidateTasks}
+                    >
+                      Re-validate
+                    </button>
                   )}
                   {activeStage.status !== "locked" && !isStreaming && (
                     <button

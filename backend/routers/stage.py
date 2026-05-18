@@ -26,6 +26,7 @@ from schemas.stage import (
 )
 from services.credit_service import InsufficientCreditsError
 from services.llm.base import ProviderError, ProviderTimeoutError
+from services.evals.online_eval import _validate_task_references
 from services.pipeline.stage_manager import (
     PreflightError,
     RateLimitError,
@@ -368,6 +369,98 @@ async def get_eval(
     eval_result = result.scalar_one_or_none()
     if eval_result is None:
         raise HTTPException(status_code=404, detail="No eval result found")
+    return {
+        "id": str(eval_result.id),
+        "stage_version_id": str(eval_result.stage_version_id),
+        "stage_type": eval_result.stage_type,
+        "overall_score": eval_result.overall_score,
+        "completeness": eval_result.completeness,
+        "clarity": eval_result.clarity,
+        "coverage_percent": eval_result.coverage_percent,
+        "uncovered_reqs": eval_result.uncovered_reqs,
+        "tasks_without_ref": eval_result.tasks_without_ref,
+        "flagged": eval_result.flagged,
+        "created_at": eval_result.created_at.isoformat(),
+    }
+
+
+@router.post("/{id}/revalidate-tasks")
+async def revalidate_tasks(
+    id: UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> dict:
+    """Re-run the structural task-reference validator on existing content.
+
+    No LLM call; uses the deterministic parser against the current harness.
+    Existing quality scores (overall_score, completeness, etc.) are preserved.
+    """
+    stage = await _load_stage(id, db, user.id)
+    if stage.type != "tasks":
+        raise HTTPException(status_code=400, detail="Stage is not a tasks stage")
+    if not stage.content:
+        raise HTTPException(status_code=400, detail="Tasks stage has no content yet")
+
+    # Fetch harness stage for the same workspace
+    harness_result = await db.execute(
+        select(Stage).where(
+            Stage.workspace_id == stage.workspace_id,
+            Stage.type == "harness",
+        )
+    )
+    harness_stage = harness_result.scalar_one_or_none()
+    harness_content = harness_stage.content if harness_stage else ""
+
+    tasks_without_ref = _validate_task_references(stage.content, harness_content or "")
+    flagged = any(
+        i.get("gap_type") != "GENERATION_FAILURE" for i in tasks_without_ref
+    )
+
+    # Fetch the existing eval for the current version to preserve quality scores
+    eval_result_row = await db.execute(
+        select(EvalResult)
+        .join(StageVersion, EvalResult.stage_version_id == StageVersion.id)
+        .where(
+            StageVersion.stage_id == id,
+            StageVersion.version == stage.current_version,
+        )
+        .order_by(desc(EvalResult.created_at))
+        .limit(1)
+    )
+    eval_result = eval_result_row.scalar_one_or_none()
+
+    if eval_result is not None:
+        eval_result.tasks_without_ref = tasks_without_ref
+        eval_result.flagged = flagged
+    else:
+        # No prior eval — create a minimal one with structural results only
+        version_result = await db.execute(
+            select(StageVersion)
+            .where(
+                StageVersion.stage_id == id,
+                StageVersion.version == stage.current_version,
+            )
+            .limit(1)
+        )
+        version = version_result.scalar_one_or_none()
+        if version is None:
+            raise HTTPException(status_code=404, detail="Stage version not found")
+        eval_result = EvalResult(
+            stage_version_id=version.id,
+            stage_type="tasks",
+            overall_score=None,
+            completeness=None,
+            clarity=None,
+            coverage_percent=None,
+            uncovered_reqs=None,
+            tasks_without_ref=tasks_without_ref,
+            flagged=flagged,
+        )
+        db.add(eval_result)
+
+    await db.commit()
+    await db.refresh(eval_result)
+
     return {
         "id": str(eval_result.id),
         "stage_version_id": str(eval_result.stage_version_id),

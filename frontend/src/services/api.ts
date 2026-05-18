@@ -368,6 +368,11 @@ export async function getStageEval(id: string): Promise<EvalResult> {
   return response.data
 }
 
+export async function revalidateTasks(id: string): Promise<EvalResult> {
+  const response = await api.post<EvalResult>(`/stages/${id}/revalidate-tasks`)
+  return response.data
+}
+
 export async function acceptStageDiff(
   id: string,
   proposedContent: string,
