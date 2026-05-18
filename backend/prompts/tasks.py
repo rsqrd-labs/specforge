@@ -81,7 +81,8 @@ Each task uses this exact format:
 **Spec refs:** FR-NNN, NFR-NNN, SEC-NNN (all requirements this task addresses)
 **Plan refs:** Section names, API names, schema names, module names, migration names
 **Harness refs:** `path/to/test_file.py::TestClass::test_method` (all tests that
-  must pass when this task is complete)
+  must pass when this task is complete; for setup-only tasks with no harness test
+  write `_(none — <brief reason, e.g. "CI config has no pytest target">)_` instead)
 **Estimated size:** XS / S / M / L
 **Risk:** Low / Medium / High — one phrase explaining why
 **Owner:** Backend / Frontend / Full-stack / DevOps / QA / Security / Data
@@ -135,7 +136,9 @@ Task design rules:
   Check the traceability matrix in the plan.
 - Every harness test must be referenced by at least one task, and every task should
   reference at least one harness test unless it is a setup-only enabler. A test with
-  no task means a feature will never be built.
+  no task means a feature will never be built. Setup-only tasks MUST use the
+  `_(none — <reason>)_` form in Harness refs so validators can distinguish them from
+  tasks missing a reference by mistake.
 - Tasks are strictly ordered: a task may only depend on earlier-numbered tasks.
 - Include explicit tasks for: database migration creation, environment variable
   documentation, secret rotation procedures, CI pipeline steps, load test runs,

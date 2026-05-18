@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from typing import Any
 from uuid import UUID
 
@@ -31,6 +32,18 @@ _COMPACT_RETRY_LIMITS: dict[str, tuple[int, int]] = {
     "harness": (5_000, 10_000),
     "tasks": (5_000, 8_000),
 }
+
+# --- Structural task-reference validator ---
+_TASK_HEADING_RE = re.compile(r"^###\s+T-(\d+):\s+(.+)$")
+_HARNESS_REFS_FIELD_RE = re.compile(r"^\*\*Harness\s+refs:\*\*", re.IGNORECASE)
+_BOLD_FIELD_START_RE = re.compile(r"^\*\*\w")
+_BACKTICK_REF_RE = re.compile(r"`([^`]+)`")
+_SETUP_ONLY_MARKER_RE = re.compile(r"_\(none|none\s*[—–-]", re.IGNORECASE)
+_HARNESS_FILE_HEADING_RE = re.compile(r"^#{2,3}\s+File:\s+(.+)$")
+_HARNESS_FENCE_OPEN_RE = re.compile(r"^(`{3,})[a-zA-Z0-9]*$")
+_CLASS_DEF_RE = re.compile(r"^class\s+(Test\w+)")
+# Matches Python test functions; TypeScript Jest tests are not parsed here.
+_TEST_FUNC_DEF_RE = re.compile(r"^\s*def\s+(test_\w+)")
 
 _JUDGE_SYSTEM = (
     "You are an independent senior product and software engineering evaluator. "
@@ -152,6 +165,192 @@ _SCORE_WEIGHTS: dict[str, dict[str, float]] = {
 }
 
 
+def _parse_task_blocks(tasks_content: str) -> list[dict[str, Any]]:
+    """Split tasks content into per-task dicts with harness_refs extracted.
+
+    harness_refs values:
+      None  — **Harness refs:** field is absent (GENERATION_FAILURE)
+      []    — field present but marked as setup-only
+      [str] — list of backtick-quoted test path references
+    """
+    lines = tasks_content.split("\n")
+    headings: list[tuple[int, int, str]] = []
+    for i, line in enumerate(lines):
+        m = _TASK_HEADING_RE.match(line.rstrip())
+        if m:
+            headings.append((i, int(m.group(1)), m.group(2).strip()))
+
+    tasks: list[dict[str, Any]] = []
+    for idx, (start, task_num, task_title) in enumerate(headings):
+        end = headings[idx + 1][0] if idx + 1 < len(headings) else len(lines)
+        block = lines[start:end]
+
+        refs_start: int | None = None
+        for i, line in enumerate(block):
+            if _HARNESS_REFS_FIELD_RE.match(line):
+                refs_start = i
+                break
+
+        if refs_start is None:
+            tasks.append(
+                {"task_number": task_num, "task_title": task_title, "harness_refs": None}
+            )
+            continue
+
+        field_lines: list[str] = []
+        for i, line in enumerate(block[refs_start:]):
+            stripped = line.strip()
+            if i > 0 and (
+                _BOLD_FIELD_START_RE.match(stripped) or stripped.startswith("###")
+            ):
+                break
+            field_lines.append(line)
+
+        refs_text = "\n".join(field_lines)
+        if _SETUP_ONLY_MARKER_RE.search(refs_text):
+            tasks.append(
+                {"task_number": task_num, "task_title": task_title, "harness_refs": []}
+            )
+            continue
+
+        tasks.append(
+            {
+                "task_number": task_num,
+                "task_title": task_title,
+                "harness_refs": _BACKTICK_REF_RE.findall(refs_text),
+            }
+        )
+
+    return tasks
+
+
+def _extract_harness_refs(harness_content: str) -> set[str]:
+    """Build matchable test identifiers from harness file headings and code blocks.
+
+    Supports Python pytest conventions (def test_* / class Test*).
+    TypeScript Jest tests (it/describe/test) are not extracted.
+    """
+    known: set[str] = set()
+    lines = harness_content.split("\n")
+    i = 0
+    while i < len(lines):
+        heading_m = _HARNESS_FILE_HEADING_RE.match(lines[i])
+        if heading_m:
+            raw_path = heading_m.group(1).strip()
+            normalized = raw_path.replace("\\", "/")
+            if normalized.startswith("harness/"):
+                normalized = normalized[len("harness/"):]
+            j = i + 1
+            while j < len(lines) and lines[j].strip() == "":
+                j += 1
+            if j < len(lines):
+                fence_m = _HARNESS_FENCE_OPEN_RE.match(lines[j].rstrip())
+                if fence_m:
+                    fence = fence_m.group(1)
+                    k = j + 1
+                    current_class: str | None = None
+                    while k < len(lines) and lines[k].rstrip() != fence:
+                        line = lines[k]
+                        cls_m = _CLASS_DEF_RE.match(line)
+                        if cls_m:
+                            current_class = cls_m.group(1)
+                        elif line and not line.startswith((" ", "\t")):
+                            current_class = None
+                        func_m = _TEST_FUNC_DEF_RE.match(line)
+                        if func_m:
+                            fn = func_m.group(1)
+                            known.add(f"{normalized}::{fn}")
+                            known.add(fn)
+                            if current_class and line.startswith((" ", "\t")):
+                                known.add(f"{normalized}::{current_class}::{fn}")
+                                known.add(f"{current_class}::{fn}")
+                        k += 1
+                    i = k + 1
+                    continue
+        i += 1
+    return known
+
+
+def _ref_matches_harness(ref: str, known_refs: set[str]) -> bool:
+    """Lenient match: strip harness/ prefix, try full path, Class::method, bare name."""
+    normalized = ref.strip().replace("\\", "/")
+    if normalized.startswith("harness/"):
+        normalized = normalized[len("harness/"):]
+    if normalized in known_refs:
+        return True
+    parts = normalized.split("::")
+    if len(parts) >= 2 and "::".join(parts[-2:]) in known_refs:
+        return True
+    return bool(parts) and parts[-1] in known_refs
+
+
+def _validate_task_references(
+    tasks_content: str, harness_content: str
+) -> list[dict[str, Any]]:
+    """Structural traceability check: returns issues with gap_type classification.
+
+    GENERATION_FAILURE — task has no **Harness refs:** field (prompt quality issue,
+      hidden from users but logged for observability).
+    GENUINE_GAP — task refs a test that does not exist in the harness (shown to user).
+    """
+    task_blocks = _parse_task_blocks(tasks_content)
+    known_refs = _extract_harness_refs(harness_content)
+
+    issues: list[dict[str, Any]] = []
+    generation_failures: list[int] = []
+
+    for task in task_blocks:
+        refs = task["harness_refs"]
+        task_num = task["task_number"]
+        task_title = task["task_title"]
+
+        if refs is None:
+            generation_failures.append(task_num)
+            issues.append(
+                {
+                    "task_number": task_num,
+                    "task_title": task_title,
+                    "reason": "Task is missing its Harness refs field.",
+                    "referenced_test": None,
+                    "gap_type": "GENERATION_FAILURE",
+                    "remediation": None,
+                }
+            )
+        elif refs:
+            unmatched = [r for r in refs if not _ref_matches_harness(r, known_refs)]
+            if unmatched:
+                missing = unmatched[0]
+                parts = missing.split("::")
+                test_name = parts[-1]
+                location = (
+                    f"in `{parts[0]}`"
+                    if len(parts) > 1 and "/" in parts[0]
+                    else "in your harness test directory"
+                )
+                issues.append(
+                    {
+                        "task_number": task_num,
+                        "task_title": task_title,
+                        "reason": f"References `{missing}` but this test is not in the harness.",
+                        "referenced_test": missing,
+                        "gap_type": "GENUINE_GAP",
+                        "remediation": (
+                            f"Add `{test_name}` {location}, then regenerate tasks."
+                        ),
+                    }
+                )
+        # refs == [] means setup-only — not an issue
+
+    if generation_failures:
+        logger.warning(
+            "tasks_structural_validation_generation_failures count=%d task_numbers=%s",
+            len(generation_failures),
+            generation_failures[:10],
+        )
+
+    return issues
+
+
 def _log_dataset_error(task: asyncio.Task) -> None:
     if not task.cancelled() and (exc := task.exception()):
         logger.error("langfuse_dataset_background_failed", extra={"error": str(exc)})
@@ -224,6 +423,8 @@ def _normalise_task_issues(raw: Any) -> list[dict[str, Any]] | None:
                 "referenced_test": (
                     str(referenced_test) if referenced_test is not None else None
                 ),
+                "gap_type": item.get("gap_type"),
+                "remediation": item.get("remediation"),
             }
         )
     return issues
@@ -416,6 +617,7 @@ async def run_eval(
     provider: str = "anthropic",
     judge_model: str | None = None,
     content_generation_id: str | None = None,
+    harness_content: str | None = None,
 ) -> EvalResult | None:
     resolved_judge_model = judge_model or JUDGE_MODELS[provider]
     raw = await _score_with_retry(
@@ -460,6 +662,9 @@ async def run_eval(
     uncovered_reqs: list[str] | None = normalised["uncovered_reqs"]
     tasks_without_ref: list[dict[str, Any]] | None = normalised["tasks_without_ref"]
 
+    if stage_type == "tasks" and harness_content:
+        tasks_without_ref = _validate_task_references(content, harness_content)
+
     flagged = False
     if (
         stage_type == "harness"
@@ -468,7 +673,10 @@ async def run_eval(
     ):
         flagged = True
     if stage_type == "tasks" and tasks_without_ref:
-        flagged = True
+        # GENERATION_FAILURE is a prompt quality issue — only GENUINE_GAP flags the result
+        flagged = any(
+            i.get("gap_type") != "GENERATION_FAILURE" for i in tasks_without_ref
+        )
 
     eval_result = EvalResult(
         stage_version_id=stage_version_id,
@@ -518,6 +726,7 @@ async def run_eval_background(
     provider: str,
     judge_model: str,
     content_generation_id: str | None = None,
+    harness_content: str | None = None,
 ) -> EvalResult | None:
     async with AsyncSessionLocal() as db:
         return await run_eval(
@@ -529,4 +738,5 @@ async def run_eval_background(
             provider,
             judge_model,
             content_generation_id,
+            harness_content=harness_content,
         )

@@ -1,49 +1,79 @@
-import type { EvalResult, Stage } from "../../types/stage"
+import type { EvalResult, Stage, TaskReferenceIssue } from "../../types/stage"
 
 interface TaskValidationPanelProps {
   stage: Stage
   evalResult: EvalResult | null | undefined
+  onNavigateToHarness?: () => void
 }
 
-export function TaskValidationPanel({ stage, evalResult }: TaskValidationPanelProps) {
+function isGenuineGap(issue: TaskReferenceIssue): boolean {
+  return !issue.gap_type || issue.gap_type === "GENUINE_GAP"
+}
+
+export function TaskValidationPanel({
+  stage,
+  evalResult,
+  onNavigateToHarness,
+}: TaskValidationPanelProps) {
   if (stage.type !== "tasks") return null
 
-  const issues = evalResult?.tasks_without_ref ?? []
+  const allIssues = evalResult?.tasks_without_ref ?? []
+  const genuineGaps = allIssues.filter(isGenuineGap)
+
+  if (!evalResult) {
+    return (
+      <div className="ws-panel-section">
+        <div className="ws-panel-section-header">
+          <div className="ws-panel-title">Coverage Gaps</div>
+        </div>
+        <p className="ws-panel-muted">Checking task traceability…</p>
+      </div>
+    )
+  }
+
+  if (genuineGaps.length === 0) return null
 
   return (
     <div className="ws-panel-section">
       <div className="ws-panel-section-header">
         <div>
-          <div className="ws-panel-title">Task Validation</div>
-          <p>Traceability between tasks and tests.</p>
+          <div className="ws-panel-title">Coverage Gaps</div>
+          <p>
+            {genuineGaps.length === 1
+              ? "1 task references a test that doesn't exist in your harness."
+              : `${genuineGaps.length} tasks reference tests that don't exist in your harness.`}
+          </p>
         </div>
-        {evalResult && (
-          <span className={`ws-panel-chip ${issues.length === 0 ? "success" : "warning"}`}>
-            {issues.length === 0 ? "All clear" : `${issues.length} flagged`}
-          </span>
-        )}
+        <span className="ws-panel-chip warning">
+          {genuineGaps.length} {genuineGaps.length === 1 ? "gap" : "gaps"}
+        </span>
       </div>
 
-      {!evalResult && (
-        <p className="ws-panel-muted">Evaluating task references...</p>
-      )}
-
-      {evalResult && issues.length === 0 && (
-        <p className="ws-panel-ok">Every task references a test.</p>
-      )}
-
-      {issues.length > 0 && (
-        <ul className="ws-issue-list">
-          {issues.map((issue) => (
-            <li key={`${issue.task_number}-${issue.task_title}`} className="ws-issue-item">
-              <div className="ws-issue-title">
-                T-{issue.task_number}: {issue.task_title}
-              </div>
-              <div className="ws-issue-reason">{issue.reason}</div>
-            </li>
-          ))}
-        </ul>
-      )}
+      <ul className="ws-issue-list">
+        {genuineGaps.map((issue) => (
+          <li
+            key={`${issue.task_number}-${issue.task_title}`}
+            className="ws-issue-item ws-issue-gap"
+          >
+            <div className="ws-issue-title">
+              T-{issue.task_number}: {issue.task_title}
+            </div>
+            <div className="ws-issue-reason">{issue.reason}</div>
+            {issue.remediation && (
+              <div className="ws-issue-remediation">{issue.remediation}</div>
+            )}
+            {onNavigateToHarness && (
+              <button
+                type="button"
+                className="ws-issue-action"
+                onClick={onNavigateToHarness}
+              >
+                Go to Harness →
+              </button>
+            )}
+          </li>
+        ))}
+      </ul>
     </div>
   )
 }

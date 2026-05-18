@@ -44,6 +44,8 @@ export interface TaskReferenceIssue {
   task_title: string
   reason: string
   referenced_test?: string
+  gap_type?: "GENERATION_FAILURE" | "GENUINE_GAP"
+  remediation?: string
 }
 
 export interface GenerateResponse {

@@ -456,4 +456,5 @@ async def test_run_eval_background_opens_its_own_session() -> None:
         "openai",
         "gpt-4o-mini",
         None,
+        harness_content=None,
     )

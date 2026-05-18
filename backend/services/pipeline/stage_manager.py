@@ -147,6 +147,7 @@ def _schedule_stage_eval(
     eval_context: str,
     provider: str,
     content_generation_id: str | None = None,
+    harness_content: str | None = None,
 ) -> asyncio.Task[EvalResult | None]:
     eval_task = asyncio.create_task(
         run_eval_background(
@@ -157,6 +158,7 @@ def _schedule_stage_eval(
             provider,
             JUDGE_MODELS[provider],
             content_generation_id=content_generation_id,
+            harness_content=harness_content,
         )
     )
     eval_task.add_done_callback(_log_eval_error)
@@ -589,9 +591,10 @@ class StageManager:
             await db.flush()
             version_id = version.id
             eval_context = ""
+            harness_content_for_eval: str | None = None
             if stage.type != "spec":
-                eval_context = await self._eval_context_for_stage(
-                    workspace.id, stage.type
+                eval_context, harness_content_for_eval = (
+                    await self._eval_context_for_stage(workspace.id, stage.type)
                 )
             await db.commit()
             _cleanup_done = True
@@ -607,6 +610,7 @@ class StageManager:
                 eval_context=eval_context,
                 provider=workspace.provider,
                 content_generation_id=content_generation_id,
+                harness_content=harness_content_for_eval,
             )
             yield f'{{"done": true, "stage_id": "{stage_id}"}}'
 
@@ -967,10 +971,10 @@ class StageManager:
         await db.flush()
         version_id = version.id
         eval_context = ""
+        harness_content_for_eval: str | None = None
         if stage.type != "spec":
-            eval_context = await self._eval_context_for_stage(
-                stage.workspace_id,
-                stage.type,
+            eval_context, harness_content_for_eval = (
+                await self._eval_context_for_stage(stage.workspace_id, stage.type)
             )
 
         if was_finalised:
@@ -987,6 +991,7 @@ class StageManager:
             content=new_content,
             eval_context=eval_context,
             provider=workspace.provider,
+            harness_content=harness_content_for_eval,
         )
         return stage
 
@@ -1070,14 +1075,21 @@ class StageManager:
     ) -> None:
         await redis.delete(f"{_STAGE_CACHE_PREFIX}{workspace_id}:{stage_type}")
 
-    async def _eval_context_for_stage(self, workspace_id: UUID, stage_type: str) -> str:
+    async def _eval_context_for_stage(
+        self, workspace_id: UUID, stage_type: str
+    ) -> tuple[str, str | None]:
+        """Return (eval_context_for_llm, raw_harness_content_or_None).
+
+        For tasks, harness content is returned separately so the structural
+        validator can use the raw harness rather than the combined LLM context.
+        """
         redis = await self._redis_client()
         if stage_type == "tasks":
             spec = await redis.get(f"{_STAGE_CACHE_PREFIX}{workspace_id}:spec") or ""
             harness = (
                 await redis.get(f"{_STAGE_CACHE_PREFIX}{workspace_id}:harness") or ""
             )
-            return "\n\n".join(
+            combined = "\n\n".join(
                 part
                 for part in (
                     f"Specification:\n{spec}" if spec else "",
@@ -1085,7 +1097,9 @@ class StageManager:
                 )
                 if part
             )
-        return await redis.get(f"{_STAGE_CACHE_PREFIX}{workspace_id}:spec") or ""
+            return combined, harness or None
+        spec = await redis.get(f"{_STAGE_CACHE_PREFIX}{workspace_id}:spec") or ""
+        return spec, None
 
     async def generate_harness_patch(
         self,
@@ -1160,7 +1174,7 @@ class StageManager:
             db.add(version)
             await db.flush()
             version_id = version.id
-            eval_context = await self._eval_context_for_stage(workspace.id, "harness")
+            eval_context, _ = await self._eval_context_for_stage(workspace.id, "harness")
             await db.commit()
             _cleanup_done = True
             await self._invalidate_stage_cache(workspace.id, "harness", redis)

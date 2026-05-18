@@ -932,10 +932,11 @@ async def test_eval_context_for_tasks_includes_spec_and_harness() -> None:
     await redis.set(f"stage:{workspace_id}:harness", "harness content")
     svc = StageManager(redis_client=redis)
 
-    context = await svc._eval_context_for_stage(workspace_id, "tasks")
+    context, harness = await svc._eval_context_for_stage(workspace_id, "tasks")
 
     assert "Specification:\nspec content" in context
     assert "Test harness:\nharness content" in context
+    assert harness == "harness content"
 
 
 @pytest.mark.asyncio

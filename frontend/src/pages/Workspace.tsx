@@ -642,10 +642,13 @@ export default function Workspace() {
     activeStage.status === "stale" && !dismissedStale[activeStage.id]
   const upstreamType = previousStageType(activeStage.type)
   const taskIssues = evalResult?.tasks_without_ref ?? []
+  const genuineGapIssues = taskIssues.filter(
+    (i) => !i.gap_type || i.gap_type === "GENUINE_GAP"
+  )
   const showRightPanel =
     Boolean(diffResult) ||
     (activeStage.type === "harness" && evalResult !== null) ||
-    (activeStage.type === "tasks" && taskIssues.length > 0)
+    (activeStage.type === "tasks" && genuineGapIssues.length > 0)
   const finalisedCount = stages.filter((stage) => stage.status === "finalised").length
   const readiness = stages.length === 0 ? 0 : Math.round((finalisedCount / stages.length) * 100)
   const currentStageIndex = STAGE_ORDER.indexOf(activeStage.type)
@@ -660,7 +663,7 @@ export default function Workspace() {
     activeStage.type === "harness"
       ? evalResult?.uncovered_reqs?.length ?? 0
       : activeStage.type === "tasks"
-        ? taskIssues.length
+        ? genuineGapIssues.length
         : evalResult?.flagged
           ? 1
           : 0
@@ -1046,7 +1049,7 @@ export default function Workspace() {
                   </p>
                 </div>
                 <div className="workspace-pane-actions">
-                  {activeStage.type === "tasks" && evalResult !== null && taskIssues.length === 0 && (
+                  {activeStage.type === "tasks" && evalResult !== null && genuineGapIssues.length === 0 && (
                     <span className="ws-validation-ok-chip">✓ All tasks valid</span>
                   )}
                   {activeStage.status !== "locked" && !isStreaming && (
@@ -1106,7 +1109,14 @@ export default function Workspace() {
                           : () => void requestFreeRegeneration()
                       }
                     />
-                    <TaskValidationPanel stage={activeStage} evalResult={evalResult} />
+                    <TaskValidationPanel
+                      stage={activeStage}
+                      evalResult={evalResult}
+                      onNavigateToHarness={(() => {
+                        const h = stages.find((s) => s.type === "harness")
+                        return h ? () => setActiveStageId(h.id) : undefined
+                      })()}
+                    />
                   </>
                 )}
               </aside>
