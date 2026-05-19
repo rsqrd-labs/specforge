@@ -56,6 +56,10 @@ class Settings(BaseSettings):
     llm_complete_timeout_seconds: int = 45
     max_request_body_bytes: int = 1_000_000
 
+    # GitHub OAuth App — leave blank to disable GitHub export
+    github_client_id: str = ""
+    github_client_secret: str = ""
+
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
 

@@ -1,5 +1,8 @@
-from fastapi import APIRouter, Cookie, Depends, HTTPException, Response, status
+import logging
+
+from fastapi import APIRouter, Cookie, Depends, HTTPException, Request, Response, status
 from fastapi.responses import RedirectResponse
+from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config import settings
@@ -9,7 +12,10 @@ from models import User
 from schemas.auth import UserResponse
 from services.auth_service import AuthError, auth_service
 from services.credit_service import credit_service
+from services.integrations import github_auth_service
 from services.security.csrf import generate_csrf_token
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -129,3 +135,101 @@ async def get_me(
 @router.get("/csrf-token")
 async def csrf_token(user: User = Depends(get_current_user)) -> dict[str, str]:
     return {"csrf_token": generate_csrf_token(str(user.id))}
+
+
+def _get_redis(request: Request) -> Redis:
+    """Return the shared Redis client from app.state.
+
+    Falls back to a per-request connection if lifespan hasn't run (e.g. in
+    unit tests that hit the route directly).
+    """
+    redis = getattr(request.app.state, "redis", None)
+    if redis is not None:
+        return redis
+    return Redis.from_url(settings.redis_url, decode_responses=True)
+
+
+@router.get("/github")
+async def github_login(
+    request: Request,
+    user: User = Depends(get_current_user),
+) -> RedirectResponse:
+    """Initiate the GitHub OAuth flow.
+
+    Returns 503 when the GitHub OAuth App is not configured so the frontend
+    can render a clear "feature disabled" state in Settings.
+    """
+    if not settings.github_client_id:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="GitHub integration is not configured",
+        )
+
+    redis = _get_redis(request)
+    try:
+        url = await github_auth_service.get_github_oauth_url(user.id, redis)
+    except AuthError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(exc),
+        ) from exc
+
+    return RedirectResponse(url=url, status_code=status.HTTP_307_TEMPORARY_REDIRECT)
+
+
+@router.get("/github/callback")
+async def github_callback(
+    request: Request,
+    code: str | None = None,
+    state: str | None = None,
+    error: str | None = None,
+    db: AsyncSession = Depends(get_db),
+) -> RedirectResponse:
+    """Complete the GitHub OAuth flow.
+
+    Authentication for this endpoint is the OAuth state parameter (Redis
+    lookup binds it to the user_id that initiated the flow). The browser
+    redirect from GitHub cannot carry the in-memory access token, so a JWT
+    requirement would be impossible — the state binding is the correct
+    OAuth CSRF protection.
+    """
+    if error:
+        # User denied the GitHub authorization screen.
+        return _redirect_to_settings(connected=False, error=error)
+
+    if not code or not state:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Missing OAuth code or state",
+        )
+
+    redis = _get_redis(request)
+    try:
+        await github_auth_service.handle_github_callback(code, state, db, redis)
+    except AuthError as exc:
+        message = str(exc)
+        if "invalid_state" in message:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid or expired OAuth state",
+            ) from exc
+        logger.warning("github_oauth.callback_failed", extra={"error": message})
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="GitHub OAuth exchange failed",
+        ) from exc
+
+    return _redirect_to_settings(connected=True)
+
+
+def _redirect_to_settings(
+    *, connected: bool, error: str | None = None
+) -> RedirectResponse:
+    base = settings.frontend_url.rstrip("/")
+    if connected:
+        target = f"{base}/settings?github_connected=true"
+    else:
+        # Pass through a safe truncated error code for diagnostics.
+        safe_error = (error or "denied")[:40].replace("\n", "").replace("\r", "")
+        target = f"{base}/settings?github_error={safe_error}"
+    return RedirectResponse(url=target, status_code=status.HTTP_303_SEE_OTHER)
