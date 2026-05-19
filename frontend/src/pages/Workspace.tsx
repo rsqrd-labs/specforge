@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react"
-import { Link, useParams } from "react-router-dom"
+import { useParams } from "react-router-dom"
 import { CoveragePanel } from "../components/workspace/CoveragePanel"
 import { CreditConfirmModal, CREDIT_COSTS } from "../components/workspace/CreditConfirmModal"
 import { DiffViewer } from "../components/workspace/DiffViewer"
@@ -14,6 +14,7 @@ import { MarkdownRenderer } from "../components/workspace/MarkdownRenderer"
 import { ProblemStatementPanel } from "../components/workspace/ProblemStatementPanel"
 import { TaskValidationPanel } from "../components/workspace/TaskValidationPanel"
 import { ExportGitHubModal } from "../components/workspace/ExportGitHubModal"
+import { GitHubStatusPill } from "../components/shared/GitHubStatusPill"
 import { useCredits } from "../hooks/useCredits"
 import { type StreamErrorState, useStream } from "../hooks/useStream"
 import {
@@ -886,28 +887,7 @@ export default function Workspace() {
                 ↑ GitHub
               </button>
             </div>
-            <Link
-              to="/settings"
-              state={{ from: id ? `/workspace/${id}` : "/dashboard" }}
-              className="header-settings-link"
-              aria-label="Settings"
-              title="Settings"
-            >
-              <svg
-                viewBox="0 0 20 20"
-                width="18"
-                height="18"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="1.6"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                aria-hidden="true"
-              >
-                <circle cx="10" cy="10" r="2.5" />
-                <path d="M16.4 11.5a6.5 6.5 0 0 0 0-3l1.5-1.2-1.5-2.6-1.9.6a6.5 6.5 0 0 0-2.6-1.5L11.6 2h-3l-.3 1.8a6.5 6.5 0 0 0-2.6 1.5l-1.9-.6L2.3 7.3l1.5 1.2a6.5 6.5 0 0 0 0 3L2.3 12.7l1.5 2.6 1.9-.6a6.5 6.5 0 0 0 2.6 1.5L8.6 18h3l.3-1.8a6.5 6.5 0 0 0 2.6-1.5l1.9.6 1.5-2.6z" />
-              </svg>
-            </Link>
+            <GitHubStatusPill />
           </div>
         </header>
 
