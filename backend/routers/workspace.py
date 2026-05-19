@@ -165,7 +165,7 @@ async def export_workspace_to_github(
     except GitHubAPIError as exc:
         logger.warning(
             "github_export.api_error",
-            extra={"status": exc.status, "message": exc.message},
+            extra={"github_status": exc.status, "github_message": exc.message},
         )
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
