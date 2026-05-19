@@ -144,6 +144,33 @@ and Google keys when those providers are enabled for the environment.
 
 ---
 
+## Phase 13 — GitHub Export Integration
+
+**Prerequisites:** `GITHUB_CLIENT_ID` and `GITHUB_CLIENT_SECRET` configured in
+the backend environment. The OAuth App's callback URL must be
+`{FRONTEND_URL}/auth/github/callback`. Skip this section when GitHub
+integration is intentionally disabled for the environment.
+
+| # | Test | Result | Notes |
+|---|------|--------|-------|
+| P13-1 | Navigate to `/settings`. GitHub card shows **not connected**. | 🔲 | |
+| P13-2 | Click **Connect GitHub** → GitHub OAuth consent screen. Approve → return to `/settings?github_connected=true`. | 🔲 | |
+| P13-3 | Settings shows **Connected as @{username}** with green status dot; query param cleaned from URL after mount. | 🔲 | |
+| P13-4 | Open a fully-finalised workspace. Both **↓ ZIP** and **↑ GitHub** buttons visible in header. | 🔲 | |
+| P13-5 | Click **↓ ZIP**. Download contains `SPEC.md`, `PLAN.md`, `TASKS.md`, `harness/...` files (unchanged from pre-Phase-13). | 🔲 | |
+| P13-6 | Click **↑ GitHub**. Modal opens in *configure* phase: pre-filled repo name (slugified workspace name), Public/Private pills, issue count pill matching task count. | 🔲 | |
+| P13-7 | Submit with Private visibility. Modal switches to *progress* phase with 3 animated dots cycling labels: "Creating repo…" → "Pushing files…" → "Creating issues…". | 🔲 | |
+| P13-8 | *Success* phase shows green check, repo URL link, **Open on GitHub ↗** button. Repo on GitHub contains all 4 files at root + harness/ + N Issues (one per task). | 🔲 | |
+| P13-9 | Close and re-export to the same repo. Modal succeeds without GitHubRepoExistsError. Issues are **updated, not duplicated** — total issue count unchanged. | 🔲 | |
+| P13-10 | Revoke OAuth token in GitHub Settings → retry export. Returns 403 with "GitHub connection expired. Reconnect from Settings." UserIntegration row deleted. | 🔲 | |
+| P13-11 | `/settings` → Disconnect → **Yes, disconnect**. Card returns to **not connected**. | 🔲 | |
+| P13-12 | Workspace header **↑ GitHub** button is disabled with tooltip "Connect GitHub in Settings to export". **↓ ZIP** still works. | 🔲 | |
+| P13-13 | Rate limit: 4 export POSTs within an hour. 4th returns 429 with detail `"GitHub export rate limit reached. Maximum 3 exports per hour."`. ZIP downloads in parallel are unaffected. | 🔲 | |
+| P13-14 | Repo name validation: try `../etc/passwd` in configure phase. Inline error appears on blur; submit disabled. | 🔲 | |
+| P13-15 | Workspace not finalised → modal Export submit returns 409 with "stage not finalised" detail. | 🔲 | |
+
+---
+
 ## Credit System Edge Cases
 
 | # | Test | Result | Notes |
@@ -243,12 +270,13 @@ With Langfuse unconfigured (`LANGFUSE_SECRET_KEY` blank):
 | PLAN / Review Gate | 6 | | | |
 | HARNESS + TASKS | 4 | | | |
 | Export | 2 | | | |
+| Phase 13 — GitHub | 15 | | | |
 | Credits Edge Cases | 3 | | | |
 | Rate Limiting | 1 | | | |
 | Stale State | 3 | | | |
 | Infrastructure | 4 | | | |
 | Sign-out | 2 | | | |
-| **Total** | **45** | | | |
+| **Total** | **60** | | | |
 
 Optional/additional checks:
 

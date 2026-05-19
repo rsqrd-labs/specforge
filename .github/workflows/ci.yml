@@ -125,6 +125,50 @@ jobs:
       - name: Phase 12 cost event schema
         run: python3 -m json.tool ../harness/schemas/llm-cost-event.schema.json >/dev/null
 
+      - name: GitHub integration tests
+        run: >-
+          uv run pytest
+          tests/test_github_integration.py
+          tests/test_github_api_client.py
+          tests/test_task_parser.py
+          -q --no-cov
+        env:
+          DATABASE_URL: "postgresql+asyncpg://postgres:postgres@localhost:5432/test"
+          REDIS_URL: "redis://localhost:6379/0"
+          JWT_PRIVATE_KEY: "ci-test-private-key"
+          JWT_PUBLIC_KEY: "ci-test-public-key"
+          GOOGLE_CLIENT_ID: "ci-test-client-id"
+          GOOGLE_CLIENT_SECRET: "ci-test-client-secret"
+          FRONTEND_URL: "http://localhost:5173"
+          ANTHROPIC_API_KEY: "ci-test-anthropic-key"
+          OPENAI_API_KEY: "ci-test-openai-key"
+          GOOGLE_API_KEY: "ci-test-google-key"
+          ENCRYPTION_MASTER_KEY: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+          CSRF_SECRET: "ci-test-csrf-secret-value-long-enough"
+          GITHUB_CLIENT_ID: ""
+          GITHUB_CLIENT_SECRET: ""
+          ENVIRONMENT: "test"
+
+      - name: Phase 13 GitHub integration harness contracts
+        run: uv run pytest ../harness/tests/backend/test_phase13_github_integration_contract.py -q
+        env:
+          DATABASE_URL: "postgresql+asyncpg://postgres:postgres@localhost:5432/test"
+          REDIS_URL: "redis://localhost:6379/0"
+          JWT_PRIVATE_KEY: "ci-test-private-key"
+          JWT_PUBLIC_KEY: "ci-test-public-key"
+          GOOGLE_CLIENT_ID: "ci-test-client-id"
+          GOOGLE_CLIENT_SECRET: "ci-test-client-secret"
+          FRONTEND_URL: "http://localhost:5173"
+          ANTHROPIC_API_KEY: "ci-test-anthropic-key"
+          OPENAI_API_KEY: "ci-test-openai-key"
+          GOOGLE_API_KEY: "ci-test-google-key"
+          ENCRYPTION_MASTER_KEY: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+          CSRF_SECRET: "ci-test-csrf-secret-value-long-enough"
+          ENVIRONMENT: "test"
+
+      - name: Phase 13 integration push schema
+        run: python3 -m json.tool ../harness/schemas/integration-push.schema.json >/dev/null
+
   frontend:
     name: Frontend
     runs-on: ubuntu-latest
@@ -156,6 +200,9 @@ jobs:
 
       - name: Vitest
         run: pnpm test -- --passWithNoTests
+
+      - name: Phase 13 frontend harness contracts
+        run: pnpm vitest run --config vitest.harness.config.ts ../harness/tests/frontend/phase13-github-integration.contract.test.ts
 
       - name: Build
         run: pnpm build
