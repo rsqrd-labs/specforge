@@ -46,4 +46,13 @@ def test_rejects_physically_impossible_non_software_statement() -> None:
     )
 
     assert result.is_valid is False
-    assert result.code == "problem_statement_too_vague"
+    assert result.code == "problem_statement_not_product_relevant"
+
+
+def test_rejects_nonsensical_physical_action_prompt() -> None:
+    result = validate_problem_statement(
+        "I want to build a software that eats rice and curry."
+    )
+
+    assert result.is_valid is False
+    assert result.code == "problem_statement_not_product_relevant"

@@ -138,11 +138,11 @@ def validate_problem_statement(text: str) -> ProblemStatementValidation:
     if not has_workflow_context:
         return ProblemStatementValidation(
             is_valid=False,
-            code="problem_statement_too_vague",
-            message="This is too vague to generate a reliable spec.",
+            code="problem_statement_not_product_relevant",
+            message="This doesn't describe a real software product, system, or workflow.",
             hints=[
-                "Add the main user type, the core workflow, and the expected output.",
-                "Include at least one constraint, integration, or important edge case if known.",
+                "Describe what the product does, who uses it, and what problem it solves.",
+                "Focus on a workflow, user action, or data problem that software can address.",
             ],
         )
 
