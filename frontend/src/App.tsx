@@ -3,6 +3,7 @@ import { ProtectedRoute } from "./components/shared/ProtectedRoute"
 import AuthCallback from "./pages/AuthCallback"
 import Dashboard from "./pages/Dashboard"
 import Landing from "./pages/Landing"
+import Settings from "./pages/Settings"
 import Workspace from "./pages/Workspace"
 
 export default function App() {
@@ -24,6 +25,14 @@ export default function App() {
           element={
             <ProtectedRoute>
               <Workspace />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/settings"
+          element={
+            <ProtectedRoute>
+              <Settings />
             </ProtectedRoute>
           }
         />

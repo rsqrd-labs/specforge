@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useRef, useState } from "react"
-import { useNavigate } from "react-router-dom"
+import { Link, useNavigate } from "react-router-dom"
 import { CreateWorkspaceModal } from "../components/dashboard/CreateWorkspaceModal"
 import { DeleteWorkspaceModal } from "../components/dashboard/DeleteWorkspaceModal"
 import { WorkspaceCard } from "../components/dashboard/WorkspaceCard"
@@ -320,6 +320,27 @@ export default function Dashboard() {
                   {userDisplayName}
                 </span>
               </div>
+              <Link
+                to="/settings"
+                className="header-settings-link"
+                aria-label="Settings"
+                title="Settings"
+              >
+                <svg
+                  viewBox="0 0 20 20"
+                  width="18"
+                  height="18"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="1.6"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  aria-hidden="true"
+                >
+                  <circle cx="10" cy="10" r="2.5" />
+                  <path d="M16.4 11.5a6.5 6.5 0 0 0 0-3l1.5-1.2-1.5-2.6-1.9.6a6.5 6.5 0 0 0-2.6-1.5L11.6 2h-3l-.3 1.8a6.5 6.5 0 0 0-2.6 1.5l-1.9-.6L2.3 7.3l1.5 1.2a6.5 6.5 0 0 0 0 3L2.3 12.7l1.5 2.6 1.9-.6a6.5 6.5 0 0 0 2.6 1.5L8.6 18h3l.3-1.8a6.5 6.5 0 0 0 2.6-1.5l1.9.6 1.5-2.6z" />
+                </svg>
+              </Link>
               <button
                 type="button"
                 className="logout-button"
