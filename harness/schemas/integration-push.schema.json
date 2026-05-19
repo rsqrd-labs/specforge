@@ -1,0 +1,40 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "integration-push",
+  "title": "IntegrationPushRead",
+  "description": "Response shape for GET /workspaces/{id}/export/github (Plan §4.5, Spec §11).",
+  "type": "object",
+  "required": ["push_id", "status", "repo_full_name", "repo_url", "issue_count", "pushed_at"],
+  "additionalProperties": false,
+  "properties": {
+    "push_id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Stable identifier for this push; used to correlate tasks to GitHub issues."
+    },
+    "status": {
+      "type": "string",
+      "enum": ["pending", "in_progress", "success", "error"],
+      "description": "Current state of the push operation."
+    },
+    "repo_full_name": {
+      "type": ["string", "null"],
+      "description": "GitHub owner/repo string, e.g. 'alice/my-project'. Null until the repo is created."
+    },
+    "repo_url": {
+      "type": ["string", "null"],
+      "format": "uri",
+      "description": "HTTPS URL for the created GitHub repository. Null until the repo is created."
+    },
+    "issue_count": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Number of GitHub Issues created (one per T-NNN task)."
+    },
+    "pushed_at": {
+      "type": ["string", "null"],
+      "format": "date-time",
+      "description": "ISO 8601 timestamp of when the push completed. Null if still in progress."
+    }
+  }
+}

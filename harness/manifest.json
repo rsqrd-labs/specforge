@@ -41,6 +41,16 @@
       "proves": "Phase 12 provider-agnostic LLM cost controls: capability registry, tier routing, prompt reuse, normalized telemetry, cache keys, and explicit cross-provider fallback."
     },
     {
+      "id": "github-integration-contracts",
+      "path": "harness/tests/backend/test_phase13_github_integration_contract.py",
+      "proves": "Phase 13 GitHub export integration: ORM models, Fernet token storage, GitHubAPIClient typed exceptions, task parser purity, export orchestrator, router error mapping, rate-limit tier, and CI wiring."
+    },
+    {
+      "id": "github-integration-frontend-contracts",
+      "path": "harness/tests/frontend/phase13-github-integration.contract.test.ts",
+      "proves": "Phase 13 frontend layer: TypeScript interfaces, api.ts GitHub functions (404 safety), Settings page route, ExportGitHubModal four-phase UI, workspace header GitHub button, and index.css design-system classes."
+    },
+    {
       "id": "e2e-smoke",
       "path": "harness/tests/e2e/specforge-smoke.spec.ts",
       "proves": "The core workspace pipeline can be completed through the browser once services are running."
