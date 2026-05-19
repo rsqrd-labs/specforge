@@ -3,6 +3,7 @@ import { useNavigate } from "react-router-dom"
 import { CreateWorkspaceModal } from "../components/dashboard/CreateWorkspaceModal"
 import { DeleteWorkspaceModal } from "../components/dashboard/DeleteWorkspaceModal"
 import { WorkspaceCard } from "../components/dashboard/WorkspaceCard"
+import { STARTER_WORKSPACES } from "../config/starterWorkspaces"
 import { getApiErrorMessage, getCredits, logout } from "../services/api"
 import { useUserStore } from "../store/userStore"
 import { useWorkspaceStore } from "../store/workspaceStore"
@@ -89,26 +90,6 @@ const PIPELINE_STAGE_DETAILS: Record<
 }
 
 const PIPELINE_STAGE_ORDER: PipelineStageId[] = ["spec", "plan", "harness", "tasks"]
-const STARTER_WORKSPACES = [
-  {
-    name: "AI onboarding coach",
-    description: "Personalized onboarding for new users",
-    statement:
-      "Build an AI onboarding coach for a B2B SaaS product. It should understand a new user's role, guide them through the first important setup steps, answer product questions, and surface success milestones for customer success teams.",
-  },
-  {
-    name: "Customer feedback hub",
-    description: "Turn user feedback into roadmap signals",
-    statement:
-      "Create a customer feedback hub that collects feedback from support tickets, calls, and surveys. Product managers should be able to cluster themes, identify priority requests, track customer impact, and turn validated insights into roadmap-ready work.",
-  },
-  {
-    name: "Internal support copilot",
-    description: "Help teams resolve operational questions",
-    statement:
-      "Design an internal support copilot for company operations. Employees should ask policy, tooling, and process questions, receive source-backed answers, and escalate unclear requests while administrators maintain approved knowledge sources.",
-  },
-]
 const STAGE_LABELS: Record<PipelineStageId, string> = {
   spec: "Spec",
   plan: "Plan",
@@ -221,6 +202,7 @@ export default function Dashboard() {
   const user = useUserStore((state) => state.user)
   const clearUser = useUserStore((state) => state.clearUser)
   const [balance, setBalance] = useState<number | null>(null)
+  const [generationCost, setGenerationCost] = useState<number>(10)
   const [showCreate, setShowCreate] = useState(false)
   const [starterWorkspace, setStarterWorkspace] = useState<
     (typeof STARTER_WORKSPACES)[number] | null
@@ -234,7 +216,10 @@ export default function Dashboard() {
   useEffect(() => {
     void fetchWorkspaces()
     getCredits()
-      .then((d) => setBalance(d.balance))
+      .then((d) => {
+        setBalance(d.balance)
+        setGenerationCost(d.generation_cost)
+      })
       .catch(() => setBalance(null))
   }, [fetchWorkspaces])
 
@@ -602,6 +587,8 @@ export default function Dashboard() {
         <CreateWorkspaceModal
           initialName={starterWorkspace?.name}
           initialStatement={starterWorkspace?.statement}
+          balance={balance}
+          generationCost={generationCost}
           onClose={() => {
             setShowCreate(false)
             setStarterWorkspace(null)

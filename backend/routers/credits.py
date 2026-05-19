@@ -8,7 +8,7 @@ from database import get_db
 from middleware.auth import get_current_user
 from models import CreditLedger, User
 from schemas.credits import CreditBalance, CreditLedgerEntry
-from services.credit_service import credit_service
+from services.credit_service import CREDIT_COSTS, credit_service
 
 router = APIRouter(prefix="/credits", tags=["credits"])
 
@@ -19,7 +19,7 @@ async def get_balance(
     db: AsyncSession = Depends(get_db),
 ) -> CreditBalance:
     balance = await credit_service.get_balance(db, user.id)
-    return CreditBalance(balance=balance)
+    return CreditBalance(balance=balance, generation_cost=CREDIT_COSTS["generate"])
 
 
 @router.get("/history", response_model=list[CreditLedgerEntry])

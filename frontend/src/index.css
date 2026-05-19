@@ -3334,10 +3334,222 @@ button:disabled {
 .modal-char-count {
   font-size: 11px;
   color: var(--color-on-surface-variant);
+  white-space: nowrap;
 }
 
 .modal-char-count.over {
   color: #c0392b;
+  font-weight: 700;
+}
+
+.modal-char-count.building {
+  color: var(--color-primary);
+}
+
+/* Char-count row (progress bar + counter) */
+.modal-char-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.modal-min-progress {
+  flex: 1;
+  height: 3px;
+  border-radius: 99px;
+  background: rgba(143, 78, 0, 0.12);
+  overflow: hidden;
+}
+
+.modal-min-progress-fill {
+  height: 100%;
+  border-radius: 99px;
+  background: linear-gradient(90deg, var(--color-primary), var(--color-secondary));
+  transition: width 0.12s ease;
+}
+
+/* Template chips */
+.modal-templates {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  padding-bottom: 2px;
+}
+
+.modal-templates-label {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--color-on-surface-variant);
+  margin-right: 2px;
+  white-space: nowrap;
+}
+
+.modal-template-chip {
+  padding: 4px 10px;
+  border-radius: 99px;
+  border: 1px solid rgba(143, 78, 0, 0.18);
+  background: rgba(255, 255, 255, 0.6);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-on-surface-variant);
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s, color 0.15s;
+  white-space: nowrap;
+}
+
+.modal-template-chip:hover {
+  border-color: var(--color-primary);
+  background: rgba(143, 78, 0, 0.06);
+  color: var(--color-primary);
+}
+
+/* Advanced collapsible */
+.modal-advanced {
+  border: 1px solid rgba(143, 78, 0, 0.12);
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+.modal-advanced-toggle {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  background: rgba(255, 255, 255, 0.45);
+  border: none;
+  cursor: pointer;
+  text-align: left;
+  transition: background 0.15s;
+}
+
+.modal-advanced-toggle:hover {
+  background: rgba(143, 78, 0, 0.05);
+}
+
+.modal-advanced-label {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--color-on-surface-variant);
+}
+
+.modal-advanced-summary {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-primary);
+  background: rgba(143, 78, 0, 0.08);
+  padding: 2px 8px;
+  border-radius: 99px;
+}
+
+.modal-advanced-chevron {
+  margin-left: auto;
+  color: var(--color-on-surface-variant);
+  transition: transform 0.2s ease;
+  flex-shrink: 0;
+}
+
+.modal-advanced-body {
+  padding: 12px 14px 14px;
+  border-top: 1px solid rgba(143, 78, 0, 0.10);
+  background: rgba(255, 255, 255, 0.3);
+}
+
+.modal-provider-desc {
+  color: var(--color-on-surface-variant) !important;
+  opacity: 0.75;
+}
+
+/* Pipeline preview */
+.modal-pipeline-preview {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  padding: 10px 14px;
+  border-radius: 10px;
+  background: rgba(143, 78, 0, 0.04);
+  border: 1px solid rgba(143, 78, 0, 0.10);
+}
+
+.modal-pipeline-label {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--color-on-surface-variant);
+  margin-right: 4px;
+}
+
+.modal-pipeline-stages {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.modal-pipeline-step {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--color-primary);
+  background: rgba(143, 78, 0, 0.08);
+  padding: 3px 9px;
+  border-radius: 99px;
+}
+
+.modal-pipeline-arrow {
+  font-size: 11px;
+  color: var(--color-on-surface-variant);
+  opacity: 0.5;
+}
+
+/* Footer layout with credit hint */
+.modal-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding-top: 4px;
+}
+
+.modal-footer-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.modal-credit-hint {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.modal-credit-cost {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--color-on-surface-variant);
+}
+
+.modal-credit-cost.low {
+  color: #c0392b;
+}
+
+.modal-credit-balance {
+  font-size: 11px;
+  color: var(--color-on-surface-variant);
+  opacity: 0.75;
+}
+
+.modal-credit-balance.low {
+  color: #c0392b;
+  opacity: 1;
+  font-weight: 600;
 }
 
 .provider-grid {
@@ -3406,14 +3618,6 @@ button:disabled {
 .provider-pill.unhealthy {
   border-color: rgba(192, 57, 43, 0.24);
   background: rgba(192, 57, 43, 0.06);
-}
-
-.modal-footer {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 10px;
-  padding-top: 4px;
 }
 
 .modal-cancel {

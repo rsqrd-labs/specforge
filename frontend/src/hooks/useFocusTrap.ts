@@ -12,12 +12,14 @@ const FOCUSABLE = [
 export function useFocusTrap(
   ref: RefObject<HTMLElement | null>,
   onClose: () => void,
+  initialFocusRef?: RefObject<HTMLElement | null>,
 ) {
   useEffect(() => {
     const el = ref.current
     if (!el) return
     const focusable = Array.from(el.querySelectorAll<HTMLElement>(FOCUSABLE))
-    focusable[0]?.focus()
+    const initial = initialFocusRef?.current ?? focusable[0]
+    initial?.focus()
 
     function handleKeyDown(event: KeyboardEvent) {
       if (event.key === "Escape") {

@@ -6,6 +6,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 class CreditBalance(BaseModel):
     balance: int = Field(ge=0)
+    generation_cost: int = Field(ge=0)
 
     model_config = ConfigDict(from_attributes=True)
 

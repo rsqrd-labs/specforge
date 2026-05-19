@@ -38,6 +38,7 @@ interface GoogleCallbackResponse {
 
 export interface CreditBalance {
   balance: number
+  generation_cost: number
 }
 
 export interface ProviderModel {
