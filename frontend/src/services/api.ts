@@ -431,3 +431,79 @@ export interface RefineStagePayload {
   selected_text: string
   mode?: "focused" | "section" | "full"
 }
+
+// ---------------------------------------------------------------------------
+// GitHub integration (Phase 13)
+// ---------------------------------------------------------------------------
+
+export interface GitHubIntegration {
+  connected: boolean
+  github_username: string | null
+}
+
+export interface GitHubExportRequest {
+  repo_name: string
+  visibility: "public" | "private"
+}
+
+export interface GitHubExportResponse {
+  push_id: string
+  status: string
+  repo_full_name: string | null
+  repo_url: string | null
+  issue_count: number
+}
+
+export interface IntegrationPushRead {
+  push_id: string
+  status: string
+  repo_full_name: string | null
+  repo_url: string | null
+  issue_count: number
+  pushed_at: string | null
+}
+
+export async function getGitHubIntegration(): Promise<GitHubIntegration> {
+  // 404 returns the disconnected shape so callers can use this unconditionally.
+  try {
+    const response = await api.get<GitHubIntegration>("/integrations/github")
+    return response.data
+  } catch (error) {
+    if (axios.isAxiosError(error) && error.response?.status === 404) {
+      return { connected: false, github_username: null }
+    }
+    throw error
+  }
+}
+
+export async function deleteGitHubIntegration(): Promise<void> {
+  await api.delete("/integrations/github")
+}
+
+export async function exportWorkspaceToGitHub(
+  id: string,
+  body: GitHubExportRequest,
+): Promise<GitHubExportResponse> {
+  const response = await api.post<GitHubExportResponse>(
+    `/workspaces/${id}/export/github`,
+    body,
+  )
+  return response.data
+}
+
+export async function getGitHubPush(
+  id: string,
+): Promise<IntegrationPushRead | null> {
+  // 404 means "no push yet" — a normal state, not an error.
+  try {
+    const response = await api.get<IntegrationPushRead>(
+      `/workspaces/${id}/export/github`,
+    )
+    return response.data
+  } catch (error) {
+    if (axios.isAxiosError(error) && error.response?.status === 404) {
+      return null
+    }
+    throw error
+  }
+}
