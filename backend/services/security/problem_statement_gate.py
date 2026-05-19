@@ -10,7 +10,8 @@ _PRODUCT_INTENT_RE = re.compile(
     r"\b("
     r"app|application|platform|product|software|system|service|tool|website|"
     r"web\s+app|mobile\s+app|dashboard|portal|marketplace|saas|api|workflow|"
-    r"automation|extension|plugin|bot|agent|crm|cms|erp|database|backend|frontend"
+    r"automation|extension|plugin|bot|agent|copilot|assistant|crm|cms|erp|"
+    r"database|backend|frontend"
     r")\b",
     re.I,
 )
