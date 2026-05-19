@@ -37,3 +37,13 @@ def test_rejects_text_without_product_intent() -> None:
 
     assert result.is_valid is False
     assert result.code == "problem_statement_missing_product_intent"
+
+
+def test_rejects_physically_impossible_non_software_statement() -> None:
+    result = validate_problem_statement(
+        "I want to build software that travels to the moon and back. "
+        "It should handle the journey efficiently."
+    )
+
+    assert result.is_valid is False
+    assert result.code == "problem_statement_too_vague"

@@ -24,9 +24,25 @@ _BUILD_INTENT_RE = re.compile(
 )
 _USER_OR_WORKFLOW_RE = re.compile(
     r"\b("
-    r"user|users|customer|customers|admin|admins|team|teams|manager|client|"
-    r"workflow|process|screen|dashboard|login|signup|payment|notification|"
-    r"report|approval|booking|task|project|order|tenant|role|permission"
+    # User types
+    r"user|users|customer|customers|admin|admins|team|teams|manager|managers|"
+    r"client|clients|employee|employees|staff|operator|operators|member|members|"
+    r"doctor|doctors|patient|patients|receptionist|receptionists|"
+    r"buyer|buyers|seller|sellers|vendor|vendors|"
+    # Workflows and process artefacts (including plurals)
+    r"workflow|workflows|process|processes|screen|screens|"
+    r"dashboard|dashboards|login|signup|payment|payments|"
+    r"notification|notifications|report|reports|approval|approvals|"
+    r"booking|bookings|task|tasks|project|projects|order|orders|"
+    r"tenant|tenants|role|roles|permission|permissions|"
+    # Software action verbs specific to real products
+    r"track|store|filter|notify|alert|schedule|submit|"
+    r"export|import|sync|authenticate|assign|validate|"
+    r"upload|download|fetch|query|"
+    # Common product data and domain artefacts
+    r"record|records|file|files|account|accounts|profile|profiles|"
+    r"settings|message|messages|event|events|calendar|"
+    r"form|forms|channel|channels|request|requests|endpoint|endpoints"
     r")\b",
     re.I,
 )
@@ -119,7 +135,7 @@ def validate_problem_statement(text: str) -> ProblemStatementValidation:
             ],
         )
 
-    if len(value.split()) < 10 and not has_workflow_context:
+    if not has_workflow_context:
         return ProblemStatementValidation(
             is_valid=False,
             code="problem_statement_too_vague",
