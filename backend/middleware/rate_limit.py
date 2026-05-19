@@ -1,4 +1,5 @@
 import logging
+import re
 import time
 from collections.abc import Awaitable, Callable
 from ipaddress import IPv4Network, IPv6Network, ip_address, ip_network
@@ -23,6 +24,15 @@ _LOGIN_BURST_LIMIT = 5
 _LOGIN_BURST_WINDOW_SECONDS = 300
 _LOGIN_HOURLY_LIMIT = 20
 _LOGIN_HOURLY_WINDOW_SECONDS = 3600
+
+# GitHub export tier (Phase 13): 3 exports per user per hour. Applies to
+# POST /workspaces/{id}/export/github only — the ZIP export at
+# /workspaces/{id}/export is NOT covered by this tier.
+_GITHUB_EXPORT_PATH_RE = re.compile(r"^/workspaces/[^/]+/export/github/?$")
+_GITHUB_EXPORT_LIMIT = 3
+_GITHUB_EXPORT_WINDOW_SECONDS = 3600
+_GITHUB_EXPORT_DETAIL = "GitHub export rate limit reached. Maximum 3 exports per hour."
+
 IpNetwork = IPv4Network | IPv6Network
 RateLimitCheck = Callable[[str, int, int], Awaitable[bool]]
 
@@ -192,6 +202,18 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             request.state.jwt_claims = claims
         if user_id and not await check(f"user:{user_id}", 100, 60):
             return _rate_limited(60)
+
+        if user_id and request.method == "POST" and _GITHUB_EXPORT_PATH_RE.match(path):
+            allowed = await check(
+                f"github_export:{user_id}",
+                _GITHUB_EXPORT_LIMIT,
+                _GITHUB_EXPORT_WINDOW_SECONDS,
+            )
+            if not allowed:
+                return _rate_limited_custom(
+                    detail=_GITHUB_EXPORT_DETAIL,
+                    retry_after_seconds=_GITHUB_EXPORT_WINDOW_SECONDS,
+                )
         return None
 
 
@@ -287,4 +309,12 @@ def _rate_limited(retry_after: int) -> JSONResponse:
         status_code=status.HTTP_429_TOO_MANY_REQUESTS,
         content={"detail": "Rate limit exceeded"},
         headers={"Retry-After": str(retry_after)},
+    )
+
+
+def _rate_limited_custom(*, detail: str, retry_after_seconds: int) -> JSONResponse:
+    return JSONResponse(
+        status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+        content={"detail": detail},
+        headers={"Retry-After": str(retry_after_seconds)},
     )
