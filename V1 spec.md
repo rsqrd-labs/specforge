@@ -58,6 +58,7 @@ V1 validates one core hypothesis: developers find enough value in the pipeline o
 - Support all three major AI providers — Anthropic, OpenAI, and Google — with user-selectable models
 - Authenticate users via Google OAuth and enforce a 50-credit free tier
 - Allow users to export all four finalised documents as a zip file for use with coding agents
+- Allow users to push a finalised workspace directly to a new GitHub repository, with each task created as a GitHub Issue, when they have connected their GitHub account
 
 ### Non-Goals for V1
 
@@ -65,7 +66,7 @@ V1 validates one core hypothesis: developers find enough value in the pipeline o
 
 - Payments and subscriptions
 - Approval workflows
-- Jira or GitHub integration
+- Jira integration
 - Team workspaces or shared pipelines
 - Chat panel per stage
 - Mobile responsiveness
@@ -197,27 +198,85 @@ of SPEC.md. Regenerate or keep as-is?"
 
 ### 4.8 Export
 
-Once all four stages are finalised the **Export** button activates in the workspace header.
-
-Downloaded zip structure:
+Once all four stages are finalised two export options activate in the workspace header:
 
 ```
-specforge-export/
+[↓ Download ZIP]   [↑ Export to GitHub]
+```
+
+Both exports produce the same file layout. No credits are deducted for either export path.
+
+**File layout (ZIP and GitHub repo root):**
+
+```
 ├── SPEC.md
 ├── PLAN.md
 ├── TASKS.md
 └── harness/
+    ├── <setup-file>          ← conftest.py · vitest.setup.ts · spec_helper.rb
+    ├── factories/
     ├── tests/
     │   ├── unit/
     │   ├── integration/
-    │   └── e2e/
-    ├── types/
+    │   ├── e2e/
+    │   ├── security/
+    │   ├── observability/
+    │   └── performance/
+    ├── contract/
     └── schemas/
 ```
 
-No credits deducted for export.
+#### ZIP Download
 
-### 4.9 Dashboard
+Click **Download ZIP** → browser downloads `specforge-{workspace-id}.zip` immediately. No configuration required. Always available on a finalised workspace regardless of GitHub connection status.
+
+#### Export to GitHub
+
+Available only when a GitHub account is connected (see §4.9). Click **Export to GitHub** → a configuration modal opens:
+
+```
+Repo name:    [my-project          ]   ← pre-filled from workspace name
+Visibility:   ● Public  ○ Private
+              Will create 12 issues — one per task
+                    [Cancel]  [Export →]
+```
+
+On confirm:
+
+```
+SpecForge creates a new GitHub repo
+         ↓
+Commits all files to the default branch in one commit
+         ↓
+Creates one GitHub Issue per task from TASKS.md
+         ↓
+Success: "Exported to github.com/username/repo-name"
+         [Open on GitHub ↗]   [Done]
+```
+
+**Re-export (idempotent):** If the workspace was previously exported to GitHub, the modal pre-fills the existing repo name (read-only) and notes the previous export date. Re-exporting updates files and issues in the existing repo rather than creating a new one. New tasks are created as new issues; existing tasks are updated in place. Issues are never deleted.
+
+**GitHub Issue format:** Each `T-NNN` task becomes one issue titled `T-NNN: {task title}`, with the full task body — phase, risk, description, steps, acceptance criteria, and harness references — preserved as the issue body. Issues are created in task order.
+
+### 4.9 GitHub Connection
+
+A GitHub connection is required for the Export to GitHub flow. Users connect once from Settings.
+
+```
+Settings → Integrations → Connect GitHub
+         ↓
+GitHub OAuth consent (scope: repo, read:user)
+         ↓
+User authorises SpecForge
+         ↓
+Token stored encrypted in key vault
+         ↓
+Settings shows: "✓ Connected as @username"  [Disconnect]
+```
+
+Disconnecting removes the stored token. Previously exported repos and issues on GitHub are not affected. If a GitHub token is found to be expired or revoked during an export attempt, it is deleted automatically and the user is prompted to reconnect.
+
+### 4.10 Dashboard
 
 Workspace cards show: name, creation date, AI provider used, pipeline progress indicator (which stages are finalised). User can return to any workspace by clicking its card.
 
@@ -433,7 +492,7 @@ Task Validation
 
 ### Google OAuth
 
-Sign in with Google is the only authentication method in V1.
+Sign in with Google is the only authentication method for SpecForge accounts.
 
 ```
 User clicks "Sign in with Google"
@@ -467,6 +526,21 @@ On first sign-in an account is created automatically from the Google profile. Na
 ### Session Management
 
 Refresh tokens rotate on every use. If an already-used refresh token is presented — indicating possible token theft — all tokens for that user are immediately revoked and a security event is logged.
+
+### GitHub OAuth (Integration Only)
+
+GitHub OAuth is used exclusively to obtain a GitHub access token for the Export to GitHub feature. It does not create or replace a SpecForge account — the user must already be signed in via Google.
+
+The GitHub OAuth flow is initiated from Settings → Integrations. On completion, the access token is encrypted with Fernet (same key vault as user-supplied LLM API keys) and stored in `UserIntegration`. The plaintext token is never written to logs or error responses.
+
+| OAuth scope | Reason |
+|---|---|
+| `repo` | Create repositories, push files, create issues |
+| `read:user` | Display the connected GitHub username in Settings |
+
+The flow uses a one-time CSRF state parameter (32-byte random hex stored in the user's session for the duration of the flow). The callback endpoint rejects any request where the state does not match.
+
+If a GitHub API call returns 401 at any point after connection, the stored token is deleted and the user is prompted to reconnect. SpecForge never retries with a known-invalid token.
 
 ---
 
@@ -573,6 +647,54 @@ Call succeeds? → Deduction stands
 |metadata|JSONB||
 |created_at|TIMESTAMPTZ||
 
+### User Integration
+
+Stores an encrypted OAuth token for a connected external service. One row per user per provider.
+
+|Field|Type|Constraints|
+|---|---|---|
+|id|UUID|Primary key|
+|user_id|UUID|FK → users.id|
+|provider|TEXT|`github` (extensible)|
+|encrypted_token|TEXT|Fernet-encrypted access token|
+|github_username|TEXT|Display only — shown in Settings|
+|connected_at|TIMESTAMPTZ||
+|last_used_at|TIMESTAMPTZ|Updated on each export|
+
+Unique constraint: `(user_id, provider)`.
+
+### Integration Push
+
+Records each GitHub export attempt. One row per workspace per provider; re-export updates this row in place.
+
+|Field|Type|Constraints|
+|---|---|---|
+|id|UUID|Primary key|
+|workspace_id|UUID|FK → workspaces.id|
+|user_id|UUID|FK → users.id|
+|provider|TEXT|`github`|
+|repo_full_name|TEXT|e.g. `username/repo-name`|
+|repo_url|TEXT|Full HTTPS URL|
+|status|TEXT|`pending` / `completed` / `failed`|
+|pushed_at|TIMESTAMPTZ|Set on completion|
+|created_at|TIMESTAMPTZ||
+
+Unique constraint: `(workspace_id, provider)`.
+
+### Integration Push Task
+
+Maps each task to its created GitHub Issue number, enabling idempotent re-export.
+
+|Field|Type|Constraints|
+|---|---|---|
+|id|UUID|Primary key|
+|push_id|UUID|FK → integration_pushes.id|
+|task_ref|TEXT|e.g. `T-001`|
+|external_issue_number|INTEGER|GitHub issue number|
+|created_at|TIMESTAMPTZ||
+
+Unique constraint: `(push_id, task_ref)`.
+
 ### Eval Result
 
 |Field|Type|Constraints|
@@ -602,6 +724,15 @@ Call succeeds? → Deduction stands
 |POST|/auth/refresh|Rotate refresh token, issue new access token|
 |POST|/auth/logout|Revoke refresh token, clear cookie|
 |GET|/auth/me|Return current user profile and credit balance|
+|GET|/auth/github|Initiate GitHub OAuth flow (must be signed in)|
+|GET|/auth/github/callback|Handle GitHub callback, store encrypted token|
+
+### Integrations
+
+|Method|Endpoint|Description|
+|---|---|---|
+|GET|/integrations/github|Return GitHub connection status and username|
+|DELETE|/integrations/github|Disconnect GitHub — delete stored token|
 
 ### Workspaces
 
@@ -612,7 +743,9 @@ Call succeeds? → Deduction stands
 |GET|/workspaces/{id}|Get workspace with all stages|
 |PATCH|/workspaces/{id}|Update workspace name|
 |DELETE|/workspaces/{id}|Archive workspace (soft delete)|
-|POST|/workspaces/{id}/export|Generate and download zip of all four stages|
+|POST|/workspaces/{id}/export|Download zip of all four stages|
+|POST|/workspaces/{id}/export/github|Push workspace to a new GitHub repo; create issues|
+|GET|/workspaces/{id}/export/github|Return latest GitHub push record for this workspace|
 
 ### Stages
 
@@ -668,6 +801,7 @@ Call succeeds? → Deduction stands
 - All LLM output validated for system prompt leakage before delivery to client
 - SQL injection prevented by ORM-only database access — no raw SQL strings
 - Rate limiting applied at global, per-user, and per-user LLM tiers via Redis sliding window
+- GitHub OAuth access tokens stored encrypted with Fernet; plaintext never written to logs, errors, or audit fields. Auto-deleted on 401 from GitHub API.
 
 ### Rate Limits
 
@@ -678,6 +812,7 @@ Call succeeds? → Deduction stands
 |User LLM|Per user|10 LLM calls|1 minute|
 |User LLM Daily|Per user|200 LLM calls|24 hours|
 |Auth Login|Per IP|5 attempts|5 minutes|
+|GitHub Export|Per user|3 exports|1 hour|
 
 ### Scalability
 
@@ -709,7 +844,13 @@ V1 is designed for hundreds of concurrent users, not thousands. Railway's defaul
 
 **Assumption 4 — The pipeline order is strict and non-skippable.** Users cannot skip stages. If experienced users want to jump directly to HARNESS on a well-understood project type, a skip mode could be added post-V1.
 
-**Assumption 5 — Google OAuth is sufficient.** GitHub OAuth is not needed yet. Enterprise SSO is explicitly out of scope.
+**Assumption 5 — Google OAuth is sufficient for sign-in.** GitHub OAuth is used only for the export integration, not for authentication. Enterprise SSO is explicitly out of scope.
+
+**Assumption 8 — One repo per workspace is the right export model.** Users want to start a fresh repo each time rather than push updates into an existing one. Re-export updates the previously created repo in place.
+
+**Assumption 9 — GitHub Issues are the right unit for tasks.** Developers working in GitHub use Issues as their unit of work. No GitHub Projects, Milestones, or Labels are created in the initial export; users can add these on GitHub after export.
+
+**Assumption 10 — Synchronous export is acceptable.** A workspace with 30 tasks will take roughly 30 seconds end-to-end under normal GitHub API conditions. If this is consistently too slow, a background job with SSE progress streaming can be added using the same pattern as stage generation.
 
 **Assumption 6 — A Pro waitlist is an acceptable credit exhaustion state.** If conversion intent is high, moving payments into V1 may be worth the additional build time.
 
@@ -723,8 +864,7 @@ V1 is designed for hundreds of concurrent users, not thousands. Railway's defaul
 | ------------------------------------ | -------------- |
 | Payments and subscriptions           | V2             |
 | Approval workflows                   | V2 Team        |
-| GitHub Issues integration            | V2             |
-| Jira integration                     | V3             |
+| Jira integration                     | V2             |
 | Team workspaces                      | V2             |
 | Chat panel per stage                 | V2             |
 | Mobile and tablet responsive design  | Post V1        |
@@ -749,4 +889,6 @@ V1 is designed for hundreds of concurrent users, not thousands. Railway's defaul
 
 ---
 
-_SpecForge V1 SPEC.md · Version 1.1.0 · 2026-05-07 — added Langfuse-backed LLM observability under §12 and Assumption 7. No product-flow changes._
+_SpecForge V1 SPEC.md · Version 1.2.0 · 2026-05-19 — added GitHub export integration: §4.8 expanded with GitHub export flow, §4.9 GitHub connection flow, §8 GitHub OAuth, §10 UserIntegration/IntegrationPush/IntegrationPushTask models, §11 integrations and GitHub export endpoints, §12 GitHub token security and rate limit, Assumptions 8–10. ZIP export unchanged._
+
+_Version 1.1.0 · 2026-05-07 — added Langfuse-backed LLM observability under §12 and Assumption 7. No product-flow changes._
