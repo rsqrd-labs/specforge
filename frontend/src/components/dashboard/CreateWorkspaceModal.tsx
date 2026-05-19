@@ -170,6 +170,7 @@ export function CreateWorkspaceModal({
                 setName(e.target.value)
                 if (errors.name) setErrors((prev) => ({ ...prev, name: "" }))
               }}
+              maxLength={200}
               className={`modal-input${errors.name ? " error" : ""}`}
               placeholder="AI onboarding coach"
             />
@@ -187,6 +188,7 @@ export function CreateWorkspaceModal({
                 if (errors.statement) setErrors((prev) => ({ ...prev, statement: "" }))
               }}
               rows={5}
+              maxLength={MAX_STATEMENT}
               className={`modal-input resize-none${errors.statement ? " error" : ""}`}
               placeholder="Describe the user, the problem, the rough shape of the solution, and what would make it worth shipping."
             />

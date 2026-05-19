@@ -940,6 +940,7 @@ export default function Workspace() {
             <input
               value={refineInstruction}
               onChange={(e) => setRefineInstruction(e.target.value)}
+              maxLength={20000}
               placeholder="Describe how to refine the selected text…"
               className="refine-input"
               disabled={isRefining}

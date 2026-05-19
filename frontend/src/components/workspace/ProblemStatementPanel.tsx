@@ -40,6 +40,7 @@ export function ProblemStatementPanel({
         <textarea
           value={problemStatement}
           readOnly={readOnly}
+          maxLength={10000}
           onChange={(event) => onChange?.(event.target.value)}
           onBlur={onBlur}
           className="problem-editor-textarea"

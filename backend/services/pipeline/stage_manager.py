@@ -956,7 +956,7 @@ class StageManager:
         workspace = await self._load_workspace(stage.workspace_id, db)
         was_finalised = stage.status == "finalised"
 
-        stage.content = new_content
+        stage.content = sanitize_text(new_content)
         stage.current_version += 1
         stage.status = "draft" if not was_finalised else "stale"
         stage.updated_at = datetime.now(UTC)
