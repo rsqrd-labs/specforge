@@ -29,6 +29,7 @@ depends-on: "[[SpecForge V1 SPEC]]"
 - [[#8. Risks and Mitigations]]
 - [[#9. Open Questions]]
 - [[#16. Phase 12 — LLM API Cost Optimization Plan]]
+- [[#17. Phase 13 — GitHub Export Integration]]
 
 ---
 
@@ -161,11 +162,12 @@ Thin layer only. Validates input via Pydantic schemas, calls the appropriate ser
 
 |File|Endpoints|
 |---|---|
-|auth.py|/auth/google, /auth/callback, /auth/refresh, /auth/logout, /auth/me|
-|workspace.py|GET/POST/PATCH/DELETE /workspaces, GET /workspaces/{id}, POST /workspaces/{id}/export|
+|auth.py|/auth/google, /auth/callback, /auth/refresh, /auth/logout, /auth/me, /auth/github, /auth/github/callback|
+|workspace.py|GET/POST/PATCH/DELETE /workspaces, GET /workspaces/{id}, POST /workspaces/{id}/export, POST+GET /workspaces/{id}/export/github|
 |stage.py|generate, refine, regenerate, finalise, rollback, versions, eval per stage|
 |credits.py|/credits/balance, /credits/history (read-only, no mutations)|
 |providers.py|/providers (returns available providers and models)|
+|integrations.py|GET /integrations/github, DELETE /integrations/github|
 
 ---
 
@@ -190,9 +192,10 @@ google.py     ← GoogleAdapter(BaseLLMAdapter)
 #### `services/pipeline/` — Stage Orchestration
 
 ```
-stage_manager.py   ← Core orchestrator. All stage lifecycle logic lives here.
-diff_engine.py     ← Computes unified diffs between content versions.
-export_service.py  ← Packages all four finalised stages into a zip.
+stage_manager.py        ← Core orchestrator. All stage lifecycle logic lives here.
+diff_engine.py          ← Computes unified diffs between content versions.
+export_service.py       ← Packages all four finalised stages into a zip.
+github_export_service.py ← Pushes the same content to GitHub (repo + issues).
 ```
 
 The Stage Manager owns: dependency checking, ownership assertion, status state machine, credit deduction and refund, prompt building, SSE stream coordination, async eval triggering, staleness propagation, and version history management.
@@ -227,6 +230,22 @@ csrf.py              ← HMAC CSRF token generation and verification
 ```
 
 The prompt guard runs on all user input before any LLM call. The output validator runs on every LLM response before it is saved or returned. These two checks bracket every LLM interaction. They are independent layers — not alternatives.
+
+---
+
+#### `services/integrations/` — Third-Party Integration Adapters
+
+```
+github_auth_service.py  ← OAuth token exchange, storage, and revocation
+github_api_client.py    ← GitHub REST API wrapper (repo, contents, issues)
+task_parser.py          ← Parses T-NNN tasks from TASKS.md content
+```
+
+`github_auth_service.py` handles the GitHub OAuth callback: exchanges the code for an access token, encrypts it with the existing Fernet key vault, and persists it in `UserIntegration`. On 401 from GitHub it deletes the stored token and raises `GitHubTokenExpiredError` so the caller can prompt reconnection.
+
+`github_api_client.py` wraps all GitHub REST API calls behind a thin async class, receiving the plaintext token (decrypted by the caller) and `httpx.AsyncClient` as dependencies. Methods: `create_repo`, `get_file_sha`, `upsert_file`, `create_issue`, `update_issue`. All errors from GitHub are converted to typed exceptions (`GitHubRepoExistsError`, `GitHubRateLimitError`, `GitHubAPIError`) so callers never parse raw HTTP status codes.
+
+`task_parser.py` is a pure function that receives TASKS.md content and returns a list of `ParsedTask(ref, title, body_md)` objects. Uses the same `### T-NNN:` heading pattern that the harness prompt parser uses. No LLM call — fully deterministic.
 
 ---
 
@@ -546,8 +565,10 @@ Reuse detection:
 
 ### 4.5 Export Flow
 
+#### ZIP Download (existing)
+
 ```
-1. User clicks Export (all four stages must be finalised)
+1. User clicks Download ZIP (all four stages must be finalised)
           ↓
 2. POST /workspaces/{id}/export
           ↓
@@ -566,6 +587,55 @@ Reuse detection:
 5. Browser downloads specforge-export.zip
    No credits deducted
 ```
+
+#### GitHub Export (new)
+
+```
+1. User clicks Export to GitHub (all four stages finalised,
+   GitHub connection present)
+          ↓
+2. POST /workspaces/{id}/export/github
+   Body: { repo_name, visibility }
+          ↓
+3. github_export_service.push(workspace_id, user_id, repo_name, visibility):
+   a. Decrypt GitHub token from UserIntegration via key_vault
+   b. Check IntegrationPush for existing push record
+      → First export: create_repo via github_api_client
+      → Re-export: skip create_repo, target existing repo
+   c. Fetch all four stage contents (same Redis cache or DB path as ZIP)
+   d. Compute harness file map via parse_harness_files() (reused from export_service)
+   e. Upsert all files via github_api_client.upsert_file():
+      SPEC.md, PLAN.md, TASKS.md → repo root
+      harness/... → all parsed harness paths
+      (upsert requires current file SHA for updates — fetched per file)
+   f. Parse tasks via task_parser.parse(tasks_content)
+   g. For each ParsedTask:
+      → Look up existing issue number in IntegrationPushTask
+      → Found: github_api_client.update_issue(number, title, body)
+      → Not found: github_api_client.create_issue(title, body)
+                   store issue number in IntegrationPushTask
+   h. Upsert IntegrationPush row (status=completed, pushed_at=now)
+          ↓
+4. Return { push_id, status, repo_full_name, repo_url, issue_count }
+   202 Accepted (synchronous in V1 — request completes when all done)
+   No credits deducted
+```
+
+**Re-export idempotency contract:**
+- `IntegrationPush` has a unique constraint on `(workspace_id, provider)`. Re-export updates the row in place.
+- `IntegrationPushTask` has a unique constraint on `(push_id, task_ref)`. Known tasks are updated; new tasks (added since last export) are inserted.
+- Files: GitHub Contents API `upsert_file` checks for an existing SHA. If the content is identical, no write is made.
+- On partial failure (repo created, some files pushed, issue creation fails mid-way): status remains `failed`. Re-export retries cleanly because `create_repo` is guarded by the existing push record, and issue creation uses the idempotent task map.
+
+**Error mapping:**
+
+| GitHub API response | Service exception | HTTP response |
+|---|---|---|
+| 422 repo name exists | `GitHubRepoExistsError` | 409 |
+| 401 token invalid | `GitHubTokenExpiredError` | 403, token deleted |
+| 429 rate limit | `GitHubRateLimitError` | 429 |
+| Stage not finalised | (checked before API call) | 409 |
+| Other 4xx/5xx | `GitHubAPIError` | 502 |
 
 ---
 
@@ -783,7 +853,8 @@ backend/
 │   ├── workspace.py
 │   ├── stage.py
 │   ├── credits.py
-│   └── providers.py
+│   ├── providers.py
+│   └── integrations.py
 │
 ├── services/
 │   ├── llm/
@@ -798,7 +869,14 @@ backend/
 │   │   ├── __init__.py
 │   │   ├── stage_manager.py
 │   │   ├── diff_engine.py
-│   │   └── export_service.py
+│   │   ├── export_service.py
+│   │   └── github_export_service.py
+│   │
+│   ├── integrations/
+│   │   ├── __init__.py
+│   │   ├── github_auth_service.py
+│   │   ├── github_api_client.py
+│   │   └── task_parser.py
 │   │
 │   ├── evals/
 │   │   ├── __init__.py
@@ -841,7 +919,10 @@ backend/
 │   ├── stage.py
 │   ├── stage_version.py
 │   ├── credit_ledger.py
-│   └── eval_result.py
+│   ├── eval_result.py
+│   ├── user_integration.py
+│   ├── integration_push.py
+│   └── integration_push_task.py
 │
 ├── schemas/
 │   ├── __init__.py
@@ -849,7 +930,8 @@ backend/
 │   ├── workspace.py
 │   ├── stage.py
 │   ├── credit.py
-│   └── provider.py
+│   ├── provider.py
+│   └── integration.py
 │
 ├── middleware/
 │   ├── __init__.py
@@ -956,6 +1038,8 @@ JWT_PRIVATE_KEY="-----BEGIN RSA PRIVATE KEY-----\n...\n-----END RSA PRIVATE KEY-
 JWT_PUBLIC_KEY="-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----"
 GOOGLE_CLIENT_ID=xxx.apps.googleusercontent.com
 GOOGLE_CLIENT_SECRET=xxx
+GITHUB_CLIENT_ID=xxx
+GITHUB_CLIENT_SECRET=xxx
 FRONTEND_URL=http://localhost:5173
 
 # LLM Providers
@@ -1052,6 +1136,26 @@ VITE_SENTRY_DSN=https://xxx@sentry.io/xxx
 **Impact:** Medium. Users get wrong upstream context in generated stages.
 
 **Mitigation:** Invalidate Redis cache for a stage on every status change and every content save. DB is the source of truth. Cache is a performance layer only.
+
+---
+
+### Risk 7 — GitHub Export Leaves Partial State on Failure
+
+**Probability:** Medium. The export is a multi-step sequence (create repo → push files → create N issues). Any step can fail independently.
+
+**Impact:** Medium. User ends up with a repo that has files but no issues, or a repo with no files at all.
+
+**Mitigation:** `IntegrationPush.status` is set to `failed` if any step does not complete. The client surfaces a recoverable error with a re-export prompt. Re-export is idempotent: `create_repo` is skipped if the push record already contains a `repo_full_name`; files use SHA-based upsert; issues use the `IntegrationPushTask` map to skip already-created ones. A partial export always makes forward progress on retry.
+
+---
+
+### Risk 8 — GitHub Token Expires or Is Revoked Between Connection and Export
+
+**Probability:** Medium. GitHub OAuth tokens for OAuth Apps do not expire by default but can be revoked by the user from github.com/settings/applications.
+
+**Impact:** Low. Export fails cleanly; token is deleted.
+
+**Mitigation:** Any 401 from the GitHub API deletes the stored token and returns a typed `GitHubTokenExpiredError` to the router, which maps it to `403` with a reconnect prompt. The client links directly to Settings → Integrations. No retry with a known-bad token.
 
 ---
 
@@ -2250,3 +2354,291 @@ Provider selection belongs in settings/workspace configuration, not in normal us
 ---
 
 _SpecForge V1 PLAN.md · Version 1.7.1 · Updated 2026-05-10 with provider-agnostic Phase 12 LLM API cost optimization plan_
+
+---
+
+## 17. Phase 13 — GitHub Export Integration
+
+> [!note] Source This phase implements the GitHub export feature specified in `V1 spec.md` §4.8–4.9, §8 (GitHub OAuth), §10 (UserIntegration, IntegrationPush, IntegrationPushTask), and §11 (new endpoints). The ZIP export remains unchanged throughout.
+
+---
+
+### 17.1 Goal
+
+Add a second export path that pushes a finalised SpecForge workspace to a new GitHub repository, with SPEC.md / PLAN.md / TASKS.md at the root, the parsed harness files under `harness/`, and one GitHub Issue per `T-NNN` task. The user connects GitHub once from Settings; export is then available on any fully-finalised workspace alongside the existing ZIP download.
+
+**Inputs:**
+- Existing post-Phase 12 codebase
+- `V1 spec.md` v1.2.0 (GitHub integration sections)
+- New GitHub OAuth App registered at github.com/settings/developers
+
+**Outputs:**
+- Three new DB tables via Alembic migration (`user_integrations`, `integration_pushes`, `integration_push_tasks`)
+- `backend/services/integrations/` directory (three new files)
+- `backend/services/pipeline/github_export_service.py`
+- `backend/routers/integrations.py`
+- Two new routes in `backend/routers/auth.py` (`/auth/github`, `/auth/github/callback`)
+- Two new routes in `backend/routers/workspace.py` (`POST/GET /workspaces/{id}/export/github`)
+- Three new ORM models and one new schema file
+- Frontend: `ExportGitHubModal.tsx`, `GitHubConnection.tsx` (Settings panel), updates to `Workspace.tsx` and `api.ts`
+- `GITHUB_CLIENT_ID` and `GITHUB_CLIENT_SECRET` added to `config.py` and `.env.example`
+
+---
+
+### 17.2 Sub-Stages
+
+| Priority | Task | Scope | Rationale |
+|---|---|---|---|
+| 1 | T-GH-01 | DB migration | Tables and constraints must exist before any service code runs |
+| 2 | T-GH-02 | ORM models + schemas | All other code depends on these |
+| 3 | T-GH-03 | GitHub OAuth backend | Connect/disconnect flow; token encrypted at rest |
+| 4 | T-GH-04 | GitHub API client | Isolated, testable wrapper; no business logic |
+| 5 | T-GH-05 | Task parser | Pure function; no I/O; tested independently |
+| 6 | T-GH-06 | github_export_service | Core business logic; depends on T-GH-04 and T-GH-05 |
+| 7 | T-GH-07 | integrations router | Thin; depends on T-GH-03 |
+| 8 | T-GH-08 | workspace export/github router | Thin; depends on T-GH-06 |
+| 9 | T-GH-09 | Frontend — Settings integration panel | GitHub connect/disconnect UI |
+| 10 | T-GH-10 | Frontend — Export to GitHub modal + Workspace.tsx wiring | Export flow in workspace |
+
+---
+
+### 17.3 Implementation Notes
+
+#### T-GH-01 — DB Migration
+
+Single Alembic migration `0003_github_integration.py`:
+
+```python
+op.create_table("user_integrations",
+    sa.Column("id",                sa.UUID,         primary_key=True),
+    sa.Column("user_id",           sa.UUID,         sa.ForeignKey("users.id"), nullable=False),
+    sa.Column("provider",          sa.Text,         nullable=False),
+    sa.Column("encrypted_token",   sa.Text,         nullable=False),
+    sa.Column("github_username",   sa.Text),
+    sa.Column("connected_at",      sa.TIMESTAMPTZ,  nullable=False),
+    sa.Column("last_used_at",      sa.TIMESTAMPTZ),
+    sa.UniqueConstraint("user_id", "provider", name="uq_user_integration_provider"),
+)
+
+op.create_table("integration_pushes",
+    sa.Column("id",             sa.UUID,        primary_key=True),
+    sa.Column("workspace_id",   sa.UUID,        sa.ForeignKey("workspaces.id"), nullable=False),
+    sa.Column("user_id",        sa.UUID,        sa.ForeignKey("users.id"),      nullable=False),
+    sa.Column("provider",       sa.Text,        nullable=False),
+    sa.Column("repo_full_name", sa.Text),
+    sa.Column("repo_url",       sa.Text),
+    sa.Column("status",         sa.Text,        nullable=False, server_default="pending"),
+    sa.Column("pushed_at",      sa.TIMESTAMPTZ),
+    sa.Column("created_at",     sa.TIMESTAMPTZ, nullable=False),
+    sa.UniqueConstraint("workspace_id", "provider", name="uq_integration_push_workspace_provider"),
+)
+
+op.create_table("integration_push_tasks",
+    sa.Column("id",                    sa.UUID,    primary_key=True),
+    sa.Column("push_id",               sa.UUID,    sa.ForeignKey("integration_pushes.id"), nullable=False),
+    sa.Column("task_ref",              sa.Text,    nullable=False),
+    sa.Column("external_issue_number", sa.Integer, nullable=False),
+    sa.Column("created_at",            sa.TIMESTAMPTZ, nullable=False),
+    sa.UniqueConstraint("push_id", "task_ref", name="uq_push_task_ref"),
+)
+```
+
+B-tree indexes on `user_integrations.user_id`, `integration_pushes.workspace_id`, `integration_push_tasks.push_id`.
+
+---
+
+#### T-GH-03 — GitHub OAuth Backend
+
+`/auth/github`:
+- Requires authenticated user (JWT middleware runs first — GitHub OAuth is an integration, not a sign-in method)
+- Generates `secrets.token_urlsafe(32)` state, stores in Redis as `oauth_github_state:{state}` with a 10-minute TTL keyed to the user's ID
+- Redirects to `https://github.com/login/oauth/authorize?client_id=...&scope=repo,read:user&state=...`
+
+`/auth/github/callback`:
+- Validates state against Redis; deletes the key on match; returns 400 if missing or expired
+- Exchanges `code` for GitHub access token via `POST https://github.com/login/oauth/access_token`
+- Calls `GET https://api.github.com/user` to get the login name
+- Encrypts token with `key_vault.encrypt()` (same Fernet key used for LLM API keys)
+- Upserts `UserIntegration(provider="github", encrypted_token=..., github_username=...)`
+- Redirects to `{FRONTEND_URL}/settings?github_connected=true`
+
+The state parameter is bound to both a random token and the user's ID to prevent one user's state from being reused for another's callback. The Redis key format `oauth_github_state:{state}` stores `user_id` as the value; the callback verifies the JWT user matches the stored user_id.
+
+---
+
+#### T-GH-04 — GitHub API Client
+
+`github_api_client.py` is a pure async wrapper with no knowledge of DB or business logic. It receives a plaintext `token: str` and an injected `httpx.AsyncClient`.
+
+```python
+class GitHubAPIClient:
+    BASE = "https://api.github.com"
+
+    async def create_repo(self, name: str, private: bool) -> dict: ...
+    async def get_file_sha(self, repo: str, path: str) -> str | None: ...
+    async def upsert_file(self, repo: str, path: str, content: str, sha: str | None, message: str) -> None: ...
+    async def create_issue(self, repo: str, title: str, body: str) -> int: ...  # returns issue number
+    async def update_issue(self, repo: str, number: int, title: str, body: str) -> None: ...
+```
+
+All methods raise typed exceptions (`GitHubRepoExistsError`, `GitHubTokenExpiredError`, `GitHubRateLimitError`, `GitHubAPIError`) rather than returning status codes. The router never inspects raw HTTP responses.
+
+The `httpx.AsyncClient` is created once per export request (not per API call) and passed through as a dependency so connection pooling works efficiently across the ~20+ API calls a typical export makes.
+
+---
+
+#### T-GH-05 — Task Parser
+
+```python
+# services/integrations/task_parser.py
+
+_TASK_HEADING_RE = re.compile(r"^###\s+(T-\d+):\s+(.+)$", re.MULTILINE)
+
+@dataclass
+class ParsedTask:
+    ref: str        # "T-001"
+    title: str      # "Set up project structure"
+    body_md: str    # Full markdown body from that heading to the next
+
+def parse_tasks(content: str) -> list[ParsedTask]: ...
+```
+
+Each `ParsedTask.body_md` captures everything from the `### T-NNN:` heading to the next heading of equal or greater weight. The body is formatted into a GitHub Issue body using the template from spec §5 (Phase, Risk, Description, Steps, Acceptance Criteria, Harness References).
+
+Pure function — no I/O, fully unit-testable with string fixtures.
+
+---
+
+#### T-GH-06 — github_export_service
+
+`github_export_service.push()` is the orchestrator. It runs synchronously end-to-end (no background tasks in V1):
+
+```python
+async def push_to_github(
+    workspace_id: UUID,
+    user_id: UUID,
+    repo_name: str,
+    visibility: str,   # "public" | "private"
+    db: AsyncSession,
+) -> IntegrationPush:
+```
+
+Execution order:
+
+1. Fetch `UserIntegration` for `(user_id, "github")` — raise `GitHubNotConnectedError` if absent
+2. Decrypt token via `key_vault.decrypt(integration.encrypted_token)`
+3. Validate `repo_name` against GitHub's allowed pattern (same regex as Pydantic schema)
+4. Fetch or create `IntegrationPush` for `(workspace_id, "github")` — set `status="pending"`
+5. If first export: `client.create_repo(repo_name, private=(visibility=="private"))`; store `repo_full_name` and `repo_url` on the push record
+6. Fetch all four stage contents (same Redis/DB path as `export_service.build_export`)
+7. Build harness file map via `parse_harness_files()` (imported from `export_service`)
+8. Upsert all files: SPEC.md, PLAN.md, TASKS.md, each harness path — `get_file_sha` then `upsert_file`
+9. Parse tasks via `task_parser.parse_tasks(tasks_content)`
+10. For each task: look up `IntegrationPushTask` by `(push_id, task_ref)` → `update_issue` or `create_issue` + insert `IntegrationPushTask`
+11. Update push record: `status="completed"`, `pushed_at=now()`, `last_used_at=now()` on `UserIntegration`
+12. Return the push record
+
+On any exception after step 4: set push record `status="failed"` and re-raise. The push record's `repo_full_name` persists even on failure so re-export knows to skip repo creation.
+
+---
+
+#### T-GH-09 — Frontend Settings Integration Panel
+
+A new `GitHubConnection.tsx` component renders within the Settings page (or a new `/settings` route if one does not exist):
+
+```
+GitHub
+Connect your GitHub account to export workspaces
+directly to a new repository with tasks as Issues.
+
+[Not connected]  [Connect GitHub →]
+```
+
+When connected:
+
+```
+✓ Connected as @username
+Last used: 19 May 2026
+
+[Disconnect]
+```
+
+"Connect GitHub" calls `GET /auth/github` and follows the redirect. On return (`?github_connected=true` in URL), the component re-fetches `GET /integrations/github` to refresh status.
+
+"Disconnect" calls `DELETE /integrations/github` with a confirmation dialog.
+
+---
+
+#### T-GH-10 — Frontend Export Modal + Workspace Wiring
+
+`ExportGitHubModal.tsx` renders when the user clicks "Export to GitHub":
+
+```
+Repo name:   [my-project       ]
+Visibility:  ● Public  ○ Private
+
+Will create 12 issues — one per task
+
+             [Cancel]  [Export →]
+```
+
+The issue count comes from `GET /workspaces/{id}/export/github` if a prior push exists, or is computed client-side by counting `T-NNN:` headings in the tasks stage content.
+
+On confirm: calls `POST /workspaces/{id}/export/github`, shows a progress indicator ("Creating repo… Pushing files… Creating issues…"), then on success shows the repo URL with an "Open on GitHub ↗" link.
+
+`Workspace.tsx` changes:
+- Add `isGitHubConnected: boolean` state (fetched from `GET /integrations/github` on workspace load)
+- Replace the single "Export" button with two: "Download ZIP" (existing) and "Export to GitHub" (new, disabled with tooltip if not connected)
+- Add `ExportGitHubModal` to the render tree
+
+`api.ts` additions:
+```typescript
+export async function getGitHubIntegration(): Promise<GitHubIntegration | null>
+export async function deleteGitHubIntegration(): Promise<void>
+export async function exportWorkspaceToGitHub(id: string, body: GitHubExportRequest): Promise<IntegrationPush>
+export async function getGitHubPush(id: string): Promise<IntegrationPush | null>
+```
+
+---
+
+### 17.4 Security Notes
+
+- GitHub token is stored encrypted with the same Fernet key as LLM API keys. The plaintext token is held in memory only for the duration of the export request.
+- The GitHub OAuth state parameter is bound to the authenticated user's ID in Redis. A state from one user's login flow cannot be reused by a different user's callback.
+- `repo_name` is validated at the Pydantic schema layer against `^[a-zA-Z0-9._-]+$`, max 100 chars, before being passed to any API call.
+- Rate limit: 3 GitHub exports per user per hour (Redis sliding window, same middleware as other rate limits).
+- On `401` from GitHub API: token deleted, `GitHubTokenExpiredError` raised, router returns `403` — SpecForge never retries with a known-invalid token.
+- The GitHub export endpoint is a new code path and does not touch the existing ZIP export path. A bug in GitHub export cannot break ZIP downloads.
+
+---
+
+### 17.5 Risks and Mitigations
+
+| Risk | Mitigation |
+|---|---|
+| GitHub API rate limit during large export (many issues) | `GitHubRateLimitError` maps to `429`; client shows retry message. Rate limit is per-token (5,000 req/hr for authenticated); a workspace with 50 tasks uses ~60 API calls, well within limits. |
+| Re-export file SHA fetch adds N round trips | Batch: fetch all file SHAs in one `GET /repos/{owner}/{repo}/contents/` call per directory level rather than per file. Implement as an optimisation if p95 export time exceeds 30s. |
+| httpx client not closed on error | Pass the `httpx.AsyncClient` as a context manager inside the service method; `async with httpx.AsyncClient() as client:` guarantees close even on exception. |
+| Task parser misses non-standard heading formats | Parser is strict: only `### T-NNN:` matches. Tasks with different heading styles produce no issue. Log a warning per unmatched task so prompt drift is visible. |
+
+---
+
+### 17.6 Validation
+
+After all T-GH-01 through T-GH-10 tasks are implemented:
+
+1. `cd backend && uv run alembic upgrade head` — migration applies cleanly
+2. `cd backend && uv run pytest tests/test_github_integration.py -v` — all unit/integration tests pass
+3. `cd backend && uv run pytest tests/ -q --cov=services --cov-fail-under=80` — coverage maintained
+4. `cd frontend && pnpm tsc` — no TypeScript errors
+5. `cd frontend && pnpm test` — all Vitest tests pass
+6. Manual smoke test:
+   - Connect GitHub from Settings — verify connected username shown
+   - Export a fully-finalised workspace — verify repo created, files present at correct paths, issues created
+   - Re-export — verify files updated, issues updated, no duplicates
+   - Disconnect GitHub — verify connect prompt shown on next workspace visit
+   - Verify ZIP export still works on same workspace
+
+---
+
+_SpecForge V1 PLAN.md · Version 1.8.0 · 2026-05-19 — added Phase 13 GitHub export integration_
