@@ -13,6 +13,7 @@ import { StreamingOverlay } from "../components/workspace/StreamingOverlay"
 import { MarkdownRenderer } from "../components/workspace/MarkdownRenderer"
 import { ProblemStatementPanel } from "../components/workspace/ProblemStatementPanel"
 import { TaskValidationPanel } from "../components/workspace/TaskValidationPanel"
+import { ExportGitHubModal } from "../components/workspace/ExportGitHubModal"
 import { useCredits } from "../hooks/useCredits"
 import { type StreamErrorState, useStream } from "../hooks/useStream"
 import {
@@ -22,6 +23,7 @@ import {
   finaliseStage,
   getStageEval,
   getApiErrorMessage,
+  getGitHubIntegration,
   getProviders,
   getWorkspace,
   refineStage,
@@ -189,6 +191,22 @@ export default function Workspace() {
   const [problemDraft, setProblemDraft] = useState("")
   const [problemDirty, setProblemDirty] = useState(false)
   const [providers, setProviders] = useState<Provider[]>([])
+  const [isGitHubConnected, setIsGitHubConnected] = useState(false)
+  const [showGitHubExport, setShowGitHubExport] = useState(false)
+
+  useEffect(() => {
+    let cancelled = false
+    getGitHubIntegration()
+      .then((g) => {
+        if (!cancelled) setIsGitHubConnected(g.connected)
+      })
+      .catch(() => {
+        if (!cancelled) setIsGitHubConnected(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
 
   const activeStage = activeStageId ? stageMap[activeStageId] : null
   const { start: startStream, isStreaming, error: streamError } = useStream(
@@ -215,6 +233,15 @@ export default function Workspace() {
   const allFinalised =
     stages.length === STAGE_ORDER.length &&
     stages.every((stage) => stage.status === "finalised")
+
+  // Count tasks for the GitHub modal's issue-count preview. Derived from the
+  // tasks stage content via regex — no API call.
+  const taskCount = useMemo(() => {
+    const tasksStage = stages.find((s) => s.type === "tasks")
+    if (!tasksStage?.content) return 0
+    return (tasksStage.content.match(/^###\s+T-\d+:/gm) ?? []).length
+  }, [stages])
+
   const canExport =
     allFinalised ||
     stages.some((stage) => Boolean(stage.content?.trim())) ||
@@ -835,9 +862,30 @@ export default function Workspace() {
               disabled={!canExport || isExporting}
               onClick={handleExport}
               className={`workspace-export-btn ${allFinalised ? "ready" : ""}`}
+              aria-label="Download ZIP"
             >
-              {isExporting ? "Exporting…" : "Export"}
+              {isExporting ? "Exporting…" : "↓ ZIP"}
             </button>
+            <div
+              className="workspace-github-btn-wrap"
+              data-tooltip={
+                !isGitHubConnected
+                  ? "Connect GitHub in Settings to export"
+                  : undefined
+              }
+            >
+              <button
+                type="button"
+                disabled={!canExport || !isGitHubConnected}
+                onClick={() => setShowGitHubExport(true)}
+                className={`workspace-github-btn ${
+                  allFinalised && isGitHubConnected ? "ready" : ""
+                }`}
+                aria-label="Export to GitHub"
+              >
+                ↑ GitHub
+              </button>
+            </div>
             <Link
               to="/settings"
               className="header-settings-link"
@@ -1185,6 +1233,16 @@ export default function Workspace() {
           }
           onProceed={proceedThroughReviewGate}
           onClose={() => setPendingReview(null)}
+        />
+      )}
+
+      {showGitHubExport && id && (
+        <ExportGitHubModal
+          workspaceId={id}
+          workspaceName={currentWorkspace?.name ?? ""}
+          isConnected={isGitHubConnected}
+          taskCount={taskCount}
+          onClose={() => setShowGitHubExport(false)}
         />
       )}
 
