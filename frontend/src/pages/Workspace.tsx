@@ -888,6 +888,7 @@ export default function Workspace() {
             </div>
             <Link
               to="/settings"
+              state={{ from: id ? `/workspace/${id}` : "/dashboard" }}
               className="header-settings-link"
               aria-label="Settings"
               title="Settings"

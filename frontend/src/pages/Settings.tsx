@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react"
-import { Link, useNavigate, useSearchParams } from "react-router-dom"
+import { Link, useLocation, useNavigate, useSearchParams } from "react-router-dom"
 
 import {
   deleteGitHubIntegration,
@@ -7,9 +7,31 @@ import {
   type GitHubIntegration,
 } from "../services/api"
 
+const RETURN_TO_KEY = "specforge:settings_return_to"
+
+function resolveReturnTo(stateFrom: string | undefined): string {
+  // Link state takes precedence (fresh click). Falls back to sessionStorage
+  // so the return target survives the OAuth roundtrip. Defaults to dashboard.
+  if (stateFrom && stateFrom !== "/settings") {
+    sessionStorage.setItem(RETURN_TO_KEY, stateFrom)
+    return stateFrom
+  }
+  return sessionStorage.getItem(RETURN_TO_KEY) ?? "/dashboard"
+}
+
+function backLabelFor(path: string): string {
+  if (path.startsWith("/workspace/")) return "← Workspace"
+  if (path === "/dashboard") return "← Dashboard"
+  return "← Back"
+}
+
 export default function Settings() {
   const navigate = useNavigate()
+  const location = useLocation()
   const [searchParams, setSearchParams] = useSearchParams()
+
+  const stateFrom = (location.state as { from?: string } | null)?.from
+  const [returnTo] = useState(() => resolveReturnTo(stateFrom))
 
   const [integration, setIntegration] = useState<GitHubIntegration | null>(null)
   const [disconnectConfirm, setDisconnectConfirm] = useState(false)
@@ -85,7 +107,8 @@ export default function Settings() {
   }
 
   function handleBack() {
-    navigate("/dashboard")
+    sessionStorage.removeItem(RETURN_TO_KEY)
+    navigate(returnTo)
   }
 
   return (
@@ -95,9 +118,9 @@ export default function Settings() {
           type="button"
           className="settings-back-link"
           onClick={handleBack}
-          aria-label="Back to Dashboard"
+          aria-label={`Back to ${backLabelFor(returnTo).replace("← ", "")}`}
         >
-          ← Dashboard
+          {backLabelFor(returnTo)}
         </button>
         <span className="settings-header-title">Settings</span>
         {/* Spacer so the title is visually centered. */}

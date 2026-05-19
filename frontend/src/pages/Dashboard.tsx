@@ -322,6 +322,7 @@ export default function Dashboard() {
               </div>
               <Link
                 to="/settings"
+                state={{ from: "/dashboard" }}
                 className="header-settings-link"
                 aria-label="Settings"
                 title="Settings"
