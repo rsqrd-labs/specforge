@@ -4443,6 +4443,34 @@ button:disabled {
   color: #c0392b;
 }
 
+/* T-USE-06: Effort Summary chip. Lotus tint to celebrate the finished pipeline;
+   saffron only on the estimate number, the headline value. No borders. */
+.effort-summary-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 25px;
+  border-radius: 999px;
+  padding: 0 12px;
+  background: rgba(161, 56, 95, 0.10);
+  color: var(--color-on-surface-variant);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+  cursor: help;
+  transition: background-color 120ms ease;
+}
+
+.effort-summary-chip:hover {
+  background: rgba(161, 56, 95, 0.16);
+}
+
+.effort-summary-chip-estimate {
+  color: var(--color-primary);
+  font-weight: 900;
+}
+
 .workspace-title {
   max-width: 100%;
   font-size: clamp(24px, 2vw, 31px);

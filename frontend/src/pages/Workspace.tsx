@@ -17,6 +17,10 @@ import { ExportGitHubModal } from "../components/workspace/ExportGitHubModal"
 import { SpecClarificationModal } from "../components/workspace/SpecClarificationModal"
 import { GitHubStatusPill } from "../components/shared/GitHubStatusPill"
 import { useCredits } from "../hooks/useCredits"
+import {
+  formatEffortSummaryChip,
+  parseEffortSummary,
+} from "../utils/tasksParser"
 import { type StreamErrorState, useStream } from "../hooks/useStream"
 import {
   acceptStageDiff,
@@ -245,6 +249,14 @@ export default function Workspace() {
     if (!tasksStage?.content) return 0
     return (tasksStage.content.match(/^###\s+T-\d+:/gm) ?? []).length
   }, [stages])
+
+  // Effort Summary chip — only the TASKS stage carries this block, and only
+  // when the user is viewing the tasks pane. Older finalised tasks generated
+  // before T-164 return null from the parser and the chip is hidden.
+  const effortSummary = useMemo(() => {
+    if (!activeStage || activeStage.type !== "tasks") return null
+    return parseEffortSummary(activeStage.content ?? "")
+  }, [activeStage])
 
   const canExport =
     allFinalised ||
@@ -872,6 +884,21 @@ export default function Workspace() {
               >
                 {providerLabel}
               </span>
+              {effortSummary && (
+                <span
+                  className="effort-summary-chip"
+                  title="S = 0.5–1d · M = 1–3d · L = 3–7d · XL = 7d+ · informational only"
+                  aria-label={`Effort summary: ${formatEffortSummaryChip(effortSummary)}`}
+                >
+                  <strong className="effort-summary-chip-estimate">
+                    {effortSummary.estimateRange}
+                  </strong>
+                  <span aria-hidden="true"> · </span>
+                  {effortSummary.totalTasks} tasks
+                  <span aria-hidden="true"> · </span>
+                  {effortSummary.mustCount} MUST
+                </span>
+              )}
             </div>
             <QualityBadge evalResult={evalResult} />
             <div className="workspace-credit-pill" aria-label="Available credits">
