@@ -422,6 +422,59 @@ export async function exportWorkspacePdf(id: string): Promise<Blob> {
 }
 
 // ---------------------------------------------------------------------------
+// Public Share (Phase 14, T-USE-09 / T-USE-10)
+// ---------------------------------------------------------------------------
+
+import type {
+  PublicWorkspaceResponse,
+  ShareLinkResponse,
+} from "../types/publicShare"
+
+export async function enablePublicShare(
+  workspaceId: string,
+): Promise<ShareLinkResponse> {
+  const response = await api.post<ShareLinkResponse>(
+    `/workspaces/${workspaceId}/share`,
+  )
+  return response.data
+}
+
+export async function disablePublicShare(workspaceId: string): Promise<void> {
+  await api.delete(`/workspaces/${workspaceId}/share`)
+}
+
+export async function rotatePublicShare(
+  workspaceId: string,
+): Promise<ShareLinkResponse> {
+  const response = await api.post<ShareLinkResponse>(
+    `/workspaces/${workspaceId}/share/rotate`,
+  )
+  return response.data
+}
+
+// 404 from /public/{slug} means unknown / disabled / rolled-back. The frontend
+// renders an empty-state page in that case, so we collapse the error to null
+// rather than throw — callers should treat null as "this link is no longer
+// valid". This call uses a bare axios instance (no CSRF / auth headers) so
+// it works for anonymous viewers and so a public-view bug can't accidentally
+// surface authenticated state.
+export async function getPublicWorkspace(
+  slug: string,
+): Promise<PublicWorkspaceResponse | null> {
+  try {
+    const response = await axios.get<PublicWorkspaceResponse>(
+      `${import.meta.env.VITE_API_URL}/public/${slug}`,
+    )
+    return response.data
+  } catch (err) {
+    if (axios.isAxiosError(err) && err.response?.status === 404) {
+      return null
+    }
+    throw err
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Spec Clarification (Phase 14, T-USE-03 / T-USE-04)
 // ---------------------------------------------------------------------------
 

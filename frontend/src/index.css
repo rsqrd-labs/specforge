@@ -5589,6 +5589,306 @@ button:disabled {
   padding: 0;
 }
 
+/* ===== T-USE-10: Share modal (Surface A) ============================== */
+
+.share-modal { max-width: 560px; }
+
+.share-modal-body {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.share-modal-lede {
+  margin: 0 0 12px 0;
+  color: var(--color-on-surface-variant);
+  font-size: 14px;
+  line-height: 1.55;
+}
+
+.share-modal-loading {
+  margin: 24px 0;
+  text-align: center;
+  color: var(--color-on-surface-variant);
+}
+
+.share-modal-url-row {
+  display: flex;
+  align-items: stretch;
+  border-radius: 14px;
+  overflow: hidden;
+  box-shadow: 0 2px 10px rgba(86, 94, 116, 0.08);
+}
+
+.share-modal-url {
+  flex: 1 1 auto;
+  padding: 14px 16px;
+  background: rgba(255, 255, 255, 0.7);
+  font-family: "Menlo", "Consolas", "Courier New", monospace;
+  font-size: 14px;
+  letter-spacing: 0.01em;
+  color: var(--color-on-surface);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.share-modal-copy {
+  border: none;
+  padding: 0 22px;
+  background: var(--color-primary);
+  color: #fff;
+  font-weight: 700;
+  font-size: 14px;
+  cursor: pointer;
+  transition: background-color 120ms ease;
+}
+
+.share-modal-copy:hover { background: #732e00; }
+
+.share-modal-copy.copied {
+  background: var(--color-secondary);
+}
+
+.share-modal-toggle-row {
+  display: inline-flex;
+  gap: 6px;
+}
+
+.share-modal-radio {
+  background: transparent;
+  border: none;
+  padding: 6px 12px;
+  color: var(--color-on-surface-variant);
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+  border-radius: 999px;
+}
+
+.share-modal-radio.active {
+  background: rgba(143, 78, 0, 0.10);
+  color: var(--color-primary);
+}
+
+.share-modal-more {
+  margin-top: 4px;
+  color: var(--color-on-surface-variant);
+  font-size: 12px;
+}
+
+.share-modal-more > summary {
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+}
+
+.share-modal-rotate {
+  margin-top: 10px;
+  padding: 12px;
+  border-radius: 10px;
+  background: rgba(86, 94, 116, 0.06);
+}
+
+.share-modal-rotate-copy {
+  margin: 0 0 10px 0;
+  font-size: 12px;
+  color: var(--color-on-surface-variant);
+}
+
+.share-modal-rotate-btn {
+  background: transparent;
+  border: 1px solid rgba(86, 94, 116, 0.30);
+  border-radius: 8px;
+  padding: 6px 12px;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--color-on-surface-variant);
+  cursor: pointer;
+}
+
+.share-modal-rotate-btn:hover {
+  background: rgba(86, 94, 116, 0.08);
+  color: var(--color-on-surface);
+}
+
+.share-modal-footer {
+  margin-top: 6px;
+  padding: 12px 0 0 0;
+  border-top: 1px solid rgba(86, 94, 116, 0.10);
+}
+
+.share-modal-privacy {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--color-on-surface-variant);
+}
+
+.share-modal-error {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: rgba(161, 56, 95, 0.08);
+  color: var(--color-secondary);
+  font-size: 13px;
+}
+
+.share-modal-error-retry {
+  background: transparent;
+  border: none;
+  color: var(--color-secondary);
+  font-weight: 700;
+  cursor: pointer;
+}
+
+/* ===== T-USE-10: Public Workspace View (Surface B) ==================== */
+
+.public-view-shell {
+  min-height: 100vh;
+  background: var(--color-surface);
+  color: var(--color-on-surface);
+  display: flex;
+  flex-direction: column;
+}
+
+.public-view-cover {
+  padding: 56px 24px 28px 24px;
+  text-align: center;
+  background: linear-gradient(180deg, rgba(143, 78, 0, 0.05), transparent);
+}
+
+.public-view-brand {
+  font-size: 11px;
+  letter-spacing: 0.28em;
+  color: var(--color-primary);
+  text-transform: uppercase;
+  font-weight: 800;
+}
+
+.public-view-title {
+  margin: 14px 0 6px 0;
+  font-family: "Plus Jakarta Sans", "Plus Jakarta Display", sans-serif;
+  font-size: clamp(28px, 4vw, 40px);
+  font-weight: 900;
+  letter-spacing: -0.01em;
+}
+
+.public-view-attribution {
+  margin: 0;
+  color: var(--color-on-surface-variant);
+  font-size: 14px;
+}
+
+.public-view-coverage-chip {
+  display: inline-block;
+  margin-top: 16px;
+  padding: 6px 14px;
+  background: rgba(34, 197, 94, 0.10);
+  color: #166534;
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.public-view-tabs {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  display: flex;
+  justify-content: center;
+  gap: 4px;
+  padding: 12px 16px;
+  background: rgba(255, 255, 255, 0.92);
+  backdrop-filter: blur(8px);
+  border-bottom: 1px solid rgba(86, 94, 116, 0.08);
+}
+
+.public-view-tab {
+  border: none;
+  background: transparent;
+  padding: 8px 16px;
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--color-on-surface-variant);
+  cursor: pointer;
+  transition: background-color 120ms ease, color 120ms ease;
+}
+
+.public-view-tab:hover { background: rgba(86, 94, 116, 0.08); }
+
+.public-view-tab.active {
+  background: var(--color-primary);
+  color: #fff;
+}
+
+.public-view-content {
+  max-width: 860px;
+  margin: 0 auto;
+  padding: 28px 24px;
+  flex: 1 1 auto;
+}
+
+.public-view-footer {
+  padding: 20px 24px 32px 24px;
+  text-align: center;
+  font-size: 13px;
+  color: var(--color-on-surface-variant);
+  border-top: 1px solid rgba(86, 94, 116, 0.08);
+}
+
+.public-view-footer-link {
+  color: var(--color-secondary);
+  font-weight: 700;
+  text-decoration: none;
+}
+.public-view-footer-link:hover { text-decoration: underline; }
+
+.public-view-empty {
+  max-width: 480px;
+  margin: 96px auto 0;
+  text-align: center;
+  color: var(--color-on-surface-variant);
+}
+.public-view-empty h1 { color: var(--color-on-surface); }
+
+.public-view-skeleton {
+  padding: 40px 24px;
+  max-width: 860px;
+  margin: 0 auto;
+}
+.public-view-skeleton-cover,
+.public-view-skeleton-tabs,
+.public-view-skeleton-body {
+  background: linear-gradient(
+    90deg,
+    rgba(86, 94, 116, 0.06),
+    rgba(86, 94, 116, 0.12),
+    rgba(86, 94, 116, 0.06)
+  );
+  background-size: 200% 100%;
+  border-radius: 12px;
+  animation: shimmer 1.4s linear infinite;
+}
+.public-view-skeleton-cover { height: 120px; margin-bottom: 18px; }
+.public-view-skeleton-tabs  { height: 36px;  margin-bottom: 28px; }
+.public-view-skeleton-body  { height: 360px; }
+@keyframes shimmer {
+  from { background-position: 200% 0; }
+  to   { background-position: -200% 0; }
+}
+
+@media (max-width: 640px) {
+  .public-view-cover { padding-top: 36px; }
+  .public-view-tabs { padding: 8px 8px; }
+  .public-view-tab { padding: 6px 10px; font-size: 12px; }
+  .public-view-content { padding: 20px 16px; }
+}
+
 /* Tooltip on disabled GitHub button */
 .workspace-github-btn-wrap {
   position: relative;

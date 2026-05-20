@@ -1,0 +1,4 @@
+User-agent: *
+# T-USE-10: public shared specs at /p/<slug> are intentionally noindex.
+# This is belt-and-suspenders with the backend's X-Robots-Tag header.
+Disallow: /p/

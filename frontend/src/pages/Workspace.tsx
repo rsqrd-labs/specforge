@@ -15,6 +15,7 @@ import { ProblemStatementPanel } from "../components/workspace/ProblemStatementP
 import { TaskValidationPanel } from "../components/workspace/TaskValidationPanel"
 import { ExportGitHubModal } from "../components/workspace/ExportGitHubModal"
 import { ExportPDFButton } from "../components/workspace/ExportPDFButton"
+import { SharePublicLinkModal } from "../components/workspace/SharePublicLinkModal"
 import { SpecClarificationModal } from "../components/workspace/SpecClarificationModal"
 import { GitHubStatusPill } from "../components/shared/GitHubStatusPill"
 import { useCredits } from "../hooks/useCredits"
@@ -199,6 +200,7 @@ export default function Workspace() {
   const [providers, setProviders] = useState<Provider[]>([])
   const [isGitHubConnected, setIsGitHubConnected] = useState(false)
   const [showGitHubExport, setShowGitHubExport] = useState(false)
+  const [showShareModal, setShowShareModal] = useState(false)
   const [pendingClarify, setPendingClarify] = useState<PendingCreditAction | null>(
     null,
   )
@@ -960,6 +962,20 @@ export default function Workspace() {
               </button>
             </div>
             <GitHubStatusPill />
+            <button
+              type="button"
+              className={`workspace-pdf-btn ${allFinalised ? "ready" : ""}`}
+              disabled={!allFinalised}
+              onClick={() => setShowShareModal(true)}
+              aria-label="Share publicly"
+              title={
+                allFinalised
+                  ? "Share a read-only link"
+                  : "Finalise all stages to share"
+              }
+            >
+              🔗 Share
+            </button>
           </div>
         </header>
 
@@ -1304,6 +1320,15 @@ export default function Workspace() {
           isConnected={isGitHubConnected}
           taskCount={taskCount}
           onClose={() => setShowGitHubExport(false)}
+        />
+      )}
+
+      {showShareModal && id && currentWorkspace && (
+        <SharePublicLinkModal
+          workspaceId={id}
+          initialEnabled={Boolean(currentWorkspace.public_share_enabled)}
+          initialSlug={currentWorkspace.public_share_slug ?? null}
+          onClose={() => setShowShareModal(false)}
         />
       )}
 
