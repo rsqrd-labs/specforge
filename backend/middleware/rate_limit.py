@@ -33,6 +33,15 @@ _GITHUB_EXPORT_LIMIT = 3
 _GITHUB_EXPORT_WINDOW_SECONDS = 3600
 _GITHUB_EXPORT_DETAIL = "GitHub export rate limit reached. Maximum 3 exports per hour."
 
+# Spec Clarification tier (Phase 14): 6 judge-model calls per user per
+# hour. Applies to POST /workspaces/{id}/clarify only. The PATCH endpoint
+# (which persists answers without calling an LLM) is intentionally
+# unmetered — it cannot run away with cost.
+_CLARIFY_PATH_RE = re.compile(r"^/workspaces/[^/]+/clarify/?$")
+_CLARIFY_LIMIT = 6
+_CLARIFY_WINDOW_SECONDS = 3600
+_CLARIFY_DETAIL = "Clarification rate limit reached. Maximum 6 calls per hour."
+
 IpNetwork = IPv4Network | IPv6Network
 RateLimitCheck = Callable[[str, int, int], Awaitable[bool]]
 
@@ -213,6 +222,18 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
                 return _rate_limited_custom(
                     detail=_GITHUB_EXPORT_DETAIL,
                     retry_after_seconds=_GITHUB_EXPORT_WINDOW_SECONDS,
+                )
+
+        if user_id and request.method == "POST" and _CLARIFY_PATH_RE.match(path):
+            allowed = await check(
+                f"clarify:{user_id}",
+                _CLARIFY_LIMIT,
+                _CLARIFY_WINDOW_SECONDS,
+            )
+            if not allowed:
+                return _rate_limited_custom(
+                    detail=_CLARIFY_DETAIL,
+                    retry_after_seconds=_CLARIFY_WINDOW_SECONDS,
                 )
         return None
 

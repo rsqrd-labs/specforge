@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 
 from redis.asyncio import Redis
@@ -45,6 +46,13 @@ async def build_prompt(
     dep_keys = _DEPENDENCIES[stage_type]
 
     deps: dict[str, str] = {"problem_statement": workspace.problem_statement}
+
+    # Phase 14: thread persisted Spec Clarification Q&A into the spec
+    # prompt so regenerates honour the user's earlier answers without a
+    # second round of questioning. JSON-encoded to preserve the existing
+    # dict[str, str] dependency contract; spec.build_user_prompt decodes.
+    if stage_type == "spec" and getattr(workspace, "clarification_qa", None):
+        deps["clarification_qa"] = json.dumps(workspace.clarification_qa)
 
     if dep_keys:
         redis = redis_client or Redis.from_url(

@@ -2,8 +2,10 @@ import logging
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Response, status
+from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from config import settings
 from database import get_db
 from middleware.auth import get_current_user
 from models import User
@@ -12,7 +14,13 @@ from schemas.integration import (
     GitHubExportResponse,
     IntegrationPushRead,
 )
-from schemas.workspace import WorkspaceCreate, WorkspaceResponse, WorkspaceUpdate
+from schemas.workspace import (
+    ClarifyResponse,
+    ClarifySubmitRequest,
+    WorkspaceCreate,
+    WorkspaceResponse,
+    WorkspaceUpdate,
+)
 from services.integrations.github_api_client import (
     GitHubAPIError,
     GitHubNotConnectedError,
@@ -21,8 +29,9 @@ from services.integrations.github_api_client import (
     GitHubTokenExpiredError,
 )
 from services.llm.provider_status import is_provider_configured
-from services.pipeline import github_export_service
+from services.pipeline import github_export_service, spec_clarifier
 from services.pipeline.export_service import ExportNotReadyError, build_export
+from services.pipeline.spec_clarifier import ClarificationValidationError
 from services.workspace_service import workspace_service
 
 logger = logging.getLogger(__name__)
@@ -91,6 +100,81 @@ async def archive_workspace(
     db: AsyncSession = Depends(get_db),
 ) -> None:
     await workspace_service.archive(id, user.id, db)
+
+
+def _get_redis() -> Redis:
+    """Construct a per-request Redis client.
+
+    The clarify endpoints touch Redis once (read/write the round key)
+    and have no need for the long-lived application singleton.
+    """
+    return Redis.from_url(settings.redis_url, decode_responses=True)
+
+
+@router.post(
+    "/{id}/clarify",
+    response_model=ClarifyResponse,
+    responses={204: {"description": "Judge model unavailable; client should bypass."}},
+)
+async def request_spec_clarification(
+    id: UUID,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> Response:
+    """Ask the cheap judge model for 3–5 clarifying questions (Phase 14).
+
+    Best-effort: if the judge model errors or times out, returns 204 so
+    the frontend silently bypasses the clarification modal and falls
+    through to the standard generate path. The call is free — no
+    credit deduction. Rate-limited to 6 calls/user/hour by the
+    middleware.
+    """
+    workspace = await workspace_service.get(id, user.id, db)
+    redis = _get_redis()
+    try:
+        questions = await spec_clarifier.request_clarifying_questions(workspace, redis)
+    finally:
+        await redis.close()
+    if not questions:
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
+    return Response(
+        content=ClarifyResponse(questions=questions).model_dump_json(),
+        media_type="application/json",
+    )
+
+
+@router.patch("/{id}/clarify", status_code=status.HTTP_204_NO_CONTENT)
+async def persist_spec_clarification(
+    id: UUID,
+    payload: ClarifySubmitRequest,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> Response:
+    """Persist the user's answers to the most recent clarification round.
+
+    Returns 400 if any submitted question is not in the cached round
+    (the user must answer the questions they were shown, not arbitrary
+    text). Each answer is sanitised and prompt-injection-scanned before
+    persistence.
+    """
+    # Authorise — calling .get() raises 404 if the workspace isn't the user's.
+    await workspace_service.get(id, user.id, db)
+    redis = _get_redis()
+    try:
+        await spec_clarifier.persist_answers(
+            workspace_id=id,
+            answers=[a.model_dump() for a in payload.answers],
+            db=db,
+            redis=redis,
+        )
+    except ClarificationValidationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": str(exc)},
+        ) from exc
+    finally:
+        await redis.close()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.post("/{id}/export")

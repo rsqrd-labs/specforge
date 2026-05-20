@@ -83,6 +83,43 @@ class ClarificationQA(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+class ClarifyingQuestion(BaseModel):
+    """Single question returned by the clarification judge model."""
+
+    question: str = Field(min_length=1, max_length=500)
+    why_it_matters: str = Field(min_length=1, max_length=500)
+
+
+class ClarifyResponse(BaseModel):
+    """Successful payload from POST /workspaces/{id}/clarify.
+
+    The route returns 204 No Content when the judge model is unavailable
+    or times out, so this shape is only seen on the happy path.
+    """
+
+    questions: list[ClarifyingQuestion]
+
+
+class ClarifyingAnswer(BaseModel):
+    """A user-supplied answer to one of the cached round's questions."""
+
+    question: str = Field(min_length=1, max_length=500)
+    answer: str = Field(min_length=1, max_length=1000)
+
+
+class ClarifySubmitRequest(BaseModel):
+    """Payload for PATCH /workspaces/{id}/clarify.
+
+    Every ``question`` must match (string-equal) a question from the
+    workspace's most recent ``POST /clarify`` round held in Redis;
+    answers whose question is not in the cached round are rejected with
+    400 so a user cannot smuggle arbitrary text past the validator by
+    fabricating a question. Each answer is sanitised before persistence.
+    """
+
+    answers: list[ClarifyingAnswer] = Field(min_length=1)
+
+
 class WorkspaceResponse(BaseModel):
     id: UUID
     user_id: UUID
