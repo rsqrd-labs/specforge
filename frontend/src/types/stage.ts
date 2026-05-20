@@ -12,6 +12,7 @@ export interface Stage {
   eval_result?: EvalResult | null
   finalised_at: string | null
   review_gate_acknowledged: boolean
+  gap_patch_used: boolean
   created_at: string
   updated_at: string
 }

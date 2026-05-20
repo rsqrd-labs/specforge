@@ -182,7 +182,6 @@ export default function Workspace() {
   const [dismissedStale, setDismissedStale] = useState<Record<string, boolean>>(
     {},
   )
-  const [freeRegenUsed, setFreeRegenUsed] = useState<Record<string, boolean>>({});
   const [error, setError] = useState<StreamErrorState | null>(null)
   const setGenericError = (message: string) => setError({ code: "generic", message })
   const [showRefineHint, setShowRefineHint] = useState(false)
@@ -441,9 +440,7 @@ export default function Workspace() {
 
   const requestFreeRegeneration = useCallback(async () => {
     if (!activeStage) return
-    const stageId = activeStage.id
     await runGeneration("regenerate-gaps")
-    setFreeRegenUsed((prev) => ({ ...prev, [stageId]: true }))
   }, [activeStage, runGeneration])
 
   const performRollback = useCallback(async (version: number) => {
@@ -1173,9 +1170,9 @@ export default function Workspace() {
                     <CoveragePanel
                       stage={activeStage}
                       evalResult={evalResult}
-                      freeRegenUsed={!!freeRegenUsed[activeStage.id]}
+                      freeRegenUsed={activeStage.gap_patch_used}
                       onRegenerate={
-                        freeRegenUsed[activeStage.id]
+                        activeStage.gap_patch_used
                           ? () => void requestGeneration("regenerate")
                           : () => void requestFreeRegeneration()
                       }

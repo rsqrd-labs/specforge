@@ -205,6 +205,11 @@ async def regenerate_stage_for_gaps(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail={"error": "not_harness_stage"},
         )
+    if stage.gap_patch_used:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={"error": "free_regen_already_used"},
+        )
 
     result = await db.execute(
         select(EvalResult)

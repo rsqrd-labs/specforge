@@ -1164,6 +1164,7 @@ class StageManager:
             stage.content = merged
             stage.current_version += 1
             stage.status = "draft"
+            stage.gap_patch_used = True
             stage.updated_at = datetime.now(UTC)
             version = StageVersion(
                 stage_id=stage.id,

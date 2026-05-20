@@ -58,6 +58,7 @@ class StageResponse(BaseModel):
     eval_result: EvalResponse | None = None
     finalised_at: datetime | None = None
     review_gate_acknowledged: bool = False
+    gap_patch_used: bool = False
     created_at: datetime
     updated_at: datetime
 
