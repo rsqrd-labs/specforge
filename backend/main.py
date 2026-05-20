@@ -21,6 +21,7 @@ from routers import integrations as integrations_router
 from routers import providers as providers_router
 from routers import public as public_router
 from routers import stage as stage_router
+from routers import templates as templates_router
 from routers import workspace as workspace_router
 from services import langfuse_service
 from services.observability import setup_observability
@@ -187,6 +188,8 @@ def create_app(redis_client: Redis | None = None) -> FastAPI:
     # T-USE-09: unauthenticated read-only public view at /public/{slug}.
     # The route prefix is in the auth-middleware exemption list (see below).
     app.include_router(public_router.router)
+    # T-USE-11: unauthenticated GET /templates — starter templates strip.
+    app.include_router(templates_router.router)
 
     return app
 
