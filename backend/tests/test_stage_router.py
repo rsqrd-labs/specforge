@@ -60,6 +60,7 @@ def _make_stage(workspace_id=None, stage_type="spec", status="draft") -> Stage:
         content="some content",
         current_version=1,
         review_gate_acknowledged=False,
+        gap_patch_used=False,
         created_at=datetime.now(UTC),
         updated_at=datetime.now(UTC),
     )

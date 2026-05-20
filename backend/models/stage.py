@@ -64,6 +64,7 @@ class Stage(Base):
     gap_patch_used: Mapped[bool] = mapped_column(
         Boolean,
         nullable=False,
+        default=False,
         server_default=text("false"),
     )
     created_at: Mapped[datetime] = mapped_column(
