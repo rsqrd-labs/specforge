@@ -57,6 +57,10 @@ class Workspace(Base):
         default=False,
         server_default=text("false"),
     )
+    public_shared_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True),
+        nullable=True,
+    )
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True),
         nullable=False,

@@ -17,6 +17,7 @@ from schemas.integration import (
 from schemas.workspace import (
     ClarifyResponse,
     ClarifySubmitRequest,
+    ShareLinkResponse,
     WorkspaceCreate,
     WorkspaceResponse,
     WorkspaceUpdate,
@@ -32,6 +33,11 @@ from services.llm.provider_status import is_provider_configured
 from services.pipeline import github_export_service, pdf_export_service, spec_clarifier
 from services.pipeline.export_service import ExportNotReadyError, build_export
 from services.pipeline.spec_clarifier import ClarificationValidationError
+from services.sharing import public_share_service
+from services.sharing.public_share_service import (
+    WorkspaceNotFinalisedError,
+    WorkspaceNotFoundError,
+)
 from services.workspace_service import workspace_service
 
 logger = logging.getLogger(__name__)
@@ -327,3 +333,76 @@ async def get_workspace_github_push(
         pushed_at=push.pushed_at,
         created_at=push.created_at,
     )
+
+
+# ---------------------------------------------------------------------------
+# T-USE-09: public share lifecycle (T-168). Three thin endpoints that
+# delegate to public_share_service. The 409 path covers a workspace whose
+# pipeline isn't fully finalised; ownership is asserted by workspace_service.
+# ---------------------------------------------------------------------------
+
+
+def _share_url(slug: str) -> str:
+    """Build the absolute public URL the frontend will surface."""
+    base = settings.frontend_url.rstrip("/")
+    return f"{base}/p/{slug}"
+
+
+@router.post("/{id}/share", response_model=ShareLinkResponse)
+async def enable_public_share(
+    id: UUID,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> ShareLinkResponse:
+    # Authorise — get() raises 404 if not owned by caller.
+    await workspace_service.get(id, user.id, db)
+    try:
+        slug = await public_share_service.enable(id, db)
+    except WorkspaceNotFinalisedError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"error": "workspace_not_finalised", "message": str(exc)},
+        ) from exc
+    except WorkspaceNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="not_found"
+        ) from exc
+    return ShareLinkResponse(slug=slug, url=_share_url(slug), enabled=True)
+
+
+@router.delete("/{id}/share", status_code=status.HTTP_204_NO_CONTENT)
+async def disable_public_share(
+    id: UUID,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> Response:
+    await workspace_service.get(id, user.id, db)
+    try:
+        await public_share_service.disable(id, db)
+    except WorkspaceNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="not_found"
+        ) from exc
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post("/{id}/share/rotate", response_model=ShareLinkResponse)
+async def rotate_public_share(
+    id: UUID,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> ShareLinkResponse:
+    await workspace_service.get(id, user.id, db)
+    try:
+        slug = await public_share_service.rotate(id, db)
+    except WorkspaceNotFinalisedError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"error": "workspace_not_finalised", "message": str(exc)},
+        ) from exc
+    except WorkspaceNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="not_found"
+        ) from exc
+    return ShareLinkResponse(slug=slug, url=_share_url(slug), enabled=True)
+

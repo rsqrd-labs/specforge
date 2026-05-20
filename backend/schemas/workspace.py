@@ -138,3 +138,43 @@ class WorkspaceResponse(BaseModel):
     updated_at: datetime
 
     model_config = ConfigDict(from_attributes=True)
+
+
+# T-USE-09: Public share allow-list — the contract for GET /public/{slug}.
+# Schema-locked to harness/schemas/public-workspace.schema.json. `extra="forbid"`
+# is the privacy guard: adding any future field to this model is an explicit
+# privacy decision, never a silent ORM passthrough.
+
+
+class PublicStageView(BaseModel):
+    type: Literal["spec", "plan", "harness", "tasks"]
+    content: str
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class PublicEvalSummary(BaseModel):
+    overall_score: int | None = Field(default=None, ge=0, le=100)
+    completeness: int | None = Field(default=None, ge=0, le=100)
+    clarity: int | None = Field(default=None, ge=0, le=100)
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class PublicWorkspaceResponse(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    provider_label: str
+    stages: list[PublicStageView] = Field(min_length=4, max_length=4)
+    coverage_summary: CoverageSummary | None = None
+    eval_summary: PublicEvalSummary | None = None
+    shared_at: datetime
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class ShareLinkResponse(BaseModel):
+    slug: str
+    url: str
+    enabled: bool
+
+    model_config = ConfigDict(extra="forbid")

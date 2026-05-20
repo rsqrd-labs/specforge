@@ -50,6 +50,24 @@ _PDF_EXPORT_LIMIT = 10
 _PDF_EXPORT_WINDOW_SECONDS = 3600
 _PDF_EXPORT_DETAIL = "PDF export rate limit reached. Maximum 10 exports per hour."
 
+# Public view tier (Phase 14, T-USE-09): 120 reads/IP/minute on /public/{slug}.
+# The endpoint is unauthenticated, so we key on the client IP rather than a
+# user_id. A higher per-minute cap than the per-user tiers is intentional —
+# legitimate readers refreshing a shared spec must not get rate-limited.
+_PUBLIC_VIEW_PATH_RE = re.compile(r"^/public/[^/]+/?$")
+_PUBLIC_VIEW_LIMIT = 120
+_PUBLIC_VIEW_WINDOW_SECONDS = 60
+_PUBLIC_VIEW_DETAIL = "Too many requests."
+
+# Share toggle tier (Phase 14, T-USE-09): 20 enable/disable/rotate calls per
+# user per hour. Stops a script from churning a workspace's public URL.
+_SHARE_TOGGLE_PATH_RE = re.compile(r"^/workspaces/[^/]+/share(?:/rotate)?/?$")
+_SHARE_TOGGLE_LIMIT = 20
+_SHARE_TOGGLE_WINDOW_SECONDS = 3600
+_SHARE_TOGGLE_DETAIL = (
+    "Share toggle rate limit reached. Maximum 20 changes per hour."
+)
+
 IpNetwork = IPv4Network | IPv6Network
 RateLimitCheck = Callable[[str, int, int], Awaitable[bool]]
 
@@ -178,6 +196,16 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         if not await check(f"ip:{ip}", 1000, 60):
             return _rate_limited(60)
 
+        # T-USE-09: per-IP cap on /public/{slug}. Sits before the general
+        # per-user check because the endpoint is unauthenticated.
+        if request.method == "GET" and _PUBLIC_VIEW_PATH_RE.match(path):
+            if not await check(
+                f"public_view:{ip}",
+                _PUBLIC_VIEW_LIMIT,
+                _PUBLIC_VIEW_WINDOW_SECONDS,
+            ):
+                return _rate_limited(_PUBLIC_VIEW_WINDOW_SECONDS)
+
         if path in _LOGIN_PATHS:
             if not await check(
                 f"login:{ip}",
@@ -254,6 +282,24 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
                 return _rate_limited_custom(
                     detail=_PDF_EXPORT_DETAIL,
                     retry_after_seconds=_PDF_EXPORT_WINDOW_SECONDS,
+                )
+
+        # T-USE-09: per-user cap on enable/disable/rotate. Catches POST and
+        # DELETE on both /share and /share/rotate.
+        if (
+            user_id
+            and request.method in ("POST", "DELETE")
+            and _SHARE_TOGGLE_PATH_RE.match(path)
+        ):
+            allowed = await check(
+                f"share_toggle:{user_id}",
+                _SHARE_TOGGLE_LIMIT,
+                _SHARE_TOGGLE_WINDOW_SECONDS,
+            )
+            if not allowed:
+                return _rate_limited_custom(
+                    detail=_SHARE_TOGGLE_DETAIL,
+                    retry_after_seconds=_SHARE_TOGGLE_WINDOW_SECONDS,
                 )
         return None
 
