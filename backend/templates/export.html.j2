@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>{{ workspace_name | e }} — SpecForge</title>
+    <style>
+      /* All CSS inlined; no external resource fetches (Plan §18.4 security). */
+      @page {
+        size: A4;
+        margin: 22mm 18mm 22mm 18mm;
+        @bottom-right {
+          content: "Page " counter(page) " of " counter(pages);
+          font-family: "Helvetica", "Arial", sans-serif;
+          font-size: 9pt;
+          color: #64748b;
+        }
+        @bottom-left {
+          content: "{{ workspace_name | e }} — SpecForge";
+          font-family: "Helvetica", "Arial", sans-serif;
+          font-size: 9pt;
+          color: #64748b;
+        }
+      }
+      @page :first {
+        @bottom-left { content: ""; }
+        @bottom-right { content: ""; }
+      }
+      body {
+        font-family: "Helvetica", "Arial", sans-serif;
+        font-size: 10.5pt;
+        line-height: 1.55;
+        color: #0f172a;
+      }
+      h1, h2, h3, h4, h5, h6 {
+        font-family: "Helvetica", "Arial", sans-serif;
+        color: #0f172a;
+        line-height: 1.2;
+        margin-top: 1.6em;
+        margin-bottom: 0.6em;
+        page-break-after: avoid;
+      }
+      h1 { font-size: 22pt; }
+      h2 { font-size: 16pt; border-bottom: 1px solid #e2e8f0; padding-bottom: 4px; }
+      h3 { font-size: 13pt; }
+      h4, h5, h6 { font-size: 11pt; }
+      p { margin: 0.6em 0; }
+      a { color: #8f4e00; text-decoration: none; }
+      ul, ol { margin: 0.6em 0 0.6em 1.4em; }
+      li { margin: 0.2em 0; }
+      blockquote {
+        border-left: 3px solid #8f4e00;
+        margin: 0.8em 0;
+        padding: 0.4em 0.9em;
+        background: #fff7ec;
+        color: #3f4754;
+      }
+      code {
+        font-family: "Menlo", "Consolas", "Courier New", monospace;
+        font-size: 9.5pt;
+        background: #f1f5f9;
+        padding: 1px 4px;
+        border-radius: 3px;
+      }
+      pre {
+        font-family: "Menlo", "Consolas", "Courier New", monospace;
+        font-size: 9pt;
+        background: #f8fafc;
+        border: 1px solid #e2e8f0;
+        border-radius: 4px;
+        padding: 10px 12px;
+        overflow-x: auto;
+        page-break-inside: avoid;
+        line-height: 1.45;
+      }
+      pre code {
+        background: transparent;
+        padding: 0;
+      }
+      table {
+        border-collapse: collapse;
+        margin: 0.8em 0;
+        width: 100%;
+        font-size: 9.5pt;
+      }
+      th, td {
+        border: 1px solid #e2e8f0;
+        padding: 6px 8px;
+        text-align: left;
+        vertical-align: top;
+      }
+      th { background: #f8fafc; font-weight: 700; }
+
+      .cover {
+        page-break-after: always;
+        text-align: center;
+        padding-top: 60mm;
+      }
+      .cover .brand {
+        font-size: 10pt;
+        letter-spacing: 0.25em;
+        color: #8f4e00;
+        text-transform: uppercase;
+      }
+      .cover h1.workspace-name {
+        font-size: 30pt;
+        margin: 16mm 0 8mm 0;
+        color: #0f172a;
+      }
+      .cover .meta {
+        font-size: 11pt;
+        color: #3f4754;
+        line-height: 1.8;
+      }
+      .cover .coverage {
+        display: inline-block;
+        margin-top: 14mm;
+        padding: 6px 14px;
+        background: #fff7ec;
+        border: 1px solid #f3d29a;
+        border-radius: 999px;
+        color: #8f4e00;
+        font-weight: 700;
+      }
+
+      .toc {
+        page-break-after: always;
+      }
+      .toc h2 { margin-top: 0; }
+      .toc ol { list-style: decimal; padding-left: 1.6em; }
+      .toc li { margin: 0.4em 0; }
+
+      .stage-section {
+        page-break-before: always;
+      }
+      .stage-section header {
+        margin-bottom: 1.2em;
+      }
+      .stage-section header .stage-kicker {
+        font-size: 9pt;
+        letter-spacing: 0.2em;
+        color: #8f4e00;
+        text-transform: uppercase;
+      }
+
+      /* Pygments classes — narrow subset used most often. */
+      .codehilite .k, .codehilite .kd, .codehilite .kr { color: #8f4e00; font-weight: 600; }
+      .codehilite .s, .codehilite .s1, .codehilite .s2 { color: #166534; }
+      .codehilite .c, .codehilite .c1, .codehilite .cm { color: #64748b; font-style: italic; }
+      .codehilite .nb { color: #1e40af; }
+      .codehilite .nf { color: #7c2d12; }
+      .codehilite .mi, .codehilite .mf { color: #b45309; }
+    </style>
+  </head>
+  <body>
+    <section class="cover">
+      <div class="brand">SpecForge</div>
+      <h1 class="workspace-name">{{ workspace_name | e }}</h1>
+      <div class="meta">
+        <div>Provider: {{ provider_label | e }}</div>
+        <div>Generated: {{ generated_at | e }}</div>
+      </div>
+      {% if coverage_label %}
+      <div class="coverage">{{ coverage_label | e }}</div>
+      {% endif %}
+    </section>
+
+    <section class="toc">
+      <h2>Contents</h2>
+      <ol>
+        {% for section in sections %}
+        <li>{{ section.title | e }}</li>
+        {% endfor %}
+      </ol>
+    </section>
+
+    {% for section in sections %}
+    <section class="stage-section">
+      <header>
+        <div class="stage-kicker">{{ section.kicker | e }}</div>
+        <h1>{{ section.title | e }}</h1>
+      </header>
+      {{ section.html | safe }}
+    </section>
+    {% endfor %}
+  </body>
+</html>

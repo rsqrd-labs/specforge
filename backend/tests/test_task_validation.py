@@ -47,6 +47,8 @@ _TASKS = """\
 **Plan refs:** Auth API
 **Harness refs:** `tests/test_auth.py::TestAuth::test_login_success`,
   `tests/test_auth.py::TestAuth::test_login_failure`
+**Priority:** MUST
+**Estimate:** S
 **Estimated size:** S
 **Risk:** Low — simple endpoint
 
@@ -56,6 +58,8 @@ _TASKS = """\
 **Spec refs:** FR-010
 **Plan refs:** Billing API
 **Harness refs:** `tests/test_billing.py::test_charge_card`
+**Priority:** MUST
+**Estimate:** M
 **Estimated size:** M
 **Risk:** Medium — external service
 
@@ -65,6 +69,8 @@ _TASKS = """\
 **Spec refs:** NFR-001
 **Plan refs:** CI config
 **Harness refs:** _(none — setup-only: no harness test for CI configuration)_
+**Priority:** SHOULD
+**Estimate:** S
 **Estimated size:** XS
 **Risk:** Low
 """
@@ -89,6 +95,8 @@ _TASKS_GENUINE_GAP = """\
 **Phase:** Core
 **Spec refs:** FR-001
 **Harness refs:** `tests/test_auth.py::TestAuth::test_nonexistent_method`
+**Priority:** MUST
+**Estimate:** S
 **Estimated size:** S
 """
 
@@ -222,6 +230,8 @@ async def test_run_eval_tasks_uses_structural_parser_when_harness_provided() -> 
     tasks_with_broken_ref = (
         "### T-001: Implement login\n\n"
         "**Harness refs:** `tests/test_auth.py::TestAuth::test_does_not_exist`\n"
+        "**Priority:** MUST\n"
+        "**Estimate:** S\n"
     )
 
     with patch("services.evals.online_eval.get_llm", return_value=_FakeJudge(judge_response)):
@@ -271,10 +281,14 @@ async def test_run_eval_tasks_generation_failure_does_not_flag() -> None:
         '"traceability": 70, "feasibility": 80, "clarity": 75}, '
         '"coverage_percent": null, "uncovered_reqs": [], "tasks_without_ref": [], "risks": []}'
     )
-    # Task with no **Harness refs:** field — GENERATION_FAILURE
+    # Task with no **Harness refs:** field — GENERATION_FAILURE.
+    # Priority/Estimate present so the T-164 field validators don't fire and
+    # this test stays focused on the GENERATION_FAILURE-doesn't-flag behaviour.
     tasks_missing_field = (
         "### T-001: Task without harness refs field\n\n"
         "**Spec refs:** FR-001\n"
+        "**Priority:** MUST\n"
+        "**Estimate:** S\n"
         "**Estimated size:** S\n"
     )
 

@@ -42,6 +42,14 @@ _CLARIFY_LIMIT = 6
 _CLARIFY_WINDOW_SECONDS = 3600
 _CLARIFY_DETAIL = "Clarification rate limit reached. Maximum 6 calls per hour."
 
+# PDF export tier (Phase 14, T-USE-07): 10 PDF renders per user per hour.
+# Applies to POST /workspaces/{id}/export/pdf only — ZIP and GitHub exports
+# have their own tiers (or none at all, for ZIP).
+_PDF_EXPORT_PATH_RE = re.compile(r"^/workspaces/[^/]+/export/pdf/?$")
+_PDF_EXPORT_LIMIT = 10
+_PDF_EXPORT_WINDOW_SECONDS = 3600
+_PDF_EXPORT_DETAIL = "PDF export rate limit reached. Maximum 10 exports per hour."
+
 IpNetwork = IPv4Network | IPv6Network
 RateLimitCheck = Callable[[str, int, int], Awaitable[bool]]
 
@@ -234,6 +242,18 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
                 return _rate_limited_custom(
                     detail=_CLARIFY_DETAIL,
                     retry_after_seconds=_CLARIFY_WINDOW_SECONDS,
+                )
+
+        if user_id and request.method == "POST" and _PDF_EXPORT_PATH_RE.match(path):
+            allowed = await check(
+                f"pdf_export:{user_id}",
+                _PDF_EXPORT_LIMIT,
+                _PDF_EXPORT_WINDOW_SECONDS,
+            )
+            if not allowed:
+                return _rate_limited_custom(
+                    detail=_PDF_EXPORT_DETAIL,
+                    retry_after_seconds=_PDF_EXPORT_WINDOW_SECONDS,
                 )
         return None
 

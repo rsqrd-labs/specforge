@@ -29,7 +29,7 @@ from services.integrations.github_api_client import (
     GitHubTokenExpiredError,
 )
 from services.llm.provider_status import is_provider_configured
-from services.pipeline import github_export_service, spec_clarifier
+from services.pipeline import github_export_service, pdf_export_service, spec_clarifier
 from services.pipeline.export_service import ExportNotReadyError, build_export
 from services.pipeline.spec_clarifier import ClarificationValidationError
 from services.workspace_service import workspace_service
@@ -193,6 +193,32 @@ async def export_workspace(
         content=zip_bytes,
         media_type="application/zip",
         headers={"Content-Disposition": (f'attachment; filename="specforge-{id}.zip"')},
+    )
+
+
+@router.post("/{id}/export/pdf")
+async def export_workspace_pdf(
+    id: UUID,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> Response:
+    """Render the workspace's finalised SPEC/PLAN/TASKS into a branded PDF.
+
+    The HARNESS directory is intentionally excluded — PDFs are for human
+    audiences. Rate-limited to 10/user/hour by the middleware.
+    """
+    try:
+        pdf_bytes, slug = await pdf_export_service.render(id, user.id, db)
+    except ExportNotReadyError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail=str(exc)
+        ) from exc
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": f'attachment; filename="specforge-{slug}.pdf"',
+        },
     )
 
 
