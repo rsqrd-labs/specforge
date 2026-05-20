@@ -18,6 +18,11 @@ class WorkspaceCreate(BaseModel):
     # Deprecated public input. Concrete model routing is server-owned; this
     # optional field remains only to reject invalid legacy clients cleanly.
     model: str | None = Field(default=None, min_length=1)
+    template_slug: str | None = Field(
+        default=None,
+        max_length=100,
+        pattern=r"^[a-z0-9][a-z0-9-]*$",
+    )
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -54,6 +59,30 @@ class WorkspaceUpdate(BaseModel):
         return self
 
 
+class CoverageSummary(BaseModel):
+    """Harness coverage figure surfaced from the latest EvalResult.
+
+    Derived on the fly when assembling the workspace response (see T-172);
+    nothing is persisted on the workspace row itself.
+    """
+
+    tests: int = Field(ge=0)
+    covered: int = Field(ge=0)
+    total: int = Field(ge=0)
+    percent: int = Field(ge=0, le=100)
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class ClarificationQA(BaseModel):
+    """One captured Q/A pair from the Spec Clarification step."""
+
+    question: str = Field(min_length=1, max_length=1000)
+    answer: str = Field(min_length=1, max_length=1000)
+
+    model_config = ConfigDict(from_attributes=True)
+
+
 class WorkspaceResponse(BaseModel):
     id: UUID
     user_id: UUID
@@ -62,6 +91,11 @@ class WorkspaceResponse(BaseModel):
     provider: Provider
     model: str
     status: WorkspaceStatus
+    template_slug: str | None = None
+    clarification_qa: list[ClarificationQA] | None = None
+    public_share_slug: str | None = None
+    public_share_enabled: bool = False
+    coverage_summary: CoverageSummary | None = None
     stages: list[StageResponse] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime

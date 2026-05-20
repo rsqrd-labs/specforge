@@ -4,8 +4,8 @@ from datetime import datetime
 from typing import TYPE_CHECKING
 from uuid import UUID as PythonUUID
 
-from sqlalchemy import CheckConstraint, ForeignKey, String, Text, func, text
-from sqlalchemy.dialects.postgresql import TIMESTAMP, UUID
+from sqlalchemy import Boolean, CheckConstraint, ForeignKey, String, Text, func, text
+from sqlalchemy.dialects.postgresql import JSONB, TIMESTAMP, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from models import Base
@@ -47,6 +47,15 @@ class Workspace(Base):
         String,
         nullable=False,
         server_default=text("'active'"),
+    )
+    template_slug: Mapped[str | None] = mapped_column(Text, nullable=True)
+    clarification_qa: Mapped[list[dict] | None] = mapped_column(JSONB, nullable=True)
+    public_share_slug: Mapped[str | None] = mapped_column(Text, nullable=True)
+    public_share_enabled: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default=text("false"),
     )
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True),
