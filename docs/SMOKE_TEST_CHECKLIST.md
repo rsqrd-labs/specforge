@@ -288,3 +288,67 @@ Optional/additional checks:
 **Sign-off:** ________________  **Date:** ________________
 
 > All items must pass before production deploy. Any ❌ must be filed as a bug and resolved first.
+
+## V1.3 Usefulness Improvements
+
+Phase 14 added six end-to-end flows. Walk all of them on a fresh smoke
+account before each release. Each row should land at ✅ or be filed as
+a bug.
+
+### Spec Clarification
+
+| Step | What to do | Expected | Result |
+| ---- | ---------- | -------- | ------ |
+| 1 | Create a fresh workspace; click Generate on the spec stage. | Clarification modal opens with 3–5 short-answer fields. A 204 from the judge silently bypasses the modal. | |
+| 2 | Click **Skip**. | Generation begins immediately; no clarification persisted. | |
+| 3 | Create another workspace; fill answers; click **Use answers**. | Generation begins; regenerated spec references the answered context. | |
+
+### Task Priority + Estimate
+
+| Step | What to do | Expected | Result |
+| ---- | ---------- | -------- | ------ |
+| 4 | Complete the pipeline to TASKS. | Every task carries `**Priority:**` and `**Estimate:**` lines. | |
+| 5 | View the workspace header. | Effort-summary chip shows `~Xw · N tasks · M MUST`. | |
+
+### PDF Export
+
+| Step | What to do | Expected | Result |
+| ---- | ---------- | -------- | ------ |
+| 6 | Click **📄 PDF** on a finalised workspace. | Download starts within 2 seconds. | |
+| 7 | Open the PDF. | Cover page, ToC, three sections (SPEC/PLAN/TASKS), syntax-highlighted code, page footer. | |
+| 8 | Inspect the PDF contents. | The harness directory is NOT included. | |
+| 9 | (Defence-in-depth) Inject an `<img src="https://evil/exfil">` into spec content via the workspace and re-export. | No outbound HTTP fired during render (check egress logs); PDF still renders. | |
+
+### Public Share
+
+| Step | What to do | Expected | Result |
+| ---- | ---------- | -------- | ------ |
+| 10 | Click **🔗 Share**. Toggle **Public**. Click **Copy**. | Copy button briefly transitions to "Copied ✓"; the clipboard holds the URL. | |
+| 11 | Open the URL in an incognito window. | The spec renders without a login prompt; stage tabs work. | |
+| 12 | View source on the public page. | `<meta name="robots" content="noindex, nofollow">` is present. | |
+| 13 | `curl -i $URL` and check headers. | `X-Robots-Tag: noindex, nofollow` and ETag are present. | |
+| 14 | Toggle **Disabled**; reload the incognito tab. | 404 page renders. | |
+| 15 | Rotate (behind the "More" disclosure); paste the OLD URL. | 404 page; the new URL works. | |
+
+### Starter Templates
+
+| Step | What to do | Expected | Result |
+| ---- | ---------- | -------- | ------ |
+| 16 | Sign in as a brand-new user with zero workspaces. | Dashboard prominently shows the templates strip with a header. | |
+| 17 | Scroll the strip on a 1280px viewport. | ~3.5 cards visible; a half-card on the right invites further scroll. | |
+| 18 | Click a card. | Create-workspace modal opens; name + problem statement + provider are pre-filled; lotus chip reads "Started from … · clear". | |
+| 19 | Click **clear** on the chip. | Fields reset; chip disappears. | |
+| 20 | Submit a template-prefilled workspace. | Workspace is created. `SELECT template_slug FROM workspaces WHERE id = '…'` returns the chosen slug. | |
+| 21 | Re-deploy the API container. | `SELECT COUNT(*) FROM templates` returns the same count as before. The seed is idempotent. | |
+
+### Harness Coverage Chip
+
+| Step | What to do | Expected | Result |
+| ---- | ---------- | -------- | ------ |
+| 22 | Open a workspace whose harness has been evaluated. | Coverage chip visible in the header (tiny progress bar + count + "covered"). | |
+| 23 | Hover the chip. | Tooltip carries the positioning line ("SpecForge generates the tests; you ship them."). | |
+| 24 | Open the dashboard. | The SAME chip is visible on the workspace card — identical visual treatment. | |
+| 25 | Open the public share view. | The chip is visible under the cover band — again, identical treatment. | |
+| 26 | Find a workspace whose harness has no eval. | The chip is absent (not a placeholder, not a "—"). | |
+
+**V1.3 Sign-off:** ________________  **Date:** ________________

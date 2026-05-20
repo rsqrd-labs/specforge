@@ -48,6 +48,20 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Install WeasyPrint native dependencies (T-USE-07)
+        # WeasyPrint requires libcairo, libpango, libgobject. Without these the
+        # Phase 14 PDF export service raises OSError at import time and the
+        # `test_pdf_export_service.py` suite skips at the module level.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libcairo2 \
+            libpango-1.0-0 \
+            libpangoft2-1.0-0 \
+            libharfbuzz0b \
+            libffi8 \
+            fonts-dejavu
+
       - name: Install dependencies
         run: uv sync --frozen --all-groups
 
@@ -169,6 +183,55 @@ jobs:
       - name: Phase 13 integration push schema
         run: python3 -m json.tool ../harness/schemas/integration-push.schema.json >/dev/null
 
+      - name: Phase 14 V1.3 usefulness backend contracts
+        run: uv run pytest ../harness/tests/backend/test_phase14_v13_usefulness_contract.py -q
+        env:
+          DATABASE_URL: "postgresql+asyncpg://postgres:postgres@localhost:5432/test"
+          REDIS_URL: "redis://localhost:6379/0"
+          JWT_PRIVATE_KEY: "ci-test-private-key"
+          JWT_PUBLIC_KEY: "ci-test-public-key"
+          GOOGLE_CLIENT_ID: "ci-test-client-id"
+          GOOGLE_CLIENT_SECRET: "ci-test-client-secret"
+          FRONTEND_URL: "http://localhost:5173"
+          ANTHROPIC_API_KEY: "ci-test-anthropic-key"
+          OPENAI_API_KEY: "ci-test-openai-key"
+          GOOGLE_API_KEY: "ci-test-google-key"
+          ENCRYPTION_MASTER_KEY: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+          CSRF_SECRET: "ci-test-csrf-secret-value-long-enough"
+          ENVIRONMENT: "test"
+
+      - name: Phase 14 V1.3 unit tests
+        # Each test module here owns one V1.3 feature. They are also covered
+        # by the main pytest run above; this step exists so a failure can be
+        # attributed to the right feature without parsing the full log.
+        run: >-
+          uv run pytest
+          tests/test_spec_clarifier.py
+          tests/test_pdf_export_service.py
+          tests/test_public_share_service.py
+          tests/test_online_eval_task_fields.py
+          tests/test_seed_templates.py
+          -q --no-cov
+        env:
+          DATABASE_URL: "postgresql+asyncpg://postgres:postgres@localhost:5432/test"
+          REDIS_URL: "redis://localhost:6379/0"
+          JWT_PRIVATE_KEY: "ci-test-private-key"
+          JWT_PUBLIC_KEY: "ci-test-public-key"
+          GOOGLE_CLIENT_ID: "ci-test-client-id"
+          GOOGLE_CLIENT_SECRET: "ci-test-client-secret"
+          FRONTEND_URL: "http://localhost:5173"
+          ANTHROPIC_API_KEY: "ci-test-anthropic-key"
+          OPENAI_API_KEY: "ci-test-openai-key"
+          GOOGLE_API_KEY: "ci-test-google-key"
+          ENCRYPTION_MASTER_KEY: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+          CSRF_SECRET: "ci-test-csrf-secret-value-long-enough"
+          ENVIRONMENT: "test"
+
+      - name: Phase 14 public-workspace + template schemas
+        run: |
+          python3 -m json.tool ../harness/schemas/public-workspace.schema.json >/dev/null
+          python3 -m json.tool ../harness/schemas/template.schema.json >/dev/null
+
   frontend:
     name: Frontend
     runs-on: ubuntu-latest
@@ -203,6 +266,9 @@ jobs:
 
       - name: Phase 13 frontend harness contracts
         run: pnpm vitest run --config vitest.harness.config.ts ../harness/tests/frontend/phase13-github-integration.contract.test.ts
+
+      - name: Phase 14 V1.3 usefulness frontend contracts
+        run: pnpm vitest run --config vitest.harness.config.ts ../harness/tests/frontend/phase14-v13-usefulness.contract.test.ts
 
       - name: Build
         run: pnpm build
