@@ -14,6 +14,7 @@ import { MarkdownRenderer } from "../components/workspace/MarkdownRenderer"
 import { ProblemStatementPanel } from "../components/workspace/ProblemStatementPanel"
 import { TaskValidationPanel } from "../components/workspace/TaskValidationPanel"
 import { ExportGitHubModal } from "../components/workspace/ExportGitHubModal"
+import { ExportPDFButton } from "../components/workspace/ExportPDFButton"
 import { SpecClarificationModal } from "../components/workspace/SpecClarificationModal"
 import { GitHubStatusPill } from "../components/shared/GitHubStatusPill"
 import { useCredits } from "../hooks/useCredits"
@@ -919,6 +920,25 @@ export default function Workspace() {
             >
               {isExporting ? "Exporting…" : "↓ ZIP"}
             </button>
+            <ExportPDFButton
+              workspaceId={currentWorkspace.id}
+              workspaceName={currentWorkspace.name}
+              disabled={!allFinalised}
+              disabledReason={
+                allFinalised
+                  ? undefined
+                  : (() => {
+                      const blocker = STAGE_ORDER.find(
+                        (t) =>
+                          stages.find((s) => s.type === t)?.status !== "finalised",
+                      )
+                      return blocker
+                        ? `Finalise ${STAGE_LABELS[blocker]} to enable PDF export.`
+                        : "Finalise all stages to enable PDF export."
+                    })()
+              }
+              allFinalised={allFinalised}
+            />
             <div
               className="workspace-github-btn-wrap"
               data-tooltip={

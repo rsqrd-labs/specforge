@@ -5494,6 +5494,101 @@ button:disabled {
   cursor: not-allowed;
 }
 
+/* T-USE-08: PDF export — sibling of the GitHub tertiary button. Same shape,
+   same slate tint, same hover envelope so the row reads as three peers. */
+.workspace-pdf-btn-wrap {
+  position: relative;
+  display: inline-flex;
+  flex-direction: column;
+  align-items: stretch;
+}
+
+.workspace-pdf-btn {
+  position: relative;
+  height: 46px;
+  padding: 0 18px;
+  border-radius: 14px;
+  border: 1px solid rgba(86, 94, 116, 0.20);
+  background:
+    linear-gradient(135deg, rgba(255,255,255,0.94), rgba(218,226,253,0.60)),
+    rgba(255, 255, 255, 0.72);
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--color-on-surface-variant);
+  cursor: pointer;
+  transition: background 0.18s, border-color 0.18s, box-shadow 0.18s, transform 0.18s;
+  box-shadow: 0 2px 8px rgba(86, 94, 116, 0.07);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+  /* Hold a stable width so the in-place label swap to "Generating PDF…"
+     does not jitter the row. */
+  min-width: 132px;
+  justify-content: center;
+}
+
+.workspace-pdf-btn:hover:not(:disabled) {
+  background:
+    linear-gradient(135deg, rgba(86, 94, 116, 0.10), rgba(143, 78, 0, 0.05)),
+    rgba(255, 255, 255, 0.88);
+  border-color: rgba(86, 94, 116, 0.34);
+  box-shadow: 0 6px 18px rgba(86, 94, 116, 0.12);
+  transform: translateY(-1px);
+  color: var(--color-on-surface);
+}
+
+.workspace-pdf-btn.ready:not(:disabled) {
+  border-color: rgba(34, 197, 94, 0.28);
+  background:
+    linear-gradient(135deg, rgba(34, 197, 94, 0.09), rgba(86, 94, 116, 0.05)),
+    rgba(255, 255, 255, 0.82);
+  color: #166534;
+}
+
+.workspace-pdf-btn:disabled {
+  opacity: 0.38;
+  cursor: not-allowed;
+}
+
+.workspace-pdf-btn-wrap[data-tooltip]:hover::after {
+  content: attr(data-tooltip);
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 6px 10px;
+  border-radius: 8px;
+  background: rgba(26, 28, 28, 0.90);
+  color: #f0f1f1;
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+  pointer-events: none;
+  z-index: 100;
+}
+
+.workspace-pdf-btn-error {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+  padding: 4px 10px;
+  font-size: 12px;
+  color: var(--color-secondary);
+  background: rgba(161, 56, 95, 0.08);
+  border-radius: 8px;
+}
+
+.workspace-pdf-btn-retry {
+  background: transparent;
+  border: none;
+  color: var(--color-secondary);
+  font-weight: 700;
+  cursor: pointer;
+  padding: 0;
+}
+
 /* Tooltip on disabled GitHub button */
 .workspace-github-btn-wrap {
   position: relative;

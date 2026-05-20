@@ -409,6 +409,18 @@ export async function exportWorkspace(id: string): Promise<Blob> {
   return response.data
 }
 
+// T-USE-08: PDF export. Returns the rendered PDF as a Blob; the component
+// is responsible for triggering the browser download. 409 means a stage is
+// not finalised — surfaced as a tooltip on the button instead of a toast.
+export async function exportWorkspacePdf(id: string): Promise<Blob> {
+  const response = await api.post<Blob>(
+    `/workspaces/${id}/export/pdf`,
+    undefined,
+    { responseType: "blob" },
+  )
+  return response.data
+}
+
 // ---------------------------------------------------------------------------
 // Spec Clarification (Phase 14, T-USE-03 / T-USE-04)
 // ---------------------------------------------------------------------------
