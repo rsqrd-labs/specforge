@@ -3673,6 +3673,164 @@ button:disabled {
   max-width: 460px;
 }
 
+/* ─── Spec Clarification Modal (Phase 14 / T-USE-04) ─────────────────────── */
+
+/*
+ * Mood: a senior PM asking three sharp questions across the table — not a
+ * survey. Question is the hero (saffron-anchored). The `why_it_matters`
+ * whisper sits in slate underneath and fades when the user starts typing.
+ */
+
+.clarify-modal {
+  max-width: 580px;
+}
+
+.clarify-modal-header {
+  align-items: flex-start;
+}
+
+.clarify-modal-subtitle {
+  margin: 4px 0 0;
+  font-size: 13px;
+  color: var(--color-on-surface-variant);
+  letter-spacing: -0.005em;
+}
+
+.clarify-modal-body {
+  gap: 20px;
+  max-height: 70vh;
+  overflow-y: auto;
+}
+
+.clarify-modal-loading {
+  max-width: 420px;
+}
+
+.clarify-modal-loading-body {
+  padding: 32px 24px;
+  align-items: center;
+  text-align: center;
+}
+
+.clarify-modal-loading-copy {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--color-on-surface-variant);
+  letter-spacing: -0.005em;
+  animation: clarify-pulse 1.6s ease-in-out infinite;
+}
+
+.clarify-modal-pulse {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, var(--color-primary), var(--color-secondary));
+  opacity: 0.22;
+  animation: clarify-pulse-dot 1.6s ease-in-out infinite;
+}
+
+@keyframes clarify-pulse {
+  0%, 100% { opacity: 0.55; }
+  50% { opacity: 1; }
+}
+
+@keyframes clarify-pulse-dot {
+  0%, 100% { transform: scale(1); opacity: 0.22; }
+  50% { transform: scale(1.18); opacity: 0.45; }
+}
+
+.clarify-question {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.clarify-question-label {
+  display: block;
+  font-size: 15px;
+  font-weight: 700;
+  line-height: 1.35;
+  letter-spacing: -0.01em;
+  color: var(--color-on-surface);
+}
+
+.clarify-question-why {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--color-on-surface-variant);
+  transition: opacity 0.24s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.clarify-question-why-engaged {
+  opacity: 0.6;
+}
+
+.clarify-modal-textarea {
+  width: 100%;
+  margin-top: 4px;
+  border-radius: 10px;
+  border: 1px solid rgba(143, 78, 0, 0.18);
+  background: rgba(255, 255, 255, 0.65);
+  padding: 10px 14px;
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--color-on-surface);
+  outline: none;
+  resize: vertical;
+  min-height: 72px;
+  font-family: inherit;
+  transition: border-color 0.18s, box-shadow 0.18s;
+}
+
+.clarify-modal-textarea::placeholder {
+  color: rgba(47, 49, 49, 0.38);
+}
+
+.clarify-modal-textarea:focus {
+  border-color: var(--color-primary);
+  box-shadow: 0 0 0 3px rgba(143, 78, 0, 0.12);
+}
+
+.clarify-modal-textarea:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.clarify-question-char-count {
+  align-self: flex-end;
+  font-size: 11px;
+  color: var(--color-on-surface-variant);
+  opacity: 0.7;
+}
+
+.clarify-modal-footer {
+  justify-content: space-between;
+  margin-top: 4px;
+}
+
+.clarify-modal-skip {
+  padding: 9px 4px;
+  background: transparent;
+  border: none;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-on-surface-variant);
+  cursor: pointer;
+  transition: color 0.15s;
+  letter-spacing: -0.005em;
+}
+
+.clarify-modal-skip:hover:not(:disabled) {
+  color: var(--color-on-surface);
+}
+
+.clarify-modal-skip:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
 .delete-workspace-copy {
   margin: 0;
   color: var(--color-on-surface-variant);

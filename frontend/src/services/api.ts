@@ -409,6 +409,53 @@ export async function exportWorkspace(id: string): Promise<Blob> {
   return response.data
 }
 
+// ---------------------------------------------------------------------------
+// Spec Clarification (Phase 14, T-USE-03 / T-USE-04)
+// ---------------------------------------------------------------------------
+
+export interface ClarifyQuestion {
+  question: string
+  why_it_matters: string
+}
+
+export interface ClarifyAnswer {
+  question: string
+  answer: string
+}
+
+export interface ClarifyResponse {
+  questions: ClarifyQuestion[]
+}
+
+export async function requestClarification(
+  workspaceId: string,
+): Promise<ClarifyResponse | null> {
+  // 204 No Content means the judge model was unavailable. The modal must
+  // silently bypass and let the standard generate path run — the user
+  // should not see an error message.
+  try {
+    const response = await api.post<ClarifyResponse>(
+      `/workspaces/${workspaceId}/clarify`,
+    )
+    if (response.status === 204 || !response.data || !response.data.questions) {
+      return null
+    }
+    return response.data
+  } catch (error) {
+    if (axios.isAxiosError(error) && error.response?.status === 204) {
+      return null
+    }
+    throw error
+  }
+}
+
+export async function persistClarification(
+  workspaceId: string,
+  answers: ClarifyAnswer[],
+): Promise<void> {
+  await api.patch(`/workspaces/${workspaceId}/clarify`, { answers })
+}
+
 export async function getCredits(): Promise<CreditBalance> {
   const response = await api.get<CreditBalance>("/credits/balance")
   return response.data

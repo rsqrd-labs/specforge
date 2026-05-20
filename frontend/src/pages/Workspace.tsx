@@ -14,6 +14,7 @@ import { MarkdownRenderer } from "../components/workspace/MarkdownRenderer"
 import { ProblemStatementPanel } from "../components/workspace/ProblemStatementPanel"
 import { TaskValidationPanel } from "../components/workspace/TaskValidationPanel"
 import { ExportGitHubModal } from "../components/workspace/ExportGitHubModal"
+import { SpecClarificationModal } from "../components/workspace/SpecClarificationModal"
 import { GitHubStatusPill } from "../components/shared/GitHubStatusPill"
 import { useCredits } from "../hooks/useCredits"
 import { type StreamErrorState, useStream } from "../hooks/useStream"
@@ -193,6 +194,9 @@ export default function Workspace() {
   const [providers, setProviders] = useState<Provider[]>([])
   const [isGitHubConnected, setIsGitHubConnected] = useState(false)
   const [showGitHubExport, setShowGitHubExport] = useState(false)
+  const [pendingClarify, setPendingClarify] = useState<PendingCreditAction | null>(
+    null,
+  )
 
   useEffect(() => {
     let cancelled = false
@@ -433,10 +437,34 @@ export default function Workspace() {
         const saved = await saveProblemStatement()
         if (!saved) return
       }
+      // First spec generation gets the clarification gate. Subsequent
+      // regenerates and every non-spec stage skip straight to credit
+      // confirm. The modal opens only when the user has not already
+      // answered clarifications on this workspace.
+      const needsClarification =
+        action === "generate" &&
+        activeStage.type === "spec" &&
+        activeStage.current_version === 0 &&
+        !(currentWorkspace?.clarification_qa && currentWorkspace.clarification_qa.length > 0)
+      if (needsClarification) {
+        setPendingClarify({ action, stageId: activeStage.id })
+        return
+      }
       setPendingCredit({ action, stageId: activeStage.id })
     },
-    [activeStage, saveProblemStatement],
+    [activeStage, currentWorkspace?.clarification_qa, saveProblemStatement],
   )
+
+  const handleClarifyProceed = useCallback(() => {
+    if (!pendingClarify) return
+    const next = pendingClarify
+    setPendingClarify(null)
+    setPendingCredit(next)
+  }, [pendingClarify])
+
+  const handleClarifyCancel = useCallback(() => {
+    setPendingClarify(null)
+  }, [])
 
   const requestFreeRegeneration = useCallback(async () => {
     if (!activeStage) return
@@ -1192,6 +1220,14 @@ export default function Workspace() {
           </div>
         )}
       </main>
+
+      {pendingClarify && id && (
+        <SpecClarificationModal
+          workspaceId={id}
+          onProceed={handleClarifyProceed}
+          onCancel={handleClarifyCancel}
+        />
+      )}
 
       {pendingCredit && (
         <CreditConfirmModal
