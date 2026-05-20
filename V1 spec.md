@@ -6,7 +6,7 @@ tags:
 - specforge
 - spec
 - v1
-- asdd created: 2026-04-25 status: final version: 1.1.0 stage: spec
+- asdd created: 2026-04-25 status: final version: 1.3.0 stage: spec
 
 ---
 
@@ -59,6 +59,12 @@ V1 validates one core hypothesis: developers find enough value in the pipeline o
 - Authenticate users via Google OAuth and enforce a 50-credit free tier
 - Allow users to export all four finalised documents as a zip file for use with coding agents
 - Allow users to push a finalised workspace directly to a new GitHub repository, with each task created as a GitHub Issue, when they have connected their GitHub account
+- Lift the baseline quality of every spec by asking the user a small set of clarifying questions before the first stage generation runs
+- Annotate every generated task with a priority label and an effort estimate, and aggregate them into a project-level effort summary, so the TASKS output is a plan a user can execute against rather than a flat list
+- Let users publish a read-only public link to any finalised workspace so a spec can be shared with cofounders, investors, or clients without granting an account
+- Let users download a branded PDF of the finalised spec for audiences that do not work with Markdown
+- Offer a small library of starter templates on the landing dashboard so a first-time user can begin from a worked example rather than a blank textarea
+- Surface harness coverage prominently in the workspace summary so the harness stage is recognisable as a differentiator rather than a buried artefact
 
 ### Non-Goals for V1
 
@@ -125,7 +131,11 @@ User clicks **Create Workspace** on the dashboard. Prompted for:
 |AI provider|Anthropic / OpenAI / Google|
 |Model|Filtered by selected provider|
 
-A placeholder in the problem statement field guides them on what a good problem statement looks like. They click Create and land in the workspace view.
+A placeholder in the problem statement field guides them on what a good problem statement looks like.
+
+**Start from a template (optional):** Above the form, a strip of starter templates ("Stripe-like checkout," "Linear-like ticketing," "Slack bot for X," etc.) is available. Clicking a template card pre-fills the workspace name and problem statement, which the user can then edit before continuing. See §4.11.
+
+They click Create and land in the workspace view.
 
 ### 4.3 The Workspace View
 
@@ -147,6 +157,8 @@ Two-panel layout:
 ```
 Click Generate
         ↓
+[Spec stage only] Spec Clarification sub-flow (see below)
+        ↓
 Credit deduction warning shown (10 credits + remaining balance)
         ↓
 User confirms
@@ -164,6 +176,39 @@ Quality badge updates (e.g. 87/100)
 
 User satisfied → clicks **Finalise** → stage marked finalised → next stage unlocks → green checkmark in Stage Navigator.
 
+#### 4.4.1 Spec Clarification (Spec stage only)
+
+The single largest determinant of spec quality is the depth of the problem statement. To raise the floor before the pipeline runs, the **first** generation of the spec stage is preceded by a lightweight clarification step:
+
+```
+User clicks Generate on the spec stage (first time)
+        ↓
+Backend asks judge model for 3–5 targeted questions about
+the problem statement (who the user is, the hard constraint,
+what success looks like, etc.)
+        ↓
+Modal opens with the questions, each as a short-answer field
+        ↓
+User answers — or clicks "Skip" to proceed with the raw
+problem statement as today
+        ↓
+Answers are concatenated as additional context and passed
+into the spec generation prompt alongside the original
+problem statement
+        ↓
+Standard generation flow continues (credit warning, stream, eval)
+```
+
+**Constraints:**
+
+- Questions are produced by the same judge model used for evals (Claude Haiku · GPT-4o Mini · Gemini Flash), so the additional latency is small (typically under 3 seconds) and the cost is sub-cent.
+- The clarification call is **free** — no credits deducted. Only the subsequent spec generation costs the standard 10 credits.
+- The clarification step runs only on the **first** spec generation per workspace. Regenerating the spec re-uses the captured answers and does not re-prompt.
+- The user can always click **Skip** to bypass the step. The product is usable without ever answering a clarifying question.
+- Q&A pairs are persisted on the workspace so they remain visible to the user and continue to inform regenerations.
+
+> [!note] The clarification call is best-effort. If the judge model is unavailable or times out (>5s), the modal is skipped automatically and the user is taken straight to the standard generate flow.
+
 ### 4.5 Human Review Gate
 
 After SPEC is finalised and before PLAN generation begins, a mandatory review prompt appears:
@@ -179,6 +224,8 @@ User proceeds through PLAN → HARNESS → TASKS in order. Same pattern at each 
 **HARNESS generation** — quality badge includes a coverage score (% of spec requirements with a corresponding test). If below 80%, uncovered requirements are listed below the editor as action items.
 
 **TASKS generation** — a task-harness validation runs automatically. Each task references specific harness tests by name. Flagged tasks (missing test references or references to nonexistent tests) are listed as action items.
+
+Every generated task additionally carries a **Priority** label (`MUST` / `SHOULD` / `COULD`) and an **Estimate** as a T-shirt size (`S` / `M` / `L` / `XL`). A project-level summary appears at the top of the TASKS view aggregating the estimates into a rough effort range (e.g. *"~3 weeks of effort: 1×XL · 4×L · 7×M · 3×S"*) and counting MUST-only tasks for a minimum-viable cut. See §5.4 for the per-task fields.
 
 ### 4.7 Staleness
 
@@ -198,13 +245,13 @@ of SPEC.md. Regenerate or keep as-is?"
 
 ### 4.8 Export
 
-Once all four stages are finalised two export options activate in the workspace header:
+Once all four stages are finalised the export options activate in the workspace header:
 
 ```
-[↓ Download ZIP]   [↑ Export to GitHub]
+[↓ Download ZIP]   [↑ Export to GitHub]   [📄 Export PDF]   [🔗 Share Public Link]
 ```
 
-Both exports produce the same file layout. No credits are deducted for either export path.
+No credits are deducted for any export path. The ZIP and GitHub paths produce the same file layout.
 
 **File layout (ZIP and GitHub repo root):**
 
@@ -258,6 +305,43 @@ Success: "Exported to github.com/username/repo-name"
 
 **GitHub Issue format:** Each `T-NNN` task becomes one issue titled `T-NNN: {task title}`, with the full task body — phase, risk, description, steps, acceptance criteria, and harness references — preserved as the issue body. Issues are created in task order.
 
+#### Export PDF
+
+Click **Export PDF** → backend renders SPEC.md, PLAN.md, and TASKS.md to a single branded PDF and the browser downloads `specforge-{workspace-name}.pdf` immediately. The harness directory is **not** included in the PDF — PDFs are for human audiences (founders, clients, investors, PMs) who want a readable artefact, not a runnable scaffold.
+
+The PDF carries the Modern Indica visual identity: cover page with workspace name and provider used, table of contents, syntax-highlighted code blocks, and a footer crediting SpecForge with a link back to the marketing site.
+
+Always available on a finalised workspace regardless of GitHub connection status. Rate-limited per §12.
+
+#### Share Public Link
+
+Click **Share Public Link** → a modal opens:
+
+```
+Public read-only link
+
+[ https://specforge.app/p/k3f9a2 ]   [Copy]
+
+● Public  ○ Disabled
+
+Anyone with the link can view your finalised SPEC.md,
+PLAN.md, HARNESS coverage, and TASKS.md. They cannot
+see your credit balance, billing, account email, other
+workspaces, or any draft / pre-finalisation content.
+
+                                      [Close]
+```
+
+When the user enables sharing the workspace gets a random 6-character public slug (`/p/{slug}`). Visitors to that URL see a read-only rendered view of the finalised stages in the Modern Indica design — no login required, no credits consumed, no editing affordances. The judge-model eval scores and harness coverage figure are shown alongside as social proof.
+
+**Constraints:**
+
+- Only workspaces with **all four stages finalised** can be shared. Toggling sharing on a workspace with any draft / locked / stale stage is rejected.
+- The slug is opaque and unguessable (sufficient entropy to resist enumeration). It is not derived from the workspace ID.
+- Re-enabling sharing after a disable cycle reuses the same slug, so previously shared URLs continue to work unless the user explicitly rotates the slug from the modal.
+- Search engines are excluded from the public view via `noindex, nofollow` meta tags. The marketing site explicitly does not crawl `/p/*`.
+- The public view is cached at the edge for low-cost serving; cache is invalidated when the user re-finalises any stage or toggles sharing off.
+
 ### 4.9 GitHub Connection
 
 A GitHub connection is required for the Export to GitHub flow. Users connect once from Settings.
@@ -280,17 +364,44 @@ Disconnecting removes the stored token. Previously exported repos and issues on 
 
 Workspace cards show: name, creation date, AI provider used, pipeline progress indicator (which stages are finalised). User can return to any workspace by clicking its card.
 
+Above the workspace grid, a **Start from a template** strip surfaces the curated starter templates (see §4.11). For a first-time user with an empty workspace list this strip is the dominant element on the dashboard.
+
 Credit balance shown prominently. When credits reach zero:
 
 > [!danger] Credit Exhaustion State "You've used all 50 free credits. The Pro plan offers 1,000 credits per month." → Waitlist link (payments not in V1).
 
----
+### 4.11 Starter Templates
+
+A curated library of worked starter templates is available on the dashboard and on the workspace creation form. Each template is a hand-tuned problem statement that produces a high-quality spec on first generation.
+
+```
+Dashboard → "Start from a template" strip
+        ↓
+User clicks a template card (e.g. "Stripe-like checkout")
+        ↓
+Workspace creation form opens, pre-filled with:
+  - workspace name (editable)
+  - problem statement (editable)
+  - suggested provider and model (editable)
+        ↓
+User edits if desired, clicks Create
+        ↓
+Standard workspace creation flow continues
+```
+
+**Constraints:**
+
+- Templates are **system-owned and curated** in V1. End users cannot create, edit, or publish their own templates. User-authored templates are explicitly V2 (see §14).
+- Templates are content-only: they pre-fill the form fields. They do not produce a pre-generated spec; the user still runs the four-stage pipeline.
+- Each template carries: name, short description, category (auth · payments · content · realtime · agent · tooling), suggested provider/model, and the seed problem statement.
+- The template library is read-only from the user's perspective and ships with the application. Adding or rotating templates is a deploy-time operation.
+- V1 ships with 6–10 templates covering the most common SaaS / agent / developer-tool starting points.
 
 ## 5. Pipeline Stages — Detailed Specification
 
 ### 5.1 SPEC.md
 
-**Input:** Problem statement from the user
+**Input:** Problem statement from the user, plus optional Spec Clarification Q&A (see §4.4.1)
 
 **Output:** Structured specification document
 
@@ -388,12 +499,27 @@ harness/
 ```
 ## Task N — [Title]
 
+Priority: MUST | SHOULD | COULD
+Estimate: S | M | L | XL          ← T-shirt size
 Input:    [files or dependencies]
 Goal:     [what to build]
 Tests:    [specific test names from harness]
 Done when: All named tests pass with no skips or mocks
 Reference: SPEC.md §N · PLAN.md §N
 ```
+
+**Project-level summary block** is emitted at the top of TASKS.md:
+
+```
+## Effort Summary
+
+Estimate range: ~3 weeks
+Tasks:          15 total · 6 MUST · 7 SHOULD · 2 COULD
+Sizes:          1×XL · 4×L · 7×M · 3×S
+Minimum cut:    Ship MUST-only → ~9 days
+```
+
+**Estimate calibration:** T-shirt sizes map to a rough developer-day range used to compute the summary band: `S` = 0.5–1d · `M` = 1–3d · `L` = 3–7d · `XL` = 7d+. The summary is informational only — it is not a contract.
 
 **Eval checks:**
 
@@ -402,6 +528,8 @@ Reference: SPEC.md §N · PLAN.md §N
 - [ ] No task has a vague done condition
 - [ ] Tasks in valid dependency order
 - [ ] First task is always harness setup
+- [ ] Every task carries a Priority and an Estimate field with a value from the allowed enum
+- [ ] At least one task is labelled `MUST` (the minimum-viable cut is non-empty)
 
 ---
 
@@ -470,6 +598,8 @@ Spec Requirements Coverage: 74% ⚠
 ✗ Session expiry handling   ← "Add a test for this →"
 ✓ Password validation
 ```
+
+**Workspace-level prominence:** the harness coverage figure (e.g. *"24 tests cover 18 of 21 requirements"*) is additionally surfaced in the workspace header summary, on the workspace dashboard card, and in the public share view (§4.8). The intent is that the harness stage — SpecForge's main differentiator versus generic PRD wrappers — is recognisable at a glance rather than discovered only by users who open the HARNESS stage.
 
 ### Task Harness Reference Display
 
@@ -608,8 +738,14 @@ Call succeeds? → Deduction stands
 |provider|TEXT|anthropic / openai / google|
 |model|TEXT|Not null|
 |status|TEXT|active / archived|
+|template_slug|TEXT|Nullable — the slug of the template the workspace was created from, if any|
+|clarification_qa|JSONB|Nullable — captured `[ { question, answer } ]` pairs from the Spec Clarification step (§4.4.1)|
+|public_share_slug|TEXT|Nullable, unique when present — opaque slug exposed at `/p/{slug}` when sharing is enabled|
+|public_share_enabled|BOOLEAN|Default false — current on/off state of the public share|
 |created_at|TIMESTAMPTZ||
 |updated_at|TIMESTAMPTZ||
+
+Unique constraint: `public_share_slug` when not null.
 
 ### Stage
 
@@ -711,6 +847,24 @@ Unique constraint: `(push_id, task_ref)`.
 |flagged|BOOLEAN|Default false|
 |created_at|TIMESTAMPTZ||
 
+### Template
+
+System-owned, deploy-time-seeded library of starter problem statements. Read-only from the user's perspective in V1.
+
+|Field|Type|Constraints|
+|---|---|---|
+|id|UUID|Primary key|
+|slug|TEXT|Unique, not null — stable identifier referenced from `Workspace.template_slug`|
+|name|TEXT|Not null, max 200 chars|
+|description|TEXT|Not null, short marketing line shown on the card|
+|category|TEXT|`auth` / `payments` / `content` / `realtime` / `agent` / `tooling`|
+|problem_statement|TEXT|Not null — seed text inserted into the workspace form|
+|suggested_provider|TEXT|Nullable — default provider hint|
+|suggested_model|TEXT|Nullable — default model hint|
+|sort_order|INTEGER|Default 0 — controls dashboard ordering|
+|active|BOOLEAN|Default true — soft-disable without deletion|
+|created_at|TIMESTAMPTZ||
+
 ---
 
 ## 11. API Contracts
@@ -739,13 +893,19 @@ Unique constraint: `(push_id, task_ref)`.
 |Method|Endpoint|Description|
 |---|---|---|
 |GET|/workspaces|List user's workspaces|
-|POST|/workspaces|Create a new workspace|
+|POST|/workspaces|Create a new workspace (accepts optional `template_slug` to record provenance)|
 |GET|/workspaces/{id}|Get workspace with all stages|
 |PATCH|/workspaces/{id}|Update workspace name|
 |DELETE|/workspaces/{id}|Archive workspace (soft delete)|
 |POST|/workspaces/{id}/export|Download zip of all four stages|
 |POST|/workspaces/{id}/export/github|Push workspace to a new GitHub repo; create issues|
 |GET|/workspaces/{id}/export/github|Return latest GitHub push record for this workspace|
+|POST|/workspaces/{id}/export/pdf|Render and stream back a branded PDF of the finalised workspace|
+|POST|/workspaces/{id}/share|Enable public sharing — returns the public slug and URL|
+|DELETE|/workspaces/{id}/share|Disable public sharing — preserves the slug for re-enable|
+|POST|/workspaces/{id}/share/rotate|Rotate the public slug (invalidates the prior URL)|
+|POST|/workspaces/{id}/clarify|Request 3–5 clarifying questions for the spec stage (judge model, free, no credit deduction)|
+|PATCH|/workspaces/{id}/clarify|Store the user's answers to the clarifying questions|
 
 ### Stages
 
@@ -772,6 +932,18 @@ Unique constraint: `(push_id, task_ref)`.
 |Method|Endpoint|Description|
 |---|---|---|
 |GET|/providers|Return available providers and models|
+
+### Templates
+
+|Method|Endpoint|Description|
+|---|---|---|
+|GET|/templates|List active starter templates (public, no auth required so the marketing dashboard preview works)|
+
+### Public Share (read-only, no auth)
+
+|Method|Endpoint|Description|
+|---|---|---|
+|GET|/public/{slug}|Return the read-only finalised workspace bundle (spec, plan, harness coverage summary, tasks). 404 if the slug is unknown or sharing is currently disabled.|
 
 ---
 
@@ -813,6 +985,10 @@ Unique constraint: `(push_id, task_ref)`.
 |User LLM Daily|Per user|200 LLM calls|24 hours|
 |Auth Login|Per IP|5 attempts|5 minutes|
 |GitHub Export|Per user|3 exports|1 hour|
+|PDF Export|Per user|10 exports|1 hour|
+|Spec Clarify|Per user|6 calls|1 hour|
+|Public Share Toggle|Per user|20 toggles|1 hour|
+|Public View|Per IP|120 reads|1 minute|
 
 ### Scalability
 
@@ -856,6 +1032,14 @@ V1 is designed for hundreds of concurrent users, not thousands. Railway's defaul
 
 **Assumption 7 — Langfuse is an optional observability enhancement.** Its unavailability must never surface to users or affect credit accounting, stage generation, or eval scoring. The system runs identically with `LANGFUSE_SECRET_KEY` unset; when it is set, Langfuse becomes an additional sink for prompt-level traces, prompt versions, eval scores, and dataset items. If a Langfuse call fails for any reason — network error, auth failure, rate limit, schema rejection — the failure is logged and swallowed. No user-facing flow may raise on a Langfuse error.
 
+**Assumption 11 — Spec Clarification meaningfully improves spec quality.** The lightweight Q&A step before the first spec generation is expected to lift baseline eval scores enough to justify the extra UI step. If users skip it more than ~60% of the time *and* eval scores show no detectable lift, the modal becomes opt-in (a small "Refine my idea first" button) rather than the default pre-generate flow.
+
+**Assumption 12 — A 6-character opaque slug is sufficient unguessability for public sharing.** The shared content is the user's own finalised spec — not credentials and not personal data — so the risk of accidental discovery is modest. The slug entropy is 36⁶ ≈ 2.2B values; combined with the per-IP read rate limit (120/min) enumeration is impractical. If sharing is later extended to anything more sensitive the slug length is increased.
+
+**Assumption 13 — A PDF without the harness directory is what non-engineering audiences want.** Founders, PMs, clients and investors want the readable artefacts (SPEC, PLAN, TASKS) rather than the runnable scaffold. If user research shows demand for a harness summary inside the PDF, an appendix is added.
+
+**Assumption 14 — A small curated template library is enough for cold-start.** 6–10 hand-tuned templates covering the most common SaaS / agent / developer-tool starting points are expected to remove the blank-page problem for a typical first-time user. If template attach rate is below ~25% the library is expanded; if a long tail of niches is requested, user-authored templates are revisited for V2.
+
 ---
 
 ## 14. Out of Scope for V1
@@ -871,6 +1055,9 @@ V1 is designed for hundreds of concurrent users, not thousands. Railway's defaul
 | Self-host installation documentation | Post V1 launch |
 | Email notifications                  | V2             |
 | Custom prompt templates              | V3             |
+| User-authored starter templates      | V2             |
+| Public-share comments or reactions   | V2             |
+| Editable PDF (interactive form)      | V2             |
 | API access for programmatic use      | V3             |
 | Audit logging                        | V3 Enterprise  |
 | Enterprise SSO or SAML               | V3 Enterprise  |
@@ -889,6 +1076,8 @@ V1 is designed for hundreds of concurrent users, not thousands. Railway's defaul
 
 ---
 
-_SpecForge V1 SPEC.md · Version 1.2.0 · 2026-05-19 — added GitHub export integration: §4.8 expanded with GitHub export flow, §4.9 GitHub connection flow, §8 GitHub OAuth, §10 UserIntegration/IntegrationPush/IntegrationPushTask models, §11 integrations and GitHub export endpoints, §12 GitHub token security and rate limit, Assumptions 8–10. ZIP export unchanged._
+_SpecForge V1 SPEC.md · Version 1.3.0 · 2026-05-20 — added six v1 usefulness features: Spec Clarification pre-generation step (§4.4.1, §5.1), per-task Priority + Estimate fields with an Effort Summary block (§4.6, §5.4), PDF export and Public Share read-only link (§4.8), Starter Templates library and §4.11 flow, harness-coverage workspace-summary surfacing (§7). Adds `Workspace.template_slug / clarification_qa / public_share_slug / public_share_enabled` fields and the `Template` table (§10), new endpoints under Workspaces / Templates / Public Share (§11), new rate-limit tiers PDF/Clarify/Share/Public-view (§12), Assumptions 11–14, and three new V2 entries in §14. Existing ZIP and GitHub export paths unchanged._
+
+_Version 1.2.0 · 2026-05-19 — added GitHub export integration: §4.8 expanded with GitHub export flow, §4.9 GitHub connection flow, §8 GitHub OAuth, §10 UserIntegration/IntegrationPush/IntegrationPushTask models, §11 integrations and GitHub export endpoints, §12 GitHub token security and rate limit, Assumptions 8–10. ZIP export unchanged._
 
 _Version 1.1.0 · 2026-05-07 — added Langfuse-backed LLM observability under §12 and Assumption 7. No product-flow changes._

@@ -51,6 +51,16 @@
       "proves": "Phase 13 frontend layer: TypeScript interfaces, api.ts GitHub functions (404 safety), Settings page route, ExportGitHubModal four-phase UI, workspace header GitHub button, and index.css design-system classes."
     },
     {
+      "id": "v1-3-usefulness-contracts",
+      "path": "harness/tests/backend/test_phase14_v13_usefulness_contract.py",
+      "proves": "Phase 14 V1.3 usefulness improvements (backend): two new migrations (workspace v1.3 fields + templates table), Workspace + Template ORM models, Spec Clarification judge-model service with sanitisation and best-effort timeout, task Priority/Estimate enforcement in the tasks prompt + online eval, WeasyPrint PDF export service with no-network resource fetcher, public share service with CSPRNG slug generation and unambiguous alphabet, unauthenticated /public/{slug} router with allow-list response shape and noindex headers, unauthenticated /templates router backed by an idempotent seed script, harness coverage figure surfaced on the workspace response, and preservation of the pre-existing ZIP / GitHub export paths and the gap_patch_used regen gate."
+    },
+    {
+      "id": "v1-3-usefulness-frontend-contracts",
+      "path": "harness/tests/frontend/phase14-v13-usefulness.contract.test.ts",
+      "proves": "Phase 14 V1.3 usefulness improvements (frontend): api.ts adds the eight v1.3 client functions without removing prior exports, SpecClarificationModal with Skip / Use-answers paths wired into Workspace, parseEffortSummary helper with graceful null on missing block plus workspace header chip, ExportPDFButton triggering a real browser download, SharePublicLinkModal with copy/toggle/rotate controls plus PublicWorkspaceView at /p/:slug outside the auth guard with noindex meta and no authenticated-store imports, robots.txt Disallow /p/, TemplatesStrip on Dashboard and the workspace creation form with template_slug provenance, harness-coverage chip rendered in workspace header / dashboard card / public view, plus the design-system CSS classes for each component."
+    },
+    {
       "id": "e2e-smoke",
       "path": "harness/tests/e2e/specforge-smoke.spec.ts",
       "proves": "The core workspace pipeline can be completed through the browser once services are running."

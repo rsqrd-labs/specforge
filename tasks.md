@@ -7412,4 +7412,674 @@ Wire the new backend tests into CI, update `.env.example` and `CLAUDE.md` with t
 
 ---
 
+## Phase 14 — V1.3 Usefulness Improvements
+
+> Source: `V1 spec.md` v1.3.0 §4.4.1, §4.8, §4.11, §5.1, §5.4, §7, §10, §11, §12; `Plan v1.md` §18. Harness: `harness/tests/backend/test_phase14_v13_usefulness_contract.py`, `harness/tests/frontend/phase14-v13-usefulness.contract.test.ts`. Phases 1–13 must be complete and green before starting this phase. Every UI element must align with the Modern Indica design system already established in `frontend/src/index.css` — saffron / lotus / slate palette, Plus Jakarta Sans, glassmorphism — no new visual identity.
+
+---
+
+### T-160: Alembic Migrations — Workspace V1.3 Fields and Templates Table
+
+**Description:**
+Two ordered migrations land the v1.3 schema. `0009_workspace_v1_3_fields.py` adds four new columns to `workspaces` (`template_slug`, `clarification_qa`, `public_share_slug`, `public_share_enabled`) plus a partial unique index on `public_share_slug`. `0010_templates.py` creates the system-owned `templates` table. Both are independently revertible. Nothing else in Phase 14 can begin until these tables/columns exist.
+
+**Inputs:**
+- `backend/migrations/versions/` (existing migration chain ends at `0008_stage_gap_patch_used.py`)
+- `backend/models/workspace.py` (current shape)
+- Plan §18.3 (T-USE-01 DDL)
+- Harness: `harness/tests/backend/test_phase14_v13_usefulness_contract.py` — `test_phase14_workspace_v1_3_*`, `test_phase14_templates_migration_*`
+
+**Outputs:**
+- `backend/migrations/versions/0009_workspace_v1_3_fields.py`
+- `backend/migrations/versions/0010_templates.py`
+
+**Steps:**
+1. Create `0009_workspace_v1_3_fields.py` with `revision = "0009"`, `down_revision = "0008"`.
+2. In `upgrade()`:
+   - `op.add_column("workspaces", sa.Column("template_slug", sa.Text(), nullable=True))`
+   - `op.add_column("workspaces", sa.Column("clarification_qa", postgresql.JSONB, nullable=True))`
+   - `op.add_column("workspaces", sa.Column("public_share_slug", sa.Text(), nullable=True))`
+   - `op.add_column("workspaces", sa.Column("public_share_enabled", sa.Boolean(), nullable=False, server_default=sa.text("false")))`
+   - `op.create_unique_constraint("uq_workspaces_public_share_slug", "workspaces", ["public_share_slug"])`
+   - Create a partial B-tree index for the hot lookup: `op.create_index("ix_workspaces_public_share_slug_enabled", "workspaces", ["public_share_slug"], postgresql_where=sa.text("public_share_enabled = true"))`
+3. In `downgrade()`, drop the index, drop the unique constraint, drop the four columns in reverse order.
+4. Create `0010_templates.py` with `revision = "0010"`, `down_revision = "0009"`.
+5. In `upgrade()` create the `templates` table with all columns per the harness: `id` UUID PK, `slug` TEXT NOT NULL UNIQUE, `name` TEXT NOT NULL, `description` TEXT NOT NULL, `category` TEXT NOT NULL, `problem_statement` TEXT NOT NULL, `suggested_provider` TEXT, `suggested_model` TEXT, `sort_order` INTEGER NOT NULL DEFAULT 0, `active` BOOLEAN NOT NULL DEFAULT true, `created_at` TIMESTAMPTZ NOT NULL.
+6. Create index `ix_templates_active_sort` on `(active, sort_order)`.
+7. In `downgrade()`, drop the index then the table.
+8. `uv run alembic upgrade head` — both apply cleanly.
+9. `uv run alembic downgrade -2` — rolls back both cleanly.
+10. `uv run alembic upgrade head` again to leave the schema in the upgraded state.
+
+**Acceptance Criteria:**
+- `uv run alembic upgrade head` exits 0; `\d+ workspaces` in psql shows the four new columns and the partial index.
+- `\d+ templates` shows the table with all columns, the unique constraint on slug, and the `ix_templates_active_sort` index.
+- `uv run alembic downgrade -2` cleanly removes everything Phase 14 added.
+- `uv run pytest ../harness/tests/backend/test_phase14_v13_usefulness_contract.py::test_phase14_workspace_v1_3_fields_migration_exists ../harness/tests/backend/test_phase14_v13_usefulness_contract.py::test_phase14_workspace_v1_3_migration_adds_all_four_columns ../harness/tests/backend/test_phase14_v13_usefulness_contract.py::test_phase14_workspace_v1_3_migration_creates_unique_constraint_on_share_slug ../harness/tests/backend/test_phase14_v13_usefulness_contract.py::test_phase14_templates_migration_exists ../harness/tests/backend/test_phase14_v13_usefulness_contract.py::test_phase14_templates_migration_creates_templates_table` all pass.
+
+**Dependencies:** T-159
+
+---
+
+### T-161: ORM Models and Pydantic Schemas for V1.3
+
+**Description:**
+Add the four new fields to the `Workspace` ORM model, create the `Template` model, and extend the workspace request/response schemas. The `Workspace` API response gains `coverage_summary` (derived on the fly — no DB column), `template_slug`, `public_share_slug`, and `public_share_enabled`. `CreateWorkspaceRequest` accepts an optional `template_slug` for provenance. `Template` is system-owned: no `user_id` FK.
+
+**Inputs:**
+- `backend/models/workspace.py` (extend)
+- `backend/schemas/workspace.py` (extend)
+- `backend/models/__init__.py` (re-exports)
+- Migration `0009`, `0010` (T-160)
+- Plan §10, §18.3
+- Harness: `test_phase14_workspace_model_has_v1_3_fields`, `test_phase14_template_model_*`, `test_phase14_workspace_schema_exposes_v1_3_fields`
+
+**Outputs:**
+- `backend/models/template.py` (new)
+- Updated `backend/models/workspace.py`
+- Updated `backend/models/__init__.py`
+- Updated `backend/schemas/workspace.py`
+
+**Steps:**
+1. In `backend/models/workspace.py` add four `Mapped` fields mirroring `0009`:
+   - `template_slug: Mapped[str | None] = mapped_column(Text, nullable=True)`
+   - `clarification_qa: Mapped[list[dict] | None] = mapped_column(JSONB, nullable=True)`
+   - `public_share_slug: Mapped[str | None] = mapped_column(Text, nullable=True, unique=True)`
+   - `public_share_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))`
+2. Create `backend/models/template.py`. The model must NOT reference `users.id` — Templates are system-owned in V1 (user-authored templates are V2). Fields exactly per the harness assertions; `__tablename__ = "templates"`.
+3. Re-export `Template` from `backend/models/__init__.py` alongside the existing exports so Alembic autogenerate sees it on future revisions.
+4. Extend `backend/schemas/workspace.py`:
+   - `CoverageSummary` (Pydantic): `tests`, `covered`, `total`, `percent`, all `int`, all `Field(ge=0)`; `percent` `Field(ge=0, le=100)`.
+   - `ClarificationQA` (Pydantic): `question: str`, `answer: str`, both max 1000.
+   - `WorkspaceResponse` adds `template_slug: str | None`, `public_share_slug: str | None`, `public_share_enabled: bool = False`, `coverage_summary: CoverageSummary | None = None`.
+   - `CreateWorkspaceRequest` adds `template_slug: str | None = None` validated against `^[a-z0-9][a-z0-9-]*$` and max 100 chars.
+5. Run `uv run python -c "from models import Workspace, Template; from schemas.workspace import WorkspaceResponse, CreateWorkspaceRequest, CoverageSummary; print('ok')"`.
+
+**Acceptance Criteria:**
+- All imports resolve.
+- `WorkspaceResponse.model_validate(workspace_orm_instance)` round-trips with the four new fields.
+- `CreateWorkspaceRequest(template_slug="../etc/passwd", ...)` raises `ValidationError`.
+- `Template.__tablename__ == "templates"` and the class has no `user_id` attribute.
+- Harness assertions `test_phase14_workspace_model_has_v1_3_fields`, `test_phase14_template_model_*`, `test_phase14_workspace_schema_exposes_v1_3_fields`, `test_phase14_workspaces_post_accepts_template_slug`, `test_phase14_models_init_exports_template` all pass.
+
+**Dependencies:** T-160
+
+---
+
+### T-162: Spec Clarification Service and Routes
+
+**Description:**
+Implement the lightweight Q&A step that runs before the first spec generation. A judge-model (Claude Haiku / GPT-4o Mini / Gemini Flash — the same selector used by `services/evals`) produces 3–5 targeted questions about the workspace's problem statement. The user's answers are persisted on `Workspace.clarification_qa` and injected into the existing spec prompt builder. The call is free (no credit deduction), best-effort (5-second timeout, returns 204 on failure), and uses the existing prompt-injection guard on every persisted answer.
+
+**Inputs:**
+- `backend/services/evals/online_eval.py` (reuse the judge-model selector)
+- `backend/services/security/prompt_injection_guard.py`, `backend/services/security/sanitizer.py`
+- `backend/services/llm/gateway.py`
+- Existing prompt builder for the spec stage (find under `backend/prompts/spec*.py`)
+- `backend/routers/workspace.py` (extend)
+- `backend/middleware/rate_limit.py` (extend)
+- Spec §4.4.1, §11; Plan §18.3 (T-USE-03)
+- Harness: `test_phase14_spec_clarifier_*`, `test_phase14_clarify_*`, `test_phase14_spec_prompt_accepts_optional_clarification_qa`
+
+**Outputs:**
+- `backend/services/pipeline/spec_clarifier.py` (new)
+- `backend/prompts/spec_clarification.py` (new — judge-model prompt that yields a strict JSON array of questions)
+- Updated spec prompt builder (accept optional `clarification_qa`)
+- Updated `backend/routers/workspace.py` (POST + PATCH `/workspaces/{id}/clarify`)
+- Updated `backend/middleware/rate_limit.py` (new tier)
+
+**Steps:**
+1. Create `backend/prompts/spec_clarification.py`. The system prompt instructs the judge model to produce a strict JSON array `[{"question": "…", "why_it_matters": "…"}]` of 3–5 questions targeted at the problem statement. No prose, no markdown — JSON only. Include a constrained few-shot example.
+2. Create `backend/services/pipeline/spec_clarifier.py` with two async functions:
+   - `request_clarifying_questions(workspace, db, redis) -> list[dict]`: selects the judge model via the existing eval selector; calls the LLM gateway under `asyncio.timeout(5.0)`; parses the JSON response; on any failure returns `[]`. Caches the returned questions in Redis under `clarify_round:{workspace.id}` with TTL 900s so PATCH can validate that the answers match the questions just asked.
+   - `persist_answers(workspace_id, answers, db, redis)`: validates each `answer.question` is in the cached round, runs each `answer.answer` through `prompt_injection_guard` and `sanitize_text`, persists the sanitised pairs to `Workspace.clarification_qa`.
+3. Do NOT import `credit_service` or call any deduction API in this module — clarification is free.
+4. Extend the spec prompt builder to accept an optional `clarification_qa` argument. When non-empty, render it as a `## Clarifications` markdown block appended to the problem statement.
+5. In `backend/routers/workspace.py`:
+   - `POST /workspaces/{id}/clarify`: auth + workspace ownership check; calls `request_clarifying_questions`; returns `{"questions": [...]}` or 204 No Content on empty.
+   - `PATCH /workspaces/{id}/clarify`: body `{"answers": [{"question": str, "answer": str}]}`; calls `persist_answers`; returns 204.
+6. Add to `backend/middleware/rate_limit.py` a new tier: 6 clarify calls per user per hour (`ratelimit:clarify:{user_id}`, 6, 3600s). Match the existing regex-based router used by other tiers.
+7. Add unit tests under `backend/tests/test_spec_clarifier.py`: judge-model timeout returns `[]`; injection patterns in answers are stripped; questions unrelated to the cached round are rejected.
+
+**Acceptance Criteria:**
+- `POST /workspaces/{id}/clarify` returns a list of 3–5 questions when the judge model is reachable, or 204 when it times out.
+- `PATCH /workspaces/{id}/clarify` rejects answers whose `question` is not in the cached Redis round (400).
+- An injection string in an answer is sanitised before persistence (verify via DB inspection in the unit test).
+- No credit ledger entry is created by either route.
+- The spec prompt builder's signature accepts `clarification_qa` and the rendered prompt includes the `## Clarifications` block when supplied.
+- All `test_phase14_spec_clarifier_*` and `test_phase14_clarify_*` harness tests pass.
+
+**Dependencies:** T-161
+
+---
+
+### T-163: SpecClarificationModal Frontend Component
+
+**Description:**
+A four-state modal (loading → ready → submitting → bypassed) opens on first `Generate` click on the spec stage. The modal must visually match the existing Modern Indica modals (`.create-modal-*`, glassmorphism shell, saffron CTA). Both `Skip` and `Use answers` paths flow into the standard generate. The modal is silently bypassed on 204 from the backend so the user never sees a clarification error.
+
+**Inputs:**
+- `frontend/src/services/api.ts` (extend)
+- `frontend/src/pages/Workspace.tsx` (mount + open trigger)
+- `frontend/src/index.css` (add `.clarify-modal-*` rules in the same section as other modal rules)
+- `frontend/src/store/stageStore.ts` (carry `clarificationQA` per workspace if not already present)
+- Spec §4.4.1; Plan §18.3 (T-USE-04)
+- Harness: `phase14 SpecClarificationModal`, `phase14 api.ts v1.3 exports`, `phase14 index.css design-system classes`
+
+**Outputs:**
+- `frontend/src/components/workspace/SpecClarificationModal.tsx` (new)
+- Updated `frontend/src/services/api.ts` (new `requestClarification` + `persistClarification`)
+- Updated `frontend/src/pages/Workspace.tsx`
+- Updated `frontend/src/index.css`
+- Updated `frontend/src/types/workspace.ts` (extend with `template_slug`, `clarification_qa`, `public_share_slug`, `public_share_enabled`, `coverage_summary` matching backend)
+
+**Steps:**
+1. In `api.ts`:
+   - `requestClarification(workspaceId): Promise<{ questions: ClarifyQuestion[] } | null>` — returns `null` on 204.
+   - `persistClarification(workspaceId, answers): Promise<void>`.
+   - Add the `ClarifyQuestion`, `ClarifyAnswer` types.
+2. Create `SpecClarificationModal.tsx`. On open: call `requestClarification`; if it returns `null`, immediately call `props.onProceed(answers=[])` so the parent dispatches the standard generate. Otherwise render the questions as labelled `<textarea>` fields (500-char max each) inside the existing `.create-modal-*` shell with a `.clarify-modal-question` class for the question block.
+3. Footer actions: `Skip` (secondary button) calls `onProceed([])` immediately; `Use answers` (primary saffron CTA, disabled until at least one field is non-empty) calls `persistClarification` then `onProceed(answers)`. Both close the modal.
+4. In `Workspace.tsx`: open the modal in the `requestGeneration` flow only when `activeStage.type === "spec" && activeStage.current_version === 0 && !workspace.clarification_qa`. Otherwise the existing flow runs unchanged.
+5. In `index.css`, add `.clarify-modal`, `.clarify-modal-question`, `.clarify-modal-textarea`, `.clarify-modal-skip` rules. Reuse `--color-primary` for the CTA, `--color-glass-bg` for the shell. Do not introduce a new colour.
+6. Extend `frontend/src/types/workspace.ts` to mirror the new `Workspace` response shape.
+7. Run `pnpm tsc` and `pnpm test`.
+
+**Acceptance Criteria:**
+- Loading state shows a brief shimmer ("Thinking of the right questions…").
+- A 204 response is invisible to the user — the modal closes immediately and the standard generate fires.
+- `Skip` does not call `persistClarification`.
+- The modal opens only on the FIRST spec generation per workspace; subsequent regenerates do not re-prompt.
+- `pnpm tsc` exits 0; `pnpm test` passes.
+- All `phase14 SpecClarificationModal` and relevant `phase14 api.ts v1.3 exports` harness tests pass.
+
+**Dependencies:** T-162
+
+---
+
+### T-164: Task Priority + Estimate Enforcement
+
+**Description:**
+Update the TASKS prompt template so every emitted task carries a `Priority` line (`MUST` / `SHOULD` / `COULD`) and an `Estimate` line (`S` / `M` / `L` / `XL`), and the document starts with a `## Effort Summary` block. Extend the online eval to structurally validate Priority and Estimate per task, emitting `MISSING_PRIORITY` / `MISSING_ESTIMATE` issues into the existing `tasks_without_ref` JSONB field so the existing `TaskValidationPanel` surfaces them with no UI shape change.
+
+**Inputs:**
+- `backend/prompts/tasks*.py` (or `.md`) — locate and update
+- `backend/services/evals/online_eval.py` (extend `_validate_task_references`)
+- Spec §5.4; Plan §18.3 (T-USE-05)
+- Harness: `test_phase14_tasks_prompt_mandates_priority_and_estimate_fields`, `test_phase14_tasks_prompt_includes_effort_summary_block`, `test_phase14_online_eval_validates_priority_and_estimate`
+
+**Outputs:**
+- Updated `backend/prompts/tasks*.py` (or `.md`)
+- Updated `backend/services/evals/online_eval.py`
+
+**Steps:**
+1. Locate the tasks prompt template under `backend/prompts/`. Update the system prompt's "Required output shape" section to mandate `Priority:` and `Estimate:` lines per `## Task N — …` block. Constrain the enums explicitly.
+2. Update the few-shot example to include Priority and Estimate lines.
+3. Mandate a `## Effort Summary` block at the top of the document with: `Estimate range: ~Xw`, `Tasks: N total · X MUST · Y SHOULD · Z COULD`, `Sizes: AxXL · BxL · CxM · DxS`, `Minimum cut: Ship MUST-only → ~Yd`.
+4. In `online_eval.py`, add a helper `_validate_task_fields(content) -> list[dict]` that for every `## Task N — …` block: parses out the `Priority:` and `Estimate:` lines (case-insensitive), validates enum membership, returns issues with shape `{ "task_number": int, "task_title": str, "reason": str, "gap_type": "MISSING_PRIORITY" | "MISSING_ESTIMATE" }`.
+5. Merge the new issues into the existing `tasks_without_ref` list in `_validate_task_references` so the persisted `EvalResult.tasks_without_ref` carries both flavours of structural issue.
+6. Add unit tests `backend/tests/test_online_eval_task_fields.py` covering: clean content (no issues), missing Priority on T-002, invalid enum value, missing Estimate.
+7. Re-finalise a tasks stage in dev — verify the existing `TaskValidationPanel` surfaces the new gap types without any UI change.
+
+**Acceptance Criteria:**
+- Generating TASKS produces an `## Effort Summary` block at the top.
+- Every emitted task carries Priority and Estimate lines with valid enum values.
+- An LLM output that omits Priority on a task flags that task in the eval result with `gap_type: "MISSING_PRIORITY"`.
+- Existing T-NNN harness-reference checks continue to flag missing references.
+- The `tasks_without_ref` panel UI is unchanged.
+- All `test_phase14_tasks_prompt_*` and `test_phase14_online_eval_validates_priority_and_estimate` harness tests pass.
+
+**Dependencies:** T-161
+
+---
+
+### T-165: Effort Summary Frontend Chip
+
+**Description:**
+Parse the `## Effort Summary` block from finalised TASKS content and render it as a chip in the workspace header. The parser must return `null` on missing/malformed blocks so older content degrades gracefully (chip hidden, no error).
+
+**Inputs:**
+- `frontend/src/pages/Workspace.tsx`
+- `frontend/src/utils/` (new helper)
+- `frontend/src/index.css`
+- Plan §18.3 (T-USE-06)
+- Harness: `phase14 effort summary`
+
+**Outputs:**
+- `frontend/src/utils/tasksParser.ts` (new)
+- Updated `frontend/src/pages/Workspace.tsx`
+- Updated `frontend/src/index.css`
+
+**Steps:**
+1. Create `frontend/src/utils/tasksParser.ts` with `parseEffortSummary(content: string): EffortSummary | null`. The function looks for `## Effort Summary`, extracts the four bullet lines (estimate range, tasks count, sizes, minimum cut), and returns an `EffortSummary` object. On any parse failure return `null`.
+2. Add unit tests `frontend/src/utils/tasksParser.test.ts`: clean content returns the structure; missing block returns `null`; malformed lines return `null` without throwing.
+3. In `Workspace.tsx`, when the active stage is TASKS and `parseEffortSummary(stage.content)` is non-null, render the chip in the header strip next to the stage indicators.
+4. Add `.effort-summary-chip` rules in `index.css`. Reuse the existing chip styling token set (radius, padding, glass background). Use `--color-secondary` (lotus) tint to differentiate from the saffron primary actions and the slate coverage chip.
+
+**Acceptance Criteria:**
+- The chip appears in the workspace header when TASKS content has the block; hides when absent.
+- The chip text matches the spec's example layout: `~3 weeks · 15 tasks · 6 MUST`.
+- The parser never throws for any input.
+- `pnpm test` passes including the new unit tests.
+- All `phase14 effort summary` harness tests pass.
+
+**Dependencies:** T-164
+
+---
+
+### T-166: PDF Export Backend (WeasyPrint)
+
+**Description:**
+Render finalised SPEC.md, PLAN.md, and TASKS.md into a single branded PDF using WeasyPrint (no headless browser). The renderer is configured with a no-network URL fetcher so a malicious `<img src>` cannot exfiltrate. The harness directory is intentionally excluded — PDFs are for human audiences. New rate-limit tier: 10 exports/user/hour.
+
+**Inputs:**
+- `backend/pyproject.toml` (add `weasyprint`)
+- `backend/services/pipeline/export_service.py` (reuse stage-content fetch helpers)
+- `backend/templates/` (new directory if not present)
+- `backend/routers/workspace.py` (extend)
+- `backend/middleware/rate_limit.py` (extend)
+- Spec §4.8, §12; Plan §18.3 (T-USE-07)
+- Harness: `test_phase14_pdf_export_*`
+
+**Outputs:**
+- `backend/services/pipeline/pdf_export_service.py` (new)
+- `backend/templates/export.html.j2` (new)
+- Updated `backend/pyproject.toml`
+- Updated `backend/routers/workspace.py`
+- Updated `backend/middleware/rate_limit.py`
+
+**Steps:**
+1. Add `weasyprint` to `pyproject.toml` and run `uv sync`. The Railway Python base image already includes `cairo` / `pango`; no Dockerfile change needed for production. Document this in the file's import block as a comment so the dependency is visible.
+2. Create `backend/templates/export.html.j2` (Jinja2). Layout: cover page (workspace name, provider used, harness coverage figure, generation date), table of contents, one section per stage. Inline all CSS — no `<link>` to external stylesheets. Use Pygments to syntax-highlight fenced code blocks server-side at render time.
+3. Create `pdf_export_service.py` with `async def render(workspace_id, db) -> bytes`:
+   - Reuse the existing content-fetch helpers from `export_service` to load SPEC, PLAN, TASKS content; do not include the harness directory.
+   - Render the Jinja template into HTML.
+   - Pass that HTML into `weasyprint.HTML(string=html_text, url_fetcher=NO_NETWORK_FETCHER)` and `.write_pdf()` it to a `BytesIO`.
+   - Define `NO_NETWORK_FETCHER` as a module-level function that raises for any non-data-URL fetch — name it explicitly so the harness can find the string `no_network`.
+4. Add `POST /workspaces/{id}/export/pdf` in `routers/workspace.py`. Stream the bytes back via `StreamingResponse(media_type="application/pdf")` with `Content-Disposition: attachment; filename="specforge-<slug>.pdf"`. Require all four stages finalised (reuse the existing `ExportNotReadyError` from Phase 13 → 409 mapping).
+5. Add to `middleware/rate_limit.py` a new tier: 10 PDF exports/user/hour, key `ratelimit:pdf_export:{user_id}`, window 3600s.
+6. Add unit tests `backend/tests/test_pdf_export_service.py`: render produces non-empty bytes starting with `%PDF-`; no-network fetcher raises on `https://` URLs.
+
+**Acceptance Criteria:**
+- `curl -X POST .../export/pdf` returns a `%PDF-1.7` (or similar) byte stream of >5 KB.
+- The PDF cover page shows the workspace name and the harness coverage figure.
+- The harness directory is NOT present in the rendered output.
+- A malicious workspace with an `<img src="https://evil/exfil">` injected via spec content does NOT cause an outbound HTTP call (the fetcher raises).
+- Rate limit fires on the 11th call within an hour.
+- All `test_phase14_pdf_export_*` harness tests pass.
+
+**Dependencies:** T-161
+
+---
+
+### T-167: PDF Export Frontend Button
+
+**Description:**
+Add `[📄 Export PDF]` as a third button in the workspace header alongside ZIP and GitHub. Click → call `exportWorkspacePdf` → receive a blob → trigger a browser download. Visually match the existing tertiary buttons; do not introduce a new colour.
+
+**Inputs:**
+- `frontend/src/pages/Workspace.tsx`
+- `frontend/src/services/api.ts`
+- `frontend/src/index.css`
+- Plan §18.3 (T-USE-08)
+- Harness: `phase14 PDF export button`
+
+**Outputs:**
+- `frontend/src/components/workspace/ExportPDFButton.tsx` (new)
+- Updated `frontend/src/services/api.ts`
+- Updated `frontend/src/pages/Workspace.tsx`
+- Updated `frontend/src/index.css`
+
+**Steps:**
+1. In `api.ts`, add `exportWorkspacePdf(workspaceId): Promise<Blob>`. Use `axios.post(..., { responseType: "blob" })`.
+2. Create `ExportPDFButton.tsx`. On click: call the API, create an object URL from the returned blob, programmatically click a hidden anchor with `download="specforge-<workspaceName>.pdf"`, revoke the URL afterwards.
+3. While the request is in flight, swap the label to "Generating PDF…" and disable the button.
+4. Mount the button in `Workspace.tsx` between the ZIP button and the GitHub button so the order reads: ZIP · PDF · GitHub · Share.
+5. Add `.workspace-pdf-btn` CSS. Reuse the tertiary slate tint set already used by `.workspace-github-btn` — both are secondary outputs vs. the saffron primary actions; visually grouping them is intentional.
+6. `pnpm tsc` + `pnpm test`.
+
+**Acceptance Criteria:**
+- Clicking the button downloads a file matching `specforge-*.pdf` whose first bytes are `%PDF-`.
+- The button is disabled with a tooltip if any of the four stages is not finalised.
+- Visual treatment matches the existing tertiary button family — no new colour added.
+- All `phase14 PDF export button` harness tests pass.
+
+**Dependencies:** T-166
+
+---
+
+### T-168: Public Share Backend
+
+**Description:**
+Implement `enable` / `disable` / `rotate` lifecycle for a per-workspace public slug, plus the unauthenticated `GET /public/{slug}` endpoint. The slug uses `secrets.choice` against a 31-character alphabet that excludes ambiguous characters (`0/o/1/l/i`). The public endpoint builds its response from an explicit allow-list helper — never from a raw `Workspace` model dump — so future ORM fields cannot accidentally leak.
+
+**Inputs:**
+- Existing `Workspace` ORM + schema (T-161)
+- `backend/routers/` (existing pattern)
+- `backend/services/` (new sub-package `sharing/`)
+- Spec §4.8, §11, §12; Plan §18.3, §18.4 (T-USE-09)
+- Harness: `test_phase14_public_share_*`, `test_phase14_public_router_*`, `test_phase14_share_routes_declared_in_workspace_router`, `test_phase14_public_view_rate_limit_tier_declared`
+
+**Outputs:**
+- `backend/services/sharing/__init__.py` (new)
+- `backend/services/sharing/public_share_service.py` (new)
+- `backend/routers/public.py` (new, unauthenticated)
+- Updated `backend/routers/workspace.py` (share lifecycle endpoints)
+- Updated `backend/main.py` (register `public` router)
+- Updated `backend/middleware/rate_limit.py` (public-view + share-toggle tiers)
+- Updated `backend/schemas/workspace.py` (`PublicWorkspaceResponse` model)
+
+**Steps:**
+1. Create `services/sharing/public_share_service.py`:
+   - `ALPHABET = "abcdefghjkmnpqrstuvwxyz23456789"` (31 chars; comment that this excludes `0/o/1/l/i`).
+   - `SLUG_LEN = 6`.
+   - `_generate_slug() -> str` using `secrets.choice` in a loop; retry up to 3 times on `IntegrityError`.
+   - `async def enable(workspace_id, db) -> str`: rejects with `WorkspaceNotFinalisedError` if any of the four stages is not `finalised`. Idempotent: if a slug already exists, only flip `public_share_enabled = True` and return the existing slug.
+   - `async def disable(workspace_id, db) -> None`: flips `public_share_enabled = False`; preserves the slug so re-enable reuses the same URL.
+   - `async def rotate(workspace_id, db) -> str`: generates a new slug, sets `public_share_enabled = True`. Old slug is invalidated.
+   - `async def build_public_view(slug, db) -> PublicWorkspaceResponse | None`: the ONLY function that constructs the public response. Builds the response as an explicit dict with the allow-list fields (`name`, `provider_label`, `stages: [{type, content}, ...]`, `coverage_summary`, `eval_summary`, `shared_at`). Returns `None` if slug unknown or sharing disabled.
+2. Define `PublicWorkspaceResponse` Pydantic model in `schemas/workspace.py` matching `harness/schemas/public-workspace.schema.json` exactly (allow-list — `model_config = ConfigDict(extra="forbid")`).
+3. Create `backend/routers/public.py`:
+   - `GET /public/{slug}`: no auth dependency; calls `build_public_view`; 404 if `None`; sets headers `X-Robots-Tag: noindex, nofollow` and `Cache-Control: public, max-age=60, stale-while-revalidate=600`.
+   - Computes an `ETag` from `shared_at`; honours `If-None-Match` with 304.
+4. Register the router in `backend/main.py` with prefix `/public` and explicitly mark it as exempt from the auth middleware in the documented exemption list.
+5. Add share lifecycle endpoints to `routers/workspace.py`:
+   - `POST /workspaces/{id}/share` → `enable`, returns `{slug, url, enabled: true}`.
+   - `DELETE /workspaces/{id}/share` → `disable`, returns 204.
+   - `POST /workspaces/{id}/share/rotate` → `rotate`, returns `{slug, url, enabled: true}`.
+   - Map `WorkspaceNotFinalisedError` → 409 with `{"error": "workspace_not_finalised"}`.
+6. Add to `middleware/rate_limit.py` two tiers: `public_view` (per-IP, 120/min) and `share_toggle` (per-user, 20/hour).
+7. Unit tests `backend/tests/test_public_share_service.py`: slug alphabet has no ambiguous chars; `_generate_slug` retries on collision; `enable` rejects non-finalised workspaces; `build_public_view` returns `None` for disabled rows; allow-list shape never leaks `user_id`, `email`, `credit balance`, `clarification_qa`.
+8. Frontend serving of `/p/:slug` (the React route) is T-169 — backend stops at `/public/{slug}`.
+
+**Acceptance Criteria:**
+- `secrets` is used for slug generation; `random` is not imported.
+- Enabling sharing on a workspace with any non-finalised stage returns 409.
+- The slug returned never contains `0`, `o`, `1`, `l`, or `i`.
+- `GET /public/<wrong>` returns 404; `GET /public/<disabled>` returns 404.
+- `GET /public/<valid>` response body keys are exactly: `name`, `provider_label`, `stages`, `coverage_summary`, `eval_summary`, `shared_at` — no extras (Pydantic `extra="forbid"`).
+- Response carries `X-Robots-Tag: noindex, nofollow`.
+- Rate limit fires on the 121st `/public/{slug}` request per IP per minute.
+- All `test_phase14_public_share_*`, `test_phase14_public_router_*` harness tests pass.
+
+**Dependencies:** T-161
+
+---
+
+### T-169: Public Share Frontend (Modal + /p/:slug Read-Only View)
+
+**Description:**
+Two surfaces: a workspace modal to enable/disable/rotate the link, and a brand-new top-level read-only route at `/p/:slug` that renders the finalised spec in the Modern Indica design without authenticated state. The route must be registered OUTSIDE the auth guard, must inject `<meta name="robots" content="noindex, nofollow" />`, and must not import any authenticated store (no `userStore`, no `creditsBalance`).
+
+**Inputs:**
+- `frontend/src/App.tsx` (register `/p/:slug` route outside the auth guard)
+- `frontend/src/pages/Workspace.tsx` (header button)
+- `frontend/src/services/api.ts`
+- `frontend/src/index.css`
+- `frontend/public/robots.txt` (add Disallow `/p/`)
+- Spec §4.8; Plan §18.3, §18.4 (T-USE-10)
+- Harness: `phase14 public share frontend`
+
+**Outputs:**
+- `frontend/src/components/workspace/SharePublicLinkModal.tsx` (new)
+- `frontend/src/pages/PublicWorkspaceView.tsx` (new)
+- Updated `frontend/src/App.tsx`
+- Updated `frontend/src/services/api.ts`
+- Updated `frontend/src/pages/Workspace.tsx`
+- Updated `frontend/src/index.css`
+- Updated `frontend/public/robots.txt`
+- `frontend/src/types/publicShare.ts` (new — `PublicWorkspaceResponse`)
+
+**Steps:**
+1. In `api.ts`, add `enablePublicShare(workspaceId)`, `disablePublicShare(workspaceId)`, `rotatePublicShare(workspaceId)`, `getPublicWorkspace(slug)`. `getPublicWorkspace` catches 404 and returns `null`.
+2. Define `PublicWorkspaceResponse` TS interface in `frontend/src/types/publicShare.ts` matching the backend Pydantic shape exactly.
+3. Create `SharePublicLinkModal.tsx`. Renders three states: `disabled` (Enable CTA), `enabled` (URL + copy button + Disable + Rotate-behind-disclosure), `loading`. Reuse the existing `.create-modal-*` shell. The URL copy uses `navigator.clipboard.writeText`. The rotate control is intentionally behind a disclosure to prevent accidental clicks.
+4. Create `PublicWorkspaceView.tsx`. On mount: `getPublicWorkspace(slug)`. While loading: skeleton. On 404: render the 404 page (reuse existing). On success: render the four finalised stages in a read-only `StageEditor` (set `readOnly` prop), the harness coverage chip, and a footer "Made with SpecForge → specforge.app". Inject `<meta name="robots" content="noindex, nofollow" />` via `react-helmet-async` (already in the dependency tree) or via direct `document.head` manipulation in a `useEffect`.
+5. Do NOT import `userStore`, `stageStore`, `creditsBalance`, or any other authenticated state. The harness will fail the test if any of these strings appear in the file.
+6. In `App.tsx`, register `/p/:slug` as a top-level `<Route>` OUTSIDE the existing `<RequireAuth>` wrapper. Use `React.lazy` for `PublicWorkspaceView` so unauthenticated visitors do not pay the full bundle cost.
+7. Add a `Share` button to the workspace header (after the PDF button). Click opens the modal.
+8. Update `frontend/public/robots.txt` to add `Disallow: /p/` under `User-agent: *`. If the file does not exist, create it with `User-agent: *\nDisallow: /p/`.
+9. Add `.public-view-*` CSS rules: cover, ToC, footer, coverage chip; reuse existing typography and palette.
+10. `pnpm tsc`, `pnpm test`, and a manual test: enable share, open the URL in an incognito window, verify the page renders without an auth redirect and view-source shows the noindex meta.
+
+**Acceptance Criteria:**
+- `/p/<valid-slug>` in an incognito tab renders the finalised spec without redirecting to `/login`.
+- View-source shows `<meta name="robots" content="noindex, nofollow">`.
+- The file `frontend/src/pages/PublicWorkspaceView.tsx` does not contain the strings `userStore`, `stageStore`, `creditsBalance`, or `useUserStore`.
+- `frontend/public/robots.txt` contains `Disallow: /p/`.
+- The copy-link button copies the canonical URL to the clipboard.
+- Rotate behind disclosure prevents single-click slug rotation.
+- `pnpm tsc` exits 0.
+- All `phase14 public share frontend` harness tests pass.
+
+**Dependencies:** T-168
+
+---
+
+### T-170: Starter Templates Backend (Model, Seed, Endpoint)
+
+**Description:**
+The `templates` table is already created in T-160 and the model in T-161. This task adds the unauthenticated `GET /templates` endpoint, the idempotent seed script with 6–10 hand-tuned starter templates, and the Docker entrypoint hook that runs the seed after `alembic upgrade head` on every container start.
+
+**Inputs:**
+- `backend/models/template.py` (T-161)
+- `backend/main.py` (extend)
+- `backend/routers/` (new file)
+- `backend/scripts/` (new directory if not present)
+- `backend/Dockerfile` or entrypoint script
+- Spec §4.11, §11; Plan §18.3 (T-USE-11)
+- Harness: `test_phase14_templates_router_*`, `test_phase14_templates_seed_script_*`, `test_phase14_templates_endpoint_is_unauthenticated`
+
+**Outputs:**
+- `backend/routers/templates.py` (new, unauthenticated)
+- `backend/scripts/seed_templates.py` (new, idempotent)
+- Updated `backend/main.py`
+- Updated `backend/Dockerfile` / entrypoint
+- `backend/schemas/template.py` (new — `TemplateRead` matching `harness/schemas/template.schema.json`)
+
+**Steps:**
+1. Create `backend/schemas/template.py` with `TemplateRead` Pydantic model mirroring the harness schema. `category` is a `Literal["auth", "payments", "content", "realtime", "agent", "tooling"]`.
+2. Create `backend/routers/templates.py`:
+   - `GET /templates`: no auth dependency; queries `Template` filtered by `active == True`, ordered by `sort_order`, then `name`. Returns `list[TemplateRead]`.
+3. Register the router in `main.py` with prefix `/templates` and add to the auth-exempt list.
+4. Create `backend/scripts/seed_templates.py`. It accepts an async session (or constructs one from the app's `DATABASE_URL`) and upserts 6–10 templates via `INSERT ... ON CONFLICT (slug) DO UPDATE SET name=EXCLUDED.name, description=..., problem_statement=..., suggested_provider=..., suggested_model=..., sort_order=..., active=true`. Required slugs: `stripe-like-checkout`, `linear-like-ticketing`, `slack-bot`, `ai-chat-assistant`, `internal-admin-panel`, `rest-api-server`, `realtime-presence`, `agent-harness`. Each must have a problem_statement of at least 200 chars that produces a high-quality spec on first generation.
+5. Mark the script idempotent by ensuring re-runs do not duplicate rows and do not bump `created_at` on already-existing rows.
+6. Update the Docker entrypoint to invoke `uv run python scripts/seed_templates.py` AFTER `alembic upgrade head`, BEFORE `uvicorn`. The script must exit 0 even when called against an empty database (the migration runs first so the table exists).
+7. Add `backend/tests/test_seed_templates.py`: run the script twice in a transaction → expect the same row count both times.
+
+**Acceptance Criteria:**
+- `GET /templates` returns at least 6 templates ordered by `sort_order` ascending.
+- An unauthenticated curl to `GET /templates` returns 200 (no 401).
+- Running the seed script twice does not duplicate any row.
+- `docker compose up --build` brings the API up with the templates already seeded.
+- Disabling a template via SQL (`UPDATE templates SET active = false WHERE slug = '…'`) causes it to disappear from the `GET /templates` response but does not break workspaces whose `Workspace.template_slug` references it.
+- All `test_phase14_templates_*` harness tests pass.
+
+**Dependencies:** T-161
+
+---
+
+### T-171: Starter Templates Frontend (Strip + Workspace Form Prefill)
+
+**Description:**
+Render the template gallery as a horizontal scrolling strip on the Dashboard above the workspace grid AND above the workspace creation form. Clicking a card pre-fills `name`, `problem_statement`, and the suggested provider/model into the form. The chosen `template_slug` is recorded on the workspace for provenance via `POST /workspaces`.
+
+**Inputs:**
+- `frontend/src/pages/Dashboard.tsx`
+- `frontend/src/components/dashboard/` (existing creation modal or inline form)
+- `frontend/src/services/api.ts`
+- `frontend/src/index.css`
+- Spec §4.2, §4.10, §4.11; Plan §18.3 (T-USE-12)
+- Harness: `phase14 starter templates`
+
+**Outputs:**
+- `frontend/src/components/templates/TemplatesStrip.tsx` (new)
+- `frontend/src/components/templates/TemplateCard.tsx` (new)
+- `frontend/src/types/template.ts` (new — `Template` interface)
+- Updated `frontend/src/services/api.ts` (`getTemplates`; extend `createWorkspace` body to accept `template_slug`)
+- Updated `frontend/src/pages/Dashboard.tsx`
+- Updated workspace creation form / modal
+- Updated `frontend/src/index.css`
+
+**Steps:**
+1. Define `Template` and `TemplateCategory` TS types matching the backend.
+2. Add `getTemplates(): Promise<Template[]>` in `api.ts`. Extend `createWorkspace` to accept an optional `template_slug` field.
+3. Create `TemplateCard.tsx` and `TemplatesStrip.tsx`. The strip horizontally scrolls (overflow-x: auto with momentum on iOS). Each card shows: name, one-line description, a small category badge, and a subtle "Use →" affordance. Cards use the existing glass card visual token (`--color-glass-bg`, `--color-glass-border`).
+4. Cache the fetched template list in a module-level variable for the session so re-renders don't re-fetch.
+5. In `Dashboard.tsx`, mount `TemplatesStrip` above the workspace grid. When the user's workspace list is empty, the strip is the dominant element (use stacked layout); when the list has content, the strip is collapsed/optional but still present.
+6. In the workspace creation form/modal, mount the strip above the name field. Clicking a card pre-fills name + problem statement + provider + model. Render a small chip below the form showing "Started from <template name> · clear" so the user can opt out.
+7. When the user submits, pass the captured `template_slug` to `createWorkspace`.
+8. Add CSS rules `.templates-strip`, `.template-card`, `.template-card-badge`, `.template-card-cta`. No new colours.
+9. `pnpm tsc` and `pnpm test`.
+
+**Acceptance Criteria:**
+- Dashboard with zero workspaces shows the TemplatesStrip prominently.
+- Clicking a card pre-fills the workspace form; clearing the chip resets the fields.
+- A workspace created from a template has `template_slug` recorded in the DB (verify in psql).
+- The strip is horizontally scrollable on narrow viewports.
+- Visual treatment matches the existing card family — no new palette entries.
+- All `phase14 starter templates` harness tests pass.
+
+**Dependencies:** T-170
+
+---
+
+### T-172: Harness Coverage Surfacing
+
+**Description:**
+The harness coverage figure already exists on `EvalResult.coverage_percent` for the harness stage. This task surfaces it as a `coverage_summary` field on the workspace API response (derived on the fly — no DB column) and renders it as a `.harness-coverage-chip` in three places: the workspace header, the dashboard workspace card, and the public share view. Harness is SpecForge's main differentiator — making it visible at a glance is intentional positioning.
+
+**Inputs:**
+- `backend/routers/workspace.py` (extend response)
+- `backend/schemas/workspace.py` (already extended in T-161)
+- `frontend/src/pages/Workspace.tsx`, `Dashboard.tsx`, `PublicWorkspaceView.tsx`
+- `frontend/src/components/dashboard/WorkspaceCard.tsx` (if present)
+- `frontend/src/index.css`
+- Spec §7; Plan §18.3 (T-USE-13)
+- Harness: `test_phase14_workspace_response_includes_coverage_summary`, `test_phase14_workspace_endpoint_computes_coverage_summary_from_eval`, `phase14 harness coverage chip`
+
+**Outputs:**
+- Updated `backend/routers/workspace.py`
+- Updated `backend/services/pipeline/stage_manager.py` (or wherever workspace assembly lives) — derive `coverage_summary`
+- Updated `frontend/src/pages/Workspace.tsx`
+- Updated `frontend/src/pages/Dashboard.tsx` / `WorkspaceCard.tsx`
+- Updated `frontend/src/pages/PublicWorkspaceView.tsx`
+- Updated `frontend/src/index.css`
+
+**Steps:**
+1. In the workspace response builder, after loading the workspace's stages, find the harness stage and its latest `EvalResult`. Derive `coverage_summary` as `{tests: <count of tests in harness>, covered: <reqs covered>, total: <reqs total>, percent: <coverage_percent>}`. If the harness stage is missing or has no eval, return `None`. Persist nothing — purely computed.
+2. Wire the derived value into `WorkspaceResponse.coverage_summary`.
+3. Wire the same derivation into the public share endpoint (T-168) so `PublicWorkspaceResponse.coverage_summary` carries the figure.
+4. Frontend: add a `<HarnessCoverageChip />` component (or inline JSX) that takes `coverage_summary` and renders the chip. If `null`, render nothing.
+5. Mount the chip in:
+   - `Workspace.tsx` header, after the stage indicator strip
+   - The Dashboard `WorkspaceCard` (replacing or supplementing the current "stages finalised" pip row)
+   - `PublicWorkspaceView.tsx` near the workspace title
+6. Add `.harness-coverage-chip` and a `.harness-coverage-chip-bar` CSS rule (a tiny progress bar inside the chip showing the percent visually). Use `--color-tertiary` for the chip base; the progress bar fills with `--color-primary` (saffron). No new tokens.
+7. Add unit tests for the chip render (`null` hides; 100% renders without warning state; <80% renders with warning state).
+
+**Acceptance Criteria:**
+- `GET /workspaces/{id}` returns `coverage_summary: {…}` for workspaces with a finalised, evaluated harness; `null` otherwise.
+- No new DB column was added.
+- The chip is visible in all three locations.
+- Visual treatment is consistent across the three locations — same component, same CSS.
+- All `test_phase14_workspace_response_includes_coverage_summary`, `test_phase14_workspace_endpoint_computes_coverage_summary_from_eval`, and `phase14 harness coverage chip` harness tests pass.
+
+**Dependencies:** T-166, T-169 _(PDF service consumes the same derivation; public view renders the chip)_
+
+---
+
+### T-173: CI Update and V1.3 Smoke Test Checklist
+
+**Description:**
+Wire the new harness contract groups into CI, ensure WeasyPrint's native deps are present in the Docker image, document the seed step in the README / CLAUDE.md, and add a V1.3 smoke section to the smoke checklist covering the full clarification → priority/estimate → PDF → public share → templates → coverage flow.
+
+**Inputs:**
+- `.github/workflows/ci.yml`
+- `backend/Dockerfile` / `docker-compose.yml`
+- `CLAUDE.md`
+- `docs/SMOKE_TEST_CHECKLIST.md` (created in T-159)
+- All T-160 through T-172 outputs
+- Harness manifest entries: `v1-3-usefulness-contracts`, `v1-3-usefulness-frontend-contracts`
+
+**Outputs:**
+- Updated `.github/workflows/ci.yml`
+- Verified `backend/Dockerfile` (cairo / pango present)
+- Updated `CLAUDE.md`
+- Updated `docs/SMOKE_TEST_CHECKLIST.md`
+
+**Steps:**
+1. Add to the backend CI job in `.github/workflows/ci.yml`, after the existing Phase 13 step:
+   ```yaml
+   - name: V1.3 usefulness contracts
+     run: cd backend && uv run pytest ../harness/tests/backend/test_phase14_v13_usefulness_contract.py -q
+   - name: V1.3 unit tests
+     run: cd backend && uv run pytest tests/test_spec_clarifier.py tests/test_pdf_export_service.py tests/test_public_share_service.py tests/test_online_eval_task_fields.py tests/test_seed_templates.py -q
+   ```
+2. Add to the frontend CI job, after the existing Phase 13 step:
+   ```yaml
+   - name: V1.3 usefulness frontend contracts
+     run: cd frontend && pnpm vitest run ../harness/tests/frontend/phase14-v13-usefulness.contract.test.ts
+   ```
+3. Verify `backend/Dockerfile` (or the Railway base image) includes `libcairo2`, `libpango-1.0-0`, `libpangoft2-1.0-0`. If using `python:3.12-slim`, add an `apt-get install -y --no-install-recommends libcairo2 libpango-1.0-0 libpangoft2-1.0-0` step. Test locally with `docker compose build --no-cache api && docker compose up -d api && docker compose exec api uv run python -c "import weasyprint; weasyprint.HTML(string='<p>hi</p>').write_pdf()"` — must exit 0.
+4. Update `CLAUDE.md`:
+   - Mention that `templates` are seeded automatically on container start via `scripts/seed_templates.py`.
+   - Mention the new optional env keys if any (none in V1; document for V2 reference).
+   - Note that `/p/{slug}` is an unauthenticated public route.
+5. Append to `docs/SMOKE_TEST_CHECKLIST.md`:
+   ```
+   ## V1.3 Usefulness Improvements
+
+   Spec Clarification:
+   1. Create a fresh workspace. Click Generate on the spec stage.
+   2. Verify the clarification modal opens with 3–5 short-answer fields.
+   3. Click Skip. Verify generation begins immediately.
+   4. Create another workspace, fill in answers, click "Use answers". Verify generation begins and the spec references the answered context.
+
+   Task Priority + Estimate:
+   5. Complete the pipeline to TASKS. Verify every task has Priority and Estimate lines.
+   6. Verify the workspace header shows an effort-summary chip.
+
+   PDF Export:
+   7. Click "📄 Export PDF" on a finalised workspace. Verify download starts within 2 seconds.
+   8. Open the PDF. Verify cover page, ToC, three sections (SPEC/PLAN/TASKS), syntax-highlighted code, SpecForge footer.
+   9. Verify the harness directory is NOT included.
+
+   Public Share:
+   10. Click "🔗 Share Public Link". Toggle enable. Copy the URL.
+   11. Open the URL in an incognito window. Verify the spec renders without a login prompt.
+   12. View source — verify the noindex meta tag is present.
+   13. Toggle disable. Reload the incognito tab. Verify 404.
+
+   Starter Templates:
+   14. Sign out. Sign in as a new user. Verify the Dashboard prominently shows the Templates strip.
+   15. Click a template card. Verify the workspace form pre-fills name + problem statement.
+   16. Submit. Verify the created workspace's template_slug is recorded.
+
+   Harness Coverage Chip:
+   17. Open a workspace with a finalised harness. Verify the coverage chip is visible in the header.
+   18. Open the dashboard. Verify the same chip on the workspace card.
+   19. Open the public share view. Verify the chip is visible there too.
+   ```
+6. Run `docker compose down && docker compose up --build -d`. Wait healthy.
+7. Run `docker compose exec api uv run pytest ../harness/tests/backend/test_phase14_v13_usefulness_contract.py -q` — all green.
+8. Run `docker compose exec frontend pnpm vitest run ../harness/tests/frontend/phase14-v13-usefulness.contract.test.ts` — all green.
+9. Run `docker compose exec api uv run pytest tests/ -q --cov=services --cov-fail-under=80` — full backend suite green and coverage maintained.
+10. Run `docker compose exec frontend pnpm tsc` — no TypeScript errors.
+
+**Acceptance Criteria:**
+- CI references both Phase 14 harness contract files.
+- WeasyPrint successfully renders a PDF inside the Docker image.
+- `CLAUDE.md` documents the template seed and the public route.
+- The smoke checklist covers all six v1.3 features end-to-end.
+- All harness tests pass inside Docker.
+- `pnpm tsc` exits 0 inside Docker.
+- All Phase 1–13 tests continue to pass.
+
+**Dependencies:** T-172
+
+---
+
+_tasks.md · SpecForge V1 · Version 2.2.0 · 2026-05-20 — Phase 14 V1.3 usefulness improvements T-160 through T-173 (Spec Clarification, per-task Priority + Estimate, PDF export, Public Share, Starter Templates, harness coverage surfacing)_
+
 _tasks.md · SpecForge V1 · Version 2.1.0 · 2026-05-19 — Phase 13 GitHub export integration T-147 through T-159_

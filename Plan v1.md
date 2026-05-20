@@ -6,7 +6,7 @@ tags:
   - asdd
 created: 2026-04-25
 status: final
-version: 1.7.1
+version: 1.9.0
 stage: plan
 depends-on: "[[SpecForge V1 SPEC]]"
 ---
@@ -30,6 +30,7 @@ depends-on: "[[SpecForge V1 SPEC]]"
 - [[#9. Open Questions]]
 - [[#16. Phase 12 — LLM API Cost Optimization Plan]]
 - [[#17. Phase 13 — GitHub Export Integration]]
+- [[#18. Phase 14 — V1.3 Usefulness Improvements]]
 
 ---
 
@@ -2640,5 +2641,357 @@ After all T-GH-01 through T-GH-10 tasks are implemented:
    - Verify ZIP export still works on same workspace
 
 ---
+
+## 18. Phase 14 — V1.3 Usefulness Improvements
+
+> [!note] Source This phase implements the six v1 usefulness features specified in `V1 spec.md` v1.3.0: Spec Clarification (§4.4.1, §5.1), per-task Priority + Estimate with Effort Summary (§4.6, §5.4), PDF export (§4.8), Public Share read-only link (§4.8), Starter Templates (§4.11), and harness-coverage workspace-summary surfacing (§7). ZIP and GitHub export paths from Phase 13 are unchanged throughout.
+
+---
+
+### 18.1 Goal
+
+Raise the perceived usefulness of v1 along two axes — *quality of the generated artefacts* and *distribution of the finished workspace* — without touching the four-stage pipeline itself.
+
+- **Quality lever:** lift baseline spec quality by asking the user a small set of clarifying questions before the first spec generation, and make the TASKS output executable as a plan by stamping every task with a priority label and a T-shirt-size estimate.
+- **Distribution lever:** add a branded PDF export, a read-only public share URL, and a curated starter-template library on the dashboard, so a finished workspace can be shared and the cold-start problem on the landing dashboard is reduced.
+- **Positioning lever:** surface the harness coverage figure (which only SpecForge produces) at the workspace and dashboard levels rather than only inside the HARNESS stage.
+
+**Inputs:**
+- Existing post-Phase 13 codebase
+- `V1 spec.md` v1.3.0 (this phase's source spec sections)
+- No new external services — the six features all run on the existing FastAPI + PostgreSQL + Redis stack
+
+**Outputs:**
+- Two new Alembic migrations (Workspace columns + Template table)
+- New service files: `backend/services/pipeline/spec_clarifier.py`, `backend/services/pipeline/pdf_export_service.py`, `backend/services/sharing/public_share_service.py`
+- New router: `backend/routers/public.py` (unauthenticated read-only public-view endpoint)
+- New routes added to existing routers: `backend/routers/workspace.py` (clarify + share + pdf endpoints), `backend/routers/templates.py`
+- New ORM model `Template`; new fields on `Workspace` (`template_slug`, `clarification_qa`, `public_share_slug`, `public_share_enabled`)
+- Updated prompt template `prompts/tasks.md` (mandate Priority + Estimate + Effort Summary) and new prompt `prompts/spec_clarification.md` (judge model produces 3–5 questions)
+- New frontend components: `SpecClarificationModal.tsx`, `ExportPDFButton.tsx`, `SharePublicLinkModal.tsx`, `TemplatesStrip.tsx`, `PublicWorkspaceView.tsx` (and route `/p/:slug`)
+- New PDF template `backend/templates/export.html.j2` rendered by WeasyPrint
+- Template seed script `backend/scripts/seed_templates.py` (6–10 curated templates)
+
+---
+
+### 18.2 Sub-Stages
+
+| Priority | Task | Scope | Rationale |
+|---|---|---|---|
+| 1 | T-USE-01 | DB migrations (Workspace columns + Template table) | All other code depends on these |
+| 2 | T-USE-02 | ORM model + schema updates | Workspace, Template, response shapes |
+| 3 | T-USE-03 | Spec Clarification — backend (prompt + service + 2 routes) | Free judge-model call; persisted on workspace |
+| 4 | T-USE-04 | Spec Clarification — frontend modal + workspace store wiring | Triggered on first spec generate; Skip path |
+| 5 | T-USE-05 | Task Priority + Estimate — prompt update + eval extension | Mandate fields; add two eval checks |
+| 6 | T-USE-06 | Effort Summary — frontend header chip + parsing | Surface the summary block at the workspace top |
+| 7 | T-USE-07 | PDF Export — WeasyPrint service + endpoint + rate limit | Branded PDF of finalised SPEC/PLAN/TASKS |
+| 8 | T-USE-08 | PDF Export — frontend button + download handler | Header action alongside ZIP/GitHub |
+| 9 | T-USE-09 | Public Share — slug gen, share routes, public router | `/public/{slug}` no-auth read-only endpoint |
+| 10 | T-USE-10 | Public Share — frontend modal + `/p/:slug` read-only view | Modern Indica render; `noindex`; copy link |
+| 11 | T-USE-11 | Starter Templates — backend seed + `GET /templates` endpoint | Public no-auth so marketing preview works |
+| 12 | T-USE-12 | Starter Templates — Dashboard strip + workspace-form prefill | Click-to-prefill; provenance via `template_slug` |
+| 13 | T-USE-13 | Harness Coverage Surfacing — workspace header / dashboard card / public view chips | Pure UI lift over existing eval data |
+
+---
+
+### 18.3 Implementation Notes
+
+#### T-USE-01 — DB Migrations
+
+Two Alembic migrations applied in order so they can be reverted independently.
+
+**`0009_workspace_v1_3_fields.py`:**
+
+```python
+op.add_column("workspaces", sa.Column("template_slug",         sa.Text,    nullable=True))
+op.add_column("workspaces", sa.Column("clarification_qa",      postgresql.JSONB, nullable=True))
+op.add_column("workspaces", sa.Column("public_share_slug",     sa.Text,    nullable=True))
+op.add_column("workspaces", sa.Column("public_share_enabled",  sa.Boolean, nullable=False, server_default=sa.text("false")))
+op.create_unique_constraint(
+    "uq_workspaces_public_share_slug",
+    "workspaces",
+    ["public_share_slug"],
+)
+op.create_index(
+    "ix_workspaces_public_share_slug",
+    "workspaces",
+    ["public_share_slug"],
+    unique=False,
+    postgresql_where=sa.text("public_share_enabled = true"),
+)
+```
+
+The partial index keeps lookups on `/public/{slug}` fast while excluding disabled rows from the hot index.
+
+**`0010_templates.py`:**
+
+```python
+op.create_table("templates",
+    sa.Column("id",                 sa.UUID,     primary_key=True),
+    sa.Column("slug",               sa.Text,     nullable=False, unique=True),
+    sa.Column("name",               sa.Text,     nullable=False),
+    sa.Column("description",        sa.Text,     nullable=False),
+    sa.Column("category",           sa.Text,     nullable=False),
+    sa.Column("problem_statement",  sa.Text,     nullable=False),
+    sa.Column("suggested_provider", sa.Text),
+    sa.Column("suggested_model",    sa.Text),
+    sa.Column("sort_order",         sa.Integer,  nullable=False, server_default="0"),
+    sa.Column("active",             sa.Boolean,  nullable=False, server_default=sa.text("true")),
+    sa.Column("created_at",         sa.TIMESTAMPTZ, nullable=False),
+)
+op.create_index("ix_templates_active_sort", "templates", ["active", "sort_order"])
+```
+
+---
+
+#### T-USE-03 — Spec Clarification Backend
+
+`POST /workspaces/{id}/clarify` — produces 3–5 questions. The judge-model selection logic from `services/evals/online_eval` is reused (same provider as the workspace; Claude Haiku / GPT-4o Mini / Gemini Flash). The prompt asks for a strict JSON array of `{ question, why_it_matters }` so the response is parseable without LLM-specific quirks. Best-effort: a 5-second timeout, no credit deduction, returns `204 No Content` on failure so the frontend falls through to standard generate.
+
+`PATCH /workspaces/{id}/clarify` — request body `{ qa: [{ question, answer }] }`. Stores into `Workspace.clarification_qa` (JSONB). Validates that every `question` matches one produced by the most recent `POST` response (Redis cache, 15-minute TTL keyed `clarify_round:{workspace_id}`).
+
+`services/pipeline/spec_clarifier.py`:
+
+```python
+async def request_clarifying_questions(
+    workspace: Workspace, db: AsyncSession, redis: Redis
+) -> list[ClarifyingQuestion]: ...
+
+async def persist_answers(
+    workspace_id: UUID, answers: list[QAPair], db: AsyncSession, redis: Redis
+) -> None: ...
+```
+
+`build_spec_user_prompt` in `prompts/spec.py` is extended to take an optional `clarification_qa` argument; if non-empty it is rendered as a `## Clarifications` block appended to the problem statement before being passed to the LLM. The existing prompt-injection guard (`services/security/prompt_injection_guard`) is applied to **every answer** before injection — answers are user-supplied free text and must be sanitised identically to the problem statement.
+
+Rate limit: 6 clarify calls per user per hour (Redis sliding window). The first spec generation on a workspace consumes 1; a user opening the modal twice to reroll consumes 2.
+
+---
+
+#### T-USE-04 — Spec Clarification Frontend
+
+`SpecClarificationModal.tsx` opens on first `Generate` click on the spec stage *only* when `activeStage.type === "spec"`, `activeStage.current_version === 0`, and the workspace has no `clarification_qa` persisted. Behaviour:
+
+```
+[Loading… "Thinking of the right questions"]
+        ↓
+3–5 short-answer fields appear (textarea, 500-char max each)
+        ↓
+Buttons: [Skip → just generate]  [Use answers → generate]
+```
+
+If the backend returns 204 (judge model failed/timed out), the modal is silently bypassed and the standard generate flow runs. The user never sees an error from the clarification step — it is purely additive.
+
+`stageStore` gains a `clarificationQA: QAPair[] | null` field per workspace; it is hydrated on workspace load from the `Workspace.clarification_qa` field and re-fetched after the PATCH.
+
+---
+
+#### T-USE-05 — Task Priority + Estimate
+
+Edit `prompts/tasks.md` to mandate the new per-task fields and the project-level Effort Summary block. The system prompt's "Required output shape" section is updated; the few-shot example is updated to include `Priority` and `Estimate` lines.
+
+`services/evals/online_eval._validate_task_references` gains two additional structural checks:
+
+```python
+def _validate_task_fields(content: str) -> list[dict]:
+    """
+    For each `## Task N — …` block:
+      - require a `Priority:` line matching MUST|SHOULD|COULD
+      - require an `Estimate:` line matching S|M|L|XL
+    Return a list of issues with shape:
+      { task_number, task_title, reason, gap_type: "MISSING_PRIORITY"|"MISSING_ESTIMATE" }
+    """
+```
+
+Issues are merged into the existing `tasks_without_ref` JSONB field on `EvalResult` so the existing `TaskValidationPanel` UI surfaces them with no shape change. No new DB column is needed; the data still lives in `stage.content` as markdown.
+
+> [!note] The existing tasks-without-ref free-regen flow (now gated by `Stage.gap_patch_used`) is preserved — a task generation that produces a body missing Priority/Estimate is flagged with `gap_type: "MISSING_PRIORITY"` or `"MISSING_ESTIMATE"` and surfaces in the same panel as a coverage gap.
+
+---
+
+#### T-USE-06 — Effort Summary Frontend
+
+`Workspace.tsx` parses the `## Effort Summary` block emitted at the top of TASKS.md and displays the estimate range as a chip in the workspace header:
+
+```
+SPEC ✓  PLAN ✓  HARNESS ✓  TASKS ✓        ~3 weeks · 15 tasks · 6 MUST
+```
+
+A `parseEffortSummary(content: string)` helper lives in `frontend/src/utils/tasksParser.ts`. If parsing fails (e.g. older content without the block), the chip is hidden — graceful degradation, no error to the user.
+
+---
+
+#### T-USE-07 — PDF Export Backend
+
+`services/pipeline/pdf_export_service.py` renders the finalised SPEC.md, PLAN.md, and TASKS.md into a single PDF via **WeasyPrint** (HTML/CSS → PDF, no headless browser, runs in the same Python process).
+
+Template lives at `backend/templates/export.html.j2`:
+
+- Cover page: workspace name, provider used, harness coverage figure, generation date
+- ToC linked to bookmarks
+- One section per stage, syntax-highlighted code blocks (Pygments)
+- Footer on every page: "Generated with SpecForge — specforge.app"
+
+`POST /workspaces/{id}/export/pdf`:
+
+```python
+@router.post("/{workspace_id}/export/pdf")
+async def export_pdf(workspace_id: UUID, ...) -> StreamingResponse:
+    pdf_bytes = await pdf_export_service.render(workspace_id, db)
+    headers = {"Content-Disposition": f'attachment; filename="specforge-{slug}.pdf"'}
+    return StreamingResponse(io.BytesIO(pdf_bytes), media_type="application/pdf", headers=headers)
+```
+
+Sync end-to-end (no background job in V1). A typical workspace renders in <1 second; the rate limit (§12: 10 PDF exports/user/hour) covers the worst case. The harness directory is intentionally **not** included in the PDF — that is the runnable artefact; the PDF is for human audiences.
+
+WeasyPrint is added as a backend dependency in `pyproject.toml`. It pulls in `cairo` / `pango` system libs which already ship with the Railway Python build image.
+
+---
+
+#### T-USE-09 — Public Share Backend
+
+`services/sharing/public_share_service.py`:
+
+```python
+ALPHABET = "abcdefghjkmnpqrstuvwxyz23456789"   # 31 chars, ambiguous chars removed
+SLUG_LEN = 6                                    # 31^6 ≈ 887M values
+
+def _generate_slug() -> str: ...
+
+async def enable(workspace_id: UUID, db: AsyncSession) -> str: ...
+async def disable(workspace_id: UUID, db: AsyncSession) -> None: ...
+async def rotate(workspace_id: UUID, db: AsyncSession) -> str: ...
+```
+
+`enable` is idempotent: if the workspace already has a `public_share_slug`, only `public_share_enabled` is flipped to `true` — the existing slug is preserved so previously shared URLs continue to work. `rotate` discards the prior slug and issues a fresh one.
+
+`enable` rejects workspaces where any stage is not finalised (`stage.status != "finalised"` for any of the four) — returns 409 with `{"error": "workspace_not_finalised"}`.
+
+`backend/routers/public.py` hosts the unauthenticated read-only endpoint:
+
+```python
+@router.get("/{slug}")
+async def get_public_workspace(slug: str, db: AsyncSession = Depends(get_db)) -> dict:
+    """No auth required. 404 if slug unknown or sharing disabled."""
+```
+
+The route is registered without the auth middleware applied. To keep this safe:
+
+- Response shape is **explicit allow-list**, not a serialised `Workspace`: `{ name, provider_label, stages: [{ type, content }], coverage: {tests, covered, total} }`. Email, user id, credit balance, raw IDs, and unrelated workspaces are categorically not in the response shape.
+- A response-builder helper in the service is the **only** function that ever produces this shape; any new field added to the underlying ORM model is invisible by default.
+- The route is wired into the existing rate-limit middleware at the per-IP tier (§12: 120 reads/min per IP).
+- The route emits `Cache-Control: public, max-age=60, stale-while-revalidate=600` so Vercel's edge / a CDN can serve repeated views without a DB round trip. Cache is invalidated by writing a `public_share:{slug}:bumped_at` Redis key whenever the workspace is re-finalised or sharing is toggled; the route includes the key value as an `ETag`.
+
+Slug uniqueness is enforced both at the DB level (unique constraint on `Workspace.public_share_slug`) and probabilistically at generation time — `_generate_slug` retries on the rare collision (≤3 attempts).
+
+---
+
+#### T-USE-10 — Public Share Frontend
+
+`SharePublicLinkModal.tsx` is opened from the workspace header. Renders the modal in §4.8 of the spec: copy-button, public/disabled toggle, rotate-link affordance behind a "More" disclosure. State managed via `useState` + `usePublicShareApi` hook.
+
+`PublicWorkspaceView.tsx` is a new route at `/p/:slug` registered in `App.tsx` outside the authenticated route guard. It renders the Modern Indica design with:
+
+- `<meta name="robots" content="noindex, nofollow" />` injected via `react-helmet-async`
+- Read-only `StageEditor` (existing component, `readOnly={true}` prop, no toolbar)
+- A harness coverage chip and the workspace's eval scores rendered as social-proof badges
+- A small footer link: "Made with SpecForge → specforge.app"
+
+The route bundles separately from the authenticated app via Vite's dynamic import so an un-signed-in visitor doesn't pay the full app bundle cost.
+
+---
+
+#### T-USE-11 — Starter Templates Backend
+
+`Template` ORM model + schema + a `GET /templates` endpoint that returns `active=true` templates sorted by `sort_order`. The endpoint is mounted **without auth middleware** so the marketing site / unauthenticated landing page can preview the template gallery.
+
+Templates are seeded via `backend/scripts/seed_templates.py`, idempotent (upsert on `slug`), and invoked from the Docker entrypoint after `alembic upgrade head`. The seed script ships 6–10 hand-tuned templates:
+
+| Slug | Category | Name |
+|---|---|---|
+| `stripe-like-checkout` | payments | Stripe-like checkout |
+| `linear-like-ticketing` | tooling | Linear-like ticketing |
+| `slack-bot` | tooling | Slack bot for X |
+| `ai-chat-assistant` | agent | AI chat assistant |
+| `internal-admin-panel` | tooling | Internal admin panel |
+| `rest-api-server` | tooling | REST API server |
+| `realtime-presence` | realtime | Realtime presence |
+| `agent-harness` | agent | Coding-agent harness |
+
+Provenance: `POST /workspaces` accepts an optional `template_slug`. When present it is validated against `templates.slug` and recorded on `Workspace.template_slug`. Recording-only — no template content is re-applied after creation.
+
+---
+
+#### T-USE-12 — Starter Templates Frontend
+
+`TemplatesStrip.tsx` is a horizontal scrolling row of `TemplateCard.tsx` instances. Rendered:
+
+- On the **Dashboard** above the workspace grid (the cold-start surface — the dominant element when the user has no workspaces yet)
+- On the **workspace creation form** above the name/problem-statement fields
+
+Click handler: copies the template's `name`, `problem_statement`, and `suggested_provider`/`suggested_model` into the form fields and scrolls the user to the form. The user can then edit before submitting. The `template_slug` is carried through to the `POST /workspaces` body.
+
+The templates list is fetched once on initial dashboard load and cached in Zustand for the session.
+
+---
+
+#### T-USE-13 — Harness Coverage Surfacing
+
+No new DB column — the harness coverage figure already exists on `EvalResult.coverage_percent` for the latest harness stage version. The change is exposing it earlier and more prominently:
+
+- **Backend:** `GET /workspaces/{id}` is extended to include `coverage_summary: { tests, covered, total, percent } | null` derived from the harness stage's latest `EvalResult`. Computed on the fly; no schema change.
+- **Frontend (workspace header):** small chip showing "24 tests · 18 / 21 reqs covered" next to the workspace name.
+- **Frontend (Dashboard card):** the same chip in the workspace card (replacing the current "stages finalised" pip-row).
+- **Frontend (public share):** the chip is also rendered in `PublicWorkspaceView.tsx` as social proof — visitors landing on a shared spec see at a glance that the spec is backed by test coverage.
+
+If the harness stage is not finalised or has no eval, the chip is hidden. Graceful degradation only.
+
+---
+
+### 18.4 Security Notes
+
+- **Public share endpoint** is the only unauthenticated, content-returning endpoint added in V1.3. Its response shape is an explicit allow-list built by a single response-builder function. New fields on the ORM model are *not* surfaced by default. This is the inverse of "serialise the model" — the contract is allow-list, not deny-list.
+- **Slug entropy:** 31⁶ ≈ 887M values, with the per-IP rate limit (120/min) making enumeration economically infeasible. The slug is generated with `secrets.choice` against a 31-char alphabet that excludes ambiguous characters (`0/o/1/l/i`) so users can read it off a screen reliably without compromising entropy.
+- **Spec Clarification answers** are user-supplied free text and pass through the same `services/security/prompt_injection_guard` and `sanitize_text` pipeline as the original problem statement. The clarifier's own questions are LLM-produced and pass through the output validator (`services/security/output_validator`) before being shown to the user.
+- **PDF generation** runs WeasyPrint on user-controlled markdown. The renderer is configured with `WEASYPRINT_FETCHER` set to a no-network handler so the PDF template cannot fetch arbitrary remote resources via an `<img src>` injected by the model. All assets in the template are inlined at build time.
+- **Templates endpoint** is unauthenticated but returns deploy-time-curated data only. There is no path from a normal user to writing into the `templates` table; only the seed script (run from a privileged shell) can write.
+- **`noindex, nofollow`** on `/p/:slug` is documented in `frontend/public/robots.txt` as well, disallowing `/p/`. The marketing site uses a separate origin and is not affected.
+
+---
+
+### 18.5 Risks and Mitigations
+
+| Risk | Mitigation |
+|---|---|
+| Clarification step adds friction; users skip it 80%+ of the time and quality lift is negligible | Track skip rate as a product metric. If skip rate exceeds ~60% with no detectable eval-score lift, demote the modal to an opt-in "Refine my idea first" button before Generate. Already noted as Assumption 11 in the spec. |
+| WeasyPrint adds a heavy native dependency (cairo/pango) that complicates the Docker image | The Railway Python base image already includes these libs. CI builds verify the PDF route end-to-end so any image regression surfaces immediately. Fallback: swap to `playwright` headless Chromium if WeasyPrint proves brittle — same `pdf_export_service` interface. |
+| Public share URL leaks something sensitive that a future schema change adds to the `Workspace` model | Response shape is an explicit allow-list inside `public_share_service.build_public_view`, not `Workspace.dict()`. A code reviewer checklist item is added: "Any new Workspace field — does it need to appear in the public view?" Default is no. |
+| Templates become stale (referenced libraries deprecated, etc.) | Templates are content-only and editable via seed script + redeploy. A periodic review item is scheduled in `docs/PRODUCTION_RELEASE_GATE.md` checklist. No user lock-in — workspaces created from a template are not coupled to it after creation. |
+| Effort-summary chip shows wildly wrong estimates and users feel misled | The spec is explicit that the summary is *informational only and not a contract* — this language is also rendered in a tooltip on the chip. The estimate calibration (S 0.5–1d · M 1–3d · L 3–7d · XL 7d+) is shown on hover so users can recalibrate against their own velocity. |
+| Slug collision under load | Generation retries up to 3 times; on the third failure raises and returns 500 (operationally a non-event at 887M slug space). DB-level unique constraint guarantees no two workspaces ever share an active slug even if a race squeaks through. |
+
+---
+
+### 18.6 Validation
+
+After all T-USE-01 through T-USE-13 tasks are implemented:
+
+1. `cd backend && uv run alembic upgrade head` — both migrations apply cleanly
+2. `cd backend && uv run python scripts/seed_templates.py` — templates upsert without duplicate-slug error
+3. `cd backend && uv run pytest tests/ -q --cov=services --cov-fail-under=80` — coverage maintained, including new service tests
+4. `cd frontend && pnpm tsc && pnpm test` — type-check clean, all Vitest tests pass
+5. `cd harness && pytest tests/backend/ -q && npx vitest run --config ../frontend/vitest.harness.config.ts` — harness contract tests pass for new endpoints
+6. Manual smoke test:
+   - First-time spec generation triggers the clarification modal; **Skip** flows straight to generate; **Use answers** persists Q&A and produces a noticeably more specific spec
+   - TASKS generation produces an Effort Summary block; the workspace-header chip parses it
+   - Click **Export PDF** on a finalised workspace → PDF downloads with cover page + ToC + content; harness directory is not included
+   - Click **Share Public Link** → toggle on → open the URL in an incognito window → finalised content renders; navigating to `/p/<wrong-slug>` returns 404; toggle off → URL returns 404
+   - Dashboard shows Templates strip; clicking a card pre-fills the workspace form; created workspace records `template_slug`
+   - Workspace header and Dashboard card both show the harness coverage chip; chip hidden when harness is not finalised
+   - ZIP and GitHub export paths still work unchanged on the same workspace
+
+---
+
+_SpecForge V1 PLAN.md · Version 1.9.0 · 2026-05-20 — added Phase 14 V1.3 usefulness improvements: Spec Clarification pre-generation step, per-task Priority + Estimate + Effort Summary, PDF export, Public Share read-only link, Starter Templates library, harness-coverage workspace-summary surfacing. Two new migrations (Workspace v1.3 fields + Template table), 13 new sub-tasks (T-USE-01 through T-USE-13), new `public.py` router, new `spec_clarifier` / `pdf_export_service` / `public_share_service` modules. ZIP and GitHub export paths unchanged._
 
 _SpecForge V1 PLAN.md · Version 1.8.0 · 2026-05-19 — added Phase 13 GitHub export integration_

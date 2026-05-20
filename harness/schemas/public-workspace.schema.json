@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://specforge.local/schemas/public-workspace.schema.json",
+  "title": "PublicWorkspaceResponse",
+  "description": "Response shape for GET /public/{slug} (Spec §4.8 / §11, Plan §18.3 / §18.4). Allow-list contract: every field listed here is intentionally public; anything not listed is considered private and MUST NOT appear in the response.",
+  "type": "object",
+  "required": [
+    "name",
+    "provider_label",
+    "stages",
+    "shared_at"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200,
+      "description": "Workspace name as set by the owner."
+    },
+    "provider_label": {
+      "type": "string",
+      "description": "Human-readable provider label used to generate the workspace (e.g. 'Anthropic Claude'). Display only; the raw provider id may be embedded but is not separately required."
+    },
+    "stages": {
+      "type": "array",
+      "minItems": 4,
+      "maxItems": 4,
+      "description": "Exactly the four finalised stages in pipeline order: spec, plan, harness, tasks.",
+      "items": {
+        "type": "object",
+        "required": ["type", "content"],
+        "additionalProperties": false,
+        "properties": {
+          "type": { "enum": ["spec", "plan", "harness", "tasks"] },
+          "content": {
+            "type": "string",
+            "description": "Finalised stage content. For the harness stage, this is the parsed harness summary, not the full directory tree."
+          }
+        }
+      }
+    },
+    "coverage_summary": {
+      "type": ["object", "null"],
+      "description": "Harness coverage figure surfaced from the latest EvalResult. Null if the harness stage has no eval.",
+      "required": ["tests", "covered", "total", "percent"],
+      "additionalProperties": false,
+      "properties": {
+        "tests": { "type": "integer", "minimum": 0 },
+        "covered": { "type": "integer", "minimum": 0 },
+        "total": { "type": "integer", "minimum": 0 },
+        "percent": { "type": "integer", "minimum": 0, "maximum": 100 }
+      }
+    },
+    "eval_summary": {
+      "type": ["object", "null"],
+      "description": "Optional aggregate eval scores rendered as social proof on the public view.",
+      "additionalProperties": false,
+      "properties": {
+        "overall_score": { "type": ["integer", "null"], "minimum": 0, "maximum": 100 },
+        "completeness": { "type": ["integer", "null"], "minimum": 0, "maximum": 100 },
+        "clarity":      { "type": ["integer", "null"], "minimum": 0, "maximum": 100 }
+      }
+    },
+    "shared_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Timestamp of the most recent enable/rotate. Used as the cache key bumper."
+    }
+  },
+  "$comment": "SECURITY: this schema is the contract for what /public/{slug} may reveal. The following fields MUST NOT appear under any circumstance: user_id, email, google_id, credit balances, raw workspace id, problem_statement (unless inside the spec stage content), public_share_slug, clarification_qa, internal eval breakdown beyond what is listed here. Any addition to this schema is a privacy review item."
+}

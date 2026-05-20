@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://specforge.local/schemas/template.schema.json",
+  "title": "Template",
+  "description": "Read shape for system-curated starter templates. Spec §10 / Plan §18.3. System-owned in V1 — no user_id FK. User-authored templates are V2.",
+  "type": "object",
+  "required": [
+    "id",
+    "slug",
+    "name",
+    "description",
+    "category",
+    "problem_statement",
+    "sort_order",
+    "active",
+    "created_at"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "id": { "type": "string", "format": "uuid" },
+    "slug": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 100,
+      "pattern": "^[a-z0-9][a-z0-9-]*$",
+      "description": "Stable lowercase-kebab identifier. Workspace.template_slug references this."
+    },
+    "name": { "type": "string", "minLength": 1, "maxLength": 200 },
+    "description": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 400,
+      "description": "Short marketing line shown under the template name on the card."
+    },
+    "category": {
+      "enum": ["auth", "payments", "content", "realtime", "agent", "tooling"]
+    },
+    "problem_statement": {
+      "type": "string",
+      "minLength": 50,
+      "maxLength": 10000,
+      "description": "Seed text inserted into the workspace form when the user picks this template."
+    },
+    "suggested_provider": {
+      "type": ["string", "null"],
+      "enum": ["anthropic", "openai", "google", null]
+    },
+    "suggested_model": {
+      "type": ["string", "null"]
+    },
+    "sort_order": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Lower values appear first on the dashboard strip."
+    },
+    "active": {
+      "type": "boolean",
+      "description": "Soft-disable flag — inactive templates are hidden from GET /templates but kept for historical Workspace.template_slug references."
+    },
+    "created_at": { "type": "string", "format": "date-time" }
+  }
+}
