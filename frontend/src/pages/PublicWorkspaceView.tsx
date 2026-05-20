@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react"
 import { Link, useParams } from "react-router-dom"
+import { HarnessCoverageChip } from "../components/workspace/HarnessCoverageChip"
 import { MarkdownRenderer } from "../components/workspace/MarkdownRenderer"
 import { getPublicWorkspace } from "../services/api"
 import type {
@@ -53,12 +54,12 @@ function CoverChip({
   coverage: PublicWorkspaceResponse["coverage_summary"]
 }) {
   if (!coverage) return null
+  // T-USE-13: the public view uses the same HarnessCoverageChip component as
+  // the workspace header and dashboard card so all three surfaces read as
+  // one product element — the single most important signal for visitors.
   return (
-    <div
-      className="public-view-coverage-chip"
-      title="Harness coverage of spec requirements"
-    >
-      <strong>{coverage.percent}%</strong> harness coverage
+    <div className="public-view-coverage-wrap">
+      <HarnessCoverageChip coverage_summary={coverage} />
     </div>
   )
 }

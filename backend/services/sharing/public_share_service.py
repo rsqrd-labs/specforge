@@ -25,8 +25,9 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from models import Stage, Workspace
+from models import EvalResult, Stage, StageVersion, Workspace
 from schemas.workspace import (
+    CoverageSummary,
     PublicStageView,
     PublicWorkspaceResponse,
 )
@@ -195,15 +196,39 @@ async def build_public_view(
         )
 
     shared_at = workspace.public_shared_at or workspace.updated_at
+    coverage_summary = await _derive_coverage_summary(workspace.id, db)
 
-    # coverage_summary and eval_summary are intentionally None at this stage;
-    # T-172 (harness coverage surfacing) wires the eval-derived fields into
-    # both the workspace response and this public view via the same helper.
+    # eval_summary stays None for now — the public view's chip uses the
+    # coverage_summary as its primary social proof signal.
     return PublicWorkspaceResponse(
         name=workspace.name,
         provider_label=_provider_label(workspace.provider),
         stages=stage_views,
-        coverage_summary=None,
+        coverage_summary=coverage_summary,
         eval_summary=None,
         shared_at=shared_at,
     )
+
+
+async def _derive_coverage_summary(
+    workspace_id: UUID, db: AsyncSession
+) -> CoverageSummary | None:
+    """Mirror of routers.workspace._derive_coverage_summary so the public
+    view carries the same chip as the in-app workspace response."""
+    result = await db.execute(
+        select(EvalResult.coverage_percent)
+        .join(StageVersion, EvalResult.stage_version_id == StageVersion.id)
+        .join(Stage, StageVersion.stage_id == Stage.id)
+        .where(
+            Stage.workspace_id == workspace_id,
+            Stage.type == "harness",
+            EvalResult.coverage_percent.is_not(None),
+        )
+        .order_by(EvalResult.created_at.desc())
+        .limit(1)
+    )
+    pct = result.scalar_one_or_none()
+    if pct is None:
+        return None
+    pct = max(0, min(100, int(pct)))
+    return CoverageSummary(tests=0, covered=pct, total=100, percent=pct)

@@ -74,6 +74,10 @@ class _FakeDB:
         # Crude but reliable: stringify the compiled select and decide based
         # on which table it targets. Tests don't need real SQL semantics.
         text = str(statement)
+        # T-USE-13: the coverage-summary query joins eval_results.
+        # Return None so the chip stays hidden in the test fixtures.
+        if "eval_results" in text:
+            return _FakeResult(None)
         if "workspaces" in text and "stages" not in text:
             return _FakeResult(self.workspace)
         return _FakeResult(self.stages)

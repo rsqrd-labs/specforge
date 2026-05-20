@@ -15,6 +15,7 @@ import { ProblemStatementPanel } from "../components/workspace/ProblemStatementP
 import { TaskValidationPanel } from "../components/workspace/TaskValidationPanel"
 import { ExportGitHubModal } from "../components/workspace/ExportGitHubModal"
 import { ExportPDFButton } from "../components/workspace/ExportPDFButton"
+import { HarnessCoverageChip } from "../components/workspace/HarnessCoverageChip"
 import { SharePublicLinkModal } from "../components/workspace/SharePublicLinkModal"
 import { SpecClarificationModal } from "../components/workspace/SpecClarificationModal"
 import { GitHubStatusPill } from "../components/shared/GitHubStatusPill"
@@ -887,6 +888,9 @@ export default function Workspace() {
               >
                 {providerLabel}
               </span>
+              <HarnessCoverageChip
+                coverage_summary={currentWorkspace.coverage_summary ?? null}
+              />
               {effortSummary && (
                 <span
                   className="effort-summary-chip"

@@ -3,12 +3,13 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Response, status
 from redis.asyncio import Redis
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config import settings
 from database import get_db
 from middleware.auth import get_current_user
-from models import User
+from models import EvalResult, Stage, StageVersion, User, Workspace
 from schemas.integration import (
     GitHubExportRequest,
     GitHubExportResponse,
@@ -17,6 +18,7 @@ from schemas.integration import (
 from schemas.workspace import (
     ClarifyResponse,
     ClarifySubmitRequest,
+    CoverageSummary,
     ShareLinkResponse,
     WorkspaceCreate,
     WorkspaceResponse,
@@ -45,6 +47,57 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/workspaces", tags=["workspaces"])
 
 
+async def _derive_coverage_summary(
+    workspace_id: UUID, db: AsyncSession
+) -> CoverageSummary | None:
+    """Build coverage_summary for the workspace response (T-USE-13).
+
+    Joins the workspace's harness stage with its latest EvalResult (via the
+    most recent StageVersion). Returns None when no harness stage exists,
+    no eval has run, or coverage_percent isn't populated yet — the chip
+    hides in that case. Nothing is persisted; this is a pure read.
+
+    The schema fields mirror harness/schemas/public-workspace.schema.json:
+      tests   — best-effort count of tests in the harness body. We don't
+                parse here; pass 0 so the frontend can fall back to "—".
+      covered/total — same: we surface the eval's coverage_percent and
+                let the UI render "X% covered". The exact covered/total
+                split isn't tracked separately by the eval.
+      percent — the integer figure from EvalResult.coverage_percent.
+    """
+    result = await db.execute(
+        select(EvalResult.coverage_percent)
+        .join(StageVersion, EvalResult.stage_version_id == StageVersion.id)
+        .join(Stage, StageVersion.stage_id == Stage.id)
+        .where(
+            Stage.workspace_id == workspace_id,
+            Stage.type == "harness",
+            EvalResult.coverage_percent.is_not(None),
+        )
+        .order_by(EvalResult.created_at.desc())
+        .limit(1)
+    )
+    pct = result.scalar_one_or_none()
+    if pct is None:
+        return None
+    pct = max(0, min(100, int(pct)))
+    return CoverageSummary(
+        tests=0,
+        covered=pct,
+        total=100,
+        percent=pct,
+    )
+
+
+async def _workspace_response(
+    workspace: Workspace, db: AsyncSession
+) -> WorkspaceResponse:
+    """Wrap WorkspaceResponse.model_validate with the derived coverage chip."""
+    response = WorkspaceResponse.model_validate(workspace)
+    response.coverage_summary = await _derive_coverage_summary(workspace.id, db)
+    return response
+
+
 @router.post("", response_model=WorkspaceResponse, status_code=status.HTTP_201_CREATED)
 async def create_workspace(
     payload: WorkspaceCreate,
@@ -69,7 +122,7 @@ async def list_workspaces(
     db: AsyncSession = Depends(get_db),
 ) -> list[WorkspaceResponse]:
     workspaces = await workspace_service.list_for_user(user.id, db)
-    return [WorkspaceResponse.model_validate(w) for w in workspaces]
+    return [await _workspace_response(w, db) for w in workspaces]
 
 
 @router.get("/{id}", response_model=WorkspaceResponse)
@@ -79,7 +132,7 @@ async def get_workspace(
     db: AsyncSession = Depends(get_db),
 ) -> WorkspaceResponse:
     workspace = await workspace_service.get(id, user.id, db)
-    return WorkspaceResponse.model_validate(workspace)
+    return await _workspace_response(workspace, db)
 
 
 @router.patch("/{id}", response_model=WorkspaceResponse)

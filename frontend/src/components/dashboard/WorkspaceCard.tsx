@@ -2,6 +2,7 @@ import { useRef } from "react"
 import { Link } from "react-router-dom"
 import type { Stage, StageStatus, StageType } from "../../types/stage"
 import type { Workspace } from "../../types/workspace"
+import { HarnessCoverageChip } from "../workspace/HarnessCoverageChip"
 
 interface WorkspaceCardProps {
   workspace: Workspace & { stages?: Stage[] }
@@ -128,6 +129,10 @@ export function WorkspaceCard({
             {PROVIDER_LABELS[workspace.provider] ?? workspace.provider}
           </span>
         </div>
+
+        <HarnessCoverageChip
+          coverage_summary={workspace.coverage_summary ?? null}
+        />
 
         <div className="workspace-card-pipeline">
           {STAGE_ORDER.map((type, i) => {
