@@ -5,6 +5,7 @@ import { PROVIDERS } from "../../config/providers"
 import { useFocusTrap } from "../../hooks/useFocusTrap"
 import { getApiErrorMessage, getProviders } from "../../services/api"
 import { useWorkspaceStore } from "../../store/workspaceStore"
+import type { Template } from "../../types/template"
 import type { AIProvider } from "../../types/workspace"
 import type { Provider } from "../../services/api"
 
@@ -12,6 +13,7 @@ interface CreateWorkspaceModalProps {
   onClose: () => void
   initialName?: string
   initialStatement?: string
+  initialTemplate?: Template | null
   balance: number | null
   generationCost: number
 }
@@ -29,6 +31,7 @@ export function CreateWorkspaceModal({
   onClose,
   initialName = "",
   initialStatement = "",
+  initialTemplate = null,
   balance,
   generationCost,
 }: CreateWorkspaceModalProps) {
@@ -38,7 +41,12 @@ export function CreateWorkspaceModal({
   const [name, setName] = useState(initialName)
   const [statement, setStatement] = useState(initialStatement)
   const [providers, setProviders] = useState<Provider[]>(PROVIDERS)
-  const [provider, setProvider] = useState<AIProvider>("openai")
+  const [provider, setProvider] = useState<AIProvider>(
+    (initialTemplate?.suggested_provider as AIProvider | undefined) ?? "openai",
+  )
+  const [activeTemplate, setActiveTemplate] = useState<Template | null>(
+    initialTemplate,
+  )
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [errors, setErrors] = useState<Record<string, string>>({})
   const [isAdvancedOpen, setIsAdvancedOpen] = useState(false)
@@ -96,6 +104,7 @@ export function CreateWorkspaceModal({
         name: name.trim(),
         problem_statement: statement,
         provider,
+        template_slug: activeTemplate?.slug ?? null,
       })
       navigate(`/workspace/${ws.id}`)
     } catch (error) {
@@ -138,6 +147,25 @@ export function CreateWorkspaceModal({
         </div>
 
         <form onSubmit={(e) => void handleSubmit(e)} className="create-modal-body">
+
+          {activeTemplate && (
+            <div className="modal-template-provenance">
+              Started from <strong>{activeTemplate.name}</strong>
+              {" · "}
+              <button
+                type="button"
+                className="modal-template-clear"
+                onClick={() => {
+                  setActiveTemplate(null)
+                  setName("")
+                  setStatement("")
+                  setErrors({})
+                }}
+              >
+                clear
+              </button>
+            </div>
+          )}
 
           {/* Template chips */}
           <div className="modal-templates">

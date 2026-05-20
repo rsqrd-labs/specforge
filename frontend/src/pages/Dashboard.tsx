@@ -4,11 +4,13 @@ import { GitHubStatusPill } from "../components/shared/GitHubStatusPill"
 import { CreateWorkspaceModal } from "../components/dashboard/CreateWorkspaceModal"
 import { DeleteWorkspaceModal } from "../components/dashboard/DeleteWorkspaceModal"
 import { WorkspaceCard } from "../components/dashboard/WorkspaceCard"
+import { TemplatesStrip } from "../components/templates/TemplatesStrip"
 import { STARTER_WORKSPACES } from "../config/starterWorkspaces"
 import { getApiErrorMessage, getCredits, logout } from "../services/api"
 import { useUserStore } from "../store/userStore"
 import { useWorkspaceStore } from "../store/workspaceStore"
 import type { Stage, StageStatus } from "../types/stage"
+import type { Template } from "../types/template"
 import type { Workspace, WorkspaceWithStages } from "../types/workspace"
 
 function useCountUp(target: number | null, duration = 950) {
@@ -208,6 +210,7 @@ export default function Dashboard() {
   const [starterWorkspace, setStarterWorkspace] = useState<
     (typeof STARTER_WORKSPACES)[number] | null
   >(null)
+  const [pickedTemplate, setPickedTemplate] = useState<Template | null>(null)
   const [isLoggingOut, setIsLoggingOut] = useState(false)
   const [workspaceToDelete, setWorkspaceToDelete] = useState<Workspace | null>(null)
   const [deletingWorkspaceId, setDeletingWorkspaceId] = useState<string | null>(null)
@@ -293,6 +296,15 @@ export default function Dashboard() {
 
   function openCreateWorkspace(starter: (typeof STARTER_WORKSPACES)[number] | null = null) {
     setStarterWorkspace(starter)
+    setShowCreate(true)
+  }
+
+  function openCreateWorkspaceFromTemplate(template: Template) {
+    // T-USE-12: clicking a template card opens the modal pre-filled with the
+    // template's name, problem_statement, and provider. The template_slug is
+    // stamped on the workspace at submit time for provenance.
+    setPickedTemplate(template)
+    setStarterWorkspace(null)
     setShowCreate(true)
   }
 
@@ -543,6 +555,10 @@ export default function Dashboard() {
           </div>
         ) : workspaces.length === 0 ? (
           <div className="workspace-empty">
+            <TemplatesStrip
+              prominent
+              onPick={openCreateWorkspaceFromTemplate}
+            />
             <div className="workspace-empty-icon">⚡</div>
             <p className="workspace-empty-heading">Your first great brief starts here</p>
             <p className="workspace-empty-body">
@@ -568,6 +584,8 @@ export default function Dashboard() {
             </button>
           </div>
         ) : (
+          <>
+            <TemplatesStrip onPick={openCreateWorkspaceFromTemplate} />
           <div className="workspace-grid">
             {workspaces.map((ws, i) => (
               <WorkspaceCard
@@ -582,18 +600,23 @@ export default function Dashboard() {
               />
             ))}
           </div>
+          </>
         )}
       </div>
 
       {showCreate && (
         <CreateWorkspaceModal
-          initialName={starterWorkspace?.name}
-          initialStatement={starterWorkspace?.statement}
+          initialName={starterWorkspace?.name ?? pickedTemplate?.name}
+          initialStatement={
+            starterWorkspace?.statement ?? pickedTemplate?.problem_statement
+          }
+          initialTemplate={pickedTemplate}
           balance={balance}
           generationCost={generationCost}
           onClose={() => {
             setShowCreate(false)
             setStarterWorkspace(null)
+            setPickedTemplate(null)
           }}
         />
       )}

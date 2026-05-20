@@ -475,6 +475,38 @@ export async function getPublicWorkspace(
 }
 
 // ---------------------------------------------------------------------------
+// Starter Templates (Phase 14, T-USE-11 / T-USE-12)
+//
+// createWorkspace accepts an optional template_slug field on its payload
+// (defined on CreateWorkspacePayload in ../types/workspace). When the user
+// picks a template from the dashboard strip, the slug is recorded on the
+// resulting Workspace row for provenance.
+// ---------------------------------------------------------------------------
+
+import type { Template } from "../types/template"
+
+// Module-level cache — the templates catalog is small and changes only at
+// deploy time, so re-fetching on every dashboard render is wasteful. The
+// cache lives for the SPA session; a hard refresh re-fetches.
+let _templateCache: Template[] | null = null
+
+export async function getTemplates(force = false): Promise<Template[]> {
+  if (!force && _templateCache) return _templateCache
+  try {
+    const response = await axios.get<Template[]>(
+      `${import.meta.env.VITE_API_URL}/templates`,
+    )
+    _templateCache = response.data
+    return response.data
+  } catch {
+    // The strip hides itself when the API returns nothing — surfacing a
+    // partial failure as an empty list is the right behaviour per the
+    // T-171 brief ("no templates available is worse than no strip").
+    return []
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Spec Clarification (Phase 14, T-USE-03 / T-USE-04)
 // ---------------------------------------------------------------------------
 
