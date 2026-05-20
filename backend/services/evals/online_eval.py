@@ -39,6 +39,16 @@ _HARNESS_REFS_FIELD_RE = re.compile(r"^\*\*Harness\s+refs:\*\*", re.IGNORECASE)
 _BOLD_FIELD_START_RE = re.compile(r"^\*\*\w")
 _BACKTICK_REF_RE = re.compile(r"`([^`]+)`")
 _SETUP_ONLY_MARKER_RE = re.compile(r"_\(none|none\s*[—–-]", re.IGNORECASE)
+# Per-task Priority and Estimate fields (T-164 / T-USE-05).
+# Tolerant of bold/colon spacing variations and optional list-marker prefixes.
+_PRIORITY_FIELD_RE = re.compile(
+    r"^[\s\-*]*\*\*\s*Priority\s*:?\s*\*\*\s*:?\s*(.+?)\s*$", re.IGNORECASE
+)
+_ESTIMATE_FIELD_RE = re.compile(
+    r"^[\s\-*]*\*\*\s*Estimate\s*:?\s*\*\*\s*:?\s*(.+?)\s*$", re.IGNORECASE
+)
+_PRIORITY_ENUM = {"MUST", "SHOULD", "COULD"}
+_ESTIMATE_ENUM = {"S", "M", "L", "XL"}
 _HARNESS_FILE_HEADING_RE = re.compile(r"^#{2,3}\s+File:\s+(.+)$")
 _HARNESS_FENCE_OPEN_RE = re.compile(r"^(`{3,})[a-zA-Z0-9]*$")
 _CLASS_DEF_RE = re.compile(r"^class\s+(Test\w+)")
@@ -332,6 +342,98 @@ def _build_gap_details(
     return harness_file, class_name, fn_name, code_stub, remediation
 
 
+def _extract_field_value(line: str, regex: re.Pattern[str]) -> str | None:
+    """Pull the value after **Field:** from a single line, stripped of formatting."""
+    match = regex.match(line.rstrip())
+    if not match:
+        return None
+    value = match.group(1).strip()
+    # Trim trailing parenthetical commentary (e.g. "MUST (ship blocker)").
+    paren = value.find("(")
+    if paren > 0:
+        value = value[:paren].strip()
+    # Strip surrounding markdown emphasis, backticks, and trailing punctuation.
+    value = value.strip("`*_ .,;")
+    return value or None
+
+
+def _validate_task_fields(tasks_content: str) -> list[dict[str, Any]]:
+    """Per-task Priority/Estimate validation (T-USE-05).
+
+    Returns one issue per missing or invalid field, shaped to merge cleanly into
+    the existing tasks_without_ref list. Issues are surfaced in the existing
+    TaskValidationPanel UI without any shape change.
+    """
+    lines = tasks_content.split("\n")
+    headings: list[tuple[int, int, str]] = []
+    for i, line in enumerate(lines):
+        m = _TASK_HEADING_RE.match(line.rstrip())
+        if m:
+            headings.append((i, int(m.group(1)), m.group(2).strip()))
+
+    issues: list[dict[str, Any]] = []
+    for idx, (start, task_num, task_title) in enumerate(headings):
+        end = headings[idx + 1][0] if idx + 1 < len(headings) else len(lines)
+        block = lines[start:end]
+
+        priority_value: str | None = None
+        estimate_value: str | None = None
+        for line in block:
+            if priority_value is None:
+                priority_value = _extract_field_value(line, _PRIORITY_FIELD_RE)
+            if estimate_value is None:
+                estimate_value = _extract_field_value(line, _ESTIMATE_FIELD_RE)
+            if priority_value is not None and estimate_value is not None:
+                break
+
+        if priority_value is None or priority_value.upper() not in _PRIORITY_ENUM:
+            reason = (
+                "Task is missing a **Priority:** line."
+                if priority_value is None
+                else (
+                    f"`{priority_value}` is not a valid Priority "
+                    "(expected MUST/SHOULD/COULD)."
+                )
+            )
+            issues.append(
+                {
+                    "task_number": task_num,
+                    "task_title": task_title,
+                    "reason": reason,
+                    "referenced_test": None,
+                    "gap_type": "MISSING_PRIORITY",
+                    "remediation": (
+                        "Add `**Priority:** MUST` (or SHOULD/COULD) to this task."
+                    ),
+                    "harness_file": None,
+                    "code_stub": None,
+                }
+            )
+
+        if estimate_value is None or estimate_value.upper() not in _ESTIMATE_ENUM:
+            reason = (
+                "Task is missing an **Estimate:** line."
+                if estimate_value is None
+                else f"`{estimate_value}` is not a valid Estimate (expected S/M/L/XL)."
+            )
+            issues.append(
+                {
+                    "task_number": task_num,
+                    "task_title": task_title,
+                    "reason": reason,
+                    "referenced_test": None,
+                    "gap_type": "MISSING_ESTIMATE",
+                    "remediation": (
+                        "Add `**Estimate:** S` (or M/L/XL) to this task."
+                    ),
+                    "harness_file": None,
+                    "code_stub": None,
+                }
+            )
+
+    return issues
+
+
 def _validate_task_references(
     tasks_content: str, harness_content: str
 ) -> list[dict[str, Any]]:
@@ -393,6 +495,8 @@ def _validate_task_references(
             len(generation_failures),
             generation_failures[:10],
         )
+
+    issues.extend(_validate_task_fields(tasks_content))
 
     return issues
 

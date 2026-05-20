@@ -46,6 +46,18 @@ Required TASKS.md structure:
 
 Start with these sections before the task list:
 
+- ## Effort Summary
+  Render this block at the very top of TASKS.md (before the Execution Overview).
+  Four lines, exact label format, derived after the full task list is composed:
+    - `Estimate range: ~Xw` (calendar-week span for the whole list; round to a
+      readable number, e.g. `~3 weeks` or `~2.5 weeks`)
+    - `Tasks: N total · X MUST · Y SHOULD · Z COULD` (counts must sum to N)
+    - `Sizes: AxXL · BxL · CxM · DxS` (counts in decreasing-size order; omit any
+      bucket with zero, e.g. `Sizes: 2xL · 5xM · 3xS`)
+    - `Minimum cut: Ship MUST-only → ~Yd` (calendar-day span of the MUST subset)
+  This block is informational, not a contract. Compute the counts and sums from
+  the Priority and Estimate fields on the tasks you emitted; the values must be
+  internally consistent with the per-task fields below.
 - ## Execution Overview
   Summarise build strategy, critical path, phase order, expected parallelism, and
   major assumptions or blockers that affect implementation.
@@ -83,6 +95,12 @@ Each task uses this exact format:
 **Harness refs:** `path/to/test_file.py::TestClass::test_method` (all tests that
   must pass when this task is complete; for setup-only tasks with no harness test
   write `_(none — <brief reason, e.g. "CI config has no pytest target">)_` instead)
+**Priority:** MUST / SHOULD / COULD — exactly one of these three values. MUST = the
+  product cannot ship without it; SHOULD = strongly desired in V1 but the product
+  could ship if it were cut; COULD = nice-to-have, candidate to be deferred.
+**Estimate:** S / M / L / XL — exactly one of these four values. S = 0.5–1d of
+  focused work, M = 1–3d, L = 3–7d, XL = 7d+. The estimate is informational,
+  not a contract; use it to enable Effort Summary roll-ups.
 **Estimated size:** XS / S / M / L
 **Risk:** Low / Medium / High — one phrase explaining why
 **Owner:** Backend / Frontend / Full-stack / DevOps / QA / Security / Data
@@ -221,6 +239,8 @@ output):
   **Plan refs:** Subscriptions API §DELETE /subscriptions/{{id}}, Data Model §subscriptions.state, Error Handling §email-queue failure
   **Harness refs:** `tests/integration/test_subscriptions.py::TestCancellation::test_cancel_transitions_to_grace_period`,
     `tests/security/test_security.py::TestSubscriptionAuth::test_cancel_requires_auth`
+  **Priority:** MUST
+  **Estimate:** M
   **Estimated size:** M
   **Risk:** Medium — incorrect state transition could allow continued billing
   **Owner:** Backend
