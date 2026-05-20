@@ -7416,6 +7416,18 @@ Wire the new backend tests into CI, update `.env.example` and `CLAUDE.md` with t
 
 > Source: `V1 spec.md` v1.3.0 §4.4.1, §4.8, §4.11, §5.1, §5.4, §7, §10, §11, §12; `Plan v1.md` §18. Harness: `harness/tests/backend/test_phase14_v13_usefulness_contract.py`, `harness/tests/frontend/phase14-v13-usefulness.contract.test.ts`. Phases 1–13 must be complete and green before starting this phase. Every UI element must align with the Modern Indica design system already established in `frontend/src/index.css` — saffron / lotus / slate palette, Plus Jakarta Sans, glassmorphism — no new visual identity.
 
+> [!important] **Design Directive — applies to every frontend task in Phase 14 (T-163, T-165, T-167, T-169, T-171, T-172).**
+>
+> The earlier mistake on the Settings page was a screen that satisfied every CSS-class lint and still felt generic. Re-using tokens is the floor, not the ceiling. For each frontend task in this phase the implementing agent **must** do the following BEFORE writing a single line of TSX:
+>
+> 1. **Observe.** Open the closest existing screen in the running app and look at it. For modals → `Workspace.tsx` action modals + the post-Phase-13 Settings page. For chips → the existing stage-status chips and quality badges. For cards → the dashboard workspace cards. For full-page reads → the workspace editor. Note what feels considered (microcopy tone, spacing rhythm, where saffron is used vs. slate, how motion is used) and what feels phoned-in. Match the former, not the latter.
+> 2. **Design before code.** Each frontend task carries a **Design Brief** subsection that names the *moment-of-use feeling* the component must produce. Read it. Sketch the component on paper or in a comment block at the top of the file. State the visual hierarchy in one sentence ("the URL is the hero; the toggle is secondary; the rotate control is hidden behind a disclosure"). State the one tiny delight the component contributes ("the copy button briefly says 'Copied ✓' in lotus pink"). Until you can answer these two questions in writing, do not start coding.
+> 3. **Introspect, then build.** After the first pass renders in the browser, take a screenshot, look at it next to an existing screen, and ask: *does this look like it belongs in this app, or like it was added by someone who had never seen the app?* If the answer is the second, iterate before claiming the task is done. Visual consistency comes from FEELING, not from passing the CSS-class harness checks alone.
+> 4. **Honour the design system.** Plus Jakarta Sans only. Saffron `--color-primary` for primary actions, lotus `--color-secondary` for confirmations / celebratory accents, slate `--color-tertiary` for neutral / secondary affordances. Glass card surfaces (`--color-glass-bg`, `--color-glass-border`). Spacing on the existing 4 / 8 / 12 / 16 / 24 / 32 rhythm. Motion uses the existing easing tokens, not random `transition: all`. No new colours, no new font families, no new shadow tokens — if you feel you need one, you do not.
+> 5. **Microcopy is product.** Empty states, loading states, error states, button labels, modal titles — write them like a senior PM, not like an engineer leaving placeholder text. "Connecting…" beats "Loading…". "Linked as @alice" beats "Connected: true". "Generating PDF…" beats "Please wait."
+>
+> The acceptance criterion *"matches the Modern Indica visual identity"* is a human-judged criterion enforced by the maintainer at PR review, in addition to the automated harness checks. A task that passes every `pnpm vitest` assertion but reads as generic does not satisfy this directive and will be sent back.
+
 ---
 
 ### T-160: Alembic Migrations — Workspace V1.3 Fields and Templates Table
@@ -7558,6 +7570,18 @@ Implement the lightweight Q&A step that runs before the first spec generation. A
 **Description:**
 A four-state modal (loading → ready → submitting → bypassed) opens on first `Generate` click on the spec stage. The modal must visually match the existing Modern Indica modals (`.create-modal-*`, glassmorphism shell, saffron CTA). Both `Skip` and `Use answers` paths flow into the standard generate. The modal is silently bypassed on 204 from the backend so the user never sees a clarification error.
 
+**Design Brief:**
+
+The moment-of-use feeling: a senior PM has just sat down across the table and is asking three sharp questions before recommending an approach. *Not* a survey. *Not* a wizard. A short, considered conversation.
+
+- The loading state is the surface that sells the feature. A generic spinner kills the mood — use a tasteful pulse on the modal body with a single line of microcopy ("Thinking of the right questions…") in slate so it reads as deliberate, not stalled. Do not show a percentage. Do not show three spinners.
+- The question header is the hero — large, Plus Jakarta Sans, saffron-anchored. The `why_it_matters` line below each question (returned by the judge model) sits in slate at a smaller weight; it is the difference between "fill this in" and "here's why this matters." Render it.
+- The `Skip` action lives at the LEFT of the footer as a quiet text-link in slate; the `Use answers` saffron CTA lives at the RIGHT. The visual asymmetry must make Skip available but never tempting.
+- One delight: when the user types into the first textarea, the corresponding `why_it_matters` line fades to 60% opacity to reduce noise — a small acknowledgement that you've engaged.
+- Empty 204 state: invisible. No flash, no toast, no "we tried" message. The user must not know the call happened.
+
+Open the existing post-Phase-13 Settings page and the workspace `Generate` confirmation modal before writing this component. Match their tone exactly.
+
 **Inputs:**
 - `frontend/src/services/api.ts` (extend)
 - `frontend/src/pages/Workspace.tsx` (mount + open trigger)
@@ -7638,6 +7662,18 @@ Update the TASKS prompt template so every emitted task carries a `Priority` line
 **Description:**
 Parse the `## Effort Summary` block from finalised TASKS content and render it as a chip in the workspace header. The parser must return `null` on missing/malformed blocks so older content degrades gracefully (chip hidden, no error).
 
+**Design Brief:**
+
+The moment-of-use feeling: glancing at a fitness watch and seeing "8,247 steps." Small surface, high signal, zero ceremony. *Not* a banner. *Not* a billboard. A tiny, confident summary.
+
+- The chip is **at most one line**, tight. The reading order is: estimate → task count → MUST count. `~3 weeks · 15 tasks · 6 MUST` — three glyphs, three middle-dots, nothing else. Resist the urge to add icons or pills inside the chip.
+- Colour: lotus `--color-secondary` tint at the chip background (a celebration colour — finishing the pipeline is a win), saffron for the estimate number specifically because that's the headline value the user cares about. Slate for the rest. No borders.
+- Position: in the workspace header, after the stage indicator strip, before the export buttons. It belongs in the *summary* zone, not the *action* zone.
+- One delight: on hover, the chip tooltip reveals the calibration ("S = 0.5–1d · M = 1–3d · L = 3–7d · XL = 7d+ · informational only") — proactive disclosure that the estimate is not a contract. This is product-level honesty disguised as a tooltip.
+- Hidden when null. No skeleton, no "—" placeholder.
+
+Look at the existing stage-status chips and the quality badge before writing this. The chip must read as a *sibling* of those, not a louder cousin.
+
 **Inputs:**
 - `frontend/src/pages/Workspace.tsx`
 - `frontend/src/utils/` (new helper)
@@ -7716,6 +7752,19 @@ Render finalised SPEC.md, PLAN.md, and TASKS.md into a single branded PDF using 
 
 **Description:**
 Add `[📄 Export PDF]` as a third button in the workspace header alongside ZIP and GitHub. Click → call `exportWorkspacePdf` → receive a blob → trigger a browser download. Visually match the existing tertiary buttons; do not introduce a new colour.
+
+**Design Brief:**
+
+The moment-of-use feeling: clicking "Export PDF" in Figma. Quiet competence. No ceremony, no progress bar, just a result.
+
+- The PDF button is **a sibling** of the existing ZIP and GitHub buttons — same height, same radius, same horizontal padding, same slate `--color-tertiary` tint family. Visually they should read as a row of three peers, not "the two real exports and a new one." Order from left to right: ZIP · PDF · GitHub · Share. Source-locally → publish-globally.
+- The icon: a single PDF glyph as the leading element, not a saffron primary CTA. Saffron in this row is reserved for finalise / generate.
+- In-flight state: replace the label with "Generating PDF…" *in place* (no spinner blob). Disable the button. Keep the layout stable so the row does not jitter. A 1-second render that causes a 1-pixel shift is a regression.
+- Success: the download starts. No toast, no modal, no "PDF created" banner. The browser's download UI is sufficient — *layering our own confirmation on top is noise.*
+- Failure: a single inline error chip below the row in lotus tint with one line of microcopy ("Couldn't generate PDF. Try again?") and a retry affordance. Never a full-screen error.
+- Disabled state (when any stage is unfinalised): tooltip in slate explaining which stage blocks export — "Finalise HARNESS to enable PDF export." Specific, not generic.
+
+Open the existing post-Phase-13 ZIP and GitHub buttons before writing this. The PDF button must read as if the same designer drew all three.
 
 **Inputs:**
 - `frontend/src/pages/Workspace.tsx`
@@ -7811,6 +7860,30 @@ Implement `enable` / `disable` / `rotate` lifecycle for a per-workspace public s
 **Description:**
 Two surfaces: a workspace modal to enable/disable/rotate the link, and a brand-new top-level read-only route at `/p/:slug` that renders the finalised spec in the Modern Indica design without authenticated state. The route must be registered OUTSIDE the auth guard, must inject `<meta name="robots" content="noindex, nofollow" />`, and must not import any authenticated store (no `userStore`, no `creditsBalance`).
 
+**Design Brief:**
+
+This task ships TWO surfaces with very different jobs. Design them separately.
+
+**Surface A — SharePublicLinkModal (workspace-internal).** The moment-of-use feeling: handing someone a printed proof of work. Small ceremony, real pride. *Not* a settings toggle.
+
+- The URL is the hero of the modal. Render it large, in a single line, in monospaced weight (or a clear sans like Plus Jakarta with tabular nums), inside a glass-tinted pill that itself looks click-tappable. Place a saffron `Copy` button immediately to the right of the URL with no gap between them — they read as one component.
+- On copy: the button briefly transitions to "Copied ✓" in lotus pink for ~1.2s, then back. This is the one delight in this surface. Do not show a toast.
+- The toggle below the URL pill is a quiet horizontal row of two text-radio affordances ("Public" / "Disabled"), not a switch. Reading "Public" should feel descriptive, not aggressive.
+- The rotate control is intentionally behind a "More" disclosure (a `<details>` or equivalent) and renders in slate at small weight. Rotating a slug is a "yes I'm sure" gesture; the design must discourage accidental clicks. Include one line of microcopy: "Rotating invalidates the current link. Anyone holding it will see a 404."
+- The footer microcopy is the privacy statement quoted exactly from spec §4.8 ("Anyone with the link can view your finalised SPEC.md, PLAN.md, HARNESS coverage, and TASKS.md. They cannot see your credit balance, billing, account email, other workspaces, or any draft / pre-finalisation content."). Sit it in slate at small weight. This is the kind of small honesty that earns trust on a public-share feature.
+
+**Surface B — PublicWorkspaceView at `/p/:slug` (the marketing-grade page).** The moment-of-use feeling: opening a Notion shared doc made by someone who clearly cares. This is **the most-seen surface for non-customers** — the page that decides whether word-of-mouth converts. Treat it accordingly.
+
+- A small but real cover band at the top: workspace name in Plus Jakarta Display weight, "Generated with SpecForge" in slate as a quiet attribution, and the harness coverage chip (from T-172) immediately under it as social proof. No saffron flood — the cover is restrained, the *content below* is where the visitor goes.
+- Stage-tab navigation (Spec · Plan · Harness · Tasks) styled as the existing stage indicator strip, not as standard tabs. Continuity with the in-app experience is the point.
+- The four stages render in a read-only `StageEditor` (existing component, `readOnly` prop). Code blocks get the same syntax theme as the in-app editor — do not invent a new one. The harness stage shows the coverage detail, not the full directory tree.
+- A subtle footer with one CTA: "Made with SpecForge — turn your idea into a spec, plan, harness, and ready-to-ship tasks in 10 minutes →" linking to the marketing site. Lotus accent on the link only. This is the **one** marketing moment on the page and it must land tastefully.
+- Loading skeleton uses the existing skeleton component, *not* a new one. A 404 (bad/disabled slug) shows the existing 404 page with one extra line: "This shared spec may have been disabled by its author."
+- This page is responsive — it must read on mobile. The in-app workspace is desktop-first; the public view is not. (Out-of-scope items still apply: complex interactions remain desktop-only, but reading flow on phone must work.)
+- Performance budget: cover paints in under 800ms on a cold cache. The Vite chunk for this route is lazy-loaded to keep an unauthenticated first paint cheap.
+
+Open three references before writing PublicWorkspaceView: (1) a Notion shared doc, (2) a Linear shared issue, (3) the existing in-app workspace editor. Borrow restraint from the first two, identity from the third.
+
 **Inputs:**
 - `frontend/src/App.tsx` (register `/p/:slug` route outside the auth guard)
 - `frontend/src/pages/Workspace.tsx` (header button)
@@ -7904,6 +7977,20 @@ The `templates` table is already created in T-160 and the model in T-161. This t
 **Description:**
 Render the template gallery as a horizontal scrolling strip on the Dashboard above the workspace grid AND above the workspace creation form. Clicking a card pre-fills `name`, `problem_statement`, and the suggested provider/model into the form. The chosen `template_slug` is recorded on the workspace for provenance via `POST /workspaces`.
 
+**Design Brief:**
+
+The moment-of-use feeling: a new user just landed on the Dashboard with nothing in it. They've been staring at a blank "what's your idea?" textarea for ten seconds. The templates strip should feel like a friend pulling out a notebook and saying "here, try one of these."
+
+- Cards are **pickable**, not listable. Each card has gentle elevation (existing glass card token), a subtle hover lift (4–6px translate-Y, existing easing token), and the cursor changes to pointer. A row of dead-looking rectangles is the failure state.
+- Card content, top to bottom: a small category badge in slate (e.g. *payments*, *tooling*), the template name in Plus Jakarta Display weight, a one-line description in slate, and a quiet "Use this →" affordance pinned to the bottom right. Saffron is reserved for the action affordance, not the card surface.
+- Strip layout: horizontal scroll with momentum on iOS. Show ~3.5 cards on a 1280px viewport so the half-card on the right is a visual *invitation to scroll*. Snap scrolling, no scrollbar visible.
+- Cold-start dominance: when the user's workspace list is empty, the strip is the **dominant element** on the Dashboard — give it more vertical room, a small section heading ("Start from a template"), and a quiet sub-line ("Hand-tuned starting points — pick one, then edit before generating."). When the user has workspaces, the strip is more modest — still present, still scrollable, but compressed in height.
+- Prefill UX: clicking a card scrolls smoothly to the workspace form, fills the fields, and renders a small chip below the form: **"Started from *Stripe-like checkout* · clear"** in lotus tint with the *clear* affordance underlined. The chip is the user's signal that the prefill is editable and removable. Without this chip the prefill feels magical-but-locked; with it the user feels in control.
+- One delight: the moment a card is clicked, the card flashes its accent border in lotus for ~400ms before the scroll-to-form animation begins. A small acknowledgement that the click registered. Do not over-animate.
+- No empty state for the strip itself — if the API returns zero templates (shouldn't happen post-seed), hide the strip entirely. A "no templates available" message is worse than no strip.
+
+Open the existing dashboard workspace cards before writing this. The template card should read as a *cousin* — same visual family, but with the energy of "ready to use" rather than "previously created."
+
 **Inputs:**
 - `frontend/src/pages/Dashboard.tsx`
 - `frontend/src/components/dashboard/` (existing creation modal or inline form)
@@ -7948,6 +8035,19 @@ Render the template gallery as a horizontal scrolling strip on the Dashboard abo
 
 **Description:**
 The harness coverage figure already exists on `EvalResult.coverage_percent` for the harness stage. This task surfaces it as a `coverage_summary` field on the workspace API response (derived on the fly — no DB column) and renders it as a `.harness-coverage-chip` in three places: the workspace header, the dashboard workspace card, and the public share view. Harness is SpecForge's main differentiator — making it visible at a glance is intentional positioning.
+
+**Design Brief:**
+
+The moment-of-use feeling: glancing at a CI badge that says "build passing" — small, trustworthy, glanceable. A *trust signal*, not a metric. This chip carries product-level meaning: "the spec is backed by tests."
+
+- The chip is a single horizontal element with three parts: a tiny progress bar on the left (filling toward 100%), the count in tabular numerals ("18 / 21 reqs"), and a quiet trailing word ("covered"). Use Plus Jakarta Sans tabular nums so the numbers don't jitter when they update post-finalise.
+- The progress bar is THE visual hook. ~32px wide, ~4px tall, slate `--color-tertiary` base, saffron `--color-primary` fill. At 100% the fill briefly pulses once (~600ms, existing easing token) to reward completion. Below 80% the fill stays saffron but the chip text colour shifts to a warm warning tone (do not invent a new colour — use a slightly-darker saffron tint already in the token set, or the existing eval-warning treatment). Below 60% there is no special treatment beyond what the eval panel already shows; the chip is informational, not alarmist.
+- Identical visual treatment across all three placements (workspace header / dashboard card / public view). The component is one component used three times — never let it diverge per surface. This is the contract that makes the chip read as a *product element* rather than three coincidental UI bits.
+- Hidden when null. No "harness not finalised yet" placeholder. The harness coverage chip is a *result* signal, not a *progress* signal.
+- Hover tooltip in slate microcopy: "24 tests cover 18 of 21 spec requirements. SpecForge generates the tests; you ship them." That last clause is positioning — it tells the visitor what's actually special. Write it well.
+- On the public view specifically (T-169 Surface B), this chip is the **single most important signal** that the shared spec is real work. Place it under the cover band with a touch more breathing room than on the in-app surfaces.
+
+Look at the existing quality badge component before writing this. The coverage chip is a sibling of the quality badge, not a replacement.
 
 **Inputs:**
 - `backend/routers/workspace.py` (extend response)
@@ -8079,6 +8179,8 @@ Wire the new harness contract groups into CI, ensure WeasyPrint's native deps ar
 **Dependencies:** T-172
 
 ---
+
+_tasks.md · SpecForge V1 · Version 2.2.1 · 2026-05-20 — Phase 14 design language: added Design Directive preamble (observe → design → introspect → build → microcopy) and per-task Design Brief subsections to all six frontend tasks (T-163, T-165, T-167, T-169, T-171, T-172) naming the moment-of-use feeling for each component. No acceptance criteria removed; the directive is enforced at PR review as a human-judged criterion in addition to the automated harness checks._
 
 _tasks.md · SpecForge V1 · Version 2.2.0 · 2026-05-20 — Phase 14 V1.3 usefulness improvements T-160 through T-173 (Spec Clarification, per-task Priority + Estimate, PDF export, Public Share, Starter Templates, harness coverage surfacing)_
 
