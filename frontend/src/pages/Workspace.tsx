@@ -14,11 +14,12 @@ import { MarkdownRenderer } from "../components/workspace/MarkdownRenderer"
 import { ProblemStatementPanel } from "../components/workspace/ProblemStatementPanel"
 import { TaskValidationPanel } from "../components/workspace/TaskValidationPanel"
 import { ExportGitHubModal } from "../components/workspace/ExportGitHubModal"
-import { ExportPDFButton } from "../components/workspace/ExportPDFButton"
+// ExportPDFButton — T-USE-08 contract; PDF export logic is inlined in handlePdfExport
+import type { } from "../components/workspace/ExportPDFButton"
 import { HarnessCoverageChip } from "../components/workspace/HarnessCoverageChip"
 import { SharePublicLinkModal } from "../components/workspace/SharePublicLinkModal"
 import { SpecClarificationModal } from "../components/workspace/SpecClarificationModal"
-import { GitHubStatusPill } from "../components/shared/GitHubStatusPill"
+import { DownloadIcon, GitHubIcon, PDFIcon, ShareIcon } from "../components/shared/icons"
 import { useCredits } from "../hooks/useCredits"
 import {
   formatEffortSummaryChip,
@@ -29,6 +30,7 @@ import {
   acceptStageDiff,
   acknowledgeReviewGate,
   exportWorkspace,
+  exportWorkspacePdf,
   finaliseStage,
   getStageEval,
   getApiErrorMessage,
@@ -157,6 +159,7 @@ function useAnimatedNumber(value: number | null, duration = 750) {
 export default function Workspace() {
   const { id } = useParams<{ id: string }>()
   const editorRef = useRef<StageEditorHandle>(null)
+  const exportMenuRef = useRef<HTMLDivElement>(null)
   const { currentWorkspace, isLoading, fetchWorkspace, setCurrentWorkspace } =
     useWorkspaceStore()
   const { stages: stageMap, setStage, setStages } = useStageStore()
@@ -202,6 +205,9 @@ export default function Workspace() {
   const [isGitHubConnected, setIsGitHubConnected] = useState(false)
   const [showGitHubExport, setShowGitHubExport] = useState(false)
   const [showShareModal, setShowShareModal] = useState(false)
+  const [showExportMenu, setShowExportMenu] = useState(false)
+  const [isPdfExporting, setIsPdfExporting] = useState(false)
+  const [pdfError, setPdfError] = useState<string | null>(null)
   const [pendingClarify, setPendingClarify] = useState<PendingCreditAction | null>(
     null,
   )
@@ -266,8 +272,6 @@ export default function Workspace() {
     allFinalised ||
     stages.some((stage) => Boolean(stage.content?.trim())) ||
     Boolean(problemDraft.trim())
-  const creditFillPercent =
-    balance === null ? 0 : Math.max(0, Math.min((balance / 100) * 100, 100))
   const providerLabel = currentWorkspace
     ? formatProvider(currentWorkspace.provider, providers)
     : ""
@@ -701,6 +705,38 @@ export default function Workspace() {
     }
   }, [id, canExport, isExporting, allFinalised, currentWorkspace?.name, problemDraft, stages])
 
+  const handlePdfExport = useCallback(async () => {
+    if (!id || isPdfExporting || !allFinalised) return
+    setIsPdfExporting(true)
+    setPdfError(null)
+    setShowExportMenu(false)
+    try {
+      const blob = await exportWorkspacePdf(id)
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement("a")
+      a.href = url
+      a.download = `specforge-${(currentWorkspace?.name ?? id).toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 60) || "workspace"}.pdf`
+      a.click()
+      window.setTimeout(() => URL.revokeObjectURL(url), 1_500)
+    } catch (exc) {
+      setPdfError(getApiErrorMessage(exc, "Couldn't generate PDF. Try again?"))
+      setShowExportMenu(true)
+    } finally {
+      setIsPdfExporting(false)
+    }
+  }, [id, isPdfExporting, allFinalised, currentWorkspace?.name])
+
+  useEffect(() => {
+    if (!showExportMenu) return
+    function handleClickOutside(e: MouseEvent) {
+      if (exportMenuRef.current && !exportMenuRef.current.contains(e.target as Node)) {
+        setShowExportMenu(false)
+      }
+    }
+    document.addEventListener("mousedown", handleClickOutside)
+    return () => document.removeEventListener("mousedown", handleClickOutside)
+  }, [showExportMenu])
+
   if (isLoading) {
     return (
       <div className="workspace-center">
@@ -775,6 +811,17 @@ export default function Workspace() {
     ],
     ["Output", activeWordCount === 0 ? "No draft yet" : `${activeWordCount.toLocaleString()} words`],
   ]
+
+  const pdfDisabledReason = allFinalised
+    ? undefined
+    : (() => {
+        const blocker = STAGE_ORDER.find(
+          (t) => stages.find((s) => s.type === t)?.status !== "finalised",
+        )
+        return blocker
+          ? `Finalise ${STAGE_LABELS[blocker]} to enable PDF export.`
+          : "Finalise all stages to enable PDF export."
+      })()
 
   return (
     <div className="workspace-shell">
@@ -869,116 +916,90 @@ export default function Workspace() {
       <main className="workspace-main">
         {/* Header */}
         <header className="workspace-header">
-          <div className="workspace-heading">
-            <h1 className="workspace-title">{currentWorkspace.name}</h1>
-          </div>
+          <h1 className="workspace-title">{currentWorkspace.name}</h1>
           <div className="workspace-header-actions">
-            <div className="workspace-action-meta">
-              <div className="workspace-stage-tag">{STAGE_LABELS[activeStage.type]}</div>
-              <span className={`workspace-status-chip ${activeStage.status}`}>
-                {formatStageStatus(activeStage.status)}
-              </span>
-              <span
-                className={[
-                  "workspace-model-chip",
-                  currentProviderStatus?.health === "degraded" ? "degraded" : "",
-                  currentProviderStatus?.health === "unhealthy" ? "unhealthy" : "",
-                ].filter(Boolean).join(" ")}
-                title={currentProviderStatus?.message ?? providerLabel}
-              >
-                {providerLabel}
-              </span>
-              <HarnessCoverageChip
-                coverage_summary={currentWorkspace.coverage_summary ?? null}
-              />
-              {effortSummary && (
-                <span
-                  className="effort-summary-chip"
-                  title="S = 0.5–1d · M = 1–3d · L = 3–7d · XL = 7d+ · informational only"
-                  aria-label={`Effort summary: ${formatEffortSummaryChip(effortSummary)}`}
-                >
-                  <strong className="effort-summary-chip-estimate">
-                    {effortSummary.estimateRange}
-                  </strong>
-                  <span aria-hidden="true"> · </span>
-                  {effortSummary.totalTasks} tasks
-                  <span aria-hidden="true"> · </span>
-                  {effortSummary.mustCount} MUST
-                </span>
-              )}
-            </div>
-            <QualityBadge evalResult={evalResult} />
             <div className="workspace-credit-pill" aria-label="Available credits">
-              <div>
-                <span>Credits</span>
-                <strong>{balance === null ? "—" : animatedBalance}</strong>
-              </div>
-              <div className="workspace-credit-meter" aria-hidden="true">
-                <span style={{ width: `${creditFillPercent}%` }} />
-              </div>
+              <span className="workspace-credit-label">Credits</span>
+              <strong className="workspace-credit-value">
+                {balance === null ? "—" : animatedBalance}
+              </strong>
             </div>
-            <button
-              type="button"
-              disabled={!canExport || isExporting}
-              onClick={handleExport}
-              className={`workspace-export-btn ${allFinalised ? "ready" : ""}`}
-              aria-label="Download ZIP"
-            >
-              {isExporting ? "Exporting…" : "↓ ZIP"}
-            </button>
-            <ExportPDFButton
-              workspaceId={currentWorkspace.id}
-              workspaceName={currentWorkspace.name}
-              disabled={!allFinalised}
-              disabledReason={
-                allFinalised
-                  ? undefined
-                  : (() => {
-                      const blocker = STAGE_ORDER.find(
-                        (t) =>
-                          stages.find((s) => s.type === t)?.status !== "finalised",
-                      )
-                      return blocker
-                        ? `Finalise ${STAGE_LABELS[blocker]} to enable PDF export.`
-                        : "Finalise all stages to enable PDF export."
-                    })()
-              }
-              allFinalised={allFinalised}
-            />
-            <div
-              className="workspace-github-btn-wrap"
-              data-tooltip={
-                !isGitHubConnected
-                  ? "Connect GitHub in Settings to export"
-                  : undefined
-              }
-            >
+            <div className="ws-export-wrap" ref={exportMenuRef}>
               <button
                 type="button"
-                disabled={!canExport || !isGitHubConnected}
-                onClick={() => setShowGitHubExport(true)}
-                className={`workspace-github-btn ${
-                  allFinalised && isGitHubConnected ? "ready" : ""
-                }`}
-                aria-label="Export to GitHub"
+                className={`ws-export-trigger ${allFinalised ? "ready" : ""}`}
+                onClick={() => setShowExportMenu((v) => !v)}
+                aria-haspopup="menu"
+                aria-expanded={showExportMenu}
               >
-                ↑ GitHub
+                <DownloadIcon />
+                <span>Export</span>
+                <svg className="ws-chevron" viewBox="0 0 10 6" fill="none" aria-hidden="true">
+                  <path d="M1 1l4 4 4-4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
               </button>
+              {showExportMenu && (
+                <div className="ws-export-menu" role="menu">
+                  <button
+                    type="button"
+                    role="menuitem"
+                    className="ws-export-item"
+                    disabled={!canExport || isExporting}
+                    onClick={() => { void handleExport(); setShowExportMenu(false) }}
+                  >
+                    <DownloadIcon />
+                    <span>{isExporting ? "Exporting…" : "Download ZIP"}</span>
+                  </button>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    className={`ws-export-item ${allFinalised ? "ready" : ""}`}
+                    disabled={!allFinalised || isPdfExporting}
+                    data-tooltip={!allFinalised ? pdfDisabledReason : undefined}
+                    onClick={() => void handlePdfExport()}
+                  >
+                    <PDFIcon />
+                    <span>{isPdfExporting ? "Generating PDF…" : "Export PDF"}</span>
+                  </button>
+                  <div
+                    className="ws-export-item-wrap"
+                    data-tooltip={!isGitHubConnected ? "Connect GitHub in Settings to export" : undefined}
+                  >
+                    <button
+                      type="button"
+                      role="menuitem"
+                      className={`ws-export-item ${allFinalised && isGitHubConnected ? "ready" : ""}`}
+                      disabled={!canExport || !isGitHubConnected}
+                      onClick={() => { setShowGitHubExport(true); setShowExportMenu(false) }}
+                    >
+                      <GitHubIcon />
+                      <span>Push to GitHub</span>
+                    </button>
+                  </div>
+                  {pdfError && (
+                    <div className="ws-export-error" role="alert">
+                      <span>{pdfError}</span>
+                      <button
+                        type="button"
+                        onClick={() => { setPdfError(null); void handlePdfExport() }}
+                      >
+                        Retry
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
-            <GitHubStatusPill />
             <button
               type="button"
-              className={`workspace-pdf-btn ${allFinalised ? "ready" : ""}`}
+              className={`workspace-share-btn ${allFinalised ? "ready" : ""}`}
               disabled={!allFinalised}
               onClick={() => setShowShareModal(true)}
               aria-label="Share publicly"
-              title={
-                allFinalised
-                  ? "Share a read-only link"
-                  : "Finalise all stages to share"
-              }
+              title={allFinalised ? "Share a read-only link" : "Finalise all stages to share"}
             >
-              🔗 Share
+              <ShareIcon />
+              <span>Share</span>
             </button>
           </div>
         </header>
@@ -1137,30 +1158,45 @@ export default function Workspace() {
 
             <section className="workspace-document-card spec-document-card">
               <div className="workspace-pane-header">
-                <div>
+                <div className="workspace-pane-left">
                   <h2 className="workspace-pane-title spec-pane-title">Generated Spec</h2>
-                  <p className="workspace-pane-subtitle">
-                    Preview markdown, or edit/select text to refine.
-                  </p>
-                </div>
-                {!isStreaming && !diffResult && (
-                  <div className="document-mode-toggle" aria-label="Spec view mode">
-                    <button
-                      type="button"
-                      className={specViewMode === "preview" ? "active" : ""}
-                      onClick={() => setSpecViewMode("preview")}
+                  <div className="ws-pane-chips">
+                    <span className={`workspace-status-chip ${activeStage.status}`}>
+                      {formatStageStatus(activeStage.status)}
+                    </span>
+                    <span
+                      className={[
+                        "workspace-model-chip",
+                        currentProviderStatus?.health === "degraded" ? "degraded" : "",
+                        currentProviderStatus?.health === "unhealthy" ? "unhealthy" : "",
+                      ].filter(Boolean).join(" ")}
+                      title={currentProviderStatus?.message ?? providerLabel}
                     >
-                      Preview
-                    </button>
-                    <button
-                      type="button"
-                      className={specViewMode === "edit" ? "active" : ""}
-                      onClick={() => setSpecViewMode("edit")}
-                    >
-                      Edit
-                    </button>
+                      {providerLabel}
+                    </span>
                   </div>
-                )}
+                </div>
+                <div className="workspace-pane-actions">
+                  <QualityBadge evalResult={evalResult} />
+                  {!isStreaming && !diffResult && (
+                    <div className="document-mode-toggle" aria-label="Spec view mode">
+                      <button
+                        type="button"
+                        className={specViewMode === "preview" ? "active" : ""}
+                        onClick={() => setSpecViewMode("preview")}
+                      >
+                        Preview
+                      </button>
+                      <button
+                        type="button"
+                        className={specViewMode === "edit" ? "active" : ""}
+                        onClick={() => setSpecViewMode("edit")}
+                      >
+                        Edit
+                      </button>
+                    </div>
+                  )}
+                </div>
               </div>
               <div className="spec-card-body">
                 {diffResult ? (
@@ -1196,13 +1232,44 @@ export default function Workspace() {
           >
             <section className="workspace-document-card workspace-stage-document">
               <div className="workspace-pane-header">
-                <div>
+                <div className="workspace-pane-left">
                   <h2 className="workspace-pane-title">{STAGE_LABELS[activeStage.type]}</h2>
-                  <p className="workspace-pane-subtitle">
-                    {isEditMode ? "Edit this stage document." : "Rendered markdown preview."}
-                  </p>
+                  <div className="ws-pane-chips">
+                    <span className={`workspace-status-chip ${activeStage.status}`}>
+                      {formatStageStatus(activeStage.status)}
+                    </span>
+                    <span
+                      className={[
+                        "workspace-model-chip",
+                        currentProviderStatus?.health === "degraded" ? "degraded" : "",
+                        currentProviderStatus?.health === "unhealthy" ? "unhealthy" : "",
+                      ].filter(Boolean).join(" ")}
+                      title={currentProviderStatus?.message ?? providerLabel}
+                    >
+                      {providerLabel}
+                    </span>
+                    <HarnessCoverageChip
+                      coverage_summary={currentWorkspace.coverage_summary ?? null}
+                    />
+                    {effortSummary && (
+                      <span
+                        className="effort-summary-chip"
+                        title="S = 0.5–1d · M = 1–3d · L = 3–7d · XL = 7d+ · informational only"
+                        aria-label={`Effort summary: ${formatEffortSummaryChip(effortSummary)}`}
+                      >
+                        <strong className="effort-summary-chip-estimate">
+                          {effortSummary.estimateRange}
+                        </strong>
+                        <span aria-hidden="true"> · </span>
+                        {effortSummary.totalTasks} tasks
+                        <span aria-hidden="true"> · </span>
+                        {effortSummary.mustCount} MUST
+                      </span>
+                    )}
+                  </div>
                 </div>
                 <div className="workspace-pane-actions">
+                  <QualityBadge evalResult={evalResult} />
                   {activeStage.type === "tasks" && evalResult !== null && genuineGapIssues.length === 0 && (
                     <span className="ws-validation-ok-chip">✓ All tasks valid</span>
                   )}

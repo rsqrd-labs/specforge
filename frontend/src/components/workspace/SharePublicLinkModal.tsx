@@ -152,7 +152,7 @@ export function SharePublicLinkModal({
     >
       <div className="create-modal share-modal">
         <header className="create-modal-header">
-          <h2 id="share-modal-title">Share publicly</h2>
+          <h2 id="share-modal-title" className="create-modal-title">Share publicly</h2>
           <button
             ref={closeRef}
             type="button"
@@ -176,7 +176,7 @@ export function SharePublicLinkModal({
               </p>
               <button
                 type="button"
-                className="create-modal-submit"
+                className="modal-submit"
                 onClick={() => void handleEnable()}
               >
                 Enable public sharing

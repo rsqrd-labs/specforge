@@ -4330,16 +4330,18 @@ button:disabled {
   min-height: 0;
   display: flex;
   flex-direction: column;
-  overflow: hidden;
+  overflow: clip;
+  overflow-clip-margin: 0;
 }
 
 /* Top header */
 .workspace-header {
-  min-height: 78px;
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  position: relative;
+  z-index: 30;
+  min-height: 64px;
+  display: flex;
   align-items: center;
-  column-gap: 18px;
+  gap: 18px;
   padding: 0 22px 0 24px;
   overflow: visible;
   border-bottom: 1px solid rgba(143, 78, 0, 0.09);
@@ -4351,11 +4353,9 @@ button:disabled {
   flex-shrink: 0;
 }
 
-.workspace-heading {
+.workspace-header .workspace-title {
+  flex: 1 1 0;
   min-width: 0;
-  display: flex;
-  align-items: center;
-  overflow: hidden;
 }
 
 .workspace-action-meta {
@@ -4490,21 +4490,21 @@ button:disabled {
   justify-content: flex-end;
   gap: 10px;
   min-width: 0;
-  flex-wrap: wrap;
+  flex-shrink: 0;
 }
 
 /* Quality badge */
 .quality-badge {
-  height: 46px;
-  min-width: 108px;
+  height: 34px;
+  min-width: 88px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 8px;
-  padding: 0 14px;
-  border-radius: 14px;
+  gap: 6px;
+  padding: 0 12px;
+  border-radius: 10px;
   border: 1px solid;
-  box-shadow: 0 10px 24px rgba(47, 49, 49, 0.06);
+  box-shadow: 0 2px 8px rgba(47, 49, 49, 0.06);
   white-space: nowrap;
 }
 
@@ -4520,7 +4520,7 @@ button:disabled {
 
 .quality-badge strong {
   color: currentColor;
-  font-size: 20px;
+  font-size: 16px;
   font-weight: 900;
   letter-spacing: 0;
   line-height: 1;
@@ -4534,20 +4534,20 @@ button:disabled {
 
 .workspace-credit-pill {
   position: relative;
-  height: 46px;
-  min-width: 128px;
+  height: 34px;
+  min-width: 100px;
   display: inline-flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 10px;
+  justify-content: center;
+  gap: 8px;
   overflow: hidden;
   border: 1px solid rgba(143, 78, 0, 0.18);
-  border-radius: 14px;
+  border-radius: 10px;
   background:
     linear-gradient(135deg, rgba(143, 78, 0, 0.12), rgba(161, 56, 95, 0.08)),
     rgba(255, 255, 255, 0.66);
-  padding: 7px 14px 11px;
-  box-shadow: 0 10px 26px rgba(143, 78, 0, 0.08);
+  padding: 0 14px;
+  box-shadow: 0 2px 8px rgba(143, 78, 0, 0.08);
 }
 
 .workspace-credit-pill::after {
@@ -4561,17 +4561,9 @@ button:disabled {
   animation: credit-glow 2.8s ease-in-out infinite alternate;
 }
 
-.workspace-credit-pill > div:first-child {
+.workspace-credit-label {
   position: relative;
   z-index: 1;
-  display: flex;
-  align-items: baseline;
-  gap: 9px;
-  min-width: 0;
-}
-
-.workspace-credit-pill span {
-  display: block;
   color: var(--color-on-surface-variant);
   font-size: 10px;
   font-weight: 900;
@@ -4579,11 +4571,11 @@ button:disabled {
   text-transform: uppercase;
 }
 
-.workspace-credit-pill strong {
-  display: block;
-  margin-top: 0;
+.workspace-credit-value {
+  position: relative;
+  z-index: 1;
   color: var(--color-primary);
-  font-size: 22px;
+  font-size: 15px;
   font-weight: 900;
   letter-spacing: 0;
   line-height: 1;
@@ -4591,12 +4583,7 @@ button:disabled {
 }
 
 .workspace-credit-meter {
-  position: absolute;
-  inset: auto 14px 8px 14px;
-  height: 3px;
-  overflow: hidden;
-  border-radius: 999px;
-  background: rgba(143, 78, 0, 0.13);
+  display: none;
 }
 
 .workspace-credit-meter span {
@@ -4612,54 +4599,174 @@ button:disabled {
   to { transform: translate3d(28px, 12px, 0) scale(1.2); opacity: 0.7; }
 }
 
-/* Export button */
-.workspace-export-btn {
+/* Export dropdown */
+.ws-export-wrap {
   position: relative;
-  height: 46px;
-  padding: 0 22px;
-  border-radius: 14px;
-  border: 1px solid rgba(143, 78, 0, 0.18);
+}
+
+.ws-export-trigger {
+  position: relative;
+  height: 34px;
+  padding: 0 14px;
+  border-radius: 10px;
+  border: 1px solid rgba(143, 78, 0, 0.20);
   background:
-    linear-gradient(135deg, rgba(255, 248, 240, 0.96), rgba(255, 240, 248, 0.84)),
+    linear-gradient(135deg, rgba(255, 248, 240, 0.96), rgba(255, 241, 248, 0.84)),
     rgba(255, 255, 255, 0.72);
-  font-size: 15px;
+  font-size: 13px;
   font-weight: 800;
   color: var(--color-on-surface);
   cursor: pointer;
   transition: background 0.18s, border-color 0.18s, box-shadow 0.18s, transform 0.18s;
   box-shadow: 0 2px 8px rgba(143, 78, 0, 0.07);
-  overflow: hidden;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
 }
 
-.workspace-export-btn::after {
-  content: "";
-  position: absolute;
-  inset: 0;
-  background: linear-gradient(110deg, transparent 30%, rgba(255, 255, 255, 0.62) 50%, transparent 70%);
-  background-size: 200% 100%;
-  background-position: 200% 0;
-  transition: background-position 0.45s ease;
-  pointer-events: none;
-}
-
-.workspace-export-btn:hover:not(:disabled) {
+.ws-export-trigger:hover {
   background:
-    linear-gradient(135deg, rgba(143, 78, 0, 0.10), rgba(161, 56, 95, 0.06)),
+    linear-gradient(135deg, rgba(143, 78, 0, 0.09), rgba(161, 56, 95, 0.05)),
     rgba(255, 255, 255, 0.88);
   border-color: rgba(143, 78, 0, 0.30);
-  box-shadow: 0 6px 18px rgba(143, 78, 0, 0.14);
+  box-shadow: 0 4px 14px rgba(143, 78, 0, 0.12);
   transform: translateY(-1px);
 }
 
-.workspace-export-btn.ready:not(:disabled) {
-  border-color: rgba(34, 197, 94, 0.28);
+.ws-export-trigger[aria-expanded="true"] {
   background:
-    linear-gradient(135deg, rgba(34, 197, 94, 0.11), rgba(143, 78, 0, 0.07)),
-    rgba(255, 255, 255, 0.82);
-  color: #166534;
-  box-shadow: 0 10px 26px rgba(34, 197, 94, 0.10);
+    linear-gradient(135deg, rgba(143, 78, 0, 0.08), rgba(161, 56, 95, 0.05)),
+    rgba(255, 255, 255, 0.88);
+  border-color: rgba(143, 78, 0, 0.28);
+  transform: translateY(0);
+  box-shadow: 0 2px 6px rgba(143, 78, 0, 0.10);
 }
 
+.ws-export-trigger.ready {
+  border-color: rgba(34, 197, 94, 0.28);
+  background:
+    linear-gradient(135deg, rgba(34, 197, 94, 0.09), rgba(143, 78, 0, 0.05)),
+    rgba(255, 255, 255, 0.82);
+  color: #166534;
+}
+
+.ws-chevron {
+  width: 10px;
+  height: 6px;
+  flex-shrink: 0;
+  transition: transform 0.18s ease;
+}
+
+.ws-export-trigger[aria-expanded="true"] .ws-chevron {
+  transform: rotate(180deg);
+}
+
+.ws-export-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  min-width: 208px;
+  background:
+    linear-gradient(160deg, rgba(255, 250, 244, 0.98), rgba(255, 241, 248, 0.92)),
+    rgba(255, 255, 255, 0.96);
+  border: 1px solid rgba(143, 78, 0, 0.14);
+  border-radius: 12px;
+  box-shadow:
+    0 8px 32px rgba(47, 24, 0, 0.14),
+    0 2px 8px rgba(47, 24, 0, 0.08);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  overflow: hidden;
+  z-index: 200;
+  padding: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.ws-export-item {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 12px;
+  border-radius: 8px;
+  border: none;
+  background: transparent;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--color-on-surface);
+  cursor: pointer;
+  text-align: left;
+  transition: background 0.12s, color 0.12s;
+  white-space: nowrap;
+}
+
+.ws-export-item:hover:not(:disabled) {
+  background: rgba(143, 78, 0, 0.07);
+  color: var(--color-primary);
+}
+
+.ws-export-item.ready:not(:disabled) {
+  color: #166534;
+}
+
+.ws-export-item.ready:hover:not(:disabled) {
+  background: rgba(34, 197, 94, 0.08);
+}
+
+.ws-export-item:disabled {
+  opacity: 0.40;
+  cursor: not-allowed;
+}
+
+.ws-export-item-wrap {
+  width: 100%;
+}
+
+.ws-export-item-wrap[data-tooltip]:hover::after {
+  content: attr(data-tooltip);
+  position: absolute;
+  right: 6px;
+  bottom: calc(100% + 4px);
+  background: rgba(40, 20, 0, 0.88);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 5px 9px;
+  border-radius: 6px;
+  white-space: nowrap;
+  pointer-events: none;
+  z-index: 210;
+}
+
+.ws-export-error {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 12px;
+  margin: 2px 0 0;
+  border-top: 1px solid rgba(239, 68, 68, 0.14);
+  background: rgba(239, 68, 68, 0.05);
+  border-radius: 0 0 8px 8px;
+  font-size: 12px;
+  color: #dc2626;
+}
+
+.ws-export-error button {
+  background: none;
+  border: none;
+  color: #dc2626;
+  font-weight: 700;
+  font-size: 12px;
+  cursor: pointer;
+  padding: 0;
+  flex-shrink: 0;
+}
+
+/* kept for legacy tooltip fallback — not used in new export flow */
 .workspace-export-btn:hover:not(:disabled)::after {
   background-position: -100% 0;
 }
@@ -5251,7 +5358,7 @@ button:disabled {
   gap: 6px;
   height: 34px;
   padding: 0 12px;
-  border-radius: 9px;
+  border-radius: 10px;
   font-size: 13px;
   font-weight: 600;
   font-family: inherit;
@@ -5452,14 +5559,14 @@ button:disabled {
 /* ─── Workspace GitHub export button ───────────────────── */
 .workspace-github-btn {
   position: relative;
-  height: 46px;
-  padding: 0 18px;
-  border-radius: 14px;
+  height: 34px;
+  padding: 0 14px;
+  border-radius: 10px;
   border: 1px solid rgba(86, 94, 116, 0.20);
   background:
     linear-gradient(135deg, rgba(255,255,255,0.94), rgba(218,226,253,0.60)),
     rgba(255, 255, 255, 0.72);
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 700;
   color: var(--color-on-surface-variant);
   cursor: pointer;
@@ -5467,7 +5574,7 @@ button:disabled {
   box-shadow: 0 2px 8px rgba(86, 94, 116, 0.07);
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 5px;
   white-space: nowrap;
 }
 
@@ -5505,14 +5612,14 @@ button:disabled {
 
 .workspace-pdf-btn {
   position: relative;
-  height: 46px;
-  padding: 0 18px;
-  border-radius: 14px;
+  height: 34px;
+  padding: 0 14px;
+  border-radius: 10px;
   border: 1px solid rgba(86, 94, 116, 0.20);
   background:
     linear-gradient(135deg, rgba(255,255,255,0.94), rgba(218,226,253,0.60)),
     rgba(255, 255, 255, 0.72);
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 700;
   color: var(--color-on-surface-variant);
   cursor: pointer;
@@ -5520,11 +5627,11 @@ button:disabled {
   box-shadow: 0 2px 8px rgba(86, 94, 116, 0.07);
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 5px;
   white-space: nowrap;
   /* Hold a stable width so the in-place label swap to "Generating PDF…"
      does not jitter the row. */
-  min-width: 132px;
+  min-width: 114px;
   justify-content: center;
 }
 
@@ -5587,6 +5694,51 @@ button:disabled {
   font-weight: 700;
   cursor: pointer;
   padding: 0;
+}
+
+.workspace-header-divider {
+  width: 1px;
+  height: 28px;
+  background: rgba(143, 78, 0, 0.14);
+  flex-shrink: 0;
+  align-self: center;
+  margin: 0 2px;
+}
+
+.workspace-share-btn {
+  position: relative;
+  height: 34px;
+  padding: 0 16px;
+  border-radius: 10px;
+  border: 1px solid transparent;
+  background: linear-gradient(135deg, var(--color-primary) 0%, var(--color-secondary) 100%);
+  font-size: 13px;
+  font-weight: 800;
+  color: #fff;
+  cursor: pointer;
+  transition: opacity 0.15s, box-shadow 0.15s, transform 0.15s;
+  box-shadow: 0 3px 10px rgba(143, 78, 0, 0.28);
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  white-space: nowrap;
+}
+
+.workspace-share-btn:hover:not(:disabled) {
+  opacity: 0.92;
+  box-shadow: 0 8px 22px rgba(143, 78, 0, 0.38);
+  transform: translateY(-1px);
+}
+
+.workspace-share-btn:active:not(:disabled) {
+  transform: translateY(0);
+  box-shadow: 0 4px 10px rgba(143, 78, 0, 0.22);
+}
+
+.workspace-share-btn:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+  box-shadow: none;
 }
 
 /* ===== T-USE-10: Share modal (Surface A) ============================== */
@@ -5713,15 +5865,14 @@ button:disabled {
 }
 
 .share-modal-footer {
-  margin-top: 6px;
-  padding: 12px 0 0 0;
-  border-top: 1px solid rgba(86, 94, 116, 0.10);
+  padding: 14px 24px 20px;
+  border-top: 1px solid rgba(143, 78, 0, 0.10);
 }
 
 .share-modal-privacy {
   margin: 0;
   font-size: 12px;
-  line-height: 1.5;
+  line-height: 1.6;
   color: var(--color-on-surface-variant);
 }
 
@@ -5938,16 +6089,20 @@ button:disabled {
 
 .public-view-shell {
   min-height: 100vh;
-  background: var(--color-surface);
+  background:
+    radial-gradient(circle at top left, rgba(255, 153, 51, 0.18), transparent 34rem),
+    radial-gradient(circle at bottom right, rgba(161, 56, 95, 0.12), transparent 30rem),
+    var(--color-background);
   color: var(--color-on-surface);
   display: flex;
   flex-direction: column;
 }
 
 .public-view-cover {
-  padding: 56px 24px 28px 24px;
+  padding: 56px 24px 36px 24px;
   text-align: center;
-  background: linear-gradient(180deg, rgba(143, 78, 0, 0.05), transparent);
+  background: linear-gradient(180deg, rgba(143, 78, 0, 0.10) 0%, transparent 100%);
+  border-bottom: 1px solid rgba(143, 78, 0, 0.08);
 }
 
 .public-view-brand {
@@ -5991,9 +6146,10 @@ button:disabled {
   justify-content: center;
   gap: 4px;
   padding: 12px 16px;
-  background: rgba(255, 255, 255, 0.92);
-  backdrop-filter: blur(8px);
-  border-bottom: 1px solid rgba(86, 94, 116, 0.08);
+  background: rgba(253, 246, 238, 0.88);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border-bottom: 1px solid rgba(143, 78, 0, 0.10);
 }
 
 .public-view-tab {
@@ -6008,11 +6164,12 @@ button:disabled {
   transition: background-color 120ms ease, color 120ms ease;
 }
 
-.public-view-tab:hover { background: rgba(86, 94, 116, 0.08); }
+.public-view-tab:hover { background: rgba(143, 78, 0, 0.08); }
 
 .public-view-tab.active {
-  background: var(--color-primary);
+  background: linear-gradient(135deg, var(--color-primary) 0%, var(--color-secondary) 100%);
   color: #fff;
+  box-shadow: 0 4px 12px rgba(143, 78, 0, 0.22);
 }
 
 .public-view-content {
@@ -6031,7 +6188,7 @@ button:disabled {
 }
 
 .public-view-footer-link {
-  color: var(--color-secondary);
+  color: var(--color-primary);
   font-weight: 700;
   text-decoration: none;
 }
@@ -6153,51 +6310,27 @@ button:disabled {
     padding-right: 18px;
   }
 
-  .workspace-model-chip {
-    max-width: 180px;
-  }
-
-  .workspace-action-meta {
-    max-width: 340px;
-  }
-
-  .quality-badge {
-    min-width: 96px;
-    padding: 0 12px;
-  }
-
   .workspace-credit-pill {
-    min-width: 112px;
-    padding-inline: 12px;
+    min-width: 88px;
+    padding-inline: 10px;
   }
 
-  .workspace-export-btn,
   .ws-view-toggle {
-    padding-inline: 16px;
+    padding-inline: 14px;
   }
 }
 
 @media (max-width: 960px) {
   .workspace-header {
-    min-height: 92px;
-    grid-template-columns: minmax(0, 1fr);
-    align-content: center;
+    flex-wrap: wrap;
+    min-height: 64px;
     row-gap: 8px;
     padding-block: 10px;
-  }
-
-  .workspace-heading {
-    min-width: 0;
   }
 
   .workspace-header-actions {
     justify-content: flex-start;
     min-width: 0;
-  }
-
-  .workspace-action-meta {
-    max-width: 100%;
-    justify-content: flex-start;
   }
 }
 
@@ -6943,11 +7076,10 @@ button:disabled {
 
 .workspace-pane-header {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
-  gap: 12px;
-  min-height: 74px;
-  padding: 14px 16px 12px;
+  gap: 16px;
+  padding: 16px 18px 14px;
   border-bottom: 1px solid rgba(143, 78, 0, 0.10);
   background:
     linear-gradient(135deg, rgba(255, 244, 230, 0.98), rgba(255, 232, 241, 0.74)),
@@ -6956,13 +7088,29 @@ button:disabled {
   box-shadow: 0 2px 10px rgba(143, 78, 0, 0.04);
 }
 
+.workspace-pane-left {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  flex: 1;
+}
+
+.ws-pane-chips {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
 .workspace-pane-actions {
   display: flex;
   align-items: center;
   justify-content: flex-end;
-  gap: 10px;
-  min-width: 0;
+  gap: 8px;
+  flex-shrink: 0;
   flex-wrap: wrap;
+  padding-top: 2px;
 }
 
 .workspace-pane-title {

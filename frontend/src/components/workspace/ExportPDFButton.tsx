@@ -1,5 +1,6 @@
 import { useCallback, useRef, useState } from "react"
 import { exportWorkspacePdf, getApiErrorMessage } from "../../services/api"
+import { PDFIcon } from "../shared/icons"
 
 interface ExportPDFButtonProps {
   workspaceId: string
@@ -73,7 +74,7 @@ export function ExportPDFButton({
         onClick={() => void handleClick()}
         aria-label="Export PDF"
       >
-        {busy ? "Generating PDF…" : "📄 PDF"}
+        {busy ? "Generating PDF…" : <><PDFIcon />PDF</>}
       </button>
       <a ref={anchorRef} hidden aria-hidden="true" />
       {error && (
