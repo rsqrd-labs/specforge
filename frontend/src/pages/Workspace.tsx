@@ -35,7 +35,7 @@ import {
   getStageEval,
   getApiErrorMessage,
   getGitHubIntegration,
-  getProviders,
+
   getWorkspace,
   refineStage,
   rejectStageDiff,
@@ -46,7 +46,6 @@ import {
 } from "../services/api"
 import { useStageStore } from "../store/stageStore"
 import { useWorkspaceStore } from "../store/workspaceStore"
-import type { Provider } from "../services/api"
 import type { EvalResult, RefineResponse, Stage, StageType } from "../types/stage"
 
 const STAGE_ORDER: StageType[] = ["spec", "plan", "harness", "tasks"]
@@ -112,18 +111,6 @@ function formatStageStatus(status: Stage["status"]): string {
   return status.replace("_", " ")
 }
 
-function formatProvider(providerId: string, providers: Provider[]): string {
-  const provider = providers.find((candidate) => candidate.id === providerId)
-  return provider?.name ?? titleCaseIdentifier(providerId)
-}
-
-function titleCaseIdentifier(value: string): string {
-  return value
-    .split(/[-_\s]+/)
-    .filter(Boolean)
-    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
-    .join(" ")
-}
 
 function useAnimatedNumber(value: number | null, duration = 750) {
   const [displayValue, setDisplayValue] = useState(value ?? 0)
@@ -201,7 +188,6 @@ export default function Workspace() {
   const [specViewMode, setSpecViewMode] = useState<"preview" | "edit">("preview")
   const [problemDraft, setProblemDraft] = useState("")
   const [problemDirty, setProblemDirty] = useState(false)
-  const [providers, setProviders] = useState<Provider[]>([])
   const [isGitHubConnected, setIsGitHubConnected] = useState(false)
   const [showGitHubExport, setShowGitHubExport] = useState(false)
   const [showShareModal, setShowShareModal] = useState(false)
@@ -272,30 +258,13 @@ export default function Workspace() {
     allFinalised ||
     stages.some((stage) => Boolean(stage.content?.trim())) ||
     Boolean(problemDraft.trim())
-  const providerLabel = currentWorkspace
-    ? formatProvider(currentWorkspace.provider, providers)
-    : ""
-  const currentProviderStatus = currentWorkspace
-    ? providers.find((provider) => provider.id === currentWorkspace.provider)
-    : null
+
 
   useEffect(() => {
     if (id) {
       void fetchWorkspace(id)
     }
   }, [id, fetchWorkspace])
-
-  useEffect(() => {
-    let cancelled = false
-    getProviders()
-      .then((catalog) => {
-        if (!cancelled) setProviders(catalog.providers)
-      })
-      .catch(() => undefined)
-    return () => {
-      cancelled = true
-    }
-  }, [])
 
   useEffect(() => {
     if (!currentWorkspace) return
@@ -1164,16 +1133,6 @@ export default function Workspace() {
                     <span className={`workspace-status-chip ${activeStage.status}`}>
                       {formatStageStatus(activeStage.status)}
                     </span>
-                    <span
-                      className={[
-                        "workspace-model-chip",
-                        currentProviderStatus?.health === "degraded" ? "degraded" : "",
-                        currentProviderStatus?.health === "unhealthy" ? "unhealthy" : "",
-                      ].filter(Boolean).join(" ")}
-                      title={currentProviderStatus?.message ?? providerLabel}
-                    >
-                      {providerLabel}
-                    </span>
                   </div>
                 </div>
                 <div className="workspace-pane-actions">
@@ -1237,16 +1196,6 @@ export default function Workspace() {
                   <div className="ws-pane-chips">
                     <span className={`workspace-status-chip ${activeStage.status}`}>
                       {formatStageStatus(activeStage.status)}
-                    </span>
-                    <span
-                      className={[
-                        "workspace-model-chip",
-                        currentProviderStatus?.health === "degraded" ? "degraded" : "",
-                        currentProviderStatus?.health === "unhealthy" ? "unhealthy" : "",
-                      ].filter(Boolean).join(" ")}
-                      title={currentProviderStatus?.message ?? providerLabel}
-                    >
-                      {providerLabel}
                     </span>
                     <HarnessCoverageChip
                       coverage_summary={currentWorkspace.coverage_summary ?? null}
