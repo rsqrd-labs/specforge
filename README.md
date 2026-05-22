@@ -17,25 +17,31 @@ SpecForge helps users move from vague product intent to a buildable software pla
 Core capabilities:
 
 - Google OAuth sign-in and secure session management.
-- Workspace creation from a problem statement.
+- Starter templates to bootstrap a workspace from common problem types.
+- Workspace creation from a problem statement with optional clarification questions before generation.
 - Streaming AI generation for `SPEC.md`, `PLAN.md`, harness coverage, and `tasks.md`.
 - Human review gates between stages.
 - Stage refinement with diff preview and accept/reject flow.
 - Credit accounting for generation and accepted refinements.
 - Provider-aware LLM routing for Anthropic, OpenAI, and Google.
+- User-supplied provider API keys, encrypted at rest, with platform key fallback.
 - Online evaluation and quality indicators for generated stages.
-- Exportable delivery artifacts for handoff to engineers or coding agents.
+- Harness full-coverage badge when all spec requirements are mapped to tests.
+- Task priority, time estimates, and effort summary across the task list.
+- Export options: ZIP delivery package, PDF document, GitHub repository push, and public share link.
 
 ## Product Flow
 
 1. User signs in with Google.
-2. User creates a workspace with a product/problem statement.
-3. SpecForge generates the stages in order:
+2. User creates a workspace from a problem statement, optionally selecting a starter template.
+3. SpecForge may ask clarifying questions to sharpen the Spec before generation begins.
+4. SpecForge generates the stages in order:
    - `Spec`: requirements, users, journeys, constraints, and acceptance criteria.
    - `Plan`: architecture, implementation strategy, risks, and sequencing.
    - `Harness`: validation assets and coverage expectations.
-   - `Tasks`: traceable work items ready for execution.
-4. User reviews, refines, accepts, and exports the package.
+   - `Tasks`: traceable work items with priority and time estimates, ready for execution.
+5. User reviews, refines, and accepts each stage before the next unlocks.
+6. User exports the package: ZIP archive, PDF document, push to a GitHub repository, or a public share link.
 
 ## Architecture
 
@@ -48,29 +54,43 @@ Browser
   v
 FastAPI API
   |
-  |-- PostgreSQL: users, workspaces, stages, credits, evals
+  |-- PostgreSQL: users, workspaces, stages, credits, evals, templates
   |-- Redis: refresh sessions, rate limits, transient auth state
   |-- LLM gateway: Anthropic, OpenAI, Google Gemini
+  |-- PDF renderer: WeasyPrint with no-network URL fetcher
   |-- Observability: Prometheus metrics, Sentry, optional OTLP
 ```
 
 Important backend areas:
 
-- `backend/routers`: HTTP API routes for auth, workspaces, stages, credits, and providers.
-- `backend/services/pipeline`: stage generation, diffing, exports, prompt building, and recovery.
+- `backend/routers`: HTTP API routes for auth, workspaces, stages, credits, providers, integrations, and public share.
+- `backend/services/pipeline`: stage generation, diffing, PDF export, prompt building, and recovery.
 - `backend/services/llm`: provider adapters and routing.
 - `backend/services/evals`: online evaluation and quality scoring.
 - `backend/services/security`: CSRF, prompt guard, output validator, sanitizer, and encrypted key handling.
 - `backend/middleware`: rate limiting and CSRF enforcement.
 - `backend/migrations`: Alembic database migrations.
+- `backend/scripts/seed_templates.py`: idempotent starter-template seed, runs on every container start.
 
 Important frontend areas:
 
-- `frontend/src/pages`: landing, auth callback, dashboard, and workspace screens.
-- `frontend/src/components/workspace`: stage editor, navigator, streaming overlay, review gates, diff viewer, and validation panels.
+- `frontend/src/pages`: landing, auth callback, dashboard, workspace, and public share (`/p/:slug`) screens.
+- `frontend/src/components/workspace`: stage editor, navigator, streaming overlay, review gates, diff viewer, clarification modal, and validation panels.
 - `frontend/src/services`: API and streaming clients.
 - `frontend/src/store`: Zustand stores for user, workspace, and stage state.
 - `frontend/src/types`: shared frontend TypeScript types.
+
+### Public Share Route
+
+`/p/:slug` is an unauthenticated React route served outside the auth guard. It reads from `GET /public/{slug}` with no CSRF or auth headers. Both surfaces inject `noindex, nofollow` metadata. The route prefix is disallowed in `frontend/public/robots.txt`.
+
+### PDF Export
+
+PDF rendering uses WeasyPrint. The backend Dockerfile installs the required native libraries (`libcairo2`, `libpango-1.0-0`, `libpangoft2-1.0-0`). The renderer is configured with a `no_network_url_fetcher` that refuses every non-`data:` URL at render time.
+
+### Starter Templates
+
+The `templates` table is populated automatically on every container start by `backend/scripts/seed_templates.py`, invoked from `backend/entrypoint.sh` after `alembic upgrade head`. The seed is idempotent. To add a new template, edit `STARTER_TEMPLATES` in the seed script — never rename a slug in place; add a new slug and mark the old one inactive.
 
 ## Tech Stack
 
@@ -84,6 +104,7 @@ Backend:
 - Redis 7
 - Authlib and python-jose for OAuth/JWT flows
 - Anthropic, OpenAI, and Google Generative AI SDKs
+- WeasyPrint for PDF rendering
 - Structlog, Prometheus, Sentry, and OpenTelemetry
 - Pytest, Ruff, Black, Bandit, pip-audit
 
@@ -91,7 +112,7 @@ Frontend:
 
 - React 18
 - TypeScript
-- Vite
+- Vite 6
 - Tailwind CSS
 - Zustand
 - Axios
@@ -152,6 +173,8 @@ Frontend environment variables can live in `frontend/.env`:
 cp frontend/.env.example frontend/.env
 ```
 
+See `docs/LOCAL_TESTING_HANDBOOK.md` for a step-by-step guide to generating secrets and configuring the stack for local development.
+
 ### Backend Variables
 
 | Variable | Purpose |
@@ -163,11 +186,15 @@ cp frontend/.env.example frontend/.env
 | `GOOGLE_CLIENT_ID` | Google OAuth client ID. |
 | `GOOGLE_CLIENT_SECRET` | Google OAuth client secret. |
 | `FRONTEND_URL` | Public frontend origin used for redirects and CORS. |
-| `ANTHROPIC_API_KEY` | Anthropic API key. |
-| `OPENAI_API_KEY` | OpenAI API key. |
-| `GOOGLE_API_KEY` | Google Gemini API key. |
-| `ENCRYPTION_MASTER_KEY` | Fernet-compatible key for encrypted secrets. |
+| `ANTHROPIC_API_KEY` | Anthropic API key. Leave blank to disable the Anthropic provider. |
+| `OPENAI_API_KEY` | OpenAI API key. Leave blank to disable the OpenAI provider. |
+| `GOOGLE_API_KEY` | Google Gemini API key. Leave blank to disable the Google provider. |
+| `ENCRYPTION_MASTER_KEY` | Fernet-compatible key for encrypting user-stored provider keys and OAuth tokens. |
 | `CSRF_SECRET` | HMAC secret for CSRF token signing. |
+| `METRICS_TOKEN` | Bearer token protecting the `/metrics` endpoint. Leave blank to allow unauthenticated scraping (not recommended in production). |
+| `MAX_ACTIVE_WORKSPACES_PER_USER` | Optional cap on active workspaces per user. Defaults to unlimited when unset. |
+| `GITHUB_CLIENT_ID` | GitHub OAuth App client ID. Leave blank to disable the GitHub export integration. |
+| `GITHUB_CLIENT_SECRET` | GitHub OAuth App client secret. Required when `GITHUB_CLIENT_ID` is set. |
 | `SENTRY_DSN` | Optional backend Sentry DSN. |
 | `GRAFANA_OTLP_ENDPOINT` | Optional OTLP trace endpoint. |
 | `GRAFANA_OTLP_TOKEN` | Optional OTLP auth token. |
@@ -309,26 +336,17 @@ pnpm test
 pnpm build
 ```
 
-Landing page targeted check:
+Harness and contract tests:
 
 ```bash
-cd frontend
-pnpm vitest run src/__tests__/Landing.test.tsx
+cd backend
+uv run pytest ../harness/tests/backend/ -q
 ```
 
 Smoke-test guidance:
 
 ```text
 docs/SMOKE_TEST_CHECKLIST.md
-```
-
-Phase 12 provider-agnostic cost checks:
-
-```bash
-cd backend
-uv run pytest ../harness/tests/backend/test_phase12_llm_cost_contract.py -q
-python3 -m json.tool ../harness/schemas/llm-cost-event.schema.json >/dev/null
-uv run python ../scripts/run_llm_route_eval.py --operation all --provider openai --format markdown
 ```
 
 ## Provider-Agnostic LLM Cost Optimization
@@ -346,7 +364,7 @@ Key invariants:
 - Cross-provider fallback is never silent. It requires an explicit
   `allow_cross_provider=True` policy decision and is reported in telemetry.
 - Prompt moat prefixes are versioned and stable so dynamic context can be cached
-  and summarized without rewriting core ASDD instructions.
+  and summarized without rewriting core instructions.
 - Generation/refine cache keys include provider, model, tier, prompt version,
   operation, problem hash, upstream hashes, instruction hash, and output contract.
 - `llm.cost_recorded` logs and Prometheus metrics include provider, model tier,
@@ -370,6 +388,8 @@ SpecForge includes several controls intended for AI-assisted workflows:
 - Prompt guard checks reject prompt-injection attempts before LLM calls.
 - Output validation blocks system-prompt leakage and unsafe model output.
 - Logs and Sentry events are scrubbed for likely secrets before export.
+- Langfuse payloads go through the shared redaction path before export.
+- User-supplied provider API keys are encrypted with Fernet before storage.
 - CI runs TruffleHog, Bandit, non-interactive `pip-audit`, and
   `pnpm audit --audit-level moderate`; no dependency scanner token is required.
 
@@ -404,6 +424,8 @@ Recommended production shape:
 - Configure `FRONTEND_URL` and `VITE_API_URL` to the public origins.
 - Enable HTTPS and secure cookies.
 
+See `docs/INTEGRATION_API_SETUP_HANDBOOK.md` for full deployment configuration instructions.
+
 ## Backend Container Deployment
 
 Build:
@@ -421,7 +443,7 @@ docker run --rm \
   specforge-api
 ```
 
-`entrypoint.sh` runs `alembic upgrade head` automatically before starting Gunicorn, so migrations apply on every container start. To run migrations separately without starting the server, override the entrypoint:
+`entrypoint.sh` runs `alembic upgrade head` and the starter-template seed automatically before starting Gunicorn, so migrations and template data are applied on every container start. To run migrations separately without starting the server, override the entrypoint:
 
 ```bash
 docker run --rm \
@@ -436,6 +458,8 @@ The Dockerfile starts Gunicorn with Uvicorn workers:
 ```text
 gunicorn main:app --worker-class uvicorn.workers.UvicornWorker --workers 2 --bind 0.0.0.0:8000
 ```
+
+The Dockerfile also installs native libraries required for PDF rendering (`libcairo2`, `libpango-1.0-0`, `libpangoft2-1.0-0`). These must be present in the container image — do not strip them from a slimmed build.
 
 Tune worker count and CPU/memory limits for your hosting platform.
 
@@ -461,7 +485,7 @@ Set the production API URL before building:
 VITE_API_URL=https://api.example.com pnpm build
 ```
 
-For single-page app hosting, configure fallback routing so all unknown paths serve `index.html`.
+For single-page app hosting, configure fallback routing so all unknown paths serve `index.html`. This is required for the public share route (`/p/:slug`) and the auth callback route to work correctly.
 
 ## Google OAuth Setup
 
@@ -484,6 +508,19 @@ The local redirect URI to register in Google Console:
 http://localhost:5173/auth/callback
 ```
 
+## GitHub Export Setup
+
+The GitHub export integration lets users push their delivery package to a GitHub repository. It is optional and disabled by default when `GITHUB_CLIENT_ID` is blank.
+
+To enable it:
+
+1. In GitHub → **Settings** → **Developer settings** → **OAuth Apps** → **New OAuth App**.
+2. Set the **Authorization callback URL** to `{FRONTEND_URL}/integrations/github/callback`.
+3. Copy the **Client ID** and generate a **Client Secret**.
+4. Set `GITHUB_CLIENT_ID` and `GITHUB_CLIENT_SECRET` in backend secrets.
+
+When `GITHUB_CLIENT_ID` is blank, the backend returns 503 for all GitHub integration routes and the frontend omits the GitHub export option. No partial configuration is needed to disable the feature.
+
 ## Observability
 
 Available endpoints:
@@ -498,7 +535,7 @@ Optional integrations:
 - Backend Sentry through `SENTRY_DSN`.
 - Frontend Sentry through `VITE_SENTRY_DSN`.
 - OTLP tracing through `GRAFANA_OTLP_ENDPOINT` and `GRAFANA_OTLP_TOKEN`.
-- Prometheus scraping through `/metrics`.
+- Prometheus scraping through `/metrics`. Protect with `METRICS_TOKEN` in production.
 - LLM-call observability through Langfuse (`LANGFUSE_SECRET_KEY`,
   `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_HOST`). With `LANGFUSE_SECRET_KEY` blank the
   Langfuse SDK is never imported and the application behaves identically to a
@@ -543,6 +580,8 @@ Sensitive values are redacted before they are emitted through logging, Sentry, o
 - Use Redis persistence or managed Redis if session durability matters.
 - Do not deploy with placeholder JWT, CSRF, or encryption secrets.
 - Do not commit `node_modules`, local caches, or generated test artifacts.
+- Set `METRICS_TOKEN` in production to prevent unauthenticated metric scraping.
+- Leave `GITHUB_CLIENT_ID` blank if you do not want to expose the GitHub export feature.
 
 ## Troubleshooting
 
@@ -570,6 +609,16 @@ CSRF failures:
 - Ensure the frontend is using the API client that fetches `/auth/csrf-token`.
 - Ensure access tokens are present in memory after authentication.
 - Avoid manually calling mutating endpoints without `X-CSRF-Token`.
+
+PDF export fails:
+
+- Confirm the backend image includes the WeasyPrint native libraries (`libcairo2`, `libpango-1.0-0`, `libpangoft2-1.0-0`).
+- Check backend logs for WeasyPrint rendering errors.
+
+GitHub export returns 503:
+
+- Confirm `GITHUB_CLIENT_ID` and `GITHUB_CLIENT_SECRET` are set in the backend environment.
+- Both variables must be non-blank to enable the integration.
 
 Large frontend build warning:
 
