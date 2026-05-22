@@ -8750,7 +8750,7 @@ Two low-severity backend findings. Finding L-1: `STAGE_DEPENDENCIES` (the dict m
 ### T-189b: Frontend Debt Sweep
 
 **Description:**
-Four low-severity frontend findings. Finding L-3: `CreditConfirmModal` exposes both `onConfirm`/`onClose` and their aliases `onOk`/`onDismiss` — four prop names for two callbacks, creating confusion for callers. Finding L-4: `ExportGitHubModal` auto-closes via `setTimeout(..., 1500)` — if the export call takes longer than 1.5 seconds the modal closes before the call completes. Finding L-5: `TemplatesStrip` has no error boundary; a network error during template fetch crashes the whole workspace view. Finding L-6: `SharePublicLinkModal` does not trap focus — Tab key exits the modal and reaches background elements, violating WCAG 2.1 SC 2.1.2.
+Four low-severity frontend findings. Finding L-3: `CreditConfirmModal` accepts both `creditCost` and `cost` as aliases for the same prop, and both `currentBalance` and `balance` as aliases for the same prop — callers across the codebase use different names, both alias pairs must be kept in sync, and TypeScript cannot catch the divergence because both are accepted. Finding L-4: `ExportGitHubModal` shows a progress spinner that runs indefinitely if the export API call hangs or returns a non-error non-success state — there is no client-side timeout, so a stuck export has no recovery path for the user. Finding L-5: `TemplatesStrip` has no error boundary; a network error during template fetch crashes the whole workspace view. Finding L-6: `SharePublicLinkModal` does not trap focus — Tab key exits the modal and reaches background elements, violating WCAG 2.1 SC 2.1.2.
 
 **Severity:** Low
 
@@ -8759,24 +8759,24 @@ Four low-severity frontend findings. Finding L-3: `CreditConfirmModal` exposes b
 - `frontend/src/components/workspace/ExportGitHubModal.tsx`
 - `frontend/src/components/workspace/TemplatesStrip.tsx`
 - `frontend/src/components/workspace/SharePublicLinkModal.tsx`
-- Harness: `test_phase15_credit_confirm_modal_no_prop_aliases`, `test_phase15_export_github_modal_no_settimeout`, `test_phase15_templates_strip_has_error_boundary`, `test_phase15_share_modal_focus_trap`
+- Harness: `test_phase15_credit_confirm_modal_no_prop_aliases`, `test_phase15_export_github_modal_has_abort_timeout`, `test_phase15_templates_strip_has_error_boundary`, `test_phase15_share_modal_focus_trap`
 
 **Outputs:**
-- `CreditConfirmModal` props: `onConfirm`, `onClose` only — `onOk`/`onDismiss` removed; all call sites updated
-- `ExportGitHubModal` closes in `onSuccess` callback, not `setTimeout`
+- `CreditConfirmModal` props: `creditCost` and `currentBalance` as canonical names — `cost` and `balance` aliases removed; all call sites updated
+- `ExportGitHubModal` export request uses `AbortController` with a 30-second timeout; spinner resolves to an error state on abort
 - `TemplatesStrip` wrapped in a React error boundary rendering "Templates unavailable" on error
 - `SharePublicLinkModal` traps focus using `focus-trap-react` or equivalent
 
 **Steps:**
-1. In `CreditConfirmModal.tsx`, remove `onOk` and `onDismiss` from the props interface. Update all call sites across the codebase to use `onConfirm`/`onClose` exclusively.
-2. In `ExportGitHubModal.tsx`, remove the `setTimeout` auto-close. Move the modal close call into the mutation/API call's `onSuccess` callback.
+1. In `CreditConfirmModal.tsx`, pick `creditCost` and `currentBalance` as the canonical prop names. Remove the `cost` and `balance` alias definitions from the props interface. Run `pnpm tsc --noEmit` — TypeScript will flag every call site still using the removed aliases. Update each call site to use the canonical names.
+2. In `ExportGitHubModal.tsx`, add `AbortController` timeout: create `const controller = new AbortController()` before the export call; pass `signal: controller.signal` to the API client; set `const timeout = setTimeout(() => controller.abort(), 30_000)` and clear it in a `finally` block. On `AbortError`, display "Export timed out — please retry."
 3. Create `frontend/src/components/workspace/TemplatesStripErrorBoundary.tsx` (or add an inline class component). Wrap `<TemplatesStrip>` with it everywhere it is rendered. The fallback renders nothing (silent fail) or a one-line "Templates unavailable" note.
 4. Install `focus-trap-react` if not already present (`pnpm add focus-trap-react`). In `SharePublicLinkModal.tsx`, wrap the modal content with `<FocusTrap active={isOpen}>`. Set `initialFocus` to the first interactive element.
 5. Run `pnpm tsc --noEmit` and `pnpm test`.
 
 **Acceptance Criteria:**
-- `CreditConfirmModal` props interface does not contain `onOk` or `onDismiss`.
-- `ExportGitHubModal` contains no `setTimeout` call.
+- `CreditConfirmModal` props interface does not contain `cost` or `balance` aliases.
+- `ExportGitHubModal` uses `AbortController` and aborts after 30 seconds with a visible error message.
 - `TemplatesStrip` is rendered inside an error boundary.
 - `SharePublicLinkModal` traps focus when open.
 - `pnpm tsc` exits 0; `pnpm test` passes.
@@ -8789,34 +8789,36 @@ Four low-severity frontend findings. Finding L-3: `CreditConfirmModal` exposes b
 ### T-189c: Infrastructure Debt Sweep
 
 **Description:**
-Two low-severity infrastructure findings. Finding L-7: Docker Compose binds Redis (6379) and PostgreSQL (5432) ports to `0.0.0.0` — all network interfaces — by default. Developers on shared networks (office LANs, university networks) expose their local database and cache to other machines on the same subnet. Finding L-8: Rate limit override constants (`RATELIMIT_DISABLED`, per-endpoint multipliers) in `rate_limit.py` have no inline documentation. New developers enabling overrides for load testing do not know the operational risks or side-effects.
+Two low-severity infrastructure findings. Finding L-7: The frontend Vite dev server port `5173:5173` in `docker-compose.yml` is bound to all interfaces without a `127.0.0.1:` prefix. On a developer laptop with the firewall disabled or on a shared network (office Wi-Fi, university LAN), the local Vite dev server — which serves unminified source, source maps, and hot-reload websockets — is accessible to any machine on the same subnet. Finding L-8: `AUTH_LOGIN_BURST_LIMIT: 60` and `AUTH_LOGIN_HOURLY_LIMIT: 240` are set as environment variable overrides in `docker-compose.yml`, dramatically relaxing the production-safe auth rate limits. A developer who copies this Compose configuration to a staging environment without understanding these variables deploys with dangerously permissive rate limits and no warning.
 
 **Severity:** Low
 
 **Inputs:**
-- `docker-compose.yml` (repository root) — `ports:` sections for `db` and `redis` services
-- `backend/middleware/rate_limit.py` — override constants
-- `docs/LOCAL_TESTING_HANDBOOK.md` — rate limit section
-- Harness: `test_phase15_docker_compose_ports_bound_to_localhost`, `test_phase15_rate_limit_overrides_documented`
+- `docker-compose.yml` (repository root) — `ports:` section for the `frontend` service; environment variable overrides for auth rate limits in the `api` service
+- `docs/LOCAL_TESTING_HANDBOOK.md` — local dev section
+- Harness: `test_phase15_docker_compose_frontend_port_bound_to_localhost`, `test_phase15_docker_compose_auth_rate_limits_documented`
 
 **Outputs:**
-- `docker-compose.yml` port bindings: `"127.0.0.1:5432:5432"` and `"127.0.0.1:6379:6379"`
-- Inline comments on each rate limit override constant explaining the effect and when it is safe to change
-- A note in `docs/LOCAL_TESTING_HANDBOOK.md` under a "Rate limit overrides" subsection
+- `docker-compose.yml` frontend port binding changed to `"127.0.0.1:5173:5173"`; DB and Redis ports also bound to localhost
+- `AUTH_LOGIN_BURST_LIMIT` and `AUTH_LOGIN_HOURLY_LIMIT` annotated with `# Local dev only — do not copy to staging/production`
+- `docs/LOCAL_TESTING_HANDBOOK.md` notes the rate limit overrides and their dev-only scope
 
 **Steps:**
-1. In `docker-compose.yml`, change the `db` service ports from `"5432:5432"` (or `- 5432:5432`) to `"127.0.0.1:5432:5432"`. Change the `redis` service ports from `"6379:6379"` to `"127.0.0.1:6379:6379"`. Verify `docker compose up` still starts correctly.
-2. In `backend/middleware/rate_limit.py`, add inline comments to each override constant:
-   - `RATELIMIT_DISABLED`: "Set to True to disable all rate limiting — for load testing only. Never set in production."
-   - Per-endpoint multipliers: explain the default limit, what multiplying by N means, and the risk of setting it too high.
-3. In `docs/LOCAL_TESTING_HANDBOOK.md`, add a "Rate limit overrides" subsection after the test suite section, listing the constants and the conditions under which they are safe to change.
-4. Run `uv run pytest tests/ -q` and `docker compose config` to validate the compose file.
+1. In `docker-compose.yml`, change the `frontend` service port from `"5173:5173"` to `"127.0.0.1:5173:5173"`. While there, also bind `db` (`5432`) and `redis` (`6379`) to `127.0.0.1` for consistent localhost-only access across all dev services.
+2. Locate the `AUTH_LOGIN_BURST_LIMIT` and `AUTH_LOGIN_HOURLY_LIMIT` environment variable overrides in the `api` service definition. Add an inline comment immediately above or beside each:
+   ```yaml
+   AUTH_LOGIN_BURST_LIMIT: 60      # Local dev only — do not copy to staging/production
+   AUTH_LOGIN_HOURLY_LIMIT: 240    # Local dev only — do not copy to staging/production
+   ```
+3. Consider moving these overrides to a `docker-compose.override.yml` so that a plain `docker compose -f docker-compose.yml` invocation used in CI or staging never picks them up.
+4. In `docs/LOCAL_TESTING_HANDBOOK.md`, add a note: "The Compose file sets relaxed auth rate limits for local development (`AUTH_LOGIN_BURST_LIMIT`, `AUTH_LOGIN_HOURLY_LIMIT`). Do not copy these values to staging or production."
+5. Run `docker compose config` to validate the compose file syntax after editing.
 
 **Acceptance Criteria:**
-- Docker Compose port bindings for `db` and `redis` are prefixed with `127.0.0.1:`.
-- Rate limit override constants have explanatory inline comments.
-- `docs/LOCAL_TESTING_HANDBOOK.md` documents the overrides.
-- Harness contracts `test_phase15_docker_compose_ports_bound_to_localhost` and `test_phase15_rate_limit_overrides_documented` pass.
+- Frontend port `5173` is bound to `127.0.0.1` in `docker-compose.yml`.
+- `AUTH_LOGIN_BURST_LIMIT` and `AUTH_LOGIN_HOURLY_LIMIT` overrides have an inline comment marking them as local dev only.
+- `docs/LOCAL_TESTING_HANDBOOK.md` documents the rate limit overrides.
+- Harness contracts `test_phase15_docker_compose_frontend_port_bound_to_localhost` and `test_phase15_docker_compose_auth_rate_limits_documented` pass.
 
 **Dependencies:** None
 
@@ -8873,6 +8875,218 @@ Wire the Phase 15 harness contract files into CI and update the production smoke
 **Dependencies:** T-174, T-175, T-176, T-177, T-178, T-179, T-180, T-181, T-182, T-183, T-184, T-185, T-186, T-187, T-188, T-189a, T-189b, T-189c
 
 ---
+
+### T-191: LLM Instance Cache LRU Eviction
+
+**Description:**
+The `_INSTANCES` dict in `backend/services/llm/gateway.py` is a module-level plain dict that caches instantiated LLM provider clients keyed by `(provider, api_key_hash)`. It is never evicted. In a long-running worker where many distinct users store custom API keys, the cache accumulates one client instance per unique key. Each instance holds an open `httpx` connection pool. Over hours of operation under diverse user load, memory grows monotonically and the number of open connections grows without bound.
+
+**Severity:** Low
+
+**Inputs:**
+- `backend/services/llm/gateway.py` — `_INSTANCES` dict or equivalent client cache
+- Harness: `test_phase15_llm_instance_cache_has_bounded_size`
+
+**Outputs:**
+- `_INSTANCES` replaced with a bounded structure: `OrderedDict` with LRU eviction at a named `_INSTANCE_CACHE_MAX = 256` constant, or `cachetools.LRUCache(maxsize=256)`
+
+**Steps:**
+1. In `gateway.py`, locate the module-level `_INSTANCES: dict[..., ...]`.
+2. Replace the plain `dict` with one of:
+   - `collections.OrderedDict` with manual LRU: before each insertion, if `len(_INSTANCES) >= _INSTANCE_CACHE_MAX`, call `_INSTANCES.popitem(last=False)` to evict the oldest entry.
+   - `cachetools.LRUCache(maxsize=256)`: add `cachetools` to `pyproject.toml`, import `LRUCache`, declare `_INSTANCES: LRUCache = LRUCache(maxsize=256)`.
+3. Add `_INSTANCE_CACHE_MAX = 256` at module level as a named constant.
+4. Run `uv run pytest tests/ -q`.
+
+**Acceptance Criteria:**
+- `_INSTANCES` has a defined maximum size (constant ≤ 256 entries).
+- When the max is reached, the oldest entry is evicted before a new one is inserted.
+- `_INSTANCE_CACHE_MAX` (or equivalent named constant) is defined at module level.
+- Harness contract `test_phase15_llm_instance_cache_has_bounded_size` passes.
+
+**Dependencies:** T-177
+
+---
+
+### T-192: CSRF Exempt Path Audit
+
+**Description:**
+The Security Audit flagged that `_EXEMPT_PATHS` in the CSRF middleware may inconsistently protect mutation endpoints. Specifically: the coverage of `/auth/logout` is unverified. Logout destroys the session — it is a mutation — and must require a valid CSRF token to prevent cross-site logout attacks (an attacker can silently log out a user by embedding a request to `/auth/logout` on any page the victim visits). Every path listed in `_EXEMPT_PATHS` must have an explicit inline justification documenting why it is safe to exempt.
+
+**Severity:** Medium
+
+**Inputs:**
+- `backend/middleware/csrf.py` — `_EXEMPT_PATHS` list
+- `backend/routers/auth.py` — logout endpoint definition
+- Harness: `test_phase15_csrf_logout_not_exempt`, `test_phase15_csrf_exempt_paths_all_documented`
+
+**Outputs:**
+- `/auth/logout` is NOT in `_EXEMPT_PATHS`
+- Each path in `_EXEMPT_PATHS` has an inline comment: `# exempt: <reason>`
+
+**Steps:**
+1. Open `backend/middleware/csrf.py`. Find `_EXEMPT_PATHS` (list or tuple).
+2. Confirm `/auth/logout` is not listed. If it is, remove it — logout requires CSRF.
+3. For `/auth/refresh` (expected to be exempt): add comment `# exempt: refresh uses HTTP-only refresh token, not session state; CSRF at this endpoint would require a pre-auth token exchange`.
+4. For any other exempt path, add an inline comment with the exemption reason.
+5. Run `grep -n "logout" backend/middleware/csrf.py` to confirm logout does not appear in the exempt list.
+6. Run `uv run pytest tests/ -q`.
+
+**Acceptance Criteria:**
+- `/auth/logout` is not present in `_EXEMPT_PATHS`.
+- Every path in `_EXEMPT_PATHS` has an inline comment explaining why it is safe to exempt.
+- All auth tests pass.
+- Harness contracts `test_phase15_csrf_logout_not_exempt` and `test_phase15_csrf_exempt_paths_all_documented` pass.
+
+**Dependencies:** None
+
+---
+
+### T-193: Content Security Policy for Public Share Page
+
+**Description:**
+The Security Audit found that the public share page (`/p/:slug`) has no Content Security Policy. The backend sets `X-Robots-Tag: noindex, nofollow` and the frontend renders `<meta name="robots">`, but CSP is absent. The public share page is unauthenticated, reachable by anyone with the link, and renders LLM-generated Markdown. Even with `rehype-sanitize` (T-181), a strict CSP is the last line of defense against residual XSS on this surface. CSP is frontend-controlled via Vercel response headers and must be added there; the backend public endpoint should also set it as defense-in-depth.
+
+**Severity:** Low
+
+**Inputs:**
+- `frontend/public/_headers` or `vercel.json` — Vercel response header configuration
+- `backend/routers/workspace.py` — public share endpoint (`GET /public/{slug}`)
+- Harness: `test_phase15_public_share_csp_configured`
+
+**Outputs:**
+- `frontend/public/_headers` (or `vercel.json`) sets `Content-Security-Policy` for `/p/*` routes: `default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; frame-ancestors 'none'`
+- Backend public endpoint sets the same CSP response header
+
+**Steps:**
+1. Create or update `frontend/public/_headers`:
+   ```
+   /p/*
+     Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; frame-ancestors 'none'
+     X-Frame-Options: DENY
+   ```
+   Alternatively configure the same header in `vercel.json` under `"headers"` for source `/p/(.*)`.
+2. In `backend/routers/workspace.py`, in the `GET /public/{slug}` endpoint, add:
+   ```python
+   response.headers["Content-Security-Policy"] = (
+       "default-src 'self'; script-src 'self'; "
+       "style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; "
+       "frame-ancestors 'none'"
+   )
+   ```
+3. Verify the CSP does not break page rendering — if the frontend uses a CDN for fonts or styles, add those domains to the relevant directives.
+4. Run `pnpm build` to confirm no build errors.
+
+**Acceptance Criteria:**
+- A CSP header is configured for `/p/*` routes in `_headers`, `vercel.json`, or equivalent.
+- The backend `GET /public/{slug}` endpoint sets `Content-Security-Policy` in its response headers.
+- The CSP includes `frame-ancestors 'none'`.
+- `pnpm build` exits 0.
+- Harness contract `test_phase15_public_share_csp_configured` passes.
+
+**Dependencies:** T-169, T-181
+
+---
+
+### T-194: Observability Instrumentation
+
+**Description:**
+Three observability gaps from the Reliability & Operations report. First: SSE streaming failures are not instrumented — a generation that silently fails mid-stream increments no Prometheus metric, making provider incidents invisible in dashboards. Second: PDF export duration is not measured — without a histogram, the event-loop blocking identified in C-4 would not surface in production monitoring until users complain. Third: eval polling failure rate is not instrumented — the silent drop after 12 retries (M-5) means eval service degradation is completely invisible in metrics.
+
+**Severity:** Medium
+
+**Inputs:**
+- Backend SSE streaming path (`stage_manager.py` or equivalent)
+- `backend/services/pipeline/pdf_export_service.py`
+- Backend eval polling / retry path
+- `backend/` — Prometheus metric registry (`prometheus_client` already a dependency per CI)
+- Harness: `test_phase15_sse_failure_counter_defined`, `test_phase15_pdf_export_histogram_defined`, `test_phase15_eval_failure_counter_defined`
+
+**Outputs:**
+- `Counter("specforge_sse_stream_failures_total", ...)` incremented on SSE streaming failure
+- `Histogram("specforge_pdf_export_duration_seconds", ...)` observed on every PDF export
+- `Counter("specforge_eval_poll_failures_total", ...)` incremented when polling gives up after max retries
+
+**Steps:**
+1. In the backend metrics module (or `main.py`), define three metrics:
+   ```python
+   from prometheus_client import Counter, Histogram
+   sse_failure_counter = Counter(
+       "specforge_sse_stream_failures_total",
+       "Number of SSE streaming failures",
+       ["stage_type"],
+   )
+   pdf_export_histogram = Histogram(
+       "specforge_pdf_export_duration_seconds",
+       "PDF export render duration in seconds",
+       buckets=[0.5, 1.0, 2.0, 5.0, 10.0, 30.0],
+   )
+   eval_failure_counter = Counter(
+       "specforge_eval_poll_failures_total",
+       "Number of eval polling terminal failures after max retries",
+       ["stage_type"],
+   )
+   ```
+2. In the SSE streaming path, increment `sse_failure_counter.labels(stage_type=...).inc()` on any exception that terminates the stream before a completion event.
+3. In `pdf_export_service.py`, wrap the `run_in_executor` call with the histogram timer:
+   ```python
+   with pdf_export_histogram.time():
+       pdf_bytes = await asyncio.get_event_loop().run_in_executor(None, _render_pdf_sync, html_text)
+   ```
+4. In the eval service, when the retry limit is reached and polling gives up, call `eval_failure_counter.labels(stage_type=...).inc()`.
+5. Verify all three metrics appear in `GET /metrics` output.
+6. Run `uv run pytest tests/ -q`.
+
+**Acceptance Criteria:**
+- `specforge_sse_stream_failures_total`, `specforge_pdf_export_duration_seconds`, and `specforge_eval_poll_failures_total` are registered in the application.
+- Each is incremented or observed at the correct call site.
+- All existing backend tests pass.
+- Harness contracts `test_phase15_sse_failure_counter_defined`, `test_phase15_pdf_export_histogram_defined`, and `test_phase15_eval_failure_counter_defined` pass.
+
+**Dependencies:** T-176, T-187
+
+---
+
+### T-195: Missing Concurrency and Integration Tests
+
+**Description:**
+The Testing Assessment identified five missing test categories that leave the most dangerous bugs without regression coverage. (1) No concurrency test for `finalise()` — the C-1 race condition (T-174) has no automated regression guard after the fix. (2) No test asserting `generate_harness_patch()` rejects `in_progress` stages with 409 — the C-2 fix (T-174) has no regression guard. (3) No OAuth state replay test — the C-3 TOCTOU fix (T-175) has no regression guard. (4) No SSE streaming lifecycle test — disconnect handling is untested at any level. (5) No credit balance staleness test — the auth cache cross-invalidation fix (T-180) has no regression guard.
+
+**Severity:** High
+
+**Inputs:**
+- `backend/tests/` — existing test suite
+- `backend/services/pipeline/stage_manager.py` — `finalise`, `generate_harness_patch`
+- `backend/services/auth_service.py` — OAuth state handling
+- `backend/services/credit_service.py` and `backend/middleware/auth.py` — credit and cache invalidation
+- Harness: `test_phase15_concurrency_tests_exist`
+
+**Outputs:**
+- `backend/tests/test_concurrency.py` (new file) containing all five test cases
+- Tests use `pytest-asyncio` with async fixtures and existing in-memory fakes
+
+**Steps:**
+1. Create `backend/tests/test_concurrency.py`. Ensure `pytest-asyncio` is in dev dependencies.
+2. **Test 1 — finalise() race:** Use `asyncio.gather` to fire two concurrent `finalise(same_stage_id)` calls. Assert that exactly one succeeds (status becomes `"finalised"`) and the other receives a guard error (409 or equivalent). The row-level lock from T-174 serialises the two calls.
+3. **Test 2 — harness patch on in_progress:** Set a test stage's status to `"in_progress"`. Call `generate_harness_patch()`. Assert it raises `HTTPException` with `status_code=409` (or equivalent).
+4. **Test 3 — OAuth state replay:** Call the OAuth callback handler twice with identical state and code parameters. Assert the first call succeeds and the second fails with 400/403 (state key consumed by `getdel` in T-175).
+5. **Test 4 — SSE lifecycle on disconnect:** Simulate a client disconnect during streaming. Assert `_cleanup_done` is set and the generator stops yielding on the next iteration.
+6. **Test 5 — credit balance invalidation:** Deduct credits for a test user. Call `invalidate_user_cache(user_id)`. Assert that the next `_USER_CACHE` lookup for that user misses (returns `None` or reflects the updated balance), not the pre-deduction value.
+7. Run `uv run pytest tests/test_concurrency.py -v` to confirm all five pass.
+
+**Acceptance Criteria:**
+- `backend/tests/test_concurrency.py` exists with all five test functions.
+- Test 2 asserts a 409-equivalent error on `in_progress` patch — not a silent success.
+- Test 3 asserts the second OAuth callback fails — not that both succeed.
+- All five new tests pass with `uv run pytest tests/test_concurrency.py -q`.
+- All pre-existing backend tests continue to pass.
+- Harness contract `test_phase15_concurrency_tests_exist` passes.
+
+**Dependencies:** T-174, T-175, T-180
+
+---
+
+_tasks.md · SpecForge V1 · Version 2.3.1 · 2026-05-22 — Phase 15 addendum: corrected L-3/L-4/L-7/L-8 task descriptions; added T-191 through T-195 (LLM cache eviction, CSRF exempt path audit, CSP for public share, observability instrumentation, missing concurrency tests) covering non-labeled report-body findings from docs/CODE_REVIEW.md_
 
 _tasks.md · SpecForge V1 · Version 2.3.0 · 2026-05-22 — Phase 15 Enterprise Production Hardening T-174 through T-190 (19 remediation tasks addressing all C-1–C-4 critical, H-1–H-6 high, M-1–M-7 medium, and L-1–L-8 low findings from the staff-engineer production readiness code review)_
 

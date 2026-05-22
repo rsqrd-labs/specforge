@@ -511,65 +511,304 @@ def test_phase15_stage_dependencies_single_definition() -> None:
 
 
 # ---------------------------------------------------------------------------
-# T-189c (L-7): Docker Compose must bind ports to 127.0.0.1
+# T-189c (L-7): Docker Compose frontend port must bind to 127.0.0.1
 # ---------------------------------------------------------------------------
 
 
-def test_phase15_docker_compose_ports_bound_to_localhost() -> None:
-    # T-189c / L-7: Binding to 0.0.0.0 exposes the database and Redis to all
-    # interfaces, including LAN neighbours on shared networks.
+def test_phase15_docker_compose_frontend_port_bound_to_localhost() -> None:
+    # T-189c / L-7: The Vite dev server port 5173:5173 is the actual L-7
+    # finding — it exposes unminified source, source maps, and hot-reload
+    # websockets to any machine on the same LAN without 127.0.0.1 binding.
     compose_file = REPO_ROOT / "docker-compose.yml"
     assert compose_file.exists(), "docker-compose.yml must exist at repository root."
     content = compose_file.read_text(encoding="utf-8")
 
-    # The port binding for DB (5432) and Redis (6379) must prefix with 127.0.0.1.
-    # Patterns that are NOT acceptable: "5432:5432", "- 5432:5432", "6379:6379"
-    # without a 127.0.0.1 prefix.
-    unbound_db = re.search(r'["\s]-?\s*(?<!127\.0\.0\.1:)5432:5432', content)
-    unbound_redis = re.search(r'["\s]-?\s*(?<!127\.0\.0\.1:)6379:6379', content)
+    # The frontend port 5173 must be prefixed with 127.0.0.1.
+    # "5173:5173" without a prefix binds to 0.0.0.0 (all interfaces).
+    unbound_frontend = re.search(
+        r'(?<![0-9\.])(5173:5173)', content
+    )
+    assert not unbound_frontend, (
+        "docker-compose.yml must bind the Vite frontend port as "
+        "'127.0.0.1:5173:5173' to prevent exposure of the dev server "
+        "to LAN neighbours. L-7 — T-189c."
+    )
+
+
+def test_phase15_docker_compose_db_redis_ports_bound_to_localhost() -> None:
+    # T-189c / L-7 extension: While fixing the frontend port, also bind
+    # the database (5432) and Redis (6379) ports to localhost.
+    compose_file = REPO_ROOT / "docker-compose.yml"
+    assert compose_file.exists(), "docker-compose.yml must exist at repository root."
+    content = compose_file.read_text(encoding="utf-8")
+
+    unbound_db = re.search(r'(?<![0-9\.])(5432:5432)', content)
+    unbound_redis = re.search(r'(?<![0-9\.])(6379:6379)', content)
 
     assert not unbound_db, (
         "docker-compose.yml must bind the PostgreSQL port as "
-        "'127.0.0.1:5432:5432' to restrict access to localhost only. "
-        "L-7 — T-189c."
+        "'127.0.0.1:5432:5432'. L-7 extension — T-189c."
     )
     assert not unbound_redis, (
         "docker-compose.yml must bind the Redis port as "
-        "'127.0.0.1:6379:6379' to restrict access to localhost only. "
-        "L-7 — T-189c."
+        "'127.0.0.1:6379:6379'. L-7 extension — T-189c."
     )
 
 
 # ---------------------------------------------------------------------------
-# T-189c (L-8): Rate limit overrides must be documented
+# T-189c (L-8): Auth rate limit Compose overrides must be documented
 # ---------------------------------------------------------------------------
 
 
-def test_phase15_rate_limit_overrides_documented() -> None:
-    # T-189c / L-8: RATELIMIT_DISABLED and per-endpoint multipliers have no
-    # documentation. New developers enabling them for load testing don't know
-    # the operational risks.
-    source = read_backend_file("middleware", "rate_limit.py")
+def test_phase15_docker_compose_auth_rate_limits_documented() -> None:
+    # T-189c / L-8: AUTH_LOGIN_BURST_LIMIT and AUTH_LOGIN_HOURLY_LIMIT in
+    # docker-compose.yml override production-safe defaults. A developer who
+    # copies the Compose config to staging gets relaxed rate limits silently.
+    compose_file = REPO_ROOT / "docker-compose.yml"
+    assert compose_file.exists(), "docker-compose.yml must exist at repository root."
+    content = compose_file.read_text(encoding="utf-8")
 
-    if "RATELIMIT_DISABLED" in source:
-        # The constant must have an inline comment or docstring nearby.
-        pattern = re.search(
-            r"RATELIMIT_DISABLED\s*=.*#.+", source
-        )
-        assert pattern, (
-            "RATELIMIT_DISABLED in rate_limit.py must have an inline comment "
-            "explaining the effect and when it is safe to enable. L-8 — T-189c."
-        )
+    for var in ("AUTH_LOGIN_BURST_LIMIT", "AUTH_LOGIN_HOURLY_LIMIT"):
+        if var in content:
+            # The variable must appear on a line that also has a comment
+            # or be immediately preceded by a comment line.
+            lines = content.splitlines()
+            found_comment = False
+            for i, line in enumerate(lines):
+                if var in line:
+                    # Check inline comment on same line
+                    if "#" in line and ("local" in line.lower() or "dev" in line.lower() or "staging" in line.lower()):
+                        found_comment = True
+                        break
+                    # Check comment on preceding line
+                    if i > 0 and "#" in lines[i - 1] and (
+                        "local" in lines[i - 1].lower() or "dev" in lines[i - 1].lower()
+                    ):
+                        found_comment = True
+                        break
+            assert found_comment, (
+                f"docker-compose.yml: {var} must have an inline or preceding "
+                f"comment noting it is 'Local dev only — do not copy to "
+                f"staging/production'. L-8 — T-189c."
+            )
 
-    # Also check LOCAL_TESTING_HANDBOOK.md mentions rate limit overrides.
+    # Also check LOCAL_TESTING_HANDBOOK.md mentions these overrides.
     handbook = REPO_ROOT / "docs" / "LOCAL_TESTING_HANDBOOK.md"
     if handbook.exists():
         handbook_text = handbook.read_text(encoding="utf-8")
         assert (
-            "rate limit" in handbook_text.lower()
-            or "RATELIMIT" in handbook_text
+            "AUTH_LOGIN_BURST_LIMIT" in handbook_text
+            or "AUTH_LOGIN_HOURLY_LIMIT" in handbook_text
+            or ("rate limit" in handbook_text.lower() and "compose" in handbook_text.lower())
         ), (
-            "docs/LOCAL_TESTING_HANDBOOK.md must document rate limit override "
-            "constants so developers know when they are safe to change. "
-            "L-8 — T-189c."
+            "docs/LOCAL_TESTING_HANDBOOK.md must document the "
+            "AUTH_LOGIN_BURST_LIMIT / AUTH_LOGIN_HOURLY_LIMIT Compose overrides "
+            "and their dev-only scope. L-8 — T-189c."
         )
+
+
+# ---------------------------------------------------------------------------
+# T-191: LLM instance cache must have bounded size
+# ---------------------------------------------------------------------------
+
+
+def test_phase15_llm_instance_cache_has_bounded_size() -> None:
+    # T-191: _INSTANCES in gateway.py is a plain dict that is never evicted.
+    # Under diverse user load (custom API keys), memory grows monotonically.
+    # The cache must have a defined max size with LRU eviction.
+    source = read_backend_file("services", "llm", "gateway.py")
+
+    has_bounded_cache = (
+        "LRUCache" in source
+        or "OrderedDict" in source
+        or "_INSTANCE_CACHE_MAX" in source
+        or "maxsize" in source
+    )
+    assert has_bounded_cache, (
+        "services/llm/gateway.py: _INSTANCES must use a bounded cache structure "
+        "(LRUCache, OrderedDict with eviction, or similar) with a named max-size "
+        "constant. A plain dict that is never evicted grows without bound. "
+        "T-191."
+    )
+
+    # The cache must not silently grow — verify a size cap constant exists.
+    has_cap_constant = (
+        "_INSTANCE_CACHE_MAX" in source
+        or "maxsize" in source
+        or re.search(r"=\s*\d{2,3}\b", source)  # a numeric cap (e.g. 256)
+    )
+    assert has_cap_constant, (
+        "services/llm/gateway.py: define a named constant for the instance "
+        "cache max size (e.g. _INSTANCE_CACHE_MAX = 256). T-191."
+    )
+
+
+# ---------------------------------------------------------------------------
+# T-192: CSRF exempt paths — logout must not be exempt
+# ---------------------------------------------------------------------------
+
+
+def test_phase15_csrf_logout_not_exempt() -> None:
+    # T-192: /auth/logout is a mutation (destroys the session). It must not
+    # be in _EXEMPT_PATHS — exempting it enables cross-site logout attacks.
+    csrf_files = list(BACKEND_ROOT.rglob("csrf*.py")) + list(
+        (BACKEND_ROOT / "middleware").glob("*.py")
+    )
+    for f in csrf_files:
+        content = f.read_text(encoding="utf-8")
+        if "_EXEMPT_PATHS" in content or "EXEMPT_PATHS" in content:
+            # Check that /auth/logout does not appear in the exempt list.
+            # Allow it as a comment explaining why it's NOT exempt.
+            lines = content.splitlines()
+            for i, line in enumerate(lines):
+                if "/auth/logout" in line and not line.strip().startswith("#"):
+                    # The path appears as code (not a comment) in this file.
+                    assert False, (
+                        f"{f.relative_to(REPO_ROOT)}: '/auth/logout' must not "
+                        f"appear in _EXEMPT_PATHS (line {i + 1}). Logout is a "
+                        f"mutation and requires CSRF protection to prevent "
+                        f"cross-site logout attacks. T-192."
+                    )
+
+
+def test_phase15_csrf_exempt_paths_all_documented() -> None:
+    # T-192: Every path in _EXEMPT_PATHS must have an inline comment explaining
+    # why it is safe to exempt from CSRF protection.
+    for f in BACKEND_ROOT.rglob("*.py"):
+        content = f.read_text(encoding="utf-8")
+        if "_EXEMPT_PATHS" not in content:
+            continue
+        lines = content.splitlines()
+        in_exempt = False
+        for line in lines:
+            stripped = line.strip()
+            if "_EXEMPT_PATHS" in stripped and "=" in stripped:
+                in_exempt = True
+            if in_exempt:
+                # A string literal in the list without a comment is a violation.
+                if re.search(r'["\']/.+["\']', stripped) and "#" not in stripped:
+                    assert False, (
+                        f"{f.relative_to(REPO_ROOT)}: exempt path '{stripped}' "
+                        f"has no inline comment explaining why it is safe to "
+                        f"skip CSRF. Add '# exempt: <reason>'. T-192."
+                    )
+                if stripped.startswith("]") or stripped.startswith(")"):
+                    in_exempt = False
+
+
+# ---------------------------------------------------------------------------
+# T-193: Public share page must have CSP configured
+# ---------------------------------------------------------------------------
+
+
+def test_phase15_public_share_csp_configured() -> None:
+    # T-193: The /p/:slug public share page is unauthenticated and renders
+    # LLM-generated Markdown. It needs an explicit Content-Security-Policy.
+    csp_found = False
+
+    # Check frontend/_headers
+    headers_file = REPO_ROOT / "frontend" / "public" / "_headers"
+    if headers_file.exists():
+        content = headers_file.read_text(encoding="utf-8")
+        if "Content-Security-Policy" in content and ("/p/" in content or "/*" in content):
+            csp_found = True
+
+    # Check vercel.json
+    vercel_json = REPO_ROOT / "vercel.json"
+    if vercel_json.exists():
+        content = vercel_json.read_text(encoding="utf-8")
+        if "Content-Security-Policy" in content:
+            csp_found = True
+
+    # Check backend public endpoint
+    workspace_router = read_backend_file("routers", "workspace.py")
+    if "Content-Security-Policy" in workspace_router:
+        csp_found = True
+
+    assert csp_found, (
+        "The public share page (/p/:slug) must have a Content-Security-Policy "
+        "configured via frontend/public/_headers, vercel.json, or the backend "
+        "public endpoint response headers. The page is unauthenticated and "
+        "renders LLM-generated content. T-193."
+    )
+
+
+# ---------------------------------------------------------------------------
+# T-194: Prometheus metrics for SSE, PDF, and eval
+# ---------------------------------------------------------------------------
+
+
+def test_phase15_sse_failure_counter_defined() -> None:
+    # T-194: SSE streaming failures are invisible in metrics. A counter must
+    # be defined and incremented when a stream terminates on error.
+    all_backend = list(BACKEND_ROOT.rglob("*.py"))
+    found = any(
+        "specforge_sse_stream_failures_total" in f.read_text(encoding="utf-8")
+        for f in all_backend
+    )
+    assert found, (
+        "backend/ must define a Prometheus Counter "
+        "'specforge_sse_stream_failures_total' and increment it on SSE "
+        "streaming failure. T-194."
+    )
+
+
+def test_phase15_pdf_export_histogram_defined() -> None:
+    # T-194: PDF export duration is not measured. A histogram makes the
+    # event-loop blocking issue (C-4) visible in production dashboards.
+    all_backend = list(BACKEND_ROOT.rglob("*.py"))
+    found = any(
+        "specforge_pdf_export_duration_seconds" in f.read_text(encoding="utf-8")
+        for f in all_backend
+    )
+    assert found, (
+        "backend/ must define a Prometheus Histogram "
+        "'specforge_pdf_export_duration_seconds' and observe it on every "
+        "PDF export call. T-194."
+    )
+
+
+def test_phase15_eval_failure_counter_defined() -> None:
+    # T-194: Eval polling failure rate is not instrumented. Silent drop after
+    # 12 retries is invisible in metrics without an explicit counter.
+    all_backend = list(BACKEND_ROOT.rglob("*.py"))
+    found = any(
+        "specforge_eval_poll_failures_total" in f.read_text(encoding="utf-8")
+        for f in all_backend
+    )
+    assert found, (
+        "backend/ must define a Prometheus Counter "
+        "'specforge_eval_poll_failures_total' and increment it when eval "
+        "polling gives up after max retries. T-194."
+    )
+
+
+# ---------------------------------------------------------------------------
+# T-195: Missing concurrency and integration test file
+# ---------------------------------------------------------------------------
+
+
+def test_phase15_concurrency_tests_exist() -> None:
+    # T-195: Five test categories have no regression coverage. A dedicated
+    # test_concurrency.py must contain all five test functions.
+    test_file = BACKEND_ROOT / "tests" / "test_concurrency.py"
+    assert test_file.exists(), (
+        "backend/tests/test_concurrency.py must exist with concurrency and "
+        "integration tests for the five missing test categories. T-195."
+    )
+    content = test_file.read_text(encoding="utf-8")
+
+    required_tests = [
+        "finalise",          # concurrency test for the C-1 race
+        "in_progress",       # harness-patch on in_progress → 409 (C-2)
+        "replay",            # OAuth state replay (C-3)
+        "cleanup_done",      # SSE lifecycle on disconnect
+        "invalidat",         # credit balance staleness / cache invalidation (H-4)
+    ]
+    missing = [kw for kw in required_tests if kw not in content]
+    assert not missing, (
+        f"backend/tests/test_concurrency.py is missing tests covering: "
+        + ", ".join(missing)
+        + ". All five concurrency/integration test categories from the "
+        "Testing Assessment must be present. T-195."
+    )

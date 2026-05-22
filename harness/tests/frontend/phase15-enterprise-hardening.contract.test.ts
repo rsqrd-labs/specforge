@@ -316,46 +316,60 @@ describe("phase15 streamingContent type narrowing (M-6)", () => {
 // ---------------------------------------------------------------------------
 
 describe("phase15 frontend debt sweep (L-3 through L-6)", () => {
-  it("CreditConfirmModal uses onConfirm/onClose, not onOk/onDismiss", async () => {
-    // T-189b / L-3: Duplicate prop aliases (onOk/onDismiss alongside
-    // onConfirm/onClose) confuse callers and require dual maintenance.
+  it("CreditConfirmModal removes cost/balance prop aliases", async () => {
+    // T-189b / L-3: CreditConfirmModal accepts both creditCost/cost and
+    // currentBalance/balance as aliases for the same props. The legacy aliases
+    // must be removed; callers must use creditCost and currentBalance.
     const source = await tryRead(
       "frontend/src/components/workspace/CreditConfirmModal.tsx",
     )
     if (!source) return // component may not yet exist — skip rather than fail
 
+    // The legacy alias prop names must not appear as prop interface members.
+    // They may appear as local variables, but not as exported prop names.
+    const hasCostAlias = source.match(/\bcost[?:]/)
     expect(
-      source,
-      "CreditConfirmModal.tsx must not export an 'onOk' prop. " +
-        "Standardise on onConfirm/onClose. L-3 — T-189b.",
-    ).not.toContain("onOk")
+      hasCostAlias,
+      "CreditConfirmModal.tsx must not expose a 'cost' prop alias. " +
+        "Standardise on 'creditCost'. L-3 — T-189b.",
+    ).toBeNull()
 
+    const hasBalanceAlias = source.match(/\bbalance[?:]/)
     expect(
-      source,
-      "CreditConfirmModal.tsx must not export an 'onDismiss' prop. " +
-        "Standardise on onConfirm/onClose. L-3 — T-189b.",
-    ).not.toContain("onDismiss")
+      hasBalanceAlias,
+      "CreditConfirmModal.tsx must not expose a 'balance' prop alias. " +
+        "Standardise on 'currentBalance'. L-3 — T-189b.",
+    ).toBeNull()
   })
 
-  it("ExportGitHubModal does not use setTimeout for auto-close", async () => {
-    // T-189b / L-4: A 1500ms setTimeout closes the modal before the API call
-    // completes if the call takes longer — silent partial failure.
+  it("ExportGitHubModal uses AbortController timeout, not infinite spinner", async () => {
+    // T-189b / L-4: The export spinner runs indefinitely if the API call hangs.
+    // The fix is an AbortController with a 30-second timeout — not a setTimeout
+    // that auto-closes the modal (which would be a different bug).
     const source = await tryRead(
       "frontend/src/components/workspace/ExportGitHubModal.tsx",
     )
     if (!source) return // component may not yet exist — skip rather than fail
 
-    const hasTimeout =
-      source.includes("setTimeout") &&
-      (source.includes("1500") || source.includes("onClose") || source.includes("setOpen"))
-    // More precise: setTimeout used to trigger a close
-    const closingTimeout = source.match(/setTimeout\s*\(\s*[^)]*(?:close|setOpen|onClose)[^)]*,\s*\d+/)
+    const hasAbortController =
+      source.includes("AbortController") || source.includes("AbortSignal")
     expect(
-      closingTimeout,
-      "ExportGitHubModal.tsx must not auto-close via setTimeout. " +
-        "Close in the onSuccess callback of the export API call instead. " +
-        "L-4 — T-189b.",
-    ).toBeNull()
+      hasAbortController,
+      "ExportGitHubModal.tsx must use AbortController to apply a client-side " +
+        "timeout to the export API call. Without it, a hung export shows an " +
+        "infinite spinner with no recovery path. L-4 — T-189b.",
+    ).toBe(true)
+
+    // A timeout value should be present to configure the abort delay.
+    const hasTimeoutValue =
+      source.includes("30_000") ||
+      source.includes("30000") ||
+      source.includes("timeout")
+    expect(
+      hasTimeoutValue,
+      "ExportGitHubModal.tsx must configure a timeout duration (e.g. 30_000ms) " +
+        "for the AbortController. L-4 — T-189b.",
+    ).toBe(true)
   })
 
   it("TemplatesStrip is wrapped in an error boundary", async () => {
@@ -425,5 +439,81 @@ describe("phase15 frontend debt sweep (L-3 through L-6)", () => {
         "an equivalent mechanism. Without it, keyboard users can tab out of " +
         "the modal. L-6 — T-189b.",
     ).toBe(true)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// T-193: Public share page must have Content Security Policy configured
+// ---------------------------------------------------------------------------
+
+describe("phase15 public share page CSP (T-193)", () => {
+  it("_headers or vercel.json configures CSP for /p/* routes", async () => {
+    // T-193: The public share page is unauthenticated and renders LLM-generated
+    // Markdown. A Content-Security-Policy is the last line of defense against
+    // residual XSS even after rehype-sanitize (T-181).
+    const headersFile = await tryRead("frontend/public/_headers")
+    const vercelJson = await tryRead("vercel.json")
+
+    let cspFound = false
+
+    if (headersFile && headersFile.includes("Content-Security-Policy")) {
+      cspFound = true
+    }
+    if (vercelJson && vercelJson.includes("Content-Security-Policy")) {
+      cspFound = true
+    }
+
+    expect(
+      cspFound,
+      "A Content-Security-Policy header must be configured for /p/* routes " +
+        "in frontend/public/_headers or vercel.json. The public share page is " +
+        "unauthenticated and renders LLM-generated content. T-193.",
+    ).toBe(true)
+  })
+
+  it("CSP for public share includes frame-ancestors none", async () => {
+    // T-193: frame-ancestors 'none' prevents embedding the public share page
+    // in an iframe, blocking clickjacking attacks.
+    const headersFile = await tryRead("frontend/public/_headers")
+    const vercelJson = await tryRead("vercel.json")
+
+    const combinedSource = (headersFile ?? "") + (vercelJson ?? "")
+
+    if (!combinedSource.includes("Content-Security-Policy")) {
+      // CSP not yet configured — covered by previous test
+      return
+    }
+
+    expect(
+      combinedSource,
+      "The Content-Security-Policy must include 'frame-ancestors' directive " +
+        "to prevent the public share page from being embedded in an iframe. " +
+        "T-193.",
+    ).toContain("frame-ancestors")
+  })
+})
+
+// ---------------------------------------------------------------------------
+// T-192: CSRF exempt path configuration
+// ---------------------------------------------------------------------------
+
+describe("phase15 CSRF exempt path audit (T-192)", () => {
+  it("no frontend code bypasses CSRF for logout", async () => {
+    // T-192: The frontend must send CSRF headers on the logout request.
+    // Check that the API client does not skip the CSRF token for /auth/logout.
+    const apiSource = await tryRead("frontend/src/services/api.ts")
+    if (!apiSource) return
+
+    // If there's a logout function, it must not explicitly skip the CSRF header.
+    if (apiSource.includes("logout")) {
+      const logoutSkipsCsrf =
+        apiSource.includes("withCredentials: false") &&
+        apiSource.match(/logout[^}]*withCredentials\s*:\s*false/)
+      expect(
+        logoutSkipsCsrf,
+        "api.ts logout function must not skip CSRF headers. " +
+          "Logout is a mutation and requires CSRF protection. T-192.",
+      ).toBeFalsy()
+    }
   })
 })
