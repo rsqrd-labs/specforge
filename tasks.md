@@ -8180,6 +8180,702 @@ Wire the new harness contract groups into CI, ensure WeasyPrint's native deps ar
 
 ---
 
+## Phase 15 — Enterprise Production Hardening
+
+> Source: `docs/CODE_REVIEW.md` §C-1 through §L-8 (staff-engineer production readiness review dated 2026-05-22). Harness: `harness/tests/backend/test_phase15_enterprise_hardening_contract.py`, `harness/tests/frontend/phase15-enterprise-hardening.contract.test.ts`. Phases 1–14 must be complete and green before starting this phase. Tasks T-174 through T-190 address every critical (C-1–C-4), high (H-1–H-6), medium (M-1–M-7), and low (L-1–L-8) finding from the code review. No finding is skipped; no finding is partially addressed.
+
+---
+
+### T-174: Stage Manager Concurrency Safety
+
+**Description:**
+Two race conditions in `backend/services/pipeline/stage_manager.py` allow concurrent requests to corrupt stage state. Finding C-1: `finalise()` calls `_load_stage(stage_id, db)` without `lock=True`; two simultaneous `finalise()` requests both pass the `status != "finalised"` guard and both apply finalise side-effects (credit charges, version snapshots, downstream stage unlocks). Finding C-2: `generate_harness_patch()` accepts `"in_progress"` in its status allowlist and lists `"final"` (a dead status that was renamed to `"finalised"`), allowing a new generation to begin on an already-running stage.
+
+**Severity:** Critical
+
+**Inputs:**
+- `backend/services/pipeline/stage_manager.py` — `finalise()` near line 897, `generate_harness_patch()` near line 1126, `_load_stage()` near line 1046
+- Harness: `test_phase15_finalise_uses_select_for_update`, `test_phase15_generate_harness_patch_status_allowlist`
+
+**Outputs:**
+- `finalise()` passes `lock=True` to `_load_stage`
+- `generate_harness_patch()` allowlist is `("draft", "stale", "finalised")`
+
+**Steps:**
+1. In `stage_manager.py`, locate `finalise()`. Find the `_load_stage(stage_id, db)` call (no `lock` argument). Change it to `_load_stage(stage_id, db, lock=True)`.
+2. In the same file, locate `generate_harness_patch()`. Find the tuple literal containing `"draft"`, `"stale"`, `"final"`, `"in_progress"`. Replace it with `("draft", "stale", "finalised")`. Remove both `"final"` (dead status) and `"in_progress"` (allows mid-generation restart).
+3. Run `uv run pytest tests/ -q` to confirm no existing tests break.
+4. Verify with `grep -n "lock=True" stage_manager.py` that `finalise()` now appears in the output alongside the two existing `lock=True` call sites.
+
+**Acceptance Criteria:**
+- `_load_stage` in `finalise()` is called with `lock=True`.
+- `generate_harness_patch()` status allowlist is exactly `("draft", "stale", "finalised")` — neither `"final"` nor `"in_progress"` appears.
+- All existing backend tests pass.
+- Harness contracts `test_phase15_finalise_uses_select_for_update` and `test_phase15_generate_harness_patch_status_allowlist` pass.
+
+**Dependencies:** None
+
+---
+
+### T-175: OAuth State Atomicity
+
+**Description:**
+Finding C-3: `backend/services/auth_service.py` validates the OAuth state parameter using two non-atomic Redis operations — `get(state_key)` followed by `delete(state_key)`. A concurrent second callback with the same state key can read a valid state before the first callback deletes it, passing the CSRF check twice and issuing two valid JWTs from one OAuth flow. Fix: replace both calls with the atomic `getdel(state_key)` command, which reads and deletes in a single round-trip.
+
+**Severity:** Critical
+
+**Inputs:**
+- `backend/services/auth_service.py` — lines near 93–95 (`get` + `delete` pattern)
+- Harness: `test_phase15_oauth_state_uses_getdel`
+
+**Outputs:**
+- `auth_service.py` uses `await redis.getdel(state_key)` — single atomic call, no separate `delete`
+
+**Steps:**
+1. Open `backend/services/auth_service.py`. Find the two-line block: `stored = await redis.get(state_key)` followed by `await redis.delete(state_key)`.
+2. Replace both lines with: `stored = await redis.getdel(state_key)`. The semantics are identical — returns the value and deletes it atomically; returns `None` if the key does not exist.
+3. Confirm `redis.getdel` is supported by the installed `redis-py` version (`pip show redis` — available since 4.1.0).
+4. Run `uv run pytest tests/test_auth_service.py -q` to confirm auth tests pass.
+
+**Acceptance Criteria:**
+- `auth_service.py` contains exactly one Redis call for state validation — `getdel` — and no separate `delete` call for the state key.
+- All auth service tests pass.
+- Harness contract `test_phase15_oauth_state_uses_getdel` passes.
+
+**Dependencies:** None
+
+---
+
+### T-176: PDF Export Thread Isolation
+
+**Description:**
+Finding C-4: `backend/services/pipeline/pdf_export_service.py` calls `HTML(string=html_text).write_pdf()` (WeasyPrint) synchronously on the async event loop. WeasyPrint is CPU-bound and holds the GIL for the full render duration — typically 0.5–3 seconds per document. During this time the entire FastAPI event loop is blocked: no other request can be handled, no SSE chunks can be flushed, no health checks can respond. Fix: extract the synchronous call into a standalone helper function and dispatch it to the default thread pool via `run_in_executor`.
+
+**Severity:** Critical
+
+**Inputs:**
+- `backend/services/pipeline/pdf_export_service.py` — `write_pdf()` call near line 167
+- Harness: `test_phase15_pdf_export_uses_run_in_executor`
+
+**Outputs:**
+- Module-level `_render_pdf_sync(html_text: str) -> bytes` function
+- Async caller uses `await asyncio.get_event_loop().run_in_executor(None, _render_pdf_sync, html_text)`
+
+**Steps:**
+1. In `pdf_export_service.py`, extract the WeasyPrint call into a top-level synchronous function:
+   ```python
+   def _render_pdf_sync(html_text: str) -> bytes:
+       return HTML(string=html_text).write_pdf()
+   ```
+2. Replace the original inline call at line 167 with:
+   ```python
+   pdf_bytes = await asyncio.get_event_loop().run_in_executor(None, _render_pdf_sync, html_text)
+   ```
+3. Add `import asyncio` at the top of the file if not already present.
+4. Run the PDF export endpoint against a test workspace to confirm the PDF still renders correctly.
+
+**Acceptance Criteria:**
+- `pdf_export_service.py` contains no direct synchronous `write_pdf()` call inside an `async def` function.
+- `_render_pdf_sync` is a module-level (non-async) function containing the WeasyPrint call.
+- `run_in_executor` is used to call it from the async context.
+- Harness contract `test_phase15_pdf_export_uses_run_in_executor` passes.
+
+**Dependencies:** T-166
+
+---
+
+### T-177: Unified Redis Connection Pool
+
+**Description:**
+Finding H-1: Across routers and services, `Redis.from_url(settings.redis_url)` is called per-request in at least 10 locations. Each call instantiates a new connection object with no pooling. Under sustained load this causes Redis connection exhaustion, `ConnectionError` spikes, and unnecessary TCP handshake overhead. The application already initialises a shared pooled `Redis` client in `app.state.redis` at startup — that shared client must be used everywhere.
+
+**Severity:** High
+
+**Inputs:**
+- `backend/database.py` or `backend/main.py` — app startup Redis initialisation
+- All router/service files calling `Redis.from_url(...)` directly
+- Harness: `test_phase15_no_redis_from_url_in_request_handlers`
+
+**Outputs:**
+- FastAPI dependency `get_redis(request: Request) -> Redis` in `backend/dependencies.py` (create if absent)
+- All per-request `Redis.from_url()` calls replaced with `Depends(get_redis)`
+
+**Steps:**
+1. Confirm `app.state.redis` is set at startup (look in `main.py` lifespan or `startup` event). If not, add it: `app.state.redis = redis.from_url(settings.redis_url, decode_responses=True)` in the startup handler and `await app.state.redis.aclose()` in shutdown.
+2. Create (or extend) `backend/dependencies.py`. Add:
+   ```python
+   from fastapi import Request
+   from redis.asyncio import Redis
+
+   def get_redis(request: Request) -> Redis:
+       return request.app.state.redis
+   ```
+3. Search for every `Redis.from_url(` call outside of `main.py` startup. For each call site: inject `redis: Redis = Depends(get_redis)` into the function signature and remove the local `Redis.from_url(...)` call.
+4. Run `grep -rn "Redis.from_url" backend/` after the change. The only occurrence must be in `main.py` (or `database.py`) at startup — zero occurrences in routers or services.
+5. Run `uv run pytest tests/ -q`.
+
+**Acceptance Criteria:**
+- `Redis.from_url(` does not appear in any router or service file — only in the application startup path.
+- All Redis-dependent tests pass.
+- Harness contract `test_phase15_no_redis_from_url_in_request_handlers` passes.
+
+**Dependencies:** None
+
+---
+
+### T-178: N+1 Coverage Query Elimination
+
+**Description:**
+Finding H-2: `backend/routers/workspace.py` near line 125 calls `_derive_coverage_summary(workspace.id, db)` inside a loop over all workspaces returned by the list query. For a user with N workspaces, the endpoint issues N+1 database queries. At the default limit of 50 workspaces, this is 51 queries per page load. Fix: rewrite `_derive_coverage_summary` to accept a list of workspace IDs and issue one batched query.
+
+**Severity:** High
+
+**Inputs:**
+- `backend/routers/workspace.py` — workspace list endpoint, `_derive_coverage_summary` function
+- `backend/services/pipeline/stage_manager.py` or equivalent — coverage query logic
+- Harness: `test_phase15_workspace_list_no_n_plus_one`
+
+**Outputs:**
+- `_derive_coverage_summary(workspace_ids: list[UUID], db: AsyncSession) -> dict[UUID, CoverageSummary | None]` — batched form
+- Workspace list endpoint calls it once with all IDs and distributes results
+
+**Steps:**
+1. Locate `_derive_coverage_summary`. Note the SQL it issues (typically a `SELECT` on the `stages` table filtered by workspace ID).
+2. Rewrite the signature to accept `workspace_ids: list[UUID]`. Change the WHERE clause from `stage.workspace_id = :id` to `stage.workspace_id = ANY(:ids)` (PostgreSQL) and bind the full list. Return `dict[UUID, CoverageSummary | None]`.
+3. In the workspace list endpoint, collect all workspace IDs after the primary query, call `_derive_coverage_summary(workspace_ids, db)` once, then distribute results: `coverage_map.get(workspace.id)` for each workspace in the response.
+4. Confirm with `EXPLAIN ANALYZE` or logging that the endpoint now issues exactly 2 queries (one for workspaces, one for coverage) regardless of workspace count.
+
+**Acceptance Criteria:**
+- `_derive_coverage_summary` is not called inside a loop in the list endpoint.
+- The endpoint issues a fixed number of queries independent of the number of workspaces returned.
+- Existing workspace list tests pass.
+- Harness contract `test_phase15_workspace_list_no_n_plus_one` passes.
+
+**Dependencies:** T-161
+
+---
+
+### T-179: Recovery Lock TTL Extension
+
+**Description:**
+Finding H-3: `backend/services/pipeline/stage_manager.py` sets `_RECOVERY_LOCK_TTL = 60` seconds, which equals `_POLL_INTERVAL_SECONDS = 60`. A recovery run that takes slightly over 60 seconds causes the distributed lock to expire while recovery is still in progress. A second recovery runner then acquires the lock and starts a concurrent recovery of the same workspace, producing duplicate version snapshots, double stage-state writes, and potential credit double-counts. Fix: extend the TTL to 3× the poll interval and add a heartbeat `EXPIRE` inside the recovery loop.
+
+**Severity:** High
+
+**Inputs:**
+- `backend/services/pipeline/stage_manager.py` — `_RECOVERY_LOCK_TTL`, `_POLL_INTERVAL_SECONDS`, recovery loop body
+- Harness: `test_phase15_recovery_lock_ttl_exceeds_poll_interval`, `test_phase15_recovery_lock_heartbeat_exists`
+
+**Outputs:**
+- `_RECOVERY_LOCK_TTL = 180`
+- Recovery loop calls `await redis.expire(lock_key, _RECOVERY_LOCK_TTL)` at least once per iteration before the expensive recovery work
+
+**Steps:**
+1. Change `_RECOVERY_LOCK_TTL = 60` to `_RECOVERY_LOCK_TTL = 180`.
+2. Inside the recovery loop body (the `async for` or `while` block that processes in-flight stages), add a heartbeat at the top of each iteration:
+   ```python
+   await redis.expire(lock_key, _RECOVERY_LOCK_TTL)
+   ```
+   This resets the TTL at the start of each iteration, keeping the lock alive for long-running recoveries.
+3. Verify `_RECOVERY_LOCK_TTL > _POLL_INTERVAL_SECONDS` with a module-level assertion or test.
+4. Run `uv run pytest tests/ -q`.
+
+**Acceptance Criteria:**
+- `_RECOVERY_LOCK_TTL >= 3 * _POLL_INTERVAL_SECONDS`.
+- The recovery loop issues a Redis `EXPIRE` heartbeat call each iteration.
+- Harness contracts `test_phase15_recovery_lock_ttl_exceeds_poll_interval` and `test_phase15_recovery_lock_heartbeat_exists` pass.
+
+**Dependencies:** None
+
+---
+
+### T-180: Auth Cache Credit Cross-Invalidation
+
+**Description:**
+Finding H-4: `backend/middleware/auth.py` caches `credit_balance` in `_USER_CACHE: OrderedDict[UUID, tuple[float, dict]]` with a 30-second TTL. When `backend/services/credit_service.py` charges or grants credits, it calls `_invalidate(user_id)` to flush internal credit caches — but this does NOT flush `_USER_CACHE`. The user's credit balance displayed in the frontend remains stale for up to 30 seconds after every generation. Fix: export an `invalidate_user_cache(user_id)` function from `auth.py` and call it inside `credit_service._invalidate()`.
+
+**Severity:** High
+
+**Inputs:**
+- `backend/middleware/auth.py` — `_USER_CACHE`, cache lookup/write logic
+- `backend/services/credit_service.py` — `_invalidate(user_id)` method
+- Harness: `test_phase15_credit_invalidation_clears_auth_cache`
+
+**Outputs:**
+- `auth.py` exports `def invalidate_user_cache(user_id: UUID) -> None` that removes the entry from `_USER_CACHE`
+- `credit_service._invalidate()` imports and calls `invalidate_user_cache(user_id)`
+
+**Steps:**
+1. In `backend/middleware/auth.py`, add a public function:
+   ```python
+   def invalidate_user_cache(user_id: UUID) -> None:
+       _USER_CACHE.pop(user_id, None)
+   ```
+2. In `backend/services/credit_service.py`, at the end of `_invalidate(user_id)`, add:
+   ```python
+   from middleware.auth import invalidate_user_cache
+   invalidate_user_cache(user_id)
+   ```
+   Place the import at the top of the file to avoid circular-import issues; if a circular import occurs, move to a late import inside the function body.
+3. Run `uv run pytest tests/ -q`. Confirm credit and auth tests pass.
+
+**Acceptance Criteria:**
+- `auth.py` exposes `invalidate_user_cache`.
+- `credit_service._invalidate()` calls `invalidate_user_cache` after updating credit state.
+- Harness contract `test_phase15_credit_invalidation_clears_auth_cache` passes.
+
+**Dependencies:** None
+
+---
+
+### T-181: Markdown XSS Remediation
+
+**Description:**
+Finding H-5: The frontend `MarkdownRenderer` component uses `react-markdown` without `rehype-sanitize`. A malicious stage document (generated by a compromised LLM response or a SPEC/PLAN/HARNESS/TASKS body containing injected content) can embed `[click me](javascript:void(0))`, `<img src=x onerror=alert(1)>`, or other XSS payloads that execute in the user's browser context — giving an attacker access to JWT tokens stored in-memory, CSRF tokens, and the user's workspace content. Fix: add `rehype-sanitize` as a `rehypePlugin`.
+
+**Severity:** High
+
+**Inputs:**
+- `frontend/src/components/` — `MarkdownRenderer.tsx` (or equivalent component using `react-markdown`)
+- `frontend/package.json` — add `rehype-sanitize`
+- Harness: `test_phase15_markdown_renderer_uses_rehype_sanitize`
+
+**Outputs:**
+- `rehype-sanitize` installed and passed as `rehypePlugins={[rehypeSanitize]}` to `<ReactMarkdown>`
+
+**Steps:**
+1. Install the package: `pnpm add rehype-sanitize`.
+2. In `MarkdownRenderer.tsx`, add the import: `import rehypeSanitize from "rehype-sanitize";`
+3. Add `rehypePlugins={[rehypeSanitize]}` to the `<ReactMarkdown>` component props. Use the default sanitization schema — it allows safe HTML elements and strips `script` tags, `on*` event attributes, and `javascript:` hrefs.
+4. Run `pnpm test` and `pnpm tsc --noEmit`.
+5. Manually verify: create a test markdown string containing `[xss](javascript:alert(1))` and confirm it renders as a plain `<a>` with an empty or safe `href`.
+
+**Acceptance Criteria:**
+- `rehype-sanitize` is listed in `frontend/package.json` dependencies.
+- `MarkdownRenderer.tsx` imports `rehypeSanitize` and passes it as a `rehypePlugin`.
+- `javascript:` hrefs and `onerror` attributes in Markdown input do not appear in the rendered DOM.
+- `pnpm tsc` exits 0; `pnpm test` passes.
+- Harness contract `test_phase15_markdown_renderer_uses_rehype_sanitize` passes.
+
+**Dependencies:** None
+
+---
+
+### T-182: LLM Adapter HTTP Timeouts
+
+**Description:**
+Finding H-6: No `httpx.Timeout` is configured on any LLM provider adapter (Anthropic, OpenAI, Google Gemini). A provider connection that hangs (slow network, provider incident, TCP half-open) holds the event loop connection slot and the credit reservation indefinitely. A credit reservation left unclosed corrupts the credit ledger — users are charged for generations that never completed and never refunded. Fix: add explicit connect and read timeouts to each adapter's `httpx.AsyncClient` and a wall-clock `asyncio.wait_for` wrapper in the gateway.
+
+**Severity:** High
+
+**Inputs:**
+- `backend/services/llm/` — provider adapters for Anthropic, OpenAI, Gemini; `gateway.py`
+- `backend/services/credit_service.py` — credit reservation/release logic
+- Harness: `test_phase15_llm_adapters_have_httpx_timeout`, `test_phase15_gateway_has_wall_clock_timeout`
+
+**Outputs:**
+- Each adapter's `httpx.AsyncClient` initialised with `httpx.Timeout(connect=10.0, read=300.0, write=10.0, pool=5.0)`
+- `gateway.py` wraps the streaming call with `asyncio.wait_for(..., timeout=330.0)`
+- On timeout, the credit reservation is released via the existing release path
+
+**Steps:**
+1. In each provider adapter file, locate the `httpx.AsyncClient(...)` constructor (or equivalent). Add `timeout=httpx.Timeout(connect=10.0, read=300.0, write=10.0, pool=5.0)`. Import `httpx` if not already imported.
+2. For providers that use the provider SDK directly (e.g., `anthropic.AsyncAnthropic`), set the `timeout` parameter on the client constructor (Anthropic SDK exposes this directly).
+3. In `gateway.py`, wrap the generation coroutine:
+   ```python
+   try:
+       result = await asyncio.wait_for(
+           _call_provider(provider, ...),
+           timeout=330.0,
+       )
+   except asyncio.TimeoutError:
+       await credit_service.release_reservation(reservation_id)
+       raise HTTPException(status_code=504, detail="Generation timed out")
+   ```
+4. Run `uv run pytest tests/ -q`.
+
+**Acceptance Criteria:**
+- Each provider adapter specifies an `httpx.Timeout` (or SDK-level timeout) with connect ≤ 15s and read ≤ 300s.
+- `gateway.py` uses `asyncio.wait_for` with a wall-clock timeout.
+- On timeout, the credit reservation is released and the caller receives a 504 response.
+- Harness contracts `test_phase15_llm_adapters_have_httpx_timeout` and `test_phase15_gateway_has_wall_clock_timeout` pass.
+
+**Dependencies:** None
+
+---
+
+### T-183: PDF Coverage Dead Attribute Fix
+
+**Description:**
+Finding M-1: `backend/services/pipeline/pdf_export_service.py` contains `_coverage_label()` which uses `getattr(workspace, "coverage_summary", None)`. The `coverage_summary` attribute does not exist on the `Workspace` ORM model — it is a computed field on the Pydantic response schema and is never stored in the database. The `getattr` always returns `None`, making the coverage section of every exported PDF permanently blank. Fix: pass the already-computed `CoverageSummary` as an explicit parameter to `_coverage_label()`.
+
+**Severity:** Medium
+
+**Inputs:**
+- `backend/services/pipeline/pdf_export_service.py` — `_coverage_label()` function, its call sites
+- `backend/schemas/workspace.py` — `CoverageSummary` Pydantic model
+- Harness: `test_phase15_pdf_coverage_label_receives_explicit_parameter`
+
+**Outputs:**
+- `_coverage_label(coverage: CoverageSummary | None) -> str` — accepts the value as a parameter, no `getattr`
+- Call sites pass the pre-computed coverage summary
+
+**Steps:**
+1. Change `_coverage_label()` signature from `_coverage_label(workspace)` (or similar) to `_coverage_label(coverage: "CoverageSummary | None") -> str`.
+2. Replace the `getattr(workspace, "coverage_summary", None)` lookup inside the function with the `coverage` parameter directly.
+3. Update all call sites of `_coverage_label` to pass the coverage summary that the PDF export endpoint already derives (or `None` if unavailable).
+4. Run `uv run pytest tests/ -q`.
+
+**Acceptance Criteria:**
+- `_coverage_label` does not call `getattr` on a workspace ORM object.
+- `_coverage_label` accepts `coverage: CoverageSummary | None` as an explicit parameter.
+- Harness contract `test_phase15_pdf_coverage_label_receives_explicit_parameter` passes.
+
+**Dependencies:** T-166, T-161
+
+---
+
+### T-184: Rate Limit Fallback Bulk Eviction
+
+**Description:**
+Finding M-2: `backend/middleware/rate_limit.py`'s in-memory fallback `OrderedDict` evicts exactly one key when the dictionary exceeds 10,000 entries. Under a burst of requests from many distinct IPs (DDoS or testing spike), insertions outpace single-key eviction and the dictionary grows unbounded — eventually causing an OOM condition on the server. Fix: when the cap is reached, evict the oldest 20% of entries (2,000 keys) in a single batch operation.
+
+**Severity:** Medium
+
+**Inputs:**
+- `backend/middleware/rate_limit.py` — in-memory fallback `OrderedDict`, eviction logic
+- Harness: `test_phase15_rate_limit_fallback_bulk_eviction`
+
+**Outputs:**
+- When `len(_fallback_store) >= 10_000`, delete the oldest 2,000 entries using `itertools.islice` before inserting the new key
+
+**Steps:**
+1. Locate the eviction block in `rate_limit.py`. It currently calls `_fallback_store.popitem(last=False)` once (or similar single-key removal).
+2. Replace with:
+   ```python
+   import itertools
+   if len(_fallback_store) >= 10_000:
+       keys_to_delete = list(itertools.islice(_fallback_store, 2_000))
+       for k in keys_to_delete:
+           del _fallback_store[k]
+   ```
+3. Confirm the constant 10,000 and the 20% batch size (2,000) are named constants, not magic numbers.
+4. Run `uv run pytest tests/ -q`.
+
+**Acceptance Criteria:**
+- When the fallback store reaches capacity, 2,000 (20%) of the oldest entries are evicted in one operation.
+- The fallback store is bounded above by 10,000 entries under any insertion rate.
+- Harness contract `test_phase15_rate_limit_fallback_bulk_eviction` passes.
+
+**Dependencies:** None
+
+---
+
+### T-185: CSRF Token Nonce Rotation
+
+**Description:**
+Finding M-3: The CSRF token is structured as `{timestamp}.{hmac(secret, user_id + timestamp)}`. Because it contains no random nonce, the same user_id + timestamp combination produces the same token — tokens are deterministic. Once issued, a token never rotates and remains valid indefinitely (until the session expires). An attacker who extracts a token once can replay it for the life of the session. Fix: inject a 128-bit random nonce into the HMAC input and into the token string; store the nonce in Redis with the session TTL; validate and consume (delete) the nonce on use.
+
+**Severity:** Medium
+
+**Inputs:**
+- `backend/services/security/` or `backend/middleware/` — CSRF token generation and validation logic
+- Redis — for nonce storage
+- Harness: `test_phase15_csrf_token_contains_nonce`, `test_phase15_csrf_nonce_single_use`
+
+**Outputs:**
+- Token format: `{timestamp}.{nonce}.{hmac(secret, user_id + timestamp + nonce)}`
+- Nonce stored in Redis as `csrf_nonce:{user_id}:{nonce}` with session TTL
+- Validation deletes the nonce key atomically (`getdel`) — each token is single-use
+- Token regenerated and set in the response on every successful state-changing request
+
+**Steps:**
+1. In the CSRF token generation function, generate a 128-bit nonce: `nonce = secrets.token_hex(16)`.
+2. Change the HMAC input to include the nonce: `hmac(secret, f"{user_id}{timestamp}{nonce}".encode())`.
+3. Change the token format to `f"{timestamp}.{nonce}.{signature}"`.
+4. Store the nonce in Redis: `await redis.setex(f"csrf_nonce:{user_id}:{nonce}", session_ttl, "1")`.
+5. In the CSRF validation function, parse the three-part token. Extract `nonce`. Call `await redis.getdel(f"csrf_nonce:{user_id}:{nonce}")` — if it returns `None`, the token is replayed or expired; reject with 403.
+6. Regenerate and set a new CSRF token in the response header on every successful mutation.
+7. Run `uv run pytest tests/ -q`.
+
+**Acceptance Criteria:**
+- CSRF tokens contain three dot-separated parts: timestamp, nonce, signature.
+- No two tokens issued for the same user share the same nonce.
+- A token that has been validated once is rejected on re-use (nonce is consumed).
+- `pnpm tsc` exits 0 (no frontend CSRF-header logic changes needed — the header name stays the same).
+- Harness contracts `test_phase15_csrf_token_contains_nonce` and `test_phase15_csrf_nonce_single_use` pass.
+
+**Dependencies:** T-177
+
+---
+
+### T-186: SSE Lifecycle Correctness
+
+**Description:**
+Two bugs in the frontend SSE cleanup path. Finding M-4: `streamRef.current = null` is set BEFORE `streamRef.current.close()` — the ref is nullified, then `.close()` is called on the nullified ref (which is either a no-op on a stale closure reference or throws `TypeError: Cannot read property 'close' of null`). Finding M-7: a comment reading "keep open for eval event" appears immediately before a `.close()` call — the code and comment directly contradict each other, making the true intent of the SSE lifetime unclear to maintainers.
+
+**Severity:** Medium
+
+**Inputs:**
+- `frontend/src/services/sseService.ts` or the component that owns `streamRef` — SSE cleanup code
+- Harness: `test_phase15_sse_close_before_null`, `test_phase15_sse_comment_contradiction_resolved`
+
+**Outputs:**
+- Cleanup order: call `.close()` first, then set `streamRef.current = null`
+- "keep open for eval event" comment removed; replaced with "close after generation complete; eval result arrives via polling, not SSE"
+
+**Steps:**
+1. Locate the SSE cleanup block. It currently reads approximately:
+   ```js
+   streamRef.current = null;
+   streamRef.current.close();  // or equivalent reversed order
+   ```
+2. Swap the order:
+   ```js
+   streamRef.current.close();
+   streamRef.current = null;
+   ```
+3. Find the "keep open for eval event" comment. Remove it. Add in its place: `// close after generation complete; eval result arrives via polling, not SSE`.
+4. Run `pnpm tsc --noEmit` and `pnpm test`.
+
+**Acceptance Criteria:**
+- In the SSE cleanup path, `.close()` is called on the non-null ref before the ref is set to `null`.
+- The string "keep open for eval event" does not appear in the codebase.
+- `pnpm tsc` exits 0; `pnpm test` passes.
+- Harness contracts `test_phase15_sse_close_before_null` and `test_phase15_sse_comment_contradiction_resolved` pass.
+
+**Dependencies:** None
+
+---
+
+### T-187: Eval Polling Error Surface
+
+**Description:**
+Finding M-5: After 12 consecutive eval polling failures, the frontend silently stops polling and returns `null`. The quality badge shimmer spinner never resolves — the user cannot distinguish "still scoring" from "scoring failed permanently." Fix: track consecutive failure count; on reaching the threshold, set an `evalError` flag and render a deterministic fallback badge with user-visible text.
+
+**Severity:** Medium
+
+**Inputs:**
+- `frontend/src/components/workspace/` — eval polling hook or component (whichever owns the retry loop), `QualityBadge.tsx`
+- Harness: `test_phase15_eval_polling_surfaces_error_after_max_retries`
+
+**Outputs:**
+- `evalError: boolean` state in the polling hook/component
+- After 12 consecutive failures, `evalError = true` and polling stops
+- When `evalError` is true, `QualityBadge` renders a grey badge with text "Score unavailable"
+
+**Steps:**
+1. In the eval polling hook (or component), add a `consecutiveFailures` counter. Increment it on each failed poll. Reset to 0 on success. When `consecutiveFailures >= 12`, set `evalError = true` and clear the polling interval.
+2. In `QualityBadge.tsx`, accept an `error?: boolean` prop. When `error` is true, render a grey badge containing "Score unavailable" instead of the shimmer state.
+3. Pass `evalError` from the polling hook to `QualityBadge` via props or context.
+4. `console.error` the final polling error with the stage ID for debugging.
+5. Run `pnpm tsc --noEmit` and `pnpm test`.
+
+**Acceptance Criteria:**
+- After 12 consecutive polling failures, the shimmer spinner is replaced with a "Score unavailable" grey badge.
+- The polling loop does not continue indefinitely after the threshold is reached.
+- `pnpm tsc` exits 0; `pnpm test` passes.
+- Harness contract `test_phase15_eval_polling_surfaces_error_after_max_retries` passes.
+
+**Dependencies:** None
+
+---
+
+### T-188: streamingContent Type Narrowing
+
+**Description:**
+Finding M-6: The Zustand store declares `streamingContent: Record<string, string> | string`. This union type requires defensive `typeof` guards at every read site (5+ locations in `StageEditor.tsx`, `StreamingOverlay.tsx`, and related components). Missing or incorrect guards cause runtime errors during streaming — `string.split` called on an object, or object property access called on a string. Fix: narrow the type to `Record<string, string>` throughout the store and all consumers.
+
+**Severity:** Medium
+
+**Inputs:**
+- `frontend/src/store/` — Zustand store defining `streamingContent`
+- `frontend/src/components/workspace/StageEditor.tsx`, `StreamingOverlay.tsx` — read sites
+- Harness: `test_phase15_streaming_content_type_is_record`
+
+**Outputs:**
+- `streamingContent: Record<string, string>` in store type definition
+- Initial value: `{}`
+- All `typeof streamingContent === "string"` guards removed
+- All callers use `streamingContent[stageId]` (object access, no string branch)
+
+**Steps:**
+1. In the Zustand store file, change the type of `streamingContent` from `Record<string, string> | string` to `Record<string, string>`. Update the initial state from any string default to `{}`.
+2. In all setter actions, ensure the value being stored is always an object key assignment (`state.streamingContent[stageId] = chunk`).
+3. In all read sites (`StageEditor.tsx`, `StreamingOverlay.tsx`, etc.), remove the `typeof` string guards. Update all accesses to use `streamingContent[stageId] ?? ""`.
+4. Run `pnpm tsc --noEmit` — it must exit 0 with zero type errors.
+5. Run `pnpm test`.
+
+**Acceptance Criteria:**
+- `streamingContent` is typed as `Record<string, string>` — no union with `string`.
+- `typeof streamingContent === "string"` guards do not appear in the codebase.
+- `pnpm tsc` exits 0; `pnpm test` passes.
+- Harness contract `test_phase15_streaming_content_type_is_record` passes.
+
+**Dependencies:** None
+
+---
+
+### T-189a: Backend Debt Sweep
+
+**Description:**
+Two low-severity backend findings. Finding L-1: `STAGE_DEPENDENCIES` (the dict mapping stage type to its upstream dependency) is defined in two separate backend modules. Both copies must be kept in sync; when they diverge, stage unlock logic and stage ordering logic produce different dependency graphs silently. Finding L-2: the workspace router loads a workspace from the database to validate the request, then passes the workspace ID to a service method that performs a second identical database load — double DB round-trip per request, wasting latency and a connection.
+
+**Severity:** Low
+
+**Inputs:**
+- `backend/services/pipeline/stage_manager.py` — `STAGE_DEPENDENCIES` (canonical definition)
+- Whichever other module also defines `STAGE_DEPENDENCIES` (find with `grep -rn "STAGE_DEPENDENCIES" backend/`)
+- `backend/routers/workspace.py` — double-load request paths
+- Harness: `test_phase15_stage_dependencies_single_definition`, `test_phase15_workspace_router_no_double_load`
+
+**Outputs:**
+- `STAGE_DEPENDENCIES` defined exactly once; duplicate definition removed and replaced with an import
+- The service method accepting a workspace ID is updated to accept the already-loaded ORM object directly (or the router passes the object through)
+
+**Steps:**
+1. Run `grep -rn "STAGE_DEPENDENCIES\s*=" backend/` to find every definition site. Keep the one in `stage_manager.py` as canonical. In all other files, remove the local definition and replace with `from services.pipeline.stage_manager import STAGE_DEPENDENCIES`.
+2. In `backend/routers/workspace.py`, identify the endpoint(s) that load a workspace then call a service that re-loads the same workspace. Update the service method signature to accept `workspace: Workspace` (ORM object) instead of `workspace_id: UUID`. Pass the already-loaded workspace directly. Remove the second DB call from the service.
+3. Run `uv run pytest tests/ -q`.
+
+**Acceptance Criteria:**
+- `STAGE_DEPENDENCIES =` appears exactly once in the backend codebase.
+- The identified workspace service method does not issue a redundant DB query when the router already has the workspace loaded.
+- Harness contracts `test_phase15_stage_dependencies_single_definition` and `test_phase15_workspace_router_no_double_load` pass.
+
+**Dependencies:** None
+
+---
+
+### T-189b: Frontend Debt Sweep
+
+**Description:**
+Four low-severity frontend findings. Finding L-3: `CreditConfirmModal` exposes both `onConfirm`/`onClose` and their aliases `onOk`/`onDismiss` — four prop names for two callbacks, creating confusion for callers. Finding L-4: `ExportGitHubModal` auto-closes via `setTimeout(..., 1500)` — if the export call takes longer than 1.5 seconds the modal closes before the call completes. Finding L-5: `TemplatesStrip` has no error boundary; a network error during template fetch crashes the whole workspace view. Finding L-6: `SharePublicLinkModal` does not trap focus — Tab key exits the modal and reaches background elements, violating WCAG 2.1 SC 2.1.2.
+
+**Severity:** Low
+
+**Inputs:**
+- `frontend/src/components/workspace/CreditConfirmModal.tsx`
+- `frontend/src/components/workspace/ExportGitHubModal.tsx`
+- `frontend/src/components/workspace/TemplatesStrip.tsx`
+- `frontend/src/components/workspace/SharePublicLinkModal.tsx`
+- Harness: `test_phase15_credit_confirm_modal_no_prop_aliases`, `test_phase15_export_github_modal_no_settimeout`, `test_phase15_templates_strip_has_error_boundary`, `test_phase15_share_modal_focus_trap`
+
+**Outputs:**
+- `CreditConfirmModal` props: `onConfirm`, `onClose` only — `onOk`/`onDismiss` removed; all call sites updated
+- `ExportGitHubModal` closes in `onSuccess` callback, not `setTimeout`
+- `TemplatesStrip` wrapped in a React error boundary rendering "Templates unavailable" on error
+- `SharePublicLinkModal` traps focus using `focus-trap-react` or equivalent
+
+**Steps:**
+1. In `CreditConfirmModal.tsx`, remove `onOk` and `onDismiss` from the props interface. Update all call sites across the codebase to use `onConfirm`/`onClose` exclusively.
+2. In `ExportGitHubModal.tsx`, remove the `setTimeout` auto-close. Move the modal close call into the mutation/API call's `onSuccess` callback.
+3. Create `frontend/src/components/workspace/TemplatesStripErrorBoundary.tsx` (or add an inline class component). Wrap `<TemplatesStrip>` with it everywhere it is rendered. The fallback renders nothing (silent fail) or a one-line "Templates unavailable" note.
+4. Install `focus-trap-react` if not already present (`pnpm add focus-trap-react`). In `SharePublicLinkModal.tsx`, wrap the modal content with `<FocusTrap active={isOpen}>`. Set `initialFocus` to the first interactive element.
+5. Run `pnpm tsc --noEmit` and `pnpm test`.
+
+**Acceptance Criteria:**
+- `CreditConfirmModal` props interface does not contain `onOk` or `onDismiss`.
+- `ExportGitHubModal` contains no `setTimeout` call.
+- `TemplatesStrip` is rendered inside an error boundary.
+- `SharePublicLinkModal` traps focus when open.
+- `pnpm tsc` exits 0; `pnpm test` passes.
+- Harness contracts for all four fixes pass.
+
+**Dependencies:** None
+
+---
+
+### T-189c: Infrastructure Debt Sweep
+
+**Description:**
+Two low-severity infrastructure findings. Finding L-7: Docker Compose binds Redis (6379) and PostgreSQL (5432) ports to `0.0.0.0` — all network interfaces — by default. Developers on shared networks (office LANs, university networks) expose their local database and cache to other machines on the same subnet. Finding L-8: Rate limit override constants (`RATELIMIT_DISABLED`, per-endpoint multipliers) in `rate_limit.py` have no inline documentation. New developers enabling overrides for load testing do not know the operational risks or side-effects.
+
+**Severity:** Low
+
+**Inputs:**
+- `docker-compose.yml` (repository root) — `ports:` sections for `db` and `redis` services
+- `backend/middleware/rate_limit.py` — override constants
+- `docs/LOCAL_TESTING_HANDBOOK.md` — rate limit section
+- Harness: `test_phase15_docker_compose_ports_bound_to_localhost`, `test_phase15_rate_limit_overrides_documented`
+
+**Outputs:**
+- `docker-compose.yml` port bindings: `"127.0.0.1:5432:5432"` and `"127.0.0.1:6379:6379"`
+- Inline comments on each rate limit override constant explaining the effect and when it is safe to change
+- A note in `docs/LOCAL_TESTING_HANDBOOK.md` under a "Rate limit overrides" subsection
+
+**Steps:**
+1. In `docker-compose.yml`, change the `db` service ports from `"5432:5432"` (or `- 5432:5432`) to `"127.0.0.1:5432:5432"`. Change the `redis` service ports from `"6379:6379"` to `"127.0.0.1:6379:6379"`. Verify `docker compose up` still starts correctly.
+2. In `backend/middleware/rate_limit.py`, add inline comments to each override constant:
+   - `RATELIMIT_DISABLED`: "Set to True to disable all rate limiting — for load testing only. Never set in production."
+   - Per-endpoint multipliers: explain the default limit, what multiplying by N means, and the risk of setting it too high.
+3. In `docs/LOCAL_TESTING_HANDBOOK.md`, add a "Rate limit overrides" subsection after the test suite section, listing the constants and the conditions under which they are safe to change.
+4. Run `uv run pytest tests/ -q` and `docker compose config` to validate the compose file.
+
+**Acceptance Criteria:**
+- Docker Compose port bindings for `db` and `redis` are prefixed with `127.0.0.1:`.
+- Rate limit override constants have explanatory inline comments.
+- `docs/LOCAL_TESTING_HANDBOOK.md` documents the overrides.
+- Harness contracts `test_phase15_docker_compose_ports_bound_to_localhost` and `test_phase15_rate_limit_overrides_documented` pass.
+
+**Dependencies:** None
+
+---
+
+### T-190: Phase 15 CI Wire-up and Production Hardening Smoke Checklist
+
+**Description:**
+Wire the Phase 15 harness contract files into CI and update the production smoke checklist to cover hardening behaviours introduced in T-174 through T-189c. Every new harness test must run in CI on every push. The smoke checklist must verify that hardening controls are active in the staging environment before any production promotion.
+
+**Severity:** High
+
+**Inputs:**
+- `.github/workflows/ci.yml` — existing CI definition
+- `docs/PRODUCTION_RELEASE_GATE.md` — automated gate and smoke gate sections
+- `harness/tests/backend/test_phase15_enterprise_hardening_contract.py` (T-174 → T-189c)
+- `harness/tests/frontend/phase15-enterprise-hardening.contract.test.ts` (T-174 → T-189c)
+
+**Outputs:**
+- CI runs `test_phase15_enterprise_hardening_contract.py` alongside existing harness contracts
+- CI runs `phase15-enterprise-hardening.contract.test.ts` in the frontend vitest harness step
+- `docs/PRODUCTION_RELEASE_GATE.md` automated gate section lists Phase 15 harness files
+- `docs/PRODUCTION_RELEASE_GATE.md` manual smoke checklist extended with hardening items
+
+**Steps:**
+1. In `.github/workflows/ci.yml`, find the `uv run pytest` step that runs harness contracts. Add `../harness/tests/backend/test_phase15_enterprise_hardening_contract.py` to the list of files.
+2. Find the frontend vitest harness step. Confirm `phase15-enterprise-hardening.contract.test.ts` is picked up by the existing glob pattern; if not, add it explicitly.
+3. In `docs/PRODUCTION_RELEASE_GATE.md`, under the "Automated Gate" code block, add:
+   ```
+   ../harness/tests/backend/test_phase15_enterprise_hardening_contract.py \
+   ```
+   to the pytest invocation.
+4. In `docs/PRODUCTION_RELEASE_GATE.md`, under "Manual Smoke Gate", add the following items to the minimum release-blocking list:
+   - Concurrent finalise requests do not double-charge credits (send two simultaneous finalise API calls and verify exactly one version snapshot and one credit deduction).
+   - OAuth sign-in with a replayed state parameter is rejected (verify 403 on duplicate state).
+   - PDF export returns within 10 seconds and does not block concurrent API requests during render.
+   - Markdown content containing `javascript:` hrefs does not execute in browser (manual XSS smoke).
+   - LLM generation request to an unreachable provider returns 504 within 350 seconds, not a hung connection.
+   - Credit balance updates immediately after generation completes (no 30-second stale display).
+5. Run the full CI locally to confirm all Phase 15 harness tests pass:
+   ```bash
+   cd backend
+   uv run pytest ../harness/tests/backend/test_phase15_enterprise_hardening_contract.py -q
+   ```
+
+**Acceptance Criteria:**
+- CI references `test_phase15_enterprise_hardening_contract.py`.
+- CI references `phase15-enterprise-hardening.contract.test.ts`.
+- `docs/PRODUCTION_RELEASE_GATE.md` automated gate lists Phase 15 harness.
+- `docs/PRODUCTION_RELEASE_GATE.md` manual smoke gate covers all six hardening behaviours.
+- All Phase 1–14 tests continue to pass.
+- All Phase 15 harness contract tests pass.
+
+**Dependencies:** T-174, T-175, T-176, T-177, T-178, T-179, T-180, T-181, T-182, T-183, T-184, T-185, T-186, T-187, T-188, T-189a, T-189b, T-189c
+
+---
+
+_tasks.md · SpecForge V1 · Version 2.3.0 · 2026-05-22 — Phase 15 Enterprise Production Hardening T-174 through T-190 (19 remediation tasks addressing all C-1–C-4 critical, H-1–H-6 high, M-1–M-7 medium, and L-1–L-8 low findings from the staff-engineer production readiness code review)_
+
 _tasks.md · SpecForge V1 · Version 2.2.1 · 2026-05-20 — Phase 14 design language: added Design Directive preamble (observe → design → introspect → build → microcopy) and per-task Design Brief subsections to all six frontend tasks (T-163, T-165, T-167, T-169, T-171, T-172) naming the moment-of-use feeling for each component. No acceptance criteria removed; the directive is enforced at PR review as a human-judged criterion in addition to the automated harness checks._
 
 _tasks.md · SpecForge V1 · Version 2.2.0 · 2026-05-20 — Phase 14 V1.3 usefulness improvements T-160 through T-173 (Spec Clarification, per-task Priority + Estimate, PDF export, Public Share, Starter Templates, harness coverage surfacing)_
