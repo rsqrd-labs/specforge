@@ -276,7 +276,7 @@ With Langfuse unconfigured (`LANGFUSE_SECRET_KEY` blank):
 | Stale State | 3 | | | |
 | Infrastructure | 4 | | | |
 | Sign-out | 2 | | | |
-| **Total** | **60** | | | |
+| **Total** | **61** | | | |
 
 Optional/additional checks:
 
@@ -345,10 +345,11 @@ a bug.
 
 | Step | What to do | Expected | Result |
 | ---- | ---------- | -------- | ------ |
-| 22 | Open a workspace whose harness has been evaluated. | Coverage chip visible in the header (tiny progress bar + count + "covered"). | |
-| 23 | Hover the chip. | Tooltip carries the positioning line ("SpecForge generates the tests; you ship them."). | |
-| 24 | Open the dashboard. | The SAME chip is visible on the workspace card — identical visual treatment. | |
-| 25 | Open the public share view. | The chip is visible under the cover band — again, identical treatment. | |
-| 26 | Find a workspace whose harness has no eval. | The chip is absent (not a placeholder, not a "—"). | |
+| 22 | Open the **Harness** stage of a workspace whose harness eval shows 100% coverage. | Green "✓ Full coverage" badge visible in the pane header. | |
+| 23 | Hover the badge. | Tooltip reads "N tests cover all N spec requirements." | |
+| 24 | Switch to the **Plan** and **Tasks** stages of the same workspace. | Coverage badge is absent — it only appears on the Harness stage. | |
+| 25 | Open the dashboard. | The "✓ Full coverage" badge is visible on the workspace card when harness coverage is 100%. | |
+| 26 | Open the public share view. | The "✓ Full coverage" badge is visible under the cover band when applicable. | |
+| 27 | Find a workspace whose harness eval is below 100% (or has no eval yet). | The badge is absent — no count, no bar, no placeholder. | |
 
 **V1.3 Sign-off:** ________________  **Date:** ________________

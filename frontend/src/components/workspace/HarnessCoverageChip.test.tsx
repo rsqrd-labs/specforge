@@ -16,43 +16,32 @@ describe("HarnessCoverageChip", () => {
     expect(container).toBeEmptyDOMElement()
   })
 
-  it("renders without warning state at 100%", () => {
+  it("renders nothing when coverage is below 100%", () => {
+    const { container } = render(
+      <HarnessCoverageChip
+        coverage_summary={{ tests: 12, covered: 13, total: 21, percent: 62 }}
+      />,
+    )
+    expect(container).toBeEmptyDOMElement()
+  })
+
+  it("renders nothing at exactly 80%", () => {
+    const { container } = render(
+      <HarnessCoverageChip
+        coverage_summary={{ tests: 18, covered: 17, total: 21, percent: 80 }}
+      />,
+    )
+    expect(container).toBeEmptyDOMElement()
+  })
+
+  it("renders the full-coverage badge at 100%", () => {
     render(
       <HarnessCoverageChip
         coverage_summary={{ tests: 21, covered: 21, total: 21, percent: 100 }}
       />,
     )
-    const chip = screen.getByLabelText("Harness coverage: 100%")
-    expect(chip.className).toContain("harness-coverage-chip")
-    expect(chip.className).not.toContain("is-warning")
-  })
-
-  it("renders the warning state below 80%", () => {
-    render(
-      <HarnessCoverageChip
-        coverage_summary={{ tests: 12, covered: 13, total: 21, percent: 62 }}
-      />,
-    )
-    const chip = screen.getByLabelText("Harness coverage: 62%")
-    expect(chip.className).toContain("is-warning")
-  })
-
-  it("does not render the warning state at exactly 80%", () => {
-    render(
-      <HarnessCoverageChip
-        coverage_summary={{ tests: 18, covered: 17, total: 21, percent: 80 }}
-      />,
-    )
-    const chip = screen.getByLabelText("Harness coverage: 80%")
-    expect(chip.className).not.toContain("is-warning")
-  })
-
-  it("falls back to a percent label when total is zero", () => {
-    render(
-      <HarnessCoverageChip
-        coverage_summary={{ tests: 0, covered: 92, total: 0, percent: 92 }}
-      />,
-    )
-    expect(screen.getByText("92%")).toBeInTheDocument()
+    const chip = screen.getByLabelText("Full harness coverage")
+    expect(chip.className).toContain("is-full")
+    expect(screen.getByText("✓ Full coverage")).toBeInTheDocument()
   })
 })

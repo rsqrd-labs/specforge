@@ -242,6 +242,10 @@ GOOGLE_CLIENT_ID=your-client-id.apps.googleusercontent.com
 GOOGLE_CLIENT_SECRET=your-client-secret
 FRONTEND_URL=http://localhost:5173
 
+# GitHub OAuth App — leave blank to disable GitHub export integration
+GITHUB_CLIENT_ID=
+GITHUB_CLIENT_SECRET=
+
 # LLM providers — fill in whichever you have, leave others as placeholder
 ANTHROPIC_API_KEY=sk-ant-...
 OPENAI_API_KEY=sk-...
@@ -299,7 +303,7 @@ see both of these lines:
 
 ```
 api    | Application startup complete.
-frontend | VITE v5.x.x  ready in ... ms
+frontend | VITE v6.x.x  ready in ... ms
 ```
 
 The stack is ready when both appear.

@@ -1197,9 +1197,11 @@ export default function Workspace() {
                     <span className={`workspace-status-chip ${activeStage.status}`}>
                       {formatStageStatus(activeStage.status)}
                     </span>
-                    <HarnessCoverageChip
-                      coverage_summary={currentWorkspace.coverage_summary ?? null}
-                    />
+                    {activeStage.type === "harness" && (
+                      <HarnessCoverageChip
+                        coverage_summary={currentWorkspace.coverage_summary ?? null}
+                      />
+                    )}
                     {effortSummary && (
                       <span
                         className="effort-summary-chip"

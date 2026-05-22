@@ -77,6 +77,8 @@ Production must satisfy these backend requirements:
 | `DATABASE_URL` | Production database URL |
 | `REDIS_URL` | Production Redis URL |
 | Provider API keys | Set only for enabled providers |
+| `GITHUB_CLIENT_ID` | Blank to disable GitHub export; set both vars together |
+| `GITHUB_CLIENT_SECRET` | Required when `GITHUB_CLIENT_ID` is set |
 
 Langfuse production requirements:
 

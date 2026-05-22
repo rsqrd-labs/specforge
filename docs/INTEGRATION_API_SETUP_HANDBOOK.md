@@ -95,6 +95,7 @@ you merge to `main`.
 | Railway | Production | Hosts the backend server, PostgreSQL, and Redis in the cloud |
 | Vercel | Production | Hosts the frontend website |
 | GitHub Actions secrets | Production | Lets the automated pipeline deploy to Railway and Vercel |
+| GitHub OAuth App | Optional | GitHub export integration — lets users push spec/plan/tasks to a GitHub repo as files + issues. Leave blank to disable. |
 | Sentry | Optional | Error reporting if something breaks in production |
 | Grafana OTLP | Optional | Distributed tracing (advanced observability) |
 | Langfuse | Optional | LLM call logging and prompt management |
@@ -308,6 +309,50 @@ Common errors for all providers:
 
 ---
 
+### GitHub OAuth App (optional — skip if you don't need GitHub export)
+
+The GitHub export integration lets users push their spec, plan, tasks, and
+harness to a new GitHub repository and create issues for each task. Leave
+both variables blank to disable it — the backend returns a 503 on GitHub
+auth endpoints and the frontend hides the export button.
+
+**How to set up the OAuth App:**
+
+1. Go to [github.com/settings/developers](https://github.com/settings/developers)
+   and sign in.
+2. Click **New OAuth App**.
+3. Fill in:
+   - **Application name**: `SpecForge` (or any name)
+   - **Homepage URL**: your Vercel URL (or `http://localhost:5173` for local)
+   - **Authorization callback URL**: `{FRONTEND_URL}/auth/github/callback`
+     — for local use `http://localhost:5173/auth/github/callback`
+4. Click **Register application**.
+5. Copy the **Client ID** shown on the app page.
+6. Click **Generate a new client secret**. Copy the secret immediately — it
+   is only shown once.
+
+```env
+GITHUB_CLIENT_ID=your-github-oauth-app-client-id
+GITHUB_CLIENT_SECRET=your-github-oauth-app-client-secret
+```
+
+Leave both blank to disable GitHub export:
+
+```env
+GITHUB_CLIENT_ID=
+GITHUB_CLIENT_SECRET=
+```
+
+Common errors:
+
+- `Connect GitHub` button is missing in Settings: `GITHUB_CLIENT_ID` is blank
+  — the backend disables the integration entirely when both vars are unset.
+- Callback fails after GitHub approval: the Authorization callback URL in the
+  GitHub OAuth App settings does not match `{FRONTEND_URL}/auth/github/callback`.
+- 503 on `/auth/github`: `GITHUB_CLIENT_ID` is not set in the backend environment.
+
+---
+
 ### Sentry (optional — skip for first deploy)
 
 Sentry catches and reports errors from the running app. Useful once you have
@@ -452,6 +497,8 @@ Railway will host the FastAPI server, PostgreSQL, and Redis.
     | `ANTHROPIC_API_KEY` | Your Anthropic key (or leave blank if not using Anthropic) |
     | `OPENAI_API_KEY` | Your OpenAI key (or leave blank if not using OpenAI) |
     | `GOOGLE_API_KEY` | Your Gemini key (or leave blank if not using Gemini) |
+    | `GITHUB_CLIENT_ID` | Your GitHub OAuth App client ID (or leave blank to disable GitHub export) |
+    | `GITHUB_CLIENT_SECRET` | Your GitHub OAuth App client secret (or leave blank) |
     | `ENCRYPTION_MASTER_KEY` | Generated below |
     | `CSRF_SECRET` | Generated below |
     | `METRICS_TOKEN` | Generated below |
@@ -655,6 +702,9 @@ GOOGLE_API_KEY=...
 
 ENCRYPTION_MASTER_KEY=your-fernet-key
 CSRF_SECRET=long-random-secret
+
+GITHUB_CLIENT_ID=
+GITHUB_CLIENT_SECRET=
 
 METRICS_TOKEN=
 SENTRY_DSN=

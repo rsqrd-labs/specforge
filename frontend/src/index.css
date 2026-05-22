@@ -5901,56 +5901,19 @@ button:disabled {
 .harness-coverage-chip {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
   min-height: 25px;
   border-radius: 999px;
   padding: 0 12px;
-  background: rgba(86, 94, 116, 0.08);
-  color: var(--color-on-surface-variant);
   font-size: 11px;
   font-weight: 700;
-  font-variant-numeric: tabular-nums;
   white-space: nowrap;
   cursor: help;
-  transition: background-color 120ms ease, color 120ms ease;
 }
 
-.harness-coverage-chip:hover {
-  background: rgba(86, 94, 116, 0.14);
-}
-
-.harness-coverage-chip.is-warning {
-  color: #6b3300;
-}
-
-.harness-coverage-chip-bar {
-  position: relative;
-  display: inline-block;
-  width: 32px;
-  height: 4px;
-  border-radius: 999px;
-  background: rgba(86, 94, 116, 0.20);
-  overflow: hidden;
-}
-
-.harness-coverage-chip-fill {
-  position: absolute;
-  inset: 0;
-  background: var(--color-primary);
-  border-radius: 999px;
-  transition: width 320ms ease;
-}
-
-.harness-coverage-chip-count {
-  font-weight: 800;
-}
-
-.harness-coverage-chip-suffix {
-  color: var(--color-on-surface-variant);
-  font-weight: 600;
-  font-size: 10px;
-  letter-spacing: 0.04em;
-  text-transform: lowercase;
+.harness-coverage-chip.is-full {
+  background: rgba(34, 197, 94, 0.12);
+  color: #16a34a;
+  border: 1px solid rgba(34, 197, 94, 0.28);
 }
 
 .public-view-coverage-wrap {
