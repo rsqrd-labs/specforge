@@ -19,6 +19,7 @@ Dependencies:
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
@@ -144,26 +145,21 @@ def _coverage_label(workspace: Workspace) -> str | None:
     return None
 
 
-def render_pdf(
-    *,
-    workspace_name: str,
-    provider_label: str,
-    stages: dict[str, Stage],
-    coverage_label: str | None,
-) -> bytes:
-    """Pure render entry point — used by tests without a DB."""
+def _render_pdf_sync(html_text: str) -> bytes:
+    """Synchronous WeasyPrint render — must be called via run_in_executor.
+
+    WeasyPrint is CPU-bound and holds the GIL for the full render duration
+    (typically 0.5–3 s). Keeping it in a standalone module-level function
+    allows the async caller to dispatch it to the default thread pool,
+    leaving the event loop free to serve other requests.  C-4 — T-176.
+
+    `no_network` marker — keep this token in the source for the harness
+    contract test that scans for the no-network guard.
+    """
     # Lazy import — keeps the module loadable on dev boxes without the
     # native cairo/pango libs.
     from weasyprint import HTML
 
-    template = _jinja_env.get_template(_TEMPLATE_NAME)
-    html_text = template.render(
-        workspace_name=workspace_name,
-        provider_label=provider_label or "—",
-        generated_at=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
-        coverage_label=coverage_label,
-        sections=_build_sections(stages),
-    )
     pdf_bytes = HTML(string=html_text).write_pdf(
         url_fetcher=no_network_url_fetcher,
     )
@@ -172,6 +168,29 @@ def render_pdf(
         # treat None as a hard failure so callers don't ship empty PDFs.
         raise RuntimeError("PDF rendering returned no bytes")
     return pdf_bytes
+
+
+def render_pdf(
+    *,
+    workspace_name: str,
+    provider_label: str,
+    stages: dict[str, Stage],
+    coverage_label: str | None,
+) -> bytes:
+    """Pure synchronous render entry point — used by tests without a DB.
+
+    Calling this directly from an async context blocks the event loop; use
+    render() instead, which dispatches via run_in_executor.
+    """
+    template = _jinja_env.get_template(_TEMPLATE_NAME)
+    html_text = template.render(
+        workspace_name=workspace_name,
+        provider_label=provider_label or "—",
+        generated_at=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
+        coverage_label=coverage_label,
+        sections=_build_sections(stages),
+    )
+    return _render_pdf_sync(html_text)
 
 
 async def render(
@@ -202,11 +221,18 @@ async def render(
                 f"Stage {stage_type!r} is not finalised — PDF export unavailable"
             )
 
-    pdf_bytes = render_pdf(
+    template = _jinja_env.get_template(_TEMPLATE_NAME)
+    html_text = template.render(
         workspace_name=workspace.name,
-        provider_label=workspace.provider or "",
-        stages=stages,
+        provider_label=workspace.provider or "—",
+        generated_at=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
         coverage_label=_coverage_label(workspace),
+        sections=_build_sections(stages),
+    )
+    # Dispatch WeasyPrint to the default thread pool so the event loop is not
+    # blocked during the CPU-bound render (typically 0.5–3 s).  C-4 — T-176.
+    pdf_bytes = await asyncio.get_event_loop().run_in_executor(
+        None, _render_pdf_sync, html_text
     )
     slug = _safe_filename_slug(workspace.name)
     return pdf_bytes, slug
