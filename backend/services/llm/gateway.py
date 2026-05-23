@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import os
+from collections import OrderedDict
 from typing import TYPE_CHECKING
 
 from config import settings
@@ -19,7 +20,10 @@ _PROVIDER_KEY_SETTINGS = {
 # Adapter instances are cached per provider, model, and API-key fingerprint.
 # When a provider key changes in the process environment, the fingerprint changes
 # and the next get_llm() call builds a fresh provider client automatically.
-_INSTANCES: dict[tuple[str, str, str], "BaseLLMAdapter"] = {}
+# The cache is bounded to _INSTANCE_CACHE_MAX entries with LRU eviction so that
+# users with many custom API keys cannot grow the cache without bound.  T-191.
+_INSTANCE_CACHE_MAX = 256
+_INSTANCES: OrderedDict[tuple[str, str, str], "BaseLLMAdapter"] = OrderedDict()
 
 # Hard wall-clock cap on any single non-streaming generation call routed
 # through the gateway.  Prevents a hung provider from holding a credit
@@ -37,8 +41,14 @@ def get_llm(provider: str, model: str) -> "BaseLLMAdapter":
         raise ValueError(f"Unknown LLM provider: {provider!r}")
     api_key = _provider_api_key(provider)
     key = (provider, model, _secret_fingerprint(api_key))
-    if key not in _INSTANCES:
-        _INSTANCES[key] = _REGISTRY[provider](model, api_key=api_key)
+    if key in _INSTANCES:
+        # Move to end (most-recently-used) to maintain LRU ordering.
+        _INSTANCES.move_to_end(key)
+        return _INSTANCES[key]
+    # Evict the least-recently-used entry when the cache is full.
+    if len(_INSTANCES) >= _INSTANCE_CACHE_MAX:
+        _INSTANCES.popitem(last=False)
+    _INSTANCES[key] = _REGISTRY[provider](model, api_key=api_key)
     return _INSTANCES[key]
 
 
