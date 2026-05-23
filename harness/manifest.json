@@ -61,6 +61,16 @@
       "proves": "Phase 14 V1.3 usefulness improvements (frontend): api.ts adds the eight v1.3 client functions without removing prior exports, SpecClarificationModal with Skip / Use-answers paths wired into Workspace, parseEffortSummary helper with graceful null on missing block plus workspace header chip, ExportPDFButton triggering a real browser download, SharePublicLinkModal with copy/toggle/rotate controls plus PublicWorkspaceView at /p/:slug outside the auth guard with noindex meta and no authenticated-store imports, robots.txt Disallow /p/, TemplatesStrip on Dashboard and the workspace creation form with template_slug provenance, harness-coverage chip rendered in workspace header / dashboard card / public view, plus the design-system CSS classes for each component."
     },
     {
+      "id": "phase15-enterprise-hardening-contracts",
+      "path": "harness/tests/backend/test_phase15_enterprise_hardening_contract.py",
+      "proves": "Phase 15 Enterprise Production Hardening (T-174 through T-195): SELECT FOR UPDATE wiring, OAuth atomic getdel, PDF thread-pool dispatch, Redis connection pooling, N+1 batch query, recovery lock TTL, auth cache invalidation, httpx timeouts, coverage label fix, rate limit bulk eviction, CSRF nonce, STAGE_DEPENDENCIES single definition, Docker port binding, LLM instance cache cap, CSRF exempt path audit, CSP for public share, SSE/PDF/eval Prometheus metrics, concurrency test suite."
+    },
+    {
+      "id": "phase16-final-remediation-contracts",
+      "path": "harness/tests/backend/test_phase16_final_remediation_contract.py",
+      "proves": "Phase 16 Final Remediation & Enterprise Hardening (T-196 through T-216): CF-1 SELECT FOR UPDATE wired in finalise() with integration test + misleading mock deleted, CF-2 can_route() enforced in gateway + circuit counter, HF-1 batched coverage query, HF-2 OpenAI empty-choices guard, HF-3 continuous recovery heartbeat, HF-4 get_running_loop() + dedicated PDF executor, HF-5 rate limit lazy Redis, HF-6 CSRF SETNX nonce tracking, HF-7 CI real DB service + alembic, MF-1 eval orphan task cancel, MF-2 coverage_utils shared module, MF-3 refund savepoint, MF-4 ErrorBoundary for TemplatesStrip, MF-5 Langfuse image pinned, LF-1 auth cache documented, LF-2 dedicated PDF executor, LF-3 false-confidence test deleted, LF-4 eval_results composite index migration, T-215 circuit rejection counter, T-216 RUNBOOK.md operational procedures."
+    },
+    {
       "id": "e2e-smoke",
       "path": "harness/tests/e2e/specforge-smoke.spec.ts",
       "proves": "The core workspace pipeline can be completed through the browser once services are running."

@@ -2992,6 +2992,126 @@ After all T-USE-01 through T-USE-13 tasks are implemented:
 
 ---
 
+---
+
+## Phase 19 — Final Remediation & Enterprise Hardening
+
+**Version:** 2.0.0 (Post-Second-Pass Review)
+**Source:** `docs/CODE_REVIEW_PASS_2.md` — Second-Pass Enterprise Code Review
+**Tasks:** T-196 through T-216 (21 tasks in `tasks.md`)
+**Harness:** `harness/tests/backend/test_phase16_final_remediation_contract.py`
+
+### 19.1 Architectural Context
+
+The second-pass enterprise code review (`docs/CODE_REVIEW_PASS_2.md`) identified two **unresolved critical findings** from Phase 15 and 19 additional findings across concurrency, reliability, security, observability, and operational readiness. Post-remediation target scores: Enterprise 8.0/10, Production 8.5/10.
+
+The Phase 19 changes do not add new features. They resolve every finding in the second-pass review and establish the operational groundwork for a production-grade V1 launch.
+
+### 19.2 Critical Unresolved Findings (CF-1, CF-2)
+
+**CF-1 — SELECT FOR UPDATE in `finalise()` (T-196)**
+
+`finalise()` in `stage_manager.py` was supposed to use pessimistic locking (T-174, Phase 15) but the call site omits `lock=True`. Two concurrent finalise requests can both read `status='draft'` and both advance the stage — double credit charges + corrupted pipeline state.
+
+Fix: One-line change to add `lock=True` at the `finalise()` call site. Accompanied by a real PostgreSQL integration test (`test_finalise_integration.py`) that validates SELECT FOR UPDATE serialisation. The misleading mock test (`test_finalise_concurrent_tasks_only_one_advances`) is **deleted** (T-212/T-214) and replaced by the integration test.
+
+**CF-2 — Circuit Breaker Enforcement in `gateway.get_llm()` (T-197)**
+
+The LLM circuit breaker tracks provider failures correctly but `gateway.get_llm()` never consults the health status. The circuit is observability-only — no requests are ever rejected when a provider is unhealthy.
+
+Fix: Add `can_route(provider) -> bool` to `provider_status.py` and wire it into `gateway.get_llm()`. Raise `503` when the circuit is open. Add `specforge_llm_circuit_rejections_total` Prometheus counter (T-215).
+
+### 19.3 High Severity Reliability Fixes (HF-1 through HF-7)
+
+| Finding | Task | Description |
+|---------|------|-------------|
+| HF-1 | T-198 | N+1 coverage query → batched `IN` clause via `coverage_utils.py` |
+| HF-2 | T-199 | OpenAI empty `choices[]` IndexError → 3 defensive guards |
+| HF-3 | T-200 | Recovery lock heartbeat fires once → continuous `asyncio.create_task` |
+| HF-4 | T-201 | `get_event_loop()` deprecated → `get_running_loop()` + dedicated `_PDF_EXECUTOR` |
+| HF-5 | T-202 | RateLimitMiddleware creates own Redis pool → lazy `request.app.state.redis` access |
+| HF-6 | T-203 | CSRF 1-hour replay window → Redis SETNX nonce tracking in `verify_csrf_token()` |
+| HF-7 | T-204 | CI no real DB/Redis → `services:` block + `alembic upgrade head` + integration test |
+
+### 19.4 Medium Severity Issues (MF-1 through MF-5)
+
+| Finding | Task | Description |
+|---------|------|-------------|
+| MF-1 | T-205 | `asyncio.shield()` orphan eval tasks → explicit `eval_task.cancel()` on timeout |
+| MF-2 | T-206 | Cross-module private import → shared `coverage_utils.py` module |
+| MF-3 | T-207 | `refund()` rolls back outer transaction → savepoint (`begin_nested`) |
+| MF-4 | T-208 | `TemplatesStrip` no error boundary → reusable `ErrorBoundary.tsx` + Dashboard wrap |
+| MF-5 | T-209 | Langfuse `:latest` image → pinned semver tag |
+
+### 19.5 Low Severity Issues and Documentation (LF-1 through LF-4, T-212 through T-216)
+
+| Finding | Task | Description |
+|---------|------|-------------|
+| LF-1 | T-210 | Auth cache multi-worker incoherence → documented limitation + RUNBOOK entry |
+| LF-2 | T-211 | Thread pool contention (PDF + Langfuse) → verify dedicated `_PDF_EXECUTOR` |
+| LF-3 | T-212 | False-confidence mock test → deleted; integration test is replacement |
+| LF-4 | T-213 | Missing `eval_results` composite index → migration `0012_eval_results_composite_index` |
+| — | T-214 | Harness enforcement of T-212 deletion |
+| CF-2 | T-215 | `specforge_llm_circuit_rejections_total` Prometheus counter |
+| All | T-216 | `docs/RUNBOOK.md` — CF-1, CF-2, LF-1 operational procedures |
+
+### 19.6 Architectural Decisions
+
+**CSRF Nonce Tracking (T-203 — Breaking Internal API)**
+
+`verify_csrf_token()` now accepts `redis: Redis` as a required parameter. This is a breaking internal API change — all callers must be updated atomically. Rationale: the alternative (injecting Redis globally or via a module-level singleton) introduces a harder-to-test dependency. The Redis parameter makes the dependency explicit and testable. The breaking change scope is limited to `middleware/csrf.py` (3-4 call sites).
+
+**RateLimitMiddleware Lazy Redis (T-202 — Architecture Change)**
+
+Removing the `redis_client` constructor parameter and accessing Redis lazily via `request.app.state.redis` is the correct architectural direction. FastAPI middleware is registered at startup before the lifespan context, so any constructor-time resource access creates a secondary, unpooled connection. The lazy pattern (access on each request) ensures the shared pool is always used. If `request.app.state.redis` is `None` (before lifespan has started), the middleware fails open — rate limiting is disabled rather than rejecting all early requests.
+
+**Coverage Utils as Shared Module (T-206 prerequisite for T-198)**
+
+Moving `_derive_coverage_summary` to `services/coverage_utils.py` is both a code quality fix (remove cross-module private import) and an enabler for the batch query optimization. The batch function `derive_coverage_summaries(workspace_ids, db)` returns a `dict[UUID, CoverageSummary | None]` in a single SQL round-trip using `WHERE workspace_id IN (...)`. This is the correct pattern for list endpoints.
+
+**Real DB Testing Infrastructure (T-204 — CI Architecture)**
+
+The CI pipeline historically operated on the assumption that unit tests with mocks provide sufficient coverage. The 0003→0005 migration incident disproved this assumption. Phase 19 establishes a two-tier testing strategy:
+- **Fast tier (mocks):** existing unit tests, run on every commit, ~60s
+- **Integration tier (real DB + Redis):** migration verification, concurrency tests, credit cycle, SELECT FOR UPDATE validation — run on every push to main, ~3-5 min
+
+The integration tier does not replace the fast tier — both run. The `--skip-integration` marker allows future test authors to explicitly opt out of the integration tier for tests that are legitimately mock-only.
+
+### 19.7 Validation Checklist
+
+After all T-196 through T-216 tasks are implemented:
+
+1. `cd backend && uv run alembic upgrade head` — migration 0012 applies cleanly
+2. `cd backend && uv run pytest tests/ -q --cov=services --cov-fail-under=80` — 80% coverage maintained; `test_finalise_integration.py` passes; `test_finalise_concurrent_tasks_only_one_advances` is gone
+3. `cd backend && uv run pytest tests/test_finalise_integration.py -v` — SELECT FOR UPDATE integration test passes against real PostgreSQL
+4. `cd backend && uv run ruff check . && uv run black --check .` — no lint or format violations
+5. `cd frontend && pnpm tsc && pnpm test` — TypeScript clean; ErrorBoundary Vitest tests pass
+6. `cd harness && pytest tests/backend/test_phase16_final_remediation_contract.py -v` — all 24+ contracts pass (all green)
+7. Manual smoke:
+   - Concurrent finalise: verify second request returns 409 (not double-generation)
+   - OpenAI streaming: verify no IndexError on usage-only chunks
+   - PDF export: verify PDF renders without blocking concurrent API calls
+   - CSRF replay: verify second use of same token returns 403
+   - Circuit breaker: simulate 3 consecutive provider failures; verify next request returns 503; verify `specforge_llm_circuit_rejections_total` increments
+   - `docs/RUNBOOK.md`: verify sections exist for all four operational areas
+
+### 19.8 Post-Remediation Scorecard (Target)
+
+| Dimension | Pre-Remediation | Post-Remediation Target |
+|-----------|----------------|------------------------|
+| Enterprise Readiness | 5.5/10 | 8.0/10 |
+| Production Stability | 6.0/10 | 8.5/10 |
+| Security Posture | 7.5/10 | 8.5/10 |
+| Scalability | 5.0/10 | 7.5/10 |
+| Reliability | 6.5/10 | 8.5/10 |
+| Operational Readiness | 7.0/10 | 9.0/10 |
+
+The remaining gap to 10/10 reflects known architectural limitations (in-process auth cache, per-process circuit breaker state) that require infrastructure changes (Redis-backed user cache, distributed circuit breaker) beyond the scope of V1.
+
+---
+
+_SpecForge V1 PLAN.md · Version 2.0.0 · 2026-05-23 — added Phase 19 Final Remediation & Enterprise Hardening covering all 21 tasks from second-pass review (T-196 through T-216): CF-1 SELECT FOR UPDATE wired, CF-2 circuit breaker enforced, HF-1 through HF-7 high-severity reliability fixes, MF-1 through MF-5 medium-severity issues, LF-1 through LF-4 low-severity issues + T-212 false-confidence test deletion + T-215 circuit metrics + T-216 RUNBOOK.md operational procedures_
+
 _SpecForge V1 PLAN.md · Version 1.9.0 · 2026-05-20 — added Phase 14 V1.3 usefulness improvements: Spec Clarification pre-generation step, per-task Priority + Estimate + Effort Summary, PDF export, Public Share read-only link, Starter Templates library, harness-coverage workspace-summary surfacing. Two new migrations (Workspace v1.3 fields + Template table), 13 new sub-tasks (T-USE-01 through T-USE-13), new `public.py` router, new `spec_clarifier` / `pdf_export_service` / `public_share_service` modules. ZIP and GitHub export paths unchanged._
 
 _SpecForge V1 PLAN.md · Version 1.8.0 · 2026-05-19 — added Phase 13 GitHub export integration_

@@ -9086,6 +9086,1054 @@ The Testing Assessment identified five missing test categories that leave the mo
 
 ---
 
+---
+
+## Phase 16 — Final Remediation & Enterprise Hardening
+
+**Source:** `docs/CODE_REVIEW_PASS_2.md` — Second-Pass Enterprise Code Review
+**Scope:** 21 targeted remediation tasks (T-196 through T-216) addressing every finding from the second-pass review. Quality bar: FAANG-grade production hardening. No shallow tasks, no vague TODOs.
+**Second-pass scores (pre-remediation):** Enterprise 5.5/10, Production 6.0/10, Security 7.5/10, Scalability 5.0/10, Reliability 6.5/10, Operational 7.0/10
+**Harness contract:** `harness/tests/backend/test_phase16_final_remediation_contract.py`
+
+---
+
+### T-196 — Wire `SELECT FOR UPDATE` in `finalise()` + Real PostgreSQL Integration Test
+
+**Category:** Concurrency / Data Integrity
+**Severity:** Critical
+**Priority:** P0
+**Source finding:** CF-1 (unresolved from Phase 15 despite T-174)
+
+**Business impact:** Two concurrent HTTP requests to finalise the same workspace stage can both pass the `status == 'draft'` guard, both advance the stage, and both charge credits. Users can be double-billed; the stage ends in an inconsistent state where downstream pipeline stages start with corrupted parent state.
+
+**Technical impact:** `stage_manager.py:finalise()` calls `_load_stage(stage_id, db)` without `lock=True`. The `_load_stage` helper accepts `lock: bool = False` and correctly applies `.with_for_update()` when `True`, but the call site in `finalise()` omits the parameter. PostgreSQL never issues `SELECT FOR UPDATE` — two transactions can both read `status='draft'` in their snapshot window and both proceed.
+
+**Root cause:** The T-174/Phase-15 fix added the `lock` parameter to `_load_stage` and verified the mechanism exists but did not wire `lock=True` at the `finalise()` call site. This is a one-character omission that the Phase-15 harness test missed because it checked that `_load_stage` is called with `lock=True` somewhere in the file, not specifically inside `finalise()`.
+
+**Implementation requirements:**
+1. In `backend/services/pipeline/stage_manager.py`, find the `finalise()` function body (around line 929). Change `await self._load_stage(stage_id, db)` to `await self._load_stage(stage_id, db, lock=True)`.
+2. Verify that `_load_stage` with `lock=True` calls `stmt.with_for_update()` before executing the query (it already does — confirm this).
+3. Write `backend/tests/test_finalise_integration.py`: a PostgreSQL integration test using `create_async_engine` + `asyncpg` + real `AsyncSession`. The test spawns two concurrent coroutines that both attempt to finalise the same stage; assert exactly one succeeds and the other receives the guard error (ValueError "cannot be finalised"). This test will FAIL on a PostgreSQL instance if `lock=True` is absent, providing real regression coverage that the mock tests cannot.
+4. The integration test must be decorated with a skip marker if `TEST_DATABASE_URL` env var is not set (to allow CI to opt in via env injection).
+5. Do NOT weaken the Phase-15 harness test `test_phase15_finalise_uses_select_for_update` — it is now accompanied by T-214 which deletes the misleading mock test.
+
+**Dependencies:** T-214 (delete misleading mock test)
+
+**Risk assessment:** LOW. The fix is one parameter addition. Regression risk: if `_load_stage(lock=True)` is called on a stage that is also loaded elsewhere in the same transaction without FOR UPDATE, PostgreSQL may deadlock. Review all callers of `_load_stage` — only `finalise()` should use `lock=True`.
+
+**Acceptance criteria:**
+- `stage_manager.py:finalise()` calls `_load_stage(stage_id, db, lock=True)`.
+- `backend/tests/test_finalise_integration.py` exists and passes against a real PostgreSQL instance.
+- Harness `test_phase16_finalise_uses_lock_true` passes.
+- Harness `test_phase16_finalise_integration_test_file_exists` passes.
+
+**Testing requirements:**
+- Unit: existing `test_concurrency.py::test_finalise_race_second_call_raises_when_not_draft` must still pass.
+- Integration: `test_finalise_integration.py` must pass against PostgreSQL with `lock=True` in place; must FAIL (demonstrate the bug) when `lock=True` is removed (negative regression test).
+- Harness: two new contracts in Phase 16 harness file.
+
+**Rollback considerations:** Reverting `lock=True` to `lock=False` is the only rollback. No schema changes involved. Monitor `pg_stat_activity` for blocking queries after deploy.
+
+**Observability requirements:** None beyond existing stage transition metrics. The SELECT FOR UPDATE adds serialisation overhead — watch `specforge_stage_finalise_duration_seconds` (if defined) for latency increase under concurrent load.
+
+**Documentation updates:** Update inline docstring on `finalise()` to note the pessimistic lock.
+
+**Estimated complexity:** XS (1 line change + integration test file ~80 lines)
+**Estimated implementation risk:** Low
+
+**Affected modules/files:**
+- `backend/services/pipeline/stage_manager.py` — 1-line fix
+- `backend/tests/test_finalise_integration.py` — new file
+- `harness/tests/backend/test_phase16_final_remediation_contract.py` — two new contracts
+
+---
+
+### T-197 — Enforce Circuit Breaker in `gateway.get_llm()` via `can_route()`
+
+**Category:** Reliability / Fault Tolerance
+**Severity:** Critical
+**Priority:** P0
+**Source finding:** CF-2
+
+**Business impact:** When an LLM provider experiences a partial outage (timeout rate > threshold), all requests continue to be routed to it. Users experience cascading timeouts and generation failures. Provider failure detection exists in code but is never consulted — the circuit breaker provides no protection.
+
+**Technical impact:** `provider_status.py` defines `_provider_health()` which correctly returns `"unhealthy"` after 3 consecutive failures and resets on success. `record_provider_failure()` and `record_provider_success()` are called correctly. But `gateway.get_llm()` never calls `_provider_health()` before returning an adapter. The circuit is observability-only.
+
+**Root cause:** The circuit-breaker tracking code was added (likely Phase 12) but the enforcement hook in `gateway.get_llm()` was never wired. The tracking and the routing are two separate code paths that were never connected.
+
+**Implementation requirements:**
+1. In `backend/services/llm/provider_status.py`, add a `can_route(provider: str) -> bool` function. It calls `_provider_health(provider)` and returns `True` if the result is `"healthy"`, `False` otherwise. Export it from the module.
+2. In `backend/services/llm/gateway.py`, import `can_route` from `provider_status`. In `get_llm()`, after resolving the target provider, call `can_route(provider)`. If it returns `False`, either:
+   - Raise `HTTPException(status_code=503, detail=f"LLM provider '{provider}' is temporarily unavailable")`, OR
+   - Fall back to the platform default provider (if the user is using a custom provider that is unhealthy). Document which behaviour is chosen in a comment.
+3. When `can_route()` returns `False`, increment `specforge_llm_circuit_rejections_total` (defined in T-215 but must be wired here). The counter must be incremented at the rejection site.
+4. Add `record_provider_failure()` calls where they are missing — verify all three adapter error paths call this.
+5. The `_FAILURES` dict in `provider_status.py` is per-process — document this limitation in a comment (see LF-1 pattern for the auth cache).
+
+**Dependencies:** T-215 (counter definition)
+
+**Risk assessment:** MEDIUM. Adding circuit-breaker enforcement changes routing behaviour — a provider with a transient spike of errors (3 consecutive failures) will be rejected for all users until `record_provider_success()` resets it. Monitor `specforge_llm_circuit_rejections_total` for unexpected activation.
+
+**Acceptance criteria:**
+- `provider_status.py` exports `can_route(provider: str) -> bool`.
+- `gateway.get_llm()` calls `can_route()` and raises 503 (or falls back) when it returns `False`.
+- `specforge_llm_circuit_rejections_total` is incremented at the rejection site.
+- Harness `test_phase16_provider_status_has_can_route` passes.
+- Harness `test_phase16_gateway_consults_can_route` passes.
+- Harness `test_phase16_circuit_breaker_rejection_counter_defined` passes.
+
+**Testing requirements:**
+- Unit: test `can_route()` returns `False` after 3 `record_provider_failure()` calls.
+- Unit: test `gateway.get_llm()` raises 503 when `can_route()` returns `False`.
+- Unit: test counter is incremented on rejection.
+- Integration: end-to-end test where a provider is marked unhealthy and a generation request returns 503.
+
+**Rollback considerations:** Remove the `can_route()` call from `gateway.get_llm()` to revert to pass-through routing. The `can_route()` function itself is harmless to leave in place.
+
+**Observability requirements:** `specforge_llm_circuit_rejections_total` Prometheus Counter (defined in T-215). Add `provider` label to distinguish which provider's circuit is open. Log a WARN message when a request is rejected by the circuit.
+
+**Documentation updates:** `docs/RUNBOOK.md` — circuit breaker activation detection, manual reset procedure (T-216).
+
+**Estimated complexity:** S (2 functions + gateway wiring + 1 metric call ~60 lines total)
+**Estimated implementation risk:** Medium
+
+**Affected modules/files:**
+- `backend/services/llm/provider_status.py` — add `can_route()`
+- `backend/services/llm/gateway.py` — wire enforcement + counter increment
+- `backend/services/pipeline/stage_manager.py` — verify all adapter error paths call `record_provider_failure()`
+
+---
+
+### T-198 — Batch Coverage Query in Workspace List Endpoint (N+1 Fix Verified)
+
+**Category:** Performance / Scalability
+**Severity:** High
+**Priority:** P1
+**Source finding:** HF-1
+
+**Business impact:** A user with 50 workspaces triggers 51 database queries on the workspace list page (1 for workspaces + 1 per workspace for coverage). At 100 concurrent users, this is 5,100 simultaneous DB queries for one page load. The endpoint will time out under moderate load and exhaust the DB connection pool.
+
+**Technical impact:** `workspace.py` calls `_derive_coverage_summary(workspace_id, db)` per workspace inside a list comprehension. The function accepts a single UUID and issues one `SELECT` per call. The T-178 fix was declared complete but the N+1 pattern may persist.
+
+**Root cause:** `_derive_coverage_summary` was designed for single-workspace views. When the workspace list endpoint was added, it was reused without adapting it for batch operation. The T-178 harness test checked for the absence of a for-loop pattern but may not have caught all call forms.
+
+**Implementation requirements:**
+1. Move `_derive_coverage_summary` to a new module `backend/services/coverage_utils.py`. Export it with a batched signature: `derive_coverage_summaries(workspace_ids: list[UUID], db: AsyncSession) -> dict[UUID, CoverageSummary | None]`.
+2. The implementation must issue exactly one SQL query using `WHERE stage.workspace_id IN (...)` across all workspace IDs.
+3. Update `workspace.py` workspace-list handler to call `derive_coverage_summaries([w.id for w in workspaces], db)` once, then map the results onto the response objects.
+4. Update `pdf_export_service.py` and `public_share_service.py` to import from `coverage_utils` (see T-206).
+5. The old single-UUID convenience wrapper may be kept for single-workspace use cases (e.g., GET /workspaces/{id}) but must call the batch function internally.
+
+**Dependencies:** T-206 (shared utility module)
+
+**Risk assessment:** LOW. Pure SQL refactor with no schema changes. Risk: if workspace IDs list is very large (> 10,000), the IN clause may be slow on some PostgreSQL versions — add a hard limit (e.g., 500 workspaces per page) if not already present.
+
+**Acceptance criteria:**
+- `backend/services/coverage_utils.py` exists with `derive_coverage_summaries()`.
+- Workspace list endpoint issues exactly 2 SQL queries (1 for workspaces + 1 batched coverage) regardless of workspace count.
+- Harness `test_phase16_derive_coverage_accepts_list` passes.
+- Harness `test_phase16_coverage_query_uses_in_clause` passes.
+
+**Testing requirements:**
+- Unit: test `derive_coverage_summaries([id1, id2, id3], db)` issues one SQL query (mock DB with query capture).
+- Integration: test workspace list with 10 workspaces generates ≤ 3 total DB queries.
+- Performance: baseline the list endpoint P99 latency before/after.
+
+**Rollback considerations:** Revert `coverage_utils.py` and restore single-UUID calls. No schema changes.
+
+**Observability requirements:** Add DB query count logging at DEBUG level in the workspace list handler. Track `specforge_workspace_list_db_queries` histogram if instrumentation is needed.
+
+**Documentation updates:** Inline comment in `coverage_utils.py` explaining the batched approach and the IN-clause limit.
+
+**Estimated complexity:** S (new module + refactor 3 callers ~120 lines)
+**Estimated implementation risk:** Low
+
+**Affected modules/files:**
+- `backend/services/coverage_utils.py` — new file
+- `backend/routers/workspace.py` — batch call
+- `backend/services/pipeline/pdf_export_service.py` — import update
+- `backend/services/public_share_service.py` — import update
+
+---
+
+### T-199 — Guard Empty `choices[]` in OpenAI Streaming Adapter
+
+**Category:** Reliability / Error Handling
+**Severity:** High
+**Priority:** P1
+**Source finding:** HF-2
+
+**Business impact:** OpenAI streaming responses include "usage-only" chunks with an empty `choices` list (added in the API to report token counts). Any user on an OpenAI provider hits an unhandled `IndexError` mid-stream, which crashes the SSE connection. The generation appears to fail, the user loses their work, and the credit reservation is not released (double credit loss: reserved + not refunded).
+
+**Technical impact:** `openai_adapter.py:39` executes `delta = chunk.choices[0].delta.content` with no guard on `chunk.choices` being empty. `IndexError` propagates up the async generator, raising through the SSE handler's `try/except` block.
+
+**Root cause:** The OpenAI API specification changed to add usage-only chunks after this adapter was written. The streaming protocol was updated server-side without the client being patched.
+
+**Implementation requirements:**
+1. In `backend/services/llm/openai_adapter.py`, immediately after the `async for chunk in stream:` line, add: `if not chunk.choices: continue`.
+2. Also guard against `chunk.choices[0].delta` being `None` (the API can send `delta=None` on the final chunk): `if chunk.choices[0].delta is None: continue`.
+3. Also guard against `chunk.choices[0].delta.content` being `None` (normal on tool-use chunks): `content = chunk.choices[0].delta.content; if content is None: continue`.
+4. Add a unit test in `backend/tests/test_openai_adapter.py` that passes a mock stream containing an empty-choices chunk and verifies no exception is raised and the chunk is silently skipped.
+5. Review `anthropic_adapter.py` and `gemini_adapter.py` for equivalent patterns — their streaming APIs may have similar edge cases.
+
+**Dependencies:** None
+
+**Risk assessment:** VERY LOW. Defensive guard with no functional change to normal paths. The three guards are purely additive.
+
+**Acceptance criteria:**
+- `openai_adapter.py` contains `if not chunk.choices: continue` (or equivalent) before `choices[0]` access.
+- Streaming does not crash on OpenAI usage-only chunks.
+- Harness `test_phase16_openai_adapter_guards_empty_choices` passes.
+
+**Testing requirements:**
+- Unit: mock stream with `[chunk(choices=[]), chunk(choices=[delta(content="hello")])]` → assert output is `"hello"` with no exception.
+- Unit: mock stream with `chunk(choices=[delta(content=None)])` → assert no exception, no output for that chunk.
+- Manual: test against live OpenAI API with a streaming call — verify usage-only chunks are handled.
+
+**Rollback considerations:** Remove the three guard lines. No state changes, no schema changes.
+
+**Observability requirements:** Log a DEBUG message when an empty-choices chunk is skipped (optional but useful for debugging streaming edge cases).
+
+**Estimated complexity:** XS (~10 lines + unit test ~30 lines)
+**Estimated implementation risk:** Very Low
+
+**Affected modules/files:**
+- `backend/services/llm/openai_adapter.py` — 3 guard lines
+- `backend/tests/test_openai_adapter.py` — new or updated unit test
+
+---
+
+### T-200 — Continuous Recovery Lock Heartbeat via `asyncio.create_task`
+
+**Category:** Reliability / Distributed Systems
+**Severity:** High
+**Priority:** P1
+**Source finding:** HF-3
+
+**Business impact:** If a recovery cycle processes many stale stages (e.g., after a mass deployment timeout or database incident), the cycle may run longer than the lock TTL. The second recovery worker acquires the lock and processes the same stages concurrently — double credit charges, corrupted stage states, and duplicate LLM API calls.
+
+**Technical impact:** `stage_manager.py` calls `await refresh_recovery_lock(redis)` once before the cycle begins. A cycle processing 20 stale stages with 30-second LLM calls takes 10+ minutes; the lock TTL expires mid-cycle. The T-179 fix raised the TTL to 3× the poll interval, which helps but does not eliminate the problem for long cycles.
+
+**Root cause:** The heartbeat was designed as a one-shot pre-check rather than a continuous background refresh. True heartbeat semantics require a looping async task.
+
+**Implementation requirements:**
+1. Define an async helper `_recovery_heartbeat(redis: Redis, lock_key: str, ttl: int, interval: int) -> None` that loops forever, calling `await redis.expire(lock_key, ttl)` every `interval` seconds (use `ttl // 3` as the interval). The loop must break on `asyncio.CancelledError`.
+2. Before the recovery cycle loop starts, create the heartbeat task: `_heartbeat = asyncio.create_task(_recovery_heartbeat(redis, lock_key, _RECOVERY_LOCK_TTL, _RECOVERY_LOCK_TTL // 3))`.
+3. Wrap the cycle in `try/finally: _heartbeat.cancel(); await asyncio.gather(_heartbeat, return_exceptions=True)` to ensure the task is cancelled and cleaned up even on exception.
+4. Remove the pre-cycle single `refresh_recovery_lock(redis)` call (the heartbeat starts immediately and covers the cycle from t=0).
+
+**Dependencies:** T-179 (existing TTL constants)
+
+**Risk assessment:** LOW. The heartbeat is a pure Redis operation with minimal overhead. Cancellation in `finally` is idiomatic asyncio. Risk: if `_RECOVERY_LOCK_TTL // 3` is very small (e.g., TTL=15s → interval=5s), Redis is called frequently. Minimum TTL should be 60s to keep interval ≥ 20s.
+
+**Acceptance criteria:**
+- `stage_manager.py` defines `_recovery_heartbeat()` as an async function.
+- The recovery cycle creates `asyncio.create_task(_recovery_heartbeat(...))` before the cycle loop.
+- The task is cancelled and awaited in `finally`.
+- Harness `test_phase16_recovery_heartbeat_uses_asyncio_task` passes.
+- Harness `test_phase16_recovery_heartbeat_is_cancelled_after_cycle` passes.
+
+**Testing requirements:**
+- Unit: mock `redis.expire` as AsyncMock. Create the heartbeat task, advance the asyncio event loop by 2× interval, verify `redis.expire` was called at least twice. Cancel the task and verify it exits cleanly.
+- Unit: verify the `finally` block cancels `_heartbeat` when an exception is raised mid-cycle.
+
+**Rollback considerations:** Remove `_recovery_heartbeat` and `create_task` call. Restore the single pre-cycle `refresh_recovery_lock(redis)` call.
+
+**Observability requirements:** Log at DEBUG level when each heartbeat refresh is issued (include remaining TTL from Redis response if available).
+
+**Estimated complexity:** S (~50 lines including the helper function)
+**Estimated implementation risk:** Low
+
+**Affected modules/files:**
+- `backend/services/pipeline/stage_manager.py` — heartbeat helper + wiring
+
+---
+
+### T-201 — Replace `get_event_loop()` with `get_running_loop()` + Dedicated PDF Executor
+
+**Category:** Reliability / Code Quality
+**Severity:** High
+**Priority:** P1
+**Source finding:** HF-4
+
+**Business impact:** In Python 3.12+, `asyncio.get_event_loop()` in a non-async context emits a DeprecationWarning and may raise `RuntimeError`. A future Python upgrade will break PDF exports silently. Sharing the default executor with Langfuse causes thread pool starvation during concurrent PDF generation.
+
+**Technical impact:** `pdf_export_service.py:263` calls `await asyncio.get_event_loop().run_in_executor(None, _render_pdf_sync, html_text)`. Two problems: (1) `get_event_loop()` is deprecated; use `get_running_loop()`. (2) `None` executor uses the default shared `ThreadPoolExecutor`, which is also used by Langfuse's `get_prompt()` and other deferred calls.
+
+**Root cause:** The PDF export was written before Python 3.10 deprecations and before Langfuse's thread-pool usage was introduced. No one revisited the executor setup when Langfuse was added.
+
+**Implementation requirements:**
+1. Define a module-level dedicated executor: `_PDF_EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=2, thread_name_prefix="pdf-export")`.
+2. Replace all `asyncio.get_event_loop().run_in_executor(...)` calls with `asyncio.get_running_loop().run_in_executor(_PDF_EXECUTOR, ...)`.
+3. Register `_PDF_EXECUTOR.shutdown(wait=False)` in the FastAPI lifespan `on_shutdown` hook (or use a context manager) to avoid resource leaks on process exit.
+4. Add a comment explaining why `max_workers=2` — PDF rendering is CPU-bound and WeasyPrint is not thread-safe if two renders share the same HTML document object; each call creates a new Document, so 2 workers provides parallelism without contention.
+
+**Dependencies:** None
+
+**Risk assessment:** VERY LOW. `get_running_loop()` behaves identically to `get_event_loop()` in an async context (which is the only context `run_in_executor` should be called from). The dedicated executor reduces contention.
+
+**Acceptance criteria:**
+- `pdf_export_service.py` contains no `get_event_loop()` calls.
+- `pdf_export_service.py` defines `_PDF_EXECUTOR = ThreadPoolExecutor(...)`.
+- `run_in_executor(_PDF_EXECUTOR, ...)` is used for PDF rendering.
+- Harness `test_phase16_pdf_uses_get_running_loop` passes.
+- Harness `test_phase16_pdf_uses_dedicated_executor` passes.
+- Harness `test_phase16_pdf_dedicated_executor_not_shared` passes (from T-211).
+
+**Testing requirements:**
+- Unit: verify `_PDF_EXECUTOR` is a `ThreadPoolExecutor` with `max_workers=2`.
+- Unit: verify `get_event_loop` does not appear in the module source.
+- Integration: concurrent PDF export test — 3 simultaneous PDF requests should all complete without thread pool exhaustion (mock WeasyPrint with a 1s sleep).
+
+**Rollback considerations:** Restore `get_event_loop().run_in_executor(None, ...)`. No schema changes.
+
+**Observability requirements:** Existing `specforge_pdf_export_duration_seconds` histogram (T-194) already covers PDF export latency. Add `_PDF_EXECUTOR._work_queue.qsize()` to a `/health` detail if thread pool pressure monitoring is needed.
+
+**Estimated complexity:** XS (~20 lines)
+**Estimated implementation risk:** Very Low
+
+**Affected modules/files:**
+- `backend/services/pipeline/pdf_export_service.py` — executor definition + `get_running_loop()` replacement
+
+---
+
+### T-202 — Fix RateLimitMiddleware Redis Injection (Remove `from_url` Fallback)
+
+**Category:** Reliability / Architecture
+**Severity:** High
+**Priority:** P1
+**Source finding:** HF-5
+
+**Business impact:** In production, `RateLimitMiddleware` is instantiated with `redis_client=None` (the default). The constructor creates a new, unpooled Redis connection via `Redis.from_url()`. Under concurrent load, this creates a second Redis connection pool alongside the FastAPI lifespan pool — connection count doubles, Redis max-client limits are hit, and rate limiting fails open (allowing unlimited requests).
+
+**Technical impact:** `middleware/rate_limit.py:134` executes `self._redis = redis_client or Redis.from_url(settings.redis_url, ...)`. `main.py:134` calls `app.add_middleware(RateLimitMiddleware, redis_client=None)` because the shared `redis_client` is not available at middleware registration time (before lifespan runs). The fix requires lazy Redis access.
+
+**Root cause:** FastAPI middleware is registered at startup before the lifespan context manager runs. The shared Redis pool doesn't exist yet when `add_middleware` is called, so `None` is passed. The fallback `from_url` was added as a workaround but creates a second pool.
+
+**Implementation requirements:**
+1. Remove the `redis_client` constructor parameter from `RateLimitMiddleware.__init__`. Remove `self._redis` assignment.
+2. In `RateLimitMiddleware.__call__(self, request, call_next)`, access Redis lazily: `redis = request.app.state.redis`. Add a guard: `if redis is None: return await call_next(request)` (fail open gracefully if Redis is not yet ready).
+3. Replace all `self._redis.xxx` calls inside `__call__` with `redis.xxx`.
+4. Update `main.py` to remove the `redis_client=` argument from `add_middleware(RateLimitMiddleware)`.
+5. Verify that the middleware does not store the Redis reference beyond the request scope (must not assign `self._redis = redis` — that would cause cross-request state sharing).
+
+**Dependencies:** None
+
+**Risk assessment:** MEDIUM. This changes the middleware architecture. The lazy access must be tested carefully — if `request.app.state.redis` is None during early startup (e.g., health checks before lifespan completes), the middleware must fail open safely. Add a startup readiness probe or order middleware after lifespan is ready.
+
+**Acceptance criteria:**
+- `RateLimitMiddleware.__init__` has no `redis_client` parameter.
+- `RateLimitMiddleware.__call__` accesses Redis via `request.app.state.redis`.
+- `main.py` does not pass `redis_client=` to `add_middleware`.
+- No `Redis.from_url()` call in `middleware/rate_limit.py`.
+- Harness `test_phase16_rate_limit_no_redis_from_url` passes.
+- Harness `test_phase16_rate_limit_uses_app_state_redis` passes.
+
+**Testing requirements:**
+- Unit: test `__call__` with `request.app.state.redis = None` → request passes through (fail open).
+- Unit: test rate limiting works correctly with a real `_FakeRedis` injected via `request.app.state.redis`.
+- Integration: verify no second Redis pool is created under concurrent load (check `INFO clients connected` on Redis before/after).
+
+**Rollback considerations:** Restore `redis_client` constructor parameter and the `from_url` fallback. Re-add `redis_client=None` to `add_middleware` call.
+
+**Observability requirements:** Log a WARNING if `request.app.state.redis is None` (indicates the lifespan hasn't started — a configuration problem). This warning should appear at most once per worker restart.
+
+**Estimated complexity:** S (~40 lines changed across 2 files)
+**Estimated implementation risk:** Medium
+
+**Affected modules/files:**
+- `backend/middleware/rate_limit.py` — remove constructor param, add lazy access
+- `backend/main.py` — remove `redis_client=` from `add_middleware`
+
+---
+
+### T-203 — CSRF Nonce Tracking via Redis SETNX (Close 1-Hour Replay Window)
+
+**Category:** Security
+**Severity:** High
+**Priority:** P1
+**Source finding:** HF-6
+
+**Business impact:** A CSRF token stolen from a user's browser (via XSS, network sniff on HTTP, or log exposure) can be replayed by an attacker for up to 1 hour (the token's timestamp TTL). This enables CSRF attacks on any mutating endpoint during the token's lifetime — workspace deletion, generation triggers, credit purchases.
+
+**Technical impact:** `verify_csrf_token()` validates the HMAC and checks the timestamp is within 1 hour but never records used tokens. A token is usable an unlimited number of times within its TTL. The Phase-15 fix (T-185) added a nonce to the token format but the nonce is never stored — possession of the nonce doesn't prevent replay.
+
+**Root cause:** The nonce was added to the token generation path (T-185) but the verification path was not updated to consume and track the nonce. The fix requires a Redis round-trip on every CSRF verification.
+
+**Implementation requirements:**
+1. Update `verify_csrf_token(token: str, ...)` signature to accept `redis: Redis` as a required parameter.
+2. After successful HMAC and timestamp validation, extract the nonce from the token (format: `{timestamp}.{nonce}.{signature}`).
+3. Compute `nonce_key = f"csrf:nonce:{nonce}"` with expiry = remaining TTL from the timestamp (e.g., `3600 - (now - timestamp)`).
+4. Call `stored = await redis.set(nonce_key, "1", nx=True, ex=remaining_ttl)`. If `stored` is `None` (key already existed — SETNX returned 0), raise `HTTPException(status_code=403, detail="CSRF token already used")`.
+5. Update all callers of `verify_csrf_token()` in `middleware/csrf.py` to inject the shared Redis client (from `request.app.state.redis`).
+6. This is a **breaking internal API change** — update all callers in one atomic commit.
+7. Write a unit test that calls `verify_csrf_token` twice with the same token → second call must raise 403.
+
+**Dependencies:** T-202 (ensures `request.app.state.redis` is the canonical Redis access pattern)
+
+**Risk assessment:** HIGH. This adds a Redis round-trip to every mutating HTTP request. Performance impact: ~1ms per request under normal Redis latency. Correctness risk: if Redis is unavailable, CSRF verification fails — either fail open (security risk) or fail closed (availability risk). Recommendation: fail OPEN with a structured log WARNING if Redis is unreachable (CSRF degradation is acceptable; service unavailability is not).
+
+**Acceptance criteria:**
+- `verify_csrf_token()` accepts a `redis: Redis` parameter.
+- Uses `redis.set(nonce_key, "1", nx=True, ex=remaining_ttl)` to atomically claim the nonce.
+- Second call with the same token raises 403.
+- Harness `test_phase16_csrf_verify_accepts_redis_param` passes.
+- Harness `test_phase16_csrf_verify_uses_setnx_for_nonce` passes.
+
+**Testing requirements:**
+- Unit: same-token double-use → second call raises HTTPException(403).
+- Unit: expired timestamp → raises 403 before Redis call (no unnecessary Redis round-trip on expired tokens).
+- Unit: Redis unavailable (mock raises ConnectionError) → fails open with WARNING log.
+- Load test: measure P99 latency impact of the Redis round-trip on a mutating endpoint at 100 RPS.
+
+**Rollback considerations:** Remove the Redis parameter and SETNX call. Revert to HMAC+timestamp-only verification. This re-opens the replay window but restores zero-Redis-dependency verification.
+
+**Observability requirements:** Increment `specforge_csrf_replay_rejections_total` counter when SETNX returns None (existing nonce detected). This metric distinguishes replay attacks from token generation bugs.
+
+**Estimated complexity:** M (~60 lines across csrf.py + middleware updates + unit tests)
+**Estimated implementation risk:** High (breaking API change + Redis dependency on hot path)
+
+**Affected modules/files:**
+- `backend/services/security/csrf.py` — SETNX in `verify_csrf_token()`
+- `backend/middleware/csrf.py` — inject Redis into verify call
+- `backend/tests/test_csrf.py` — new/updated unit tests
+
+---
+
+### T-204 — Add Real PostgreSQL and Redis Service Containers to CI
+
+**Category:** Testing / CI Infrastructure
+**Severity:** High
+**Priority:** P1
+**Source finding:** HF-7
+
+**Business impact:** CI passes with all-mock tests while real-DB bugs go undetected. The 0003→0005 migration regression incident proves this — a column type mismatch that would have failed `alembic upgrade head` was not caught by CI because no real database existed. Future migration regressions, SELECT FOR UPDATE issues, and deadlock scenarios are invisible.
+
+**Technical impact:** `.github/workflows/ci.yml` sets `DATABASE_URL` and `REDIS_URL` environment variables but never starts PostgreSQL or Redis service containers. All tests use in-memory mocks. `alembic upgrade head` is never run in CI — migration regressions are undetected.
+
+**Root cause:** The CI pipeline was built for fast mock-only test runs. Real service containers were deferred as a future improvement and never added.
+
+**Implementation requirements:**
+1. Add a `services:` block to the backend test job in `ci.yml`:
+   ```yaml
+   services:
+     postgres:
+       image: postgres:15-alpine
+       env:
+         POSTGRES_PASSWORD: postgres
+         POSTGRES_DB: specforge_test
+       ports:
+         - 5432:5432
+       options: >-
+         --health-cmd pg_isready
+         --health-interval 10s
+         --health-timeout 5s
+         --health-retries 5
+     redis:
+       image: redis:7-alpine
+       ports:
+         - 6379:6379
+       options: >-
+         --health-cmd "redis-cli ping"
+         --health-interval 10s
+         --health-timeout 5s
+         --health-retries 5
+   ```
+2. Update `DATABASE_URL` env var to `postgresql+asyncpg://postgres:postgres@localhost:5432/specforge_test`.
+3. Update `REDIS_URL` to `redis://localhost:6379/0`.
+4. Add `uv run alembic upgrade head` step before `uv run pytest`.
+5. Add `--skip-integration` pytest marker support for the existing mock tests. Any test that should SKIP on real-DB CI (if any) must use this marker. New integration tests must NOT use this marker.
+6. Write `backend/tests/test_credit_cycle_integration.py`: a real DB + Redis integration test that runs the full credit deduct → generation → refund cycle against the test database and verifies: (a) credit balance is updated in DB, (b) Redis cache is invalidated, (c) the ledger entry exists.
+
+**Dependencies:** T-196 (integration test for finalise), T-203 (Redis service needed for CSRF nonce tests)
+
+**Risk assessment:** MEDIUM. CI will be slower (service startup: ~30s). The postgres health-check retries prevent flaky failures. Risk: existing mock tests may fail against a real DB if they have incorrect SQL — this is desirable behaviour, not a bug.
+
+**Acceptance criteria:**
+- `ci.yml` has `services: postgres:` and `services: redis:` blocks.
+- `alembic upgrade head` runs before pytest in CI.
+- `backend/tests/test_credit_cycle_integration.py` exists and passes.
+- Harness `test_phase16_ci_has_postgres_service` passes.
+- Harness `test_phase16_ci_runs_alembic_upgrade` passes.
+- Harness `test_phase16_ci_has_redis_service` passes.
+
+**Testing requirements:**
+- CI smoke: verify `alembic upgrade head` completes without errors against the test DB.
+- Integration: credit cycle test passes end-to-end with real DB + Redis.
+- Regression: all existing mock tests continue to pass.
+
+**Rollback considerations:** Remove `services:` block from CI YAML. Remove `alembic upgrade head` step. No code changes required.
+
+**Observability requirements:** CI workflow step timing visible in GitHub Actions UI. Add `::group::` annotations to differentiate migration and test steps.
+
+**Documentation updates:** `README.md` — note that CI now requires PostgreSQL and Redis service containers.
+
+**Estimated complexity:** M (~80 lines CI YAML + integration test file ~100 lines)
+**Estimated implementation risk:** Medium
+
+**Affected modules/files:**
+- `.github/workflows/ci.yml` — services block + alembic step
+- `backend/tests/test_credit_cycle_integration.py` — new integration test
+
+---
+
+### T-205 — Cancel Orphan Eval Tasks on `asyncio.shield()` Timeout
+
+**Category:** Reliability / Resource Management
+**Severity:** Medium
+**Priority:** P2
+**Source finding:** MF-1
+
+**Business impact:** Under load (20+ concurrent users), 30-second eval timeouts accumulate orphaned coroutines at a rate of 1 per timeout. Each orphan holds an open HTTP connection to the eval backend and a thread pool slot. After 60 minutes of moderate load, the server can have 120+ orphaned eval connections causing connection pool exhaustion and eval service degradation.
+
+**Technical impact:** `stage_manager.py:638-665` wraps the eval task in `asyncio.shield(eval_task)` with a 30-second timeout. When `asyncio.wait_for(asyncio.shield(...))` times out, `asyncio.shield` protects the inner task from cancellation — but no code explicitly cancels it afterward. The task continues running with no reference held.
+
+**Root cause:** `asyncio.shield()` was added to prevent the eval task from being cancelled when the parent coroutine is cancelled (correct intent). But `shield()` semantics mean the task outlives a timeout — it requires explicit cancellation if you want it stopped on timeout.
+
+**Implementation requirements:**
+1. Retain the task reference before shielding: `eval_task = asyncio.create_task(self._run_eval(...))`.
+2. Wrap the `shield` call in a `try/except asyncio.TimeoutError`:
+   ```python
+   try:
+       await asyncio.wait_for(asyncio.shield(eval_task), timeout=30.0)
+   except asyncio.TimeoutError:
+       eval_task.cancel()
+       # Optionally await cancellation: await asyncio.gather(eval_task, return_exceptions=True)
+       logger.warning("eval task timed out and was cancelled", stage_id=str(stage_id))
+   ```
+3. The cancel + gather ensures the coroutine's `finally` block runs (closing the HTTP client). Without the await, the task is marked for cancellation but may not clean up before the next GC cycle.
+4. Add a unit test verifying that after timeout, `eval_task.cancelled()` is True.
+
+**Dependencies:** None
+
+**Risk assessment:** LOW. The change only affects the timeout path. Normal (sub-30s) eval completion is unaffected. The `eval_task.cancel()` call is idempotent if the task has already completed.
+
+**Acceptance criteria:**
+- `eval_task.cancel()` is called in the `TimeoutError` handler.
+- `asyncio.gather(eval_task, return_exceptions=True)` is awaited after cancel.
+- Harness `test_phase16_eval_orphan_tasks_are_cancelled` passes.
+
+**Testing requirements:**
+- Unit: mock eval task that runs indefinitely. Verify that after a 30-second (fast-forward) timeout, `eval_task.cancelled()` is True.
+- Unit: verify the timeout path logs a WARNING with `stage_id`.
+
+**Rollback considerations:** Remove the `cancel()` and `gather()` calls. The orphan issue returns but is not a correctness regression (evals are best-effort).
+
+**Observability requirements:** Log WARNING on timeout (already required above). Optionally add `specforge_eval_task_orphan_total` counter but the T-194 `specforge_eval_poll_failures_total` already covers eval failures.
+
+**Estimated complexity:** XS (~15 lines)
+**Estimated implementation risk:** Very Low
+
+**Affected modules/files:**
+- `backend/services/pipeline/stage_manager.py` — eval task cancel on timeout
+
+---
+
+### T-206 — Move `_derive_coverage_summary` to Shared `coverage_utils.py` Module
+
+**Category:** Code Quality / Architecture
+**Severity:** Medium
+**Priority:** P2
+**Source finding:** MF-2
+
+**Business impact:** The cross-module private import creates a hidden dependency between PDF export and the public share service. Any rename or refactor of `_derive_coverage_summary` in `public_share_service.py` silently breaks PDF export — the import error is only discovered at runtime when a user attempts a PDF export.
+
+**Technical impact:** `pdf_export_service.py` imports `_derive_coverage_summary` from `public_share_service.py` using a private-function import (`from ... import _derive_coverage_summary`). Python allows this but it violates the convention that `_`-prefixed names are module-private.
+
+**Root cause:** The coverage summary logic was first written in `public_share_service.py` and later copy-used by PDF export without refactoring it to a shared location. Both services have the same need but neither "owns" it.
+
+**Implementation requirements:**
+1. Create `backend/services/coverage_utils.py` (also required by T-198 for the batch function).
+2. Move `_derive_coverage_summary` into `coverage_utils.py` and rename it to `derive_coverage_summary` (remove the private prefix since it is now a public utility).
+3. Update `public_share_service.py` to import `derive_coverage_summary` from `coverage_utils`.
+4. Update `pdf_export_service.py` to import `derive_coverage_summary` from `coverage_utils`.
+5. Export `derive_coverage_summary` from `services/__init__.py` if one exists.
+6. This task is a prerequisite for T-198 (batched coverage query).
+
+**Dependencies:** None (but T-198 builds on this)
+
+**Risk assessment:** VERY LOW. Pure refactor — rename + move. No logic changes. Verify import paths with `uv run ruff check .` and `pnpm tsc`.
+
+**Acceptance criteria:**
+- `backend/services/coverage_utils.py` exists and defines `derive_coverage_summary`.
+- `pdf_export_service.py` does not import from `public_share_service`.
+- Harness `test_phase16_coverage_utils_module_exists` passes.
+- Harness `test_phase16_pdf_does_not_import_from_public_share` passes.
+
+**Testing requirements:**
+- Smoke: `python -c "from services.coverage_utils import derive_coverage_summary"` succeeds.
+- Regression: all existing unit tests for PDF export and public share continue to pass.
+
+**Rollback considerations:** Move the function back and restore the cross-module import. No schema or API changes.
+
+**Observability requirements:** None.
+
+**Estimated complexity:** XS (~30 lines across 3 files)
+**Estimated implementation risk:** Very Low
+
+**Affected modules/files:**
+- `backend/services/coverage_utils.py` — new file
+- `backend/services/pipeline/pdf_export_service.py` — import update
+- `backend/services/public_share_service.py` — import update
+
+---
+
+### T-207 — Use Savepoint (`begin_nested`) in `refund()` to Isolate `IntegrityError`
+
+**Category:** Data Integrity / Reliability
+**Severity:** Medium
+**Priority:** P2
+**Source finding:** MF-3
+
+**Business impact:** When `refund()` fails with an `IntegrityError` (duplicate ledger entry, constraint violation), it calls `await db.rollback()`. This rolls back the **entire outer transaction** — including the stage status update that marked the stage as complete, any content saved to the stage, and any telemetry writes that shared the session. The user's work is silently lost while the UI shows success.
+
+**Technical impact:** `credit_service.py:171-172` catches `IntegrityError` and calls `db.rollback()`. The outer transaction (from the FastAPI route handler session scope) is rolled back. SQLAlchemy's `begin_nested()` creates a SAVEPOINT that can be rolled back independently.
+
+**Root cause:** The `IntegrityError` handler was written without considering that `refund()` is called within a larger transaction context managed by the route handler's `db: AsyncSession` dependency.
+
+**Implementation requirements:**
+1. In `credit_service.py`, locate the `refund()` function.
+2. Wrap the ledger insert and flush in a savepoint:
+   ```python
+   async with db.begin_nested():
+       db.add(ledger_entry)
+       await db.flush()
+   ```
+3. On `IntegrityError` from the savepoint context, the savepoint is automatically rolled back; the outer transaction continues. Re-raise as `InsufficientCreditsError` or return the existing balance if the entry is a duplicate (idempotent refund).
+4. Remove the `except IntegrityError: await db.rollback()` pattern.
+5. Write a unit test simulating `IntegrityError` inside `refund()` — assert the outer session is still usable (can perform a subsequent commit).
+
+**Dependencies:** None
+
+**Risk assessment:** LOW. SQLAlchemy's `begin_nested()` is well-tested. The only risk is that the savepoint semantics differ between `NullPool` (test) and `AsyncAdaptedQueuePool` (production) — test both.
+
+**Acceptance criteria:**
+- `credit_service.py:refund()` uses `async with db.begin_nested()` for the ledger insert.
+- No `await db.rollback()` in the `refund()` function body.
+- Unit test demonstrates outer transaction survives a refund `IntegrityError`.
+- Harness `test_phase16_refund_uses_savepoint_not_rollback` passes.
+
+**Testing requirements:**
+- Unit: mock `db.flush()` to raise `IntegrityError`. Verify outer session is still active (can run another `db.execute()`).
+- Unit: verify `InsufficientCreditsError` (or equivalent) is raised after the failed refund (not a naked `IntegrityError`).
+
+**Rollback considerations:** Restore `except IntegrityError: await db.rollback()`. The outer-transaction corruption returns.
+
+**Estimated complexity:** XS (~20 lines)
+**Estimated implementation risk:** Low
+
+**Affected modules/files:**
+- `backend/services/credit_service.py` — `begin_nested()` in `refund()`
+
+---
+
+### T-208 — Wrap `TemplatesStrip` in Reusable Error Boundary (Frontend)
+
+**Category:** Frontend / Reliability
+**Severity:** Medium
+**Priority:** P2
+**Source finding:** MF-4
+
+**Business impact:** A malformed API response for the templates endpoint (unexpected JSON shape, network error during render) causes an unhandled React exception that crashes the entire Dashboard page. The user is shown a blank page with no recovery path and must hard-reload, losing their current workspace selection.
+
+**Technical impact:** `Dashboard.tsx` renders `<TemplatesStrip>` in two locations without an error boundary wrapper. React's error propagation means any throw inside the component tree crashes the nearest error boundary — which is the top-level app error boundary, causing a full-page crash.
+
+**Root cause:** Error boundaries were added to `MarkdownRenderer` (T-181 / Phase 15) but `TemplatesStrip` was not wrapped. There is no reusable `ErrorBoundary` component in the component library.
+
+**Implementation requirements:**
+1. Create `frontend/src/components/ErrorBoundary.tsx` — a reusable class-based React error boundary. Props: `fallback?: ReactNode` (default: a generic "Something went wrong" inline message) and `onError?: (error: Error, info: ErrorInfo) => void` (optional reporting hook for Sentry). Follow the pattern from `RendererErrorBoundary` in `MarkdownRenderer.tsx` but generalize it.
+2. In `Dashboard.tsx`, wrap both `<TemplatesStrip>` usages:
+   ```tsx
+   <ErrorBoundary fallback={<TemplatesErrorFallback />}>
+     <TemplatesStrip ... />
+   </ErrorBoundary>
+   ```
+3. Define `TemplatesErrorFallback` inline in `Dashboard.tsx` — a simple styled message: "Templates unavailable — reload to retry." with a reload button.
+4. The `ErrorBoundary` component must NOT be a wrapper that silences errors; it must call `onError` (if provided) and log to console.error for debugging.
+5. Export `ErrorBoundary` from `components/index.ts` (or equivalent barrel export).
+
+**Dependencies:** None
+
+**Risk assessment:** VERY LOW. Error boundaries are a standard React pattern. The only risk is mistyping the class component lifecycle hooks (test in Vitest).
+
+**Acceptance criteria:**
+- `frontend/src/components/ErrorBoundary.tsx` exists with `getDerivedStateFromError` and `componentDidCatch`.
+- Both `<TemplatesStrip>` usages in `Dashboard.tsx` are wrapped.
+- Harness `test_phase16_templates_strip_has_error_boundary` passes.
+- Frontend Vitest test: `ErrorBoundary` renders fallback when child throws.
+
+**Testing requirements:**
+- Vitest: `<ErrorBoundary fallback={<div>Error</div>}><ThrowingComponent /></ErrorBoundary>` renders fallback.
+- Vitest: `onError` callback is called with the error and componentStack.
+- E2E (optional): simulate a 500 response from `/api/templates` — verify Dashboard remains usable.
+
+**Rollback considerations:** Remove `ErrorBoundary` wrapper from both `TemplatesStrip` usages. No backend changes.
+
+**Estimated complexity:** S (~80 lines: new component + Dashboard changes + tests)
+**Estimated implementation risk:** Very Low
+
+**Affected modules/files:**
+- `frontend/src/components/ErrorBoundary.tsx` — new file
+- `frontend/src/pages/Dashboard.tsx` — wrap both TemplatesStrip usages
+
+---
+
+### T-209 — Pin Langfuse Docker Image to Specific Version
+
+**Category:** Operational / Supply Chain
+**Severity:** Medium
+**Priority:** P2
+**Source finding:** MF-5
+
+**Business impact:** `langfuse/langfuse:latest` is pulled on every `docker compose pull`. A breaking Langfuse release can silently disable prompt management and telemetry in production without any code change in this repository. An operator running `docker compose up --pull always` after a Langfuse major release will get a broken deployment.
+
+**Technical impact:** `docker-compose.yml:80` uses `image: langfuse/langfuse:latest`. The floating tag bypasses the version contract expected from Docker image pinning.
+
+**Root cause:** The Langfuse service was added with `:latest` as a convenience during development and was never pinned for production safety.
+
+**Implementation requirements:**
+1. Check the current stable Langfuse release at `https://github.com/langfuse/langfuse/releases`. As of 2026-05-23, pin to the latest stable semver tag (e.g., `langfuse/langfuse:2.84.0` or the current latest).
+2. Alternatively, pin to a SHA digest: `langfuse/langfuse@sha256:<digest>` for maximum immutability.
+3. Update `docker-compose.yml` line 80: change `image: langfuse/langfuse:latest` to `image: langfuse/langfuse:<version>`.
+4. Add a comment above the image line: `# Pin to a specific version — update deliberately. Check releases: https://github.com/langfuse/langfuse/releases`
+5. Document the upgrade procedure in `docs/RUNBOOK.md` (or a separate `docs/DEPENDENCIES.md`): how to check for Langfuse updates, how to test the upgrade in a dev environment, and what breaking changes to look for.
+
+**Dependencies:** None
+
+**Risk assessment:** VERY LOW. This is a string change in a YAML file. Risk: if the pinned version has a known vulnerability, it will persist until manually updated. Mitigation: add Langfuse to a Dependabot or Renovate configuration.
+
+**Acceptance criteria:**
+- `docker-compose.yml` does not contain `langfuse/langfuse:latest`.
+- The image tag is a specific semver (e.g., `2.84.0`) or SHA digest.
+- Harness `test_phase16_langfuse_image_not_latest` passes.
+
+**Testing requirements:**
+- Smoke: `docker compose config` validates without errors.
+- Manual: `docker compose pull` with the pinned tag succeeds.
+
+**Rollback considerations:** Restore `langfuse/langfuse:latest`. This is a zero-risk rollback (the old floating tag).
+
+**Observability requirements:** None.
+
+**Documentation updates:** Add Langfuse upgrade procedure to `docs/RUNBOOK.md` or `docs/DEPENDENCIES.md`.
+
+**Estimated complexity:** XS (~5 lines)
+**Estimated implementation risk:** Very Low
+
+**Affected modules/files:**
+- `docker-compose.yml` — pin Langfuse image tag
+
+---
+
+### T-210 — Document Auth Cache Multi-Worker Limitation + Redis-Backed Cache Option
+
+**Category:** Architecture / Documentation
+**Severity:** Low
+**Priority:** P3
+**Source finding:** LF-1
+
+**Business impact:** In a multi-worker deployment (Railway horizontal scaling, uvicorn `--workers=4`), `invalidate_user_cache(user_id)` only clears the cache in the worker that handled the credit deduction. Other workers continue serving stale `credit_balance` values for up to 30 seconds. A user who just purchased credits will see the old balance on their next request if it hits a different worker.
+
+**Technical impact:** `_USER_CACHE` in `middleware/auth.py` is an in-process Python dict. `invalidate_user_cache()` calls `_USER_CACHE.pop(user_id, None)` — a local operation that has no effect on sibling processes.
+
+**Root cause:** The auth cache was designed for single-worker deployment. Multi-worker scaling was added later without revisiting the cache invalidation strategy.
+
+**Implementation requirements:**
+1. Add a prominent comment to `middleware/auth.py` above `_USER_CACHE`:
+   ```python
+   # NOTE: _USER_CACHE is per-process. In multi-worker deployments (--workers > 1
+   # or horizontal scaling), invalidate_user_cache() only clears the cache in the
+   # worker that receives the invalidation call. Other workers may serve stale
+   # credit_balance values for up to AUTH_CACHE_TTL_SECONDS (default: 30s).
+   # To resolve this in multi-worker deployments, replace _USER_CACHE with a
+   # Redis-backed cache keyed by user_id with a short TTL.
+   ```
+2. Add a `TODO(LF-1): migrate to Redis-backed user cache for multi-worker deployments` comment in the same location.
+3. Create `docs/RUNBOOK.md` (if it doesn't exist; required by T-216) with a section: **Auth Cache Multi-Worker Incoherence** — explaining the limitation, symptoms (user sees stale credits after purchase), detection (check `specforge_auth_cache_hit_total` by worker label), and workaround (restart affected workers or wait 30s).
+4. Optionally (P4 stretch goal): implement a Redis-backed user cache as `_RedisUserCache` with the same interface as `_USER_CACHE` and swap it in when `settings.redis_url` is set. This is **not** required for T-210 acceptance; it may be a separate task.
+
+**Dependencies:** T-216 (RUNBOOK.md creation)
+
+**Risk assessment:** VERY LOW. Documentation-only change + inline comment. No code behaviour changes.
+
+**Acceptance criteria:**
+- `middleware/auth.py` has a multi-worker limitation comment above `_USER_CACHE`.
+- `docs/RUNBOOK.md` has a section documenting the limitation.
+- Harness `test_phase16_auth_cache_limitation_documented` passes.
+- Harness `test_phase16_auth_cache_runbook_entry_exists` passes.
+
+**Estimated complexity:** XS (~10 lines comment + RUNBOOK section)
+**Estimated implementation risk:** Very Low
+
+**Affected modules/files:**
+- `backend/middleware/auth.py` — inline comment
+- `docs/RUNBOOK.md` — new section
+
+---
+
+### T-211 — Dedicate `ThreadPoolExecutor` for PDF Exports (Decouple from Langfuse)
+
+**Category:** Performance / Reliability
+**Severity:** Low
+**Priority:** P3
+**Source finding:** LF-2
+
+**Business impact:** Under concurrent PDF export load (e.g., 5 users exporting simultaneously), all thread pool slots are consumed by WeasyPrint renders. Langfuse's `get_prompt()` calls — which are also dispatched to `run_in_executor(None, ...)` — are queued behind the PDF jobs. Prompt fetches time out, falling back to hardcoded prompts and degrading generation quality silently.
+
+**Technical impact:** Both `pdf_export_service.py` and Langfuse's synchronous `get_prompt()` use `run_in_executor(None, ...)` which routes to the default asyncio `ThreadPoolExecutor`. This executor has `min(32, os.cpu_count() + 4)` threads (e.g., 36 on an 8-core machine). PDF renders are CPU-bound and slow (2-5s each), while Langfuse calls are I/O-bound and fast (100ms). Mixed workloads starve the fast I/O-bound calls.
+
+**Root cause:** Neither PDF export nor Langfuse integration specified a dedicated executor when they were implemented. This is the "sharing the default executor" antipattern.
+
+**Note:** T-201 also creates the dedicated PDF executor (`_PDF_EXECUTOR`). T-211 is specifically about verifying the Langfuse `run_in_executor(None)` pattern is distinct and that the separation is documented. If T-201 is implemented first, T-211 becomes a verification + documentation task.
+
+**Implementation requirements:**
+1. Verify T-201 is implemented first (`_PDF_EXECUTOR` exists in `pdf_export_service.py`).
+2. Locate all `run_in_executor(None, ...)` calls in the codebase. For each:
+   - If it is a Langfuse `get_prompt()` call, leave it on the default executor (it's I/O-bound and short).
+   - If it is a PDF render or other CPU-bound operation, replace `None` with `_PDF_EXECUTOR`.
+3. Add a comment in `pdf_export_service.py` at the executor definition: `# Dedicated executor isolates CPU-bound WeasyPrint rendering from Langfuse I/O calls.`
+4. Add a comment wherever the default executor is used for Langfuse: `# Default executor: Langfuse get_prompt() is I/O-bound (fast), not CPU-bound.`
+
+**Dependencies:** T-201 (defines `_PDF_EXECUTOR`)
+
+**Risk assessment:** VERY LOW. Documentation + confirmation task. The actual executor change is in T-201.
+
+**Acceptance criteria:**
+- No `run_in_executor(None, ...)` calls in `pdf_export_service.py`.
+- The dedicated `_PDF_EXECUTOR` is used for all PDF rendering.
+- Harness `test_phase16_pdf_dedicated_executor_not_shared` passes.
+
+**Estimated complexity:** XS (~5 lines verification + comments)
+**Estimated implementation risk:** Very Low
+
+**Affected modules/files:**
+- `backend/services/pipeline/pdf_export_service.py` — verify dedicated executor, add comment
+
+---
+
+### T-212 — Delete `test_finalise_concurrent_tasks_only_one_advances` (False Confidence)
+
+**Category:** Testing / Code Quality
+**Severity:** Low (impact of keeping: High)
+**Priority:** P1 (must ship with T-196)
+**Source finding:** LF-3
+
+**Business impact:** The test creates false confidence that the CF-1 race condition is handled. It has been blocking proper acknowledgment of the SELECT FOR UPDATE gap for the duration of Phase 15. Any engineer running the test suite sees green and concludes the concurrency bug is fixed, even though it is not.
+
+**Technical impact:** `test_concurrency.py::test_finalise_concurrent_tasks_only_one_advances` uses a `_RacingDB` whose `execute()` method manually mutates `stage.status = "finalised"` on the second call. This simulates the outcome of a race without exercising any locking mechanism. The test passes whether or not `lock=True` is in `finalise()`. It is a tautological test.
+
+**Root cause:** The test was written with good intent (simulate the race scenario) but the mock approach cannot validate pessimistic locking. Only a real PostgreSQL transaction can validate that SELECT FOR UPDATE serialises concurrent reads.
+
+**Implementation requirements:**
+1. Delete `test_finalise_concurrent_tasks_only_one_advances` from `backend/tests/test_concurrency.py`.
+2. Keep `test_finalise_race_second_call_raises_when_not_draft` — this test is valid: it verifies that `finalise()` raises when the stage is already finalised. It tests the guard logic independently of locking.
+3. The replacement is `test_finalise_integration.py` from T-196.
+4. Add a comment in `test_concurrency.py` where the deleted test was: `# NOTE: The concurrent finalise race is tested in test_finalise_integration.py using a real PostgreSQL transaction with SELECT FOR UPDATE.`
+
+**Dependencies:** T-196 (integration test must exist before this is deleted)
+
+**Risk assessment:** VERY LOW. Deleting a false-positive test. The race is tested more accurately in T-196's integration test.
+
+**Acceptance criteria:**
+- `test_finalise_concurrent_tasks_only_one_advances` does not exist in `test_concurrency.py`.
+- `test_finalise_race_second_call_raises_when_not_draft` still exists and passes.
+- Harness `test_phase16_misleading_mock_finalise_test_is_gone` passes.
+
+**Estimated complexity:** XS (delete 45 lines + add comment)
+**Estimated implementation risk:** Very Low
+
+**Affected modules/files:**
+- `backend/tests/test_concurrency.py` — delete one test function, add replacement comment
+
+---
+
+### T-213 — Add Composite Index Migration for `eval_results(stage_version_id, created_at DESC)`
+
+**Category:** Performance / Database
+**Severity:** Low
+**Priority:** P3
+**Source finding:** LF-4
+
+**Business impact:** The eval polling query runs on every stage generation (4 times per workspace pipeline — once per stage type). It filters by `stage_version_id` and orders by `created_at DESC` to find the most recent eval. Without a composite index, PostgreSQL performs a sequential scan. At 10,000 eval rows (a few hundred active workspaces), this query takes 50ms+. At 1M rows (moderate scale), it exceeds 500ms, making the polling loop timeout before evals are returned.
+
+**Technical impact:** No migration adds a composite index on `eval_results(stage_version_id, created_at DESC)`. The latest migration is `0011_workspace_public_shared_at.py`. A new migration must be added.
+
+**Root cause:** The eval results table index was not planned during the initial schema design. The table was treated as an append-only log without considering the polling query access pattern.
+
+**Implementation requirements:**
+1. Create `backend/migrations/versions/0012_eval_results_composite_index.py` using the Alembic migration template.
+2. The `upgrade()` function must execute:
+   ```python
+   op.create_index(
+       "ix_eval_results_stage_version_created_at",
+       "eval_results",
+       ["stage_version_id", sa.text("created_at DESC")],
+       postgresql_using="btree",
+   )
+   ```
+3. The `downgrade()` function must drop the index: `op.drop_index("ix_eval_results_stage_version_created_at", "eval_results")`.
+4. The migration must be idempotent on a database that already has the index (use `if_exists=True` on the drop).
+5. Generate the migration with `uv run alembic revision --autogenerate -m "eval_results_composite_index"` and then manually adjust to add the DESC direction (autogenerate may not capture this).
+6. Run `uv run alembic upgrade head` locally to verify the migration applies without error.
+
+**Dependencies:** None
+
+**Risk assessment:** LOW. Adding an index is non-blocking on PostgreSQL (CREATE INDEX CONCURRENTLY is preferred for production — note this in the migration comment). However, Alembic's `op.create_index` does not support CONCURRENTLY by default; use `postgresql_concurrently=True` parameter or note in the RUNBOOK that this migration requires a maintenance window on large tables.
+
+**Acceptance criteria:**
+- `backend/migrations/versions/0012_eval_results_composite_index.py` exists.
+- The migration creates `ix_eval_results_stage_version_created_at` on `eval_results`.
+- `alembic upgrade head` and `alembic downgrade -1` both succeed without error.
+- Harness `test_phase16_eval_results_composite_index_migration_exists` passes.
+
+**Testing requirements:**
+- Apply migration to the test database (from T-204 CI). Verify index exists via `\d eval_results` in psql.
+- Run `alembic downgrade -1` — verify index is dropped. Run `alembic upgrade head` again — verify index re-created.
+- Query plan: `EXPLAIN ANALYZE SELECT * FROM eval_results WHERE stage_version_id = $1 ORDER BY created_at DESC LIMIT 1` must show `Index Scan` not `Seq Scan`.
+
+**Rollback considerations:** `alembic downgrade -1` drops the index. The downgrade target is listed in the migration's `down_revision`.
+
+**Observability requirements:** None — the index improvement will be visible in PostgreSQL's `pg_stat_user_indexes` (index scans vs sequential scans ratio).
+
+**Estimated complexity:** XS (~30 lines migration file)
+**Estimated implementation risk:** Very Low
+
+**Affected modules/files:**
+- `backend/migrations/versions/0012_eval_results_composite_index.py` — new migration
+
+---
+
+### T-214 — Delete False-Confidence Mock Concurrency Test (Harness Enforcement)
+
+**Category:** Testing / Code Quality
+**Severity:** Low
+**Priority:** P1 (ships with T-196)
+**Source finding:** LF-3 (same finding as T-212 but at harness-contract level)
+
+**Note:** T-212 is the implementation task (delete the test). T-214 is the harness-contract enforcement task — the harness test `test_phase16_misleading_mock_finalise_test_is_gone` ensures the deletion cannot be accidentally reverted.
+
+**Implementation requirements:**
+1. T-212 must be completed first.
+2. The Phase 16 harness contract already includes `test_phase16_misleading_mock_finalise_test_is_gone` which permanently enforces the deletion.
+3. No additional implementation required for T-214 beyond T-212 — this task exists to ensure the harness contract is explicitly tracked as a deliverable.
+
+**Acceptance criteria:**
+- Harness `test_phase16_misleading_mock_finalise_test_is_gone` passes (green = test is gone from codebase).
+- `test_finalise_race_second_call_raises_when_not_draft` still passes (valid test preserved).
+
+**Dependencies:** T-212
+
+**Estimated complexity:** XS (harness test already written in Phase 16 contract file)
+
+---
+
+### T-215 — Add `specforge_llm_circuit_rejections_total` Prometheus Counter
+
+**Category:** Observability
+**Severity:** Low
+**Priority:** P2
+**Source finding:** CF-2 (observability gap)
+
+**Business impact:** Without the circuit rejection counter, operators cannot tell whether the circuit breaker has ever activated in production. An open circuit is invisible in dashboards. When a provider has an outage, operators cannot distinguish "users are seeing errors because the circuit is open and protecting them" from "the circuit never activated and the provider is still being hit."
+
+**Technical impact:** `provider_status.py` and `gateway.py` have no Prometheus instrumentation for circuit breaker activations. The counter must be defined and incremented at the `can_route() == False` site.
+
+**Implementation requirements:**
+1. In `backend/services/llm/provider_status.py` (or `backend/metrics.py` if a centralized metrics module exists), define:
+   ```python
+   CIRCUIT_REJECTIONS = Counter(
+       "specforge_llm_circuit_rejections_total",
+       "Number of LLM requests rejected because the circuit breaker is open",
+       ["provider"],
+   )
+   ```
+2. In the code path where `can_route()` returns `False` (either inside `can_route()` itself or in `gateway.get_llm()`), call `CIRCUIT_REJECTIONS.labels(provider=provider).inc()`.
+3. Add the counter to `docs/RUNBOOK.md` alerting section: "Alert if `specforge_llm_circuit_rejections_total > 0` — a circuit breaker has activated. Check provider health."
+4. Add a Grafana dashboard query (or just document the PromQL): `rate(specforge_llm_circuit_rejections_total[5m])` grouped by `provider`.
+
+**Dependencies:** T-197 (can_route() must exist to have a rejection site)
+
+**Risk assessment:** VERY LOW. Prometheus counter definition and increment. Zero risk.
+
+**Acceptance criteria:**
+- `specforge_llm_circuit_rejections_total` Counter is defined with a `provider` label.
+- The counter is incremented when `can_route()` returns `False`.
+- Harness `test_phase16_circuit_breaker_rejection_counter_defined` passes.
+- Harness `test_phase16_circuit_rejection_counter_incremented_on_rejection` passes.
+
+**Estimated complexity:** XS (~15 lines)
+**Estimated implementation risk:** Very Low
+
+**Affected modules/files:**
+- `backend/services/llm/provider_status.py` or `backend/metrics.py` — counter definition
+- `backend/services/llm/gateway.py` or `provider_status.py` — counter increment
+
+---
+
+### T-216 — Create `docs/RUNBOOK.md` with CF-1, CF-2, LF-1 Operational Procedures
+
+**Category:** Operational / Documentation
+**Severity:** Low
+**Priority:** P2
+**Source finding:** Cross-cutting (all Critical and High findings)
+
+**Business impact:** When the SELECT FOR UPDATE deadlocks, the circuit breaker activates, or a multi-worker cache incoherence incident occurs, on-call engineers need documented incident response procedures. Without a runbook, incident resolution is ad-hoc and slow. A 15-minute production incident becomes a 2-hour outage because no one knows the rollback or reset procedure.
+
+**Technical impact:** No `docs/RUNBOOK.md` exists in the repository. The document must be created as a living reference for Phase 16 operational changes.
+
+**Implementation requirements:**
+Create `docs/RUNBOOK.md` with the following sections (minimum):
+
+1. **Circuit Breaker (CF-2):**
+   - Detection: `specforge_llm_circuit_rejections_total` > 0 in Prometheus
+   - Symptoms: users receive 503 "LLM provider temporarily unavailable" for affected provider
+   - Reset procedure: call `reset_provider_failures(provider)` via admin endpoint or Redis CLI (`DEL specforge:llm:failures:<provider>`)
+   - SLA impact: users on custom `<provider>` keys receive 503; users on platform default key receive 200 (platform key uses a different provider)
+   - Escalation: if all providers are unhealthy, escalate to LLM provider engineering contact
+
+2. **Finalise Race (CF-1):**
+   - Detection: two `CreditLedger` entries for the same `workspace_id` + `stage_type` within 1 second in the DB
+   - Symptoms: user reports unexpected credit deduction; stage shows conflicting generation results
+   - Recovery: identify duplicate ledger entries via SQL; refund the second charge via admin credit endpoint; reset stage to `draft` status
+   - Prevention: confirm `_load_stage(lock=True)` is in place post-deploy
+
+3. **Auth Cache Multi-Worker Incoherence (LF-1):**
+   - Detection: user sees stale credit balance after purchase (check `credit_balance` in `/api/me` vs DB)
+   - Symptoms: user purchased credits but UI shows old balance for up to 30 seconds
+   - Workaround: advise user to wait 30 seconds or hard-reload; the cache TTL will expire
+   - Long-term fix: see T-210 — migrate to Redis-backed user cache
+
+4. **Credits Refund Procedure:**
+   - How to issue manual credit refund via admin endpoint
+   - How to verify the ledger entry was created correctly
+   - Escalation threshold (> 10 affected users → incident P1)
+
+5. **Migration Runbook:**
+   - How to run `alembic upgrade head` safely in production (Railway deploy process)
+   - How to roll back a migration with `alembic downgrade -1`
+   - Note on the eval_results composite index (T-213): may require maintenance window on large tables
+
+**Dependencies:** T-210 (requires RUNBOOK.md for LF-1 documentation), T-197 (circuit breaker must exist before documenting it)
+
+**Risk assessment:** VERY LOW. Documentation-only. No code changes.
+
+**Acceptance criteria:**
+- `docs/RUNBOOK.md` exists with sections for circuit breaker, finalise race, auth cache, credits refund, and migrations.
+- Harness `test_phase16_runbook_covers_circuit_breaker_procedure` passes.
+- Harness `test_phase16_runbook_covers_finalise_race_procedure` passes.
+- Harness `test_phase16_runbook_has_required_sections` passes.
+- Harness `test_phase16_auth_cache_runbook_entry_exists` passes.
+
+**Estimated complexity:** S (~200-line markdown document)
+**Estimated implementation risk:** Very Low
+
+**Affected modules/files:**
+- `docs/RUNBOOK.md` — new file
+
+---
+
+_tasks.md · SpecForge V1 · Version 2.4.0 · 2026-05-23 — Phase 16 Final Remediation & Enterprise Hardening T-196 through T-216 (21 remediation tasks addressing every finding from docs/CODE_REVIEW_PASS_2.md second-pass enterprise review: 2 critical unresolved findings, 5 high severity regressions, 5 medium severity issues, 4 low severity issues, plus 2 observability/documentation tasks mapping to systemic risks)_
+
 _tasks.md · SpecForge V1 · Version 2.3.1 · 2026-05-22 — Phase 15 addendum: corrected L-3/L-4/L-7/L-8 task descriptions; added T-191 through T-195 (LLM cache eviction, CSRF exempt path audit, CSP for public share, observability instrumentation, missing concurrency tests) covering non-labeled report-body findings from docs/CODE_REVIEW.md_
 
 _tasks.md · SpecForge V1 · Version 2.3.0 · 2026-05-22 — Phase 15 Enterprise Production Hardening T-174 through T-190 (19 remediation tasks addressing all C-1–C-4 critical, H-1–H-6 high, M-1–M-7 medium, and L-1–L-8 low findings from the staff-engineer production readiness code review)_
