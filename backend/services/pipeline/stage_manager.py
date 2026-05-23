@@ -30,10 +30,6 @@ from services.credit_service import (
     InsufficientCreditsError,
     credit_service,
 )
-from services.observability import (
-    EVAL_POLL_FAILURES,
-    SSE_STREAM_FAILURES,
-)
 from services.evals.online_eval import run_eval_background
 from services.llm.base import ProviderError, ProviderTimeoutError
 from services.llm.cost_cache import (
@@ -45,6 +41,9 @@ from services.llm.gateway import get_llm
 from services.llm.output_budget import output_budget_for_operation
 from services.llm.provider_config import JUDGE_MODELS
 from services.llm.routing import LLMRoute, LLMRoutingError, resolve_llm_route
+from services.observability import (
+    SSE_STREAM_FAILURES,
+)
 from services.pipeline.diff_engine import (
     apply_diff,
     compute_diff,
@@ -1012,8 +1011,8 @@ class StageManager:
         eval_context = ""
         harness_content_for_eval: str | None = None
         if stage.type != "spec":
-            eval_context, harness_content_for_eval = (
-                await self._eval_context_for_stage(stage.workspace_id, stage.type)
+            eval_context, harness_content_for_eval = await self._eval_context_for_stage(
+                stage.workspace_id, stage.type
             )
 
         if was_finalised:
@@ -1212,7 +1211,9 @@ class StageManager:
             db.add(version)
             await db.flush()
             version_id = version.id
-            eval_context, _ = await self._eval_context_for_stage(workspace.id, "harness")
+            eval_context, _ = await self._eval_context_for_stage(
+                workspace.id, "harness"
+            )
             await db.commit()
             await self._invalidate_stage_cache(workspace.id, "harness", redis)
 
@@ -1238,6 +1239,13 @@ class StageManager:
         except (ProviderError, TimeoutError) as exc:
             # On provider failure the stage remains in its pre-patch status
             # (draft / stale / finalised) — no state change needed.
+            # Record the failure so the circuit breaker can trip if the
+            # provider has consecutive errors.  CF-2 — T-197.
+            from services.llm.provider_status import (  # noqa: PLC0415
+                record_provider_failure,
+            )
+
+            record_provider_failure(route.provider, exc)
             if isinstance(exc, TimeoutError):
                 raise ProviderTimeoutError(route.provider, stream_timeout) from exc
             raise

@@ -2,14 +2,20 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
 import os
 from collections import OrderedDict
 from typing import TYPE_CHECKING
 
+from fastapi import HTTPException
+
 from config import settings
+from services.llm.provider_status import CIRCUIT_REJECTIONS, can_route
 
 if TYPE_CHECKING:
     from services.llm.base import BaseLLMAdapter
+
+logger = logging.getLogger(__name__)
 
 _REGISTRY: dict[str, type] = {}
 _PROVIDER_KEY_SETTINGS = {
@@ -36,9 +42,43 @@ def _register(provider: str, cls: type) -> None:
     _REGISTRY[provider] = cls
 
 
-def get_llm(provider: str, model: str) -> "BaseLLMAdapter":
+def get_llm(
+    provider: str,
+    model: str,
+    *,
+    bypass_circuit: bool = False,
+) -> "BaseLLMAdapter":
+    """Return a cached adapter for *provider* / *model*.
+
+    Raises HTTPException(503) when the provider circuit is open (≥ 3 recent
+    consecutive failures) unless *bypass_circuit=True*.  Health-check probes
+    must pass bypass_circuit=True so they can reach an unhealthy provider and
+    record a success that resets the circuit.  CF-2 — T-197.
+
+    The circuit state is per-worker-process; see the _FAILURES comment in
+    provider_status.py for multi-worker implications.
+    """
     if provider not in _REGISTRY:
         raise ValueError(f"Unknown LLM provider: {provider!r}")
+
+    # Enforce the circuit breaker: reject requests to providers whose failure
+    # count has tripped the threshold.  Choosing hard-reject (503) over silent
+    # fallback so callers can retry against a different provider explicitly
+    # rather than silently masking the outage.  CF-2 — T-197.
+    if not bypass_circuit and not can_route(provider):
+        CIRCUIT_REJECTIONS.labels(provider=provider).inc()
+        logger.warning(
+            "llm.circuit_open",
+            extra={"provider": provider, "model": model},
+        )
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                f"LLM provider '{provider}' is temporarily unavailable "
+                "(circuit open — too many recent failures)."
+            ),
+        )
+
     api_key = _provider_api_key(provider)
     key = (provider, model, _secret_fingerprint(api_key))
     if key in _INSTANCES:

@@ -11,6 +11,8 @@ import time
 from dataclasses import dataclass
 from typing import Literal
 
+from prometheus_client import Counter
+
 from config import settings
 from services.llm.provider_config import JUDGE_MODELS, PROVIDER_DISPLAY
 from services.observability import (
@@ -29,7 +31,22 @@ _PROVIDER_KEY_SETTINGS = {
 _PLACEHOLDER_PREFIXES = ("placeholder-",)
 _RECENT_FAILURE_WINDOW_SECONDS = 600
 _UNHEALTHY_FAILURE_THRESHOLD = 3
+
+# _FAILURES is a module-level dict — its state is per-worker-process.
+# Multi-worker deployments (e.g. Gunicorn with multiple uvicorn workers) will
+# have independent circuit state per process: a provider can be open in one
+# worker and healthy in another.  This is an accepted trade-off for simplicity;
+# a distributed circuit would require a shared Redis counter.  LF-1 — T-197.
 _FAILURES: dict[str, "ProviderFailureState"] = {}
+
+# Prometheus counter for circuit-breaker activations.  Allows operators to
+# detect and alert on unexpected or sustained circuit trips via dashboards.
+# T-215 / CF-2 — T-197.
+CIRCUIT_REJECTIONS = Counter(
+    "specforge_llm_circuit_rejections_total",
+    "Number of requests rejected because the LLM provider circuit is open",
+    ["provider"],
+)
 
 
 @dataclass
@@ -73,6 +90,37 @@ def all_provider_snapshots() -> list[dict[str, object]]:
     return [provider_snapshot(provider) for provider in provider_ids()]
 
 
+def _circuit_open(provider: str) -> bool:
+    """Return True if the provider circuit has tripped (≥ failure threshold).
+
+    Reads _FAILURES directly rather than calling _provider_health() to avoid
+    the configured/unconfigured ambiguity — a not-configured provider has no
+    _FAILURES entry and is therefore not circuit-open.  CF-2 — T-197.
+    """
+    state = _FAILURES.get(provider)
+    if state is None:
+        return False
+    if time.time() - state.last_failure_at > _RECENT_FAILURE_WINDOW_SECONDS:
+        _FAILURES.pop(provider, None)
+        return False
+    return state.count >= _UNHEALTHY_FAILURE_THRESHOLD
+
+
+def can_route(provider: str) -> bool:
+    """Return False when the provider circuit is open; True otherwise.
+
+    Called by gateway.get_llm() before returning an adapter to enforce the
+    circuit breaker.  A False result causes get_llm() to raise
+    HTTPException(503) and increment specforge_llm_circuit_rejections_total
+    so that operators can detect circuit activations in dashboards.
+
+    NOTE: _FAILURES is per-worker-process.  In multi-worker deployments each
+    process tracks failures independently — see the _FAILURES comment above.
+    CF-2 — T-197.
+    """
+    return not _circuit_open(provider)
+
+
 async def check_provider_health(provider: str) -> dict[str, object]:
     if provider not in PROVIDER_DISPLAY:
         raise ValueError(f"Unknown provider: {provider!r}")
@@ -82,7 +130,11 @@ async def check_provider_health(provider: str) -> dict[str, object]:
     try:
         from services.llm.gateway import get_llm
 
-        adapter = get_llm(provider, JUDGE_MODELS[provider])
+        # bypass_circuit=True: health probes must always reach the provider,
+        # even when its circuit is open.  Without this, a tripped circuit
+        # would block health checks, preventing them from detecting recovery
+        # and resetting the circuit via record_provider_success().  CF-2 — T-197.
+        adapter = get_llm(provider, JUDGE_MODELS[provider], bypass_circuit=True)
         await asyncio.wait_for(
             adapter.complete(
                 "You are a provider health checker. Reply with OK.",
