@@ -2,6 +2,7 @@ import { Children, Component, isValidElement, type ReactNode } from "react"
 import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
 import rehypeHighlight from "rehype-highlight"
+import rehypeSanitize from "rehype-sanitize"
 
 interface MarkdownRendererProps {
   content: string
@@ -246,7 +247,7 @@ export function MarkdownRenderer({
       <div className={variant === "harness" ? "md-prose md-prose-harness" : "md-prose"}>
         <ReactMarkdown
           remarkPlugins={[remarkGfm]}
-          rehypePlugins={[[rehypeHighlight, { ignoreMissing: true }]]}
+          rehypePlugins={[rehypeSanitize, [rehypeHighlight, { ignoreMissing: true }]]}
           components={{
             h2({ children, node: _node, ...props }) {
               const label = textFromChildren(children)

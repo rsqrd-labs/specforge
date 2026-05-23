@@ -102,6 +102,12 @@ export function ExportGitHubModal({
 
     setPhase("progress")
     setError(null)
+
+    // Client-side timeout: abort the export request after 30 seconds so a
+    // hung API call resolves to a recoverable error state rather than an
+    // infinite spinner.  L-4 — T-189b.
+    const controller = new AbortController()
+    const timeout = setTimeout(() => controller.abort(), 30_000)
     try {
       const response = await exportWorkspaceToGitHub(workspaceId, {
         repo_name: repoName,
@@ -110,8 +116,16 @@ export function ExportGitHubModal({
       setResult(response)
       setPhase("success")
     } catch (caught) {
-      setError(getApiErrorMessage(caught, "Export failed. Please try again."))
+      const isAbort =
+        caught instanceof DOMException && caught.name === "AbortError"
+      setError(
+        isAbort
+          ? "Export timed out — please retry."
+          : getApiErrorMessage(caught, "Export failed. Please try again."),
+      )
       setPhase("error")
+    } finally {
+      clearTimeout(timeout)
     }
   }
 

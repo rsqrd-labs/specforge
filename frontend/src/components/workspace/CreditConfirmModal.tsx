@@ -3,10 +3,10 @@ import { useFocusTrap } from "../../hooks/useFocusTrap"
 
 interface CreditConfirmModalProps {
   action: "generate" | "regenerate" | "refine"
+  /** Credit cost of the action.  Defaults to CREDIT_COSTS[action] if omitted. */
   creditCost?: number
+  /** Caller's current credit balance.  Defaults to 0 if omitted. */
   currentBalance?: number
-  cost?: number
-  balance?: number
   open?: boolean
   onConfirm: () => void
   onCancel: () => void
@@ -37,16 +37,14 @@ export function CreditConfirmModal({
   action,
   creditCost,
   currentBalance,
-  cost,
-  balance,
   open,
   onConfirm,
   onCancel,
 }: CreditConfirmModalProps) {
   if (open === false) return null
 
-  const resolvedCost = creditCost ?? cost ?? CREDIT_COSTS[action]
-  const resolvedBalance = currentBalance ?? balance ?? 0
+  const resolvedCost = creditCost ?? CREDIT_COSTS[action]
+  const resolvedBalance = currentBalance ?? 0
   const remaining = resolvedBalance - resolvedCost
   const isInsufficient = resolvedBalance < resolvedCost
   const dialogRef = useRef<HTMLDivElement>(null)

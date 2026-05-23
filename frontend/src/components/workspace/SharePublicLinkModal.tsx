@@ -5,6 +5,7 @@ import {
   getApiErrorMessage,
   rotatePublicShare,
 } from "../../services/api"
+import { useFocusTrap } from "../../hooks/useFocusTrap"
 import type { ShareLinkResponse } from "../../types/publicShare"
 
 interface SharePublicLinkModalProps {
@@ -58,6 +59,11 @@ export function SharePublicLinkModal({
   })
   const [copiedAt, setCopiedAt] = useState<number | null>(null)
   const closeRef = useRef<HTMLButtonElement | null>(null)
+  const modalRef = useRef<HTMLDivElement | null>(null)
+  // Trap focus within the modal so Tab/Shift+Tab cycle through interactive
+  // elements and keyboard users cannot reach background content.
+  // WCAG 2.1 SC 2.1.2 — L-6 / T-189b.
+  useFocusTrap(modalRef, onClose)
 
   useEffect(() => {
     closeRef.current?.focus()
@@ -150,7 +156,7 @@ export function SharePublicLinkModal({
       aria-labelledby="share-modal-title"
       onClick={(e) => e.target === e.currentTarget && onClose()}
     >
-      <div className="create-modal share-modal">
+      <div ref={modalRef} className="create-modal share-modal">
         <header className="create-modal-header">
           <h2 id="share-modal-title" className="create-modal-title">Share publicly</h2>
           <button
