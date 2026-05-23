@@ -1,3 +1,4 @@
+import itertools
 import logging
 import re
 import time
@@ -20,6 +21,10 @@ logger = logging.getLogger(__name__)
 _LOGIN_PATHS = frozenset({"/auth/google", "/auth/callback"})
 _BYPASS_PATHS = frozenset({"/health"})
 _LOCAL_FALLBACK_MAX_KEYS = 10_000
+# Evict this many oldest entries when the cap is exceeded.  Single-item
+# eviction cannot keep up with a burst of distinct IPs; bulk removal bounds
+# memory usage while amortising eviction overhead.  M-2 — T-184.
+_LOCAL_FALLBACK_EVICT_BATCH = 2_000
 _LOGIN_BURST_LIMIT = 5
 _LOGIN_BURST_WINDOW_SECONDS = 300
 _LOGIN_HOURLY_LIMIT = 20
@@ -321,7 +326,13 @@ def _local_sliding_window_check(
     timestamps.append(now)
     windows[ratelimit_key] = timestamps
     if len(windows) > _LOCAL_FALLBACK_MAX_KEYS:
-        windows.pop(next(iter(windows)))
+        # Bulk-evict the oldest _LOCAL_FALLBACK_EVICT_BATCH entries so that a
+        # burst of distinct IPs does not require O(n) individual pops.
+        # itertools.islice over a dict yields keys in insertion order.
+        # M-2 — T-184.
+        to_delete = list(itertools.islice(windows, _LOCAL_FALLBACK_EVICT_BATCH))
+        for k in to_delete:
+            del windows[k]
     return True
 
 
