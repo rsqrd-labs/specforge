@@ -14,9 +14,9 @@ from services.security.csrf import verify_csrf_token
 _SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 _EXEMPT_PATHS = frozenset(
     {
-        "/auth/google",
-        "/auth/callback",
-        "/auth/refresh",
+        "/auth/google",    # exempt: initiates OAuth redirect — no session exists yet
+        "/auth/callback",  # exempt: receives OAuth provider callback — no auth token yet
+        "/auth/refresh",   # exempt: exchanges HTTP-only refresh cookie for a new token
     }
 )
 
