@@ -12,16 +12,19 @@ from config import settings
 from database import get_shared_redis
 from models import Stage
 from services.credit_service import credit_service
-from services.pipeline.stage_manager import CREDIT_COSTS
+from services.pipeline.stage_manager import (
+    CREDIT_COSTS,
+    _POLL_INTERVAL_SECONDS,
+    _RECOVERY_LOCK_KEY,
+    _RECOVERY_LOCK_TTL,
+    refresh_recovery_lock,
+)
 
 logger = logging.getLogger(__name__)
 
 _STUCK_THRESHOLD_MINUTES = 3
-_POLL_INTERVAL_SECONDS = 60
-# Redis lock prevents all gunicorn workers from running recovery simultaneously.
-# TTL must exceed the maximum recovery duration; 60 s is generous.
-_RECOVERY_LOCK_KEY = "recovery:leader_lock"
-_RECOVERY_LOCK_TTL = 60
+# _POLL_INTERVAL_SECONDS, _RECOVERY_LOCK_KEY, and _RECOVERY_LOCK_TTL are
+# canonical in stage_manager.py and imported above.  H-3 — T-179.
 
 
 async def recover_stuck_stages(db: AsyncSession) -> int:
@@ -79,6 +82,9 @@ async def run_recovery_loop() -> None:
             )
             if not acquired:
                 continue
+            # Heartbeat: delegate TTL refresh to stage_manager helper.
+            # H-3 — T-179.
+            await refresh_recovery_lock(redis)
             async with AsyncSessionLocal() as db:
                 count = await recover_stuck_stages(db)
                 if count > 0:

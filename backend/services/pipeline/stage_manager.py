@@ -58,6 +58,18 @@ from services.security.sanitizer import sanitize_text
 
 logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# Recovery lock constants — H-3 (T-179)
+#
+# The recovery loop in recovery_service.py holds a Redis NX lock so only one
+# worker runs recovery per cycle.  The TTL must be at least 3× the poll
+# interval so a slow run cannot expire the lock mid-flight.  Both constants
+# are defined here (the canonical module for stage lifecycle logic) and
+# imported by recovery_service.py.
+# ---------------------------------------------------------------------------
+_POLL_INTERVAL_SECONDS = 60
+_RECOVERY_LOCK_TTL = 180  # 3 × _POLL_INTERVAL_SECONDS  H-3 — T-179
+
 STAGE_ORDER = ["spec", "plan", "harness", "tasks"]
 STAGE_GENERATION_TIERS = {
     "spec": ("strong", "mid"),
@@ -288,6 +300,17 @@ _STAGE_CACHE_PREFIX = "stage:"
 _STAGE_CACHE_TTL = 3600
 
 _FILE_HEADING_RE = re.compile(r"^(#{2,3})\s+File:\s+(.+?)$", re.MULTILINE)
+
+_RECOVERY_LOCK_KEY = "recovery:leader_lock"
+
+
+async def refresh_recovery_lock(redis: "Redis") -> None:
+    """Heartbeat: extend the recovery leader-lock TTL for the current cycle.
+
+    Called by the recovery loop each iteration so a long-running recovery
+    does not lose the Redis lock mid-flight.  H-3 — T-179.
+    """
+    await redis.expire(_RECOVERY_LOCK_KEY, _RECOVERY_LOCK_TTL)
 
 
 def _merge_harness_patch(existing: str, patch: str) -> str:
