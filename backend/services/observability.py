@@ -85,6 +85,34 @@ LLM_PROVIDER_HEALTH = Gauge(
     ["provider"],
 )
 
+# T-194: SSE, PDF, and eval instrumentation.
+# -----------------------------------------
+# SSE streaming failure counter — incremented when a stage-generation SSE
+# stream terminates with an error before the client receives a completion
+# event. This makes streaming failure rate visible in dashboards.
+SSE_STREAM_FAILURES = Counter(
+    "specforge_sse_stream_failures_total",
+    "SSE stage-generation streams that terminated on error",
+    ["stage_type"],
+)
+
+# PDF export duration histogram — WeasyPrint is CPU-bound and blocks the
+# thread-pool executor thread for 0.5–3 s per render. Observing duration
+# makes event-loop-blocking outliers (C-4) visible.
+PDF_EXPORT_DURATION = Histogram(
+    "specforge_pdf_export_duration_seconds",
+    "Wall-clock duration of PDF export render calls",
+    buckets=(0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0),
+)
+
+# Eval polling failure counter — incremented when the eval poller gives up
+# after max retries. Without this counter, silent eval drops are invisible.
+EVAL_POLL_FAILURES = Counter(
+    "specforge_eval_poll_failures_total",
+    "Eval polling attempts that exhausted max retries and silently dropped",
+    ["stage_type"],
+)
+
 _sentry_configured = False
 _otel_configured = False
 _REDACTED = "[REDACTED]"

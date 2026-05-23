@@ -30,6 +30,10 @@ from services.credit_service import (
     InsufficientCreditsError,
     credit_service,
 )
+from services.observability import (
+    EVAL_POLL_FAILURES,
+    SSE_STREAM_FAILURES,
+)
 from services.evals.online_eval import run_eval_background
 from services.llm.base import ProviderError, ProviderTimeoutError
 from services.llm.cost_cache import (
@@ -572,6 +576,10 @@ class StageManager:
                         yield token
                 content_generation_id = getattr(adapter, "last_generation_id", None)
             except (ProviderError, TimeoutError) as exc:
+                # Increment SSE failure counter so streaming failures are
+                # visible in dashboards even before the 3-min recovery loop
+                # fires.  T-194.
+                SSE_STREAM_FAILURES.labels(stage_type=stage.type).inc()
                 if deduction is not None:
                     await credit_service.refund(db, deduction.id)
                 stage.status = "draft"

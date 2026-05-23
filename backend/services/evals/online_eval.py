@@ -17,6 +17,7 @@ from services.llm.batch_executor import complete_background_llm
 from services.llm.gateway import get_llm
 from services.llm.output_budget import output_budget_for_operation
 from services.llm.provider_config import JUDGE_MODELS
+from services.observability import EVAL_POLL_FAILURES
 
 logger = logging.getLogger(__name__)
 _EVAL_TIMEOUT_SECONDS = 90.0
@@ -781,6 +782,9 @@ async def run_eval(
         model=resolved_judge_model,
     )
     if raw is None:
+        # Both compact=False and compact=True calls failed — increment the
+        # eval poll failure counter so silent drops are visible.  T-194.
+        EVAL_POLL_FAILURES.labels(stage_type=stage_type).inc()
         return None
 
     data = _parse_eval_json(raw)
@@ -799,6 +803,7 @@ async def run_eval(
             model=resolved_judge_model,
         )
         if retry_raw is None:
+            EVAL_POLL_FAILURES.labels(stage_type=stage_type).inc()
             return None
         data = _parse_eval_json(retry_raw)
         if data is None:
@@ -807,6 +812,7 @@ async def run_eval(
                 stage_version_id,
                 retry_raw[:200],
             )
+            EVAL_POLL_FAILURES.labels(stage_type=stage_type).inc()
             return None
 
     normalised = _normalise_eval_payload(stage_type, data)

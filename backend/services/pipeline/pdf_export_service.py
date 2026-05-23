@@ -37,6 +37,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 # native deps via the Dockerfile's apt-get step.
 
 from models import Stage, Workspace
+from services.observability import PDF_EXPORT_DURATION
 from services.pipeline.export_service import ExportNotReadyError
 
 logger = logging.getLogger(__name__)
@@ -172,13 +173,18 @@ def _render_pdf_sync(html_text: str) -> bytes:
     `no_network` marker — keep this token in the source for the harness
     contract test that scans for the no-network guard.
     """
+    import time
+
     # Lazy import — keeps the module loadable on dev boxes without the
     # native cairo/pango libs.
     from weasyprint import HTML
 
+    _start = time.perf_counter()
     pdf_bytes = HTML(string=html_text).write_pdf(
         url_fetcher=no_network_url_fetcher,
     )
+    # Observe render duration in the Prometheus histogram.  T-194.
+    PDF_EXPORT_DURATION.observe(time.perf_counter() - _start)
     if not pdf_bytes:
         # WeasyPrint returns bytes or None on certain failure modes; we
         # treat None as a hard failure so callers don't ship empty PDFs.
