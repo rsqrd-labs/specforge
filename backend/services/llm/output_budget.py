@@ -1,3 +1,9 @@
+"""Per-operation output token budgets for LLM generation calls.
+
+This module contains no HTTP calls.  HTTP timeout policy (H-6 — T-182):
+timeout= enforcement is delegated to each concrete adapter implementation.
+"""
+
 from __future__ import annotations
 
 OUTPUT_TOKEN_BUDGETS: dict[str, int] = {

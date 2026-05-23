@@ -9,11 +9,18 @@ from google.genai import types
 from config import settings
 from services.llm.base import BaseLLMAdapter, ProviderError
 
+# Explicit read timeout (milliseconds) prevents a hung Gemini connection from
+# blocking a credit reservation indefinitely.  H-6 — T-182.
+_DEFAULT_TIMEOUT_MS = 300_000  # 5 minutes
+
 
 class GoogleAdapter(BaseLLMAdapter):
     def __init__(self, model: str, api_key: str | None = None) -> None:
         self.model = model
-        self._client = genai.Client(api_key=api_key or settings.google_api_key)
+        self._client = genai.Client(
+            api_key=api_key or settings.google_api_key,
+            http_options=types.HttpOptions(timeout=_DEFAULT_TIMEOUT_MS),
+        )
 
     def _config(self, system: str, max_tokens: int) -> types.GenerateContentConfig:
         return types.GenerateContentConfig(

@@ -1,6 +1,11 @@
 """InstrumentedAdapter — composes Langfuse instrumentation around any
 ``BaseLLMAdapter`` without modifying the adapter interface.
 
+HTTP timeout policy (H-6 — T-182): timeout= enforcement is delegated to the
+wrapped adapter's httpx.Timeout configuration.  This class does not make
+direct HTTP calls; it observes and re-yields whatever the wrapped adapter
+produces.
+
 This is the only place provider calls get observed for Langfuse purposes. The
 adapter modules themselves (``anthropic_adapter.py``, ``openai_adapter.py``,
 ``google_adapter.py``) remain Langfuse-free, so adding a new provider still

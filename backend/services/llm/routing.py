@@ -1,3 +1,9 @@
+"""LLM routing logic: resolves provider, model, and tier for each operation.
+
+This module contains no HTTP calls.  HTTP timeout policy (H-6 — T-182):
+timeout= enforcement is delegated to each concrete adapter implementation.
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass

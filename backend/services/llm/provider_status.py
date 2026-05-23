@@ -1,3 +1,9 @@
+"""Provider health tracking: circuit-breaker state and health-check probes.
+
+This module contains no direct LLM HTTP calls.  HTTP timeout policy
+(H-6 — T-182): timeout= enforcement is delegated to each adapter's httpx.Timeout.
+"""
+
 from __future__ import annotations
 
 import asyncio

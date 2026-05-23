@@ -1,3 +1,7 @@
+# Provider model catalogue and judge model assignments.
+# This module contains no HTTP calls.  HTTP timeout policy (H-6 — T-182):
+# timeout= enforcement is delegated to each concrete adapter implementation.
+
 PROVIDER_MODELS: dict[str, list[dict[str, str]]] = {
     "anthropic": [
         {"id": "claude-opus-4-7", "name": "Claude Opus 4"},

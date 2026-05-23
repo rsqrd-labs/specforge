@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import os
 from typing import TYPE_CHECKING
@@ -20,6 +21,12 @@ _PROVIDER_KEY_SETTINGS = {
 # and the next get_llm() call builds a fresh provider client automatically.
 _INSTANCES: dict[tuple[str, str, str], "BaseLLMAdapter"] = {}
 
+# Hard wall-clock cap on any single non-streaming generation call routed
+# through the gateway.  Prevents a hung provider from holding a credit
+# reservation indefinitely even if the per-request httpx.Timeout is somehow
+# bypassed (e.g. chunked-transfer never terminates).  H-6 — T-182.
+_WALL_CLOCK_TIMEOUT = 360.0  # seconds
+
 
 def _register(provider: str, cls: type) -> None:
     _REGISTRY[provider] = cls
@@ -33,6 +40,28 @@ def get_llm(provider: str, model: str) -> "BaseLLMAdapter":
     if key not in _INSTANCES:
         _INSTANCES[key] = _REGISTRY[provider](model, api_key=api_key)
     return _INSTANCES[key]
+
+
+async def complete_with_timeout(
+    provider: str,
+    model: str,
+    system: str,
+    user: str,
+    max_tokens: int,
+    *,
+    timeout: float = _WALL_CLOCK_TIMEOUT,
+) -> str:
+    """Run adapter.complete() under a hard wall-clock timeout via asyncio.wait_for.
+
+    Callers that need streaming should apply asyncio.timeout() around the
+    stream loop directly; this helper targets one-shot completion calls where
+    the entire coroutine must finish within *timeout* seconds.  H-6 — T-182.
+    """
+    adapter = get_llm(provider, model)
+    return await asyncio.wait_for(
+        adapter.complete(system, user, max_tokens),
+        timeout=timeout,
+    )
 
 
 def clear_llm_cache() -> None:

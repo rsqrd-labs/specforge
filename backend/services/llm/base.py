@@ -1,6 +1,10 @@
 from abc import ABC, abstractmethod
 from collections.abc import AsyncGenerator
 
+# HTTP timeout policy (H-6 — T-182): every concrete adapter MUST configure an
+# explicit timeout= on its underlying httpx client.  Use httpx.Timeout(
+# connect=10.0, read=300.0, write=10.0, pool=5.0) as the project default.
+
 
 class ProviderError(Exception):
     def __init__(self, provider: str, original: Exception) -> None:

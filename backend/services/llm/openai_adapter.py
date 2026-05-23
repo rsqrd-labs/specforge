@@ -2,16 +2,25 @@ from __future__ import annotations
 
 from collections.abc import AsyncGenerator
 
+import httpx
 import openai
 
 from config import settings
 from services.llm.base import BaseLLMAdapter, ProviderError
 
+# Explicit timeouts prevent a hung provider from blocking a credit reservation
+# indefinitely.  connect/write are short (fast-fail on connection issues);
+# read allows long streaming responses.  H-6 — T-182.
+_DEFAULT_TIMEOUT = httpx.Timeout(connect=10.0, read=300.0, write=10.0, pool=5.0)
+
 
 class OpenAIAdapter(BaseLLMAdapter):
     def __init__(self, model: str, api_key: str | None = None) -> None:
         self.model = model
-        self._client = openai.AsyncOpenAI(api_key=api_key or settings.openai_api_key)
+        self._client = openai.AsyncOpenAI(
+            api_key=api_key or settings.openai_api_key,
+            timeout=_DEFAULT_TIMEOUT,
+        )
 
     async def stream(
         self, system: str, user: str, max_tokens: int

@@ -1,3 +1,9 @@
+"""Route quality gate configuration for LLM provider promotion decisions.
+
+This module contains no HTTP calls.  HTTP timeout policy (H-6 — T-182):
+timeout= enforcement is the responsibility of each adapter implementation.
+"""
+
 from __future__ import annotations
 
 from copy import deepcopy

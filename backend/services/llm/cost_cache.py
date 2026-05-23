@@ -1,3 +1,9 @@
+"""Redis-backed cache for LLM generation outputs.
+
+This module makes Redis calls (not LLM HTTP calls).  HTTP timeout policy
+(H-6 — T-182): timeout= enforcement belongs to each adapter's httpx.Timeout.
+"""
+
 from __future__ import annotations
 
 import hashlib

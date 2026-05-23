@@ -1,3 +1,10 @@
+"""Background LLM batch executor for non-interactive operations.
+
+HTTP timeout policy (H-6 — T-182): timeout= enforcement is delegated to the
+underlying adapter's httpx.Timeout configuration.  This module does not make
+direct HTTP calls; it delegates to BaseLLMAdapter implementations.
+"""
+
 from __future__ import annotations
 
 import logging
