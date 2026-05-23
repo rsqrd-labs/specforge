@@ -125,19 +125,35 @@ def _build_sections(stages: dict[str, Stage]) -> list[dict[str, str]]:
     return sections
 
 
-def _coverage_label(workspace: Workspace) -> str | None:
-    """One-line coverage chip text for the cover page, or None if unknown."""
-    summary = getattr(workspace, "coverage_summary", None)
+def _coverage_label(coverage_summary: Any) -> str | None:
+    """One-line coverage chip text for the cover page, or None if unknown.
+
+    Accepts a pre-computed CoverageSummary (Pydantic model), a plain dict,
+    or a string.  The caller is responsible for deriving the value from the
+    database — the ORM Workspace model has no coverage_summary attribute
+    (it is a computed Pydantic-only field that always returns None when read
+    via getattr on an ORM instance).  M-1 — T-183.
+    """
+    summary = coverage_summary
     if not summary:
         return None
+    # Handle Pydantic CoverageSummary objects and duck-typed equivalents.
+    pct = getattr(summary, "percent", None)
+    if isinstance(pct, (int, float)):
+        return f"Harness coverage: {int(pct)}%"
+    covered = getattr(summary, "covered", None)
+    total = getattr(summary, "total", None)
+    if covered is not None and total:
+        return f"Harness coverage: {covered}/{total}"
+    # Fallback: plain dict (legacy callers).
     if isinstance(summary, dict):
-        covered = summary.get("covered_count") or summary.get("covered")
-        total = summary.get("total_count") or summary.get("total")
-        pct = summary.get("coverage_percent") or summary.get("percent")
-        if isinstance(pct, (int, float)):
-            return f"Harness coverage: {int(pct)}%"
-        if covered is not None and total:
-            return f"Harness coverage: {covered}/{total}"
+        dict_pct = summary.get("coverage_percent") or summary.get("percent")
+        if isinstance(dict_pct, (int, float)):
+            return f"Harness coverage: {int(dict_pct)}%"
+        dict_covered = summary.get("covered_count") or summary.get("covered")
+        dict_total = summary.get("total_count") or summary.get("total")
+        if dict_covered is not None and dict_total:
+            return f"Harness coverage: {dict_covered}/{dict_total}"
         if "label" in summary:
             return str(summary["label"])
     if isinstance(summary, str):
@@ -221,12 +237,19 @@ async def render(
                 f"Stage {stage_type!r} is not finalised — PDF export unavailable"
             )
 
+    # Derive coverage_summary explicitly — the ORM Workspace has no such
+    # attribute; it is only on the Pydantic response schema.  M-1 — T-183.
+    from services.sharing.public_share_service import (  # noqa: PLC0415
+        _derive_coverage_summary,
+    )
+
+    coverage_summary = await _derive_coverage_summary(workspace_id, db)
     template = _jinja_env.get_template(_TEMPLATE_NAME)
     html_text = template.render(
         workspace_name=workspace.name,
         provider_label=workspace.provider or "—",
         generated_at=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
-        coverage_label=_coverage_label(workspace),
+        coverage_label=_coverage_label(coverage_summary),
         sections=_build_sections(stages),
     )
     # Dispatch WeasyPrint to the default thread pool so the event loop is not
