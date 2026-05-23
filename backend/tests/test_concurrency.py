@@ -10,9 +10,8 @@ T-195 — covers five missing test categories identified in the Testing Assessme
 """
 from __future__ import annotations
 
-import asyncio
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock
 from uuid import UUID, uuid4
 
 import pytest
@@ -167,52 +166,11 @@ async def test_finalise_race_second_call_raises_when_not_draft() -> None:
         await manager.finalise(already_finalised_stage.id, user, db)
 
 
-@pytest.mark.asyncio
-async def test_finalise_concurrent_tasks_only_one_advances() -> None:
-    """C-1 — simulate two coroutines racing to finalise the same stage.
-
-    The first task finalises; the second sees the updated status and raises.
-    This validates the guard logic that prevents a double-advance in realistic
-    concurrent scenarios.
-    """
-    from services.pipeline.stage_manager import StageManager
-
-    manager = StageManager()
-    stage = _make_stage(status="draft")
-    call_count = 0
-
-    class _RacingDB:
-        """After the first execute, flip stage to finalised to simulate C-1."""
-
-        async def execute(self, stmt: Any) -> Any:
-            nonlocal call_count
-            call_count += 1
-            # Second execute returns the stage as already finalised.
-            if call_count > 1:
-                stage.status = "finalised"
-            return _ScalarResult(stage)
-
-        async def commit(self) -> None:
-            pass
-
-        async def refresh(self, obj: Any) -> None:
-            pass
-
-    redis_mock = AsyncMock()
-    redis_mock.set = AsyncMock()
-    redis_mock.delete = AsyncMock()
-
-    user = _make_user()
-
-    with patch.object(manager, "_redis_client", return_value=redis_mock):
-        with patch.object(manager, "_invalidate_stage_cache", new_callable=AsyncMock):
-            with patch.object(manager, "_get_next_stage", new_callable=AsyncMock, return_value=None):
-                # First call succeeds.
-                await manager.finalise(stage.id, user, _RacingDB())
-
-    # Now stage.status is 'finalised'; a second finalise must fail.
-    with pytest.raises(ValueError, match="cannot be finalised"):
-        await manager.finalise(stage.id, user, _RacingDB())
+# NOTE: The concurrent finalise race is tested against a real PostgreSQL
+# database in tests/test_finalise_integration.py using SELECT FOR UPDATE.
+# The mock-based approach that was previously here (T-212/T-214 deletion) gave
+# false confidence because it mutated stage.status in Python memory without
+# ever exercising the database lock. CF-1 — T-196.
 
 
 # ---------------------------------------------------------------------------

@@ -926,7 +926,14 @@ class StageManager:
         )
 
     async def finalise(self, stage_id: UUID, user, db: AsyncSession) -> Stage:
-        stage = await self._load_stage(stage_id, db)
+        """Advance a draft stage to finalised status.
+
+        Acquires a row-level SELECT FOR UPDATE lock via _load_stage(..., lock=True)
+        before reading the stage status.  This serialises concurrent finalise()
+        calls so that only the first caller succeeds and the second sees the
+        committed status='finalised' and raises ValueError.  CF-1 — T-196.
+        """
+        stage = await self._load_stage(stage_id, db, lock=True)
         if stage.status != "draft":
             raise ValueError(f"Stage status {stage.status!r} cannot be finalised")
 
