@@ -90,9 +90,11 @@ class AuthService:
         self, code: str, state: str, db: AsyncSession
     ) -> tuple[str, str]:
         state_key = f"{OAUTH_STATE_PREFIX}{state}"
-        if not await self.redis.get(state_key):
+        # Atomic read-and-delete: getdel returns the value and removes the key
+        # in a single round-trip, eliminating the TOCTOU window that the
+        # separate get() + delete() pair had (C-3 — T-175).
+        if not await self.redis.getdel(state_key):
             raise AuthError("Invalid or expired OAuth state")
-        await self.redis.delete(state_key)
 
         await self._maybe_await(
             self.oauth_client.fetch_token(

@@ -72,6 +72,11 @@ class FakeRedis:
     async def get(self, name: str) -> str | None:
         return self.values.get(name)
 
+    async def getdel(self, name: str) -> str | None:
+        """Atomic read-and-delete — mirrors redis-py's getdel semantics."""
+        value = self.values.pop(name, None)
+        return value
+
     async def delete(self, *names: str) -> None:
         for name in names:
             self.values.pop(name, None)
