@@ -4,7 +4,11 @@ import type { Stage, StageType } from "../types/stage"
 
 interface StageState {
   stages: Record<string, Stage>
-  streamingContent: Record<string, string> | string
+  /** Per-stage streaming buffer keyed by stage ID.  Narrowed from the former
+   *  `Record<string,string>|string` union — all consumers use object access.
+   *  M-6 — T-188.
+   */
+  streamingContent: Record<string, string>
   activeStream: string | null
   setStage: (stage: Stage) => void
   setStages: (stages: Stage[]) => void
@@ -38,21 +42,14 @@ export const useStageStore = create<StageState>()(
 
     appendToken: (stageId, token) =>
       set((state) => ({
-        streamingContent:
-          typeof state.streamingContent === "string"
-            ? state.streamingContent + token
-            : {
-                ...state.streamingContent,
-                [stageId]: (state.streamingContent[stageId] ?? "") + token,
-              },
+        streamingContent: {
+          ...state.streamingContent,
+          [stageId]: (state.streamingContent[stageId] ?? "") + token,
+        },
       })),
 
     appendStreamToken: (token) =>
       set((state) => {
-        if (typeof state.streamingContent === "string") {
-          return { streamingContent: state.streamingContent + token }
-        }
-
         const stageId = state.activeStream
         if (!stageId) return state
         return {
@@ -66,26 +63,15 @@ export const useStageStore = create<StageState>()(
     startStream: (stageId) =>
       set((state) => ({
         activeStream: stageId,
-        streamingContent:
-          typeof state.streamingContent === "string"
-            ? { [stageId]: "" }
-            : { ...state.streamingContent, [stageId]: "" },
+        streamingContent: { ...state.streamingContent, [stageId]: "" },
       })),
 
     finaliseStream: (stageId) =>
       set((state) => {
-        const accumulated =
-          typeof state.streamingContent === "string"
-            ? state.streamingContent
-            : state.streamingContent[stageId]
+        const accumulated = state.streamingContent[stageId]
         const existing = state.stages[stageId]
-        const updatedStreamingContent =
-          typeof state.streamingContent === "string"
-            ? ""
-            : { ...state.streamingContent }
-        if (typeof updatedStreamingContent !== "string") {
-          delete updatedStreamingContent[stageId]
-        }
+        const updatedStreamingContent = { ...state.streamingContent }
+        delete updatedStreamingContent[stageId]
 
         return {
           activeStream: null,

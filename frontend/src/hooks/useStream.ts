@@ -5,7 +5,7 @@ import {
   regenerateStage,
   regenerateStageForGaps,
 } from "../services/api"
-import { StreamError, createSSEConnection } from "../services/sseService"
+import { StreamError, closeStreamRef, createSSEConnection } from "../services/sseService"
 import { useStageStore } from "../store/stageStore"
 import type { EvalResult, Stage } from "../types/stage"
 
@@ -96,7 +96,7 @@ export function useStream(stageId: string | null) {
 
         return null
       } finally {
-        streamRef.current = null
+        closeStreamRef(streamRef)
         setIsStreaming(false)
       }
     },
@@ -104,8 +104,7 @@ export function useStream(stageId: string | null) {
   )
 
   const cancel = useCallback(() => {
-    streamRef.current?.close()
-    streamRef.current = null
+    closeStreamRef(streamRef)
     if (stageId) {
       useStageStore.getState().finaliseStream(stageId)
     }

@@ -80,10 +80,7 @@ export const StageEditor = forwardRef<StageEditorHandle, StageEditorProps>(
 
     useEffect(() => {
       const unsubscribe = useStageStore.subscribe(
-        (state) =>
-          typeof state.streamingContent === "string"
-            ? state.streamingContent
-            : state.streamingContent[stageId],
+        (state) => state.streamingContent[stageId],
         (content) => {
           const view = viewRef.current
           if (!view || content === undefined) return

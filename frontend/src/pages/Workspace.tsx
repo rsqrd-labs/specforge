@@ -177,6 +177,11 @@ export default function Workspace() {
   const [evalResults, setEvalResults] = useState<Record<string, EvalResult | null>>(
     {},
   )
+  /** Stages whose eval polling exhausted all retries without a successful result.
+   *  When true, QualityBadge renders "Score unavailable" instead of the shimmer.
+   *  M-5 — T-187.
+   */
+  const [evalError, setEvalError] = useState<Record<string, boolean>>({})
   const [dismissedStale, setDismissedStale] = useState<Record<string, boolean>>(
     {},
   )
@@ -306,18 +311,25 @@ export default function Workspace() {
     let cancelled = false
 
     const loadEval = async () => {
+      let consecutiveFailures = 0
       for (let attempt = 0; attempt < EVAL_POLL_ATTEMPTS; attempt += 1) {
         try {
           const result = await getStageEval(stageId)
           if (!cancelled) {
+            consecutiveFailures = 0
             setEvalResults((existing) => ({ ...existing, [stageId]: result }))
           }
           return
-        } catch {
+        } catch (err) {
           if (cancelled) {
             return
           }
-          if (attempt === EVAL_POLL_ATTEMPTS - 1) {
+          consecutiveFailures += 1
+          if (consecutiveFailures >= EVAL_POLL_ATTEMPTS || attempt === EVAL_POLL_ATTEMPTS - 1) {
+            // All retries exhausted — surface a terminal error badge rather than
+            // leaving the shimmer spinner spinning indefinitely.  M-5 — T-187.
+            console.error("[eval] polling exhausted maxRetries for stage", stageId, err)
+            setEvalError((existing) => ({ ...existing, [stageId]: true }))
             setEvalResults((existing) => ({ ...existing, [stageId]: null }))
             return
           }
@@ -723,6 +735,7 @@ export default function Workspace() {
   }
 
   const evalResult = evalResults[activeStage.id] ?? activeStage.eval_result ?? null
+  const isEvalError = evalError[activeStage.id] ?? false
   const showStaleWarning =
     activeStage.status === "stale" && !dismissedStale[activeStage.id]
   const upstreamType = previousStageType(activeStage.type)
@@ -1136,7 +1149,7 @@ export default function Workspace() {
                   </div>
                 </div>
                 <div className="workspace-pane-actions">
-                  <QualityBadge evalResult={evalResult} />
+                  <QualityBadge evalResult={evalResult} error={isEvalError} />
                   {!isStreaming && !diffResult && (
                     <div className="document-mode-toggle" aria-label="Spec view mode">
                       <button
@@ -1220,7 +1233,7 @@ export default function Workspace() {
                   </div>
                 </div>
                 <div className="workspace-pane-actions">
-                  <QualityBadge evalResult={evalResult} />
+                  <QualityBadge evalResult={evalResult} error={isEvalError} />
                   {activeStage.type === "tasks" && evalResult !== null && genuineGapIssues.length === 0 && (
                     <span className="ws-validation-ok-chip">✓ All tasks valid</span>
                   )}

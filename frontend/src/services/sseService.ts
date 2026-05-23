@@ -25,6 +25,23 @@ interface EvalEvent {
 
 type SSEPayload = DoneEvent | TokenEvent | ErrorEvent | EvalEvent
 
+/**
+ * Safely close and nullify an SSE stream reference.
+ *
+ * Correct teardown order: call `.close()` on the live ref **first**, then
+ * clear the ref.  Reversing the order destroys the reference before the
+ * connection is terminated — the subsequent close call becomes a no-op on a
+ * stale closure value or throws `TypeError` on a null dereference.
+ * M-4 — T-186.
+ */
+export function closeStreamRef(
+  streamRef: { current: SSEControl | null },
+): void {
+  // close after generation complete; eval result arrives via polling, not SSE
+  streamRef.current?.close()
+  streamRef.current = null
+}
+
 export class StreamError extends Error {
   constructor(
     public readonly code: string,
