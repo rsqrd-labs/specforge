@@ -11,7 +11,7 @@ from starlette.requests import Request
 from starlette.responses import Response
 
 from config import settings, validate_production_settings
-from database import async_engine
+from database import _initialize_redis, async_engine
 from middleware.body_size import BodySizeLimitMiddleware
 from middleware.csrf import CsrfMiddleware
 from middleware.rate_limit import RateLimitMiddleware
@@ -100,6 +100,10 @@ def create_app(redis_client: Redis | None = None) -> FastAPI:
             socket_timeout=2,
         )
         app.state.redis = redis
+        # Register the pool with the module-level helper so services and
+        # background tasks can call database.get_shared_redis() without
+        # holding a Request reference.  H-1 — T-177.
+        _initialize_redis(redis)
         task = asyncio.create_task(run_recovery_loop())
         yield
         task.cancel()

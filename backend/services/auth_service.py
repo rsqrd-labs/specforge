@@ -13,6 +13,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config import settings
+from database import get_shared_redis
 from models import User
 from services.credit_service import CreditService, credit_service
 
@@ -59,10 +60,9 @@ class AuthService:
         jwt_private_key: str | None = None,
         jwt_public_key: str | None = None,
     ) -> None:
-        self.redis = redis_client or Redis.from_url(
-            settings.redis_url,
-            decode_responses=True,
-        )
+        # Use the constructor-injected client (for tests) or the shared pool.
+        # H-1 — T-177.
+        self.redis = redis_client or get_shared_redis()
         self.oauth_client = oauth_client or AsyncOAuth2Client(
             client_id=settings.google_client_id,
             client_secret=settings.google_client_secret,

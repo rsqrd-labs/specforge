@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from config import settings
+from database import get_shared_redis
 from middleware.rate_limit import sliding_window_check
 from models import EvalResult, Stage, StageVersion, Workspace
 from prompts.base import (
@@ -355,8 +356,10 @@ class StageManager:
         self._redis: Redis | None = redis_client
 
     async def _redis_client(self) -> Redis:
+        # Use the constructor-injected client (for tests) or the shared pool
+        # established at lifespan start.  H-1 — T-177.
         if self._redis is None:
-            self._redis = Redis.from_url(settings.redis_url, decode_responses=True)
+            self._redis = get_shared_redis()
         return self._redis
 
     async def _start_langfuse_span(

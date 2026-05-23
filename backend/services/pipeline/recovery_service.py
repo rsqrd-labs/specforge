@@ -9,6 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config import settings
+from database import get_shared_redis
 from models import Stage
 from services.credit_service import credit_service
 from services.pipeline.stage_manager import CREDIT_COSTS
@@ -67,21 +68,20 @@ async def run_recovery_loop() -> None:
     """
     from database import AsyncSessionLocal
 
-    redis = Redis.from_url(settings.redis_url, decode_responses=True)
-    try:
-        while True:
-            await asyncio.sleep(_POLL_INTERVAL_SECONDS)
-            try:
-                acquired = await redis.set(
-                    _RECOVERY_LOCK_KEY, "1", nx=True, ex=_RECOVERY_LOCK_TTL
-                )
-                if not acquired:
-                    continue
-                async with AsyncSessionLocal() as db:
-                    count = await recover_stuck_stages(db)
-                    if count > 0:
-                        logger.info("stage.recovery.complete recovered=%d", count)
-            except Exception:
-                logger.exception("stage.recovery.error")
-    finally:
-        await redis.aclose()
+    # Use the shared connection pool — never create a per-loop client.
+    # H-1 — T-177.
+    redis = get_shared_redis()
+    while True:
+        await asyncio.sleep(_POLL_INTERVAL_SECONDS)
+        try:
+            acquired = await redis.set(
+                _RECOVERY_LOCK_KEY, "1", nx=True, ex=_RECOVERY_LOCK_TTL
+            )
+            if not acquired:
+                continue
+            async with AsyncSessionLocal() as db:
+                count = await recover_stuck_stages(db)
+                if count > 0:
+                    logger.info("stage.recovery.complete recovered=%d", count)
+        except Exception:
+            logger.exception("stage.recovery.error")

@@ -7,7 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config import settings
-from database import get_db
+from database import get_db, get_redis
 from middleware.auth import get_current_user
 from models import EvalResult, Stage, StageVersion, User, Workspace
 from schemas.integration import (
@@ -161,13 +161,7 @@ async def archive_workspace(
     await workspace_service.archive(id, user.id, db)
 
 
-def _get_redis() -> Redis:
-    """Construct a per-request Redis client.
-
-    The clarify endpoints touch Redis once (read/write the round key)
-    and have no need for the long-lived application singleton.
-    """
-    return Redis.from_url(settings.redis_url, decode_responses=True)
+# _get_redis removed — inject redis via Depends(get_redis).  H-1 — T-177.
 
 
 @router.post(
@@ -179,6 +173,7 @@ async def request_spec_clarification(
     id: UUID,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    redis: Redis = Depends(get_redis),
 ) -> Response:
     """Ask the cheap judge model for 3–5 clarifying questions (Phase 14).
 
@@ -189,11 +184,8 @@ async def request_spec_clarification(
     middleware.
     """
     workspace = await workspace_service.get(id, user.id, db)
-    redis = _get_redis()
-    try:
-        questions = await spec_clarifier.request_clarifying_questions(workspace, redis)
-    finally:
-        await redis.close()
+    # Shared pool — no manual close needed.  H-1 — T-177.
+    questions = await spec_clarifier.request_clarifying_questions(workspace, redis)
     if not questions:
         return Response(status_code=status.HTTP_204_NO_CONTENT)
     return Response(
@@ -208,6 +200,7 @@ async def persist_spec_clarification(
     payload: ClarifySubmitRequest,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    redis: Redis = Depends(get_redis),
 ) -> Response:
     """Persist the user's answers to the most recent clarification round.
 
@@ -218,7 +211,7 @@ async def persist_spec_clarification(
     """
     # Authorise — calling .get() raises 404 if the workspace isn't the user's.
     await workspace_service.get(id, user.id, db)
-    redis = _get_redis()
+    # Shared pool — no manual close needed.  H-1 — T-177.
     try:
         await spec_clarifier.persist_answers(
             workspace_id=id,
@@ -231,8 +224,6 @@ async def persist_spec_clarification(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail={"error": str(exc)},
         ) from exc
-    finally:
-        await redis.close()
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 

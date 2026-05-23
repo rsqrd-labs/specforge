@@ -12,6 +12,7 @@ import prompts.plan as plan_prompts
 import prompts.spec as spec_prompts
 import prompts.tasks as tasks_prompts
 from config import settings
+from database import get_shared_redis
 from models import Stage, Workspace
 from services.pipeline.stage_summary_service import summarize_stage_content
 
@@ -55,9 +56,7 @@ async def build_prompt(
         deps["clarification_qa"] = json.dumps(workspace.clarification_qa)
 
     if dep_keys:
-        redis = redis_client or Redis.from_url(
-            settings.redis_url, decode_responses=True
-        )
+        redis = redis_client or get_shared_redis()  # H-1 — T-177
         for dep_type in dep_keys:
             content = await _fetch_stage_content(dep_type, workspace.id, db, redis)
             if len(content) > _MAX_UPSTREAM_CHARS:

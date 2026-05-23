@@ -6,7 +6,7 @@ from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config import settings
-from database import get_db
+from database import get_db, get_redis
 from middleware.auth import get_current_user
 from models import User
 from schemas.auth import UserResponse
@@ -137,22 +137,15 @@ async def csrf_token(user: User = Depends(get_current_user)) -> dict[str, str]:
     return {"csrf_token": generate_csrf_token(str(user.id))}
 
 
-def _get_redis(request: Request) -> Redis:
-    """Return the shared Redis client from app.state.
-
-    Falls back to a per-request connection if lifespan hasn't run (e.g. in
-    unit tests that hit the route directly).
-    """
-    redis = getattr(request.app.state, "redis", None)
-    if redis is not None:
-        return redis
-    return Redis.from_url(settings.redis_url, decode_responses=True)
+# _get_redis removed — use get_redis from database.py via Depends().
+# H-1 — T-177.
 
 
 @router.get("/github")
 async def github_login(
     request: Request,
     user: User = Depends(get_current_user),
+    redis: Redis = Depends(get_redis),
 ) -> RedirectResponse:
     """Initiate the GitHub OAuth flow.
 
@@ -165,7 +158,6 @@ async def github_login(
             detail="GitHub integration is not configured",
         )
 
-    redis = _get_redis(request)
     try:
         url = await github_auth_service.get_github_oauth_url(user.id, redis)
     except AuthError as exc:
@@ -184,6 +176,7 @@ async def github_callback(
     state: str | None = None,
     error: str | None = None,
     db: AsyncSession = Depends(get_db),
+    redis: Redis = Depends(get_redis),
 ) -> RedirectResponse:
     """Complete the GitHub OAuth flow.
 
@@ -203,7 +196,6 @@ async def github_callback(
             detail="Missing OAuth code or state",
         )
 
-    redis = _get_redis(request)
     try:
         await github_auth_service.handle_github_callback(code, state, db, redis)
     except AuthError as exc:

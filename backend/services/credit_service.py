@@ -10,6 +10,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config import settings
+from database import get_shared_redis
 from models import CreditLedger, User
 
 logger = logging.getLogger(__name__)
@@ -37,8 +38,10 @@ class CreditService:
         return f"{_CACHE_PREFIX}{user_id}"
 
     async def _get_redis(self) -> Redis:
+        # Use the constructor-injected client (for tests) or the shared pool.
+        # H-1 — T-177.
         if self._redis is None:
-            self._redis = Redis.from_url(settings.redis_url, decode_responses=True)
+            self._redis = get_shared_redis()
         return self._redis
 
     async def get_balance(self, db: AsyncSession, user_id: UUID) -> int:

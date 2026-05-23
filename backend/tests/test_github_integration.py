@@ -30,7 +30,7 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 from config import settings
-from database import get_db
+from database import get_db, get_redis
 from main import create_app
 from middleware.auth import get_current_user
 from models import User
@@ -176,8 +176,13 @@ def app(monkeypatch: pytest.MonkeyPatch) -> Any:
     monkeypatch.setattr(settings, "github_client_id", "test_client_id")
     monkeypatch.setattr(settings, "github_client_secret", "test_secret")
 
-    application = create_app(redis_client=_FakeRedis())
+    fake_redis = _FakeRedis()
+    application = create_app(redis_client=fake_redis)
+    # The AsyncClient does not trigger the lifespan, so app.state.redis is not
+    # set automatically.  Manually inject the fake so Depends(get_redis) works.
+    application.state.redis = fake_redis
     application.dependency_overrides[get_db] = _fake_get_db
+    application.dependency_overrides[get_redis] = lambda: fake_redis
     yield application
     application.dependency_overrides.clear()
 
