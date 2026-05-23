@@ -290,7 +290,8 @@ def _upstream_artifact_hashes(workspace: Workspace, stage_type: str) -> dict[str
     }
 
 
-STAGE_DEPENDENCIES: dict[str, list[str]] = {
+# Canonical single definition of stage dependency ordering.  L-1 — T-189a.
+STAGE_DEPENDENCIES = {
     "spec": [],
     "plan": ["spec"],
     "harness": ["spec", "plan"],
@@ -368,12 +369,9 @@ class RateLimitError(Exception):
 
 class StageManager:
     STAGE_ORDER = STAGE_ORDER
-    STAGE_DEPENDENCIES = {
-        "spec": ["problem_statement"],
-        "plan": ["spec"],
-        "harness": ["spec", "plan"],
-        "tasks": ["spec", "plan", "harness"],
-    }
+    # STAGE_DEPENDENCIES is defined at module scope above; do not duplicate
+    # it here — two diverging dicts produce different dependency graphs.
+    # L-1 — T-189a.
 
     def __init__(self, redis_client: Redis | None = None) -> None:
         self._redis: Redis | None = redis_client
