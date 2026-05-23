@@ -1123,10 +1123,8 @@ class StageManager:
         stage = await self._load_stage(stage_id, db, lock=True)
         workspace = await self._load_workspace(stage.workspace_id, db)
 
-        if stage.status not in ("draft", "stale", "final", "in_progress"):
+        if stage.status not in ("draft", "stale", "finalised"):
             raise StageStateError(f"Stage status {stage.status!r} cannot be patched")
-        if stage.status == "final":
-            stage.status = "stale"
 
         redis = await self._redis_client()
         if not await sliding_window_check(redis, f"llm:{user.id}", 10, 60):
@@ -1142,16 +1140,16 @@ class StageManager:
             lambda: _route_for_stage_generation("harness", workspace)
         )
 
-        stage.status = "in_progress"
-        stage.deduction_ledger_id = None
-        stage.updated_at = datetime.now(UTC)
-        await db.commit()
-
-        _cleanup_done = False
+        # generate_harness_patch is credit-free and idempotent.  We intentionally
+        # skip the active-generation status transition that generate() uses: the
+        # SELECT FOR UPDATE lock from _load_stage serialises concurrent patch
+        # requests, and omitting that transition means a crash mid-stream leaves
+        # the stage in its original status (no partial writes are ever committed),
+        # making recovery-service involvement unnecessary.  C-2 — T-174.
         accumulated = ""
+        stream_timeout = _stream_timeout_for_stage("harness")
         try:
             adapter = get_llm(route.provider, route.model)
-            stream_timeout = _stream_timeout_for_stage("harness")
             async with asyncio.timeout(stream_timeout):
                 async for token in adapter.stream(
                     system_prompt, user_prompt, max_tokens=2048
@@ -1177,7 +1175,6 @@ class StageManager:
             version_id = version.id
             eval_context, _ = await self._eval_context_for_stage(workspace.id, "harness")
             await db.commit()
-            _cleanup_done = True
             await self._invalidate_stage_cache(workspace.id, "harness", redis)
 
             eval_task = _schedule_stage_eval(
@@ -1200,35 +1197,11 @@ class StageManager:
                 pass
 
         except (ProviderError, TimeoutError) as exc:
-            stage.status = "draft"
-            stage.updated_at = datetime.now(UTC)
-            await db.commit()
-            _cleanup_done = True
+            # On provider failure the stage remains in its pre-patch status
+            # (draft / stale / finalised) — no state change needed.
             if isinstance(exc, TimeoutError):
                 raise ProviderTimeoutError(route.provider, stream_timeout) from exc
             raise
-        finally:
-            if not _cleanup_done:
-                from database import AsyncSessionLocal
-
-                try:
-                    async with AsyncSessionLocal() as cleanup_db:
-                        result = await cleanup_db.execute(
-                            select(Stage).where(Stage.id == stage_id)
-                        )
-                        stuck = result.scalar_one_or_none()
-                        if stuck is not None and stuck.status == "in_progress":
-                            stuck.status = "draft"
-                            stuck.updated_at = datetime.now(UTC)
-                            await cleanup_db.commit()
-                            await redis.delete(
-                                f"{_STAGE_CACHE_PREFIX}{workspace.id}:harness"
-                            )
-                except Exception:
-                    logger.exception(
-                        "harness_patch_cleanup_failed",
-                        extra={"stage_id": str(stage_id)},
-                    )
 
 
 stage_manager = StageManager()
