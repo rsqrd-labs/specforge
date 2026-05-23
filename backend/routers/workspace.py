@@ -44,6 +44,22 @@ from services.workspace_service import workspace_service
 
 logger = logging.getLogger(__name__)
 
+# Content-Security-Policy applied on the public /p/:slug share page.
+# The frontend _headers file and the backend public router both set this
+# header so it is enforced regardless of which layer serves the response.
+# T-193 — unauthenticated pages that render LLM-generated Markdown need
+# an explicit CSP to prevent injected content from loading external scripts.
+_PUBLIC_SHARE_CSP = (
+    "default-src 'none'; "
+    "img-src 'self' data: https:; "
+    "style-src 'self' 'unsafe-inline'; "
+    "font-src 'self'; "
+    "script-src 'none'; "
+    "frame-ancestors 'none'; "
+    "base-uri 'none'; "
+    "form-action 'none'"
+)
+
 router = APIRouter(prefix="/workspaces", tags=["workspaces"])
 
 

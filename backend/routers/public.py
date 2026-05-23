@@ -22,6 +22,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database import get_db
+from routers.workspace import _PUBLIC_SHARE_CSP
 from schemas.workspace import PublicWorkspaceResponse
 from services.sharing import public_share_service
 
@@ -61,6 +62,7 @@ async def get_public_workspace(
                 "ETag": etag,
                 "X-Robots-Tag": _NOINDEX_HEADER,
                 "Cache-Control": _CACHE_CONTROL,
+                "Content-Security-Policy": _PUBLIC_SHARE_CSP,
             },
         )
 
@@ -71,5 +73,6 @@ async def get_public_workspace(
             "ETag": etag,
             "X-Robots-Tag": _NOINDEX_HEADER,
             "Cache-Control": _CACHE_CONTROL,
+            "Content-Security-Policy": _PUBLIC_SHARE_CSP,
         },
     )
