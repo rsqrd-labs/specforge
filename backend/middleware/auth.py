@@ -117,6 +117,16 @@ def clear_user_cache(user_id: UUID | None = None) -> None:
     _USER_CACHE.pop(user_id, None)
 
 
+def invalidate_user_cache(user_id: UUID) -> None:
+    """Remove ``user_id`` from the auth middleware cache.
+
+    Call this after any operation that modifies the user's credit_balance so
+    the next request re-reads the authoritative value from the database rather
+    than serving a stale cache entry.  H-4 — T-180.
+    """
+    _USER_CACHE.pop(user_id, None)
+
+
 def _unauthorized() -> HTTPException:
     return HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
