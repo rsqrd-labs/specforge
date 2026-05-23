@@ -453,6 +453,26 @@ bad state.
 
 ---
 
+## Auth rate limit overrides in Docker Compose
+
+The `docker-compose.yml` file sets two environment variables on the `api` service
+that override the production-safe defaults:
+
+```yaml
+AUTH_LOGIN_BURST_LIMIT: 60    # Local dev only — do not copy to staging/production
+AUTH_LOGIN_HOURLY_LIMIT: 240  # Local dev only — do not copy to staging/production
+```
+
+These relaxed rate limit values let you run tests and exercise the auth flow
+without hitting login throttling on your laptop. **Do not copy them to staging
+or production** — the defaults enforced by `config.py` are much stricter.
+
+If you need to test the rate limit behaviour itself (e.g. you are working on
+the authentication flow), temporarily lower the values or remove the overrides
+so the production defaults apply.
+
+---
+
 ## Troubleshooting
 
 ### `docker compose up` fails immediately

@@ -6,7 +6,11 @@ services:
       POSTGRES_USER: specforge
       POSTGRES_PASSWORD: specforge
     ports:
-      - "127.0.0.1:5432:5432"
+      # Long-form syntax binds to 127.0.0.1 only — not exposed to LAN.  L-7 — T-189c.
+      - target: 5432
+        published: 5432
+        host_ip: "127.0.0.1"
+        protocol: tcp
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -18,7 +22,11 @@ services:
   redis:
     image: redis:7-alpine
     ports:
-      - "127.0.0.1:6379:6379"
+      # Long-form syntax binds to 127.0.0.1 only — not exposed to LAN.  L-7 — T-189c.
+      - target: 6379
+        published: 6379
+        host_ip: "127.0.0.1"
+        protocol: tcp
     volumes:
       - redis_data:/data
     healthcheck:
@@ -37,8 +45,8 @@ services:
       DATABASE_URL: postgresql+asyncpg://specforge:specforge@db:5432/specforge
       REDIS_URL: redis://redis:6379/0
       FRONTEND_URL: http://localhost:5173
-      AUTH_LOGIN_BURST_LIMIT: 60
-      AUTH_LOGIN_HOURLY_LIMIT: 240
+      AUTH_LOGIN_BURST_LIMIT: 60  # Local dev only — do not copy to staging/production
+      AUTH_LOGIN_HOURLY_LIMIT: 240  # Local dev only — do not copy to staging/production
     depends_on:
       db:
         condition: service_healthy
@@ -52,7 +60,12 @@ services:
     image: node:22-alpine
     working_dir: /app
     ports:
-      - "5173:5173"
+      # Long-form syntax binds to 127.0.0.1 only — prevents Vite dev server
+      # source maps and HMR websockets from being exposed to LAN.  L-7 — T-189c.
+      - target: 5173
+        published: 5173
+        host_ip: "127.0.0.1"
+        protocol: tcp
     environment:
       VITE_API_URL: http://localhost:8000
       VITE_SENTRY_DSN: ""
