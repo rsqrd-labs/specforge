@@ -4,20 +4,18 @@ import asyncio
 import logging
 from datetime import UTC, datetime, timedelta
 
-from redis.asyncio import Redis
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from config import settings
 from database import get_shared_redis
 from models import Stage
 from services.credit_service import credit_service
 from services.pipeline.stage_manager import (
-    CREDIT_COSTS,
     _POLL_INTERVAL_SECONDS,
     _RECOVERY_LOCK_KEY,
     _RECOVERY_LOCK_TTL,
-    refresh_recovery_lock,
+    CREDIT_COSTS,
+    run_recovery_cycle,
 )
 
 logger = logging.getLogger(__name__)
@@ -82,11 +80,10 @@ async def run_recovery_loop() -> None:
             )
             if not acquired:
                 continue
-            # Heartbeat: delegate TTL refresh to stage_manager helper.
-            # H-3 — T-179.
-            await refresh_recovery_lock(redis)
+            # Continuous heartbeat keeps the lock alive for the full cycle.
+            # HF-3 — T-200.
             async with AsyncSessionLocal() as db:
-                count = await recover_stuck_stages(db)
+                count = await run_recovery_cycle(redis, db)
                 if count > 0:
                     logger.info("stage.recovery.complete recovered=%d", count)
         except Exception:

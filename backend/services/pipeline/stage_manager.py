@@ -317,6 +317,64 @@ async def refresh_recovery_lock(redis: "Redis") -> None:
     await redis.expire(_RECOVERY_LOCK_KEY, _RECOVERY_LOCK_TTL)
 
 
+async def _recovery_heartbeat(
+    redis: "Redis",
+    lock_key: str,
+    ttl: int,
+    interval: int,
+) -> None:
+    """Continuous heartbeat: keep the recovery leader-lock alive during a cycle.
+
+    Loops until cancelled, refreshing the Redis key TTL every *interval*
+    seconds.  Exits cleanly on asyncio.CancelledError so the caller's
+    ``finally`` block always completes.  HF-3 — T-200.
+    """
+    try:
+        while True:
+            await asyncio.sleep(interval)
+            try:
+                await redis.expire(lock_key, ttl)
+                logger.debug(
+                    "recovery_heartbeat.refresh lock_key=%s ttl=%d",
+                    lock_key,
+                    ttl,
+                )
+            except Exception:
+                logger.exception(
+                    "recovery_heartbeat.refresh.error lock_key=%s", lock_key
+                )
+    except asyncio.CancelledError:
+        pass
+
+
+async def run_recovery_cycle(redis: "Redis", db: AsyncSession) -> int:
+    """Run one recovery cycle under a continuous lock heartbeat.
+
+    Spawns a background asyncio.Task that refreshes the recovery leader-lock
+    TTL every ``_RECOVERY_LOCK_TTL // 3`` seconds.  The task is guaranteed to
+    be cancelled in the ``finally`` block so the lock is never inadvertently
+    held beyond the cycle.  HF-3 — T-200.
+
+    Returns the number of stages recovered.
+    """
+    # Lazy import breaks the circular dependency:
+    #   stage_manager → recovery_service → stage_manager.
+    # recovery_service is imported at function-call time (not module-load time).
+    from services.pipeline.recovery_service import recover_stuck_stages  # noqa: PLC0415
+
+    heartbeat_interval = _RECOVERY_LOCK_TTL // 3
+    _heartbeat = asyncio.create_task(
+        _recovery_heartbeat(
+            redis, _RECOVERY_LOCK_KEY, _RECOVERY_LOCK_TTL, heartbeat_interval
+        )
+    )
+    try:
+        return await recover_stuck_stages(db)
+    finally:
+        _heartbeat.cancel()
+        await asyncio.gather(_heartbeat, return_exceptions=True)
+
+
 def _merge_harness_patch(existing: str, patch: str) -> str:
     """Append new ## File: sections from patch into existing harness.
 
