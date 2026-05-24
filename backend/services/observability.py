@@ -113,6 +113,14 @@ EVAL_POLL_FAILURES = Counter(
     ["stage_type"],
 )
 
+# CSRF replay rejection counter — incremented when verify_csrf_token() detects
+# a nonce that has already been claimed in Redis (i.e., the token was replayed).
+# Distinguishes active replay attacks from token generation bugs.  HF-6 — T-203.
+CSRF_REPLAY_REJECTIONS = Counter(
+    "specforge_csrf_replay_rejections_total",
+    "CSRF tokens rejected because the nonce was already consumed in Redis",
+)
+
 _sentry_configured = False
 _otel_configured = False
 _REDACTED = "[REDACTED]"

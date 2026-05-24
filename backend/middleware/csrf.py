@@ -1,8 +1,17 @@
+"""CSRF enforcement middleware.
+
+Every mutating HTTP request (POST / PUT / PATCH / DELETE) that carries a
+Bearer token must include a valid ``X-CSRF-Token`` header.  The CSRF token is
+verified by ``services.security.csrf.verify_csrf_token``, which now performs a
+Redis SETNX round-trip to atomically consume the token's nonce — closing the
+1-hour replay window.  HF-6 — T-203.
+"""
+
 from __future__ import annotations
 
 from collections.abc import Callable
 
-from fastapi import status
+from fastapi import HTTPException, status
 from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
@@ -14,9 +23,9 @@ from services.security.csrf import verify_csrf_token
 _SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 _EXEMPT_PATHS = frozenset(
     {
-        "/auth/google",    # exempt: initiates OAuth redirect — no session exists yet
-        "/auth/callback",  # exempt: receives OAuth provider callback — no auth token yet
-        "/auth/refresh",   # exempt: exchanges HTTP-only refresh cookie for a new token
+        "/auth/google",  # exempt: initiates OAuth redirect — no session exists yet
+        "/auth/callback",  # exempt: OAuth provider callback — no auth token yet
+        "/auth/refresh",  # exempt: exchanges HTTP-only refresh cookie for a new token
     }
 )
 
@@ -34,7 +43,26 @@ class CsrfMiddleware(BaseHTTPMiddleware):
         if not csrf_token:
             return _forbidden()
 
-        if not verify_csrf_token(csrf_token, session_id):
+        # Read the shared Redis pool injected by the FastAPI lifespan.  If Redis
+        # is not yet available (pre-lifespan), verify_csrf_token() degrades
+        # gracefully and logs a WARNING rather than blocking the request.
+        # HF-5 — T-202.  HF-6 — T-203.
+        redis = getattr(request.app.state, "redis", None)
+
+        try:
+            valid = await verify_csrf_token(csrf_token, session_id, redis)
+        except HTTPException as exc:
+            # verify_csrf_token() raises HTTPException(403) when it detects a
+            # replayed nonce (SETNX returned None).  BaseHTTPMiddleware runs
+            # outside FastAPI's ExceptionMiddleware, so we must convert the
+            # exception to a JSONResponse here rather than letting it propagate
+            # to ServerErrorMiddleware (which would return 500).  HF-6 — T-203.
+            return JSONResponse(
+                status_code=exc.status_code,
+                content={"detail": exc.detail},
+            )
+
+        if not valid:
             return _forbidden()
 
         return await call_next(request)
