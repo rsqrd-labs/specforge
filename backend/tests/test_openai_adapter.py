@@ -1,0 +1,235 @@
+"""Unit tests for OpenAI streaming adapter guards — T-199 (HF-2).
+
+Tests verify that the three defensive guards added to OpenAIAdapter.stream()
+correctly handle the edge-case chunks that the OpenAI API sends:
+
+  OA-1  Usage-only chunks (choices=[]) are silently skipped.
+  OA-2  Chunks with delta=None are silently skipped.
+  OA-3  Chunks with delta.content=None are silently skipped.
+  OA-4  Normal content chunks are yielded correctly.
+  OA-5  A mixed stream (usage chunk + real content) yields only real content.
+  OA-6  An entirely empty stream yields nothing and does not raise.
+  OA-7  OpenAIError is re-raised as ProviderError.
+"""
+
+from __future__ import annotations
+
+from collections.abc import AsyncIterator
+from types import SimpleNamespace
+from typing import Any
+from unittest.mock import AsyncMock, MagicMock
+
+import openai
+import pytest
+
+from services.llm.base import ProviderError
+
+# ---------------------------------------------------------------------------
+# Helpers — build fake chunk objects that match the openai SDK shape
+# ---------------------------------------------------------------------------
+
+
+def _chunk(content: str | None = None, choices: list | None = None) -> Any:
+    """Build a minimal fake streaming chunk.
+
+    If *choices* is supplied it is used directly; otherwise a single choice
+    with ``delta.content = content`` is created.
+    """
+    if choices is not None:
+        return SimpleNamespace(choices=choices)
+    delta = SimpleNamespace(content=content)
+    choice = SimpleNamespace(delta=delta)
+    return SimpleNamespace(choices=[choice])
+
+
+def _chunk_empty_choices() -> Any:
+    """Usage-only chunk: choices=[] (no delta at all)."""
+    return SimpleNamespace(choices=[])
+
+
+def _chunk_delta_none() -> Any:
+    """Final-chunk variant: choices=[{delta: None}]."""
+    choice = SimpleNamespace(delta=None)
+    return SimpleNamespace(choices=[choice])
+
+
+async def _fake_stream(chunks: list[Any]) -> AsyncIterator[Any]:
+    """Yield each chunk in turn as an async iterator."""
+    for chunk in chunks:
+        yield chunk
+
+
+# ---------------------------------------------------------------------------
+# Fixture: patch the openai client on a fresh adapter instance
+# ---------------------------------------------------------------------------
+
+
+def _make_adapter(chunks: list[Any]) -> Any:
+    """Return an OpenAIAdapter whose underlying client streams *chunks*."""
+    from services.llm.openai_adapter import OpenAIAdapter
+
+    adapter = OpenAIAdapter.__new__(OpenAIAdapter)
+    adapter.model = "gpt-4o"
+
+    mock_create = AsyncMock()
+    mock_create.return_value = _fake_stream(chunks)
+
+    mock_completions = MagicMock()
+    mock_completions.create = mock_create
+
+    mock_chat = MagicMock()
+    mock_chat.completions = mock_completions
+
+    mock_client = MagicMock()
+    mock_client.chat = mock_chat
+    adapter._client = mock_client
+
+    return adapter
+
+
+# ---------------------------------------------------------------------------
+# OA-1: usage-only chunks (choices=[]) are skipped
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_empty_choices_chunk_is_skipped() -> None:
+    """OA-1 — choices=[] chunks must be silently skipped, not raise IndexError."""
+    adapter = _make_adapter([_chunk_empty_choices(), _chunk("hello")])
+
+    tokens: list[str] = []
+    async for token in adapter.stream("sys", "user", 100):
+        tokens.append(token)
+
+    assert tokens == ["hello"], (
+        "Usage-only chunk (choices=[]) must be skipped. " f"Got tokens: {tokens!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# OA-2: delta=None chunks are skipped
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_delta_none_chunk_is_skipped() -> None:
+    """OA-2 — chunks where choices[0].delta is None must be silently skipped."""
+    adapter = _make_adapter([_chunk_delta_none(), _chunk("world")])
+
+    tokens: list[str] = []
+    async for token in adapter.stream("sys", "user", 100):
+        tokens.append(token)
+
+    assert tokens == ["world"], (
+        "Chunk with delta=None must be skipped without raising. "
+        f"Got tokens: {tokens!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# OA-3: delta.content=None chunks are skipped
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_delta_content_none_chunk_is_skipped() -> None:
+    """OA-3 — chunks where delta.content is None must be silently skipped."""
+    adapter = _make_adapter([_chunk(content=None), _chunk("end")])
+
+    tokens: list[str] = []
+    async for token in adapter.stream("sys", "user", 100):
+        tokens.append(token)
+
+    assert tokens == ["end"], (
+        "Chunk with delta.content=None must be skipped without raising. "
+        f"Got tokens: {tokens!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# OA-4: normal content chunks are yielded
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_normal_chunks_are_yielded() -> None:
+    """OA-4 — chunks with non-None delta.content must be yielded as-is."""
+    adapter = _make_adapter([_chunk("Hello"), _chunk(", "), _chunk("world!")])
+
+    tokens: list[str] = []
+    async for token in adapter.stream("sys", "user", 100):
+        tokens.append(token)
+
+    assert tokens == ["Hello", ", ", "world!"]
+
+
+# ---------------------------------------------------------------------------
+# OA-5: mixed stream — usage chunk + real content
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_mixed_stream_yields_only_content() -> None:
+    """OA-5 — a real-world stream mix must yield only the content tokens."""
+    chunks = [
+        _chunk("The "),
+        _chunk_empty_choices(),  # usage-only chunk mid-stream
+        _chunk("answer"),
+        _chunk_delta_none(),  # final stop chunk
+        _chunk(content=None),  # tool-use stub
+    ]
+    adapter = _make_adapter(chunks)
+
+    result = ""
+    async for token in adapter.stream("sys", "user", 200):
+        result += token
+
+    assert (
+        result == "The answer"
+    ), f"Mixed stream must concatenate only real content. Got: {result!r}"
+
+
+# ---------------------------------------------------------------------------
+# OA-6: entirely empty stream
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_entirely_empty_stream_yields_nothing() -> None:
+    """OA-6 — a stream with zero chunks must yield nothing and not raise."""
+    adapter = _make_adapter([])
+
+    tokens: list[str] = []
+    async for token in adapter.stream("sys", "user", 100):
+        tokens.append(token)
+
+    assert tokens == []
+
+
+# ---------------------------------------------------------------------------
+# OA-7: OpenAIError is re-raised as ProviderError
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_openai_error_is_wrapped_as_provider_error() -> None:
+    """OA-7 — openai.OpenAIError raised during streaming must become ProviderError."""
+    from services.llm.openai_adapter import OpenAIAdapter
+
+    adapter = OpenAIAdapter.__new__(OpenAIAdapter)
+    adapter.model = "gpt-4o"
+
+    async def _raising_stream(*_a: Any, **_kw: Any) -> Any:
+        raise openai.APIError("upstream error", request=MagicMock(), body=None)
+
+    mock_completions = MagicMock()
+    mock_completions.create = AsyncMock(side_effect=_raising_stream)
+    mock_chat = MagicMock()
+    mock_chat.completions = mock_completions
+    mock_client = MagicMock()
+    mock_client.chat = mock_chat
+    adapter._client = mock_client
+
+    with pytest.raises(ProviderError):
+        async for _ in adapter.stream("sys", "user", 100):
+            pass

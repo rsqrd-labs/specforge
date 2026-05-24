@@ -36,9 +36,20 @@ class OpenAIAdapter(BaseLLMAdapter):
                 max_tokens=max_tokens,
             )
             async for chunk in response:
-                delta = chunk.choices[0].delta.content
-                if delta is not None:
-                    yield delta
+                # Guard 1: OpenAI sends usage-only chunks where choices=[] to
+                # report token counts.  Accessing choices[0] on such a chunk
+                # raises IndexError and crashes the SSE stream, leaving any
+                # credit reservation unreleased.  HF-2 — T-199.
+                if not chunk.choices:
+                    continue
+                # Guard 2: The final chunk may have delta=None (no content).
+                if chunk.choices[0].delta is None:
+                    continue
+                # Guard 3: Tool-use and stop chunks send delta.content=None.
+                content = chunk.choices[0].delta.content
+                if content is None:
+                    continue
+                yield content
         except openai.OpenAIError as exc:
             raise ProviderError("openai", exc) from exc
 
