@@ -175,11 +175,8 @@ async def test_rate_limit_middleware_returns_429_when_ip_limit_exceeded() -> Non
     fake_redis._sets["ratelimit:ip:203.0.113.10"] = entries
 
     app = FastAPI()
-    app.add_middleware(
-        RateLimitMiddleware,
-        redis_client=fake_redis,
-        trusted_proxy_ips="127.0.0.1",
-    )
+    app.add_middleware(RateLimitMiddleware, trusted_proxy_ips="127.0.0.1")
+    app.state.redis = fake_redis
 
     @app.get("/")
     async def root() -> dict:
@@ -202,11 +199,8 @@ async def test_rate_limit_middleware_allows_20th_hourly_login_attempt() -> None:
     }
 
     app = FastAPI()
-    app.add_middleware(
-        RateLimitMiddleware,
-        redis_client=fake_redis,
-        trusted_proxy_ips="127.0.0.1",
-    )
+    app.add_middleware(RateLimitMiddleware, trusted_proxy_ips="127.0.0.1")
+    app.state.redis = fake_redis
 
     @app.post("/auth/google")
     async def google_login() -> dict:
@@ -230,11 +224,8 @@ async def test_rate_limit_middleware_blocks_21st_hourly_login_attempt() -> None:
     }
 
     app = FastAPI()
-    app.add_middleware(
-        RateLimitMiddleware,
-        redis_client=fake_redis,
-        trusted_proxy_ips="127.0.0.1",
-    )
+    app.add_middleware(RateLimitMiddleware, trusted_proxy_ips="127.0.0.1")
+    app.state.redis = fake_redis
 
     @app.post("/auth/google")
     async def google_login() -> dict:
@@ -259,7 +250,8 @@ async def test_rate_limit_middleware_ignores_spoofed_forwarded_for_by_default() 
     }
 
     app = FastAPI()
-    app.add_middleware(RateLimitMiddleware, redis_client=fake_redis)
+    app.add_middleware(RateLimitMiddleware)
+    app.state.redis = fake_redis
 
     @app.get("/")
     async def root() -> dict:
@@ -281,11 +273,8 @@ async def test_rate_limit_middleware_ignores_malformed_forwarded_for() -> None:
     }
 
     app = FastAPI()
-    app.add_middleware(
-        RateLimitMiddleware,
-        redis_client=fake_redis,
-        trusted_proxy_ips="127.0.0.1",
-    )
+    app.add_middleware(RateLimitMiddleware, trusted_proxy_ips="127.0.0.1")
+    app.state.redis = fake_redis
 
     @app.get("/")
     async def root() -> dict:
@@ -301,11 +290,8 @@ async def test_rate_limit_middleware_ignores_malformed_forwarded_for() -> None:
 @pytest.mark.asyncio
 async def test_rate_limit_middleware_uses_local_fallback_when_redis_fails() -> None:
     app = FastAPI()
-    app.add_middleware(
-        RateLimitMiddleware,
-        redis_client=_FailingRedis(),
-        trusted_proxy_ips="127.0.0.1",
-    )
+    app.add_middleware(RateLimitMiddleware, trusted_proxy_ips="127.0.0.1")
+    app.state.redis = _FailingRedis()
 
     @app.get("/")
     async def root() -> dict:
@@ -316,6 +302,33 @@ async def test_rate_limit_middleware_uses_local_fallback_when_redis_fails() -> N
         response = await client.get("/", headers={"X-Forwarded-For": "203.0.113.10"})
 
     assert response.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_rate_limit_middleware_fails_open_when_redis_not_in_app_state() -> None:
+    """Requests pass through when app.state.redis is not yet populated.
+
+    During early startup (before the lifespan registers Redis) there is no
+    Redis on app.state.  The middleware must not block traffic in that window:
+    it logs a once-per-restart warning and lets the request through.
+    HF-5 — T-202.
+    """
+    app = FastAPI()
+    app.add_middleware(RateLimitMiddleware, trusted_proxy_ips="127.0.0.1")
+    # Deliberately do NOT set app.state.redis — simulates pre-lifespan state.
+
+    @app.get("/")
+    async def root() -> dict:
+        return {"ok": True}
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/", headers={"X-Forwarded-For": "203.0.113.10"})
+
+    assert response.status_code == 200, (
+        "Middleware must fail open (pass request) when app.state.redis is not set. "
+        "HF-5 — T-202."
+    )
 
 
 def test_local_fallback_limiter_blocks_over_limit() -> None:

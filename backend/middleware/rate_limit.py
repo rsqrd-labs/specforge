@@ -69,9 +69,7 @@ _PUBLIC_VIEW_DETAIL = "Too many requests."
 _SHARE_TOGGLE_PATH_RE = re.compile(r"^/workspaces/[^/]+/share(?:/rotate)?/?$")
 _SHARE_TOGGLE_LIMIT = 20
 _SHARE_TOGGLE_WINDOW_SECONDS = 3600
-_SHARE_TOGGLE_DETAIL = (
-    "Share toggle rate limit reached. Maximum 20 changes per hour."
-)
+_SHARE_TOGGLE_DETAIL = "Share toggle rate limit reached. Maximum 20 changes per hour."
 
 IpNetwork = IPv4Network | IPv6Network
 RateLimitCheck = Callable[[str, int, int], Awaitable[bool]]
@@ -127,13 +125,9 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
     def __init__(
         self,
         app,
-        redis_client: Redis | None = None,
         trusted_proxy_ips: str | None = None,
     ) -> None:
         super().__init__(app)
-        self._redis: Redis = redis_client or Redis.from_url(
-            settings.redis_url, decode_responses=True
-        )
         configured_proxies = (
             settings.trusted_proxy_ips
             if trusted_proxy_ips is None
@@ -141,6 +135,11 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         )
         self._trusted_proxy_networks = _parse_trusted_proxy_networks(configured_proxies)
         self._local_fallback_windows: dict[str, list[float]] = {}
+        # Suppresses repeated startup warnings when app.state.redis is not yet
+        # available (e.g. during early lifespan before _initialize_redis is
+        # called).  The bool write is GIL-protected; no lock required.
+        # HF-5 — T-202.
+        self._logged_redis_not_ready: bool = False
 
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
         ip = _get_client_ip(request, self._trusted_proxy_networks)
@@ -149,12 +148,31 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         if path in _BYPASS_PATHS:
             return await call_next(request)
 
+        # Read Redis from the shared app-state pool injected by the FastAPI
+        # lifespan (_initialize_redis).  Using request.app.state avoids
+        # constructor-time Redis.from_url(), which would create an unregistered
+        # connection pool that bypasses the lifespan's cleanup and also makes
+        # the middleware untestable without a live Redis URL.  HF-5 — T-202.
+        redis = getattr(request.app.state, "redis", None)
+        if redis is None:
+            if not self._logged_redis_not_ready:
+                logger.warning(
+                    "rate_limit.redis_not_ready "
+                    "app.state.redis is not set — rate limiting bypassed until "
+                    "Redis is registered by the lifespan"
+                )
+                self._logged_redis_not_ready = True
+            return await call_next(request)
+
+        async def _redis_check(key: str, limit: int, window_seconds: int) -> bool:
+            return await sliding_window_check(redis, key, limit, window_seconds)
+
         try:
             limited_response = await self._enforce_limits(
                 request,
                 ip,
                 path,
-                self._redis_check,
+                _redis_check,
             )
         except RedisError:
             logger.warning("rate_limit.redis_unavailable_fallback", exc_info=True)
@@ -169,14 +187,6 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             return limited_response
 
         return await call_next(request)
-
-    async def _redis_check(
-        self,
-        key: str,
-        limit: int,
-        window_seconds: int,
-    ) -> bool:
-        return await sliding_window_check(self._redis, key, limit, window_seconds)
 
     async def _local_fallback_check(
         self,

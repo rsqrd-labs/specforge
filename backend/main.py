@@ -136,7 +136,7 @@ def create_app(redis_client: Redis | None = None) -> FastAPI:
         BodySizeLimitMiddleware,
         max_body_bytes=settings.max_request_body_bytes,
     )
-    app.add_middleware(RateLimitMiddleware, redis_client=redis_client)
+    app.add_middleware(RateLimitMiddleware)
     app.add_middleware(CsrfMiddleware)
     app.add_middleware(
         CORSMiddleware,
