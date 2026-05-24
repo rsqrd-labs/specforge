@@ -1693,3 +1693,115 @@ async def test_refine_unbalanced_markdown_fence_refunds_credits() -> None:
 
     mock_deduct.assert_awaited_once_with(db, user.id, 3, "refine")
     mock_refund.assert_awaited_once_with(db, deduction.id, user.id)
+
+
+# ---------------------------------------------------------------------------
+# T-205: eval_task cancel on asyncio.shield() timeout
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_generate_eval_task_cancelled_on_timeout(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """T-205 — asyncio.shield() eval_task must be explicitly cancelled on TimeoutError.
+
+    When asyncio.wait_for(asyncio.shield(eval_task), timeout=30.0) fires,
+    asyncio.shield() keeps the inner task alive.  The fix must call
+    eval_task.cancel() followed by asyncio.gather(eval_task,
+    return_exceptions=True) so the task receives CancelledError and is
+    fully cleaned up.
+
+    The test injects a slow run_eval_background coroutine that sets an
+    asyncio.Event on CancelledError.  The patched asyncio.wait_for raises
+    TimeoutError immediately for timeout==30.0 to avoid sleeping 30 s.
+    """
+    import logging
+
+    workspace_id = uuid4()
+    spec_stage = _make_stage(workspace_id, "spec", status="draft")
+    workspace = _make_workspace([spec_stage])
+    user = _make_user()
+    deduction = CreditLedger(id=uuid4(), user_id=user.id, amount=-10, reason="generate")
+    # DB: _load_stage → spec_stage, _load_workspace → workspace
+    # Spec stage has no dependencies so _assert_dependencies_finalised is a no-op.
+    db = _MultiQueryDB([spec_stage, workspace])
+
+    # Event set when slow_eval receives CancelledError — proves that
+    # the fix called eval_task.cancel() and awaited gather() so the task
+    # actually processed the cancellation.
+    cancelled_event = asyncio.Event()
+
+    async def slow_eval(*args, **kwargs):
+        """Blocks indefinitely; records cancellation via cancelled_event."""
+        try:
+            await asyncio.sleep(9999)
+        except asyncio.CancelledError:
+            cancelled_event.set()
+            raise
+        return None
+
+    async def fake_stream(*args, **kwargs):
+        yield "hello world"
+
+    # Preserve the real wait_for so other callers are unaffected.
+    _real_wait_for = asyncio.wait_for
+
+    async def patched_wait_for(coro_or_future, timeout):
+        if timeout == 30.0:
+            # Yield to the event loop so slow_eval starts and reaches its
+            # first `await asyncio.sleep(9999)`.  Without this, the task is
+            # cancelled before it runs, so slow_eval's except block never
+            # fires and cancelled_event is never set.
+            await asyncio.sleep(0)
+            # Simulate the eval taking longer than the 30-second budget.
+            # Raising here mimics what asyncio.wait_for does when the shield
+            # expires; the inner task is NOT cancelled at this point — that
+            # is exactly the bug our fix addresses.
+            raise asyncio.TimeoutError
+        return await _real_wait_for(coro_or_future, timeout)
+
+    svc = StageManager(redis_client=_FakeRedis())
+
+    with (
+        patch(
+            "services.pipeline.stage_manager.credit_service.deduct",
+            new_callable=AsyncMock,
+            return_value=deduction,
+        ),
+        patch(
+            "services.pipeline.stage_manager.build_prompt",
+            new_callable=AsyncMock,
+            return_value=("sys", "user"),
+        ),
+        patch("services.pipeline.stage_manager.get_llm") as mock_get_llm,
+        patch("services.pipeline.stage_manager.run_eval_background", slow_eval),
+        patch("asyncio.wait_for", patched_wait_for),
+    ):
+        mock_adapter = MagicMock()
+        mock_adapter.stream = fake_stream
+        mock_get_llm.return_value = mock_adapter
+
+        with caplog.at_level(logging.WARNING, logger="services.pipeline.stage_manager"):
+            tokens = []
+            async for token in svc.generate(spec_stage.id, user, db):
+                tokens.append(token)
+
+    # The eval_task must have been cancelled (slow_eval set the event).
+    assert cancelled_event.is_set(), (
+        "eval_task must be explicitly cancelled after asyncio.wait_for timeout. "
+        "asyncio.shield() does NOT cancel the inner task — the fix must call "
+        "eval_task.cancel() + asyncio.gather(eval_task, return_exceptions=True). "
+        "T-205."
+    )
+
+    # A WARNING must be emitted so the timeout is visible in production logs.
+    stage_id_str = str(spec_stage.id)
+    assert any(
+        "eval_task.timeout_cancelled" in record.message
+        and stage_id_str in record.message
+        for record in caplog.records
+    ), (
+        "Expected logger.warning('eval_task.timeout_cancelled stage_id=...') "
+        f"but got: {[r.message for r in caplog.records]}. T-205."
+    )

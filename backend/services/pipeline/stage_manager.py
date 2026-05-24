@@ -709,7 +709,18 @@ class StageManager:
                 )
                 if eval_result is not None:
                     yield json.dumps({"eval": _eval_to_dict(eval_result)})
-            except (asyncio.TimeoutError, Exception):
+            except asyncio.TimeoutError:
+                # asyncio.shield() protects eval_task from the wait_for
+                # cancellation signal, so the task continues running after
+                # the timeout fires.  Cancel it explicitly to release the
+                # thread-pool slot and prevent resource leaks.  T-205.
+                eval_task.cancel()
+                await asyncio.gather(eval_task, return_exceptions=True)
+                logger.warning(
+                    "eval_task.timeout_cancelled stage_id=%s",
+                    stage_id,
+                )
+            except Exception:
                 pass
         except Exception as exc:
             if span_id and not span_finished:
@@ -1291,7 +1302,18 @@ class StageManager:
                 )
                 if eval_result is not None:
                     yield json.dumps({"eval": _eval_to_dict(eval_result)})
-            except (asyncio.TimeoutError, Exception):
+            except asyncio.TimeoutError:
+                # asyncio.shield() protects eval_task from the wait_for
+                # cancellation signal, so the task continues running after
+                # the timeout fires.  Cancel it explicitly to release the
+                # thread-pool slot and prevent resource leaks.  T-205.
+                eval_task.cancel()
+                await asyncio.gather(eval_task, return_exceptions=True)
+                logger.warning(
+                    "eval_task.timeout_cancelled stage_id=%s",
+                    stage_id,
+                )
+            except Exception:
                 pass
 
         except (ProviderError, TimeoutError) as exc:
