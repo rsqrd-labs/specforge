@@ -17,6 +17,7 @@ Dependencies:
 - pygments    : code-block syntax highlighting (used via the markdown
   codehilite extension; classes inlined in the template stylesheet).
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -35,8 +36,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 # dev environments without the native pango/cairo/gobject libraries — only
 # the actual render path requires them. The Railway Docker image ships the
 # native deps via the Dockerfile's apt-get step.
-
 from models import Stage, Workspace
+from services.coverage_utils import derive_coverage_summary
 from services.observability import PDF_EXPORT_DURATION
 from services.pipeline.export_service import ExportNotReadyError
 
@@ -245,11 +246,9 @@ async def render(
 
     # Derive coverage_summary explicitly — the ORM Workspace has no such
     # attribute; it is only on the Pydantic response schema.  M-1 — T-183.
-    from services.sharing.public_share_service import (  # noqa: PLC0415
-        _derive_coverage_summary,
-    )
-
-    coverage_summary = await _derive_coverage_summary(workspace_id, db)
+    # Imported from the shared coverage_utils module (not public_share_service)
+    # to avoid cross-module private imports.  MF-2 — T-206.
+    coverage_summary = await derive_coverage_summary(workspace_id, db)
     template = _jinja_env.get_template(_TEMPLATE_NAME)
     html_text = template.render(
         workspace_name=workspace.name,

@@ -14,6 +14,7 @@ Security:
 - The response shape is locked by Pydantic `extra="forbid"`; adding a new
   field is an explicit privacy decision.
 """
+
 from __future__ import annotations
 
 import logging
@@ -25,12 +26,12 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from models import EvalResult, Stage, StageVersion, Workspace
+from models import Stage, Workspace
 from schemas.workspace import (
-    CoverageSummary,
     PublicStageView,
     PublicWorkspaceResponse,
 )
+from services.coverage_utils import derive_coverage_summary
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +44,7 @@ _PROVIDER_LABELS: dict[str, str] = {
 
 def _provider_label(provider: str) -> str:
     return _PROVIDER_LABELS.get(provider, provider or "Unknown")
+
 
 # 31-character alphabet — no ambiguous chars (0/o/1/l/i are intentionally
 # excluded so the slug can be read off a screen and re-typed without confusion).
@@ -196,7 +198,10 @@ async def build_public_view(
         )
 
     shared_at = workspace.public_shared_at or workspace.updated_at
-    coverage_summary = await _derive_coverage_summary(workspace.id, db)
+    # derive_coverage_summary imported from the shared coverage_utils module
+    # so the public view carries the same chip as the in-app workspace response.
+    # MF-2 — T-206.
+    coverage_summary = await derive_coverage_summary(workspace.id, db)
 
     # eval_summary stays None for now — the public view's chip uses the
     # coverage_summary as its primary social proof signal.
@@ -208,27 +213,3 @@ async def build_public_view(
         eval_summary=None,
         shared_at=shared_at,
     )
-
-
-async def _derive_coverage_summary(
-    workspace_id: UUID, db: AsyncSession
-) -> CoverageSummary | None:
-    """Mirror of routers.workspace._derive_coverage_summary so the public
-    view carries the same chip as the in-app workspace response."""
-    result = await db.execute(
-        select(EvalResult.coverage_percent)
-        .join(StageVersion, EvalResult.stage_version_id == StageVersion.id)
-        .join(Stage, StageVersion.stage_id == Stage.id)
-        .where(
-            Stage.workspace_id == workspace_id,
-            Stage.type == "harness",
-            EvalResult.coverage_percent.is_not(None),
-        )
-        .order_by(EvalResult.created_at.desc())
-        .limit(1)
-    )
-    pct = result.scalar_one_or_none()
-    if pct is None:
-        return None
-    pct = max(0, min(100, int(pct)))
-    return CoverageSummary(tests=0, covered=pct, total=100, percent=pct)

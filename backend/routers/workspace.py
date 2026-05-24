@@ -3,13 +3,12 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Response, status
 from redis.asyncio import Redis
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config import settings
 from database import get_db, get_redis
 from middleware.auth import get_current_user
-from models import EvalResult, Stage, StageVersion, User, Workspace
+from models import User, Workspace
 from schemas.integration import (
     GitHubExportRequest,
     GitHubExportResponse,
@@ -18,12 +17,12 @@ from schemas.integration import (
 from schemas.workspace import (
     ClarifyResponse,
     ClarifySubmitRequest,
-    CoverageSummary,
     ShareLinkResponse,
     WorkspaceCreate,
     WorkspaceResponse,
     WorkspaceUpdate,
 )
+from services.coverage_utils import derive_coverage_summaries, derive_coverage_summary
 from services.integrations.github_api_client import (
     GitHubAPIError,
     GitHubNotConnectedError,
@@ -63,54 +62,17 @@ _PUBLIC_SHARE_CSP = (
 router = APIRouter(prefix="/workspaces", tags=["workspaces"])
 
 
-async def _derive_coverage_summary(
-    workspace_id: UUID, db: AsyncSession
-) -> CoverageSummary | None:
-    """Build coverage_summary for the workspace response (T-USE-13).
-
-    Joins the workspace's harness stage with its latest EvalResult (via the
-    most recent StageVersion). Returns None when no harness stage exists,
-    no eval has run, or coverage_percent isn't populated yet — the chip
-    hides in that case. Nothing is persisted; this is a pure read.
-
-    The schema fields mirror harness/schemas/public-workspace.schema.json:
-      tests   — best-effort count of tests in the harness body. We don't
-                parse here; pass 0 so the frontend can fall back to "—".
-      covered/total — same: we surface the eval's coverage_percent and
-                let the UI render "X% covered". The exact covered/total
-                split isn't tracked separately by the eval.
-      percent — the integer figure from EvalResult.coverage_percent.
-    """
-    result = await db.execute(
-        select(EvalResult.coverage_percent)
-        .join(StageVersion, EvalResult.stage_version_id == StageVersion.id)
-        .join(Stage, StageVersion.stage_id == Stage.id)
-        .where(
-            Stage.workspace_id == workspace_id,
-            Stage.type == "harness",
-            EvalResult.coverage_percent.is_not(None),
-        )
-        .order_by(EvalResult.created_at.desc())
-        .limit(1)
-    )
-    pct = result.scalar_one_or_none()
-    if pct is None:
-        return None
-    pct = max(0, min(100, int(pct)))
-    return CoverageSummary(
-        tests=0,
-        covered=pct,
-        total=100,
-        percent=pct,
-    )
-
-
 async def _workspace_response(
     workspace: Workspace, db: AsyncSession
 ) -> WorkspaceResponse:
-    """Wrap WorkspaceResponse.model_validate with the derived coverage chip."""
+    """Wrap WorkspaceResponse.model_validate with the derived coverage chip.
+
+    Uses derive_coverage_summary from coverage_utils so single-workspace
+    endpoints (GET /workspaces/{id}) share the same code path as the batched
+    list endpoint.  HF-1 — T-198.  MF-2 — T-206.
+    """
     response = WorkspaceResponse.model_validate(workspace)
-    response.coverage_summary = await _derive_coverage_summary(workspace.id, db)
+    response.coverage_summary = await derive_coverage_summary(workspace.id, db)
     return response
 
 
@@ -138,7 +100,20 @@ async def list_workspaces(
     db: AsyncSession = Depends(get_db),
 ) -> list[WorkspaceResponse]:
     workspaces = await workspace_service.list_for_user(user.id, db)
-    return [await _workspace_response(w, db) for w in workspaces]
+    # Batch coverage query — O(1) DB queries regardless of workspace count.
+    # Replaces the previous N+1 pattern of one query per workspace.
+    # HF-1 — T-198.
+    coverage_map = await derive_coverage_summaries([w.id for w in workspaces], db)
+    logger.debug(
+        "workspace_list_query",
+        extra={"workspace_count": len(workspaces), "coverage_query_count": 1},
+    )
+    responses: list[WorkspaceResponse] = []
+    for w in workspaces:
+        resp = WorkspaceResponse.model_validate(w)
+        resp.coverage_summary = coverage_map.get(w.id)
+        responses.append(resp)
+    return responses
 
 
 @router.get("/{id}", response_model=WorkspaceResponse)
@@ -465,4 +440,3 @@ async def rotate_public_share(
             status_code=status.HTTP_404_NOT_FOUND, detail="not_found"
         ) from exc
     return ShareLinkResponse(slug=slug, url=_share_url(slug), enabled=True)
-

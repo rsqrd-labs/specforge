@@ -6,6 +6,7 @@ allow-list response shape (no leakage), and the lifecycle behaviour
 `rotate` allocates a new one). DB-level integration is covered via the
 service's interaction with an in-memory fake session.
 """
+
 from __future__ import annotations
 
 import inspect
@@ -34,9 +35,9 @@ def test_generate_slug_uses_secrets_module() -> None:
     src = inspect.getsource(share)
     assert "import secrets" in src
     assert "secrets.choice" in src
-    assert "import random" not in src, (
-        "random.* is predictable. Slug generation must use secrets.* only."
-    )
+    assert (
+        "import random" not in src
+    ), "random.* is predictable. Slug generation must use secrets.* only."
 
 
 def test_generate_slug_returns_only_alphabet_chars() -> None:
@@ -60,6 +61,13 @@ class _FakeResult:
 
     def scalars(self):  # noqa: ANN201 — duck-type
         return iter(self._row or [])
+
+    def __iter__(self):  # noqa: ANN204 — support direct row iteration
+        # derive_coverage_summaries iterates the result set directly.
+        # None → empty iterator (no eval data); list → iter(list).
+        if self._row is None:
+            return iter([])
+        return iter(self._row)
 
 
 class _FakeDB:
@@ -224,6 +232,6 @@ async def test_build_public_view_allow_list_contains_only_safe_keys() -> None:
         "clarification_qa",
         "public_share_slug",
     ):
-        assert forbidden not in body, (
-            f"Private field {forbidden!r} leaked into public response."
-        )
+        assert (
+            forbidden not in body
+        ), f"Private field {forbidden!r} leaked into public response."
