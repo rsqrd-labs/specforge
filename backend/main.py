@@ -25,6 +25,7 @@ from routers import templates as templates_router
 from routers import workspace as workspace_router
 from services import langfuse_service
 from services.observability import setup_observability
+from services.pipeline.pdf_export_service import shutdown_pdf_executor
 from services.pipeline.recovery_service import run_recovery_loop
 
 # setup_observability() owns the guarded sentry_sdk.init call and only enables
@@ -114,6 +115,10 @@ def create_app(redis_client: Redis | None = None) -> FastAPI:
         # Drain any queued Langfuse events before the consumer thread is
         # dropped by interpreter shutdown. No-op when Langfuse is disabled.
         await langfuse_service.get_langfuse_client().flush()
+        # Release the dedicated PDF thread pool.  wait=False lets the
+        # lifespan exit immediately; any in-flight render drains naturally
+        # at interpreter exit.  HF-4 — T-201.
+        shutdown_pdf_executor()
         if _owns_redis:
             await redis.aclose()
 

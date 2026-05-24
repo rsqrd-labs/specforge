@@ -21,6 +21,7 @@ Dependencies:
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
@@ -42,6 +43,29 @@ from services.observability import PDF_EXPORT_DURATION
 from services.pipeline.export_service import ExportNotReadyError
 
 logger = logging.getLogger(__name__)
+
+# Dedicated executor for WeasyPrint rendering.  max_workers=2 because:
+# (a) WeasyPrint is CPU-bound and creates a new HTML Document per call,
+#     so two workers run without internal object contention; and
+# (b) PDF export must not share the default executor with Langfuse
+#     get_prompt() calls and other I/O-offloaded work — a burst of PDF
+#     requests would starve those operations.  HF-4 — T-201.
+_PDF_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
+    max_workers=2,
+    thread_name_prefix="pdf-export",
+)
+
+
+def shutdown_pdf_executor() -> None:
+    """Shut down the PDF thread pool on process exit.
+
+    Called from the FastAPI lifespan so in-flight renders finish or are
+    abandoned cleanly without leaking OS threads.  wait=False lets the
+    lifespan complete immediately; threads drain naturally at interpreter exit.
+    HF-4 — T-201.
+    """
+    _PDF_EXECUTOR.shutdown(wait=False)
+
 
 _TEMPLATES_DIR = Path(__file__).resolve().parents[2] / "templates"
 _TEMPLATE_NAME = "export.html.j2"
@@ -257,10 +281,13 @@ async def render(
         coverage_label=_coverage_label(coverage_summary),
         sections=_build_sections(stages),
     )
-    # Dispatch WeasyPrint to the default thread pool so the event loop is not
-    # blocked during the CPU-bound render (typically 0.5–3 s).  C-4 — T-176.
-    pdf_bytes = await asyncio.get_event_loop().run_in_executor(
-        None, _render_pdf_sync, html_text
+    # Dispatch WeasyPrint to the dedicated PDF thread pool so the event loop is
+    # not blocked during the CPU-bound render (typically 0.5–3 s).
+    # get_running_loop() is used (not the deprecated 3.10+ get_event_loop
+    # variant) — it raises RuntimeError if no loop is running, making bugs
+    # explicit.  C-4 — T-176.  HF-4 — T-201.
+    pdf_bytes = await asyncio.get_running_loop().run_in_executor(
+        _PDF_EXECUTOR, _render_pdf_sync, html_text
     )
     slug = _safe_filename_slug(workspace.name)
     return pdf_bytes, slug
