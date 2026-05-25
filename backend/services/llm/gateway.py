@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import logging
 import os
+import time as _time
 from collections import OrderedDict
 from typing import TYPE_CHECKING
 
@@ -29,7 +30,12 @@ _PROVIDER_KEY_SETTINGS = {
 # The cache is bounded to _INSTANCE_CACHE_MAX entries with LRU eviction so that
 # users with many custom API keys cannot grow the cache without bound.  T-191.
 _INSTANCE_CACHE_MAX = 256
-_INSTANCES: OrderedDict[tuple[str, str, str], "BaseLLMAdapter"] = OrderedDict()
+# Adapters older than this are evicted on cache hit and rebuilt fresh.
+# Ensures stale httpx connection pools are recycled periodically.  L-1 — T-223.
+_INSTANCE_CACHE_TTL_SECONDS: float = 3600.0
+_INSTANCES: OrderedDict[
+    tuple[str, str, str], tuple["BaseLLMAdapter", float]
+] = OrderedDict()
 
 # Hard wall-clock cap on any single non-streaming generation call routed
 # through the gateway.  Prevents a hung provider from holding a credit
@@ -87,14 +93,19 @@ def get_llm(
     api_key = _provider_api_key(provider)
     key = (provider, model, _secret_fingerprint(api_key))
     if key in _INSTANCES:
-        # Move to end (most-recently-used) to maintain LRU ordering.
-        _INSTANCES.move_to_end(key)
-        return _INSTANCES[key]
+        adapter, created_at = _INSTANCES[key]
+        if _time.monotonic() - created_at < _INSTANCE_CACHE_TTL_SECONDS:
+            # Fresh — move to end (most-recently-used) for LRU ordering.
+            _INSTANCES.move_to_end(key)
+            return adapter
+        # TTL expired — evict the stale adapter and rebuild below.
+        del _INSTANCES[key]
     # Evict the least-recently-used entry when the cache is full.
     if len(_INSTANCES) >= _INSTANCE_CACHE_MAX:
         _INSTANCES.popitem(last=False)
-    _INSTANCES[key] = _REGISTRY[provider](model, api_key=api_key)
-    return _INSTANCES[key]
+    new_adapter = _REGISTRY[provider](model, api_key=api_key)
+    _INSTANCES[key] = (new_adapter, _time.monotonic())
+    return new_adapter
 
 
 async def complete_with_timeout(

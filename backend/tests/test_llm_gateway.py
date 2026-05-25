@@ -52,6 +52,38 @@ def test_get_llm_rebuilds_adapter_when_provider_key_changes(
     clear_llm_cache()
 
 
+def test_get_llm_rebuilds_adapter_after_ttl_expires(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Adapters older than _INSTANCE_CACHE_TTL_SECONDS must be evicted and
+    rebuilt on the next get_llm() call.  This ensures stale httpx connection
+    pools are recycled periodically rather than served indefinitely.
+    L-1 — T-223.
+    """
+    import time
+
+    clear_llm_cache()
+    # Shorten the TTL to 0 so the adapter is immediately stale.
+    monkeypatch.setattr(gateway, "_INSTANCE_CACHE_TTL_SECONDS", 0.0)
+
+    first = get_llm("anthropic", "claude-sonnet-4-6")
+
+    # Advance monotonic time by enough to exceed TTL=0.
+    # We sleep briefly so _time.monotonic() returns a value > created_at + 0.
+    time.sleep(0.01)
+
+    second = get_llm("anthropic", "claude-sonnet-4-6")
+
+    assert first is not second, (
+        "get_llm() must return a fresh adapter after TTL expiry.  "
+        "L-1 — T-223."
+    )
+    # The cache should contain only the newly-built adapter (the stale one was
+    # evicted before insertion of the new one).
+    assert len(gateway._INSTANCES) == 1
+    clear_llm_cache()
+
+
 @pytest.mark.asyncio
 async def test_anthropic_adapter_stream_yields_tokens() -> None:
 
