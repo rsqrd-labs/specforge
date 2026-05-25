@@ -10175,30 +10175,43 @@ Create `docs/RUNBOOK.md` with the following sections (minimum):
 **Implementation requirements:**
 1. Open `backend/services/pipeline/stage_manager.py`.
 2. Locate the inner `except (ProviderError, TimeoutError) as exc:` block inside `generate()` (approximately line 635). This block currently: increments `SSE_STREAM_FAILURES`, refunds credits, resets stage status, and raises `ProviderTimeoutError`.
-3. Add two lines at the **start** of this except block, before the existing `SSE_STREAM_FAILURES.inc()` call:
+3. Add the following block at the **start** of this except block, before the existing `SSE_STREAM_FAILURES.inc()` call:
    ```python
-   from services.llm.provider_status import record_provider_failure  # noqa: PLC0415
-   record_provider_failure(route.provider, exc)
+   # Record failure for stream timeouts ONLY — not for ProviderError.
+   # CRITICAL: Do NOT call record_provider_failure() unconditionally here.
+   # InstrumentedAdapter.stream() already calls record_provider_failure() inside
+   # its `except Exception` block for non-timeout ProviderErrors.  Calling it
+   # again here (unconditionally) would double-count those errors and trip the
+   # circuit after 2 failures instead of the documented 3.
+   # The timeout path is the only gap: asyncio.timeout() fires via CancelledError
+   # (a BaseException), which bypasses InstrumentedAdapter.stream()'s
+   # `except Exception` guard entirely.  Only TimeoutError reaches here without
+   # having already triggered record_provider_failure().  C-1 — T-217.
+   if isinstance(exc, TimeoutError):
+       from services.llm.provider_status import record_provider_failure  # noqa: PLC0415
+       record_provider_failure(route.provider, exc)
    ```
-4. Add a one-line comment referencing the finding: `# Record failure so the circuit breaker trips after 3 consecutive errors. C-1 — T-217.`
-5. No other changes to `generate()`. Do not modify `refine()` or `generate_harness_patch()` — they are already correct.
-6. Run: `cd backend && uv run pytest tests/test_circuit_breaker.py -v` — all CB-* tests must continue passing.
-7. Write one new test in `tests/test_circuit_breaker.py` named `test_generate_stream_timeout_records_provider_failure` that: mocks `record_provider_failure`, simulates a `TimeoutError` in the `generate()` except block, and asserts `record_provider_failure` was called with the correct provider. (Unit-level mock is sufficient; no real AsyncSession needed.)
+4. No other changes to `generate()`. Do not modify `refine()` or `generate_harness_patch()` — they are already correct.
+5. Run: `cd backend && uv run pytest tests/test_circuit_breaker.py -v` — all CB-* tests must continue passing.
+6. Write one new test in `tests/test_circuit_breaker.py` named `test_generate_stream_timeout_records_provider_failure` that: mocks `record_provider_failure`, simulates a `TimeoutError` in the `generate()` except block, and asserts `record_provider_failure` was called with the correct provider. (Unit-level mock is sufficient; no real AsyncSession needed.)
+7. Write one more test named `test_generate_provider_error_does_not_double_count_record_provider_failure` that: mocks both `InstrumentedAdapter.stream()` to raise a `ProviderError` AND mocks `record_provider_failure`, then simulates `generate()`'s except block, and asserts `record_provider_failure` is called exactly **once** (not twice) — confirming no double-counting.
 
 **Dependencies:** T-197 (circuit breaker must exist)
 
 **Risk assessment:** VERY LOW. One import + one function call. Exactly mirrors the pattern already present in two other methods. The `record_provider_failure()` function is side-effect-only (increments a counter in a dict); it cannot raise. No credit logic, no DB, no async operations touched.
 
 **Acceptance criteria:**
-1. `cd backend && uv run pytest tests/test_circuit_breaker.py -v` — all tests green including new `test_generate_stream_timeout_records_provider_failure`.
+1. `cd backend && uv run pytest tests/test_circuit_breaker.py -v` — all tests green including new `test_generate_stream_timeout_records_provider_failure` and `test_generate_provider_error_does_not_double_count_record_provider_failure`.
 2. `cd harness && pytest tests/backend/test_phase17_final_hardening_contract.py::test_phase17_generate_except_block_calls_record_provider_failure -v` passes.
-3. Manual smoke: configure Anthropic with an invalid API key, trigger a generate → confirm `specforge_llm_circuit_rejections_total{provider="anthropic"}` increments after 3 failures.
-4. `cd backend && uv run ruff check services/pipeline/stage_manager.py` — no lint violations.
+3. `cd harness && pytest tests/backend/test_phase17_final_hardening_contract.py::test_phase17_generate_except_block_guards_against_double_counting -v` passes.
+4. Manual smoke: configure Anthropic with an invalid API key, trigger a generate → confirm `specforge_llm_circuit_rejections_total{provider="anthropic"}` increments after 3 failures (not 2).
+5. `cd backend && uv run ruff check services/pipeline/stage_manager.py` — no lint violations.
 
 **Testing requirements:**
 - Unit test using `unittest.mock.patch` for `record_provider_failure` — verify call count and arguments.
+- Anti-regression test: mock `ProviderError` path → assert `record_provider_failure` called exactly **once** (no double-count).
 - Existing `test_circuit_breaker.py` CB-1 through CB-8 tests must remain green (regression guard).
-- Harness contract test scans the `generate()` body for `record_provider_failure` call.
+- Harness contract test scans the `generate()` body for `record_provider_failure` call inside a `TimeoutError` isinstance guard.
 
 **Observability requirements:** No new metrics. The existing `specforge_llm_circuit_rejections_total` and `specforge_sse_stream_failures_total` counters now cover the timeout path.
 
@@ -10296,13 +10309,13 @@ Create `docs/RUNBOOK.md` with the following sections (minimum):
        """
        await self._invalidate(user_id)
    ```
-2. In `backend/services/pipeline/stage_manager.py`, locate **every** `await db.commit()` that follows a `credit_service.deduct()` or `credit_service.refund()` call. Add `await credit_service.invalidate(user.id)` (or the relevant user_id variable) immediately after each such commit. The sites are:
-   - `generate()` line ~585: `await db.commit()` after `deduction = await credit_service.deduct(...)` → add `await credit_service.invalidate(user.id)` on the next line.
-   - `generate()` line ~644: `await db.commit()` in the `except (ProviderError, TimeoutError)` handler after `await credit_service.refund(db, deduction.id)` → add `await credit_service.invalidate(user.id)`.
-   - `generate()` line ~660: `await db.commit()` after validation failure refund → add `await credit_service.invalidate(user.id)`.
-   - `refine()`: locate the same pattern (deduct → commit sites) and add the post-commit invalidation.
-   - Any other method in `stage_manager.py` that calls `credit_service.deduct()` or `credit_service.refund()` followed by `db.commit()`.
-3. In the cleanup `finally` block of `generate()` that uses `async with AsyncSessionLocal() as cleanup_db:` and calls `await credit_service.refund(cleanup_db, deduction.id)` — this block uses a new session. After the refund, the cleanup_db session commits implicitly when the `async with` exits. Add explicit `await credit_service.invalidate(original.user_id)` after the `async with` block (or move cleanup_db.commit() to be explicit and add invalidation after it).
+2. In `backend/services/pipeline/stage_manager.py`, locate **every** `await db.commit()` that follows a `credit_service.deduct()` or `credit_service.refund()` call. Add `await credit_service.invalidate(user.id)` (or the relevant user_id variable name in scope) immediately after each such commit. The complete list of sites (from codebase grep — verify line numbers haven't shifted):
+   - **generate() ~line 577→commit ~line 585**: `deduction = await credit_service.deduct(...)` → `await db.commit()` → add `await credit_service.invalidate(user.id)  # Post-commit cache eviction — H-2 — T-219.`
+   - **generate() ~line 641→commit ~line 644**: `await credit_service.refund(db, deduction.id)` inside the `except (ProviderError, TimeoutError)` handler → `await db.commit()` → add `await credit_service.invalidate(user.id)  # Post-commit cache eviction — H-2 — T-219.`
+   - **generate() ~line 657→commit ~line 660**: `await credit_service.refund(db, deduction.id)` in the validation-failure path → `await db.commit()` → add `await credit_service.invalidate(user.id)  # Post-commit cache eviction — H-2 — T-219.`
+   - **refine() ~line 909→commit ~line 1026**: `deduction = await credit_service.deduct(...)` → (much later) `await db.commit()` → add `await credit_service.invalidate(user.id)  # Post-commit cache eviction — H-2 — T-219.`
+   - **refine() ~line 973→commit ~line 1055**: `await credit_service.refund(db, deduction.id, user.id)` → `await db.commit()` → add `await credit_service.invalidate(user.id)  # Post-commit cache eviction — H-2 — T-219.`
+3. In the **disconnect cleanup block** of `generate()` (the `finally` block that uses `async with AsyncSessionLocal() as cleanup_db:`): this block calls `await credit_service.refund(cleanup_db, deduction.id)` at approximately line 749, then calls `await cleanup_db.commit()` explicitly at approximately line 774 (inside the `async with` block — NOT relying on implicit `__aexit__` behaviour; `AsyncSession.__aexit__` does **not** auto-commit). Add `await credit_service.invalidate(stuck.user_id)` immediately after the `await cleanup_db.commit()` call at line 774. Use `stuck.user_id` (the `Stage.user_id` field loaded at line ~746 via `stuck = result.scalar_one_or_none()`) as the user identifier in this block since the outer `user` variable may not be in scope.
 4. Add a comment at every new `invalidate()` call site: `# Post-commit cache eviction — H-2 — T-219.`
 5. Run: `cd backend && uv run pytest tests/ -q` — all tests pass.
 
@@ -10360,10 +10373,11 @@ Create `docs/RUNBOOK.md` with the following sections (minimum):
    )
    ```
 2. Add `Gauge` to the `from prometheus_client import Counter` import at the top of the file: `from prometheus_client import Counter, Gauge`.
-3. In `record_provider_failure(provider, exc)`: after updating `_FAILURES`, add:
+3. In `record_provider_failure(provider, exc)`: add the following **at the very end of the function** (after all `_FAILURES` mutations, including the `_FAILURES.pop()` call that clears successes and any `_FAILURES[provider].append()` calls):
    ```python
    CIRCUIT_STATE.labels(provider=provider).set(1 if _circuit_open(provider) else 0)
    ```
+   Placing it at the end ensures the Gauge reflects the state AFTER the failure has been recorded, not before.
 4. In `record_provider_success(provider)`: after `_FAILURES.pop(provider, None)`, add:
    ```python
    CIRCUIT_STATE.labels(provider=provider).set(0)
@@ -10439,9 +10453,16 @@ Create `docs/RUNBOOK.md` with the following sections (minimum):
                asyncio.to_thread(client.auth_check),
                timeout=10.0,
            )
-           if result and getattr(result, "status", None) == "success":
+           # IMPORTANT: The Langfuse v2 SDK's auth_check() returns `bool` (True on
+           # success) and RAISES an Exception on failure — it does NOT return False.
+           # Do NOT use getattr(result, "status", None) == "success" — auth_check()
+           # returns a plain bool, not an object with a .status attribute.  The
+           # correct check is simply `if result:`.  Verified against installed SDK:
+           # langfuse/client.py def auth_check(self) -> bool: ... return True
+           if result:
                logger.info("langfuse.startup_check.ok")
                return True
+           # Defensive: covers any future SDK change that returns a falsy value.
            logger.warning(
                "langfuse.startup_check.failed",
                result=str(result)[:200],
@@ -10516,7 +10537,7 @@ Create `docs/RUNBOOK.md` with the following sections (minimum):
    if not await sliding_window_check(redis, f"llm_daily:{user.id}", 200, 86400):
        raise RateLimitError(retry_after=86400)
    ```
-2. Wrap both calls in a `try/except RedisError` that fails open (allow the request, log a warning):
+2. Wrap both calls in a `try/except RedisError` that fails open (allow the request, log a warning). **CRITICAL: `RateLimitError` is NOT a `RedisError`** — do not add `RateLimitError` to the except clause or it will swallow legitimate rate-limit enforcement. The except must catch ONLY `RedisError`:
    ```python
    from redis.exceptions import RedisError  # (already imported elsewhere in the file)
 
@@ -10525,7 +10546,7 @@ Create `docs/RUNBOOK.md` with the following sections (minimum):
            raise RateLimitError(retry_after=60)
        if not await sliding_window_check(redis, f"llm_daily:{user.id}", 200, 86400):
            raise RateLimitError(retry_after=86400)
-   except RedisError:
+   except RedisError:  # Only catches Redis connection failures, NOT RateLimitError
        # Redis unavailable — fail open, matching RateLimitMiddleware behavior.
        # Log at WARNING so operators are alerted to the degraded state.
        # L-4 — T-222.
@@ -10610,7 +10631,8 @@ Create `docs/RUNBOOK.md` with the following sections (minimum):
        _INSTANCES.clear()
    ```
    (No change needed — `_INSTANCES.clear()` still works on a dict of tuples.)
-5. Run: `cd backend && uv run pytest tests/ -q` — all tests pass. Pay special attention to any test that uses `get_llm()` or checks `_INSTANCES` contents directly.
+5. Check for tests that access `_INSTANCES` directly: `grep -rn "_INSTANCES\[" backend/tests/`. At the time of writing, no tests access `_INSTANCES` directly (confirmed by grep — zero results). If you find any after implementing, update them to unpack the tuple: `adapter, created_at = _INSTANCES[key]`.
+6. Run: `cd backend && uv run pytest tests/ -q` — all tests pass. Pay special attention to any test that uses `get_llm()` or checks `_INSTANCES` contents directly.
 
 **Dependencies:** None
 
@@ -10693,6 +10715,126 @@ Add **§8 — Secret Rotation Procedures** to `docs/RUNBOOK.md` with the followi
 - Restart the service container
 
 After writing §8, update the RUNBOOK Table of Contents (if present) to include §8.
+
+**Script deliverable — `backend/scripts/rotate_encryption_key.py`:**
+
+The RUNBOOK §8.1 procedure references a script `backend/scripts/rotate_encryption_key.py`. This script does NOT currently exist and must be created as part of T-224. Create it with the following structure (it is a real, runnable script — not pseudo-code):
+
+```python
+#!/usr/bin/env python3
+"""ENCRYPTION_MASTER_KEY rotation script.
+
+Usage:
+    python backend/scripts/rotate_encryption_key.py \\
+        --old-key <BASE64_FERNET_OLD_KEY> \\
+        --new-key <BASE64_FERNET_NEW_KEY> \\
+        --database-url <POSTGRESQL_URL>
+
+This script is IDEMPOTENT: it tests decryption with the new key first; rows
+that are already encrypted under the new key are skipped.  Safe to re-run.
+
+Exit codes:
+    0 — all rows rotated (or already on new key)
+    1 — argument error or database connection failure
+    2 — partial failure (some rows could not be decrypted — inspect output)
+"""
+from __future__ import annotations
+
+import argparse
+import sys
+from uuid import UUID
+
+# NOTE: Requires `cryptography` (already a backend dependency).
+# Run from the repo root: `cd backend && uv run python scripts/rotate_encryption_key.py`
+
+def _parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(description="Rotate ENCRYPTION_MASTER_KEY for stored user API keys")
+    p.add_argument("--old-key", required=True, help="Current Fernet key (base64)")
+    p.add_argument("--new-key", required=True, help="New Fernet key (base64)")
+    p.add_argument("--database-url", required=True, help="PostgreSQL connection URL")
+    p.add_argument("--dry-run", action="store_true", help="Print what would be rotated without writing")
+    return p.parse_args()
+
+
+def main() -> int:
+    args = _parse_args()
+
+    try:
+        from cryptography.fernet import Fernet, InvalidToken
+    except ImportError:
+        print("ERROR: cryptography package not installed.  Run: pip install cryptography", file=sys.stderr)
+        return 1
+
+    try:
+        old_fernet = Fernet(args.old_key.encode())
+        new_fernet = Fernet(args.new_key.encode())
+    except Exception as exc:
+        print(f"ERROR: Invalid Fernet key: {exc}", file=sys.stderr)
+        return 1
+
+    try:
+        import psycopg2
+        conn = psycopg2.connect(args.database_url)
+    except Exception as exc:
+        print(f"ERROR: Could not connect to database: {exc}", file=sys.stderr)
+        return 1
+
+    # Identify encrypted columns by reading the models.  Adjust the query below
+    # if the column name or table name differs from the current schema.
+    # Current schema: table=user_api_keys, column=encrypted_key (text, nullable).
+    cur = conn.cursor()
+    cur.execute("SELECT id, encrypted_key FROM user_api_keys WHERE encrypted_key IS NOT NULL")
+    rows = cur.fetchall()
+
+    rotated = 0
+    skipped_already_new = 0
+    failed = 0
+
+    for row_id, enc_value in rows:
+        # Try decrypting with new key first (idempotency: skip if already rotated).
+        try:
+            new_fernet.decrypt(enc_value.encode())
+            skipped_already_new += 1
+            continue
+        except InvalidToken:
+            pass
+
+        # Decrypt with old key, re-encrypt with new key.
+        try:
+            plaintext = old_fernet.decrypt(enc_value.encode())
+        except InvalidToken:
+            print(f"WARN: row {row_id}: cannot decrypt with old key — skipping", file=sys.stderr)
+            failed += 1
+            continue
+
+        new_enc = new_fernet.encrypt(plaintext).decode()
+
+        if args.dry_run:
+            print(f"DRY-RUN: would rotate row {row_id}")
+        else:
+            cur.execute(
+                "UPDATE user_api_keys SET encrypted_key = %s WHERE id = %s",
+                (new_enc, row_id),
+            )
+        rotated += 1
+
+    if not args.dry_run:
+        conn.commit()
+
+    conn.close()
+    print(f"Done. rotated={rotated} skipped_already_new={skipped_already_new} failed={failed}")
+    return 2 if failed > 0 else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+```
+
+The implementing agent must:
+1. Create `backend/scripts/rotate_encryption_key.py` with the above content.
+2. Make it executable: `chmod +x backend/scripts/rotate_encryption_key.py`.
+3. Verify column names match the current schema (check `backend/models/user_api_keys.py` or the equivalent model — if the table/column names differ, update the script accordingly).
+4. Add `psycopg2-binary` to `backend/pyproject.toml` under `[project.optional-dependencies]` or confirm it is already present.
 
 **Dependencies:** T-216 (RUNBOOK.md must exist)
 

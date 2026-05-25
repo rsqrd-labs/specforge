@@ -135,6 +135,60 @@ def test_phase17_generate_except_block_references_circuit_task() -> None:
     )
 
 
+def test_phase17_generate_except_block_guards_against_double_counting() -> None:
+    """C-1 — generate()'s record_provider_failure call MUST be inside a
+    `if isinstance(exc, TimeoutError)` guard — NOT unconditional.
+
+    Background on the double-counting bug this test prevents:
+    InstrumentedAdapter.stream() already calls record_provider_failure() in its
+    `except Exception` block for non-timeout ProviderErrors (e.g., HTTP 401).
+    If generate()'s except (ProviderError, TimeoutError) block also calls
+    record_provider_failure() unconditionally, a non-timeout ProviderError is
+    recorded TWICE — once in InstrumentedAdapter, once in generate().  This trips
+    the circuit after 2 failures instead of the documented 3.
+
+    The isinstance(exc, TimeoutError) guard is the correct fix:
+    - For TimeoutError: InstrumentedAdapter.stream()'s `except Exception` was bypassed
+      by CancelledError (a BaseException), so record_provider_failure was NOT called.
+      The guard allows the call to happen here — exactly once.
+    - For ProviderError: InstrumentedAdapter.stream()'s `except Exception` already
+      called record_provider_failure.  The guard prevents the second call — no double-count.
+
+    C-1 — T-217.
+    """
+    source = read_backend_file("services", "pipeline", "stage_manager.py")
+
+    fn_match = re.search(
+        r"(async\s+def\s+generate\s*\([^)]*\)[^:]*:)(.*?)(?=\n\s{0,4}(?:async\s+)?def\s+\w|\Z)",
+        source,
+        re.DOTALL,
+    )
+    assert fn_match, (
+        "Could not extract generate() body from stage_manager.py.  C-1 — T-217."
+    )
+    generate_body = fn_match.group(2)
+
+    # The record_provider_failure call must be conditional on isinstance(exc, TimeoutError).
+    # This prevents double-counting: InstrumentedAdapter.stream() already handles
+    # non-timeout ProviderErrors in its except Exception block.
+    has_isinstance_guard = re.search(
+        r"if\s+isinstance\s*\(\s*exc\s*,\s*TimeoutError\s*\)[^:]*:.*?record_provider_failure",
+        generate_body,
+        re.DOTALL,
+    )
+    assert has_isinstance_guard, (
+        "generate()'s record_provider_failure call must be inside an "
+        "`if isinstance(exc, TimeoutError):` guard.  An unconditional call would "
+        "double-count non-timeout ProviderErrors (already recorded by "
+        "InstrumentedAdapter.stream()'s except Exception block), tripping the "
+        "circuit after 2 failures instead of the documented 3.  "
+        "The correct pattern is:\n"
+        "    if isinstance(exc, TimeoutError):\n"
+        "        record_provider_failure(route.provider, exc)\n"
+        "C-1 — T-217."
+    )
+
+
 # ---------------------------------------------------------------------------
 # T-218 (H-1): tasks.build_user_prompt() must contain traceability instruction
 # ---------------------------------------------------------------------------
