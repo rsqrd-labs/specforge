@@ -43,6 +43,11 @@ dependencies = [
     "markdown==3.*",
 ]
 
+[project.optional-dependencies]
+# Used by backend/scripts/rotate_encryption_key.py for direct DB access during
+# key rotation.  Not required at runtime (the app uses asyncpg via SQLAlchemy).
+scripts = ["psycopg2-binary>=2.9"]
+
 [dependency-groups]
 dev = [
     "bandit==1.*",

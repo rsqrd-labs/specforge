@@ -14,6 +14,7 @@ Covers: circuit breaker, finalise race incident response, credit refund procedur
 5. [General Health Checks](#5-general-health-checks)
 6. [Langfuse Docker Image — Version Management](#6-langfuse-docker-image--version-management)
 7. [Database Migrations — Alembic Runbook](#7-database-migrations--alembic-runbook)
+8. [Secret Rotation Procedures](#8-secret-rotation-procedures)
 
 ---
 
@@ -470,3 +471,174 @@ pg_dump --schema-only $DATABASE_URL > schema_backup_$(date +%Y%m%d).sql
 
 Store the backup outside the Railway ephemeral filesystem (e.g. in an S3
 bucket or local machine) before triggering the deploy.
+
+---
+
+## 8. Secret Rotation Procedures
+
+SpecForge manages three categories of critical secrets, each with a distinct
+rotation impact and procedure.  Rotate proactively on a scheduled cadence or
+immediately when a compromise is suspected.
+
+### §8.1 — ENCRYPTION_MASTER_KEY Rotation
+
+**Impact:** `ENCRYPTION_MASTER_KEY` (Fernet symmetric key) encrypts all stored
+integration tokens in the `user_integrations` table (`encrypted_token` column).
+Rotating without re-encrypting those rows leaves them permanently unreadable
+under the new key.
+
+**Pre-rotation check:**
+
+```sql
+-- Verify all rows are currently readable (count should be non-negative, no errors):
+SELECT COUNT(*) FROM user_integrations WHERE encrypted_token IS NOT NULL;
+```
+
+**Rotation steps:**
+
+1. Generate a new Fernet key:
+
+   ```bash
+   python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+   ```
+
+2. Add the new key to Railway environment **alongside** the existing one —
+   do **not** remove the old key yet:
+
+   ```
+   ENCRYPTION_MASTER_KEY=<old_key>        # keep for decryption
+   NEW_ENCRYPTION_MASTER_KEY=<new_key>    # new key for re-encryption
+   ```
+
+3. Run the rotation script to re-encrypt all rows (idempotent — safe to
+   re-run; rows already encrypted under the new key are skipped):
+
+   ```bash
+   cd backend
+   uv run python scripts/rotate_encryption_key.py \
+       --old-key "$ENCRYPTION_MASTER_KEY" \
+       --new-key "$NEW_ENCRYPTION_MASTER_KEY" \
+       --database-url "$DATABASE_URL"
+   ```
+
+   Use `--dry-run` to preview without writing:
+
+   ```bash
+   uv run python scripts/rotate_encryption_key.py \
+       --old-key "$ENCRYPTION_MASTER_KEY" \
+       --new-key "$NEW_ENCRYPTION_MASTER_KEY" \
+       --database-url "$DATABASE_URL" \
+       --dry-run
+   ```
+
+   **Exit codes:** `0` = all rows rotated or already on new key;
+   `1` = connection/argument error; `2` = partial failure (some rows
+   could not be decrypted — inspect stderr output).
+
+4. Verify the rotation succeeded:
+
+   ```bash
+   uv run pytest tests/test_key_vault.py -v
+   ```
+
+   Run the tests with `ENCRYPTION_MASTER_KEY` set to the **new** key.
+
+5. Promote the new key in Railway:
+
+   ```
+   ENCRYPTION_MASTER_KEY=<new_key>        # replace with new key
+   # Remove NEW_ENCRYPTION_MASTER_KEY
+   ```
+
+6. Deploy the updated environment.
+
+**Rollback:** Keep the old key in Railway as `OLD_ENCRYPTION_MASTER_KEY` until
+the rotation is fully verified.  To roll back, re-run the script with
+`--old-key` and `--new-key` swapped.
+
+---
+
+### §8.2 — CSRF_SECRET Rotation
+
+**Impact:** Rotating `CSRF_SECRET` immediately invalidates **all** outstanding
+CSRF tokens.  Users will see `403 Forbidden — CSRF token invalid` on their
+next mutating request (POST/PUT/DELETE).  They simply need to refresh the page
+to obtain a new token — no data loss occurs.
+
+**Best practice:** Rotate during a low-traffic window (e.g., off-peak hours).
+
+**Rotation steps:**
+
+1. Generate a new secret:
+
+   ```bash
+   python -c "import secrets; print(secrets.token_hex(32))"
+   ```
+
+2. Update `CSRF_SECRET` in Railway environment.
+
+3. Deploy — the new secret takes effect immediately on next process start.
+
+4. Monitor `csrf.verify.failed` structured log events; they should return
+   to the pre-rotation baseline within **5 minutes** as users refresh and
+   receive new tokens.
+
+**No Redis cleanup required** — existing CSRF nonce keys expire naturally on
+their existing TTL.
+
+**Rollback:** Restore the previous value of `CSRF_SECRET` in Railway and
+redeploy.
+
+---
+
+### §8.3 — JWT Key Rotation
+
+**Impact:** Rotating `JWT_PRIVATE_KEY` / `JWT_PUBLIC_KEY` invalidates **all**
+existing access tokens and refresh tokens (RS256 signature verification fails
+against the old public key).  Every active user is forced to re-authenticate.
+
+**Best practice:** Rotate only when key compromise is confirmed, or on an
+annual schedule.  Announce to users in advance if possible.
+
+**Rotation steps:**
+
+1. Generate a new RS256 key pair:
+
+   ```bash
+   openssl genrsa 4096 | tee jwt_private.pem
+   openssl rsa -in jwt_private.pem -pubout > jwt_public.pem
+   ```
+
+2. Update `JWT_PRIVATE_KEY` (contents of `jwt_private.pem`) and
+   `JWT_PUBLIC_KEY` (contents of `jwt_public.pem`) in Railway.
+
+3. Purge all refresh token entries from Redis so stale tokens cannot be
+   exchanged:
+
+   ```bash
+   redis-cli -u "$REDIS_URL" KEYS "refresh:*" | xargs redis-cli -u "$REDIS_URL" DEL
+   ```
+
+4. Deploy.
+
+5. Monitor authentication error rates — they will spike briefly as users
+   re-authenticate, then return to baseline within minutes.
+
+**Rollback:** Restore the old `JWT_PRIVATE_KEY` and `JWT_PUBLIC_KEY` in
+Railway and redeploy.  Previously-issued tokens (before the rotation) become
+valid again, but any tokens issued under the new key will stop working.
+
+---
+
+### §8.4 — Redis Password Rotation (if applicable)
+
+If the Redis instance requires a password (e.g., Railway managed Redis with
+auth enabled):
+
+1. Obtain the new Redis password from the Railway dashboard or your Redis
+   provider.
+2. Update `REDIS_URL` in Railway to include the new password.
+3. Redeploy the service — the connection pool is rebuilt on startup.
+
+No data re-encryption is needed; Redis stores session and rate-limit state,
+not long-lived secrets.
