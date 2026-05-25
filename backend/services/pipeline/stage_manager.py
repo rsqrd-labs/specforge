@@ -10,6 +10,7 @@ from datetime import UTC, datetime
 from uuid import UUID
 
 from redis.asyncio import Redis
+from redis.exceptions import RedisError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -527,10 +528,21 @@ class StageManager:
             )
 
         redis = await self._redis_client()
-        if not await sliding_window_check(redis, f"llm:{user.id}", 10, 60):
-            raise RateLimitError(retry_after=60)
-        if not await sliding_window_check(redis, f"llm_daily:{user.id}", 200, 86400):
-            raise RateLimitError(retry_after=86400)
+        try:
+            if not await sliding_window_check(redis, f"llm:{user.id}", 10, 60):
+                raise RateLimitError(retry_after=60)
+            if not await sliding_window_check(redis, f"llm_daily:{user.id}", 200, 86400):  # noqa: E501
+                raise RateLimitError(retry_after=86400)
+        except RedisError:  # Only Redis connection failures — NOT RateLimitError.
+            # Redis unavailable — fail open, matching RateLimitMiddleware behavior.
+            # Log at WARNING so operators are alerted to the degraded state.
+            # L-4 — T-222.
+            logger.warning(
+                "stage_manager.llm_rate_limit.redis_unavailable "
+                "stage_id=%s user_id=%s — rate limiting bypassed",
+                stage_id,
+                user.id,
+            )
 
         if not free:
             _assert_visible_credit_balance(user, CREDIT_COSTS["generate"])
@@ -832,10 +844,21 @@ class StageManager:
                 )
 
         redis = await self._redis_client()
-        if not await sliding_window_check(redis, f"llm:{user.id}", 10, 60):
-            raise RateLimitError(retry_after=60)
-        if not await sliding_window_check(redis, f"llm_daily:{user.id}", 200, 86400):
-            raise RateLimitError(retry_after=86400)
+        try:
+            if not await sliding_window_check(redis, f"llm:{user.id}", 10, 60):
+                raise RateLimitError(retry_after=60)
+            if not await sliding_window_check(redis, f"llm_daily:{user.id}", 200, 86400):  # noqa: E501
+                raise RateLimitError(retry_after=86400)
+        except RedisError:  # Only Redis connection failures — NOT RateLimitError.
+            # Redis unavailable — fail open, matching RateLimitMiddleware behavior.
+            # Log at WARNING so operators are alerted to the degraded state.
+            # L-4 — T-222.
+            logger.warning(
+                "stage_manager.llm_rate_limit.redis_unavailable "
+                "stage_id=%s user_id=%s — rate limiting bypassed",
+                stage_id,
+                user.id,
+            )
 
         content = stage.content or ""
         if request.selection_end > len(content):
@@ -1262,10 +1285,21 @@ class StageManager:
             raise StageStateError(f"Stage status {stage.status!r} cannot be patched")
 
         redis = await self._redis_client()
-        if not await sliding_window_check(redis, f"llm:{user.id}", 10, 60):
-            raise RateLimitError(retry_after=60)
-        if not await sliding_window_check(redis, f"llm_daily:{user.id}", 200, 86400):
-            raise RateLimitError(retry_after=86400)
+        try:
+            if not await sliding_window_check(redis, f"llm:{user.id}", 10, 60):
+                raise RateLimitError(retry_after=60)
+            if not await sliding_window_check(redis, f"llm_daily:{user.id}", 200, 86400):  # noqa: E501
+                raise RateLimitError(retry_after=86400)
+        except RedisError:  # Only Redis connection failures — NOT RateLimitError.
+            # Redis unavailable — fail open, matching RateLimitMiddleware behavior.
+            # Log at WARNING so operators are alerted to the degraded state.
+            # L-4 — T-222.
+            logger.warning(
+                "stage_manager.llm_rate_limit.redis_unavailable "
+                "stage_id=%s user_id=%s — rate limiting bypassed",
+                stage_id,
+                user.id,
+            )
 
         existing_content = stage.content or ""
         system_prompt = await get_patch_system_prompt()

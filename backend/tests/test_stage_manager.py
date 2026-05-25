@@ -1317,6 +1317,111 @@ async def test_refine_raises_rate_limit_error_when_llm_limit_exceeded() -> None:
 
 
 @pytest.mark.asyncio
+async def test_generate_redis_error_in_rate_limit_fails_open() -> None:
+    """When sliding_window_check raises RedisError (Redis connectivity blip),
+    generate() must fail open — proceed with generation instead of surfacing
+    an internal_error SSE event.  Mirrors RateLimitMiddleware behavior.
+    L-4 — T-222.
+    """
+    from redis.exceptions import RedisError as _RedisError
+
+    workspace_id = uuid4()
+    spec_stage = _make_stage(workspace_id, "spec", status="draft")
+    workspace = _make_workspace([spec_stage])
+    user = _make_user()
+    svc = StageManager(redis_client=_FakeRedis())
+    db = _MultiQueryDB([spec_stage, workspace, []])
+
+    fake_deduction = MagicMock()
+    fake_deduction.id = uuid4()
+
+    # sliding_window_check raises RedisError — simulates a connectivity blip.
+    with (
+        patch(
+            "services.pipeline.stage_manager.sliding_window_check",
+            new_callable=AsyncMock,
+            side_effect=_RedisError("connection reset"),
+        ),
+        patch(
+            "services.pipeline.stage_manager.credit_service.deduct",
+            new_callable=AsyncMock,
+            return_value=fake_deduction,
+        ),
+        patch(
+            "services.pipeline.stage_manager.credit_service.invalidate",
+            new_callable=AsyncMock,
+        ),
+        patch(
+            "services.pipeline.stage_manager._resolve_preflight_route",
+            side_effect=Exception("preflight_reached"),
+        ),
+    ):
+        # Generation must proceed past the rate-limit check (reaching preflight).
+        # We stop it at _resolve_preflight_route to avoid further mocking.
+        try:
+            async for _ in svc.generate(spec_stage.id, user, db):
+                pass
+        except Exception as exc:
+            assert "preflight_reached" in str(exc), (
+                f"Expected generation to proceed past rate-limit check, "
+                f"but got: {exc!r}. RedisError must not propagate — "
+                "fail-open means generation continues.  L-4 — T-222."
+            )
+        else:
+            pass  # generation succeeded (unlikely with stub, but acceptable)
+
+
+@pytest.mark.asyncio
+async def test_refine_redis_error_in_rate_limit_fails_open() -> None:
+    """When sliding_window_check raises RedisError in refine(), the call must
+    proceed rather than raising an internal error.  L-4 — T-222.
+    """
+    from redis.exceptions import RedisError as _RedisError
+
+    from schemas.stage import RefineRequest
+
+    workspace_id = uuid4()
+    stage = _make_stage(workspace_id, "spec", status="draft", content="hello world")
+    workspace = _make_workspace([stage])
+    user = _make_user()
+    svc = StageManager(redis_client=_FakeRedis())
+    db = _MultiQueryDB([stage, workspace])
+
+    request = RefineRequest(
+        instruction="improve",
+        selection_start=0,
+        selection_end=5,
+        selected_text="hello",
+    )
+
+    # sliding_window_check raises RedisError — should fail open, not propagate.
+    # We let the call proceed into refine's business logic; a downstream error
+    # (e.g. credit deduct) would confirm the rate-limit gate was passed.
+    with (
+        patch(
+            "services.pipeline.stage_manager.sliding_window_check",
+            new_callable=AsyncMock,
+            side_effect=_RedisError("connection reset"),
+        ),
+        patch(
+            "services.pipeline.stage_manager.credit_service.deduct",
+            new_callable=AsyncMock,
+            side_effect=Exception("credit_deduct_reached"),
+        ),
+    ):
+        try:
+            await svc.refine(stage.id, request, user, db)
+        except Exception as exc:
+            # Any exception other than RedisError confirms fail-open worked.
+            assert not isinstance(exc, _RedisError), (
+                "RedisError from sliding_window_check must not propagate "
+                "from refine().  L-4 — T-222."
+            )
+        else:
+            pass  # no exception also acceptable
+
+
+@pytest.mark.asyncio
 async def test_refine_rejects_injection_before_credit_deduction() -> None:
     from schemas.stage import RefineRequest
     from services.pipeline.stage_manager import SecurityError
