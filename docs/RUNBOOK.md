@@ -1,7 +1,7 @@
 # SpecForge Operations Runbook
 
 Operational procedures for SpecForge V1 on-call engineers and SREs.  
-Covers: circuit breaker, finalise race incident response, credit refund procedures, and auth cache limitations.
+Covers: circuit breaker, finalise race incident response, credit refund procedures, auth cache limitations, and dependency version management.
 
 ---
 
@@ -12,6 +12,7 @@ Covers: circuit breaker, finalise race incident response, credit refund procedur
 3. [Credit Accounting — Refund and Recovery](#3-credit-accounting--refund-and-recovery)
 4. [Auth Cache — Multi-Worker Limitations](#4-auth-cache--multi-worker-limitations)
 5. [General Health Checks](#5-general-health-checks)
+6. [Langfuse Docker Image — Version Management](#6-langfuse-docker-image--version-management)
 
 ---
 
@@ -246,3 +247,86 @@ Key metrics to monitor:
 | `sse_stream_duration_seconds` | P95 > 120s → streaming hung |
 | `pdf_export_duration_seconds` | P95 > 10s → PDF rendering slow |
 | `eval_failure_total` | Sustained increase → eval service degraded |
+
+---
+
+## 6. Langfuse Docker Image — Version Management
+
+**Reference:** MF-5, T-209  
+**File:** `docker-compose.yml` — `langfuse` service
+
+### Why the Image Is Pinned
+
+`docker-compose.yml` pins the Langfuse image to a specific semver tag (e.g.
+`langfuse/langfuse:3.175.0`) instead of `:latest`. A floating `:latest` tag
+means **any** `docker compose pull` can silently pull a breaking Langfuse
+release, disabling prompt management and telemetry in production without any
+code change in this repository.
+
+### Checking for Updates
+
+1. Visit **https://github.com/langfuse/langfuse/releases** and note the latest
+   stable semver tag.
+2. Review the release notes for:
+   - **Breaking changes** to the Langfuse API surface (prompt management
+     endpoints, SDK payload shapes).
+   - **Database migration requirements** — Langfuse runs its own Postgres
+     instance; a major release may require running migrations before the new
+     container starts.
+   - **Environment variable renames** — check `docker-compose.yml` env block
+     against the new release's required vars.
+3. If SpecForge integrates with the Langfuse API (`LANGFUSE_PUBLIC_KEY`,
+   `LANGFUSE_SECRET_KEY`, `LANGFUSE_HOST`), verify the SDK version in
+   `backend/pyproject.toml` is compatible with the new Langfuse server version.
+
+### Upgrade Procedure
+
+```bash
+# 1. Edit docker-compose.yml — update the pinned tag:
+#    image: langfuse/langfuse:<new-version>
+vim docker-compose.yml
+
+# 2. Pull the new image (validates the tag exists on Docker Hub):
+docker compose pull langfuse
+
+# 3. Start the langfuse profile in dev to smoke-test:
+docker compose --profile langfuse up -d langfuse langfuse-db
+
+# 4. Verify Langfuse UI is reachable:
+curl -s http://localhost:3000/api/public/health | jq .
+
+# 5. Send a test generation request through SpecForge and confirm prompts are
+#    fetched from Langfuse (check backend logs for "langfuse.prompt_fetched"):
+#    docker compose logs -f backend | grep langfuse
+
+# 6. If everything is healthy, commit the version bump:
+git add docker-compose.yml
+git commit -m "chore: bump Langfuse image to <new-version>"
+git push
+```
+
+### Rollback
+
+If the new version causes issues:
+
+```bash
+# Revert docker-compose.yml to the previous pinned tag and redeploy:
+git revert HEAD  # or manually edit and docker compose up -d
+```
+
+Because the image is pinned, rolling back is a single tag change — no data
+loss unless Langfuse ran schema migrations (check release notes).
+
+### Langfuse-Specific Breakage Signals
+
+| Symptom | Likely Cause |
+|---|---|
+| Backend logs `langfuse.prompt_fetch_failed` | SDK/server API version mismatch |
+| Langfuse UI blank / 500 on load | DB migration not completed |
+| `LANGFUSE_HOST` returns 404 on `/api/public/prompts` | Endpoint path changed in new version |
+| Prompts silently falling back to hardcoded defaults | `get_prompt()` returning `None` — check SDK compatibility |
+
+### Current Pinned Version
+
+See `docker-compose.yml` — `langfuse` service `image:` line. Update this
+runbook entry when the version is bumped.

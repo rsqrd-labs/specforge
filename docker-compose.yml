@@ -77,7 +77,12 @@ services:
     command: sh -c "corepack enable && pnpm install && pnpm dev --host 0.0.0.0"
 
   langfuse:
-    image: langfuse/langfuse:latest
+    # Pin to a specific version — update deliberately. Check releases:
+    # https://github.com/langfuse/langfuse/releases
+    # To upgrade: update the tag below, run `docker compose pull langfuse`,
+    # smoke-test with `docker compose --profile langfuse up -d`, then commit.
+    # MF-5 — T-209.
+    image: langfuse/langfuse:3.175.0
     profiles: ["langfuse"]
     ports:
       - "127.0.0.1:3000:3000"
