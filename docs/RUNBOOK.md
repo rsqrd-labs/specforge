@@ -13,6 +13,7 @@ Covers: circuit breaker, finalise race incident response, credit refund procedur
 4. [Auth Cache — Multi-Worker Limitations](#4-auth-cache--multi-worker-limitations)
 5. [General Health Checks](#5-general-health-checks)
 6. [Langfuse Docker Image — Version Management](#6-langfuse-docker-image--version-management)
+7. [Database Migrations — Alembic Runbook](#7-database-migrations--alembic-runbook)
 
 ---
 
@@ -75,6 +76,14 @@ Or simply restart the worker processes — `_FAILURES` is in-process memory and 
 For emergency bypass (e.g. during circuit tuning or provider-side investigation):
 
 In `provider_status.py`, temporarily raise `_UNHEALTHY_FAILURE_THRESHOLD` or set it to a very high value, then redeploy. **Revert immediately** after the investigation.
+
+### SLA Impact and Escalation
+
+| Scope | Impact | Action |
+|---|---|---|
+| One provider tripped | Users on that provider's key receive HTTP 503; platform-key users on other providers unaffected | Check provider status page; wait for auto-reset or call `record_provider_success()` |
+| All providers tripped | All generation requests return 503 | **Escalate immediately** to LLM provider engineering contact; consider emergency bypass (raise `_UNHEALTHY_FAILURE_THRESHOLD`) while investigating |
+| Circuit never resets | Health probes fail to reach provider | Verify network egress from Railway; check provider status API |
 
 ### Multi-Worker Note
 
@@ -176,6 +185,14 @@ await CreditService(redis_client=redis).refund(db, user_id, amount, "manual_refu
 2. Calls `invalidate_user_cache(user_id)` to evict the in-process `_USER_CACHE` entry (H-4 — T-185).
 
 If the credit balance appears stale after a deduction, verify both caches were cleared.
+
+### Escalation Threshold
+
+| Affected Users | Severity | Action |
+|---|---|---|
+| 1–2 | Low | Issue manual refund; monitor for recurrence |
+| 3–9 | Medium | Open incident; assign on-call engineer |
+| ≥ 10 | **P1 Incident** | Page on-call lead; escalate to engineering manager; run post-mortem within 48h |
 
 ---
 
@@ -335,3 +352,115 @@ loss unless Langfuse ran schema migrations (check release notes).
 
 See `docker-compose.yml` — `langfuse` service `image:` line. Update this
 runbook entry when the version is bumped.
+
+---
+
+## 7. Database Migrations — Alembic Runbook
+
+**Reference:** T-213, T-216  
+**Files:** `backend/migrations/`, `backend/alembic.ini`
+
+### Running Migrations in Production (Railway)
+
+Migrations run automatically as part of the Railway deploy process via
+`backend/entrypoint.sh`:
+
+```bash
+alembic upgrade head
+```
+
+This is safe to run on every deploy — Alembic tracks applied migrations in the
+`alembic_version` table and skips already-applied revisions. Do **not** set
+`--sql` (dry-run mode) in production; it generates SQL without executing it.
+
+**Manual trigger** (if needed via Railway shell):
+
+```bash
+cd /app
+uv run alembic upgrade head
+```
+
+### Rolling Back a Migration
+
+```bash
+# Roll back the most recent migration:
+uv run alembic downgrade -1
+
+# Roll back to a specific revision:
+uv run alembic downgrade <revision_id>
+
+# Check current head:
+uv run alembic current
+
+# View migration history:
+uv run alembic history --verbose
+```
+
+> **Warning:** `downgrade -1` is destructive if the migration added columns or
+> tables with data. Always check the `downgrade()` function in the migration
+> file before running in production. Take a database snapshot first.
+
+### Checking Migration Status
+
+```bash
+# Confirm all migrations are applied:
+uv run alembic current
+
+# Expected output: <revision_id> (head)
+# If a revision shows without "(head)", a migration is pending.
+```
+
+```sql
+-- Verify from the DB directly:
+SELECT version_num FROM alembic_version;
+```
+
+### Migration-Specific Notes
+
+#### T-213 — `eval_results` Composite Index (`0012_eval_results_composite_index.py`)
+
+Migration `0012` creates a B-tree composite index on
+`eval_results(stage_version_id, created_at DESC)` via a standard
+`CREATE INDEX` statement (not `CONCURRENTLY`).
+
+**On small/staging databases:** safe to apply online with no perceptible lock
+time. The migration runs in a transaction; if it fails, the table is unchanged.
+
+**On large production tables (millions of eval rows):** the `ShareLock` held
+during index build blocks concurrent writes for the full build duration
+(typically seconds to minutes depending on table size). Consider a maintenance
+window **or** run the index build manually outside this migration:
+
+```sql
+-- Run outside a transaction (psql):
+\set ON_ERROR_STOP on
+CREATE INDEX CONCURRENTLY ix_eval_results_stage_version_created_at
+    ON eval_results USING btree (stage_version_id, created_at DESC);
+```
+
+Then mark the migration as applied without executing it:
+
+```bash
+uv run alembic stamp 0012
+```
+
+#### Adding New Migrations
+
+1. Generate a new revision:
+   ```bash
+   uv run alembic revision --autogenerate -m "describe_the_change"
+   ```
+2. Review the generated file in `backend/migrations/versions/` — autogenerate
+   is not always correct; verify the `upgrade()` and `downgrade()` functions.
+3. Test locally: `uv run alembic upgrade head` against a fresh database.
+4. Commit the file and let CI/Railway apply it on the next deploy.
+
+### Schema Backup Before a Major Migration
+
+```bash
+# Snapshot the schema (not data) before a risky migration:
+pg_dump --schema-only $DATABASE_URL > schema_backup_$(date +%Y%m%d).sql
+```
+
+Store the backup outside the Railway ephemeral filesystem (e.g. in an S3
+bucket or local machine) before triggering the deploy.
