@@ -349,6 +349,8 @@ def test_lifespan_flushes_langfuse_on_shutdown() -> None:
     flushed = AsyncMock()
 
     class _StubClient:
+        enabled = False  # skip startup_check in lifespan — T-221
+
         async def flush(self) -> None:
             await flushed()
 

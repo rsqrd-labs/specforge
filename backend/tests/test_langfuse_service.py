@@ -604,3 +604,134 @@ def test_reset_langfuse_client_drops_singleton(
     langfuse_service.reset_langfuse_client()
     b = langfuse_service.get_langfuse_client()
     assert a is not b
+
+
+# ---------------------------------------------------------------------------
+# startup_check() — connectivity health check on lifespan startup (M-4 T-221)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_startup_check_disabled_returns_true_without_sdk_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When Langfuse is disabled (no secret key), startup_check returns True
+    immediately — a disabled client is not an error. auth_check must never
+    be called so the check adds zero latency for unconfigured deployments.
+    M-4 — T-221.
+    """
+    _configure_settings(monkeypatch, langfuse_secret_key="")
+    client = langfuse_service.get_langfuse_client()
+    assert client.enabled is False
+
+    with patch.dict({"langfuse": None}):
+        # Must return True even if langfuse SDK is not importable.
+        result = await client.startup_check()
+    assert result is True
+
+
+@pytest.mark.asyncio
+async def test_startup_check_success_returns_true(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When auth_check() returns True, startup_check must return True and log
+    langfuse.startup_check.ok.  M-4 — T-221.
+    """
+    _configure_settings(
+        monkeypatch,
+        langfuse_secret_key="sk-test",
+        langfuse_public_key="pk-test",
+    )
+    fake_sdk = MagicMock()
+    fake_sdk.auth_check.return_value = True
+    with patch("langfuse.Langfuse", return_value=fake_sdk):
+        client = langfuse_service.get_langfuse_client()
+        result = await client.startup_check()
+
+    assert result is True
+    fake_sdk.auth_check.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_startup_check_exception_returns_false_without_raising(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When auth_check() raises any exception, startup_check must catch it,
+    log a WARNING, and return False — never re-raise.  A Langfuse outage
+    must not prevent the application from starting.  M-4 — T-221.
+    """
+    _configure_settings(
+        monkeypatch,
+        langfuse_secret_key="sk-test",
+        langfuse_public_key="pk-test",
+    )
+    fake_sdk = MagicMock()
+    fake_sdk.auth_check.side_effect = RuntimeError("auth failed — server unreachable")
+    with patch("langfuse.Langfuse", return_value=fake_sdk):
+        client = langfuse_service.get_langfuse_client()
+        # Must return False without propagating the RuntimeError.
+        result = await client.startup_check()
+
+    assert result is False
+
+
+@pytest.mark.asyncio
+async def test_startup_check_timeout_returns_false(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When auth_check() takes longer than the 10-second timeout, startup_check
+    must cancel it and return False.  A slow or unreachable Langfuse host
+    must not stall lifespan startup indefinitely.  M-4 — T-221.
+    """
+    import time
+
+    _configure_settings(
+        monkeypatch,
+        langfuse_secret_key="sk-test",
+        langfuse_public_key="pk-test",
+    )
+    fake_sdk = MagicMock()
+
+    def _hang_briefly(*_args: Any, **_kwargs: Any) -> bool:
+        # Simulate a slow server: sleep slightly past our test-injected
+        # asyncio.wait_for timeout (which we shorten via monkeypatching the
+        # coroutine directly below).
+        time.sleep(0.5)
+        return True
+
+    fake_sdk.auth_check.side_effect = _hang_briefly
+
+    with patch("langfuse.Langfuse", return_value=fake_sdk):
+        client = langfuse_service.get_langfuse_client()
+
+        # Patch asyncio.wait_for to raise TimeoutError immediately so the
+        # test is fast and deterministic rather than actually waiting 10s.
+        async def _timeout_immediately(coro, timeout):  # noqa: ANN001, ANN201
+            coro.close()  # clean up the coroutine to avoid ResourceWarning
+            raise asyncio.TimeoutError
+
+        with patch("asyncio.wait_for", side_effect=_timeout_immediately):
+            result = await client.startup_check()
+
+    assert result is False
+
+
+@pytest.mark.asyncio
+async def test_startup_check_falsy_result_returns_false(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Defensive path: if auth_check() returns a falsy value (future SDK change),
+    startup_check must return False and log a warning.  M-4 — T-221.
+    """
+    _configure_settings(
+        monkeypatch,
+        langfuse_secret_key="sk-test",
+        langfuse_public_key="pk-test",
+    )
+    fake_sdk = MagicMock()
+    fake_sdk.auth_check.return_value = False
+    with patch("langfuse.Langfuse", return_value=fake_sdk):
+        client = langfuse_service.get_langfuse_client()
+        result = await client.startup_check()
+
+    assert result is False

@@ -285,6 +285,48 @@ class LangfuseClient:
         except Exception:
             logger.error("langfuse.flush.failed", exc_info=True)
 
+    async def startup_check(self) -> bool:
+        """Verify Langfuse connectivity on process startup.
+
+        Calls the SDK's auth_check() in a worker thread (blocking I/O).
+        Returns True on success, False on failure.  Never raises — a Langfuse
+        outage must not prevent the application from starting.  Logs a
+        structured WARNING on failure so operators can detect version skew or
+        connectivity issues immediately on deploy.  M-4 — T-221.
+        """
+        client = self._ensure_client()
+        if client is None:
+            return True  # disabled — not an error
+        try:
+            result = await asyncio.wait_for(
+                asyncio.to_thread(client.auth_check),
+                timeout=10.0,
+            )
+            # IMPORTANT: The Langfuse v2 SDK's auth_check() returns `bool` (True on
+            # success) and RAISES an Exception on failure — it does NOT return False.
+            # Do NOT use getattr(result, "status", None) == "success" — auth_check()
+            # returns a plain bool, not an object with a .status attribute.  The
+            # correct check is simply `if result:`.  Verified against installed SDK:
+            # langfuse/client.py def auth_check(self) -> bool: ... return True
+            if result:
+                logger.info("langfuse.startup_check.ok")
+                return True
+            # Defensive: covers any future SDK change that returns a falsy value.
+            logger.warning(
+                "langfuse.startup_check.failed",
+                result=str(result)[:200],
+            )
+            return False
+        except asyncio.TimeoutError:
+            logger.warning(
+                "langfuse.startup_check.timeout",
+                timeout_seconds=10.0,
+            )
+            return False
+        except Exception:
+            logger.warning("langfuse.startup_check.error", exc_info=True)
+            return False
+
     async def get_prompt(
         self,
         name: str,

@@ -105,6 +105,13 @@ def create_app(redis_client: Redis | None = None) -> FastAPI:
         # background tasks can call database.get_shared_redis() without
         # holding a Request reference.  H-1 — T-177.
         _initialize_redis(redis)
+        # Langfuse startup health check: verifies connectivity and key validity.
+        # Converts silent SDK/server version-skew failures into a loud WARNING
+        # so operators detect incompatibility on deploy rather than weeks later.
+        # Never fatal — the result is logged only.  M-4 — T-221.
+        langfuse_client = langfuse_service.get_langfuse_client()
+        if langfuse_client.enabled:
+            await langfuse_client.startup_check()
         task = asyncio.create_task(run_recovery_loop())
         yield
         task.cancel()
