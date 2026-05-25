@@ -29,12 +29,17 @@ The LLM circuit breaker tracks consecutive failures per provider using `_FAILURE
 
 **Prometheus metric:** `specforge_llm_circuit_rejections_total{provider="<provider>"}`
 
+> **Alert:** if `specforge_llm_circuit_rejections_total > 0` — a circuit breaker has
+> activated. Check provider health via `GET /providers/{id}/health`.
+
 ```promql
 # Alert: circuit breaker tripped in the last 5 minutes
 increase(specforge_llm_circuit_rejections_total[5m]) > 0
 
-# Compare rejections per provider
-sum by (provider) (rate(specforge_llm_circuit_rejections_total[1m]))
+# Grafana dashboard: rejection rate per provider (T-215)
+rate(specforge_llm_circuit_rejections_total[5m])
+# — or grouped to sum across all labels:
+sum by (provider) (rate(specforge_llm_circuit_rejections_total[5m]))
 ```
 
 **Log signal:**

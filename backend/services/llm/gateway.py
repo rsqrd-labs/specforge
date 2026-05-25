@@ -65,6 +65,11 @@ def get_llm(
     # count has tripped the threshold.  Choosing hard-reject (503) over silent
     # fallback so callers can retry against a different provider explicitly
     # rather than silently masking the outage.  CF-2 — T-197.
+    #
+    # Increment the Prometheus rejection counter before raising so that even
+    # if the HTTPException is swallowed at a higher level, the metric reflects
+    # the rejection.  Counter is labelled by provider so operators can isolate
+    # which provider's circuit is open.  T-215.
     if not bypass_circuit and not can_route(provider):
         CIRCUIT_REJECTIONS.labels(provider=provider).inc()
         logger.warning(
