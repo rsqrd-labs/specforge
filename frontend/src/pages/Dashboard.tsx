@@ -1,5 +1,6 @@
 import { Fragment, useEffect, useRef, useState } from "react"
 import { useNavigate } from "react-router-dom"
+import { ErrorBoundary } from "../components/ErrorBoundary"
 import { GitHubStatusPill } from "../components/shared/GitHubStatusPill"
 import { CreateWorkspaceModal } from "../components/dashboard/CreateWorkspaceModal"
 import { DeleteWorkspaceModal } from "../components/dashboard/DeleteWorkspaceModal"
@@ -197,6 +198,29 @@ function UserAvatar({
   }
 
   return <div className="user-avatar-fallback">{initials}</div>
+}
+
+/**
+ * Fallback rendered by ErrorBoundary when TemplatesStrip throws.
+ * A malformed /api/templates response or network error during render must
+ * not crash the entire Dashboard — it should degrade to this inline message.
+ * MF-4 — T-208.
+ */
+function TemplatesErrorFallback() {
+  return (
+    <div className="templates-error-fallback" role="alert" aria-live="polite">
+      <span className="templates-error-message">
+        Templates unavailable — reload to retry.
+      </span>
+      <button
+        type="button"
+        className="templates-error-reload"
+        onClick={() => window.location.reload()}
+      >
+        Reload
+      </button>
+    </div>
+  )
 }
 
 export default function Dashboard() {
@@ -555,10 +579,12 @@ export default function Dashboard() {
           </div>
         ) : workspaces.length === 0 ? (
           <div className="workspace-empty">
-            <TemplatesStrip
-              prominent
-              onPick={openCreateWorkspaceFromTemplate}
-            />
+            <ErrorBoundary fallback={<TemplatesErrorFallback />}>
+              <TemplatesStrip
+                prominent
+                onPick={openCreateWorkspaceFromTemplate}
+              />
+            </ErrorBoundary>
             <div className="workspace-empty-icon">⚡</div>
             <p className="workspace-empty-heading">Your first great brief starts here</p>
             <p className="workspace-empty-body">
@@ -585,7 +611,9 @@ export default function Dashboard() {
           </div>
         ) : (
           <>
-            <TemplatesStrip onPick={openCreateWorkspaceFromTemplate} />
+            <ErrorBoundary fallback={<TemplatesErrorFallback />}>
+              <TemplatesStrip onPick={openCreateWorkspaceFromTemplate} />
+            </ErrorBoundary>
           <div className="workspace-grid">
             {workspaces.map((ws, i) => (
               <WorkspaceCard
