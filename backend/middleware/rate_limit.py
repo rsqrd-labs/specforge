@@ -135,11 +135,10 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         )
         self._trusted_proxy_networks = _parse_trusted_proxy_networks(configured_proxies)
         self._local_fallback_windows: dict[str, list[float]] = {}
-        # Suppresses repeated startup warnings when app.state.redis is not yet
-        # available (e.g. during early lifespan before _initialize_redis is
-        # called).  The bool write is GIL-protected; no lock required.
-        # HF-5 — T-202.
-        self._logged_redis_not_ready: bool = False
+        # Suppresses repeated startup warnings emitted when app.state.redis is
+        # not yet populated (early lifespan, before _initialize_redis runs).
+        # GIL-protected bool; no explicit lock needed.  HF-5 — T-202.
+        self._redis_warned: bool = False
 
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
         ip = _get_client_ip(request, self._trusted_proxy_networks)
@@ -155,14 +154,20 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         # the middleware untestable without a live Redis URL.  HF-5 — T-202.
         redis = getattr(request.app.state, "redis", None)
         if redis is None:
-            if not self._logged_redis_not_ready:
+            if not self._redis_warned:
                 logger.warning(
                     "rate_limit.redis_not_ready "
-                    "app.state.redis is not set — rate limiting bypassed until "
-                    "Redis is registered by the lifespan"
+                    "falling back to in-process rate limiting"
                 )
-                self._logged_redis_not_ready = True
+                self._redis_warned = True
+            limited_response = await self._enforce_limits(
+                request, ip, path, self._local_fallback_check
+            )
+            if limited_response is not None:
+                return limited_response
             return await call_next(request)
+        else:
+            self._redis_warned = False  # Reset; re-fire warning on next Redis gap.
 
         async def _redis_check(key: str, limit: int, window_seconds: int) -> bool:
             return await sliding_window_check(redis, key, limit, window_seconds)
