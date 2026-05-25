@@ -201,6 +201,7 @@ Instructions:
    - Every FR/NFR/SEC ID → which task addresses it?
    - Every harness test path → which task makes it pass?
    - Every plan contract (endpoint, schema, module boundary) → which task implements it?
+   - For each plan section or contract (architecture decision, module boundary, API endpoint, schema, migration), confirm at least one task addresses it — no plan artifact may be orphaned from the task list.
    Verify that no item in any of the three lists is orphaned before writing T-001.
    Do not include this coverage map in your output — it goes into the Traceability
    Overview section of the artifact, using the exact IDs from the spec and the exact
