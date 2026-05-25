@@ -633,6 +633,23 @@ class StageManager:
                         yield token
                 content_generation_id = getattr(adapter, "last_generation_id", None)
             except (ProviderError, TimeoutError) as exc:
+                # Record failure for stream timeouts ONLY — not for ProviderError.
+                # CRITICAL: Do NOT call record_provider_failure() unconditionally here.
+                # InstrumentedAdapter.stream() already calls record_provider_failure()
+                # inside its `except Exception` block for non-timeout ProviderErrors.
+                # Calling it again here (unconditionally) would double-count those
+                # errors and trip the circuit after 2 failures instead of the
+                # documented 3.
+                # The timeout path is the only gap: asyncio.timeout() fires via
+                # CancelledError (a BaseException), which bypasses
+                # InstrumentedAdapter.stream()'s `except Exception` guard entirely.
+                # Only TimeoutError reaches here without having already triggered
+                # record_provider_failure().  C-1 — T-217.
+                if isinstance(exc, TimeoutError):
+                    from services.llm.provider_status import (  # noqa: PLC0415
+                        record_provider_failure,
+                    )
+                    record_provider_failure(route.provider, exc)
                 # Increment SSE failure counter so streaming failures are
                 # visible in dashboards even before the 3-min recovery loop
                 # fires.  T-194.
