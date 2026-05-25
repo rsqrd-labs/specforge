@@ -165,11 +165,23 @@ class CreditService:
             amount=refund_amount,
             reason=refund_reason,
         )
-        db.add(refund_entry)
         try:
-            await db.flush()
+            async with db.begin_nested():
+                # Scope the INSERT to a SAVEPOINT so that a concurrent duplicate
+                # refund (IntegrityError on the unique reason constraint) only
+                # rolls back this savepoint — the outer transaction (stage status
+                # updates, content writes, etc.) remains intact.  MF-3 — T-207.
+                db.add(refund_entry)
+                await db.flush()
         except IntegrityError:
-            await db.rollback()
+            # A concurrent refund for the same deduction already committed.
+            # The SAVEPOINT was automatically rolled back; the outer transaction
+            # is intact.  Treat as idempotent — the credits were already refunded.
+            logger.warning(
+                "credit.refund.duplicate_entry ledger_entry_id=%s user_id=%s",
+                ledger_entry_id,
+                original.user_id,
+            )
             return
         user.credit_balance = int(user.credit_balance or 0) + refund_amount
         await db.flush()

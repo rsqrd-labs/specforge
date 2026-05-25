@@ -25,6 +25,35 @@ class _FakeRedis:
             self._store.pop(k, None)
 
 
+class _SavepointCtx:
+    """Async context manager simulating an SQLAlchemy begin_nested() savepoint.
+
+    Mirrors real SQLAlchemy savepoint semantics:
+    - On exception inside the ``async with`` block the savepoint is rolled back
+      (``savepoint_rolled_back`` flag set on the owning ``_FakeDB``).
+    - The outer transaction is NOT touched (``rolled_back`` stays False).
+    - The exception is always re-raised so the caller's ``except`` handler fires.
+    MF-3 — T-207.
+    """
+
+    def __init__(self, db: "_FakeDB") -> None:
+        self._db = db
+
+    async def __aenter__(self) -> "_SavepointCtx":
+        return self
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: Any,
+    ) -> bool:
+        if exc_type is not None:
+            # Savepoint rolled back — record it but do NOT touch the outer tx.
+            self._db.savepoint_rolled_back = True
+        return False  # never suppress; the exception must propagate
+
+
 class _FakeDB:
     def __init__(
         self,
@@ -42,6 +71,8 @@ class _FakeDB:
         self._execute_count = 0
         self.added: list[Any] = []
         self.rolled_back = False
+        # Set to True when begin_nested()'s __aexit__ sees an exception.
+        self.savepoint_rolled_back = False
 
     async def execute(self, statement: Any) -> Any:
         call = self._execute_count
@@ -70,6 +101,15 @@ class _FakeDB:
 
     async def commit(self) -> None:
         pass
+
+    def begin_nested(self) -> _SavepointCtx:
+        """Return an async savepoint context manager (simulates begin_nested).
+
+        The returned context manager rolls back only the savepoint on exception,
+        leaving the outer transaction intact — mirrors real SQLAlchemy behaviour.
+        MF-3 — T-207.
+        """
+        return _SavepointCtx(self)
 
 
 class _Scalars:
@@ -194,6 +234,11 @@ async def test_refund_is_idempotent(svc: CreditService) -> None:
 
 @pytest.mark.asyncio
 async def test_refund_is_race_safe_via_integrity_error(svc: CreditService) -> None:
+    """Duplicate refund (IntegrityError) is swallowed silently.
+
+    Previously this called db.rollback() which corrupted the outer transaction.
+    With begin_nested() only the savepoint is rolled back.  MF-3 — T-207.
+    """
     user_id = uuid4()
     user = _user(user_id, balance=40)
     deduction = CreditLedger(id=uuid4(), user_id=user_id, amount=-10, reason="gen")
@@ -207,14 +252,22 @@ async def test_refund_is_race_safe_via_integrity_error(svc: CreditService) -> No
     # Must not raise — duplicate refund is silently swallowed
     await svc.refund(db, deduction.id)
 
-    assert db.rolled_back
+    # Savepoint was rolled back, but the outer transaction must NOT have been.
+    assert db.savepoint_rolled_back, "savepoint should have been rolled back"
+    assert not db.rolled_back, "outer transaction must NOT be rolled back"
     assert user.credit_balance == 40
 
 
 @pytest.mark.asyncio
-async def test_refund_integrity_error_clears_failed_transaction(
+async def test_refund_integrity_error_outer_transaction_survives(
     svc: CreditService,
 ) -> None:
+    """After a duplicate-refund IntegrityError the outer session is still usable.
+
+    MF-3 — T-207: The SAVEPOINT is rolled back; the outer transaction (which
+    may have stage-status updates, workspace writes, etc.) is unaffected.
+    Callers can still commit the outer transaction after refund() returns.
+    """
     user_id = uuid4()
     user = _user(user_id, balance=40)
     deduction = CreditLedger(id=uuid4(), user_id=user_id, amount=-10, reason="gen")
@@ -224,11 +277,17 @@ async def test_refund_integrity_error_clears_failed_transaction(
         raise_integrity_error_on_flush=True,
     )
 
-    # Concurrent call: db.flush() raises IntegrityError — must return silently
+    # refund() must return without raising even though flush() raises internally
     await svc.refund(db, deduction.id)
 
-    # db.rollback() must have been called to clear the failed transaction
-    assert db.rolled_back
+    # Outer transaction was NOT rolled back
+    assert not db.rolled_back, "db.rollback() must not be called — outer tx must survive"
+
+    # Session is still usable: commit() must not raise
+    await db.commit()  # would raise if session were in an invalid state
+
+    # Execute is still usable too (simulates stage-status query continuing)
+    _ = await db.execute(object())  # must not raise
 
 
 @pytest.mark.asyncio
