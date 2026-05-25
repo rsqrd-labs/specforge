@@ -583,6 +583,9 @@ class StageManager:
         stage.deduction_ledger_id = deduction.id if deduction else None
         stage.updated_at = datetime.now(UTC)
         await db.commit()
+        if deduction is not None:
+            # Post-commit cache eviction — H-2 — T-219.
+            await credit_service.invalidate(user.id)
 
         # _cleanup_done starts False immediately after the commit so that any
         # exception enters the finally cleanup path and refunds credits + resets
@@ -659,6 +662,9 @@ class StageManager:
                 stage.status = "draft"
                 stage.updated_at = datetime.now(UTC)
                 await db.commit()
+                if deduction is not None:
+                    # Post-commit cache eviction — H-2 — T-219.
+                    await credit_service.invalidate(user.id)
                 _cleanup_done = True
                 if span_id:
                     await self._mark_langfuse_span_failed(span_id, exc)
@@ -675,6 +681,8 @@ class StageManager:
                 stage.status = "draft"
                 stage.updated_at = datetime.now(UTC)
                 await db.commit()
+                # Post-commit cache eviction — H-2 — T-219.
+                await credit_service.invalidate(user.id)
                 _cleanup_done = True
                 if span_id:
                     await self._mark_langfuse_span_failed(
@@ -789,6 +797,9 @@ class StageManager:
                             stuck.status = "draft"
                             stuck.updated_at = datetime.now(UTC)
                             await cleanup_db.commit()
+                            if deduction is not None:
+                                # Post-commit cache eviction — H-2 — T-219.
+                                await credit_service.invalidate(user.id)
                             await redis.delete(
                                 f"{_STAGE_CACHE_PREFIX}{workspace.id}:{stage.type}"
                             )

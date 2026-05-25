@@ -409,6 +409,7 @@ async def test_generate_stream_timeout_records_provider_failure() -> None:
     mock_credit = MagicMock()
     mock_credit.deduct = AsyncMock(return_value=mocks["fake_deduction"])
     mock_credit.refund = AsyncMock()
+    mock_credit.invalidate = AsyncMock()  # T-219: post-commit cache eviction.
 
     with (
         patch.object(
@@ -524,6 +525,7 @@ async def test_generate_provider_error_does_not_double_count_record_provider_fai
     mock_credit = MagicMock()
     mock_credit.deduct = AsyncMock(return_value=mocks["fake_deduction"])
     mock_credit.refund = AsyncMock()
+    mock_credit.invalidate = AsyncMock()  # T-219: post-commit cache eviction.
 
     with (
         patch.object(

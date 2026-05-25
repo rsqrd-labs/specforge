@@ -9,7 +9,6 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from config import settings
 from database import get_shared_redis
 from models import CreditLedger, User
 
@@ -229,6 +228,18 @@ class CreditService:
         from middleware.auth import invalidate_user_cache  # noqa: PLC0415
 
         invalidate_user_cache(user_id)
+
+    async def invalidate(self, user_id: UUID) -> None:
+        """Public alias for post-commit cache invalidation.
+
+        Call this immediately after ``db.commit()`` in any code path that
+        first called ``deduct()``, ``credit()``, or ``refund()``.  The first
+        invalidation (inside those methods, after flush) clears the cache
+        eagerly.  This second call ensures any concurrent ``get_balance()``
+        that re-populated the cache during the flush→commit window is
+        immediately evicted after the true balance is committed.  H-2 — T-219.
+        """
+        await self._invalidate(user_id)
 
 
 credit_service = CreditService()
