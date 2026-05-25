@@ -41,6 +41,12 @@ increase(specforge_llm_circuit_rejections_total[5m]) > 0
 rate(specforge_llm_circuit_rejections_total[5m])
 # — or grouped to sum across all labels:
 sum by (provider) (rate(specforge_llm_circuit_rejections_total[5m]))
+
+# Current open/closed state per provider (0=closed, 1=open): (T-220)
+specforge_llm_circuit_state
+
+# Alert when any provider circuit is open:
+max by (provider) (specforge_llm_circuit_state) == 1
 ```
 
 **Log signal:**

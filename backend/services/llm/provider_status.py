@@ -11,7 +11,7 @@ import time
 from dataclasses import dataclass
 from typing import Literal
 
-from prometheus_client import Counter
+from prometheus_client import Counter, Gauge
 
 from config import settings
 from services.llm.provider_config import JUDGE_MODELS, PROVIDER_DISPLAY
@@ -45,6 +45,16 @@ _FAILURES: dict[str, "ProviderFailureState"] = {}
 CIRCUIT_REJECTIONS = Counter(
     "specforge_llm_circuit_rejections_total",
     "Number of requests rejected because the LLM provider circuit is open",
+    ["provider"],
+)
+
+# Gauge for current circuit breaker state per provider.  0 = closed (healthy),
+# 1 = open (rejecting requests).  Updated synchronously in record_provider_failure()
+# and record_provider_success().  Per-process; under multi-worker deployment,
+# use max(specforge_llm_circuit_state) by provider in Grafana.  M-2 — T-220.
+CIRCUIT_STATE = Gauge(
+    "specforge_llm_circuit_state",
+    "Current circuit breaker state per LLM provider (0=closed, 1=open)",
     ["provider"],
 )
 
@@ -152,6 +162,7 @@ async def check_provider_health(provider: str) -> dict[str, object]:
 
 def record_provider_success(provider: str) -> None:
     _FAILURES.pop(provider, None)
+    CIRCUIT_STATE.labels(provider=provider).set(0)  # Circuit closed — M-2 — T-220.
     record_llm_provider_health(provider, "healthy")
 
 
@@ -162,6 +173,10 @@ def record_provider_failure(provider: str, exc: BaseException) -> None:
     state.last_error = exc.__class__.__name__
     record_llm_provider_failure(provider, state.last_error)
     record_llm_provider_health(provider, _provider_health(provider, True)[0])
+    # Update Gauge AFTER all _FAILURES mutations so it reflects the post-failure
+    # state.  _circuit_open() re-reads _FAILURES to determine open/closed.
+    # M-2 — T-220.
+    CIRCUIT_STATE.labels(provider=provider).set(1 if _circuit_open(provider) else 0)
 
 
 def _provider_health(
