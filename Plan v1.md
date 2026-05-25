@@ -3110,6 +3110,117 @@ The remaining gap to 10/10 reflects known architectural limitations (in-process 
 
 ---
 
+## Phase 20 — Final Hardening & Enterprise Closure
+
+**Version:** 2.1.0 (Post-Third-Pass Review)
+**Source:** Enterprise code review conducted 2026-05-25 — nine findings across circuit-breaker reliability, prompt regression, credit-cache correctness, observability gaps, rate-limit robustness, and operational procedures.
+**Tasks:** T-217 through T-225 (9 tasks in `tasks.md`)
+**Harness:** `harness/tests/backend/test_phase17_final_hardening_contract.py`
+
+### 20.1 Architectural Context
+
+Phase 19 raised enterprise readiness from 5.5 to 8.0/10. The third-pass review identified one **critical behavioral gap** (circuit breaker never trips on stream timeouts), one **pre-existing test failure** that indicates a prompt regression, and seven **medium/low findings** spanning cache timing, observability coverage, rate-limit robustness, adapter TTL, and operational runbook gaps. Phase 20 closes all of them.
+
+No new features are added. No existing APIs change in a breaking way. Every change is either a targeted bug fix, an observability addition, or a documentation/operational procedure.
+
+### 20.2 Critical Finding — Circuit Breaker Gap in generate() (C-1 → T-217)
+
+**Root cause verified:** `asyncio.timeout(stream_timeout)` in `stage_manager.generate()` fires by injecting `CancelledError` (a `BaseException` subclass) into the running generator. `InstrumentedAdapter.stream()` catches only `Exception` — `CancelledError` bypasses this block entirely, so `record_provider_failure()` is never called on stream timeouts. The `except (ProviderError, TimeoutError)` block in `generate()` (lines 635–651) also omits `record_provider_failure()`. This means three consecutive provider timeouts during `generate()` will **never trip the circuit breaker**, leaving the service routing every subsequent request to the hung provider.
+
+**Fix:** One import + one function call added to the `generate()` except block at line 635:
+```python
+from services.llm.provider_status import record_provider_failure
+record_provider_failure(route.provider, exc)
+```
+This mirrors the identical pattern already present in `refine()` and `generate_harness_patch()` at lines 1324–1328. Zero API surface change.
+
+**Verification method:** Unit test with `asyncio.timeout(0.1)` wrapping a fake adapter that `await asyncio.sleep(10)` — confirmed via Python 3.12 that `CancelledError` propagates and `record_provider_failure` is NOT called before the fix; IS called after.
+
+### 20.3 High Finding — Tasks Prompt Regression (H-1 → T-218)
+
+`test_tasks_prompt_is_ordered_traceable_and_agent_executable` in `test_prompt_builder.py` has failed since a Phase 14 rewrite of `prompts/tasks.py`. The test guards a specific traceability instruction: `"For each plan section or contract"` must appear in `tasks.build_user_prompt()`. This instruction ensures the LLM traces plan sections (not just spec requirements) to tasks — a quality constraint that prevents tasks from being spec-only and missing plan-level architectural contracts. The instruction was removed from the user prompt without updating the test, indicating the quality guard slipped.
+
+**Fix:** Restore the instruction as a first-class bullet in step 0 of `build_user_prompt()`, explicitly naming plan sections and contracts as a coverage axis.
+
+### 20.4 Medium Finding — Credit Cache Invalidation Before Commit (H-2 → T-219)
+
+`credit_service._invalidate()` is called after `db.flush()` but before the outer `db.commit()`. A concurrent `get_balance()` hitting between invalidation and commit reads the pre-deduction balance from PostgreSQL (READ COMMITTED isolation, uncommitted changes are invisible), then populates Redis with the stale higher value. After commit, the cache shows the wrong balance for up to 5 minutes. The hard guard (`SELECT FOR UPDATE` in `deduct()`) prevents actual credit loss, but the stale cache causes `_assert_visible_credit_balance()` to pass incorrectly in other workers, leading to "generation starts → fails with insufficient_credits" UX degradation.
+
+**Fix:** Expose a public `invalidate(user_id)` method on `CreditService`. Call it a **second time** immediately after every `await db.commit()` that follows a credit write in `stage_manager.py`. The first invalidation (in `deduct()`) clears the cache early; the second (post-commit) ensures any cache re-population during the window is immediately evicted after the true balance is committed.
+
+### 20.5 Medium Finding — Rate Limit Startup Window Bypasses All Tiers (H-3 → T-225)
+
+When `app.state.redis is None` (before the FastAPI lifespan completes Redis initialization), `RateLimitMiddleware` calls `return await call_next(request)` — bypassing **all** rate limiting including the IP-global 1000 req/min cap. The code already has `_local_fallback_check` (in-process sliding window) that is used when Redis raises `RedisError` mid-request. The startup window should use the same fallback instead of bypassing entirely.
+
+**Fix:** Replace `return await call_next(request)` in the `redis is None` branch with a call to `_enforce_limits(..., self._local_fallback_check)`. Add reset of `_logged_redis_not_ready` when Redis becomes available so the startup warning fires again after a Redis restart.
+
+### 20.6 Observability Gap — Circuit State Gauge Missing (M-2 → T-220)
+
+`CIRCUIT_REJECTIONS` counter (T-215) tracks that rejections occurred but cannot tell an operator whether a circuit is currently open or closed. A Gauge `specforge_llm_circuit_state` (0=closed, 1=open) per provider allows Grafana dashboards to show a real-time circuit map. Updated in `record_provider_failure()` and `record_provider_success()` alongside the existing failure tracking.
+
+### 20.7 Medium Finding — Langfuse SDK/Server Compatibility Health Check (M-4 → T-221)
+
+SDK pinned at `langfuse>=2.60,<3`; server at `langfuse/langfuse:3.175.0`. The SDK's exception-swallowing design means protocol-level incompatibility is logged silently as `langfuse.create_trace.failed` and never surfaces to CI or operators. Add a startup health check: when `settings.langfuse_secret_key` is set, call `langfuse_client.auth_check()` during lifespan startup. Log a structured WARNING (not error, never fatal) if the check fails, so operators can detect version skew immediately on deploy rather than hours later from missing traces.
+
+### 20.8 Low Findings (L-1, L-4 → T-223, T-222)
+
+**L-1 — Adapter cache no TTL (T-223):** `_INSTANCES` in `gateway.py` uses LRU-only eviction. Stale adapters with dead connection pools are served indefinitely. Add `_INSTANCE_CACHE_TTL_SECONDS = 3600` and store `(adapter, created_at)` tuples; evict entries older than the TTL on cache hit.
+
+**L-4 — sliding_window_check no fallback (T-222):** `sliding_window_check()` calls `redis.eval()` directly in `stage_manager.generate()` and `refine()`. If Redis raises `RedisError`, the exception propagates as an unhandled SSE `internal_error` rather than a graceful RateLimitError or a fail-open. Wrap with `try/except RedisError` and fail-open (log warning + allow request) matching `RateLimitMiddleware`'s established behavior.
+
+### 20.9 Operational Gap — Secret Rotation Procedures (T-224)
+
+`ENCRYPTION_MASTER_KEY` and `CSRF_SECRET` have no documented rotation procedure. Loss of `ENCRYPTION_MASTER_KEY` makes all stored user API keys unrecoverable; rotation of `CSRF_SECRET` invalidates all outstanding CSRF tokens globally. Add RUNBOOK §8 covering: key identification, pre-rotation verification, rotation procedure for each secret, post-rotation smoke tests, and rollback.
+
+### 20.10 Finding-to-Task Coverage Map
+
+| Finding | Severity | Task | Status |
+|---------|----------|------|--------|
+| C-1 — generate() timeout no circuit trip | Critical | T-217 | New task |
+| H-1 — tasks prompt test regression | High | T-218 | New task |
+| H-2 — credit _invalidate() before commit | Medium | T-219 | New task |
+| H-3 — rate limit startup window bypass | Medium | T-225 | New task |
+| M-2 — no circuit_state Gauge | Medium | T-220 | New task |
+| M-4 — Langfuse startup health check | Medium | T-221 | New task |
+| L-1 — adapter cache no TTL | Low | T-223 | New task |
+| L-4 — sliding_window_check no fallback | Low | T-222 | New task |
+| Operational — secret rotation procedures | Medium | T-224 | New task |
+| L-2 — CSRF fail-open | Low | Accepted design; RUNBOOK §8 |
+| L-3 — public IP-only rate limit | Low | Accepted design decision |
+| M-1 — migration lock risk | Medium | Covered by RUNBOOK §7 (T-216) |
+| M-3 — per-process user cache | Low | Covered by RUNBOOK §4 (T-216) |
+
+### 20.11 Architectural Decisions
+
+**Double-invalidation for credit cache (T-219)**
+
+The chosen pattern — first invalidation inside `deduct()`/`credit()`/`refund()` after flush, second invalidation after `db.commit()` in every caller — is deliberate. The first invalidation reduces the probability of a stale hit; the second eliminates the window where a concurrent `get_balance()` re-populated Redis with uncommitted data. No public credit_service API is removed. Callers gain one new responsibility: calling `await credit_service.invalidate(user.id)` after every commit that follows a credit write. An alternative (move invalidation out of the service entirely) requires auditing every call site and is higher-risk.
+
+**Local fallback for startup window (T-225)**
+
+Using `_local_fallback_check` during the `redis is None` window means the per-process in-memory windows are consulted instead of bypassing. Under multi-worker deployment, the effective limit during this window is `configured_limit × worker_count` (same as the Redis-crash fallback path). This is the same accepted trade-off already documented for the `RedisError` fallback path — consistency is more important than perfection here.
+
+**circuit_state Gauge per process (T-220)**
+
+The Gauge is per-worker-process (same limitation as `_FAILURES`). Under multi-worker deployment, Prometheus scrapes all workers; the aggregate view (`max(specforge_llm_circuit_state)`) correctly shows open if any worker has tripped. Operators should alert on `max by (provider)` not `avg by (provider)`.
+
+### 20.12 Post-Remediation Scorecard (Target)
+
+| Dimension | Phase 19 Target | Phase 20 Target |
+|-----------|----------------|-----------------|
+| Enterprise Readiness | 8.0/10 | 9.0/10 |
+| Production Stability | 8.5/10 | 9.0/10 |
+| Security Posture | 8.5/10 | 9.0/10 |
+| Scalability | 7.5/10 | 8.0/10 |
+| Reliability | 8.5/10 | 9.5/10 |
+| Operational Readiness | 9.0/10 | 9.5/10 |
+
+The remaining gap reflects multi-worker distributed state (Redis-backed circuit breaker, Redis-backed user cache) which is explicitly V2 scope. All V1 single-worker deployment targets are met.
+
+---
+
+_SpecForge V1 PLAN.md · Version 2.1.0 · 2026-05-25 — added Phase 20 Final Hardening & Enterprise Closure covering all 9 tasks from third-pass enterprise review (T-217 through T-225): C-1 circuit breaker timeout gap fixed in generate(), H-1 tasks prompt regression restored, H-2 credit cache double-invalidation, H-3 rate limit startup window fix, M-2 circuit_state Gauge, M-4 Langfuse startup check, L-1 adapter TTL eviction, L-4 sliding window RedisError fallback, secret rotation RUNBOOK §8_
+
 _SpecForge V1 PLAN.md · Version 2.0.0 · 2026-05-23 — added Phase 19 Final Remediation & Enterprise Hardening covering all 21 tasks from second-pass review (T-196 through T-216): CF-1 SELECT FOR UPDATE wired, CF-2 circuit breaker enforced, HF-1 through HF-7 high-severity reliability fixes, MF-1 through MF-5 medium-severity issues, LF-1 through LF-4 low-severity issues + T-212 false-confidence test deletion + T-215 circuit metrics + T-216 RUNBOOK.md operational procedures_
 
 _SpecForge V1 PLAN.md · Version 1.9.0 · 2026-05-20 — added Phase 14 V1.3 usefulness improvements: Spec Clarification pre-generation step, per-task Priority + Estimate + Effort Summary, PDF export, Public Share read-only link, Starter Templates library, harness-coverage workspace-summary surfacing. Two new migrations (Workspace v1.3 fields + Template table), 13 new sub-tasks (T-USE-01 through T-USE-13), new `public.py` router, new `spec_clarifier` / `pdf_export_service` / `public_share_service` modules. ZIP and GitHub export paths unchanged._

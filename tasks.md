@@ -10132,6 +10132,677 @@ Create `docs/RUNBOOK.md` with the following sections (minimum):
 
 ---
 
+## Phase 17 — Final Hardening & Enterprise Closure
+
+> Tasks T-217 through T-225. Source: third-pass enterprise code review (2026-05-25).
+> Every task maps to a named finding. No finding is left unaddressed.
+
+### Phase 17 Finding-to-Task Coverage Map
+
+| Finding | Severity | Task | Description |
+|---------|----------|------|-------------|
+| C-1 | Critical | T-217 | generate() stream timeouts do not trip circuit breaker |
+| H-1 | High | T-218 | Tasks prompt regression — pre-existing test failure |
+| H-2 | Medium | T-219 | Credit `_invalidate()` called before `db.commit()` |
+| H-3 | Medium | T-225 | Rate limit bypasses all tiers when Redis is None on startup |
+| M-2 | Medium | T-220 | No `specforge_llm_circuit_state` Gauge for current open/closed state |
+| M-4 | Medium | T-221 | Langfuse SDK/server compatibility — silent failure on version skew |
+| L-1 | Low | T-223 | `_INSTANCES` adapter cache has no TTL — stale connections served indefinitely |
+| L-4 | Low | T-222 | `sliding_window_check()` has no `RedisError` fallback in stage_manager |
+| Ops | Medium | T-224 | No `ENCRYPTION_MASTER_KEY`/`CSRF_SECRET`/JWT rotation procedure in RUNBOOK |
+| L-2 | Low | Accepted design | CSRF fail-open during Redis outage — documented trade-off |
+| L-3 | Low | Accepted design | Public endpoint IP-only rate limit — design decision |
+| M-1 | Medium | RUNBOOK §7 | Migration lock risk — already covered by T-216 |
+| M-3 | Low | RUNBOOK §4 | Per-process user cache — already documented by T-210/T-216 |
+
+---
+
+### T-217 — Fix Circuit Breaker Gap: Stream Timeouts in generate() Do Not Call record_provider_failure
+
+**Category:** Reliability / Circuit Breaker
+**Severity:** Critical
+**Priority:** P0
+**Source finding:** C-1 (third-pass review)
+
+**Business impact:** The circuit breaker is the primary reliability defense against provider outages. When a provider starts hanging (most common failure mode), `generate()` timeouts should accumulate into `_FAILURES` and trip the circuit after 3 consecutive failures. Without this fix, the circuit never trips on stream timeouts. Every request to a hung provider burns user credits and waits for the 360-second wall-clock timeout before returning an error. Users experience sustained outages instead of the intended fail-fast 503 behavior.
+
+**Technical impact:** `asyncio.timeout(stream_timeout)` fires by injecting `CancelledError` (a `BaseException`) into the running generator. `InstrumentedAdapter.stream()` catches only `Exception` — `CancelledError` bypasses this guard entirely. The outer `except (ProviderError, TimeoutError)` block in `generate()` (lines 635–651) handles the resulting `TimeoutError` but does not call `record_provider_failure()`. Contrast: `refine()` and `generate_harness_patch()` both explicitly call `record_provider_failure()` in their equivalent except blocks (lines 1324–1328).
+
+**Root cause:** The `generate()` except block was written before the circuit breaker was introduced (T-197). When T-197 wired `record_provider_failure()` into `refine()` and `generate_harness_patch()`, the `generate()` path was missed.
+
+**Verified by:** Python 3.12 simulation — `asyncio.timeout(0.1)` + adapter sleeping 10s → `CancelledError` propagates, bypasses `except Exception`, `record_provider_failure` never called (confirmed in review session).
+
+**Implementation requirements:**
+1. Open `backend/services/pipeline/stage_manager.py`.
+2. Locate the inner `except (ProviderError, TimeoutError) as exc:` block inside `generate()` (approximately line 635). This block currently: increments `SSE_STREAM_FAILURES`, refunds credits, resets stage status, and raises `ProviderTimeoutError`.
+3. Add two lines at the **start** of this except block, before the existing `SSE_STREAM_FAILURES.inc()` call:
+   ```python
+   from services.llm.provider_status import record_provider_failure  # noqa: PLC0415
+   record_provider_failure(route.provider, exc)
+   ```
+4. Add a one-line comment referencing the finding: `# Record failure so the circuit breaker trips after 3 consecutive errors. C-1 — T-217.`
+5. No other changes to `generate()`. Do not modify `refine()` or `generate_harness_patch()` — they are already correct.
+6. Run: `cd backend && uv run pytest tests/test_circuit_breaker.py -v` — all CB-* tests must continue passing.
+7. Write one new test in `tests/test_circuit_breaker.py` named `test_generate_stream_timeout_records_provider_failure` that: mocks `record_provider_failure`, simulates a `TimeoutError` in the `generate()` except block, and asserts `record_provider_failure` was called with the correct provider. (Unit-level mock is sufficient; no real AsyncSession needed.)
+
+**Dependencies:** T-197 (circuit breaker must exist)
+
+**Risk assessment:** VERY LOW. One import + one function call. Exactly mirrors the pattern already present in two other methods. The `record_provider_failure()` function is side-effect-only (increments a counter in a dict); it cannot raise. No credit logic, no DB, no async operations touched.
+
+**Acceptance criteria:**
+1. `cd backend && uv run pytest tests/test_circuit_breaker.py -v` — all tests green including new `test_generate_stream_timeout_records_provider_failure`.
+2. `cd harness && pytest tests/backend/test_phase17_final_hardening_contract.py::test_phase17_generate_except_block_calls_record_provider_failure -v` passes.
+3. Manual smoke: configure Anthropic with an invalid API key, trigger a generate → confirm `specforge_llm_circuit_rejections_total{provider="anthropic"}` increments after 3 failures.
+4. `cd backend && uv run ruff check services/pipeline/stage_manager.py` — no lint violations.
+
+**Testing requirements:**
+- Unit test using `unittest.mock.patch` for `record_provider_failure` — verify call count and arguments.
+- Existing `test_circuit_breaker.py` CB-1 through CB-8 tests must remain green (regression guard).
+- Harness contract test scans the `generate()` body for `record_provider_failure` call.
+
+**Observability requirements:** No new metrics. The existing `specforge_llm_circuit_rejections_total` and `specforge_sse_stream_failures_total` counters now cover the timeout path.
+
+**Rollback considerations:** A one-line revert of the two added lines is sufficient. No DB, no config, no migration.
+
+**Estimated complexity:** XS (~5 lines + 30-line test)
+**Estimated implementation risk:** Very Low
+
+**Affected modules/files:**
+- `backend/services/pipeline/stage_manager.py` — add `record_provider_failure()` call in `generate()` except block
+- `backend/tests/test_circuit_breaker.py` — add `test_generate_stream_timeout_records_provider_failure`
+
+---
+
+### T-218 — Fix Tasks Stage User Prompt Regression (Pre-existing Test Failure)
+
+**Category:** Testing / Prompt Quality
+**Severity:** High
+**Priority:** P0
+**Source finding:** H-1 (third-pass review)
+
+**Business impact:** `test_tasks_prompt_is_ordered_traceable_and_agent_executable` has failed since a Phase 14 tasks prompt rewrite. This failure means CI's `--cov-fail-under=80` may be failing, and a quality guard for the tasks stage LLM prompt has been silently absent. The missing instruction — "For each plan section or contract, [trace to tasks]" — was a coverage axis ensuring the LLM traces plan-level architectural contracts (not just spec requirements) to generated tasks. Without it, generated TASKS.md documents risk missing plan-level implementation details.
+
+**Technical impact:** `tasks.build_user_prompt()` no longer contains the phrase `"For each plan section or contract"`. The test at `test_prompt_builder.py:249` asserts this phrase is present. The phrase was in an earlier version of the user prompt's coverage-map step and was lost during the Phase 14 system prompt expansion.
+
+**Root cause:** Phase 14 added a detailed Spec/Plan/Harness coverage mandate to `SYSTEM_PROMPT` but did not carry the "For each plan section or contract" coverage axis into the `build_user_prompt()` user message. The test was not updated to match, and the change was not caught in CI.
+
+**Implementation requirements:**
+1. Open `backend/prompts/tasks.py`.
+2. Locate `build_user_prompt()`, specifically step 0 of the numbered instructions. Step 0 currently reads:
+   ```
+   0. Before writing any task, build your full coverage map internally:
+      - Every FR/NFR/SEC ID → which task addresses it?
+      - Every harness test path → which task makes it pass?
+      - Every plan contract (endpoint, schema, module boundary) → which task implements it?
+   ```
+3. Add a fourth bullet at the end of step 0 that contains the exact phrase `"For each plan section or contract"`:
+   ```
+      - For each plan section or contract (architecture decision, module boundary, API endpoint, schema, migration), confirm at least one task addresses it — no plan artifact may be orphaned from the task list.
+   ```
+4. The phrase `"For each plan section or contract"` must appear in the returned string of `build_user_prompt()` — it will be part of step 0's bullet, which is inside the `f"""..."""` template.
+5. Run: `cd backend && uv run pytest tests/test_prompt_builder.py -v` — all 12 tests must pass (was 11 pass + 1 fail before this fix).
+6. Run: `cd backend && uv run pytest tests/ -q` — confirm total pass count increases from 496 to 497.
+
+**Dependencies:** None
+
+**Risk assessment:** VERY LOW. String addition to a prompt template. No DB, no runtime logic, no security impact. The prompt change adds a quality instruction; it does not remove or weaken any existing instruction.
+
+**Acceptance criteria:**
+1. `cd backend && uv run pytest tests/test_prompt_builder.py::test_tasks_prompt_is_ordered_traceable_and_agent_executable -v` passes.
+2. `cd backend && uv run pytest tests/ -q` — exactly 0 failures (previously 1).
+3. `cd harness && pytest tests/backend/test_phase17_final_hardening_contract.py::test_phase17_tasks_build_user_prompt_contains_plan_section_instruction -v` passes.
+
+**Testing requirements:**
+- The existing test at `test_prompt_builder.py:249` is the primary acceptance test — it must pass green.
+- No new tests required (the existing test is the full coverage for this fix).
+
+**Observability requirements:** None.
+
+**Rollback considerations:** Revert the one bullet addition. The test will fail again (same as before) — this is acceptable if reverting a prompt change for unrelated reasons.
+
+**Estimated complexity:** XS (~3 lines)
+**Estimated implementation risk:** Very Low
+
+**Affected modules/files:**
+- `backend/prompts/tasks.py` — `build_user_prompt()`: add one bullet to step 0 coverage map instructions
+
+---
+
+### T-219 — Fix Credit Cache Invalidation Timing: Invalidate After db.commit(), Not Only After db.flush()
+
+**Category:** Data Correctness / Credit Accounting
+**Severity:** Medium
+**Priority:** P1
+**Source finding:** H-2 (third-pass review)
+
+**Business impact:** Between `credit_service.deduct()` calling `_invalidate()` (after flush) and the outer `db.commit()` in stage_manager, a concurrent `get_balance()` call reads the uncommitted (pre-deduction) balance from PostgreSQL (READ COMMITTED isolation), then re-populates Redis with the stale value. For up to 5 minutes after this race, users' displayed balance is incorrectly high. `_assert_visible_credit_balance()` in stage_manager may pass with the stale balance, proceeding to `deduct()` which correctly raises `InsufficientCreditsError` — causing generation to start then fail mid-flight with a confusing "insufficient credits" error.
+
+**Technical impact:** No actual credit loss occurs (`SELECT FOR UPDATE` in `deduct()` is the hard guard). The impact is UX degradation: a user who has just spent their last credits may see a spinner start, then receive a credits error instead of an immediate pre-flight rejection. In multi-worker deployments, the staleness window is also per-process (30s `_USER_CACHE` TTL), compounding the issue.
+
+**Root cause:** `credit_service._invalidate()` is designed to be called after `db.flush()` (within the transaction) to eagerly clear the cache. However, the commit hasn't happened, so any concurrent read re-populates the cache from the uncommitted DB state. The correct pattern for a write-through cache is: invalidate AFTER commit, not after flush.
+
+**Implementation requirements:**
+1. In `backend/services/credit_service.py`, add a public method immediately below `_invalidate()`:
+   ```python
+   async def invalidate(self, user_id: UUID) -> None:
+       """Public alias for post-commit cache invalidation.
+
+       Call this immediately after ``db.commit()`` in any code path that
+       first called ``deduct()``, ``credit()``, or ``refund()``.  The first
+       invalidation (inside those methods, after flush) clears the cache
+       eagerly.  This second call ensures any concurrent ``get_balance()``
+       that re-populated the cache during the flush→commit window is
+       immediately evicted after the true balance is committed.  H-2 — T-219.
+       """
+       await self._invalidate(user_id)
+   ```
+2. In `backend/services/pipeline/stage_manager.py`, locate **every** `await db.commit()` that follows a `credit_service.deduct()` or `credit_service.refund()` call. Add `await credit_service.invalidate(user.id)` (or the relevant user_id variable) immediately after each such commit. The sites are:
+   - `generate()` line ~585: `await db.commit()` after `deduction = await credit_service.deduct(...)` → add `await credit_service.invalidate(user.id)` on the next line.
+   - `generate()` line ~644: `await db.commit()` in the `except (ProviderError, TimeoutError)` handler after `await credit_service.refund(db, deduction.id)` → add `await credit_service.invalidate(user.id)`.
+   - `generate()` line ~660: `await db.commit()` after validation failure refund → add `await credit_service.invalidate(user.id)`.
+   - `refine()`: locate the same pattern (deduct → commit sites) and add the post-commit invalidation.
+   - Any other method in `stage_manager.py` that calls `credit_service.deduct()` or `credit_service.refund()` followed by `db.commit()`.
+3. In the cleanup `finally` block of `generate()` that uses `async with AsyncSessionLocal() as cleanup_db:` and calls `await credit_service.refund(cleanup_db, deduction.id)` — this block uses a new session. After the refund, the cleanup_db session commits implicitly when the `async with` exits. Add explicit `await credit_service.invalidate(original.user_id)` after the `async with` block (or move cleanup_db.commit() to be explicit and add invalidation after it).
+4. Add a comment at every new `invalidate()` call site: `# Post-commit cache eviction — H-2 — T-219.`
+5. Run: `cd backend && uv run pytest tests/ -q` — all tests pass.
+
+**Dependencies:** None (no schema changes, no migration)
+
+**Risk assessment:** LOW. `invalidate()` is a cache eviction (Redis DELETE). It is idempotent and safe to call redundantly. The worst case of calling it twice is one extra Redis round-trip. No DB writes, no business logic changes, no credit flow changes.
+
+**Acceptance criteria:**
+1. `cd harness && pytest tests/backend/test_phase17_final_hardening_contract.py::test_phase17_credit_service_has_public_invalidate_method -v` passes.
+2. `cd harness && pytest tests/backend/test_phase17_final_hardening_contract.py::test_phase17_stage_manager_calls_invalidate_after_commit -v` passes.
+3. `cd backend && uv run pytest tests/ -q` — all tests pass.
+4. Code review: no `await db.commit()` line following a credit_service write in stage_manager.py is unaccompanied by `credit_service.invalidate()`.
+
+**Testing requirements:**
+- Harness contract tests (string scans): `public_invalidate_method` exists in credit_service.py; `credit_service.invalidate` appears near `db.commit()` in stage_manager.py.
+- No new unit test required beyond the harness contract. The existing `test_credit_service.py` tests should continue passing.
+
+**Observability requirements:** None — the existing `credit.cache_invalidation_failed` log entry covers failures.
+
+**Rollback considerations:** Remove the new `invalidate()` method and the post-commit calls. No DB impact.
+
+**Estimated complexity:** S (~20 lines across 2 files)
+**Estimated implementation risk:** Low
+
+**Affected modules/files:**
+- `backend/services/credit_service.py` — add public `invalidate(user_id)` method
+- `backend/services/pipeline/stage_manager.py` — add `credit_service.invalidate()` after every `db.commit()` following a credit write
+
+---
+
+### T-220 — Add specforge_llm_circuit_state Gauge for Real-Time Circuit Open/Closed Status
+
+**Category:** Observability
+**Severity:** Medium
+**Priority:** P2
+**Source finding:** M-2 / Observability gap (third-pass review)
+
+**Business impact:** The existing `specforge_llm_circuit_rejections_total` counter (T-215) only shows that rejections occurred — it cannot tell an operator whether a provider's circuit is currently open. When an on-call engineer receives a "users can't generate specs" alert, they need to know instantly whether the circuit is open (provider down, expected behavior) or closed (circuit not protecting users, something else is wrong). A Gauge resolves this in seconds.
+
+**Technical impact:** `provider_status.py` has no Gauge for circuit state. `_FAILURES` is the authoritative state but has no Prometheus representation of its current open/closed status. The Gauge should be updated synchronously inside `record_provider_failure()` and `record_provider_success()` — both are synchronous functions and already update `_FAILURES`.
+
+**Root cause:** T-215 added the rejection Counter but did not add a complementary Gauge for observability of the current state. These are two different observability instruments: Counter answers "how many rejections happened?" and Gauge answers "is the circuit open right now?"
+
+**Implementation requirements:**
+1. In `backend/services/llm/provider_status.py`, immediately below the `CIRCUIT_REJECTIONS` Counter definition (approximately line 49), define:
+   ```python
+   # Gauge for current circuit breaker state per provider.  0 = closed (healthy),
+   # 1 = open (rejecting requests).  Updated synchronously in record_provider_failure()
+   # and record_provider_success().  Per-process; under multi-worker deployment,
+   # use max(specforge_llm_circuit_state) by provider in Grafana.  T-220.
+   CIRCUIT_STATE = Gauge(
+       "specforge_llm_circuit_state",
+       "Current circuit breaker state per LLM provider (0=closed, 1=open)",
+       ["provider"],
+   )
+   ```
+2. Add `Gauge` to the `from prometheus_client import Counter` import at the top of the file: `from prometheus_client import Counter, Gauge`.
+3. In `record_provider_failure(provider, exc)`: after updating `_FAILURES`, add:
+   ```python
+   CIRCUIT_STATE.labels(provider=provider).set(1 if _circuit_open(provider) else 0)
+   ```
+4. In `record_provider_success(provider)`: after `_FAILURES.pop(provider, None)`, add:
+   ```python
+   CIRCUIT_STATE.labels(provider=provider).set(0)
+   ```
+5. In `docs/RUNBOOK.md` §1 (Circuit Breaker), add the following PromQL beneath the existing `rate(specforge_llm_circuit_rejections_total[5m])` entry:
+   ```
+   # Current open/closed state per provider (0=closed, 1=open):
+   specforge_llm_circuit_state
+
+   # Alert when any provider circuit is open:
+   max by (provider) (specforge_llm_circuit_state) == 1
+   ```
+6. Run: `cd backend && uv run pytest tests/test_circuit_breaker.py -v` — all CB-* tests pass.
+
+**Dependencies:** T-215 (CIRCUIT_REJECTIONS must exist; Gauge import already has Counter so structure is established)
+
+**Risk assessment:** VERY LOW. Pure observability addition. Gauge `set()` is side-effect-only, cannot raise, cannot affect business logic.
+
+**Acceptance criteria:**
+1. `cd harness && pytest tests/backend/test_phase17_final_hardening_contract.py::test_phase17_circuit_state_gauge_defined -v` passes.
+2. `cd harness && pytest tests/backend/test_phase17_final_hardening_contract.py::test_phase17_circuit_state_updated_on_failure_and_success -v` passes.
+3. `cd backend && uv run pytest tests/test_circuit_breaker.py -v` — all existing CB-* tests green.
+4. RUNBOOK.md §1 contains `specforge_llm_circuit_state` PromQL.
+
+**Testing requirements:**
+- Harness contract: `CIRCUIT_STATE` Gauge definition present in provider_status.py.
+- Harness contract: `CIRCUIT_STATE.labels` called inside `record_provider_failure` and `record_provider_success`.
+- Harness contract: RUNBOOK.md §1 contains `specforge_llm_circuit_state`.
+
+**Observability requirements:** This task IS the observability addition. No additional instrumentation beyond the Gauge itself.
+
+**Rollback considerations:** Remove the Gauge definition and the two `.set()` calls. No DB, no config.
+
+**Estimated complexity:** XS (~15 lines + RUNBOOK edit)
+**Estimated implementation risk:** Very Low
+
+**Affected modules/files:**
+- `backend/services/llm/provider_status.py` — add `CIRCUIT_STATE` Gauge, update `record_provider_failure()` and `record_provider_success()`
+- `docs/RUNBOOK.md` — add PromQL for circuit_state to §1
+
+---
+
+### T-221 — Add Langfuse Startup Health Check to Detect SDK/Server Version Skew
+
+**Category:** Reliability / Observability
+**Severity:** Medium
+**Priority:** P2
+**Source finding:** M-4 (third-pass review)
+
+**Business impact:** The Langfuse SDK is pinned at `langfuse>=2.60,<3` while the server is at `langfuse/langfuse:3.175.0`. The SDK's exception-swallowing design means any protocol-level incompatibility is silently logged as `langfuse.create_trace.failed` and never surfaces to operators. Without a startup check, a breaking change in the server API (e.g., deprecation of v2 ingestion endpoints) would cause 100% trace loss for weeks before anyone notices. The startup check converts this from "silent failure" to "loud warning on deploy."
+
+**Technical impact:** `LangfuseClient` has no health-check method. The Langfuse v2 SDK has `langfuse.auth_check()` which verifies connectivity and key validity with a single lightweight HTTP call. This is the correct hook for a startup health check.
+
+**Root cause:** The exception-swallowing design of `LangfuseClient` (intentional — Assumption 7 in the docstring) means individual call failures are invisible. The startup check is the designated place to surface structural connectivity failures without changing the exception-swallowing contract for individual calls.
+
+**Implementation requirements:**
+1. In `backend/services/langfuse_service.py`, add a new async method to `LangfuseClient` immediately after `flush()`:
+   ```python
+   async def startup_check(self) -> bool:
+       """Verify Langfuse connectivity on process startup.
+
+       Calls the SDK's auth_check() in a worker thread (blocking I/O).
+       Returns True on success, False on failure.  Never raises — a Langfuse
+       outage must not prevent the application from starting.  Logs a
+       structured WARNING on failure so operators can detect version skew or
+       connectivity issues immediately on deploy.  M-4 — T-221.
+       """
+       client = self._ensure_client()
+       if client is None:
+           return True  # disabled — not an error
+       try:
+           result = await asyncio.wait_for(
+               asyncio.to_thread(client.auth_check),
+               timeout=10.0,
+           )
+           if result and getattr(result, "status", None) == "success":
+               logger.info("langfuse.startup_check.ok")
+               return True
+           logger.warning(
+               "langfuse.startup_check.failed",
+               result=str(result)[:200],
+           )
+           return False
+       except asyncio.TimeoutError:
+           logger.warning(
+               "langfuse.startup_check.timeout",
+               timeout_seconds=10.0,
+           )
+           return False
+       except Exception:
+           logger.warning("langfuse.startup_check.error", exc_info=True)
+           return False
+   ```
+2. In `backend/main.py` (or wherever the FastAPI lifespan is defined), inside the lifespan startup block, after Redis is initialized, add:
+   ```python
+   langfuse_client = langfuse_service.get_langfuse_client()
+   if langfuse_client.enabled:
+       await langfuse_client.startup_check()
+       # Result is logged; never fatal.
+   ```
+3. The `startup_check()` call must NEVER raise and NEVER prevent app startup. It is fire-and-observe only.
+4. Run: `cd backend && uv run pytest tests/ -q` — all tests pass.
+
+**Dependencies:** None (LangfuseClient already exists from T-208)
+
+**Risk assessment:** LOW. `startup_check()` is purely additive. `auth_check()` is a read-only SDK call. The 10-second timeout ensures the lifespan startup is never blocked for more than 10 seconds. Langfuse being down during startup is gracefully handled (returns False, logs warning, app starts normally).
+
+**Acceptance criteria:**
+1. `cd harness && pytest tests/backend/test_phase17_final_hardening_contract.py::test_phase17_langfuse_client_has_startup_check_method -v` passes.
+2. `cd harness && pytest tests/backend/test_phase17_final_hardening_contract.py::test_phase17_langfuse_startup_check_never_raises -v` passes.
+3. `cd backend && uv run pytest tests/ -q` — all tests pass.
+4. When `LANGFUSE_SECRET_KEY` is empty, `startup_check()` returns True immediately without calling `auth_check()`.
+
+**Testing requirements:**
+- Harness contract: `startup_check` method exists in `LangfuseClient`.
+- Harness contract: `startup_check` uses `asyncio.wait_for` with a timeout.
+- Unit test in existing `test_langfuse_service.py` (or new file): mock `client.auth_check()` to raise an exception → verify `startup_check()` returns False without re-raising.
+
+**Observability requirements:** Log events `langfuse.startup_check.ok`, `langfuse.startup_check.failed`, `langfuse.startup_check.timeout`, `langfuse.startup_check.error` at structured WARNING/INFO level.
+
+**Rollback considerations:** Remove the `startup_check()` method and the lifespan call. No DB, no config.
+
+**Estimated complexity:** S (~40 lines)
+**Estimated implementation risk:** Low
+
+**Affected modules/files:**
+- `backend/services/langfuse_service.py` — add `startup_check()` method to `LangfuseClient`
+- `backend/main.py` — call `startup_check()` in lifespan startup after Redis init
+
+---
+
+### T-222 — Add RedisError Fallback for sliding_window_check in stage_manager.py
+
+**Category:** Reliability
+**Severity:** Low
+**Priority:** P2
+**Source finding:** L-4 (third-pass review)
+
+**Business impact:** `sliding_window_check()` is called directly in `stage_manager.generate()` and `stage_manager.refine()` for the per-user LLM rate limiter (10 req/min, 200 req/day). If Redis raises `RedisError` (connectivity blip, Redis restart), the exception propagates unhandled through the async generator, surfaces as an SSE `{"error": "internal_error"}` event, and loses all context. Users see a cryptic internal error when they expected either a successful generation or a "rate limit exceeded" message. The `RateLimitMiddleware` already handles this gracefully via `_local_fallback_check`; the stage_manager should match that behavior.
+
+**Technical impact:** `redis.eval()` inside `sliding_window_check()` can raise `redis.exceptions.RedisError` on connection failure. In the stage_manager's use of this function, no `try/except RedisError` wrapper exists.
+
+**Root cause:** `sliding_window_check()` was written as a utility that expects callers to handle Redis errors. `RateLimitMiddleware` does handle it (falls back to in-process). The stage_manager callers (lines 530–533 in `generate()`) do not.
+
+**Implementation requirements:**
+1. In `backend/services/pipeline/stage_manager.py`, locate the two `sliding_window_check()` call sites in `generate()` (lines ~530–533):
+   ```python
+   if not await sliding_window_check(redis, f"llm:{user.id}", 10, 60):
+       raise RateLimitError(retry_after=60)
+   if not await sliding_window_check(redis, f"llm_daily:{user.id}", 200, 86400):
+       raise RateLimitError(retry_after=86400)
+   ```
+2. Wrap both calls in a `try/except RedisError` that fails open (allow the request, log a warning):
+   ```python
+   from redis.exceptions import RedisError  # (already imported elsewhere in the file)
+
+   try:
+       if not await sliding_window_check(redis, f"llm:{user.id}", 10, 60):
+           raise RateLimitError(retry_after=60)
+       if not await sliding_window_check(redis, f"llm_daily:{user.id}", 200, 86400):
+           raise RateLimitError(retry_after=86400)
+   except RedisError:
+       # Redis unavailable — fail open, matching RateLimitMiddleware behavior.
+       # Log at WARNING so operators are alerted to the degraded state.
+       # L-4 — T-222.
+       logger.warning(
+           "stage_manager.llm_rate_limit.redis_unavailable "
+           "stage_id=%s user_id=%s — rate limiting bypassed",
+           stage_id,
+           user.id,
+       )
+   ```
+3. Apply the same pattern to the equivalent call sites in `refine()` if they exist.
+4. Run: `cd backend && uv run pytest tests/ -q` — all tests pass.
+
+**Dependencies:** None
+
+**Risk assessment:** VERY LOW. Fail-open is the deliberate choice — identical to `RateLimitMiddleware` behavior. Under Redis failure, rate limiting degrades gracefully rather than breaking generation. A `WARNING` log ensures the degraded state is visible.
+
+**Acceptance criteria:**
+1. `cd harness && pytest tests/backend/test_phase17_final_hardening_contract.py::test_phase17_stage_manager_sliding_window_redis_error_fallback -v` passes.
+2. `cd backend && uv run pytest tests/ -q` — all tests pass.
+3. Code review: no bare `await sliding_window_check(...)` call in stage_manager.py lacks a `RedisError` handler.
+
+**Testing requirements:**
+- Harness contract: `except RedisError` present near `sliding_window_check` in stage_manager.py.
+- Unit test (existing `test_stage_manager.py` or new): mock `sliding_window_check` to raise `RedisError` → verify generation proceeds (no exception raised to caller).
+
+**Observability requirements:** Log `stage_manager.llm_rate_limit.redis_unavailable` at WARNING level with stage_id and user_id context.
+
+**Rollback considerations:** Remove the try/except wrapper. No DB, no config.
+
+**Estimated complexity:** XS (~15 lines)
+**Estimated implementation risk:** Very Low
+
+**Affected modules/files:**
+- `backend/services/pipeline/stage_manager.py` — wrap `sliding_window_check()` calls in `generate()` and `refine()` with `RedisError` handler
+
+---
+
+### T-223 — Add TTL-Based Eviction to the LLM Adapter Instance Cache
+
+**Category:** Reliability
+**Severity:** Low
+**Priority:** P3
+**Source finding:** L-1 (third-pass review)
+
+**Business impact:** The `_INSTANCES` cache in `gateway.py` stores adapter objects with no time-based expiry — only LRU eviction at 256 entries. A cached adapter whose provider SDK has accumulated dead connections (e.g., after a provider-side TCP reset with no FIN, which many HTTP/1.1 keep-alive connections experience after ~1 hour of inactivity) will be returned indefinitely. Most provider SDKs handle reconnection transparently via httpx connection pool retry, but this is implementation-dependent. A TTL ensures adapters are periodically rebuilt, clearing any stale connection state.
+
+**Technical impact:** `_INSTANCES` maps `(provider, model, key_fingerprint)` → `BaseLLMAdapter`. No creation timestamp is stored. Adding TTL requires storing `(adapter, created_at)` tuples instead of plain adapter values.
+
+**Root cause:** `_INSTANCES` was designed as a simple performance cache (avoid repeated constructor calls for the same provider/model/key). Connection lifetime was not considered in the original design.
+
+**Implementation requirements:**
+1. In `backend/services/llm/gateway.py`, add a module-level constant below `_INSTANCE_CACHE_MAX`:
+   ```python
+   # Adapters older than this are evicted on cache hit and rebuilt fresh.
+   # Ensures stale httpx connection pools are recycled periodically.  L-1 — T-223.
+   _INSTANCE_CACHE_TTL_SECONDS: float = 3600.0
+   ```
+2. Change the type annotation of `_INSTANCES` to store tuples:
+   ```python
+   import time as _time
+   _INSTANCES: OrderedDict[tuple[str, str, str], tuple["BaseLLMAdapter", float]] = OrderedDict()
+   ```
+3. Update `get_llm()` to store `(adapter, created_at)` and check TTL on cache hit:
+   ```python
+   if key in _INSTANCES:
+       adapter, created_at = _INSTANCES[key]
+       if _time.monotonic() - created_at < _INSTANCE_CACHE_TTL_SECONDS:
+           _INSTANCES.move_to_end(key)
+           return adapter
+       # TTL expired — evict and rebuild below.
+       del _INSTANCES[key]
+   if len(_INSTANCES) >= _INSTANCE_CACHE_MAX:
+       _INSTANCES.popitem(last=False)
+   new_adapter = _REGISTRY[provider](model, api_key=api_key)
+   _INSTANCES[key] = (new_adapter, _time.monotonic())
+   return new_adapter
+   ```
+4. Update `clear_llm_cache()` to remain functional:
+   ```python
+   def clear_llm_cache() -> None:
+       _INSTANCES.clear()
+   ```
+   (No change needed — `_INSTANCES.clear()` still works on a dict of tuples.)
+5. Run: `cd backend && uv run pytest tests/ -q` — all tests pass. Pay special attention to any test that uses `get_llm()` or checks `_INSTANCES` contents directly.
+
+**Dependencies:** None
+
+**Risk assessment:** LOW. The behavioral change is limited to evicting adapters after 1 hour. The first request after TTL expiry pays a small constructor overhead (negligible). Any test that inspects `_INSTANCES[key]` directly must be updated to unpack the tuple.
+
+**Acceptance criteria:**
+1. `cd harness && pytest tests/backend/test_phase17_final_hardening_contract.py::test_phase17_gateway_adapter_cache_has_ttl_constant -v` passes.
+2. `cd harness && pytest tests/backend/test_phase17_final_hardening_contract.py::test_phase17_gateway_instances_stores_tuples_with_timestamp -v` passes.
+3. `cd backend && uv run pytest tests/ -q` — all tests pass.
+
+**Testing requirements:**
+- Harness contract: `_INSTANCE_CACHE_TTL_SECONDS` defined in gateway.py.
+- Harness contract: `_INSTANCES` stores tuples (float timestamp present in values).
+- Unit test: set `_INSTANCE_CACHE_TTL_SECONDS = 0.01` in test scope, call `get_llm()` twice with 0.02s sleep → second call gets a new instance (not cached). Restore TTL after test.
+
+**Observability requirements:** None — connection recycling is silent. If needed in future, a Counter `specforge_llm_adapter_cache_evictions_total` can be added.
+
+**Rollback considerations:** Revert the tuple storage change to plain adapter values. No DB, no config.
+
+**Estimated complexity:** S (~25 lines in gateway.py)
+**Estimated implementation risk:** Low
+
+**Affected modules/files:**
+- `backend/services/llm/gateway.py` — `_INSTANCES` type, `get_llm()` cache logic, `_INSTANCE_CACHE_TTL_SECONDS` constant
+
+---
+
+### T-224 — Add Secret Rotation Procedures to RUNBOOK.md (§8)
+
+**Category:** Operational / Security
+**Severity:** Medium
+**Priority:** P2
+**Source finding:** Operational gap (third-pass review)
+
+**Business impact:** `ENCRYPTION_MASTER_KEY` (Fernet) encrypts all stored user API keys. If this key is compromised or rotated without a procedure, all stored API keys become either inaccessible (wrong key) or unrotated (still encrypted under the compromised key). `CSRF_SECRET` invalidates all outstanding CSRF tokens when rotated — without a procedure, an operator might rotate it during a high-traffic period without understanding the session impact. JWT key rotation forces all users to re-authenticate. None of these have documented procedures.
+
+**Technical impact:** Three secrets require distinct rotation procedures:
+1. `ENCRYPTION_MASTER_KEY` (Fernet) — requires re-encrypting all rows in `user_api_keys` table (or equivalent stored key columns) under the new Fernet key.
+2. `CSRF_SECRET` — rotation immediately invalidates all outstanding CSRF tokens; users experience a "403 Forbidden — CSRF token invalid" on their next mutating request. No re-encryption needed.
+3. `JWT_PRIVATE_KEY` / `JWT_PUBLIC_KEY` — rotation invalidates all existing access tokens and refresh tokens (since signature verification fails). Users are forced to re-authenticate.
+
+**Root cause:** The secrets were added as configuration with no rotation lifecycle defined. The RUNBOOK §1–§7 cover operational incidents but not planned security maintenance procedures.
+
+**Implementation requirements:**
+Add **§8 — Secret Rotation Procedures** to `docs/RUNBOOK.md` with the following sub-sections:
+
+**§8.1 — ENCRYPTION_MASTER_KEY Rotation**
+- Pre-rotation: verify all currently encrypted values are readable (`SELECT COUNT(*) FROM user_api_keys WHERE encrypted_key IS NOT NULL`)
+- Rotation steps:
+  1. Generate new Fernet key: `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`
+  2. Set `NEW_ENCRYPTION_MASTER_KEY=<new>` alongside existing `ENCRYPTION_MASTER_KEY=<old>` in Railway env
+  3. Run migration script `backend/scripts/rotate_encryption_key.py --old-key $ENCRYPTION_MASTER_KEY --new-key $NEW_ENCRYPTION_MASTER_KEY` — this script reads each encrypted value, decrypts with old key, re-encrypts with new key, and updates the row. Script must be idempotent (test decrypt with new key first; skip if already re-encrypted)
+  4. Verify: `python -m pytest tests/test_key_vault.py -v` passes with NEW_ENCRYPTION_MASTER_KEY
+  5. Remove old key, rename NEW_ENCRYPTION_MASTER_KEY to ENCRYPTION_MASTER_KEY in Railway
+- Rollback: keep old key in env as `OLD_ENCRYPTION_MASTER_KEY` until rotation is verified; re-run script in reverse if needed
+
+**§8.2 — CSRF_SECRET Rotation**
+- Impact: all outstanding CSRF tokens are immediately invalidated. Users see 403 on next mutating request and must refresh to get a new token.
+- Best practice: rotate during a low-traffic window (e.g., off-peak hours)
+- Steps:
+  1. Generate new secret: `python -c "import secrets; print(secrets.token_hex(32))"`
+  2. Update `CSRF_SECRET` in Railway environment
+  3. Deploy — the new secret takes effect immediately on next process start
+  4. Monitor `csrf.verify.failed` log events; they should return to baseline within 5 minutes as tokens are refreshed
+- No Redis cleanup required (existing nonce keys expire naturally on their existing TTL)
+
+**§8.3 — JWT Key Rotation**
+- Impact: all existing access tokens and refresh tokens become invalid. All users must re-authenticate.
+- Best practice: rotate only when key compromise is confirmed or on annual schedule; announce to users in advance if possible
+- Steps:
+  1. Generate new RS256 key pair: `openssl genrsa 4096 | tee jwt_private.pem; openssl rsa -in jwt_private.pem -pubout > jwt_public.pem`
+  2. Update `JWT_PRIVATE_KEY` and `JWT_PUBLIC_KEY` in Railway
+  3. Purge all refresh token entries from Redis: `redis-cli KEYS "refresh:*" | xargs redis-cli DEL`
+  4. Deploy
+  5. Monitor authentication error rates; they should spike briefly (re-auth) then return to baseline
+- Rollback: restore old keys in Railway; existing tokens become valid again
+
+**§8.4 — Redis Password Rotation (if applicable)**
+- Update `REDIS_URL` in Railway with new password
+- Restart the service container
+
+After writing §8, update the RUNBOOK Table of Contents (if present) to include §8.
+
+**Dependencies:** T-216 (RUNBOOK.md must exist)
+
+**Risk assessment:** VERY LOW. Documentation-only. No code changes.
+
+**Acceptance criteria:**
+1. `cd harness && pytest tests/backend/test_phase17_final_hardening_contract.py::test_phase17_runbook_has_secret_rotation_section -v` passes.
+2. `cd harness && pytest tests/backend/test_phase17_final_hardening_contract.py::test_phase17_runbook_secret_rotation_covers_all_keys -v` passes.
+3. RUNBOOK.md contains `§8` or `## 8` heading with sub-sections for ENCRYPTION_MASTER_KEY, CSRF_SECRET, and JWT rotation.
+
+**Testing requirements:**
+- Harness contract: string scan for key rotation headings and procedure terms in RUNBOOK.md.
+
+**Observability requirements:** None.
+
+**Rollback considerations:** Not applicable (documentation).
+
+**Estimated complexity:** S (~120-line RUNBOOK section)
+**Estimated implementation risk:** Very Low
+
+**Affected modules/files:**
+- `docs/RUNBOOK.md` — add §8 Secret Rotation Procedures
+
+---
+
+### T-225 — Fix Rate Limit Startup Window: Fall Back to In-Process Limits Instead of Bypassing All Tiers
+
+**Category:** Security / Rate Limiting
+**Severity:** Medium
+**Priority:** P1
+**Source finding:** H-3 (third-pass review)
+
+**Business impact:** During the application startup window (between process start and the FastAPI lifespan completing Redis initialization, typically 1–5 seconds), ALL rate limiting is bypassed. This means the IP-global 1000 req/min cap, the per-user 100 req/min cap, and all domain-specific tiers (LLM, PDF, GitHub export, clarify) are inactive. An attacker who times a burst at startup (e.g., during a rolling Railway deploy where workers restart briefly) can bypass rate limiting entirely. The `RateLimitMiddleware` already has `_local_fallback_check` (in-process sliding window) for Redis failures — the startup window should use the same fallback.
+
+**Technical impact:** `RateLimitMiddleware.dispatch()` at lines 157–165 checks `redis is None` and calls `return await call_next(request)` — completely bypassing `_enforce_limits()`. The `RedisError` path (lines 177–184) correctly calls `_enforce_limits(..., self._local_fallback_check)`. The startup path should mirror this.
+
+**Root cause:** The startup fail-open was introduced in T-202 to prevent early requests from being rejected before Redis is available. The intent was correct (don't break requests), but the implementation went too far (bypass all tiers instead of using the in-process fallback).
+
+**Implementation requirements:**
+1. In `backend/middleware/rate_limit.py`, locate the `redis is None` branch in `dispatch()` (approximately lines 156–165):
+   ```python
+   redis = getattr(request.app.state, "redis", None)
+   if redis is None:
+       if not self._logged_redis_not_ready:
+           logger.warning(
+               "rate_limit.redis_not_ready "
+               "app.state.redis is not set — rate limiting bypassed until "
+               "Redis is registered by the lifespan"
+           )
+           self._logged_redis_not_ready = True
+       return await call_next(request)  # ← THE BUG
+   ```
+2. Replace `return await call_next(request)` with a fallback to the in-process check:
+   ```python
+   redis = getattr(request.app.state, "redis", None)
+   if redis is None:
+       if not self._logged_redis_not_ready:
+           logger.warning(
+               "rate_limit.redis_not_ready "
+               "app.state.redis is not set — falling back to in-process "
+               "rate limiting until Redis is registered by the lifespan"
+           )
+           self._logged_redis_not_ready = True
+       # Use in-process fallback so rate limiting remains active during startup.
+       # Same behavior as the RedisError fallback path.  H-3 — T-225.
+       limited_response = await self._enforce_limits(
+           request, ip, path, self._local_fallback_check
+       )
+       if limited_response is not None:
+           return limited_response
+       return await call_next(request)
+   ```
+3. In the `else` branch (where `redis is not None`), reset `_logged_redis_not_ready = False` so the startup warning fires again after a Redis restart:
+   ```python
+   else:
+       self._logged_redis_not_ready = False
+   ```
+4. Update the warning log message to say "falling back to in-process rate limiting" (not "bypassed") — this is a semantic correction, not just a cosmetic change. A monitoring alert on this log message should not indicate "no rate limiting" anymore.
+5. Run: `cd backend && uv run pytest tests/ -q` — all tests pass. Check existing rate limit tests.
+
+**Dependencies:** T-202 (lazy Redis injection in RateLimitMiddleware must exist)
+
+**Risk assessment:** LOW. The change replaces one code path (`return call_next`) with another (`_enforce_limits` using the same in-process fallback already used for RedisError). Under startup conditions, this is strictly more protective than the current behavior. The `_logged_redis_not_ready` reset ensures operators can detect Redis restart events via log monitoring.
+
+**Acceptance criteria:**
+1. `cd harness && pytest tests/backend/test_phase17_final_hardening_contract.py::test_phase17_rate_limit_startup_uses_fallback_not_bypass -v` passes.
+2. `cd backend && uv run pytest tests/test_rate_limit.py -v` — all existing rate limit tests pass.
+3. `cd backend && uv run pytest tests/ -q` — all tests pass.
+4. Code review: no `return await call_next(request)` exists in the `redis is None` branch of `RateLimitMiddleware.dispatch()`.
+5. The log message contains "falling back to in-process" (not "bypassed").
+
+**Testing requirements:**
+- Harness contract: `return await call_next(request)` NOT present immediately after the `redis is None` check in rate_limit.py (string scan).
+- Harness contract: `_local_fallback_check` appears in the `redis is None` handling branch.
+- Unit test (existing test_rate_limit.py or new): simulate `app.state.redis = None` → verify rate limit middleware still applies limits (returns 429 when limit is exceeded).
+
+**Observability requirements:** Updated log message `rate_limit.redis_not_ready ... falling back to in-process rate limiting` — operators should update any alert rules that match the old `"rate limiting bypassed"` string.
+
+**Rollback considerations:** Revert the `return await call_next(request)` change. No DB, no config, no migration.
+
+**Estimated complexity:** S (~15 lines)
+**Estimated implementation risk:** Low
+
+**Affected modules/files:**
+- `backend/middleware/rate_limit.py` — replace bypass with in-process fallback in `redis is None` branch of `dispatch()`
+
+---
+
+_tasks.md · SpecForge V1 · Version 2.5.0 · 2026-05-25 — Phase 17 Final Hardening & Enterprise Closure T-217 through T-225 (9 remediation tasks addressing all findings from third-pass enterprise review 2026-05-25: 1 critical circuit breaker gap, 1 high prompt regression, 4 medium findings covering credit cache timing / rate limit startup / Langfuse health / secret rotation, 2 low findings covering sliding window fallback / adapter TTL, plus circuit_state Gauge observability addition)_
+
 _tasks.md · SpecForge V1 · Version 2.4.0 · 2026-05-23 — Phase 16 Final Remediation & Enterprise Hardening T-196 through T-216 (21 remediation tasks addressing every finding from docs/CODE_REVIEW_PASS_2.md second-pass enterprise review: 2 critical unresolved findings, 5 high severity regressions, 5 medium severity issues, 4 low severity issues, plus 2 observability/documentation tasks mapping to systemic risks)_
 
 _tasks.md · SpecForge V1 · Version 2.3.1 · 2026-05-22 — Phase 15 addendum: corrected L-3/L-4/L-7/L-8 task descriptions; added T-191 through T-195 (LLM cache eviction, CSRF exempt path audit, CSP for public share, observability instrumentation, missing concurrency tests) covering non-labeled report-body findings from docs/CODE_REVIEW.md_
