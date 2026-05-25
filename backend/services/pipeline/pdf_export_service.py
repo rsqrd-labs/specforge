@@ -44,12 +44,13 @@ from services.pipeline.export_service import ExportNotReadyError
 
 logger = logging.getLogger(__name__)
 
-# Dedicated executor for WeasyPrint rendering.  max_workers=2 because:
+# Dedicated executor isolates CPU-bound WeasyPrint rendering from Langfuse I/O calls.
+# max_workers=2 because:
 # (a) WeasyPrint is CPU-bound and creates a new HTML Document per call,
 #     so two workers run without internal object contention; and
 # (b) PDF export must not share the default executor with Langfuse
 #     get_prompt() calls and other I/O-offloaded work — a burst of PDF
-#     requests would starve those operations.  HF-4 — T-201.
+#     requests would starve those operations.  HF-4 — T-201.  LF-2 — T-211.
 _PDF_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
     max_workers=2,
     thread_name_prefix="pdf-export",

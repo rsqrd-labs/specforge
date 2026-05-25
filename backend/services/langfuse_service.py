@@ -315,6 +315,11 @@ class LangfuseClient:
         if client is None:
             return None
         try:
+            # Default executor: Langfuse get_prompt() is I/O-bound (fast), not
+            # CPU-bound — it must not use the dedicated _PDF_EXECUTOR which is
+            # reserved for WeasyPrint rendering.  asyncio.to_thread() dispatches
+            # to the default ThreadPoolExecutor, keeping the two workloads
+            # isolated.  LF-2 — T-211.
             prompt = await asyncio.wait_for(
                 asyncio.to_thread(
                     client.get_prompt,
