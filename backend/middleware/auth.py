@@ -17,6 +17,18 @@ from services.auth_service import AuthError, auth_service
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/google", auto_error=False)
 _USER_CACHE_TTL_SECONDS = 30
 _USER_CACHE_MAX_SIZE = 4096
+
+# NOTE: _USER_CACHE is per-process. In multi-worker deployments (uvicorn
+# --workers > 1 or Railway horizontal scaling), invalidate_user_cache() only
+# clears the cache in the worker that receives the invalidation call. Other
+# workers may continue serving stale credit_balance values for up to
+# _USER_CACHE_TTL_SECONDS (default: 30 s).
+#
+# For single-worker deployments this is not a problem. For multi-worker
+# deployments, the 30-second TTL bounds the maximum staleness window.
+#
+# TODO(LF-1): migrate to Redis-backed user cache for multi-worker deployments.
+# See docs/RUNBOOK.md §4 for detection and workaround procedures.
 _USER_CACHE: OrderedDict[UUID, tuple[float, dict[str, Any]]] = OrderedDict()
 
 
