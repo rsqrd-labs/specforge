@@ -11098,6 +11098,7 @@ The implementing agent must:
        event_type: Mapped[str] = mapped_column(Text, nullable=False)
        processed_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=func.now())
    ```
+   **Import note**: The `StripeWebhookEvent` model uses `text("gen_random_uuid()")` for the primary key's `server_default`. Ensure the import line reads `from sqlalchemy import Text, func, text` — note the lowercase `text` alongside `Text`. A missing `text` import causes a `NameError` at module import time, blocking the entire app from starting.
 
 8. Re-export both models from `backend/models/__init__.py` alongside existing exports:
    ```python
@@ -11129,7 +11130,9 @@ The implementing agent must:
 
 **Rollback considerations:** `alembic downgrade -1` drops both tables. No application code references these tables until T-228/T-229/T-230 land — safe to rollback independently.
 
-**Documentation updates:** None beyond inline migration comments.
+**Retention note:** `stripe_webhook_events` grows forever at one row per processed webhook. Stripe retries events for up to 72 hours; after that, the row is only needed for forensic audit. A periodic cleanup job (`DELETE FROM stripe_webhook_events WHERE processed_at < NOW() - INTERVAL '30 days'`) should be added in a future phase. Do not implement it in T-226 — V1 volumes will not exhaust storage — but add a `-- TODO: add retention cleanup for stripe_webhook_events (Phase 18+)` comment in the migration file so the gap is visible during future schema reviews.
+
+**Documentation updates:** None beyond inline migration comments and the retention TODO comment above.
 
 **Estimated complexity:** M (migration file ~80 lines + 2 model files ~30 lines each)
 **Estimated implementation risk:** Low
@@ -11163,8 +11166,8 @@ The implementing agent must:
    stripe_price_cents: int = 900          # $9.00 — 200 credits per purchase
    stripe_credits_per_purchase: int = 200
    stripe_credit_validity_days: int = 30
-   stripe_success_url: str = ""           # e.g. https://app.specforge.dev/billing/success
-   stripe_cancel_url: str = ""            # e.g. https://app.specforge.dev/billing/cancel
+   stripe_success_url: str = ""           # e.g. https://app.specforge.dev/billing (NOT /billing/success — see T-238)
+   stripe_cancel_url: str = ""            # e.g. https://app.specforge.dev/billing
    ```
 
 2. In `validate_production_settings()`, add the following check **inside** the `if settings.environment.lower() != "production": return` guard (i.e., it only runs in production):
@@ -11189,8 +11192,13 @@ The implementing agent must:
    STRIPE_PRICE_CENTS=900
    STRIPE_CREDITS_PER_PURCHASE=200
    STRIPE_CREDIT_VALIDITY_DAYS=30
-   STRIPE_SUCCESS_URL=http://localhost:5173/billing/success
-   STRIPE_CANCEL_URL=http://localhost:5173/billing/cancel
+   # IMPORTANT: STRIPE_SUCCESS_URL must point to the /billing page (NOT /billing/success).
+   # T-238 registers /billing as the authenticated billing route.  The Billing component
+   # detects ?session_id= on that route and enters polling mode.
+   # There is no separate /billing/success route — if you set this to /billing/success,
+   # users will land on a 404 after paying.
+   STRIPE_SUCCESS_URL=http://localhost:5173/billing
+   STRIPE_CANCEL_URL=http://localhost:5173/billing
    ```
 
 4. Run: `uv run python -c "from config import settings; print(settings.stripe_secret_key, settings.stripe_credits_per_purchase)"` — must not raise (empty string + 200 printed).
@@ -11280,11 +11288,17 @@ The implementing agent must:
    # Guarded so the module is importable when stripe_secret_key is empty (billing disabled).
    if settings.stripe_secret_key:
        stripe.api_key = settings.stripe_secret_key
+       # Pin API version: prevents silent behavioral drift if someone changes the
+       # account's API version in the Stripe dashboard.  Update this string when
+       # upgrading stripe-python — check the stripe-python changelog for the matching version.
+       stripe.api_version = "2024-06-20"
    ```
 
 3. Implement `create_checkout_session(user_id: UUID, user_email: str) -> str`:
    - Guard: if `not settings.stripe_secret_key`, raise `HTTPException(status_code=503, detail="Billing is not configured on this server")`.
-   - Call `stripe.checkout.Session.create(...)` with:
+   - Guard: if `not settings.stripe_success_url`, raise `HTTPException(status_code=503, detail="Billing success URL is not configured (STRIPE_SUCCESS_URL)")`. An empty success URL produces a malformed Stripe redirect (`?session_id=...` with no base) that Stripe will reject at session-creation time. Fail loudly here rather than letting Stripe return a cryptic error.
+   - Call `await stripe.checkout.Session.create_async(...)` with:
+     - **IMPORTANT**: Use `create_async()`, not `create()`. The synchronous `stripe.checkout.Session.create()` blocks the event loop. `stripe-python ≥ 7.0` ships async variants for all API calls; always use the `_async` suffix in async FastAPI code.
      - `mode="payment"`
      - `line_items=[{"price_data": {"currency": "usd", "unit_amount": settings.stripe_price_cents, "product_data": {"name": "SpecForge Credits", "description": f"{settings.stripe_credits_per_purchase} credits · {settings.stripe_credit_validity_days}-day validity"}}, "quantity": 1}]`
      - `success_url=settings.stripe_success_url + "?session_id={CHECKOUT_SESSION_ID}"`
@@ -11351,7 +11365,11 @@ The implementing agent must:
    - Emit structured log: `billing.dispute_created`, `stripe_event_id`, `user_id`, `pack_id`, `credits_revoked=revoke`.
    - Increment `BILLING_PACK_DISPUTED` counter.
 
-7. Export `stripe_service = StripeService()` at module bottom (or make all functions module-level — either pattern is acceptable as long as it's consistent with how `credit_service` is exported).
+7. Implement as a `StripeService` class with `create_checkout_session`, `handle_event`, `_handle_checkout_completed`, and `_handle_dispute_created` as instance methods (matching the `CreditService` pattern). Export a singleton at module bottom:
+   ```python
+   stripe_service = StripeService()
+   ```
+   **Why a class**: T-231 imports `from services.stripe_service import stripe_service` — a named singleton. If you use module-level functions instead, T-231's import fails with `ImportError`. Do NOT use module-level functions for this service. The `CreditService` class pattern is the established convention in this codebase; follow it.
 
 **Dependencies:** T-226 (models must exist), T-227 (config fields must exist)
 
@@ -11843,7 +11861,7 @@ The implementing agent must:
 - Unit tests for IDOR scenario land in T-237.
 - Manual: request `/billing/status?session_id=cs_for_user_A` with user_B's JWT → confirm 404.
 
-**Observability requirements:** Log `billing.status_idor_attempt` (at WARNING level) when the session exists but belongs to a different user — requires a two-query pattern or application-level check. Add a `BILLING_IDOR_ATTEMPTS` counter (if defined in T-236) at this log site. If simpler, log the 404 at DEBUG with no distinction.
+**Observability requirements:** Log `billing.status_not_found` at DEBUG level when the double-predicate query returns no row — this covers both the "webhook not yet processed" case (legitimate polling) and any IDOR attempt. Do not use a two-query pattern to distinguish them; the single double-predicate query is the correct implementation, and distinguishing ownership at the log level requires an extra DB round-trip. `BILLING_IDOR_ATTEMPTS` is intentionally not defined — detecting it cheaply without a second query is not worth the latency cost in V1.
 
 **Rollback considerations:** Remove both endpoints from `billing.py`. No DB changes.
 
@@ -11993,6 +12011,21 @@ The implementing agent must:
        stripe_event_id = event["id"]
        event_type = event["type"]
 
+       # Step 2b: Livemode guard — reject test events in production and vice versa.
+       # A misconfigured webhook endpoint (e.g., test endpoint receiving live events)
+       # would silently grant credits from test payments that never charged real money.
+       # settings.environment is "production" in prod, anything else (e.g., "development") elsewhere.
+       is_production = settings.environment.lower() == "production"
+       if event.get("livemode") is not None and event.get("livemode") != is_production:
+           logger.warning(
+               "billing.webhook_livemode_mismatch stripe_event_id=%s livemode=%s env=%s",
+               stripe_event_id, event.get("livemode"), settings.environment,
+           )
+           raise HTTPException(
+               status_code=status.HTTP_400_BAD_REQUEST,
+               detail="Webhook livemode does not match server environment",
+           )
+
        # Step 3: INSERT idempotency row BEFORE calling handle_event.
        # If the process crashes between handle_event and this INSERT, the next
        # retry would double-credit. The only safe order is: INSERT first, then handle.
@@ -12011,19 +12044,30 @@ The implementing agent must:
            logger.info("billing.webhook_duplicate_event stripe_event_id=%s", stripe_event_id)
            return {"status": "already_processed"}
 
-       # Step 5: Process the event.
-       # Unknown event types are handled by handle_event (it logs and returns normally).
-       # Do NOT raise for unknown types — Stripe retries on non-2xx.
+       # Step 5: Process the event inside a SAVEPOINT.
+       # Wrapping handle_event in begin_nested() isolates its DB writes from the outer
+       # transaction.  If handle_event raises (e.g., credit_service.credit fails after
+       # writing the pack row), the SAVEPOINT auto-rolls-back all partial changes — no
+       # committed pack row without a corresponding credit.
+       #
+       # The outer transaction (which holds the idempotency row) still commits on return.
+       # This means the event is recorded as "received" in stripe_webhook_events even
+       # if processing failed.  Return 200 to Stripe; the RUNBOOK §9 alert on
+       # BILLING_WEBHOOK_ERROR will surface the failure for manual replay via
+       # the Stripe dashboard.  On manual replay, the idempotency row already exists —
+       # the replayed delivery returns {"status": "already_processed"}.  To re-run the
+       # handler, delete the stripe_webhook_events row for that stripe_event_id first.
        try:
-           await stripe_service.handle_event(db, dict(event))
+           async with db.begin_nested():  # SAVEPOINT — isolates handle_event side-effects
+               await stripe_service.handle_event(db, dict(event))
        except Exception as exc:
+           # SAVEPOINT auto-rolled back; outer txn (idempotency row) will still commit.
            logger.error(
                "billing.webhook_handle_failed stripe_event_id=%s event_type=%s error=%s",
                stripe_event_id, event_type, exc,
                exc_info=True,
            )
-           # Return 200 anyway — if we return 500, Stripe retries, potentially
-           # re-running partial state changes. Log for alerting; fix manually.
+           # Return 200 — Stripe won't retry; partial DB state is clean; monitor via RUNBOOK §9.
            return {"status": "error_logged"}
 
        # Step 6: Commit the transaction (DB session is managed by Depends(get_db)).
@@ -12042,8 +12086,9 @@ The implementing agent must:
 **Risk assessment:** HIGH. This is the most security-sensitive endpoint. Key risks and mitigations:
 - **Signature replay**: `tolerance=300` rejects events older than 5 minutes. Combine with idempotency row to reject within-window replays.
 - **Double-crediting on retry**: Idempotency row INSERT-before-handle guarantees at-most-once semantics even on concurrent deliveries.
-- **Crash between INSERT and handle_event**: Not possible — `begin_nested()` (SAVEPOINT) and the final transaction commit are atomic. Either both commit or both roll back.
-- **Partial handle_event failure**: The `except Exception` wraps handle_event and returns 200 on failure. This means a failed credit grant is NOT retried by Stripe. This is intentional: if handle_event fails partway (e.g., after writing the pack but before crediting), a retry would see the idempotency row and return `already_processed` — preventing the double-credit from a retry, but also meaning the credit was not granted. Monitor `billing.webhook_handle_failed` log events via the RUNBOOK alert rule.
+- **Partial handle_event failure / partial commit**: `handle_event` is wrapped in `begin_nested()` (SAVEPOINT). If handle_event raises after writing a pack row but before updating credit_balance, the SAVEPOINT auto-rolls-back both writes — no committed pack without credits. The outer transaction (idempotency row) still commits, so the event is recorded. Manual replay is the recovery path (see RUNBOOK §9).
+- **Livemode mismatch**: The livemode guard rejects events where `event["livemode"]` doesn't match the server's `ENVIRONMENT` setting. This prevents a test-mode webhook endpoint from granting credits on test events in production.
+- **Crash between INSERT and handle_event**: Both are in the same outer transaction. If the process crashes before the outer transaction commits, both roll back — the next Stripe retry processes the event from scratch (idempotent).
 
 **Acceptance criteria:**
 1. `POST /billing/webhook` with a valid Stripe signature returns `{"status": "ok"}` with HTTP 200.
@@ -12423,9 +12468,19 @@ Each test must include a clear docstring explaining what invariant it tests and 
      try {
        const response = await api.get<BillingStatusResponse>(`/billing/status?session_id=${sessionId}`)
        return response.data
-     } catch {
-       // 404 means pending (webhook not yet processed) — treat as null
-       return null
+     } catch (err: unknown) {
+       // 404 = webhook not yet processed (pending) — return null so the caller retries.
+       // Any other status (5xx, network error) is re-thrown so the polling loop can
+       // surface an error to the user instead of silently retrying forever.
+       if (
+         typeof err === "object" &&
+         err !== null &&
+         "response" in err &&
+         (err as { response?: { status?: number } }).response?.status === 404
+       ) {
+         return null
+       }
+       throw err
      }
    }
 
@@ -12437,8 +12492,38 @@ Each test must include a clear docstring explaining what invariant it tests and 
 
 3. **Create `frontend/src/pages/Billing.tsx`** implementing all three surfaces described in the Design Brief:
    - On mount: fetch `BillingPackage` (no auth required) and `StripeCreditPack[]` history. Fetch credit balance from existing `getCredits()`.
-   - Detect `/billing/success?session_id=XXX` via `useSearchParams()`. If present, enter polling mode.
-   - Polling mode: `setInterval(() => fetchBillingStatus(sessionId), 2000)`. On `status === "completed"`: clear interval, show success state, refresh balance. On 30-second timeout: show "Payment received — credits may take a moment to appear." message.
+   - Detect `?session_id=XXX` query param via `useSearchParams()`. If present, enter polling mode.
+   - Polling mode: use `useEffect` with a `setInterval` and **always return a cleanup function** to avoid memory leaks when the component unmounts mid-poll:
+     ```tsx
+     useEffect(() => {
+       if (!sessionId) return
+       let elapsed = 0
+       const id = setInterval(async () => {
+         elapsed += 2
+         try {
+           const result = await fetchBillingStatus(sessionId)
+           if (result) {
+             clearInterval(id)
+             setPollingStatus("completed")
+             setCreditsAdded(result.credits_added)
+             setExpiresAt(result.expires_at)
+             // Refresh balance in userStore so CreditMeter updates immediately.
+           } else if (elapsed >= 30) {
+             clearInterval(id)
+             setPollingStatus("timeout")
+           }
+         } catch {
+           // Non-404 error (server down, network failure) — stop polling and show error.
+           clearInterval(id)
+           setPollingStatus("error")
+         }
+       }, 2000)
+       return () => clearInterval(id)  // Cleanup on unmount — MANDATORY, prevents memory leak
+     }, [sessionId])
+     ```
+   - On `pollingStatus === "completed"`: show success state with credits_added and expires_at.
+   - On `pollingStatus === "timeout"` (30 s): show "Payment received — credits may take a moment to appear. Refresh the page in 30 seconds." Do NOT show an error. Webhook delivery can be delayed.
+   - On `pollingStatus === "error"`: show "Unable to verify payment status. Please refresh or contact support."
    - For the "Buy Credits" button click: call `createCheckoutSession()`, then `window.location.href = response.checkout_url` (full-page redirect to Stripe).
    - Status chips for pack history: use the existing CSS chip pattern from the app. Map `active` → `var(--color-primary-container)`, `consumed` → `var(--color-tertiary-container)`, `expired` → `var(--color-surface-container-high)`, `disputed` → `var(--color-error-container)`.
    - Format dates with `Intl.DateTimeFormat` — do not use raw ISO strings.
@@ -12507,6 +12592,8 @@ Each test must include a clear docstring explaining what invariant it tests and 
 - `frontend/src/pages/Dashboard.tsx` — update CreditMeter CTA to link to `/billing`
 
 ---
+
+_tasks.md · SpecForge V1 · Version 2.6.1 · 2026-05-27 — Phase 18 post-review amendments: (1) T-226 StripeWebhookEvent missing `text` import clarified + retention note added; (2) T-227 STRIPE_SUCCESS_URL env corrected to /billing (not /billing/success); (3) T-228 `create()` → `create_async()`, stripe.api_version pinned, empty success_url guard added, StripeService class pattern mandated; (4) T-232 BILLING_IDOR_ATTEMPTS counter mention removed (two-query overhead not justified in V1); (5) T-234 handle_event wrapped in begin_nested() SAVEPOINT to prevent partial state commits, livemode guard added to reject test/live event mismatch; (6) T-238 setInterval clearInterval cleanup made explicit via useEffect pattern, fetchBillingStatus now distinguishes 404 (pending) from non-404 errors (re-throw)_
 
 _tasks.md · SpecForge V1 · Version 2.6.0 · 2026-05-27 — Phase 18 Stripe Payments Integration T-226 through T-238 (13 tasks: DB migration for stripe_credit_packs + stripe_webhook_events + ORM models, 7 Stripe config vars with production key guard, StripeService with checkout + dispute + event dispatch, CreditService lazy expiry + FIFO pack drain, 5 billing endpoints including IDOR-safe status polling, rate limit tier for checkout, webhook with HMAC validation + idempotency, CSRF + rate-limit middleware exemptions for webhook, 10 Prometheus billing counters + secret scrubbing for sk_live/whsec patterns, full unit test suite, Billing.tsx frontend page with expiry warning chip and post-redirect polling)_
 
