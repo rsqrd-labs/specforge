@@ -181,12 +181,12 @@ PROVIDER_CAPABILITY_REGISTRY: dict[str, dict[str, Any]] = {
                     "eval.score",
                 ],
             },
-            "gemini-2.0-flash": {
+            "gemini-3.5-flash": {
                 "tier": "mini",
-                "input_cost_per_million": 0.1,
-                "cached_input_cost_per_million": 0.025,
-                "output_cost_per_million": 0.4,
-                "max_context_tokens": 1_000_000,
+                "input_cost_per_million": 1.5,
+                "cached_input_cost_per_million": 0.15,
+                "output_cost_per_million": 9.0,
+                "max_context_tokens": 1_048_576,
                 "default_max_output_tokens": 8192,
                 "recommended_operations": [
                     "harness.generate",

@@ -116,7 +116,7 @@ async def test_stream_records_exactly_one_generation_with_full_output() -> None:
         span_id="span-X",
         trace_id="trace-Y",
         provider="google",
-        model="gemini-2.0-flash",
+        model="gemini-3.5-flash",
         stage_type="harness",
         action="generate",
     )
@@ -134,7 +134,7 @@ async def test_stream_records_exactly_one_generation_with_full_output() -> None:
     assert kwargs["span_id"] == "span-X"
     assert kwargs["trace_id"] == "trace-Y"
     assert kwargs["provider"] == "google"
-    assert kwargs["model"] == "gemini-2.0-flash"
+    assert kwargs["model"] == "gemini-3.5-flash"
     assert kwargs["metadata"]["stage_type"] == "harness"
     assert kwargs["metadata"]["action"] == "generate"
     assert "latency_ms" in kwargs["metadata"]

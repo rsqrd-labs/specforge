@@ -809,9 +809,9 @@ PROVIDERS = {
         "judge_model": "gpt-4o-mini",
     },
     "google": {
-        "models": ["gemini-1.5-pro", "gemini-2.0-flash"],
+        "models": ["gemini-1.5-pro", "gemini-3.5-flash"],
         "default": "gemini-1.5-pro",
-        "judge_model": "gemini-2.0-flash",
+        "judge_model": "gemini-3.5-flash",
     },
 }
 ```

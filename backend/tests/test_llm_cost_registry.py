@@ -29,13 +29,20 @@ def test_model_tier_lookup_and_tier_filtering() -> None:
 
 
 def test_model_cost_lookup_returns_copy() -> None:
-    model_cost = get_model_cost("google", "gemini-2.0-flash")
+    model_cost = get_model_cost("google", "gemini-3.5-flash")
     model_cost["tier"] = "strong"
 
     assert (
-        PROVIDER_CAPABILITY_REGISTRY["google"]["models"]["gemini-2.0-flash"]["tier"]
+        PROVIDER_CAPABILITY_REGISTRY["google"]["models"]["gemini-3.5-flash"]["tier"]
         == "mini"
     )
+
+
+def test_google_registry_excludes_shutdown_gemini_flash_model() -> None:
+    google_models = PROVIDER_CAPABILITY_REGISTRY["google"]["models"]
+
+    assert "gemini-2.0-flash" not in google_models
+    assert "gemini-3.5-flash" in google_models
 
 
 def test_required_tiers_are_present() -> None:

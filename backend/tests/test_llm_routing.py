@@ -32,7 +32,7 @@ def test_routes_to_cheapest_same_provider_model_for_tier_and_operation() -> None
     )
 
     assert route.provider == "google"
-    assert route.model == "gemini-2.0-flash"
+    assert route.model == "gemini-3.5-flash"
     assert route.model_tier == "mini"
     assert route.cross_provider_fallback is False
 
