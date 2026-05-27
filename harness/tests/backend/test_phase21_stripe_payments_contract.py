@@ -1815,6 +1815,22 @@ def test_t237_unit_tests_cover_checkout_rate_limit() -> None:
     )
 
 
+def test_t237_unit_tests_cover_livemode_mismatch() -> None:
+    """T-237 — test_stripe_payments.py must test the livemode guard added in T-234.
+
+    A webhook event whose livemode flag contradicts the server environment must be
+    rejected with HTTP 400.  Without this test, the livemode guard can be silently
+    removed during a refactor and production could start accepting test-mode events.
+    """
+    source = read_backend_file("tests", "test_stripe_payments.py")
+    assert "livemode" in source.lower(), (
+        "test_stripe_payments.py must include test_webhook_livemode_mismatch (or an "
+        "equivalent test that patches event['livemode'] to the wrong value and asserts "
+        "HTTP 400).  This guards the T-234 livemode gate against silent regression.  "
+        "T-237."
+    )
+
+
 # ---------------------------------------------------------------------------
 # T-238: Frontend files
 # ---------------------------------------------------------------------------

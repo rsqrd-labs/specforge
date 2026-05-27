@@ -11086,7 +11086,7 @@ The implementing agent must:
    from __future__ import annotations
    from datetime import datetime
    from uuid import UUID as PythonUUID
-   from sqlalchemy import Text, func
+   from sqlalchemy import Text, func, text  # 'text' required for server_default=text("gen_random_uuid()")
    from sqlalchemy.dialects.postgresql import TIMESTAMP, UUID
    from sqlalchemy.orm import Mapped, mapped_column
    from models import Base
@@ -12335,6 +12335,8 @@ Create `backend/tests/test_stripe_payments.py` with the following tests. Each te
 
 9. **`test_checkout_rate_limit`** — creates an authenticated `AsyncClient`. Calls `POST /billing/checkout` 6 times in a loop (mocking `stripe_service.create_checkout_session`). Asserts the 6th response is HTTP 429 with `detail` containing "5 purchases per hour".
 
+10. **`test_webhook_livemode_mismatch`** — constructs a mock webhook event where `event["livemode"]` is `True` but `settings.environment` is `"development"` (or vice versa). Patches `stripe.Webhook.construct_event` to return that event. Calls `POST /billing/webhook` with a valid-looking signature. Asserts HTTP 400 with `detail` containing "livemode". This test guards the livemode gate added in T-234 and must not be removed even if the guard logic is refactored.
+
 Each test must include a clear docstring explaining what invariant it tests and why it matters for correctness.
 
 **Dependencies:** T-226, T-227, T-228, T-229, T-230, T-231, T-232, T-233, T-234, T-235, T-236 (all billing tasks must be complete before this test suite can be written and pass)
@@ -12342,13 +12344,13 @@ Each test must include a clear docstring explaining what invariant it tests and 
 **Risk assessment:** LOW. Test-only file. Cannot affect production behaviour.
 
 **Acceptance criteria:**
-1. `cd backend && uv run pytest tests/test_stripe_payments.py -v` — all 9 tests pass.
-2. `cd harness && pytest tests/backend/test_phase21_stripe_payments_contract.py::test_t237_unit_test_file_exists tests/backend/test_phase21_stripe_payments_contract.py::test_t237_unit_tests_cover_webhook_idempotency tests/backend/test_phase21_stripe_payments_contract.py::test_t237_unit_tests_cover_idor_prevention tests/backend/test_phase21_stripe_payments_contract.py::test_t237_unit_tests_cover_lazy_expiry tests/backend/test_phase21_stripe_payments_contract.py::test_t237_unit_tests_cover_fifo_drain tests/backend/test_phase21_stripe_payments_contract.py::test_t237_unit_tests_cover_dispute_revocation tests/backend/test_phase21_stripe_payments_contract.py::test_t237_unit_tests_cover_invalid_signature tests/backend/test_phase21_stripe_payments_contract.py::test_t237_unit_tests_cover_checkout_session_creation tests/backend/test_phase21_stripe_payments_contract.py::test_t237_unit_tests_cover_checkout_completed_credits_user tests/backend/test_phase21_stripe_payments_contract.py::test_t237_unit_tests_cover_checkout_rate_limit -v` — all 10 pass (1 file existence + 9 coverage checks).
+1. `cd backend && uv run pytest tests/test_stripe_payments.py -v` — all 10 tests pass.
+2. `cd harness && pytest tests/backend/test_phase21_stripe_payments_contract.py::test_t237_unit_test_file_exists tests/backend/test_phase21_stripe_payments_contract.py::test_t237_unit_tests_cover_webhook_idempotency tests/backend/test_phase21_stripe_payments_contract.py::test_t237_unit_tests_cover_idor_prevention tests/backend/test_phase21_stripe_payments_contract.py::test_t237_unit_tests_cover_lazy_expiry tests/backend/test_phase21_stripe_payments_contract.py::test_t237_unit_tests_cover_fifo_drain tests/backend/test_phase21_stripe_payments_contract.py::test_t237_unit_tests_cover_dispute_revocation tests/backend/test_phase21_stripe_payments_contract.py::test_t237_unit_tests_cover_invalid_signature tests/backend/test_phase21_stripe_payments_contract.py::test_t237_unit_tests_cover_checkout_session_creation tests/backend/test_phase21_stripe_payments_contract.py::test_t237_unit_tests_cover_checkout_completed_credits_user tests/backend/test_phase21_stripe_payments_contract.py::test_t237_unit_tests_cover_checkout_rate_limit tests/backend/test_phase21_stripe_payments_contract.py::test_t237_unit_tests_cover_livemode_mismatch -v` — all 11 pass (1 file existence + 10 coverage checks).
 3. `cd backend && uv run pytest tests/ --cov=services --cov-fail-under=80` — coverage remains ≥ 80%.
 4. `cd backend && uv run pytest tests/ -q` — all tests pass including the new suite.
 
 **Testing requirements:**
-- The test file itself is the deliverable — no additional harness tests required beyond the 10 listed above.
+- The test file itself is the deliverable — no additional harness tests required beyond the 11 listed above.
 
 **Observability requirements:** None.
 
@@ -12358,7 +12360,7 @@ Each test must include a clear docstring explaining what invariant it tests and 
 **Estimated implementation risk:** Low
 
 **Affected modules/files:**
-- `backend/tests/test_stripe_payments.py` — new file (9 unit tests)
+- `backend/tests/test_stripe_payments.py` — new file (10 unit tests)
 
 ---
 
@@ -12593,7 +12595,7 @@ Each test must include a clear docstring explaining what invariant it tests and 
 
 ---
 
-_tasks.md · SpecForge V1 · Version 2.6.1 · 2026-05-27 — Phase 18 post-review amendments: (1) T-226 StripeWebhookEvent missing `text` import clarified + retention note added; (2) T-227 STRIPE_SUCCESS_URL env corrected to /billing (not /billing/success); (3) T-228 `create()` → `create_async()`, stripe.api_version pinned, empty success_url guard added, StripeService class pattern mandated; (4) T-232 BILLING_IDOR_ATTEMPTS counter mention removed (two-query overhead not justified in V1); (5) T-234 handle_event wrapped in begin_nested() SAVEPOINT to prevent partial state commits, livemode guard added to reject test/live event mismatch; (6) T-238 setInterval clearInterval cleanup made explicit via useEffect pattern, fetchBillingStatus now distinguishes 404 (pending) from non-404 errors (re-throw)_
+_tasks.md · SpecForge V1 · Version 2.6.2 · 2026-05-27 — Phase 18 post-review amendments: (1) T-226 StripeWebhookEvent `text` import added to code block + retention note; (2) T-227 STRIPE_SUCCESS_URL env corrected to /billing (not /billing/success); (3) T-228 `create()` → `create_async()`, stripe.api_version pinned, empty success_url guard added, StripeService class pattern mandated; (4) T-232 BILLING_IDOR_ATTEMPTS counter mention removed; (5) T-234 handle_event wrapped in begin_nested() SAVEPOINT, livemode guard added; (6) T-237 test_webhook_livemode_mismatch added as test #10 (guards T-234 livemode gate); (7) T-238 setInterval clearInterval cleanup made explicit, fetchBillingStatus distinguishes 404 from non-404 errors_
 
 _tasks.md · SpecForge V1 · Version 2.6.0 · 2026-05-27 — Phase 18 Stripe Payments Integration T-226 through T-238 (13 tasks: DB migration for stripe_credit_packs + stripe_webhook_events + ORM models, 7 Stripe config vars with production key guard, StripeService with checkout + dispute + event dispatch, CreditService lazy expiry + FIFO pack drain, 5 billing endpoints including IDOR-safe status polling, rate limit tier for checkout, webhook with HMAC validation + idempotency, CSRF + rate-limit middleware exemptions for webhook, 10 Prometheus billing counters + secret scrubbing for sk_live/whsec patterns, full unit test suite, Billing.tsx frontend page with expiry warning chip and post-redirect polling)_
 
