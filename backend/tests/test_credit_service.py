@@ -75,6 +75,25 @@ class _FakeDB:
         self.savepoint_rolled_back = False
 
     async def execute(self, statement: Any) -> Any:
+        # T-229: _expire_user_packs / _drain_packs query stripe_credit_packs.
+        # Pre-T-229 tests don't set up any packs — return an empty list so the
+        # sweep methods find nothing to expire/drain and exit without side-effects.
+        # Pack queries are detected by inspecting the statement's FROM clause;
+        # this avoids importing StripeCreditPack in the test module.
+        try:
+            froms = (
+                statement.get_final_froms()
+                if hasattr(statement, "get_final_froms")
+                else statement.froms
+            )
+            if any(getattr(f, "name", None) == "stripe_credit_packs" for f in froms):
+                return _EmptyPacksResult()
+        except AttributeError:
+            pass
+        # Counter-based dispatch for refund() tests that use entity_lookup.
+        # refund() does not call _expire_user_packs, so these counters are
+        # unaffected by the pack-query guard above (pack queries are returned
+        # early and do not increment _execute_count).
         call = self._execute_count
         self._execute_count += 1
         # refund() first looks up the original deduction by ID
@@ -145,6 +164,25 @@ class _EntityResult:
 
     def scalar_one(self) -> Any:
         return self._entity
+
+
+class _EmptyPacksResult:
+    """Empty scalars result for StripeCreditPack queries (T-229).
+
+    _expire_user_packs / _drain_packs call db.execute(select(StripeCreditPack)
+    ...).  Pre-T-229 tests don't set up any packs; returning an empty list
+    lets those code paths run without side-effects.
+    """
+
+    class _Scalars:
+        def all(self) -> list:
+            return []
+
+    def scalars(self) -> "_EmptyPacksResult._Scalars":
+        return self._Scalars()
+
+    def scalar_one_or_none(self) -> None:
+        return None
 
 
 @pytest.fixture
@@ -281,7 +319,8 @@ async def test_refund_integrity_error_outer_transaction_survives(
     await svc.refund(db, deduction.id)
 
     # Outer transaction was NOT rolled back
-    assert not db.rolled_back, "db.rollback() must not be called — outer tx must survive"
+    # Outer transaction must survive the savepoint rollback.
+    assert not db.rolled_back, "db.rollback() must not be called — outer tx survives"
 
     # Session is still usable: commit() must not raise
     await db.commit()  # would raise if session were in an invalid state

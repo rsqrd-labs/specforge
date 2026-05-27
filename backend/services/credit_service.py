@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 from uuid import UUID
 
 from redis.asyncio import Redis
@@ -11,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from database import get_shared_redis
 from models import CreditLedger, User
+from models.stripe_credit_pack import StripeCreditPack
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +46,10 @@ class CreditService:
         return self._redis
 
     async def get_balance(self, db: AsyncSession, user_id: UUID) -> int:
+        # Sweep expired packs before reading balance.  This keeps the DB balance
+        # authoritative and ensures the Redis cache reflects post-expiry state.
+        # T-229 — lazy expiry.
+        await self._expire_user_packs(db, user_id)
         redis = await self._get_redis()
         cached = await redis.get(self._redis_key(user_id))
         if cached is not None:
@@ -53,6 +59,82 @@ class CreditService:
         balance = int(user.credit_balance) if user is not None else 0
         await redis.set(self._redis_key(user_id), balance, ex=_CACHE_TTL)
         return balance
+
+    async def _expire_user_packs(self, db: AsyncSession, user_id: UUID) -> None:
+        """Sweep active packs whose expires_at has passed.
+
+        Runs inside the caller's transaction — do NOT call db.commit() here.
+        Uses SELECT FOR UPDATE on both the user row and the pack rows to prevent
+        concurrent get_balance() calls from racing each other.
+
+        The user row lock is acquired FIRST (same order as deduct()) to avoid
+        deadlocks with concurrent deduct() calls.
+        """
+        now = datetime.now(timezone.utc)
+        # Lock user row first (consistent lock ordering with deduct()).
+        user = await self._get_user(db, user_id, lock=True)
+        if user is None:
+            return
+        # Lock and fetch expired active packs.
+        result = await db.execute(
+            select(StripeCreditPack)
+            .where(
+                StripeCreditPack.user_id == user_id,
+                StripeCreditPack.status == "active",
+                StripeCreditPack.expires_at <= now,
+            )
+            .with_for_update()
+        )
+        expired_packs = result.scalars().all()
+        if not expired_packs:
+            return
+        total_expired = sum(p.credits_remaining for p in expired_packs)
+        for pack in expired_packs:
+            pack.status = "expired"
+            pack.credits_remaining = 0
+        # Deduct expired credits from user balance (floor at 0 — defensive).
+        user.credit_balance = max(0, int(user.credit_balance or 0) - total_expired)
+        await db.flush()
+        await self._invalidate(user_id)
+        # TODO T-236: import and increment BILLING_CREDITS_EXPIRED counter
+        # from services.observability import BILLING_CREDITS_EXPIRED
+        # BILLING_CREDITS_EXPIRED.inc(total_expired)
+
+    async def _drain_packs(self, db: AsyncSession, user_id: UUID, amount: int) -> None:
+        """Drain credits_remaining from active packs in FIFO order.
+
+        FIFO = soonest-expiring pack first (ORDER BY expires_at ASC).
+
+        Called by deduct() AFTER recording the CreditLedger entry and updating
+        user.credit_balance.  Pack rows must already be locked by
+        _expire_user_packs() having acquired FOR UPDATE on the user row —
+        use the same transaction.
+
+        FIFO = ORDER BY expires_at ASC.  Never ORDER BY expires_at DESC.
+        """
+        if amount <= 0:
+            return
+        result = await db.execute(
+            select(StripeCreditPack)
+            .where(
+                StripeCreditPack.user_id == user_id,
+                StripeCreditPack.status == "active",
+            )
+            .order_by(StripeCreditPack.expires_at.asc())  # FIFO: soonest-expiring first
+            .with_for_update()
+        )
+        packs = result.scalars().all()
+        remaining = amount
+        for pack in packs:
+            if remaining <= 0:
+                break
+            drain = min(pack.credits_remaining, remaining)
+            pack.credits_remaining -= drain
+            remaining -= drain
+            if pack.credits_remaining == 0:
+                pack.status = "consumed"
+        await db.flush()
+        # TODO T-236: import and increment BILLING_CREDITS_CONSUMED counter
 
     async def _get_user(
         self,
@@ -95,6 +177,7 @@ class CreditService:
         amount: int,
         reason: str,
     ) -> CreditLedger:
+        await self._expire_user_packs(db, user_id)  # Step 1: sweep expired packs
         user = await self._get_user(db, user_id, lock=True)
         balance = int(user.credit_balance or 0) if user is not None else 0
         if user is None or balance < amount:
@@ -105,6 +188,7 @@ class CreditService:
         entry = CreditLedger(user_id=user_id, amount=-amount, reason=reason)
         db.add(entry)
         await db.flush()
+        await self._drain_packs(db, user_id, amount)  # Step 2: FIFO pack drain
         await self._invalidate(user_id)
         return entry
 

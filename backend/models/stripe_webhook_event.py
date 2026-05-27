@@ -27,7 +27,11 @@ from __future__ import annotations
 from datetime import datetime
 from uuid import UUID as PythonUUID
 
-from sqlalchemy import Text, func, text  # 'text' required for server_default=text("gen_random_uuid()")
+from sqlalchemy import (  # 'text' required for server_default=text("gen_random_uuid()")
+    Text,
+    func,
+    text,
+)
 from sqlalchemy.dialects.postgresql import TIMESTAMP, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 

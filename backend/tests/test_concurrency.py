@@ -8,6 +8,7 @@ T-195 — covers five missing test categories identified in the Testing Assessme
   SSE  SSE cleanup_done flag prevents double-refund on disconnect
   H-4  Credit balance cache invalidation on deduct/refund
 """
+
 from __future__ import annotations
 
 from typing import Any
@@ -17,10 +18,9 @@ from uuid import UUID, uuid4
 import pytest
 
 from middleware.auth import _USER_CACHE, invalidate_user_cache
-from services.auth_service import AuthError, AuthService, OAUTH_STATE_PREFIX
-from services.credit_service import CreditService, InsufficientCreditsError
+from services.auth_service import OAUTH_STATE_PREFIX, AuthError, AuthService
+from services.credit_service import CreditService
 from services.pipeline.stage_manager import StageStateError
-
 
 # ---------------------------------------------------------------------------
 # Helpers / fakes
@@ -82,9 +82,23 @@ class _FakeCreditDB:
         self._execute_count = 0
 
     async def execute(self, statement: Any) -> Any:
-        call = self._execute_count
         self._execute_count += 1
-        return _ScalarResult(self.user if call == 0 else None)
+        # T-229: _expire_user_packs / _drain_packs query stripe_credit_packs.
+        # This test doesn't set up any packs — return empty list so the sweep
+        # methods find nothing to expire/drain.  _ScalarResult(None).scalars()
+        # already returns _ScalarAll(None) whose .all() returns [].
+        try:
+            froms = (
+                statement.get_final_froms()
+                if hasattr(statement, "get_final_froms")
+                else statement.froms
+            )
+            if any(getattr(f, "name", None) == "stripe_credit_packs" for f in froms):
+                return _ScalarResult(None)
+        except AttributeError:
+            pass
+        # All User-table queries return the user unconditionally.
+        return _ScalarResult(self.user)
 
     def add(self, instance: Any) -> None:
         from models import CreditLedger
@@ -192,9 +206,9 @@ def test_harness_patch_in_progress_raises_stage_state_error() -> None:
 
     for status in in_progress_statuses:
         # The guard: stage.status not in allowed_statuses → raise
-        assert status not in allowed_statuses, (
-            f"Status {status!r} should be rejected by the patch guard (C-2)"
-        )
+        assert (
+            status not in allowed_statuses
+        ), f"Status {status!r} should be rejected by the patch guard (C-2)"
 
 
 @pytest.mark.asyncio
@@ -249,9 +263,9 @@ async def test_oauth_replay_second_callback_rejected() -> None:
 
     # Second callback: key is gone — must be rejected.
     second = await redis.getdel(state_key)
-    assert second is None, (
-        "OAuth state must be consumed on first use; replay must fail (C-3)"
-    )
+    assert (
+        second is None
+    ), "OAuth state must be consumed on first use; replay must fail (C-3)"
 
 
 @pytest.mark.asyncio
@@ -371,9 +385,9 @@ async def test_credit_invalidate_removes_entry_from_auth_cache() -> None:
     # Simulate what _invalidate() does:
     invalidate_user_cache(user_id)
 
-    assert user_id not in _USER_CACHE, (
-        "invalidate_user_cache must remove the user entry from _USER_CACHE (H-4)"
-    )
+    assert (
+        user_id not in _USER_CACHE
+    ), "invalidate_user_cache must remove the user entry from _USER_CACHE (H-4)"
 
 
 @pytest.mark.asyncio
@@ -398,8 +412,6 @@ async def test_credit_deduct_invalidates_cache_via_redis_and_auth() -> None:
     entry so the middleware serves an accurate credit_balance on the next
     request.
     """
-    from models import CreditLedger
-
     user_id = uuid4()
     redis = _FakeRedis()
     credit_key = f"credits:{user_id}"
@@ -416,11 +428,11 @@ async def test_credit_deduct_invalidates_cache_via_redis_and_auth() -> None:
     await service.deduct(db, user_id, 10, "generate")
 
     # Redis balance cache must be cleared.
-    assert await redis.get(credit_key) is None, (
-        "deduct() must delete the Redis credit balance cache entry (H-4)"
-    )
+    assert (
+        await redis.get(credit_key) is None
+    ), "deduct() must delete the Redis credit balance cache entry (H-4)"
 
     # Auth middleware in-process cache must also be cleared.
-    assert user_id not in _USER_CACHE, (
-        "deduct() must evict the user entry from the auth middleware cache (H-4)"
-    )
+    assert (
+        user_id not in _USER_CACHE
+    ), "deduct() must evict the user entry from the auth middleware cache (H-4)"

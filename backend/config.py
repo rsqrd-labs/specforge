@@ -64,16 +64,15 @@ class Settings(BaseSettings):
     # Use sk_test_* keys for development; sk_live_* keys for production only.
     stripe_secret_key: str = ""
     stripe_webhook_secret: str = ""
-    stripe_price_cents: int = 900              # $9.00 — 200 credits per purchase
+    stripe_price_cents: int = 900  # $9.00 — 200 credits per purchase
     stripe_credits_per_purchase: int = 200
     stripe_credit_validity_days: int = 30
-    # IMPORTANT: STRIPE_SUCCESS_URL must point to the /billing page (NOT /billing/success).
-    # T-238 registers /billing as the authenticated billing route.  The Billing component
-    # detects ?session_id= on that route and enters polling mode.
-    # There is no separate /billing/success route — if you set this to /billing/success,
-    # users will land on a 404 after paying.
-    stripe_success_url: str = ""               # e.g. https://app.specforge.dev/billing
-    stripe_cancel_url: str = ""                # e.g. https://app.specforge.dev/billing
+    # IMPORTANT: STRIPE_SUCCESS_URL must point to /billing (NOT /billing/success).
+    # T-238 registers /billing as the authenticated billing route.  The Billing
+    # component detects ?session_id= on that route and enters polling mode.
+    # There is no /billing/success route — users land on a 404 if you set this wrong.
+    stripe_success_url: str = ""  # e.g. https://app.specforge.dev/billing
+    stripe_cancel_url: str = ""  # e.g. https://app.specforge.dev/billing
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
