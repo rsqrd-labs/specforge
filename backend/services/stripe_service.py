@@ -32,6 +32,12 @@ from config import settings
 from models import CreditLedger, User
 from models.stripe_credit_pack import StripeCreditPack
 from services.credit_service import credit_service
+from services.observability import (
+    BILLING_CHECKOUT_COMPLETED,
+    BILLING_CHECKOUT_CREATED,
+    BILLING_CREDITS_GRANTED,
+    BILLING_PACK_DISPUTED,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -143,7 +149,7 @@ class StripeService:
                 detail="Failed to create checkout session. Please try again.",
             ) from exc
 
-        # TODO T-236: import and increment BILLING_CHECKOUT_CREATED counter
+        BILLING_CHECKOUT_CREATED.inc()
         return session.url  # type: ignore[return-value]
 
     async def handle_event(self, db: AsyncSession, event: dict) -> None:
@@ -278,8 +284,8 @@ class StripeService:
             expires_at.isoformat(),
         )
 
-        # TODO T-236: import and increment BILLING_CHECKOUT_COMPLETED counter
-        # TODO T-236: import and increment BILLING_CREDITS_GRANTED counter
+        BILLING_CHECKOUT_COMPLETED.inc()
+        BILLING_CREDITS_GRANTED.inc(settings.stripe_credits_per_purchase)
 
     async def _handle_dispute_created(
         self,
@@ -380,7 +386,7 @@ class StripeService:
             revoke,
         )
 
-        # TODO T-236: import and increment BILLING_PACK_DISPUTED counter
+        BILLING_PACK_DISPUTED.inc()
 
 
 # Module-level singleton — imported by name in the billing router:

@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from database import get_shared_redis
 from models import CreditLedger, User
 from models.stripe_credit_pack import StripeCreditPack
+from services.observability import BILLING_CREDITS_CONSUMED, BILLING_CREDITS_EXPIRED
 
 logger = logging.getLogger(__name__)
 
@@ -96,9 +97,7 @@ class CreditService:
         user.credit_balance = max(0, int(user.credit_balance or 0) - total_expired)
         await db.flush()
         await self._invalidate(user_id)
-        # TODO T-236: import and increment BILLING_CREDITS_EXPIRED counter
-        # from services.observability import BILLING_CREDITS_EXPIRED
-        # BILLING_CREDITS_EXPIRED.inc(total_expired)
+        BILLING_CREDITS_EXPIRED.inc(total_expired)
 
     async def _drain_packs(self, db: AsyncSession, user_id: UUID, amount: int) -> None:
         """Drain credits_remaining from active packs in FIFO order.
@@ -134,7 +133,7 @@ class CreditService:
             if pack.credits_remaining == 0:
                 pack.status = "consumed"
         await db.flush()
-        # TODO T-236: import and increment BILLING_CREDITS_CONSUMED counter
+        BILLING_CREDITS_CONSUMED.inc(amount - remaining)
 
     async def _get_user(
         self,

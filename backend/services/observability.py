@@ -121,6 +121,52 @@ CSRF_REPLAY_REJECTIONS = Counter(
     "CSRF tokens rejected because the nonce was already consumed in Redis",
 )
 
+# Billing / Stripe counters (Phase 18) — T-236
+# ---------------------------------------------
+# These counters power the four Grafana alert rules documented in RUNBOOK §9.
+BILLING_CHECKOUT_CREATED = Counter(
+    "specforge_billing_checkout_created_total",
+    "Stripe Checkout Sessions created via POST /billing/checkout",
+)
+BILLING_CHECKOUT_COMPLETED = Counter(
+    "specforge_billing_checkout_completed_total",
+    "checkout.session.completed webhook events received and processed",
+)
+BILLING_CREDITS_GRANTED = Counter(
+    "specforge_billing_credits_granted_total",
+    "Total credits granted to users via Stripe purchase",
+)
+BILLING_CREDITS_EXPIRED = Counter(
+    "specforge_billing_credits_expired_total",
+    "Credits swept by lazy expiry in _expire_user_packs()",
+)
+BILLING_CREDITS_CONSUMED = Counter(
+    "specforge_billing_credits_consumed_total",
+    "Credits drained by FIFO pack drain in _drain_packs()",
+)
+BILLING_PACK_DISPUTED = Counter(
+    "specforge_billing_pack_disputed_total",
+    "Credit packs revoked due to Stripe charge disputes",
+)
+BILLING_WEBHOOK_RECEIVED = Counter(
+    "specforge_billing_webhook_received_total",
+    "All webhook events received (before idempotency check)",
+    ["event_type"],
+)
+BILLING_WEBHOOK_DUPLICATE = Counter(
+    "specforge_billing_webhook_duplicate_total",
+    "Webhook events rejected as duplicates by the idempotency guard",
+)
+BILLING_WEBHOOK_ERROR = Counter(
+    "specforge_billing_webhook_error_total",
+    "Webhook events that failed during handle_event processing",
+    ["error_type"],
+)
+BILLING_CHECKOUT_RATE_LIMITED = Counter(
+    "specforge_billing_checkout_rate_limited_total",
+    "POST /billing/checkout requests rejected by the 5/hour rate limit",
+)
+
 _sentry_configured = False
 _otel_configured = False
 _REDACTED = "[REDACTED]"
@@ -128,6 +174,7 @@ _SENSITIVE_KEYS = {
     "api_key",
     "apikey",
     "authorization",
+    "client_secret",
     "csrf_token",
     "google_api_key",
     "grafana_otlp_token",
@@ -141,6 +188,8 @@ _SENSITIVE_KEYS = {
     "secret",
     "set-cookie",
     "set_cookie",
+    "stripe_secret_key",
+    "stripe_webhook_secret",
     "token",
 }
 _LOG_RECORD_BUILTINS = set(logging.LogRecord("", 0, "", 0, "", (), None).__dict__)
@@ -155,6 +204,10 @@ _SECRET_PATTERNS: tuple[re.Pattern[str], ...] = (
     ),
     re.compile(r"(?i)(refresh[_-]?token\s*[:=]\s*)['\"]?[^'\"\s,;}]+['\"]?"),
     re.compile(r"(?i)(authorization\s*[:=]\s*)['\"]?[^'\"\s,;}]+['\"]?"),
+    # Stripe secret keys: sk_live_* (production) and sk_test_* (development)
+    re.compile(r"sk_(?:live|test)_[A-Za-z0-9_-]{24,}"),
+    # Stripe webhook signing secrets
+    re.compile(r"whsec_[A-Za-z0-9/+=]{24,}"),
 )
 
 

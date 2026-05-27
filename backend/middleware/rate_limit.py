@@ -15,6 +15,7 @@ from starlette.responses import Response
 
 from config import settings
 from services.auth_service import decode_access_token_claims
+from services.observability import BILLING_CHECKOUT_RATE_LIMITED
 
 logger = logging.getLogger(__name__)
 
@@ -342,7 +343,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
                 _BILLING_CHECKOUT_WINDOW_SECONDS,
             )
             if not allowed:
-                # TODO T-236: increment BILLING_CHECKOUT_RATE_LIMITED counter
+                BILLING_CHECKOUT_RATE_LIMITED.inc()
                 return _rate_limited_custom(
                     detail=_BILLING_CHECKOUT_DETAIL,
                     retry_after_seconds=_BILLING_CHECKOUT_WINDOW_SECONDS,

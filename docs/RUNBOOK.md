@@ -642,3 +642,17 @@ auth enabled):
 
 No data re-encryption is needed; Redis stores session and rate-limit state,
 not long-lived secrets.
+
+
+---
+
+## 9. Billing Alerts
+
+The following Grafana alert rules correspond to the Prometheus counters defined in `services/observability.py` (Phase 18 — T-236).
+
+| Alert | Condition | Severity | Action |
+|---|---|---|---|
+| BillingWebhookErrorRate | `rate(specforge_billing_webhook_error_total[5m]) > 0` | Warning | Check logs for `billing.webhook_handle_failed`; inspect Stripe dashboard for event details; delete the `stripe_webhook_events` row to replay the event |
+| BillingCheckoutDropped | `checkout.session.completed` events stagnant while `checkout_created` rising (5-min window) | Warning | Check Stripe webhook delivery logs; verify `/billing/webhook` is reachable and returning 200; inspect CSRF/rate-limit exemptions |
+| BillingDisputeCreated | `specforge_billing_pack_disputed_total` increments | Warning | Review Stripe dispute in the dashboard; contact user if fraudulent; credits already revoked automatically |
+| BillingWebhookDuplicate | `rate(specforge_billing_webhook_duplicate_total[1h]) > 10` | Info | Normal if Stripe is retrying; investigate if above 100/hour — may indicate the webhook endpoint is failing silently after `already_processed` return |

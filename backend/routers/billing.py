@@ -37,6 +37,11 @@ from schemas.billing import (
     PackageResponse,
     PackHistoryItem,
 )
+from services.observability import (
+    BILLING_WEBHOOK_DUPLICATE,
+    BILLING_WEBHOOK_ERROR,
+    BILLING_WEBHOOK_RECEIVED,
+)
 from services.stripe_service import stripe_service
 
 logger = logging.getLogger(__name__)
@@ -262,6 +267,10 @@ async def stripe_webhook(
             detail="Webhook livemode does not match server environment",
         )
 
+    # Count every event that passes signature + livemode validation, before the
+    # idempotency check.  Labelled by event_type for per-event-type dashboards.
+    BILLING_WEBHOOK_RECEIVED.labels(event_type=event_type).inc()
+
     # Step 3: INSERT idempotency row BEFORE processing the event.
     # If the process crashes between this INSERT and the event handler, the next
     # retry will find the row and return 200 (already_processed) — no double-credit.
@@ -281,6 +290,7 @@ async def stripe_webhook(
         logger.info(
             "billing.webhook_duplicate_event stripe_event_id=%s", stripe_event_id
         )
+        BILLING_WEBHOOK_DUPLICATE.inc()
         return {"status": "already_processed"}
 
     # Step 5: Process the event inside a SAVEPOINT.
@@ -303,7 +313,7 @@ async def stripe_webhook(
             exc,
             exc_info=True,
         )
-        # TODO T-236: increment BILLING_WEBHOOK_ERROR counter
+        BILLING_WEBHOOK_ERROR.labels(error_type=type(exc).__name__).inc()
         # Return 200 — Stripe won't retry; partial DB state is clean.
         return {"status": "error_logged"}
 
