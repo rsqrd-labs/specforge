@@ -71,6 +71,14 @@ _SHARE_TOGGLE_LIMIT = 20
 _SHARE_TOGGLE_WINDOW_SECONDS = 3600
 _SHARE_TOGGLE_DETAIL = "Share toggle rate limit reached. Maximum 20 changes per hour."
 
+# Billing checkout tier (Phase 18): 5 checkout sessions per user per hour.
+# Prevents mass session creation that inflates Stripe API costs and
+# triggers Stripe fraud detection.  T-231/T-233 — Phase 18.
+_BILLING_CHECKOUT_PATH_RE = re.compile(r"^/billing/checkout/?$")
+_BILLING_CHECKOUT_LIMIT = 5
+_BILLING_CHECKOUT_WINDOW_SECONDS = 3600
+_BILLING_CHECKOUT_DETAIL = "Checkout rate limit reached. Maximum 5 purchases per hour."
+
 IpNetwork = IPv4Network | IPv6Network
 RateLimitCheck = Callable[[str, int, int], Awaitable[bool]]
 
@@ -320,6 +328,23 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
                 return _rate_limited_custom(
                     detail=_SHARE_TOGGLE_DETAIL,
                     retry_after_seconds=_SHARE_TOGGLE_WINDOW_SECONDS,
+                )
+
+        if (
+            user_id
+            and request.method == "POST"
+            and _BILLING_CHECKOUT_PATH_RE.match(path)
+        ):
+            allowed = await check(
+                f"billing_checkout:{user_id}",
+                _BILLING_CHECKOUT_LIMIT,
+                _BILLING_CHECKOUT_WINDOW_SECONDS,
+            )
+            if not allowed:
+                # TODO T-236: increment BILLING_CHECKOUT_RATE_LIMITED counter
+                return _rate_limited_custom(
+                    detail=_BILLING_CHECKOUT_DETAIL,
+                    retry_after_seconds=_BILLING_CHECKOUT_WINDOW_SECONDS,
                 )
         return None
 
