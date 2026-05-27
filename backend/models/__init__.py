@@ -11,6 +11,8 @@ from models.integration_push import IntegrationPush  # noqa: E402
 from models.integration_push_task import IntegrationPushTask  # noqa: E402
 from models.stage import Stage  # noqa: E402
 from models.stage_version import StageVersion  # noqa: E402
+from models.stripe_credit_pack import StripeCreditPack  # noqa: E402
+from models.stripe_webhook_event import StripeWebhookEvent  # noqa: E402
 from models.template import Template  # noqa: E402
 from models.user import User  # noqa: E402
 from models.user_integration import UserIntegration  # noqa: E402
@@ -24,6 +26,8 @@ __all__ = [
     "IntegrationPushTask",
     "Stage",
     "StageVersion",
+    "StripeCreditPack",
+    "StripeWebhookEvent",
     "Template",
     "User",
     "UserIntegration",
