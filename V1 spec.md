@@ -6,7 +6,7 @@ tags:
 - specforge
 - spec
 - v1
-- asdd created: 2026-04-25 status: final version: 1.3.0 stage: spec
+- asdd created: 2026-04-25 status: final version: 1.4.0 stage: spec
 
 ---
 
@@ -26,7 +26,7 @@ tags:
 - [[#6. Stage Interaction Modes]]
 - [[#7. Quality and Evals]]
 - [[#8. Authentication and Accounts]]
-- [[#9. Credit System]]
+- [[#9. Credit System and Billing]]
 - [[#10. Data Models]]
 - [[#11. API Contracts]]
 - [[#12. Non-Functional Requirements]]
@@ -65,12 +65,13 @@ V1 validates one core hypothesis: developers find enough value in the pipeline o
 - Let users download a branded PDF of the finalised spec for audiences that do not work with Markdown
 - Offer a small library of starter templates on the landing dashboard so a first-time user can begin from a worked example rather than a blank textarea
 - Surface harness coverage prominently in the workspace summary so the harness stage is recognisable as a differentiator rather than a buried artefact
+- Allow users to purchase additional credits in a single pack (200 credits for $9, valid 30 days from purchase date) via Stripe Hosted Checkout so the product has a clear monetisation path from V1
 
 ### Non-Goals for V1
 
 > [!warning] Explicitly Out of Scope These are not deferred — they are deliberately excluded from V1 to maintain focus.
 
-- Payments and subscriptions
+- Subscriptions and recurring billing (one-time credit packs are in scope; subscription management is not)
 - Approval workflows
 - Jira integration
 - Team workspaces or shared pipelines
@@ -366,9 +367,11 @@ Workspace cards show: name, creation date, AI provider used, pipeline progress i
 
 Above the workspace grid, a **Start from a template** strip surfaces the curated starter templates (see §4.11). For a first-time user with an empty workspace list this strip is the dominant element on the dashboard.
 
-Credit balance shown prominently. When credits reach zero:
+Credit balance shown prominently. A **Buy Credits** button is always visible next to the credit meter for users who want to top up proactively. When credits expire or run out:
 
-> [!danger] Credit Exhaustion State "You've used all 50 free credits. The Pro plan offers 1,000 credits per month." → Waitlist link (payments not in V1).
+> [!danger] Credit Exhaustion State "You're out of credits. Buy 200 credits for $9 →" links directly to `/billing`. No waitlist, no form — one click to Stripe Checkout.
+
+When a purchased pack is within 7 days of expiry, a warning chip appears on the credit meter: "⚠ X credits expire in N days — Buy more →". This gives users enough lead time to purchase a new pack before their current one lapses mid-pipeline.
 
 ### 4.11 Starter Templates
 
@@ -396,6 +399,45 @@ Standard workspace creation flow continues
 - Each template carries: name, short description, category (auth · payments · content · realtime · agent · tooling), suggested provider/model, and the seed problem statement.
 - The template library is read-only from the user's perspective and ships with the application. Adding or rotating templates is a deploy-time operation.
 - V1 ships with 6–10 templates covering the most common SaaS / agent / developer-tool starting points.
+
+### 4.12 Credit Purchase Flow
+
+Users who exhaust their free credits — or want to top up proactively — use the Billing page at `/billing`.
+
+```
+Dashboard → click "Buy Credits" (credit meter) or visit /billing directly
+        ↓
+Billing page shows:
+  - Current credit balance + expiry info (if any active pack)
+  - Single package card: 200 credits · $9.00 · valid 30 days
+        ↓
+User clicks "Buy Credits →"
+        ↓
+POST /billing/checkout → redirect to Stripe Hosted Checkout
+        ↓
+User enters card details on Stripe's page (no card data on SpecForge servers)
+        ↓
+Stripe redirects back to /billing?session_id={id}&success=1
+        ↓
+Billing page polls GET /billing/status?session_id={id} (2 s interval, max 10 attempts)
+until status = 'active'
+        ↓
+Success state: "200 credits added. Expires {date}."
+Balance updates immediately.
+```
+
+> [!important] Webhook is the authoritative credit source
+> Credits are granted by the backend on receipt of Stripe's `checkout.session.completed` webhook — not by the success redirect. The redirect polling is only to confirm the webhook has already processed. If the user closes the tab immediately after payment, the webhook still fires and credits are still granted.
+
+**Billing page sections:**
+
+1. **Balance summary** — current credit count, earliest pack expiry date (if within 14 days), link to ledger history
+2. **Package card** — single package: 200 credits · $9.00 · 30-day validity · "Buy Credits →" CTA. Package details are loaded from `GET /billing/package` so the price can be updated server-side without a frontend deploy.
+3. **Purchase history** — accordion list of past packs with status badges: `Active` (green, shows credits remaining and expiry date) · `Expired` (grey) · `Refunded` (yellow)
+
+**Cancelled checkout:** If the user cancels on Stripe's page, they are redirected to `/billing?cancelled=1`. The pending pack row is created but remains `status='pending'` until the checkout window expires on Stripe's side. No credits are granted for a cancelled session.
+
+---
 
 ## 5. Pipeline Stages — Detailed Specification
 
@@ -674,35 +716,84 @@ If a GitHub API call returns 401 at any point after connection, the stored token
 
 ---
 
-## 9. Credit System
+## 9. Credit System and Billing
 
 ### Credit Ledger
 
-> [!note] Design Rule The credit ledger is append-only. Balance is always computed as `SUM(amount) WHERE user_id = ?`. Credits are never updated in place. Every change is a new ledger entry.
+> [!note] Design Rule The credit ledger is append-only. Every balance change is a new row. Credits are never updated in place. Every deduction, credit grant, expiry, refund, and purchase is a distinct ledger entry with a descriptive `reason` field (`signup_bonus`, `stripe_purchase:{pack_id}`, `generate`, `refund:{ledger_id}`, `expiry:{pack_id}`, `stripe_refund:{pack_id}`).
+
+`user.credit_balance` is a denormalised integer kept in sync with the ledger. It is the fast path for balance reads and is cache-backed in Redis (5-minute TTL). Invariant: `credit_balance >= SUM(stripe_credit_packs.credits_remaining)` for all active packs owned by that user at any point in time.
 
 ### Credit Deduction Flow
 
 ```
 User triggers LLM action
         ↓
+Lazy expiry check — any active purchased packs past their expires_at?
+  Yes → deduct expired credits, update ledger, mark packs expired
+        ↓
 Credit balance checked
         ↓
-Insufficient? → Request rejected, clear message shown
+Insufficient? → Request rejected, clear message shown, "Buy Credits →" CTA
         ↓
-Sufficient? → Credits deducted atomically
+Sufficient? → Credits deducted atomically (SELECT FOR UPDATE)
+              FIFO drain from soonest-expiring active pack first,
+              then platform credits (signup bonus, manual grants)
         ↓
 LLM call made
         ↓
-Call fails? → Deduction reversed (positive ledger entry)
+Call fails? → Deduction reversed (positive ledger entry — refund)
         ↓
 Call succeeds? → Deduction stands
 ```
 
 ### Free Tier
 
-- 50 credits on account creation
-- One-time allocation (no monthly reset in V1)
-- When zero: credit exhaustion state with Pro waitlist link
+- 50 credits granted on first account creation (`reason: signup_bonus`)
+- Platform credits do not expire
+- When zero: credit exhaustion state with "Buy Credits →" link to `/billing`
+
+### Purchased Credits
+
+Users can buy one credit pack at a time via Stripe Hosted Checkout. V1 ships with a single package; price and credit count are configurable server-side.
+
+| | |
+|---|---|
+| Pack size | 200 credits |
+| Price | $9.00 USD |
+| Validity | 30 days from purchase date |
+| Currency | USD only in V1 |
+| Refund policy | Unused credits revoked on Stripe refund; no negative balance |
+
+**Purchase is authoritative on webhook receipt**, not on success redirect. Credits become available in the user's balance as soon as `checkout.session.completed` is processed by the backend. If payment fails or is cancelled, no credits are granted.
+
+### Credit Expiry
+
+Purchased credits expire 30 days from the date of purchase. Expiry is enforced **lazily** — at the top of every `get_balance()` and `deduct()` call, the backend checks for any active packs past their `expires_at` and converts the remaining pack credits into a negative ledger entry (`reason: expiry:{pack_id}`), reducing `credit_balance` accordingly.
+
+The amount expired per pack is `MIN(pack.credits_remaining, user.credit_balance)` — the balance can never go below zero from expiry alone.
+
+Platform credits (signup bonus, manually granted credits) **never expire**.
+
+### FIFO Pack Drain
+
+When credits are deducted for an LLM action, the cost is drawn from the user's active purchased packs in ascending `expires_at` order (soonest-expiring first). Each pack's `credits_remaining` is decremented accordingly inside the same `SELECT FOR UPDATE` transaction as the balance update. This ensures that:
+
+- Credits closest to expiry are consumed first
+- The `credits_remaining` field accurately reflects what would be lost if a pack expired right now
+- Platform credits (no pack row) are always consumed last
+
+### Stripe Refunds and Disputes
+
+If a user disputes a charge or requests a refund:
+
+1. Stripe fires `charge.refunded` or `charge.dispute.created`
+2. Backend looks up the pack by `stripe_payment_intent_id`
+3. Revokes `MIN(pack.credits_remaining, user.credit_balance)` credits
+4. Creates a negative ledger entry (`reason: stripe_refund:{pack_id}`)
+5. Sets pack `status = 'refunded'`, `credits_remaining = 0`
+
+Disputed charges are revoked immediately on `dispute.created` and are **not** automatically reinstated if the dispute is resolved in the seller's favour — reinstatement is a manual admin action.
 
 ### Credit Display
 
@@ -711,6 +802,9 @@ Call succeeds? → Deduction stands
 |Top navigation bar|Current balance on all authenticated pages|
 |Workspace view|Credit meter below stage action buttons|
 |Below 10 credits|Low-credit warning shown|
+|Active pack within 7 days of expiry|"⚠ X credits expire in N days — Buy more →" chip|
+|Zero credits|"You're out of credits. Buy 200 credits for $9 →"|
+|Billing page|Balance, earliest expiry date, purchase card, history|
 
 ---
 
@@ -725,6 +819,7 @@ Call succeeds? → Deduction stands
 |google_id|TEXT|Unique, not null|
 |name|TEXT||
 |avatar_url|TEXT||
+|credit_balance|INTEGER|Not null, default 0, check ≥ 0 — denormalised fast-path balance; kept in sync with ledger|
 |created_at|TIMESTAMPTZ||
 
 ### Workspace
@@ -847,6 +942,38 @@ Unique constraint: `(push_id, task_ref)`.
 |flagged|BOOLEAN|Default false|
 |created_at|TIMESTAMPTZ||
 
+### Stripe Credit Pack
+
+One row per Stripe Checkout session. Created with `status='pending'` when the checkout session is initiated; updated to `status='active'` when `checkout.session.completed` fires. Tracks remaining credits for FIFO drain and lazy expiry.
+
+|Field|Type|Constraints|
+|---|---|---|
+|id|UUID|Primary key|
+|user_id|UUID|FK → users.id, CASCADE|
+|stripe_checkout_session_id|TEXT|Unique, not null|
+|stripe_payment_intent_id|TEXT|Unique, nullable — populated on checkout completion|
+|credits_purchased|INTEGER|Not null, check > 0|
+|credits_remaining|INTEGER|Not null, check ≥ 0 and ≤ credits_purchased — decremented FIFO on deduct; drives expiry calculation|
+|price_cents|INTEGER|Not null, check > 0|
+|expires_at|TIMESTAMPTZ|Not null — set to `created_at + 30 days` on activation|
+|status|TEXT|`pending` / `active` / `expired` / `refunded`|
+|created_at|TIMESTAMPTZ||
+
+Indexes: `(user_id)`, `(user_id, expires_at)` WHERE `status = 'active'` for lazy-expiry lookups.
+
+### Stripe Webhook Event
+
+Idempotency table. One row per processed Stripe event. A second insert for the same `stripe_event_id` raises a unique constraint error, which the handler catches and silently skips — making every webhook handler idempotent regardless of event type.
+
+|Field|Type|Constraints|
+|---|---|---|
+|id|UUID|Primary key|
+|stripe_event_id|TEXT|Unique, not null — e.g. `evt_1AbC...`|
+|event_type|TEXT|Not null — e.g. `checkout.session.completed`|
+|processed_at|TIMESTAMPTZ|Not null, default now()|
+
+---
+
 ### Template
 
 System-owned, deploy-time-seeded library of starter problem statements. Read-only from the user's perspective in V1.
@@ -924,8 +1051,21 @@ System-owned, deploy-time-seeded library of starter problem statements. Read-onl
 
 |Method|Endpoint|Description|
 |---|---|---|
-|GET|/credits/balance|Return current credit balance|
+|GET|/credits/balance|Return current balance, generation cost, and earliest pack expiry info (`expires_soon`, `next_expiry_at`)|
 |GET|/credits/history|Return credit ledger entries (paginated)|
+
+### Billing
+
+|Method|Endpoint|Auth|CSRF|Description|
+|---|---|---|---|---|
+|GET|/billing/package|Required|No|Return the single available credit package (`credits`, `price_cents`, `validity_days`)|
+|POST|/billing/checkout|Required|Yes|Create a Stripe Checkout session; returns `{checkout_url}` for frontend redirect|
+|GET|/billing/status|Required|No|Poll checkout session status by `?session_id=...`; ownership-scoped by `user_id`; returns `{status, expires_at}`|
+|GET|/billing/history|Required|No|Return user's pack purchase history (paginated)|
+|POST|/billing/webhook|None|Exempt|Stripe webhook endpoint; authenticated by `Stripe-Signature` HMAC-SHA256; no Bearer token|
+
+> [!important] Webhook security boundary
+> `/billing/webhook` carries no Bearer token and is exempt from CSRF enforcement. Its only authentication mechanism is the `Stripe-Signature` header validated against `STRIPE_WEBHOOK_SECRET` with a 300-second timestamp tolerance. The endpoint is also exempt from all per-IP rate limiting — Stripe's retry schedule must not be blocked.
 
 ### Providers
 
@@ -974,6 +1114,11 @@ System-owned, deploy-time-seeded library of starter problem statements. Read-onl
 - SQL injection prevented by ORM-only database access — no raw SQL strings
 - Rate limiting applied at global, per-user, and per-user LLM tiers via Redis sliding window
 - GitHub OAuth access tokens stored encrypted with Fernet; plaintext never written to logs, errors, or audit fields. Auto-deleted on 401 from GitHub API.
+- Stripe webhook requests authenticated by HMAC-SHA256 `Stripe-Signature` header with a 300-second timestamp tolerance. Invalid signature → 400 (no Sentry noise). Expired timestamp → 400.
+- Stripe secret keys (`sk_live_*`, `sk_test_*`) and webhook signing secrets (`whsec_*`) scrubbed from all log, error, and trace pipelines alongside existing secret patterns.
+- `GET /billing/status` lookups are scoped by `user_id` in addition to `session_id` to prevent IDOR — a user cannot poll another user's checkout session status. Returns 404 (not 403) on ownership mismatch to avoid confirming existence.
+- PII boundary with Stripe: only the user's email is passed to Stripe (for checkout form pre-fill). No card data touches SpecForge servers at any point. `client_reference_id` carries only the opaque UUID `user_id`.
+- Production guard: `STRIPE_SECRET_KEY` must be set and must not be a test key (`sk_test_*`) in production; enforced at startup alongside existing production validation checks.
 
 ### Rate Limits
 
@@ -989,6 +1134,8 @@ System-owned, deploy-time-seeded library of starter problem statements. Read-onl
 |Spec Clarify|Per user|6 calls|1 hour|
 |Public Share Toggle|Per user|20 toggles|1 hour|
 |Public View|Per IP|120 reads|1 minute|
+|Billing Checkout|Per user|5 sessions|1 hour|
+|Billing Webhook|Exempt|Signature-validated; no rate cap|—|
 
 ### Scalability
 
@@ -1006,6 +1153,32 @@ V1 is designed for hundreds of concurrent users, not thousands. Railway's defaul
 - All LLM observability is **optional** and degrades gracefully when Langfuse is unavailable or unconfigured. The platform falls back to local prompt templates and skips trace/score submission silently.
 - **No user-facing feature depends on Langfuse availability.** Stage generation, refine, finalise, eval scoring, credit accounting, and export work identically with or without Langfuse configured.
 
+**Billing observability** — the following Prometheus counters are emitted for all Stripe billing events:
+
+|Metric|Description|
+|---|---|
+|`specforge_billing_checkout_created_total`|Stripe Checkout sessions initiated|
+|`specforge_billing_purchase_completed_total`|Purchases completed and credits granted|
+|`specforge_billing_purchase_revenue_cents_total`|Total revenue from completed purchases|
+|`specforge_billing_credits_granted_total`|Credits added via Stripe purchase|
+|`specforge_billing_refunds_total`|Refund events processed|
+|`specforge_billing_credits_revoked_total`|Credits revoked on refund or dispute|
+|`specforge_billing_disputes_total`|Dispute events processed|
+|`specforge_billing_webhook_errors_total`|Webhook processing failures (labelled by `error_type`)|
+|`specforge_billing_credits_expired_total`|Credits expired by lazy-expiry mechanism|
+|`specforge_billing_webhook_duplicates_total`|Webhook events skipped as duplicates (labelled by `event_type`)|
+
+Structlog billing events follow a consistent schema — fields always include `event_type`, `stripe_event_id`, `user_id`, and `pack_id`; email and raw payloads are never logged. Key event names: `billing.checkout.created`, `billing.purchase.activated`, `billing.refund.processed`, `billing.dispute.flagged`, `billing.webhook.duplicate_skipped`, `billing.expiry.run`.
+
+Recommended Grafana alert rules (documented in `RUNBOOK.md §9`):
+
+|Alert|Expression|Severity|
+|---|---|---|
+|Webhook errors|`rate(specforge_billing_webhook_errors_total[5m]) > 0`|Warning|
+|Dispute spike|`increase(specforge_billing_disputes_total[24h]) > 5`|Critical|
+|Zero purchases 72 h|`increase(specforge_billing_purchase_completed_total[72h]) == 0`|Warning|
+|Unexpected expiry spike|`rate(specforge_billing_credits_expired_total[1h]) > 500`|Warning|
+
 ---
 
 ## 13. Assumptions
@@ -1014,7 +1187,7 @@ V1 is designed for hundreds of concurrent users, not thousands. Railway's defaul
 
 **Assumption 1 — Model selection is not friction.** Developers are willing to select their preferred provider and model rather than having SpecForge choose for them. If this creates too much friction, a pre-selected recommended default can be added.
 
-**Assumption 2 — 50 credits is enough to experience full pipeline value.** If users consistently run out before completing their first workspace the free allocation needs to increase.
+**Assumption 2 — 50 credits is enough to experience full pipeline value before asking for payment.** If users consistently run out before completing their first workspace the free allocation needs to increase. Users can purchase additional credits at any time, so exhaustion is no longer a terminal state.
 
 **Assumption 3 — Export to zip is the right delivery mechanism.** Users want to drop files into their project and use them with a coding agent. A future version might integrate directly with the coding agent's context window.
 
@@ -1028,7 +1201,7 @@ V1 is designed for hundreds of concurrent users, not thousands. Railway's defaul
 
 **Assumption 10 — Synchronous export is acceptable.** A workspace with 30 tasks will take roughly 30 seconds end-to-end under normal GitHub API conditions. If this is consistently too slow, a background job with SSE progress streaming can be added using the same pattern as stage generation.
 
-**Assumption 6 — A Pro waitlist is an acceptable credit exhaustion state.** If conversion intent is high, moving payments into V1 may be worth the additional build time.
+**Assumption 6 — A single credit pack at $9 is the right pricing entry point.** A single no-choice purchase removes decision paralysis. If conversion data shows users wanting larger or smaller packs, tiered pricing can be introduced without a schema change (the `stripe_credit_packs` table is pack-agnostic). 200 credits = 5 full four-stage pipeline runs, which should be enough for users to validate SpecForge on a real project.
 
 **Assumption 7 — Langfuse is an optional observability enhancement.** Its unavailability must never surface to users or affect credit accounting, stage generation, or eval scoring. The system runs identically with `LANGFUSE_SECRET_KEY` unset; when it is set, Langfuse becomes an additional sink for prompt-level traces, prompt versions, eval scores, and dataset items. If a Langfuse call fails for any reason — network error, auth failure, rate limit, schema rejection — the failure is logged and swallowed. No user-facing flow may raise on a Langfuse error.
 
@@ -1040,13 +1213,20 @@ V1 is designed for hundreds of concurrent users, not thousands. Railway's defaul
 
 **Assumption 14 — A small curated template library is enough for cold-start.** 6–10 hand-tuned templates covering the most common SaaS / agent / developer-tool starting points are expected to remove the blank-page problem for a typical first-time user. If template attach rate is below ~25% the library is expanded; if a long tail of niches is requested, user-authored templates are revisited for V2.
 
+**Assumption 15 — Stripe Hosted Checkout is acceptable UX for a developer audience.** A full-page redirect to Stripe's checkout page is industry-standard and removes all PCI scope from SpecForge. If user research shows meaningful drop-off at the redirect step, an embedded Stripe Payment Element can replace it without changes to the backend billing logic.
+
+**Assumption 16 — 30-day credit validity is long enough to avoid frustration but short enough to drive re-purchase.** If expiry triggers significant support requests ("my credits expired while I was away") the validity period can be extended server-side via `STRIPE_CREDIT_VALIDITY_DAYS` without a schema migration. If credits are expiring with significant remaining balances (visible in `specforge_billing_credits_expired_total`), the expiry period is too short.
+
+**Assumption 17 — Webhook delivery is sufficiently reliable for credit granting.** Stripe retries failed webhooks for up to 72 hours with exponential backoff. If the backend is down for longer than that — an extreme scenario — purchased credits would not be granted automatically. A manual admin script that replays events from Stripe's event log is the recovery path; documenting this in `RUNBOOK.md §9` is sufficient for V1.
+
 ---
 
 ## 14. Out of Scope for V1
 
 | Feature                              | When           |
 | ------------------------------------ | -------------- |
-| Payments and subscriptions           | V2             |
+| Subscriptions and recurring billing  | V2             |
+| Tiered credit packages               | V2             |
 | Approval workflows                   | V2 Team        |
 | Jira integration                     | V2             |
 | Team workspaces                      | V2             |
@@ -1072,11 +1252,15 @@ V1 is designed for hundreds of concurrent users, not thousands. Railway's defaul
 |Pipeline completion rate|≥ 30%|% of workspaces that reach a finalised TASKS stage|
 |Export rate|≥ 60%|% of completed workspaces that result in a download|
 |Return rate|≥ 40%|% of users who complete one workspace and start a second|
+|Credit purchase conversion|≥ 10%|% of users who exhaust free credits and purchase a pack|
+|Credit expiry waste|< 20%|% of purchased credits that expire unused — indicates over-buying or insufficient re-engagement|
 |Qualitative signal|10 user interviews|Did they use the output in a real project?|
 
 ---
 
-_SpecForge V1 SPEC.md · Version 1.3.0 · 2026-05-20 — added six v1 usefulness features: Spec Clarification pre-generation step (§4.4.1, §5.1), per-task Priority + Estimate fields with an Effort Summary block (§4.6, §5.4), PDF export and Public Share read-only link (§4.8), Starter Templates library and §4.11 flow, harness-coverage workspace-summary surfacing (§7). Adds `Workspace.template_slug / clarification_qa / public_share_slug / public_share_enabled` fields and the `Template` table (§10), new endpoints under Workspaces / Templates / Public Share (§11), new rate-limit tiers PDF/Clarify/Share/Public-view (§12), Assumptions 11–14, and three new V2 entries in §14. Existing ZIP and GitHub export paths unchanged._
+_SpecForge V1 SPEC.md · Version 1.4.0 · 2026-05-27 — Stripe payments integration: §2 Goals adds credit purchase goal; §2 Non-Goals changes "Payments and subscriptions" to "Subscriptions and recurring billing"; §4.10 Dashboard replaces waitlist callout with purchase CTA and expiry warning chip; new §4.12 Credit Purchase Flow with checkout redirect, webhook-authoritative crediting, Billing page sections, and cancellation handling; §9 fully rewritten as "Credit System and Billing" covering ledger invariant, FIFO pack drain, lazy expiry, Stripe refund/dispute policy, and updated credit display table; §10 adds `User.credit_balance` field, new `StripeCreditPack` and `StripeWebhookEvent` data models; §11 Credits endpoint updated with expiry fields, new Billing endpoints table with auth/CSRF/ownership notes; §12 Security adds 5 Stripe-specific rules, Rate Limits adds Billing Checkout and Billing Webhook tiers, Observability adds 10 billing Prometheus counters, structlog event schema, and 4 Grafana alert rules; §13 updates Assumptions 2 and 6, adds Assumptions 15–17 for Stripe UX, expiry period, and webhook reliability; §14 replaces "Payments and subscriptions" with "Subscriptions and recurring billing" + "Tiered credit packages"; Success Metrics adds credit purchase conversion and expiry waste targets._
+
+_Version 1.3.0 · 2026-05-20 — added six v1 usefulness features: Spec Clarification pre-generation step (§4.4.1, §5.1), per-task Priority + Estimate fields with an Effort Summary block (§4.6, §5.4), PDF export and Public Share read-only link (§4.8), Starter Templates library and §4.11 flow, harness-coverage workspace-summary surfacing (§7). Adds `Workspace.template_slug / clarification_qa / public_share_slug / public_share_enabled` fields and the `Template` table (§10), new endpoints under Workspaces / Templates / Public Share (§11), new rate-limit tiers PDF/Clarify/Share/Public-view (§12), Assumptions 11–14, and three new V2 entries in §14. Existing ZIP and GitHub export paths unchanged._
 
 _Version 1.2.0 · 2026-05-19 — added GitHub export integration: §4.8 expanded with GitHub export flow, §4.9 GitHub connection flow, §8 GitHub OAuth, §10 UserIntegration/IntegrationPush/IntegrationPushTask models, §11 integrations and GitHub export endpoints, §12 GitHub token security and rate limit, Assumptions 8–10. ZIP export unchanged._
 

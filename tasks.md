@@ -10943,6 +10943,1573 @@ The implementing agent must:
 
 ---
 
+## Phase 18 — Stripe Payments Integration
+
+---
+
+> [!important] **Payments Security Directive — applies to every backend task in Phase 18 (T-226 through T-237) and the frontend task T-238.**
+>
+> Payments code has non-negotiables that seem obvious but are violated under deadline pressure. Every implementing agent **must** treat the following as hard constraints before writing a single line of code:
+>
+> 1. **Webhook is the only credit-grant path.** Credits are granted ONLY when `checkout.session.completed` arrives via webhook. The success redirect (`/billing/success`) is a UX redirect only — it polls status; it never calls any credit-granting code path. There is no shortcut.
+> 2. **Never resolve `user_id` from `customer_email`.** The user is resolved exclusively from `session.metadata["user_id"]` (a UUID injected at checkout-creation time by authenticated code). Email is spoofable via the Stripe dashboard; `metadata.user_id` is not.
+> 3. **Never log the raw webhook payload.** Do not log `event["data"]`, `event["data"]["object"]`, or any field that could contain card fingerprints or PII. Log structured fields only: `event_id`, `event_type`, `user_id`, `session_id`, `pack_id`, `credits_granted`.
+> 4. **Read `await request.body()` BEFORE any JSON parsing.** Stripe HMAC-SHA256 validation operates on the raw byte string. Any `.json()` or `.body()` call after the bytes have been consumed will break validation silently with an `InvalidSignatureError`.
+> 5. **INSERT the idempotency row BEFORE calling `handle_event`.** If the process crashes after `handle_event` but before the INSERT, credits are granted but the row is never written — the next retry double-credits. The only safe order is: INSERT → catch IntegrityError (duplicate) → call handle_event.
+> 6. **`expires_at` comes from `event["created"]`, not `datetime.utcnow()`.** Stripe may redeliver webhooks with a delay of minutes or hours. Using server clock gives the user a validity window starting at delivery time, not purchase time. Use `datetime.utcfromtimestamp(event["created"])` to give the user the full 30-day window from when Stripe confirmed the payment.
+> 7. **Dispute revocation is capped: `min(pack.credits_remaining, user.credit_balance)`**. A user may have spent all of a disputed pack's credits. Revoking the full purchase amount would push `user.credit_balance` negative, violating the DB CHECK constraint. Always cap at the current balance.
+> 8. **IDOR on `/billing/status`: return 404, not 403.** A 403 confirms the session exists but belongs to a different user. A 404 leaks nothing. The WHERE clause must include BOTH `stripe_session_id = ?` AND `user_id = ?` — never query by session_id alone and then check ownership in Python.
+> 9. **`/billing/webhook` must be exempt from BOTH CSRF middleware AND rate-limit middleware.** CSRF exemption: Stripe has no browser session, so no CSRF token can be attached. Rate-limit exemption: Stripe retries on non-2xx with exponential backoff — a 429 causes legitimate events to be retried indefinitely, burning Stripe's retry budget and delaying credit delivery.
+> 10. **Test with `stripe listen --forward-to localhost:8000/billing/webhook`** before declaring any webhook task done. The CLI validates the full signature chain against a live Stripe endpoint. Do not rely solely on unit tests with mocked signatures.
+>
+> The acceptance criterion *"webhook is idempotent and credits are never doubled"* is a human-judged integration criterion enforced at PR review, in addition to the automated harness checks. A task that passes every pytest assertion but can double-credit a user on webhook retry does not satisfy this directive and will be sent back.
+
+---
+
+### T-226 — DB Migration: `stripe_credit_packs` + `stripe_webhook_events` Tables + ORM Models
+
+**Category:** Data / Schema
+**Severity:** Critical
+**Priority:** P0
+**Source finding:** New feature: Phase 18 Stripe Payments Integration
+
+**Business impact:** No Stripe purchase flow can function without the backing tables. `stripe_credit_packs` tracks every credit pack purchased, its remaining credits, and expiry. `stripe_webhook_events` is the idempotency guard preventing duplicate event processing. Without these tables, the entire Phase 18 feature set blocks.
+
+**Technical impact:** The existing `users.credit_balance` column is a scalar. `stripe_credit_packs` adds per-pack tracking with FIFO drain and lazy expiry on top of that scalar — both tables must land together to preserve the invariant `credit_balance >= SUM(credits_remaining FOR active packs)`.
+
+**Implementation requirements:**
+
+1. Create `backend/migrations/versions/0013_stripe_payments.py` with `revision = "0013"`, `down_revision = "0012"`.
+
+2. In `upgrade()`, create `stripe_credit_packs` table:
+   ```python
+   op.create_table(
+       "stripe_credit_packs",
+       sa.Column("id", postgresql.UUID(as_uuid=True), primary_key=True,
+                 server_default=sa.text("gen_random_uuid()")),
+       sa.Column("user_id", postgresql.UUID(as_uuid=True), nullable=False),
+       sa.Column("stripe_session_id", sa.VARCHAR(), nullable=False),
+       sa.Column("stripe_payment_intent_id", sa.VARCHAR(), nullable=True),
+       sa.Column("credits_purchased", sa.Integer(), nullable=False),
+       sa.Column("credits_remaining", sa.Integer(), nullable=False),
+       sa.Column("price_cents", sa.Integer(), nullable=False),
+       sa.Column("status", sa.VARCHAR(), nullable=False, server_default=sa.text("'active'")),
+       sa.Column("purchased_at", postgresql.TIMESTAMP(timezone=True), nullable=False,
+                 server_default=sa.text("now()")),
+       sa.Column("expires_at", postgresql.TIMESTAMP(timezone=True), nullable=False),
+       sa.Column("created_at", postgresql.TIMESTAMP(timezone=True), nullable=False,
+                 server_default=sa.text("now()")),
+       sa.ForeignKeyConstraint(["user_id"], ["users.id"], ondelete="CASCADE"),
+       sa.CheckConstraint("credits_remaining >= 0", name="ck_stripe_credit_packs_remaining_nonneg"),
+       sa.CheckConstraint("credits_remaining <= credits_purchased", name="ck_stripe_credit_packs_remaining_leq_purchased"),
+       sa.CheckConstraint("status IN ('active','consumed','expired','disputed')", name="ck_stripe_credit_packs_status"),
+   )
+   ```
+
+3. Still in `upgrade()`, add indexes on `stripe_credit_packs`:
+   ```python
+   op.create_index("ix_stripe_credit_packs_user_id", "stripe_credit_packs", ["user_id"])
+   # Partial index: only active packs are queried by FIFO drain and lazy expiry
+   op.create_index(
+       "ix_stripe_credit_packs_user_active",
+       "stripe_credit_packs",
+       ["user_id", "expires_at"],
+       postgresql_where=sa.text("status = 'active'"),
+   )
+   op.create_unique_constraint(
+       "uq_stripe_credit_packs_session_id",
+       "stripe_credit_packs",
+       ["stripe_session_id"],
+   )
+   ```
+
+4. Create `stripe_webhook_events` table:
+   ```python
+   op.create_table(
+       "stripe_webhook_events",
+       sa.Column("id", postgresql.UUID(as_uuid=True), primary_key=True,
+                 server_default=sa.text("gen_random_uuid()")),
+       sa.Column("stripe_event_id", sa.VARCHAR(), nullable=False),
+       sa.Column("event_type", sa.VARCHAR(), nullable=False),
+       sa.Column("processed_at", postgresql.TIMESTAMP(timezone=True), nullable=False,
+                 server_default=sa.text("now()")),
+   )
+   op.create_unique_constraint(
+       "uq_stripe_webhook_events_event_id",
+       "stripe_webhook_events",
+       ["stripe_event_id"],
+   )
+   ```
+
+5. In `downgrade()`, reverse in dependency order:
+   ```python
+   op.drop_constraint("uq_stripe_webhook_events_event_id", "stripe_webhook_events", type_="unique")
+   op.drop_table("stripe_webhook_events")
+   op.drop_constraint("uq_stripe_credit_packs_session_id", "stripe_credit_packs", type_="unique")
+   op.drop_index("ix_stripe_credit_packs_user_active", table_name="stripe_credit_packs")
+   op.drop_index("ix_stripe_credit_packs_user_id", table_name="stripe_credit_packs")
+   op.drop_table("stripe_credit_packs")
+   ```
+
+6. Create `backend/models/stripe_credit_pack.py`:
+   ```python
+   from __future__ import annotations
+   from datetime import datetime
+   from uuid import UUID as PythonUUID
+   from sqlalchemy import CheckConstraint, Integer, Text, func, text
+   from sqlalchemy.dialects.postgresql import TIMESTAMP, UUID
+   from sqlalchemy.orm import Mapped, mapped_column, relationship
+   from models import Base
+
+   class StripeCreditPack(Base):
+       __tablename__ = "stripe_credit_packs"
+       __table_args__ = (
+           CheckConstraint("credits_remaining >= 0", name="ck_stripe_credit_packs_remaining_nonneg"),
+           CheckConstraint("credits_remaining <= credits_purchased", name="ck_stripe_credit_packs_remaining_leq_purchased"),
+           CheckConstraint("status IN ('active','consumed','expired','disputed')", name="ck_stripe_credit_packs_status"),
+       )
+       id: Mapped[PythonUUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
+       user_id: Mapped[PythonUUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+       stripe_session_id: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+       stripe_payment_intent_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+       credits_purchased: Mapped[int] = mapped_column(Integer, nullable=False)
+       credits_remaining: Mapped[int] = mapped_column(Integer, nullable=False)
+       price_cents: Mapped[int] = mapped_column(Integer, nullable=False)
+       status: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'active'"))
+       purchased_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=func.now())
+       expires_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+       created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=func.now())
+   ```
+
+7. Create `backend/models/stripe_webhook_event.py`:
+   ```python
+   from __future__ import annotations
+   from datetime import datetime
+   from uuid import UUID as PythonUUID
+   from sqlalchemy import Text, func
+   from sqlalchemy.dialects.postgresql import TIMESTAMP, UUID
+   from sqlalchemy.orm import Mapped, mapped_column
+   from models import Base
+
+   class StripeWebhookEvent(Base):
+       __tablename__ = "stripe_webhook_events"
+       id: Mapped[PythonUUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
+       stripe_event_id: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+       event_type: Mapped[str] = mapped_column(Text, nullable=False)
+       processed_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=func.now())
+   ```
+
+8. Re-export both models from `backend/models/__init__.py` alongside existing exports:
+   ```python
+   from models.stripe_credit_pack import StripeCreditPack
+   from models.stripe_webhook_event import StripeWebhookEvent
+   ```
+
+9. Run: `uv run alembic upgrade head` — verify both tables and all indexes exist. Then `uv run alembic downgrade -1` — verify clean reversal. Then `uv run alembic upgrade head` again to restore.
+
+10. Run: `uv run python -c "from models import StripeCreditPack, StripeWebhookEvent; print('ok')"` — both imports must succeed.
+
+**Dependencies:** T-225 (last migration is `0012_eval_results_composite_index.py` — verify the actual latest migration filename and set `down_revision` accordingly before creating `0013`)
+
+**Risk assessment:** LOW. Standard table creation migration. The two CHECK constraints on `stripe_credit_packs` guard the credits accounting invariant at the DB level — they are defence-in-depth and should not break application logic. Monitor `pg_stat_activity` after deploy for any lock waits on the `users` table caused by the FK reference.
+
+**Acceptance criteria:**
+1. `uv run alembic upgrade head` exits 0; `\d+ stripe_credit_packs` shows all 11 columns, 3 CHECK constraints, 1 unique constraint, and 2 indexes.
+2. `\d+ stripe_webhook_events` shows 4 columns and 1 unique constraint.
+3. `uv run alembic downgrade -1` exits 0 and drops both tables cleanly.
+4. `cd harness && pytest tests/backend/test_phase21_stripe_payments_contract.py::test_t226_migration_directory_has_stripe_migration tests/backend/test_phase21_stripe_payments_contract.py::test_t226_migration_creates_stripe_webhook_events tests/backend/test_phase21_stripe_payments_contract.py::test_t226_migration_has_unique_index_on_stripe_event_id tests/backend/test_phase21_stripe_payments_contract.py::test_t226_migration_has_unique_index_on_stripe_session_id tests/backend/test_phase21_stripe_payments_contract.py::test_t226_migration_has_expires_at_column tests/backend/test_phase21_stripe_payments_contract.py::test_t226_migration_has_credits_remaining_column tests/backend/test_phase21_stripe_payments_contract.py::test_t226_migration_has_status_column tests/backend/test_phase21_stripe_payments_contract.py::test_t226_migration_has_partial_or_composite_index_for_active_packs tests/backend/test_phase21_stripe_payments_contract.py::test_t226_migration_has_downgrade_function -v` — all 9 pass.
+5. `cd harness && pytest tests/backend/test_phase21_stripe_payments_contract.py::test_stripe_credit_pack_model_exists tests/backend/test_phase21_stripe_payments_contract.py::test_stripe_webhook_event_model_exists tests/backend/test_phase21_stripe_payments_contract.py::test_stripe_credit_pack_model_has_required_columns tests/backend/test_phase21_stripe_payments_contract.py::test_stripe_webhook_event_model_has_stripe_event_id tests/backend/test_phase21_stripe_payments_contract.py::test_stripe_webhook_event_model_has_event_type -v` — all 5 pass.
+
+**Testing requirements:**
+- Migration up/down cycle verified manually against PostgreSQL.
+- `uv run python -c "from models import StripeCreditPack, StripeWebhookEvent"` exits 0.
+- Harness contracts: 9 migration structure tests + 5 model file tests.
+
+**Observability requirements:** None for this task. The tables will be instrumented by counters added in T-236.
+
+**Rollback considerations:** `alembic downgrade -1` drops both tables. No application code references these tables until T-228/T-229/T-230 land — safe to rollback independently.
+
+**Documentation updates:** None beyond inline migration comments.
+
+**Estimated complexity:** M (migration file ~80 lines + 2 model files ~30 lines each)
+**Estimated implementation risk:** Low
+
+**Affected modules/files:**
+- `backend/migrations/versions/0013_stripe_payments.py` — new migration
+- `backend/models/stripe_credit_pack.py` — new ORM model
+- `backend/models/stripe_webhook_event.py` — new ORM model
+- `backend/models/__init__.py` — re-export both models
+
+---
+
+### T-227 — Config: 7 Stripe Environment Variables + Production Key Guard
+
+**Category:** Configuration / Security
+**Severity:** Critical
+**Priority:** P0
+**Source finding:** New feature: Phase 18 Stripe Payments Integration
+
+**Business impact:** Without the config additions, every Stripe SDK call will fail at import time or with a missing-config error. The production key guard prevents the most common deployment mistake for payment integrations: deploying to production with Stripe test keys, which silently accepts test card numbers and never charges real money.
+
+**Technical impact:** `config.py Settings` class needs 7 new fields. `validate_production_settings()` needs a guard that raises if `stripe_secret_key.startswith("sk_test_")` in a production environment. `.env.example` needs all 7 vars documented so self-hosters know what to configure.
+
+**Implementation requirements:**
+
+1. Open `backend/config.py`. In `class Settings(BaseSettings)`, add the following fields after the `github_client_id` / `github_client_secret` block:
+   ```python
+   # Stripe Payments (Phase 18) — leave blank to disable billing UI
+   stripe_secret_key: str = ""
+   stripe_webhook_secret: str = ""
+   stripe_price_cents: int = 900          # $9.00 — 200 credits per purchase
+   stripe_credits_per_purchase: int = 200
+   stripe_credit_validity_days: int = 30
+   stripe_success_url: str = ""           # e.g. https://app.specforge.dev/billing/success
+   stripe_cancel_url: str = ""            # e.g. https://app.specforge.dev/billing/cancel
+   ```
+
+2. In `validate_production_settings()`, add the following check **inside** the `if settings.environment.lower() != "production": return` guard (i.e., it only runs in production):
+   ```python
+   if settings.stripe_secret_key.startswith("sk_test_"):
+       errors.append(
+           "STRIPE_SECRET_KEY is a test key (sk_test_*). "
+           "Production deployments must use a live key (sk_live_*). "
+           "Using a test key in production silently accepts test card numbers "
+           "without charging real money."
+       )
+   ```
+   The check is appended to the existing `errors` list and raised collectively with all other errors at the end of `validate_production_settings()`. Do NOT raise immediately — the existing pattern accumulates all errors before raising.
+
+3. Update `backend/.env.example` — add a Stripe section after the GitHub section:
+   ```bash
+   # Stripe Payments (Phase 18)
+   # Leave STRIPE_SECRET_KEY empty to disable billing UI.
+   # Use sk_test_* keys for development; sk_live_* keys for production only.
+   STRIPE_SECRET_KEY=sk_test_xxx
+   STRIPE_WEBHOOK_SECRET=whsec_xxx
+   STRIPE_PRICE_CENTS=900
+   STRIPE_CREDITS_PER_PURCHASE=200
+   STRIPE_CREDIT_VALIDITY_DAYS=30
+   STRIPE_SUCCESS_URL=http://localhost:5173/billing/success
+   STRIPE_CANCEL_URL=http://localhost:5173/billing/cancel
+   ```
+
+4. Run: `uv run python -c "from config import settings; print(settings.stripe_secret_key, settings.stripe_credits_per_purchase)"` — must not raise (empty string + 200 printed).
+
+5. Verify the production guard by writing a quick manual test (do not commit):
+   ```python
+   import os; os.environ["ENVIRONMENT"] = "production"
+   os.environ["STRIPE_SECRET_KEY"] = "sk_test_xxx"
+   # ... (set all other required production vars)
+   from config import validate_production_settings
+   validate_production_settings()  # must raise RuntimeError mentioning sk_test_*
+   ```
+
+**Dependencies:** T-226 (Alembic migration must exist so the app can start; no direct code dependency, but T-226 must land first per the task ordering contract)
+
+**Risk assessment:** VERY LOW. Additive config fields with defaults. The production guard adds an `errors.append()` — it cannot break an existing production deploy that already has a live key. An existing production deploy with an empty `stripe_secret_key` (billing disabled) will not trigger the guard because `"".startswith("sk_test_")` is False.
+
+**Acceptance criteria:**
+1. `uv run python -c "from config import settings; assert settings.stripe_credits_per_purchase == 200"` exits 0.
+2. `cd harness && pytest tests/backend/test_phase21_stripe_payments_contract.py::test_t227_config_has_stripe_secret_key tests/backend/test_phase21_stripe_payments_contract.py::test_t227_config_has_stripe_webhook_secret tests/backend/test_phase21_stripe_payments_contract.py::test_t227_config_has_stripe_price_cents tests/backend/test_phase21_stripe_payments_contract.py::test_t227_config_has_stripe_credits_per_purchase tests/backend/test_phase21_stripe_payments_contract.py::test_t227_config_has_stripe_credit_validity_days tests/backend/test_phase21_stripe_payments_contract.py::test_t227_config_has_stripe_success_url tests/backend/test_phase21_stripe_payments_contract.py::test_t227_config_has_stripe_cancel_url tests/backend/test_phase21_stripe_payments_contract.py::test_t227_validate_production_settings_rejects_test_key -v` — all 8 pass.
+3. `cd harness && pytest tests/backend/test_phase21_stripe_payments_contract.py::test_env_example_documents_stripe_vars -v` passes.
+4. `cd backend && uv run pytest tests/ -q` — all existing tests pass (no regressions from config changes).
+
+**Testing requirements:**
+- Harness contracts: 8 config field tests + 1 env.example completeness test.
+- Existing `test_config.py` or `test_app_contract.py` config tests must remain green.
+- Manual production guard verification (documented above, not committed).
+
+**Observability requirements:** None.
+
+**Rollback considerations:** Removing the 7 config fields and the production guard is a safe revert. The guard addition is purely additive.
+
+**Estimated complexity:** XS (~25 lines across 2 files)
+**Estimated implementation risk:** Very Low
+
+**Affected modules/files:**
+- `backend/config.py` — add 7 fields to Settings + production guard in validate_production_settings()
+- `backend/.env.example` — document 7 Stripe vars with placeholder values
+
+---
+
+### T-228 — StripeService: Checkout Session Creation, Event Handling, Dispute Revocation
+
+**Category:** Business Logic / Payments
+**Severity:** Critical
+**Priority:** P0
+**Source finding:** New feature: Phase 18 Stripe Payments Integration
+
+**Business impact:** `StripeService` is the single integration boundary between SpecForge and Stripe. All checkout session creation, webhook event dispatch, and dispute handling flow through it. An error here (wrong metadata key, wrong `expires_at` derivation, broken dispute logic) directly impacts credit accounting for every user who purchases.
+
+**Technical impact:** The service wraps the `stripe` Python SDK. Stripe API calls are async-compatible via `stripe.checkout.Session.create_async()` (stripe-python ≥ 7.0 supports async natively). The service must be importable with `stripe_secret_key = ""` (billing disabled mode) — guard all SDK calls with `if not settings.stripe_secret_key: raise HTTPException(503, "Billing not configured")`.
+
+**Implementation requirements:**
+
+1. Add `stripe` to `backend/pyproject.toml` dependencies (stripe-python ≥ 7.0). Run `uv sync`.
+
+2. Create `backend/services/stripe_service.py`:
+
+   ```python
+   """Stripe integration service for SpecForge credit purchases.
+
+   Security contract (Phase 18 Payments Directive):
+   - user_id resolved from session.metadata["user_id"] ONLY — never from customer_email
+   - expires_at derived from event["created"] (Stripe timestamp) — never from datetime.utcnow()
+   - Dispute revocation capped at min(pack.credits_remaining, user.credit_balance)
+   - Raw event payload NEVER logged; only structured fields
+   """
+   from __future__ import annotations
+
+   import logging
+   from datetime import datetime, timedelta, timezone
+   from uuid import UUID
+
+   import stripe
+   from fastapi import HTTPException, status
+   from sqlalchemy import select
+   from sqlalchemy.ext.asyncio import AsyncSession
+
+   from config import settings
+   from models import User
+   from models.stripe_credit_pack import StripeCreditPack
+   from services.credit_service import credit_service
+
+   logger = logging.getLogger(__name__)
+
+   # Initialise Stripe SDK key at module level — idempotent and thread-safe.
+   # Guarded so the module is importable when stripe_secret_key is empty (billing disabled).
+   if settings.stripe_secret_key:
+       stripe.api_key = settings.stripe_secret_key
+   ```
+
+3. Implement `create_checkout_session(user_id: UUID, user_email: str) -> str`:
+   - Guard: if `not settings.stripe_secret_key`, raise `HTTPException(status_code=503, detail="Billing is not configured on this server")`.
+   - Call `stripe.checkout.Session.create(...)` with:
+     - `mode="payment"`
+     - `line_items=[{"price_data": {"currency": "usd", "unit_amount": settings.stripe_price_cents, "product_data": {"name": "SpecForge Credits", "description": f"{settings.stripe_credits_per_purchase} credits · {settings.stripe_credit_validity_days}-day validity"}}, "quantity": 1}]`
+     - `success_url=settings.stripe_success_url + "?session_id={CHECKOUT_SESSION_ID}"`
+     - `cancel_url=settings.stripe_cancel_url`
+     - `client_reference_id=str(user_id)` — belt-and-suspenders alongside metadata
+     - `metadata={"user_id": str(user_id)}` — the authoritative lookup key in the webhook handler
+     - `customer_email=user_email` — pre-fills Stripe Checkout form for UX; NOT used for user resolution
+   - Returns `session.url` (the Stripe-hosted checkout URL).
+   - Increment `BILLING_CHECKOUT_CREATED` Prometheus counter (from T-236) on success.
+
+4. Implement `handle_event(db: AsyncSession, event: dict) -> None`:
+   - Dispatch table:
+     ```python
+     dispatch = {
+         "checkout.session.completed": _handle_checkout_completed,
+         "charge.dispute.created": _handle_dispute_created,
+     }
+     handler = dispatch.get(event["type"])
+     if handler:
+         await handler(db, event)
+     else:
+         logger.info("billing.webhook_unhandled_event", event_type=event["type"], stripe_event_id=event["id"])
+     ```
+   - Unknown event types return normally (caller returns 200 to Stripe). Do NOT raise for unknown types.
+
+5. Implement `_handle_checkout_completed(db: AsyncSession, event: dict) -> None`:
+   - Extract `session = event["data"]["object"]`.
+   - Guard: `if session.get("payment_status") != "paid": return` (covers free trials, unpaid sessions).
+   - Extract `user_id_str = session["metadata"]["user_id"]`. Parse to `UUID`. If missing or invalid, log `billing.checkout_missing_user_id` and return.
+   - Derive `expires_at = datetime.utcfromtimestamp(event["created"]).replace(tzinfo=timezone.utc) + timedelta(days=settings.stripe_credit_validity_days)`. **Do NOT use `datetime.utcnow()`**.
+   - Create and persist a `StripeCreditPack`:
+     ```python
+     pack = StripeCreditPack(
+         user_id=user_id,
+         stripe_session_id=session["id"],
+         stripe_payment_intent_id=session.get("payment_intent"),
+         credits_purchased=settings.stripe_credits_per_purchase,
+         credits_remaining=settings.stripe_credits_per_purchase,
+         price_cents=settings.stripe_price_cents,
+         status="active",
+         expires_at=expires_at,
+     )
+     db.add(pack)
+     await db.flush()
+     ```
+   - Call `await credit_service.credit(db, user_id, settings.stripe_credits_per_purchase, f"stripe_purchase:{session['id']}")`.
+   - Emit structured log (fields only — no raw payload):
+     ```python
+     logger.info("billing.checkout_completed",
+         stripe_event_id=event["id"], stripe_session_id=session["id"],
+         user_id=str(user_id), pack_id=str(pack.id),
+         credits_granted=settings.stripe_credits_per_purchase,
+         expires_at=expires_at.isoformat())
+     ```
+   - Increment `BILLING_CHECKOUT_COMPLETED` and `BILLING_CREDITS_GRANTED` counters.
+
+6. Implement `_handle_dispute_created(db: AsyncSession, event: dict) -> None`:
+   - Extract `charge = event["data"]["object"]`.
+   - Find the pack: `SELECT * FROM stripe_credit_packs WHERE stripe_payment_intent_id = charge["payment_intent"] AND status != 'disputed' FOR UPDATE`. If not found, log `billing.dispute_pack_not_found` and return.
+   - Find the user: `SELECT * FROM users WHERE id = pack.user_id FOR UPDATE`.
+   - Compute: `revoke = min(pack.credits_remaining, int(user.credit_balance or 0))`.
+   - Update: `pack.status = "disputed"`, `pack.credits_remaining = 0`, `user.credit_balance -= revoke`.
+   - Add a `CreditLedger` entry: `amount=-revoke, reason=f"stripe_dispute:{event['id']}"`.
+   - Emit structured log: `billing.dispute_created`, `stripe_event_id`, `user_id`, `pack_id`, `credits_revoked=revoke`.
+   - Increment `BILLING_PACK_DISPUTED` counter.
+
+7. Export `stripe_service = StripeService()` at module bottom (or make all functions module-level — either pattern is acceptable as long as it's consistent with how `credit_service` is exported).
+
+**Dependencies:** T-226 (models must exist), T-227 (config fields must exist)
+
+**Risk assessment:** MEDIUM. `stripe.checkout.Session.create()` is a network call — must be wrapped in try/except for `stripe.error.StripeError` and re-raised as `HTTPException(502)`. The dispute handler modifies `user.credit_balance` directly — ensure it uses `SELECT FOR UPDATE` to prevent a concurrent `deduct()` from reading a stale balance. The Stripe SDK is synchronous by default; in async FastAPI, use `asyncio.to_thread()` if not using the async client variant.
+
+**Acceptance criteria:**
+1. `cd harness && pytest tests/backend/test_phase21_stripe_payments_contract.py::test_t228_stripe_service_file_exists tests/backend/test_phase21_stripe_payments_contract.py::test_t228_stripe_service_has_create_checkout_session tests/backend/test_phase21_stripe_payments_contract.py::test_t228_stripe_service_has_handle_event tests/backend/test_phase21_stripe_payments_contract.py::test_t228_stripe_service_has_checkout_completed_handler tests/backend/test_phase21_stripe_payments_contract.py::test_t228_stripe_service_has_dispute_handler tests/backend/test_phase21_stripe_payments_contract.py::test_t228_create_checkout_uses_user_id_in_metadata tests/backend/test_phase21_stripe_payments_contract.py::test_t228_create_checkout_does_not_use_email_for_metadata_user_resolution tests/backend/test_phase21_stripe_payments_contract.py::test_t228_expires_at_derived_from_event_created_timestamp tests/backend/test_phase21_stripe_payments_contract.py::test_t228_dispute_revocation_uses_min_of_remaining_and_balance -v` — all 9 pass.
+2. `uv run python -c "from services.stripe_service import stripe_service; print('ok')"` exits 0 with empty `STRIPE_SECRET_KEY`.
+3. `cd backend && uv run pytest tests/ -q` — all existing tests pass.
+
+**Testing requirements:**
+- Harness: 9 structural contracts.
+- Unit tests land in T-237 — this task focuses on structure and correctness of the module, not test coverage.
+
+**Observability requirements:** `BILLING_CHECKOUT_CREATED`, `BILLING_CHECKOUT_COMPLETED`, `BILLING_CREDITS_GRANTED`, `BILLING_PACK_DISPUTED` counters (defined in T-236; import them here once T-236 lands). If T-236 lands after T-228, add `# TODO T-236: import and increment billing counters` comments at the increment sites.
+
+**Rollback considerations:** Delete `services/stripe_service.py`. Remove `stripe` from `pyproject.toml`. No DB changes.
+
+**Estimated complexity:** L (~150 lines)
+**Estimated implementation risk:** Medium
+
+**Affected modules/files:**
+- `backend/services/stripe_service.py` — new file
+- `backend/pyproject.toml` — add `stripe >= 7.0` dependency
+
+---
+
+### T-229 — CreditService Extensions: Lazy Pack Expiry + FIFO Pack Drain
+
+**Category:** Business Logic / Credit Accounting
+**Severity:** Critical
+**Priority:** P0
+**Source finding:** New feature: Phase 18 Stripe Payments Integration
+
+**Business impact:** Without lazy expiry, expired packs continue contributing to `credit_balance`, allowing users to spend credits that have passed their 30-day validity window. Without FIFO drain, `credits_remaining` on individual packs diverges from `credit_balance`, breaking the audit invariant `credit_balance == SUM(credits_remaining FOR active packs)`.
+
+**Technical impact:** `CreditService.get_balance()` and `deduct()` both need to sweep expired packs before operating on the balance. `deduct()` additionally needs to drain `credits_remaining` from packs in FIFO order (soonest-expiring first) so pack statuses stay in sync with the scalar balance. Both operations must use `SELECT FOR UPDATE` on both the user row and the pack rows to prevent races.
+
+**Implementation requirements:**
+
+1. Open `backend/services/credit_service.py`. Add the following imports at the top if not already present:
+   ```python
+   from datetime import datetime, timezone
+   from sqlalchemy import select, update
+   from models.stripe_credit_pack import StripeCreditPack
+   ```
+
+2. Add `_expire_user_packs(self, db: AsyncSession, user_id: UUID) -> None` as a private method on `CreditService`:
+   ```python
+   async def _expire_user_packs(self, db: AsyncSession, user_id: UUID) -> None:
+       """Sweep active packs whose expires_at has passed.
+
+       Runs inside the caller's transaction — do NOT call db.commit() here.
+       Uses SELECT FOR UPDATE on both the user row and the pack rows to prevent
+       concurrent get_balance() calls from racing each other.
+
+       The user row lock is acquired FIRST (same order as deduct()) to avoid
+       deadlocks with concurrent deduct() calls.
+       """
+       now = datetime.now(timezone.utc)
+       # Lock user row first (consistent lock ordering with deduct()).
+       user = await self._get_user(db, user_id, lock=True)
+       if user is None:
+           return
+       # Lock and fetch expired active packs.
+       result = await db.execute(
+           select(StripeCreditPack)
+           .where(
+               StripeCreditPack.user_id == user_id,
+               StripeCreditPack.status == "active",
+               StripeCreditPack.expires_at <= now,
+           )
+           .with_for_update()
+       )
+       expired_packs = result.scalars().all()
+       if not expired_packs:
+           return
+       total_expired = sum(p.credits_remaining for p in expired_packs)
+       for pack in expired_packs:
+           pack.status = "expired"
+           pack.credits_remaining = 0
+       # Deduct expired credits from user balance (floor at 0 — defensive).
+       user.credit_balance = max(0, int(user.credit_balance or 0) - total_expired)
+       await db.flush()
+       await self._invalidate(user_id)
+       # Increment BILLING_CREDITS_EXPIRED counter (T-236).
+       # from services.observability import BILLING_CREDITS_EXPIRED
+       # BILLING_CREDITS_EXPIRED.inc(total_expired)
+   ```
+
+3. Add `_drain_packs(self, db: AsyncSession, user_id: UUID, amount: int) -> None` as a private method:
+   ```python
+   async def _drain_packs(self, db: AsyncSession, user_id: UUID, amount: int) -> None:
+       """Drain credits_remaining from active packs in FIFO order (soonest-expiring first).
+
+       Called by deduct() AFTER recording the CreditLedger entry and updating
+       user.credit_balance.  The pack rows must already be locked by _expire_user_packs()
+       having acquired FOR UPDATE on the user row — use the same transaction.
+
+       FIFO = ORDER BY expires_at ASC.  Never ORDER BY expires_at DESC.
+       """
+       if amount <= 0:
+           return
+       result = await db.execute(
+           select(StripeCreditPack)
+           .where(
+               StripeCreditPack.user_id == user_id,
+               StripeCreditPack.status == "active",
+           )
+           .order_by(StripeCreditPack.expires_at.asc())  # FIFO: soonest-expiring first
+           .with_for_update()
+       )
+       packs = result.scalars().all()
+       remaining = amount
+       for pack in packs:
+           if remaining <= 0:
+               break
+           drain = min(pack.credits_remaining, remaining)
+           pack.credits_remaining -= drain
+           remaining -= drain
+           if pack.credits_remaining == 0:
+               pack.status = "consumed"
+       await db.flush()
+       # Increment BILLING_CREDITS_CONSUMED counter (T-236).
+   ```
+
+4. Modify `get_balance(self, db: AsyncSession, user_id: UUID) -> int` to call `_expire_user_packs` first. The method currently reads from Redis cache. Insert the expiry sweep **before** the Redis cache read so that:
+   - Expired packs are swept from the DB
+   - The Redis cache is invalidated (done inside `_expire_user_packs` via `_invalidate`)
+   - The fresh balance is then populated into cache from the DB
+   
+   The updated flow:
+   ```python
+   async def get_balance(self, db: AsyncSession, user_id: UUID) -> int:
+       # Sweep expired packs before reading balance.  This keeps the DB balance
+       # authoritative and ensures the Redis cache reflects post-expiry state.
+       # T-229 — lazy expiry.
+       await self._expire_user_packs(db, user_id)
+       redis = await self._get_redis()
+       cached = await redis.get(self._redis_key(user_id))
+       if cached is not None:
+           return int(cached)
+       user = await self._get_user(db, user_id)
+       balance = int(user.credit_balance) if user is not None else 0
+       await redis.set(self._redis_key(user_id), balance, ex=_CACHE_TTL)
+       return balance
+   ```
+
+5. Modify `deduct(self, db: AsyncSession, user_id: UUID, amount: int, reason: str) -> CreditLedger` to:
+   - Call `await self._expire_user_packs(db, user_id)` **at the start** (before reading balance).
+   - Call `await self._drain_packs(db, user_id, amount)` **after** writing the `CreditLedger` entry and calling `await db.flush()`.
+   
+   The updated `deduct()` body:
+   ```python
+   async def deduct(self, db, user_id, amount, reason):
+       await self._expire_user_packs(db, user_id)  # Step 1: sweep expired packs
+       user = await self._get_user(db, user_id, lock=True)
+       balance = int(user.credit_balance or 0) if user is not None else 0
+       if user is None or balance < amount:
+           raise InsufficientCreditsError(f"Balance {balance} is less than required {amount}")
+       user.credit_balance = balance - amount
+       entry = CreditLedger(user_id=user_id, amount=-amount, reason=reason)
+       db.add(entry)
+       await db.flush()
+       await self._drain_packs(db, user_id, amount)  # Step 2: FIFO pack drain
+       await self._invalidate(user_id)
+       return entry
+   ```
+
+6. Run: `cd backend && uv run pytest tests/ -q` — all existing credit service tests must pass. If any test mocks `deduct()` or `get_balance()` and now fails because the method signature changed, update the mock.
+
+**Dependencies:** T-226 (StripeCreditPack model must exist), T-227 (settings.stripe_credit_validity_days must exist)
+
+**Risk assessment:** MEDIUM. The expiry sweep changes the semantics of `get_balance()` — it now has a DB write side-effect. Tests that call `get_balance()` with a mock DB will need to account for the `_expire_user_packs` call. The `_drain_packs` is called inside the same transaction as `deduct()` — if the transaction is rolled back (e.g., by a concurrent write), the drain is also rolled back, preserving consistency. Watch for deadlocks: `_expire_user_packs` acquires user row lock then pack row locks; `deduct()` calls `_expire_user_packs` first, so the lock order is consistent. No deadlock risk from within this module.
+
+**Acceptance criteria:**
+1. `cd harness && pytest tests/backend/test_phase21_stripe_payments_contract.py::test_t229_credit_service_has_expire_user_packs tests/backend/test_phase21_stripe_payments_contract.py::test_t229_credit_service_has_drain_packs tests/backend/test_phase21_stripe_payments_contract.py::test_t229_get_balance_calls_expire_user_packs tests/backend/test_phase21_stripe_payments_contract.py::test_t229_deduct_calls_expire_user_packs tests/backend/test_phase21_stripe_payments_contract.py::test_t229_deduct_calls_drain_packs tests/backend/test_phase21_stripe_payments_contract.py::test_t229_drain_packs_orders_by_expires_at_asc tests/backend/test_phase21_stripe_payments_contract.py::test_t229_expire_user_packs_uses_with_for_update_on_packs tests/backend/test_phase21_stripe_payments_contract.py::test_t229_expire_user_packs_uses_with_for_update_on_user tests/backend/test_phase21_stripe_payments_contract.py::test_t229_expire_user_packs_sets_status_expired tests/backend/test_phase21_stripe_payments_contract.py::test_t229_drain_packs_sets_status_consumed_when_empty -v` — all 10 pass.
+2. `cd backend && uv run pytest tests/ -q` — all existing tests pass (credit service regression guard).
+
+**Testing requirements:**
+- Harness: 10 structural/behavioural contracts.
+- Full unit test suite for expiry and drain logic lands in T-237.
+- Existing `tests/test_credit_service.py` tests must remain green.
+
+**Observability requirements:** Increment `BILLING_CREDITS_EXPIRED` (in `_expire_user_packs`) and `BILLING_CREDITS_CONSUMED` (in `_drain_packs`) — both counters defined in T-236. Add commented `# T-236` placeholders at increment sites if T-236 has not landed yet.
+
+**Rollback considerations:** Revert the three method changes in `credit_service.py`. Pack expiry stops being lazy — expired packs will not be swept until a background job is added (out of scope for V1). No schema rollback required (the `status` column remains, packs remain `active` past expiry until the next sweep).
+
+**Estimated complexity:** M (~80 lines added to credit_service.py)
+**Estimated implementation risk:** Medium
+
+**Affected modules/files:**
+- `backend/services/credit_service.py` — add `_expire_user_packs()`, `_drain_packs()`; modify `get_balance()`, `deduct()`
+
+---
+
+### T-230 — `GET /billing/package` Endpoint + `schemas/billing.py`
+
+**Category:** API / Billing
+**Severity:** High
+**Priority:** P1
+**Source finding:** New feature: Phase 18 Stripe Payments Integration
+
+**Business impact:** The package info endpoint is the first surface the frontend calls to render the billing page. It exposes the price, credit count, and validity period without authentication so unauthenticated landing-page visitors could theoretically see it, and so the frontend can display it before the user logs in. Without this endpoint, the billing UI cannot show what the user is buying.
+
+**Technical impact:** No auth dependency — this is public pricing data sourced from env vars. Returns `PackageResponse` Pydantic model. The billing router file is created here; all other billing endpoints (T-231, T-232, T-233, T-234) extend it.
+
+**Implementation requirements:**
+
+1. Create `backend/schemas/billing.py` with all Pydantic schemas for the billing domain:
+   ```python
+   from __future__ import annotations
+   from datetime import datetime
+   from uuid import UUID
+   from typing import Literal
+   from pydantic import BaseModel, ConfigDict, Field
+
+   class PackageResponse(BaseModel):
+       """Response for GET /billing/package — public pricing information."""
+       credits: int = Field(ge=1)
+       price_cents: int = Field(ge=1)
+       validity_days: int = Field(ge=1)
+       currency: str = "usd"
+
+   class CheckoutResponse(BaseModel):
+       """Response for POST /billing/checkout."""
+       checkout_url: str
+
+   class BillingStatusResponse(BaseModel):
+       """Response for GET /billing/status."""
+       status: Literal["pending", "completed"]
+       credits_added: int = Field(ge=0)
+       expires_at: datetime | None = None
+       model_config = ConfigDict(from_attributes=True)
+
+   class PackHistoryItem(BaseModel):
+       """One row in GET /billing/history."""
+       id: UUID
+       credits_purchased: int
+       credits_remaining: int
+       price_cents: int
+       status: Literal["active", "consumed", "expired", "disputed"]
+       purchased_at: datetime
+       expires_at: datetime
+       model_config = ConfigDict(from_attributes=True)
+   ```
+
+2. Create `backend/routers/billing.py`:
+   ```python
+   """Billing router — Phase 18 Stripe Payments Integration.
+
+   Endpoints:
+     GET  /billing/package   — unauthenticated, returns PackageResponse
+     POST /billing/checkout  — authenticated, creates Stripe Checkout Session
+     GET  /billing/status    — authenticated, polls pack status (IDOR-safe)
+     GET  /billing/history   — authenticated, returns purchase history
+     POST /billing/webhook   — Stripe webhook (no auth, no CSRF, no rate limit)
+   """
+   from fastapi import APIRouter, Depends, HTTPException, Request, status
+   from sqlalchemy.ext.asyncio import AsyncSession
+
+   from config import settings
+   from database import get_db
+   from routers.auth import get_current_user
+   from schemas.billing import PackageResponse, CheckoutResponse, BillingStatusResponse, PackHistoryItem
+
+   router = APIRouter(prefix="/billing", tags=["billing"])
+   ```
+
+3. Implement `GET /billing/package`:
+   ```python
+   @router.get("/package", response_model=PackageResponse)
+   async def get_package() -> PackageResponse:
+       """Return the current credit package configuration.
+
+       No authentication required — this is public pricing information.
+       Values are sourced from environment variables so they can be changed
+       without a code deployment.
+       """
+       return PackageResponse(
+           credits=settings.stripe_credits_per_purchase,
+           price_cents=settings.stripe_price_cents,
+           validity_days=settings.stripe_credit_validity_days,
+           currency="usd",
+       )
+   ```
+
+4. Register the billing router in `backend/main.py`:
+   ```python
+   from routers import billing as billing_router
+   # ... (add with other app.include_router calls)
+   app.include_router(billing_router.router)
+   ```
+   Do NOT add `/billing` to any auth-exempt list — only `/billing/webhook` is exempt (handled in T-235).
+
+**Dependencies:** T-227 (config fields must exist for `settings.stripe_credits_per_purchase` etc.), T-226 (models must exist, though not directly used in this task)
+
+**Risk assessment:** VERY LOW. Static config read endpoint. No DB queries, no auth, no side effects.
+
+**Acceptance criteria:**
+1. `curl -s http://localhost:8000/billing/package | jq .` returns `{"credits": 200, "price_cents": 900, "validity_days": 30, "currency": "usd"}`.
+2. `cd harness && pytest tests/backend/test_phase21_stripe_payments_contract.py::test_t230_t234_billing_router_file_exists tests/backend/test_phase21_stripe_payments_contract.py::test_t230_package_endpoint_exists tests/backend/test_phase21_stripe_payments_contract.py::test_t230_package_endpoint_does_not_require_auth tests/backend/test_phase21_stripe_payments_contract.py::test_t230_billing_schemas_file_exists -v` — all 4 pass.
+3. `cd harness && pytest tests/backend/test_phase21_stripe_payments_contract.py::test_billing_router_registered_in_main -v` passes.
+4. `cd backend && uv run pytest tests/ -q` — all existing tests pass.
+
+**Testing requirements:**
+- Harness: 4 structural contracts + 1 router registration test.
+- Manual: `curl http://localhost:8000/billing/package` from an unauthenticated client returns 200.
+
+**Observability requirements:** None for this endpoint.
+
+**Rollback considerations:** Remove the router file and the `include_router` call in `main.py`. Remove `schemas/billing.py`.
+
+**Estimated complexity:** S (~80 lines across 2 new files + 2-line main.py addition)
+**Estimated implementation risk:** Very Low
+
+**Affected modules/files:**
+- `backend/schemas/billing.py` — new file (all billing Pydantic schemas)
+- `backend/routers/billing.py` — new file (router skeleton + package endpoint)
+- `backend/main.py` — register billing router
+
+---
+
+### T-231 — `POST /billing/checkout`: Create Stripe Checkout Session
+
+**Category:** API / Billing
+**Severity:** High
+**Priority:** P1
+**Source finding:** New feature: Phase 18 Stripe Payments Integration
+
+**Business impact:** This is the purchase entry point. A user clicks "Buy Credits" → frontend calls this endpoint → backend creates a Stripe Checkout Session → returns the redirect URL → user completes payment on Stripe's hosted page. Any bug here (missing auth, wrong metadata, broken redirect URL) blocks the entire purchase flow.
+
+**Technical impact:** Requires `get_current_user` dependency for authentication. Calls `stripe_service.create_checkout_session()`. Rate-limited to 5/user/hour by the tier added in T-235 (the middleware enforcement is in T-235; the endpoint itself has no additional rate-limit logic). Increments the `BILLING_CHECKOUT_CREATED` counter.
+
+**Implementation requirements:**
+
+1. In `backend/routers/billing.py`, add the following import at the top:
+   ```python
+   from models import User
+   from services.stripe_service import stripe_service
+   ```
+
+2. Implement `POST /billing/checkout`:
+   ```python
+   @router.post("/checkout", response_model=CheckoutResponse, status_code=status.HTTP_200_OK)
+   async def create_checkout(
+       current_user: User = Depends(get_current_user),
+       db: AsyncSession = Depends(get_db),
+   ) -> CheckoutResponse:
+       """Create a Stripe Checkout Session and return the redirect URL.
+
+       Authentication required — the user_id is embedded in session metadata
+       so the webhook handler can grant credits without querying by email.
+
+       Rate limited: 5 checkouts per user per hour (enforced by RateLimitMiddleware).
+       """
+       try:
+           checkout_url = await stripe_service.create_checkout_session(
+               user_id=current_user.id,
+               user_email=current_user.email,
+           )
+       except Exception as exc:
+           logger.error("billing.checkout_create_failed user_id=%s error=%s",
+                        current_user.id, exc, exc_info=True)
+           raise HTTPException(
+               status_code=status.HTTP_502_BAD_GATEWAY,
+               detail="Failed to create checkout session. Please try again.",
+           ) from exc
+       return CheckoutResponse(checkout_url=checkout_url)
+   ```
+
+3. Add `logger = logging.getLogger(__name__)` and `import logging` to `billing.py` if not already present.
+
+4. Verify the endpoint correctly returns 401 for unauthenticated requests (enforced by `get_current_user` dependency — no additional code needed).
+
+**Dependencies:** T-228 (StripeService must exist), T-230 (billing router + schemas must exist)
+
+**Risk assessment:** LOW. The endpoint itself is a thin wrapper over `stripe_service.create_checkout_session()`. The main risk is `stripe.error.StripeError` from the Stripe API — the try/except in step 2 handles this by returning a 502 with a user-friendly message. Stripe errors must never propagate raw to the client (they contain internal Stripe metadata).
+
+**Acceptance criteria:**
+1. Authenticated `POST /billing/checkout` with a valid `STRIPE_SECRET_KEY` returns `{"checkout_url": "https://checkout.stripe.com/..."}`.
+2. Unauthenticated `POST /billing/checkout` returns 401.
+3. `cd harness && pytest tests/backend/test_phase21_stripe_payments_contract.py::test_t231_checkout_endpoint_exists tests/backend/test_phase21_stripe_payments_contract.py::test_t231_checkout_endpoint_requires_auth -v` — both pass.
+4. `cd backend && uv run pytest tests/ -q` — all existing tests pass.
+
+**Testing requirements:**
+- Harness: 2 structural contracts.
+- Unit tests (with mocked `stripe_service`) land in T-237.
+- Manual: trigger a real Stripe checkout in dev using `stripe listen`.
+
+**Observability requirements:** `BILLING_CHECKOUT_CREATED` counter increment (import from T-236 once it lands). Log `billing.checkout_create_failed` on Stripe errors.
+
+**Rollback considerations:** Remove the endpoint from `billing.py`. No DB changes.
+
+**Estimated complexity:** XS (~30 lines added to billing.py)
+**Estimated implementation risk:** Low
+
+**Affected modules/files:**
+- `backend/routers/billing.py` — add POST /billing/checkout endpoint
+
+---
+
+### T-232 — `GET /billing/status` + `GET /billing/history` Endpoints
+
+**Category:** API / Billing
+**Severity:** High
+**Priority:** P1
+**Source finding:** New feature: Phase 18 Stripe Payments Integration
+
+**Business impact:** `/billing/status` is polled by the frontend success-redirect page while waiting for the webhook to complete. Without it, users have no signal that their payment was processed. The 30-second polling window + 2-second interval requires this endpoint to be fast and IDOR-safe. `/billing/history` gives users a full audit trail of their purchases.
+
+**Technical impact:** `/billing/status` has a critical IDOR surface: a user who knows another user's `stripe_session_id` must receive 404 (not 403, not 200). The WHERE clause must include **both** `stripe_session_id` and `user_id` at the SQL level — not a Python post-check. `/billing/history` returns up to 50 records ordered by `purchased_at DESC`.
+
+**Implementation requirements:**
+
+1. In `backend/routers/billing.py`, add:
+   ```python
+   from sqlalchemy import select
+   from models.stripe_credit_pack import StripeCreditPack
+   ```
+
+2. Implement `GET /billing/status`:
+   ```python
+   @router.get("/status", response_model=BillingStatusResponse)
+   async def get_billing_status(
+       session_id: str,
+       current_user: User = Depends(get_current_user),
+       db: AsyncSession = Depends(get_db),
+   ) -> BillingStatusResponse:
+       """Poll the status of a Stripe Checkout Session.
+
+       IDOR prevention: query is scoped by BOTH session_id AND user_id.
+       Returns 404 on mismatch — not 403 — to avoid resource-existence leakage.
+
+       Used by the /billing/success page to poll until 'completed'.
+       """
+       pack = await db.scalar(
+           select(StripeCreditPack).where(
+               StripeCreditPack.stripe_session_id == session_id,
+               StripeCreditPack.user_id == current_user.id,  # IDOR: both predicates required
+           )
+       )
+       if pack is None:
+           # 404 regardless of whether the session exists for another user.
+           # Never return 403 here — a 403 would confirm the session exists.
+           raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found")
+       return BillingStatusResponse(
+           status="completed",
+           credits_added=pack.credits_purchased,
+           expires_at=pack.expires_at,
+       )
+   ```
+   Note: if the pack does not exist yet (webhook not yet processed), the endpoint returns 404. The frontend treats 404 as "pending" and retries. Once the webhook fires and the pack is created, the endpoint returns 200 with `status="completed"`.
+
+3. Implement `GET /billing/history`:
+   ```python
+   @router.get("/history", response_model=list[PackHistoryItem])
+   async def get_billing_history(
+       current_user: User = Depends(get_current_user),
+       db: AsyncSession = Depends(get_db),
+   ) -> list[PackHistoryItem]:
+       """Return the user's full credit pack purchase history, newest first.
+
+       Includes all statuses (active, consumed, expired, disputed) so users
+       can see a complete audit trail. Capped at 50 entries for V1.
+       """
+       result = await db.execute(
+           select(StripeCreditPack)
+           .where(StripeCreditPack.user_id == current_user.id)
+           .order_by(StripeCreditPack.purchased_at.desc())
+           .limit(50)
+       )
+       packs = result.scalars().all()
+       return [PackHistoryItem.model_validate(p) for p in packs]
+   ```
+
+**Dependencies:** T-230 (billing router + schemas must exist), T-226 (StripeCreditPack model must exist)
+
+**Risk assessment:** LOW. The IDOR guard is the critical correctness property — the double-predicate WHERE clause is the implementation. The history endpoint is a simple SELECT — no side effects.
+
+**Acceptance criteria:**
+1. `GET /billing/status?session_id=cs_test_xxx` with a different user's JWT returns 404 (not 403).
+2. `GET /billing/history` returns records ordered newest-first and capped at 50.
+3. `cd harness && pytest tests/backend/test_phase21_stripe_payments_contract.py::test_t232_status_endpoint_exists tests/backend/test_phase21_stripe_payments_contract.py::test_t232_status_endpoint_scopes_by_both_session_id_and_user_id tests/backend/test_phase21_stripe_payments_contract.py::test_t232_status_endpoint_returns_404_not_403_on_mismatch tests/backend/test_phase21_stripe_payments_contract.py::test_t233_history_endpoint_exists tests/backend/test_phase21_stripe_payments_contract.py::test_t233_history_is_sorted_desc_and_capped -v` — all 5 pass.
+4. `cd backend && uv run pytest tests/ -q` — all existing tests pass.
+
+**Testing requirements:**
+- Harness: 5 structural/behavioural contracts.
+- Unit tests for IDOR scenario land in T-237.
+- Manual: request `/billing/status?session_id=cs_for_user_A` with user_B's JWT → confirm 404.
+
+**Observability requirements:** Log `billing.status_idor_attempt` (at WARNING level) when the session exists but belongs to a different user — requires a two-query pattern or application-level check. Add a `BILLING_IDOR_ATTEMPTS` counter (if defined in T-236) at this log site. If simpler, log the 404 at DEBUG with no distinction.
+
+**Rollback considerations:** Remove both endpoints from `billing.py`. No DB changes.
+
+**Estimated complexity:** S (~60 lines added to billing.py)
+**Estimated implementation risk:** Low
+
+**Affected modules/files:**
+- `backend/routers/billing.py` — add GET /billing/status and GET /billing/history
+
+---
+
+### T-233 — Rate Limit Tier: `/billing/checkout` — 5 Checkouts per User per Hour
+
+**Category:** Security / Rate Limiting
+**Severity:** High
+**Priority:** P1
+**Source finding:** New feature: Phase 18 Stripe Payments Integration
+
+**Business impact:** Without a checkout-specific rate limit, a malicious user could programmatically create hundreds of Stripe Checkout Sessions per hour. Each session is a live Stripe API object — mass creation increases Stripe API costs, can trigger Stripe fraud detection for the platform account, and creates noise in the Stripe dashboard. 5/hour is a generous limit for legitimate purchasing behaviour.
+
+**Technical impact:** Adds one new rate-limit tier to `RateLimitMiddleware._enforce_limits()` following the exact same pattern as the GitHub export, clarify, PDF export, and share-toggle tiers already present.
+
+**Implementation requirements:**
+
+1. Open `backend/middleware/rate_limit.py`. After the `_SHARE_TOGGLE_*` constants block, add:
+   ```python
+   # Billing checkout tier (Phase 18): 5 checkout sessions per user per hour.
+   # Prevents mass session creation that inflates Stripe API costs and
+   # triggers Stripe fraud detection.  T-231/T-233 — Phase 18.
+   _BILLING_CHECKOUT_PATH_RE = re.compile(r"^/billing/checkout/?$")
+   _BILLING_CHECKOUT_LIMIT = 5
+   _BILLING_CHECKOUT_WINDOW_SECONDS = 3600
+   _BILLING_CHECKOUT_DETAIL = "Checkout rate limit reached. Maximum 5 purchases per hour."
+   ```
+
+2. In `RateLimitMiddleware._enforce_limits()`, add the checkout tier check. Add it **after** the share-toggle check and **before** the final `return None`:
+   ```python
+   if user_id and request.method == "POST" and _BILLING_CHECKOUT_PATH_RE.match(path):
+       allowed = await check(
+           f"billing_checkout:{user_id}",
+           _BILLING_CHECKOUT_LIMIT,
+           _BILLING_CHECKOUT_WINDOW_SECONDS,
+       )
+       if not allowed:
+           return _rate_limited_custom(
+               detail=_BILLING_CHECKOUT_DETAIL,
+               retry_after_seconds=_BILLING_CHECKOUT_WINDOW_SECONDS,
+           )
+   ```
+
+3. Run: `cd backend && uv run pytest tests/test_rate_limit.py -v` — all existing rate limit tests pass.
+
+**Dependencies:** T-230 (billing router must exist so the path is valid), T-229 (all preceding billing tasks)
+
+**Risk assessment:** VERY LOW. The change follows the exact existing pattern for other rate-limit tiers. Adding a new `if` block cannot break existing tiers — each tier has its own disjoint path pattern. The `billing_checkout:{user_id}` key namespace does not conflict with any existing key.
+
+**Acceptance criteria:**
+1. The 6th `POST /billing/checkout` within one hour from the same user returns 429 with `{"detail": "Checkout rate limit reached. Maximum 5 purchases per hour."}` and `Retry-After: 3600`.
+2. `cd harness && pytest tests/backend/test_phase21_stripe_payments_contract.py::test_t231_checkout_rate_limit_tier_in_rate_limit_middleware tests/backend/test_phase21_stripe_payments_contract.py::test_t231_checkout_rate_limit_is_five_per_hour -v` — both pass.
+3. `cd backend && uv run pytest tests/test_rate_limit.py -v` — all rate limit tests pass.
+
+**Testing requirements:**
+- Harness: 2 structural contracts.
+- Unit test for the 5/hour limit lands in T-237.
+- Existing rate-limit tests must remain green (regression guard).
+
+**Observability requirements:** Increment `BILLING_CHECKOUT_RATE_LIMITED` counter (defined in T-236) at the rejection site. Add a `# T-236` comment placeholder if T-236 has not landed.
+
+**Rollback considerations:** Remove the `_BILLING_CHECKOUT_*` constants and the `if` block. No DB changes.
+
+**Estimated complexity:** XS (~15 lines)
+**Estimated implementation risk:** Very Low
+
+**Affected modules/files:**
+- `backend/middleware/rate_limit.py` — add billing checkout rate-limit tier
+
+---
+
+### T-234 — `POST /billing/webhook`: Stripe Event Handler
+
+**Category:** API / Billing / Security
+**Severity:** Critical
+**Priority:** P0
+**Source finding:** New feature: Phase 18 Stripe Payments Integration
+
+**Business impact:** This is the most security-critical endpoint in Phase 18. All credit grants flow through this handler. A bug in signature validation allows arbitrary actors to inject fake `checkout.session.completed` events and self-credit unlimited credits. A bug in idempotency allows a webhook retry to double-credit. Both failure modes have direct financial impact.
+
+**Technical impact:** The endpoint must: (1) read raw bytes before any JSON parsing, (2) validate the Stripe HMAC-SHA256 signature with `tolerance=300`, (3) INSERT the idempotency row before calling `handle_event`, (4) catch `IntegrityError` on duplicate event IDs, (5) never require JWT auth, (6) never log raw payload, (7) always return 200 (Stripe retries on non-2xx).
+
+**Implementation requirements:**
+
+1. In `backend/routers/billing.py`, add:
+   ```python
+   import stripe
+   from sqlalchemy.exc import IntegrityError
+   from models.stripe_webhook_event import StripeWebhookEvent
+   ```
+
+2. Implement `POST /billing/webhook` — this endpoint takes `request: Request` and `db: AsyncSession`, with NO `get_current_user` dependency:
+   ```python
+   @router.post("/webhook", status_code=status.HTTP_200_OK)
+   async def stripe_webhook(
+       request: Request,
+       db: AsyncSession = Depends(get_db),
+   ) -> dict:
+       """Stripe webhook event handler.
+
+       Security contract (Phase 18 Payments Directive):
+       1. Raw bytes read BEFORE any JSON parsing (Stripe signature covers raw bytes).
+       2. Stripe-Signature validated with tolerance=300 (5-min clock skew window).
+       3. Idempotency row inserted BEFORE handle_event (crash-safe ordering).
+       4. IntegrityError on duplicate stripe_event_id → return 200 immediately.
+       5. No get_current_user dependency — Stripe has no browser session.
+       6. Raw payload NEVER logged — only structured fields.
+       7. Always returns 200 — Stripe retries on non-2xx (including 429, 500).
+
+       This endpoint is exempt from CSRF middleware and rate limiting (see T-235).
+       """
+       # Step 1: Read raw body BEFORE any other parsing.
+       # This is mandatory: Stripe's HMAC-SHA256 signature covers the exact raw bytes.
+       # Any intermediate parsing (e.g. await request.json()) alters the byte sequence
+       # and produces an InvalidSignatureError even with a valid signature.
+       payload = await request.body()
+       sig_header = request.headers.get("Stripe-Signature", "")
+
+       # Step 2: Validate Stripe HMAC-SHA256 signature.
+       try:
+           event = stripe.Webhook.construct_event(
+               payload=payload,
+               sig_header=sig_header,
+               secret=settings.stripe_webhook_secret,
+               tolerance=300,  # 5-minute clock skew tolerance (Stripe recommendation)
+           )
+       except stripe.error.SignatureVerificationError as exc:
+           logger.warning("billing.webhook_invalid_signature error=%s", exc)
+           raise HTTPException(
+               status_code=status.HTTP_400_BAD_REQUEST,
+               detail="Invalid Stripe signature",
+           ) from exc
+       except Exception as exc:
+           logger.error("billing.webhook_construct_failed error=%s", exc, exc_info=True)
+           raise HTTPException(
+               status_code=status.HTTP_400_BAD_REQUEST,
+               detail="Malformed webhook payload",
+           ) from exc
+
+       stripe_event_id = event["id"]
+       event_type = event["type"]
+
+       # Step 3: INSERT idempotency row BEFORE calling handle_event.
+       # If the process crashes between handle_event and this INSERT, the next
+       # retry would double-credit. The only safe order is: INSERT first, then handle.
+       # An IntegrityError means a concurrent or previous delivery of the same event
+       # already wrote this row — return 200 immediately (idempotent success).
+       idempotency_row = StripeWebhookEvent(
+           stripe_event_id=stripe_event_id,
+           event_type=event_type,
+       )
+       try:
+           async with db.begin_nested():  # SAVEPOINT — isolates the INSERT
+               db.add(idempotency_row)
+               await db.flush()
+       except IntegrityError:
+           # Step 4: Duplicate event — already processed or concurrently processing.
+           logger.info("billing.webhook_duplicate_event stripe_event_id=%s", stripe_event_id)
+           return {"status": "already_processed"}
+
+       # Step 5: Process the event.
+       # Unknown event types are handled by handle_event (it logs and returns normally).
+       # Do NOT raise for unknown types — Stripe retries on non-2xx.
+       try:
+           await stripe_service.handle_event(db, dict(event))
+       except Exception as exc:
+           logger.error(
+               "billing.webhook_handle_failed stripe_event_id=%s event_type=%s error=%s",
+               stripe_event_id, event_type, exc,
+               exc_info=True,
+           )
+           # Return 200 anyway — if we return 500, Stripe retries, potentially
+           # re-running partial state changes. Log for alerting; fix manually.
+           return {"status": "error_logged"}
+
+       # Step 6: Commit the transaction (DB session is managed by Depends(get_db)).
+       # The idempotency row + any credits granted by handle_event commit together.
+       return {"status": "ok"}
+   ```
+
+3. Ensure `logger = logging.getLogger(__name__)` is at module level in `billing.py`.
+
+4. Verify that the endpoint does NOT import or call `get_current_user` anywhere in its function signature or body.
+
+5. Verify the raw payload is never logged: search `billing.py` for `event["data"]`, `event.data`, `payload`, and confirm none of these appear in any `logger.*` call.
+
+**Dependencies:** T-228 (stripe_service.handle_event must exist), T-230 (billing router scaffolding must exist), T-235 (middleware exemptions — technically the webhook can exist before exemptions are wired, but functional testing requires T-235)
+
+**Risk assessment:** HIGH. This is the most security-sensitive endpoint. Key risks and mitigations:
+- **Signature replay**: `tolerance=300` rejects events older than 5 minutes. Combine with idempotency row to reject within-window replays.
+- **Double-crediting on retry**: Idempotency row INSERT-before-handle guarantees at-most-once semantics even on concurrent deliveries.
+- **Crash between INSERT and handle_event**: Not possible — `begin_nested()` (SAVEPOINT) and the final transaction commit are atomic. Either both commit or both roll back.
+- **Partial handle_event failure**: The `except Exception` wraps handle_event and returns 200 on failure. This means a failed credit grant is NOT retried by Stripe. This is intentional: if handle_event fails partway (e.g., after writing the pack but before crediting), a retry would see the idempotency row and return `already_processed` — preventing the double-credit from a retry, but also meaning the credit was not granted. Monitor `billing.webhook_handle_failed` log events via the RUNBOOK alert rule.
+
+**Acceptance criteria:**
+1. `POST /billing/webhook` with a valid Stripe signature returns `{"status": "ok"}` with HTTP 200.
+2. `POST /billing/webhook` with an invalid/missing signature returns HTTP 400.
+3. `POST /billing/webhook` with the same `stripe_event_id` twice returns `{"status": "already_processed"}` on the second call.
+4. `POST /billing/webhook` does not require `Authorization` or `X-CSRF-Token` headers.
+5. `cd harness && pytest tests/backend/test_phase21_stripe_payments_contract.py::test_t234_webhook_endpoint_exists tests/backend/test_phase21_stripe_payments_contract.py::test_t234_webhook_reads_raw_body tests/backend/test_phase21_stripe_payments_contract.py::test_t234_webhook_validates_stripe_signature tests/backend/test_phase21_stripe_payments_contract.py::test_t234_webhook_uses_tolerance_300 tests/backend/test_phase21_stripe_payments_contract.py::test_t234_webhook_idempotency_insert_before_handle_event tests/backend/test_phase21_stripe_payments_contract.py::test_t234_webhook_catches_integrity_error_for_duplicate_events tests/backend/test_phase21_stripe_payments_contract.py::test_t234_webhook_does_not_require_jwt_auth tests/backend/test_phase21_stripe_payments_contract.py::test_t234_webhook_does_not_log_raw_payload tests/backend/test_phase21_stripe_payments_contract.py::test_t234_webhook_returns_200_for_unhandled_event_types -v` — all 9 pass.
+
+**Testing requirements:**
+- Harness: 9 structural/behavioural contracts.
+- Unit tests (mocked stripe.Webhook.construct_event) land in T-237.
+- Manual integration: `stripe listen --forward-to localhost:8000/billing/webhook` — trigger `stripe trigger checkout.session.completed` and verify credits are granted.
+
+**Observability requirements:** Log structured fields at each step: `billing.webhook_invalid_signature`, `billing.webhook_duplicate_event`, `billing.webhook_handle_failed`. Increment `BILLING_WEBHOOK_RECEIVED`, `BILLING_WEBHOOK_DUPLICATE`, `BILLING_WEBHOOK_ERROR` counters (defined in T-236).
+
+**Rollback considerations:** Remove the `/billing/webhook` endpoint. Stripe will retry until the endpoint returns 2xx or the retry window expires (72 hours). Manually process any events received during the rollback window using the Stripe dashboard.
+
+**Estimated complexity:** M (~70 lines for the endpoint body)
+**Estimated implementation risk:** High (security-critical)
+
+**Affected modules/files:**
+- `backend/routers/billing.py` — add POST /billing/webhook endpoint
+
+---
+
+### T-235 — Middleware Exemptions: CSRF Bypass + Rate Limit Bypass for `/billing/webhook` + Checkout Rate Limit
+
+**Category:** Security / Middleware
+**Severity:** High
+**Priority:** P1
+**Source finding:** New feature: Phase 18 Stripe Payments Integration
+
+**Business impact:** Without the CSRF exemption, Stripe's webhook POST will be rejected with 403 (no X-CSRF-Token header — Stripe has no browser session to obtain one). Without the rate-limit exemption, Stripe's retry backoff can be exceeded if the endpoint gets hit by the global 1000 req/min IP cap during periods of high webhook volume, causing legitimate credits to be permanently lost.
+
+**Technical impact:** Two files need one-line additions. The CSRF exempt path and rate-limit bypass path must both use the **exact string** `/billing/webhook` — not `/billing` (which would accidentally exempt `/billing/checkout` from CSRF). The harness tests explicitly check for overmatch prevention.
+
+**Implementation requirements:**
+
+1. Open `backend/middleware/csrf.py`. Find `_EXEMPT_PATHS = frozenset({...})`. Add `"/billing/webhook"` to the frozenset:
+   ```python
+   _EXEMPT_PATHS = frozenset(
+       {
+           "/auth/google",
+           "/auth/callback",
+           "/auth/refresh",
+           "/billing/webhook",  # Stripe webhook — no browser session, no CSRF token possible
+       }
+   )
+   ```
+
+2. Open `backend/middleware/rate_limit.py`. Find `_BYPASS_PATHS = frozenset({"/health"})`. Add `"/billing/webhook"`:
+   ```python
+   _BYPASS_PATHS = frozenset({"/health", "/billing/webhook"})
+   ```
+   The comment in the existing code (or add one): `# /billing/webhook: exempt so Stripe retries are not rate-limited.`
+
+3. Verify the billing router has been registered in `main.py` (T-230). The middleware exemptions are path-string based — they work regardless of whether the router is registered, but both should be present for the endpoint to be reachable.
+
+4. Run: `cd backend && uv run pytest tests/test_rate_limit.py tests/test_csrf.py -v` — all existing middleware tests pass.
+
+**Dependencies:** T-230 (billing router scaffolding), T-234 (webhook endpoint — exemptions are needed for it to function)
+
+**Risk assessment:** VERY LOW. One-line additions to two frozensets. The harness test `test_t235_csrf_exempt_paths_uses_literal_string_not_prefix` explicitly verifies that `/billing` alone is not in `_EXEMPT_PATHS`, preventing the accidental exemption of authenticated billing endpoints.
+
+**Acceptance criteria:**
+1. `POST /billing/webhook` with a valid Stripe signature and **no** `X-CSRF-Token` header returns 200 (not 403).
+2. `POST /billing/checkout` with a valid JWT and **no** `X-CSRF-Token` header still returns 403 (CSRF exempt path does not bleed to /billing/checkout).
+3. `cd harness && pytest tests/backend/test_phase21_stripe_payments_contract.py::test_t235_webhook_path_in_csrf_exempt_paths tests/backend/test_phase21_stripe_payments_contract.py::test_t235_webhook_path_in_rate_limit_bypass_paths tests/backend/test_phase21_stripe_payments_contract.py::test_t235_csrf_exempt_paths_uses_literal_string_not_prefix -v` — all 3 pass.
+4. `cd backend && uv run pytest tests/test_rate_limit.py tests/test_csrf.py -v` — all existing tests pass.
+
+**Testing requirements:**
+- Harness: 3 structural contracts (string presence + overmatch prevention).
+- Manual: `curl -X POST http://localhost:8000/billing/webhook` with no headers and a valid Stripe-signed payload → should reach the endpoint (400 for invalid signature, not 403 for missing CSRF).
+
+**Observability requirements:** None.
+
+**Rollback considerations:** Remove `"/billing/webhook"` from both frozensets. Stripe webhooks will be rejected by CSRF middleware (403) and potentially rate-limited.
+
+**Estimated complexity:** XS (2 one-line additions across 2 files)
+**Estimated implementation risk:** Very Low
+
+**Affected modules/files:**
+- `backend/middleware/csrf.py` — add `/billing/webhook` to `_EXEMPT_PATHS`
+- `backend/middleware/rate_limit.py` — add `/billing/webhook` to `_BYPASS_PATHS`
+
+---
+
+### T-236 — Security and Observability: Secret Scrubbing + 10 Prometheus Billing Counters
+
+**Category:** Security / Observability
+**Severity:** High
+**Priority:** P1
+**Source finding:** New feature: Phase 18 Stripe Payments Integration
+
+**Business impact:** Stripe secret keys (`sk_live_*`, `sk_test_*`) and webhook secrets (`whsec_*`) must never appear in logs, Sentry breadcrumbs, or OTLP traces. A leaked live key grants full Stripe API access (create charges, issue refunds, read customer data). The 10 Prometheus counters enable the Grafana alert rules documented in Plan §21.4 — without them, billing failures are silent.
+
+**Technical impact:** `services/observability.py` already has `_SENSITIVE_KEYS` and `_SECRET_PATTERNS` for existing secrets. This task adds Stripe-specific entries to both, and adds 10 new `Counter` objects to the module that billing code imports by name.
+
+**Implementation requirements:**
+
+1. Open `backend/services/observability.py`. In `_SENSITIVE_KEYS`, add:
+   ```python
+   "stripe_secret_key",
+   "stripe_webhook_secret",
+   "client_secret",
+   ```
+   (Existing keys remain unchanged — these are additive.)
+
+2. In `_SECRET_PATTERNS`, add two new compiled regexes:
+   ```python
+   re.compile(r"sk_(?:live|test)_[A-Za-z0-9_-]{24,}"),   # Stripe secret keys
+   re.compile(r"whsec_[A-Za-z0-9/+=]{24,}"),              # Stripe webhook secrets
+   ```
+
+3. Add 10 Prometheus `Counter` objects as module-level constants (after the existing `CSRF_REPLAY_REJECTIONS` counter). Each counter must use the exact metric name shown — the harness tests check for the exact string:
+   ```python
+   # Billing / Stripe counters (Phase 18)
+   BILLING_CHECKOUT_CREATED = Counter(
+       "specforge_billing_checkout_created_total",
+       "Stripe Checkout Sessions created via POST /billing/checkout",
+   )
+   BILLING_CHECKOUT_COMPLETED = Counter(
+       "specforge_billing_checkout_completed_total",
+       "checkout.session.completed webhook events received and processed",
+   )
+   BILLING_CREDITS_GRANTED = Counter(
+       "specforge_billing_credits_granted_total",
+       "Total credits granted to users via Stripe purchase",
+   )
+   BILLING_CREDITS_EXPIRED = Counter(
+       "specforge_billing_credits_expired_total",
+       "Credits swept by lazy expiry in _expire_user_packs()",
+   )
+   BILLING_CREDITS_CONSUMED = Counter(
+       "specforge_billing_credits_consumed_total",
+       "Credits drained by FIFO pack drain in _drain_packs()",
+   )
+   BILLING_PACK_DISPUTED = Counter(
+       "specforge_billing_pack_disputed_total",
+       "Credit packs revoked due to Stripe charge disputes",
+   )
+   BILLING_WEBHOOK_RECEIVED = Counter(
+       "specforge_billing_webhook_received_total",
+       "All webhook events received (before idempotency check)",
+       ["event_type"],
+   )
+   BILLING_WEBHOOK_DUPLICATE = Counter(
+       "specforge_billing_webhook_duplicate_total",
+       "Webhook events rejected as duplicates by the idempotency guard",
+   )
+   BILLING_WEBHOOK_ERROR = Counter(
+       "specforge_billing_webhook_error_total",
+       "Webhook events that failed during handle_event processing",
+       ["error_type"],
+   )
+   BILLING_CHECKOUT_RATE_LIMITED = Counter(
+       "specforge_billing_checkout_rate_limited_total",
+       "POST /billing/checkout requests rejected by the 5/hour rate limit",
+   )
+   ```
+
+4. After adding the counters, wire them to the call sites in the already-written T-228/T-229/T-231/T-233/T-234 code:
+   - `stripe_service.py create_checkout_session`: import and increment `BILLING_CHECKOUT_CREATED`.
+   - `stripe_service.py _handle_checkout_completed`: increment `BILLING_CHECKOUT_COMPLETED` and `BILLING_CREDITS_GRANTED`.
+   - `stripe_service.py _handle_dispute_created`: increment `BILLING_PACK_DISPUTED`.
+   - `credit_service.py _expire_user_packs`: increment `BILLING_CREDITS_EXPIRED.inc(total_expired)`.
+   - `credit_service.py _drain_packs`: increment `BILLING_CREDITS_CONSUMED.inc(amount - remaining)` (where `amount - remaining` is the amount actually drained).
+   - `routers/billing.py stripe_webhook` — `BILLING_WEBHOOK_RECEIVED.labels(event_type=event_type).inc()` at the start of processing; `BILLING_WEBHOOK_DUPLICATE.inc()` on IntegrityError; `BILLING_WEBHOOK_ERROR.labels(error_type=type(exc).__name__).inc()` on handle_event exception.
+   - `middleware/rate_limit.py` — `BILLING_CHECKOUT_RATE_LIMITED.inc()` at the rate-limit rejection site.
+
+5. Update `docs/RUNBOOK.md` §9 (create if §9 does not exist): document the 4 Grafana alert rules from Plan §21.4:
+   ```
+   ## 9. Billing Alerts
+
+   | Alert | Condition | Severity | Action |
+   |---|---|---|---|
+   | BillingWebhookErrorRate | rate(specforge_billing_webhook_error_total[5m]) > 0 | Warning | Check logs for billing.webhook_handle_failed; inspect Stripe dashboard for event details |
+   | BillingCheckoutDropped | checkout_completed stagnant while checkout_created rising (5-min window) | Warning | Check Stripe webhook delivery logs; verify /billing/webhook is reachable |
+   | BillingDisputeCreated | specforge_billing_pack_disputed_total increments | Warning | Review Stripe dispute in dashboard; contact user if fraudulent |
+   | BillingWebhookDuplicate | rate(specforge_billing_webhook_duplicate_total[1h]) > 10 | Info | Normal if Stripe is retrying; investigate if above 100/hour |
+   ```
+
+6. Run: `cd backend && uv run pytest tests/ -q` — all tests pass. Run: `cd backend && uv run ruff check services/observability.py` — no lint violations.
+
+**Dependencies:** T-228, T-229, T-230, T-231, T-233, T-234 (call sites must exist to wire the counters)
+
+**Risk assessment:** LOW. Additive changes to `_SENSITIVE_KEYS` and `_SECRET_PATTERNS` cannot break existing scrubbing. New counter definitions are module-level globals — they cannot affect runtime behaviour until they are incremented. The `client_secret` key addition to `_SENSITIVE_KEYS` is broad (matches any key named `client_secret`) — verify this does not false-positive on any existing keys in the codebase. A grep for `client_secret` in all Python files should confirm it only appears in Stripe-related contexts.
+
+**Acceptance criteria:**
+1. `cd harness && pytest tests/backend/test_phase21_stripe_payments_contract.py::test_t236_stripe_secret_key_in_sensitive_keys tests/backend/test_phase21_stripe_payments_contract.py::test_t236_stripe_webhook_secret_in_sensitive_keys tests/backend/test_phase21_stripe_payments_contract.py::test_t236_client_secret_in_sensitive_keys tests/backend/test_phase21_stripe_payments_contract.py::test_t236_stripe_live_test_key_in_secret_patterns tests/backend/test_phase21_stripe_payments_contract.py::test_t236_whsec_in_secret_patterns tests/backend/test_phase21_stripe_payments_contract.py::test_t236_billing_checkout_created_counter_defined tests/backend/test_phase21_stripe_payments_contract.py::test_t236_billing_checkout_completed_counter_defined tests/backend/test_phase21_stripe_payments_contract.py::test_t236_billing_credits_granted_counter_defined tests/backend/test_phase21_stripe_payments_contract.py::test_t236_billing_credits_expired_counter_defined tests/backend/test_phase21_stripe_payments_contract.py::test_t236_billing_credits_consumed_counter_defined tests/backend/test_phase21_stripe_payments_contract.py::test_t236_billing_pack_disputed_counter_defined tests/backend/test_phase21_stripe_payments_contract.py::test_t236_billing_webhook_received_counter_defined tests/backend/test_phase21_stripe_payments_contract.py::test_t236_billing_webhook_duplicate_counter_defined tests/backend/test_phase21_stripe_payments_contract.py::test_t236_billing_webhook_error_counter_defined tests/backend/test_phase21_stripe_payments_contract.py::test_t236_billing_checkout_rate_limited_counter_defined tests/backend/test_phase21_stripe_payments_contract.py::test_t236_all_10_billing_counters_are_defined -v` — all 17 pass (5 scrubbing + 10 counter existence + 1 completeness + 1 pattern).
+2. `cd backend && uv run pytest tests/ -q` — all tests pass, including any existing observability tests.
+
+**Testing requirements:**
+- Harness: 17 structural contracts.
+- Verify redaction: `from services.observability import redact_sensitive_data; print(redact_sensitive_data("sk_live_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"))` → must output `[REDACTED]` (not the key).
+
+**Observability requirements:** Self-referential — this task IS the observability task. The RUNBOOK §9 alert rules document what to monitor.
+
+**Rollback considerations:** Revert the 3 `_SENSITIVE_KEYS` additions and 2 `_SECRET_PATTERNS` additions. Remove the 10 counter definitions and all increment call sites. RUNBOOK §9 can remain (documentation-only).
+
+**Estimated complexity:** M (~50 lines in observability.py + ~30 lines RUNBOOK §9 + wiring ~20 lines across 4 files)
+**Estimated implementation risk:** Low
+
+**Affected modules/files:**
+- `backend/services/observability.py` — 3 sensitive keys, 2 secret patterns, 10 Counter definitions
+- `backend/services/stripe_service.py` — wire 4 counter increments
+- `backend/services/credit_service.py` — wire 2 counter increments
+- `backend/routers/billing.py` — wire 3 counter increments
+- `backend/middleware/rate_limit.py` — wire 1 counter increment
+- `docs/RUNBOOK.md` — add §9 Billing Alerts
+
+---
+
+### T-237 — Backend Unit Tests: `test_stripe_payments.py`
+
+**Category:** Testing / Quality
+**Severity:** High
+**Priority:** P1
+**Source finding:** New feature: Phase 18 Stripe Payments Integration
+
+**Business impact:** Payments code without unit tests ships bugs silently. The idempotency, IDOR, expiry, and FIFO drain invariants are the four correctness properties that must hold for every purchase. A broken idempotency check could double-credit millions of users before discovery. Tests are the regression fence that prevents silent regressions when `credit_service.py` or `stripe_service.py` are touched in future phases.
+
+**Technical impact:** All tests use `unittest.mock.patch` or `pytest-mock` to mock Stripe API calls and `AsyncMock` for async DB sessions. FakeRedis (from `fakeredis`) is used for the Redis client. SQLite in-memory async sessions via `aiosqlite` are acceptable for unit tests; PostgreSQL integration tests are preferable for the FIFO and IDOR scenarios but not required (mark them with `pytest.mark.integration` and skip unless `TEST_DATABASE_URL` is set).
+
+**Implementation requirements:**
+
+Create `backend/tests/test_stripe_payments.py` with the following tests. Each test is described with its required structure — implement with `pytest-asyncio`, `AsyncMock`, and `unittest.mock.patch`:
+
+1. **`test_checkout_session_creation`** — patches `stripe.checkout.Session.create` to return a mock with `url="https://checkout.stripe.com/test"`. Calls `stripe_service.create_checkout_session(user_id=uuid4(), user_email="test@example.com")`. Asserts the returned URL matches. Asserts `stripe.checkout.Session.create` was called with `metadata={"user_id": ANY}` (verifying user_id is in metadata).
+
+2. **`test_webhook_checkout_completed_grants_credits`** — constructs a mock `checkout.session.completed` event dict with `metadata={"user_id": str(uuid4())}`, `payment_status="paid"`, `created=int(time.time())`. Mocks `credit_service.credit`. Calls `stripe_service.handle_event(db, event)`. Asserts `credit_service.credit` was called with `amount=settings.stripe_credits_per_purchase`.
+
+3. **`test_webhook_idempotency`** — creates a `StripeWebhookEvent` row in the DB with a specific `stripe_event_id`. Sends the same event to the webhook endpoint twice (or simulates the INSERT-IntegrityError path). Asserts credits are granted exactly once (mock `credit_service.credit` call count == 1).
+
+4. **`test_webhook_invalid_signature`** — calls `POST /billing/webhook` via `AsyncClient` with a tampered `Stripe-Signature` header. Asserts HTTP 400 response.
+
+5. **`test_billing_status_idor_prevention`** — creates a `StripeCreditPack` row owned by `user_A`. Calls `GET /billing/status?session_id=<pack.stripe_session_id>` as `user_B`. Asserts HTTP 404 (not 403, not 200).
+
+6. **`test_lazy_expiry_sweeps_expired_packs`** — creates a `StripeCreditPack` with `expires_at = datetime.now(UTC) - timedelta(days=1)` (already expired). Calls `credit_service.get_balance(db, user_id)`. Asserts `pack.status == "expired"` and `pack.credits_remaining == 0`. Asserts `user.credit_balance` reflects the sweep.
+
+7. **`test_fifo_drain_order`** — creates two packs: `pack_A` (expires in 5 days, 100 credits) and `pack_B` (expires in 15 days, 100 credits). Calls `credit_service.deduct(db, user_id, 50, "test")`. Asserts `pack_A.credits_remaining == 50` and `pack_B.credits_remaining == 100` (soonest-expiring drained first).
+
+8. **`test_dispute_revocation`** — creates a pack with `credits_remaining=150` and a user with `credit_balance=100`. Constructs a mock `charge.dispute.created` event. Calls `stripe_service.handle_event(db, event)`. Asserts `credits_revoked == 100` (min(150, 100)), `pack.status == "disputed"`, `user.credit_balance == 0`.
+
+9. **`test_checkout_rate_limit`** — creates an authenticated `AsyncClient`. Calls `POST /billing/checkout` 6 times in a loop (mocking `stripe_service.create_checkout_session`). Asserts the 6th response is HTTP 429 with `detail` containing "5 purchases per hour".
+
+Each test must include a clear docstring explaining what invariant it tests and why it matters for correctness.
+
+**Dependencies:** T-226, T-227, T-228, T-229, T-230, T-231, T-232, T-233, T-234, T-235, T-236 (all billing tasks must be complete before this test suite can be written and pass)
+
+**Risk assessment:** LOW. Test-only file. Cannot affect production behaviour.
+
+**Acceptance criteria:**
+1. `cd backend && uv run pytest tests/test_stripe_payments.py -v` — all 9 tests pass.
+2. `cd harness && pytest tests/backend/test_phase21_stripe_payments_contract.py::test_t237_unit_test_file_exists tests/backend/test_phase21_stripe_payments_contract.py::test_t237_unit_tests_cover_webhook_idempotency tests/backend/test_phase21_stripe_payments_contract.py::test_t237_unit_tests_cover_idor_prevention tests/backend/test_phase21_stripe_payments_contract.py::test_t237_unit_tests_cover_lazy_expiry tests/backend/test_phase21_stripe_payments_contract.py::test_t237_unit_tests_cover_fifo_drain tests/backend/test_phase21_stripe_payments_contract.py::test_t237_unit_tests_cover_dispute_revocation tests/backend/test_phase21_stripe_payments_contract.py::test_t237_unit_tests_cover_invalid_signature tests/backend/test_phase21_stripe_payments_contract.py::test_t237_unit_tests_cover_checkout_session_creation tests/backend/test_phase21_stripe_payments_contract.py::test_t237_unit_tests_cover_checkout_completed_credits_user tests/backend/test_phase21_stripe_payments_contract.py::test_t237_unit_tests_cover_checkout_rate_limit -v` — all 10 pass (1 file existence + 9 coverage checks).
+3. `cd backend && uv run pytest tests/ --cov=services --cov-fail-under=80` — coverage remains ≥ 80%.
+4. `cd backend && uv run pytest tests/ -q` — all tests pass including the new suite.
+
+**Testing requirements:**
+- The test file itself is the deliverable — no additional harness tests required beyond the 10 listed above.
+
+**Observability requirements:** None.
+
+**Rollback considerations:** Delete `tests/test_stripe_payments.py`. No runtime impact.
+
+**Estimated complexity:** L (~250 lines of test code)
+**Estimated implementation risk:** Low
+
+**Affected modules/files:**
+- `backend/tests/test_stripe_payments.py` — new file (9 unit tests)
+
+---
+
+### T-238 — Frontend: Billing Page, TypeScript Types, Route Registration, CreditMeter Expiry Warning
+
+**Category:** Frontend / UI / UX
+**Severity:** Medium
+**Priority:** P2
+**Source finding:** New feature: Phase 18 Stripe Payments Integration
+
+**Business impact:** The billing page is the purchase entry point for users who have run out of credits. The CreditMeter expiry warning is the proactive retention mechanism — it nudges users to renew before credits expire rather than discovering a zero balance mid-generation. Both surfaces affect conversion and retention.
+
+---
+
+> **Design Brief — applies to T-238. Read before writing a single line of TSX.**
+>
+> The Phase 14 Design Directive applies to all frontend work. For the billing page specifically, design THREE distinct moments-of-use separately:
+>
+> **Surface A — The Billing Page (pre-purchase state)**
+> The moment-of-use feeling: a user who just ran out of credits opens the billing page. They are slightly frustrated. This page should feel *clear and trustworthy*, not sales-aggressive. Think Stripe's own pricing pages — direct, no hidden details.
+> - The credit balance is the **anchor element** at the top: large number, clear label ("credits remaining"), with a subtle breakdown if packs exist (e.g., "200 active · expires Dec 12").
+> - The package card below is the **single CTA surface**: one glass card, centered or left-anchored. Shows the three facts in visual hierarchy: **200 credits** (largest, saffron weight), **$9** (large, on-surface), **30-day validity** (smaller, slate). One button: "Buy Credits →" in saffron. No asterisks, no "cancel anytime", no dark patterns.
+> - Purchase history below the CTA (if packs exist): a clean table, not a card grid. Columns: date, credits (purchased / remaining), status chip, expiry date. Status chips follow the existing pattern — `active` in primary-container, `consumed` in tertiary-container, `expired` in surface-dim, `disputed` in error-container. Do not invent new chip colors.
+> - Empty history state: two lines only — "No purchases yet." + "Credits are valid for 30 days from purchase." No illustrations. No "Get started" CTAs. The buy button is already above.
+> - The page is simple: do not add breadcrumbs, sidebars, tabs, or hero banners. It is a utility page, not a marketing page.
+>
+> **Surface B — Post-Stripe Redirect (`/billing/success?session_id=XXX`)**
+> The moment-of-use feeling: the user just paid and is waiting to see credits appear. They are anxious. This surface should feel **calm and certain** — not "loading" ambiguity.
+> - Full-screen centered overlay (or a distinct section in the billing page if the session_id param is present): a soft pulse animation on the SpecForge icon, a single line "Processing your payment…", and a sub-line "This usually takes a few seconds."
+> - While polling `GET /billing/status?session_id=XXX` (2-second interval, 30-second max): show the pulse.
+> - On `status === "completed"`: transition to a success state. One icon (checkmark in lotus/secondary color), one line: "**200 credits added** · valid until [date]". A "Continue to Dashboard →" link. No confetti, no fireworks — this is a professional tool.
+> - On 30-second timeout with no completion: show "Payment received — credits may take a moment to appear. Refresh the page in 30 seconds." Do NOT show an error. Webhook delivery can be delayed; the user's payment was real.
+>
+> **Surface C — CreditMeter Expiry Warning (Dashboard/Workspace header)**
+> The moment-of-use feeling: a gentle tap on the shoulder, not a fire alarm.
+> - 7–4 days before expiry: amber chip below the credit count: "**X credits expire [date]** → Renew". Amber = `#b45309` or closest existing token. The chip is clickable and navigates to `/billing`.
+> - 3–0 days: chip upgrades to `--color-error` (red). One word changes: "expire soon" → "expire [tomorrow/today]". Still a tap, not a scream.
+> - Clicking the chip in both states navigates to `/billing`.
+> - The existing zero-credit state (`"You've used all 50 free credits"`) is updated to reflect the actual balance (credits may be > 50 now) and the CTA changes from "Join waitlist" to "Buy more credits →" linking to `/billing`.
+>
+> Before writing any TSX: open the Dashboard, the Settings page, and the existing stage-status chips. The billing page must look like it belongs in the same app. A billing page that passes all harness tests but looks like it was copy-pasted from a different design system will be sent back.
+
+---
+
+**Inputs:**
+- `frontend/src/App.tsx` — register `/billing`, `/billing/success`, `/billing/cancel` routes
+- `frontend/src/pages/Dashboard.tsx` — update CreditMeter CTA
+- `frontend/src/components/shared/CreditMeter.tsx` — add expiry warning
+- `frontend/src/services/api.ts` — add billing API functions
+- `frontend/src/index.css` — add `.billing-*` CSS classes if needed
+- Plan §21.4 (T-238), Design.md (Modern Indica tokens)
+- Harness: `harness/tests/backend/test_phase21_stripe_payments_contract.py` — all `test_t238_*` tests
+
+**Outputs:**
+- `frontend/src/pages/Billing.tsx` (new)
+- `frontend/src/types/billing.ts` (new)
+- Updated `frontend/src/App.tsx`
+- Updated `frontend/src/services/api.ts`
+- Updated `frontend/src/components/shared/CreditMeter.tsx`
+- Updated `frontend/src/pages/Dashboard.tsx` (CTA link update)
+
+**Steps:**
+
+1. **Create `frontend/src/types/billing.ts`** with exact TypeScript interfaces matching the backend Pydantic schemas. The `StripeCreditPack.status` field MUST be a union type literal — do not use `string`:
+   ```typescript
+   export interface BillingPackage {
+     credits: number;
+     price_cents: number;
+     validity_days: number;
+     currency: string;
+   }
+
+   export interface StripeCreditPack {
+     id: string;
+     credits_purchased: number;
+     credits_remaining: number;
+     price_cents: number;
+     status: "active" | "consumed" | "expired" | "disputed";
+     purchased_at: string;
+     expires_at: string;
+   }
+
+   export interface BillingStatusResponse {
+     status: "pending" | "completed";
+     credits_added: number;
+     expires_at: string | null;
+   }
+
+   export interface CheckoutResponse {
+     checkout_url: string;
+   }
+   ```
+
+2. **Add billing API functions to `frontend/src/services/api.ts`**:
+   ```typescript
+   export async function fetchBillingPackage(): Promise<BillingPackage> {
+     const response = await api.get<BillingPackage>("/billing/package")
+     return response.data
+   }
+
+   export async function createCheckoutSession(): Promise<CheckoutResponse> {
+     const response = await api.post<CheckoutResponse>("/billing/checkout")
+     return response.data
+   }
+
+   export async function fetchBillingStatus(sessionId: string): Promise<BillingStatusResponse | null> {
+     try {
+       const response = await api.get<BillingStatusResponse>(`/billing/status?session_id=${sessionId}`)
+       return response.data
+     } catch {
+       // 404 means pending (webhook not yet processed) — treat as null
+       return null
+     }
+   }
+
+   export async function fetchBillingHistory(): Promise<StripeCreditPack[]> {
+     const response = await api.get<StripeCreditPack[]>("/billing/history")
+     return response.data
+   }
+   ```
+
+3. **Create `frontend/src/pages/Billing.tsx`** implementing all three surfaces described in the Design Brief:
+   - On mount: fetch `BillingPackage` (no auth required) and `StripeCreditPack[]` history. Fetch credit balance from existing `getCredits()`.
+   - Detect `/billing/success?session_id=XXX` via `useSearchParams()`. If present, enter polling mode.
+   - Polling mode: `setInterval(() => fetchBillingStatus(sessionId), 2000)`. On `status === "completed"`: clear interval, show success state, refresh balance. On 30-second timeout: show "Payment received — credits may take a moment to appear." message.
+   - For the "Buy Credits" button click: call `createCheckoutSession()`, then `window.location.href = response.checkout_url` (full-page redirect to Stripe).
+   - Status chips for pack history: use the existing CSS chip pattern from the app. Map `active` → `var(--color-primary-container)`, `consumed` → `var(--color-tertiary-container)`, `expired` → `var(--color-surface-container-high)`, `disputed` → `var(--color-error-container)`.
+   - Format dates with `Intl.DateTimeFormat` — do not use raw ISO strings.
+   - Format price: `(price_cents / 100).toLocaleString("en-US", { style: "currency", currency: "USD" })`.
+
+4. **Update `frontend/src/components/shared/CreditMeter.tsx`**:
+   - Add optional `packs?: StripeCreditPack[]` prop.
+   - If any pack has `status === "active"` and `expires_at` is within 7 days:
+     - Find the soonest-expiring active pack.
+     - Render an expiry warning chip below the credit balance.
+     - 4–7 days: amber styling, text: `"{X} credits expire {date} · Renew"`
+     - 0–3 days: error/red styling, text: `"{X} credits expire {days_label} · Renew"`
+     - Both chips link to `/billing` via `useNavigate`.
+   - Update the zero-balance state: change `"Join waitlist for more."` to `"Buy more credits →"` with a `Link` to `/billing`.
+
+5. **Update `frontend/src/App.tsx`**: add `/billing` as an authenticated route:
+   ```tsx
+   import Billing from "./pages/Billing"
+   // Inside <Routes>, inside the ProtectedRoute section:
+   <Route
+     path="/billing"
+     element={
+       <ProtectedRoute>
+         <Billing />
+       </ProtectedRoute>
+     }
+   />
+   ```
+   No `/billing/success` or `/billing/cancel` route needed — the billing page itself handles the `?session_id` query param detection.
+
+6. **Update `frontend/src/pages/Dashboard.tsx`**: if there is a placeholder "coming soon" purchase CTA, replace it with `<Link to="/billing">Buy Credits</Link>`. If not present, add a `Link to="/billing"` in the area near the CreditMeter.
+
+7. Run: `cd frontend && pnpm tsc` — no TypeScript errors. Run: `cd frontend && pnpm test` — all existing tests pass.
+
+**Acceptance criteria:**
+1. `/billing` renders the package card, current balance, and purchase history table for an authenticated user.
+2. Clicking "Buy Credits →" redirects to the Stripe Checkout URL.
+3. Visiting `/billing?session_id=xxx` while polling: success state shown on `status === "completed"`.
+4. CreditMeter shows amber chip when any active pack expires within 7 days; red chip when ≤3 days remain.
+5. The CreditMeter zero-balance CTA links to `/billing` (not `#waitlist`).
+6. `pnpm tsc` exits 0 (no type errors).
+7. `cd harness && pytest tests/backend/test_phase21_stripe_payments_contract.py::test_t238_billing_page_exists tests/backend/test_phase21_stripe_payments_contract.py::test_t238_billing_types_file_exists tests/backend/test_phase21_stripe_payments_contract.py::test_t238_billing_types_has_billing_package_interface tests/backend/test_phase21_stripe_payments_contract.py::test_t238_billing_types_has_stripe_credit_pack_interface tests/backend/test_phase21_stripe_payments_contract.py::test_t238_billing_types_has_billing_status_response_interface tests/backend/test_phase21_stripe_payments_contract.py::test_t238_billing_types_has_checkout_response_interface tests/backend/test_phase21_stripe_payments_contract.py::test_t238_billing_types_stripe_credit_pack_has_status_union tests/backend/test_phase21_stripe_payments_contract.py::test_t238_billing_page_polls_billing_status tests/backend/test_phase21_stripe_payments_contract.py::test_t238_billing_page_calls_billing_package_endpoint tests/backend/test_phase21_stripe_payments_contract.py::test_t238_billing_page_calls_billing_history_endpoint tests/backend/test_phase21_stripe_payments_contract.py::test_t238_billing_route_registered_in_app tests/backend/test_phase21_stripe_payments_contract.py::test_t238_credit_meter_has_expiry_warning -v` — all 12 pass.
+8. Human-judged criterion: the billing page looks like it belongs in SpecForge. The status chips, typography, and spacing are consistent with the Dashboard and Settings pages. This criterion is verified by the maintainer at PR review.
+
+**Dependencies:** T-227 (config vars), T-230 (billing package endpoint), T-231 (checkout endpoint), T-232 (status + history endpoints)
+
+**Testing requirements:**
+- Harness: 12 structural/content contracts.
+- `pnpm tsc` type-check.
+- `pnpm test` — all existing vitest tests pass.
+- Manual: complete a full Stripe test checkout in dev; verify credits appear on the billing page after webhook fires.
+
+**Observability requirements:** None (frontend).
+
+**Rollback considerations:** Remove `Billing.tsx`, `types/billing.ts`, the `/billing` route in `App.tsx`, and the billing API functions from `api.ts`. Revert `CreditMeter.tsx` and `Dashboard.tsx` changes.
+
+**Estimated complexity:** L (~300 lines across new files + updates)
+**Estimated implementation risk:** Low
+
+**Affected modules/files:**
+- `frontend/src/pages/Billing.tsx` — new full-page component
+- `frontend/src/types/billing.ts` — new TypeScript interfaces
+- `frontend/src/services/api.ts` — add 4 billing API functions
+- `frontend/src/components/shared/CreditMeter.tsx` — expiry warning chip + updated zero-balance CTA
+- `frontend/src/App.tsx` — register `/billing` authenticated route
+- `frontend/src/pages/Dashboard.tsx` — update CreditMeter CTA to link to `/billing`
+
+---
+
+_tasks.md · SpecForge V1 · Version 2.6.0 · 2026-05-27 — Phase 18 Stripe Payments Integration T-226 through T-238 (13 tasks: DB migration for stripe_credit_packs + stripe_webhook_events + ORM models, 7 Stripe config vars with production key guard, StripeService with checkout + dispute + event dispatch, CreditService lazy expiry + FIFO pack drain, 5 billing endpoints including IDOR-safe status polling, rate limit tier for checkout, webhook with HMAC validation + idempotency, CSRF + rate-limit middleware exemptions for webhook, 10 Prometheus billing counters + secret scrubbing for sk_live/whsec patterns, full unit test suite, Billing.tsx frontend page with expiry warning chip and post-redirect polling)_
+
 _tasks.md · SpecForge V1 · Version 2.5.0 · 2026-05-25 — Phase 17 Final Hardening & Enterprise Closure T-217 through T-225 (9 remediation tasks addressing all findings from third-pass enterprise review 2026-05-25: 1 critical circuit breaker gap, 1 high prompt regression, 4 medium findings covering credit cache timing / rate limit startup / Langfuse health / secret rotation, 2 low findings covering sliding window fallback / adapter TTL, plus circuit_state Gauge observability addition)_
 
 _tasks.md · SpecForge V1 · Version 2.4.0 · 2026-05-23 — Phase 16 Final Remediation & Enterprise Hardening T-196 through T-216 (21 remediation tasks addressing every finding from docs/CODE_REVIEW_PASS_2.md second-pass enterprise review: 2 critical unresolved findings, 5 high severity regressions, 5 medium severity issues, 4 low severity issues, plus 2 observability/documentation tasks mapping to systemic risks)_
