@@ -2,6 +2,7 @@ import { lazy, Suspense } from "react"
 import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom"
 import { ProtectedRoute } from "./components/shared/ProtectedRoute"
 import AuthCallback from "./pages/AuthCallback"
+import Billing from "./pages/Billing"
 import Dashboard from "./pages/Dashboard"
 import Landing from "./pages/Landing"
 import Settings from "./pages/Settings"
@@ -46,6 +47,14 @@ export default function App() {
           element={
             <ProtectedRoute>
               <Settings />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/billing"
+          element={
+            <ProtectedRoute>
+              <Billing />
             </ProtectedRoute>
           }
         />

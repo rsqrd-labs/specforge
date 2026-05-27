@@ -8,6 +8,12 @@ import axios, {
 
 import type { User } from "../types/user"
 import type {
+  BillingPackage,
+  BillingStatusResponse,
+  CheckoutResponse,
+  StripeCreditPack,
+} from "../types/billing"
+import type {
   CreateWorkspacePayload,
   Workspace,
   WorkspaceWithStages,
@@ -555,6 +561,37 @@ export async function persistClarification(
 
 export async function getCredits(): Promise<CreditBalance> {
   const response = await api.get<CreditBalance>("/credits/balance")
+  return response.data
+}
+
+export async function fetchBillingPackage(): Promise<BillingPackage> {
+  const response = await api.get<BillingPackage>("/billing/package")
+  return response.data
+}
+
+export async function createCheckoutSession(): Promise<CheckoutResponse> {
+  const response = await api.post<CheckoutResponse>("/billing/checkout")
+  return response.data
+}
+
+export async function fetchBillingStatus(
+  sessionId: string,
+): Promise<BillingStatusResponse | null> {
+  try {
+    const response = await api.get<BillingStatusResponse>("/billing/status", {
+      params: { session_id: sessionId },
+    })
+    return response.data
+  } catch (error) {
+    if (axios.isAxiosError(error) && error.response?.status === 404) {
+      return null
+    }
+    throw error
+  }
+}
+
+export async function fetchBillingHistory(): Promise<StripeCreditPack[]> {
+  const response = await api.get<StripeCreditPack[]>("/billing/history")
   return response.data
 }
 

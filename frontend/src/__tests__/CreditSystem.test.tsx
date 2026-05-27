@@ -1,44 +1,63 @@
 import { render, screen } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { describe, expect, it, vi } from "vitest"
+import { MemoryRouter } from "react-router-dom"
 
 import { CreditBanner } from "../components/dashboard/CreditBanner"
 import { CreditMeter } from "../components/shared/CreditMeter"
 import { CreditConfirmModal } from "../components/workspace/CreditConfirmModal"
 
 describe("CreditMeter", () => {
+  function renderCreditMeter(balance: number) {
+    return render(
+      <MemoryRouter>
+        <CreditMeter balance={balance} />
+      </MemoryRouter>,
+    )
+  }
+
   it("shows 'used all credits' message when balance is 0", () => {
-    render(<CreditMeter balance={0} />)
-    expect(
-      screen.getByText(/you've used all 50 free credits/i),
-    ).toBeInTheDocument()
+    renderCreditMeter(0)
+    expect(screen.getByText(/you're at 0 credits/i)).toBeInTheDocument()
+    expect(screen.getByRole("link", { name: /buy more credits/i })).toHaveAttribute(
+      "href",
+      "/billing",
+    )
   })
 
   it("shows remaining count when balance is positive", () => {
-    render(<CreditMeter balance={25} />)
+    renderCreditMeter(25)
     expect(screen.getByText("25")).toBeInTheDocument()
     expect(screen.getByText(/credits remaining/i)).toBeInTheDocument()
   })
 
   it("applies error text class when balance is 0", () => {
-    const { container } = render(<CreditMeter balance={0} />)
+    const { container } = renderCreditMeter(0)
     expect(container.firstChild).toHaveClass("text-error")
   })
 })
 
 describe("CreditBanner", () => {
+  function renderCreditBanner(balance: number) {
+    return render(
+      <MemoryRouter>
+        <CreditBanner balance={balance} />
+      </MemoryRouter>,
+    )
+  }
+
   it("applies error-container class when balance is at low threshold (≤5)", () => {
-    const { container } = render(<CreditBanner balance={5} />)
+    const { container } = renderCreditBanner(5)
     expect(container.firstChild).toHaveClass("bg-error-container")
   })
 
   it("applies error-container class when balance is 0", () => {
-    const { container } = render(<CreditBanner balance={0} />)
+    const { container } = renderCreditBanner(0)
     expect(container.firstChild).toHaveClass("bg-error-container")
   })
 
   it("does not apply error-container class when balance is above threshold", () => {
-    const { container } = render(<CreditBanner balance={6} />)
+    const { container } = renderCreditBanner(6)
     expect(container.firstChild).not.toHaveClass("bg-error-container")
   })
 })

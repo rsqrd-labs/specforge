@@ -18,6 +18,7 @@ function makeStage(overrides: Partial<Stage> = {}): Stage {
     current_version: 0,
     eval_result: null,
     finalised_at: null,
+    gap_patch_used: false,
     review_gate_acknowledged: false,
     created_at: new Date().toISOString(),
     updated_at: new Date().toISOString(),

@@ -1,15 +1,22 @@
 import { Fragment, useEffect, useRef, useState } from "react"
-import { useNavigate } from "react-router-dom"
+import { Link, useNavigate } from "react-router-dom"
 import { ErrorBoundary } from "../components/ErrorBoundary"
 import { GitHubStatusPill } from "../components/shared/GitHubStatusPill"
+import { CreditMeter } from "../components/shared/CreditMeter"
 import { CreateWorkspaceModal } from "../components/dashboard/CreateWorkspaceModal"
 import { DeleteWorkspaceModal } from "../components/dashboard/DeleteWorkspaceModal"
 import { WorkspaceCard } from "../components/dashboard/WorkspaceCard"
 import { TemplatesStrip } from "../components/templates/TemplatesStrip"
 import { STARTER_WORKSPACES } from "../config/starterWorkspaces"
-import { getApiErrorMessage, getCredits, logout } from "../services/api"
+import {
+  fetchBillingHistory,
+  getApiErrorMessage,
+  getCredits,
+  logout,
+} from "../services/api"
 import { useUserStore } from "../store/userStore"
 import { useWorkspaceStore } from "../store/workspaceStore"
+import type { StripeCreditPack } from "../types/billing"
 import type { Stage, StageStatus } from "../types/stage"
 import type { Template } from "../types/template"
 import type { Workspace, WorkspaceWithStages } from "../types/workspace"
@@ -230,6 +237,7 @@ export default function Dashboard() {
   const clearUser = useUserStore((state) => state.clearUser)
   const [balance, setBalance] = useState<number | null>(null)
   const [generationCost, setGenerationCost] = useState<number>(10)
+  const [billingPacks, setBillingPacks] = useState<StripeCreditPack[]>([])
   const [showCreate, setShowCreate] = useState(false)
   const [starterWorkspace, setStarterWorkspace] = useState<
     (typeof STARTER_WORKSPACES)[number] | null
@@ -249,6 +257,9 @@ export default function Dashboard() {
         setGenerationCost(d.generation_cost)
       })
       .catch(() => setBalance(null))
+    fetchBillingHistory()
+      .then(setBillingPacks)
+      .catch(() => setBillingPacks([]))
   }, [fetchWorkspaces])
 
   useEffect(() => {
@@ -411,12 +422,26 @@ export default function Dashboard() {
           <p className="credit-card-sub">
             {isLow ? "A few focused runs left" : "Fuel for the next breakthrough"}
           </p>
+          <div className="credit-card-meter">
+            {balance !== null ? (
+              <CreditMeter
+                balance={balance}
+                packs={billingPacks}
+                variant="inverse"
+              />
+            ) : (
+              <span>Checking your credits</span>
+            )}
+          </div>
           <div className="credit-card-bar-track">
             <div
               className="credit-card-bar-fill"
               style={{ width: `${fillPct}%` }}
             />
           </div>
+          <Link to="/billing" className="credit-card-buy-link">
+            Buy Credits →
+          </Link>
         </div>
       </div>
 
