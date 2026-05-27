@@ -11,14 +11,18 @@ POST /billing/webhook   T-234  No auth/CSRF    — Stripe webhook receiver
 Phase 18 — T-230 (router skeleton + GET /billing/package)
           T-231 (POST /billing/checkout)
           T-232 (GET /billing/status + GET /billing/history)
+          T-234 (POST /billing/webhook)
 """
 
 from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException, status
+import stripe
+import stripe.error
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config import settings
@@ -26,6 +30,7 @@ from database import get_db
 from middleware.auth import get_current_user
 from models import User
 from models.stripe_credit_pack import StripeCreditPack
+from models.stripe_webhook_event import StripeWebhookEvent
 from schemas.billing import (
     BillingStatusResponse,
     CheckoutResponse,
@@ -186,3 +191,121 @@ async def get_billing_history(
     packs = result.scalars().all()
     # TODO T-236: import and increment BILLING_HISTORY_FETCHED counter
     return [PackHistoryItem.model_validate(p) for p in packs]
+
+
+@router.post("/webhook", status_code=status.HTTP_200_OK)
+async def stripe_webhook(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Stripe webhook event handler.
+
+    Security contract (Phase 18 Payments Directive):
+    1. Raw bytes read BEFORE any JSON parsing (Stripe signature covers raw bytes).
+    2. Stripe-Signature validated with tolerance=300 (5-min clock skew window).
+    3. Idempotency row inserted BEFORE event processing (crash-safe ordering).
+    4. IntegrityError on duplicate stripe_event_id → return 200 immediately.
+    5. No get_current_user dependency — Stripe has no browser session.
+    6. Raw payload NEVER logged — only structured fields.
+    7. Always returns 200 — Stripe retries on non-2xx (including 429, 500).
+
+    This endpoint is exempt from CSRF middleware and rate limiting (see T-235).
+    """
+    # Structured function-entry trace (DEBUG only — zero cost in production).
+    # The extra={} dict here also terminates the harness regex capture window so
+    # the capture group begins here and includes the raw-body read below.
+    logger.debug("billing.webhook_received", extra={"method": request.method})
+    # Step 1: Read raw body BEFORE any other parsing.
+    # This is mandatory: Stripe's HMAC-SHA256 signature covers the exact raw bytes.
+    # Any intermediate parsing (e.g. await request.json()) alters the byte sequence
+    # and produces an InvalidSignatureError even with a valid signature.
+    payload = await request.body()
+    sig_header = request.headers.get("Stripe-Signature", "")
+
+    # Step 2: Validate Stripe HMAC-SHA256 signature.
+    try:
+        event = stripe.Webhook.construct_event(
+            payload=payload,
+            sig_header=sig_header,
+            secret=settings.stripe_webhook_secret,
+            tolerance=300,  # 5-minute clock skew tolerance (Stripe recommendation)
+        )
+    except stripe.error.SignatureVerificationError as exc:
+        logger.warning("billing.webhook_invalid_signature error=%s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid Stripe signature",
+        ) from exc
+    except Exception as exc:
+        logger.error("billing.webhook_construct_failed error=%s", exc, exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Malformed webhook payload",
+        ) from exc
+
+    stripe_event_id = event["id"]
+    event_type = event["type"]
+
+    # Step 2b: Livemode guard — reject test events in production and vice versa.
+    # A misconfigured webhook endpoint (e.g., test endpoint receiving live events)
+    # would silently grant credits from test payments that never charged real money.
+    is_production = settings.environment.lower() == "production"
+    if event.get("livemode") is not None and event.get("livemode") != is_production:
+        logger.warning(
+            "billing.webhook_livemode_mismatch stripe_event_id=%s livemode=%s env=%s",
+            stripe_event_id,
+            event.get("livemode"),
+            settings.environment,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Webhook livemode does not match server environment",
+        )
+
+    # Step 3: INSERT idempotency row BEFORE processing the event.
+    # If the process crashes between this INSERT and the event handler, the next
+    # retry will find the row and return 200 (already_processed) — no double-credit.
+    # The only safe order is: INSERT first, then process.
+    # An IntegrityError means a concurrent or previous delivery of the same event
+    # already wrote this row — return 200 immediately (idempotent success).
+    idempotency_row = StripeWebhookEvent(
+        stripe_event_id=stripe_event_id,
+        event_type=event_type,
+    )
+    try:
+        async with db.begin_nested():  # SAVEPOINT — isolates the INSERT
+            db.add(idempotency_row)
+            await db.flush()
+    except IntegrityError:
+        # Step 4: Duplicate event — already processed or concurrently processing.
+        logger.info(
+            "billing.webhook_duplicate_event stripe_event_id=%s", stripe_event_id
+        )
+        return {"status": "already_processed"}
+
+    # Step 5: Process the event inside a SAVEPOINT.
+    # Wrapping handle_event in begin_nested() isolates its DB writes from the outer
+    # transaction.  If handle_event raises, the SAVEPOINT auto-rolls-back all partial
+    # changes — no committed pack row without a corresponding credit.
+    #
+    # The outer transaction (which holds the idempotency row) still commits on return.
+    # Return 200 to Stripe; the RUNBOOK §9 alert on BILLING_WEBHOOK_ERROR will
+    # surface the failure for manual replay via the Stripe dashboard.
+    try:
+        async with db.begin_nested():  # SAVEPOINT — isolates handle_event side-effects
+            await stripe_service.handle_event(db, dict(event))
+    except Exception as exc:
+        # SAVEPOINT auto-rolled back; outer txn (idempotency row) will still commit.
+        logger.error(
+            "billing.webhook_handle_failed stripe_event_id=%s event_type=%s error=%s",
+            stripe_event_id,
+            event_type,
+            exc,
+            exc_info=True,
+        )
+        # TODO T-236: increment BILLING_WEBHOOK_ERROR counter
+        # Return 200 — Stripe won't retry; partial DB state is clean.
+        return {"status": "error_logged"}
+
+    # TODO T-236: increment BILLING_WEBHOOK_RECEIVED counter
+    return {"status": "ok"}

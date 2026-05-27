@@ -19,7 +19,8 @@ from services.auth_service import decode_access_token_claims
 logger = logging.getLogger(__name__)
 
 _LOGIN_PATHS = frozenset({"/auth/google", "/auth/callback"})
-_BYPASS_PATHS = frozenset({"/health"})
+# /billing/webhook is exempt so Stripe retries are not rate-limited.
+_BYPASS_PATHS = frozenset({"/health", "/billing/webhook"})
 _LOCAL_FALLBACK_MAX_KEYS = 10_000
 # Evict this many oldest entries when the cap is exceeded.  Single-item
 # eviction cannot keep up with a burst of distinct IPs; bulk removal bounds
