@@ -16,6 +16,7 @@ from middleware.body_size import BodySizeLimitMiddleware
 from middleware.csrf import CsrfMiddleware
 from middleware.rate_limit import RateLimitMiddleware
 from routers import auth as auth_router
+from routers import billing as billing_router
 from routers import credits as credits_router
 from routers import integrations as integrations_router
 from routers import providers as providers_router
@@ -206,6 +207,8 @@ def create_app(redis_client: Redis | None = None) -> FastAPI:
     app.include_router(public_router.router)
     # T-USE-11: unauthenticated GET /templates — starter templates strip.
     app.include_router(templates_router.router)
+    # Phase 18: Stripe Payments billing endpoints.
+    app.include_router(billing_router.router)
 
     return app
 
