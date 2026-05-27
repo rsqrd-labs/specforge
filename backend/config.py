@@ -60,6 +60,21 @@ class Settings(BaseSettings):
     github_client_id: str = ""
     github_client_secret: str = ""
 
+    # Stripe Payments (Phase 18) — leave blank to disable billing UI.
+    # Use sk_test_* keys for development; sk_live_* keys for production only.
+    stripe_secret_key: str = ""
+    stripe_webhook_secret: str = ""
+    stripe_price_cents: int = 900              # $9.00 — 200 credits per purchase
+    stripe_credits_per_purchase: int = 200
+    stripe_credit_validity_days: int = 30
+    # IMPORTANT: STRIPE_SUCCESS_URL must point to the /billing page (NOT /billing/success).
+    # T-238 registers /billing as the authenticated billing route.  The Billing component
+    # detects ?session_id= on that route and enters polling mode.
+    # There is no separate /billing/success route — if you set this to /billing/success,
+    # users will land on a 404 after paying.
+    stripe_success_url: str = ""               # e.g. https://app.specforge.dev/billing
+    stripe_cancel_url: str = ""                # e.g. https://app.specforge.dev/billing
+
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
 
@@ -110,6 +125,20 @@ def validate_production_settings() -> None:
                 "output content after secret-shaped redaction; only enable it "
                 "after approving that telemetry data flow."
             )
+
+    # Stripe production key guard.  A test key (sk_test_*) in production means
+    # payments appear to succeed via test cards but no real money is charged.
+    # This guard catches the misconfiguration at startup — before any user
+    # attempts a purchase — using the same accumulate-then-raise pattern as all
+    # other production checks above.  An empty stripe_secret_key (billing
+    # disabled) passes the guard: "".startswith("sk_test_") is False.
+    if settings.stripe_secret_key.startswith("sk_test_"):
+        errors.append(
+            "STRIPE_SECRET_KEY is a test key (sk_test_*). "
+            "Production deployments must use a live key (sk_live_*). "
+            "Using a test key in production silently accepts test card numbers "
+            "without charging real money."
+        )
 
     if errors:
         raise RuntimeError("; ".join(errors))
