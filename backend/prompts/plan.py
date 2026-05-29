@@ -272,6 +272,61 @@ Required PLAN.md structure (every section is mandatory):
   quality. "Best effort" is not a stance. Stances must be implementable:
   "in-memory LRU with 10K-entry cap" beats "fast and cheap."
 
+- ## Frontend Architecture (if applicable)
+  Include this section whenever the spec implies a browser-facing surface
+  (UI, web, app, page, screen, dashboard, console). If the product is
+  genuinely backend-only, write a one-line "Not applicable because <reason>"
+  note (per the PROFESSIONAL_OUTPUT_RULES exception protocol) and continue.
+
+  Required sub-bullets (all 14 mandatory when the section is in scope):
+
+  - Rendering model: SPA / SSR / SSG / hybrid — and why for this product.
+    Justify against latency, SEO, build-complexity, and personalisation needs.
+  - State management: chosen library + boundary between server state and
+    client state (e.g., React Query / TanStack Query for server state,
+    Zustand / Redux Toolkit for client state). Name the boundary rule.
+  - Data fetching: library, cache invalidation strategy (time-based,
+    mutation-triggered, event-driven), optimistic update policy, retry policy
+    (named, with thresholds — max attempts, backoff curve).
+  - Forms: form library (React Hook Form / Formik) + validation library
+    (Zod / Yup) + error display contract (field-level vs summary, when each
+    is used).
+  - Component architecture: directory layout (feature folders vs atomic),
+    presentational/container split policy, design-system source (in-house
+    library, vendor library, or hybrid).
+  - Design tokens: where defined (source of truth), how consumed (CSS
+    variables, JS module, Tailwind config), dark-mode strategy
+    (class-based, prefers-color-scheme, user-toggle).
+  - Routing: library, lazy-load boundaries (per-route code splits),
+    route-level data loader contract (when a route owns its data fetch
+    vs when components do).
+  - Loading / error / empty / offline: a global contract — every async
+    component MUST declare implementations for all four states. No
+    happy-path-only components. Name the shared primitives that render
+    each state (e.g., <LoadingSkeleton/>, <ErrorBoundaryFallback/>,
+    <EmptyState/>, <OfflineBanner/>).
+  - Accessibility: WCAG level (target: 2.1 AA), axe-core baseline (zero
+    serious or critical violations as a CI gate), focus management on
+    route change (where focus lands), ARIA live region usage for async
+    results, skip-link presence on every page.
+  - Performance: bundle budget (KB gzipped per route, with an absolute
+    ceiling), code-split boundaries (per-route, per-feature, per-modal),
+    image strategy (next-gen formats, responsive sources, lazy loading),
+    virtualization triggers (row-count threshold above which a list
+    virtualises).
+  - Error boundaries: where they wrap (route-level always, component-level
+    around third-party widgets), fallback UI contract (informative, not
+    blank; offers a recovery action).
+  - Security headers: CSP policy (concrete script-src, connect-src,
+    frame-ancestors directives), Trusted Types stance (enforced vs
+    report-only), dependency XSS audit cadence (per release vs per quarter).
+  - Browser support: explicit matrix (e.g., last 2 versions of Chrome,
+    Safari, Firefox, Edge; iOS Safari 15+; Android Chrome 110+). Anything
+    older is out of scope and surfaces a graceful upgrade prompt.
+  - i18n: stance (English-only V1 is a valid stance; declare it explicitly)
+    + library if any (react-intl / i18next / FormatJS) + locale-detection
+    strategy.
+
 - ## Assumptions and Open Questions
   Every assumption made where the spec was silent. Every decision that needs product
   or legal sign-off before implementation begins.
@@ -389,5 +444,14 @@ in your output):
 - The Architecture Quality Attribute Matrix has 5 named columns per component
   (Performance / Scalability / Reliability / Security / Maintainability) and
   no "best effort" stances [coverage_percent].
+- The Frontend Architecture section is present whenever the spec mentions a
+  browser-facing surface (UI, web, app, page, screen, dashboard, console).
+  If the product is backend-only, a "Not applicable because <reason>" note
+  appears in its place [requirements_coverage].
+- The Frontend Architecture section has all 14 required sub-bullets populated
+  when in scope (rendering model, state management, data fetching, forms,
+  component architecture, design tokens, routing, loading/error/empty/offline,
+  accessibility, performance, error boundaries, security headers, browser
+  support, i18n) [specificity_testability].
 
 Return only PLAN.md. Do not include any preamble, commentary, or summary."""
