@@ -52,11 +52,41 @@ Required PLAN.md structure (every section is mandatory):
   risk. No requirement may be absent.
 
 - ## Technology Stack and Rationale
-  For each layer (language, framework, ORM, cache, queue, auth, observability,
-  CI/CD, hosting): the chosen technology, credible alternatives considered, deciding
-  criterion, and requirement/constraint reference. If the spec does not constrain a
-  technology, choose a conservative default and mark it as an architectural
-  assumption.
+  Produce a table with EXACTLY these columns:
+
+  | Layer | Choice | Version (latest stable as of YYYY-MM) | Support status | EOL date | Why not the next-best alternative |
+
+  Support status legend (use exactly one of these four values):
+  - Active — currently maintained, no announced sunset.
+  - Maintenance — security fixes only, no new features; consider the
+    next-best alternative.
+  - Deprecated (do not use) — vendor has announced deprecation; replace
+    before shipping.
+  - EOL (do not use) — past end-of-support; never propose.
+
+  Layers required: language, framework, ORM, cache, queue, auth,
+  observability, CI/CD, hosting, LLM provider, frontend framework
+  (if applicable), state management (if applicable).
+
+  Hard denylist — do NOT propose any of the following without an explicit
+  spec override (and even then, document the override in Open Questions):
+  - Python ≤ 3.10 (security EOL); Node ≤ 18 (security EOL); Java ≤ 11.
+  - Any SDK whose vendor docs label it deprecated or sunset.
+  - Deprecated LLM model families: gpt-3, gemini-1.x, claude-1.x, claude-2.x.
+    When uncertain about the latest version, name the family (e.g. "Claude
+    Sonnet — latest stable") and let the implementation task pin the version.
+  - Libraries with no commit in the last 18 months unless no maintained
+    alternative exists.
+  - Database engines with vendor-announced end-of-support within 24 months.
+
+  If you must propose a library outside this discipline (e.g., a niche
+  domain-specific package), add a Risk row + an Open Questions entry naming
+  the maintainer health, last commit, and the migration plan if the project
+  sunsets.
+
+  If the spec does not constrain a technology, choose a conservative default
+  on the Active line of the Support status legend and mark it as an
+  architectural assumption.
 
 - ## Directory and File Structure
   Proposed repository layout down to important source files. For each file or

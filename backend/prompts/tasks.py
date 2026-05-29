@@ -180,6 +180,16 @@ Task design rules:
 - Prefer vertical slices after foundations are in place: a task should often connect
   model/service/API/test for one small behavior rather than scattering the behavior
   across many unrelated tasks.
+- Every dependency-introducing task MUST include these three Acceptance Criteria
+  in addition to its harness criteria:
+  a. SCA tool exit-0: `pip-audit` (Python) / `pnpm audit` (Node) / equivalent
+     exits 0 with no critical or high CVEs against the chosen package version.
+  b. Pinned version matches the version recorded in PLAN.md Technology Stack
+     table for the relevant Layer. If the task introduces a new layer that the
+     PLAN does not yet name, the task must first update the PLAN (separate
+     task) — never silently pin a version that the PLAN does not declare.
+  c. The chosen package is NOT on the Support status `Deprecated` or `EOL`
+     line in PLAN.md Technology Stack table.
 """
 
 
@@ -308,5 +318,9 @@ in your output):
 - Security control tasks appear before the API tasks they protect [feasibility].
 - Data model and migration tasks appear before the services and APIs that depend on
   them [feasibility].
+- Every task that adds a dependency carries the three Acceptance Criteria for
+  SCA (pip-audit / pnpm audit / equivalent exit-0, no critical or high CVEs),
+  version-pin matching PLAN.md Technology Stack, and non-Deprecated /
+  non-EOL Support status [specificity_testability].
 
 Return only TASKS.md. Do not include any preamble, commentary, or summary."""

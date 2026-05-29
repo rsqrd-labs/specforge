@@ -149,6 +149,30 @@ def _phrases_present(source: str, phrases: list[str]) -> list[str]:
     return [p for p in phrases if p not in source]
 
 
+def _extract_section(source: str, heading: str) -> str:
+    """Return the body of a markdown section identified by its `## ` heading.
+
+    Returns the text between `heading` (matched as a substring on any line) and
+    the next `## ` heading (or end of input).  Returns the empty string if the
+    heading is not found.
+
+    Used by the T-242 sub-bullet tests to scope phrase checks to the Frontend
+    Architecture section, preventing false positives where unrelated parts of
+    the prompt (e.g. T-241's Technology Stack layers list, which mentions
+    "state management (if applicable)" as a layer name) accidentally satisfy a
+    Frontend-section requirement.
+    """
+    start = source.find(heading)
+    if start < 0:
+        return ""
+    rest = source[start + len(heading):]
+    # The next "## " on its own line terminates the section.  Use a regex
+    # anchored on a newline so a bare "## " inside a code fence cannot prematurely
+    # end the section.
+    end_match = re.search(r"\n##\s", rest)
+    return rest[: end_match.start()] if end_match else rest
+
+
 # ===========================================================================
 # T-239 — plan.py: Architecture Anti-Patterns + ADR + Multi-tenancy
 # ===========================================================================
@@ -460,13 +484,22 @@ def test_t241_plan_prompt_technology_stack_requires_eol_date() -> None:
 
 
 def test_t241_plan_prompt_denylists_eol_python_and_node() -> None:
-    """T-241 — denylist must name Python ≤ 3.10 and Node ≤ 18 as security EOL."""
+    """T-241 — denylist must name Python ≤ 3.10 and Node ≤ 18 as security EOL.
+
+    Accepts the Unicode form (``Python ≤ 3.10``), the ASCII less-than-or-equal
+    (``Python <= 3.10``), bare less-than (``Python < 3.10``), or the literal
+    version (``Python 3.10``) — any of those is a clear EOL declaration.
+    """
     src = _read_plan_prompt()
-    assert re.search(r"Python\s*[≤<=]\s*3\.10|Python\s*3\.10\b", src), (
-        "Deprecation denylist must name Python ≤ 3.10 as security EOL.  T-241."
+    python_pat = r"Python\s*(?:≤|<=|<|=)\s*3\.10|Python\s*3\.10\b"
+    node_pat = r"Node\s*(?:≤|<=|<|=)\s*18|Node\s*18\b"
+    assert re.search(python_pat, src), (
+        "Deprecation denylist must name Python ≤ 3.10 (or <= 3.10) as security "
+        "EOL.  T-241."
     )
-    assert re.search(r"Node\s*[≤<=]\s*18|Node\s*18\b", src), (
-        "Deprecation denylist must name Node ≤ 18 as security EOL.  T-241."
+    assert re.search(node_pat, src), (
+        "Deprecation denylist must name Node ≤ 18 (or <= 18) as security EOL.  "
+        "T-241."
     )
 
 
@@ -536,24 +569,29 @@ def test_t242_plan_prompt_has_frontend_architecture_section() -> None:
 
 
 def test_t242_frontend_section_lists_state_management() -> None:
-    """T-242 — Frontend section must require a state management decision."""
-    src = _read_plan_prompt()
-    assert "State management" in src or "state management" in src, (
-        "Frontend Architecture section must require a state management decision.  "
-        "T-242."
+    """T-242 — Frontend section must require a state management decision.
+
+    Scoped to the Frontend Architecture section body so unrelated mentions
+    (e.g. "state management (if applicable)" appearing as a layer name in
+    T-241's Technology Stack list) do not satisfy the requirement.
+    """
+    body = _extract_section(_read_plan_prompt(), "## Frontend Architecture")
+    assert "state management" in body.lower(), (
+        "The Frontend Architecture section must require a state management "
+        "decision.  T-242."
     )
 
 
 def test_t242_frontend_section_lists_data_fetching_and_cache_invalidation() -> None:
     """T-242 — Frontend section must require a data-fetching layer and cache invalidation."""
-    src = _read_plan_prompt()
-    assert "Data fetching" in src or "data fetching" in src, (
-        "Frontend Architecture section must require a Data fetching decision.  "
-        "T-242."
+    body = _extract_section(_read_plan_prompt(), "## Frontend Architecture")
+    assert "data fetching" in body.lower(), (
+        "The Frontend Architecture section must require a Data fetching "
+        "decision.  T-242."
     )
-    assert "cache invalidation" in src.lower(), (
-        "Frontend Architecture section must require a cache invalidation strategy.  "
-        "T-242."
+    assert "cache invalidation" in body.lower(), (
+        "The Frontend Architecture section must require a cache invalidation "
+        "strategy.  T-242."
     )
 
 
@@ -564,61 +602,69 @@ def test_t242_frontend_section_requires_loading_error_empty_offline_contract() -
     explicit contract, the model emits happy-path components that silently
     spin forever on a 500 response.
     """
-    src = _read_plan_prompt().lower()
+    body = _extract_section(_read_plan_prompt(), "## Frontend Architecture").lower()
     for state in ["loading", "error", "empty", "offline"]:
-        assert state in src, (
-            f"Frontend Architecture section must require a '{state}' state "
-            f"contract.  T-242."
+        assert state in body, (
+            f"The Frontend Architecture section must require a '{state}' "
+            f"state contract.  T-242."
         )
 
 
 def test_t242_frontend_section_requires_wcag_and_axe_core_baseline() -> None:
     """T-242 — Frontend section must require WCAG level + axe-core baseline."""
-    src = _read_plan_prompt()
-    assert "WCAG" in src, "Frontend section must require WCAG level.  T-242."
-    assert "axe-core" in src or "axe core" in src, (
-        "Frontend section must require an axe-core baseline.  T-242."
+    body = _extract_section(_read_plan_prompt(), "## Frontend Architecture")
+    assert "WCAG" in body, (
+        "The Frontend Architecture section must require a WCAG level.  T-242."
+    )
+    assert "axe-core" in body or "axe core" in body, (
+        "The Frontend Architecture section must require an axe-core baseline.  "
+        "T-242."
     )
 
 
 def test_t242_frontend_section_requires_bundle_budget() -> None:
     """T-242 — Frontend section must require a bundle-size budget."""
-    src = _read_plan_prompt()
-    assert "bundle budget" in src.lower() or "bundle size" in src.lower(), (
-        "Frontend Architecture section must require a bundle-size budget.  T-242."
+    body = _extract_section(_read_plan_prompt(), "## Frontend Architecture").lower()
+    assert "bundle budget" in body or "bundle size" in body, (
+        "The Frontend Architecture section must require a bundle-size budget.  "
+        "T-242."
     )
 
 
 def test_t242_frontend_section_requires_csp_policy() -> None:
     """T-242 — Frontend section must require a CSP policy + Trusted Types stance."""
-    src = _read_plan_prompt()
-    assert "CSP" in src, "Frontend section must require a CSP policy.  T-242."
-    assert "Trusted Types" in src or "trusted types" in src, (
-        "Frontend section must require a Trusted Types stance.  T-242."
+    body = _extract_section(_read_plan_prompt(), "## Frontend Architecture")
+    assert "CSP" in body, (
+        "The Frontend Architecture section must require a CSP policy.  T-242."
+    )
+    assert "Trusted Types" in body or "trusted types" in body, (
+        "The Frontend Architecture section must require a Trusted Types "
+        "stance.  T-242."
     )
 
 
 def test_t242_frontend_section_requires_browser_support_matrix() -> None:
     """T-242 — Frontend section must require an explicit browser support matrix."""
-    src = _read_plan_prompt()
-    assert "Browser support" in src or "browser support" in src, (
-        "Frontend section must require an explicit Browser support matrix.  T-242."
+    body = _extract_section(_read_plan_prompt(), "## Frontend Architecture")
+    assert "browser support" in body.lower(), (
+        "The Frontend Architecture section must require an explicit Browser "
+        "support matrix.  T-242."
     )
 
 
 def test_t242_frontend_section_requires_design_tokens() -> None:
     """T-242 — Frontend section must require design tokens + dark-mode strategy."""
-    src = _read_plan_prompt()
-    assert "Design tokens" in src or "design tokens" in src, (
-        "Frontend section must require Design tokens.  T-242."
+    body = _extract_section(_read_plan_prompt(), "## Frontend Architecture")
+    assert "design tokens" in body.lower(), (
+        "The Frontend Architecture section must require Design tokens.  T-242."
     )
 
 
 def test_t242_frontend_section_requires_error_boundaries() -> None:
     """T-242 — Frontend section must require error boundaries + fallback UI contract."""
-    src = _read_plan_prompt()
-    assert "Error boundaries" in src or "error boundaries" in src, (
-        "Frontend section must require error boundaries.  T-242."
+    body = _extract_section(_read_plan_prompt(), "## Frontend Architecture")
+    assert "error boundaries" in body.lower(), (
+        "The Frontend Architecture section must require error boundaries.  T-242."
     )
 
 
