@@ -91,10 +91,11 @@ Required PLAN.md structure (every section is mandatory):
 
 - ## Security Architecture
   For each SEC requirement: the specific control, where in the stack it is
-  enforced, and how it is tested. Include: input sanitisation points, output
-  encoding points, secret storage mechanism, TLS configuration, dependency scanning
-  cadence, auditability, abuse/rate-limit controls, and incident response steps for
-  credential leakage.
+  enforced, and how it is tested (see Threat Model for STRIDE coverage; this
+  section names the controls). Include: input sanitisation points, output
+  encoding points, secret storage mechanism, TLS configuration, dependency
+  scanning cadence, auditability, abuse/rate-limit controls, and incident
+  response steps for credential leakage.
 
 - ## Privacy and Data Handling
   Data classification per entity (public / internal / confidential / restricted).
@@ -130,9 +131,10 @@ Required PLAN.md structure (every section is mandatory):
   operational ownership.
 
 - ## Scalability and Performance
-  Per-endpoint latency budget and how it is achieved. Horizontal scaling trigger.
-  Database connection pooling parameters. Cache eviction policy. Bottleneck analysis
-  tied to NFR requirements.
+  Per-endpoint latency budget and how it is achieved (see Capacity Model for
+  the numbers; this section justifies the design choice that meets them).
+  Horizontal scaling trigger. Database connection pooling parameters. Cache
+  eviction policy. Bottleneck analysis tied to NFR requirements.
 
 - ## Rollout and Migration Plan
   Implementation phases, feature flags, data migration steps, backward
@@ -170,6 +172,75 @@ Required PLAN.md structure (every section is mandatory):
   row-level security | schema-per-tenant | physical isolation. Justify against
   the spec's isolation, compliance, and noisy-neighbor requirements. Reference
   the SEC-NNN that drives the choice.
+
+- ## Capacity Model
+  For each top-3 endpoint AND each background workflow, produce:
+  - Target RPS: steady-state and peak (with timezone if applicable).
+  - Latency budget: p50, p95, p99 in milliseconds, end-to-end.
+  - Data growth: rows/day, bytes/day, retention horizon.
+  - Read/write ratio.
+  - 10x stress projection: at 10x current load, which component breaks first?
+    Name the bottleneck (DB primary, single Redis node, sync external call, etc.).
+    This is the Capacity Model stress projection — the binding analysis for
+    where the design fails first.
+  - 100x stress projection: at 100x current load, what is the redesign?
+    Name the new topology (read replicas, sharding strategy, queue introduction,
+    cache layer).  This is the Capacity Model stress projection at the next
+    order of magnitude.
+  Numbers without a justification are an assumption — mark and link to
+  Open Questions.
+
+- ## Threat Model (STRIDE)
+  For each trust boundary visible in the Architecture Overview diagram,
+  enumerate exactly these 6 STRIDE categories with the mitigating control
+  and the SEC-NNN it satisfies:
+  - Spoofing: how identity is forged and what prevents it.
+  - Tampering: how data in transit or at rest is altered and what prevents it.
+  - Repudiation: how a user denies an action and what audit log proves it.
+  - Information disclosure: how data leaks across the boundary and what
+    prevents it.
+  - Denial of service: how the boundary is overwhelmed and what absorbs or
+    rejects it.
+  - Elevation of privilege: how a low-privilege actor gains higher rights
+    and what blocks it.
+  A trust boundary with fewer than 3 named mitigations is a gap; flag it
+  in Risks and add an entry to Assumptions and Open Questions.
+
+- ## SLOs and Error Budgets
+  For each user-facing service, declare:
+  - Availability SLO: percentage over a stated window (e.g., 99.9% per 30
+    rolling days).
+  - Latency SLO: p95 and p99 thresholds in milliseconds.
+  - Correctness SLO: percentage of operations meeting their correctness
+    contract (e.g., "no double-credit on retry" measured at 100%).
+  - Error budget: monthly burn allowance derived from the availability SLO,
+    and the policy when budget is exhausted (freeze releases / page on-call
+    / ticket-only).
+  - Paging-vs-ticketing thresholds: when does this alert wake someone vs
+    open a ticket for next-business-day triage?
+
+- ## Failure Mode and Effects Analysis (FMEA-lite)
+  For each external dependency (DB, cache, queue, third-party API, LLM
+  provider, identity provider, payment processor), produce a row in a table
+  with exactly these columns:
+
+  | Dependency | Failure mode | Detection | Blast radius | Mitigation | Recovery time | Customer impact |
+
+  A row with "TBD" in any column is not acceptable — make a decision and
+  mark assumptions. Blast radius must name the affected user surface
+  (all users / authenticated users only / paid users only / single tenant).
+  Recovery time must give an order-of-magnitude target (seconds / minutes /
+  hours / days).
+
+- ## Architecture Quality Attribute Matrix
+  For each component in the Architecture Overview, produce one row with
+  exactly these five columns:
+
+  | Component | Performance stance | Scalability stance | Reliability stance | Security stance | Maintainability stance |
+
+  A "stance" is one sentence stating how this component achieves the
+  quality. "Best effort" is not a stance. Stances must be implementable:
+  "in-memory LRU with 10K-entry cap" beats "fast and cheap."
 
 - ## Assumptions and Open Questions
   Every assumption made where the spec was silent. Every decision that needs product
@@ -273,5 +344,20 @@ in your output):
 - The Multi-tenancy Stance section names exactly one option from the named enum
   (shared-schema + tenant_id column | row-level security | schema-per-tenant |
   physical isolation) and justifies it against a SEC-NNN [traceability].
+- Every top-3 endpoint and background workflow has a Capacity Model row with
+  all 6 fields populated (RPS, latency budget, data growth, read/write ratio,
+  10x stress projection, 100x stress projection) [specificity_testability].
+- The Threat Model enumerates all 6 STRIDE categories (Spoofing, Tampering,
+  Repudiation, Information disclosure, Denial of service, Elevation of
+  privilege) per trust boundary [requirements_coverage].
+- Every user-facing service has an SLO + Error Budget row with availability,
+  latency (p95/p99), correctness, and paging-vs-ticketing thresholds populated
+  [specificity_testability].
+- Every external dependency has an FMEA row with all 6 columns populated
+  (Failure mode, Detection, Blast radius, Mitigation, Recovery time, Customer
+  impact) and no "TBD" cells [specificity_testability].
+- The Architecture Quality Attribute Matrix has 5 named columns per component
+  (Performance / Scalability / Reliability / Security / Maintainability) and
+  no "best effort" stances [coverage_percent].
 
 Return only PLAN.md. Do not include any preamble, commentary, or summary."""
