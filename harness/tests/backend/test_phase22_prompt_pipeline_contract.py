@@ -301,17 +301,33 @@ def test_t240_capacity_model_requires_rps_and_latency_budget() -> None:
 
 
 def test_t240_capacity_model_requires_10x_100x_projection() -> None:
-    """T-240 — Capacity Model must require a 10×/100× stress projection.
+    """T-240 — Capacity Model must require BOTH 10× AND 100× stress projections.
 
     "Where does this design break first?" is the question that separates
     "we picked PostgreSQL because Django uses it" from "we picked PostgreSQL
     and it breaks at 10K writes/sec on a single primary, at which point we
     add read replicas + Citus."
+
+    Requires both projections separately so that incidental "10x" mentions
+    elsewhere in the prompt (e.g. ADR Reversal Cost guidance from T-239) do
+    not falsely satisfy the Capacity Model requirement.
     """
     src = _read_plan_prompt()
-    assert re.search(r"10×|10x|100×|100x", src), (
-        "Capacity Model must require a 10×/100× stress projection naming where "
+    assert re.search(r"10×|\b10x\b", src), (
+        "Capacity Model must require a 10× stress projection naming where "
         "the design breaks first.  T-240."
+    )
+    assert re.search(r"100×|\b100x\b", src), (
+        "Capacity Model must require a 100× stress projection naming the "
+        "redesign required at that scale.  T-240."
+    )
+    # The two projections must co-occur in the prompt near the phrase
+    # "stress projection" — otherwise the matches are likely from unrelated
+    # context.
+    assert "stress projection" in src.lower(), (
+        "Capacity Model must use the phrase 'stress projection' so the "
+        "10×/100× requirements are anchored to the Capacity Model section "
+        "rather than incidental mentions elsewhere.  T-240."
     )
 
 

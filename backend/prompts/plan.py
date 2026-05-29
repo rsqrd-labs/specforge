@@ -143,6 +143,34 @@ Required PLAN.md structure (every section is mandatory):
   Top 10 risks ranked by severity × probability. For each: description, impact,
   likelihood, mitigation, and contingency.
 
+- ## Architecture Decision Records (ADR)
+  For each of the top-5 design decisions, produce a 5-line ADR:
+  - Decision: one sentence stating what was chosen.
+  - Forces: the requirement IDs (FR-NNN, NFR-NNN, SEC-NNN), constraints, or risks
+    that motivated the decision.
+  - Options Considered: at least 2 with a one-line tradeoff each.
+  - Chosen + WHY-not-next-best: why this option beats the runner-up.
+  - Reversal Cost: what the team would have to do to undo this decision at 10x
+    the current scale. State Low / Medium / High plus a one-line rationale.
+
+- ## Architecture Anti-Patterns (explicitly avoid)
+  Do NOT propose these patterns unless a specific requirement forces them. State,
+  for each, that it was considered and rejected and why:
+  - Microservices below ~3 engineers / before product-market fit
+  - Distributed monolith (independent deploys but shared DB / sync coupling)
+  - Premature sharding, premature read-replicas, premature event sourcing
+  - Dual-write without outbox / CDC pattern
+  - Business rules in routers / controllers
+  - Sync external calls in the request path without a circuit breaker
+  - N+1 patterns (require an explicit eager-load or batch strategy per relation)
+  - Polling where webhooks / SSE / WebSocket are first-class
+
+- ## Multi-tenancy Stance
+  Declare exactly one of: shared-schema + tenant_id column (default) |
+  row-level security | schema-per-tenant | physical isolation. Justify against
+  the spec's isolation, compliance, and noisy-neighbor requirements. Reference
+  the SEC-NNN that drives the choice.
+
 - ## Assumptions and Open Questions
   Every assumption made where the spec was silent. Every decision that needs product
   or legal sign-off before implementation begins.
@@ -167,6 +195,9 @@ Planning rules:
   LLM-facing inputs means the Prompt and AI Safety Controls section is not needed),
   write one sentence explaining why it is excluded and add a corresponding entry to
   Assumptions and Open Questions. Do not generate speculative filler.
+- Every Architecture Decision Record MUST include all five lines (Decision,
+  Forces, Options Considered, Chosen + WHY-not-next-best, Reversal Cost).
+  A missing line fails the artifact_validator (T-248).
 """
 
 
@@ -233,5 +264,14 @@ in your output):
   that motivated it, with at least one alternative considered [feasibility].
 - Entity names, requirement IDs, and endpoint paths are identical to the spec
   throughout — no synonyms or renumbering [clarity, traceability].
+- Every top-5 design decision appears in an ADR with all 5 lines
+  (Decision, Forces, Options Considered, Chosen + WHY-not-next-best, Reversal Cost)
+  [traceability, specificity_testability].
+- The Architecture Anti-Patterns section explicitly addresses each of the 8 named
+  patterns (either rejecting them with rationale or, rarely, justifying them
+  against a requirement) [specificity_testability].
+- The Multi-tenancy Stance section names exactly one option from the named enum
+  (shared-schema + tenant_id column | row-level security | schema-per-tenant |
+  physical isolation) and justifies it against a SEC-NNN [traceability].
 
 Return only PLAN.md. Do not include any preamble, commentary, or summary."""
