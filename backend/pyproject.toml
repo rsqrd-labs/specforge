@@ -59,6 +59,7 @@ dev = [
     "black==26.*",
     "ruff==0.8.*",
     "pytest-mock",
+    "aiosqlite>=0.22.1",
 ]
 
 [tool.uv]
