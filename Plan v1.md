@@ -3830,6 +3830,302 @@ After Phase 21 is implemented:
 
 ---
 
+## 22. Phase 22 — Prompt Pipeline Quality Hardening
+
+**Version:** 2.3.0
+**Source:** Internal audit (2026-05-29) of `backend/prompts/{base,spec,plan,harness,tasks,spec_clarification}.py` and `backend/services/pipeline/prompt_builder.py`. Findings 1–7 in the audit report:
+- F-1: Architecture is not forced toward correctness (no anti-pattern denylist, no ADR format, no capacity model, no multi-tenancy stance).
+- F-2: No mechanism prevents deprecated APIs / EOL stacks (evidenced by commit `fbe19ed Replace deprecated Gemini Flash model`).
+- F-3: "Architect thinking" is asserted, not enforced (no threat model, no SLO/SLI, no FMEA, no quality-attribute matrix).
+- F-4: Harness edge-case coverage is shallow (no boundary/property/concurrency/chaos categories; output-budget rule encourages deferred files).
+- F-5: Frontend design patterns are absent from the pipeline.
+- F-6: Secure/scalable/reliable/resilient gaps (no supply chain, no SLOs, no DR RPO/RTO).
+- F-7: Structural pipeline issues — 50K upstream cap with lossy summarization, single-shot generation with no critic loop, no structured-output validation, no prompt experimentation framework, escape-hatch wording in `PROFESSIONAL_OUTPUT_RULES`.
+
+**Tasks:** T-239 through T-249 (11 tasks in `tasks.md`)
+**Harness:** `harness/tests/backend/test_phase22_prompt_pipeline_contract.py`
+
+---
+
+### 22.1 Goal
+
+Raise the floor on every artifact the SpecForge pipeline produces (SPEC / PLAN / HARNESS / TASKS) so that **prompt quality is enforced by code, not by aspiration**. The pipeline must reliably steer the LLM toward correct architecture, current (non-deprecated) technology, architect-grade reasoning, comprehensive harness coverage, first-class frontend design patterns, and production-grade non-functional qualities — without depending on the model to volunteer them.
+
+Two structural shifts back the goal:
+1. **From assertion to enforcement** — the "Before returning, verify" checklists at the end of every user prompt become an actual second-pass critic call plus a deterministic markdown validator, so coverage gaps cannot ship.
+2. **From lossy summarization to faithful injection** — the 50K upstream cap is removed in favor of section-aware injection that keeps the spec/plan IDs the downstream stage needs verbatim, eliminating the silent quality regression on non-trivial products.
+
+---
+
+### 22.2 Prerequisites
+
+- Post-Phase 21 codebase (T-226 through T-238 all implemented and passing)
+- A second "judge" provider/model is callable from `services/llm/gateway.py` (already used by `spec_clarifier`)
+- Langfuse remote-prompt path is wired (already in place via `prompts.base.load_prompt`)
+- At least 3 historical workspaces with complete SPEC/PLAN/HARNESS/TASKS artifacts available for the offline eval golden set (T-248)
+
+---
+
+### 22.3 Sub-Stages
+
+| Task | Description | Priority |
+|---|---|---|
+| T-239 | `plan.py` — Architecture Anti-Patterns denylist + 5-line ADR format + Multi-tenancy stance (F-1) | Critical |
+| T-240 | `plan.py` — Capacity Model + STRIDE Threat Model + SLO/SLI/error budget + FMEA-lite + Architecture Quality Attribute matrix (F-3, F-6) | Critical |
+| T-241 | `plan.py` + `tasks.py` — Technology Currency discipline (version, support status, EOL date, known-bad denylist) + per-task SCA acceptance criterion (F-2) | Critical |
+| T-242 | `plan.py` — Frontend Architecture section (state, data-fetching, forms, components, tokens, routing, loading/error/empty, a11y, perf, CSP, i18n, browser matrix) (F-5) | High |
+| T-243 | `tasks.py` — Frontend task checklist (loading + error + empty + focus + a11y assertion + perf-budget delta per frontend-touching task) (F-5) | High |
+| T-244 | `harness.py` — Expand mandatory test categories (boundary, property-based, concurrency, chaos, regression-safety, supply-chain) + rewrite output-budget rule so security/contract/migration/integration are never droppable (F-4, F-6) | Critical |
+| T-245 | `base.py` — Tighten `PROFESSIONAL_OUTPUT_RULES` escape-hatch wording; promote security/privacy/a11y/observability/reliability/abuse from "when they materially affect" to mandatory with an explicit "Not applicable because …" exception protocol (F-7.5) | High |
+| T-246 | `prompt_builder.py` — Raise `_MAX_UPSTREAM_CHARS` to 200_000 and switch to section-aware injection when upstream exceeds the cap; emit `pipeline.upstream_section_skipped` metric per skipped section so quality regressions are observable (F-7.1) | Critical |
+| T-247 | New `services/pipeline/critic.py` — Lightweight judge-model second pass per stage that checks the "Before returning, verify" invariants programmatically (every FR/NFR/SEC referenced, every section present, no `TBD`/`as needed`, every Plan ADR has Forces + Options + Reversal cost). Failure triggers one regenerate pass with the critic findings injected; second failure surfaces a `StageQualityGate` error to the workspace UI (F-7.2) | Critical |
+| T-248 | New `services/pipeline/artifact_validator.py` — Deterministic markdown validator enforcing mandatory section presence per stage (no LLM); runs before the critic, fails the stage with a structured `MissingSectionError` listing the absent sections. Frontend surfaces the error inline in `StageEditor` (F-7.3) | High |
+| T-249 | New `harness/prompt_eval/` — Offline eval suite: 3 golden workspaces × 4 stages × 25 deterministic graders (RTM coverage %, section presence %, deprecated-API hits, banned-phrase hits, ADR completeness, frontend-section presence). `ASDD_PROMPT_VERSION` bump requires running the suite locally; CI gates a `ASDD_PROMPT_VERSION` bump on the eval suite passing. Documents the prompt-experimentation workflow in `RUNBOOK.md §10` (F-7.4) | High |
+
+---
+
+### 22.4 Implementation Notes
+
+#### T-239 — plan.py: Anti-Patterns + ADR + Multi-tenancy
+
+Add three new mandatory sections to the required PLAN.md structure in `prompts/plan.py SYSTEM_PROMPT`:
+
+- **Architecture Decision Records (ADR)** — for each top-5 design decision: one-sentence Decision, Forces (requirement IDs), ≥2 Options Considered (one-line tradeoff each), Chosen + WHY-not-next-best, Reversal Cost. The ADR section satisfies the "credible alternatives considered" wording in the Technology Stack section by giving it a binding format.
+- **Architecture Anti-Patterns (explicitly avoid)** — explicit denylist: microservices below ~3 engineers / before PMF, distributed monolith, premature sharding/read-replicas/event sourcing, dual-write without outbox or CDC, business rules in routers/controllers, sync external calls in the request path without circuit breaker, N+1 patterns without an explicit eager-load or batch strategy per relation, polling where webhooks/SSE/WebSocket are first-class.
+- **Multi-tenancy Stance** — declare one of: shared-schema + tenant_id (default) | row-level security | schema-per-tenant | physical isolation. Must justify against the spec's isolation, compliance, and noisy-neighbor requirements.
+
+The corresponding `build_user_prompt` "Before returning, verify" block grows three lines, each pointing at the new section. T-247 (critic) and T-248 (validator) enforce them.
+
+#### T-240 — plan.py: Capacity + STRIDE + SLO + FMEA + AQA
+
+Add four new mandatory sections:
+
+- **Capacity Model** — for each top-3 endpoint and each background workflow: target RPS (steady + peak), p50/p95/p99 latency budget, data growth (rows/day, bytes/day, retention horizon), read/write ratio, 10× and 100× stress projection naming where the design breaks first.
+- **Threat Model (STRIDE)** — for each trust boundary in the architecture diagram: Spoofing / Tampering / Repudiation / Information disclosure / Denial of service / Elevation of privilege rows naming the mitigating control, where it lives in the stack, and the SEC-NNN ID it satisfies.
+- **SLOs and Error Budgets** — per user-facing service: availability SLO (%), latency SLO (p95/p99 ms), correctness SLO (%), error-budget consumption policy, paging-vs-ticketing thresholds.
+- **Failure Mode and Effects Analysis (FMEA-lite)** — per external dependency (DB, cache, queue, third-party API): Failure mode | Detection | Blast radius | Mitigation | Recovery time | Customer impact.
+- **Architecture Quality Attribute Matrix** — per component: Performance / Scalability / Reliability / Security / Maintainability stance in one row each. Forces the model to think across all five qualities for every component, not collapse them into prose.
+
+These sections subsume the loose "Scalability and Performance" / "Security Architecture" sections — Phase 22 collapses overlap by referencing the new sections from the existing ones (no duplication).
+
+#### T-241 — Technology Currency + Deprecation Discipline
+
+Two surfaces:
+
+In `plan.py SYSTEM_PROMPT` Technology Stack section, the table format becomes mandatory:
+
+```
+| Layer | Choice | Version (latest stable as of YYYY-MM) | Support status | EOL date | Why not the next-best alternative |
+```
+
+Support status legend: `Active | Maintenance | Deprecated (do not use) | EOL (do not use)`. Hard denylist baked into the prompt:
+- Python ≤ 3.10, Node ≤ 18, Java ≤ 11 (security EOL)
+- Any SDK whose vendor docs label deprecated or sunset
+- Deprecated LLM model families (gpt-3, gemini-1.x, claude-1.x, claude-2.x); when uncertain, name the family (e.g. "Claude Sonnet — latest stable") and let the implementation task pin the version
+- Libraries with no commit in the last 18 months unless no maintained alternative exists
+- Database engines with vendor-announced end-of-support within 24 months
+
+In `tasks.py SYSTEM_PROMPT`, every dependency-introducing task MUST add Acceptance Criteria:
+- SCA tool (`pip-audit` / `pnpm audit` / equivalent) exits 0 with no critical/high CVEs
+- The pinned version matches the version recorded in the PLAN.md Technology Stack table
+- The chosen package is not on the support-status `Deprecated` or `EOL` line
+
+T-249's eval suite includes a `deprecated_dep_hit_count` grader that greps the generated PLAN/TASKS against the denylist; a non-zero count fails the gate.
+
+#### T-242 — plan.py: Frontend Architecture section
+
+Add a conditional mandatory section to `plan.py SYSTEM_PROMPT` triggered whenever the spec/plan implies a browser-facing surface:
+
+```
+## Frontend Architecture (if applicable)
+- Rendering model: SPA / SSR / SSG / hybrid — and why
+- State management: chosen library + boundary between server state and client state
+- Data fetching: library, cache invalidation strategy, optimistic update policy, retry policy
+- Forms: library + validation library + error display contract
+- Component architecture: directory layout, presentational/container split, design-system source
+- Design tokens: where defined, how consumed, dark-mode strategy
+- Routing: library, lazy-load boundaries, route-level data loader contract
+- Loading / error / empty / offline: global contract — every async component must declare all four states
+- Accessibility: WCAG level, axe-core baseline, focus management on route change, ARIA live region usage
+- Performance: bundle budget (KB gzipped), code-split boundaries, image strategy, virtualization triggers
+- Error boundaries: where they wrap, fallback UI contract
+- Security headers: CSP policy, Trusted Types stance, dependency XSS audit
+- Browser support: explicit matrix
+- i18n: stance + library if any
+```
+
+The "if applicable" sentinel is enforced by T-248 (validator) — if the spec mentions UI/web/app/page/screen/dashboard, the validator requires this section's heading to be present.
+
+#### T-243 — tasks.py: Frontend task checklist
+
+Extend the Steps and Acceptance Criteria requirements in `tasks.py SYSTEM_PROMPT` for any task whose **Owner** is `Frontend` or `Full-stack`:
+
+- Steps MUST include implementations for the loading state, error state, and empty state (not just the happy path).
+- Steps MUST include the focus/keyboard interaction (where focus lands, what keys do what).
+- Acceptance Criteria MUST include at least one accessibility assertion (axe-core scan OR an RTL role-based query that fails when the role is missing).
+- Acceptance Criteria MUST include the bundle-size delta if the task adds a runtime dependency (target: ≤ +15KB gzipped per task; require a Plan-section reference if the task exceeds the budget intentionally).
+
+#### T-244 — harness.py: Mandatory test categories + output-budget rewrite
+
+Two changes to `prompts/harness.py SYSTEM_PROMPT`:
+
+**1. Expand mandatory test categories.** The current categories (unit, integration, e2e, security, observability, performance, contract) are joined by:
+
+- `boundary_values` — empty, null, max-length, Unicode, emoji, RTL, control chars
+- `property_based` — at least one Hypothesis (Python) / fast-check (TS) suite per parser, validator, and ID generator
+- `concurrency` — at least one N-concurrent-writer test per resource with an idempotency requirement
+- `chaos` — dependency-kill test per external service (DB, cache, queue, third-party)
+- `regression_safety` — schema-diff test against the last released contract
+- `migration_safety` — forward + backward read test + rollback test
+- `accessibility` — axe-core / equivalent run with zero serious or critical violations (frontend stacks only)
+- `performance_budget` — bundle-size assertion, Lighthouse score floor, p95 latency assertion under load (frontend + API)
+- `supply_chain` — SBOM presence test + lockfile-pinned test
+
+**2. Rewrite output-budget discipline.** The current rule encourages deferring files when token budget is tight. The new rule is:
+
+> When token budget is exhausted, do NOT defer files. Instead, drop test categories in this priority order: `performance_budget` → `accessibility` (still required to exist as a stub in the file tree) → `property_based` → `boundary_values` extras. NEVER drop: `integration`, `security`, `contract`, `migration_safety`. Output a `TestCategoryGap` record in Coverage Plan naming each reduced category and the requirement IDs left uncovered.
+
+This rewires the model's failure mode from "skip files silently" to "drop only the lowest-priority categories, loudly."
+
+#### T-245 — base.py: PROFESSIONAL_OUTPUT_RULES tightening
+
+The current rule reads: _"Include security, privacy, accessibility, observability, reliability, and abuse cases when they materially affect the artifact."_ The escape-hatch wording (`when they materially affect`) gives the model permission to omit the very controls the audit identified as missing. Rewrite to:
+
+> Every artifact MUST include security, privacy, accessibility, observability, reliability, and abuse case content. If a category is genuinely not applicable, include a one-line `Not applicable because <reason>` note in the relevant section — never omit the section heading.
+
+T-248's validator enforces the section-heading presence; the model must produce the explicit "Not applicable" note instead of silent omission.
+
+#### T-246 — prompt_builder.py: Faithful upstream injection
+
+Two changes in `backend/services/pipeline/prompt_builder.py`:
+
+1. Raise `_MAX_UPSTREAM_CHARS` from `50_000` to `200_000`. Current frontier models accept 200K+ context windows; the cap is a vestige of pre-2025 limits. The Phase 21 spec/plan exceeded 50K, so every Phase 21 harness/tasks generation was running on a lossy summary — a known quality regression we shipped through.
+
+2. When upstream content still exceeds the cap after the bump, switch from `summarize_stage_content` (lossy) to **section-aware injection**:
+   - Parse the upstream artifact by `##` heading.
+   - For the harness stage: keep the Requirement Traceability Matrix + the API Design + the Security Architecture + the Data Model verbatim; summarize everything else.
+   - For the tasks stage: keep the full RTM verbatim; summarize narrative sections.
+   - Emit a new Prometheus counter `pipeline_upstream_section_skipped_total{stage, section}` whenever a section is summarized instead of injected verbatim, so quality regressions on large products are observable in Grafana.
+
+This preserves the IDs and contracts that downstream stages need by name, while still bounding the prompt size.
+
+#### T-247 — services/pipeline/critic.py: Stage critic loop
+
+New module `backend/services/pipeline/critic.py` exposing:
+
+```python
+class StageCriticResult(BaseModel):
+    passed: bool
+    failures: list[CriticFinding]   # missing section, missing FR coverage, banned phrase, deprecated API, etc.
+
+async def critic_review(stage_type: str, artifact_md: str, deps: dict[str, str]) -> StageCriticResult:
+    ...
+```
+
+The critic is called from `stage_manager.py` immediately after generation completes and before the artifact is persisted to the database. It uses the same cheap judge model class as `spec_clarifier` (Claude Haiku / GPT-4o Mini / Gemini Flash) — cost ≤ 1¢ per stage.
+
+The critic's prompt is a programmatic restatement of the "Before returning, verify" checklist already at the end of every user prompt — every FR/NFR/SEC ID from upstream is enumerated, the artifact is searched for each, and missing IDs produce `CoverageGap` findings. Additional graders: section-presence (delegates to T-248), banned-phrase (`TBD`, `as needed`, `to be determined`, `…`), deprecated-API hits from the T-241 denylist, ADR-completeness (every ADR has Forces + Options + Chosen + Reversal cost).
+
+A failed critic triggers exactly **one regenerate pass** with the critic findings injected as additional user-prompt context. A second consecutive failure raises `StageQualityGateError`, surfaced to the workspace UI via the existing SSE event channel as a new `quality_gate_failed` event; the frontend `StreamingOverlay` renders the failures and offers a manual "Override and continue" action gated to the workspace owner.
+
+Cost guardrail: the critic call is skipped when the artifact is under 500 chars (likely an early-abort) and when the workspace has set `disable_critic=True` in its settings (an escape hatch for the rare case where the critic blocks shipping; logged loudly).
+
+#### T-248 — services/pipeline/artifact_validator.py: Deterministic section validator
+
+New module performing a zero-LLM, regex-based mandatory-section presence check per stage:
+
+```python
+SECTION_CONTRACTS: dict[str, list[str]] = {
+    "spec": [
+        "## Overview", "## Product Goals", "## User Problems", "## Non-Goals",
+        "## Users and Personas", "## User Journeys", "## User Flow Diagrams",
+        "## Functional Requirements", "## Non-Functional Requirements",
+        "## Conceptual Domain Model", "## Integrations and External Touchpoints",
+        "## Permissions and Access Expectations",
+        "## Security, Privacy, and Abuse Expectations",
+        "## Error Handling and Recovery", "## High-Level System Context",
+        "## Feature Interaction Overview", "## Acceptance Criteria",
+        "## Success Metrics", "## Edge Cases", "## Constraints", "## Risks",
+        "## Assumptions and Open Questions", "## Out of Scope",
+    ],
+    "plan": [...],     # mirrors plan.py SYSTEM_PROMPT including T-239 / T-240 / T-242 additions
+    "harness": [...],
+    "tasks": [...],
+}
+
+class MissingSectionError(StageQualityGateError):
+    missing: list[str]
+```
+
+The validator runs **before** the critic. A missing heading short-circuits the stage with a structured error containing the list of absent sections; the frontend `StageEditor` renders the error inline with a "Regenerate" CTA.
+
+Conditional sections (e.g. the Phase-22 Frontend Architecture section under T-242) are enforced when a sentinel string from the spec is present (UI, web, app, page, screen, dashboard). The sentinel map lives in the same module and is unit-tested.
+
+Performance: validator runs in < 5 ms on a 200K-char artifact; no Redis dependency.
+
+#### T-249 — harness/prompt_eval/: Offline eval suite + prompt versioning
+
+New directory `harness/prompt_eval/` containing:
+
+- `golden_workspaces/` — 3 anonymized workspace snapshots (problem statement + clarification Q&A + canonical SPEC.md, PLAN.md, harness/, tasks.md) chosen to span: (a) simple SaaS CRUD, (b) AI-facing product, (c) real-time / event-driven product.
+- `graders/` — 25 deterministic graders organised into:
+  - **Coverage** (5): RTM-coverage %, FR→test %, FR→task %, plan-section-presence %, harness-file-presence %
+  - **Quality** (8): deprecated-API hit count, banned-phrase hit count, ADR completeness %, frontend-section presence (when applicable), Capacity-Model presence, STRIDE presence, SLO presence, FMEA presence
+  - **Format** (6): heading order, code-fence balance, mermaid validity, table column counts, ID-format consistency, trailing-newline policy
+  - **Safety** (6): secret-shaped string scan, prompt-injection-echo scan, untrusted-content-tag presence, fake-system-message echo, role-change accept, security-rules-stripped
+- `run.py` — CLI runner: `uv run python -m prompt_eval.run --version asdd-v1.8.0 --baseline asdd-v1.7.1` produces a markdown delta report (per-grader pass rate, per-stage cost, per-stage latency).
+- CI hook (new `.github/workflows/prompt-eval.yml`): on any PR that bumps `ASDD_PROMPT_VERSION` in `prompts/base.py`, the eval suite runs in CI; failure blocks merge with the delta report posted as a PR comment.
+- `RUNBOOK.md §10` documents the prompt experimentation workflow: branch → edit prompt → bump version → run eval → review delta → merge.
+
+The eval suite intentionally lives in `harness/` (not `backend/tests/`) so it does not run in the normal backend test suite — it is a slow, model-spend-heavy gate run only when prompts change.
+
+---
+
+### 22.5 Security Invariants
+
+1. **Critic must not be able to weaken the artifact it reviews.** The critic's allowed actions are exclusively: produce a `CoverageGap` / `MissingSection` / `BannedPhrase` / `DeprecatedAPI` finding. It cannot rewrite the artifact directly; the regenerate pass goes through the original stage prompt with the findings injected as additional context. T-247 unit tests assert the critic's output schema cannot include free-form artifact bytes.
+2. **`disable_critic` workspace flag is owner-only and audit-logged.** A new `audit_event = "critic_disabled"` row is written every time the flag is toggled, with the actor user_id. Prevents a compromised workspace member from silently disabling the quality gate.
+3. **Eval golden workspaces are anonymized at ingest.** The script that imports a workspace into `harness/prompt_eval/golden_workspaces/` strips email, name, IP, workspace name, and any free-form fields longer than 280 chars; assert-via-test that no PII pattern survives.
+4. **Section-aware injection does not leak cross-workspace data.** T-246's parser operates only on the workspace's own upstream content; no global cache.
+5. **Critic-prompt template is held in code, not in Langfuse remote prompts.** A compromised Langfuse dashboard could otherwise weaken the gate. The `_enforce_security_rules` mechanism in `base.py` does not apply to the critic prompt, so the critic prompt MUST be defined inline in `services/pipeline/critic.py`.
+
+---
+
+### 22.6 Risks and Mitigations
+
+| Risk | Likelihood | Impact | Mitigation |
+|---|---|---|---|
+| Critic adds 2-5 s latency per stage, hurting perceived streaming responsiveness | High | Medium | Run critic AFTER the stage SSE close event so the user sees the artifact immediately; render a "Verifying…" chip in `StageEditor`; auto-regenerate happens in-place. Cost guardrail of 1¢/stage means the critic is cheap. |
+| Critic + regenerate pass double-charges credits | Medium | High | The regenerate pass triggered by the critic is platform-funded (no user credit deduction). Add `BILLING_CREDITS_CRITIC_REGEN` counter so we can attribute cost. |
+| Validator's mandatory-section list goes stale when prompts evolve | Medium | Medium | Single source of truth: `SECTION_CONTRACTS` in `artifact_validator.py` is imported by both the prompt-builder unit tests and the eval suite (T-249). Any heading rename surfaces as a test failure in the same PR. |
+| Eval golden set drifts from current quality bar (the suite "passes" but the prompt is bad) | Medium | High | Re-baseline the golden set every quarter; add a `RUNBOOK.md §10.2` checklist for re-baseline. Track per-grader pass rate as a Prometheus counter so trend is observable. |
+| 200K-char upstream injection inflates LLM cost per stage by ~3× on large workspaces | High | Medium | Section-aware injection in T-246 truncates only narrative sections, not RTMs/contracts. Add a per-workspace `prompt_input_tokens` Prometheus histogram + alert at p99 > 150K so cost regressions surface before billing surprises. |
+| Critic false-positives block a legitimate artifact from shipping | Medium | High | `disable_critic` escape hatch (workspace-owner only, audit-logged). Critic findings render as actionable items in the UI, never as opaque errors. |
+| Deprecation denylist in T-241 itself goes stale (e.g., Python 3.10 EOL passes) | High | Low | Denylist lives in `prompts/plan.py` constants block, version-pinned to `ASDD_PROMPT_VERSION`. T-249 eval includes a grader that fails when the denylist's most recent entry is > 12 months old, forcing a refresh. |
+
+---
+
+### 22.7 Validation
+
+After Phase 22 is implemented:
+
+- [ ] `uv run pytest backend/tests/test_artifact_validator.py -v` — all section-presence tests pass
+- [ ] `uv run pytest backend/tests/test_critic.py -v` — all critic tests pass, including the "critic cannot rewrite artifact bytes" security test
+- [ ] `cd harness && pytest tests/backend/test_phase22_prompt_pipeline_contract.py -v` — all contract tests pass
+- [ ] `cd backend && uv run pytest tests/ --cov=services --cov-fail-under=80` — coverage maintained
+- [ ] `uv run python -m prompt_eval.run --version asdd-v1.8.0 --baseline asdd-v1.7.1` — eval suite reports ≥ baseline on every grader; bump `ASDD_PROMPT_VERSION` in `prompts/base.py` only if true
+- [ ] Manual: generate a SPEC for a UI-facing product; assert the validator forces a Frontend Architecture section into the downstream PLAN
+- [ ] Manual: generate a PLAN that names `gpt-3` as the model; assert the critic emits a `DeprecatedAPI` finding and the regenerate pass replaces it
+- [ ] Manual: generate a PLAN missing the Capacity Model section; assert the validator short-circuits with `MissingSectionError(missing=["## Capacity Model"])`
+- [ ] Manual: generate a HARNESS that defers integration tests; assert the new output-budget rule keeps integration/security/contract/migration present (defer falls only on the dropped categories)
+- [ ] Manual: build a 250K-char SPEC; assert prompt-builder uses section-aware injection (RTM preserved verbatim) and `pipeline_upstream_section_skipped_total` increments for non-essential sections
+- [ ] Manual: toggle `disable_critic=True` on a workspace; assert the `audit_event=critic_disabled` row is written with the actor user_id
+- [ ] Manual: open a PR that bumps `ASDD_PROMPT_VERSION` without running the eval; assert CI blocks the merge with the delta report attached as a comment
+
+---
+
+_SpecForge V1 PLAN.md · Version 2.3.0 · 2026-05-29 — added Phase 22 Prompt Pipeline Quality Hardening covering all 11 tasks (T-239 through T-249): closes the 7 audit findings on the SPEC/PLAN/HARNESS/TASKS prompt pipeline — Architecture anti-patterns + ADR + multi-tenancy; Capacity Model + STRIDE + SLO + FMEA + AQA matrix; Technology Currency / deprecation denylist; Frontend Architecture section + per-task FE checklist; mandatory harness test categories (boundary/property/concurrency/chaos/supply-chain) with priority-protected output-budget rule; PROFESSIONAL_OUTPUT_RULES escape-hatch tightening; 50K→200K upstream cap with section-aware injection + `pipeline_upstream_section_skipped_total` metric; new `services/pipeline/critic.py` (judge-model second pass with 1-regenerate cap and `disable_critic` escape hatch); new `services/pipeline/artifact_validator.py` (zero-LLM mandatory-section presence); new `harness/prompt_eval/` (3 golden workspaces × 25 graders + CI gate on `ASDD_PROMPT_VERSION` bumps + RUNBOOK §10 prompt-experimentation workflow)_
+
 _SpecForge V1 PLAN.md · Version 2.2.0 · 2026-05-27 — added Phase 21 Stripe Payments Integration covering all 13 tasks (T-226 through T-238): DB migration (stripe_credit_packs + stripe_webhook_events), config with production key guard, StripeService (checkout + webhook handler + dispute revocation), CreditService extensions (lazy expiry + FIFO pack drain), 5 billing endpoints, middleware exemptions for webhook, 10 Prometheus billing counters + structlog schema + secret scrubbing, full test suite, Billing.tsx frontend page + expiry warning chip_
 
 _SpecForge V1 PLAN.md · Version 2.1.0 · 2026-05-25 — added Phase 20 Final Hardening & Enterprise Closure covering all 9 tasks from third-pass enterprise review (T-217 through T-225): C-1 circuit breaker timeout gap fixed in generate(), H-1 tasks prompt regression restored, H-2 credit cache double-invalidation, H-3 rate limit startup window fix, M-2 circuit_state Gauge, M-4 Langfuse startup check, L-1 adapter TTL eviction, L-4 sliding window RedisError fallback, secret rotation RUNBOOK §8_
