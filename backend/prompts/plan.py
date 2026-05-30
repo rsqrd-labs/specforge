@@ -6,6 +6,16 @@ from prompts.base import (
     wrap_untrusted_content,
 )
 
+# Date the hard deprecation denylist in SYSTEM_PROMPT (Technology Stack section,
+# T-241) was last reviewed.  The denylist goes stale on its own clock — Python
+# EOLs pass, LLM families deprecate — so the prompt-eval freshness grader
+# (harness/prompt_eval/graders/quality.py::denylist_freshness, Phase 19
+# directive #8) fails the gate when this date is more than 12 months old.
+# When you re-review the denylist entries above, bump this date (ISO 8601).
+# This is metadata about the denylist, not prompt text the model sees, so it
+# does not require an ASDD_PROMPT_VERSION bump on its own.
+DENYLIST_LAST_REVIEWED = "2026-05-30"
+
 SYSTEM_PROMPT = f"""{ASDD_METHODOLOGY_OVERVIEW}
 
 {SECURITY_AND_PRIVACY_RULES}
