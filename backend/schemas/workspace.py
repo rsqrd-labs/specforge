@@ -59,6 +59,18 @@ class WorkspaceUpdate(BaseModel):
         return self
 
 
+class WorkspaceCriticToggle(BaseModel):
+    """Owner-only toggle for the Phase 19 critic quality gate (T-247).
+
+    Setting disable_critic=True bypasses the critic second-pass for the
+    workspace; the router writes a `critic_disabled` audit log row.
+    """
+
+    disable_critic: bool
+
+    model_config = ConfigDict(from_attributes=True)
+
+
 class CoverageSummary(BaseModel):
     """Harness coverage figure surfaced from the latest EvalResult.
 
@@ -132,6 +144,7 @@ class WorkspaceResponse(BaseModel):
     clarification_qa: list[ClarificationQA] | None = None
     public_share_slug: str | None = None
     public_share_enabled: bool = False
+    disable_critic: bool = False
     coverage_summary: CoverageSummary | None = None
     stages: list[StageResponse] = Field(default_factory=list)
     created_at: datetime

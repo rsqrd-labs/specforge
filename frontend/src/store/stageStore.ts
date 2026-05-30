@@ -1,5 +1,6 @@
 import { create } from "zustand"
 import { subscribeWithSelector } from "zustand/middleware"
+import type { QualityGateInfo } from "../services/sseService"
 import type { Stage, StageType } from "../types/stage"
 
 interface StageState {
@@ -10,12 +11,17 @@ interface StageState {
    */
   streamingContent: Record<string, string>
   activeStream: string | null
+  /** Critic quality-gate findings per stage ID, set when a generation is held
+   *  back by the gate (T-247).  Cleared when a new stream starts for the stage. */
+  qualityGate: Record<string, QualityGateInfo>
   setStage: (stage: Stage) => void
   setStages: (stages: Stage[]) => void
   appendToken: (stageId: string, token: string) => void
   appendStreamToken: (token: string) => void
   startStream: (stageId: string) => void
   finaliseStream: (stageId: string) => void
+  setQualityGate: (stageId: string, info: QualityGateInfo) => void
+  clearQualityGate: (stageId: string) => void
   markStale: (stageType: StageType) => void
 }
 
@@ -26,6 +32,7 @@ export const useStageStore = create<StageState>()(
     stages: {},
     streamingContent: {},
     activeStream: null,
+    qualityGate: {},
 
     setStage: (stage) =>
       set((state) => ({
@@ -61,10 +68,28 @@ export const useStageStore = create<StageState>()(
       }),
 
     startStream: (stageId) =>
+      set((state) => {
+        // Clear any prior gate findings for this stage on a fresh attempt.
+        const qualityGate = { ...state.qualityGate }
+        delete qualityGate[stageId]
+        return {
+          activeStream: stageId,
+          streamingContent: { ...state.streamingContent, [stageId]: "" },
+          qualityGate,
+        }
+      }),
+
+    setQualityGate: (stageId, info) =>
       set((state) => ({
-        activeStream: stageId,
-        streamingContent: { ...state.streamingContent, [stageId]: "" },
+        qualityGate: { ...state.qualityGate, [stageId]: info },
       })),
+
+    clearQualityGate: (stageId) =>
+      set((state) => {
+        const qualityGate = { ...state.qualityGate }
+        delete qualityGate[stageId]
+        return { qualityGate }
+      }),
 
     finaliseStream: (stageId) =>
       set((state) => {

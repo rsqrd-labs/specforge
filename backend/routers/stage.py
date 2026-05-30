@@ -27,6 +27,7 @@ from schemas.stage import (
 from services.credit_service import InsufficientCreditsError
 from services.llm.base import ProviderError, ProviderTimeoutError
 from services.evals.online_eval import _validate_task_references
+from services.pipeline.critic import StageQualityGateError
 from services.pipeline.stage_manager import (
     PreflightError,
     RateLimitError,
@@ -52,10 +53,27 @@ async def _stream_stage(
         async for token in stage_manager.generate(
             stage_id, user, db, trace_id=trace_id, free=free
         ):
-            if token.startswith('{"done"') or token.startswith('{"eval"'):
+            if (
+                token.startswith('{"done"')
+                or token.startswith('{"eval"')
+                or token.startswith('{"quality_gate_failed"')
+            ):
                 yield f"data: {token}\n\n"
             else:
                 yield f"data: {json.dumps({'token': token})}\n\n"
+    except StageQualityGateError as exc:
+        # The quality_gate_failed event was already streamed to the client before
+        # generate() raised; emit nothing further so the frontend does not also
+        # see a misleading internal_error.  Credits were refunded and the stage
+        # reset to draft inside generate().
+        logger.info(
+            "stage_quality_gate_failed",
+            extra={
+                "stage_id": str(stage_id),
+                "stage": exc.stage_type,
+                "finding_count": len(exc.findings),
+            },
+        )
     except StageDependencyError as exc:
         payload = json.dumps({"error": "dependency_not_finalised", "detail": str(exc)})
         yield f"data: {payload}\n\n"

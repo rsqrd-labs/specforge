@@ -23,7 +23,28 @@ interface EvalEvent {
   eval: EvalResult
 }
 
-type SSEPayload = DoneEvent | TokenEvent | ErrorEvent | EvalEvent
+export interface QualityGateFinding {
+  kind: string
+  detail: string
+  reference: string | null
+}
+
+export interface QualityGateInfo {
+  stage: string
+  kind: string
+  findings: QualityGateFinding[]
+}
+
+interface QualityGateFailedEvent {
+  quality_gate_failed: QualityGateInfo
+}
+
+type SSEPayload =
+  | DoneEvent
+  | TokenEvent
+  | ErrorEvent
+  | EvalEvent
+  | QualityGateFailedEvent
 
 /**
  * Safely close and nullify an SSE stream reference.
@@ -77,6 +98,11 @@ function streamErrorMessage(event: ErrorEvent): string {
       )
     case "insufficient_credits":
       return "You need more credits before generating this stage."
+    case "quality_gate_failed":
+      return (
+        "Generation was held back by the quality gate. Review the findings " +
+        "below, then regenerate or override to continue."
+      )
     case "internal_error":
       return "Something went wrong while generating. Please try again."
     default:
@@ -127,6 +153,7 @@ export function createSSEConnection(
   onDone: (stageId: string) => void,
   onError: (error: Error) => void,
   onEval: (result: EvalResult | null) => void = () => {},
+  onQualityGateFailed: (info: QualityGateInfo) => void = () => {},
 ): SSEControl {
   let closed = false
   let currentController = new AbortController()
@@ -205,6 +232,22 @@ export function createSSEConnection(
             onDone((data as DoneEvent).stage_id)
             // Keep connection open to receive the follow-on eval event
             continue
+          }
+
+          if ("quality_gate_failed" in data) {
+            const info = (data as QualityGateFailedEvent).quality_gate_failed
+            onQualityGateFailed(info)
+            // Terminal: the backend refunded the credit and reset the stage to
+            // draft, then ended the stream without a `done`.  Surface it as an
+            // application error so the caller stops waiting and tears down.
+            onError(
+              new StreamError(
+                "quality_gate_failed",
+                streamErrorMessage({ error: "quality_gate_failed" }),
+              ),
+            )
+            close()
+            return true // application-level gate failure — do not retry
           }
 
           if ("error" in data) {

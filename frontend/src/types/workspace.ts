@@ -29,6 +29,7 @@ export interface Workspace {
   clarification_qa?: ClarificationQA[] | null
   public_share_slug?: string | null
   public_share_enabled?: boolean
+  disable_critic?: boolean
   coverage_summary?: CoverageSummary | null
 }
 

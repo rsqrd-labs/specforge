@@ -206,6 +206,32 @@ describe("createSSEConnection retry behaviour", () => {
     expect(console.warn).not.toHaveBeenCalled()
   })
 
+  it("surfaces a quality_gate_failed event and stops without retrying", async () => {
+    const gateBody =
+      'data: {"quality_gate_failed":{"stage":"plan","kind":"critic_findings",' +
+      '"findings":[{"kind":"MissingSection","detail":"No ADR","reference":"ADR"}]}}\n\n'
+    vi.spyOn(globalThis, "fetch").mockImplementation(() => mockFetchOk(gateBody))
+
+    const onDone = vi.fn()
+    const onError = vi.fn()
+    const onGate = vi.fn()
+
+    createSSEConnection("/stream", vi.fn(), onDone, onError, vi.fn(), onGate)
+
+    await vi.runAllTimersAsync()
+
+    expect(onGate).toHaveBeenCalledTimes(1)
+    expect(onGate.mock.calls[0][0]).toMatchObject({
+      stage: "plan",
+      findings: [{ kind: "MissingSection", detail: "No ADR", reference: "ADR" }],
+    })
+    // Terminal: surfaced as an error, the done callback never fires, no retry.
+    expect(onError).toHaveBeenCalledTimes(1)
+    expect(onError.mock.calls[0][0].code).toBe("quality_gate_failed")
+    expect(onDone).not.toHaveBeenCalled()
+    expect(console.warn).not.toHaveBeenCalled()
+  })
+
   it("stops retrying when close() is called during a backoff delay", async () => {
     vi.spyOn(globalThis, "fetch").mockImplementation(() => mockFetchFail(503))
 

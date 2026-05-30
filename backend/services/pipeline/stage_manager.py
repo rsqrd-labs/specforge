@@ -43,7 +43,13 @@ from services.llm.output_budget import output_budget_for_operation
 from services.llm.provider_config import JUDGE_MODELS
 from services.llm.routing import LLMRoute, LLMRoutingError, resolve_llm_route
 from services.observability import (
+    BILLING_CREDITS_CRITIC_REGEN,
     SSE_STREAM_FAILURES,
+)
+from services.pipeline.critic import (
+    MAX_REGENERATES,
+    StageQualityGateError,
+    critic_review,
 )
 from services.pipeline.diff_engine import (
     apply_diff,
@@ -703,6 +709,70 @@ class StageManager:
                     span_finished = True
                 raise SecurityError(f"Output failed validation: {validation.reason}")
 
+            # T-247: critic quality gate.  Runs AFTER output validation and
+            # BEFORE persistence + caching, so only a critic-passed artifact is
+            # ever cached, persisted, or eval'd (the cache-hit early return is
+            # therefore legitimately pre-vetted).  The validator pre-gate (T-248)
+            # slots in immediately before this block.  Skipped when the
+            # workspace owner has toggled the audited disable_critic escape hatch.
+            if not workspace.disable_critic:
+                critic_deps = await self._critic_deps(workspace.id, stage.type)
+                regenerate_count = 0
+                while True:
+                    critic_result = await critic_review(
+                        stage.type,
+                        accumulated,
+                        critic_deps,
+                        provider=workspace.provider,
+                    )
+                    if critic_result.passed:
+                        break
+                    if regenerate_count >= MAX_REGENERATES:
+                        # Terminal gate failure after the one regenerate pass.
+                        await self._refund_and_reset(db, deduction, stage, user)
+                        _cleanup_done = True
+                        gate_error = StageQualityGateError(
+                            stage.type, critic_result.findings
+                        )
+                        if span_id:
+                            await self._mark_langfuse_span_failed(span_id, gate_error)
+                            span_finished = True
+                        yield json.dumps(
+                            {
+                                "quality_gate_failed": {
+                                    "stage": stage.type,
+                                    "kind": "critic_findings",
+                                    "findings": [
+                                        f.model_dump() for f in critic_result.findings
+                                    ],
+                                }
+                            }
+                        )
+                        raise gate_error
+                    # One platform-funded regenerate with the findings injected.
+                    accumulated = await self._regenerate_with_findings(
+                        route=route,
+                        system_prompt=system_prompt,
+                        base_user_prompt=user_prompt,
+                        findings=critic_result.findings,
+                        stage_type=stage.type,
+                    )
+                    BILLING_CREDITS_CRITIC_REGEN.labels(stage=stage.type).inc()
+                    regenerate_count += 1
+                    # The regenerated artifact must clear the same security gate.
+                    regen_validation = validate(accumulated)
+                    if not regen_validation.is_safe:
+                        await self._refund_and_reset(db, deduction, stage, user)
+                        _cleanup_done = True
+                        sec_error = SecurityError(
+                            f"Regenerated output failed validation: "
+                            f"{regen_validation.reason}"
+                        )
+                        if span_id:
+                            await self._mark_langfuse_span_failed(span_id, sec_error)
+                            span_finished = True
+                        raise sec_error
+
             stage.content = accumulated
             stage.current_version += 1
             stage.status = "draft"
@@ -1258,6 +1328,85 @@ class StageManager:
             return combined, harness or None
         spec = await redis.get(f"{_STAGE_CACHE_PREFIX}{workspace_id}:spec") or ""
         return spec, None
+
+    async def _critic_deps(
+        self, workspace_id: UUID, stage_type: str
+    ) -> dict[str, str]:
+        """Upstream dependency contents for the critic, from the stage cache.
+
+        Finalised upstream stages are cached on finalise(); the critic reads
+        them to check coverage (e.g. every upstream FR appears in this stage).
+        A missing/empty dependency yields an empty string — the critic handles
+        that gracefully.
+        """
+        redis = await self._redis_client()
+        deps: dict[str, str] = {}
+        for dep_type in STAGE_DEPENDENCIES[stage_type]:
+            deps[dep_type] = (
+                await redis.get(f"{_STAGE_CACHE_PREFIX}{workspace_id}:{dep_type}")
+                or ""
+            )
+        return deps
+
+    async def _refund_and_reset(
+        self, db: AsyncSession, deduction, stage: Stage, user
+    ) -> None:
+        """Refund the generation credit and reset the stage to draft.
+
+        Mirrors the security-validation-failure cleanup so a quality-gate
+        rejection refunds the user exactly once and leaves a regeneratable
+        draft.  The caller owns _cleanup_done / span bookkeeping.
+        """
+        if deduction is not None:
+            await credit_service.refund(db, deduction.id)
+        stage.status = "draft"
+        stage.updated_at = datetime.now(UTC)
+        await db.commit()
+        if deduction is not None:
+            # Post-commit cache eviction — H-2 — T-219.
+            await credit_service.invalidate(user.id)
+
+    async def _regenerate_with_findings(
+        self,
+        *,
+        route: LLMRoute,
+        system_prompt: str,
+        base_user_prompt: str,
+        findings,
+        stage_type: str,
+    ) -> str:
+        """One platform-funded, non-streaming regenerate with findings injected.
+
+        The original stage prompt is reused verbatim; the critic findings are
+        appended as additional context.  Per the Phase 19 Security Directive the
+        critic never rewrites the artifact directly — the regenerate goes back
+        through the original generator prompt.  Credit-free (platform-funded):
+        the caller increments BILLING_CREDITS_CRITIC_REGEN.
+        """
+        findings_block = "\n".join(
+            f"- [{f.kind}] {f.detail}"
+            + (f" (reference: {f.reference})" if f.reference else "")
+            for f in findings
+        )
+        augmented_user_prompt = (
+            f"{base_user_prompt}\n\n"
+            "## Critic Findings — you MUST resolve every item below\n"
+            "Your previous attempt failed the automated quality gate for the "
+            "reasons listed here. Produce a complete, corrected artifact that "
+            "fully resolves every finding. Do not reference this section or the "
+            "critic in your output.\n"
+            f"{findings_block}"
+        )
+        adapter = get_llm(route.provider, route.model)
+        raw = await asyncio.wait_for(
+            adapter.complete(
+                system_prompt,
+                augmented_user_prompt,
+                max_tokens=output_budget_for_operation(route.operation),
+            ),
+            timeout=_stream_timeout_for_stage(stage_type),
+        )
+        return _strip_code_fence(raw)
 
     async def generate_harness_patch(
         self,

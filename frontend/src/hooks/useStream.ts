@@ -68,6 +68,7 @@ export function useStream(stageId: string | null) {
              resolve,
              reject,
              onEval,
+             (info) => useStageStore.getState().setQualityGate(stageId, info),
            )
         })
 

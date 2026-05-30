@@ -130,6 +130,45 @@ async def complete_with_timeout(
     )
 
 
+# Platform-funded judge model provider used by the Phase 19 critic when the
+# workspace provider has no configured judge model.  anthropic is the platform
+# primary (its API key is the only non-optional provider key in config).
+_DEFAULT_JUDGE_PROVIDER = "anthropic"
+
+
+async def call_judge_model(
+    *,
+    system_prompt: str,
+    user_prompt: str,
+    provider: str | None = None,
+    max_tokens: int = 2048,
+    timeout: float | None = None,
+) -> str:
+    """Run a one-shot completion against the cheap judge model for *provider*.
+
+    Used by the Phase 19 critic (services/pipeline/critic.py).  Routes through
+    the circuit-aware get_llm() and a hard wall-clock timeout.  Falls back to
+    the platform-default judge provider when *provider* has no configured judge
+    model so the gate keeps working regardless of the workspace's primary
+    provider.  T-247.
+    """
+    from services.llm.provider_config import JUDGE_MODELS  # noqa: PLC0415
+
+    judge_provider = provider if provider in JUDGE_MODELS else _DEFAULT_JUDGE_PROVIDER
+    model = JUDGE_MODELS[judge_provider]
+    effective_timeout = (
+        timeout if timeout is not None else float(settings.llm_complete_timeout_seconds)
+    )
+    return await complete_with_timeout(
+        judge_provider,
+        model,
+        system_prompt,
+        user_prompt,
+        max_tokens,
+        timeout=effective_timeout,
+    )
+
+
 def clear_llm_cache() -> None:
     _INSTANCES.clear()
 

@@ -61,6 +61,14 @@ class Workspace(Base):
         TIMESTAMP(timezone=True),
         nullable=True,
     )
+    # Owner-only escape hatch for the Phase 19 critic quality gate (T-247).
+    # Toggling it writes a structured `critic_disabled` audit log row.
+    disable_critic: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default=text("false"),
+    )
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True),
         nullable=False,

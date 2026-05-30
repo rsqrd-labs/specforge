@@ -176,6 +176,14 @@ PIPELINE_UPSTREAM_SECTION_SKIPPED = Counter(
     labelnames=["stage", "section"],
 )
 
+BILLING_CREDITS_CRITIC_REGEN = Counter(
+    "specforge_billing_credits_critic_regen_total",
+    "Number of platform-funded stage regenerations triggered by the critic. "
+    "Used to attribute the cost of the quality gate against operational P&L. "
+    "T-247 (Phase 19).",
+    labelnames=["stage"],
+)
+
 _sentry_configured = False
 _otel_configured = False
 _REDACTED = "[REDACTED]"

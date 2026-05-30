@@ -327,6 +327,16 @@ export async function updateWorkspace(
   return response.data
 }
 
+export async function setWorkspaceCritic(
+  id: string,
+  disableCritic: boolean,
+): Promise<WorkspaceWithStages> {
+  const response = await api.patch<WorkspaceWithStages>(`/workspaces/${id}/critic`, {
+    disable_critic: disableCritic,
+  })
+  return response.data
+}
+
 export async function getStage(id: string): Promise<Stage> {
   const response = await api.get<Stage>(`/stages/${id}`)
   return response.data

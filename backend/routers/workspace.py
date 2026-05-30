@@ -19,6 +19,7 @@ from schemas.workspace import (
     ClarifySubmitRequest,
     ShareLinkResponse,
     WorkspaceCreate,
+    WorkspaceCriticToggle,
     WorkspaceResponse,
     WorkspaceUpdate,
 )
@@ -32,6 +33,7 @@ from services.integrations.github_api_client import (
 )
 from services.llm.provider_status import is_provider_configured
 from services.pipeline import github_export_service, pdf_export_service, spec_clarifier
+from services.pipeline.critic import AUDIT_EVENT_CRITIC_DISABLED
 from services.pipeline.export_service import ExportNotReadyError, build_export
 from services.pipeline.spec_clarifier import ClarificationValidationError
 from services.sharing import public_share_service
@@ -141,6 +143,36 @@ async def update_workspace(
         problem_statement=payload.problem_statement,
     )
     return WorkspaceResponse.model_validate(workspace)
+
+
+@router.patch("/{id}/critic", response_model=WorkspaceResponse)
+async def set_workspace_critic(
+    id: UUID,
+    payload: WorkspaceCriticToggle,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> WorkspaceResponse:
+    """Owner-only toggle of the critic quality gate (T-247).
+
+    workspace_service.get filters by user_id, so a non-owner gets 404 and can
+    never flip another user's gate.  Every change writes a structured
+    `critic_disabled` audit row naming the actor and the resulting state.
+    """
+    workspace = await workspace_service.get(id, user.id, db)
+    if workspace.disable_critic != payload.disable_critic:
+        workspace.disable_critic = payload.disable_critic
+        await db.commit()
+        await db.refresh(workspace)
+        logger.info(
+            AUDIT_EVENT_CRITIC_DISABLED,
+            extra={
+                "audit_event": AUDIT_EVENT_CRITIC_DISABLED,
+                "actor_id": str(user.id),
+                "workspace_id": str(id),
+                "disable_critic": payload.disable_critic,
+            },
+        )
+    return await _workspace_response(workspace, db)
 
 
 @router.delete("/{id}", status_code=status.HTTP_204_NO_CONTENT)

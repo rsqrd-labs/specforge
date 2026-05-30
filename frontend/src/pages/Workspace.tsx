@@ -41,6 +41,7 @@ import {
   rejectStageDiff,
   revalidateTasks,
   rollbackStage,
+  setWorkspaceCritic,
   updateWorkspace,
   updateStageContent,
 } from "../services/api"
@@ -150,6 +151,8 @@ export default function Workspace() {
   const { currentWorkspace, isLoading, fetchWorkspace, setCurrentWorkspace } =
     useWorkspaceStore()
   const { stages: stageMap, setStage, setStages } = useStageStore()
+  const qualityGateMap = useStageStore((s) => s.qualityGate)
+  const clearQualityGate = useStageStore((s) => s.clearQualityGate)
   const { balance } = useCredits()
   const animatedBalance = useAnimatedNumber(balance)
 
@@ -221,6 +224,30 @@ export default function Workspace() {
   const { start: startStream, isStreaming, error: streamError } = useStream(
     activeStage?.id ?? null,
   )
+
+  // T-247 critic quality gate: findings surfaced when a generation is held back.
+  const activeGate = activeStage ? qualityGateMap[activeStage.id] : undefined
+
+  const handleGateRegenerate = useCallback(() => {
+    if (!activeStage) return
+    clearQualityGate(activeStage.id)
+    void startStream("generate")
+  }, [activeStage, clearQualityGate, startStream])
+
+  const handleGateOverride = useCallback(async () => {
+    if (!activeStage || !currentWorkspace) return
+    // Owner escape hatch: disable the gate for the workspace, then regenerate.
+    // The backend re-enforces owner-only and writes the critic_disabled audit row.
+    await setWorkspaceCritic(currentWorkspace.id, true)
+    setCurrentWorkspace({ ...currentWorkspace, disable_critic: true })
+    clearQualityGate(activeStage.id)
+    void startStream("generate")
+  }, [activeStage, currentWorkspace, setCurrentWorkspace, clearQualityGate, startStream])
+
+  const handleGateDismiss = useCallback(() => {
+    if (!activeStage) return
+    clearQualityGate(activeStage.id)
+  }, [activeStage, clearQualityGate])
 
   const stages = useMemo(() => {
     const workspaceStageIds = new Set(
@@ -1193,7 +1220,13 @@ export default function Workspace() {
                     <MarkdownRenderer content={activeStage.content ?? ""} />
                   </div>
                 )}
-                <StreamingOverlay isVisible={isStreaming} />
+                <StreamingOverlay
+                  isVisible={isStreaming}
+                  gate={activeGate}
+                  onRegenerate={handleGateRegenerate}
+                  onOverride={handleGateOverride}
+                  onDismiss={handleGateDismiss}
+                />
               </div>
             </section>
           </div>
@@ -1275,7 +1308,13 @@ export default function Workspace() {
                     />
                   </div>
                 )}
-                <StreamingOverlay isVisible={isStreaming} />
+                <StreamingOverlay
+                  isVisible={isStreaming}
+                  gate={activeGate}
+                  onRegenerate={handleGateRegenerate}
+                  onOverride={handleGateOverride}
+                  onDismiss={handleGateDismiss}
+                />
               </div>
             </section>
 
