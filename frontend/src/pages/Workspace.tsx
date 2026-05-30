@@ -1,6 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react"
-import { useParams } from "react-router-dom"
+import { useNavigate, useParams } from "react-router-dom"
 import { CoveragePanel } from "../components/workspace/CoveragePanel"
+import {
+  CreateStoryboardModal,
+  canCreateStoryboardFromStages,
+} from "../components/workspace/CreateStoryboardModal"
 import { CreditConfirmModal, CREDIT_COSTS } from "../components/workspace/CreditConfirmModal"
 import { DiffViewer } from "../components/workspace/DiffViewer"
 import { GenerateBar } from "../components/workspace/GenerateBar"
@@ -19,6 +23,7 @@ import type { } from "../components/workspace/ExportPDFButton"
 import { HarnessCoverageChip } from "../components/workspace/HarnessCoverageChip"
 import { SharePublicLinkModal } from "../components/workspace/SharePublicLinkModal"
 import { SpecClarificationModal } from "../components/workspace/SpecClarificationModal"
+import { StoryboardToolbar } from "../components/workspace/StoryboardToolbar"
 import { DownloadIcon, GitHubIcon, PDFIcon, ShareIcon } from "../components/shared/icons"
 import { useCredits } from "../hooks/useCredits"
 import {
@@ -32,22 +37,29 @@ import {
   exportWorkspace,
   exportWorkspacePdf,
   finaliseStage,
+  generateStoryboard,
   getStageEval,
   getApiErrorMessage,
   getGitHubIntegration,
+  getLatestStoryboard,
+  getStoryboard,
 
   getWorkspace,
   refineStage,
+  regenerateStoryboard,
   rejectStageDiff,
   revalidateTasks,
   rollbackStage,
+  shareStoryboard,
   setWorkspaceCritic,
   updateWorkspace,
   updateStageContent,
+  downloadStoryboard,
 } from "../services/api"
 import { useStageStore } from "../store/stageStore"
 import { useWorkspaceStore } from "../store/workspaceStore"
 import type { EvalResult, RefineResponse, Stage, StageType } from "../types/stage"
+import type { StoryboardDetail, StoryboardDownloadKind } from "../types/storyboard"
 
 const STAGE_ORDER: StageType[] = ["spec", "plan", "harness", "tasks"]
 
@@ -60,6 +72,8 @@ const STAGE_LABELS: Record<StageType, string> = {
 
 const EVAL_POLL_ATTEMPTS = 12
 const EVAL_POLL_DELAY_MS = 2500
+const STORYBOARD_POLL_ATTEMPTS = 60
+const STORYBOARD_POLL_DELAY_MS = 2500
 
 const REFINE_MODE_OPTIONS = [
   {
@@ -80,6 +94,12 @@ const REFINE_MODE_OPTIONS = [
 ] as const
 
 type CreditAction = "generate" | "regenerate"
+type StoryboardAction = "generate" | "regenerate" | "share" | "download" | "notes"
+
+interface StoryboardFlowMessage {
+  kind: "info" | "success" | "error"
+  text: string
+}
 
 interface PendingCreditAction {
   action: CreditAction
@@ -88,6 +108,39 @@ interface PendingCreditAction {
 
 const sleep = (ms: number) =>
   new Promise<void>((resolve) => window.setTimeout(resolve, ms))
+
+function storyboardFileStem(title: string, id: string): string {
+  return (
+    title
+      .toLowerCase()
+      .replace(/[^a-z0-9-]+/g, "-")
+      .replace(/^-+|-+$/g, "")
+      .slice(0, 60) || `storyboard-${id}`
+  )
+}
+
+function storyboardFilename(
+  storyboard: StoryboardDetail,
+  kind: StoryboardDownloadKind,
+): string {
+  const extensionByKind: Record<StoryboardDownloadKind, string> = {
+    html: "html",
+    pdf: "pdf",
+    notes: "md",
+    "demo-script": "md",
+    appendix: "md",
+  }
+  return `specforge-${storyboardFileStem(storyboard.title, storyboard.id)}-${kind}.${extensionByKind[kind]}`
+}
+
+function saveBlob(blob: Blob, filename: string): void {
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement("a")
+  link.href = url
+  link.download = filename
+  link.click()
+  window.setTimeout(() => URL.revokeObjectURL(url), 1_500)
+}
 
 function firstUnlockedStage(stages: Stage[]): Stage | null {
   return (
@@ -146,8 +199,13 @@ function useAnimatedNumber(value: number | null, duration = 750) {
 
 export default function Workspace() {
   const { id } = useParams<{ id: string }>()
+  const navigate = useNavigate()
   const editorRef = useRef<StageEditorHandle>(null)
   const exportMenuRef = useRef<HTMLDivElement>(null)
+  const storyboardAutoOpenRef = useRef<string | null>(null)
+  const storyboardActionInFlightRef = useRef(false)
+  const storyboardLoadRequestRef = useRef(0)
+  const storyboardLoadingRequestRef = useRef(0)
   const { currentWorkspace, isLoading, fetchWorkspace, setCurrentWorkspace } =
     useWorkspaceStore()
   const { stages: stageMap, setStage, setStages } = useStageStore()
@@ -202,6 +260,16 @@ export default function Workspace() {
   const [showExportMenu, setShowExportMenu] = useState(false)
   const [isPdfExporting, setIsPdfExporting] = useState(false)
   const [pdfError, setPdfError] = useState<string | null>(null)
+  const [latestStoryboard, setLatestStoryboard] =
+    useState<StoryboardDetail | null>(null)
+  const [isStoryboardLoading, setIsStoryboardLoading] = useState(false)
+  const [showCreateStoryboard, setShowCreateStoryboard] = useState(false)
+  const [storyboardAction, setStoryboardAction] =
+    useState<StoryboardAction | null>(null)
+  const [storyboardMessage, setStoryboardMessage] =
+    useState<StoryboardFlowMessage | null>(null)
+  const [storyboardGenerationFailure, setStoryboardGenerationFailure] =
+    useState<string | null>(null)
   const [pendingClarify, setPendingClarify] = useState<PendingCreditAction | null>(
     null,
   )
@@ -269,6 +337,12 @@ export default function Workspace() {
   const allFinalised =
     stages.length === STAGE_ORDER.length &&
     stages.every((stage) => stage.status === "finalised")
+  const canCreateStoryboard = canCreateStoryboardFromStages(stages)
+  const hasStaleStoryboardPrerequisite = stages.some(
+    (stage) => stage.status === "stale",
+  )
+  const shouldShowCreateStoryboardCta =
+    canCreateStoryboard && latestStoryboard === null && !isStoryboardLoading
 
   // Count tasks for the GitHub modal's issue-count preview. Derived from the
   // tasks stage content via regex — no API call.
@@ -291,12 +365,49 @@ export default function Workspace() {
     stages.some((stage) => Boolean(stage.content?.trim())) ||
     Boolean(problemDraft.trim())
 
+  const refreshLatestStoryboard = useCallback(
+    async (quiet = false) => {
+      if (!id) return null
+
+      const requestId = storyboardLoadRequestRef.current + 1
+      storyboardLoadRequestRef.current = requestId
+      if (!quiet) {
+        storyboardLoadingRequestRef.current = requestId
+        setIsStoryboardLoading(true)
+      }
+      try {
+        const storyboard = await getLatestStoryboard(id)
+        if (storyboardLoadRequestRef.current === requestId) {
+          setLatestStoryboard(storyboard)
+        }
+        return storyboard
+      } catch (error) {
+        if (storyboardLoadRequestRef.current === requestId) {
+          setStoryboardMessage({
+            kind: "error",
+            text: getApiErrorMessage(error, "Could not load the latest Storyboard."),
+          })
+        }
+        return null
+      } finally {
+        if (!quiet && storyboardLoadingRequestRef.current === requestId) {
+          setIsStoryboardLoading(false)
+        }
+      }
+    },
+    [id],
+  )
 
   useEffect(() => {
     if (id) {
       void fetchWorkspace(id)
     }
   }, [id, fetchWorkspace])
+
+  useEffect(() => {
+    if (!id || currentWorkspace?.id !== id) return
+    void refreshLatestStoryboard()
+  }, [id, currentWorkspace?.id, refreshLatestStoryboard])
 
   useEffect(() => {
     if (!currentWorkspace) return
@@ -382,6 +493,82 @@ export default function Workspace() {
       if (streamError) setError(streamError)
     }
   }, [streamError])
+
+  useEffect(() => {
+    if (!latestStoryboard || latestStoryboard.status !== "generating") return
+
+    let cancelled = false
+    let attempts = 0
+    let timeoutId: number | undefined
+
+    const poll = async () => {
+      attempts += 1
+      try {
+        const fresh = await getStoryboard(latestStoryboard.id)
+        if (cancelled) return
+
+        setLatestStoryboard(fresh)
+
+        if (fresh.status === "ready") {
+          setStoryboardMessage({
+            kind: "success",
+            text: "Storyboard is ready to present.",
+          })
+          if (storyboardAutoOpenRef.current === fresh.id) {
+            storyboardAutoOpenRef.current = null
+            navigate(`/storyboards/${fresh.id}`)
+          }
+          return
+        }
+
+        if (fresh.status === "failed") {
+          storyboardAutoOpenRef.current = null
+          setStoryboardGenerationFailure(
+            "Storyboard generation failed after the request was accepted.",
+          )
+          setStoryboardMessage({
+            kind: "error",
+            text:
+              "Storyboard generation failed. Credits were refunded and any previous ready Storyboard remains available.",
+          })
+          if (id) {
+            const authoritativeLatest = await getLatestStoryboard(id)
+            if (!cancelled && authoritativeLatest) {
+              setLatestStoryboard(authoritativeLatest)
+            }
+          }
+          return
+        }
+
+        if (fresh.status !== "generating") {
+          storyboardAutoOpenRef.current = null
+          return
+        }
+      } catch {
+        if (cancelled) return
+        if (attempts >= STORYBOARD_POLL_ATTEMPTS) {
+          setStoryboardMessage({
+            kind: "error",
+            text: "Storyboard status could not be refreshed. Open the workspace again to check the latest state.",
+          })
+          return
+        }
+      }
+
+      if (!cancelled && attempts < STORYBOARD_POLL_ATTEMPTS) {
+        timeoutId = window.setTimeout(poll, STORYBOARD_POLL_DELAY_MS)
+      }
+    }
+
+    timeoutId = window.setTimeout(poll, STORYBOARD_POLL_DELAY_MS)
+
+    return () => {
+      cancelled = true
+      if (timeoutId !== undefined) {
+        window.clearTimeout(timeoutId)
+      }
+    }
+  }, [id, latestStoryboard?.id, latestStoryboard?.status, navigate])
 
   useEffect(() => {
     if (!showRefineHint) return
@@ -630,6 +817,7 @@ export default function Workspace() {
       const workspace = await getWorkspace(id)
       setCurrentWorkspace(workspace)
       setStages(workspace.stages)
+      void refreshLatestStoryboard(true)
       // Auto-advance to the next stage now that it's unlocked
       const nextIndex = STAGE_ORDER.indexOf(finalisedType) + 1
       if (nextIndex < STAGE_ORDER.length) {
@@ -643,7 +831,7 @@ export default function Workspace() {
     } catch {
       setGenericError("Only draft stages can be finalised.")
     }
-  }, [activeStage, id, setStage, setCurrentWorkspace, setStages])
+  }, [activeStage, id, setStage, setCurrentWorkspace, setStages, refreshLatestStoryboard])
 
   const handleContentChange = useCallback(
     async (content: string) => {
@@ -734,6 +922,209 @@ export default function Workspace() {
     }
   }, [id, isPdfExporting, allFinalised, currentWorkspace?.name])
 
+  const handleCreateStoryboard = useCallback(async () => {
+    if (!id || storyboardActionInFlightRef.current) return
+
+    if (!canCreateStoryboard || hasStaleStoryboardPrerequisite) {
+      setStoryboardGenerationFailure(
+        "All four source stages must be finalised before creating a Storyboard.",
+      )
+      return
+    }
+
+    storyboardActionInFlightRef.current = true
+    setStoryboardAction("generate")
+    setStoryboardMessage(null)
+    setStoryboardGenerationFailure(null)
+
+    try {
+      const created = await generateStoryboard(id)
+      setLatestStoryboard(created)
+      setShowCreateStoryboard(false)
+
+      if (created.status === "ready") {
+        setStoryboardMessage({
+          kind: "success",
+          text: "Storyboard is ready to present.",
+        })
+        navigate(`/storyboards/${created.id}`)
+      } else if (created.status === "failed") {
+        setStoryboardGenerationFailure("Storyboard generation failed.")
+        setStoryboardMessage({
+          kind: "error",
+          text:
+            "Storyboard generation failed. Credits were refunded and you can try again.",
+        })
+      } else {
+        storyboardAutoOpenRef.current = created.id
+        setStoryboardMessage({
+          kind: "info",
+          text: "Storyboard generation started. This workspace will open the deck when it is ready.",
+        })
+      }
+    } catch (error) {
+      const message = getApiErrorMessage(
+        error,
+        "Storyboard generation failed. If credits were deducted, the backend refund path restores them.",
+      )
+      setStoryboardGenerationFailure(message)
+      setStoryboardMessage({ kind: "error", text: message })
+    } finally {
+      storyboardActionInFlightRef.current = false
+      setStoryboardAction(null)
+    }
+  }, [
+    id,
+    canCreateStoryboard,
+    hasStaleStoryboardPrerequisite,
+    navigate,
+  ])
+
+  const handleOpenStoryboard = useCallback(() => {
+    if (!latestStoryboard || latestStoryboard.status === "failed") return
+    navigate(`/storyboards/${latestStoryboard.id}`)
+  }, [latestStoryboard, navigate])
+
+  const handlePresentStoryboard = useCallback(() => {
+    if (
+      !latestStoryboard ||
+      (latestStoryboard.status !== "ready" && latestStoryboard.status !== "stale")
+    ) {
+      return
+    }
+    navigate(`/storyboards/${latestStoryboard.id}?present=1`)
+  }, [latestStoryboard, navigate])
+
+  const handleRegenerateStoryboard = useCallback(async () => {
+    if (!latestStoryboard || storyboardActionInFlightRef.current) return
+
+    storyboardActionInFlightRef.current = true
+    setStoryboardAction("regenerate")
+    setStoryboardMessage(null)
+    setStoryboardGenerationFailure(null)
+
+    try {
+      const regenerating = await regenerateStoryboard(latestStoryboard.id)
+      setLatestStoryboard(regenerating)
+
+      if (regenerating.status === "ready") {
+        setStoryboardMessage({
+          kind: "success",
+          text: "Storyboard regeneration finished.",
+        })
+        navigate(`/storyboards/${regenerating.id}`)
+      } else if (regenerating.status === "failed") {
+        setStoryboardGenerationFailure("Storyboard regeneration failed.")
+        setStoryboardMessage({
+          kind: "error",
+          text:
+            "Storyboard regeneration failed. Credits were refunded and the previous ready deck remains available.",
+        })
+        await refreshLatestStoryboard(true)
+      } else {
+        storyboardAutoOpenRef.current = regenerating.id
+        setStoryboardMessage({
+          kind: "info",
+          text: "Storyboard regeneration started. The current ready deck remains available until a new version is ready.",
+        })
+      }
+    } catch (error) {
+      setStoryboardMessage({
+        kind: "error",
+        text: getApiErrorMessage(
+          error,
+          "Storyboard regeneration failed. Credits are refunded if the backend cannot complete the paid run.",
+        ),
+      })
+    } finally {
+      storyboardActionInFlightRef.current = false
+      setStoryboardAction(null)
+    }
+  }, [latestStoryboard, navigate, refreshLatestStoryboard])
+
+  const handleShareStoryboard = useCallback(async () => {
+    if (
+      !latestStoryboard ||
+      latestStoryboard.status !== "ready" ||
+      storyboardActionInFlightRef.current
+    ) {
+      return
+    }
+
+    storyboardActionInFlightRef.current = true
+    setStoryboardAction("share")
+    setStoryboardMessage(null)
+
+    try {
+      const share = await shareStoryboard(latestStoryboard.id, {
+        allow_pdf_download: true,
+        allow_notes_download: false,
+        allow_appendix_download: false,
+        allow_source_layer: false,
+      })
+      setLatestStoryboard({
+        ...latestStoryboard,
+        public_share_enabled: share.enabled,
+        public_share_slug: share.slug,
+        permissions: share.permissions,
+      })
+      try {
+        await navigator.clipboard.writeText(share.url)
+        setStoryboardMessage({
+          kind: "success",
+          text: "Share link enabled with private materials hidden by default and copied to clipboard.",
+        })
+      } catch {
+        setStoryboardMessage({
+          kind: "success",
+          text: `Share link enabled with private materials hidden by default: ${share.url}`,
+        })
+      }
+    } catch (error) {
+      setStoryboardMessage({
+        kind: "error",
+        text: getApiErrorMessage(error, "Could not enable the Storyboard share link."),
+      })
+    } finally {
+      storyboardActionInFlightRef.current = false
+      setStoryboardAction(null)
+    }
+  }, [latestStoryboard])
+
+  const handleDownloadStoryboard = useCallback(
+    async (kind: StoryboardDownloadKind) => {
+      if (!latestStoryboard || storyboardActionInFlightRef.current) return
+      if (
+        latestStoryboard.status !== "ready" &&
+        latestStoryboard.status !== "stale"
+      ) {
+        return
+      }
+
+      storyboardActionInFlightRef.current = true
+      setStoryboardAction(kind === "notes" ? "notes" : "download")
+      setStoryboardMessage(null)
+
+      try {
+        const blob = await downloadStoryboard(
+          latestStoryboard.id,
+          kind,
+          kind === "notes" ? "md" : undefined,
+        )
+        saveBlob(blob, storyboardFilename(latestStoryboard, kind))
+      } catch (error) {
+        setStoryboardMessage({
+          kind: "error",
+          text: getApiErrorMessage(error, "Storyboard download failed."),
+        })
+      } finally {
+        storyboardActionInFlightRef.current = false
+        setStoryboardAction(null)
+      }
+    },
+    [latestStoryboard],
+  )
+
   useEffect(() => {
     if (!showExportMenu) return
     function handleClickOutside(e: MouseEvent) {
@@ -820,6 +1211,13 @@ export default function Workspace() {
     ],
     ["Output", activeWordCount === 0 ? "No draft yet" : `${activeWordCount.toLocaleString()} words`],
   ]
+  const isStoryboardBusy = storyboardAction !== null
+  const storyboardProgressText =
+    latestStoryboard?.status === "generating"
+      ? "Storyboard generation is running. You can keep working here while status refreshes."
+      : isStoryboardLoading
+        ? "Checking Storyboard status..."
+        : null
 
   const pdfDisabledReason = allFinalised
     ? undefined
@@ -1070,6 +1468,71 @@ export default function Workspace() {
             </div>
           </div>
         )}
+
+        {storyboardMessage && (
+          <div className={`storyboard-flow-message ${storyboardMessage.kind}`}>
+            <span>{storyboardMessage.text}</span>
+            <button
+              type="button"
+              onClick={() => setStoryboardMessage(null)}
+              aria-label="Dismiss Storyboard status"
+            >
+              x
+            </button>
+          </div>
+        )}
+
+        {storyboardProgressText && (
+          <div className="storyboard-flow-message info" role="status">
+            <span>{storyboardProgressText}</span>
+          </div>
+        )}
+
+        {latestStoryboard ? (
+          <StoryboardToolbar
+            storyboard={latestStoryboard}
+            isBusy={isStoryboardBusy}
+            openLabel="Open Storyboard"
+            onOpen={handleOpenStoryboard}
+            onPresent={handlePresentStoryboard}
+            onShare={handleShareStoryboard}
+            onDownload={() => void handleDownloadStoryboard("pdf")}
+            onRegenerate={() => void handleRegenerateStoryboard()}
+            onDownloadNotes={() => void handleDownloadStoryboard("notes")}
+          />
+        ) : shouldShowCreateStoryboardCta ? (
+          <section className="storyboard-entry-card" aria-label="Storyboard creation">
+            <div>
+              <span className="storyboard-status-badge ready">Ready</span>
+              <strong>Product keynote is unlocked</strong>
+              <p>
+                All four stages are finalised. Create a browser-native Storyboard
+                with architecture reveal, notes, downloads, and sharing.
+              </p>
+            </div>
+            <button
+              type="button"
+              className="gen-btn-primary"
+              onClick={() => {
+                setStoryboardGenerationFailure(null)
+                setShowCreateStoryboard(true)
+              }}
+            >
+              Create Storyboard
+            </button>
+          </section>
+        ) : !latestStoryboard && !isStoryboardLoading ? (
+          <section className="storyboard-entry-card muted" aria-label="Storyboard locked">
+            <div>
+              <span className="storyboard-status-badge locked">Locked</span>
+              <strong>Storyboard unlocks after finalisation</strong>
+              <p>
+                Finalise SPEC, PLAN, HARNESS, and TASKS before starting the
+                paid Storyboard flow.
+              </p>
+            </div>
+          </section>
+        ) : null}
 
         {/* Generate bar */}
         <div className="generate-bar">
@@ -1405,6 +1868,20 @@ export default function Workspace() {
           onClose={() => setShowShareModal(false)}
         />
       )}
+
+      <CreateStoryboardModal
+        open={showCreateStoryboard}
+        stages={stages}
+        currentBalance={balance}
+        isPending={storyboardAction === "generate"}
+        failureMessage={storyboardGenerationFailure}
+        generateStoryboard={handleCreateStoryboard}
+        onClose={() => {
+          if (storyboardAction !== "generate") {
+            setShowCreateStoryboard(false)
+          }
+        }}
+      />
 
     </div>
   )
