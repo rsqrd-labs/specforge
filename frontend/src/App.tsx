@@ -12,6 +12,12 @@ import Workspace from "./pages/Workspace"
 // and lazy-loaded so unauthenticated visitors don't pay the full bundle.
 const PublicWorkspaceView = lazy(() => import("./pages/PublicWorkspaceView"))
 
+// Phase 20 — T-257. The owner Storyboard page is behind the auth guard; the
+// public Storyboard view (/sb/:slug) is registered OUTSIDE the guard and lazy
+// loaded, exactly like the public workspace view.
+const Storyboard = lazy(() => import("./pages/Storyboard"))
+const StoryboardPublic = lazy(() => import("./pages/StoryboardPublic"))
+
 export default function App() {
   return (
     <BrowserRouter>
@@ -23,6 +29,14 @@ export default function App() {
           element={
             <Suspense fallback={null}>
               <PublicWorkspaceView />
+            </Suspense>
+          }
+        />
+        <Route
+          path="/sb/:slug"
+          element={
+            <Suspense fallback={null}>
+              <StoryboardPublic />
             </Suspense>
           }
         />
@@ -39,6 +53,16 @@ export default function App() {
           element={
             <ProtectedRoute>
               <Workspace />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/storyboards/:id"
+          element={
+            <ProtectedRoute>
+              <Suspense fallback={null}>
+                <Storyboard />
+              </Suspense>
             </ProtectedRoute>
           }
         />

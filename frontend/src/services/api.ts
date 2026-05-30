@@ -698,3 +698,174 @@ export async function getGitHubPush(
     throw error
   }
 }
+
+// ---------------------------------------------------------------------------
+// Storyboard (Phase 20, T-257). Owner functions go through the authenticated
+// `api` instance (auth + CSRF interceptors apply); public functions use a bare
+// axios call with no auth/CSRF headers so they work for anonymous viewers and a
+// public-view bug can't leak authenticated state. Source excerpts, notes, and
+// appendix content are never written to localStorage/sessionStorage.
+// ---------------------------------------------------------------------------
+
+import type {
+  StoryboardDetail,
+  StoryboardDownloadKind,
+  StoryboardNotesFormat,
+  StoryboardPresenterResponse,
+  StoryboardPublicDownloadKind,
+  StoryboardPublicResponse,
+  StoryboardShareRequest,
+  StoryboardShareResponse,
+  StoryboardSummary,
+} from "../types/storyboard"
+
+// Exhaustive map of download kind → endpoint path fragment. Keeping it explicit
+// (rather than interpolating the kind) is type-safe — a new kind forces a map
+// entry — and the literal owner/public download paths stay greppable.
+const STORYBOARD_DOWNLOAD_PATHS: Record<StoryboardDownloadKind, string> = {
+  html: "/download/html",
+  pdf: "/download/pdf",
+  notes: "/download/notes",
+  "demo-script": "/download/demo-script",
+  appendix: "/download/appendix",
+}
+
+export async function listStoryboards(
+  workspaceId: string,
+): Promise<StoryboardSummary[]> {
+  const response = await api.get<StoryboardSummary[]>(
+    `/workspaces/${workspaceId}/storyboards`,
+  )
+  return response.data
+}
+
+// 404 means the workspace has no Storyboard yet — a normal pre-generation state,
+// not an error — so it collapses to null.
+export async function getLatestStoryboard(
+  workspaceId: string,
+): Promise<StoryboardDetail | null> {
+  try {
+    const response = await api.get<StoryboardDetail>(
+      `/workspaces/${workspaceId}/storyboards/latest`,
+    )
+    return response.data
+  } catch (error) {
+    if (axios.isAxiosError(error) && error.response?.status === 404) {
+      return null
+    }
+    throw error
+  }
+}
+
+export async function generateStoryboard(
+  workspaceId: string,
+): Promise<StoryboardDetail> {
+  const response = await api.post<StoryboardDetail>(
+    `/workspaces/${workspaceId}/storyboards`,
+  )
+  return response.data
+}
+
+export async function getStoryboard(id: string): Promise<StoryboardDetail> {
+  const response = await api.get<StoryboardDetail>(`/storyboards/${id}`)
+  return response.data
+}
+
+export async function regenerateStoryboard(
+  id: string,
+): Promise<StoryboardDetail> {
+  const response = await api.post<StoryboardDetail>(
+    `/storyboards/${id}/regenerate`,
+  )
+  return response.data
+}
+
+export async function regenerateStoryboardSection(
+  id: string,
+  sectionId: string,
+): Promise<StoryboardDetail> {
+  const response = await api.post<StoryboardDetail>(
+    `/storyboards/${id}/sections/${sectionId}/regenerate`,
+  )
+  return response.data
+}
+
+export async function getStoryboardPresenter(
+  id: string,
+): Promise<StoryboardPresenterResponse> {
+  const response = await api.get<StoryboardPresenterResponse>(
+    `/storyboards/${id}/presenter`,
+  )
+  return response.data
+}
+
+// Owner artifact download. Returns the bytes as a Blob; the caller triggers the
+// browser download. Notes additionally accept a `format` (markdown or PDF).
+export async function downloadStoryboard(
+  id: string,
+  kind: StoryboardDownloadKind,
+  notesFormat?: StoryboardNotesFormat,
+): Promise<Blob> {
+  const path = `/storyboards/${id}${STORYBOARD_DOWNLOAD_PATHS[kind]}`
+  const response = await api.get<Blob>(path, {
+    responseType: "blob",
+    params: kind === "notes" && notesFormat ? { format: notesFormat } : undefined,
+  })
+  return response.data
+}
+
+export async function shareStoryboard(
+  id: string,
+  request?: StoryboardShareRequest,
+): Promise<StoryboardShareResponse> {
+  const response = await api.post<StoryboardShareResponse>(
+    `/storyboards/${id}/share`,
+    request ?? {},
+  )
+  return response.data
+}
+
+export async function disableStoryboardShare(id: string): Promise<void> {
+  await api.delete(`/storyboards/${id}/share`)
+}
+
+export async function rotateStoryboardShare(
+  id: string,
+): Promise<StoryboardShareResponse> {
+  const response = await api.post<StoryboardShareResponse>(
+    `/storyboards/${id}/share/rotate`,
+  )
+  return response.data
+}
+
+// Public Storyboard view. Bare axios (no auth/CSRF). A 404 — unknown, disabled,
+// or rotated slug — collapses to null so the public route renders a not-found
+// empty state rather than crashing or redirecting through the auth guard.
+export async function getPublicStoryboard(
+  slug: string,
+): Promise<StoryboardPublicResponse | null> {
+  try {
+    const response = await axios.get<StoryboardPublicResponse>(
+      `${import.meta.env.VITE_API_URL}/storyboards/public/${slug}`,
+    )
+    return response.data
+  } catch (error) {
+    if (axios.isAxiosError(error) && error.response?.status === 404) {
+      return null
+    }
+    throw error
+  }
+}
+
+// Public artifact download. Bare axios (no auth/CSRF). The backend returns 404
+// for any disallowed kind, so the caller treats a thrown 404 as "not available".
+export async function downloadPublicStoryboard(
+  slug: string,
+  kind: StoryboardPublicDownloadKind,
+): Promise<Blob> {
+  const response = await axios.get<Blob>(
+    `${import.meta.env.VITE_API_URL}/storyboards/public/${slug}${STORYBOARD_DOWNLOAD_PATHS[kind]}`,
+    { responseType: "blob" },
+  )
+  return response.data
+}
