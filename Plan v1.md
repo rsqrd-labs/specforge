@@ -6,14 +6,14 @@ tags:
   - asdd
 created: 2026-04-25
 status: final
-version: 2.2.0
+version: 2.4.0
 stage: plan
 depends-on: "[[SpecForge V1 SPEC]]"
 ---
 
 # SpecForge V1 — PLAN.md
 
-> [!note] Derived From This plan is derived from [[SpecForge V1 SPEC]] v1.0.0. Every architectural decision traces back to a requirement in that document. Where a decision goes beyond what the spec explicitly states, it is called out as a **planning decision** with a rationale.
+> [!note] Derived From This plan is derived from [[SpecForge V1 SPEC]] v1.5.0. Every architectural decision traces back to a requirement in that document. Where a decision goes beyond what the spec explicitly states, it is called out as a **planning decision** with a rationale.
 
 ---
 
@@ -32,6 +32,8 @@ depends-on: "[[SpecForge V1 SPEC]]"
 - [[#17. Phase 13 — GitHub Export Integration]]
 - [[#18. Phase 14 — V1.3 Usefulness Improvements]]
 - [[#21. Phase 21 — Stripe Payments Integration]]
+- [[#22. Phase 22 — Prompt Pipeline Quality Hardening]]
+- [[#23. Phase 23 — Storyboard Product Keynote Generation]]
 
 ---
 
@@ -171,6 +173,7 @@ Thin layer only. Validates input via Pydantic schemas, calls the appropriate ser
 |providers.py|/providers (returns available providers and models)|
 |integrations.py|GET /integrations/github, DELETE /integrations/github|
 |billing.py|GET /billing/package, POST /billing/checkout, GET /billing/status, GET /billing/history, POST /billing/webhook (Stripe webhook, exempt from auth + CSRF + rate limit)|
+|storyboards.py|Storyboard generation, retrieval, downloads, presenter mode, section regeneration, owner share controls, public Storyboard route|
 
 ---
 
@@ -199,6 +202,9 @@ stage_manager.py        ← Core orchestrator. All stage lifecycle logic lives h
 diff_engine.py          ← Computes unified diffs between content versions.
 export_service.py       ← Packages all four finalised stages into a zip.
 github_export_service.py ← Pushes the same content to GitHub (repo + issues).
+storyboard_service.py   ← Paid Storyboard orchestration, source extraction, generation job state.
+storyboard_renderer.py  ← Converts structured Storyboard JSON to HTML/PDF/download bundles.
+storyboard_public_service.py ← Public Storyboard payload and permission filtering.
 ```
 
 The Stage Manager owns: dependency checking, ownership assertion, status state machine, credit deduction and refund, prompt building, SSE stream coordination, async eval triggering, staleness propagation, and version history management.
@@ -274,6 +280,7 @@ spec.py     ← SpecPromptBuilder
 plan.py     ← PlanPromptBuilder
 harness.py  ← HarnessPromptBuilder
 tasks.py    ← TasksPromptBuilder
+storyboard.py ← StoryboardPromptBuilder for the six-act keynote, notes, source map, and diagram intent.
 ```
 
 Each builder exposes three methods:
@@ -319,6 +326,9 @@ observability.py  ← Request logging, Prometheus increment, trace context.
 |Landing.tsx|/|Methodology explainer, demo, sign-in CTA. Unauthenticated.|
 |Dashboard.tsx|/dashboard|Workspace list, credit balance, create workspace button.|
 |Workspace.tsx|/workspace/:id|Two-panel layout. Composes StageNavigator and StageEditor.|
+|Storyboard.tsx|/storyboards/:id|Browser-native keynote viewer, presentation mode, source layer, downloads.|
+|StoryboardPublic.tsx|/sb/:slug|Unauthenticated launch page and public deck view.|
+|Billing.tsx|/billing|Credit purchase page and Stripe checkout status polling.|
 
 ---
 
@@ -337,6 +347,20 @@ observability.py  ← Request logging, Prometheus increment, trace context.
 |TaskValidationPanel.tsx|After TASKS generation. Lists tasks with missing or invalid harness test references.|
 |GenerateBar.tsx|Bottom toolbar. Generate, Refine, Regenerate, Finalise. Shows credit cost per action.|
 |CreditConfirmModal.tsx|Before any LLM action. Shows cost, current balance, post-action balance.|
+|CreateStoryboardModal.tsx|Paid Storyboard confirmation. Shows 25-credit cost, included artifacts, and stale prerequisites.|
+|StoryboardToolbar.tsx|Present, Share, Download, Regenerate, Download Notes actions for ready Storyboards.|
+
+#### `components/storyboard/` — Keynote UI
+
+|Component|Responsibility|
+|---|---|
+|StoryboardLaunchPage.tsx|Shareable first screen with title, promise, architecture preview, Present / Download / Notes actions.|
+|StoryboardDeck.tsx|Full-screen slide renderer with keyboard navigation and section transitions.|
+|ArchitectureReveal.tsx|Layered architecture diagram renderer; animates client → frontend → API → data → integrations → trust → recovery.|
+|PresenterMode.tsx|Current slide, next slide, notes, timer, pause cues, demo cues, backup talking points.|
+|SourceLayer.tsx|Optional source attribution overlay for SPEC / PLAN / HARNESS / TASKS-backed claims.|
+|StoryboardShareModal.tsx|Public on/off, slug rotation, and download/source permission toggles.|
+|StoryboardDownloadMenu.tsx|Downloads HTML, PDF, speaker notes, demo script, and appendix according to permissions.|
 
 ---
 
@@ -973,7 +997,8 @@ backend/
 │   ├── providers.py
 │   ├── integrations.py
 │   ├── public.py
-│   └── billing.py
+│   ├── billing.py
+│   └── storyboards.py
 │
 ├── services/
 │   ├── llm/
@@ -989,7 +1014,10 @@ backend/
 │   │   ├── stage_manager.py
 │   │   ├── diff_engine.py
 │   │   ├── export_service.py
-│   │   └── github_export_service.py
+│   │   ├── github_export_service.py
+│   │   ├── storyboard_service.py
+│   │   ├── storyboard_renderer.py
+│   │   └── storyboard_public_service.py
 │   │
 │   ├── integrations/
 │   │   ├── __init__.py
@@ -1030,7 +1058,8 @@ backend/
 │   ├── spec.py
 │   ├── plan.py
 │   ├── harness.py
-│   └── tasks.py
+│   ├── tasks.py
+│   └── storyboard.py
 │
 ├── models/
 │   ├── __init__.py
@@ -1044,7 +1073,8 @@ backend/
 │   ├── integration_push.py
 │   ├── integration_push_task.py
 │   ├── stripe_credit_pack.py
-│   └── stripe_webhook_event.py
+│   ├── stripe_webhook_event.py
+│   └── storyboard.py
 │
 ├── schemas/
 │   ├── __init__.py
@@ -1054,7 +1084,8 @@ backend/
 │   ├── credit.py
 │   ├── provider.py
 │   ├── integration.py
-│   └── billing.py
+│   ├── billing.py
+│   └── storyboard.py
 │
 ├── middleware/
 │   ├── __init__.py
@@ -1097,7 +1128,9 @@ frontend/
 │   │   ├── Landing.tsx
 │   │   ├── Dashboard.tsx
 │   │   ├── Workspace.tsx
-│   │   └── Billing.tsx
+│   │   ├── Billing.tsx
+│   │   ├── Storyboard.tsx
+│   │   └── StoryboardPublic.tsx
 │   │
 │   ├── components/
 │   │   ├── workspace/
@@ -1111,7 +1144,17 @@ frontend/
 │   │   │   ├── CoveragePanel.tsx
 │   │   │   ├── TaskValidationPanel.tsx
 │   │   │   ├── GenerateBar.tsx
-│   │   │   └── CreditConfirmModal.tsx
+│   │   │   ├── CreditConfirmModal.tsx
+│   │   │   ├── CreateStoryboardModal.tsx
+│   │   │   └── StoryboardToolbar.tsx
+│   │   ├── storyboard/
+│   │   │   ├── StoryboardLaunchPage.tsx
+│   │   │   ├── StoryboardDeck.tsx
+│   │   │   ├── ArchitectureReveal.tsx
+│   │   │   ├── PresenterMode.tsx
+│   │   │   ├── SourceLayer.tsx
+│   │   │   ├── StoryboardShareModal.tsx
+│   │   │   └── StoryboardDownloadMenu.tsx
 │   │   └── shared/
 │   │       ├── CreditMeter.tsx
 │   │       ├── ModelSelector.tsx
@@ -1134,7 +1177,8 @@ frontend/
 │   │   ├── stage.ts
 │   │   ├── workspace.ts
 │   │   ├── user.ts
-│   │   └── billing.ts
+│   │   ├── billing.ts
+│   │   └── storyboard.ts
 │   │
 │   └── config/
 │       └── providers.ts
@@ -1195,8 +1239,8 @@ STRIPE_WEBHOOK_SECRET=whsec_xxx
 STRIPE_PRICE_CENTS=900
 STRIPE_CREDITS_PER_PURCHASE=200
 STRIPE_CREDIT_VALIDITY_DAYS=30
-STRIPE_SUCCESS_URL=http://localhost:5173/billing/success
-STRIPE_CANCEL_URL=http://localhost:5173/billing/cancel
+STRIPE_SUCCESS_URL=http://localhost:5173/billing
+STRIPE_CANCEL_URL=http://localhost:5173/billing
 
 # App
 ENVIRONMENT=development
@@ -4123,6 +4167,649 @@ After Phase 22 is implemented:
 - [ ] Manual: open a PR that bumps `ASDD_PROMPT_VERSION` without running the eval; assert CI blocks the merge with the delta report attached as a comment
 
 ---
+
+## 23. Phase 23 — Storyboard Product Keynote Generation
+
+> [!note]
+> Source: This phase implements `V1 spec.md` v1.5.0. Storyboard is a paid, browser-native product keynote generator derived from a completed workspace. It is intentionally not a generic slide generator. The output is a six-act big-tech-style launch presentation with a cinematic architecture reveal, presenter notes, demo script, source-backed claims, technical appendix, sharing, and downloads.
+
+### 23.1 Product Objective
+
+Storyboard lets a user click one paid action after finalising SPEC, PLAN, HARNESS, and TASKS and receive a launch-ready keynote they would be proud to present. The system must generate:
+
+- A browser-viewable keynote deck with a polished launch page.
+- A cinematic architecture reveal that visualizes the product architecture in layers.
+- Presenter mode with speaker notes, timer, transition cues, demo cues, and backup talking points.
+- A source-backed confidence layer that maps claims to SPEC / PLAN / HARNESS / TASKS.
+- Downloadable `storyboard.html`, `storyboard.pdf`, `speaker-notes.md`, `speaker-notes.pdf`, `demo-script.md`, and `technical-appendix.md`.
+- Public sharing through a Storyboard-specific slug, separate from workspace public share.
+
+The main keynote has exactly six top-level acts:
+
+1. Opening Thesis
+2. Product Vision
+3. Product Walkthrough
+4. Technical Architecture
+5. Trust, Security, Reliability
+6. Launch Close
+
+Validation and Execution Plan are **not** visible top-level keynote acts. HARNESS and TASKS can inform speaker notes, source attribution, demo script, Q&A backup, and the technical appendix.
+
+### 23.2 Architecture Summary
+
+Storyboard is a new artifact type, not a fifth pipeline stage. It depends on finalised versions of all four existing stages, but it has its own lifecycle, versioning, share settings, and downloads.
+
+```
+Finalised SPEC / PLAN / HARNESS / TASKS
+        |
+        v
+StoryboardSourceBuilder
+        |
+        v
+StoryboardPromptBuilder -> LLM complete() -> strict JSON schema validation
+        |
+        v
+StoryboardService persists Storyboard row + source map + notes/appendix
+        |
+        +--> StoryboardRenderer: HTML / PDF / offline package
+        +--> StoryboardPublicService: public permission-filtered payload
+        +--> Frontend StoryboardDeck / PresenterMode / ArchitectureReveal
+```
+
+Key design decisions:
+
+- **Structured payload first.** The LLM produces a bounded JSON payload, speaker notes markdown, demo script markdown, appendix markdown, and diagram intent. The trusted frontend renderer owns all HTML, animation, and styling.
+- **No arbitrary generated scripts.** Generated Storyboard HTML is assembled from a trusted template and sanitized content. LLM output is never inserted as `<script>`, raw CSS, or unsanitized HTML.
+- **Source versions are immutable.** Storyboard stores `source_stage_version_ids` so each keynote is reproducible and source-backed even if later workspace content changes.
+- **Paid generation is idempotent.** A duplicate request or status polling retry cannot double-charge. A replacement Storyboard is only promoted after the new version is persisted successfully.
+- **Sharing is independent.** `/p/{slug}` shares workspace artifacts; `/sb/{slug}` shares Storyboards. Permissions and slug rotation are separate.
+
+### 23.3 Task Breakdown
+
+| Task | Area | Description | Priority |
+|---|---|---|---|
+| T-250 | Data model | Storyboard migration + ORM model + indexes + stale status fields | Critical |
+| T-251 | Schemas/API | Pydantic request/response schemas and authenticated Storyboard router | Critical |
+| T-252 | Source builder | Deterministic finalised-stage source extraction and source-map contract | Critical |
+| T-253 | Prompt builder | Storyboard prompt with strict JSON schema, six acts, notes, demo script, appendix, architecture reveal | Critical |
+| T-254 | Service orchestration | Credit deduction/refund, idempotency, locking, generation lifecycle, stale propagation | Critical |
+| T-255 | Renderer/downloads | Trusted HTML/PDF/notes/demo/appendix downloads, sanitization, no remote scripts | High |
+| T-256 | Public sharing | `/sb/{slug}` launch page payload, permission filtering, slug rotation, CSP/noindex | High |
+| T-257 | Frontend owner flow | Workspace CTA, paid confirmation modal, generation status, toolbar, regenerate | High |
+| T-258 | Browser deck | StoryboardDeck, slide navigation, cinematic architecture reveal, responsive presentation | High |
+| T-259 | Presenter mode | Notes, timer, next-slide preview, transition cues, demo cues, backup talking points | Medium |
+| T-260 | Source layer | Claim/source overlay with bounded excerpts and owner-controlled public access | Medium |
+| T-261 | Security/rate limits | Storyboard generation/share/public/download rate tiers, CSRF, auth, ownership, sanitization tests | Critical |
+| T-262 | Observability | Prometheus counters/histograms + structured logs + no content logging | Medium |
+| T-263 | Tests/harness | Backend, frontend, and harness contract suite for Storyboard | Critical |
+| T-264 | Docs/smoke | Runbook, local testing, release gate, smoke checklist updates | Medium |
+
+### 23.4 Backend Implementation Detail
+
+#### T-250 — Storyboard Migration And Model
+
+Add `backend/models/storyboard.py`:
+
+```python
+class Storyboard(Base):
+    __tablename__ = "storyboards"
+
+    id: Mapped[UUID]
+    workspace_id: Mapped[UUID]
+    user_id: Mapped[UUID]
+    version: Mapped[int]
+    status: Mapped[Literal["generating", "ready", "failed", "stale"]]
+    title: Mapped[str]
+    theme: Mapped[str]
+    content_json: Mapped[dict]
+    speaker_notes_md: Mapped[str]
+    demo_script_md: Mapped[str]
+    technical_appendix_md: Mapped[str]
+    source_map_json: Mapped[dict]
+    source_stage_version_ids: Mapped[dict]
+    credit_ledger_id: Mapped[UUID | None]
+    public_share_slug: Mapped[str | None]
+    public_share_enabled: Mapped[bool]
+    allow_pdf_download: Mapped[bool]
+    allow_notes_download: Mapped[bool]
+    allow_appendix_download: Mapped[bool]
+    allow_source_layer: Mapped[bool]
+    created_at: Mapped[datetime]
+    updated_at: Mapped[datetime]
+```
+
+Migration requirements:
+
+- Table: `storyboards`.
+- FK `workspace_id -> workspaces.id ON DELETE CASCADE`.
+- FK `user_id -> users.id ON DELETE CASCADE`.
+- Nullable FK `credit_ledger_id -> credit_ledger.id`.
+- Unique `(workspace_id, version)`.
+- Partial unique index on `public_share_slug WHERE public_share_slug IS NOT NULL`.
+- Index `(workspace_id, created_at DESC)`.
+- Index `(user_id, created_at DESC)`.
+- Check constraints:
+  - `version > 0`
+  - `status IN ('generating', 'ready', 'failed', 'stale')`
+  - title length <= 200
+
+`source_stage_version_ids` stores:
+
+```json
+{
+  "spec": "<stage_version_uuid>",
+  "plan": "<stage_version_uuid>",
+  "harness": "<stage_version_uuid>",
+  "tasks": "<stage_version_uuid>"
+}
+```
+
+When any source stage is re-finalised, `StageManager.finalise()` marks every ready Storyboard for that workspace as `stale`. This is a service-level update in the same transaction as downstream stale propagation.
+
+#### T-251 — Schemas And Router
+
+Add `backend/schemas/storyboard.py`:
+
+- `StoryboardSummary`
+- `StoryboardDetail`
+- `StoryboardGenerateRequest`
+- `StoryboardRegenerateSectionRequest`
+- `StoryboardShareRequest`
+- `StoryboardShareResponse`
+- `StoryboardPublicResponse`
+- `StoryboardPresenterResponse`
+- `StoryboardDownloadKind = Literal["html", "pdf", "notes", "demo-script", "appendix"]`
+- `StoryboardNotesFormat = Literal["md", "pdf"]`
+
+Router: `backend/routers/storyboards.py`.
+
+Authenticated endpoints:
+
+| Method | Path | Behavior |
+|---|---|---|
+| `GET` | `/workspaces/{id}/storyboards` | List summaries for owned workspace |
+| `GET` | `/workspaces/{id}/storyboards/latest` | Latest summary and stale status |
+| `POST` | `/workspaces/{id}/storyboards` | Generate full Storyboard; costs 25 credits |
+| `GET` | `/storyboards/{id}` | Full owner payload |
+| `POST` | `/storyboards/{id}/regenerate` | Full regeneration; costs 25 credits |
+| `POST` | `/storyboards/{id}/sections/{section_id}/regenerate` | Section regeneration; costs 5 credits |
+| `GET` | `/storyboards/{id}/presenter` | Presenter mode payload |
+| `GET` | `/storyboards/{id}/download/html` | Owner offline browser package download |
+| `GET` | `/storyboards/{id}/download/pdf` | Owner static Storyboard PDF download |
+| `GET` | `/storyboards/{id}/download/notes` | Owner speaker notes download; `?format=md|pdf` |
+| `GET` | `/storyboards/{id}/download/demo-script` | Owner demo script markdown download |
+| `GET` | `/storyboards/{id}/download/appendix` | Owner technical appendix markdown download |
+| `POST` | `/storyboards/{id}/share` | Enable/update public permissions |
+| `DELETE` | `/storyboards/{id}/share` | Disable public sharing |
+| `POST` | `/storyboards/{id}/share/rotate` | Rotate public slug |
+
+Public endpoint:
+
+| Method | Path | Behavior |
+|---|---|---|
+| `GET` | `/storyboards/public/{slug}` | Permission-filtered launch page/deck payload |
+| `GET` | `/storyboards/public/{slug}/download/{kind}` | Permission-filtered public download for `pdf`, `notes`, `demo-script`, or `appendix` |
+
+Implementation notes:
+
+- Return `404` for unauthorized owner lookups and unknown public slugs to avoid IDOR existence leaks.
+- Mutating endpoints require CSRF.
+- Public endpoints are unauthenticated and must set `X-Robots-Tag: noindex, nofollow` and CSP headers.
+- Download endpoints stream bytes with explicit `Content-Disposition`.
+
+#### T-252 — Storyboard Source Builder
+
+Add `services/pipeline/storyboard_source.py` or keep it inside `storyboard_service.py` if small.
+
+Responsibilities:
+
+1. Load workspace with owner check.
+2. Assert all four stages are `finalised`.
+3. Load the exact current `StageVersion` for each stage.
+4. Build a bounded source package:
+
+```python
+@dataclass(frozen=True)
+class StoryboardSourcePackage:
+    workspace_id: UUID
+    workspace_name: str
+    problem_statement: str
+    provider: str
+    model: str
+    stage_versions: dict[StageType, UUID]
+    artifacts: dict[StageType, str]
+    excerpts: dict[str, SourceExcerpt]
+```
+
+5. Produce source IDs for citeable chunks, e.g. `SPEC:intro`, `PLAN:architecture`, `HARNESS:coverage`, `TASKS:must`.
+
+Source extraction rules:
+
+- Use only finalised stage versions.
+- Excerpts are bounded to 1,200 chars each.
+- Never include account email, credit data, billing data, JWTs, API keys, or draft content.
+- PLAN architecture, trust, capacity, STRIDE, SLO, and FMEA sections receive priority.
+- HARNESS and TASKS are used for evidence, demo cues, appendix, and "what ships" context, not top-level Validation / Execution Plan acts.
+- If a section cannot be found, the source builder emits an explicit `missing_source_section` finding for the prompt rather than inventing.
+
+#### T-253 — Storyboard Prompt Builder
+
+Add `backend/prompts/storyboard.py`.
+
+Inputs:
+
+- `StoryboardSourcePackage`
+- desired mode: V1 default is `"product_launch"`
+- optional owner instruction for regeneration
+- optional `section_id` for single-section regeneration
+
+Output must be strict JSON plus markdown fields. The prompt must require:
+
+- Exactly six top-level acts listed in §23.1.
+- No top-level acts named Validation or Execution Plan.
+- At least one architecture reveal diagram with the required layer set.
+- Slide copy must be sparse: one idea per slide, max 18 words per headline, max 45 words visible text per slide unless diagram labels require more.
+- Speaker notes carry depth: each slide gets talk track, transition, timing, pause/emphasis, and backup detail.
+- Demo script maps concrete product actions to slides.
+- Technical appendix contains architecture/security/reliability/testing/task/Q&A backup, but is separate from the main deck.
+- Source map required for every claim and every architecture component.
+- Visual identity object required: palette, typography mood, motif, transition style, diagram style.
+- No arbitrary HTML, CSS, JavaScript, iframes, remote assets, tracking pixels, or third-party script references.
+
+Pydantic schema validation:
+
+```python
+class StoryboardPayload(BaseModel):
+    title: constr(max_length=200)
+    theme: StoryboardTheme
+    sections: conlist(StoryboardSection, min_length=6, max_length=6)
+    diagrams: list[StoryboardDiagram]
+    source_map: dict[str, list[SourceRef]]
+    notes: dict[str, SpeakerNote]
+    demo_script_md: str
+    technical_appendix_md: str
+```
+
+If JSON parsing or schema validation fails, one internal repair attempt is allowed with the parser error injected. If the repaired payload still fails, mark Storyboard failed and refund credits.
+
+#### T-254 — Storyboard Service Orchestration
+
+Add `services/pipeline/storyboard_service.py`.
+
+Core methods:
+
+```python
+async def generate_storyboard(db, redis, workspace_id, user_id) -> Storyboard
+async def regenerate_storyboard(db, redis, storyboard_id, user_id) -> Storyboard
+async def regenerate_section(db, redis, storyboard_id, section_id, user_id) -> Storyboard
+async def mark_workspace_storyboards_stale(db, workspace_id) -> None
+```
+
+Credit flow:
+
+1. Acquire a Redis idempotency lock: `storyboard:generate:{workspace_id}:{user_id}` with a short TTL.
+2. Assert no `status='generating'` Storyboard exists for the same workspace/user. If one exists, return it instead of charging again.
+3. Run lazy expiry and balance check.
+4. Deduct 25 credits with reason `storyboard_generate:{storyboard_id}` after the placeholder Storyboard ID exists.
+5. Create Storyboard row with `status='generating'`, `version = max(version)+1`.
+6. Generate payload.
+7. Validate and sanitize payload.
+8. Persist content, notes, demo script, appendix, source map, source versions.
+9. Mark status `ready` and commit.
+10. Invalidate credit cache after commit.
+
+Failure behavior:
+
+- If generation fails after credit deduction, refund with `refund:{ledger_id}` and mark Storyboard `failed`.
+- If DB commit fails after LLM succeeds, refund if the debit committed; otherwise no refund needed.
+- If service restarts while `status='generating'`, recovery marks stale in-progress jobs older than 30 minutes as `failed` and refunds if `credit_ledger_id` exists and no refund exists.
+- Full regeneration never deletes the previous ready Storyboard. The new version becomes latest only after it is ready.
+- Section regeneration creates a new Storyboard version with only the selected section replaced and all source maps revalidated.
+
+Concurrency:
+
+- Use `SELECT FOR UPDATE` on the workspace row when assigning Storyboard version.
+- Unique `(workspace_id, version)` protects against concurrent version races.
+- Redis lock avoids duplicate user-triggered generation requests.
+- Credit ledger reason includes Storyboard ID so idempotent refund checks can query by reason.
+
+#### T-255 — Renderer And Downloads
+
+Add `services/pipeline/storyboard_renderer.py`.
+
+Renderer outputs:
+
+- HTML document for online/offline presentation.
+- PDF document for audience handout.
+- Speaker notes markdown and PDF.
+- Demo script markdown.
+- Technical appendix markdown.
+- Optional ZIP package containing HTML, JSON payload, local CSS, notes, demo script, appendix, and PDF.
+
+Security constraints:
+
+- Use a trusted HTML template with escaped JSON payload.
+- Apply the same sanitizer policy as public share/PDF for generated markdown.
+- No remote JavaScript, remote CSS, iframe, object, embed, external font, or network image by default.
+- For PDF rendering, use the existing no-network URL fetcher pattern.
+- CSP for online and offline HTML:
+  - `default-src 'self'`
+  - `script-src 'self'`
+  - `style-src 'self' 'unsafe-inline'`
+  - `img-src 'self' data:`
+  - `frame-ancestors 'none'`
+
+Download filenames:
+
+- `specforge-storyboard-{workspace-slug}.html`
+- `specforge-storyboard-{workspace-slug}.pdf`
+- `specforge-storyboard-speaker-notes-{workspace-slug}.md`
+- `specforge-storyboard-speaker-notes-{workspace-slug}.pdf`
+- `specforge-storyboard-demo-script-{workspace-slug}.md`
+- `specforge-storyboard-technical-appendix-{workspace-slug}.md`
+
+#### T-256 — Public Sharing
+
+Add `services/pipeline/storyboard_public_service.py`.
+
+Public sharing behavior:
+
+- Slug length: at least 10 random base36 chars. Storyboard links expose richer presentation assets than `/p/{slug}`, so use higher entropy from day one.
+- Default public permissions:
+  - presentation view: enabled
+  - PDF download: enabled
+  - notes download: disabled
+  - appendix download: disabled
+  - source layer: disabled
+- Owner can toggle permissions without changing slug.
+- Rotate invalidates old slug immediately.
+- Public response excludes owner-only fields: `user_id`, `workspace_id`, `credit_ledger_id`, source stage version IDs, failed versions, and all disabled downloads.
+- Public pages return 404 when disabled or unknown; never 403.
+
+#### T-257 — Frontend Owner Flow
+
+Workspace header changes:
+
+- Add `Create Storyboard` CTA when all four stages are finalised.
+- If latest Storyboard exists:
+  - show `Open Storyboard`
+  - show stale badge if source stages changed
+  - show `Regenerate` confirmation if stale
+
+`CreateStoryboardModal.tsx`:
+
+- Shows cost: 25 credits.
+- Shows included artifacts: browser keynote, architecture reveal, speaker notes, demo script, technical appendix, share link, PDF/HTML downloads.
+- Shows post-action balance.
+- Blocks when balance < 25 and links to `/billing`.
+- Blocks when any stage is not finalised or is stale.
+- Uses existing credit-confirmation visual language but Storyboard-specific copy.
+
+Generation UX:
+
+- POST generate starts job and returns Storyboard ID/status.
+- Client polls latest Storyboard or opens `/storyboards/:id` when status is ready.
+- Errors show refund language when applicable: "Credits were refunded because Storyboard generation failed."
+
+#### T-258 — Browser Deck And Architecture Reveal
+
+`StoryboardDeck.tsx`:
+
+- Reads `StoryboardPayload`.
+- Full-screen, keyboard navigable:
+  - ArrowRight / Space: next
+  - ArrowLeft: previous
+  - F: fullscreen
+  - P: presenter mode
+  - S: source layer toggle when allowed
+  - Esc: exit presentation
+- Stores only local UI state in memory. No localStorage for source content.
+
+`ArchitectureReveal.tsx`:
+
+- Accepts structured diagram layers, not raw HTML.
+- Animates in deterministic steps:
+  1. User/client
+  2. Frontend
+  3. API/backend
+  4. Data stores
+  5. LLM/provider layer
+  6. Integrations
+  7. Trust boundaries
+  8. Failure/recovery path
+- Has accessible fallback: an ordered architecture summary visible to screen readers and PDF.
+- Must not require canvas for core meaning; SVG/HTML fallback is acceptable.
+
+Design constraints:
+
+- Slides are sparse and cinematic.
+- No generic pitch-deck stock illustrations.
+- Diagrams and motifs are product-specific.
+- Technical labels remain legible on 1280px desktop and projected 16:9.
+- Mobile can view/share, but live presenting is optimized for desktop/tablet.
+
+#### T-259 — Presenter Mode
+
+`PresenterMode.tsx`:
+
+- Shows current slide, next slide, elapsed timer, speaker notes, transition cue, suggested pause/emphasis, demo cue, and backup points.
+- Notes are private to authenticated owner unless public notes download is enabled.
+- Presenter mode never appears on public view if notes permission is disabled.
+- Timer resets per session and is not persisted.
+
+Speaker notes contract per slide:
+
+```json
+{
+  "slide_id": "slide-001",
+  "talk_track": "...",
+  "transition": "...",
+  "timing_seconds": 45,
+  "pause_cue": "Pause after the product promise.",
+  "demo_cue": "Open dashboard and show workspace creation.",
+  "backup_points": ["...", "..."]
+}
+```
+
+#### T-260 — Source Layer
+
+`SourceLayer.tsx`:
+
+- Uses `source_map` from the Storyboard payload.
+- Displays badges: SPEC, PLAN, HARNESS, TASKS.
+- Shows bounded source excerpts only when user clicks a badge.
+- Public source layer requires `allow_source_layer=true`.
+- Excerpts are capped client-side too, even though the backend already bounds them.
+
+Source map contract:
+
+```json
+{
+  "slide-004.claim-architecture-boundary": [
+    {
+      "source": "PLAN",
+      "source_id": "PLAN:security-architecture",
+      "excerpt": "..."
+    }
+  ]
+}
+```
+
+Harness must assert every slide has at least one source reference and every architecture diagram node has at least one PLAN-backed source reference unless it is a purely visual grouping label.
+
+#### T-261 — Security And Rate Limits
+
+Rate-limit tiers:
+
+| Tier | Scope | Limit | Window |
+|---|---|---:|---|
+| Storyboard Generate | Per user | 3 full generations | 1 hour |
+| Storyboard Section Regenerate | Per user | 10 section regenerations | 1 hour |
+| Storyboard Share Toggle | Per user | 20 toggles | 1 hour |
+| Storyboard Public View | Per IP | 120 reads | 1 minute |
+| Storyboard Download | Per user/IP | 30 downloads | 1 hour |
+
+Security invariants:
+
+1. Owner-only authenticated endpoints return 404 on non-owned Storyboards.
+2. Public endpoints are read-only and never include private fields.
+3. Public pages are `noindex, nofollow` and have CSP.
+4. LLM output is schema-validated and sanitized before persistence.
+5. HTML downloads contain no generated scripts, no remote scripts, and no remote styles.
+6. Source layer uses only finalised source versions.
+7. Storyboard generation never logs raw payload, speaker notes, source excerpts, or appendix.
+8. Regeneration cannot mutate a ready Storyboard in place until replacement content passes validation.
+9. Credits are refunded exactly once on failure.
+10. Duplicate requests do not double-charge.
+
+#### T-262 — Observability
+
+Prometheus metrics in `services/observability.py`:
+
+| Metric | Labels | Description |
+|---|---|---|
+| `specforge_storyboard_generation_started_total` | none | Full Storyboard generations started |
+| `specforge_storyboard_generation_completed_total` | none | Full Storyboard generations persisted successfully |
+| `specforge_storyboard_generation_failed_total` | `error_type` | Full Storyboard generations failed |
+| `specforge_storyboard_section_regenerated_total` | none | Single-section regenerations completed |
+| `specforge_storyboard_generation_duration_seconds` | none | Full Storyboard generation latency histogram |
+| `specforge_storyboard_credits_deducted_total` | `action` | Credits deducted |
+| `specforge_storyboard_credits_refunded_total` | `action`, `reason` | Credits refunded |
+| `specforge_storyboard_public_view_total` | none | Public launch/deck views |
+| `specforge_storyboard_download_total` | `kind`, `public` | Downloads by type |
+| `specforge_storyboard_source_missing_total` | `source`, `section` | Expected source section absent during extraction |
+
+Structlog event names:
+
+- `storyboard.generate_started`
+- `storyboard.generate_completed`
+- `storyboard.generate_failed`
+- `storyboard.section_regenerated`
+- `storyboard.share_enabled`
+- `storyboard.share_disabled`
+- `storyboard.share_rotated`
+- `storyboard.downloaded`
+- `storyboard.public_viewed`
+- `storyboard.marked_stale`
+
+Every event includes `storyboard_id`, `workspace_id`, `user_id`, `version`, and `action` where available. Never log generated content or source excerpts.
+
+#### T-263 — Tests And Harness Contract
+
+Add `harness/tests/backend/test_phase23_storyboard_contract.py`. This file is the cross-codebase safety net for tasks generated from this plan.
+
+Contract tests should assert:
+
+1. `backend/models/storyboard.py` exists and defines the fields listed in T-250.
+2. A migration creates `storyboards`, `(workspace_id, version)` unique constraint, and unique public slug index.
+3. `backend/schemas/storyboard.py` defines summary/detail/public/presenter/share schemas.
+4. `backend/routers/storyboards.py` registers all authenticated and public endpoints from T-251.
+5. Storyboard endpoints are included in `main.py`.
+6. `services/pipeline/storyboard_service.py` references `CreditService.deduct`, refund handling, idempotency lock, and `SELECT FOR UPDATE` or equivalent row lock for version assignment.
+7. `storyboard_service.py` marks prior ready versions stale when source stages change or exposes a callable used by `StageManager.finalise()`.
+8. `prompts/storyboard.py` exists and contains the six required acts.
+9. `prompts/storyboard.py` explicitly forbids top-level Validation and Execution Plan acts.
+10. Prompt/schema requires an architecture reveal diagram with the required layers.
+11. Prompt/schema requires speaker notes, demo script, technical appendix, source map, and visual identity.
+12. Renderer code contains no path that writes raw LLM HTML/JS into output.
+13. Renderer/downloads use the existing no-network PDF fetcher or equivalent.
+14. Public Storyboard responses set `noindex`, `X-Robots-Tag`, and CSP.
+15. Public response filtering respects `allow_notes_download`, `allow_appendix_download`, and `allow_source_layer`.
+16. Rate limit middleware contains Storyboard Generate, Section Regenerate, Share Toggle, Public View, and Download tiers.
+17. Observability defines all `specforge_storyboard_*` metrics listed in T-262.
+18. Frontend routes include `/storyboards/:id` and `/sb/:slug`.
+19. Frontend has `ArchitectureReveal`, `PresenterMode`, `SourceLayer`, and `StoryboardShareModal` components.
+20. Frontend Storyboard types include `sections`, `diagrams`, `notes`, `source_map`, `demo_script`, and `technical_appendix`.
+
+Backend unit tests:
+
+- `test_storyboard_generation_requires_all_stages_finalised`
+- `test_storyboard_generation_deducts_25_credits`
+- `test_storyboard_generation_refunds_on_llm_failure`
+- `test_storyboard_duplicate_generate_does_not_double_charge`
+- `test_storyboard_full_regeneration_preserves_previous_ready_version_on_failure`
+- `test_storyboard_section_regeneration_costs_5_credits`
+- `test_storyboard_marks_stale_when_source_stage_refinalised`
+- `test_storyboard_public_owner_permissions_filter_downloads`
+- `test_storyboard_public_unknown_or_disabled_returns_404`
+- `test_storyboard_source_map_contains_only_finalised_versions`
+- `test_storyboard_schema_rejects_validation_or_execution_plan_top_level_acts`
+- `test_storyboard_architecture_reveal_requires_layers`
+- `test_storyboard_renderer_strips_script_and_remote_asset_references`
+
+Frontend tests:
+
+- `CreateStoryboardModal` shows 25-credit cost and blocks insufficient balance.
+- `StoryboardDeck` navigates with keyboard and renders six acts.
+- `ArchitectureReveal` renders every required layer in order.
+- `PresenterMode` hides notes on public view unless allowed.
+- `SourceLayer` hides excerpts unless owner/public permission allows it.
+- `StoryboardShareModal` toggles PDF/notes/appendix/source permissions independently.
+- Public Storyboard route renders launch page without auth redirect.
+
+Manual validation:
+
+- Generate Storyboard from a completed workspace; confirm deck opens in browser.
+- Confirm main deck has no Validation or Execution Plan sections.
+- Confirm Technical Architecture contains animated architecture reveal.
+- Download HTML and open it offline.
+- Download PDF, speaker notes, demo script, and appendix.
+- Enable public sharing; open `/sb/{slug}` in an incognito window.
+- Verify public default hides notes, appendix, and source layer.
+- Enable source layer publicly; verify bounded source excerpts are visible.
+- Re-finalise PLAN; verify Storyboard becomes stale.
+- Trigger generation failure with a fake provider; verify refund and no ready Storyboard corruption.
+
+#### T-264 — Documentation, Smoke Tests, And Release Gate
+
+Update documentation after implementation, not before:
+
+- `docs/RUNBOOK.md`: add Storyboard generation failure recovery, credit refund checks, stale Storyboard remediation, slug rotation, and public link disablement.
+- `docs/LOCAL_TESTING_HANDBOOK.md`: add local end-to-end setup for a completed workspace, Storyboard generation, download verification, and public `/sb/{slug}` testing.
+- `docs/OBSERVABILITY_RUNBOOK.md`: add dashboards/alerts for Storyboard generation failures, refund spikes, public view volume, download failures, render latency, and source-missing counts.
+- `docs/PRODUCTION_RELEASE_GATE.md`: add Storyboard pre-release requirements: migrations applied, rate limits active, public route security headers verified, HTML/PDF sanitizer tests passing, and credit ledger refund smoke complete.
+- `docs/SMOKE_TEST_CHECKLIST.md`: add the manual validation flow from T-263 as an operator-ready checklist.
+- `tasks.md`: add implementation tasks for T-250 through T-264 only after this plan is accepted.
+
+Release gate:
+
+- Do not ship Storyboard until full generation, section regeneration, public sharing, all owner downloads, permission-filtered public downloads, stale marking, and refund paths pass in staging.
+- Public Storyboard routes must be tested from an unauthenticated browser session and must not expose speaker notes, appendix, source excerpts, user IDs, credit ledger data, or source-stage internals unless the matching public permission is explicitly enabled.
+- A failed full regeneration or section regeneration must leave the previous ready Storyboard presentation available.
+- The launch page and deck must render without remote assets so shared/downloaded presentations remain stable and do not leak visitor data to third parties.
+- Product must confirm final credit pricing in `V1 spec.md` before release. The plan assumes 25 credits for full generation and 5 credits for section regeneration.
+
+### 23.5 Risks And Mitigations
+
+| Risk | Likelihood | Impact | Mitigation |
+|---|---|---|---|
+| Storyboard feels generic, undermining the premium promise | Medium | High | Prompt requires source-backed product-specific claims, visual identity, demo script, and architecture reveal. Harness checks for source maps and required acts. |
+| LLM emits invalid JSON or unsafe HTML | High | High | Strict Pydantic schema, one repair attempt, sanitizer, trusted renderer only, no generated scripts. |
+| Duplicate generation double-charges credits | Medium | High | Redis idempotency lock, generating-status reuse, ledger reason tied to Storyboard ID, duplicate tests. |
+| Public Storyboard leaks speaker notes or appendix | Medium | High | Default public permissions disable notes/appendix/source; response filtering tested by contract and unit tests. |
+| Architecture diagram is decorative rather than technical | Medium | Medium | PLAN-backed source references required for architecture nodes; required layer list enforced by schema/harness. |
+| PDF/HTML rendering blocks event loop | Medium | Medium | Reuse dedicated render executor pattern from PDF export; measure duration metrics. |
+| Storyboard staleness is missed after stage re-finalise | Medium | High | Hook `mark_workspace_storyboards_stale()` into `StageManager.finalise()` and test it. |
+| Large workspaces exceed prompt/context limits | Medium | Medium | Source builder prioritizes sections and bounded excerpts; missing-source metric emits when truncated/absent. |
+
+### 23.6 Validation
+
+After Phase 23 is implemented:
+
+- [ ] `cd backend && uv run pytest tests/test_storyboard_service.py -q`
+- [ ] `cd backend && uv run pytest tests/test_storyboard_router.py -q`
+- [ ] `cd backend && uv run pytest tests/test_storyboard_renderer.py -q`
+- [ ] `cd backend && uv run pytest ../harness/tests/backend/test_phase23_storyboard_contract.py -q`
+- [ ] `cd frontend && pnpm test -- Storyboard`
+- [ ] `cd frontend && pnpm tsc --noEmit`
+- [ ] `git diff --check`
+- [ ] Manual end-to-end: finalise all four stages -> Generate Storyboard -> Present -> Share -> Download all owner artifacts -> public incognito view
+- [ ] Security smoke: inject `<script>` in SPEC content, regenerate Storyboard, verify deck/PDF/HTML show no executable script
+- [ ] Billing smoke: insufficient balance blocks; failure refunds; duplicate generate does not double-charge
+
+---
+
+_SpecForge V1 PLAN.md · Version 2.4.0 · 2026-05-30 — added Phase 23 Storyboard Product Keynote Generation covering T-250 through T-264: paid 25-credit browser-native product keynote generation, six-act launch narrative, architecture reveal, source-backed claims, presenter notes, demo script, technical appendix, trusted HTML/PDF/download renderer, `/sb/{slug}` public sharing, permission-filtered public assets, idempotent credit deduction/refund, stale Storyboard propagation, Storyboard-specific rate limits, observability, comprehensive harness contract, and documentation/release-gate requirements._
 
 _SpecForge V1 PLAN.md · Version 2.3.0 · 2026-05-29 — added Phase 22 Prompt Pipeline Quality Hardening covering all 11 tasks (T-239 through T-249): closes the 7 audit findings on the SPEC/PLAN/HARNESS/TASKS prompt pipeline — Architecture anti-patterns + ADR + multi-tenancy; Capacity Model + STRIDE + SLO + FMEA + AQA matrix; Technology Currency / deprecation denylist; Frontend Architecture section + per-task FE checklist; mandatory harness test categories (boundary/property/concurrency/chaos/supply-chain) with priority-protected output-budget rule; PROFESSIONAL_OUTPUT_RULES escape-hatch tightening; 50K→200K upstream cap with section-aware injection + `pipeline_upstream_section_skipped_total` metric; new `services/pipeline/critic.py` (judge-model second pass with 1-regenerate cap and `disable_critic` escape hatch); new `services/pipeline/artifact_validator.py` (zero-LLM mandatory-section presence); new `harness/prompt_eval/` (3 golden workspaces × 25 graders + CI gate on `ASDD_PROMPT_VERSION` bumps + RUNBOOK §10 prompt-experimentation workflow)_
 

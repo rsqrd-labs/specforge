@@ -6,7 +6,7 @@ tags:
 - specforge
 - spec
 - v1
-- asdd created: 2026-04-25 status: final version: 1.4.0 stage: spec
+- asdd created: 2026-04-25 status: final version: 1.5.0 stage: spec
 
 ---
 
@@ -45,6 +45,8 @@ SPEC.md → PLAN.md → HARNESS → TASKS.md
 
 V1 validates one core hypothesis: developers find enough value in the pipeline output to use it in real projects.
 
+Once the four-stage workspace is finalised, SpecForge can also generate premium downstream artifacts from the same source of truth: exports for builders, public links for reviewers, and Storyboard keynotes for presenting the product vision and architecture to an audience.
+
 ---
 
 ## 2. Goals and Non-Goals
@@ -66,6 +68,7 @@ V1 validates one core hypothesis: developers find enough value in the pipeline o
 - Offer a small library of starter templates on the landing dashboard so a first-time user can begin from a worked example rather than a blank textarea
 - Surface harness coverage prominently in the workspace summary so the harness stage is recognisable as a differentiator rather than a buried artefact
 - Allow users to purchase additional credits in a single pack (200 credits for $9, valid 30 days from purchase date) via Stripe Hosted Checkout so the product has a clear monetisation path from V1
+- Allow users to generate a paid **Storyboard**: a browser-native, shareable, downloadable product keynote presentation that turns a finalised workspace into a stunning big-tech-style launch narrative with architecture diagrams, presenter notes, source-backed claims, and a technical appendix
 
 ### Non-Goals for V1
 
@@ -80,6 +83,7 @@ V1 validates one core hypothesis: developers find enough value in the pipeline o
 - Self-host documentation
 - Bidirectional sync
 - Enterprise features of any kind
+- Native PowerPoint / Apple Keynote file export for Storyboard; V1 Storyboards are browser-native HTML/PDF/notes artifacts
 
 ---
 
@@ -246,13 +250,13 @@ of SPEC.md. Regenerate or keep as-is?"
 
 ### 4.8 Export
 
-Once all four stages are finalised the export options activate in the workspace header:
+Once all four stages are finalised the export and launch options activate in the workspace header:
 
 ```
-[↓ Download ZIP]   [↑ Export to GitHub]   [📄 Export PDF]   [🔗 Share Public Link]
+[↓ Download ZIP]   [↑ Export to GitHub]   [📄 Export PDF]   [🔗 Share Public Link]   [🎬 Create Storyboard]
 ```
 
-No credits are deducted for any export path. The ZIP and GitHub paths produce the same file layout.
+No credits are deducted for ZIP, GitHub, PDF, or public share. **Create Storyboard** is a paid generation flow described in §4.13, because it uses the LLM pipeline to create a new launch keynote artifact. The ZIP and GitHub paths produce the same file layout.
 
 **File layout (ZIP and GitHub repo root):**
 
@@ -437,6 +441,205 @@ Balance updates immediately.
 
 **Cancelled checkout:** If the user cancels on Stripe's page, they are redirected to `/billing?cancelled=1`. The pending pack row is created but remains `status='pending'` until the checkout window expires on Stripe's side. No credits are granted for a cancelled session.
 
+### 4.13 Storyboard — Product Keynote
+
+Storyboard is a paid, one-click product keynote generator. It turns a completed SpecForge workspace into a stunning browser-native launch presentation that feels like a big-tech product keynote while remaining grounded in the actual SPEC, PLAN, HARNESS, and TASKS artifacts.
+
+Storyboard is **not** a generic slide template. It is a product-specific launch narrative with technical depth, architecture diagrams, speaker notes, source-backed claims, and downloadable presentation materials.
+
+```
+All four stages finalised
+        ↓
+User clicks "Create Storyboard"
+        ↓
+Credit confirmation modal shown (25 credits + remaining balance)
+        ↓
+User confirms
+        ↓
+Storyboard generation runs from SPEC + PLAN + HARNESS + TASKS
+        ↓
+Browser keynote opens when ready
+        ↓
+User can present, share, download, or regenerate
+```
+
+**Credit model:**
+
+|Action|Cost|Notes|
+|---|---:|---|
+|Generate Storyboard|25 credits|Full keynote, notes, demo script, appendix, diagrams|
+|Regenerate full Storyboard|25 credits|Requires confirmation; prior version preserved|
+|Regenerate one Storyboard section|5 credits|Only available after a Storyboard exists|
+|Present, share, download PDF/HTML/notes/appendix|0 credits|Included after generation|
+
+Credits are pre-checked before generation. The debit is created when generation starts and is refunded if generation fails before a usable Storyboard is persisted. Refreshing the page or retrying status polling never double-charges. If any upstream stage is re-finalised after Storyboard generation, the Storyboard is marked **stale** and the UI prompts the user to regenerate before presenting or sharing.
+
+#### Storyboard Structure
+
+The main keynote has six acts:
+
+1. **Opening Thesis**
+   - Product name
+   - Category framing
+   - Why now
+   - Big promise
+
+2. **Product Vision**
+   - User problem
+   - Target audience
+   - Before/after transformation
+   - Product principles
+
+3. **Product Walkthrough**
+   - Hero workflow
+   - Feature reveals
+   - Demo-style journey
+   - Product-specific interaction moments
+
+4. **Technical Architecture**
+   - Cinematic architecture reveal
+   - System components
+   - Data flow
+   - Integrations
+   - Scaling model
+   - Technical tradeoffs
+
+5. **Trust, Security, Reliability**
+   - Auth/access model
+   - Data boundaries
+   - Threat model highlights
+   - SLOs
+   - Failure handling
+   - Recovery model
+
+6. **Launch Close**
+   - Final product statement
+   - What ships
+   - What comes next
+   - Memorable closing line
+
+Validation and execution planning are intentionally **not** top-level keynote acts. HARNESS and TASKS still inform the Storyboard, but they appear as supporting evidence, demo details, Q&A backup, and technical appendix material rather than as project-review sections.
+
+#### Cinematic Architecture Reveal
+
+Every Storyboard must include at least one architecture diagram. The primary diagram is not presented as a static documentation block; it reveals the product architecture in layers:
+
+1. User/client layer
+2. Frontend experience
+3. API/backend services
+4. Data stores
+5. LLM/provider layer, when applicable
+6. External integrations
+7. Trust boundaries
+8. Failure and recovery paths
+
+The MVP representation is structured diagram JSON or Mermaid generated by the backend and rendered by the browser deck. The visual style is upgraded by the frontend renderer: premium spacing, large labels, animation timing, and product-specific color/shape treatment. Raw Mermaid syntax is never shown to viewers unless they open a technical/source view.
+
+#### Presentation Experience
+
+The Storyboard viewer is browser-native and requires no PowerPoint, Apple Keynote, Google Slides, or browser extension.
+
+Core modes:
+
+- **Launch page** — shareable first screen with product title, one-line promise, architecture preview, and buttons for Present / Download / Notes.
+- **Presentation mode** — full-screen deck with keyboard navigation, smooth section transitions, and cinematic architecture reveal.
+- **Presenter mode** — current slide, next slide preview, speaker notes, timer, transition cues, suggested pauses, demo cues, and backup talking points.
+- **Source layer** — optional overlay showing whether a claim came from SPEC, PLAN, HARNESS, or TASKS. Public viewers can inspect source attribution only when the owner enables it, and never see private account, billing, or draft data.
+
+#### Generated Artifacts
+
+Each Storyboard stores and exposes:
+
+- `storyboard.json` — structured presentation payload, sections, slides, diagrams, theme, and source map
+- `storyboard.html` — downloadable offline browser package
+- `storyboard.pdf` — static audience handout
+- `speaker-notes.md` — presenter talk track
+- `speaker-notes.pdf` — printable presenter notes
+- `demo-script.md` — step-by-step product demo script
+- `technical-appendix.md` — architecture, security, reliability, validation, task, and Q&A backup notes
+
+The main slides stay visually sparse: one idea, one strong visual, minimal text. Speaker notes and the appendix carry the depth. This is the standard that makes Storyboard feel like a keynote rather than a report.
+
+#### Visual Identity Generator
+
+Every Storyboard receives a product-specific visual identity inferred from the workspace:
+
+- Color palette
+- Typography mood
+- Diagram style
+- Section transition style
+- Product motif
+- Tone based on category: enterprise SaaS, AI product, developer tool, infra platform, fintech, content product, realtime collaboration product, etc.
+
+The renderer may use curated themes, but the output must never look like a generic deck template. Copy, diagrams, demo moments, and source-backed claims are always specific to the workspace.
+
+#### Product Demo Script
+
+Storyboard generates a practical demo path:
+
+- What screen or product state to start on
+- What user action to take
+- What to say during each moment
+- When to pause
+- Which capability or architecture point is being demonstrated
+- Which slide the live demo moment supports
+
+The demo script is downloadable and visible in Presenter mode. It is not shown in the main public keynote unless the owner enables source/appendix access.
+
+#### Source-Backed Confidence Layer
+
+Every major claim, architecture element, workflow, and trust statement in Storyboard has a source map back to one or more finalised artifacts:
+
+|Source|Typical use|
+|---|---|
+|SPEC|Problem framing, target users, product promise, user flows|
+|PLAN|Architecture, data flow, technical decisions, integrations, tradeoffs|
+|HARNESS|Validation confidence, critical behavior, reliability/test evidence|
+|TASKS|What ships, implementation shape, demo sequence, next-step context|
+
+The source layer exists to make the keynote defensible without making the visible presentation heavy. Source excerpts are sanitized, bounded in length, and never include draft content.
+
+#### Sharing and Downloads
+
+Storyboard sharing is separate from the existing public workspace share link. A user may share the workspace bundle, the Storyboard, both, or neither.
+
+```
+Storyboard → Share
+        ↓
+[ https://specforge.app/sb/k3f9a2 ]   [Copy]
+
+● Public  ○ Disabled
+
+Anyone with the link can view the launch page,
+present the browser keynote, and download only the
+artifacts the owner has enabled.
+```
+
+Owner controls:
+
+- Public on/off
+- Rotate public slug
+- Allow PDF download
+- Allow speaker-notes download
+- Allow technical-appendix download
+- Allow source-layer access
+
+Default public permissions: presentation and PDF download enabled; speaker notes, technical appendix, and source layer disabled until the owner opts in.
+
+Public Storyboard pages are `noindex, nofollow`, rate-limited, and served with a strict CSP. Public visitors cannot see the owner's account email, credit balance, billing history, private workspace list, draft stages, or previous Storyboard versions.
+
+#### Signature Slide Moments
+
+Every Storyboard must deliberately include two or three memorable keynote moments:
+
+- The bold opening promise
+- The before/after transformation
+- The animated architecture reveal
+- The trust/reliability reveal
+- The closing line
+
+The acceptance bar is human and product-facing: one click should produce a Storyboard the user would feel proud to present to customers, investors, teammates, or technical leadership.
+
 ---
 
 ## 5. Pipeline Stages — Detailed Specification
@@ -603,6 +806,14 @@ Minimum cut:    Ship MUST-only → ~9 days
 - **Available when:** Stage has more than one version
 - **Behaviour:** User views and restores any prior version from version history panel. Restoring marks all downstream finalised stages as stale.
 
+### Storyboard Generation
+
+- **Cost:** 25 credits for full generation; 5 credits for a single-section regeneration
+- **Available when:** SPEC, PLAN, HARNESS, and TASKS are all finalised and not stale
+- **Behaviour:** Generates a separate Storyboard artifact from the finalised stage versions. The artifact includes the browser keynote payload, architecture diagram data, speaker notes, demo script, source map, and technical appendix.
+- **On failure:** Credits refunded, Storyboard marked failed, clear error shown with one-click retry.
+- **On upstream change:** Storyboard marked stale until regenerated. Existing shared Storyboard links remain accessible but show a stale banner to the owner and can be disabled or rotated.
+
 ---
 
 ## 7. Quality and Evals
@@ -720,7 +931,7 @@ If a GitHub API call returns 401 at any point after connection, the stored token
 
 ### Credit Ledger
 
-> [!note] Design Rule The credit ledger is append-only. Every balance change is a new row. Credits are never updated in place. Every deduction, credit grant, expiry, refund, and purchase is a distinct ledger entry with a descriptive `reason` field (`signup_bonus`, `stripe_purchase:{pack_id}`, `generate`, `refund:{ledger_id}`, `expiry:{pack_id}`, `stripe_refund:{pack_id}`).
+> [!note] Design Rule The credit ledger is append-only. Every balance change is a new row. Credits are never updated in place. Every deduction, credit grant, expiry, refund, purchase, and Storyboard generation is a distinct ledger entry with a descriptive `reason` field (`signup_bonus`, `stripe_purchase:{pack_id}`, `generate`, `storyboard_generate:{storyboard_id}`, `storyboard_section:{storyboard_id}:{section_id}`, `refund:{ledger_id}`, `expiry:{pack_id}`, `stripe_refund:{pack_id}`).
 
 `user.credit_balance` is a denormalised integer kept in sync with the ledger. It is the fast path for balance reads and is cache-backed in Redis (5-minute TTL). Invariant: `credit_balance >= SUM(stripe_credit_packs.credits_remaining)` for all active packs owned by that user at any point in time.
 
@@ -766,6 +977,19 @@ Users can buy one credit pack at a time via Stripe Hosted Checkout. V1 ships wit
 | Refund policy | Unused credits revoked on Stripe refund; no negative balance |
 
 **Purchase is authoritative on webhook receipt**, not on success redirect. Credits become available in the user's balance as soon as `checkout.session.completed` is processed by the backend. If payment fails or is cancelled, no credits are granted.
+
+### Storyboard Credit Costs
+
+Storyboard is a premium generation feature and is not treated as a free export.
+
+|Action|Cost|Failure behavior|
+|---|---:|---|
+|Full Storyboard generation|25 credits|Refund if no usable Storyboard is persisted|
+|Full Storyboard regeneration|25 credits|Refund if regeneration fails; previous Storyboard remains active|
+|Single-section regeneration|5 credits|Refund if section repair fails; previous section remains active|
+|Present / share / download|0 credits|No LLM call; no credit mutation|
+
+Storyboard credit deductions use the same atomic balance and FIFO pack-drain path as stage generation. A browser refresh, duplicate request, or polling retry must never create a second charge for the same in-progress Storyboard job.
 
 ### Credit Expiry
 
@@ -994,6 +1218,76 @@ System-owned, deploy-time-seeded library of starter problem statements. Read-onl
 
 ---
 
+### Storyboard
+
+One row per generated Storyboard version. Storyboards are derived from a completed workspace but stored as their own artifact so they can be presented, shared, downloaded, regenerated, and marked stale independently from the four pipeline stages.
+
+|Field|Type|Constraints|
+|---|---|---|
+|id|UUID|Primary key|
+|workspace_id|UUID|FK → workspaces.id|
+|user_id|UUID|FK → users.id|
+|version|INTEGER|Not null, monotonically increasing per workspace|
+|status|TEXT|`generating` / `ready` / `failed` / `stale`|
+|title|TEXT|Generated product/keynote title, max 200 chars|
+|theme|TEXT|Generated or selected visual identity key|
+|content_json|JSONB|Structured sections, slides, diagrams, animation hints, launch page payload|
+|speaker_notes_md|TEXT|Downloadable presenter talk track|
+|demo_script_md|TEXT|Downloadable product demo script|
+|technical_appendix_md|TEXT|Downloadable technical appendix and Q&A prep|
+|source_map_json|JSONB|Slide/claim → SPEC/PLAN/HARNESS/TASKS source references|
+|source_stage_version_ids|JSONB|Stage version IDs used as generation inputs|
+|credit_ledger_id|UUID|Nullable FK → credit_ledger.id for the generation debit|
+|public_share_slug|TEXT|Nullable, unique when present — opaque slug exposed at `/sb/{slug}`|
+|public_share_enabled|BOOLEAN|Default false|
+|allow_pdf_download|BOOLEAN|Default true|
+|allow_notes_download|BOOLEAN|Default false|
+|allow_appendix_download|BOOLEAN|Default false|
+|allow_source_layer|BOOLEAN|Default false|
+|created_at|TIMESTAMPTZ||
+|updated_at|TIMESTAMPTZ||
+
+Unique constraints: `(workspace_id, version)` and `public_share_slug` when not null.
+
+**Content JSON contract:**
+
+```json
+{
+  "sections": [
+    {
+      "id": "opening-thesis",
+      "title": "Opening Thesis",
+      "slides": [
+        {
+          "id": "slide-001",
+          "type": "hero",
+          "headline": "...",
+          "visual": {...},
+          "speaker_notes_ref": "notes.slide-001",
+          "sources": ["SPEC"]
+        }
+      ]
+    }
+  ],
+  "diagrams": [
+    {
+      "id": "architecture-reveal",
+      "type": "architecture_reveal",
+      "layers": ["client", "frontend", "api", "data", "integrations", "trust", "recovery"]
+    }
+  ],
+  "theme": {
+    "palette": ["#..."],
+    "typography": "executive-technical",
+    "motif": "..."
+  }
+}
+```
+
+The renderer owns final visual presentation. The LLM produces structured content and diagram intent; the frontend prevents arbitrary script/style injection.
+
+---
+
 ## 11. API Contracts
 
 ### Authentication
@@ -1033,6 +1327,26 @@ System-owned, deploy-time-seeded library of starter problem statements. Read-onl
 |POST|/workspaces/{id}/share/rotate|Rotate the public slug (invalidates the prior URL)|
 |POST|/workspaces/{id}/clarify|Request 3–5 clarifying questions for the spec stage (judge model, free, no credit deduction)|
 |PATCH|/workspaces/{id}/clarify|Store the user's answers to the clarifying questions|
+
+### Storyboards
+
+|Method|Endpoint|Auth|CSRF|Description|
+|---|---|---|---|---|
+|GET|/workspaces/{id}/storyboards|Required|No|List Storyboards for a workspace, newest first|
+|GET|/workspaces/{id}/storyboards/latest|Required|No|Return latest Storyboard summary and stale status|
+|POST|/workspaces/{id}/storyboards|Required|Yes|Generate a full Storyboard from the finalised workspace; costs 25 credits; returns Storyboard ID and generation status|
+|GET|/storyboards/{id}|Required|No|Return full Storyboard payload for browser presentation|
+|POST|/storyboards/{id}/regenerate|Required|Yes|Regenerate full Storyboard; costs 25 credits; previous ready version remains available until replacement succeeds|
+|POST|/storyboards/{id}/sections/{section_id}/regenerate|Required|Yes|Regenerate one Storyboard section; costs 5 credits|
+|GET|/storyboards/{id}/presenter|Required|No|Return presenter-mode payload: slides, notes, next-slide preview data, demo cues|
+|GET|/storyboards/{id}/download/html|Required|No|Download offline browser package|
+|GET|/storyboards/{id}/download/pdf|Required|No|Download static Storyboard PDF|
+|GET|/storyboards/{id}/download/notes|Required|No|Download `speaker-notes.md` or PDF variant by query parameter|
+|GET|/storyboards/{id}/download/demo-script|Required|No|Download `demo-script.md`|
+|GET|/storyboards/{id}/download/appendix|Required|No|Download `technical-appendix.md`|
+|POST|/storyboards/{id}/share|Required|Yes|Enable Storyboard public sharing and configure public download/source permissions|
+|DELETE|/storyboards/{id}/share|Required|Yes|Disable Storyboard public sharing — preserves slug for re-enable|
+|POST|/storyboards/{id}/share/rotate|Required|Yes|Rotate Storyboard public slug and invalidate prior public URL|
 
 ### Stages
 
@@ -1084,6 +1398,8 @@ System-owned, deploy-time-seeded library of starter problem statements. Read-onl
 |Method|Endpoint|Description|
 |---|---|---|
 |GET|/public/{slug}|Return the read-only finalised workspace bundle (spec, plan, harness coverage summary, tasks). 404 if the slug is unknown or sharing is currently disabled.|
+|GET|/storyboards/public/{slug}|Return public Storyboard launch page and presentation payload. 404 if the slug is unknown or sharing is disabled. Download/source-layer access follows owner permissions.|
+|GET|/storyboards/public/{slug}/download/{kind}|Download a public Storyboard artifact when the owner has enabled that permission. `kind` is `pdf`, `notes`, `demo-script`, or `appendix`; public HTML package download is not exposed by default.|
 
 ---
 
@@ -1119,6 +1435,10 @@ System-owned, deploy-time-seeded library of starter problem statements. Read-onl
 - `GET /billing/status` lookups are scoped by `user_id` in addition to `session_id` to prevent IDOR — a user cannot poll another user's checkout session status. Returns 404 (not 403) on ownership mismatch to avoid confirming existence.
 - PII boundary with Stripe: only the user's email is passed to Stripe (for checkout form pre-fill). No card data touches SpecForge servers at any point. `client_reference_id` carries only the opaque UUID `user_id`.
 - Production guard: `STRIPE_SECRET_KEY` must be set and must not be a test key (`sk_test_*`) in production; enforced at startup alongside existing production validation checks.
+- Storyboard public links expose only the generated Storyboard payload and owner-enabled downloads. They never expose account email, credit balance, billing history, private workspace lists, draft stage content, previous Storyboard versions, or raw prompts.
+- Storyboard source excerpts are sanitized, bounded in length, and sourced only from finalised stage versions. The source layer is disabled on public links by default.
+- Storyboard HTML downloads contain no arbitrary LLM-generated scripts. Deck rendering uses the trusted frontend renderer over structured JSON; generated Markdown, diagram labels, notes, and appendix content pass through the same sanitization policy as public share and PDF export.
+- Public Storyboard pages use `noindex, nofollow`, `X-Robots-Tag`, and a strict CSP. Offline HTML packages include the minimum assets needed to render the deck and do not fetch remote scripts.
 
 ### Rate Limits
 
@@ -1136,6 +1456,11 @@ System-owned, deploy-time-seeded library of starter problem statements. Read-onl
 |Public View|Per IP|120 reads|1 minute|
 |Billing Checkout|Per user|5 sessions|1 hour|
 |Billing Webhook|Exempt|Signature-validated; no rate cap|—|
+|Storyboard Generate|Per user|3 full generations|1 hour|
+|Storyboard Section Regenerate|Per user|10 section regenerations|1 hour|
+|Storyboard Share Toggle|Per user|20 toggles|1 hour|
+|Storyboard Public View|Per IP|120 reads|1 minute|
+|Storyboard Download|Per user/IP|30 downloads|1 hour|
 
 ### Scalability
 
@@ -1179,6 +1504,23 @@ Recommended Grafana alert rules (documented in `RUNBOOK.md §9`):
 |Zero purchases 72 h|`increase(specforge_billing_purchase_completed_total[72h]) == 0`|Warning|
 |Unexpected expiry spike|`rate(specforge_billing_credits_expired_total[1h]) > 500`|Warning|
 
+**Storyboard observability** — the following metrics are emitted for the paid keynote flow:
+
+|Metric|Description|
+|---|---|
+|`specforge_storyboard_generation_started_total`|Full Storyboard generations started|
+|`specforge_storyboard_generation_completed_total`|Full Storyboard generations persisted successfully|
+|`specforge_storyboard_generation_failed_total`|Full Storyboard generations failed, labelled by failure type|
+|`specforge_storyboard_section_regenerated_total`|Single-section regenerations completed|
+|`specforge_storyboard_generation_duration_seconds`|Histogram of full Storyboard generation duration|
+|`specforge_storyboard_credits_deducted_total`|Credits deducted for Storyboard actions|
+|`specforge_storyboard_credits_refunded_total`|Credits refunded after Storyboard failures|
+|`specforge_storyboard_public_view_total`|Public Storyboard launch page/deck views|
+|`specforge_storyboard_download_total`|Downloads by type: html, pdf, notes, demo_script, appendix|
+|`specforge_storyboard_source_missing_total`|Expected source sections absent during Storyboard source extraction, labelled by source and section|
+
+Structlog Storyboard events include `storyboard_id`, `workspace_id`, `user_id`, `version`, `action`, `status`, `credit_ledger_id`, and `source_stage_version_ids`. Speaker notes, source excerpts, raw generated JSON, and technical appendix content are never logged.
+
 ---
 
 ## 13. Assumptions
@@ -1219,6 +1561,12 @@ Recommended Grafana alert rules (documented in `RUNBOOK.md §9`):
 
 **Assumption 17 — Webhook delivery is sufficiently reliable for credit granting.** Stripe retries failed webhooks for up to 72 hours with exponential backoff. If the backend is down for longer than that — an extreme scenario — purchased credits would not be granted automatically. A manual admin script that replays events from Stripe's event log is the recovery path; documenting this in `RUNBOOK.md §9` is sufficient for V1.
 
+**Assumption 18 — Storyboard is valuable enough to be paid.** A 25-credit price is expected to feel fair because Storyboard produces a separate launch artifact: keynote, architecture reveal, speaker notes, demo script, downloadable materials, and share page. If users frequently abandon at the confirmation modal, lower the price or offer a preview mode.
+
+**Assumption 19 — Browser-native is the correct default presentation format.** Users want a link they can present immediately without PowerPoint, Apple Keynote, or Google Slides. PDF and offline HTML downloads cover most portability needs. Native slide-file export can be added later if customer demand is clear.
+
+**Assumption 20 — Source-backed claims are a differentiator, not visual clutter.** The main Storyboard must stay cinematic and sparse, but the optional source layer gives technical buyers confidence that claims are derived from SPEC, PLAN, HARNESS, and TASKS rather than generic marketing text. If public viewers find the source layer confusing, it remains owner-only by default.
+
 ---
 
 ## 14. Out of Scope for V1
@@ -1238,6 +1586,7 @@ Recommended Grafana alert rules (documented in `RUNBOOK.md §9`):
 | User-authored starter templates      | V2             |
 | Public-share comments or reactions   | V2             |
 | Editable PDF (interactive form)      | V2             |
+| Storyboard PPTX / `.key` export      | V2             |
 | API access for programmatic use      | V3             |
 | Audit logging                        | V3 Enterprise  |
 | Enterprise SSO or SAML               | V3 Enterprise  |
@@ -1251,6 +1600,8 @@ Recommended Grafana alert rules (documented in `RUNBOOK.md §9`):
 |---|---|---|
 |Pipeline completion rate|≥ 30%|% of workspaces that reach a finalised TASKS stage|
 |Export rate|≥ 60%|% of completed workspaces that result in a download|
+|Storyboard generation rate|≥ 15%|% of completed workspaces that generate a Storyboard|
+|Storyboard presentation/share rate|≥ 50%|% of generated Storyboards that are presented, shared, or downloaded|
 |Return rate|≥ 40%|% of users who complete one workspace and start a second|
 |Credit purchase conversion|≥ 10%|% of users who exhaust free credits and purchase a pack|
 |Credit expiry waste|< 20%|% of purchased credits that expire unused — indicates over-buying or insufficient re-engagement|
@@ -1258,7 +1609,9 @@ Recommended Grafana alert rules (documented in `RUNBOOK.md §9`):
 
 ---
 
-_SpecForge V1 SPEC.md · Version 1.4.0 · 2026-05-27 — Stripe payments integration: §2 Goals adds credit purchase goal; §2 Non-Goals changes "Payments and subscriptions" to "Subscriptions and recurring billing"; §4.10 Dashboard replaces waitlist callout with purchase CTA and expiry warning chip; new §4.12 Credit Purchase Flow with checkout redirect, webhook-authoritative crediting, Billing page sections, and cancellation handling; §9 fully rewritten as "Credit System and Billing" covering ledger invariant, FIFO pack drain, lazy expiry, Stripe refund/dispute policy, and updated credit display table; §10 adds `User.credit_balance` field, new `StripeCreditPack` and `StripeWebhookEvent` data models; §11 Credits endpoint updated with expiry fields, new Billing endpoints table with auth/CSRF/ownership notes; §12 Security adds 5 Stripe-specific rules, Rate Limits adds Billing Checkout and Billing Webhook tiers, Observability adds 10 billing Prometheus counters, structlog event schema, and 4 Grafana alert rules; §13 updates Assumptions 2 and 6, adds Assumptions 15–17 for Stripe UX, expiry period, and webhook reliability; §14 replaces "Payments and subscriptions" with "Subscriptions and recurring billing" + "Tiered credit packages"; Success Metrics adds credit purchase conversion and expiry waste targets._
+_SpecForge V1 SPEC.md · Version 1.5.0 · 2026-05-30 — added Storyboard paid product-keynote generation: §2 adds Storyboard as a paid goal and excludes native PPTX/Keynote export from V1; §4.8 adds the Create Storyboard action; new §4.13 defines six-act keynote structure, credit pricing, cinematic architecture reveal, browser presentation mode, presenter mode, launch page, source-backed confidence layer, product demo script, visual identity generator, hidden technical appendix, sharing controls, downloads, and signature slide moments; §6 adds Storyboard generation interaction mode; §9 adds Storyboard credit ledger reasons and pricing/refund rules; §10 adds Storyboard data model and JSON contract; §11 adds Storyboard API and public route contracts; §12 adds Storyboard security, rate limits, and observability metrics; §13 adds assumptions for paid Storyboard value, browser-native presentation, and source-backed claims; §14 adds native slide export as V2; Success Metrics adds Storyboard generation and presentation/share targets._
+
+_Version 1.4.0 · 2026-05-27 — Stripe payments integration: §2 Goals adds credit purchase goal; §2 Non-Goals changes "Payments and subscriptions" to "Subscriptions and recurring billing"; §4.10 Dashboard replaces waitlist callout with purchase CTA and expiry warning chip; new §4.12 Credit Purchase Flow with checkout redirect, webhook-authoritative crediting, Billing page sections, and cancellation handling; §9 fully rewritten as "Credit System and Billing" covering ledger invariant, FIFO pack drain, lazy expiry, Stripe refund/dispute policy, and updated credit display table; §10 adds `User.credit_balance` field, new `StripeCreditPack` and `StripeWebhookEvent` data models; §11 Credits endpoint updated with expiry fields, new Billing endpoints table with auth/CSRF/ownership notes; §12 Security adds 5 Stripe-specific rules, Rate Limits adds Billing Checkout and Billing Webhook tiers, Observability adds 10 billing Prometheus counters, structlog event schema, and 4 Grafana alert rules; §13 updates Assumptions 2 and 6, adds Assumptions 15–17 for Stripe UX, expiry period, and webhook reliability; §14 replaces "Payments and subscriptions" with "Subscriptions and recurring billing" + "Tiered credit packages"; Success Metrics adds credit purchase conversion and expiry waste targets._
 
 _Version 1.3.0 · 2026-05-20 — added six v1 usefulness features: Spec Clarification pre-generation step (§4.4.1, §5.1), per-task Priority + Estimate fields with an Effort Summary block (§4.6, §5.4), PDF export and Public Share read-only link (§4.8), Starter Templates library and §4.11 flow, harness-coverage workspace-summary surfacing (§7). Adds `Workspace.template_slug / clarification_qa / public_share_slug / public_share_enabled` fields and the `Template` table (§10), new endpoints under Workspaces / Templates / Public Share (§11), new rate-limit tiers PDF/Clarify/Share/Public-view (§12), Assumptions 11–14, and three new V2 entries in §14. Existing ZIP and GitHub export paths unchanged._
 
