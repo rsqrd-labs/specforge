@@ -81,6 +81,62 @@ _BILLING_CHECKOUT_LIMIT = 5
 _BILLING_CHECKOUT_WINDOW_SECONDS = 3600
 _BILLING_CHECKOUT_DETAIL = "Checkout rate limit reached. Maximum 5 purchases per hour."
 
+# Storyboard Generate tier (Phase 20, T-261): 3 full generations per user per
+# hour. Applies to the initial workspace generation and full Storyboard
+# regeneration; section regeneration has its own cheaper, higher-volume tier.
+_STORYBOARD_GENERATE_PATH_RE = re.compile(
+    r"^(?:/workspaces/[^/]+/storyboards|/storyboards/[^/]+/regenerate)/?$"
+)
+_STORYBOARD_GENERATE_LIMIT = 3
+_STORYBOARD_GENERATE_WINDOW_SECONDS = 3600
+_STORYBOARD_GENERATE_DETAIL = (
+    "Storyboard generate rate limit reached. Maximum 3 full generations per hour."
+)
+
+# Storyboard Section Regenerate tier (Phase 20, T-261): 10 section refreshes
+# per user per hour.
+_STORYBOARD_SECTION_REGENERATE_PATH_RE = re.compile(
+    r"^/storyboards/[^/]+/sections/[^/]+/regenerate/?$"
+)
+_STORYBOARD_SECTION_REGENERATE_LIMIT = 10
+_STORYBOARD_SECTION_REGENERATE_WINDOW_SECONDS = 3600
+_STORYBOARD_SECTION_REGENERATE_DETAIL = (
+    "Storyboard section regenerate rate limit reached. Maximum 10 sections per hour."
+)
+
+# Storyboard Share Toggle tier (Phase 20, T-261): 20 enable/disable/rotate
+# calls per user per hour.
+_STORYBOARD_SHARE_TOGGLE_PATH_RE = re.compile(
+    r"^/storyboards/[^/]+/share(?:/rotate)?/?$"
+)
+_STORYBOARD_SHARE_TOGGLE_LIMIT = 20
+_STORYBOARD_SHARE_TOGGLE_WINDOW_SECONDS = 3600
+_STORYBOARD_SHARE_TOGGLE_DETAIL = (
+    "Storyboard share toggle rate limit reached. Maximum 20 changes per hour."
+)
+
+# Storyboard Public View tier (Phase 20, T-261): 120 public launch-page/deck
+# reads per IP per minute. Public downloads are intentionally excluded and use
+# the download tier below.
+_STORYBOARD_PUBLIC_VIEW_PATH_RE = re.compile(r"^/storyboards/public/[^/]+/?$")
+_STORYBOARD_PUBLIC_VIEW_LIMIT = 120
+_STORYBOARD_PUBLIC_VIEW_WINDOW_SECONDS = 60
+_STORYBOARD_PUBLIC_VIEW_DETAIL = "Too many Storyboard public views."
+
+# Storyboard Download tier (Phase 20, T-261): 30 downloads per hour. Owner
+# downloads key by authenticated user; public downloads key by IP.
+_STORYBOARD_OWNER_DOWNLOAD_PATH_RE = re.compile(
+    r"^/storyboards/[^/]+/download/[^/]+/?$"
+)
+_STORYBOARD_PUBLIC_DOWNLOAD_PATH_RE = re.compile(
+    r"^/storyboards/public/[^/]+/download/[^/]+/?$"
+)
+_STORYBOARD_DOWNLOAD_LIMIT = 30
+_STORYBOARD_DOWNLOAD_WINDOW_SECONDS = 3600
+_STORYBOARD_DOWNLOAD_DETAIL = (
+    "Storyboard download rate limit reached. Maximum 30 downloads per hour."
+)
+
 IpNetwork = IPv4Network | IPv6Network
 RateLimitCheck = Callable[[str, int, int], Awaitable[bool]]
 
@@ -236,6 +292,29 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             ):
                 return _rate_limited(_PUBLIC_VIEW_WINDOW_SECONDS)
 
+        # Phase 20, T-261: unauthenticated public Storyboard reads are per-IP.
+        if request.method == "GET" and _STORYBOARD_PUBLIC_VIEW_PATH_RE.match(path):
+            if not await check(
+                f"storyboard_public_view:{ip}",
+                _STORYBOARD_PUBLIC_VIEW_LIMIT,
+                _STORYBOARD_PUBLIC_VIEW_WINDOW_SECONDS,
+            ):
+                return _rate_limited_custom(
+                    detail=_STORYBOARD_PUBLIC_VIEW_DETAIL,
+                    retry_after_seconds=_STORYBOARD_PUBLIC_VIEW_WINDOW_SECONDS,
+                )
+
+        if request.method == "GET" and _STORYBOARD_PUBLIC_DOWNLOAD_PATH_RE.match(path):
+            if not await check(
+                f"storyboard_download_ip:{ip}",
+                _STORYBOARD_DOWNLOAD_LIMIT,
+                _STORYBOARD_DOWNLOAD_WINDOW_SECONDS,
+            ):
+                return _rate_limited_custom(
+                    detail=_STORYBOARD_DOWNLOAD_DETAIL,
+                    retry_after_seconds=_STORYBOARD_DOWNLOAD_WINDOW_SECONDS,
+                )
+
         if path in _LOGIN_PATHS:
             if not await check(
                 f"login:{ip}",
@@ -347,6 +426,70 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
                 return _rate_limited_custom(
                     detail=_BILLING_CHECKOUT_DETAIL,
                     retry_after_seconds=_BILLING_CHECKOUT_WINDOW_SECONDS,
+                )
+
+        if (
+            user_id
+            and request.method == "POST"
+            and _STORYBOARD_GENERATE_PATH_RE.match(path)
+        ):
+            allowed = await check(
+                f"storyboard_generate:{user_id}",
+                _STORYBOARD_GENERATE_LIMIT,
+                _STORYBOARD_GENERATE_WINDOW_SECONDS,
+            )
+            if not allowed:
+                return _rate_limited_custom(
+                    detail=_STORYBOARD_GENERATE_DETAIL,
+                    retry_after_seconds=_STORYBOARD_GENERATE_WINDOW_SECONDS,
+                )
+
+        if (
+            user_id
+            and request.method == "POST"
+            and _STORYBOARD_SECTION_REGENERATE_PATH_RE.match(path)
+        ):
+            allowed = await check(
+                f"storyboard_section_regenerate:{user_id}",
+                _STORYBOARD_SECTION_REGENERATE_LIMIT,
+                _STORYBOARD_SECTION_REGENERATE_WINDOW_SECONDS,
+            )
+            if not allowed:
+                return _rate_limited_custom(
+                    detail=_STORYBOARD_SECTION_REGENERATE_DETAIL,
+                    retry_after_seconds=_STORYBOARD_SECTION_REGENERATE_WINDOW_SECONDS,
+                )
+
+        if (
+            user_id
+            and request.method in ("POST", "DELETE")
+            and _STORYBOARD_SHARE_TOGGLE_PATH_RE.match(path)
+        ):
+            allowed = await check(
+                f"storyboard_share_toggle:{user_id}",
+                _STORYBOARD_SHARE_TOGGLE_LIMIT,
+                _STORYBOARD_SHARE_TOGGLE_WINDOW_SECONDS,
+            )
+            if not allowed:
+                return _rate_limited_custom(
+                    detail=_STORYBOARD_SHARE_TOGGLE_DETAIL,
+                    retry_after_seconds=_STORYBOARD_SHARE_TOGGLE_WINDOW_SECONDS,
+                )
+
+        if (
+            user_id
+            and request.method == "GET"
+            and _STORYBOARD_OWNER_DOWNLOAD_PATH_RE.match(path)
+        ):
+            allowed = await check(
+                f"storyboard_download_user:{user_id}",
+                _STORYBOARD_DOWNLOAD_LIMIT,
+                _STORYBOARD_DOWNLOAD_WINDOW_SECONDS,
+            )
+            if not allowed:
+                return _rate_limited_custom(
+                    detail=_STORYBOARD_DOWNLOAD_DETAIL,
+                    retry_after_seconds=_STORYBOARD_DOWNLOAD_WINDOW_SECONDS,
                 )
         return None
 

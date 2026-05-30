@@ -70,6 +70,9 @@ HTML_CSP = (
 # re-validate here before inlining into CSS so a malformed value can never break
 # out of the colour context. Falls back to brand defaults.
 _HEX_RE = re.compile(r"^#[0-9A-Fa-f]{6}$")
+_REMOTE_REFERENCE_RE = re.compile(
+    r"(?i)\bhttps?://[^\s<>'\")]+|//[^\s<>'\")]+"
+)
 _DEFAULT_ACCENT = "#6d28d9"
 _DEFAULT_ACCENT_2 = "#0ea5e9"
 
@@ -156,7 +159,7 @@ def _clean(value: Any) -> str:
 
     if value is None:
         return ""
-    return sanitize_text(str(value))
+    return _REMOTE_REFERENCE_RE.sub("", sanitize_text(str(value))).strip()
 
 
 def _hex_or(default: str, value: Any) -> str:

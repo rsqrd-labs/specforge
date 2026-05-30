@@ -8,6 +8,7 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from redis.exceptions import RedisError
 
+import middleware.rate_limit as rate_limit_module
 from middleware.rate_limit import (
     RateLimitMiddleware,
     _local_sliding_window_check,
@@ -346,3 +347,172 @@ def test_trusted_proxy_config_rejects_ipv4_universal_trust() -> None:
 def test_trusted_proxy_config_rejects_ipv6_universal_trust() -> None:
     with pytest.raises(ValueError, match="universal trust"):
         _parse_trusted_proxy_networks("::/0")
+
+
+def _fill_window(
+    fake_redis: _FakeRedis,
+    key: str,
+    limit: int,
+    *,
+    age_seconds: float = 1.0,
+) -> None:
+    now = time.time()
+    fake_redis._sets[f"ratelimit:{key}"] = {
+        f"req_{i}": now - age_seconds - i * 0.001 for i in range(limit)
+    }
+
+
+async def _rate_limited_request(
+    *,
+    method: str,
+    path: str,
+    fake_redis: _FakeRedis,
+    user_id: str | None = None,
+) -> Any:
+    app = FastAPI()
+    app.add_middleware(RateLimitMiddleware, trusted_proxy_ips="127.0.0.1")
+    app.state.redis = fake_redis
+
+    @app.api_route("/{rest:path}", methods=["GET", "POST", "DELETE"])
+    async def catch_all(rest: str) -> dict:
+        return {"ok": True, "path": rest}
+
+    headers = {"X-Forwarded-For": "203.0.113.10"}
+    if user_id is not None:
+        headers["Authorization"] = "Bearer storyboard-token"
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        return await client.request(method, path, headers=headers)
+
+
+@pytest.mark.asyncio
+async def test_storyboard_generate_rate_limit_blocks_fourth_full_generation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    user_id = "user-storyboard-generate"
+    fake_redis = _FakeRedis()
+    _fill_window(fake_redis, f"storyboard_generate:{user_id}", 3)
+    monkeypatch.setattr(
+        rate_limit_module,
+        "decode_access_token_claims",
+        lambda token: {"sub": user_id} if token == "storyboard-token" else None,
+    )
+
+    response = await _rate_limited_request(
+        method="POST",
+        path="/workspaces/workspace-1/storyboards",
+        fake_redis=fake_redis,
+        user_id=user_id,
+    )
+
+    assert response.status_code == 429
+    assert response.headers["Retry-After"] == "3600"
+    assert "3 full generations" in response.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_storyboard_section_regenerate_rate_limit_blocks_eleventh_section(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    user_id = "user-storyboard-section"
+    fake_redis = _FakeRedis()
+    _fill_window(fake_redis, f"storyboard_section_regenerate:{user_id}", 10)
+    monkeypatch.setattr(
+        rate_limit_module,
+        "decode_access_token_claims",
+        lambda token: {"sub": user_id} if token == "storyboard-token" else None,
+    )
+
+    response = await _rate_limited_request(
+        method="POST",
+        path="/storyboards/storyboard-1/sections/technical-architecture/regenerate",
+        fake_redis=fake_redis,
+        user_id=user_id,
+    )
+
+    assert response.status_code == 429
+    assert response.headers["Retry-After"] == "3600"
+    assert "10 sections" in response.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_storyboard_share_toggle_rate_limit_blocks_twenty_first_change(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    user_id = "user-storyboard-share"
+    fake_redis = _FakeRedis()
+    _fill_window(fake_redis, f"storyboard_share_toggle:{user_id}", 20)
+    monkeypatch.setattr(
+        rate_limit_module,
+        "decode_access_token_claims",
+        lambda token: {"sub": user_id} if token == "storyboard-token" else None,
+    )
+
+    response = await _rate_limited_request(
+        method="POST",
+        path="/storyboards/storyboard-1/share/rotate",
+        fake_redis=fake_redis,
+        user_id=user_id,
+    )
+
+    assert response.status_code == 429
+    assert response.headers["Retry-After"] == "3600"
+    assert "20 changes" in response.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_storyboard_public_view_rate_limit_is_per_ip() -> None:
+    fake_redis = _FakeRedis()
+    _fill_window(fake_redis, "storyboard_public_view:203.0.113.10", 120)
+
+    response = await _rate_limited_request(
+        method="GET",
+        path="/storyboards/public/sharetoken123",
+        fake_redis=fake_redis,
+    )
+
+    assert response.status_code == 429
+    assert response.headers["Retry-After"] == "60"
+    assert "public views" in response.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_storyboard_public_download_rate_limit_is_per_ip() -> None:
+    fake_redis = _FakeRedis()
+    _fill_window(fake_redis, "storyboard_download_ip:203.0.113.10", 30)
+
+    response = await _rate_limited_request(
+        method="GET",
+        path="/storyboards/public/sharetoken123/download/pdf",
+        fake_redis=fake_redis,
+    )
+
+    assert response.status_code == 429
+    assert response.headers["Retry-After"] == "3600"
+    assert "30 downloads" in response.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_storyboard_owner_download_rate_limit_is_per_user(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    user_id = "user-storyboard-download"
+    fake_redis = _FakeRedis()
+    _fill_window(fake_redis, f"storyboard_download_user:{user_id}", 30)
+    monkeypatch.setattr(
+        rate_limit_module,
+        "decode_access_token_claims",
+        lambda token: {"sub": user_id} if token == "storyboard-token" else None,
+    )
+
+    response = await _rate_limited_request(
+        method="GET",
+        path="/storyboards/storyboard-1/download/pdf",
+        fake_redis=fake_redis,
+        user_id=user_id,
+    )
+
+    assert response.status_code == 429
+    assert response.headers["Retry-After"] == "3600"
+    assert "30 downloads" in response.json()["detail"]
