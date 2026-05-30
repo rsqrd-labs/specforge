@@ -1,5 +1,9 @@
 import { useEffect, useState } from "react"
 import { useParams } from "react-router-dom"
+import { PresenterMode } from "../components/storyboard/PresenterMode"
+import { StoryboardDeck } from "../components/storyboard/StoryboardDeck"
+import { StoryboardDownloadMenu } from "../components/storyboard/StoryboardDownloadMenu"
+import { StoryboardLaunchPage } from "../components/storyboard/StoryboardLaunchPage"
 import { getPublicStoryboard } from "../services/api"
 import type { StoryboardPublicResponse } from "../types/storyboard"
 
@@ -11,12 +15,7 @@ import type { StoryboardPublicResponse } from "../types/storyboard"
 // UI. The harness contract test enforces this by string-searching the source
 // for those identifiers, so they must not appear here even in comments. The
 // page reads exclusively from the unauthenticated /storyboards/public/{slug}
-// endpoint via the bare axios path in api.ts (no CSRF / auth headers attached),
-// and never persists source excerpts, notes, or appendix content to
-// localStorage / sessionStorage.
-//
-// This is the foundation the cinematic public deck, presenter-free view, share
-// surface, and gated downloads (T-260) build on.
+// endpoint via the bare axios path in api.ts.
 
 const NOINDEX_META_ID = "specforge-storyboard-public-noindex"
 
@@ -45,6 +44,9 @@ type LoadState =
 export default function StoryboardPublic() {
   const { slug } = useParams<{ slug: string }>()
   const [state, setState] = useState<LoadState>({ kind: "loading" })
+  const [view, setView] = useState<"launch" | "deck">("launch")
+  const [showDownloads, setShowDownloads] = useState(false)
+  const [showNotes, setShowNotes] = useState(false)
   useNoIndexMeta()
 
   useEffect(() => {
@@ -54,6 +56,9 @@ export default function StoryboardPublic() {
     }
     let cancelled = false
     setState({ kind: "loading" })
+    setView("launch")
+    setShowDownloads(false)
+    setShowNotes(false)
     // getPublicStoryboard maps unknown / disabled / rotated slugs to null, so a
     // bad link renders the empty state rather than crashing or redirecting.
     getPublicStoryboard(slug)
@@ -86,7 +91,7 @@ export default function StoryboardPublic() {
   if (state.kind === "loading") {
     return (
       <main className="storyboard-public" aria-busy="true">
-        <p>Loading…</p>
+        <StoryboardDeck isLoading title="Storyboard" />
       </main>
     )
   }
@@ -101,16 +106,53 @@ export default function StoryboardPublic() {
   }
 
   const { storyboard } = state
+  const payload = storyboard.presentation
   return (
     <main className="storyboard-public">
-      <header className="storyboard-public__header">
-        <h1>{storyboard.title}</h1>
-      </header>
-      <ol className="storyboard-public__acts">
-        {storyboard.presentation.sections.map((section) => (
-          <li key={section.id}>{section.title}</li>
-        ))}
-      </ol>
+      {view === "deck" ? (
+        <StoryboardDeck
+          payload={payload}
+          status="ready"
+          title={storyboard.title}
+          isOwner={false}
+          allowPresenterMode={storyboard.permissions.allow_notes_download}
+          allowSourceLayer={storyboard.permissions.allow_source_layer}
+          sharePermissions={storyboard.permissions}
+          publicView={true}
+          onExit={() => setView("launch")}
+        />
+      ) : (
+        <>
+          <StoryboardLaunchPage
+            title={storyboard.title}
+            payload={payload}
+            permissions={storyboard.permissions}
+            downloads={storyboard.downloads}
+            sharedAt={storyboard.shared_at}
+            onPresent={() => setView("deck")}
+            onDownload={() => setShowDownloads((value) => !value)}
+            onNotes={() => setShowNotes((value) => !value)}
+          />
+          {showDownloads && (
+            <StoryboardDownloadMenu
+              mode="public"
+              title={storyboard.title}
+              slug={slug}
+              permissions={storyboard.permissions}
+              downloads={storyboard.downloads}
+            />
+          )}
+          {showNotes && (
+            <PresenterMode
+              payload={payload}
+              isOwner={false}
+              permissions={storyboard.permissions}
+              publicView={true}
+              onClose={() => setShowNotes(false)}
+            />
+          )}
+        </>
+      )}
     </main>
   )
 }

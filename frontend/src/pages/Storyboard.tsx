@@ -1,9 +1,13 @@
 import axios from "axios"
 import { useEffect, useState } from "react"
 import { Link, useParams } from "react-router-dom"
+import { PresenterMode } from "../components/storyboard/PresenterMode"
 import { StoryboardDeck } from "../components/storyboard/StoryboardDeck"
+import { StoryboardDownloadMenu } from "../components/storyboard/StoryboardDownloadMenu"
+import { StoryboardLaunchPage } from "../components/storyboard/StoryboardLaunchPage"
+import { StoryboardShareModal } from "../components/storyboard/StoryboardShareModal"
 import { getApiErrorMessage, getStoryboard } from "../services/api"
-import type { StoryboardDetail } from "../types/storyboard"
+import type { StoryboardDetail, StoryboardSharePermissions } from "../types/storyboard"
 
 // Authenticated owner Storyboard page (Phase 20 — T-257).
 //
@@ -23,6 +27,10 @@ type LoadState =
 export default function Storyboard() {
   const { id } = useParams<{ id: string }>()
   const [state, setState] = useState<LoadState>({ kind: "loading" })
+  const [view, setView] = useState<"launch" | "deck">("launch")
+  const [showDownloads, setShowDownloads] = useState(false)
+  const [showNotes, setShowNotes] = useState(false)
+  const [showShareModal, setShowShareModal] = useState(false)
 
   useEffect(() => {
     if (!id) {
@@ -33,7 +41,13 @@ export default function Storyboard() {
     setState({ kind: "loading" })
     getStoryboard(id)
       .then((storyboard) => {
-        if (!cancelled) setState({ kind: "ready", storyboard })
+        if (!cancelled) {
+          setState({ kind: "ready", storyboard })
+          setView("launch")
+          setShowDownloads(false)
+          setShowNotes(false)
+          setShowShareModal(false)
+        }
       })
       .catch((error: unknown) => {
         if (cancelled) return
@@ -48,6 +62,25 @@ export default function Storyboard() {
       cancelled = true
     }
   }, [id])
+
+  function updateShareState(next: {
+    enabled: boolean
+    slug: string | null
+    permissions: StoryboardSharePermissions
+  }) {
+    setState((current) => {
+      if (current.kind !== "ready") return current
+      return {
+        kind: "ready",
+        storyboard: {
+          ...current.storyboard,
+          public_share_enabled: next.enabled,
+          public_share_slug: next.slug,
+          permissions: next.permissions,
+        },
+      }
+    })
+  }
 
   useEffect(() => {
     document.title =
@@ -86,6 +119,7 @@ export default function Storyboard() {
   }
 
   const { storyboard } = state
+  const isPresentable = storyboard.status === "ready" || storyboard.status === "stale"
   return (
     <main className="storyboard-page storyboard-page--deck">
       <header className="storyboard-page__header">
@@ -94,14 +128,60 @@ export default function Storyboard() {
         </p>
         <Link to={`/workspace/${storyboard.workspace_id}`}>Back to workspace</Link>
       </header>
-      <StoryboardDeck
-        payload={storyboard.content}
-        status={storyboard.status}
-        title={storyboard.title}
-        isOwner={true}
-        allowPresenterMode={true}
-        allowSourceLayer={true}
-      />
+      {view === "deck" ? (
+        <StoryboardDeck
+          payload={storyboard.content}
+          status={storyboard.status}
+          title={storyboard.title}
+          isOwner={true}
+          allowPresenterMode={true}
+          allowSourceLayer={true}
+          sharePermissions={storyboard.permissions}
+          onExit={() => setView("launch")}
+        />
+      ) : (
+        <>
+          <StoryboardLaunchPage
+            title={storyboard.title}
+            payload={storyboard.content}
+            isOwner={true}
+            permissions={storyboard.permissions}
+            onPresent={() => {
+              if (isPresentable) setView("deck")
+            }}
+            onDownload={() => setShowDownloads((value) => !value)}
+            onNotes={() => setShowNotes((value) => !value)}
+            onShare={() => setShowShareModal(true)}
+          />
+          {showDownloads && (
+            <StoryboardDownloadMenu
+              mode="owner"
+              title={storyboard.title}
+              storyboardId={storyboard.id}
+              permissions={storyboard.permissions}
+            />
+          )}
+          {showNotes && (
+            <PresenterMode
+              payload={storyboard.content}
+              isOwner={true}
+              permissions={storyboard.permissions}
+              onClose={() => setShowNotes(false)}
+            />
+          )}
+        </>
+      )}
+
+      {showShareModal && (
+        <StoryboardShareModal
+          storyboardId={storyboard.id}
+          initialEnabled={storyboard.public_share_enabled}
+          initialSlug={storyboard.public_share_slug}
+          initialPermissions={storyboard.permissions}
+          onClose={() => setShowShareModal(false)}
+          onShareChanged={updateShareState}
+        />
+      )}
     </main>
   )
 }

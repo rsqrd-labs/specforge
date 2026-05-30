@@ -7,12 +7,14 @@ import {
 } from "react"
 import { MarkdownRenderer } from "../workspace/MarkdownRenderer"
 import { ArchitectureReveal } from "./ArchitectureReveal"
+import { PresenterMode } from "./PresenterMode"
+import { SourceLayer } from "./SourceLayer"
 import type {
-  SpeakerNote,
   StoryboardDiagram,
   StoryboardPayload,
   StoryboardSection,
   StoryboardSectionTitle,
+  StoryboardSharePermissions,
   StoryboardSlide,
   StoryboardStatus,
 } from "../../types/storyboard"
@@ -46,6 +48,8 @@ interface StoryboardDeckProps {
   isOwner?: boolean
   allowPresenterMode?: boolean
   allowSourceLayer?: boolean
+  sharePermissions?: Partial<StoryboardSharePermissions>
+  publicView?: boolean
   onExit?: () => void
 }
 
@@ -90,14 +94,6 @@ function findArchitectureDiagram(
   payload: StoryboardPayload | null | undefined,
 ): StoryboardDiagram | null {
   return payload?.diagrams.find((diagram) => diagram.type === "architecture_reveal") ?? null
-}
-
-function noteForSlide(
-  payload: StoryboardPayload | null | undefined,
-  slide: StoryboardSlide | null,
-): SpeakerNote | null {
-  if (!payload || !slide) return null
-  return payload.notes[slide.speaker_notes_ref] ?? payload.notes[slide.id] ?? null
 }
 
 function deckState({
@@ -184,6 +180,8 @@ export function StoryboardDeck({
   isOwner = false,
   allowPresenterMode = false,
   allowSourceLayer = false,
+  sharePermissions,
+  publicView = false,
   onExit,
 }: StoryboardDeckProps) {
   const shellRef = useRef<HTMLDivElement>(null)
@@ -197,10 +195,11 @@ export function StoryboardDeck({
   const state = deckState({ payload, status, errorMessage, isLoading, isNotFound })
   const canShowDeck = state === "ready" || state === "stale"
   const activeSlide = canShowDeck ? slides[activeSlideIndex] ?? null : null
-  const activeNote = noteForSlide(payload, activeSlide?.slide ?? null)
   const activeSectionIndex = activeSlide?.sectionIndex ?? 0
-  const presenterAllowed = isOwner || allowPresenterMode
-  const sourceAllowed = isOwner || allowSourceLayer
+  const presenterAllowed =
+    isOwner || allowPresenterMode || sharePermissions?.allow_notes_download === true
+  const sourceAllowed =
+    isOwner || allowSourceLayer || sharePermissions?.allow_source_layer === true
 
   useEffect(() => {
     setActiveSlideIndex((current) =>
@@ -304,7 +303,7 @@ export function StoryboardDeck({
     return () => window.removeEventListener("keydown", handleShortcut)
   }, [handleShortcut])
 
-  if (!canShowDeck) {
+  if (!canShowDeck || !payload) {
     return (
       <section className="storyboard-deck-shell storyboard-deck-shell-empty">
         <StatePanel state={state} title={title ?? payload?.title} message={errorMessage} />
@@ -427,23 +426,25 @@ export function StoryboardDeck({
       </footer>
 
       {isPresenterVisible && presenterAllowed && (
-        <aside className="storyboard-presenter-preview" aria-label="Presenter mode">
-          <strong>Presenter mode</strong>
-          <p>{activeNote?.talk_track ?? "No speaker note is available for this slide."}</p>
-          <span>{activeNote?.transition}</span>
-        </aside>
+        <PresenterMode
+          payload={payload}
+          activeSlideIndex={activeSlideIndex}
+          isOwner={isOwner}
+          permissions={sharePermissions}
+          publicView={publicView}
+          onClose={() => setIsPresenterVisible(false)}
+        />
       )}
 
       {isSourceVisible && sourceAllowed && (
-        <aside className="storyboard-source-preview" aria-label="Source layer">
-          <strong>Source layer</strong>
-          <p>Source attribution is available for this slide.</p>
-          <div>
-            {(slide?.sources ?? []).map((source) => (
-              <span key={`source-${source}`}>{source}</span>
-            ))}
-          </div>
-        </aside>
+        <SourceLayer
+          payload={payload}
+          currentSlideId={slide?.id ?? null}
+          isOwner={isOwner}
+          permissions={sharePermissions}
+          publicView={publicView}
+          onClose={() => setIsSourceVisible(false)}
+        />
       )}
     </section>
   )
