@@ -24,7 +24,6 @@ Security notes:
 
 from __future__ import annotations
 
-import logging
 from typing import Any
 from uuid import UUID
 
@@ -50,7 +49,6 @@ from schemas.storyboard import (
     StoryboardSummary,
 )
 from services.credit_service import InsufficientCreditsError
-from services.observability import STORYBOARD_DOWNLOAD
 from services.pipeline import storyboard_public_service, storyboard_renderer
 from services.pipeline.storyboard_service import (
     COST_FULL_GENERATION,
@@ -74,8 +72,6 @@ from services.pipeline.storyboard_source import (
     StoryboardWorkspaceNotFoundError,
 )
 from services.workspace_service import workspace_service
-
-logger = logging.getLogger(__name__)
 
 # Single router, no prefix: each route carries its full path so the two distinct
 # owner prefixes (/workspaces/{id}/storyboards and /storyboards/{id}) and the
@@ -513,7 +509,15 @@ async def download_storyboard_html(
     _require_presentable(sb)
     workspace_name = await _workspace_name(sb.workspace_id, db)
     html = storyboard_renderer.render_deck_html(sb.content_json or {}, workspace_name)
-    STORYBOARD_DOWNLOAD.labels(kind="html", public="false").inc()
+    storyboard_renderer.record_download_event(
+        storyboard_id=sb.id,
+        workspace_id=sb.workspace_id,
+        user_id=user.id,
+        version=sb.version,
+        kind="html",
+        public=False,
+        status=sb.status,
+    )
     return Response(
         content=html.encode("utf-8"),
         media_type="text/html; charset=utf-8",
@@ -538,7 +542,15 @@ async def download_storyboard_pdf(
     pdf_bytes = await storyboard_renderer.render_deck_pdf(
         sb.content_json or {}, workspace_name
     )
-    STORYBOARD_DOWNLOAD.labels(kind="pdf", public="false").inc()
+    storyboard_renderer.record_download_event(
+        storyboard_id=sb.id,
+        workspace_id=sb.workspace_id,
+        user_id=user.id,
+        version=sb.version,
+        kind="pdf",
+        public=False,
+        status=sb.status,
+    )
     return Response(
         content=pdf_bytes,
         media_type="application/pdf",
@@ -564,7 +576,15 @@ async def download_storyboard_notes(
         pdf_bytes = await storyboard_renderer.render_notes_pdf(
             sb.speaker_notes_md, workspace_name
         )
-        STORYBOARD_DOWNLOAD.labels(kind="notes-pdf", public="false").inc()
+        storyboard_renderer.record_download_event(
+            storyboard_id=sb.id,
+            workspace_id=sb.workspace_id,
+            user_id=user.id,
+            version=sb.version,
+            kind="notes-pdf",
+            public=False,
+            status=sb.status,
+        )
         return Response(
             content=pdf_bytes,
             media_type="application/pdf",
@@ -572,7 +592,15 @@ async def download_storyboard_notes(
                 storyboard_renderer.filename_for("notes-pdf", workspace_name)
             ),
         )
-    STORYBOARD_DOWNLOAD.labels(kind="notes-md", public="false").inc()
+    storyboard_renderer.record_download_event(
+        storyboard_id=sb.id,
+        workspace_id=sb.workspace_id,
+        user_id=user.id,
+        version=sb.version,
+        kind="notes-md",
+        public=False,
+        status=sb.status,
+    )
     return _markdown_download(
         sb.speaker_notes_md,
         storyboard_renderer.filename_for("notes-md", workspace_name),
@@ -587,8 +615,17 @@ async def download_storyboard_demo_script(
     db: AsyncSession = Depends(get_db),
 ) -> Response:
     sb = await _get_owned_storyboard(id, user, db)
+    _require_presentable(sb)
     workspace_name = await _workspace_name(sb.workspace_id, db)
-    STORYBOARD_DOWNLOAD.labels(kind="demo-script", public="false").inc()
+    storyboard_renderer.record_download_event(
+        storyboard_id=sb.id,
+        workspace_id=sb.workspace_id,
+        user_id=user.id,
+        version=sb.version,
+        kind="demo-script",
+        public=False,
+        status=sb.status,
+    )
     return _markdown_download(
         sb.demo_script_md,
         storyboard_renderer.filename_for("demo-script", workspace_name),
@@ -603,8 +640,17 @@ async def download_storyboard_appendix(
     db: AsyncSession = Depends(get_db),
 ) -> Response:
     sb = await _get_owned_storyboard(id, user, db)
+    _require_presentable(sb)
     workspace_name = await _workspace_name(sb.workspace_id, db)
-    STORYBOARD_DOWNLOAD.labels(kind="appendix", public="false").inc()
+    storyboard_renderer.record_download_event(
+        storyboard_id=sb.id,
+        workspace_id=sb.workspace_id,
+        user_id=user.id,
+        version=sb.version,
+        kind="appendix",
+        public=False,
+        status=sb.status,
+    )
     return _markdown_download(
         sb.technical_appendix_md,
         storyboard_renderer.filename_for("appendix", workspace_name),
@@ -741,6 +787,7 @@ async def get_public_storyboard(
     if sb is None:
         raise _public_404()
     view = storyboard_public_service.build_public_view(sb)
+    storyboard_public_service.record_public_view(sb)
     return JSONResponse(
         content=view.model_dump(mode="json"),
         headers=_public_headers(),
@@ -779,7 +826,14 @@ async def download_public_storyboard(
         pdf_bytes = await storyboard_renderer.render_deck_pdf(
             sb.content_json or {}, sb.title
         )
-        STORYBOARD_DOWNLOAD.labels(kind="pdf", public="true").inc()
+        storyboard_renderer.record_download_event(
+            storyboard_id=sb.id,
+            workspace_id=sb.workspace_id,
+            version=sb.version,
+            kind="pdf",
+            public=True,
+            status=sb.status,
+        )
         return Response(
             content=pdf_bytes,
             media_type="application/pdf",
@@ -790,7 +844,14 @@ async def download_public_storyboard(
 
     filename_kind, attribute = _PUBLIC_MARKDOWN_DOWNLOADS[kind]
     body: str = getattr(sb, attribute) or ""
-    STORYBOARD_DOWNLOAD.labels(kind=kind, public="true").inc()
+    storyboard_renderer.record_download_event(
+        storyboard_id=sb.id,
+        workspace_id=sb.workspace_id,
+        version=sb.version,
+        kind=filename_kind,
+        public=True,
+        status=sb.status,
+    )
     return Response(
         content=body.encode("utf-8"),
         media_type="text/markdown; charset=utf-8",

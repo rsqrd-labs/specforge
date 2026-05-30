@@ -52,6 +52,22 @@ def test_metrics_endpoint_exposes_prometheus_metrics() -> None:
     assert "http_request_duration_seconds" in response.text
 
 
+def test_storyboard_metrics_are_registered() -> None:
+    for metric in [
+        "STORYBOARD_GENERATION_STARTED",
+        "STORYBOARD_GENERATION_COMPLETED",
+        "STORYBOARD_GENERATION_FAILED",
+        "STORYBOARD_SECTION_REGENERATED",
+        "STORYBOARD_GENERATION_DURATION",
+        "STORYBOARD_CREDITS_DEDUCTED",
+        "STORYBOARD_CREDITS_REFUNDED",
+        "STORYBOARD_PUBLIC_VIEW",
+        "STORYBOARD_DOWNLOAD",
+        "STORYBOARD_SOURCE_MISSING",
+    ]:
+        assert hasattr(observability, metric)
+
+
 def test_metrics_endpoint_rejects_unauthenticated() -> None:
     with patch.object(observability.settings, "metrics_token", "secret"):
         client = TestClient(create_app(redis_client=_NoopRedis()))

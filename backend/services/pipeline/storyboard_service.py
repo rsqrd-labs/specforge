@@ -41,9 +41,9 @@ labels.
 from __future__ import annotations
 
 import copy
-import logging
 import time
 from datetime import UTC, datetime, timedelta
+from typing import Any
 from uuid import UUID
 
 from redis.asyncio import Redis
@@ -52,7 +52,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from models import Storyboard, Workspace
+from models import CreditLedger, Storyboard, Workspace
 from prompts.storyboard import (
     SYSTEM_PROMPT,
     StoryboardPayload,
@@ -63,20 +63,21 @@ from services.credit_service import InsufficientCreditsError, credit_service
 from services.llm.base import ProviderError
 from services.llm.gateway import complete_with_timeout
 from services.observability import (
-    STORYBOARD_CREDITS_DEDUCTED,
-    STORYBOARD_CREDITS_REFUNDED,
-    STORYBOARD_GENERATION_COMPLETED,
-    STORYBOARD_GENERATION_DURATION,
-    STORYBOARD_GENERATION_FAILED,
-    STORYBOARD_GENERATION_STARTED,
-    STORYBOARD_SECTION_REGENERATED,
+    get_structured_logger,
+    record_storyboard_credits_deducted,
+    record_storyboard_credits_refunded,
+    record_storyboard_generation_completed,
+    record_storyboard_generation_duration,
+    record_storyboard_generation_failed,
+    record_storyboard_generation_started,
+    record_storyboard_section_regenerated,
 )
 from services.pipeline.storyboard_source import (
     StoryboardSourcePackage,
     build_storyboard_source,
 )
 
-logger = logging.getLogger(__name__)
+logger = get_structured_logger(__name__)
 
 # Credit costs (Storyboard Delivery Directive §2).
 COST_FULL_GENERATION = 25
@@ -86,6 +87,11 @@ COST_SECTION_REGENERATION = 5
 ACTION_GENERATE = "generate"
 ACTION_REGENERATE = "regenerate"
 ACTION_REGENERATE_SECTION = "regenerate_section"
+_CREDIT_COST_BY_ACTION = {
+    ACTION_GENERATE: COST_FULL_GENERATION,
+    ACTION_REGENERATE: COST_FULL_GENERATION,
+    ACTION_REGENERATE_SECTION: COST_SECTION_REGENERATION,
+}
 
 # Short TTL on the per-(workspace, user) reserve lock. It only needs to span the
 # reserve transaction; it is always released before the slow LLM call, and a
@@ -256,10 +262,21 @@ async def mark_workspace_storyboards_stale(
     for sb in storyboards:
         sb.status = "stale"
         sb.updated_at = now
+        logger.info(
+            "storyboard.marked_stale",
+            **_storyboard_event_fields(
+                sb,
+                user_id=sb.user_id,
+                action="mark_stale",
+                status="stale",
+                include_credit_ledger=False,
+            ),
+        )
     if storyboards:
         logger.info(
             "storyboard.stale_propagated",
-            extra={"workspace_id": str(workspace_id), "count": len(storyboards)},
+            workspace_id=str(workspace_id),
+            count=len(storyboards),
         )
 
 
@@ -287,20 +304,23 @@ async def recover_stuck_storyboards(db: AsyncSession) -> int:
     refunded_users: set[UUID] = set()
     for sb in stuck:
         if sb.credit_ledger_id is not None:
+            action, refund_amount = await _ledger_action_and_amount(
+                db, sb.credit_ledger_id
+            )
             await credit_service.refund(db, sb.credit_ledger_id, user_id=sb.user_id)
-            STORYBOARD_CREDITS_REFUNDED.labels(
-                action=ACTION_GENERATE, reason="stuck_recovery"
-            ).inc()
+            record_storyboard_credits_refunded(
+                action, "stuck_recovery", refund_amount
+            )
             refunded_users.add(sb.user_id)
         sb.status = "failed"
         sb.updated_at = datetime.now(UTC)
         logger.warning(
             "storyboard.recovery",
-            extra={
-                "storyboard_id": str(sb.id),
-                "workspace_id": str(sb.workspace_id),
-                "refunded": sb.credit_ledger_id is not None,
-            },
+            storyboard_id=str(sb.id),
+            workspace_id=str(sb.workspace_id),
+            version=sb.version,
+            status=sb.status,
+            refunded=sb.credit_ledger_id is not None,
         )
         recovered += 1
 
@@ -461,17 +481,17 @@ async def _reserve(
     # Credit cache invalidation after the debit commit (req 10).
     await credit_service.invalidate(user_id)
 
-    STORYBOARD_GENERATION_STARTED.labels(action=action).inc()
-    STORYBOARD_CREDITS_DEDUCTED.labels(action=action).inc(cost)
+    record_storyboard_generation_started(action)
+    record_storyboard_credits_deducted(action, cost)
     logger.info(
-        "storyboard.generation.started",
-        extra={
-            "storyboard_id": str(sb.id),
-            "workspace_id": str(workspace_id),
-            "version": sb.version,
-            "action": action,
-            "cost": cost,
-        },
+        "storyboard.generate_started",
+        **_storyboard_event_fields(
+            sb,
+            user_id=user_id,
+            action=action,
+            status=sb.status,
+            include_credit_ledger=True,
+        ),
     )
     return sb, True
 
@@ -487,18 +507,14 @@ async def _run_full_generation(
     try:
         payload = await _complete_and_validate(source)
     except StoryboardPayloadError as exc:
-        STORYBOARD_GENERATION_DURATION.labels(action=action).observe(
-            time.monotonic() - start
-        )
+        record_storyboard_generation_duration(action, time.monotonic() - start)
         # Failure after the debit: mark failed + refund exactly once, then
         # surface the typed reason. The previous ready version (a different
         # version row) is untouched and remains the latest presentable one.
         await _fail_and_refund(db, storyboard_id, user_id, action, exc)
-        error_type = "payload_parse" if exc.stage == "parse" else "payload_schema"
+        error_type = _payload_error_type(exc)
         raise StoryboardGenerationError(error_type, exc.summary) from exc
-    STORYBOARD_GENERATION_DURATION.labels(action=action).observe(
-        time.monotonic() - start
-    )
+    record_storyboard_generation_duration(action, time.monotonic() - start)
 
     return await _finalise_ready(db, storyboard_id, user_id, payload, source, action)
 
@@ -527,18 +543,24 @@ async def _run_section_generation(
                 "schema", "spliced section payload failed validation"
             ) from exc
     except StoryboardPayloadError as exc:
-        STORYBOARD_GENERATION_DURATION.labels(action=action).observe(
-            time.monotonic() - start
-        )
+        record_storyboard_generation_duration(action, time.monotonic() - start)
         await _fail_and_refund(db, storyboard_id, user_id, action, exc)
-        error_type = "payload_parse" if exc.stage == "parse" else "payload_schema"
+        error_type = _payload_error_type(exc)
         raise StoryboardGenerationError(error_type, exc.summary) from exc
-    STORYBOARD_GENERATION_DURATION.labels(action=action).observe(
-        time.monotonic() - start
-    )
+    record_storyboard_generation_duration(action, time.monotonic() - start)
 
     sb = await _finalise_ready(db, storyboard_id, user_id, payload, source, action)
-    STORYBOARD_SECTION_REGENERATED.inc()
+    record_storyboard_section_regenerated()
+    logger.info(
+        "storyboard.section_regenerated",
+        **_storyboard_event_fields(
+            sb,
+            user_id=user_id,
+            action=action,
+            status=sb.status,
+            include_credit_ledger=True,
+        ),
+    )
     return sb
 
 
@@ -617,15 +639,16 @@ async def _finalise_ready(
     await db.commit()
     await db.refresh(sb)
 
-    STORYBOARD_GENERATION_COMPLETED.labels(action=action).inc()
+    record_storyboard_generation_completed(action)
     logger.info(
-        "storyboard.generation.completed",
-        extra={
-            "storyboard_id": str(sb.id),
-            "workspace_id": str(sb.workspace_id),
-            "version": sb.version,
-            "action": action,
-        },
+        "storyboard.generate_completed",
+        **_storyboard_event_fields(
+            sb,
+            user_id=user_id,
+            action=action,
+            status=sb.status,
+            include_credit_ledger=True,
+        ),
     )
     return sb
 
@@ -658,26 +681,85 @@ async def _fail_and_refund(
 
     if refunded:
         await credit_service.invalidate(user_id)
-        STORYBOARD_CREDITS_REFUNDED.labels(
-            action=action, reason="generation_failed"
-        ).inc()
+        record_storyboard_credits_refunded(
+            action, "generation_failed", _credit_cost_for_action(action)
+        )
 
-    error_type = "payload_parse" if exc.stage == "parse" else "payload_schema"
-    STORYBOARD_GENERATION_FAILED.labels(action=action, error_type=error_type).inc()
+    error_type = _payload_error_type(exc)
+    record_storyboard_generation_failed(action, error_type)
     logger.warning(
-        "storyboard.generation.failed",
-        extra={
-            "storyboard_id": str(storyboard_id),
-            "action": action,
-            "error_type": error_type,
-            "refunded": refunded,
-        },
+        "storyboard.generate_failed",
+        **_storyboard_event_fields(
+            sb,
+            user_id=user_id,
+            action=action,
+            status=sb.status,
+            include_credit_ledger=True,
+            error_type=error_type,
+            refunded=refunded,
+        ),
     )
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _storyboard_event_fields(
+    sb: Storyboard,
+    *,
+    user_id: UUID | None,
+    action: str,
+    status: str | None = None,
+    include_credit_ledger: bool,
+    **extra: Any,
+) -> dict[str, Any]:
+    fields: dict[str, Any] = {
+        "storyboard_id": str(sb.id),
+        "workspace_id": str(sb.workspace_id),
+        "version": sb.version,
+        "action": action,
+        "status": status or sb.status,
+    }
+    if user_id is not None:
+        fields["user_id"] = str(user_id)
+    if include_credit_ledger and sb.credit_ledger_id is not None:
+        fields["credit_ledger_id"] = str(sb.credit_ledger_id)
+    fields.update(extra)
+    return fields
+
+
+def _payload_error_type(exc: StoryboardPayloadError) -> str:
+    summary = (exc.summary or "").lower()
+    if "timed out" in summary or "timeout" in summary:
+        return "timeout"
+    if "provider" in summary:
+        return "provider"
+    return "payload_parse" if exc.stage == "parse" else "payload_schema"
+
+
+def _credit_cost_for_action(action: str) -> int:
+    return _CREDIT_COST_BY_ACTION.get(action, COST_FULL_GENERATION)
+
+
+async def _ledger_action_and_amount(
+    db: AsyncSession, ledger_id: UUID
+) -> tuple[str, int]:
+    ledger = await db.get(CreditLedger, ledger_id)
+    if ledger is None:
+        return ACTION_GENERATE, COST_FULL_GENERATION
+
+    reason = ledger.reason or ""
+    if reason.startswith("storyboard_regenerate_section:"):
+        action = ACTION_REGENERATE_SECTION
+    elif reason.startswith("storyboard_regenerate:"):
+        action = ACTION_REGENERATE
+    else:
+        action = ACTION_GENERATE
+
+    amount = abs(int(ledger.amount or 0)) or _credit_cost_for_action(action)
+    return action, amount
 
 
 async def _acquire_lock(redis: Redis, key: str) -> bool:
@@ -692,7 +774,7 @@ async def _acquire_lock(redis: Redis, key: str) -> bool:
     try:
         return bool(await redis.set(key, "1", nx=True, ex=_RESERVE_LOCK_TTL_SECONDS))
     except RedisError:
-        logger.warning("storyboard.reserve_lock_unavailable", extra={"key": key})
+        logger.warning("storyboard.reserve_lock_unavailable", key=key)
         return False
 
 
@@ -700,7 +782,7 @@ async def _release_lock(redis: Redis, key: str) -> None:
     try:
         await redis.delete(key)
     except RedisError:
-        logger.warning("storyboard.reserve_lock_release_failed", extra={"key": key})
+        logger.warning("storyboard.reserve_lock_release_failed", key=key)
 
 
 async def _find_in_flight(

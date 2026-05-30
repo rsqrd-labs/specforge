@@ -24,6 +24,11 @@ from config import settings
 
 logger = structlog.get_logger(__name__)
 
+
+def get_structured_logger(name: str) -> Any:
+    return structlog.get_logger(name)
+
+
 REQUEST_COUNT = Counter(
     "http_requests_total",
     "Total HTTP requests",
@@ -193,11 +198,9 @@ PIPELINE_VALIDATOR_FAILURES = Counter(
 )
 
 # ---------------------------------------------------------------------------
-# Storyboard (Phase 20).  T-254 owns the generation/credit lifecycle metrics and
-# T-255 owns the download metric below; the public-view / source-missing metrics
-# enumerated in T-262 are declared by that task to avoid duplicate-timeseries
-# registration (prometheus_client raises on a re-declared metric name).  Keep
-# that boundary.
+# Storyboard (Phase 20).  Counters and histograms are intentionally labelled
+# only with bounded enums so a malicious title/slug/error cannot create
+# unbounded Prometheus series.  T-262 owns the complete Storyboard metric set.
 # ---------------------------------------------------------------------------
 STORYBOARD_GENERATION_STARTED = Counter(
     "specforge_storyboard_generation_started_total",
@@ -256,6 +259,54 @@ STORYBOARD_DOWNLOAD = Counter(
     "notes-md, notes-pdf, demo-script, appendix); ``public`` is 'true' for the "
     "unauthenticated share surface and 'false' for owner downloads.  T-255.",
     labelnames=["kind", "public"],
+)
+
+STORYBOARD_PUBLIC_VIEW = Counter(
+    "specforge_storyboard_public_view_total",
+    "Unauthenticated public Storyboard views served successfully. 404s and "
+    "permission denials are intentionally not counted.  T-262 (Phase 20).",
+)
+
+STORYBOARD_SOURCE_MISSING = Counter(
+    "specforge_storyboard_source_missing_total",
+    "Expected finalised source sections absent during deterministic Storyboard "
+    "source extraction. Labels are bounded source/section enums and never carry "
+    "source excerpts.  T-262 (Phase 20).",
+    labelnames=["source", "section"],
+)
+
+_STORYBOARD_ACTION_LABELS = frozenset(
+    {"generate", "regenerate", "regenerate_section"}
+)
+_STORYBOARD_ERROR_TYPE_LABELS = frozenset(
+    {
+        "payload_parse",
+        "payload_schema",
+        "provider",
+        "timeout",
+        "row_missing",
+        "unexpected",
+    }
+)
+_STORYBOARD_REFUND_REASON_LABELS = frozenset(
+    {"generation_failed", "stuck_recovery"}
+)
+_STORYBOARD_DOWNLOAD_KIND_LABELS = frozenset(
+    {"html", "pdf", "notes-md", "notes-pdf", "demo-script", "appendix"}
+)
+_STORYBOARD_SOURCE_LABELS = frozenset({"spec", "plan", "harness", "tasks"})
+_STORYBOARD_SECTION_LABELS = frozenset(
+    {
+        "overview",
+        "architecture",
+        "security-architecture",
+        "capacity-model",
+        "stride",
+        "slo",
+        "fmea",
+        "coverage",
+        "must",
+    }
 )
 
 _sentry_configured = False
@@ -528,6 +579,105 @@ def record_llm_provider_health(provider: str, health: str) -> None:
         "healthy": 3,
     }
     LLM_PROVIDER_HEALTH.labels(provider).set(values.get(health, 0))
+
+
+def record_storyboard_generation_started(action: str) -> None:
+    STORYBOARD_GENERATION_STARTED.labels(action=_storyboard_action(action)).inc()
+
+
+def record_storyboard_generation_completed(action: str) -> None:
+    STORYBOARD_GENERATION_COMPLETED.labels(action=_storyboard_action(action)).inc()
+
+
+def record_storyboard_generation_failed(action: str, error_type: str) -> None:
+    STORYBOARD_GENERATION_FAILED.labels(
+        action=_storyboard_action(action),
+        error_type=_storyboard_error_type(error_type),
+    ).inc()
+
+
+def record_storyboard_section_regenerated() -> None:
+    STORYBOARD_SECTION_REGENERATED.inc()
+
+
+def record_storyboard_generation_duration(
+    action: str, duration_seconds: float
+) -> None:
+    if duration_seconds >= 0:
+        STORYBOARD_GENERATION_DURATION.labels(
+            action=_storyboard_action(action)
+        ).observe(duration_seconds)
+
+
+def record_storyboard_credits_deducted(action: str, amount: int | float) -> None:
+    _inc_counter(
+        STORYBOARD_CREDITS_DEDUCTED.labels(action=_storyboard_action(action)),
+        amount,
+    )
+
+
+def record_storyboard_credits_refunded(
+    action: str, reason: str, amount: int | float
+) -> None:
+    _inc_counter(
+        STORYBOARD_CREDITS_REFUNDED.labels(
+            action=_storyboard_action(action),
+            reason=_storyboard_refund_reason(reason),
+        ),
+        amount,
+    )
+
+
+def record_storyboard_public_view() -> None:
+    STORYBOARD_PUBLIC_VIEW.inc()
+
+
+def record_storyboard_download(kind: str, *, public: bool) -> str:
+    kind_label = _storyboard_download_kind(kind)
+    STORYBOARD_DOWNLOAD.labels(
+        kind=kind_label,
+        public="true" if public else "false",
+    ).inc()
+    return kind_label
+
+
+def record_storyboard_source_missing(source: str, section: str) -> None:
+    STORYBOARD_SOURCE_MISSING.labels(
+        source=_storyboard_source(source),
+        section=_storyboard_section(section),
+    ).inc()
+
+
+def _storyboard_action(action: str) -> str:
+    value = str(action or "unknown")
+    return value if value in _STORYBOARD_ACTION_LABELS else "unknown"
+
+
+def _storyboard_error_type(error_type: str) -> str:
+    value = str(error_type or "unexpected")
+    return value if value in _STORYBOARD_ERROR_TYPE_LABELS else "unexpected"
+
+
+def _storyboard_refund_reason(reason: str) -> str:
+    value = str(reason or "generation_failed")
+    return value if value in _STORYBOARD_REFUND_REASON_LABELS else "generation_failed"
+
+
+def _storyboard_download_kind(kind: str) -> str:
+    value = str(kind or "unknown")
+    if value == "notes":
+        value = "notes-md"
+    return value if value in _STORYBOARD_DOWNLOAD_KIND_LABELS else "unknown"
+
+
+def _storyboard_source(source: str) -> str:
+    value = str(source or "").lower()
+    return value if value in _STORYBOARD_SOURCE_LABELS else "unknown"
+
+
+def _storyboard_section(section: str) -> str:
+    value = str(section or "").split(":", 1)[-1].lower().replace("_", "-")
+    return value if value in _STORYBOARD_SECTION_LABELS else "unknown"
 
 
 def _inc_counter(counter, value: Any) -> None:

@@ -39,7 +39,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from models import Stage, StageVersion, Workspace
 from schemas.stage import StageType
-from services.observability import redact_sensitive_data
+from services.observability import (
+    record_storyboard_source_missing,
+    redact_sensitive_data,
+)
 
 # Hard cap on every excerpt fed to the prompt. Keeps the prompt bounded and
 # prevents a single huge section from dominating the source map.
@@ -373,6 +376,8 @@ async def build_storyboard_source(
     }
 
     excerpts, missing = _extract_excerpts(artifacts)
+    for item in missing:
+        record_storyboard_source_missing(item.stage, item.source_id)
 
     return StoryboardSourcePackage(
         workspace_id=workspace.id,

@@ -29,7 +29,6 @@ with a bounded commit-retry on the (astronomically unlikely) collision.
 
 from __future__ import annotations
 
-import logging
 import secrets
 import string
 from datetime import UTC, datetime
@@ -46,12 +45,16 @@ from schemas.storyboard import (
     StoryboardSharePermissions,
     StoryboardShareRequest,
 )
+from services.observability import (
+    get_structured_logger,
+    record_storyboard_public_view,
+)
 from services.pipeline.storyboard_service import (
     StoryboardNotFoundError,
     StoryboardNotPresentableError,
 )
 
-logger = logging.getLogger(__name__)
+logger = get_structured_logger(__name__)
 
 # Opaque base62 alphabet (a-zA-Z0-9). 16 chars ≫ the 10-char minimum, drawn with
 # the secrets CSPRNG. 62^16 ≈ 4.7e28 so a collision is effectively impossible;
@@ -128,6 +131,31 @@ def _apply_permissions(sb: Storyboard, request: StoryboardShareRequest | None) -
         sb.allow_source_layer = request.allow_source_layer
 
 
+def _share_event_fields(
+    sb: Storyboard, *, user_id: UUID | None, action: str
+) -> dict[str, Any]:
+    fields: dict[str, Any] = {
+        "storyboard_id": str(sb.id),
+        "workspace_id": str(sb.workspace_id),
+        "version": sb.version,
+        "action": action,
+        "status": sb.status,
+    }
+    if user_id is not None:
+        fields["user_id"] = str(user_id)
+    return fields
+
+
+def record_public_view(sb: Storyboard) -> None:
+    """Record one successful public Storyboard view without logging content."""
+
+    record_storyboard_public_view()
+    logger.info(
+        "storyboard.public_viewed",
+        **_share_event_fields(sb, user_id=None, action="public_view"),
+    )
+
+
 async def enable_share(
     db: AsyncSession,
     storyboard_id: UUID,
@@ -156,8 +184,8 @@ async def enable_share(
         await db.commit()
         await db.refresh(sb)
         logger.info(
-            "storyboard.share.enabled",
-            extra={"storyboard_id": str(storyboard_id), "rotated": False},
+            "storyboard.share_enabled",
+            **_share_event_fields(sb, user_id=user_id, action="share_enable"),
         )
         return sb
 
@@ -171,15 +199,16 @@ async def enable_share(
             await db.commit()
             await db.refresh(sb)
             logger.info(
-                "storyboard.share.enabled",
-                extra={"storyboard_id": str(storyboard_id), "rotated": False},
+                "storyboard.share_enabled",
+                **_share_event_fields(sb, user_id=user_id, action="share_enable"),
             )
             return sb
         except IntegrityError:
             await db.rollback()
             logger.warning(
                 "storyboard.share.slug_collision",
-                extra={"storyboard_id": str(storyboard_id), "attempt": attempt + 1},
+                storyboard_id=str(storyboard_id),
+                attempt=attempt + 1,
             )
             sb = await _load_owned(db, storyboard_id, user_id)
     raise RuntimeError(
@@ -200,7 +229,8 @@ async def disable_share(db: AsyncSession, storyboard_id: UUID, user_id: UUID) ->
     sb.updated_at = datetime.now(UTC)
     await db.commit()
     logger.info(
-        "storyboard.share.disabled", extra={"storyboard_id": str(storyboard_id)}
+        "storyboard.share_disabled",
+        **_share_event_fields(sb, user_id=user_id, action="share_disable"),
     )
 
 
@@ -230,15 +260,16 @@ async def rotate_share(
             await db.commit()
             await db.refresh(sb)
             logger.info(
-                "storyboard.share.rotated",
-                extra={"storyboard_id": str(storyboard_id)},
+                "storyboard.share_rotated",
+                **_share_event_fields(sb, user_id=user_id, action="share_rotate"),
             )
             return sb
         except IntegrityError:
             await db.rollback()
             logger.warning(
                 "storyboard.share.slug_collision",
-                extra={"storyboard_id": str(storyboard_id), "attempt": attempt + 1},
+                storyboard_id=str(storyboard_id),
+                attempt=attempt + 1,
             )
             sb = await _load_owned(db, storyboard_id, user_id)
     raise RuntimeError("Could not rotate to a new unique Storyboard slug.")

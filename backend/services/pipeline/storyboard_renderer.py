@@ -36,13 +36,20 @@ import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from uuid import UUID
 
 import bleach
 import markdown as md
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
+from services.observability import (
+    get_structured_logger,
+    record_storyboard_download,
+)
 from services.pipeline.pdf_export_service import _safe_filename_slug, render_html_to_pdf
 from services.security.sanitizer import sanitize_text
+
+logger = get_structured_logger(__name__)
 
 _TEMPLATES_DIR = Path(__file__).resolve().parents[2] / "templates"
 _DECK_TEMPLATE = "storyboard.html.j2"
@@ -133,6 +140,33 @@ _FILENAME_TEMPLATES: dict[str, str] = {
     "demo-script": "specforge-storyboard-demo-script-{slug}.md",
     "appendix": "specforge-storyboard-technical-appendix-{slug}.md",
 }
+
+
+def record_download_event(
+    *,
+    storyboard_id: UUID,
+    workspace_id: UUID,
+    version: int,
+    kind: str,
+    public: bool,
+    status: str,
+    user_id: UUID | None = None,
+) -> None:
+    """Record a successful Storyboard artifact download without content fields."""
+
+    kind_label = record_storyboard_download(kind, public=public)
+    fields: dict[str, Any] = {
+        "storyboard_id": str(storyboard_id),
+        "workspace_id": str(workspace_id),
+        "version": version,
+        "action": "download",
+        "status": status,
+        "kind": kind_label,
+        "public": public,
+    }
+    if user_id is not None:
+        fields["user_id"] = str(user_id)
+    logger.info("storyboard.downloaded", **fields)
 
 
 def filename_for(kind: str, workspace_name: str) -> str:
