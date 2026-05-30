@@ -15,6 +15,7 @@ from typing import Any
 import pytest
 
 from prompts.storyboard import (
+    ALLOWED_VISUAL_KINDS,
     REQUIRED_ARCHITECTURE_LAYERS,
     REQUIRED_SECTION_TITLES,
     STORYBOARD_PROMPT_VERSION,
@@ -109,7 +110,7 @@ def _valid_payload() -> dict[str, Any]:
         )
     notes = {f"s{idx}": _note(f"s{idx}") for idx in range(6)}
     return {
-        "title": "Launch Keynote",
+        "title": "SpecForge Launch Keynote",
         "theme": {
             "palette": ["#101010", "#2244FF", "#FFAA00"],
             "typography": "Modern geometric sans",
@@ -136,7 +137,7 @@ def test_valid_payload_validates() -> None:
 def test_storyboard_prompt_names_canonical_payload_keys_and_bad_aliases() -> None:
     """The live model needs exact field names, not conceptual aliases."""
 
-    assert STORYBOARD_PROMPT_VERSION == "storyboard-v1.2"
+    assert STORYBOARD_PROMPT_VERSION == "storyboard-v1.3"
     required_keys = [
         "palette",
         "typography",
@@ -147,6 +148,8 @@ def test_storyboard_prompt_names_canonical_payload_keys_and_bad_aliases() -> Non
         "source_refs",
         "demo_script_md",
         "technical_appendix_md",
+        "renderer-supported",
+        "video-demo",
         '"source_map"',
         '"slide_id"',
         '"backup_points"',
@@ -167,6 +170,9 @@ def test_storyboard_prompt_names_canonical_payload_keys_and_bad_aliases() -> Non
     ]
     for alias in forbidden_aliases:
         assert alias in SYSTEM_PROMPT
+
+    for visual_kind in ALLOWED_VISUAL_KINDS:
+        assert visual_kind in SYSTEM_PROMPT
 
 
 def test_storyboard_repair_prompt_repeats_canonical_payload_keys() -> None:
@@ -273,6 +279,37 @@ def test_rejects_non_hex_palette() -> None:
         StoryboardPayload.model_validate(data)
 
 
+def test_rejects_unsupported_generated_visual_kinds() -> None:
+    data = _valid_payload()
+    for bad_kind in ("video-demo", "illustration", "infographic", "call-to-action"):
+        data["sections"][0]["slides"][0]["visual"] = {"kind": bad_kind}
+        with pytest.raises(Exception) as exc:
+            StoryboardPayload.model_validate(copy.deepcopy(data))
+        assert "visual.kind" in str(exc.value) or "visual" in str(exc.value).lower()
+
+
+def test_rejects_generic_storyboard_titles() -> None:
+    data = _valid_payload()
+    data["title"] = "Product Launch Keynote"
+    with pytest.raises(Exception) as exc:
+        StoryboardPayload.model_validate(data)
+    assert "generic" in str(exc.value).lower()
+
+
+def test_rejects_video_demo_cues_and_scripts() -> None:
+    data = _valid_payload()
+    data["notes"]["s0"]["demo_cue"] = "Trigger video demonstration."
+    with pytest.raises(Exception) as exc:
+        StoryboardPayload.model_validate(copy.deepcopy(data))
+    assert "video demo" in str(exc.value).lower()
+
+    data = _valid_payload()
+    data["demo_script_md"] = "## Demo\nPlay the recorded demo video."
+    with pytest.raises(Exception) as exc:
+        StoryboardPayload.model_validate(data)
+    assert "video demo" in str(exc.value).lower()
+
+
 # ---------------------------------------------------------------------------
 # Parse / repair flow
 # ---------------------------------------------------------------------------
@@ -289,7 +326,7 @@ async def test_parse_succeeds_without_repair() -> None:
         return raw
 
     payload = await parse_and_validate_payload(raw, repair=_repair)
-    assert payload.title == "Launch Keynote"
+    assert payload.title == "SpecForge Launch Keynote"
     assert calls == 0  # no repair needed
 
 
@@ -297,7 +334,7 @@ async def test_parse_succeeds_without_repair() -> None:
 async def test_parse_strips_markdown_fences() -> None:
     raw = "```json\n" + json.dumps(_valid_payload()) + "\n```"
     payload = await parse_and_validate_payload(raw)
-    assert payload.title == "Launch Keynote"
+    assert payload.title == "SpecForge Launch Keynote"
 
 
 @pytest.mark.asyncio
@@ -313,7 +350,7 @@ async def test_one_repair_attempt_then_success() -> None:
         return good
 
     payload = await parse_and_validate_payload(bad, repair=_repair)
-    assert payload.title == "Launch Keynote"
+    assert payload.title == "SpecForge Launch Keynote"
     assert calls == 1
 
 

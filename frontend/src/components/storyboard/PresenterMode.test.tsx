@@ -13,7 +13,7 @@ afterEach(() => {
 })
 
 describe("PresenterMode", () => {
-  it("shows current slide, next slide, timer, speaker cues, demo cue, and backup points", () => {
+  it("shows current slide, next slide, timer, speaker cues, walkthrough cue, and backup points", () => {
     vi.useFakeTimers()
     render(<PresenterMode payload={makeStoryboardPayload()} isOwner />)
 
@@ -28,13 +28,26 @@ describe("PresenterMode", () => {
     )
     expect(screen.getByText(/opening thesis transition/i)).toBeInTheDocument()
     expect(screen.getByText(/opening thesis pause cue/i)).toBeInTheDocument()
-    expect(screen.getByText(/opening thesis demo cue/i)).toBeInTheDocument()
+    expect(screen.getByText(/opening thesis walkthrough cue/i)).toBeInTheDocument()
     expect(screen.getByText(/opening thesis backup point/i)).toBeInTheDocument()
 
     act(() => {
       vi.advanceTimersByTime(2000)
     })
     expect(screen.getByText("0:02")).toBeInTheDocument()
+  })
+
+  it("does not surface video demo cues or fallback to the script body", () => {
+    const payload = makeStoryboardPayload({
+      demo_script_md: "This script should not appear as a cue fallback.",
+    })
+    payload.notes["opening-thesis-slide"].demo_cue = "Trigger video demonstration."
+
+    render(<PresenterMode payload={payload} isOwner />)
+
+    expect(screen.queryByText(/trigger video demonstration/i)).toBeNull()
+    expect(screen.queryByText(/script should not appear/i)).toBeNull()
+    expect(screen.queryByText(/^walkthrough$/i)).toBeNull()
   })
 
   it("keeps public speaker notes private unless notes permission is enabled", () => {

@@ -190,7 +190,15 @@ _SECTION_SPECS: tuple[_SectionSpec, ...] = (
     _SectionSpec(
         "PLAN:capacity-model",
         "plan",
-        ("capacity", "scaling", "throughput", "load model"),
+        (
+            "capacity",
+            "scaling",
+            "scalability",
+            "performance",
+            "throughput",
+            "load model",
+            "load",
+        ),
     ),
     _SectionSpec(
         "PLAN:stride",
@@ -200,16 +208,49 @@ _SECTION_SPECS: tuple[_SectionSpec, ...] = (
     _SectionSpec(
         "PLAN:slo",
         "plan",
-        ("slo", "service level", "availability target", "error budget"),
+        (
+            "slo",
+            "service level",
+            "availability target",
+            "availability",
+            "error budget",
+            "observability",
+            "operations",
+            "monitoring",
+        ),
     ),
-    _SectionSpec("PLAN:fmea", "plan", ("fmea", "failure mode", "failure-mode")),
+    _SectionSpec(
+        "PLAN:fmea",
+        "plan",
+        (
+            "fmea",
+            "failure mode",
+            "failure-mode",
+            "error handling",
+            "recovery",
+            "risks and mitigations",
+            "risk mitigation",
+        ),
+    ),
     _SectionSpec(
         "HARNESS:coverage",
         "harness",
         ("coverage", "requirements coverage", "traceability"),
     ),
     _SectionSpec(
-        "TASKS:must", "tasks", ("must", "must-have", "p0", "critical path", "mvp")
+        "TASKS:must",
+        "tasks",
+        (
+            "must",
+            "must-have",
+            "p0",
+            "critical path",
+            "mvp",
+            "phase",
+            "foundation",
+            "execution",
+        ),
+        lead_fallback=True,
     ),
 )
 

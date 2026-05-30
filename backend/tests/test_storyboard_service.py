@@ -105,7 +105,9 @@ def _note(slide_id: str) -> dict:
     }
 
 
-def _payload_dict(*, title: str = "Launch Keynote", first_headline: str | None = None):
+def _payload_dict(
+    *, title: str = "SpecForge Launch Keynote", first_headline: str | None = None
+):
     """Build a strict-schema-valid Storyboard payload (a plain dict)."""
 
     sections = []
@@ -162,7 +164,7 @@ def _payload_dict(*, title: str = "Launch Keynote", first_headline: str | None =
             ]
         },
         "notes": notes,
-        "demo_script_md": "## Demo\n1. Show the editor.\n",
+        "demo_script_md": "## Walkthrough\n1. Show the editor.\n",
         "technical_appendix_md": "## Appendix\nArchitecture details.\n",
     }
 
@@ -315,12 +317,12 @@ async def test_storyboard_generation_deducts_25_credits(
     assert sb.status == "ready"
     assert sb.version == 1
     assert sb.credit_ledger_id is not None
-    assert sb.title == "Launch Keynote"
+    assert sb.title == "SpecForge Launch Keynote"
     # The full validated payload is persisted, plus the typed columns the router
     # and downloads read.
     assert sb.content_json["sections"][0]["title"] == REQUIRED_SECTION_TITLES[0]
     assert "Speaker Notes" in sb.speaker_notes_md
-    assert sb.demo_script_md.startswith("## Demo")
+    assert sb.demo_script_md.startswith("## Walkthrough")
     assert sb.source_map_json  # non-empty
     assert set(sb.source_stage_version_ids) == {"spec", "plan", "harness", "tasks"}
 

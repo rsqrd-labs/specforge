@@ -50,7 +50,7 @@ function makePayload(): StoryboardPayload {
             type: title === "Technical Architecture" ? "architecture" : "hero",
             headline: `${title} headline`,
             visible_text: `${title} visible text`,
-            visual: { kind: `${id}-visual` },
+            visual: { kind: "video-demo" },
             speaker_notes_ref: `${id}-slide`,
             sources: ["SPEC", "PLAN"],
           },
@@ -179,7 +179,18 @@ describe("StoryboardDeck", () => {
 
     const reveal = screen.getByLabelText("Technical Architecture")
     expect(within(reveal).getByText(/architecture layers revealed/i)).toBeInTheDocument()
+    expect(within(reveal).getByText(/8 of 8 architecture layers/i)).toBeInTheDocument()
     expect(screen.getByText("Technical Architecture headline")).toBeInTheDocument()
+  })
+
+  it("uses deterministic visual frames instead of generated media promises", () => {
+    render(<StoryboardDeck payload={makePayload()} status="ready" isOwner />)
+
+    expect(screen.queryByText(/video-demo/i)).toBeNull()
+    expect(screen.getByText(/problem to product/i)).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole("tab", { name: /product walkthrough/i }))
+    expect(screen.getByText(/live workflow path/i)).toBeInTheDocument()
   })
 
   it("handles loading, error, empty, failed, stale, and not-found states", () => {

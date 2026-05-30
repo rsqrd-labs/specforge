@@ -206,20 +206,28 @@ def _hex_or(default: str, value: Any) -> str:
     return value if isinstance(value, str) and _HEX_RE.match(value) else default
 
 
-def _visual_detail(visual: dict[str, Any]) -> str:
-    """Build a short, sanitised descriptor from a slide visual's string values.
+_VISUAL_LABELS_BY_ACT = {
+    "Opening Thesis": ("Thesis", "Problem to product"),
+    "Product Vision": ("Vision", "Product signal"),
+    "Product Walkthrough": ("Flow", "Live workflow path"),
+    "Technical Architecture": ("Architecture", "System layers"),
+    "Trust, Security, Reliability": ("Trust", "Controls and recovery"),
+    "Launch Close": ("Close", "Readiness narrative"),
+}
 
-    The visual object allows extra descriptor keys (they are pure data); we
-    surface only string values, never interpret any key as markup, and bound the
-    result so a verbose descriptor cannot dominate the slide.
-    """
 
-    parts = [
-        str(v)
-        for k, v in visual.items()
-        if k != "kind" and isinstance(v, str) and v.strip()
-    ]
-    return _clean(" · ".join(parts))[:200]
+def _visual_label(section_title: str, slide_type: str) -> tuple[str, str]:
+    if slide_type == "architecture":
+        return _VISUAL_LABELS_BY_ACT["Technical Architecture"]
+    if slide_type == "trust":
+        return _VISUAL_LABELS_BY_ACT["Trust, Security, Reliability"]
+    if slide_type == "walkthrough":
+        return _VISUAL_LABELS_BY_ACT["Product Walkthrough"]
+    if slide_type == "product":
+        return _VISUAL_LABELS_BY_ACT["Product Vision"]
+    if slide_type == "closing":
+        return _VISUAL_LABELS_BY_ACT["Launch Close"]
+    return _VISUAL_LABELS_BY_ACT.get(section_title, ("Keynote", "Source-backed frame"))
 
 
 def _build_deck_context(content: dict[str, Any], workspace_name: str) -> dict[str, Any]:
@@ -230,21 +238,24 @@ def _build_deck_context(content: dict[str, Any], workspace_name: str) -> dict[st
 
     sections: list[dict[str, Any]] = []
     for section in content.get("sections") or []:
+        section_title = _clean(section.get("title"))
         slides: list[dict[str, Any]] = []
         for slide in section.get("slides") or []:
-            visual = slide.get("visual") or {}
+            visual_kind, visual_fallback = _visual_label(
+                section_title, _clean(slide.get("type"))
+            )
             slides.append(
                 {
                     "headline": _clean(slide.get("headline")),
                     "visible_text": _clean(slide.get("visible_text")),
-                    "visual_kind": _clean(visual.get("kind")),
-                    "visual_detail": _visual_detail(visual),
+                    "visual_kind": visual_kind,
+                    "visual_detail": visual_fallback,
                     "sources": [
                         s for s in (slide.get("sources") or []) if s in _VALID_SOURCES
                     ],
                 }
             )
-        sections.append({"title": _clean(section.get("title")), "slides": slides})
+        sections.append({"title": section_title, "slides": slides})
 
     architecture_layers: list[dict[str, Any]] = []
     for diagram in content.get("diagrams") or []:

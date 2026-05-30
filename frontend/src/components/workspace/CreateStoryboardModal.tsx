@@ -18,7 +18,7 @@ const INCLUDED_ARTIFACTS = [
   { label: "Browser keynote", contractTerm: "browser" },
   { label: "Architecture reveal", contractTerm: "architecture" },
   { label: "Speaker notes", contractTerm: "speaker" },
-  { label: "Demo script", contractTerm: "demo" },
+  { label: "Walkthrough script", contractTerm: "demo" },
   { label: "Technical appendix", contractTerm: "appendix" },
   { label: "Share link", contractTerm: "share" },
   { label: "PDF downloads", contractTerm: "PDF" },

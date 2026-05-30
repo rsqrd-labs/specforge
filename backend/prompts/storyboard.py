@@ -22,6 +22,7 @@ guarantees shape, not safety, and rendering still escapes everything.
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Awaitable, Callable
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -29,7 +30,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from prompts.base import SECURITY_AND_PRIVACY_RULES, wrap_untrusted_content
 from services.pipeline.storyboard_source import StoryboardSourcePackage
 
-STORYBOARD_PROMPT_VERSION = "storyboard-v1.2"
+STORYBOARD_PROMPT_VERSION = "storyboard-v1.3"
 
 # The main keynote has exactly six visible top-level acts, in this exact order.
 # Validation and Execution Plan are deliberately NOT acts — they belong in the
@@ -57,6 +58,19 @@ REQUIRED_ARCHITECTURE_LAYERS: tuple[str, ...] = (
     "trust",
     "recovery",
 )
+ALLOWED_VISUAL_KINDS: tuple[str, ...] = (
+    "hero",
+    "thesis",
+    "product",
+    "walkthrough",
+    "architecture",
+    "trust",
+    "closing",
+    "appendix_pointer",
+    "diagram_ref",
+    "bullets",
+    "metric",
+)
 
 _SOURCE_ENUM = ("SPEC", "PLAN", "HARNESS", "TASKS")
 
@@ -64,6 +78,18 @@ _ID_PATTERN = r"^[a-z0-9-]+$"
 _MAX_EXCERPT_CHARS = 1200
 _MAX_HEADLINE_WORDS = 18
 _MAX_VISIBLE_WORDS = 45
+_FORBIDDEN_VIDEO_DEMO_RE = re.compile(
+    r"\b(video|recorded|recording)\s+(demo|demonstration|walkthrough)\b|"
+    r"\b(demo|demonstration|walkthrough)\s+video\b",
+    re.IGNORECASE,
+)
+_GENERIC_TITLES = {
+    "product launch keynote",
+    "launch keynote",
+    "product keynote",
+    "storyboard keynote",
+    "product launch deck",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -95,10 +121,14 @@ class SpeakerNote(BaseModel):
     backup_points: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
-    def _non_empty_backup_points(self) -> "SpeakerNote":
+    def _validate_notes(self) -> "SpeakerNote":
+        if _FORBIDDEN_VIDEO_DEMO_RE.search(self.demo_cue):
+            raise ValueError("demo_cue must not request or describe a video demo")
         for point in self.backup_points:
             if not point.strip():
                 raise ValueError("backup_points entries must be non-empty")
+            if _FORBIDDEN_VIDEO_DEMO_RE.search(point):
+                raise ValueError("backup_points must not request a video demo")
         return self
 
 
@@ -114,6 +144,14 @@ class StoryboardVisual(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     kind: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _supported_visual_kind(self) -> "StoryboardVisual":
+        if self.kind not in ALLOWED_VISUAL_KINDS:
+            raise ValueError(
+                "visual.kind must be one of: " + ", ".join(ALLOWED_VISUAL_KINDS)
+            )
+        return self
 
 
 class StoryboardSlide(BaseModel):
@@ -241,6 +279,13 @@ class StoryboardPayload(BaseModel):
 
     @model_validator(mode="after")
     def _enforce_acts_and_architecture(self) -> "StoryboardPayload":
+        if self.title.strip().lower() in _GENERIC_TITLES:
+            raise ValueError(
+                "title must name the actual product or workspace, not a generic keynote"
+            )
+        if _FORBIDDEN_VIDEO_DEMO_RE.search(self.demo_script_md):
+            raise ValueError("demo_script_md must not request or describe a video demo")
+
         titles = [section.title for section in self.sections]
 
         forbidden = [t for t in titles if t in FORBIDDEN_TOP_LEVEL_ACTS]
@@ -262,6 +307,16 @@ class StoryboardPayload(BaseModel):
         for values in self.source_map.values():
             if not values:
                 raise ValueError("every source_map entry must cite at least one source")
+        note_keys = set(self.notes)
+        for section in self.sections:
+            for slide in section.slides:
+                if (
+                    slide.speaker_notes_ref not in note_keys
+                    and slide.id not in note_keys
+                ):
+                    raise ValueError(
+                        f"slide {slide.id!r} is missing a matching speaker note"
+                    )
         return self
 
 
@@ -273,6 +328,7 @@ _ACTS_BLOCK = "\n".join(
     f"  {i + 1}. {t}" for i, t in enumerate(REQUIRED_SECTION_TITLES)
 )
 _LAYERS_BLOCK = ", ".join(REQUIRED_ARCHITECTURE_LAYERS)
+_VISUAL_KINDS_BLOCK = ", ".join(ALLOWED_VISUAL_KINDS)
 _CANONICAL_KEYS_BLOCK = """CANONICAL JSON SHAPE — use these keys exactly.
 Root object keys:
   title, theme, sections, diagrams, source_map, notes, demo_script_md,
@@ -287,6 +343,7 @@ slide keys:
   It is not an array of objects.
 visual keys:
   kind plus optional inert descriptor keys
+  kind must be a renderer-supported layout, never a media promise.
 diagram keys:
   id, type, layers
 diagram layer keys:
@@ -306,7 +363,7 @@ key is visible_text. If you need theme colours, the key is palette."""
 _MINIMAL_PAYLOAD_SHAPE = """FIELD SHAPE EXAMPLE — expand this structure to six
 sections and all eight architecture layers, but do not rename keys:
 {
-  "title": "Product Launch Keynote",
+  "title": "SpecForge Launch Keynote",
   "theme": {
     "palette": ["#101418", "#1FB6FF", "#F5A623"],
     "typography": "Modern geometric sans",
@@ -344,7 +401,7 @@ sections and all eight architecture layers, but do not rename keys:
           "source_refs": [
             {
               "source": "PLAN",
-              "source_id": "PLAN:Architecture",
+              "source_id": "PLAN:architecture",
               "excerpt": "Bounded source excerpt."
             }
           ]
@@ -356,7 +413,7 @@ sections and all eight architecture layers, but do not rename keys:
     "claim-1": [
       {
         "source": "SPEC",
-        "source_id": "SPEC:Overview",
+        "source_id": "SPEC:overview",
         "excerpt": "Bounded source excerpt."
       }
     ]
@@ -384,7 +441,8 @@ Do not combine, rename, or omit any of those eight architecture layer kinds."""
 SYSTEM_PROMPT = f"""You are SpecForge's Storyboard keynote director. You turn a
 finalised SPEC + PLAN + HARNESS + TASKS into a polished, product-specific launch
 keynote — not a generic slide deck. Every claim is grounded in the provided
-finalised sources; you never invent capabilities, metrics, or components.
+finalised sources; you never invent capabilities, metrics, pricing, commercial
+claims, timelines, customer promises, or components.
 
 OUTPUT CONTRACT — return one strict JSON object only. No prose, no Markdown
 fences, no commentary. The object must match the Storyboard payload schema.
@@ -407,17 +465,27 @@ architecture, security architecture, capacity model, STRIDE, SLO, and FMEA
 evidence for the Technical Architecture act and the Trust, Security, Reliability
 act.
 
+VISUALS — visual.kind must be one of these exact renderer-supported layouts:
+{_VISUAL_KINDS_BLOCK}. Never output "illustration", "video-demo", "video",
+"infographic", "call-to-action", "image", "photo", "screenshot", or any visual
+that implies a generated asset or media file. The trusted renderer draws the
+visuals from structured data.
+
 SLIDE RULES — one idea per slide. Headlines are at most 18 words. Visible slide
 text stays sparse: at most 45 visible words per slide unless diagram labels
 require more. The main deck stays sparse; depth lives in speaker notes and the
 technical appendix, not on the slides.
 
 SPEAKER NOTES — provide one note per slide keyed by the slide id, each with a
-talk track, a transition, timing (seconds), a pause cue, a demo cue, and backup
-points for Q&A.
+talk track, a transition, timing (seconds), a pause cue, a concise live
+walkthrough cue when the sources support one, and backup points for Q&A. Leave
+demo_cue as an empty string when there is no source-backed live action. Never
+mention or request a video demo.
 
-DEMO SCRIPT — the demo script (Markdown) maps concrete product actions to
-specific slides, so a presenter can drive a live walkthrough.
+WALKTHROUGH SCRIPT — keep the API field name demo_script_md, but its Markdown
+content is a source-backed live walkthrough script. It maps concrete product
+actions to specific slides so a presenter can drive the product in the browser.
+It is not a video demo, recording script, or asset request.
 
 TECHNICAL APPENDIX — the technical appendix (Markdown) carries architecture,
 security, reliability, testing, task, and Q&A backup depth. It is separate from
@@ -425,7 +493,8 @@ the main deck.
 
 SOURCE MAP — provide a source map so every major claim and every architecture
 component maps to bounded finalised source excerpts. Only cite the source ids you
-were given; never fabricate a citation.
+were given, exactly as written, such as "SPEC:overview" rather than "SPEC";
+never fabricate or paraphrase a citation id.
 
 VISUAL IDENTITY — provide a theme expressing the product's visual identity: a
 colour palette (3-8 #RRGGBB hex values), a typography mood, a motif, a transition
@@ -456,6 +525,13 @@ def _render_sources_block(source: StoryboardSourcePackage) -> str:
     return "\n\n".join(lines)
 
 
+def _render_source_ids_block(source: StoryboardSourcePackage) -> str:
+    lines: list[str] = []
+    for source_id, excerpt in source.excerpts.items():
+        lines.append(f"- {source_id} (source: {excerpt.stage.upper()})")
+    return "\n".join(lines) or "- none"
+
+
 def build_user_prompt(source: StoryboardSourcePackage) -> str:
     """Render the user prompt grounding the keynote in the finalised sources.
 
@@ -466,6 +542,7 @@ def build_user_prompt(source: StoryboardSourcePackage) -> str:
 
     problem = wrap_untrusted_content("problem_statement", source.problem_statement)
     sources_block = _render_sources_block(source)
+    source_ids_block = _render_source_ids_block(source)
     return f"""Build the launch keynote for this product. Ground every claim,
 metric, and architecture component in the finalised sources below. Produce the
 strict JSON payload described in the system prompt.
@@ -475,8 +552,17 @@ PRODUCT NAME: {source.workspace_name}
 PROBLEM STATEMENT:
 {problem}
 
+AVAILABLE SOURCE IDS — every source_map and diagram source_refs entry must use
+one of these exact source_id values and the matching source enum:
+{source_ids_block}
+
 FINALISED SOURCE EXCERPTS (cite these source ids in your source_map):
 {sources_block}
+
+Quality bar: the title, headlines, notes, and walkthrough must describe this
+specific product from the sources. Do not use "Product Launch Keynote" or other
+generic launch-copy filler. Do not invent pricing, customer promises, real-time
+capabilities, or any video-demo asset.
 
 Return only the JSON Storyboard payload."""
 

@@ -116,6 +116,8 @@ def test_render_deck_html_includes_content_and_csp() -> None:
     assert "SpecForge Launch Keynote" in html
     assert "Opening Thesis" in html
     assert "From idea to engineered spec" in html
+    assert "Problem to product" in html
+    assert "full-bleed" not in html
     assert "Browser SPA" in html
     # Embedded CSP meta with all required directives.
     assert "default-src 'self'" in html

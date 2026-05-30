@@ -43,6 +43,16 @@ function noteForSlide(
   return payload.notes[slide.speaker_notes_ref] ?? payload.notes[slide.id] ?? null
 }
 
+function sourceBackedWalkthroughCue(note: SpeakerNote | null): string | null {
+  const cue = note?.demo_cue?.trim()
+  if (!cue) return null
+  if (/\b(video|recorded|recording)\s+(demo|demonstration|walkthrough)\b/i.test(cue)) {
+    return null
+  }
+  if (/\b(demo|demonstration|walkthrough)\s+video\b/i.test(cue)) return null
+  return cue
+}
+
 export function PresenterMode({
   payload,
   activeSlideIndex = 0,
@@ -58,6 +68,7 @@ export function PresenterMode({
   const next = slides[currentIndex + 1] ?? null
   const canViewNotes = isOwner || permissions?.allow_notes_download === true
   const note = canViewNotes ? noteForSlide(payload, current?.slide) : null
+  const walkthroughCue = sourceBackedWalkthroughCue(note)
 
   useEffect(() => {
     setElapsedSeconds(0)
@@ -133,10 +144,12 @@ export function PresenterMode({
           <dt>Pause</dt>
           <dd>{note?.pause_cue ?? "Pause briefly before the next slide."}</dd>
         </div>
-        <div>
-          <dt>Demo</dt>
-          <dd>{note?.demo_cue ?? payload.demo_script_md}</dd>
-        </div>
+        {walkthroughCue && (
+          <div>
+            <dt>Walkthrough</dt>
+            <dd>{walkthroughCue}</dd>
+          </div>
+        )}
       </dl>
 
       <section className="presenter-mode__backup" aria-label="Backup points">

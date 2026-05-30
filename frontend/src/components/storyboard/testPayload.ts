@@ -112,13 +112,13 @@ export function makeStoryboardPayload(
             transition: `${title} transition`,
             timing_seconds: 45,
             pause_cue: `${title} pause cue`,
-            demo_cue: `${title} demo cue`,
+            demo_cue: `${title} walkthrough cue`,
             backup_points: [`${title} backup point`],
           },
         ]
       }),
     ),
-    demo_script_md: "Demo script",
+    demo_script_md: "Walkthrough script",
     technical_appendix_md: "Technical appendix",
   }
 

@@ -6,7 +6,10 @@ import {
   useState,
 } from "react"
 import { MarkdownRenderer } from "../workspace/MarkdownRenderer"
-import { ArchitectureReveal } from "./ArchitectureReveal"
+import {
+  ARCHITECTURE_LAYER_SEQUENCE,
+  ArchitectureReveal,
+} from "./ArchitectureReveal"
 import { PresenterMode } from "./PresenterMode"
 import { SourceLayer } from "./SourceLayer"
 import type {
@@ -60,6 +63,45 @@ interface DeckSlide {
   slideIndex: number
 }
 
+interface VisualFrame {
+  eyebrow: string
+  title: string
+  detail: string
+}
+
+const VISUAL_FRAMES: Record<StoryboardSectionTitle, VisualFrame> = {
+  "Opening Thesis": {
+    eyebrow: "Thesis",
+    title: "Problem to product",
+    detail: "The opening frame stays tied to the finalised SPEC and PLAN.",
+  },
+  "Product Vision": {
+    eyebrow: "Vision",
+    title: "Product signal",
+    detail: "The deck highlights only capabilities grounded in the workspace.",
+  },
+  "Product Walkthrough": {
+    eyebrow: "Flow",
+    title: "Live workflow path",
+    detail: "Presenter cues focus on browser actions, not generated media.",
+  },
+  "Technical Architecture": {
+    eyebrow: "Architecture",
+    title: "System layers",
+    detail: "The reveal is rendered from structured diagram layers.",
+  },
+  "Trust, Security, Reliability": {
+    eyebrow: "Trust",
+    title: "Controls and recovery",
+    detail: "Security, reliability, and testing claims stay source-backed.",
+  },
+  "Launch Close": {
+    eyebrow: "Close",
+    title: "Readiness narrative",
+    detail: "The final act connects scope, confidence, and next action.",
+  },
+}
+
 function sectionForAct(
   payload: StoryboardPayload | null | undefined,
   title: StoryboardSectionTitle,
@@ -94,6 +136,20 @@ function findArchitectureDiagram(
   payload: StoryboardPayload | null | undefined,
 ): StoryboardDiagram | null {
   return payload?.diagrams.find((diagram) => diagram.type === "architecture_reveal") ?? null
+}
+
+function visualFrameFor(
+  section: StoryboardSection,
+  slide: StoryboardSlide | null,
+): VisualFrame {
+  const base = VISUAL_FRAMES[section.title]
+  if (!slide) return base
+  if (slide.type === "trust") return VISUAL_FRAMES["Trust, Security, Reliability"]
+  if (slide.type === "walkthrough") return VISUAL_FRAMES["Product Walkthrough"]
+  if (slide.type === "product") return VISUAL_FRAMES["Product Vision"]
+  if (slide.type === "closing") return VISUAL_FRAMES["Launch Close"]
+  if (slide.type === "architecture") return VISUAL_FRAMES["Technical Architecture"]
+  return base
 }
 
 function deckState({
@@ -315,7 +371,8 @@ export function StoryboardDeck({
   const section = activeSlide?.section ?? sections[0]
   const isArchitectureSlide =
     slide?.type === "architecture" || section.title === "Technical Architecture"
-  const architectureStep = Math.max(1, Math.min(activeSlideIndex + 1, 8))
+  const architectureStep = ARCHITECTURE_LAYER_SEQUENCE.length
+  const visualFrame = visualFrameFor(section, slide)
 
   return (
     <section
@@ -408,9 +465,9 @@ export function StoryboardDeck({
               />
             ) : (
               <div className="storyboard-visual-card">
-                <span>{slide?.visual.kind ?? "keynote"}</span>
-                <strong>{payload?.theme.diagram_style}</strong>
-                <p>{payload?.theme.transition_style}</p>
+                <span>{visualFrame.eyebrow}</span>
+                <strong>{visualFrame.title}</strong>
+                <p>{visualFrame.detail}</p>
               </div>
             )}
           </div>

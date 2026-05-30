@@ -45,8 +45,8 @@ const OWNER_DOWNLOADS: DownloadItem[] = [
   },
   {
     kind: "demo-script",
-    label: "Demo script",
-    description: "Step-by-step live demo runbook.",
+    label: "Walkthrough script",
+    description: "Step-by-step browser presentation runbook.",
   },
   {
     kind: "appendix",

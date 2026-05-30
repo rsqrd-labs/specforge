@@ -69,7 +69,7 @@ describe("CreateStoryboardModal", () => {
       "Browser keynote",
       "Architecture reveal",
       "Speaker notes",
-      "Demo script",
+      "Walkthrough script",
       "Technical appendix",
       "Share link",
       "PDF downloads",

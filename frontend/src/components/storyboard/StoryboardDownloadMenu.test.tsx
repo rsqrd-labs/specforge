@@ -35,7 +35,7 @@ describe("StoryboardDownloadMenu", () => {
     expect(screen.getByRole("button", { name: /HTML package/i })).toBeInTheDocument()
     expect(screen.getByRole("button", { name: /^PDF/i })).toBeInTheDocument()
     expect(screen.getByRole("button", { name: /speaker notes/i })).toBeInTheDocument()
-    expect(screen.getByRole("button", { name: /demo script/i })).toBeInTheDocument()
+    expect(screen.getByRole("button", { name: /walkthrough script/i })).toBeInTheDocument()
     expect(screen.getByRole("button", { name: /technical appendix/i })).toBeInTheDocument()
 
     await user.click(screen.getByRole("button", { name: /speaker notes/i }))
@@ -80,6 +80,6 @@ describe("StoryboardDownloadMenu", () => {
 
     expect(screen.getByRole("button", { name: /speaker notes/i })).toBeInTheDocument()
     expect(screen.getByRole("button", { name: /technical appendix/i })).toBeInTheDocument()
-    expect(screen.getByRole("button", { name: /demo script/i })).toBeInTheDocument()
+    expect(screen.getByRole("button", { name: /walkthrough script/i })).toBeInTheDocument()
   })
 })

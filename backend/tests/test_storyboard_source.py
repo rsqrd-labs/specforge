@@ -241,6 +241,42 @@ def test_missing_section_recorded_not_invented() -> None:
     assert "PLAN:stride" not in excerpts
 
 
+def test_extract_excerpts_handles_common_plan_heading_variants() -> None:
+    artifacts = dict(_ARTIFACTS)
+    artifacts["plan"] = """# Plan
+
+## System Design
+React, FastAPI, PostgreSQL, Redis, and provider integrations.
+
+## Security Architecture
+CSRF and encrypted provider credentials.
+
+## Scalability and Performance
+Queueing, cache boundaries, and rate limits keep generation responsive.
+
+## Error Handling and Recovery
+Provider failures are retried, refunded, and surfaced without corrupting state.
+
+## Observability and Operations
+SLOs are monitored through structured metrics and failure alerts.
+"""
+    artifacts["tasks"] = """# Tasks
+
+## Phase 1: Infrastructure and Foundations
+- T-001 ship the database, cache, and API foundations.
+"""
+
+    excerpts, missing = _extract_excerpts(artifacts)  # type: ignore[arg-type]
+    missing_ids = {item.source_id for item in missing}
+
+    assert "PLAN:capacity-model" in excerpts
+    assert "PLAN:fmea" in excerpts
+    assert "PLAN:slo" in excerpts
+    assert "TASKS:must" in excerpts
+    assert "PLAN:capacity-model" not in missing_ids
+    assert "TASKS:must" not in missing_ids
+
+
 # ---------------------------------------------------------------------------
 # build_storyboard_source — gating + pinning
 # ---------------------------------------------------------------------------

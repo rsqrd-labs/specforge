@@ -41,6 +41,7 @@ labels.
 from __future__ import annotations
 
 import copy
+import re
 import time
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -57,7 +58,9 @@ from prompts.storyboard import (
     SYSTEM_PROMPT,
     StoryboardPayload,
     StoryboardPayloadError,
+    build_repair_user_prompt,
     build_user_prompt,
+    parse_and_validate_payload,
 )
 from services.credit_service import InsufficientCreditsError, credit_service
 from services.llm.base import ProviderError
@@ -110,6 +113,11 @@ _OUTPUT_TOKEN_BUDGET = 12288
 STUCK_THRESHOLD_MINUTES = 30
 
 _PRESENTABLE = frozenset({"ready", "stale"})
+_FORBIDDEN_VIDEO_DEMO_RE = re.compile(
+    r"\b(video|recorded|recording)\s+(demo|demonstration|walkthrough)\b|"
+    r"\b(demo|demonstration|walkthrough)\s+video\b",
+    re.IGNORECASE,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -578,13 +586,18 @@ async def _complete_and_validate(
     user_prompt = build_user_prompt(source)
 
     async def _repair(repair_prompt: str) -> str:
-        return await complete_with_timeout(
-            source.provider,
-            source.model,
-            SYSTEM_PROMPT,
-            repair_prompt,
-            _OUTPUT_TOKEN_BUDGET,
-        )
+        try:
+            return await complete_with_timeout(
+                source.provider,
+                source.model,
+                SYSTEM_PROMPT,
+                repair_prompt,
+                _OUTPUT_TOKEN_BUDGET,
+            )
+        except TimeoutError as exc:
+            raise StoryboardPayloadError("parse", "llm repair timed out") from exc
+        except ProviderError as exc:
+            raise StoryboardPayloadError("parse", "llm repair provider error") from exc
 
     try:
         raw = await complete_with_timeout(
@@ -599,12 +612,85 @@ async def _complete_and_validate(
     except ProviderError as exc:
         raise StoryboardPayloadError("parse", "llm provider error") from exc
 
-    # parse_and_validate_payload owns the strict schema check and the single
-    # internal repair attempt (it builds the repair prompt itself and calls our
-    # injected _repair once). Lazy import keeps the prompt module decoupled.
-    from prompts.storyboard import parse_and_validate_payload  # noqa: PLC0415
+    return await _parse_validate_and_ground(raw, source, repair=_repair)
 
-    return await parse_and_validate_payload(raw, repair=_repair)
+
+async def _parse_validate_and_ground(
+    raw: str,
+    source: StoryboardSourcePackage,
+    *,
+    repair,
+) -> StoryboardPayload:
+    """Validate schema + source grounding, allowing one total repair attempt."""
+
+    try:
+        payload = await parse_and_validate_payload(raw)
+        _validate_payload_against_source(payload, source)
+        return payload
+    except StoryboardPayloadError as first_error:
+        allowed_ids = ", ".join(sorted(source.excerpts)) or "none"
+        repair_prompt = build_repair_user_prompt(
+            raw,
+            f"{first_error.summary}; allowed source ids: {allowed_ids}",
+        )
+        repaired = await repair(repair_prompt)
+        payload = await parse_and_validate_payload(repaired)
+        _validate_payload_against_source(payload, source)
+        return payload
+
+
+def _validate_payload_against_source(
+    payload: StoryboardPayload, source: StoryboardSourcePackage
+) -> None:
+    """Fail closed when generated citations or media cues are not render-safe.
+
+    Pydantic validates the payload shape. This source-aware pass validates the
+    dynamic part the static schema cannot know: every citation id must be one of
+    the exact finalised excerpts in this source package, and the source enum must
+    match that excerpt's stage. The summary is intentionally source-free; it
+    names only invalid fields and allowed ids so logs/repair prompts stay safe.
+    """
+
+    available = source.excerpts
+    errors: list[str] = []
+
+    def check_ref(ref: Any, context: str) -> None:
+        source_id = getattr(ref, "source_id", "")
+        source_enum = getattr(ref, "source", "")
+        excerpt = available.get(source_id)
+        if excerpt is None:
+            errors.append(f"{context} uses unavailable source_id {source_id!r}")
+            return
+        expected_source = excerpt.stage.upper()
+        if source_enum != expected_source:
+            errors.append(
+                f"{context} source {source_enum!r} does not match {source_id!r}"
+            )
+
+    for claim_key, refs in payload.source_map.items():
+        for idx, ref in enumerate(refs):
+            check_ref(ref, f"source_map[{claim_key!r}][{idx}]")
+
+    for diagram in payload.diagrams:
+        for layer in diagram.layers:
+            for idx, ref in enumerate(layer.source_refs):
+                check_ref(ref, f"diagram[{diagram.id!r}].layer[{layer.id!r}][{idx}]")
+
+    for key, note in payload.notes.items():
+        if _FORBIDDEN_VIDEO_DEMO_RE.search(note.demo_cue):
+            errors.append(f"notes[{key!r}].demo_cue requests a video demo")
+
+    if _FORBIDDEN_VIDEO_DEMO_RE.search(payload.demo_script_md):
+        errors.append("demo_script_md requests a video demo")
+
+    if errors:
+        allowed = ", ".join(sorted(available)) or "none"
+        summary = "; ".join(errors[:20])
+        if len(errors) > 20:
+            summary += f"; +{len(errors) - 20} more"
+        raise StoryboardPayloadError(
+            "schema", f"{summary}; allowed source ids: {allowed}"
+        )
 
 
 async def _finalise_ready(
