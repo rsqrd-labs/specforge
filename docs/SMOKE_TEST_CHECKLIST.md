@@ -397,3 +397,17 @@ a bug.
 | 27 | Find a workspace whose harness eval is below 100% (or has no eval yet). | The badge is absent — no count, no bar, no placeholder. | |
 
 **V1.3 Sign-off:** ________________  **Date:** ________________
+
+---
+
+## Storyboard Smoke
+
+| Step | What to do | Expected | Result |
+| ---- | ---------- | -------- | ------ |
+| S1 | Complete SPEC, PLAN, HARNESS, and TASKS, then create a Storyboard. | Deck opens with exactly six acts and architecture reveal. | |
+| S2 | Open presenter mode. | Speaker notes are visible to the owner and do not appear in public mode unless enabled. | |
+| S3 | Enable sharing and open the `/sb/` URL in an incognito window. | Public deck loads without auth and has noindex posture. | |
+| S4 | Keep source and speaker notes permissions disabled. | Public source excerpts and speaker notes stay hidden. | |
+| S5 | Enable speaker notes, appendix, and source layer; reload public view. | Speaker notes, bounded source excerpts, and appendix are available only after permission is enabled. | |
+| S6 | Download PDF, notes, demo script, and appendix from owner view. | Each download is an attachment with expected content type. | |
+| S7 | Disable then rotate the public slug. | Old incognito link returns not-found; the new link works. | |

@@ -652,7 +652,7 @@ async def test_storyboard_recovery_fails_and_refunds_stuck_generating(
 
 
 @pytest.mark.asyncio
-async def test_storyboard_generation_requires_finalised_stages_without_charge(
+async def test_storyboard_generation_requires_all_stages_finalised(
     db_engine, redis_client, seed, monkeypatch
 ):
     """Unfinalised sources fail closed before any debit or placeholder row."""

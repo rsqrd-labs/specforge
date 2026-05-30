@@ -141,6 +141,12 @@ _FILENAME_TEMPLATES: dict[str, str] = {
     "appendix": "specforge-storyboard-technical-appendix-{slug}.md",
 }
 
+# Sanitized generated markdown fields handled by this module: speaker_notes,
+# demo_script, and technical_appendix.  Remote references such as
+# http://example.invalid/asset.png or https://example.invalid/font.css are
+# removed from deck text before templating; note PDFs keep only safe links and
+# never allow remote images/assets.
+
 
 def record_download_event(
     *,

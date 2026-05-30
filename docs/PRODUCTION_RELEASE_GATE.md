@@ -152,6 +152,9 @@ Minimum release-blocking coverage:
 - `/health` and `/metrics` are reachable as expected.
 - Prompt pipeline output includes required Phase 19 sections and the eval suite
   report has been reviewed.
+- Storyboard migration has run, Storyboard rate limit tiers are active, public
+  CSP blocks framing/scripts, and renderer sanitizer coverage confirms generated
+  script, iframe, and remote-asset input is inert.
 - Frontend loads without console errors.
 
 Pass criteria:

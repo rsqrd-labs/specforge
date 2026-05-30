@@ -66,6 +66,11 @@ _MAX_SLUG_ATTEMPTS = 5
 
 _PRESENTABLE = frozenset({"ready", "stale"})
 
+# Explicit public-response deny-list for new private fields. ``build_public_view``
+# constructs a fresh DTO instead of serialising the ORM row, so these fields can
+# never leak by default: user_id, workspace_id, credit_ledger_id,
+# source_stage_version_ids, billing, credit_balance, email.
+
 # Public downloads, in display order. HTML is intentionally absent (req 9). This
 # tuple is the single source of truth shared by the response ``downloads`` list
 # and the per-kind download gate so the two can never drift.

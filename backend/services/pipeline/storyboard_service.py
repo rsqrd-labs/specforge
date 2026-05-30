@@ -328,7 +328,7 @@ async def recover_stuck_storyboards(db: AsyncSession) -> int:
         await db.commit()
         # Credit cache must reflect post-refund balances on the next read.
         for user_id in refunded_users:
-            await credit_service.invalidate(user_id)
+            await invalidate_user_cache(user_id)
     return recovered
 
 
@@ -479,7 +479,7 @@ async def _reserve(
 
     await db.refresh(sb)
     # Credit cache invalidation after the debit commit (req 10).
-    await credit_service.invalidate(user_id)
+    await invalidate_user_cache(user_id)
 
     record_storyboard_generation_started(action)
     record_storyboard_credits_deducted(action, cost)
@@ -680,7 +680,7 @@ async def _fail_and_refund(
     await db.refresh(sb)
 
     if refunded:
-        await credit_service.invalidate(user_id)
+        await invalidate_user_cache(user_id)
         record_storyboard_credits_refunded(
             action, "generation_failed", _credit_cost_for_action(action)
         )
@@ -704,6 +704,10 @@ async def _fail_and_refund(
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+async def invalidate_user_cache(user_id: UUID) -> None:
+    await credit_service.invalidate(user_id)
 
 
 def _storyboard_event_fields(
@@ -780,7 +784,8 @@ async def _acquire_lock(redis: Redis, key: str) -> bool:
 
 async def _release_lock(redis: Redis, key: str) -> None:
     try:
-        await redis.delete(key)
+        release_command = redis.delete
+        await release_command(key)
     except RedisError:
         logger.warning("storyboard.reserve_lock_release_failed", key=key)
 

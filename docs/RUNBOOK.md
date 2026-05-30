@@ -19,6 +19,7 @@ billing alerts, and prompt pipeline quality gates.
 8. [Secret Rotation Procedures](#8-secret-rotation-procedures)
 9. [Billing Alerts](#9-billing-alerts)
 10. [Prompt Pipeline Quality Gates And Eval Workflow](#10-prompt-pipeline-quality-gates-and-eval-workflow)
+11. [Storyboard Operations](#11-storyboard-operations)
 
 ---
 
@@ -761,3 +762,34 @@ Once per quarter, refresh the eval suite so it reflects the current product:
 | `specforge_billing_credits_critic_regen_total` spikes | Critic repair loops are consuming extra regeneration credits | Compare provider latency/errors, recent prompt changes, and validator failures |
 | `pipeline_upstream_section_skipped_total` increases | The prompt builder could not find expected upstream context | Inspect the upstream stage for renamed/missing headings; check whether a prompt or parser change caused drift |
 | Prompt eval CI fails | New prompt behavior regressed against baseline | Do not merge until the prompt is fixed or the regression has explicit release-owner acceptance |
+
+---
+
+## 11. Storyboard Operations
+
+Storyboard generation creates a paid, versioned keynote artifact from finalised
+SPEC, PLAN, HARNESS, and TASKS sources. Operators should treat Storyboard
+failures like credit-affecting generation incidents.
+
+### Generation Failure And Refund Verification
+
+1. Find the `storyboard.generate_failed` log row by `storyboard_id`.
+2. Confirm `specforge_storyboard_generation_failed_total{error_type=...}`
+   incremented.
+3. Check `credit_ledger` for the original debit and matching refund row.
+4. Confirm `specforge_storyboard_credits_refunded_total` increased with
+   `reason="generation_failed"` or `reason="stuck_recovery"`.
+
+### Stale Storyboard Recovery
+
+When a source stage is refinalised, ready Storyboards for that workspace are
+marked `stale`. The stale deck remains presentable; ask the owner to regenerate
+when they need a fresh keynote sourced from the latest stage versions.
+
+### Public Slug Disable And Rotation
+
+To stop a public `/sb/` link, use the owner disable action first. To retire a
+known slug permanently, rotate the Storyboard share; the old slug should return
+404 immediately. For a public data leakage report, disable the link, rotate the
+slug, preserve logs, and verify the public response does not expose private
+fields or gated source excerpts.

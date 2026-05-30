@@ -278,7 +278,7 @@ async def test_build_unknown_workspace_raises() -> None:
 
 
 @pytest.mark.asyncio
-async def test_source_map_contains_only_finalised_current_versions() -> None:
+async def test_storyboard_source_map_contains_only_finalised_versions() -> None:
     db, stages, versions = _finalised_fixture()
     pkg = await build_storyboard_source(db, _WORKSPACE_ID, _USER_ID)
 

@@ -750,8 +750,8 @@ def _public_404() -> HTTPException:
     """404 with the public privacy headers.
 
     Every public denial — unknown/disabled/rotated slug, a download that isn't
-    permitted, ``html``, or an unknown kind — returns this so existence is never
-    confirmed and 403 is never used (security req).
+    permitted, or an unknown kind — returns this so existence is never confirmed
+    with a forbidden-style response.
     """
 
     return HTTPException(
@@ -795,7 +795,8 @@ async def get_public_storyboard(
 
 
 # Public download kind → (renderer filename kind, markdown attribute). ``pdf`` is
-# rendered (no markdown attribute); HTML is intentionally not a key (req 9).
+# rendered (no markdown attribute); the offline package kind is intentionally not
+# a key here (req 9).
 _PUBLIC_MARKDOWN_DOWNLOADS: dict[str, tuple[str, str]] = {
     "notes": ("notes-md", "speaker_notes_md"),
     "demo-script": ("demo-script", "demo_script_md"),
@@ -818,7 +819,7 @@ async def download_public_storyboard(
     sb = await storyboard_public_service.lookup_shareable(db, slug)
     if sb is None:
         raise _public_404()
-    # 404 (not 403) for html, unknown kinds, and kinds the owner has not enabled.
+    # 404 for unknown kinds and kinds the owner has not enabled.
     if not storyboard_public_service.is_public_download_allowed(sb, kind):
         raise _public_404()
 

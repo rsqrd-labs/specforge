@@ -668,3 +668,20 @@ Environment variable changes require a restart.
 | Run prompt eval | `cd harness && uv run python -m prompt_eval.run --version "$(grep -oE 'asdd-v[0-9.]+' ../backend/prompts/base.py)" --baseline asdd-v1.7.1 --report /tmp/prompt_eval_report.md` |
 | Check backend health | `curl http://localhost:8000/health` |
 | Open API explorer | http://localhost:8000/docs |
+
+---
+
+## Storyboard Local Smoke
+
+Use this after SPEC, PLAN, HARNESS, and TASKS are all finalised in a local
+workspace.
+
+1. Open the workspace and confirm the Create Storyboard action is enabled.
+2. Generate a Storyboard with a mocked provider in tests or a staging-safe
+   provider key locally.
+3. Open the deck and verify the six acts, presenter view, architecture reveal,
+   and source layer.
+4. Enable sharing and open the `/sb/` URL in another browser profile.
+5. Exercise download actions for PDF, speaker notes, demo script, and appendix.
+6. Disable or rotate the public Storyboard link and confirm the old `/sb/` URL
+   returns the not-found state.

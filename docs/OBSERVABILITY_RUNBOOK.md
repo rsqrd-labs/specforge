@@ -73,6 +73,11 @@ Important metric families:
 
 - `specforge_billing_*` for Stripe checkout, webhook, credit grant, duplicate,
   dispute, expiry, consumption, and checkout rate-limit signals.
+- `specforge_storyboard_*` for Storyboard generation, public views, downloads,
+  missing source sections, credit deduction, and refund behavior. Watch
+  `specforge_storyboard_generation_failed_total` for failure spikes and alert
+  on refund anomalies through
+  `specforge_storyboard_credits_refunded_total{reason="generation_failed"}`.
 - `pipeline_validator_failures_total` for mandatory section contract failures.
 - `pipeline_upstream_section_skipped_total` for upstream context sections the
   prompt builder could not find.
