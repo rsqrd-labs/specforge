@@ -92,12 +92,30 @@ class _FakeScalars:
 
 
 class _FakeDB:
-    """Returns a fixed result for every query — enough for the router's reads."""
+    """Returns a fixed result for every query — enough for the router's reads.
 
-    def __init__(self, value: Any = None) -> None:
+    A ``select(Workspace.name)`` (used by download endpoints to slug the
+    filename) is detected by its FROM clause and answered with a plain name
+    string so the storyboard value isn't mistaken for a workspace name.
+    """
+
+    def __init__(
+        self, value: Any = None, workspace_name: str = "Demo Workspace"
+    ) -> None:
         self._value = value
+        self._workspace_name = workspace_name
 
     async def execute(self, statement: Any) -> _FakeResult:
+        try:
+            froms = (
+                statement.get_final_froms()
+                if hasattr(statement, "get_final_froms")
+                else statement.froms
+            )
+            if any(getattr(f, "name", None) == "workspaces" for f in froms):
+                return _FakeResult(self._workspace_name)
+        except Exception:
+            pass
         return _FakeResult(self._value)
 
 
@@ -273,14 +291,78 @@ async def test_download_on_non_ready_storyboard_conflicts() -> None:
 
 
 @pytest.mark.asyncio
-async def test_notes_pdf_format_is_delegated_until_renderer() -> None:
+async def test_html_download_is_attachment_with_csp() -> None:
+    # The HTML deck renders with no native deps, so this exercises the real
+    # renderer end-to-end through the endpoint.
+    app = _app(db_value=_storyboard(status="ready"))
+    async with await _client(app) as client:
+        response = await client.get(f"/storyboards/{_STORYBOARD_ID}/download/html")
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/html")
+    disposition = response.headers["Content-Disposition"]
+    assert disposition.startswith("attachment;")
+    assert disposition.endswith('.html"')
+    assert "Demo-Workspace" in disposition  # slug from the workspace name
+    assert response.headers["X-Content-Type-Options"] == "nosniff"
+    assert "frame-ancestors 'none'" in response.headers["Content-Security-Policy"]
+    assert "script-src 'self'" in response.headers["Content-Security-Policy"]
+    # Trusted deck markup with no executable script tag.
+    assert "<script" not in response.text.lower()
+
+
+@pytest.mark.asyncio
+async def test_html_download_on_non_ready_conflicts() -> None:
+    app = _app(db_value=_storyboard(status="generating"))
+    async with await _client(app) as client:
+        response = await client.get(f"/storyboards/{_STORYBOARD_ID}/download/html")
+    assert response.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_pdf_download_streams_pdf(monkeypatch) -> None:
+    # PDF rendering needs WeasyPrint native libs; mock the renderer so the
+    # endpoint wiring (content-type, attachment, filename) is asserted without
+    # them. The renderer's own no-network behaviour is covered in its unit tests.
+    import routers.storyboards as storyboards_router
+
+    async def _fake_pdf(content, workspace_name):
+        return b"%PDF-1.7 fake"
+
+    monkeypatch.setattr(
+        storyboards_router.storyboard_renderer, "render_deck_pdf", _fake_pdf
+    )
+    app = _app(db_value=_storyboard(status="ready"))
+    async with await _client(app) as client:
+        response = await client.get(f"/storyboards/{_STORYBOARD_ID}/download/pdf")
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "application/pdf"
+    disposition = response.headers["Content-Disposition"]
+    assert disposition.startswith("attachment;")
+    assert disposition.endswith('.pdf"')
+    assert response.headers["X-Content-Type-Options"] == "nosniff"
+
+
+@pytest.mark.asyncio
+async def test_notes_pdf_renders_attachment(monkeypatch) -> None:
+    import routers.storyboards as storyboards_router
+
+    async def _fake_notes_pdf(notes_md, workspace_name):
+        return b"%PDF-1.7 notes"
+
+    monkeypatch.setattr(
+        storyboards_router.storyboard_renderer, "render_notes_pdf", _fake_notes_pdf
+    )
     app = _app(db_value=_storyboard(status="ready"))
     async with await _client(app) as client:
         response = await client.get(
             f"/storyboards/{_STORYBOARD_ID}/download/notes?format=pdf"
         )
-    assert response.status_code == 503
-    assert response.json()["detail"]["component"] == "renderer"
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "application/pdf"
+    disposition = response.headers["Content-Disposition"]
+    assert disposition.startswith("attachment;")
+    assert "speaker-notes" in disposition
+    assert disposition.endswith('.pdf"')
 
 
 # ---------------------------------------------------------------------------

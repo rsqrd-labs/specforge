@@ -5,14 +5,14 @@ ownership boundaries, CSRF posture, response shapes, public privacy headers, and
 download streaming semantics. Generation, rendering, and public allow-list
 filtering are deliberately delegated to services delivered by later tasks:
 
-* generation / regeneration / section regeneration  -> T-254 storyboard_service
-* HTML and PDF rendered downloads                    -> T-255 storyboard_renderer
-* public allow-list response building + slug/share   -> T-256 storyboard_public_service
+* generation / regeneration / section regen  -> T-254 storyboard_service (wired)
+* HTML and PDF rendered downloads             -> T-255 storyboard_renderer (wired)
+* public allow-list response + slug/share     -> T-256 storyboard_public_service
 
-Endpoints whose body is owned by a later task return a typed 503
-``storyboard_pipeline_unavailable`` until that task wires its service in. The
-owner read endpoints and the markdown download endpoints depend only on the
-T-250 model and are fully implemented here.
+Endpoints whose body is still owned by a later task (public sharing) return a
+typed 503 ``storyboard_pipeline_unavailable`` until that task wires its service
+in. Owner reads, generation, and all owner download/render surfaces are fully
+implemented here.
 
 Security notes:
 * Owner routes depend on ``get_current_user`` and scope every lookup to the
@@ -38,7 +38,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from database import get_db, get_redis
 from middleware.auth import get_current_user
-from models import Storyboard, User
+from models import Storyboard, User, Workspace
 from schemas.storyboard import (
     StoryboardDetail,
     StoryboardGenerateRequest,
@@ -51,6 +51,8 @@ from schemas.storyboard import (
     StoryboardSummary,
 )
 from services.credit_service import InsufficientCreditsError
+from services.observability import STORYBOARD_DOWNLOAD
+from services.pipeline import storyboard_renderer
 from services.pipeline.storyboard_service import (
     COST_FULL_GENERATION,
     COST_SECTION_REGENERATION,
@@ -251,6 +253,30 @@ async def _get_owned_storyboard(
     if sb is None:
         raise _not_found()
     return sb
+
+
+async def _workspace_name(workspace_id: UUID, db: AsyncSession) -> str:
+    """Workspace name for filename slugging, or "" (renderer falls back safely).
+
+    A scalar column read — ownership was already proven by the Storyboard lookup,
+    and the name only feeds the download filename, never the response body.
+    """
+
+    result = await db.execute(
+        select(Workspace.name).where(Workspace.id == workspace_id)
+    )
+    name = result.scalar_one_or_none()
+    return name if isinstance(name, str) else ""
+
+
+def _require_presentable(sb: Storyboard) -> None:
+    """Reject downloads/renders of a non-presentable version (no content yet)."""
+
+    if sb.status not in _PRESENTABLE:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"code": "storyboard_not_ready"},
+        )
 
 
 def _markdown_download(body: str, filename: str, status_value: str) -> Response:
@@ -468,16 +494,48 @@ async def get_storyboard_presenter(
 # ---------------------------------------------------------------------------
 
 
+def _attachment_headers(filename: str, *, csp: str | None = None) -> dict[str, str]:
+    """Download headers: force attachment + nosniff, optionally a strict CSP.
+
+    Rendered HTML is always served as an attachment with ``nosniff`` so the API
+    origin can never be coaxed into executing the deck inline, and carries the
+    same CSP as the template's embedded ``<meta>``.
+    """
+
+    headers = {
+        "Content-Disposition": f'attachment; filename="{filename}"',
+        "X-Content-Type-Options": "nosniff",
+    }
+    if csp is not None:
+        headers["Content-Security-Policy"] = csp
+    return headers
+
+
 @router.get("/storyboards/{id}/download/html")
 async def download_storyboard_html(
     id: UUID,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> Response:
-    """Offline HTML keynote package. Rendered by the trusted renderer in T-255."""
+    """Offline, self-contained HTML keynote package (owner only).
 
-    await _get_owned_storyboard(id, user, db)
-    raise _pipeline_unavailable("renderer")
+    Rendered by the trusted renderer; served as an attachment with a strict CSP
+    and ``nosniff`` so it cannot execute inline on the API origin.
+    """
+
+    sb = await _get_owned_storyboard(id, user, db)
+    _require_presentable(sb)
+    workspace_name = await _workspace_name(sb.workspace_id, db)
+    html = storyboard_renderer.render_deck_html(sb.content_json or {}, workspace_name)
+    STORYBOARD_DOWNLOAD.labels(kind="html", public="false").inc()
+    return Response(
+        content=html.encode("utf-8"),
+        media_type="text/html; charset=utf-8",
+        headers=_attachment_headers(
+            storyboard_renderer.filename_for("html", workspace_name),
+            csp=storyboard_renderer.HTML_CSP,
+        ),
+    )
 
 
 @router.get("/storyboards/{id}/download/pdf")
@@ -486,10 +544,22 @@ async def download_storyboard_pdf(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> Response:
-    """Static PDF keynote. Rendered via the no-network PDF executor in T-255."""
+    """Static PDF keynote, rendered via the shared no-network PDF executor."""
 
-    await _get_owned_storyboard(id, user, db)
-    raise _pipeline_unavailable("renderer")
+    sb = await _get_owned_storyboard(id, user, db)
+    _require_presentable(sb)
+    workspace_name = await _workspace_name(sb.workspace_id, db)
+    pdf_bytes = await storyboard_renderer.render_deck_pdf(
+        sb.content_json or {}, workspace_name
+    )
+    STORYBOARD_DOWNLOAD.labels(kind="pdf", public="false").inc()
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers=_attachment_headers(
+            storyboard_renderer.filename_for("pdf", workspace_name)
+        ),
+    )
 
 
 @router.get("/storyboards/{id}/download/notes")
@@ -499,15 +569,27 @@ async def download_storyboard_notes(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> Response:
-    """Speaker notes as markdown (now) or rendered PDF (T-255)."""
+    """Speaker notes as raw markdown (default) or a rendered PDF."""
 
     sb = await _get_owned_storyboard(id, user, db)
+    _require_presentable(sb)
+    workspace_name = await _workspace_name(sb.workspace_id, db)
     if format == "pdf":
-        # PDF rendering of notes belongs to the trusted renderer (T-255).
-        raise _pipeline_unavailable("renderer")
+        pdf_bytes = await storyboard_renderer.render_notes_pdf(
+            sb.speaker_notes_md, workspace_name
+        )
+        STORYBOARD_DOWNLOAD.labels(kind="notes-pdf", public="false").inc()
+        return Response(
+            content=pdf_bytes,
+            media_type="application/pdf",
+            headers=_attachment_headers(
+                storyboard_renderer.filename_for("notes-pdf", workspace_name)
+            ),
+        )
+    STORYBOARD_DOWNLOAD.labels(kind="notes-md", public="false").inc()
     return _markdown_download(
         sb.speaker_notes_md,
-        f"specforge-storyboard-{sb.id}-speaker-notes.md",
+        storyboard_renderer.filename_for("notes-md", workspace_name),
         sb.status,
     )
 
@@ -519,9 +601,11 @@ async def download_storyboard_demo_script(
     db: AsyncSession = Depends(get_db),
 ) -> Response:
     sb = await _get_owned_storyboard(id, user, db)
+    workspace_name = await _workspace_name(sb.workspace_id, db)
+    STORYBOARD_DOWNLOAD.labels(kind="demo-script", public="false").inc()
     return _markdown_download(
         sb.demo_script_md,
-        f"specforge-storyboard-{sb.id}-demo-script.md",
+        storyboard_renderer.filename_for("demo-script", workspace_name),
         sb.status,
     )
 
@@ -533,9 +617,11 @@ async def download_storyboard_appendix(
     db: AsyncSession = Depends(get_db),
 ) -> Response:
     sb = await _get_owned_storyboard(id, user, db)
+    workspace_name = await _workspace_name(sb.workspace_id, db)
+    STORYBOARD_DOWNLOAD.labels(kind="appendix", public="false").inc()
     return _markdown_download(
         sb.technical_appendix_md,
-        f"specforge-storyboard-{sb.id}-technical-appendix.md",
+        storyboard_renderer.filename_for("appendix", workspace_name),
         sb.status,
     )
 

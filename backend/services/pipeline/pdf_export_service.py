@@ -300,3 +300,20 @@ def _safe_filename_slug(name: str) -> str:
         ch if ch.isalnum() or ch in ("-", "_") else "-" for ch in (name or "")
     ).strip("-_")
     return cleaned[:60] or "workspace"
+
+
+async def render_html_to_pdf(html_text: str) -> bytes:
+    """Render a trusted, fully-inlined HTML document to PDF bytes.
+
+    Shared no-network PDF entry point: dispatches the CPU-bound WeasyPrint render
+    to the dedicated PDF thread pool (so the event loop is never blocked) and
+    applies ``no_network_url_fetcher`` so a render can never trigger an outbound
+    HTTP request. Callers own the HTML and are responsible for escaping/
+    sanitising any untrusted content before it reaches this function.
+
+    Reused by the Storyboard renderer (T-255) so both PDF surfaces share one
+    executor, one no-network guard, and one render-duration metric.
+    """
+    return await asyncio.get_running_loop().run_in_executor(
+        _PDF_EXECUTOR, _render_pdf_sync, html_text
+    )

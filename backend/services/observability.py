@@ -193,10 +193,11 @@ PIPELINE_VALIDATOR_FAILURES = Counter(
 )
 
 # ---------------------------------------------------------------------------
-# Storyboard (Phase 20).  T-254 owns the generation/credit lifecycle metrics
-# below; the public-view / download / source-missing metrics enumerated in
-# T-262 are declared by that task to avoid duplicate-timeseries registration
-# (prometheus_client raises on a re-declared metric name).  Keep that boundary.
+# Storyboard (Phase 20).  T-254 owns the generation/credit lifecycle metrics and
+# T-255 owns the download metric below; the public-view / source-missing metrics
+# enumerated in T-262 are declared by that task to avoid duplicate-timeseries
+# registration (prometheus_client raises on a re-declared metric name).  Keep
+# that boundary.
 # ---------------------------------------------------------------------------
 STORYBOARD_GENERATION_STARTED = Counter(
     "specforge_storyboard_generation_started_total",
@@ -247,6 +248,14 @@ STORYBOARD_CREDITS_REFUNDED = Counter(
     "``reason`` is content-free (e.g. 'generation_failed', 'stuck_recovery').  "
     "T-254 (Phase 20).",
     labelnames=["action", "reason"],
+)
+
+STORYBOARD_DOWNLOAD = Counter(
+    "specforge_storyboard_download_total",
+    "Storyboard artifact downloads.  ``kind`` is the artifact (html, pdf, "
+    "notes-md, notes-pdf, demo-script, appendix); ``public`` is 'true' for the "
+    "unauthenticated share surface and 'false' for owner downloads.  T-255.",
+    labelnames=["kind", "public"],
 )
 
 _sentry_configured = False

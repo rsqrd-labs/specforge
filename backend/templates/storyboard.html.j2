@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    {# Trusted, codebase-owned template (T-255). The LLM never contributes
+       markup: every dynamic value below is structured, already-sanitised text
+       and is HTML-escaped by Jinja autoescape. No <script>, no remote assets,
+       no external fonts — the deck is a self-contained offline package. #}
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; frame-ancestors 'none'"
+    />
+    <meta name="robots" content="noindex, nofollow" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{{ title }} — SpecForge Storyboard</title>
+    <style>
+      /* All CSS inlined; no external resource fetches (Storyboard Delivery
+         Directive §5 — never reference remote assets or external fonts). */
+      :root {
+        --sb-ink: #0f172a;
+        --sb-muted: #475569;
+        --sb-border: #e2e8f0;
+        --sb-accent: {{ accent_color }};
+        --sb-accent-2: {{ accent_color_2 }};
+        --sb-bg: #ffffff;
+      }
+      @page {
+        size: A4 landscape;
+        margin: 16mm 16mm 16mm 16mm;
+        @bottom-right {
+          content: "Slide " counter(page) " of " counter(pages);
+          font-family: "Helvetica", "Arial", sans-serif;
+          font-size: 9pt;
+          color: #64748b;
+        }
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        font-family: "Helvetica", "Arial", sans-serif;
+        font-size: 12pt;
+        line-height: 1.5;
+        color: var(--sb-ink);
+        background: var(--sb-bg);
+      }
+      .deck { max-width: 1100px; margin: 0 auto; padding: 24px; }
+      .slide {
+        border: 1px solid var(--sb-border);
+        border-radius: 14px;
+        padding: 28px 32px;
+        margin: 0 0 22px 0;
+        page-break-inside: avoid;
+        background: #ffffff;
+      }
+      .slide--cover {
+        border: none;
+        background: linear-gradient(135deg, var(--sb-accent), var(--sb-accent-2));
+        color: #ffffff;
+        padding: 64px 40px;
+        page-break-after: always;
+      }
+      .slide--cover h1 { color: #ffffff; font-size: 34pt; margin: 0 0 12px 0; }
+      .slide--cover .motif { font-size: 14pt; opacity: 0.92; }
+      .act {
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        font-size: 9.5pt;
+        font-weight: 700;
+        color: var(--sb-accent);
+        margin: 0 0 6px 0;
+      }
+      .act-header {
+        page-break-after: avoid;
+        margin: 30px 0 12px 0;
+        padding-bottom: 6px;
+        border-bottom: 2px solid var(--sb-accent);
+      }
+      .act-header h2 { margin: 0; font-size: 18pt; }
+      h3.headline { margin: 0 0 8px 0; font-size: 16pt; line-height: 1.25; }
+      .visible-text { color: var(--sb-muted); margin: 0 0 10px 0; }
+      .visual {
+        font-size: 9.5pt;
+        color: var(--sb-muted);
+        background: #f8fafc;
+        border: 1px solid var(--sb-border);
+        border-radius: 8px;
+        padding: 8px 12px;
+        margin: 8px 0 0 0;
+      }
+      .visual .label { font-weight: 700; color: var(--sb-ink); }
+      .sources {
+        margin: 10px 0 0 0;
+        font-size: 8.5pt;
+        color: var(--sb-muted);
+      }
+      .source-chip {
+        display: inline-block;
+        border: 1px solid var(--sb-border);
+        border-radius: 999px;
+        padding: 1px 9px;
+        margin: 0 4px 4px 0;
+      }
+      .arch { margin-top: 8px; }
+      .arch-layer {
+        border-left: 3px solid var(--sb-accent);
+        padding: 6px 0 6px 12px;
+        margin: 8px 0;
+      }
+      .arch-layer .layer-kind {
+        text-transform: uppercase;
+        font-size: 8.5pt;
+        letter-spacing: 0.06em;
+        color: var(--sb-accent);
+        font-weight: 700;
+      }
+      .arch-layer .layer-label { font-weight: 700; }
+      .arch-layer .layer-summary { color: var(--sb-muted); font-size: 10pt; }
+      .footer {
+        margin-top: 18px;
+        padding-top: 10px;
+        border-top: 1px solid var(--sb-border);
+        font-size: 8.5pt;
+        color: #94a3b8;
+      }
+    </style>
+  </head>
+  <body>
+    <main class="deck">
+      <section class="slide slide--cover">
+        <h1>{{ title }}</h1>
+        {% if motif %}<div class="motif">{{ motif }}</div>{% endif %}
+      </section>
+
+      {% for section in sections %}
+      <div class="act-header">
+        <div class="act">Act {{ loop.index }}</div>
+        <h2>{{ section.title }}</h2>
+      </div>
+      {% for slide in section.slides %}
+      <section class="slide">
+        <h3 class="headline">{{ slide.headline }}</h3>
+        {% if slide.visible_text %}
+        <p class="visible-text">{{ slide.visible_text }}</p>
+        {% endif %}
+        {% if slide.visual_kind %}
+        <div class="visual">
+          <span class="label">{{ slide.visual_kind }}</span>
+          {% if slide.visual_detail %} — {{ slide.visual_detail }}{% endif %}
+        </div>
+        {% endif %}
+        {% if slide.sources %}
+        <div class="sources">
+          {% for src in slide.sources %}
+          <span class="source-chip">{{ src }}</span>
+          {% endfor %}
+        </div>
+        {% endif %}
+      </section>
+      {% endfor %}
+      {% endfor %}
+
+      {% if architecture_layers %}
+      <div class="act-header">
+        <div class="act">Architecture Reveal</div>
+        <h2>System Architecture</h2>
+      </div>
+      <section class="slide arch">
+        {% for layer in architecture_layers %}
+        <div class="arch-layer">
+          <div class="layer-kind">{{ layer.kind }}</div>
+          <div class="layer-label">{{ layer.label }}</div>
+          {% if layer.summary %}
+          <div class="layer-summary">{{ layer.summary }}</div>
+          {% endif %}
+        </div>
+        {% endfor %}
+      </section>
+      {% endif %}
+
+      <div class="footer">
+        Generated by SpecForge · {{ generated_at }} · Offline keynote package.
+        Source-backed claims map to finalised SPEC / PLAN / HARNESS / TASKS.
+      </div>
+    </main>
+  </body>
+</html>
