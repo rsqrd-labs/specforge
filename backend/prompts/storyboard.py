@@ -29,7 +29,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from prompts.base import SECURITY_AND_PRIVACY_RULES, wrap_untrusted_content
 from services.pipeline.storyboard_source import StoryboardSourcePackage
 
-STORYBOARD_PROMPT_VERSION = "storyboard-v1"
+STORYBOARD_PROMPT_VERSION = "storyboard-v1.2"
 
 # The main keynote has exactly six visible top-level acts, in this exact order.
 # Validation and Execution Plan are deliberately NOT acts — they belong in the
@@ -273,6 +273,113 @@ _ACTS_BLOCK = "\n".join(
     f"  {i + 1}. {t}" for i, t in enumerate(REQUIRED_SECTION_TITLES)
 )
 _LAYERS_BLOCK = ", ".join(REQUIRED_ARCHITECTURE_LAYERS)
+_CANONICAL_KEYS_BLOCK = """CANONICAL JSON SHAPE — use these keys exactly.
+Root object keys:
+  title, theme, sections, diagrams, source_map, notes, demo_script_md,
+  technical_appendix_md
+theme keys:
+  palette, typography, motif, transition_style, diagram_style
+section keys:
+  id, title, slides
+slide keys:
+  id, type, headline, visible_text, visual, speaker_notes_ref, sources
+  sources is an array of source enum strings only, for example ["SPEC", "PLAN"].
+  It is not an array of objects.
+visual keys:
+  kind plus optional inert descriptor keys
+diagram keys:
+  id, type, layers
+diagram layer keys:
+  id, kind, label, summary, source_refs
+source reference keys:
+  source, source_id, excerpt
+  source references are objects used in source_map and diagram layer source_refs.
+  Never add url, link, href, title, or heading fields to a source reference.
+speaker note keys:
+  slide_id, talk_track, transition, timing_seconds, pause_cue, demo_cue,
+  backup_points
+
+Do not use alias keys. In particular, never use colour_palette,
+typography_mood, text, note_ref, speaker_note_ref, speakerNotesRef, sourceRefs,
+sourceMap, demo_script, or technical_appendix. If you need slide body text, the
+key is visible_text. If you need theme colours, the key is palette."""
+_MINIMAL_PAYLOAD_SHAPE = """FIELD SHAPE EXAMPLE — expand this structure to six
+sections and all eight architecture layers, but do not rename keys:
+{
+  "title": "Product Launch Keynote",
+  "theme": {
+    "palette": ["#101418", "#1FB6FF", "#F5A623"],
+    "typography": "Modern geometric sans",
+    "motif": "Layered product glass",
+    "transition_style": "Cinematic fades",
+    "diagram_style": "Layered architecture planes"
+  },
+  "sections": [
+    {
+      "id": "act-1",
+      "title": "Opening Thesis",
+      "slides": [
+        {
+          "id": "slide-1",
+          "type": "thesis",
+          "headline": "One concise headline",
+          "visible_text": "One sparse visible line.",
+          "visual": {"kind": "hero"},
+          "speaker_notes_ref": "slide-1",
+          "sources": ["SPEC", "PLAN"]
+        }
+      ]
+    }
+  ],
+  "diagrams": [
+    {
+      "id": "architecture-reveal",
+      "type": "architecture_reveal",
+      "layers": [
+        {
+          "id": "layer-api",
+          "kind": "api",
+          "label": "API layer",
+          "summary": "Short sourced summary.",
+          "source_refs": [
+            {
+              "source": "PLAN",
+              "source_id": "PLAN:Architecture",
+              "excerpt": "Bounded source excerpt."
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "source_map": {
+    "claim-1": [
+      {
+        "source": "SPEC",
+        "source_id": "SPEC:Overview",
+        "excerpt": "Bounded source excerpt."
+      }
+    ]
+  },
+  "notes": {
+    "slide-1": {
+      "slide_id": "slide-1",
+      "talk_track": "Presenter talk track.",
+      "transition": "Transition to next slide.",
+      "timing_seconds": 45,
+      "pause_cue": "Pause for emphasis.",
+      "demo_cue": "",
+      "backup_points": ["One Q&A backup point."]
+    }
+  },
+  "demo_script_md": "## Demo\\n1. Show the product workflow.",
+  "technical_appendix_md": "## Appendix\\nArchitecture backup."
+}
+
+The final architecture_reveal layers array must include at least one layer
+object for each required kind, using these exact kind values:
+client, frontend, api, data, llm, integrations, trust, recovery.
+Do not combine, rename, or omit any of those eight architecture layer kinds."""
 
 SYSTEM_PROMPT = f"""You are SpecForge's Storyboard keynote director. You turn a
 finalised SPEC + PLAN + HARNESS + TASKS into a polished, product-specific launch
@@ -281,6 +388,10 @@ finalised sources; you never invent capabilities, metrics, or components.
 
 OUTPUT CONTRACT — return one strict JSON object only. No prose, no Markdown
 fences, no commentary. The object must match the Storyboard payload schema.
+
+{_CANONICAL_KEYS_BLOCK}
+
+{_MINIMAL_PAYLOAD_SHAPE}
 
 THE SIX TOP-LEVEL ACTS — exactly six sections, with these exact titles, in order:
 {_ACTS_BLOCK}
@@ -382,6 +493,10 @@ def build_repair_user_prompt(previous_output: str, errors: str) -> str:
 
 VALIDATION ERRORS:
 {errors}
+
+{_CANONICAL_KEYS_BLOCK}
+
+{_MINIMAL_PAYLOAD_SHAPE}
 
 Return a corrected strict JSON Storyboard payload that resolves every error
 above and still satisfies all system-prompt rules (exactly six acts with the

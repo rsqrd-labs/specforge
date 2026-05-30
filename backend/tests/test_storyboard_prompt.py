@@ -17,8 +17,11 @@ import pytest
 from prompts.storyboard import (
     REQUIRED_ARCHITECTURE_LAYERS,
     REQUIRED_SECTION_TITLES,
+    STORYBOARD_PROMPT_VERSION,
+    SYSTEM_PROMPT,
     StoryboardPayload,
     StoryboardPayloadError,
+    build_repair_user_prompt,
     build_user_prompt,
     parse_and_validate_payload,
 )
@@ -128,6 +131,50 @@ def _valid_payload() -> dict[str, Any]:
 def test_valid_payload_validates() -> None:
     payload = StoryboardPayload.model_validate(_valid_payload())
     assert [s.title for s in payload.sections] == list(REQUIRED_SECTION_TITLES)
+
+
+def test_storyboard_prompt_names_canonical_payload_keys_and_bad_aliases() -> None:
+    """The live model needs exact field names, not conceptual aliases."""
+
+    assert STORYBOARD_PROMPT_VERSION == "storyboard-v1.2"
+    required_keys = [
+        "palette",
+        "typography",
+        "visible_text",
+        "speaker_notes_ref",
+        "source_map",
+        '["SPEC", "PLAN"]',
+        "source_refs",
+        "demo_script_md",
+        "technical_appendix_md",
+        '"source_map"',
+        '"slide_id"',
+        '"backup_points"',
+        "client, frontend, api, data, llm, integrations, trust, recovery",
+    ]
+    for key in required_keys:
+        assert key in SYSTEM_PROMPT
+
+    forbidden_aliases = [
+        "colour_palette",
+        "typography_mood",
+        "text",
+        "speaker_note_ref",
+        "sourceMap",
+        "url",
+        "demo_script",
+        "technical_appendix",
+    ]
+    for alias in forbidden_aliases:
+        assert alias in SYSTEM_PROMPT
+
+
+def test_storyboard_repair_prompt_repeats_canonical_payload_keys() -> None:
+    prompt = build_repair_user_prompt("{}", "theme.palette: Field required")
+    for key in ("palette", "visible_text", "speaker_notes_ref", "source_map"):
+        assert key in prompt
+    for alias in ("colour_palette", "typography_mood", "text"):
+        assert alias in prompt
 
 
 # ---------------------------------------------------------------------------
