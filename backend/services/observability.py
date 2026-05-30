@@ -167,6 +167,15 @@ BILLING_CHECKOUT_RATE_LIMITED = Counter(
     "POST /billing/checkout requests rejected by the 5/hour rate limit",
 )
 
+PIPELINE_UPSTREAM_SECTION_SKIPPED = Counter(
+    "pipeline_upstream_section_skipped_total",
+    "Count of upstream sections skipped during section-aware injection "
+    "because the 200K budget was exhausted.  A non-zero value here means "
+    "the downstream stage saw a summary instead of the verbatim section, "
+    "which is a quality regression for large products.",
+    labelnames=["stage", "section"],
+)
+
 _sentry_configured = False
 _otel_configured = False
 _REDACTED = "[REDACTED]"

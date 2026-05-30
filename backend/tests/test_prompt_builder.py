@@ -4,6 +4,7 @@ from typing import Any
 from uuid import uuid4
 
 import pytest
+from prometheus_client import REGISTRY
 
 from models import Stage, Workspace
 from prompts import harness, plan, spec, tasks
@@ -14,7 +15,12 @@ from prompts.base import (
     SECURITY_AND_PRIVACY_RULES,
     STAGE_PROMPT_VERSIONS,
 )
-from services.pipeline.prompt_builder import _MAX_UPSTREAM_CHARS, build_prompt
+from services.pipeline import prompt_builder
+from services.pipeline.prompt_builder import (
+    _MAX_UPSTREAM_CHARS,
+    _section_aware_injection,
+    build_prompt,
+)
 
 
 class _FakeRedis:
@@ -253,3 +259,49 @@ def test_tasks_prompt_is_ordered_traceable_and_agent_executable() -> None:
             "harness": "harness/tests/test_projects.py::test_create_project",
         }
     )
+
+
+# --- T-246: section-aware injection -----------------------------------------
+
+_SKIPPED_METRIC = "pipeline_upstream_section_skipped_total"
+
+
+def test_section_aware_injection_keeps_rtm_verbatim_when_content_fits() -> None:
+    """T-246 — keep-sections survive verbatim; narrative is summarized."""
+    rtm = (
+        "## Requirement Traceability Matrix\n"
+        "| FR-042 | create project | tests/test_proj.py::test_create |\n"
+    )
+    narrative = "## Background\nThis project began as a hackathon prototype.\n"
+    result = _section_aware_injection("plan", rtm + narrative)
+
+    # The RTM is a keep-section: heading and rows survive byte-for-byte.
+    assert "## Requirement Traceability Matrix" in result
+    assert "FR-042 | create project" in result
+    # Narrative is not a keep-section: its prose is replaced by the summary,
+    # so the distinctive sentence does not survive verbatim.
+    assert "hackathon prototype" not in result
+    # The deterministic summary scaffold is appended after the kept sections.
+    assert "## Downstream Constraints" in result
+
+
+def test_section_aware_injection_increments_metric_when_keep_section_skipped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T-246 — a kept section dropped for budget fires the skipped metric."""
+    # A tiny budget: the first keep-section (RTM) fits and consumes it; the
+    # second keep-section (API Design) then cannot fit and must be skipped.
+    monkeypatch.setattr(prompt_builder, "_MAX_UPSTREAM_CHARS", 60)
+    rtm = "## Requirement Traceability Matrix\nFR-001\n"
+    api = "## API Design\n" + "POST /things\n" * 50
+    content = rtm + api
+    labels = {"stage": "plan", "section": "## API Design"}
+    before = REGISTRY.get_sample_value(_SKIPPED_METRIC, labels) or 0.0
+
+    result = _section_aware_injection("plan", content)
+
+    after = REGISTRY.get_sample_value(_SKIPPED_METRIC, labels) or 0.0
+    assert after - before == 1.0
+    # The kept RTM still survives; the dropped section is absent verbatim.
+    assert "## Requirement Traceability Matrix" in result
+    assert "POST /things" not in result
