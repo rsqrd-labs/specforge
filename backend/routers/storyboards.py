@@ -2,17 +2,14 @@
 
 This module owns the Storyboard HTTP contract: route registration, auth and
 ownership boundaries, CSRF posture, response shapes, public privacy headers, and
-download streaming semantics. Generation, rendering, and public allow-list
-filtering are deliberately delegated to services delivered by later tasks:
+download streaming semantics. The business logic is delegated to services:
 
-* generation / regeneration / section regen  -> T-254 storyboard_service (wired)
-* HTML and PDF rendered downloads             -> T-255 storyboard_renderer (wired)
+* generation / regeneration / section regen  -> T-254 storyboard_service
+* HTML and PDF rendered downloads             -> T-255 storyboard_renderer
 * public allow-list response + slug/share     -> T-256 storyboard_public_service
 
-Endpoints whose body is still owned by a later task (public sharing) return a
-typed 503 ``storyboard_pipeline_unavailable`` until that task wires its service
-in. Owner reads, generation, and all owner download/render surfaces are fully
-implemented here.
+Owner reads, generation, all owner download/render surfaces, owner share
+management, and the unauthenticated public view/downloads are all wired here.
 
 Security notes:
 * Owner routes depend on ``get_current_user`` and scope every lookup to the
@@ -32,10 +29,12 @@ from typing import Any
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from fastapi.responses import JSONResponse
 from redis.asyncio import Redis
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from config import settings
 from database import get_db, get_redis
 from middleware.auth import get_current_user
 from models import Storyboard, User, Workspace
@@ -52,7 +51,7 @@ from schemas.storyboard import (
 )
 from services.credit_service import InsufficientCreditsError
 from services.observability import STORYBOARD_DOWNLOAD
-from services.pipeline import storyboard_renderer
+from services.pipeline import storyboard_public_service, storyboard_renderer
 from services.pipeline.storyboard_service import (
     COST_FULL_GENERATION,
     COST_SECTION_REGENERATION,
@@ -115,19 +114,6 @@ def _public_headers() -> dict[str, str]:
         "Content-Security-Policy": _PUBLIC_STORYBOARD_CSP,
         "Cache-Control": "no-store, private",
     }
-
-
-def _pipeline_unavailable(component: str) -> HTTPException:
-    """Typed 503 for endpoints whose service lands in a later Phase 20 task.
-
-    The component names which downstream service is not yet wired so the
-    intermediate state is explicit to clients and logs.
-    """
-
-    return HTTPException(
-        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-        detail={"code": "storyboard_pipeline_unavailable", "component": component},
-    )
 
 
 def _not_found() -> HTTPException:
@@ -631,6 +617,23 @@ async def download_storyboard_appendix(
 # ---------------------------------------------------------------------------
 
 
+def _share_url(slug: str) -> str:
+    """Absolute public Storyboard URL the frontend surfaces (independent of the
+    workspace ``/p/`` share — Storyboards live at ``/sb/{slug}``)."""
+
+    base = settings.frontend_url.rstrip("/")
+    return f"{base}/sb/{slug}"
+
+
+def _share_response(sb: Storyboard) -> StoryboardShareResponse:
+    return StoryboardShareResponse(
+        slug=sb.public_share_slug or "",
+        url=_share_url(sb.public_share_slug) if sb.public_share_slug else "",
+        enabled=sb.public_share_enabled,
+        permissions=_permissions(sb),
+    )
+
+
 @router.post("/storyboards/{id}/share", response_model=StoryboardShareResponse)
 async def enable_storyboard_share(
     id: UUID,
@@ -638,10 +641,23 @@ async def enable_storyboard_share(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> StoryboardShareResponse:
-    """Enable public sharing / update permissions. Slug + filtering land in T-256."""
+    """Enable public sharing and/or update permissions.
 
-    await _get_owned_storyboard(id, user, db)
-    raise _pipeline_unavailable("public_sharing")
+    The service owns the owned-load (so the retry-on-collision path is not
+    confused by a second query); a non-owned id is 404, a non-presentable version
+    is 409. Permission changes take effect immediately.
+    """
+
+    try:
+        sb = await storyboard_public_service.enable_share(db, id, user.id, payload)
+    except StoryboardNotFoundError as exc:
+        raise _not_found() from exc
+    except StoryboardNotPresentableError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"code": "storyboard_not_ready"},
+        ) from exc
+    return _share_response(sb)
 
 
 @router.delete("/storyboards/{id}/share", status_code=status.HTTP_204_NO_CONTENT)
@@ -650,10 +666,13 @@ async def disable_storyboard_share(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> Response:
-    """Disable public sharing (slug preserved for re-enable). Wired in T-256."""
+    """Disable public sharing; the slug is preserved so re-enable reuses the URL."""
 
-    await _get_owned_storyboard(id, user, db)
-    raise _pipeline_unavailable("public_sharing")
+    try:
+        await storyboard_public_service.disable_share(db, id, user.id)
+    except StoryboardNotFoundError as exc:
+        raise _not_found() from exc
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.post("/storyboards/{id}/share/rotate", response_model=StoryboardShareResponse)
@@ -662,10 +681,18 @@ async def rotate_storyboard_share(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> StoryboardShareResponse:
-    """Rotate the public slug, invalidating the old link immediately. Wired in T-256."""
+    """Rotate the public slug, invalidating the old link immediately."""
 
-    await _get_owned_storyboard(id, user, db)
-    raise _pipeline_unavailable("public_sharing")
+    try:
+        sb = await storyboard_public_service.rotate_share(db, id, user.id)
+    except StoryboardNotFoundError as exc:
+        raise _not_found() from exc
+    except StoryboardNotPresentableError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"code": "storyboard_not_ready"},
+        ) from exc
+    return _share_response(sb)
 
 
 # ---------------------------------------------------------------------------
@@ -673,23 +700,30 @@ async def rotate_storyboard_share(
 # ---------------------------------------------------------------------------
 
 
-async def _lookup_public_storyboard(slug: str, db: AsyncSession) -> Storyboard | None:
-    """Resolve a shareable Storyboard by slug.
+def _public_404() -> HTTPException:
+    """404 with the public privacy headers.
 
-    Returns ``None`` (→ 404) for unknown, disabled, or non-presentable slugs so
-    the existence of any private Storyboard is never leaked.
+    Every public denial — unknown/disabled/rotated slug, a download that isn't
+    permitted, ``html``, or an unknown kind — returns this so existence is never
+    confirmed and 403 is never used (security req).
     """
 
-    result = await db.execute(
-        select(Storyboard).where(
-            Storyboard.public_share_slug == slug,
-            Storyboard.public_share_enabled.is_(True),
-        )
+    return HTTPException(
+        status_code=status.HTTP_404_NOT_FOUND,
+        detail="not_found",
+        headers=_public_headers(),
     )
-    sb = result.scalar_one_or_none()
-    if sb is None or sb.status not in _PRESENTABLE:
-        return None
-    return sb
+
+
+def _public_attachment_headers(filename: str) -> dict[str, str]:
+    """Download headers for a public artifact: attachment + nosniff + the public
+    noindex / no-store posture."""
+
+    return {
+        **_public_headers(),
+        "Content-Disposition": f'attachment; filename="{filename}"',
+        "X-Content-Type-Options": "nosniff",
+    }
 
 
 @router.get("/storyboards/public/{slug}")
@@ -699,26 +733,27 @@ async def get_public_storyboard(
 ) -> Response:
     """Public allow-list view of a shared Storyboard.
 
-    The lookup, 404 semantics, and privacy headers are owned here; the
-    permission-filtered response body is built by the T-256 public service.
+    The response body is permission-filtered by the public service and returned
+    as a fresh DTO (never the ORM row); privacy headers are applied here.
     """
 
-    sb = await _lookup_public_storyboard(slug, db)
+    sb = await storyboard_public_service.lookup_shareable(db, slug)
     if sb is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="not_found",
-            headers=_public_headers(),
-        )
-    # Found + shareable: the allow-list body is service-owned (T-256).
-    raise HTTPException(
-        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-        detail={
-            "code": "storyboard_pipeline_unavailable",
-            "component": "public_sharing",
-        },
+        raise _public_404()
+    view = storyboard_public_service.build_public_view(sb)
+    return JSONResponse(
+        content=view.model_dump(mode="json"),
         headers=_public_headers(),
     )
+
+
+# Public download kind → (renderer filename kind, markdown attribute). ``pdf`` is
+# rendered (no markdown attribute); HTML is intentionally not a key (req 9).
+_PUBLIC_MARKDOWN_DOWNLOADS: dict[str, tuple[str, str]] = {
+    "notes": ("notes-md", "speaker_notes_md"),
+    "demo-script": ("demo-script", "demo_script_md"),
+    "appendix": ("appendix", "technical_appendix_md"),
+}
 
 
 @router.get("/storyboards/public/{slug}/download/{kind}")
@@ -727,20 +762,39 @@ async def download_public_storyboard(
     kind: str,
     db: AsyncSession = Depends(get_db),
 ) -> Response:
-    """Public download, gated by per-Storyboard permissions. Wired in T-256."""
+    """Public download, gated by per-Storyboard permissions (404 on any denial).
 
-    sb = await _lookup_public_storyboard(slug, db)
+    The filename is slugged from the Storyboard title (never the workspace name)
+    so the internal workspace name is not leaked.
+    """
+
+    sb = await storyboard_public_service.lookup_shareable(db, slug)
     if sb is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="not_found",
-            headers=_public_headers(),
+        raise _public_404()
+    # 404 (not 403) for html, unknown kinds, and kinds the owner has not enabled.
+    if not storyboard_public_service.is_public_download_allowed(sb, kind):
+        raise _public_404()
+
+    if kind == "pdf":
+        pdf_bytes = await storyboard_renderer.render_deck_pdf(
+            sb.content_json or {}, sb.title
         )
-    raise HTTPException(
-        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-        detail={
-            "code": "storyboard_pipeline_unavailable",
-            "component": "public_sharing",
-        },
-        headers=_public_headers(),
+        STORYBOARD_DOWNLOAD.labels(kind="pdf", public="true").inc()
+        return Response(
+            content=pdf_bytes,
+            media_type="application/pdf",
+            headers=_public_attachment_headers(
+                storyboard_renderer.filename_for("pdf", sb.title)
+            ),
+        )
+
+    filename_kind, attribute = _PUBLIC_MARKDOWN_DOWNLOADS[kind]
+    body: str = getattr(sb, attribute) or ""
+    STORYBOARD_DOWNLOAD.labels(kind=kind, public="true").inc()
+    return Response(
+        content=body.encode("utf-8"),
+        media_type="text/markdown; charset=utf-8",
+        headers=_public_attachment_headers(
+            storyboard_renderer.filename_for(filename_kind, sb.title)
+        ),
     )

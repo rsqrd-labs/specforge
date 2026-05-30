@@ -1,11 +1,11 @@
 """Router contract tests for the Storyboard API (Phase 20 — T-251).
 
-These exercise the parts of the contract that are fully owned by T-251: auth
-requirement, CSRF protection on mutations, owner IDOR → 404, public unknown-slug
-→ 404 with privacy headers, and markdown download streaming with an attachment
-Content-Disposition. Generation/regeneration are now wired to the T-254 service
-and the router's delegation + typed-error mapping is asserted here; render/share/
-public bodies are still delegated to T-255/T-256 and return a typed 503.
+These exercise the contract: auth requirement, CSRF protection on mutations,
+owner IDOR → 404, public unknown-slug → 404 with privacy headers, and download
+streaming with an attachment Content-Disposition. Generation (T-254), rendered
+downloads (T-255), and public sharing / allow-list view (T-256) are all wired;
+the router's delegation, typed-error mapping, and public privacy posture are
+asserted here.
 """
 
 from __future__ import annotations
@@ -397,8 +397,7 @@ async def test_presenter_returns_notes_map() -> None:
 
 # ---------------------------------------------------------------------------
 # Generation endpoints are wired to the T-254 service: the router delegates and
-# maps the result/typed errors. (Render and share bodies are still delegated to
-# T-255/T-256 and assert their 503 boundary above.)
+# maps the result/typed errors.
 # ---------------------------------------------------------------------------
 
 
@@ -467,3 +466,116 @@ async def test_generate_maps_stages_not_finalised_to_409(monkeypatch) -> None:
 
 async def _async_none() -> None:
     return None
+
+
+# ---------------------------------------------------------------------------
+# Public sharing (T-256): allow-list view, privacy headers, download gating
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_public_view_returns_allow_list_with_privacy_headers() -> None:
+    sb = _storyboard(status="ready", public_share_enabled=True, public_share_slug="x")
+    app = _app(db_value=sb, override_user=False)
+    async with await _client(app) as client:
+        response = await client.get("/storyboards/public/abcdefghij")
+    assert response.status_code == 200
+    body = response.json()
+    assert set(body.keys()) == {
+        "title",
+        "presentation",
+        "permissions",
+        "downloads",
+        "shared_at",
+    }
+    # Privacy headers on the public surface.
+    assert response.headers["X-Robots-Tag"] == "noindex, nofollow"
+    assert "frame-ancestors 'none'" in response.headers["Content-Security-Policy"]
+    assert response.headers["Cache-Control"] == "no-store, private"
+    # Forbidden identifiers never appear.
+    blob = response.text
+    assert str(_WORKSPACE_ID) not in blob
+    assert str(_USER_ID) not in blob
+    assert "source_stage_version_ids" not in blob
+    # Notes are off by default, so the private talk track is redacted (replaced,
+    # not the original "hi").
+    assert body["presentation"]["notes"].get("s1", {}).get("talk_track") != "hi"
+
+
+@pytest.mark.asyncio
+async def test_public_download_pdf_allowed(monkeypatch) -> None:
+    import routers.storyboards as storyboards_router
+
+    async def _fake_pdf(content, name):
+        return b"%PDF-1.7 public"
+
+    monkeypatch.setattr(
+        storyboards_router.storyboard_renderer, "render_deck_pdf", _fake_pdf
+    )
+    sb = _storyboard(
+        status="ready", public_share_enabled=True, public_share_slug="x"
+    )  # allow_pdf_download defaults True
+    app = _app(db_value=sb, override_user=False)
+    async with await _client(app) as client:
+        response = await client.get("/storyboards/public/abcdefghij/download/pdf")
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "application/pdf"
+    assert response.headers["Content-Disposition"].startswith("attachment;")
+    assert response.headers["X-Robots-Tag"] == "noindex, nofollow"
+
+
+@pytest.mark.asyncio
+async def test_public_download_notes_forbidden_returns_404() -> None:
+    # allow_notes_download defaults False → 404 (never 403).
+    sb = _storyboard(status="ready", public_share_enabled=True, public_share_slug="x")
+    app = _app(db_value=sb, override_user=False)
+    async with await _client(app) as client:
+        response = await client.get("/storyboards/public/abcdefghij/download/notes")
+    assert response.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_public_download_html_is_never_public() -> None:
+    sb = _storyboard(status="ready", public_share_enabled=True, public_share_slug="x")
+    app = _app(db_value=sb, override_user=False)
+    async with await _client(app) as client:
+        response = await client.get("/storyboards/public/abcdefghij/download/html")
+    assert response.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_public_download_demo_script_allowed_when_shared() -> None:
+    sb = _storyboard(status="ready", public_share_enabled=True, public_share_slug="x")
+    app = _app(db_value=sb, override_user=False)
+    async with await _client(app) as client:
+        response = await client.get(
+            "/storyboards/public/abcdefghij/download/demo-script"
+        )
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/markdown")
+    assert response.headers["Content-Disposition"].startswith("attachment;")
+
+
+@pytest.mark.asyncio
+async def test_enable_share_returns_slug_and_url(monkeypatch) -> None:
+    import routers.storyboards as storyboards_router
+
+    sb = _storyboard(
+        status="ready", public_share_enabled=True, public_share_slug="sharetoken1"
+    )
+
+    async def _fake_enable(db, storyboard_id, user_id, request):
+        return sb
+
+    monkeypatch.setattr(
+        storyboards_router.storyboard_public_service, "enable_share", _fake_enable
+    )
+    app = _app(db_value=sb)
+    async with await _client(app) as client:
+        response = await client.post(f"/storyboards/{_STORYBOARD_ID}/share")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["slug"] == "sharetoken1"
+    assert body["url"].endswith("/sb/sharetoken1")
+    assert body["enabled"] is True
+    assert body["permissions"]["allow_pdf_download"] is True
