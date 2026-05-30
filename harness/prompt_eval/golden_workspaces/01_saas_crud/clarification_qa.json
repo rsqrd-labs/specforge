@@ -1,0 +1,10 @@
+[
+  {
+    "question": "Which users operate the dashboard?",
+    "answer": "Support operators and workspace owners use role-scoped accounts."
+  },
+  {
+    "question": "What data sensitivity applies?",
+    "answer": "Tenant billing metadata is confidential and exports must redact secrets."
+  }
+]

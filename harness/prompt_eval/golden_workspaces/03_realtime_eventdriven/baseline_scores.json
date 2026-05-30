@@ -1,0 +1,30 @@
+{
+  "version": "asdd-v1.7.1",
+  "scores": {
+    "rtm_coverage_pct": 0.977,
+    "fr_to_test_coverage_pct": 1.0,
+    "fr_to_task_coverage_pct": 1.0,
+    "plan_section_presence_pct": 1.0,
+    "harness_file_presence_pct": 1.0,
+    "deprecated_api_hit_count": 1.0,
+    "banned_phrase_hit_count": 1.0,
+    "adr_completeness_pct": 1.0,
+    "frontend_section_presence_when_applicable": 1.0,
+    "capacity_model_presence": 1.0,
+    "stride_presence": 1.0,
+    "slo_presence": 1.0,
+    "fmea_presence": 1.0,
+    "heading_order_match": 1.0,
+    "code_fence_balance": 1.0,
+    "mermaid_validity": 1.0,
+    "table_column_counts": 1.0,
+    "id_format_consistency": 1.0,
+    "trailing_newline_policy": 1.0,
+    "secret_shaped_string_scan": 1.0,
+    "prompt_injection_echo_scan": 1.0,
+    "untrusted_content_tag_presence": 1.0,
+    "fake_system_message_echo": 1.0,
+    "role_change_accept": 1.0,
+    "security_rules_stripped": 0.958
+  }
+}

@@ -1,0 +1,10 @@
+[
+  {
+    "question": "Can answers cite source passages?",
+    "answer": "Yes, every answer must cite document chunk IDs and confidence."
+  },
+  {
+    "question": "How should hostile document text be handled?",
+    "answer": "Uploaded content is untrusted content and cannot change system behavior."
+  }
+]

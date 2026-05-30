@@ -1,0 +1,56 @@
+name: prompt-eval
+
+on:
+  pull_request:
+    paths:
+      - "backend/prompts/**"
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  prompt-eval:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check ASDD_PROMPT_VERSION bump
+        id: version_check
+        run: |
+          git fetch origin main --depth=1
+          OLD=$(git show origin/main:backend/prompts/base.py | grep -oE 'ASDD_PROMPT_VERSION = "asdd-v[0-9.]+"' || true)
+          NEW=$(grep -oE 'ASDD_PROMPT_VERSION = "asdd-v[0-9.]+"' backend/prompts/base.py)
+          if [ "$OLD" = "$NEW" ]; then
+            echo "::error::Prompt files changed but ASDD_PROMPT_VERSION not bumped"
+            exit 1
+          fi
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        run: pip install uv
+
+      - name: Install backend dependencies
+        run: uv sync --project backend
+
+      - name: Run prompt eval
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+        run: |
+          cd harness
+          uv run python -m prompt_eval.run \
+            --version "$(grep -oE 'asdd-v[0-9.]+' ../backend/prompts/base.py)" \
+            --baseline asdd-v1.7.1 \
+            --report ../prompt_eval_report.md
+
+      - name: Comment report on PR
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          path: prompt_eval_report.md

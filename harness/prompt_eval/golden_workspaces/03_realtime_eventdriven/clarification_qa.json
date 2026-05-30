@@ -1,0 +1,10 @@
+[
+  {
+    "question": "Which realtime channel is preferred?",
+    "answer": "Use WebSocket for board events and SSE only for read-only status streams."
+  },
+  {
+    "question": "What happens after reconnect?",
+    "answer": "Clients resume from the last event sequence number."
+  }
+]
