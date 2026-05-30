@@ -26,6 +26,7 @@ from pydantic import ValidationError
 
 from models import CreditLedger, Stage, StageVersion, Workspace
 from services.pipeline import critic as critic_module
+from services.pipeline.artifact_validator import SECTION_CONTRACTS
 from services.pipeline.critic import (
     AUDIT_EVENT_CRITIC_DISABLED,
     CriticFinding,
@@ -37,9 +38,14 @@ from services.pipeline.stage_manager import StageManager
 
 _REGEN_METRIC = "specforge_billing_credits_critic_regen_total"
 
-# Content long enough to clear the critic's _MIN_GRADABLE_CHARS early-abort so
-# the stubbed critic_review is actually consulted.
-_LONG_ARTIFACT = "## Section\nEvery requirement is covered in detail here.\n" * 20
+# A spec artifact containing every required section heading so the zero-LLM
+# section validator (which runs BEFORE the critic in generate()) passes and the
+# stubbed critic_review is actually reached.  Also well past the critic's
+# 500-char gradable floor so the direct critic_review unit tests do real work.
+_LONG_ARTIFACT = "\n\n".join(
+    f"{heading}\nDetailed content for this section covering the requirement.\n"
+    for heading in SECTION_CONTRACTS["spec"]
+)
 
 
 # ---------------------------------------------------------------------------

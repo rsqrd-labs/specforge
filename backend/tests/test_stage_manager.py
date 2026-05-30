@@ -45,6 +45,11 @@ def _make_workspace(stages: list[Stage] | None = None) -> Workspace:
         provider="anthropic",
         model="claude-sonnet-4-6",
         status="active",
+        # These tests exercise credit/caching/langfuse/locking/eval concerns with
+        # toy stream content, not the Phase 19 quality gate (validator + critic),
+        # which is covered in test_critic.py.  Use the production escape hatch so
+        # the section-presence validator does not reject the toy artifacts.
+        disable_critic=True,
         created_at=datetime.now(UTC),
         updated_at=datetime.now(UTC),
     )

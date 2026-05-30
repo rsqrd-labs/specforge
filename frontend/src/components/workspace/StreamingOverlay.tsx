@@ -22,6 +22,10 @@ export function StreamingOverlay({
   onDismiss,
 }: StreamingOverlayProps) {
   if (gate) {
+    const missing = gate.missing ?? []
+    const findings = gate.findings ?? []
+    const isMissingSections = gate.kind === "missing_sections" || missing.length > 0
+    const issueCount = isMissingSections ? missing.length : findings.length
     return (
       <div
         className="streaming-overlay quality-gate-overlay pointer-events-auto"
@@ -31,21 +35,36 @@ export function StreamingOverlay({
         <div className="quality-gate-panel">
           <h3 className="quality-gate-title">Quality gate held this generation back</h3>
           <p className="quality-gate-subtitle">
-            The critic found {gate.findings.length}{" "}
-            {gate.findings.length === 1 ? "issue" : "issues"} in the generated{" "}
-            {gate.stage}. Regenerate to try again, or override to accept anyway.
+            {isMissingSections
+              ? `The generated ${gate.stage} is missing ${issueCount} required ${
+                  issueCount === 1 ? "section" : "sections"
+                }. Regenerate to try again, or override to accept anyway.`
+              : `The critic found ${issueCount} ${
+                  issueCount === 1 ? "issue" : "issues"
+                } in the generated ${gate.stage}. Regenerate to try again, or override to accept anyway.`}
           </p>
-          <ul className="quality-gate-findings">
-            {gate.findings.map((finding, index) => (
-              <li key={index} className="quality-gate-finding">
-                <span className="quality-gate-kind">{finding.kind}</span>
-                {finding.reference ? (
-                  <span className="quality-gate-ref"> · {finding.reference}</span>
-                ) : null}
-                <span className="quality-gate-detail"> — {finding.detail}</span>
-              </li>
-            ))}
-          </ul>
+          {isMissingSections ? (
+            <ul className="quality-gate-findings">
+              {missing.map((heading) => (
+                <li key={heading} className="quality-gate-finding">
+                  <span className="quality-gate-kind">MissingSection</span>
+                  <span className="quality-gate-detail"> — {heading}</span>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <ul className="quality-gate-findings">
+              {findings.map((finding, index) => (
+                <li key={index} className="quality-gate-finding">
+                  <span className="quality-gate-kind">{finding.kind}</span>
+                  {finding.reference ? (
+                    <span className="quality-gate-ref"> · {finding.reference}</span>
+                  ) : null}
+                  <span className="quality-gate-detail"> — {finding.detail}</span>
+                </li>
+              ))}
+            </ul>
+          )}
           <div className="quality-gate-actions">
             {onRegenerate ? (
               <button

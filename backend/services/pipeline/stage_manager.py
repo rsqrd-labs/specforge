@@ -44,7 +44,12 @@ from services.llm.provider_config import JUDGE_MODELS
 from services.llm.routing import LLMRoute, LLMRoutingError, resolve_llm_route
 from services.observability import (
     BILLING_CREDITS_CRITIC_REGEN,
+    PIPELINE_VALIDATOR_FAILURES,
     SSE_STREAM_FAILURES,
+)
+from services.pipeline.artifact_validator import (
+    MissingSectionError,
+    validate_sections,
 )
 from services.pipeline.critic import (
     MAX_REGENERATES,
@@ -717,6 +722,30 @@ class StageManager:
             # workspace owner has toggled the audited disable_critic escape hatch.
             if not workspace.disable_critic:
                 critic_deps = await self._critic_deps(workspace.id, stage.type)
+                # T-248: zero-LLM section-presence gate runs FIRST — it is the
+                # cheapest gate (regex/substring, no LLM call) and short-circuits
+                # a missing-heading failure before burning a critic call.  A
+                # section miss is terminal (no regenerate): the prompt, not the
+                # sampling, omitted the heading.
+                try:
+                    validate_sections(stage.type, accumulated, critic_deps)
+                except MissingSectionError as exc:
+                    PIPELINE_VALIDATOR_FAILURES.labels(stage=stage.type).inc()
+                    await self._refund_and_reset(db, deduction, stage, user)
+                    _cleanup_done = True
+                    if span_id:
+                        await self._mark_langfuse_span_failed(span_id, exc)
+                        span_finished = True
+                    yield json.dumps(
+                        {
+                            "quality_gate_failed": {
+                                "stage": stage.type,
+                                "kind": "missing_sections",
+                                "missing": exc.missing,
+                            }
+                        }
+                    )
+                    raise
                 regenerate_count = 0
                 while True:
                     critic_result = await critic_review(

@@ -31,8 +31,11 @@ export interface QualityGateFinding {
 
 export interface QualityGateInfo {
   stage: string
+  /** "critic_findings" (carries `findings`) or "missing_sections" (carries
+   *  `missing`). */
   kind: string
-  findings: QualityGateFinding[]
+  findings?: QualityGateFinding[]
+  missing?: string[]
 }
 
 interface QualityGateFailedEvent {

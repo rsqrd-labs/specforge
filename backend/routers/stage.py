@@ -27,6 +27,7 @@ from schemas.stage import (
 from services.credit_service import InsufficientCreditsError
 from services.llm.base import ProviderError, ProviderTimeoutError
 from services.evals.online_eval import _validate_task_references
+from services.pipeline.artifact_validator import MissingSectionError
 from services.pipeline.critic import StageQualityGateError
 from services.pipeline.stage_manager import (
     PreflightError,
@@ -72,6 +73,18 @@ async def _stream_stage(
                 "stage_id": str(stage_id),
                 "stage": exc.stage_type,
                 "finding_count": len(exc.findings),
+            },
+        )
+    except MissingSectionError as exc:
+        # T-248: same contract as the critic gate above — the quality_gate_failed
+        # (kind=missing_sections) event was already streamed before generate()
+        # raised, and credits were refunded + the stage reset to draft.
+        logger.info(
+            "stage_missing_sections",
+            extra={
+                "stage_id": str(stage_id),
+                "stage": exc.stage_type,
+                "missing_count": len(exc.missing),
             },
         )
     except StageDependencyError as exc:

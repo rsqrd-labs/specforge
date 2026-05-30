@@ -184,6 +184,14 @@ BILLING_CREDITS_CRITIC_REGEN = Counter(
     labelnames=["stage"],
 )
 
+PIPELINE_VALIDATOR_FAILURES = Counter(
+    "pipeline_validator_failures_total",
+    "Count of stage generations rejected by the zero-LLM section-presence "
+    "validator (a required heading was absent).  Tracks which stage's prompt "
+    "most often omits mandatory sections.  T-248 (Phase 19).",
+    labelnames=["stage"],
+)
+
 _sentry_configured = False
 _otel_configured = False
 _REDACTED = "[REDACTED]"
