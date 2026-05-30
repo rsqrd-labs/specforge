@@ -3,8 +3,9 @@
 These exercise the parts of the contract that are fully owned by T-251: auth
 requirement, CSRF protection on mutations, owner IDOR → 404, public unknown-slug
 → 404 with privacy headers, and markdown download streaming with an attachment
-Content-Disposition. Generation/render/share/public bodies are delegated to
-later tasks and return a typed 503; that boundary is asserted here too.
+Content-Disposition. Generation/regeneration are now wired to the T-254 service
+and the router's delegation + typed-error mapping is asserted here; render/share/
+public bodies are still delegated to T-255/T-256 and return a typed 503.
 """
 
 from __future__ import annotations
@@ -313,15 +314,74 @@ async def test_presenter_returns_notes_map() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Delegated endpoints return a typed 503 (boundary until later tasks wire them)
+# Generation endpoints are wired to the T-254 service: the router delegates and
+# maps the result/typed errors. (Render and share bodies are still delegated to
+# T-255/T-256 and assert their 503 boundary above.)
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_regenerate_is_pipeline_unavailable() -> None:
-    monkey_user = _app(db_value=_storyboard(status="ready"))
-    async with await _client(monkey_user) as client:
+async def test_regenerate_invokes_service_and_returns_detail(monkeypatch) -> None:
+    import routers.storyboards as storyboards_router
+
+    async def _fake_regenerate(db, redis, storyboard_id, user_id):
+        return _storyboard(status="ready")
+
+    monkeypatch.setattr(
+        storyboards_router, "_service_regenerate_storyboard", _fake_regenerate
+    )
+    app = _app(db_value=_storyboard(status="ready"))
+    async with await _client(app) as client:
         response = await client.post(f"/storyboards/{_STORYBOARD_ID}/regenerate")
-    assert response.status_code == 503
-    assert response.json()["detail"]["code"] == "storyboard_pipeline_unavailable"
-    assert response.json()["detail"]["component"] == "generation"
+    assert response.status_code == 200
+    assert response.json()["id"] == str(_STORYBOARD_ID)
+
+
+@pytest.mark.asyncio
+async def test_regenerate_maps_generation_failure_to_502(monkeypatch) -> None:
+    import routers.storyboards as storyboards_router
+    from services.pipeline.storyboard_service import StoryboardGenerationError
+
+    async def _fail(db, redis, storyboard_id, user_id):
+        raise StoryboardGenerationError("payload_schema", "bad shape")
+
+    monkeypatch.setattr(storyboards_router, "_service_regenerate_storyboard", _fail)
+    app = _app(db_value=_storyboard(status="ready"))
+    async with await _client(app) as client:
+        response = await client.post(f"/storyboards/{_STORYBOARD_ID}/regenerate")
+    assert response.status_code == 502
+    body = response.json()["detail"]
+    assert body["code"] == "storyboard_generation_failed"
+    assert body["error_type"] == "payload_schema"
+
+
+@pytest.mark.asyncio
+async def test_generate_maps_stages_not_finalised_to_409(monkeypatch) -> None:
+    import routers.storyboards as storyboards_router
+    from services.pipeline.storyboard_source import (
+        StoryboardStagesNotFinalisedError,
+    )
+
+    async def _not_finalised(db, redis, workspace_id, user_id):
+        raise StoryboardStagesNotFinalisedError({"plan": "draft"})
+
+    monkeypatch.setattr(
+        storyboards_router, "_service_generate_storyboard", _not_finalised
+    )
+    # workspace_service.get must succeed (ownership) before the service runs.
+    monkeypatch.setattr(
+        storyboards_router.workspace_service,
+        "get",
+        lambda *args, **kwargs: _async_none(),
+    )
+    app = _app(db_value=_storyboard(status="ready"))
+    async with await _client(app) as client:
+        response = await client.post(f"/workspaces/{_WORKSPACE_ID}/storyboards")
+    assert response.status_code == 409
+    body = response.json()["detail"]
+    assert body["code"] == "storyboard_stages_not_finalised"
+    assert body["stages"] == {"plan": "draft"}
+
+
+async def _async_none() -> None:
+    return None

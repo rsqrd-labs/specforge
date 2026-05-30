@@ -1164,6 +1164,18 @@ class StageManager:
             next_stage.status = "draft"
             next_stage.updated_at = datetime.now(UTC)
 
+        # Refinalising any source stage invalidates every ready Storyboard built
+        # from this workspace's prior sources. Mark them stale in THIS
+        # transaction (same atomic unit as the finalise + downstream-stale
+        # propagation) so a keynote can never silently reflect sources that have
+        # moved on. Lazy import avoids the stage_manager → storyboard_service →
+        # … cycle, mirroring run_recovery_cycle's pattern.  T-254 (Phase 20).
+        from services.pipeline.storyboard_service import (  # noqa: PLC0415
+            mark_workspace_storyboards_stale,
+        )
+
+        await mark_workspace_storyboards_stale(db, stage.workspace_id)
+
         redis = await self._redis_client()
         await self._invalidate_stage_cache(stage.workspace_id, stage.type, redis)
         content = stage.content or ""

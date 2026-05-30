@@ -192,6 +192,63 @@ PIPELINE_VALIDATOR_FAILURES = Counter(
     labelnames=["stage"],
 )
 
+# ---------------------------------------------------------------------------
+# Storyboard (Phase 20).  T-254 owns the generation/credit lifecycle metrics
+# below; the public-view / download / source-missing metrics enumerated in
+# T-262 are declared by that task to avoid duplicate-timeseries registration
+# (prometheus_client raises on a re-declared metric name).  Keep that boundary.
+# ---------------------------------------------------------------------------
+STORYBOARD_GENERATION_STARTED = Counter(
+    "specforge_storyboard_generation_started_total",
+    "Storyboard generations that acquired a placeholder row and debited credits. "
+    "Labelled by action so full generation, full regeneration, and single-section "
+    "regeneration can be told apart.  T-254 (Phase 20).",
+    labelnames=["action"],
+)
+
+STORYBOARD_GENERATION_COMPLETED = Counter(
+    "specforge_storyboard_generation_completed_total",
+    "Storyboard generations that validated their LLM payload and reached the "
+    "'ready' state.  T-254 (Phase 20).",
+    labelnames=["action"],
+)
+
+STORYBOARD_GENERATION_FAILED = Counter(
+    "specforge_storyboard_generation_failed_total",
+    "Storyboard generations that failed after debiting and were refunded and "
+    "marked 'failed'.  ``error_type`` is a coarse, content-free reason (e.g. "
+    "'payload_parse', 'payload_schema', 'provider', 'timeout') — never raw "
+    "generated text.  T-254 (Phase 20).",
+    labelnames=["action", "error_type"],
+)
+
+STORYBOARD_SECTION_REGENERATED = Counter(
+    "specforge_storyboard_section_regenerated_total",
+    "Single-section Storyboard regenerations that reached the 'ready' state.  "
+    "T-254 (Phase 20).",
+)
+
+STORYBOARD_GENERATION_DURATION = Histogram(
+    "specforge_storyboard_generation_duration_seconds",
+    "Wall-clock duration of the Storyboard LLM generation + validation phase "
+    "(excludes the credit/placeholder transaction).  T-254 (Phase 20).",
+    labelnames=["action"],
+)
+
+STORYBOARD_CREDITS_DEDUCTED = Counter(
+    "specforge_storyboard_credits_deducted_total",
+    "Total credits debited for Storyboard generation, by action.  T-254.",
+    labelnames=["action"],
+)
+
+STORYBOARD_CREDITS_REFUNDED = Counter(
+    "specforge_storyboard_credits_refunded_total",
+    "Total credits refunded for failed/recovered Storyboard generations.  "
+    "``reason`` is content-free (e.g. 'generation_failed', 'stuck_recovery').  "
+    "T-254 (Phase 20).",
+    labelnames=["action", "reason"],
+)
+
 _sentry_configured = False
 _otel_configured = False
 _REDACTED = "[REDACTED]"

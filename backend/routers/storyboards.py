@@ -32,10 +32,11 @@ from typing import Any
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from redis.asyncio import Redis
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from database import get_db
+from database import get_db, get_redis
 from middleware.auth import get_current_user
 from models import Storyboard, User
 from schemas.storyboard import (
@@ -48,6 +49,28 @@ from schemas.storyboard import (
     StoryboardShareRequest,
     StoryboardShareResponse,
     StoryboardSummary,
+)
+from services.credit_service import InsufficientCreditsError
+from services.pipeline.storyboard_service import (
+    COST_FULL_GENERATION,
+    COST_SECTION_REGENERATION,
+    StoryboardGenerationError,
+    StoryboardNotFoundError,
+    StoryboardNotPresentableError,
+    StoryboardSectionNotFoundError,
+)
+from services.pipeline.storyboard_service import (
+    generate_storyboard as _service_generate_storyboard,
+)
+from services.pipeline.storyboard_service import (
+    regenerate_section as _service_regenerate_section,
+)
+from services.pipeline.storyboard_service import (
+    regenerate_storyboard as _service_regenerate_storyboard,
+)
+from services.pipeline.storyboard_source import (
+    StoryboardStagesNotFinalisedError,
+    StoryboardWorkspaceNotFoundError,
 )
 from services.workspace_service import workspace_service
 
@@ -109,6 +132,46 @@ def _not_found() -> HTTPException:
     return HTTPException(
         status_code=status.HTTP_404_NOT_FOUND,
         detail="not_found",
+    )
+
+
+def _stages_not_finalised(exc: StoryboardStagesNotFinalisedError) -> HTTPException:
+    """409: the workspace's source stages are not all finalised.
+
+    Surfaces which stages are not ready (status only — never any content) so the
+    UI can guide the owner without leaking artifact text.
+    """
+
+    return HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail={
+            "code": "storyboard_stages_not_finalised",
+            "stages": exc.not_ready,
+        },
+    )
+
+
+def _insufficient_credits(required: int) -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_402_PAYMENT_REQUIRED,
+        detail={"code": "insufficient_credits", "required": required},
+    )
+
+
+def _generation_failed(exc: StoryboardGenerationError) -> HTTPException:
+    """502: generation failed after the debit; the credit was already refunded.
+
+    ``detail`` is the redaction-safe, content-free reason carried by the typed
+    service error — never raw generated text.
+    """
+
+    return HTTPException(
+        status_code=status.HTTP_502_BAD_GATEWAY,
+        detail={
+            "code": "storyboard_generation_failed",
+            "error_type": exc.error_type,
+            "reason": exc.detail,
+        },
     )
 
 
@@ -275,15 +338,27 @@ async def generate_storyboard(
     payload: StoryboardGenerateRequest | None = None,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    redis: Redis = Depends(get_redis),
 ) -> StoryboardDetail:
     """Generate a new Storyboard from the workspace's finalised stages (25 credits).
 
     Ownership is validated up front so an unauthorised caller gets 404 before any
-    pipeline work. The generation flow itself is wired in T-254.
+    pipeline work; the service then runs source extraction, the debit, the LLM
+    call, and strict validation with idempotent, refund-safe semantics (T-254).
     """
 
     await workspace_service.get(id, user.id, db)
-    raise _pipeline_unavailable("generation")
+    try:
+        sb = await _service_generate_storyboard(db, redis, id, user.id)
+    except (StoryboardWorkspaceNotFoundError, StoryboardNotFoundError) as exc:
+        raise _not_found() from exc
+    except StoryboardStagesNotFinalisedError as exc:
+        raise _stages_not_finalised(exc) from exc
+    except InsufficientCreditsError as exc:
+        raise _insufficient_credits(COST_FULL_GENERATION) from exc
+    except StoryboardGenerationError as exc:
+        raise _generation_failed(exc) from exc
+    return _detail(sb)
 
 
 # ---------------------------------------------------------------------------
@@ -307,11 +382,27 @@ async def regenerate_storyboard(
     payload: StoryboardGenerateRequest | None = None,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    redis: Redis = Depends(get_redis),
 ) -> StoryboardDetail:
-    """Full regeneration into a new version (25 credits). Wired in T-254."""
+    """Full regeneration into a new version (25 credits).
+
+    The previous ready version is never mutated: a new version row is created, so
+    if this regeneration fails the prior keynote remains the latest presentable
+    one.
+    """
 
     await _get_owned_storyboard(id, user, db)
-    raise _pipeline_unavailable("generation")
+    try:
+        sb = await _service_regenerate_storyboard(db, redis, id, user.id)
+    except StoryboardNotFoundError as exc:
+        raise _not_found() from exc
+    except StoryboardStagesNotFinalisedError as exc:
+        raise _stages_not_finalised(exc) from exc
+    except InsufficientCreditsError as exc:
+        raise _insufficient_credits(COST_FULL_GENERATION) from exc
+    except StoryboardGenerationError as exc:
+        raise _generation_failed(exc) from exc
+    return _detail(sb)
 
 
 @router.post(
@@ -324,11 +415,37 @@ async def regenerate_storyboard_section(
     payload: StoryboardRegenerateSectionRequest | None = None,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    redis: Redis = Depends(get_redis),
 ) -> StoryboardDetail:
-    """Regenerate a single section into a new version (5 credits). Wired in T-254."""
+    """Regenerate a single section into a new version (5 credits).
+
+    Only the named act is replaced; everything else is carried over from the
+    base version and the spliced payload is re-validated as a whole before
+    persistence. A failure leaves the base version's section active.
+    """
 
     await _get_owned_storyboard(id, user, db)
-    raise _pipeline_unavailable("generation")
+    try:
+        sb = await _service_regenerate_section(db, redis, id, section_id, user.id)
+    except StoryboardNotFoundError as exc:
+        raise _not_found() from exc
+    except StoryboardSectionNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": "storyboard_section_not_found", "section_id": section_id},
+        ) from exc
+    except StoryboardNotPresentableError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"code": "storyboard_not_ready"},
+        ) from exc
+    except StoryboardStagesNotFinalisedError as exc:
+        raise _stages_not_finalised(exc) from exc
+    except InsufficientCreditsError as exc:
+        raise _insufficient_credits(COST_SECTION_REGENERATION) from exc
+    except StoryboardGenerationError as exc:
+        raise _generation_failed(exc) from exc
+    return _detail(sb)
 
 
 @router.get("/storyboards/{id}/presenter", response_model=StoryboardPresenterResponse)

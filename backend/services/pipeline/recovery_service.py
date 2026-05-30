@@ -58,6 +58,17 @@ async def recover_stuck_stages(db: AsyncSession) -> int:
     if recovered > 0:
         await db.commit()
 
+    # Storyboard generations stuck in 'generating' past their (longer) threshold
+    # are recovered in the same leader-locked cycle.  recover_stuck_storyboards
+    # commits its own changes independently, so it is safe to run after the stage
+    # commit above whether or not any stage was recovered.  Lazy import keeps the
+    # pipeline import graph acyclic.  T-254 (Phase 20).
+    from services.pipeline.storyboard_service import (  # noqa: PLC0415
+        recover_stuck_storyboards,
+    )
+
+    recovered += await recover_stuck_storyboards(db)
+
     return recovered
 
 
