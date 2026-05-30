@@ -82,6 +82,32 @@ export default function Storyboard() {
     })
   }
 
+  // Generation now runs server-side in the background, so a freshly created or
+  // directly-opened Storyboard can legitimately be `generating`. Poll until it
+  // settles so the page resolves to the deck (or a failed state) on its own
+  // rather than stranding the viewer on the static "generating" panel.
+  const generatingId =
+    state.kind === "ready" && state.storyboard.status === "generating"
+      ? state.storyboard.id
+      : null
+  useEffect(() => {
+    if (!generatingId) return
+    let cancelled = false
+    const timer = window.setInterval(() => {
+      getStoryboard(generatingId)
+        .then((storyboard) => {
+          if (!cancelled) setState({ kind: "ready", storyboard })
+        })
+        .catch(() => {
+          /* transient read error: keep the last known state and retry */
+        })
+    }, 2500)
+    return () => {
+      cancelled = true
+      window.clearInterval(timer)
+    }
+  }, [generatingId])
+
   useEffect(() => {
     document.title =
       state.kind === "ready"

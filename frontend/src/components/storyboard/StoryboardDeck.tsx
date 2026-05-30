@@ -13,7 +13,6 @@ import {
 import { PresenterMode } from "./PresenterMode"
 import { SourceLayer } from "./SourceLayer"
 import type {
-  SourceRef,
   StoryboardDiagram,
   StoryboardPayload,
   StoryboardSection,
@@ -21,6 +20,7 @@ import type {
   StoryboardSharePermissions,
   StoryboardSlide,
   StoryboardStatus,
+  StoryboardVisual,
 } from "../../types/storyboard"
 
 export const STORYBOARD_ACTS: StoryboardSectionTitle[] = [
@@ -64,13 +64,60 @@ interface DeckSlide {
   slideIndex: number
 }
 
-interface EvidenceFrame {
-  source: string
-  title: string
-  excerpt: string
+// Human label per inert visual.kind. The renderer draws a deterministic, themed
+// visual from this — it never honours a media promise (e.g. "video-demo") and
+// never paints raw source-artifact text onto the slide; source evidence lives in
+// the toggleable Sources layer, not the hero visual.
+const VISUAL_KIND_LABEL: Record<string, string> = {
+  hero: "Vision",
+  thesis: "Thesis",
+  product: "Product",
+  walkthrough: "Walkthrough",
+  architecture: "Architecture",
+  trust: "Trust & reliability",
+  closing: "Close",
+  appendix_pointer: "Appendix",
+  diagram_ref: "Diagram",
+  bullets: "Highlights",
+  metric: "Key metric",
 }
 
-const EVIDENCE_EXCERPT_MAX_LENGTH = 260
+const VISUAL_POINTS_MAX = 5
+
+// Descriptor keys are pure data: read them defensively (any may be absent) and
+// render only strings. React escapes every value, so nothing is ever executed.
+function asStringList(value: unknown): string[] {
+  if (!Array.isArray(value)) return []
+  return value.filter(
+    (item): item is string => typeof item === "string" && item.trim().length > 0,
+  )
+}
+
+function visualPoints(visual: StoryboardVisual | undefined): string[] {
+  if (!visual) return []
+  for (const key of ["points", "items", "bullets", "highlights"]) {
+    const list = asStringList((visual as Record<string, unknown>)[key])
+    if (list.length > 0) return list.slice(0, VISUAL_POINTS_MAX)
+  }
+  return []
+}
+
+interface VisualMetric {
+  value: string
+  label: string
+}
+
+function visualMetric(visual: StoryboardVisual | undefined): VisualMetric | null {
+  if (!visual) return null
+  const data = visual as Record<string, unknown>
+  const rawValue = data.value ?? data.metric ?? data.stat
+  if (typeof rawValue !== "string" && typeof rawValue !== "number") return null
+  const rawLabel = data.label ?? data.caption ?? data.unit
+  return {
+    value: String(rawValue),
+    label: typeof rawLabel === "string" ? rawLabel : "",
+  }
+}
 
 function sectionForAct(
   payload: StoryboardPayload | null | undefined,
@@ -108,39 +155,54 @@ function findArchitectureDiagram(
   return payload?.diagrams.find((diagram) => diagram.type === "architecture_reveal") ?? null
 }
 
-function boundedEvidence(text: string): string {
-  const trimmed = text.trim()
-  if (trimmed.length <= EVIDENCE_EXCERPT_MAX_LENGTH) return trimmed
-  return `${trimmed.slice(0, EVIDENCE_EXCERPT_MAX_LENGTH).trimEnd()}...`
-}
-
-function sourceRefsForSlide(
-  payload: StoryboardPayload,
-  slide: StoryboardSlide | null,
-): SourceRef[] {
-  if (!slide) return []
-  return Object.entries(payload.source_map)
-    .filter(([key]) => key === slide.id || key.startsWith(`${slide.id}.`))
-    .flatMap(([, refs]) => refs)
-}
-
-function evidenceFrameFor(
-  payload: StoryboardPayload,
-  slide: StoryboardSlide | null,
-): EvidenceFrame {
-  const ref = sourceRefsForSlide(payload, slide)[0]
-  if (ref) {
-    return {
-      source: ref.source,
-      title: ref.source_id,
-      excerpt: boundedEvidence(ref.excerpt),
-    }
-  }
-  return {
-    source: "Slide",
-    title: slide?.sources?.join(" + ") || "Source evidence",
-    excerpt: boundedEvidence(slide?.visible_text ?? payload.title),
-  }
+// Deterministic, theme-driven slide visual. It renders from the slide's own
+// structured data keyed by visual.kind — descriptor bullets/metric when the
+// model supplied them, otherwise the headline as a clean caption — plus the
+// grounding source badges. It never renders source-artifact excerpts or any
+// generated media, so every slide reads as a designed keynote panel.
+function SlideVisual({
+  slide,
+  palette,
+}: {
+  slide: StoryboardSlide | null
+  palette: string[] | undefined
+}) {
+  const swatches = (palette && palette.length > 0 ? palette : ["#1FB6FF"]).slice(
+    0,
+    4,
+  )
+  const accent = palette?.[1] ?? palette?.[0] ?? "#1FB6FF"
+  const kind = slide?.visual?.kind ?? "hero"
+  const label = VISUAL_KIND_LABEL[kind] ?? "Highlight"
+  const metric = visualMetric(slide?.visual)
+  const points = visualPoints(slide?.visual)
+  return (
+    <div className="storyboard-visual-card" style={{ borderColor: accent }}>
+      <span className="storyboard-visual-kind" style={{ color: accent }}>
+        {label}
+      </span>
+      {metric ? (
+        <div className="storyboard-visual-metric">
+          <strong>{metric.value}</strong>
+          {metric.label && <p>{metric.label}</p>}
+        </div>
+      ) : points.length > 0 ? (
+        <ul className="storyboard-visual-points">
+          {points.map((point, index) => (
+            <li key={index}>{point}</li>
+          ))}
+        </ul>
+      ) : (
+        // No descriptor data: render a deterministic, theme-driven motif rather
+        // than duplicating the headline or dumping source text onto the visual.
+        <div className="storyboard-visual-motif" aria-hidden="true">
+          {swatches.map((colour, index) => (
+            <span key={index} style={{ background: colour }} />
+          ))}
+        </div>
+      )}
+    </div>
+  )
 }
 
 function deckState({
@@ -363,7 +425,6 @@ export function StoryboardDeck({
   const isArchitectureSlide =
     slide?.type === "architecture" || section.title === "Technical Architecture"
   const architectureStep = ARCHITECTURE_LAYER_SEQUENCE.length
-  const evidenceFrame = evidenceFrameFor(payload, slide)
 
   return (
     <section
@@ -446,7 +507,7 @@ export function StoryboardDeck({
             )}
           </div>
 
-          <div className="storyboard-slide-visual" aria-hidden={!isArchitectureSlide}>
+          <div className="storyboard-slide-visual">
             {isArchitectureSlide && architectureDiagram ? (
               <ArchitectureReveal
                 diagram={architectureDiagram}
@@ -455,11 +516,7 @@ export function StoryboardDeck({
                 title="Technical Architecture"
               />
             ) : (
-              <div className="storyboard-visual-card">
-                <span>{evidenceFrame.source}</span>
-                <strong>{evidenceFrame.title}</strong>
-                <p>{evidenceFrame.excerpt}</p>
-              </div>
+              <SlideVisual slide={slide} palette={payload?.theme.palette} />
             )}
           </div>
         </article>

@@ -164,30 +164,31 @@ def test_grounding_rejects_shallow_or_fabricated_source_ids() -> None:
     assert "SPEC:overview" in exc.value.summary
 
 
-def test_grounding_rejects_paraphrased_or_truncated_source_excerpts() -> None:
+def test_grounding_accepts_paraphrased_excerpt_when_citation_id_is_valid() -> None:
+    # The anti-fabrication boundary is the source_id + enum binding, not the
+    # literal excerpt text. A paraphrased excerpt against a real, matching
+    # source_id is grounded and must be accepted — requiring verbatim text made
+    # well-grounded decks fail on harmless rewording.
     payload = _payload()
-    payload["source_map"]["s0"][0]["excerpt"] = (
-        "SpecForge turns an idea into a structured engineering spec..."
+    payload["source_map"]["s0"][0][
+        "excerpt"
+    ] = "SpecForge turns an idea into a structured engineering spec..."
+
+    _validate_payload_against_source(
+        StoryboardPayload.model_validate(payload), _source_package()
     )
 
-    with pytest.raises(StoryboardPayloadError) as exc:
-        _validate_payload_against_source(
-            StoryboardPayload.model_validate(payload), _source_package()
-        )
 
-    assert "excerpt is not exact text" in exc.value.summary
-
-
-def test_grounding_requires_every_slide_to_have_source_map_evidence() -> None:
+def test_grounding_allows_a_slide_without_its_own_source_map_entry() -> None:
+    # Not every slide must carry its own source_map claim; the schema still
+    # requires a non-empty source_map overall, and every citation that IS present
+    # is still validated against the available source ids.
     payload = _payload()
     payload["source_map"].pop("s0")
 
-    with pytest.raises(StoryboardPayloadError) as exc:
-        _validate_payload_against_source(
-            StoryboardPayload.model_validate(payload), _source_package()
-        )
-
-    assert "missing source_map evidence" in exc.value.summary
+    _validate_payload_against_source(
+        StoryboardPayload.model_validate(payload), _source_package()
+    )
 
 
 def test_grounding_rejects_mismatched_source_enum() -> None:

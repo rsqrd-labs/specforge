@@ -44,6 +44,7 @@ export function StoryboardToolbar({
     <section
       className={`storyboard-toolbar storyboard-toolbar-${storyboard.status}`}
       aria-label="Storyboard actions"
+      aria-busy={isGenerating}
     >
       <div className="storyboard-toolbar-copy">
         <span
@@ -66,6 +67,23 @@ export function StoryboardToolbar({
           </p>
         </div>
       </div>
+
+      {isGenerating && (
+        <div
+          className="storyboard-generating-progress"
+          role="status"
+          aria-live="polite"
+        >
+          <span className="storyboard-generating-spinner" aria-hidden="true" />
+          <div className="storyboard-generating-track" aria-hidden="true">
+            <span className="storyboard-generating-bar" />
+          </div>
+          <p>
+            Building your six-act keynote — this usually takes about a minute.
+            You can keep working; it opens automatically when it is ready.
+          </p>
+        </div>
+      )}
 
       <div className="storyboard-toolbar-actions">
         <button

@@ -72,7 +72,13 @@ const STAGE_LABELS: Record<StageType, string> = {
 
 const EVAL_POLL_ATTEMPTS = 12
 const EVAL_POLL_DELAY_MS = 2500
-const STORYBOARD_POLL_ATTEMPTS = 60
+// Generation runs in a background task on the server (the request returns the
+// 'generating' placeholder immediately), so the client polls the owner-detail
+// endpoint until it settles. The window comfortably outlasts a full keynote
+// generation (LLM call plus up to two repair rounds); if it lapses, the toolbar
+// still shows 'generating' and reopening the workspace resumes polling, and the
+// server-side recovery loop is the ultimate backstop.
+const STORYBOARD_POLL_ATTEMPTS = 150
 const STORYBOARD_POLL_DELAY_MS = 2500
 
 const REFINE_MODE_OPTIONS = [

@@ -183,12 +183,18 @@ describe("StoryboardDeck", () => {
     expect(screen.getByText("Technical Architecture headline")).toBeInTheDocument()
   })
 
-  it("uses deterministic visual frames instead of generated media promises", () => {
+  it("renders a deterministic themed visual, never a media promise or raw source text", () => {
     render(<StoryboardDeck payload={makePayload()} status="ready" isOwner />)
 
+    // No media promise is honoured, and raw source-artifact excerpts never leak
+    // onto the hero visual (they live in the toggleable Sources layer).
     expect(screen.queryByText(/video-demo/i)).toBeNull()
-    expect(screen.getByText(/spec-1/i)).toBeInTheDocument()
-    expect(screen.getByText(/bounded source excerpt/i)).toBeInTheDocument()
+    expect(screen.queryByText(/bounded source excerpt/i)).toBeNull()
+    expect(screen.queryByText(/spec-1/i)).toBeNull()
+    // The deterministic frame is a themed visual with a kind label; the headline
+    // stays in the slide copy (not duplicated into the visual).
+    expect(screen.getByText("Highlight")).toBeInTheDocument()
+    expect(screen.getByText("Opening Thesis headline")).toBeInTheDocument()
 
     fireEvent.click(screen.getByRole("tab", { name: /product walkthrough/i }))
     expect(screen.getAllByText(/product walkthrough visible text/i).length).toBeGreaterThan(0)

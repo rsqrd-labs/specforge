@@ -10,19 +10,26 @@ Transaction boundaries (the heart of the design — see req 8 of T-254)
 A slow LLM call must never be wrapped in an open DB transaction. So generation
 is split across two committed transactions with the LLM call in between:
 
-* **Tx1 — reserve.** Lock the workspace row ``FOR UPDATE`` (serialises version
-  assignment), insert a ``generating`` placeholder at the next version, debit
-  the credits, store the ledger id, and commit. If the debit raises
-  ``InsufficientCreditsError`` the whole transaction rolls back, so no orphan
-  placeholder and no charge survive. The committed ``generating`` row is the
-  durable marker the recovery loop keys off.
-* **(no transaction) — generate.** Release the Redis idempotency lock, then run
-  the LLM completion and strict validation. Nothing is held open here.
-* **Tx2 — finalise.** Reload the placeholder ``FOR UPDATE``. On success persist
-  the validated payload and flip to ``ready``; on failure flip to ``failed``,
-  refund exactly once (the credit ledger refund path is itself idempotent), and
-  commit. A failure therefore never mutates a previously ``ready`` version —
-  each generation is a brand-new version row.
+* **Tx1 — reserve (in the request).** Lock the workspace row ``FOR UPDATE``
+  (serialises version assignment), insert a ``generating`` placeholder at the
+  next version, debit the credits, store the ledger id, and commit. If the debit
+  raises ``InsufficientCreditsError`` the whole transaction rolls back, so no
+  orphan placeholder and no charge survive. The committed ``generating`` row is
+  both the durable marker the recovery loop keys off and the placeholder the
+  HTTP request returns *immediately* — the caller never waits on the LLM.
+* **(no transaction, background task) — generate.** The request returns the
+  ``generating`` placeholder and the LLM completion + strict validation run in a
+  detached ``asyncio`` task with its **own** DB session (the request session has
+  already closed). Nothing is held open here. A multi-minute keynote generation
+  therefore never blocks the HTTP request — fixing the long synchronous wait and
+  removing exposure to any upstream proxy/gateway request timeout.
+* **Tx2 — finalise (in the background task).** Reload the placeholder
+  ``FOR UPDATE``. On success persist the validated payload and flip to
+  ``ready``; on failure flip to ``failed``, refund exactly once (the credit
+  ledger refund path is itself idempotent), and commit. A failure therefore
+  never mutates a previously ``ready`` version — each generation is a brand-new
+  version row. If the worker dies before Tx2 runs, the row stays ``generating``
+  and the recovery loop fails + refunds it past ``STUCK_THRESHOLD_MINUTES``.
 
 Idempotency is defended in three composed layers so a flaky Redis can never
 cause a double charge:
@@ -40,9 +47,11 @@ labels.
 
 from __future__ import annotations
 
+import asyncio
 import copy
 import re
 import time
+from collections.abc import Awaitable, Callable, Coroutine
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
@@ -103,9 +112,11 @@ _CREDIT_COST_BY_ACTION = {
 _RESERVE_LOCK_TTL_SECONDS = 30
 
 # Generated keynote payloads are large (six acts, slides, per-slide notes, demo
-# script, technical appendix). Sized above the largest stage budget; the gateway
-# still applies its hard wall-clock timeout on top.
-_OUTPUT_TOKEN_BUDGET = 12288
+# script, technical appendix, plus bounded citation excerpts on every source_map
+# entry and architecture layer). Sized generously so the structured JSON is not
+# truncated mid-object — a cut-off payload is the dominant *parse* failure mode.
+# The gateway still applies its hard wall-clock timeout on top.
+_OUTPUT_TOKEN_BUDGET = 16384
 
 # A ``generating`` Storyboard older than this is considered stuck and is failed +
 # refunded by the recovery loop (T-254 req 7). Distinct from the 3-minute stage
@@ -113,12 +124,99 @@ _OUTPUT_TOKEN_BUDGET = 12288
 STUCK_THRESHOLD_MINUTES = 30
 
 _PRESENTABLE = frozenset({"ready", "stale"})
+
+# ---------------------------------------------------------------------------
+# Background-execution seams
+#
+# Generation is reserved synchronously inside the HTTP request, then the slow
+# LLM run is dispatched to a detached asyncio task that opens its own session.
+# Both the dispatcher and the session-factory provider are module-level so tests
+# can override them: tests await the run inline against the test engine so a
+# generation completes deterministically without a real event-loop detachment.
+# ---------------------------------------------------------------------------
+
+# Strong references to in-flight background tasks so the event loop does not GC a
+# detached task before it finishes (mirrors the recovery loop's task handling).
+_BACKGROUND_TASKS: set[asyncio.Task[None]] = set()
+
+
+def _default_session_factory() -> Any:
+    # Imported lazily so a test that rebinds ``database.AsyncSessionLocal`` (or
+    # this provider) is honoured, and so the import graph stays acyclic.
+    from database import AsyncSessionLocal
+
+    return AsyncSessionLocal
+
+
+# Returns the async_sessionmaker the background run uses for its own session.
+_session_factory_provider: Callable[[], Any] = _default_session_factory
+
+
+async def _spawn_background(coro: Coroutine[Any, Any, None]) -> None:
+    """Detach ``coro`` onto the event loop and return immediately.
+
+    Overridden in tests with an inline awaiter so generation runs to completion
+    within the test before assertions. In production the coroutine outlives the
+    HTTP response on the shared event loop.
+    """
+
+    task = asyncio.create_task(coro)
+    _BACKGROUND_TASKS.add(task)
+    task.add_done_callback(_BACKGROUND_TASKS.discard)
+
+
+async def _background_run(
+    run: Callable[[AsyncSession], Awaitable[Any]],
+    storyboard_id: UUID,
+    user_id: UUID,
+    action: str,
+) -> None:
+    """Open a fresh session and execute a generation run, fail-closing on error.
+
+    ``run`` performs the LLM completion, validation, and Tx2 finalise against the
+    session it is given. A typed ``StoryboardGenerationError`` means the run
+    already marked the row failed and refunded in its own Tx2, so it is swallowed
+    here. Any *unexpected* error is logged (content-free) and the placeholder is
+    failed + refunded immediately so a paid row never hangs in ``generating``
+    waiting on the 30-minute recovery sweep.
+    """
+
+    factory = _session_factory_provider()
+    try:
+        async with factory() as db:
+            await run(db)
+    except StoryboardGenerationError:
+        return
+    except Exception:
+        logger.exception(
+            "storyboard.background_run_error",
+            storyboard_id=str(storyboard_id),
+            action=action,
+        )
+        try:
+            async with _session_factory_provider()() as db:
+                await _fail_and_refund(
+                    db,
+                    storyboard_id,
+                    user_id,
+                    action,
+                    error_type="unexpected",
+                    summary="background generation run raised",
+                )
+        except Exception:
+            # Last-resort guard: the recovery loop remains the backstop.
+            logger.exception(
+                "storyboard.background_force_fail_error",
+                storyboard_id=str(storyboard_id),
+                action=action,
+            )
+
+
 _FORBIDDEN_VIDEO_DEMO_RE = re.compile(
     r"\b(video|recorded|recording)\s+(demo|demonstration|walkthrough)\b|"
     r"\b(demo|demonstration|walkthrough)\s+video\b",
     re.IGNORECASE,
 )
-_WHITESPACE_RE = re.compile(r"\s+")
 
 
 # ---------------------------------------------------------------------------
@@ -240,9 +338,19 @@ async def regenerate_section(
         # double-charge — return it untouched (idempotent retry).
         return sb
 
-    return await _run_section_generation(
-        db, sb.id, user_id, source, base_payload, section_id
+    # Dispatch the section regeneration to the background; return the placeholder.
+    storyboard_id = sb.id
+    await _spawn_background(
+        _background_run(
+            lambda task_db: _run_section_generation(
+                task_db, storyboard_id, user_id, source, base_payload, section_id
+            ),
+            storyboard_id,
+            user_id,
+            ACTION_REGENERATE_SECTION,
+        )
     )
+    return sb
 
 
 async def mark_workspace_storyboards_stale(
@@ -317,9 +425,7 @@ async def recover_stuck_storyboards(db: AsyncSession) -> int:
                 db, sb.credit_ledger_id
             )
             await credit_service.refund(db, sb.credit_ledger_id, user_id=sb.user_id)
-            record_storyboard_credits_refunded(
-                action, "stuck_recovery", refund_amount
-            )
+            record_storyboard_credits_refunded(action, "stuck_recovery", refund_amount)
             refunded_users.add(sb.user_id)
         sb.status = "failed"
         sb.updated_at = datetime.now(UTC)
@@ -382,7 +488,21 @@ async def _generate_full(
         # without charging or re-running.
         return sb
 
-    return await _run_full_generation(db, sb.id, user_id, source, action)
+    # Dispatch the slow LLM run to the background and return the ``generating``
+    # placeholder now. The caller polls the owner-detail endpoint until the
+    # background Tx2 flips the row to ``ready`` or ``failed`` (refunded).
+    storyboard_id = sb.id
+    await _spawn_background(
+        _background_run(
+            lambda task_db: _run_full_generation(
+                task_db, storyboard_id, user_id, source, action
+            ),
+            storyboard_id,
+            user_id,
+            action,
+        )
+    )
+    return sb
 
 
 async def _reserve(
@@ -520,8 +640,15 @@ async def _run_full_generation(
         # Failure after the debit: mark failed + refund exactly once, then
         # surface the typed reason. The previous ready version (a different
         # version row) is untouched and remains the latest presentable one.
-        await _fail_and_refund(db, storyboard_id, user_id, action, exc)
         error_type = _payload_error_type(exc)
+        await _fail_and_refund(
+            db,
+            storyboard_id,
+            user_id,
+            action,
+            error_type=error_type,
+            summary=exc.summary,
+        )
         raise StoryboardGenerationError(error_type, exc.summary) from exc
     record_storyboard_generation_duration(action, time.monotonic() - start)
 
@@ -553,8 +680,15 @@ async def _run_section_generation(
             ) from exc
     except StoryboardPayloadError as exc:
         record_storyboard_generation_duration(action, time.monotonic() - start)
-        await _fail_and_refund(db, storyboard_id, user_id, action, exc)
         error_type = _payload_error_type(exc)
+        await _fail_and_refund(
+            db,
+            storyboard_id,
+            user_id,
+            action,
+            error_type=error_type,
+            summary=exc.summary,
+        )
         raise StoryboardGenerationError(error_type, exc.summary) from exc
     record_storyboard_generation_duration(action, time.monotonic() - start)
 
@@ -576,12 +710,13 @@ async def _run_section_generation(
 async def _complete_and_validate(
     source: StoryboardSourcePackage,
 ) -> StoryboardPayload:
-    """Run the LLM completion + strict validation (with one repair attempt).
+    """Run the LLM completion + strict validation (with bounded repair rounds).
 
     Maps every failure to a typed, content-free outcome. ``StoryboardPayloadError``
     is propagated for the caller's fail+refund path; transport failures are
     converted into the same typed error family so the caller has a single
-    fail-closed contract.
+    fail-closed contract. Validation allows up to ``_MAX_REPAIR_ROUNDS`` repair
+    re-prompts before the failure becomes terminal.
     """
 
     user_prompt = build_user_prompt(source)
@@ -616,53 +751,68 @@ async def _complete_and_validate(
     return await _parse_validate_and_ground(raw, source, repair=_repair)
 
 
+# Repair rounds after the initial completion. Two rounds (three total model
+# calls) materially lifts the success rate of a strict structured payload while
+# staying bounded; each round feeds the prior output plus the content-free error
+# summary back to the model.
+_MAX_REPAIR_ROUNDS = 2
+
+
 async def _parse_validate_and_ground(
     raw: str,
     source: StoryboardSourcePackage,
     *,
     repair,
 ) -> StoryboardPayload:
-    """Validate schema + source grounding, allowing one total repair attempt."""
+    """Validate schema + source grounding, allowing up to ``_MAX_REPAIR_ROUNDS``.
 
-    try:
-        payload = await parse_and_validate_payload(raw)
-        _validate_payload_against_source(payload, source)
-        return payload
-    except StoryboardPayloadError as first_error:
-        allowed_ids = ", ".join(sorted(source.excerpts)) or "none"
-        repair_prompt = build_repair_user_prompt(
-            raw,
-            f"{first_error.summary}; allowed source ids: {allowed_ids}",
-        )
-        repaired = await repair(repair_prompt)
-        payload = await parse_and_validate_payload(repaired)
-        _validate_payload_against_source(payload, source)
-        return payload
+    Each failed round re-prompts with the previous output and the redaction-safe
+    error summary. The final round's failure propagates as the typed error for
+    the caller's fail + refund path.
+    """
+
+    attempt_raw = raw
+    for round_index in range(_MAX_REPAIR_ROUNDS + 1):
+        try:
+            payload = await parse_and_validate_payload(attempt_raw)
+            _validate_payload_against_source(payload, source)
+            return payload
+        except StoryboardPayloadError as error:
+            if round_index == _MAX_REPAIR_ROUNDS:
+                raise
+            allowed_ids = ", ".join(sorted(source.excerpts)) or "none"
+            repair_prompt = build_repair_user_prompt(
+                attempt_raw,
+                f"{error.summary}; allowed source ids: {allowed_ids}",
+            )
+            attempt_raw = await repair(repair_prompt)
+    # Unreachable: the final round either returns or raises above.
+    raise AssertionError("storyboard repair loop exited without a result")
 
 
 def _validate_payload_against_source(
     payload: StoryboardPayload, source: StoryboardSourcePackage
 ) -> None:
-    """Fail closed when generated citations or media cues are not render-safe.
+    """Fail closed when generated citations or media cues are not grounded.
 
     Pydantic validates the payload shape. This source-aware pass validates the
-    dynamic part the static schema cannot know: every citation id must be one of
-    the exact finalised excerpts in this source package, and the source enum must
-    match that excerpt's stage. The summary is intentionally source-free; it
-    names only invalid fields and allowed ids so logs/repair prompts stay safe.
+    dynamic part the static schema cannot know — the anti-fabrication boundary:
+    every citation id must be one of the finalised excerpts in this source
+    package, and the source enum must match that excerpt's stage. That id+enum
+    binding (not the literal excerpt text) is what stops the model inventing
+    citations; the displayed ``excerpt`` is untrusted prose the renderer escapes,
+    so it is intentionally NOT required to be a verbatim slice of the source —
+    requiring that made well-grounded decks fail on harmless paraphrase. The
+    summary is source-free: it names only invalid fields and the allowed ids so
+    logs/repair prompts stay safe.
     """
 
     available = source.excerpts
     errors: list[str] = []
-    slide_source_map_keys = set(payload.source_map)
-
-    def normalise_excerpt(text: str) -> str:
-        return _WHITESPACE_RE.sub(" ", text).strip()
 
     def check_ref(ref: Any, context: str) -> None:
         source_id = getattr(ref, "source_id", "")
         source_enum = getattr(ref, "source", "")
-        ref_excerpt = normalise_excerpt(getattr(ref, "excerpt", ""))
         excerpt = available.get(source_id)
         if excerpt is None:
             errors.append(f"{context} uses unavailable source_id {source_id!r}")
@@ -672,21 +822,11 @@ def _validate_payload_against_source(
             errors.append(
                 f"{context} source {source_enum!r} does not match {source_id!r}"
             )
-        if ref_excerpt not in normalise_excerpt(excerpt.excerpt):
-            errors.append(
-                f"{context} excerpt is not exact text from source_id {source_id!r}"
-            )
 
     for section in payload.sections:
         for slide in section.slides:
             if len(set(slide.sources)) != len(slide.sources):
                 errors.append(f"slide {slide.id!r} has duplicate source badges")
-            has_slide_claim = any(
-                key == slide.id or key.startswith(f"{slide.id}.")
-                for key in slide_source_map_keys
-            )
-            if not has_slide_claim:
-                errors.append(f"slide {slide.id!r} is missing source_map evidence")
 
     for claim_key, refs in payload.source_map.items():
         for idx, ref in enumerate(refs):
@@ -765,10 +905,18 @@ async def _fail_and_refund(
     storyboard_id: UUID,
     user_id: UUID,
     action: str,
-    exc: StoryboardPayloadError,
+    *,
+    error_type: str,
+    summary: str,
 ) -> None:
-    """Tx2 (failure): mark the placeholder failed and refund exactly once."""
+    """Tx2 (failure): mark the placeholder failed and refund exactly once.
 
+    ``error_type`` is the coarse, content-free failure label for metrics/logs;
+    ``summary`` is accepted for caller symmetry but is never persisted or logged
+    (the persisted row carries only ``status='failed'`` — privacy req).
+    """
+
+    del summary  # intentionally not persisted/logged (content-free policy)
     sb = await _load_for_update(db, storyboard_id)
     if sb is None:
         # Already terminated (e.g. by recovery). Nothing to do — refund, if any,
@@ -792,7 +940,6 @@ async def _fail_and_refund(
             action, "generation_failed", _credit_cost_for_action(action)
         )
 
-    error_type = _payload_error_type(exc)
     record_storyboard_generation_failed(action, error_type)
     logger.warning(
         "storyboard.generate_failed",

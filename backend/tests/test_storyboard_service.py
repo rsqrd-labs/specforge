@@ -32,7 +32,6 @@ from prompts.storyboard import REQUIRED_SECTION_TITLES, StoryboardPayload
 from services.credit_service import credit_service
 from services.pipeline import storyboard_service
 from services.pipeline.storyboard_service import (
-    StoryboardGenerationError,
     generate_storyboard,
     mark_workspace_storyboards_stale,
     recover_stuck_storyboards,
@@ -306,6 +305,44 @@ async def _storyboards(factory, workspace_id) -> list[Storyboard]:
         return list(result.scalars())
 
 
+async def _reload(factory, storyboard_id) -> Storyboard:
+    """Re-read a Storyboard from a fresh session.
+
+    Generation now returns the ``generating`` placeholder synchronously and the
+    LLM run + finalise happen in a background task with its own session, so the
+    object the entrypoint returns reflects the *reserve* state. Tests reload the
+    row to observe the settled (``ready``/``failed``) terminal state.
+    """
+
+    async with factory() as session:
+        result = await session.execute(
+            select(Storyboard).where(Storyboard.id == storyboard_id)
+        )
+        return result.scalar_one()
+
+
+@pytest_asyncio.fixture
+async def inline_generation(db_engine, monkeypatch):
+    """Run the background generation inline, against the test engine.
+
+    Production detaches the run onto the event loop with its own
+    ``AsyncSessionLocal`` session; here we await it inline and point the
+    session-factory seam at the test engine so a generation settles
+    deterministically before the test asserts.
+    """
+
+    factory = async_sessionmaker(db_engine, expire_on_commit=False)
+
+    async def _await_inline(coro):
+        await coro
+
+    monkeypatch.setattr(storyboard_service, "_spawn_background", _await_inline)
+    monkeypatch.setattr(
+        storyboard_service, "_session_factory_provider", lambda: factory
+    )
+    return factory
+
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
@@ -313,7 +350,7 @@ async def _storyboards(factory, workspace_id) -> list[Storyboard]:
 
 @pytest.mark.asyncio
 async def test_storyboard_generation_deducts_25_credits(
-    db_engine, redis_client, seed, monkeypatch
+    db_engine, redis_client, seed, monkeypatch, inline_generation
 ):
     user_id, workspace_id = seed
     factory = async_sessionmaker(db_engine, expire_on_commit=False)
@@ -324,7 +361,12 @@ async def test_storyboard_generation_deducts_25_credits(
     )
 
     async with factory() as session:
-        sb = await generate_storyboard(session, redis_client, workspace_id, user_id)
+        placeholder = await generate_storyboard(
+            session, redis_client, workspace_id, user_id
+        )
+    # The request returns the generating placeholder; the background run settles it.
+    assert placeholder.status == "generating"
+    sb = await _reload(factory, placeholder.id)
 
     assert sb.status == "ready"
     assert sb.version == 1
@@ -346,22 +388,72 @@ async def test_storyboard_generation_deducts_25_credits(
 
 
 @pytest.mark.asyncio
-async def test_storyboard_generation_refunds_on_llm_failure(
+async def test_storyboard_generation_runs_as_a_real_detached_background_task(
     db_engine, redis_client, seed, monkeypatch
+):
+    """The production path: the request returns ``generating`` and the LLM run is
+    detached via ``asyncio.create_task``.
+
+    Deliberately does NOT patch ``_spawn_background`` — only the session-factory
+    seam — so the real detachment mechanism (create_task + the strong-ref set) is
+    exercised. We then drain ``_BACKGROUND_TASKS`` to await the detached run
+    deterministically before asserting it settled the row to ``ready``.
+    """
+
+    user_id, workspace_id = seed
+    factory = async_sessionmaker(db_engine, expire_on_commit=False)
+    monkeypatch.setattr(
+        storyboard_service, "_session_factory_provider", lambda: factory
+    )
+    monkeypatch.setattr(
+        storyboard_service,
+        "complete_with_timeout",
+        _fake_llm_returning(_payload_dict()),
+    )
+
+    async with factory() as session:
+        placeholder = await generate_storyboard(
+            session, redis_client, workspace_id, user_id
+        )
+    # The request did not block on the LLM: it returned the generating placeholder
+    # and a real detached task was registered.
+    assert placeholder.status == "generating"
+    assert len(storyboard_service._BACKGROUND_TASKS) == 1
+
+    # Drain the detached task (this is what would otherwise run after the
+    # response on the shared event loop).
+    await asyncio.gather(*storyboard_service._BACKGROUND_TASKS)
+    # Let the done-callback (scheduled via call_soon) run to clear the strong ref.
+    await asyncio.sleep(0)
+
+    settled = await _reload(factory, placeholder.id)
+    assert settled.status == "ready"
+    assert await _balance(factory, user_id) == 75
+    # The strong-ref set is cleaned up by the done-callback once the task ends.
+    assert len(storyboard_service._BACKGROUND_TASKS) == 0
+
+
+@pytest.mark.asyncio
+async def test_storyboard_generation_refunds_on_llm_failure(
+    db_engine, redis_client, seed, monkeypatch, inline_generation
 ):
     user_id, workspace_id = seed
     factory = async_sessionmaker(db_engine, expire_on_commit=False)
-    # Invalid output both on the first call and the single repair attempt.
+    # Invalid output on the first call and on every repair attempt.
     monkeypatch.setattr(
         storyboard_service,
         "complete_with_timeout",
         _fake_llm_returning("this is not valid json"),
     )
 
+    # The request accepts the job (returns the placeholder); the background run
+    # fails, marks the row failed, and refunds. The typed error is swallowed by
+    # the background guard, so the entrypoint does not raise.
     async with factory() as session:
-        with pytest.raises(StoryboardGenerationError) as excinfo:
-            await generate_storyboard(session, redis_client, workspace_id, user_id)
-    assert excinfo.value.error_type in {"payload_parse", "payload_schema"}
+        placeholder = await generate_storyboard(
+            session, redis_client, workspace_id, user_id
+        )
+    assert placeholder.status == "generating"
 
     sbs = await _storyboards(factory, workspace_id)
     assert len(sbs) == 1
@@ -374,8 +466,37 @@ async def test_storyboard_generation_refunds_on_llm_failure(
 
 
 @pytest.mark.asyncio
+async def test_storyboard_background_unexpected_error_fails_and_refunds(
+    db_engine, redis_client, seed, monkeypatch, inline_generation
+):
+    """An unexpected (non-typed) error in the background run must not strand the
+    paid row in ``generating`` — the guard fails + refunds it immediately."""
+
+    user_id, workspace_id = seed
+    factory = async_sessionmaker(db_engine, expire_on_commit=False)
+
+    async def _boom(source):
+        raise RuntimeError("unexpected provider/runtime explosion")
+
+    # Raise a non-StoryboardPayloadError from inside the run so it escapes the
+    # typed fail+refund path and hits the background guard's generic handler.
+    monkeypatch.setattr(storyboard_service, "_complete_and_validate", _boom)
+
+    async with factory() as session:
+        placeholder = await generate_storyboard(
+            session, redis_client, workspace_id, user_id
+        )
+    assert placeholder.status == "generating"
+
+    sbs = await _storyboards(factory, workspace_id)
+    assert len(sbs) == 1
+    assert sbs[0].status == "failed"  # never left hanging in 'generating'
+    assert await _balance(factory, user_id) == 100  # debit refunded
+
+
+@pytest.mark.asyncio
 async def test_storyboard_duplicate_generate_does_not_double_charge(
-    db_engine, redis_client, seed, monkeypatch
+    db_engine, redis_client, seed, monkeypatch, inline_generation
 ):
     user_id, workspace_id = seed
     factory = async_sessionmaker(db_engine, expire_on_commit=False)
@@ -455,7 +576,7 @@ async def test_storyboard_duplicate_generate_existing_inflight_row(
 
 @pytest.mark.asyncio
 async def test_storyboard_full_regeneration_preserves_previous_ready_version_on_failure(
-    db_engine, redis_client, seed, monkeypatch
+    db_engine, redis_client, seed, monkeypatch, inline_generation
 ):
     user_id, workspace_id = seed
     factory = async_sessionmaker(db_engine, expire_on_commit=False)
@@ -468,17 +589,17 @@ async def test_storyboard_full_regeneration_preserves_previous_ready_version_on_
     )
     async with factory() as session:
         v1 = await generate_storyboard(session, redis_client, workspace_id, user_id)
-    assert v1.status == "ready"
+    assert (await _reload(factory, v1.id)).status == "ready"
 
-    # v2 full regeneration: LLM fails.
+    # v2 full regeneration: LLM fails. The background run fails + refunds; the
+    # entrypoint returns the placeholder rather than raising.
     monkeypatch.setattr(
         storyboard_service,
         "complete_with_timeout",
         _fake_llm_returning("broken output"),
     )
     async with factory() as session:
-        with pytest.raises(StoryboardGenerationError):
-            await regenerate_storyboard(session, redis_client, v1.id, user_id)
+        await regenerate_storyboard(session, redis_client, v1.id, user_id)
 
     sbs = await _storyboards(factory, workspace_id)
     assert len(sbs) == 2
@@ -494,7 +615,7 @@ async def test_storyboard_full_regeneration_preserves_previous_ready_version_on_
 
 @pytest.mark.asyncio
 async def test_storyboard_section_regeneration_costs_5_credits(
-    db_engine, redis_client, seed, monkeypatch
+    db_engine, redis_client, seed, monkeypatch, inline_generation
 ):
     user_id, workspace_id = seed
     factory = async_sessionmaker(db_engine, expire_on_commit=False)
@@ -505,7 +626,10 @@ async def test_storyboard_section_regeneration_costs_5_credits(
         _fake_llm_returning(_payload_dict(first_headline="Original opening headline")),
     )
     async with factory() as session:
-        v1 = await generate_storyboard(session, redis_client, workspace_id, user_id)
+        v1_placeholder = await generate_storyboard(
+            session, redis_client, workspace_id, user_id
+        )
+    v1 = await _reload(factory, v1_placeholder.id)
     target_section_id = v1.content_json["sections"][0]["id"]
     v1_second_act = v1.content_json["sections"][1]
 
@@ -516,9 +640,10 @@ async def test_storyboard_section_regeneration_costs_5_credits(
         _fake_llm_returning(_payload_dict(first_headline="Regenerated opening line")),
     )
     async with factory() as session:
-        v2 = await regenerate_section(
+        v2_placeholder = await regenerate_section(
             session, redis_client, v1.id, target_section_id, user_id
         )
+    v2 = await _reload(factory, v2_placeholder.id)
 
     assert v2.status == "ready"
     assert v2.version == 2
@@ -542,7 +667,7 @@ async def test_storyboard_section_regeneration_costs_5_credits(
 
 @pytest.mark.asyncio
 async def test_storyboard_marks_stale_when_source_stage_refinalised(
-    db_engine, redis_client, seed, monkeypatch
+    db_engine, redis_client, seed, monkeypatch, inline_generation
 ):
     user_id, workspace_id = seed
     factory = async_sessionmaker(db_engine, expire_on_commit=False)
@@ -553,7 +678,7 @@ async def test_storyboard_marks_stale_when_source_stage_refinalised(
     )
     async with factory() as session:
         v1 = await generate_storyboard(session, redis_client, workspace_id, user_id)
-    assert v1.status == "ready"
+    assert (await _reload(factory, v1.id)).status == "ready"
 
     # Refinalising a source stage marks the ready keynote stale. Drive it through
     # the same helper StageManager.finalise() calls inside its transaction.
@@ -568,7 +693,7 @@ async def test_storyboard_marks_stale_when_source_stage_refinalised(
 
 @pytest.mark.asyncio
 async def test_storyboard_finalise_marks_ready_storyboards_stale(
-    db_engine, redis_client, seed, monkeypatch
+    db_engine, redis_client, seed, monkeypatch, inline_generation
 ):
     """End-to-end: StageManager.finalise() propagates stale in one transaction."""
 
@@ -585,7 +710,7 @@ async def test_storyboard_finalise_marks_ready_storyboards_stale(
     )
     async with factory() as session:
         v1 = await generate_storyboard(session, redis_client, workspace_id, user_id)
-    assert v1.status == "ready"
+    assert (await _reload(factory, v1.id)).status == "ready"
 
     # Reset the 'tasks' stage to draft so finalise() has a draft to advance.
     async with factory() as session:
@@ -703,7 +828,7 @@ async def test_storyboard_generation_requires_all_stages_finalised(
 
 @pytest.mark.asyncio
 async def test_storyboard_validates_spliced_section_payload(
-    db_engine, redis_client, seed, monkeypatch
+    db_engine, redis_client, seed, monkeypatch, inline_generation
 ):
     """Section regen re-validates the whole payload after the splice."""
 
@@ -714,7 +839,10 @@ async def test_storyboard_validates_spliced_section_payload(
         storyboard_service, "complete_with_timeout", _fake_llm_returning(valid)
     )
     async with factory() as session:
-        v1 = await generate_storyboard(session, redis_client, workspace_id, user_id)
+        v1_placeholder = await generate_storyboard(
+            session, redis_client, workspace_id, user_id
+        )
+    v1 = await _reload(factory, v1_placeholder.id)
     target = v1.content_json["sections"][0]["id"]
 
     # Whole-payload validity is asserted independently so the splice contract is
@@ -722,15 +850,15 @@ async def test_storyboard_validates_spliced_section_payload(
     StoryboardPayload.model_validate(v1.content_json)
 
     # Section regen with a payload missing a required act -> fails validation,
-    # refunds, leaves v1 intact.
+    # refunds, leaves v1 intact. The background run swallows the typed error after
+    # marking the row failed, so the entrypoint returns the placeholder.
     broken = _payload_dict()
     broken["sections"] = broken["sections"][:5]  # only 5 acts
     monkeypatch.setattr(
         storyboard_service, "complete_with_timeout", _fake_llm_returning(broken)
     )
     async with factory() as session:
-        with pytest.raises(StoryboardGenerationError):
-            await regenerate_section(session, redis_client, v1.id, target, user_id)
+        await regenerate_section(session, redis_client, v1.id, target, user_id)
 
     sbs = await _storyboards(factory, workspace_id)
     by_version = {sb.version: sb for sb in sbs}
