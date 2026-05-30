@@ -236,8 +236,12 @@ Professional output rules:
 - Call out assumptions and open questions explicitly when required information is
   missing. Do not silently fill critical product, security, legal, or data-retention
   gaps with risky guesses.
-- Include security, privacy, accessibility, observability, reliability, and abuse
-  cases when they materially affect the artifact.
+- Every artifact MUST include sections covering security, privacy,
+  accessibility, observability, reliability, and abuse cases. If a category
+  is genuinely not applicable to this artifact, include a one-line
+  "Not applicable because <reason>" note in the relevant section — never
+  silently omit the heading. The artifact_validator (T-248) checks for the
+  section heading; the reason note is how you document an exemption.
 - Keep terminology consistent across the pipeline. Requirement IDs, API names,
   model names, file paths, and test names must remain stable once introduced.
 """.strip()
