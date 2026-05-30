@@ -14025,6 +14025,1320 @@ Each test must include a clear docstring explaining what invariant it tests and 
 
 ---
 
+## Phase 23 — Storyboard Product Keynote Generation
+
+> Source: `V1 spec.md` v1.5.0 §4.13, §6, §9, §10, §11, §12, §13, §14, Success Metrics; `Plan v1.md` §23; harness files `harness/tests/backend/test_phase23_storyboard_contract.py`, `harness/tests/frontend/phase23-storyboard.contract.test.ts`, `harness/schemas/storyboard-payload.schema.json`, and `harness/schemas/storyboard-public-response.schema.json`.
+>
+> Storyboard is a paid, browser-native, shareable product keynote generator. It turns a finalised SPEC + PLAN + HARNESS + TASKS workspace into a polished six-act launch presentation with architecture reveal, presenter notes, source-backed claims, demo script, technical appendix, downloads, and public sharing. It is not a generic slide generator.
+>
+> [!important] **Storyboard Delivery Directive — applies to every backend and frontend task in Phase 23 (T-250 through T-264).**
+>
+> 1. Work on one task at a time. Do not start the next Storyboard task until the current task has implementation, tests, validation, documentation updates if needed, security review, and self-review complete.
+> 2. Storyboard generation is paid: full generation/regeneration costs 25 credits; single-section regeneration costs 5 credits. Duplicate requests, refreshes, and polling retries must never double-charge.
+> 3. The main keynote has exactly six visible top-level acts: Opening Thesis, Product Vision, Product Walkthrough, Technical Architecture, Trust, Security, Reliability, Launch Close. Validation and Execution Plan are not top-level acts.
+> 4. Do not add Rehearsal Coach or Storyboard Quality Score. The user explicitly excluded those ideas.
+> 5. LLM output is structured JSON and Markdown only. Never execute, persist, or render arbitrary LLM HTML, JavaScript, CSS, iframe, tracking pixel, external font, or remote asset references.
+> 6. Public Storyboard links are separate from workspace public links. `/p/{slug}` shares finalised workspace artifacts; `/sb/{slug}` shares the Storyboard launch/deck experience. Permissions and slug rotation are independent.
+> 7. Public Storyboard responses must be allow-list based and noindex. They must never expose account email, user ID, workspace ID, credit balance, billing history, private workspace lists, draft stages, previous Storyboard versions, credit ledger IDs, raw prompts, or source stage version IDs.
+> 8. Source-backed confidence is a product differentiator. Every major claim and every architecture component must map to finalised SPEC / PLAN / HARNESS / TASKS source references with bounded excerpts.
+> 9. A failed full regeneration or section regeneration must leave the previous ready Storyboard intact and presentable.
+> 10. Security, idempotency, concurrency, rate limiting, observability, recovery, and data privacy are release-blocking requirements, not follow-up polish.
+
+---
+
+### T-250 — Storyboard Data Model, Migration, and ORM Registration
+
+**Category:** Backend / Data Model / Migration
+**Severity:** Critical
+**Priority:** P0
+**Harness:** `harness/tests/backend/test_phase23_storyboard_contract.py -k "t250"`
+
+**Description:**
+Create the persistent Storyboard artifact model. A Storyboard is not a fifth pipeline stage; it is a generated artifact derived from finalised SPEC, PLAN, HARNESS, and TASKS stage versions. It needs independent lifecycle, versioning, public share settings, credit linkage, stale state, and downloads.
+
+**Implementation requirements:**
+
+1. Add `backend/models/storyboard.py` defining `Storyboard`.
+2. Register/export `Storyboard` from `backend/models/__init__.py`.
+3. Create a new Alembic migration after the current latest migration.
+4. Migration creates table `storyboards` with:
+   - `id UUID PRIMARY KEY`
+   - `workspace_id UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE`
+   - `user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE`
+   - `version INTEGER NOT NULL`
+   - `status TEXT NOT NULL`
+   - `title TEXT NOT NULL`
+   - `theme TEXT NOT NULL`
+   - `content_json JSONB NOT NULL`
+   - `speaker_notes_md TEXT NOT NULL`
+   - `demo_script_md TEXT NOT NULL`
+   - `technical_appendix_md TEXT NOT NULL`
+   - `source_map_json JSONB NOT NULL`
+   - `source_stage_version_ids JSONB NOT NULL`
+   - `credit_ledger_id UUID NULL REFERENCES credit_ledger(id)`
+   - `public_share_slug TEXT NULL`
+   - `public_share_enabled BOOLEAN NOT NULL DEFAULT false`
+   - `allow_pdf_download BOOLEAN NOT NULL DEFAULT true`
+   - `allow_notes_download BOOLEAN NOT NULL DEFAULT false`
+   - `allow_appendix_download BOOLEAN NOT NULL DEFAULT false`
+   - `allow_source_layer BOOLEAN NOT NULL DEFAULT false`
+   - `created_at TIMESTAMPTZ NOT NULL`
+   - `updated_at TIMESTAMPTZ NOT NULL`
+5. Add constraints:
+   - unique `(workspace_id, version)`
+   - partial unique index on `public_share_slug WHERE public_share_slug IS NOT NULL`
+   - index `(workspace_id, created_at DESC)`
+   - index `(user_id, created_at DESC)`
+   - check `version > 0`
+   - check `status IN ('generating', 'ready', 'failed', 'stale')`
+   - check `length(title) <= 200`
+6. Keep `content_json`, `source_map_json`, and `source_stage_version_ids` database-native JSONB. Do not store these as stringified JSON.
+7. Ensure model timestamps follow existing project conventions.
+
+**Security / reliability requirements:**
+- Do not expose public slugs through predictable database IDs.
+- `source_stage_version_ids` must store immutable source `StageVersion.id` values so future source changes cannot silently alter an existing Storyboard.
+- Cascading workspace/user deletes are allowed; deleting credit ledger entries is not.
+
+**Acceptance criteria:**
+1. `cd backend && uv run pytest ../harness/tests/backend/test_phase23_storyboard_contract.py -k "t250" -q` passes.
+2. `cd backend && uv run alembic upgrade head` succeeds on a clean local DB.
+3. `cd backend && uv run alembic downgrade -1 && uv run alembic upgrade head` succeeds.
+4. Manual DB inspection confirms `(workspace_id, version)` and partial public slug uniqueness.
+
+**Testing requirements:**
+- Add migration tests or assertions in existing migration test style if available.
+- Add a small model import test in `backend/tests/test_storyboard_model.py` if no model test file already covers it.
+
+**Rollback considerations:** Downgrade migration drops `storyboards` and associated indexes only. No existing table should be modified destructively.
+
+**Estimated complexity:** M
+**Estimated implementation risk:** Medium
+
+**Affected modules/files:**
+- `backend/models/storyboard.py` — new ORM model
+- `backend/models/__init__.py` — export model
+- `backend/migrations/versions/00xx_storyboards.py` — new migration
+- `backend/tests/test_storyboard_model.py` — model/migration unit coverage if needed
+
+---
+
+### T-251 — Storyboard Schemas and API Router Contracts
+
+**Category:** Backend / API / Schemas / Authorization
+**Severity:** Critical
+**Priority:** P0
+**Harness:** `harness/tests/backend/test_phase23_storyboard_contract.py -k "t251"`
+
+**Description:**
+Define Pydantic schemas and the FastAPI router for Storyboard owner and public API surfaces. The router should delegate generation/business logic to services implemented in later tasks, but the API contract, auth boundaries, CSRF behavior, response shapes, and route registration must be correct in this task.
+
+**Implementation requirements:**
+
+1. Add `backend/schemas/storyboard.py` with:
+   - `StoryboardSummary`
+   - `StoryboardDetail`
+   - `StoryboardGenerateRequest`
+   - `StoryboardRegenerateSectionRequest`
+   - `StoryboardShareRequest`
+   - `StoryboardShareResponse`
+   - `StoryboardPublicResponse`
+   - `StoryboardPresenterResponse`
+   - `StoryboardDownloadKind = Literal["html", "pdf", "notes", "demo-script", "appendix"]`
+   - `StoryboardNotesFormat = Literal["md", "pdf"]`
+2. Schemas must expose:
+   - status values `generating`, `ready`, `failed`, `stale`
+   - public permission booleans
+   - source map and notes fields only on owner responses or public responses where explicitly allowed
+   - generated artifact metadata and download availability
+3. Add `backend/routers/storyboards.py`.
+4. Owner routes:
+   - `GET /workspaces/{id}/storyboards`
+   - `GET /workspaces/{id}/storyboards/latest`
+   - `POST /workspaces/{id}/storyboards`
+   - `GET /storyboards/{id}`
+   - `POST /storyboards/{id}/regenerate`
+   - `POST /storyboards/{id}/sections/{section_id}/regenerate`
+   - `GET /storyboards/{id}/presenter`
+   - `GET /storyboards/{id}/download/html`
+   - `GET /storyboards/{id}/download/pdf`
+   - `GET /storyboards/{id}/download/notes?format=md|pdf`
+   - `GET /storyboards/{id}/download/demo-script`
+   - `GET /storyboards/{id}/download/appendix`
+   - `POST /storyboards/{id}/share`
+   - `DELETE /storyboards/{id}/share`
+   - `POST /storyboards/{id}/share/rotate`
+5. Public routes:
+   - `GET /storyboards/public/{slug}`
+   - `GET /storyboards/public/{slug}/download/{kind}`
+6. Register the router in `backend/main.py`.
+7. Owner routes must require `get_current_user`.
+8. Unknown or non-owned owner resources return 404, not 403.
+9. Mutating routes are normal POST/DELETE routes and must not be added to CSRF exemptions.
+10. Public routes are unauthenticated, read-only, return 404 for unknown/disabled slugs, and set:
+    - `X-Robots-Tag: noindex, nofollow`
+    - strict `Content-Security-Policy`
+    - no cache headers where private permissions can change
+11. Download routes stream bytes with explicit `Content-Disposition: attachment`.
+
+**Security / reliability requirements:**
+- Public route response filtering must be service-owned and allow-list based; the router must not return ORM objects directly.
+- Do not leak whether a Storyboard exists to another authenticated user.
+- Keep public route slug semantics opaque; no database IDs in public URLs.
+- Ensure API errors use the existing error response shape.
+
+**Acceptance criteria:**
+1. `cd backend && uv run pytest ../harness/tests/backend/test_phase23_storyboard_contract.py -k "t251" -q` passes.
+2. `cd backend && uv run pytest tests/test_storyboard_router.py -q` passes.
+3. Manual: unauthenticated `GET /storyboards/public/badslug` returns 404 with no auth redirect.
+4. Manual: authenticated user A cannot fetch user B's Storyboard and receives 404.
+
+**Testing requirements:**
+- Add router tests for auth required, CSRF required on mutations, public 404, owner IDOR 404, headers, and download content disposition.
+
+**Rollback considerations:** Remove router registration and schemas. No data migration rollback beyond T-250.
+
+**Estimated complexity:** L
+**Estimated implementation risk:** Medium
+
+**Affected modules/files:**
+- `backend/schemas/storyboard.py` — new schemas
+- `backend/routers/storyboards.py` — new router
+- `backend/main.py` — include router
+- `backend/tests/test_storyboard_router.py` — new router tests
+
+---
+
+### T-252 — Storyboard Source Builder
+
+**Category:** Backend / Pipeline / Source Extraction
+**Severity:** Critical
+**Priority:** P0
+**Harness:** `harness/tests/backend/test_phase23_storyboard_contract.py -k "t252"`
+
+**Description:**
+Build deterministic source extraction for Storyboard generation. Storyboard must be grounded in the finalised SPEC, PLAN, HARNESS, and TASKS artifacts and must never use draft or stale source content.
+
+**Implementation requirements:**
+
+1. Add `backend/services/pipeline/storyboard_source.py` or a clearly separated source-builder class in `storyboard_service.py`.
+2. Define an immutable source package, e.g.:
+   ```python
+   @dataclass(frozen=True)
+   class StoryboardSourcePackage:
+       workspace_id: UUID
+       workspace_name: str
+       problem_statement: str
+       provider: str
+       model: str
+       stage_versions: dict[StageType, UUID]
+       artifacts: dict[StageType, str]
+       excerpts: dict[str, SourceExcerpt]
+       missing_source_sections: list[MissingSourceSection]
+   ```
+3. Load the workspace with an owner check.
+4. Assert all four stages are `finalised`. If any stage is missing, locked, draft, in progress, or stale, raise a typed error consumed by the router/UI.
+5. Load the exact current `StageVersion` rows for SPEC, PLAN, HARNESS, TASKS.
+6. Store stage version IDs under keys `spec`, `plan`, `harness`, `tasks`.
+7. Produce citeable source IDs such as:
+   - `SPEC:overview`
+   - `PLAN:architecture`
+   - `PLAN:security-architecture`
+   - `PLAN:capacity-model`
+   - `PLAN:stride`
+   - `PLAN:slo`
+   - `PLAN:fmea`
+   - `HARNESS:coverage`
+   - `TASKS:must`
+8. Bound every excerpt to 1,200 characters.
+9. Exclude account email, credit data, billing data, JWTs, API keys, OAuth tokens, refresh tokens, secrets, and draft content.
+10. Prioritize PLAN architecture/trust/capacity/STRIDE/SLO/FMEA sections for architecture reveal and trust slides.
+11. HARNESS and TASKS can inform evidence, demo cues, what-ships context, appendix, and Q&A backup, but not top-level Validation or Execution Plan acts.
+12. If an expected section cannot be extracted, emit a structured `missing_source_section` finding instead of inventing content.
+
+**Security / reliability requirements:**
+- Never include raw secrets or account/billing data in LLM input.
+- Never use `Stage.content` if the source of truth is a finalised `StageVersion`.
+- Keep extraction deterministic so idempotent retries get the same source package.
+- Emit `specforge_storyboard_source_missing_total` when expected sections are absent once observability exists in T-262.
+
+**Acceptance criteria:**
+1. `cd backend && uv run pytest ../harness/tests/backend/test_phase23_storyboard_contract.py -k "t252" -q` passes.
+2. `cd backend && uv run pytest tests/test_storyboard_source.py -q` passes.
+3. Unit test proves non-finalised stages block generation before credit deduction.
+4. Unit test proves excerpts are capped and sensitive sample strings are removed.
+5. Unit test proves source package contains all four stage version IDs.
+
+**Testing requirements:**
+- `test_storyboard_generation_requires_all_stages_finalised`
+- `test_storyboard_source_map_contains_only_finalised_versions`
+- source builder sanitization/excerpt-bound tests
+- missing source section metric/finding test
+
+**Rollback considerations:** Remove source builder and service imports. No DB changes.
+
+**Estimated complexity:** L
+**Estimated implementation risk:** Medium
+
+**Affected modules/files:**
+- `backend/services/pipeline/storyboard_source.py` — new source builder
+- `backend/services/pipeline/storyboard_service.py` — consume source package later
+- `backend/tests/test_storyboard_source.py` — new unit tests
+
+---
+
+### T-253 — Storyboard Prompt Builder and Strict Payload Validation
+
+**Category:** Backend / Prompting / Validation / Safety
+**Severity:** Critical
+**Priority:** P0
+**Harness:** `harness/tests/backend/test_phase23_storyboard_contract.py -k "t253"`
+
+**Description:**
+Create the Storyboard prompt builder and strict structured-output schema. The prompt must produce a product-specific launch keynote, not a generic presentation. It must be grounded in the source package and safe for trusted rendering.
+
+**Implementation requirements:**
+
+1. Add `backend/prompts/storyboard.py`.
+2. Define Pydantic models for:
+   - `StoryboardPayload`
+   - `StoryboardTheme`
+   - `StoryboardSection`
+   - `StoryboardSlide`
+   - `StoryboardDiagram`
+   - `StoryboardDiagramLayer`
+   - `SourceRef`
+   - `SpeakerNote`
+3. The payload must include:
+   - `title`
+   - `theme`
+   - exactly six `sections`
+   - at least one `architecture_reveal` diagram
+   - `source_map`
+   - `notes`
+   - `demo_script_md`
+   - `technical_appendix_md`
+4. Top-level section titles must be exactly:
+   - Opening Thesis
+   - Product Vision
+   - Product Walkthrough
+   - Technical Architecture
+   - Trust, Security, Reliability
+   - Launch Close
+5. Explicitly forbid top-level acts named Validation or Execution Plan.
+6. Architecture reveal must include layers:
+   - client
+   - frontend
+   - api
+   - data
+   - llm
+   - integrations
+   - trust
+   - recovery
+7. Slide rules:
+   - one idea per slide
+   - max 18 words per headline
+   - max 45 visible words per slide unless diagram labels require more
+   - main deck stays sparse; speaker notes and appendix carry depth
+8. Speaker notes per slide must include talk track, transition, timing, pause cue, demo cue, and backup points.
+9. Demo script must map concrete product actions to slides.
+10. Technical appendix must include architecture/security/reliability/testing/task/Q&A backup, but is separate from the main deck.
+11. Source map must exist for every claim and architecture component.
+12. Visual identity object must include palette, typography mood, motif, transition style, and diagram style.
+13. Prompt must ban arbitrary HTML, CSS, JavaScript, iframes, remote assets, tracking pixels, external fonts, and third-party script references.
+14. Implement parser/validator flow with one internal repair attempt. If initial JSON parsing or schema validation fails:
+    - invoke one repair prompt with the parser error
+    - if repair fails, surface a typed validation failure for T-254 to mark failed and refund
+15. Keep prompt template local/in-code. Do not load Storyboard prompt text from Langfuse in V1.
+16. Ensure `harness/schemas/storyboard-payload.schema.json` and `harness/schemas/storyboard-public-response.schema.json` remain aligned with the Pydantic models.
+
+**Security / reliability requirements:**
+- Treat generated text as untrusted even after schema validation.
+- Do not let the model provide executable rendering instructions.
+- Do not log raw generated payload or repair prompt content.
+- Validation must run before persistence of ready content.
+
+**Acceptance criteria:**
+1. `cd backend && uv run pytest ../harness/tests/backend/test_phase23_storyboard_contract.py -k "t253" -q` passes.
+2. `cd backend && uv run pytest tests/test_storyboard_prompt.py -q` passes.
+3. Unit test rejects seven or fewer/more than six sections.
+4. Unit test rejects Validation or Execution Plan as top-level section title.
+5. Unit test rejects architecture reveal missing required layers.
+6. Unit test verifies one repair attempt and no second repair loop.
+
+**Testing requirements:**
+- `test_storyboard_schema_rejects_validation_or_execution_plan_top_level_acts`
+- `test_storyboard_architecture_reveal_requires_layers`
+- parser repair success/failure tests
+- schema parity test with harness JSON schema
+
+**Rollback considerations:** Remove prompt module and imports. No migration changes.
+
+**Estimated complexity:** L
+**Estimated implementation risk:** High
+
+**Affected modules/files:**
+- `backend/prompts/storyboard.py` — new prompt and schema module
+- `backend/tests/test_storyboard_prompt.py` — new tests
+- `harness/schemas/storyboard-payload.schema.json` — keep in sync if contract evolves
+- `harness/schemas/storyboard-public-response.schema.json` — keep in sync if contract evolves
+
+---
+
+### T-254 — Storyboard Service Orchestration, Credits, Idempotency, and Recovery
+
+**Category:** Backend / Pipeline / Billing / Concurrency / Recovery
+**Severity:** Critical
+**Priority:** P0
+**Harness:** `harness/tests/backend/test_phase23_storyboard_contract.py -k "t254"`
+
+**Description:**
+Implement the core Storyboard service that orchestrates source extraction, prompt generation, credit deduction/refund, idempotency, versioning, stale propagation, and failed-job recovery. This is the critical reliability task for the feature.
+
+**Implementation requirements:**
+
+1. Add `backend/services/pipeline/storyboard_service.py`.
+2. Expose:
+   ```python
+   async def generate_storyboard(db, redis, workspace_id, user_id) -> Storyboard: ...
+   async def regenerate_storyboard(db, redis, storyboard_id, user_id) -> Storyboard: ...
+   async def regenerate_section(db, redis, storyboard_id, section_id, user_id) -> Storyboard: ...
+   async def mark_workspace_storyboards_stale(db, workspace_id) -> None: ...
+   ```
+3. Full generation flow:
+   - acquire Redis idempotency lock `storyboard:generate:{workspace_id}:{user_id}` with short TTL
+   - if a `status='generating'` Storyboard already exists for same workspace/user, return it without deducting again
+   - run lazy credit expiry and balance check
+   - create placeholder Storyboard row with `status='generating'`, next version, and empty safe placeholders
+   - deduct 25 credits with reason `storyboard_generate:{storyboard_id}` after placeholder ID exists
+   - store `credit_ledger_id`
+   - build source package
+   - call LLM complete path using Storyboard prompt
+   - validate and sanitize payload
+   - persist content JSON, notes, demo script, appendix, source map, source stage version IDs
+   - mark status `ready`
+   - commit
+   - invalidate credit cache after commit
+4. Full regeneration:
+   - costs 25 credits
+   - creates a new version
+   - never mutates/deletes previous ready version until replacement is ready
+   - if replacement fails, previous ready Storyboard remains latest presentable version
+5. Section regeneration:
+   - costs 5 credits
+   - creates a new Storyboard version with only selected section replaced
+   - revalidates whole payload and source map
+   - if replacement fails, previous ready section remains active
+6. Failure behavior:
+   - if generation fails after debit, call `credit_service.refund(db, credit_ledger_id, user_id=user_id)` exactly once
+   - mark Storyboard `failed`
+   - preserve typed error reason for the router/UI
+   - do not leave partially ready content exposed
+7. Recovery:
+   - detect Storyboards stuck in `generating` for more than 30 minutes
+   - mark them `failed`
+   - refund if `credit_ledger_id` exists and no refund exists
+   - wire into existing recovery loop or create a Storyboard-specific recovery helper invoked by it
+8. Concurrency:
+   - use `SELECT FOR UPDATE` on workspace row when assigning version
+   - rely on unique `(workspace_id, version)` as DB guard
+   - Redis lock prevents duplicate user clicks and retry storms
+   - do not hold DB transaction open during slow LLM call if the existing architecture has a safer placeholder/commit pattern; document exact transaction boundaries in code comments
+9. Stale propagation:
+   - update `StageManager.finalise()` so refinalising any source stage marks existing ready Storyboards for that workspace as `stale`
+   - perform stale update in the same transaction as stage finalise/downstream stale propagation
+10. Credit cache:
+   - invalidate user credit cache after successful debit commit and after refund commit
+11. Emit structlog events and metrics hooks defined in T-262.
+
+**Security / reliability requirements:**
+- No raw generated payload, source excerpts, notes, demo script, or appendix in logs.
+- Duplicate generation cannot double-charge even under concurrent POSTs.
+- Refund is idempotent and race-safe through existing credit ledger refund path.
+- The previous ready Storyboard must survive any failure in regeneration.
+- Generation must fail closed if source validation or payload validation fails.
+
+**Acceptance criteria:**
+1. `cd backend && uv run pytest ../harness/tests/backend/test_phase23_storyboard_contract.py -k "t254" -q` passes.
+2. `cd backend && uv run pytest tests/test_storyboard_service.py -q` passes.
+3. `test_storyboard_generation_deducts_25_credits` passes.
+4. `test_storyboard_generation_refunds_on_llm_failure` passes.
+5. `test_storyboard_duplicate_generate_does_not_double_charge` passes.
+6. `test_storyboard_full_regeneration_preserves_previous_ready_version_on_failure` passes.
+7. `test_storyboard_section_regeneration_costs_5_credits` passes.
+8. `test_storyboard_marks_stale_when_source_stage_refinalised` passes.
+9. Manual concurrent double-click test produces one debit and one generating Storyboard.
+
+**Testing requirements:**
+- Use fakes/mocks for LLM success/failure.
+- Include a concurrency test for duplicate generation.
+- Include stuck-job recovery tests.
+- Include credit cache invalidation test.
+
+**Rollback considerations:** Remove service wiring, stale hook, and recovery hook. Existing Storyboard rows can remain inert.
+
+**Estimated complexity:** XL
+**Estimated implementation risk:** High
+
+**Affected modules/files:**
+- `backend/services/pipeline/storyboard_service.py` — new service
+- `backend/services/pipeline/stage_manager.py` — stale Storyboard propagation
+- `backend/services/pipeline/recovery_service.py` — stuck generation recovery
+- `backend/routers/storyboards.py` — call service functions
+- `backend/tests/test_storyboard_service.py` — new service tests
+- `backend/tests/test_stage_manager.py` — stale propagation coverage if needed
+
+---
+
+### T-255 — Storyboard Trusted Renderer and Download Artifacts
+
+**Category:** Backend / Rendering / Downloads / XSS Defense
+**Severity:** High
+**Priority:** P1
+**Harness:** `harness/tests/backend/test_phase23_storyboard_contract.py -k "t255"`
+
+**Description:**
+Render Storyboard payloads into safe downloadable artifacts. The renderer owns all HTML, animation, CSS, and PDF production; LLM output remains structured content only.
+
+**Implementation requirements:**
+
+1. Add `backend/services/pipeline/storyboard_renderer.py`.
+2. Renderer outputs:
+   - offline `storyboard.html`
+   - static `storyboard.pdf`
+   - `speaker-notes.md`
+   - `speaker-notes.pdf`
+   - `demo-script.md`
+   - `technical-appendix.md`
+3. Use a trusted HTML template owned by the codebase.
+4. Escape JSON payload before embedding in HTML.
+5. Sanitize generated Markdown and diagram labels using the existing sanitizer policy.
+6. Ban/remove:
+   - generated `<script>`
+   - inline event handlers
+   - remote scripts
+   - remote styles
+   - iframe/object/embed
+   - external fonts
+   - remote image URLs by default
+   - tracking pixels
+7. HTML CSP:
+   - `default-src 'self'`
+   - `script-src 'self'`
+   - `style-src 'self' 'unsafe-inline'`
+   - `img-src 'self' data:`
+   - `frame-ancestors 'none'`
+8. PDF rendering:
+   - reuse existing PDF executor/no-network URL fetcher pattern
+   - avoid blocking event loop
+   - set sensible timeouts and size bounds
+9. Stable filenames:
+   - `specforge-storyboard-{workspace-slug}.html`
+   - `specforge-storyboard-{workspace-slug}.pdf`
+   - `specforge-storyboard-speaker-notes-{workspace-slug}.md`
+   - `specforge-storyboard-speaker-notes-{workspace-slug}.pdf`
+   - `specforge-storyboard-demo-script-{workspace-slug}.md`
+   - `specforge-storyboard-technical-appendix-{workspace-slug}.md`
+10. Wire owner download endpoints from T-251 to renderer.
+11. Emit download metric hooks from T-262.
+
+**Security / reliability requirements:**
+- Never write raw LLM HTML/JS to output.
+- Offline HTML package must not fetch remote assets or leak visitor data.
+- Renderer failure must not corrupt Storyboard row state or charge additional credits.
+- Public HTML package download is not exposed by default.
+
+**Acceptance criteria:**
+1. `cd backend && uv run pytest ../harness/tests/backend/test_phase23_storyboard_contract.py -k "t255" -q` passes.
+2. `cd backend && uv run pytest tests/test_storyboard_renderer.py -q` passes.
+3. `test_storyboard_renderer_strips_script_and_remote_asset_references` passes.
+4. Manual: inject `<script>alert(1)</script>` into source content; generated HTML/PDF do not execute or preserve it as executable markup.
+5. Manual: download HTML and open it offline; no network requests are made.
+
+**Testing requirements:**
+- Sanitizer tests for script tags, event handlers, remote images, remote CSS, iframes.
+- PDF no-network fetcher test.
+- Filename slug test.
+- Content-Disposition test if not already covered by router tests.
+
+**Rollback considerations:** Disable download endpoints and renderer imports. Existing Storyboards still retrievable as JSON.
+
+**Estimated complexity:** L
+**Estimated implementation risk:** High
+
+**Affected modules/files:**
+- `backend/services/pipeline/storyboard_renderer.py` — new renderer
+- `backend/templates/storyboard.html.j2` or equivalent trusted template — new template
+- `backend/routers/storyboards.py` — download endpoint wiring
+- `backend/tests/test_storyboard_renderer.py` — new tests
+
+---
+
+### T-256 — Storyboard Public Sharing Service and Permission Filtering
+
+**Category:** Backend / Public Sharing / Privacy / Slug Management
+**Severity:** High
+**Priority:** P1
+**Harness:** `harness/tests/backend/test_phase23_storyboard_contract.py -k "t256"`
+
+**Description:**
+Implement public sharing for Storyboards at `/sb/{slug}` via backend `/storyboards/public/{slug}` APIs. Sharing is independent from workspace public share and must be permission-filtered by default.
+
+**Implementation requirements:**
+
+1. Add `backend/services/pipeline/storyboard_public_service.py`.
+2. Public slug requirements:
+   - at least 10 random chars
+   - generated with cryptographic RNG (`secrets`)
+   - base36/base62-like opaque alphabet
+   - partial unique index from T-250 enforces uniqueness
+3. Default permissions when enabling share:
+   - presentation view enabled
+   - PDF download enabled
+   - notes download disabled
+   - appendix download disabled
+   - source layer disabled
+4. Owner can toggle permissions without changing slug.
+5. Rotate invalidates the old slug immediately and creates a new slug.
+6. Disable sharing returns public lookup to 404 but may preserve slug for re-enable unless rotate was requested.
+7. Public response excludes:
+   - `user_id`
+   - `workspace_id`
+   - `credit_ledger_id`
+   - `source_stage_version_ids`
+   - account email
+   - credit balance
+   - billing history
+   - private workspace lists
+   - draft stages
+   - failed versions
+   - previous versions
+   - private notes/appendix/source excerpts unless explicitly enabled
+8. Public download endpoint allows only:
+   - `pdf` if `allow_pdf_download`
+   - `notes` if `allow_notes_download`
+   - `appendix` if `allow_appendix_download`
+   - `demo-script` if share is enabled
+9. Public download endpoint must not expose HTML package by default.
+10. Public route sets noindex, CSP, and no-store/private-aware cache headers.
+
+**Security / reliability requirements:**
+- Unknown, disabled, rotated, and unauthorized public downloads return 404, not 403.
+- Public service returns DTOs/allow-list dicts, never ORM objects.
+- Permission changes take effect immediately.
+- Slug rotation must be atomic.
+
+**Acceptance criteria:**
+1. `cd backend && uv run pytest ../harness/tests/backend/test_phase23_storyboard_contract.py -k "t256" -q` passes.
+2. `cd backend && uv run pytest tests/test_storyboard_public_service.py -q` passes.
+3. `test_storyboard_public_owner_permissions_filter_downloads` passes.
+4. `test_storyboard_public_unknown_or_disabled_returns_404` passes.
+5. Manual: enable sharing, open `/sb/{slug}` incognito, verify notes/appendix/source hidden by default.
+6. Manual: rotate slug, verify old URL 404s and new URL works.
+
+**Testing requirements:**
+- Default permissions test.
+- Slug length/entropy source test.
+- Toggle permissions test.
+- Public allow-list response test.
+- Public download permission matrix test.
+
+**Rollback considerations:** Disable public share routes and service. Existing Storyboards remain owner-only.
+
+**Estimated complexity:** L
+**Estimated implementation risk:** High
+
+**Affected modules/files:**
+- `backend/services/pipeline/storyboard_public_service.py` — new service
+- `backend/routers/storyboards.py` — public endpoints/share endpoints
+- `backend/tests/test_storyboard_public_service.py` — new tests
+- `harness/schemas/storyboard-public-response.schema.json` — keep aligned
+
+---
+
+### T-257 — Frontend Storyboard Types, API Client, and Routes
+
+**Category:** Frontend / Types / API / Routing
+**Severity:** High
+**Priority:** P1
+**Harness:** `harness/tests/frontend/phase23-storyboard.contract.test.ts` — API client, type, and route describes
+
+**Description:**
+Add the typed frontend surface for Storyboard: TypeScript models, API client functions, authenticated owner route, and unauthenticated public route. This task creates the foundation for the UI tasks that follow.
+
+**Implementation requirements:**
+
+1. Add `frontend/src/types/storyboard.ts`.
+2. Define:
+   - `StoryboardStatus = "generating" | "ready" | "failed" | "stale"`
+   - `StoryboardSummary`
+   - `StoryboardDetail`
+   - `StoryboardPayload`
+   - `StoryboardTheme`
+   - `StoryboardSection`
+   - `StoryboardSlide`
+   - `StoryboardDiagram`
+   - `StoryboardDiagramLayer`
+   - `SpeakerNote`
+   - `SourceRef`
+   - `StoryboardPublicResponse`
+   - `StoryboardShareRequest`
+   - `StoryboardShareResponse`
+   - `StoryboardDownloadKind`
+3. Types must encode:
+   - six act titles
+   - statuses
+   - sources `SPEC | PLAN | HARNESS | TASKS`
+   - `source_stage_version_ids`
+   - `source_map`
+   - `speaker_notes_md`
+   - `demo_script_md`
+   - `technical_appendix_md`
+   - diagrams/theme
+   - public permission booleans
+4. Extend `frontend/src/services/api.ts` with typed functions:
+   - `listStoryboards`
+   - `getLatestStoryboard`
+   - `generateStoryboard`
+   - `getStoryboard`
+   - `regenerateStoryboard`
+   - `regenerateStoryboardSection`
+   - `getStoryboardPresenter`
+   - `downloadStoryboard`
+   - `shareStoryboard`
+   - `disableStoryboardShare`
+   - `rotateStoryboardShare`
+   - `getPublicStoryboard`
+   - `downloadPublicStoryboard`
+5. `getPublicStoryboard` must handle 404 by returning `null` or a typed not-found state, not by crashing the route.
+6. Add routes in `frontend/src/App.tsx`:
+   - authenticated `/storyboards/:id` → `Storyboard.tsx`
+   - unauthenticated `/sb/:slug` → `StoryboardPublic.tsx`
+7. Create placeholder page shells:
+   - `frontend/src/pages/Storyboard.tsx`
+   - `frontend/src/pages/StoryboardPublic.tsx`
+8. `StoryboardPublic.tsx` must not import `ProtectedRoute`, `userStore`, `CreditMeter`, or anything that displays credits/account state.
+
+**Security / reliability requirements:**
+- Public route must be outside the authenticated guard.
+- Do not store source excerpts, notes, or appendix in localStorage/sessionStorage.
+- API functions must preserve existing auth/CSRF interceptor behavior.
+
+**Acceptance criteria:**
+1. `cd frontend && pnpm vitest run --root .. harness/tests/frontend/phase23-storyboard.contract.test.ts -t "API client|TypeScript types|routes"`.
+2. `cd frontend && pnpm tsc --noEmit` passes.
+3. Manual: navigating to `/sb/badslug` renders a public not-found state without auth redirect.
+4. Manual: navigating to `/storyboards/fake` while signed out routes through auth guard.
+
+**Testing requirements:**
+- Add unit test for `getPublicStoryboard` 404 handling.
+- Add type compile coverage for download kinds and permission fields.
+
+**Rollback considerations:** Remove routes, types, and API functions. No backend impact.
+
+**Estimated complexity:** M
+**Estimated implementation risk:** Medium
+
+**Affected modules/files:**
+- `frontend/src/types/storyboard.ts` — new types
+- `frontend/src/services/api.ts` — Storyboard client functions
+- `frontend/src/App.tsx` — routes
+- `frontend/src/pages/Storyboard.tsx` — owner shell
+- `frontend/src/pages/StoryboardPublic.tsx` — public shell
+- `frontend/src/services/api.storyboard.test.ts` or existing API tests — new coverage
+
+---
+
+### T-258 — Frontend Owner Flow: Workspace CTA, Paid Modal, Toolbar, and Generation Status
+
+**Category:** Frontend / Workspace UX / Billing UX
+**Severity:** High
+**Priority:** P1
+**Harness:** `harness/tests/frontend/phase23-storyboard.contract.test.ts` — workspace, modal, toolbar describes
+
+**Description:**
+Add the owner-facing Storyboard flow inside the workspace. A user should see Create Storyboard only when all four stages are finalised, confirm the paid action, watch generation status, and open/share/download/regenerate the ready Storyboard.
+
+**Implementation requirements:**
+
+1. Add `frontend/src/components/workspace/CreateStoryboardModal.tsx`.
+2. Add `frontend/src/components/workspace/StoryboardToolbar.tsx`.
+3. Update `frontend/src/pages/Workspace.tsx`:
+   - load latest Storyboard summary for the workspace
+   - show `Create Storyboard` CTA when all four stages are finalised and no latest Storyboard exists
+   - show `Open Storyboard` when a latest Storyboard exists
+   - show stale badge and regeneration prompt when latest Storyboard status is `stale`
+   - block creation when any stage is not finalised or prerequisite state is stale
+4. `CreateStoryboardModal` must show:
+   - cost: 25 credits
+   - included artifacts: browser keynote, architecture reveal, speaker notes, demo script, technical appendix, share link, PDF/HTML downloads
+   - current balance and post-action balance
+   - insufficient balance state with link to `/billing`
+   - finalised-stage prerequisite state
+   - refund-aware failure text
+5. Generation UX:
+   - POST starts generation and returns ID/status
+   - poll latest Storyboard or specific Storyboard status
+   - navigate to `/storyboards/:id` when ready
+   - show clear failure state if generation failed and credits were refunded
+6. `StoryboardToolbar` actions:
+   - Present
+   - Share
+   - Download
+   - Regenerate
+   - Download Notes
+7. Use existing design system density and button patterns. This is app UI, not a marketing page.
+
+**Security / reliability requirements:**
+- Never fire generate twice from double-clicks; disable action while pending.
+- Do not assume balance from stale UI; backend remains authoritative.
+- Do not expose public share controls until Storyboard is ready.
+
+**Acceptance criteria:**
+1. `cd frontend && pnpm vitest run --root .. harness/tests/frontend/phase23-storyboard.contract.test.ts -t "Workspace|CreateStoryboardModal|StoryboardToolbar"`.
+2. `cd frontend && pnpm test -- Storyboard`.
+3. `cd frontend && pnpm tsc --noEmit` passes.
+4. Manual: insufficient balance blocks and links to `/billing`.
+5. Manual: all four stages finalised → Create Storyboard appears.
+6. Manual: generation failure shows refund language.
+
+**Testing requirements:**
+- `CreateStoryboardModal` cost/balance/prerequisite/insufficient tests.
+- Workspace CTA visibility tests.
+- Toolbar action tests.
+- Pending double-click prevention test.
+
+**Rollback considerations:** Remove workspace CTA/modal/toolbar imports. Routes/types from T-257 can remain unused.
+
+**Estimated complexity:** L
+**Estimated implementation risk:** Medium
+
+**Affected modules/files:**
+- `frontend/src/pages/Workspace.tsx` — Storyboard owner entry point
+- `frontend/src/components/workspace/CreateStoryboardModal.tsx` — new modal
+- `frontend/src/components/workspace/StoryboardToolbar.tsx` — new toolbar
+- `frontend/src/components/workspace/CreateStoryboardModal.test.tsx` — new tests
+- `frontend/src/pages/Workspace.storyboard.test.tsx` — new or existing tests
+
+---
+
+### T-259 — Browser Storyboard Deck and Cinematic Architecture Reveal
+
+**Category:** Frontend / Presentation / Accessibility
+**Severity:** High
+**Priority:** P1
+**Harness:** `harness/tests/frontend/phase23-storyboard.contract.test.ts` — StoryboardDeck and ArchitectureReveal describes
+
+**Description:**
+Build the browser-native keynote viewing experience. The deck should feel like a polished product launch presentation while staying technically grounded and accessible.
+
+**Implementation requirements:**
+
+1. Add `frontend/src/components/storyboard/StoryboardDeck.tsx`.
+2. Add `frontend/src/components/storyboard/ArchitectureReveal.tsx`.
+3. `StoryboardDeck`:
+   - consumes `StoryboardPayload`
+   - renders exactly six top-level acts
+   - supports full-screen presentation mode
+   - supports keyboard navigation:
+     - ArrowRight / Space: next
+     - ArrowLeft: previous
+     - F: fullscreen
+     - P: presenter mode
+     - S: source layer toggle when allowed
+     - Esc: exit presentation
+   - keeps source excerpts and private notes in memory only; no localStorage/sessionStorage
+   - handles loading, error, empty, failed, stale, and not-found states
+4. `ArchitectureReveal`:
+   - accepts structured diagram layers, not raw HTML
+   - reveals deterministic steps:
+     1. client
+     2. frontend
+     3. api
+     4. data
+     5. llm
+     6. integrations
+     7. trust
+     8. recovery
+   - exposes technical labels legibly at 1280px and projected 16:9
+   - has accessible text fallback for screen readers and PDF
+   - does not require canvas for core meaning; SVG/HTML fallback is acceptable
+5. `frontend/src/pages/Storyboard.tsx`:
+   - fetches owner Storyboard
+   - renders launch page/deck
+   - passes owner permissions to presenter/source/download components
+6. Design:
+   - sparse slides, one idea per slide
+   - product-specific diagrams/motifs
+   - no generic stock imagery
+   - responsive enough for mobile viewing, optimized for desktop/tablet presenting
+
+**Security / reliability requirements:**
+- Never render untrusted HTML from payload.
+- All generated text goes through existing Markdown/text sanitization.
+- Avoid layout shift during navigation; slides should have stable 16:9 presentation dimensions.
+- Public/owner permission flags must control source and notes overlays.
+
+**Acceptance criteria:**
+1. `cd frontend && pnpm vitest run --root .. harness/tests/frontend/phase23-storyboard.contract.test.ts -t "StoryboardDeck|ArchitectureReveal"`.
+2. `cd frontend && pnpm test -- StoryboardDeck ArchitectureReveal`.
+3. `cd frontend && pnpm tsc --noEmit` passes.
+4. Manual: keyboard navigation works across six acts.
+5. Manual: architecture reveal shows all required layers in order.
+6. Manual: screen reader fallback contains ordered architecture summary.
+
+**Testing requirements:**
+- `StoryboardDeck.test.tsx`
+- `ArchitectureReveal.test.tsx`
+- Keyboard navigation tests.
+- Accessibility fallback tests.
+- No localStorage/sessionStorage tests.
+
+**Rollback considerations:** Keep API/types but remove owner page deck rendering. User can still list Storyboards.
+
+**Estimated complexity:** XL
+**Estimated implementation risk:** Medium
+
+**Affected modules/files:**
+- `frontend/src/pages/Storyboard.tsx` — owner page
+- `frontend/src/components/storyboard/StoryboardDeck.tsx` — new deck
+- `frontend/src/components/storyboard/ArchitectureReveal.tsx` — new reveal
+- `frontend/src/components/storyboard/StoryboardDeck.test.tsx` — new tests
+- `frontend/src/components/storyboard/ArchitectureReveal.test.tsx` — new tests
+- `frontend/src/index.css` — Storyboard presentation styles if needed
+
+---
+
+### T-260 — Presenter Mode, Source Layer, Public Launch Page, Sharing Modal, and Downloads UI
+
+**Category:** Frontend / Presentation / Public Share / Privacy
+**Severity:** High
+**Priority:** P1
+**Harness:** `harness/tests/frontend/phase23-storyboard.contract.test.ts` — PresenterMode, SourceLayer, sharing/download/public describes
+
+**Description:**
+Complete the Storyboard user experience with presenter tools, source-backed confidence layer, public launch page, sharing controls, and download menu. This task makes Storyboard feel like a complete product launch artifact rather than a generated deck.
+
+**Implementation requirements:**
+
+1. Add:
+   - `frontend/src/components/storyboard/PresenterMode.tsx`
+   - `frontend/src/components/storyboard/SourceLayer.tsx`
+   - `frontend/src/components/storyboard/StoryboardLaunchPage.tsx`
+   - `frontend/src/components/storyboard/StoryboardShareModal.tsx`
+   - `frontend/src/components/storyboard/StoryboardDownloadMenu.tsx`
+2. `PresenterMode` shows:
+   - current slide
+   - next slide
+   - elapsed timer
+   - speaker notes
+   - transition cue
+   - suggested pause/emphasis cue
+   - demo cue
+   - backup points
+3. Presenter notes:
+   - owner can always see notes
+   - public visitor cannot see notes unless public notes permission is enabled
+   - timer is session-local and not persisted
+4. `SourceLayer`:
+   - uses `source_map`
+   - shows badges for SPEC, PLAN, HARNESS, TASKS
+   - opens bounded source excerpts only on click
+   - respects `allow_source_layer`
+   - caps excerpts client-side as defense-in-depth
+5. `StoryboardLaunchPage`:
+   - first-screen public/owner launch experience
+   - renders title, promise, architecture preview, Present, Download, and Notes actions
+   - no landing-page marketing filler
+6. `StoryboardShareModal`:
+   - toggles public sharing
+   - shows/copies `/sb/{slug}`
+   - toggles PDF, notes, appendix, and source-layer permissions independently
+   - notes/appendix/source default disabled
+   - supports disable and rotate
+7. `StoryboardDownloadMenu`:
+   - owner downloads HTML, PDF, notes, demo script, appendix
+   - public downloads are filtered by permissions
+   - public HTML download is not exposed by default
+8. `StoryboardPublic.tsx`:
+   - fetches public payload
+   - renders launch page and deck without auth redirect
+   - no user/account/credit imports
+   - no private fields rendered
+   - renders noindex meta tag
+
+**Security / reliability requirements:**
+- Public UI must not render hidden fields even if backend accidentally includes them.
+- Source excerpts and notes must never be persisted to browser storage.
+- Download menu must enforce permissions client-side, even though backend is authoritative.
+- Copy/share UX must not expose workspace `/p` slug as Storyboard `/sb` slug.
+
+**Acceptance criteria:**
+1. `cd frontend && pnpm vitest run --root .. harness/tests/frontend/phase23-storyboard.contract.test.ts -t "PresenterMode|SourceLayer|sharing|downloads|LaunchPage|Public Storyboard"`.
+2. `cd frontend && pnpm test -- Storyboard`.
+3. `cd frontend && pnpm tsc --noEmit` passes.
+4. Manual: public default hides notes, appendix, and source layer.
+5. Manual: enabling source layer publicly reveals bounded excerpts only.
+6. Manual: share rotate invalidates old URL in UI after backend confirms.
+
+**Testing requirements:**
+- `PresenterMode.test.tsx`
+- `SourceLayer.test.tsx`
+- `StoryboardShareModal.test.tsx`
+- `StoryboardDownloadMenu.test.tsx`
+- `StoryboardPublic.test.tsx`
+- At least four focused Storyboard component tests exist, satisfying harness.
+
+**Rollback considerations:** Disable public route and hide share/download controls. Owner deck remains available from T-259.
+
+**Estimated complexity:** XL
+**Estimated implementation risk:** Medium
+
+**Affected modules/files:**
+- `frontend/src/pages/StoryboardPublic.tsx` — public page
+- `frontend/src/components/storyboard/PresenterMode.tsx` — new component
+- `frontend/src/components/storyboard/SourceLayer.tsx` — new component
+- `frontend/src/components/storyboard/StoryboardLaunchPage.tsx` — new component
+- `frontend/src/components/storyboard/StoryboardShareModal.tsx` — new component
+- `frontend/src/components/storyboard/StoryboardDownloadMenu.tsx` — new component
+- `frontend/src/components/storyboard/*.test.tsx` — focused tests
+
+---
+
+### T-261 — Storyboard Security Controls, Rate Limits, and Abuse Resistance
+
+**Category:** Backend / Security / Rate Limiting / Privacy
+**Severity:** Critical
+**Priority:** P0
+**Harness:** `harness/tests/backend/test_phase23_storyboard_contract.py -k "t261"`
+
+**Description:**
+Add explicit security and abuse-control hardening for the Storyboard surface. This task is a final backend security pass over auth, CSRF, public privacy, sanitization, rate limits, and content logging.
+
+**Implementation requirements:**
+
+1. Add rate limit tiers in `backend/middleware/rate_limit.py`:
+   - Storyboard Generate: per user, 3 full generations, 1 hour
+   - Storyboard Section Regenerate: per user, 10 section regenerations, 1 hour
+   - Storyboard Share Toggle: per user, 20 toggles, 1 hour
+   - Storyboard Public View: per IP, 120 reads, 1 minute
+   - Storyboard Download: per user/IP, 30 downloads, 1 hour
+2. Public routes:
+   - unauthenticated
+   - read-only
+   - noindex/nofollow
+   - strict CSP
+   - no public HTML download by default
+3. Owner routes:
+   - require auth
+   - return 404 for non-owned resources
+   - mutating endpoints require CSRF
+4. Sanitization:
+   - LLM payload validated before persistence
+   - renderer sanitizes generated Markdown and labels
+   - HTML/PDF renderer blocks scripts and remote assets
+5. Logging:
+   - no raw payload
+   - no speaker notes
+   - no source excerpts
+   - no appendix
+   - no prompt text
+   - no billing or credit balance data
+6. Regeneration:
+   - cannot mutate a ready Storyboard in place until replacement passes validation
+7. Credit safety:
+   - failure refunds exactly once
+   - duplicate requests do not double-charge
+8. Add or extend tests for script injection and remote asset injection.
+
+**Security / reliability requirements:**
+- Security tests must exercise both owner and public paths.
+- Rate limit fallback behavior must not silently fail open if Redis is absent unless matching existing project fallback policy.
+- Public response must remain an allow-list even after schema/model evolution.
+
+**Acceptance criteria:**
+1. `cd backend && uv run pytest ../harness/tests/backend/test_phase23_storyboard_contract.py -k "t261" -q` passes.
+2. `cd backend && uv run pytest tests/test_storyboard_security.py -q` passes.
+3. `cd backend && uv run pytest tests/test_rate_limit.py -q` passes.
+4. Manual: unauthenticated public view works; public mutation attempts do not exist.
+5. Manual: authenticated non-owner receives 404 for Storyboard owner endpoints.
+6. Manual: repeated public views/downloads hit the configured rate limits.
+
+**Testing requirements:**
+- Rate limit tier tests.
+- CSRF mutation tests.
+- Public allow-list tests.
+- No content logging test.
+- Renderer injection test if not covered in T-255.
+
+**Rollback considerations:** Remove Storyboard-specific rate limit branches and security tests. Do not remove generic security middleware.
+
+**Estimated complexity:** L
+**Estimated implementation risk:** High
+
+**Affected modules/files:**
+- `backend/middleware/rate_limit.py` — Storyboard tiers
+- `backend/middleware/csrf.py` — verify no Storyboard exemptions
+- `backend/routers/storyboards.py` — auth/header behavior
+- `backend/services/pipeline/storyboard_*` — privacy/logging checks
+- `backend/tests/test_storyboard_security.py` — new tests
+- `backend/tests/test_rate_limit.py` — rate limit coverage
+
+---
+
+### T-262 — Storyboard Observability Metrics and Structured Events
+
+**Category:** Backend / Observability / Operations
+**Severity:** Medium
+**Priority:** P1
+**Harness:** `harness/tests/backend/test_phase23_storyboard_contract.py -k "t262"`
+
+**Description:**
+Instrument Storyboard so production operators can see generation failures, refund spikes, render/download issues, public traffic, and missing source-section patterns without inspecting private content.
+
+**Implementation requirements:**
+
+1. Add Prometheus metrics in `backend/services/observability.py`:
+   - `specforge_storyboard_generation_started_total`
+   - `specforge_storyboard_generation_completed_total`
+   - `specforge_storyboard_generation_failed_total{error_type}`
+   - `specforge_storyboard_section_regenerated_total`
+   - `specforge_storyboard_generation_duration_seconds`
+   - `specforge_storyboard_credits_deducted_total{action}`
+   - `specforge_storyboard_credits_refunded_total{action,reason}`
+   - `specforge_storyboard_public_view_total`
+   - `specforge_storyboard_download_total{kind,public}`
+   - `specforge_storyboard_source_missing_total{source,section}`
+2. Emit metrics from:
+   - full generation start/complete/fail
+   - section regeneration complete/fail
+   - credit debit/refund paths
+   - public view
+   - owner/public download
+   - missing source section extraction
+3. Emit structlog events:
+   - `storyboard.generate_started`
+   - `storyboard.generate_completed`
+   - `storyboard.generate_failed`
+   - `storyboard.section_regenerated`
+   - `storyboard.share_enabled`
+   - `storyboard.share_disabled`
+   - `storyboard.share_rotated`
+   - `storyboard.downloaded`
+   - `storyboard.public_viewed`
+   - `storyboard.marked_stale`
+4. Event fields:
+   - `storyboard_id`
+   - `workspace_id`
+   - `user_id` where authenticated
+   - `version`
+   - `action`
+   - `status`
+   - `credit_ledger_id` only for authenticated internal events
+5. Never log generated content or source excerpts.
+
+**Security / reliability requirements:**
+- Metrics labels must be low cardinality.
+- `error_type` should be bounded enum/string classification, not raw exception text.
+- Logs must be useful for incident response without exposing private generated artifacts.
+
+**Acceptance criteria:**
+1. `cd backend && uv run pytest ../harness/tests/backend/test_phase23_storyboard_contract.py -k "t262" -q` passes.
+2. `cd backend && uv run pytest tests/test_observability.py tests/test_storyboard_observability.py -q` passes.
+3. Manual: generate failure increments `specforge_storyboard_generation_failed_total`.
+4. Manual: public view increments `specforge_storyboard_public_view_total`.
+
+**Testing requirements:**
+- Metric existence tests.
+- Metric increment tests around service paths.
+- Log redaction/no content logging tests.
+
+**Rollback considerations:** Remove Storyboard metric definitions and event calls. No user-facing behavior changes.
+
+**Estimated complexity:** M
+**Estimated implementation risk:** Low
+
+**Affected modules/files:**
+- `backend/services/observability.py` — metrics
+- `backend/services/pipeline/storyboard_service.py` — events/metrics
+- `backend/services/pipeline/storyboard_public_service.py` — events/metrics
+- `backend/services/pipeline/storyboard_renderer.py` — download/render metrics
+- `backend/tests/test_storyboard_observability.py` — new tests
+- `backend/tests/test_observability.py` — metric definition coverage
+
+---
+
+### T-263 — Storyboard End-to-End Test Suite and Harness Closure
+
+**Category:** Test Infrastructure / Backend + Frontend / Contract Closure
+**Severity:** Critical
+**Priority:** P0
+**Harness:** Full Phase 23 backend and frontend harness
+
+**Description:**
+Close the Storyboard feature with complete backend, frontend, and harness validation. This task should not add major product behavior; it fills any missing behavioral tests, fixes gaps found by the harness, and proves the feature is ready for documentation and smoke testing.
+
+**Implementation requirements:**
+
+1. Ensure backend unit/integration tests include:
+   - `test_storyboard_generation_requires_all_stages_finalised`
+   - `test_storyboard_generation_deducts_25_credits`
+   - `test_storyboard_generation_refunds_on_llm_failure`
+   - `test_storyboard_duplicate_generate_does_not_double_charge`
+   - `test_storyboard_full_regeneration_preserves_previous_ready_version_on_failure`
+   - `test_storyboard_section_regeneration_costs_5_credits`
+   - `test_storyboard_marks_stale_when_source_stage_refinalised`
+   - `test_storyboard_public_owner_permissions_filter_downloads`
+   - `test_storyboard_public_unknown_or_disabled_returns_404`
+   - `test_storyboard_source_map_contains_only_finalised_versions`
+   - `test_storyboard_schema_rejects_validation_or_execution_plan_top_level_acts`
+   - `test_storyboard_architecture_reveal_requires_layers`
+   - `test_storyboard_renderer_strips_script_and_remote_asset_references`
+2. Ensure frontend focused tests include at least four of:
+   - `StoryboardDeck.test.tsx`
+   - `ArchitectureReveal.test.tsx`
+   - `PresenterMode.test.tsx`
+   - `SourceLayer.test.tsx`
+   - `StoryboardShareModal.test.tsx`
+   - `CreateStoryboardModal.test.tsx`
+3. Add an e2e smoke test if practical:
+   - finalised workspace fixture
+   - generate Storyboard with mocked provider
+   - open deck
+   - share publicly
+   - download PDF/notes
+4. Run the entire Phase 23 harness:
+   - backend contract
+   - frontend contract
+   - schema validation
+5. Fix any implementation gaps; do not weaken harness unless spec/plan has changed and the change is intentional.
+6. Ensure no test relies on real paid LLM calls or real billing network calls.
+
+**Security / reliability requirements:**
+- Include tests for failure and recovery paths, not only happy paths.
+- Include privacy/permission tests for public sharing.
+- Include concurrency/idempotency test for duplicate generation.
+- Include XSS/remote-asset tests for renderer.
+
+**Acceptance criteria:**
+1. `cd backend && uv run pytest ../harness/tests/backend/test_phase23_storyboard_contract.py -q` passes.
+2. `cd frontend && pnpm vitest run --root .. harness/tests/frontend/phase23-storyboard.contract.test.ts` passes.
+3. `for f in harness/schemas/*.schema.json; do python3 -m json.tool "$f" > /dev/null || exit 1; done` passes.
+4. `cd backend && uv run pytest tests/test_storyboard_service.py tests/test_storyboard_router.py tests/test_storyboard_renderer.py -q` passes.
+5. `cd frontend && pnpm test -- Storyboard` passes.
+6. `cd frontend && pnpm tsc --noEmit` passes.
+7. `git diff --check` passes.
+
+**Testing requirements:**
+- Backend unit/integration tests listed above.
+- Frontend component tests listed above.
+- Optional e2e smoke if stable in local CI.
+
+**Rollback considerations:** This is mostly tests and fixes. Revert individual fixes if they introduce regressions; do not delete harness coverage.
+
+**Estimated complexity:** L
+**Estimated implementation risk:** Medium
+
+**Affected modules/files:**
+- `backend/tests/test_storyboard_*.py` — fill missing backend tests
+- `frontend/src/components/storyboard/*.test.tsx` — fill missing frontend tests
+- `harness/tests/backend/test_phase23_storyboard_contract.py` — should remain unchanged unless spec/plan changes
+- `harness/tests/frontend/phase23-storyboard.contract.test.ts` — should remain unchanged unless spec/plan changes
+- `harness/tests/e2e/specforge-smoke.spec.ts` or new Storyboard e2e — optional
+
+---
+
+### T-264 — Storyboard Documentation, Smoke Checklist, and Release Gate
+
+**Category:** Documentation / Operations / Release Readiness
+**Severity:** Medium
+**Priority:** P1
+**Harness:** `harness/tests/backend/test_phase23_storyboard_contract.py -k "t264"`
+
+**Description:**
+Document Storyboard operations and release criteria. The feature is not complete until operators can test it locally, monitor it in production, recover failed jobs, investigate refund issues, and safely manage public links.
+
+**Implementation requirements:**
+
+1. Update `docs/RUNBOOK.md` with:
+   - Storyboard generation failure recovery
+   - stuck `generating` job recovery
+   - credit refund verification
+   - stale Storyboard remediation after source refinalise
+   - public slug rotation
+   - public link disablement
+   - incident checklist for public data leakage report
+2. Update `docs/LOCAL_TESTING_HANDBOOK.md` with:
+   - completed workspace fixture/setup
+   - mocked provider setup for Storyboard generation
+   - generating a Storyboard locally
+   - opening `/storyboards/:id`
+   - enabling `/sb/{slug}`
+   - testing public view in incognito
+   - downloading HTML/PDF/notes/demo/appendix
+3. Update `docs/OBSERVABILITY_RUNBOOK.md` with:
+   - Storyboard metrics table
+   - dashboards/alerts for generation failure rate
+   - refund spike detection
+   - public view volume
+   - download failures
+   - render latency
+   - source-missing counts
+4. Update `docs/PRODUCTION_RELEASE_GATE.md` with:
+   - migration applied
+   - rate limits active
+   - public route security headers verified
+   - HTML/PDF sanitizer tests passing
+   - credit ledger refund smoke passing
+   - public privacy smoke passing
+   - previous-ready regeneration failure smoke passing
+5. Update `docs/SMOKE_TEST_CHECKLIST.md` with:
+   - finalise all four stages
+   - Generate Storyboard
+   - Confirm six main acts and no Validation/Execution Plan act
+   - Present deck
+   - verify architecture reveal
+   - Download HTML/PDF/speaker notes/demo script/appendix
+   - Enable public sharing
+   - Incognito `/sb/{slug}` view
+   - Verify default public hides notes/appendix/source
+   - Enable source layer and verify bounded excerpts
+   - Re-finalise PLAN and verify Storyboard becomes stale
+   - Trigger fake provider failure and verify refund/no ready corruption
+6. Confirm `tasks.md` contains T-250 through T-264 and version history is updated.
+
+**Security / reliability requirements:**
+- Documentation must include public data leakage response.
+- Documentation must explain how to verify a refund happened exactly once.
+- Release gate must block if public notes/source/appendix leak by default.
+
+**Acceptance criteria:**
+1. `cd backend && uv run pytest ../harness/tests/backend/test_phase23_storyboard_contract.py -k "t264" -q` passes.
+2. Documentation links/commands are copy-pasteable.
+3. Manual smoke checklist is complete in staging before release.
+4. `git diff --check` passes.
+
+**Testing requirements:**
+- Harness documentation string scans from T-264 pass.
+- Manual staging smoke before production release.
+
+**Rollback considerations:** Revert documentation section updates only. No runtime changes.
+
+**Estimated complexity:** M
+**Estimated implementation risk:** Low
+
+**Affected modules/files:**
+- `docs/RUNBOOK.md`
+- `docs/LOCAL_TESTING_HANDBOOK.md`
+- `docs/OBSERVABILITY_RUNBOOK.md`
+- `docs/PRODUCTION_RELEASE_GATE.md`
+- `docs/SMOKE_TEST_CHECKLIST.md`
+- `tasks.md`
+
+---
+
+_tasks.md · SpecForge V1 · Version 2.8.0 · 2026-05-30 — Phase 23 Storyboard Product Keynote Generation T-250 through T-264 (15 tasks implementing the paid Storyboard feature from `V1 spec.md` v1.5.0 and `Plan v1.md` §23: Storyboard data model/migration; owner and public API contracts; finalised-stage source builder; strict six-act prompt and payload validation; 25-credit generation / 5-credit section regeneration with idempotency, row locking, refunds, stale propagation, and stuck-job recovery; trusted renderer and secure downloads; independent `/sb/{slug}` public sharing with permission filtering; frontend types/API/routes; workspace CTA and paid modal; browser deck and architecture reveal; presenter mode, source layer, launch page, share modal, downloads UI; security/rate limits; observability; full backend/frontend harness closure; docs, smoke checklist, and release gate)_
+
 _tasks.md · SpecForge V1 · Version 2.7.0 · 2026-05-29 — Phase 19 Prompt Pipeline Quality Hardening T-239 through T-249 (11 tasks closing 7 audit findings: F-1 architecture not forced toward correctness via T-239 ADR + anti-patterns + multi-tenancy; F-2 deprecation discipline via T-241 technology currency table + denylist + SCA criteria; F-3/F-6 architect thinking + scalability/reliability via T-240 Capacity Model + STRIDE + SLO + FMEA + AQA matrix; F-4 harness edge-case coverage via T-244 nine new mandatory categories + never-drop output budget; F-5 frontend design patterns via T-242 plan Frontend Architecture section + T-243 per-task FE checklist; F-7.1 50K→200K upstream cap + section-aware injection via T-246; F-7.2 critic loop via T-247 with one-regenerate cap, schema-restricted output, inline prompt template, disable_critic escape hatch; F-7.3 zero-LLM section validator via T-248; F-7.4 offline eval suite + CI gate on ASDD_PROMPT_VERSION bumps via T-249; F-7.5 PROFESSIONAL_OUTPUT_RULES escape-hatch tightening via T-245)_
 
 _tasks.md · SpecForge V1 · Version 2.6.3 · 2026-05-27 — Phase 18 post-review amendments: (1) T-226 StripeWebhookEvent `text` import added to code block + retention note; (2) T-227 STRIPE_SUCCESS_URL env corrected to /billing (not /billing/success); (3) T-228 `create()` → `create_async()`, stripe.api_version pinned, empty success_url guard added, StripeService class pattern mandated, risk assessment updated to remove asyncio.to_thread() alternative; (4) T-232 BILLING_IDOR_ATTEMPTS counter mention removed; (5) T-234 handle_event wrapped in begin_nested() SAVEPOINT, livemode guard added; (6) T-237 test_checkout_session_creation patch target corrected to create_async (was create), test_webhook_livemode_mismatch added as test #10; (7) T-238 setInterval clearInterval cleanup made explicit, fetchBillingStatus distinguishes 404 from non-404 errors_

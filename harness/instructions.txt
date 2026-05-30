@@ -19,8 +19,13 @@ Harness workflow:
 
 Expected commands after the app exists:
 - cd backend && uv run pytest ../harness/tests/backend
-- cd frontend && pnpm vitest run ../harness/tests/frontend
+- cd frontend && pnpm vitest run --root .. harness/tests/frontend
 - cd frontend && pnpm playwright test ../harness/tests/e2e
+
+Storyboard Phase 23 targeted commands:
+- cd backend && uv run pytest ../harness/tests/backend/test_phase23_storyboard_contract.py
+- cd frontend && pnpm vitest run --root .. harness/tests/frontend/phase23-storyboard.contract.test.ts
+- for f in harness/schemas/*.schema.json; do python3 -m json.tool "$f" > /dev/null || exit 1; done
 
 The harness is allowed to fail before implementation exists. That is the red
 phase.

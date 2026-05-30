@@ -1,0 +1,491 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://specforge.local/schemas/storyboard-payload.schema.json",
+  "title": "StoryboardPayload",
+  "description": "Structured JSON contract for a generated Storyboard keynote. The LLM produces this payload; trusted backend/frontend renderers turn it into browser slides, PDFs, notes, scripts, and appendices.",
+  "type": "object",
+  "required": [
+    "title",
+    "theme",
+    "sections",
+    "diagrams",
+    "source_map",
+    "notes",
+    "demo_script_md",
+    "technical_appendix_md"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "title": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "theme": {
+      "$ref": "#/$defs/storyboard_theme"
+    },
+    "sections": {
+      "type": "array",
+      "minItems": 6,
+      "maxItems": 6,
+      "prefixItems": [
+        {
+          "$ref": "#/$defs/opening_thesis_section"
+        },
+        {
+          "$ref": "#/$defs/product_vision_section"
+        },
+        {
+          "$ref": "#/$defs/product_walkthrough_section"
+        },
+        {
+          "$ref": "#/$defs/technical_architecture_section"
+        },
+        {
+          "$ref": "#/$defs/trust_security_reliability_section"
+        },
+        {
+          "$ref": "#/$defs/launch_close_section"
+        }
+      ],
+      "items": false
+    },
+    "diagrams": {
+      "type": "array",
+      "minItems": 1,
+      "contains": {
+        "$ref": "#/$defs/architecture_reveal_diagram"
+      },
+      "items": {
+        "$ref": "#/$defs/diagram"
+      }
+    },
+    "source_map": {
+      "type": "object",
+      "description": "Map from slide/claim/component IDs to bounded source references from finalised SPEC, PLAN, HARNESS, and TASKS versions.",
+      "minProperties": 1,
+      "additionalProperties": {
+        "type": "array",
+        "minItems": 1,
+        "items": {
+          "$ref": "#/$defs/source_ref"
+        }
+      }
+    },
+    "notes": {
+      "type": "object",
+      "description": "Speaker notes keyed by slide ID.",
+      "minProperties": 1,
+      "additionalProperties": {
+        "$ref": "#/$defs/speaker_note"
+      }
+    },
+    "demo_script_md": {
+      "type": "string",
+      "minLength": 1
+    },
+    "technical_appendix_md": {
+      "type": "string",
+      "minLength": 1
+    }
+  },
+  "$defs": {
+    "storyboard_theme": {
+      "type": "object",
+      "required": [
+        "palette",
+        "typography",
+        "motif",
+        "transition_style",
+        "diagram_style"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "palette": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 8,
+          "items": {
+            "type": "string",
+            "pattern": "^#[0-9A-Fa-f]{6}$"
+          }
+        },
+        "typography": {
+          "type": "string",
+          "minLength": 1
+        },
+        "motif": {
+          "type": "string",
+          "minLength": 1
+        },
+        "transition_style": {
+          "type": "string",
+          "minLength": 1
+        },
+        "diagram_style": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "section_base": {
+      "type": "object",
+      "required": [
+        "id",
+        "title",
+        "slides"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80,
+          "pattern": "^[a-z0-9-]+$"
+        },
+        "title": {
+          "type": "string"
+        },
+        "slides": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/slide"
+          }
+        }
+      }
+    },
+    "opening_thesis_section": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/section_base"
+        },
+        {
+          "properties": {
+            "title": {
+              "const": "Opening Thesis"
+            }
+          }
+        }
+      ]
+    },
+    "product_vision_section": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/section_base"
+        },
+        {
+          "properties": {
+            "title": {
+              "const": "Product Vision"
+            }
+          }
+        }
+      ]
+    },
+    "product_walkthrough_section": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/section_base"
+        },
+        {
+          "properties": {
+            "title": {
+              "const": "Product Walkthrough"
+            }
+          }
+        }
+      ]
+    },
+    "technical_architecture_section": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/section_base"
+        },
+        {
+          "properties": {
+            "title": {
+              "const": "Technical Architecture"
+            }
+          }
+        }
+      ]
+    },
+    "trust_security_reliability_section": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/section_base"
+        },
+        {
+          "properties": {
+            "title": {
+              "const": "Trust, Security, Reliability"
+            }
+          }
+        }
+      ]
+    },
+    "launch_close_section": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/section_base"
+        },
+        {
+          "properties": {
+            "title": {
+              "const": "Launch Close"
+            }
+          }
+        }
+      ]
+    },
+    "slide": {
+      "type": "object",
+      "required": [
+        "id",
+        "type",
+        "headline",
+        "visible_text",
+        "visual",
+        "speaker_notes_ref",
+        "sources"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80,
+          "pattern": "^[a-z0-9-]+$"
+        },
+        "type": {
+          "enum": [
+            "hero",
+            "thesis",
+            "product",
+            "walkthrough",
+            "architecture",
+            "trust",
+            "closing",
+            "appendix_pointer"
+          ]
+        },
+        "headline": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 140
+        },
+        "visible_text": {
+          "type": "string",
+          "maxLength": 360
+        },
+        "visual": {
+          "type": "object",
+          "required": [
+            "kind"
+          ],
+          "additionalProperties": true,
+          "properties": {
+            "kind": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        },
+        "speaker_notes_ref": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sources": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "enum": [
+              "SPEC",
+              "PLAN",
+              "HARNESS",
+              "TASKS"
+            ]
+          }
+        }
+      }
+    },
+    "diagram": {
+      "type": "object",
+      "required": [
+        "id",
+        "type",
+        "layers"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80,
+          "pattern": "^[a-z0-9-]+$"
+        },
+        "type": {
+          "type": "string",
+          "minLength": 1
+        },
+        "layers": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/diagram_layer"
+          }
+        }
+      }
+    },
+    "architecture_reveal_diagram": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/diagram"
+        },
+        {
+          "properties": {
+            "type": {
+              "const": "architecture_reveal"
+            },
+            "layers": {
+              "type": "array",
+              "minItems": 8,
+              "contains": {
+                "properties": {
+                  "kind": {
+                    "const": "client"
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "diagram_layer": {
+      "type": "object",
+      "required": [
+        "id",
+        "kind",
+        "label",
+        "source_refs"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80,
+          "pattern": "^[a-z0-9-]+$"
+        },
+        "kind": {
+          "enum": [
+            "client",
+            "frontend",
+            "api",
+            "data",
+            "llm",
+            "integrations",
+            "trust",
+            "recovery",
+            "group"
+          ]
+        },
+        "label": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "summary": {
+          "type": "string",
+          "maxLength": 400
+        },
+        "source_refs": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/source_ref"
+          }
+        }
+      }
+    },
+    "source_ref": {
+      "type": "object",
+      "required": [
+        "source",
+        "source_id",
+        "excerpt"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "source": {
+          "enum": [
+            "SPEC",
+            "PLAN",
+            "HARNESS",
+            "TASKS"
+          ]
+        },
+        "source_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "excerpt": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1200
+        }
+      }
+    },
+    "speaker_note": {
+      "type": "object",
+      "required": [
+        "slide_id",
+        "talk_track",
+        "transition",
+        "timing_seconds",
+        "pause_cue",
+        "demo_cue",
+        "backup_points"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "slide_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "talk_track": {
+          "type": "string",
+          "minLength": 1
+        },
+        "transition": {
+          "type": "string",
+          "minLength": 1
+        },
+        "timing_seconds": {
+          "type": "integer",
+          "minimum": 5,
+          "maximum": 600
+        },
+        "pause_cue": {
+          "type": "string",
+          "minLength": 1
+        },
+        "demo_cue": {
+          "type": "string"
+        },
+        "backup_points": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    }
+  },
+  "$comment": "SECURITY: the LLM must never return executable HTML, CSS, JavaScript, iframes, external fonts, tracking pixels, or remote assets. Rendering belongs to trusted application code. The six top-level sections are fixed; Validation and Execution Plan are intentionally not section titles."
+}

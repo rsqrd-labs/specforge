@@ -5,7 +5,7 @@
   "purpose": "Executable red/green contract for building SpecForge V1 with agentic coding tasks.",
   "commands": {
     "backend": "cd backend && uv run pytest ../harness/tests/backend",
-    "frontend": "cd frontend && pnpm vitest run ../harness/tests/frontend",
+    "frontend": "cd frontend && pnpm vitest run --root .. harness/tests/frontend",
     "e2e": "cd frontend && pnpm playwright test ../harness/tests/e2e",
     "schemas": "for f in harness/schemas/*.schema.json; do python3 -m json.tool \"$f\" > /dev/null || exit 1; done"
   },
@@ -69,6 +69,21 @@
       "id": "phase16-final-remediation-contracts",
       "path": "harness/tests/backend/test_phase16_final_remediation_contract.py",
       "proves": "Phase 16 Final Remediation & Enterprise Hardening (T-196 through T-216): CF-1 SELECT FOR UPDATE wired in finalise() with integration test + misleading mock deleted, CF-2 can_route() enforced in gateway + circuit counter, HF-1 batched coverage query, HF-2 OpenAI empty-choices guard, HF-3 continuous recovery heartbeat, HF-4 get_running_loop() + dedicated PDF executor, HF-5 rate limit lazy Redis, HF-6 CSRF SETNX nonce tracking, HF-7 CI real DB service + alembic, MF-1 eval orphan task cancel, MF-2 coverage_utils shared module, MF-3 refund savepoint, MF-4 ErrorBoundary for TemplatesStrip, MF-5 Langfuse image pinned, LF-1 auth cache documented, LF-2 dedicated PDF executor, LF-3 false-confidence test deleted, LF-4 eval_results composite index migration, T-215 circuit rejection counter, T-216 RUNBOOK.md operational procedures."
+    },
+    {
+      "id": "phase23-storyboard-backend-contracts",
+      "path": "harness/tests/backend/test_phase23_storyboard_contract.py",
+      "proves": "Phase 23 Storyboard Product Keynote Generation (backend): Storyboard model and migration, authenticated owner router, public /storyboards/public routes, source builder, strict six-act prompt/schema, idempotent 25-credit generation and 5-credit section regeneration, refund and stale propagation, trusted renderer/downloads, permission-filtered public sharing, rate limits, observability, unit-test coverage, docs, smoke, and release-gate requirements."
+    },
+    {
+      "id": "phase23-storyboard-frontend-contracts",
+      "path": "harness/tests/frontend/phase23-storyboard.contract.test.ts",
+      "proves": "Phase 23 Storyboard Product Keynote Generation (frontend): typed API surface, Storyboard types, authenticated /storyboards/:id route, unauthenticated /sb/:slug route, workspace Create/Open Storyboard flow, paid confirmation modal, toolbar, full-screen deck, architecture reveal, presenter mode, source layer, sharing permissions, downloads, launch page, public privacy, and focused component tests."
+    },
+    {
+      "id": "phase23-storyboard-schemas",
+      "path": "harness/schemas/storyboard-*.schema.json",
+      "proves": "Phase 23 Storyboard JSON contracts: exactly six keynote acts, architecture reveal diagram, source map, speaker notes, demo script, technical appendix, visual identity, bounded source excerpts, and permission-filtered public response allow-list."
     },
     {
       "id": "e2e-smoke",

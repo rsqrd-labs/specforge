@@ -1,0 +1,114 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://specforge.local/schemas/storyboard-public-response.schema.json",
+  "title": "StoryboardPublicResponse",
+  "description": "Allow-list response contract for public Storyboard launch/deck pages at GET /storyboards/public/{slug}. Anything not listed here is private and must not appear in unauthenticated responses.",
+  "type": "object",
+  "required": [
+    "title",
+    "presentation",
+    "permissions",
+    "shared_at"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "title": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "presentation": {
+      "$ref": "storyboard-payload.schema.json"
+    },
+    "permissions": {
+      "type": "object",
+      "required": [
+        "allow_pdf_download",
+        "allow_notes_download",
+        "allow_appendix_download",
+        "allow_source_layer"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "allow_pdf_download": {
+          "type": "boolean",
+          "default": true
+        },
+        "allow_notes_download": {
+          "type": "boolean",
+          "default": false
+        },
+        "allow_appendix_download": {
+          "type": "boolean",
+          "default": false
+        },
+        "allow_source_layer": {
+          "type": "boolean",
+          "default": false
+        }
+      }
+    },
+    "downloads": {
+      "type": "array",
+      "description": "Only owner-enabled public downloads. HTML package download is intentionally absent by default.",
+      "items": {
+        "enum": [
+          "pdf",
+          "notes",
+          "demo-script",
+          "appendix"
+        ]
+      },
+      "uniqueItems": true
+    },
+    "shared_at": {
+      "type": "string",
+      "format": "date-time"
+    }
+  },
+  "not": {
+    "anyOf": [
+      {
+        "required": [
+          "user_id"
+        ]
+      },
+      {
+        "required": [
+          "workspace_id"
+        ]
+      },
+      {
+        "required": [
+          "credit_ledger_id"
+        ]
+      },
+      {
+        "required": [
+          "source_stage_version_ids"
+        ]
+      },
+      {
+        "required": [
+          "email"
+        ]
+      },
+      {
+        "required": [
+          "credit_balance"
+        ]
+      },
+      {
+        "required": [
+          "billing_history"
+        ]
+      },
+      {
+        "required": [
+          "previous_versions"
+        ]
+      }
+    ]
+  },
+  "$comment": "SECURITY: public Storyboard responses are permission-filtered and noindex. They never expose user IDs, workspace IDs, credit data, billing data, source stage version IDs, previous versions, private notes, private appendix, or source excerpts unless the matching public permission is enabled."
+}
