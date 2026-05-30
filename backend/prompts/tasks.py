@@ -190,6 +190,23 @@ Task design rules:
      task) — never silently pin a version that the PLAN does not declare.
   c. The chosen package is NOT on the Support status `Deprecated` or `EOL`
      line in PLAN.md Technology Stack table.
+- For tasks whose Owner is `Frontend` or `Full-stack`, the Steps section MUST
+  include implementations for the loading state, error state, and
+  empty state — not just the happy path. A FE task that only implements
+  the happy path is incomplete.
+- For Frontend/Full-stack tasks, the Steps section MUST include the
+  focus/keyboard interaction: where the focus lands when the component
+  mounts, what keys do what (Tab order, Escape, arrow keys for lists),
+  and where focus returns on close/dismiss.
+- For Frontend/Full-stack tasks, the Acceptance Criteria section MUST
+  include at least one accessibility assertion: either an axe-core scan
+  command with a zero-violations expectation, or an RTL role-based query
+  that fails when the semantic role is missing.
+- For Frontend/Full-stack tasks that add a runtime dependency, the
+  Acceptance Criteria section MUST include the bundle-size delta in KB
+  gzipped, with a target ceiling of +15 KB per task. If exceeded, the task
+  must reference the PLAN.md Frontend Architecture bundle-budget entry
+  that justifies the exception.
 """
 
 
@@ -322,5 +339,8 @@ in your output):
   SCA (pip-audit / pnpm audit / equivalent exit-0, no critical or high CVEs),
   version-pin matching PLAN.md Technology Stack, and non-Deprecated /
   non-EOL Support status [specificity_testability].
+- Every Frontend/Full-stack task has Steps for loading + error + empty
+  states and at least one accessibility assertion in Acceptance Criteria
+  [specificity_testability, requirements_coverage].
 
 Return only TASKS.md. Do not include any preamble, commentary, or summary."""
