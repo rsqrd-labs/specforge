@@ -1,8 +1,9 @@
 # SpecForge Observability Runbook
 
 Use this runbook when validating, operating, or troubleshooting SpecForge
-observability. It covers the three observability paths used by the application:
-Prometheus metrics, Sentry, and Langfuse.
+observability. It covers the observability paths used by the application:
+Prometheus metrics, Sentry, Langfuse, Stripe billing counters, and prompt
+pipeline quality counters.
 
 ## Scope
 
@@ -11,6 +12,8 @@ Prometheus metrics, Sentry, and Langfuse.
 | Prometheus metrics | Health, request, auth, rate-limit, credit, and LLM operation metrics from `/metrics` | Enabled; protected by token or localhost-only access |
 | Sentry | Backend and frontend exception reporting | Disabled when DSNs are blank |
 | Langfuse | Optional LLM traces, prompt lookup, eval score links, and dataset collection | Disabled when `LANGFUSE_SECRET_KEY` is blank |
+| Stripe billing counters | Checkout, webhook, credit grant, duplicate delivery, dispute, and rate-limit signals | Enabled when the billing router is loaded; billing can still be disabled with blank Stripe keys |
+| Prompt quality counters | Validator failures, skipped upstream sections, and critic-regeneration credit usage | Enabled with the pipeline; used by Phase 19 release gates |
 
 Detailed setup steps live in `docs/INTEGRATION_API_SETUP_HANDBOOK.md`. This
 runbook is for operations and incident response.
@@ -48,6 +51,8 @@ Production startup validation is enforced in `backend/config.py`:
 - If Langfuse is enabled in production, `LANGFUSE_HOST` must use HTTPS.
 - If Langfuse is enabled in production,
   `LANGFUSE_CONTENT_CAPTURE_ACK=true` is required.
+- If `STRIPE_SECRET_KEY` is set in production, it must not be a `sk_test_*`
+  key. Leave it blank to intentionally disable billing.
 
 ## Normal Validation
 
@@ -63,6 +68,16 @@ Run these checks before relying on observability during a release.
 
 Expected result: health is `200`, metrics are available only to trusted callers,
 and dashboard scrape targets are healthy.
+
+Important metric families:
+
+- `specforge_billing_*` for Stripe checkout, webhook, credit grant, duplicate,
+  dispute, expiry, consumption, and checkout rate-limit signals.
+- `pipeline_validator_failures_total` for mandatory section contract failures.
+- `pipeline_upstream_section_skipped_total` for upstream context sections the
+  prompt builder could not find.
+- `specforge_billing_credits_critic_regen_total` for critic-triggered
+  regeneration credit consumption.
 
 ### Sentry
 
@@ -102,6 +117,33 @@ integration does not exist.
 
 Expected result: Langfuse provides observability only. User-facing flows must
 not depend on Langfuse availability.
+
+### Billing Metrics
+
+1. In staging with Stripe test credentials, load `GET /billing/package`.
+2. Create a Checkout Session through the billing page.
+3. Complete checkout and let the Stripe webhook reach `/billing/webhook`.
+4. Confirm `specforge_billing_checkout_created_total`,
+   `specforge_billing_checkout_completed_total`, and
+   `specforge_billing_credits_granted_total` increment.
+5. Replay the same event from Stripe or the Stripe CLI and confirm
+   `specforge_billing_webhook_duplicate_total` increments without granting
+   credits twice.
+
+Expected result: checkout and webhook counters reflect the Stripe dashboard,
+and duplicate delivery is visible but harmless.
+
+### Prompt Quality Metrics
+
+1. Generate SPEC, PLAN, HARNESS, and TASKS on staging.
+2. Confirm `pipeline_validator_failures_total` remains at zero.
+3. Confirm any `pipeline_upstream_section_skipped_total` labels correspond to
+   genuinely absent optional upstream context, not renamed mandatory headings.
+4. Confirm `specforge_billing_credits_critic_regen_total` does not spike above
+   the normal baseline after prompt changes.
+
+Expected result: prompt gates are quiet during normal generation. Any increase
+after a prompt deploy is treated as a release investigation signal.
 
 ## Incident Response
 
@@ -160,6 +202,67 @@ Decision:
 - If generation, refine, credits, or eval fail because of Langfuse, treat that
   as a release blocker; the integration is required to fail open.
 
+### Billing Webhook Errors
+
+Impact: users may pay without receiving credits until webhook delivery or
+processing recovers.
+
+Checks:
+
+- Verify `STRIPE_WEBHOOK_SECRET` matches the Stripe endpoint.
+- Inspect Stripe dashboard delivery logs for `/billing/webhook`.
+- Check logs for `billing.webhook_invalid_signature`,
+  `billing.webhook_livemode_mismatch`, and `billing.webhook_handle_failed`.
+- Confirm `stripe_webhook_events.stripe_event_id` has one row per processed
+  event and duplicate deliveries return `already_processed`.
+- Confirm production is using live Stripe keys and staging is using test keys.
+
+Decision:
+
+- Roll back or disable billing if multiple successful payments are not granting
+  credits.
+- Keep the app online but pause checkout promotion if duplicate counters rise
+  while grants remain correct.
+
+### Prompt Validator Failures
+
+Impact: generated artifacts may be missing required architecture, security,
+SLO, capacity, FMEA, traceability, or validation sections.
+
+Checks:
+
+- Inspect `pipeline_validator_failures_total{stage=...}` labels.
+- Compare the affected stage output with `SECTION_CONTRACTS` in
+  `artifact_validator.py`.
+- Check recent changes to `backend/prompts/**`, `prompt_builder.py`, and
+  `critic.py`.
+- Run `harness/prompt_eval` against the deployed `ASDD_PROMPT_VERSION`.
+
+Decision:
+
+- Treat a new sustained increase as a release blocker.
+- Revert the prompt/version or disable the promotion until the eval suite and
+  manual sample pass.
+
+### Critic Regeneration Spike
+
+Impact: users may see slower generation and extra credit consumption from
+repair attempts.
+
+Checks:
+
+- Inspect `specforge_billing_credits_critic_regen_total{stage=...}`.
+- Check whether validator failures increased at the same time.
+- Check provider latency/error rates; low-quality partial responses can cause
+  repair loops.
+- Review the prompt eval report for the current `ASDD_PROMPT_VERSION`.
+
+Decision:
+
+- Roll back a prompt deploy if the spike is new and tied to that version.
+- If provider instability is the cause, route users to a healthy provider when
+  possible.
+
 ### Langfuse Prompt Changes Not Taking Effect
 
 Impact: prompt template updates may not be reflected immediately.
@@ -201,6 +304,9 @@ Go:
 - Sentry DSNs are correct or intentionally blank.
 - Langfuse disabled mode has no behavioral delta.
 - Langfuse enabled mode fails open under outage testing.
+- Stripe checkout/webhook metrics match the Stripe dashboard when billing is
+  enabled, and duplicate delivery is idempotent.
+- Prompt validator and critic-regeneration metrics are at expected baseline.
 - Prompt/output telemetry export has been approved before enabling Langfuse in
   production.
 
@@ -209,5 +315,9 @@ No-go:
 - Production startup validation fails.
 - `/metrics` is exposed without the intended protection.
 - Langfuse failure breaks generation, refine, eval, credits, or prompt fallback.
+- Stripe checkout completes without credit grants, or webhook HMAC/livemode
+  validation is misconfigured.
+- Prompt validator failures or critic-regeneration credit usage spike after a
+  prompt deploy.
 - Prompt or model output telemetry is enabled in production without approval.
 - Secrets appear in logs, traces, Sentry events, or Langfuse payloads.

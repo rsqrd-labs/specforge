@@ -158,6 +158,26 @@ have access to:
 You only need one. Leave the others blank in the config file — the app will
 only show providers with valid keys.
 
+### Stripe billing keys (optional)
+
+Leave Stripe blank for normal local development. The billing page still loads
+and `GET /billing/package` still returns the configured package, but checkout
+creation returns a safe 503 until Stripe is configured.
+
+To test paid credit packs locally:
+
+1. Create a Stripe test account or use an existing Stripe test mode project.
+2. Copy a test secret key (`sk_test_...`) into `STRIPE_SECRET_KEY`.
+3. Install the Stripe CLI and run:
+
+   ```bash
+   stripe listen --forward-to localhost:8000/billing/webhook
+   ```
+
+4. Copy the printed webhook signing secret (`whsec_...`) into
+   `STRIPE_WEBHOOK_SECRET`.
+5. Use `http://localhost:5173/billing` for both success and cancel URLs.
+
 ---
 
 ## Part 3 — Configure environment files
@@ -245,6 +265,15 @@ FRONTEND_URL=http://localhost:5173
 # GitHub OAuth App — leave blank to disable GitHub export integration
 GITHUB_CLIENT_ID=
 GITHUB_CLIENT_SECRET=
+
+# Stripe billing — leave blank to disable local checkout
+STRIPE_SECRET_KEY=
+STRIPE_WEBHOOK_SECRET=
+STRIPE_PRICE_CENTS=900
+STRIPE_CREDITS_PER_PURCHASE=200
+STRIPE_CREDIT_VALIDITY_DAYS=30
+STRIPE_SUCCESS_URL=http://localhost:5173/billing
+STRIPE_CANCEL_URL=http://localhost:5173/billing
 
 # LLM providers — fill in whichever you have, leave others as placeholder
 ANTHROPIC_API_KEY=sk-ant-...
@@ -349,6 +378,16 @@ curl http://localhost:8000/providers
 Expected: a JSON response with a `providers` array. You should see an entry
 for each provider whose API key you filled in.
 
+### Check the billing package
+
+```bash
+curl http://localhost:8000/billing/package
+```
+
+Expected: JSON with the current price, credits per purchase, and validity
+window. If Stripe keys are blank, checkout creation is disabled but the package
+endpoint remains available.
+
 ### Sign in and run the full flow
 
 1. Open [http://localhost:5173](http://localhost:5173) in your browser.
@@ -365,6 +404,20 @@ for each provider whose API key you filled in.
 
 If all of the above works, your local setup is complete and functioning
 end-to-end.
+
+### Optional billing checkout walkthrough
+
+With Stripe test mode and `stripe listen` running:
+
+1. Open [http://localhost:5173/billing](http://localhost:5173/billing).
+2. Confirm the credit pack price and current purchase history load.
+3. Click the buy-credits control and confirm the browser redirects to Stripe
+   Checkout.
+4. Complete checkout with a Stripe test card.
+5. Return to `/billing?session_id=...`; the page should poll
+   `GET /billing/status` until the webhook grants credits.
+6. Confirm the credit balance and purchase history update once. Replaying the
+   webhook should not grant credits a second time.
 
 ---
 
@@ -420,6 +473,26 @@ codebase:
 ```bash
 cd backend
 uv run pytest ../harness/tests/backend/ -q
+```
+
+### Prompt eval suite
+
+Run this whenever you change `backend/prompts/**`, the critic template, or
+prompt section contracts:
+
+```bash
+cd harness
+uv run python -m prompt_eval.run \
+  --version "$(grep -oE 'asdd-v[0-9.]+' ../backend/prompts/base.py)" \
+  --baseline asdd-v1.7.1 \
+  --report /tmp/prompt_eval_report.md
+```
+
+Also run the anonymization guard before changing golden workspaces:
+
+```bash
+cd backend
+uv run pytest ../harness/tests/backend/test_prompt_eval_anonymization.py -q
 ```
 
 ---
@@ -516,6 +589,22 @@ status and look at `docker compose logs redis`.
   reject requests from accounts without a payment method even if they have a
   free tier.
 
+### Billing checkout returns 503
+
+This is expected when local billing is intentionally disabled. To enable it,
+set `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_SUCCESS_URL`, and
+`STRIPE_CANCEL_URL` in `backend/.env`, then restart the backend.
+
+### Billing checkout succeeds but credits do not appear
+
+- Confirm `stripe listen --forward-to localhost:8000/billing/webhook` is still
+  running.
+- Confirm `STRIPE_WEBHOOK_SECRET` matches the current Stripe CLI listener.
+- Check backend logs for `billing.webhook_invalid_signature`,
+  `billing.webhook_livemode_mismatch`, or `billing.webhook_handle_failed`.
+- Confirm you completed the Checkout Session created by SpecForge, not a
+  standalone test event without SpecForge metadata.
+
 ### Backend starts but immediately crashes
 
 Run the config check:
@@ -576,5 +665,6 @@ Environment variable changes require a restart.
 | Run backend tests | `cd backend && uv run pytest tests/ -q` |
 | Run frontend tests | `cd frontend && pnpm test` |
 | Run harness tests | `cd backend && uv run pytest ../harness/tests/backend/ -q` |
+| Run prompt eval | `cd harness && uv run python -m prompt_eval.run --version "$(grep -oE 'asdd-v[0-9.]+' ../backend/prompts/base.py)" --baseline asdd-v1.7.1 --report /tmp/prompt_eval_report.md` |
 | Check backend health | `curl http://localhost:8000/health` |
 | Open API explorer | http://localhost:8000/docs |

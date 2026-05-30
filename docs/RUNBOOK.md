@@ -1,7 +1,9 @@
 # SpecForge Operations Runbook
 
 Operational procedures for SpecForge V1 on-call engineers and SREs.  
-Covers: circuit breaker, finalise race incident response, credit refund procedures, auth cache limitations, and dependency version management.
+Covers: circuit breaker, finalise race incident response, credit refund
+procedures, auth cache limitations, dependency version management, Stripe
+billing alerts, and prompt pipeline quality gates.
 
 ---
 
@@ -15,6 +17,8 @@ Covers: circuit breaker, finalise race incident response, credit refund procedur
 6. [Langfuse Docker Image — Version Management](#6-langfuse-docker-image--version-management)
 7. [Database Migrations — Alembic Runbook](#7-database-migrations--alembic-runbook)
 8. [Secret Rotation Procedures](#8-secret-rotation-procedures)
+9. [Billing Alerts](#9-billing-alerts)
+10. [Prompt Pipeline Quality Gates And Eval Workflow](#10-prompt-pipeline-quality-gates-and-eval-workflow)
 
 ---
 
@@ -32,7 +36,7 @@ The LLM circuit breaker tracks consecutive failures per provider using `_FAILURE
 **Prometheus metric:** `specforge_llm_circuit_rejections_total{provider="<provider>"}`
 
 > **Alert:** if `specforge_llm_circuit_rejections_total > 0` — a circuit breaker has
-> activated. Check provider health via `GET /providers/{id}/health`.
+> activated. Check provider health via `GET /providers/health` while signed in.
 
 ```promql
 # Alert: circuit breaker tripped in the last 5 minutes
@@ -61,7 +65,9 @@ Search Grafana / Loki: `{app="specforge"} |= "llm.circuit_open"`.
 ### User Impact When the Circuit Is Open
 
 - All generation requests routed to the tripped provider return **HTTP 503** immediately (no LLM call is made).
-- Health-check probes (`GET /providers/{id}/health`) are **not** blocked — they bypass the circuit via `bypass_circuit=True` and can detect recovery.
+- Health-check probes (`GET /providers/health`) are **not** blocked — they
+  bypass the circuit via `bypass_circuit=True` and can detect recovery for all
+  configured providers. The endpoint requires an authenticated user.
 - The circuit **auto-resets** when either:
   1. `record_provider_success()` is called (health probe succeeds), or
   2. The last failure is older than 600 seconds (the window expires).
@@ -248,15 +254,19 @@ To force-clear the cache for a specific user: `invalidate_user_cache(user_id)` i
 GET /health
 ```
 
-Returns `{"status": "ok", "db": "ok", "redis": "ok"}` or HTTP 503 with failing components.
+Returns HTTP 200 with `{"status":"ok","version":"1.0.0"}` when healthy and
+HTTP 503 with `status:"degraded"` on dependency failure. In non-production the
+response also includes `db` and `redis`; production omits dependency details.
 
 ### LLM Provider Health
 
 ```
-GET /providers/{provider_id}/health
+GET /providers/health
 ```
 
-Triggers a live health probe to the provider (bypasses the circuit breaker). Returns the current health status, failure count, and circuit state.
+Requires authentication. Triggers live health probes for all configured
+providers (bypassing the circuit breaker) and returns each provider's health
+status, failure count, and circuit state.
 
 ### Prometheus Metrics
 
@@ -276,6 +286,11 @@ Key metrics to monitor:
 | `sse_stream_duration_seconds` | P95 > 120s → streaming hung |
 | `pdf_export_duration_seconds` | P95 > 10s → PDF rendering slow |
 | `eval_failure_total` | Sustained increase → eval service degraded |
+| `specforge_billing_webhook_error_total` | Any increase → Stripe webhook processing error |
+| `specforge_billing_checkout_rate_limited_total` | Sustained increase → checkout abuse or broken retry loop |
+| `pipeline_validator_failures_total` | Any increase → prompt output missing mandatory sections |
+| `pipeline_upstream_section_skipped_total` | Sustained increase → upstream stage lacks required context |
+| `specforge_billing_credits_critic_regen_total` | Spike → critic loop is burning extra regeneration credits |
 
 ---
 
@@ -652,7 +667,97 @@ The following Grafana alert rules correspond to the Prometheus counters defined 
 
 | Alert | Condition | Severity | Action |
 |---|---|---|---|
-| BillingWebhookErrorRate | `rate(specforge_billing_webhook_error_total[5m]) > 0` | Warning | Check logs for `billing.webhook_handle_failed`; inspect Stripe dashboard for event details; delete the `stripe_webhook_events` row to replay the event |
+| BillingWebhookErrorRate | `rate(specforge_billing_webhook_error_total[5m]) > 0` | Warning | Check logs for `billing.webhook_handle_failed`; inspect Stripe dashboard for event details; use Stripe retry after the handler is fixed. Delete a `stripe_webhook_events` row only with incident-lead approval and only after confirming credits were not granted |
 | BillingCheckoutDropped | `checkout.session.completed` events stagnant while `checkout_created` rising (5-min window) | Warning | Check Stripe webhook delivery logs; verify `/billing/webhook` is reachable and returning 200; inspect CSRF/rate-limit exemptions |
 | BillingDisputeCreated | `specforge_billing_pack_disputed_total` increments | Warning | Review Stripe dispute in the dashboard; contact user if fraudulent; credits already revoked automatically |
 | BillingWebhookDuplicate | `rate(specforge_billing_webhook_duplicate_total[1h]) > 10` | Info | Normal if Stripe is retrying; investigate if above 100/hour — may indicate the webhook endpoint is failing silently after `already_processed` return |
+
+### Billing Endpoint Recovery
+
+- `GET /billing/package` is public and should keep returning the configured
+  package even when checkout is disabled.
+- `POST /billing/checkout` requires authentication and is rate limited to five
+  attempts per user per hour. A 503 means billing is intentionally disabled or
+  missing `STRIPE_SECRET_KEY` / `STRIPE_SUCCESS_URL`; a 502 means Stripe could
+  not create the Checkout Session.
+- `POST /billing/webhook` is exempt from browser CSRF and app rate limits, but
+  every event must pass Stripe signature validation. Webhook retries are safe:
+  `stripe_webhook_events.stripe_event_id` is unique and duplicate deliveries
+  return `already_processed`.
+- In production, a `sk_test_*` Stripe secret is rejected at startup. If staging
+  test webhooks are accidentally pointed at production, the livemode guard
+  rejects them before credits are granted.
+
+## 10. Prompt Pipeline Quality Gates And Eval Workflow
+
+Phase 19 introduced mandatory structure gates before critic regeneration and an
+offline prompt eval suite for prompt changes. The relevant files are:
+
+- `backend/prompts/base.py` for `ASDD_PROMPT_VERSION`.
+- `backend/services/pipeline/artifact_validator.py` for stage section
+  contracts and zero-LLM validation before critic/regeneration.
+- `backend/services/pipeline/prompt_builder.py` for upstream section extraction
+  and `pipeline_upstream_section_skipped_total`.
+- `backend/services/pipeline/critic.py` for the inline critic repair prompt and
+  `specforge_billing_credits_critic_regen_total`.
+- `harness/prompt_eval/` for golden workspaces, deterministic graders, and the
+  local CLI.
+- `.github/workflows/prompt-eval.yml` for the PR gate on prompt changes.
+
+### Required Workflow For Prompt Changes
+
+1. Branch from `main`.
+2. Change the prompt, critic template, or section contract.
+3. Bump `ASDD_PROMPT_VERSION` in `backend/prompts/base.py`. Use a minor bump
+   for structural requirements and a patch bump for wording-only changes.
+4. Run the eval locally:
+
+   ```bash
+   cd harness
+   uv run python -m prompt_eval.run \
+     --version <new-version> \
+     --baseline <old-version> \
+     --report report.md
+   ```
+
+5. Review `report.md`. Per-grader scores must be at or above baseline. Any
+   accepted regression needs an owner and written release approval.
+6. Open the PR. The `prompt-eval` GitHub workflow fails if files under
+   `backend/prompts/**` changed without an `ASDD_PROMPT_VERSION` bump, then runs
+   the same eval suite and posts the Markdown report on the PR.
+
+### Quarterly Rebaseline
+
+Once per quarter, refresh the eval suite so it reflects the current product:
+
+1. Choose one representative recent workspace from production or staging.
+2. Anonymize it before it enters `harness/prompt_eval/golden_workspaces/`.
+3. Run the anonymization guard:
+
+   ```bash
+   cd backend
+   uv run pytest ../harness/tests/backend/test_prompt_eval_anonymization.py -q
+   ```
+
+4. Run the prompt eval on `main` and save the new baseline scores:
+
+   ```bash
+   cd harness
+   uv run python -m prompt_eval.run \
+     --version "$(grep -oE 'asdd-v[0-9.]+' ../backend/prompts/base.py)" \
+     --baseline asdd-v1.7.1 \
+     --report prompt_eval_report.md
+   ```
+
+5. Attach `prompt_eval_report.md` to the quarterly review and update the
+   checked-in baseline score files only after the anonymization and eval checks
+   pass.
+
+### Incident Response Signals
+
+| Signal | Meaning | Action |
+|---|---|---|
+| `pipeline_validator_failures_total` increases | A stage output is missing a mandatory contract section before critic repair | Inspect the affected stage output and prompt version; pause prompt promotion if new |
+| `specforge_billing_credits_critic_regen_total` spikes | Critic repair loops are consuming extra regeneration credits | Compare provider latency/errors, recent prompt changes, and validator failures |
+| `pipeline_upstream_section_skipped_total` increases | The prompt builder could not find expected upstream context | Inspect the upstream stage for renamed/missing headings; check whether a prompt or parser change caused drift |
+| Prompt eval CI fails | New prompt behavior regressed against baseline | Do not merge until the prompt is fixed or the regression has explicit release-owner acceptance |

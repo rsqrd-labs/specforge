@@ -1,5 +1,11 @@
 # SpecForge — Second-Pass Enterprise Code Review
 
+> **Archive note:** This is a historical verification snapshot from
+> May 23, 2026, not the current operational source of truth. Several findings
+> here have since been remediated or superseded by later phase work. Use
+> `docs/PRODUCTION_RELEASE_GATE.md`, `docs/RUNBOOK.md`, and
+> `docs/OBSERVABILITY_RUNBOOK.md` for current release and operations guidance.
+
 > **Review type:** Deep verification + advanced second-pass  
 > **Reviewer role:** Principal Engineer / Staff SRE / Security Architect / Scalability & Reliability Auditor  
 > **Scope:** Post-remediation codebase following the first-pass CODE_REVIEW.md and subsequent hardening tasks  

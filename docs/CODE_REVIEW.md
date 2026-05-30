@@ -1,5 +1,10 @@
 # SpecForge — Staff-Level Production Readiness Review
 
+> **Archive note:** This is a historical review snapshot, not the current
+> operational source of truth. Many findings listed here have since been
+> remediated. Use `docs/PRODUCTION_RELEASE_GATE.md`, `docs/RUNBOOK.md`, and
+> `docs/OBSERVABILITY_RUNBOOK.md` for current release and operations guidance.
+
 ---
 
 ## Executive Summary

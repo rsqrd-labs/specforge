@@ -96,14 +96,15 @@ you merge to `main`.
 | Vercel | Production | Hosts the frontend website |
 | GitHub Actions secrets | Production | Lets the automated pipeline deploy to Railway and Vercel |
 | GitHub OAuth App | Optional | GitHub export integration — lets users push spec/plan/tasks to a GitHub repo as files + issues. Leave blank to disable. |
+| Stripe | Optional | Paid credit packs through Stripe Checkout and signed webhooks. Leave blank to disable billing checkout. |
 | Sentry | Optional | Error reporting if something breaks in production |
 | Grafana OTLP | Optional | Distributed tracing (advanced observability) |
 | Langfuse | Optional | LLM call logging and prompt management |
 | Prometheus metrics | Built in | `/metrics` endpoint — no setup needed |
 
-Dependencies installed but not yet wired to credentials (safe to ignore):
-`stripe`, `resend`, `supabase` — these packages exist but SpecForge does not
-read any corresponding environment variables for them.
+Dependencies installed but not currently required for runtime setup:
+`resend` and `supabase`. Stripe is wired through the billing endpoints and is
+documented below.
 
 ---
 
@@ -353,6 +354,60 @@ Common errors:
 
 ---
 
+### Stripe Billing (optional — skip if you do not sell credit packs)
+
+Stripe powers the `/billing` page, hosted Checkout Sessions, and signed
+webhooks that grant purchased credits. Leave `STRIPE_SECRET_KEY` blank to
+disable checkout; the billing package endpoint remains available and the
+frontend surfaces a safe error if a user attempts checkout.
+
+**How to set up Stripe:**
+
+1. In Stripe, use test mode for local/staging and live mode for production.
+2. Copy the secret key into `STRIPE_SECRET_KEY`.
+3. Create a webhook endpoint pointing at `{BACKEND_URL}/billing/webhook`.
+4. Subscribe the endpoint to:
+   - `checkout.session.completed`
+   - `charge.dispute.created`
+5. Copy the webhook signing secret into `STRIPE_WEBHOOK_SECRET`.
+6. Set the return URLs to the billing page:
+   - `STRIPE_SUCCESS_URL={FRONTEND_URL}/billing`
+   - `STRIPE_CANCEL_URL={FRONTEND_URL}/billing`
+7. Configure the package:
+   - `STRIPE_PRICE_CENTS=900`
+   - `STRIPE_CREDITS_PER_PURCHASE=200`
+   - `STRIPE_CREDIT_VALIDITY_DAYS=30`
+
+```env
+STRIPE_SECRET_KEY=sk_test_...       # use sk_live_... in production
+STRIPE_WEBHOOK_SECRET=whsec_...
+STRIPE_PRICE_CENTS=900
+STRIPE_CREDITS_PER_PURCHASE=200
+STRIPE_CREDIT_VALIDITY_DAYS=30
+STRIPE_SUCCESS_URL=http://localhost:5173/billing
+STRIPE_CANCEL_URL=http://localhost:5173/billing
+```
+
+Production guardrails:
+
+- `STRIPE_SECRET_KEY` may be blank to intentionally disable billing.
+- If set in production, `STRIPE_SECRET_KEY` must be a live key. The backend
+  refuses to start with `sk_test_*` when `ENVIRONMENT=production`.
+- The webhook handler verifies `Stripe-Signature`, stores every processed
+  `stripe_event_id`, and treats duplicate deliveries as idempotent.
+- The webhook livemode guard rejects test events in production and live events
+  in non-production.
+
+Common errors:
+
+- Checkout returns 503: billing is disabled or `STRIPE_SUCCESS_URL` is blank.
+- Checkout returns 502: Stripe could not create the Checkout Session; check the
+  API key and Stripe dashboard logs.
+- Credits do not appear after payment: verify webhook delivery, signing secret,
+  and logs for `billing.webhook_handle_failed`.
+
+---
+
 ### Sentry (optional — skip for first deploy)
 
 Sentry catches and reports errors from the running app. Useful once you have
@@ -448,6 +503,7 @@ first time. Work through these steps in order.
 - A Vercel account ([vercel.com](https://vercel.com)) — free to sign up.
 - Your Google OAuth credentials (from section 2 above).
 - At least one LLM provider API key.
+- Stripe test/live credentials if you plan to enable paid credit packs.
 
 ### Step 1 — Set up Railway (backend + databases)
 
@@ -499,6 +555,13 @@ Railway will host the FastAPI server, PostgreSQL, and Redis.
     | `GOOGLE_API_KEY` | Your Gemini key (or leave blank if not using Gemini) |
     | `GITHUB_CLIENT_ID` | Your GitHub OAuth App client ID (or leave blank to disable GitHub export) |
     | `GITHUB_CLIENT_SECRET` | Your GitHub OAuth App client secret (or leave blank) |
+    | `STRIPE_SECRET_KEY` | Blank to disable billing; `sk_live_...` for production billing |
+    | `STRIPE_WEBHOOK_SECRET` | Stripe webhook signing secret when billing is enabled |
+    | `STRIPE_PRICE_CENTS` | Credit pack price in cents, e.g. `900` |
+    | `STRIPE_CREDITS_PER_PURCHASE` | Credits granted per purchase, e.g. `200` |
+    | `STRIPE_CREDIT_VALIDITY_DAYS` | Credit expiry window, e.g. `30` |
+    | `STRIPE_SUCCESS_URL` | Your frontend billing URL, e.g. `https://your-vercel-url.vercel.app/billing` |
+    | `STRIPE_CANCEL_URL` | Your frontend billing URL, e.g. `https://your-vercel-url.vercel.app/billing` |
     | `ENCRYPTION_MASTER_KEY` | Generated below |
     | `CSRF_SECRET` | Generated below |
     | `METRICS_TOKEN` | Generated below |
@@ -625,6 +688,14 @@ Actions.
    | `VERCEL_ORG_ID` | Your Vercel org/account ID |
    | `VERCEL_PROJECT_ID` | Your Vercel project ID |
 
+   Optional but recommended for prompt-eval and provider smoke workflows:
+
+   | Secret name | Value |
+   | --- | --- |
+   | `ANTHROPIC_API_KEY` | Anthropic key for prompt/provider eval jobs |
+   | `OPENAI_API_KEY` | OpenAI key for prompt/provider eval jobs |
+   | `GOOGLE_API_KEY` | Gemini key for prompt/provider eval jobs |
+
 6. Push any small change to `main`. Watch the **Actions** tab in GitHub — you
    should see a workflow run that ends with a deploy step pushing to both
    Railway and Vercel.
@@ -637,7 +708,9 @@ Actions.
 2. Click **Sign in with Google** and complete the flow. You should land on
    `/dashboard` with 50 credits.
 3. Create a workspace and run a SPEC generation. Tokens should stream in.
-4. Check the Railway backend logs (Deployments → the running deploy →
+4. If Stripe billing is enabled, open `/billing`, create a test checkout in
+   staging, and confirm the webhook grants credits once.
+5. Check the Railway backend logs (Deployments → the running deploy →
    **View Logs**) for any errors.
 
 If something is wrong, the [Troubleshooting Guide](#5-troubleshooting-guide)
@@ -706,6 +779,14 @@ CSRF_SECRET=long-random-secret
 GITHUB_CLIENT_ID=
 GITHUB_CLIENT_SECRET=
 
+STRIPE_SECRET_KEY=
+STRIPE_WEBHOOK_SECRET=
+STRIPE_PRICE_CENTS=900
+STRIPE_CREDITS_PER_PURCHASE=200
+STRIPE_CREDIT_VALIDITY_DAYS=30
+STRIPE_SUCCESS_URL=http://localhost:5173/billing
+STRIPE_CANCEL_URL=http://localhost:5173/billing
+
 METRICS_TOKEN=
 SENTRY_DSN=
 GRAFANA_OTLP_ENDPOINT=
@@ -766,6 +847,8 @@ The backend enforces these rules at startup when `ENVIRONMENT=production`:
 - `FRONTEND_URL` must start with `https://`.
 - `JWT_PRIVATE_KEY` must be a real PEM key (not the CI placeholder).
 - `ENCRYPTION_MASTER_KEY` must not be the CI placeholder value.
+- If `STRIPE_SECRET_KEY` is set, it must not start with `sk_test_` in
+  production. Leave it blank to intentionally disable billing checkout.
 - If `LANGFUSE_SECRET_KEY` is set, `LANGFUSE_PUBLIC_KEY` must also be set,
   `LANGFUSE_HOST` must use `https://`, and `LANGFUSE_CONTENT_CAPTURE_ACK`
   must be `true`.
@@ -806,6 +889,15 @@ curl http://localhost:8000/providers
 
 Expected: a JSON object with a `providers` array containing `anthropic`,
 `openai`, and `google`.
+
+### Check billing package
+
+```bash
+curl http://localhost:8000/billing/package
+```
+
+Expected: JSON with price, credits, and validity window. Blank Stripe keys are
+valid for local development and mean checkout creation is disabled.
 
 ### Browser walkthrough
 
@@ -868,6 +960,19 @@ Check:
   `backend/services/llm/provider_config.py`.
 - Redis and PostgreSQL are reachable (`/health` shows both as `ok`).
 - Backend logs for a line containing `ProviderError`.
+
+### Billing checkout does not work
+
+Check:
+
+- `STRIPE_SECRET_KEY` is set only when billing checkout should be enabled.
+- In production, the key starts with `sk_live_`; `sk_test_` keys are rejected
+  by startup validation.
+- `STRIPE_SUCCESS_URL` and `STRIPE_CANCEL_URL` point to `{FRONTEND_URL}/billing`.
+- Stripe webhook endpoint is `{BACKEND_URL}/billing/webhook` and uses the same
+  signing secret as `STRIPE_WEBHOOK_SECRET`.
+- Backend logs for `billing.webhook_invalid_signature`,
+  `billing.webhook_livemode_mismatch`, or `billing.webhook_handle_failed`.
 
 ### CSRF failures (requests return 403)
 

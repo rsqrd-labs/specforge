@@ -20,6 +20,9 @@ Record these before starting the gate:
 | Frontend image/build | |
 | Database migration required | Yes / No |
 | Langfuse enabled in production | Yes / No |
+| Stripe billing enabled in production | Yes / No |
+| `ASDD_PROMPT_VERSION` | |
+| Prompt eval baseline | |
 
 ## Automated Gate
 
@@ -37,9 +40,21 @@ uv run pytest \
   ../harness/tests/backend/test_production_readiness_contract.py \
   ../harness/tests/backend/test_langfuse_contract.py \
   ../harness/tests/backend/test_langfuse_live_traffic_contract.py \
+  ../harness/tests/backend/test_phase21_stripe_payments_contract.py \
+  ../harness/tests/backend/test_phase22_prompt_pipeline_contract.py \
   -q
 uv run bandit -r config.py database.py main.py middleware models prompts routers schemas services
 uv run pip-audit --strict
+```
+
+Prompt quality gate:
+
+```bash
+cd harness
+uv run python -m prompt_eval.run \
+  --version "$(grep -oE 'asdd-v[0-9.]+' ../backend/prompts/base.py)" \
+  --baseline asdd-v1.7.1 \
+  --report ../prompt_eval_report.md
 ```
 
 Production smoke against staging:
@@ -57,6 +72,9 @@ Pass criteria:
 - Formatting and lint pass.
 - Unit tests pass.
 - Security and production-readiness harness contracts pass.
+- Stripe billing and prompt pipeline harness contracts pass.
+- Prompt eval report shows no unapproved per-grader regression against the
+  selected baseline.
 - Bandit reports no unresolved issues.
 - `pip-audit --strict` reports no known vulnerabilities.
 - Production smoke passes against staging with live LLM smoke enabled.
@@ -80,6 +98,18 @@ Production must satisfy these backend requirements:
 | `GITHUB_CLIENT_ID` | Blank to disable GitHub export; set both vars together |
 | `GITHUB_CLIENT_SECRET` | Required when `GITHUB_CLIENT_ID` is set |
 
+Stripe billing requirements:
+
+| Variable | Requirement |
+|---|---|
+| `STRIPE_SECRET_KEY` | Blank to disable billing; `sk_live_*` required when billing is enabled in production |
+| `STRIPE_WEBHOOK_SECRET` | Required when billing is enabled |
+| `STRIPE_PRICE_CENTS` | Positive integer package price in cents |
+| `STRIPE_CREDITS_PER_PURCHASE` | Positive integer credit grant per pack |
+| `STRIPE_CREDIT_VALIDITY_DAYS` | Positive integer expiry window |
+| `STRIPE_SUCCESS_URL` | HTTPS frontend billing URL, normally `{FRONTEND_URL}/billing` |
+| `STRIPE_CANCEL_URL` | HTTPS frontend billing URL, normally `{FRONTEND_URL}/billing` |
+
 Langfuse production requirements:
 
 | Variable | Requirement |
@@ -93,10 +123,14 @@ Langfuse production requirements:
 Pass criteria:
 
 - Application startup validation succeeds in the production-like environment.
+- If billing is enabled, Stripe webhooks are configured for the staging backend
+  and a test checkout has completed end to end.
 - Langfuse is either intentionally disabled or explicitly approved for
   prompt/output telemetry export.
 - No development secrets, CI placeholders, or local URLs are present in
   production variables.
+- No `sk_test_*` Stripe key is present in production. The backend rejects this
+  at startup, but the gate should catch it before deploy.
 
 ## Manual Smoke Gate
 
@@ -113,7 +147,11 @@ Minimum release-blocking coverage:
 - Stage finalise unlocks downstream stages.
 - Full SPEC to TASKS path can complete.
 - Export zip downloads and contains expected files.
+- Billing package, checkout redirect, status polling, and history work when
+  Stripe billing is enabled.
 - `/health` and `/metrics` are reachable as expected.
+- Prompt pipeline output includes required Phase 19 sections and the eval suite
+  report has been reviewed.
 - Frontend loads without console errors.
 
 Pass criteria:
@@ -128,6 +166,12 @@ Metrics:
 - `/metrics` requires the intended token or trusted-source access.
 - Staging scrape target is healthy.
 - Production scrape target is ready before deploy.
+- Billing counters are present: `specforge_billing_checkout_created_total`,
+  `specforge_billing_checkout_completed_total`,
+  `specforge_billing_webhook_error_total`, and duplicate/rate-limit counters.
+- Prompt quality counters are present: `pipeline_validator_failures_total`,
+  `pipeline_upstream_section_skipped_total`, and
+  `specforge_billing_credits_critic_regen_total`.
 
 Sentry:
 
@@ -160,6 +204,10 @@ Confirm:
 - Metrics endpoint is not publicly exposed without protection.
 - CORS and frontend URLs match production domains.
 - Prompt-injection defenses and output validation remain enabled.
+- Prompt changes are versioned through `ASDD_PROMPT_VERSION` and gated by
+  `harness/prompt_eval`.
+- Stripe webhook HMAC validation, idempotency, livemode guard, CSRF exemption,
+  and checkout rate limit are enabled.
 - Langfuse payloads go through the shared redaction path.
 - Langfuse production enablement has explicit content-capture acknowledgement.
 
@@ -183,6 +231,10 @@ Rollback triggers:
 - Authentication is unavailable.
 - Workspace creation or stage generation is broadly unavailable.
 - Credit deductions occur without successful generation and refund paths fail.
+- Stripe checkout completes but credits are not granted, or webhook errors
+  affect multiple users.
+- Prompt validator failures or critic-regeneration credit spikes appear after
+  deploy and cannot be mitigated by reverting the prompt/version.
 - Production startup validation fails.
 - Security controls are disabled or bypassed.
 - Langfuse failure propagates into user-facing failures.

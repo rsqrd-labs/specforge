@@ -33,6 +33,16 @@ workspace create/read/update/archive, and live SPEC streaming when
 `SPECFORGE_RUN_LLM_SMOKE=1`. Keep the manual checklist below for browser-only
 OAuth and UI interaction coverage.
 
+For prompt changes, also run the Phase 19 prompt eval before deploy:
+
+```bash
+cd harness
+uv run python -m prompt_eval.run \
+  --version "$(grep -oE 'asdd-v[0-9.]+' ../backend/prompts/base.py)" \
+  --baseline asdd-v1.7.1 \
+  --report ../prompt_eval_report.md
+```
+
 Use this checklist with `docs/PRODUCTION_RELEASE_GATE.md`. For observability
 troubleshooting during smoke, use `docs/OBSERVABILITY_RUNBOOK.md`.
 
@@ -171,6 +181,38 @@ integration is intentionally disabled for the environment.
 
 ---
 
+## Phase 18 — Stripe Billing
+
+**Prerequisites:** Stripe is enabled in staging with test credentials, and the
+webhook endpoint is `{BACKEND_URL}/billing/webhook`. If billing is
+intentionally disabled for the environment, run P18-7 and mark P18-1 through
+P18-6 as not applicable with release-owner approval.
+
+| # | Test | Result | Notes |
+|---|------|--------|-------|
+| P18-1 | Open `/billing` → package price, credit amount, current balance, and purchase history load. | 🔲 | |
+| P18-2 | Click buy credits → browser redirects to Stripe Checkout for the configured pack. | 🔲 | |
+| P18-3 | Complete test checkout → return to `/billing?session_id=...`; status polling grants credits once. | 🔲 | |
+| P18-4 | Purchase history shows the completed pack, credit amount, and expiry date. | 🔲 | |
+| P18-5 | Replay the same Stripe event → duplicate is accepted as idempotent and credits are not granted twice. | 🔲 | |
+| P18-6 | Send a webhook with an invalid signature → API returns 400 and no credits are granted. | 🔲 | |
+| P18-7 | With Stripe intentionally disabled, buy credits shows a safe disabled/error state and no checkout session is created. | 🔲 | |
+
+---
+
+## Phase 19 — Prompt Pipeline Quality Gate
+
+| # | Test | Result | Notes |
+|---|------|--------|-------|
+| P19-1 | `ASDD_PROMPT_VERSION` in `backend/prompts/base.py` is at or above the release target and was bumped for any prompt change. | 🔲 | |
+| P19-2 | `harness/prompt_eval` passes against the selected baseline and `prompt_eval_report.md` has no unapproved per-grader regression. | 🔲 | |
+| P19-3 | Generate PLAN and confirm required architecture/security/reliability sections are present, including ADRs, capacity, STRIDE, SLOs, and FMEA where applicable. | 🔲 | |
+| P19-4 | Generate HARNESS and TASKS; mandatory section validation passes before critic repair. | 🔲 | |
+| P19-5 | `/metrics` shows no new `pipeline_validator_failures_total` increase during the smoke run. | 🔲 | |
+| P19-6 | Any `pipeline_upstream_section_skipped_total` or `specforge_billing_credits_critic_regen_total` increase is understood and accepted by release owner. | 🔲 | |
+
+---
+
 ## Credit System Edge Cases
 
 | # | Test | Result | Notes |
@@ -271,12 +313,14 @@ With Langfuse unconfigured (`LANGFUSE_SECRET_KEY` blank):
 | HARNESS + TASKS | 4 | | | |
 | Export | 2 | | | |
 | Phase 13 — GitHub | 15 | | | |
+| Phase 18 — Billing | 7 | | | |
+| Phase 19 — Prompt Quality | 6 | | | |
 | Credits Edge Cases | 3 | | | |
 | Rate Limiting | 1 | | | |
 | Stale State | 3 | | | |
 | Infrastructure | 4 | | | |
 | Sign-out | 2 | | | |
-| **Total** | **61** | | | |
+| **Total** | **74** | | | |
 
 Optional/additional checks:
 
