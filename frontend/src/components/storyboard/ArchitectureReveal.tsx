@@ -1,4 +1,4 @@
-import { useId, type CSSProperties } from "react"
+import type { CSSProperties } from "react"
 import type {
   StoryboardDiagram,
   StoryboardDiagramLayer,
@@ -72,7 +72,6 @@ export function ArchitectureReveal({
   const primary = safeHex(palette[0], "#8f4e00")
   const secondary = safeHex(palette[1], "#a1385f")
   const accent = safeHex(palette[2], "#565e74")
-  const gradientId = `storyboard-arch-line-${useId().replace(/[^a-zA-Z0-9_-]/g, "")}`
 
   return (
     <figure
@@ -86,74 +85,31 @@ export function ArchitectureReveal({
         } as CSSProperties
       }
     >
-      <div className="architecture-reveal-stage" aria-hidden="true">
-        <svg viewBox="0 0 960 420" aria-hidden="true" focusable="false">
-          <defs>
-            <linearGradient id={gradientId} x1="0" x2="1" y1="0" y2="1">
-              <stop offset="0%" stopColor={primary} />
-              <stop offset="100%" stopColor={secondary} />
-            </linearGradient>
-          </defs>
-          {ordered.map((layer, index) => {
-            const row = index % 2
-            const column = Math.floor(index / 2)
-            const x = 46 + column * 222
-            const y = row === 0 ? 74 : 248
-            const active = index < visibleCount
-            return (
-              <g
-                key={layer.id}
-                className={`architecture-node ${active ? "visible" : "pending"}`}
-                data-layer-kind={layer.kind}
-              >
-                {index > 0 && (
-                  <path
-                    d={`M${x - 38} ${row === 0 ? 124 : 298} C${x - 74} ${row === 0 ? 188 : 212}, ${x - 108} ${row === 0 ? 212 : 188}, ${x - 138} ${index % 2 === 0 ? 124 : 298}`}
-                    fill="none"
-                    stroke={`url(#${gradientId})`}
-                    strokeWidth="3"
-                    strokeLinecap="round"
-                    opacity={active ? 0.45 : 0.12}
-                  />
-                )}
-                <rect
-                  x={x}
-                  y={y}
-                  width="172"
-                  height="82"
-                  rx="18"
-                  fill={active ? "rgba(255,255,255,0.92)" : "rgba(255,255,255,0.42)"}
-                  stroke={active ? `url(#${gradientId})` : "rgba(85,67,54,0.22)"}
-                  strokeWidth="2"
-                />
-                <circle
-                  cx={x + 28}
-                  cy={y + 28}
-                  r="10"
-                  fill={active ? secondary : accent}
-                  opacity={active ? 0.92 : 0.32}
-                />
-                <text
-                  x={x + 48}
-                  y={y + 32}
-                  className="architecture-node-kind"
-                  fill={active ? primary : accent}
-                >
-                  {layer.kind}
-                </text>
-                <text
-                  x={x + 22}
-                  y={y + 62}
-                  className="architecture-node-label"
-                  fill="#1a1c1c"
-                >
-                  {layer.label.slice(0, 28)}
-                </text>
-              </g>
-            )
-          })}
-        </svg>
-      </div>
+      <ol className="architecture-reveal-stage" aria-label={`${title} ordered layers`}>
+        {ordered.map((layer, index) => {
+          const active = index < visibleCount
+          const summary =
+            layer.summary ||
+            LAYER_COPY[layer.kind as keyof typeof LAYER_COPY] ||
+            layer.kind
+          const sourceId = layer.source_refs[0]?.source_id
+          return (
+            <li
+              key={layer.id}
+              className={`architecture-layer-card ${active ? "visible" : "pending"}`}
+              data-layer-kind={layer.kind}
+            >
+              <span className="architecture-layer-card__index">{index + 1}</span>
+              <div>
+                <span className="architecture-layer-card__kind">{layer.kind}</span>
+                <strong>{layer.label}</strong>
+                <p>{summary}</p>
+                {sourceId && <small>{sourceId}</small>}
+              </div>
+            </li>
+          )
+        })}
+      </ol>
 
       <ol
         className="architecture-reveal-fallback sr-only"

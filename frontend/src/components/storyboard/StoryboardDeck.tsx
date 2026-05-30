@@ -13,6 +13,7 @@ import {
 import { PresenterMode } from "./PresenterMode"
 import { SourceLayer } from "./SourceLayer"
 import type {
+  SourceRef,
   StoryboardDiagram,
   StoryboardPayload,
   StoryboardSection,
@@ -63,44 +64,13 @@ interface DeckSlide {
   slideIndex: number
 }
 
-interface VisualFrame {
-  eyebrow: string
+interface EvidenceFrame {
+  source: string
   title: string
-  detail: string
+  excerpt: string
 }
 
-const VISUAL_FRAMES: Record<StoryboardSectionTitle, VisualFrame> = {
-  "Opening Thesis": {
-    eyebrow: "Thesis",
-    title: "Problem to product",
-    detail: "The opening frame stays tied to the finalised SPEC and PLAN.",
-  },
-  "Product Vision": {
-    eyebrow: "Vision",
-    title: "Product signal",
-    detail: "The deck highlights only capabilities grounded in the workspace.",
-  },
-  "Product Walkthrough": {
-    eyebrow: "Flow",
-    title: "Live workflow path",
-    detail: "Presenter cues focus on browser actions, not generated media.",
-  },
-  "Technical Architecture": {
-    eyebrow: "Architecture",
-    title: "System layers",
-    detail: "The reveal is rendered from structured diagram layers.",
-  },
-  "Trust, Security, Reliability": {
-    eyebrow: "Trust",
-    title: "Controls and recovery",
-    detail: "Security, reliability, and testing claims stay source-backed.",
-  },
-  "Launch Close": {
-    eyebrow: "Close",
-    title: "Readiness narrative",
-    detail: "The final act connects scope, confidence, and next action.",
-  },
-}
+const EVIDENCE_EXCERPT_MAX_LENGTH = 260
 
 function sectionForAct(
   payload: StoryboardPayload | null | undefined,
@@ -138,18 +108,39 @@ function findArchitectureDiagram(
   return payload?.diagrams.find((diagram) => diagram.type === "architecture_reveal") ?? null
 }
 
-function visualFrameFor(
-  section: StoryboardSection,
+function boundedEvidence(text: string): string {
+  const trimmed = text.trim()
+  if (trimmed.length <= EVIDENCE_EXCERPT_MAX_LENGTH) return trimmed
+  return `${trimmed.slice(0, EVIDENCE_EXCERPT_MAX_LENGTH).trimEnd()}...`
+}
+
+function sourceRefsForSlide(
+  payload: StoryboardPayload,
   slide: StoryboardSlide | null,
-): VisualFrame {
-  const base = VISUAL_FRAMES[section.title]
-  if (!slide) return base
-  if (slide.type === "trust") return VISUAL_FRAMES["Trust, Security, Reliability"]
-  if (slide.type === "walkthrough") return VISUAL_FRAMES["Product Walkthrough"]
-  if (slide.type === "product") return VISUAL_FRAMES["Product Vision"]
-  if (slide.type === "closing") return VISUAL_FRAMES["Launch Close"]
-  if (slide.type === "architecture") return VISUAL_FRAMES["Technical Architecture"]
-  return base
+): SourceRef[] {
+  if (!slide) return []
+  return Object.entries(payload.source_map)
+    .filter(([key]) => key === slide.id || key.startsWith(`${slide.id}.`))
+    .flatMap(([, refs]) => refs)
+}
+
+function evidenceFrameFor(
+  payload: StoryboardPayload,
+  slide: StoryboardSlide | null,
+): EvidenceFrame {
+  const ref = sourceRefsForSlide(payload, slide)[0]
+  if (ref) {
+    return {
+      source: ref.source,
+      title: ref.source_id,
+      excerpt: boundedEvidence(ref.excerpt),
+    }
+  }
+  return {
+    source: "Slide",
+    title: slide?.sources?.join(" + ") || "Source evidence",
+    excerpt: boundedEvidence(slide?.visible_text ?? payload.title),
+  }
 }
 
 function deckState({
@@ -372,7 +363,7 @@ export function StoryboardDeck({
   const isArchitectureSlide =
     slide?.type === "architecture" || section.title === "Technical Architecture"
   const architectureStep = ARCHITECTURE_LAYER_SEQUENCE.length
-  const visualFrame = visualFrameFor(section, slide)
+  const evidenceFrame = evidenceFrameFor(payload, slide)
 
   return (
     <section
@@ -465,9 +456,9 @@ export function StoryboardDeck({
               />
             ) : (
               <div className="storyboard-visual-card">
-                <span>{visualFrame.eyebrow}</span>
-                <strong>{visualFrame.title}</strong>
-                <p>{visualFrame.detail}</p>
+                <span>{evidenceFrame.source}</span>
+                <strong>{evidenceFrame.title}</strong>
+                <p>{evidenceFrame.excerpt}</p>
               </div>
             )}
           </div>

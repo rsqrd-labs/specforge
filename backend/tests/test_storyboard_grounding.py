@@ -127,7 +127,7 @@ def _payload() -> dict:
             }
         ],
         "source_map": {
-            "opening-claim": [
+            f"s{idx}": [
                 {
                     "source": "SPEC",
                     "source_id": "SPEC:overview",
@@ -136,6 +136,7 @@ def _payload() -> dict:
                     ),
                 }
             ]
+            for idx in range(6)
         },
         "notes": notes,
         "demo_script_md": "## Walkthrough\n1. Open the workspace and show generation.",
@@ -151,7 +152,7 @@ def test_grounding_accepts_exact_source_ids() -> None:
 
 def test_grounding_rejects_shallow_or_fabricated_source_ids() -> None:
     payload = _payload()
-    payload["source_map"]["opening-claim"][0]["source_id"] = "SPEC"
+    payload["source_map"]["s0"][0]["source_id"] = "SPEC"
 
     with pytest.raises(StoryboardPayloadError) as exc:
         _validate_payload_against_source(
@@ -161,6 +162,32 @@ def test_grounding_rejects_shallow_or_fabricated_source_ids() -> None:
     assert exc.value.stage == "schema"
     assert "unavailable source_id" in exc.value.summary
     assert "SPEC:overview" in exc.value.summary
+
+
+def test_grounding_rejects_paraphrased_or_truncated_source_excerpts() -> None:
+    payload = _payload()
+    payload["source_map"]["s0"][0]["excerpt"] = (
+        "SpecForge turns an idea into a structured engineering spec..."
+    )
+
+    with pytest.raises(StoryboardPayloadError) as exc:
+        _validate_payload_against_source(
+            StoryboardPayload.model_validate(payload), _source_package()
+        )
+
+    assert "excerpt is not exact text" in exc.value.summary
+
+
+def test_grounding_requires_every_slide_to_have_source_map_evidence() -> None:
+    payload = _payload()
+    payload["source_map"].pop("s0")
+
+    with pytest.raises(StoryboardPayloadError) as exc:
+        _validate_payload_against_source(
+            StoryboardPayload.model_validate(payload), _source_package()
+        )
+
+    assert "missing source_map evidence" in exc.value.summary
 
 
 def test_grounding_rejects_mismatched_source_enum() -> None:

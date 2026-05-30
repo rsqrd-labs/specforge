@@ -128,6 +128,8 @@ def _payload_dict(
         )
         notes[slide["id"]] = _note(slide["id"])
 
+    spec_excerpt = "Finalised spec overview content for the keynote."
+    plan_excerpt = "FastAPI + PostgreSQL + Redis; React SPA."
     arch_layers = [
         {
             "id": f"layer-{kind}",
@@ -135,7 +137,11 @@ def _payload_dict(
             "label": f"{kind.title()} plane",
             "summary": "Plane summary.",
             "source_refs": [
-                {"source": "PLAN", "source_id": "PLAN:architecture", "excerpt": "ref"}
+                {
+                    "source": "PLAN",
+                    "source_id": "PLAN:architecture",
+                    "excerpt": plan_excerpt,
+                }
             ],
         }
         for kind in _ARCH_LAYER_KINDS
@@ -159,9 +165,15 @@ def _payload_dict(
             }
         ],
         "source_map": {
-            "thesis-claim": [
-                {"source": "SPEC", "source_id": "SPEC:overview", "excerpt": "Overview."}
+            slide["id"]: [
+                {
+                    "source": "SPEC",
+                    "source_id": "SPEC:overview",
+                    "excerpt": spec_excerpt,
+                }
             ]
+            for section in sections
+            for slide in section["slides"]
         },
         "notes": notes,
         "demo_script_md": "## Walkthrough\n1. Show the editor.\n",

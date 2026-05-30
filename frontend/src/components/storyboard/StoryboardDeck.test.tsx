@@ -187,10 +187,11 @@ describe("StoryboardDeck", () => {
     render(<StoryboardDeck payload={makePayload()} status="ready" isOwner />)
 
     expect(screen.queryByText(/video-demo/i)).toBeNull()
-    expect(screen.getByText(/problem to product/i)).toBeInTheDocument()
+    expect(screen.getByText(/spec-1/i)).toBeInTheDocument()
+    expect(screen.getByText(/bounded source excerpt/i)).toBeInTheDocument()
 
     fireEvent.click(screen.getByRole("tab", { name: /product walkthrough/i }))
-    expect(screen.getByText(/live workflow path/i)).toBeInTheDocument()
+    expect(screen.getAllByText(/product walkthrough visible text/i).length).toBeGreaterThan(0)
   })
 
   it("handles loading, error, empty, failed, stale, and not-found states", () => {

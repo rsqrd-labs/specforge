@@ -310,6 +310,22 @@ def test_rejects_video_demo_cues_and_scripts() -> None:
     assert "video demo" in str(exc.value).lower()
 
 
+def test_rejects_generic_launch_copy_filler() -> None:
+    data = _valid_payload()
+    data["sections"][0]["slides"][0]["headline"] = (
+        "Empower Your Business with Seamless Workflow Automation"
+    )
+    with pytest.raises(Exception) as exc:
+        StoryboardPayload.model_validate(data)
+    assert "generic launch-copy" in str(exc.value).lower()
+
+    data = _valid_payload()
+    data["notes"]["s0"]["talk_track"] = "Join the revolution in operational excellence."
+    with pytest.raises(Exception) as exc:
+        StoryboardPayload.model_validate(data)
+    assert "generic launch-copy" in str(exc.value).lower()
+
+
 # ---------------------------------------------------------------------------
 # Parse / repair flow
 # ---------------------------------------------------------------------------
@@ -421,6 +437,31 @@ def test_build_user_prompt_wraps_sources_and_problem() -> None:
     assert "PLAN:architecture" in prompt
     assert "untrusted_content" in prompt  # injection fence applied
     assert "FastAPI + Postgres + Redis." in prompt
+
+
+def test_build_user_prompt_uses_spec_title_for_placeholder_workspace_name() -> None:
+    source = StoryboardSourcePackage(
+        workspace_id=__import__("uuid").uuid4(),
+        workspace_name="Test 3",
+        problem_statement="Build workflows.",
+        provider="anthropic",
+        model="claude-sonnet-4-6",
+        stage_versions={},
+        artifacts={"spec": "# Workflow Automation Platform\n\n## Overview\n..."},
+        excerpts={
+            "SPEC:overview": SourceExcerpt(
+                source_id="SPEC:overview",
+                stage="spec",
+                heading="Overview",
+                excerpt="Workflow Automation Platform overview.",
+            )
+        },
+        missing_source_sections=[],
+    )
+    prompt = build_user_prompt(source)
+
+    assert "PRODUCT NAME: Workflow Automation Platform" in prompt
+    assert "WORKSPACE NAME: Test 3" in prompt
 
 
 # ---------------------------------------------------------------------------

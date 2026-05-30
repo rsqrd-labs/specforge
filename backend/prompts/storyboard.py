@@ -83,6 +83,18 @@ _FORBIDDEN_VIDEO_DEMO_RE = re.compile(
     r"\b(demo|demonstration|walkthrough)\s+video\b",
     re.IGNORECASE,
 )
+_FORBIDDEN_MARKETING_RE = re.compile(
+    r"\b("
+    r"empower your business|"
+    r"join the revolution|"
+    r"operational excellence|"
+    r"game[- ]changing|"
+    r"revolutioni[sz]e|"
+    r"transform your|"
+    r"seamless workflow automation"
+    r")\b",
+    re.IGNORECASE,
+)
 _GENERIC_TITLES = {
     "product launch keynote",
     "launch keynote",
@@ -90,6 +102,11 @@ _GENERIC_TITLES = {
     "storyboard keynote",
     "product launch deck",
 }
+_PLACEHOLDER_WORKSPACE_RE = re.compile(
+    r"^(test|untitled|workspace|new workspace|draft)(\s+\d+)?$",
+    re.IGNORECASE,
+)
+_TITLE_RE = re.compile(r"^\s{0,3}#\s+(.+?)\s*#*\s*$", re.MULTILINE)
 
 
 # ---------------------------------------------------------------------------
@@ -124,11 +141,21 @@ class SpeakerNote(BaseModel):
     def _validate_notes(self) -> "SpeakerNote":
         if _FORBIDDEN_VIDEO_DEMO_RE.search(self.demo_cue):
             raise ValueError("demo_cue must not request or describe a video demo")
+        for field_name, text in (
+            ("talk_track", self.talk_track),
+            ("transition", self.transition),
+            ("pause_cue", self.pause_cue),
+            ("demo_cue", self.demo_cue),
+        ):
+            if _FORBIDDEN_MARKETING_RE.search(text):
+                raise ValueError(f"{field_name} contains generic launch-copy filler")
         for point in self.backup_points:
             if not point.strip():
                 raise ValueError("backup_points entries must be non-empty")
             if _FORBIDDEN_VIDEO_DEMO_RE.search(point):
                 raise ValueError("backup_points must not request a video demo")
+            if _FORBIDDEN_MARKETING_RE.search(point):
+                raise ValueError("backup_points contain generic launch-copy filler")
         return self
 
 
@@ -171,6 +198,15 @@ class StoryboardSlide(BaseModel):
 
     @model_validator(mode="after")
     def _enforce_sparse_and_sources(self) -> "StoryboardSlide":
+        for field_name, text in (
+            ("headline", self.headline),
+            ("visible_text", self.visible_text),
+        ):
+            if _FORBIDDEN_MARKETING_RE.search(text):
+                raise ValueError(
+                    f"slide {self.id!r} {field_name} contains "
+                    "generic launch-copy filler"
+                )
         if len(self.headline.split()) > _MAX_HEADLINE_WORDS:
             raise ValueError(
                 f"slide {self.id!r} headline exceeds {_MAX_HEADLINE_WORDS} words"
@@ -494,7 +530,8 @@ the main deck.
 SOURCE MAP — provide a source map so every major claim and every architecture
 component maps to bounded finalised source excerpts. Only cite the source ids you
 were given, exactly as written, such as "SPEC:overview" rather than "SPEC";
-never fabricate or paraphrase a citation id.
+never fabricate or paraphrase a citation id. Key source_map entries by slide id,
+and copy citation excerpts verbatim from the provided source excerpt text.
 
 VISUAL IDENTITY — provide a theme expressing the product's visual identity: a
 colour palette (3-8 #RRGGBB hex values), a typography mood, a motif, a transition
@@ -532,6 +569,21 @@ def _render_source_ids_block(source: StoryboardSourcePackage) -> str:
     return "\n".join(lines) or "- none"
 
 
+def _source_product_name(source: StoryboardSourcePackage) -> str:
+    """Prefer the SPEC title when the workspace name is only a placeholder."""
+
+    workspace_name = source.workspace_name.strip()
+    spec_title = ""
+    match = _TITLE_RE.search(source.artifacts.get("spec", ""))
+    if match:
+        spec_title = match.group(1).strip()
+    if spec_title and (
+        not workspace_name or _PLACEHOLDER_WORKSPACE_RE.match(workspace_name)
+    ):
+        return spec_title
+    return workspace_name or spec_title or "Storyboard"
+
+
 def build_user_prompt(source: StoryboardSourcePackage) -> str:
     """Render the user prompt grounding the keynote in the finalised sources.
 
@@ -543,11 +595,13 @@ def build_user_prompt(source: StoryboardSourcePackage) -> str:
     problem = wrap_untrusted_content("problem_statement", source.problem_statement)
     sources_block = _render_sources_block(source)
     source_ids_block = _render_source_ids_block(source)
+    product_name = _source_product_name(source)
     return f"""Build the launch keynote for this product. Ground every claim,
 metric, and architecture component in the finalised sources below. Produce the
 strict JSON payload described in the system prompt.
 
-PRODUCT NAME: {source.workspace_name}
+PRODUCT NAME: {product_name}
+WORKSPACE NAME: {source.workspace_name}
 
 PROBLEM STATEMENT:
 {problem}
@@ -561,8 +615,16 @@ FINALISED SOURCE EXCERPTS (cite these source ids in your source_map):
 
 Quality bar: the title, headlines, notes, and walkthrough must describe this
 specific product from the sources. Do not use "Product Launch Keynote" or other
-generic launch-copy filler. Do not invent pricing, customer promises, real-time
-capabilities, or any video-demo asset.
+generic launch-copy filler. Avoid phrases like "empower your business", "join
+the revolution", "operational excellence", "transform your...", and "game
+changing". Do not invent pricing, customer promises, real-time capabilities, or
+any video-demo asset.
+
+SOURCE MAP — key source_map entries by slide id. Every slide id must have at
+least one source_map entry (either the exact slide id or a key prefixed with
+"<slide_id>."). Every source_map and diagram source_refs excerpt must be copied
+verbatim from the matching source excerpt above; do not paraphrase citation
+excerpts or use ellipses.
 
 Return only the JSON Storyboard payload."""
 

@@ -206,28 +206,14 @@ def _hex_or(default: str, value: Any) -> str:
     return value if isinstance(value, str) and _HEX_RE.match(value) else default
 
 
-_VISUAL_LABELS_BY_ACT = {
-    "Opening Thesis": ("Thesis", "Problem to product"),
-    "Product Vision": ("Vision", "Product signal"),
-    "Product Walkthrough": ("Flow", "Live workflow path"),
-    "Technical Architecture": ("Architecture", "System layers"),
-    "Trust, Security, Reliability": ("Trust", "Controls and recovery"),
-    "Launch Close": ("Close", "Readiness narrative"),
-}
-
-
-def _visual_label(section_title: str, slide_type: str) -> tuple[str, str]:
-    if slide_type == "architecture":
-        return _VISUAL_LABELS_BY_ACT["Technical Architecture"]
-    if slide_type == "trust":
-        return _VISUAL_LABELS_BY_ACT["Trust, Security, Reliability"]
-    if slide_type == "walkthrough":
-        return _VISUAL_LABELS_BY_ACT["Product Walkthrough"]
-    if slide_type == "product":
-        return _VISUAL_LABELS_BY_ACT["Product Vision"]
-    if slide_type == "closing":
-        return _VISUAL_LABELS_BY_ACT["Launch Close"]
-    return _VISUAL_LABELS_BY_ACT.get(section_title, ("Keynote", "Source-backed frame"))
+def _source_refs_for_slide(
+    source_map: dict[str, Any], slide_id: str
+) -> list[dict[str, Any]]:
+    refs: list[dict[str, Any]] = []
+    for key, value in source_map.items():
+        if key == slide_id or key.startswith(f"{slide_id}."):
+            refs.extend(ref for ref in value if isinstance(ref, dict))
+    return refs
 
 
 def _build_deck_context(content: dict[str, Any], workspace_name: str) -> dict[str, Any]:
@@ -237,19 +223,22 @@ def _build_deck_context(content: dict[str, Any], workspace_name: str) -> dict[st
     accent_2 = _hex_or(_DEFAULT_ACCENT_2, palette[1] if len(palette) > 1 else None)
 
     sections: list[dict[str, Any]] = []
+    source_map = content.get("source_map") or {}
+    if not isinstance(source_map, dict):
+        source_map = {}
     for section in content.get("sections") or []:
         section_title = _clean(section.get("title"))
         slides: list[dict[str, Any]] = []
         for slide in section.get("slides") or []:
-            visual_kind, visual_fallback = _visual_label(
-                section_title, _clean(slide.get("type"))
-            )
+            slide_id = _clean(slide.get("id"))
+            refs = _source_refs_for_slide(source_map, slide_id)
+            first_ref = refs[0] if refs else {}
             slides.append(
                 {
                     "headline": _clean(slide.get("headline")),
                     "visible_text": _clean(slide.get("visible_text")),
-                    "visual_kind": visual_kind,
-                    "visual_detail": visual_fallback,
+                    "visual_kind": _clean(first_ref.get("source_id")),
+                    "visual_detail": _clean(first_ref.get("excerpt"))[:260],
                     "sources": [
                         s for s in (slide.get("sources") or []) if s in _VALID_SOURCES
                     ],

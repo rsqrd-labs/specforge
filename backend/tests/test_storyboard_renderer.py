@@ -60,7 +60,15 @@ def _payload() -> dict:
                 ],
             }
         ],
-        "source_map": {},
+        "source_map": {
+            "s0": [
+                {
+                    "source": "SPEC",
+                    "source_id": "SPEC:overview",
+                    "excerpt": "Four stages, one flow.",
+                }
+            ]
+        },
         "notes": {},
         "demo_script_md": "## Demo\n1. Open editor.\n",
         "technical_appendix_md": "## Appendix\nDetails.\n",
@@ -116,7 +124,7 @@ def test_render_deck_html_includes_content_and_csp() -> None:
     assert "SpecForge Launch Keynote" in html
     assert "Opening Thesis" in html
     assert "From idea to engineered spec" in html
-    assert "Problem to product" in html
+    assert "SPEC:overview" in html
     assert "full-bleed" not in html
     assert "Browser SPA" in html
     # Embedded CSP meta with all required directives.

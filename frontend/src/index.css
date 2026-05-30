@@ -9466,6 +9466,12 @@ button:disabled {
 
 .architecture-reveal-stage {
   width: 100%;
+  min-height: 320px;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin: 0;
+  list-style: none;
   border: 1px solid rgba(143, 78, 0, 0.12);
   border-radius: 8px;
   background:
@@ -9474,29 +9480,69 @@ button:disabled {
   padding: 18px;
 }
 
-.architecture-reveal-stage svg {
-  display: block;
-  width: 100%;
-  min-height: 320px;
+.architecture-layer-card {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+  border: 1px solid rgba(143, 78, 0, 0.14);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.82);
+  padding: 12px;
+  transition: opacity 0.2s ease, transform 0.2s ease;
 }
 
-.architecture-node {
-  transition: opacity 0.24s ease, transform 0.24s ease;
-}
-
-.architecture-node.pending {
+.architecture-layer-card.pending {
   opacity: 0.42;
 }
 
-.architecture-node-kind {
-  font-size: 13px;
+.architecture-layer-card__index {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 999px;
+  background: var(--storyboard-arch-secondary);
+  color: #fff;
+  font-size: 12px;
   font-weight: 900;
+}
+
+.architecture-layer-card__kind {
+  display: block;
+  margin-bottom: 3px;
+  color: var(--storyboard-arch-primary);
+  font-size: 10px;
+  font-weight: 900;
+  letter-spacing: 0.06em;
   text-transform: uppercase;
 }
 
-.architecture-node-label {
+.architecture-layer-card strong {
+  display: block;
+  color: var(--color-on-surface);
   font-size: 14px;
   font-weight: 800;
+  line-height: 1.2;
+}
+
+.architecture-layer-card p {
+  margin: 5px 0 0;
+  color: var(--color-on-surface-variant);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.architecture-layer-card small {
+  display: inline-flex;
+  margin-top: 8px;
+  border-radius: 999px;
+  background: rgba(86, 94, 116, 0.10);
+  color: var(--color-tertiary);
+  padding: 3px 7px;
+  font-size: 9px;
+  font-weight: 900;
 }
 
 .architecture-reveal-caption {
@@ -9553,6 +9599,10 @@ button:disabled {
     grid-template-columns: 1fr;
   }
 
+  .architecture-reveal-stage {
+    grid-template-columns: 1fr;
+  }
+
   .storyboard-share-modal__url {
     grid-template-columns: 1fr;
   }
@@ -9593,28 +9643,11 @@ button:disabled {
   }
 
   .architecture-reveal-stage {
-    display: none;
-  }
-
-  .architecture-reveal-fallback.sr-only {
-    position: static;
-    width: auto;
-    height: auto;
-    margin: 12px 0 0;
-    padding-left: 20px;
-    overflow: visible;
-    clip: auto;
-    clip-path: none;
-    white-space: normal;
-  }
-
-  .architecture-reveal-fallback li {
-    margin-bottom: 8px;
-  }
-
-  .architecture-reveal-fallback span {
-    display: block;
-    color: #333;
+    grid-template-columns: 1fr;
+    min-height: 0;
+    padding: 0;
+    border: 0;
+    background: transparent;
   }
 }
 

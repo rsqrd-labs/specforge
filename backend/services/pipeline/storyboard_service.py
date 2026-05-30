@@ -118,6 +118,7 @@ _FORBIDDEN_VIDEO_DEMO_RE = re.compile(
     r"\b(demo|demonstration|walkthrough)\s+video\b",
     re.IGNORECASE,
 )
+_WHITESPACE_RE = re.compile(r"\s+")
 
 
 # ---------------------------------------------------------------------------
@@ -653,10 +654,15 @@ def _validate_payload_against_source(
 
     available = source.excerpts
     errors: list[str] = []
+    slide_source_map_keys = set(payload.source_map)
+
+    def normalise_excerpt(text: str) -> str:
+        return _WHITESPACE_RE.sub(" ", text).strip()
 
     def check_ref(ref: Any, context: str) -> None:
         source_id = getattr(ref, "source_id", "")
         source_enum = getattr(ref, "source", "")
+        ref_excerpt = normalise_excerpt(getattr(ref, "excerpt", ""))
         excerpt = available.get(source_id)
         if excerpt is None:
             errors.append(f"{context} uses unavailable source_id {source_id!r}")
@@ -666,6 +672,21 @@ def _validate_payload_against_source(
             errors.append(
                 f"{context} source {source_enum!r} does not match {source_id!r}"
             )
+        if ref_excerpt not in normalise_excerpt(excerpt.excerpt):
+            errors.append(
+                f"{context} excerpt is not exact text from source_id {source_id!r}"
+            )
+
+    for section in payload.sections:
+        for slide in section.slides:
+            if len(set(slide.sources)) != len(slide.sources):
+                errors.append(f"slide {slide.id!r} has duplicate source badges")
+            has_slide_claim = any(
+                key == slide.id or key.startswith(f"{slide.id}.")
+                for key in slide_source_map_keys
+            )
+            if not has_slide_claim:
+                errors.append(f"slide {slide.id!r} is missing source_map evidence")
 
     for claim_key, refs in payload.source_map.items():
         for idx, ref in enumerate(refs):
