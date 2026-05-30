@@ -1,6 +1,7 @@
 import axios from "axios"
 import { useEffect, useState } from "react"
 import { Link, useParams } from "react-router-dom"
+import { StoryboardDeck } from "../components/storyboard/StoryboardDeck"
 import { getApiErrorMessage, getStoryboard } from "../services/api"
 import type { StoryboardDetail } from "../types/storyboard"
 
@@ -60,17 +61,16 @@ export default function Storyboard() {
 
   if (state.kind === "loading") {
     return (
-      <main className="storyboard-page" aria-busy="true">
-        <p>Loading Storyboard…</p>
+      <main className="storyboard-page storyboard-page--deck" aria-busy="true">
+        <StoryboardDeck isLoading title="Storyboard" />
       </main>
     )
   }
 
   if (state.kind === "not_found") {
     return (
-      <main className="storyboard-page storyboard-page--empty">
-        <h1>Storyboard not found</h1>
-        <p>This Storyboard does not exist or is not available on your account.</p>
+      <main className="storyboard-page storyboard-page--deck">
+        <StoryboardDeck isNotFound title="Storyboard" />
         <Link to="/dashboard">Back to dashboard</Link>
       </main>
     )
@@ -78,9 +78,8 @@ export default function Storyboard() {
 
   if (state.kind === "error") {
     return (
-      <main className="storyboard-page storyboard-page--error" role="alert">
-        <h1>Could not load Storyboard</h1>
-        <p>{state.message}</p>
+      <main className="storyboard-page storyboard-page--deck" role="alert">
+        <StoryboardDeck title="Storyboard" errorMessage={state.message} />
         <Link to="/dashboard">Back to dashboard</Link>
       </main>
     )
@@ -88,14 +87,21 @@ export default function Storyboard() {
 
   const { storyboard } = state
   return (
-    <main className="storyboard-page">
+    <main className="storyboard-page storyboard-page--deck">
       <header className="storyboard-page__header">
-        <h1>{storyboard.title}</h1>
         <p className="storyboard-page__meta">
           Version {storyboard.version} · <span>{storyboard.status}</span>
         </p>
+        <Link to={`/workspace/${storyboard.workspace_id}`}>Back to workspace</Link>
       </header>
-      <Link to={`/workspace/${storyboard.workspace_id}`}>Back to workspace</Link>
+      <StoryboardDeck
+        payload={storyboard.content}
+        status={storyboard.status}
+        title={storyboard.title}
+        isOwner={true}
+        allowPresenterMode={true}
+        allowSourceLayer={true}
+      />
     </main>
   )
 }
