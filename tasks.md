@@ -14025,13 +14025,13 @@ Each test must include a clear docstring explaining what invariant it tests and 
 
 ---
 
-## Phase 23 — Storyboard Product Keynote Generation
+## Phase 20 — Storyboard Product Keynote Generation
 
 > Source: `V1 spec.md` v1.5.0 §4.13, §6, §9, §10, §11, §12, §13, §14, Success Metrics; `Plan v1.md` §23; harness files `harness/tests/backend/test_phase23_storyboard_contract.py`, `harness/tests/frontend/phase23-storyboard.contract.test.ts`, `harness/schemas/storyboard-payload.schema.json`, and `harness/schemas/storyboard-public-response.schema.json`.
 >
 > Storyboard is a paid, browser-native, shareable product keynote generator. It turns a finalised SPEC + PLAN + HARNESS + TASKS workspace into a polished six-act launch presentation with architecture reveal, presenter notes, source-backed claims, demo script, technical appendix, downloads, and public sharing. It is not a generic slide generator.
 >
-> [!important] **Storyboard Delivery Directive — applies to every backend and frontend task in Phase 23 (T-250 through T-264).**
+> [!important] **Storyboard Delivery Directive — applies to every backend and frontend task in Phase 20 (T-250 through T-264).**
 >
 > 1. Work on one task at a time. Do not start the next Storyboard task until the current task has implementation, tests, validation, documentation updates if needed, security review, and self-review complete.
 > 2. Storyboard generation is paid: full generation/regeneration costs 25 credits; single-section regeneration costs 5 credits. Duplicate requests, refreshes, and polling retries must never double-charge.
@@ -15173,7 +15173,7 @@ Instrument Storyboard so production operators can see generation failures, refun
 **Category:** Test Infrastructure / Backend + Frontend / Contract Closure
 **Severity:** Critical
 **Priority:** P0
-**Harness:** Full Phase 23 backend and frontend harness
+**Harness:** Full Phase 20 Storyboard backend and frontend harness
 
 **Description:**
 Close the Storyboard feature with complete backend, frontend, and harness validation. This task should not add major product behavior; it fills any missing behavioral tests, fixes gaps found by the harness, and proves the feature is ready for documentation and smoke testing.
@@ -15207,7 +15207,7 @@ Close the Storyboard feature with complete backend, frontend, and harness valida
    - open deck
    - share publicly
    - download PDF/notes
-4. Run the entire Phase 23 harness:
+4. Run the entire Phase 20 Storyboard harness:
    - backend contract
    - frontend contract
    - schema validation
@@ -15337,7 +15337,7 @@ Document Storyboard operations and release criteria. The feature is not complete
 
 ---
 
-_tasks.md · SpecForge V1 · Version 2.8.0 · 2026-05-30 — Phase 23 Storyboard Product Keynote Generation T-250 through T-264 (15 tasks implementing the paid Storyboard feature from `V1 spec.md` v1.5.0 and `Plan v1.md` §23: Storyboard data model/migration; owner and public API contracts; finalised-stage source builder; strict six-act prompt and payload validation; 25-credit generation / 5-credit section regeneration with idempotency, row locking, refunds, stale propagation, and stuck-job recovery; trusted renderer and secure downloads; independent `/sb/{slug}` public sharing with permission filtering; frontend types/API/routes; workspace CTA and paid modal; browser deck and architecture reveal; presenter mode, source layer, launch page, share modal, downloads UI; security/rate limits; observability; full backend/frontend harness closure; docs, smoke checklist, and release gate)_
+_tasks.md · SpecForge V1 · Version 2.8.0 · 2026-05-30 — Phase 20 Storyboard Product Keynote Generation T-250 through T-264 (15 tasks implementing the paid Storyboard feature from `V1 spec.md` v1.5.0 and `Plan v1.md` §23: Storyboard data model/migration; owner and public API contracts; finalised-stage source builder; strict six-act prompt and payload validation; 25-credit generation / 5-credit section regeneration with idempotency, row locking, refunds, stale propagation, and stuck-job recovery; trusted renderer and secure downloads; independent `/sb/{slug}` public sharing with permission filtering; frontend types/API/routes; workspace CTA and paid modal; browser deck and architecture reveal; presenter mode, source layer, launch page, share modal, downloads UI; security/rate limits; observability; full backend/frontend harness closure; docs, smoke checklist, and release gate)_
 
 _tasks.md · SpecForge V1 · Version 2.7.0 · 2026-05-29 — Phase 19 Prompt Pipeline Quality Hardening T-239 through T-249 (11 tasks closing 7 audit findings: F-1 architecture not forced toward correctness via T-239 ADR + anti-patterns + multi-tenancy; F-2 deprecation discipline via T-241 technology currency table + denylist + SCA criteria; F-3/F-6 architect thinking + scalability/reliability via T-240 Capacity Model + STRIDE + SLO + FMEA + AQA matrix; F-4 harness edge-case coverage via T-244 nine new mandatory categories + never-drop output budget; F-5 frontend design patterns via T-242 plan Frontend Architecture section + T-243 per-task FE checklist; F-7.1 50K→200K upstream cap + section-aware injection via T-246; F-7.2 critic loop via T-247 with one-regenerate cap, schema-restricted output, inline prompt template, disable_critic escape hatch; F-7.3 zero-LLM section validator via T-248; F-7.4 offline eval suite + CI gate on ASDD_PROMPT_VERSION bumps via T-249; F-7.5 PROFESSIONAL_OUTPUT_RULES escape-hatch tightening via T-245)_
 
