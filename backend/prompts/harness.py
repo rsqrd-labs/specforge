@@ -131,20 +131,53 @@ Harness rules:
   assertion such as `assert False, "not implemented: FR-001"`.
 - If the plan is missing a testable detail, write a failing gap test that names the
   missing plan detail and the affected requirement rather than silently skipping it.
+- `boundary_values` tests: for every endpoint that accepts user input, write a
+  parametrised test covering empty string, null, max-length, Unicode (BMP +
+  supplementary planes), emoji, RTL, zero-width control chars. At least one
+  boundary_values test file per resource.
+- `property_based` tests: for every parser, validator, serializer, and ID
+  generator, write a Hypothesis (Python) or fast-check (TypeScript) suite
+  with ≥ 100 examples. Strategy must be tight enough to find off-by-one
+  and Unicode normalization bugs.
+- `concurrency` tests: for every endpoint with an idempotency requirement,
+  write an N-concurrent-writer test (asyncio.gather / Promise.all with
+  N ≥ 5 concurrent requests to the same resource) and assert exactly-once
+  side effects.
+- `chaos` tests: for every external dependency (DB, cache, queue, third-party
+  API, LLM provider), write a dependency-kill test that drops the connection
+  mid-request and asserts the documented graceful-degradation path.
+- `regression_safety` tests: schema-diff test for every public API contract
+  against the last released contract (e.g., openapi-diff). Breaking changes
+  must fail the test.
+- `migration_safety` tests: every Alembic migration must have a forward test
+  (apply + new code reads), a backward test (apply + old code reads), and a
+  rollback test (downgrade + new code reads).
+- `accessibility` tests: for every frontend route, an axe-core run with a
+  zero-serious-or-critical-violations assertion.
+- `performance_budget` tests: bundle-size assertion per route (frontend),
+  Lighthouse score floor (frontend), and p95 latency assertion under load
+  (backend endpoints).
+- `supply_chain` tests: SBOM presence test (CycloneDX or SPDX), lockfile-
+  pinned test (assert no unpinned ranges in lockfile), and SCA exit-0 test.
 
-Output budget discipline:
-- If the complete harness would exceed output token limits, complete fewer files
-  rather than abbreviating many files. Priority order:
-  (1) the shared setup file and all factory files — every other test depends on these;
-  (2) integration tests — highest product signal per line written;
-  (3) security tests — high residual risk if absent;
-  (4) unit tests for core business logic;
-  (5) remaining categories in the order they appear in the Coverage Plan.
-- For any file deferred due to token limits, write a placeholder in the file tree:
-  `# DEFERRED — token budget; required by: <req IDs>` and list all deferred files
-  with their priority level in the Coverage Plan section.
-- Never split a file across two responses or write partial class/function bodies.
-  A complete, runnable file is always better than a partial one.
+Output budget discipline (rewritten Phase 19):
+- When token budget is exhausted, do NOT defer files. Instead, drop test
+  categories in this priority order:
+    1. drop `performance_budget`
+    2. drop `accessibility` (still required to exist as a stub file in the
+       file tree with a single failing `assert False, "deferred: a11y"`)
+    3. drop `property_based`
+    4. drop the `boundary_values` extras (keep at least one per resource)
+- NEVER drop these four categories: `integration`, `security`, `contract`,
+  `migration_safety`. These four are load-bearing for the product contract;
+  dropping them silently means shipping unverified.
+- For every category that was reduced or dropped, write a `TestCategoryGap`
+  record in the Coverage Plan with this exact format:
+    `TestCategoryGap: category=<name> reason=<token_budget|other> reqs=<FR-NNN,SEC-NNN>`
+  These records are how the prompt-eval suite (T-249) detects silent
+  coverage regressions.
+- Never split a file across two responses. A complete, runnable file is
+  always better than a partial one.
 """
 
 
@@ -254,6 +287,13 @@ in your output):
 - No test contains `pass`, `TODO`, `raise NotImplementedError`, or an empty body.
 - Any files deferred due to token limits are listed in the Coverage Plan with their
   priority level and the requirement IDs they would have covered.
+- Every endpoint has at least one boundary_values test [requirements_coverage].
+- Every parser/validator/serializer has at least one property_based test
+  [requirements_coverage].
+- Every external dependency has a chaos test [requirements_coverage].
+- The Coverage Plan contains TestCategoryGap records for any reduced category
+  and the NEVER-drop set (integration / security / contract / migration_safety)
+  is fully populated [coverage_percent].
 
 Return only the HARNESS artifact: the file tree followed by every file's full
 content. Do not include any preamble, commentary, or summary."""
