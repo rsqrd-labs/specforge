@@ -42,6 +42,7 @@ uv run pytest \
   ../harness/tests/backend/test_langfuse_live_traffic_contract.py \
   ../harness/tests/backend/test_phase21_stripe_payments_contract.py \
   ../harness/tests/backend/test_phase22_prompt_pipeline_contract.py \
+  ../harness/tests/backend/test_phase23_storyboard_contract.py \
   -q
 uv run bandit -r config.py database.py main.py middleware models prompts routers schemas services
 uv run pip-audit --strict
@@ -55,6 +56,15 @@ uv run python -m prompt_eval.run \
   --version "$(grep -oE 'asdd-v[0-9.]+' ../backend/prompts/base.py)" \
   --baseline asdd-v1.7.1 \
   --report ../prompt_eval_report.md
+```
+
+Storyboard frontend gate:
+
+```bash
+cd frontend
+pnpm vitest run --root .. harness/tests/frontend/phase23-storyboard.contract.test.ts
+pnpm test -- Storyboard
+pnpm tsc --noEmit
 ```
 
 Production smoke against staging:
@@ -73,6 +83,8 @@ Pass criteria:
 - Unit tests pass.
 - Security and production-readiness harness contracts pass.
 - Stripe billing and prompt pipeline harness contracts pass.
+- Storyboard backend/frontend harness contracts and focused Storyboard tests
+  pass.
 - Prompt eval report shows no unapproved per-grader regression against the
   selected baseline.
 - Bandit reports no unresolved issues.
@@ -157,6 +169,34 @@ Minimum release-blocking coverage:
   script, iframe, and remote-asset input is inert.
 - Frontend loads without console errors.
 
+### Storyboard Release Gate
+
+These checks are release-blocking for Phase 20:
+
+| Gate | Required evidence | Blocks release if |
+|---|---|---|
+| Migration applied | `alembic current` on staging includes the Storyboard migration revision and `storyboards` exists with the public slug index | Migration is missing or rollback plan is unknown |
+| Rate limits active | Generate, section-regenerate, share-toggle, public-view, and download tiers are present in middleware and visible in staging responses | Any Storyboard mutation/public route bypasses rate limiting |
+| Public route security headers | `curl -i "$STAGING_API_URL/storyboards/public/$STORYBOARD_SLUG"` shows `X-Robots-Tag: noindex, nofollow`, `Cache-Control: no-store, private`, `X-Content-Type-Options: nosniff`, and CSP with `frame-ancestors 'none'` | Headers are absent on success or not-found responses |
+| HTML/PDF sanitizer tests | `cd backend && uv run pytest tests/test_storyboard_renderer.py tests/test_storyboard_security.py -q` passes | Script, iframe, object/embed, or remote-asset input survives rendering |
+| Credit ledger refund smoke | Fake provider failure produces one debit and exactly one `refund:<credit_ledger_id>` row | Refund is missing, duplicated, wrong amount, or balance cache stays stale |
+| Public privacy smoke | Default `/sb/{slug}` hides speaker notes, appendix, source excerpts, user/workspace IDs, email, credit balance, billing history, `credit_ledger_id`, raw prompts, and `source_stage_version_ids` | Notes, source, appendix, account, billing, or ledger data leaks by default |
+| Previous-ready regeneration failure smoke | Create ready v1, trigger failed full regeneration or section regeneration, then reopen the deck | Previous ready/stale version is deleted, mutated, or no longer presentable |
+
+Copy-paste staging probes:
+
+```bash
+export STAGING_API_URL=https://api.example.com
+export STORYBOARD_SLUG=replace-with-public-slug
+curl -i "$STAGING_API_URL/storyboards/public/$STORYBOARD_SLUG"
+curl -i "$STAGING_API_URL/storyboards/public/$STORYBOARD_SLUG/download/pdf"
+curl -i "$STAGING_API_URL/storyboards/public/$STORYBOARD_SLUG/download/notes"
+```
+
+Expected default: public page and PDF are available, notes are not found unless
+the owner enabled notes download, and HTML package download is never public by
+default.
+
 Pass criteria:
 
 - No critical smoke item fails.
@@ -175,6 +215,15 @@ Metrics:
 - Prompt quality counters are present: `pipeline_validator_failures_total`,
   `pipeline_upstream_section_skipped_total`, and
   `specforge_billing_credits_critic_regen_total`.
+- Storyboard counters are present: `specforge_storyboard_generation_started_total`,
+  `specforge_storyboard_generation_failed_total`,
+  `specforge_storyboard_credits_refunded_total`,
+  `specforge_storyboard_public_view_total`,
+  `specforge_storyboard_download_total`, and
+  `specforge_storyboard_source_missing_total`.
+- Storyboard dashboards include generation failure rate, refund spike detection,
+  public view volume, download failures, PDF render latency, and source-missing
+  counts.
 
 Sentry:
 
@@ -213,6 +262,12 @@ Confirm:
   and checkout rate limit are enabled.
 - Langfuse payloads go through the shared redaction path.
 - Langfuse production enablement has explicit content-capture acknowledgement.
+- Storyboard public responses are allow-list based and noindex.
+- Storyboard public notes, source excerpts, and appendix remain hidden by
+  default. The release is blocked if any of them leak without the matching owner
+  permission.
+- Storyboard renderer sanitizer tests pass for scripts, iframes, object/embed
+  tags, event handlers, and remote assets.
 
 Pass criteria:
 
@@ -226,6 +281,13 @@ Before deploy:
 
 - Confirm whether a database migration is required.
 - Confirm migration has run against staging.
+- Confirm the Storyboard migration is present before enabling the feature:
+
+  ```bash
+  cd backend
+  uv run alembic current
+  ```
+
 - Confirm backup/restore procedure is available.
 - Confirm rollback target commit/build is known.
 
@@ -238,6 +300,12 @@ Rollback triggers:
   affect multiple users.
 - Prompt validator failures or critic-regeneration credit spikes appear after
   deploy and cannot be mitigated by reverting the prompt/version.
+- Storyboard generation debits credits without an exactly-once refund on
+  provider/schema failure.
+- Public `/sb/` responses expose private notes, appendix, source excerpts,
+  account identifiers, billing state, or ledger identifiers by default.
+- Previous ready Storyboard versions are corrupted or hidden after a failed
+  regeneration.
 - Production startup validation fails.
 - Security controls are disabled or bypassed.
 - Langfuse failure propagates into user-facing failures.

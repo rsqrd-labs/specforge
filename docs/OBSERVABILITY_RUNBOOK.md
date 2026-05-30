@@ -84,6 +84,70 @@ Important metric families:
 - `specforge_billing_credits_critic_regen_total` for critic-triggered
   regeneration credit consumption.
 
+### Storyboard Metrics
+
+Storyboard metrics use bounded labels only; no title, slug, generated text,
+source excerpt, prompt, email, user ID, workspace ID, or credit ledger ID should
+appear in Prometheus labels.
+
+| Metric | Type | Labels | Use |
+|---|---|---|---|
+| `specforge_storyboard_generation_started_total` | Counter | `action` | Paid Storyboard attempts that acquired a placeholder row and debited credits |
+| `specforge_storyboard_generation_completed_total` | Counter | `action` | Attempts that validated and reached `ready` |
+| `specforge_storyboard_generation_failed_total` | Counter | `action`, `error_type` | Provider, timeout, parser, schema, row-missing, or unexpected failures |
+| `specforge_storyboard_section_regenerated_total` | Counter | none | Successful single-section regenerations |
+| `specforge_storyboard_generation_duration_seconds` | Histogram | `action` | LLM generation plus payload validation latency |
+| `specforge_storyboard_credits_deducted_total` | Counter | `action` | Credits charged for generation/regeneration |
+| `specforge_storyboard_credits_refunded_total` | Counter | `action`, `reason` | Credits refunded for failed or recovered generations |
+| `specforge_storyboard_public_view_total` | Counter | none | Successful unauthenticated `/sb/` views |
+| `specforge_storyboard_download_total` | Counter | `kind`, `public` | Successful owner/public downloads by artifact kind |
+| `specforge_storyboard_source_missing_total` | Counter | `source`, `section` | Expected source sections absent during source extraction |
+| `specforge_pdf_export_duration_seconds` | Histogram | none | PDF render latency, including Storyboard PDF and notes PDF downloads |
+
+Recommended dashboard panels:
+
+```promql
+# Generation failure rate by action over 15 minutes
+sum by (action) (rate(specforge_storyboard_generation_failed_total[15m]))
+/
+clamp_min(sum by (action) (rate(specforge_storyboard_generation_started_total[15m])), 1)
+
+# Refund credits issued over the last hour
+sum by (action, reason) (increase(specforge_storyboard_credits_refunded_total[1h]))
+
+# Public view volume
+increase(specforge_storyboard_public_view_total[5m])
+
+# Download volume by artifact and surface
+sum by (kind, public) (increase(specforge_storyboard_download_total[15m]))
+
+# Storyboard generation p95 latency by action
+histogram_quantile(
+  0.95,
+  sum by (le, action) (rate(specforge_storyboard_generation_duration_seconds_bucket[15m]))
+)
+
+# PDF render p95 latency
+histogram_quantile(
+  0.95,
+  sum by (le) (rate(specforge_pdf_export_duration_seconds_bucket[15m]))
+)
+
+# Missing source sections
+sum by (source, section) (increase(specforge_storyboard_source_missing_total[1h]))
+```
+
+Recommended alerts:
+
+| Alert | PromQL starter | Response |
+|---|---|---|
+| Storyboard generation failure rate high | `sum(rate(specforge_storyboard_generation_failed_total[15m])) / clamp_min(sum(rate(specforge_storyboard_generation_started_total[15m])), 1) > 0.05` | Check provider health, schema failures, and refund exactness |
+| Refund spike | `sum(increase(specforge_storyboard_credits_refunded_total[1h])) > 100` | Verify every refund maps to one failed Storyboard and one original debit |
+| Public view surge | `increase(specforge_storyboard_public_view_total[5m]) > 1000` | Check abuse/rate-limit dashboards and CDN/referrer context |
+| Download failures | `sum(rate(http_requests_total{path=~".*/storyboards/.*/download.*",status_code=~"5.."}[10m])) > 0` | Inspect renderer and storage-free download paths |
+| Render latency high | `histogram_quantile(0.95, sum by (le) (rate(specforge_pdf_export_duration_seconds_bucket[15m]))) > 10` | Inspect PDF worker saturation and renderer exceptions |
+| Source-missing count increased | `sum(increase(specforge_storyboard_source_missing_total[1h])) > 0` | Inspect finalised SPEC/PLAN/HARNESS/TASKS structure before releasing prompt changes |
+
 ### Sentry
 
 1. Confirm backend `SENTRY_DSN` is set in the target environment.

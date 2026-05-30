@@ -404,10 +404,19 @@ a bug.
 
 | Step | What to do | Expected | Result |
 | ---- | ---------- | -------- | ------ |
-| S1 | Complete SPEC, PLAN, HARNESS, and TASKS, then create a Storyboard. | Deck opens with exactly six acts and architecture reveal. | |
-| S2 | Open presenter mode. | Speaker notes are visible to the owner and do not appear in public mode unless enabled. | |
-| S3 | Enable sharing and open the `/sb/` URL in an incognito window. | Public deck loads without auth and has noindex posture. | |
-| S4 | Keep source and speaker notes permissions disabled. | Public source excerpts and speaker notes stay hidden. | |
-| S5 | Enable speaker notes, appendix, and source layer; reload public view. | Speaker notes, bounded source excerpts, and appendix are available only after permission is enabled. | |
-| S6 | Download PDF, notes, demo script, and appendix from owner view. | Each download is an attachment with expected content type. | |
-| S7 | Disable then rotate the public slug. | Old incognito link returns not-found; the new link works. | |
+| S1 | Create or open a staging workspace and finalise SPEC, PLAN, HARNESS, and TASKS. | Create Storyboard is enabled only after all four source stages are finalised. | |
+| S2 | Click Generate Storyboard and confirm the paid modal. | Generation starts, exactly 25 credits are reserved once, and duplicate clicks do not create another debit. | |
+| S3 | Open the generated `/storyboards/<id>` owner page. | Deck renders exactly six main acts: Opening Thesis, Product Vision, Product Walkthrough, Technical Architecture, Trust/Security/Reliability, and Launch Close. | |
+| S4 | Inspect act tabs and slide titles. | There is no top-level Validation act and no top-level Execution Plan act. | |
+| S5 | Present deck from the owner page. | Presenter mode opens; speaker notes are visible to the owner. | |
+| S6 | Open the architecture reveal. | Layered client/frontend/API/data/LLM/integrations/trust/recovery architecture appears and is sourced. | |
+| S7 | Download HTML, PDF, speaker notes, demo script, and appendix from owner view. | Each download returns an attachment with the expected file type; PDF opens locally. | |
+| S8 | Enable public sharing with default permissions and copy the `/sb/<slug>` link. | Public sharing creates a Storyboard `/sb/` URL, not a workspace `/p/` URL. | |
+| S9 | Open `/sb/<slug>` in an incognito/private window. | Public deck loads without sign-in, has no account/credit UI, and has noindex posture. | |
+| S10 | With default public permissions, inspect deck, source layer, presenter/notes UI, appendix, and public downloads. | Speaker notes, technical appendix, and source excerpts are hidden; public HTML download is not available. | |
+| S11 | Enable source layer, notes, and appendix, then reload the incognito page. | Bounded source excerpts, speaker notes, and appendix become available only after their owner permissions are enabled. | |
+| S12 | Re-finalise PLAN in the same workspace. | Existing ready Storyboard is marked stale but remains presentable; owner is prompted to regenerate. | |
+| S13 | In staging with a fake provider failure, trigger full regeneration or section regeneration. | Failed replacement refunds exactly once, and the previous ready/stale Storyboard remains presentable and unmodified. | |
+| S14 | Disable then rotate the public slug. | Old incognito link returns not-found; the new link works only after sharing is enabled. | |
+
+Storyboard sign-off: ________________  Date: ________________

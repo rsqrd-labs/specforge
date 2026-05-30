@@ -769,27 +769,246 @@ Once per quarter, refresh the eval suite so it reflects the current product:
 
 Storyboard generation creates a paid, versioned keynote artifact from finalised
 SPEC, PLAN, HARNESS, and TASKS sources. Operators should treat Storyboard
-failures like credit-affecting generation incidents.
+failures like credit-affecting generation incidents: full generation and full
+regeneration cost 25 credits, section regeneration costs 5 credits, and every
+failed paid attempt must refund exactly once.
+
+**Primary modules:** `backend/services/pipeline/storyboard_service.py`,
+`backend/services/pipeline/storyboard_public_service.py`,
+`backend/services/pipeline/storyboard_renderer.py`, and
+`backend/routers/storyboards.py`.
+
+### Fast Triage Signals
+
+| Signal | Meaning | First action |
+|---|---|---|
+| `storyboard.generate_failed` log | Generation failed after a credit debit | Verify the refund ledger entry exists exactly once |
+| Storyboard row stuck in `generating` | Worker died or provider call hung after reservation | Run stuck-job recovery checks below |
+| `specforge_storyboard_generation_failed_total` spike | Provider, timeout, parser, or schema failures increased | Split by `action` and `error_type`; inspect provider health |
+| `specforge_storyboard_credits_refunded_total` spike | Failures are refunding credits | Confirm refunds match failed Storyboard rows one-for-one |
+| Ready Storyboard becomes `stale` | A source stage was refinalised | Ask owner to regenerate when they need the latest source versions |
+| Public leakage report | A `/sb/` link may expose gated content | Disable, rotate, preserve evidence, and verify default privacy |
 
 ### Generation Failure And Refund Verification
 
-1. Find the `storyboard.generate_failed` log row by `storyboard_id`.
-2. Confirm `specforge_storyboard_generation_failed_total{error_type=...}`
-   incremented.
-3. Check `credit_ledger` for the original debit and matching refund row.
-4. Confirm `specforge_storyboard_credits_refunded_total` increased with
-   `reason="generation_failed"` or `reason="stuck_recovery"`.
+Use this when a paid Storyboard attempt fails or a user reports missing credits.
+
+1. Find the failed Storyboard row.
+
+   ```sql
+   SELECT id, workspace_id, user_id, version, status, credit_ledger_id,
+          created_at, updated_at
+   FROM storyboards
+   WHERE id = '<storyboard_uuid>';
+   ```
+
+   Expected: `status = 'failed'` and `credit_ledger_id` is non-null for a paid
+   failed attempt.
+
+2. Confirm the failure metric and content-free log exist.
+
+   ```promql
+   increase(specforge_storyboard_generation_failed_total[30m])
+   ```
+
+   Search logs for `storyboard.generate_failed` and the `storyboard_id`. Logs
+   must not contain `speaker_notes_md`, `technical_appendix_md`,
+   `demo_script_md`, `content_json`, raw prompts, or source excerpts.
+
+3. Verify the original debit and exactly one refund.
+
+   ```sql
+   WITH failed AS (
+     SELECT user_id, credit_ledger_id
+     FROM storyboards
+     WHERE id = '<storyboard_uuid>'
+   )
+   SELECT cl.id, cl.amount, cl.reason, cl.created_at
+   FROM credit_ledger cl
+   JOIN failed f ON cl.user_id = f.user_id
+   WHERE cl.id = f.credit_ledger_id
+      OR cl.reason = 'refund:' || f.credit_ledger_id::text
+   ORDER BY cl.created_at;
+   ```
+
+   Expected for full generation/regeneration: one `-25` debit and one `+25`
+   refund. Expected for section regeneration: one `-5` debit and one `+5`
+   refund.
+
+   ```sql
+   SELECT COUNT(*) AS refund_rows
+   FROM credit_ledger
+   WHERE user_id = '<user_uuid>'
+     AND reason = 'refund:<credit_ledger_uuid>';
+   ```
+
+   Expected: `refund_rows = 1`. The unique refund reason makes retries
+   idempotent; a count above one is a P1 credit-accounting incident.
+
+4. Confirm the refund metric moved by the same credit amount.
+
+   ```promql
+   increase(specforge_storyboard_credits_refunded_total[30m])
+   ```
+
+   The `reason` label is `generation_failed` for direct LLM/schema/provider
+   failures and `stuck_recovery` for recovery of old `generating` rows.
+
+5. If the ledger is correct but the UI balance is stale, clear the user's
+   credit cache by restarting the affected worker or by exercising a balance
+   read after the service has invalidated `credits:<user_id>`. Do not create a
+   manual refund unless the SQL above proves the refund is missing.
+
+### Stuck `generating` Job Recovery
+
+Storyboard reservations intentionally create a placeholder row before the LLM
+call. Recovery handles rows left in `generating` for more than 30 minutes.
+
+1. Identify old placeholders.
+
+   ```sql
+   SELECT id, workspace_id, user_id, version, credit_ledger_id, created_at,
+          updated_at
+   FROM storyboards
+   WHERE status = 'generating'
+     AND updated_at < now() - interval '30 minutes'
+   ORDER BY updated_at;
+   ```
+
+2. Confirm the recovery loop is running. The normal recovery path invokes
+   Storyboard recovery from the backend recovery service; look for
+   `storyboard.recovered_stuck` or `storyboard.generate_failed` events.
+
+3. In a one-off staging shell, operators can run the service helper directly:
+
+   ```bash
+   cd backend
+   uv run python - <<'PY'
+   import asyncio
+   from database import AsyncSessionLocal
+   from services.pipeline.storyboard_service import recover_stuck_storyboards
+
+   async def main() -> None:
+       async with AsyncSessionLocal() as db:
+           recovered = await recover_stuck_storyboards(db)
+           print(recovered)
+
+   asyncio.run(main())
+   PY
+   ```
+
+4. Re-run the refund verification query for every recovered row. Expected:
+   status is `failed`, previous ready Storyboard versions remain presentable,
+   and any `credit_ledger_id` has exactly one matching `refund:<ledger_id>` row.
 
 ### Stale Storyboard Recovery
 
 When a source stage is refinalised, ready Storyboards for that workspace are
-marked `stale`. The stale deck remains presentable; ask the owner to regenerate
-when they need a fresh keynote sourced from the latest stage versions.
+marked `stale`. The stale deck remains presentable because it is pinned to
+immutable `source_stage_version_ids`; do not delete or mutate it in place.
+
+1. Confirm the source stage was refinalised after Storyboard generation.
+
+   ```sql
+   SELECT id, stage_type, status, updated_at
+   FROM stages
+   WHERE workspace_id = '<workspace_uuid>'
+   ORDER BY stage_type;
+   ```
+
+2. Confirm affected Storyboards are stale.
+
+   ```sql
+   SELECT id, version, status, source_stage_version_ids, updated_at
+   FROM storyboards
+   WHERE workspace_id = '<workspace_uuid>'
+   ORDER BY version DESC;
+   ```
+
+3. Tell the owner the stale Storyboard is still safe to present, but regeneration
+   is required to build a new version from the latest SPEC, PLAN, HARNESS, and
+   TASKS versions. If regeneration fails, the previous ready/stale version must
+   remain the latest presentable deck.
 
 ### Public Slug Disable And Rotation
 
-To stop a public `/sb/` link, use the owner disable action first. To retire a
-known slug permanently, rotate the Storyboard share; the old slug should return
-404 immediately. For a public data leakage report, disable the link, rotate the
-slug, preserve logs, and verify the public response does not expose private
-fields or gated source excerpts.
+Public Storyboard links are independent from workspace `/p/` public links. The
+public route is `/sb/{slug}` in the frontend and `/storyboards/public/{slug}` in
+the backend.
+
+To stop a public link without changing the slug:
+
+```bash
+export API_URL=https://api.example.com
+export OWNER_ACCESS_TOKEN=replace-with-owner-access-token
+export STORYBOARD_ID=replace-with-storyboard-uuid
+curl -X DELETE \
+  -H "Authorization: Bearer $OWNER_ACCESS_TOKEN" \
+  "$API_URL/storyboards/$STORYBOARD_ID/share"
+```
+
+Expected: `204 No Content`; the old `/sb/{slug}` returns not found.
+
+To retire a known slug permanently and issue a new one:
+
+```bash
+curl -X POST \
+  -H "Authorization: Bearer $OWNER_ACCESS_TOKEN" \
+  "$API_URL/storyboards/$STORYBOARD_ID/share/rotate"
+```
+
+Expected: response contains a new `/sb/{slug}` URL; the old slug returns not
+found immediately.
+
+To re-enable sharing with explicit permissions:
+
+```bash
+curl -X POST \
+  -H "Authorization: Bearer $OWNER_ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "allow_pdf_download": true,
+    "allow_notes_download": false,
+    "allow_appendix_download": false,
+    "allow_source_layer": false
+  }' \
+  "$API_URL/storyboards/$STORYBOARD_ID/share"
+```
+
+Default public privacy is PDF plus demo-script only; speaker notes, appendix,
+and source excerpts are hidden until the owner enables the matching permission.
+
+### Public Data Leakage Incident Checklist
+
+1. Disable the public Storyboard share immediately.
+2. Rotate the slug so any copied URL is retired permanently.
+3. Preserve the suspected slug, Storyboard ID, timestamps, request logs, and
+   response samples. Do not paste generated deck content into tickets; attach it
+   only in the approved incident store.
+4. Verify the public response is allow-list based:
+
+   ```bash
+   export API_URL=https://api.example.com
+   export STORYBOARD_SLUG=replace-with-public-slug
+   curl -s "$API_URL/storyboards/public/$STORYBOARD_SLUG" | \
+     python3 -m json.tool
+   ```
+
+   The response must not contain account email, user ID, workspace ID, credit
+   balance, billing history, previous versions, `credit_ledger_id`, raw prompts,
+   or `source_stage_version_ids`.
+
+5. Verify default gates are closed: notes, appendix, and source excerpts are
+   redacted unless the owner enabled `allow_notes_download`,
+   `allow_appendix_download`, or `allow_source_layer`.
+6. Confirm privacy headers on both success and not-found responses:
+
+   ```bash
+   curl -i "$API_URL/storyboards/public/$STORYBOARD_SLUG"
+   ```
+
+   Expected: `X-Robots-Tag: noindex, nofollow`, `Cache-Control: no-store,
+   private`, `X-Content-Type-Options: nosniff`, and a CSP with
+   `frame-ancestors 'none'`.
+7. File a security incident if any private field or gated content is exposed by
+   default. Keep sharing disabled until the fix, tests, and release gate pass.

@@ -673,15 +673,165 @@ Environment variable changes require a restart.
 
 ## Storyboard Local Smoke
 
-Use this after SPEC, PLAN, HARNESS, and TASKS are all finalised in a local
-workspace.
+Storyboard is a paid artifact generated from finalised SPEC, PLAN, HARNESS, and
+TASKS. Use this smoke after the base local stack is healthy.
 
-1. Open the workspace and confirm the Create Storyboard action is enabled.
-2. Generate a Storyboard with a mocked provider in tests or a staging-safe
-   provider key locally.
-3. Open the deck and verify the six acts, presenter view, architecture reveal,
-   and source layer.
-4. Enable sharing and open the `/sb/` URL in another browser profile.
-5. Exercise download actions for PDF, speaker notes, demo script, and appendix.
-6. Disable or rotate the public Storyboard link and confirm the old `/sb/` URL
-   returns the not-found state.
+### Completed Workspace Fixture
+
+For UI smoke, create a normal local workspace and finalise all four stages:
+
+1. Open [http://localhost:5173/dashboard](http://localhost:5173/dashboard).
+2. Create a workspace with a problem statement of at least 50 characters.
+3. Generate and finalise SPEC.
+4. Generate and finalise PLAN.
+5. Generate and finalise HARNESS.
+6. Generate and finalise TASKS.
+7. Confirm the workspace shows a Storyboard action and the credit balance is at
+   least 25 credits.
+
+For deterministic service smoke with a mocked provider, use the Storyboard
+integration tests. They create a completed workspace fixture, monkeypatch the
+LLM completion path, exercise credit deduction/refund/idempotency, and require
+only local PostgreSQL and Redis:
+
+```bash
+docker compose up -d db redis
+cd backend
+TEST_DATABASE_URL=postgresql+asyncpg://specforge:specforge@localhost:5432/specforge \
+TEST_REDIS_URL=redis://localhost:6379/1 \
+uv run pytest tests/test_storyboard_service.py -q
+```
+
+Expected: Storyboard service tests pass without calling an external LLM
+provider.
+
+### Generate A Storyboard Locally
+
+The browser flow uses the configured provider key in `backend/.env`; use a
+staging-safe provider key and model.
+
+1. Open the completed workspace.
+2. Click **Create Storyboard**.
+3. Confirm the 25-credit cost in the modal.
+4. Submit and wait for generation to complete.
+5. If the request fails, confirm the UI reports the failure and the credit
+   balance returns to its pre-generation value.
+
+Optional API check with an owner access token:
+
+```bash
+export OWNER_ACCESS_TOKEN=replace-with-owner-access-token
+export WORKSPACE_ID=replace-with-workspace-uuid
+curl -s -X POST \
+  -H "Authorization: Bearer $OWNER_ACCESS_TOKEN" \
+  "http://localhost:8000/workspaces/$WORKSPACE_ID/storyboards" | \
+  python3 -m json.tool
+```
+
+Expected: response status is `ready` or `generating`; duplicate clicks/polls
+must not create a second debit.
+
+### Open Owner And Public Views
+
+Open the owner deck:
+
+```text
+http://localhost:5173/storyboards/<storyboard_uuid>
+```
+
+Expected: the deck has exactly six main acts, presenter mode opens, and the
+architecture reveal is visible.
+
+Enable a public `/sb/{slug}` link with default private gates closed:
+
+```bash
+export OWNER_ACCESS_TOKEN=replace-with-owner-access-token
+export STORYBOARD_ID=replace-with-storyboard-uuid
+curl -s -X POST \
+  -H "Authorization: Bearer $OWNER_ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "allow_pdf_download": true,
+    "allow_notes_download": false,
+    "allow_appendix_download": false,
+    "allow_source_layer": false
+  }' \
+  "http://localhost:8000/storyboards/$STORYBOARD_ID/share" | \
+  python3 -m json.tool
+```
+
+Open the returned URL in an incognito/private browser window:
+
+```text
+http://localhost:5173/sb/<slug>
+```
+
+Expected: the public deck loads without sign-in, has no account or credit UI,
+and hides speaker notes, appendix, and source excerpts by default.
+
+### Download Artifacts
+
+Owner downloads include HTML, PDF, speaker notes, demo script, and appendix:
+
+```bash
+export OWNER_ACCESS_TOKEN=replace-with-owner-access-token
+export STORYBOARD_ID=replace-with-storyboard-uuid
+mkdir -p /tmp/specforge-storyboard
+curl -L -H "Authorization: Bearer $OWNER_ACCESS_TOKEN" \
+  -o /tmp/specforge-storyboard/deck.html \
+  "http://localhost:8000/storyboards/$STORYBOARD_ID/download/html"
+curl -L -H "Authorization: Bearer $OWNER_ACCESS_TOKEN" \
+  -o /tmp/specforge-storyboard/deck.pdf \
+  "http://localhost:8000/storyboards/$STORYBOARD_ID/download/pdf"
+curl -L -H "Authorization: Bearer $OWNER_ACCESS_TOKEN" \
+  -o /tmp/specforge-storyboard/speaker-notes.md \
+  "http://localhost:8000/storyboards/$STORYBOARD_ID/download/notes?format=md"
+curl -L -H "Authorization: Bearer $OWNER_ACCESS_TOKEN" \
+  -o /tmp/specforge-storyboard/demo-script.md \
+  "http://localhost:8000/storyboards/$STORYBOARD_ID/download/demo-script"
+curl -L -H "Authorization: Bearer $OWNER_ACCESS_TOKEN" \
+  -o /tmp/specforge-storyboard/technical-appendix.md \
+  "http://localhost:8000/storyboards/$STORYBOARD_ID/download/appendix"
+ls -lh /tmp/specforge-storyboard
+```
+
+Public downloads intentionally exclude the HTML package. With default
+permissions, only PDF and demo script are available:
+
+```bash
+export STORYBOARD_SLUG=replace-with-public-slug
+curl -i "http://localhost:8000/storyboards/public/$STORYBOARD_SLUG/download/pdf"
+curl -i "http://localhost:8000/storyboards/public/$STORYBOARD_SLUG/download/demo-script"
+curl -i "http://localhost:8000/storyboards/public/$STORYBOARD_SLUG/download/notes"
+curl -i "http://localhost:8000/storyboards/public/$STORYBOARD_SLUG/download/appendix"
+curl -i "http://localhost:8000/storyboards/public/$STORYBOARD_SLUG/download/html"
+```
+
+Expected: PDF and demo script return attachment responses; notes, appendix, and
+HTML return not-found until the matching owner permissions are enabled. HTML is
+never public by default.
+
+### Disable Or Rotate The Public Link
+
+Disable sharing:
+
+```bash
+export OWNER_ACCESS_TOKEN=replace-with-owner-access-token
+export STORYBOARD_ID=replace-with-storyboard-uuid
+curl -i -X DELETE \
+  -H "Authorization: Bearer $OWNER_ACCESS_TOKEN" \
+  "http://localhost:8000/storyboards/$STORYBOARD_ID/share"
+```
+
+Reload the incognito `/sb/<slug>` page. Expected: not-found.
+
+Rotate sharing after re-enabling:
+
+```bash
+curl -s -X POST \
+  -H "Authorization: Bearer $OWNER_ACCESS_TOKEN" \
+  "http://localhost:8000/storyboards/$STORYBOARD_ID/share/rotate" | \
+  python3 -m json.tool
+```
+
+Expected: the old `/sb/<slug>` remains not-found and the new slug works.
