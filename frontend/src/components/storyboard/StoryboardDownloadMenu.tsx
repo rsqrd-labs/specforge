@@ -25,6 +25,7 @@ interface StoryboardDownloadMenuProps {
   permissions?: Partial<StoryboardSharePermissions>
   downloads?: StoryboardPublicDownloadKind[]
   onDownload?: (kind: StoryboardDownloadKind) => Promise<Blob | void> | Blob | void
+  onClose?: () => void
 }
 
 const OWNER_DOWNLOADS: DownloadItem[] = [
@@ -47,11 +48,6 @@ const OWNER_DOWNLOADS: DownloadItem[] = [
     kind: "demo-script",
     label: "Walkthrough script",
     description: "Step-by-step browser presentation runbook.",
-  },
-  {
-    kind: "appendix",
-    label: "Technical appendix",
-    description: "Implementation details and backup material.",
   },
 ]
 
@@ -95,7 +91,6 @@ function publicItems(
     if (!isPublicKind(item.kind) || !downloads.includes(item.kind)) return false
     if (item.kind === "pdf") return permissions.allow_pdf_download === true
     if (item.kind === "notes") return permissions.allow_notes_download === true
-    if (item.kind === "appendix") return permissions.allow_appendix_download === true
     return (
       item.kind === "demo-script" &&
       (permissions.allow_appendix_download === true ||
@@ -112,6 +107,7 @@ export function StoryboardDownloadMenu({
   permissions = {},
   downloads = [],
   onDownload,
+  onClose,
 }: StoryboardDownloadMenuProps) {
   const [pendingKind, setPendingKind] = useState<StoryboardDownloadKind | null>(null)
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
@@ -155,52 +151,69 @@ export function StoryboardDownloadMenu({
   }
 
   return (
-    <section className="storyboard-download-menu" aria-label="Storyboard downloads">
-      <header>
-        <strong>Download</strong>
-        <span>{mode === "owner" ? "Owner artifacts" : "Public artifacts"}</span>
-      </header>
-
-      {items.length > 0 ? (
-        <>
-          {pdfItem && (
-            <button
-              type="button"
-              className="storyboard-download-menu__primary"
-              onClick={() => void handleDownload("pdf")}
-              disabled={pendingKind !== null}
-            >
-              <span className="storyboard-download-menu__primary-label">
-                {pendingKind === "pdf" ? "Preparing PDF…" : "Download PDF"}
-              </span>
-              <small>{pdfItem.description}</small>
+    <div
+      className="storyboard-download-overlay"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Storyboard downloads"
+      onClick={(event) => {
+        if (event.target === event.currentTarget) onClose?.()
+      }}
+    >
+      <section className="storyboard-download-menu">
+        <header>
+          <div>
+            <strong>Download</strong>
+            <span>{mode === "owner" ? "Owner artifacts" : "Public artifacts"}</span>
+          </div>
+          {onClose && (
+            <button type="button" onClick={onClose} aria-label="Close download menu">
+              Close
             </button>
           )}
+        </header>
 
-          {otherItems.length > 0 && (
-            <div className="storyboard-download-menu__more">
-              <span className="storyboard-download-menu__more-label">More formats</span>
-              <div className="storyboard-download-menu__items">
-                {otherItems.map((item) => (
-                  <button
-                    key={item.kind}
-                    type="button"
-                    onClick={() => void handleDownload(item.kind)}
-                    disabled={pendingKind !== null}
-                  >
-                    <span>{item.label}</span>
-                    <small>{item.description}</small>
-                  </button>
-                ))}
+        {items.length > 0 ? (
+          <>
+            {pdfItem && (
+              <button
+                type="button"
+                className="storyboard-download-menu__primary"
+                onClick={() => void handleDownload("pdf")}
+                disabled={pendingKind !== null}
+              >
+                <span className="storyboard-download-menu__primary-label">
+                  {pendingKind === "pdf" ? "Preparing PDF…" : "Download PDF"}
+                </span>
+                <small>{pdfItem.description}</small>
+              </button>
+            )}
+
+            {otherItems.length > 0 && (
+              <div className="storyboard-download-menu__more">
+                <span className="storyboard-download-menu__more-label">More formats</span>
+                <div className="storyboard-download-menu__items">
+                  {otherItems.map((item) => (
+                    <button
+                      key={item.kind}
+                      type="button"
+                      onClick={() => void handleDownload(item.kind)}
+                      disabled={pendingKind !== null}
+                    >
+                      <span>{item.label}</span>
+                      <small>{item.description}</small>
+                    </button>
+                  ))}
+                </div>
               </div>
-            </div>
-          )}
-        </>
-      ) : (
-        <p>No public downloads are enabled for this Storyboard.</p>
-      )}
+            )}
+          </>
+        ) : (
+          <p>No public downloads are enabled for this Storyboard.</p>
+        )}
 
-      {errorMessage && <p role="alert">{errorMessage}</p>}
-    </section>
+        {errorMessage && <p role="alert">{errorMessage}</p>}
+      </section>
+    </div>
   )
 }

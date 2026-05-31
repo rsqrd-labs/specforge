@@ -140,6 +140,7 @@ export default function StoryboardPublic() {
               slug={slug}
               permissions={storyboard.permissions}
               downloads={storyboard.downloads}
+              onClose={() => setShowDownloads(false)}
             />
           )}
           {showNotes && (

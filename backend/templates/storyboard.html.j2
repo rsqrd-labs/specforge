@@ -261,26 +261,23 @@
       }
       .vcard__motif span:last-child { margin-bottom: 0; }
 
-      /* ---- Architecture page --------------------------------------------- */
-      .arch-head {
+      /* ---- Architecture slide -------------------------------------------- */
+      /* The Technical Architecture slide drops the two-column body: copy sits in a
+         fixed-height band on top, the reveal grid spans the full width below — the
+         print analogue of the live deck's single-column arch layout. The fixed
+         copy band guarantees the grid can never be pushed into an overlap. */
+      .page--arch-slide .headline { font-size: 22pt; }
+      .arch-slide-copy {
         position: absolute;
-        top: 15mm;
+        top: 30mm;
         left: 24mm;
         right: 24mm;
-      }
-      .arch-head .kicker {
-        position: static;
-        color: var(--ink);
-      }
-      .arch-head h2 {
-        margin: 2mm 0 0;
-        font-size: 24pt;
-        font-weight: 800;
-        letter-spacing: -0.01em;
+        height: 50mm;
+        overflow: hidden;
       }
       .arch-grid {
         position: absolute;
-        top: 40mm;
+        top: 86mm;
         left: 24mm;
         right: 24mm;
         bottom: 11mm;
@@ -360,6 +357,40 @@
 
     {# ---- One designed slide per page ---- #}
     {% for page in pages %}
+    {% if page.architecture %}
+    {# Architecture slide: the reveal grid *is* this slide's visual (mirrors the
+       live deck), so copy sits on top and the layers span the full width below —
+       no separate architecture page. #}
+    <section class="page page--slide page--arch-slide" style="--a: {{ page.accent }}; --a2: {{ page.accent_2 }}; --ink: {{ page.ink }};">
+      <div class="kicker">
+        <span class="kicker__act">Act {{ page.act_no }}</span> · {{ page.act_title }}
+      </div>
+      <div class="arch-slide-copy">
+        <h2 class="headline">{{ page.headline }}</h2>
+        <div class="headline-rule"></div>
+        {% if page.visible_text %}<p class="visible-text">{{ page.visible_text }}</p>{% endif %}
+        {% if page.sources %}
+        <div class="chips">
+          {% for src in page.sources %}<span class="chip">{{ src }}</span>{% endfor %}
+        </div>
+        {% endif %}
+      </div>
+      <div class="arch-grid">
+        {% for layer in page.architecture %}
+        <div class="arch-card" style="--a: {{ layer.accent }}; --a2: {{ layer.accent_2 }}; --ink: {{ layer.ink }}; --ink2: {{ layer.ink_2 }};">
+          <span class="arch-card__num">{{ layer.number }}</span>
+          <span class="arch-card__kind">{{ layer.kind }}</span>
+          <div class="arch-card__label">{{ layer.label }}</div>
+          {% if layer.summary %}<p class="arch-card__summary">{{ layer.summary }}</p>{% endif %}
+        </div>
+        {% endfor %}
+      </div>
+      <div class="page__foot">
+        <span>{{ title }}</span>
+        <span>{{ page.slide_no }} / {{ total_slides }}</span>
+      </div>
+    </section>
+    {% else %}
     <section class="page page--slide" style="--a: {{ page.accent }}; --a2: {{ page.accent_2 }}; --ink: {{ page.ink }};">
       <div class="kicker">
         <span class="kicker__act">Act {{ page.act_no }}</span> · {{ page.act_title }}
@@ -400,32 +431,7 @@
         <span>{{ page.slide_no }} / {{ total_slides }}</span>
       </div>
     </section>
-    {% endfor %}
-
-    {# ---- Architecture reveal ---- #}
-    {% if architecture %}
-    <section class="page page--arch" style="--a: {{ architecture.accent }}; --a2: {{ architecture.accent_2 }}; --ink: {{ architecture.ink }};">
-      <div class="arch-head">
-        <div>
-          <div class="kicker">Architecture Reveal</div>
-          <h2>System Architecture</h2>
-        </div>
-      </div>
-      <div class="arch-grid">
-        {% for layer in architecture.layers %}
-        <div class="arch-card" style="--a: {{ layer.accent }}; --a2: {{ layer.accent_2 }}; --ink: {{ layer.ink }}; --ink2: {{ layer.ink_2 }};">
-          <span class="arch-card__num">{{ layer.number }}</span>
-          <span class="arch-card__kind">{{ layer.kind }}</span>
-          <div class="arch-card__label">{{ layer.label }}</div>
-          {% if layer.summary %}<p class="arch-card__summary">{{ layer.summary }}</p>{% endif %}
-        </div>
-        {% endfor %}
-      </div>
-      <div class="page__foot">
-        <span>{{ title }}</span>
-        <span>{{ total_slides }} / {{ total_slides }}</span>
-      </div>
-    </section>
     {% endif %}
+    {% endfor %}
   </body>
 </html>

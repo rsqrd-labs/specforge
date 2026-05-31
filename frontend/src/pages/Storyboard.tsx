@@ -185,6 +185,7 @@ export default function Storyboard() {
               title={storyboard.title}
               storyboardId={storyboard.id}
               permissions={storyboard.permissions}
+              onClose={() => setShowDownloads(false)}
             />
           )}
           {showNotes && (

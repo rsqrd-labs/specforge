@@ -84,6 +84,28 @@ _DEFAULT_ACCENT_2 = "#0ea5e9"
 _VALID_SOURCES = ("SPEC", "PLAN", "HARNESS", "TASKS")
 _ARCH_REVEAL_TYPE = "architecture_reveal"
 
+# The live deck (StoryboardDeck) renders the architecture reveal as the *visual of
+# the Technical Architecture slide itself* — there is no standalone architecture
+# page. A page is the architecture slide when its slide type is "architecture" or
+# it belongs to the Technical Architecture act, mirroring the frontend predicate.
+_ARCH_SLIDE_TYPE = "architecture"
+_ARCH_ACT_TITLE = "Technical Architecture"
+
+# Canonical plane order the live deck reveals layers in. We order the *emitted*
+# layers by this sequence for visual parity, but — unlike the interactive deck —
+# never synthesise placeholders for missing planes: a polished PDF must not carry
+# "this layer was not described" filler.
+_ARCH_LAYER_SEQUENCE = (
+    "client",
+    "frontend",
+    "api",
+    "data",
+    "llm",
+    "integrations",
+    "trust",
+    "recovery",
+)
+
 # Strict allow-list for the markdown→HTML notes path. No img (remote images /
 # tracking pixels), no script/style/iframe/object/embed, no event-handler attrs.
 _NOTES_ALLOWED_TAGS = [
@@ -291,11 +313,82 @@ def _visual_metric(visual: Any) -> dict[str, str] | None:
     }
 
 
+def _order_arch_layers(layers: list[Any]) -> list[dict[str, Any]]:
+    """Order the *emitted* architecture layers by the canonical plane sequence.
+
+    Only layers the model actually produced are kept (no placeholder padding) and,
+    like the live deck, at most one card per canonical kind — so a duplicated kind
+    can never push the grid past the two rows the slide is sized for. Known kinds
+    sort into ``_ARCH_LAYER_SEQUENCE`` order; any unknown kind keeps its original
+    relative position at the end.
+    """
+
+    order = {kind: i for i, kind in enumerate(_ARCH_LAYER_SEQUENCE)}
+    seen: set[str] = set()
+    deduped: list[dict[str, Any]] = []
+    for layer in layers:
+        if not isinstance(layer, dict):
+            continue
+        kind = _clean(layer.get("kind"))
+        if kind and kind in order:
+            if kind in seen:
+                continue
+            seen.add(kind)
+        deduped.append(layer)
+    return sorted(
+        deduped, key=lambda layer: order.get(_clean(layer.get("kind")), len(order))
+    )
+
+
+def _build_arch_layers(
+    content: dict[str, Any], palette: list[str]
+) -> list[dict[str, Any]]:
+    """Themed, structured architecture layers, or ``[]`` when none were emitted.
+
+    Each layer takes the next palette colour so the planes read as a colourful
+    stack, exactly like the live ``ArchitectureReveal``.
+    """
+
+    for diagram in content.get("diagrams") or []:
+        if diagram.get("type") != _ARCH_REVEAL_TYPE:
+            continue
+        ordered = _order_arch_layers(diagram.get("layers") or [])
+        layers: list[dict[str, Any]] = []
+        for index, layer in enumerate(ordered):
+            label = _clean(layer.get("label"))
+            kind = _clean(layer.get("kind"))
+            if not label and not kind:
+                continue
+            layer_accent = palette[index % len(palette)]
+            layer_accent_2 = palette[(index + 1) % len(palette)]
+            layers.append(
+                {
+                    "number": len(layers) + 1,
+                    "kind": kind,
+                    "label": label,
+                    "summary": _clean(layer.get("summary")),
+                    "accent": layer_accent,
+                    "accent_2": layer_accent_2,
+                    "ink": _readable_ink(layer_accent),
+                    # White number sits on the badge fill, so the fill itself must
+                    # be dark enough — use the ink gradient, not the raw accents.
+                    "ink_2": _readable_ink(layer_accent_2),
+                }
+            )
+        return layers
+    return []
+
+
 def _build_deck_context(content: dict[str, Any], workspace_name: str) -> dict[str, Any]:
     theme = content.get("theme") or {}
     palette = _safe_palette(theme)
     accent = palette[0]
     accent_2 = palette[1] if len(palette) > 1 else palette[0]
+
+    # The architecture reveal is rendered as the Technical Architecture slide's own
+    # visual (mirroring the live deck), so build its themed layers once and attach
+    # them to the matching slide(s) below — there is no standalone architecture page.
+    arch_layers = _build_arch_layers(content, palette)
 
     # One flat list of slide "pages" (each renders to its own A4 page). Every
     # slide carries its act's rotating accent so the printed deck shifts colour
@@ -310,6 +403,12 @@ def _build_deck_context(content: dict[str, Any], workspace_name: str) -> dict[st
             visual = slide.get("visual") or {}
             kind = _clean(visual.get("kind")) if isinstance(visual, dict) else ""
             slide_no += 1
+            # An architecture slide shows the reveal grid as its visual; fall back
+            # to the normal visual when no architecture layers were emitted.
+            is_arch_slide = (
+                _clean(slide.get("type")) == _ARCH_SLIDE_TYPE
+                or section_title == _ARCH_ACT_TITLE
+            )
             pages.append(
                 {
                     "slide_no": slide_no,
@@ -323,46 +422,14 @@ def _build_deck_context(content: dict[str, Any], workspace_name: str) -> dict[st
                     "visual_label": _VISUAL_KIND_LABEL.get(kind, "Highlight"),
                     "visual_points": _visual_points(visual),
                     "visual_metric": _visual_metric(visual),
+                    "architecture": (
+                        arch_layers if is_arch_slide and arch_layers else None
+                    ),
                     "sources": [
                         s for s in (slide.get("sources") or []) if s in _VALID_SOURCES
                     ],
                 }
             )
-
-    # The architecture reveal is its own page: every layer takes the next palette
-    # colour so the eight planes read as a colourful stack (mirrors the live deck).
-    architecture: dict[str, Any] | None = None
-    for diagram in content.get("diagrams") or []:
-        if diagram.get("type") == _ARCH_REVEAL_TYPE:
-            layers: list[dict[str, Any]] = []
-            for layer_index, layer in enumerate(diagram.get("layers") or []):
-                layer_accent = palette[layer_index % len(palette)]
-                layer_accent_2 = palette[(layer_index + 1) % len(palette)]
-                layers.append(
-                    {
-                        "number": layer_index + 1,
-                        "kind": _clean(layer.get("kind")),
-                        "label": _clean(layer.get("label")),
-                        "summary": _clean(layer.get("summary")),
-                        "accent": layer_accent,
-                        "accent_2": layer_accent_2,
-                        "ink": _readable_ink(layer_accent),
-                        # White number sits on the badge fill, so the fill itself
-                        # must be dark enough — use the ink gradient, not the raw
-                        # (possibly pale) accents.
-                        "ink_2": _readable_ink(layer_accent_2),
-                    }
-                )
-            if layers:
-                architecture = {
-                    "accent": accent,
-                    "accent_2": accent_2,
-                    "ink": _readable_ink(accent),
-                    "layers": layers,
-                }
-            break
-
-    total_slides = len(pages) + (1 if architecture else 0)
 
     return {
         "title": _clean(content.get("title")) or _clean(workspace_name) or "Storyboard",
@@ -375,8 +442,7 @@ def _build_deck_context(content: dict[str, Any], workspace_name: str) -> dict[st
         "cover_accent_2": _readable_ink(accent_2),
         "palette": palette,
         "pages": pages,
-        "architecture": architecture,
-        "total_slides": total_slides,
+        "total_slides": len(pages),
         "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
     }
 

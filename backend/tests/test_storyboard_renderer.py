@@ -43,7 +43,22 @@ def _payload() -> dict:
                         "sources": ["SPEC", "PLAN"],
                     }
                 ],
-            }
+            },
+            {
+                "id": "act-3",
+                "title": "Technical Architecture",
+                "slides": [
+                    {
+                        "id": "s-arch",
+                        "type": "architecture",
+                        "headline": "System architecture",
+                        "visible_text": "Eight planes, one stack.",
+                        "visual": {"kind": "architecture"},
+                        "speaker_notes_ref": "s-arch",
+                        "sources": ["PLAN", "TASKS"],
+                    }
+                ],
+            },
         ],
         "diagrams": [
             {
