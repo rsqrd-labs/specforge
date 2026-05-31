@@ -44,11 +44,6 @@ const OWNER_DOWNLOADS: DownloadItem[] = [
     label: "Speaker notes",
     description: "Presenter notes as Markdown.",
   },
-  {
-    kind: "demo-script",
-    label: "Walkthrough script",
-    description: "Step-by-step browser presentation runbook.",
-  },
 ]
 
 // File extension per download kind, so the browser saves a usable file (the
@@ -91,11 +86,7 @@ function publicItems(
     if (!isPublicKind(item.kind) || !downloads.includes(item.kind)) return false
     if (item.kind === "pdf") return permissions.allow_pdf_download === true
     if (item.kind === "notes") return permissions.allow_notes_download === true
-    return (
-      item.kind === "demo-script" &&
-      (permissions.allow_appendix_download === true ||
-        permissions.allow_source_layer === true)
-    )
+    return false
   })
 }
 
