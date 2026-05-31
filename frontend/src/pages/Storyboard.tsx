@@ -1,6 +1,6 @@
 import axios from "axios"
 import { useEffect, useState } from "react"
-import { Link, useParams } from "react-router-dom"
+import { Link, useLocation, useParams } from "react-router-dom"
 import { PresenterMode } from "../components/storyboard/PresenterMode"
 import { StoryboardDeck } from "../components/storyboard/StoryboardDeck"
 import { StoryboardDownloadMenu } from "../components/storyboard/StoryboardDownloadMenu"
@@ -26,6 +26,16 @@ type LoadState =
 
 export default function Storyboard() {
   const { id } = useParams<{ id: string }>()
+  const location = useLocation()
+  // The workspace this Storyboard was opened from, passed in navigation state by
+  // the workspace page. It lets the not-found / error states (where the fetch
+  // failed, so we have no loaded workspace_id) return the user to their workspace
+  // instead of the dashboard. Absent on a deep link → dashboard fallback.
+  const originWorkspaceId = (location.state as { workspaceId?: string } | null)
+    ?.workspaceId
+  const workspaceBackTarget = originWorkspaceId
+    ? `/workspace/${originWorkspaceId}`
+    : "/dashboard"
   const [state, setState] = useState<LoadState>({ kind: "loading" })
   const [view, setView] = useState<"launch" | "deck">("launch")
   const [showDownloads, setShowDownloads] = useState(false)
@@ -130,7 +140,9 @@ export default function Storyboard() {
     return (
       <main className="storyboard-page storyboard-page--deck">
         <StoryboardDeck isNotFound title="Storyboard" />
-        <Link to="/dashboard">Back to dashboard</Link>
+        <Link to={workspaceBackTarget}>
+          {originWorkspaceId ? "Back to workspace" : "Back to dashboard"}
+        </Link>
       </main>
     )
   }
@@ -139,7 +151,9 @@ export default function Storyboard() {
     return (
       <main className="storyboard-page storyboard-page--deck" role="alert">
         <StoryboardDeck title="Storyboard" errorMessage={state.message} />
-        <Link to="/dashboard">Back to dashboard</Link>
+        <Link to={workspaceBackTarget}>
+          {originWorkspaceId ? "Back to workspace" : "Back to dashboard"}
+        </Link>
       </main>
     )
   }

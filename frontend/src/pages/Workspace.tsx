@@ -522,7 +522,7 @@ export default function Workspace() {
           })
           if (storyboardAutoOpenRef.current === fresh.id) {
             storyboardAutoOpenRef.current = null
-            navigate(`/storyboards/${fresh.id}`)
+            navigate(`/storyboards/${fresh.id}`, { state: { workspaceId: id } })
           }
           return
         }
@@ -953,7 +953,7 @@ export default function Workspace() {
           kind: "success",
           text: "Storyboard is ready to present.",
         })
-        navigate(`/storyboards/${created.id}`)
+        navigate(`/storyboards/${created.id}`, { state: { workspaceId: id } })
       } else if (created.status === "failed") {
         setStoryboardGenerationFailure("Storyboard generation failed.")
         setStoryboardMessage({
@@ -988,8 +988,8 @@ export default function Workspace() {
 
   const handleOpenStoryboard = useCallback(() => {
     if (!latestStoryboard || latestStoryboard.status === "failed") return
-    navigate(`/storyboards/${latestStoryboard.id}`)
-  }, [latestStoryboard, navigate])
+    navigate(`/storyboards/${latestStoryboard.id}`, { state: { workspaceId: id } })
+  }, [latestStoryboard, navigate, id])
 
   const handlePresentStoryboard = useCallback(() => {
     if (
@@ -998,8 +998,10 @@ export default function Workspace() {
     ) {
       return
     }
-    navigate(`/storyboards/${latestStoryboard.id}?present=1`)
-  }, [latestStoryboard, navigate])
+    navigate(`/storyboards/${latestStoryboard.id}?present=1`, {
+      state: { workspaceId: id },
+    })
+  }, [latestStoryboard, navigate, id])
 
   const handleRegenerateStoryboard = useCallback(async () => {
     if (!latestStoryboard || storyboardActionInFlightRef.current) return
@@ -1018,7 +1020,7 @@ export default function Workspace() {
           kind: "success",
           text: "Storyboard regeneration finished.",
         })
-        navigate(`/storyboards/${regenerating.id}`)
+        navigate(`/storyboards/${regenerating.id}`, { state: { workspaceId: id } })
       } else if (regenerating.status === "failed") {
         setStoryboardGenerationFailure("Storyboard regeneration failed.")
         setStoryboardMessage({
@@ -1046,7 +1048,7 @@ export default function Workspace() {
       storyboardActionInFlightRef.current = false
       setStoryboardAction(null)
     }
-  }, [latestStoryboard, navigate, refreshLatestStoryboard])
+  }, [latestStoryboard, navigate, refreshLatestStoryboard, id])
 
   const handleShareStoryboard = useCallback(async () => {
     if (
