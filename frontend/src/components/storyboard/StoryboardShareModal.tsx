@@ -16,6 +16,32 @@ export const DEFAULT_SHARE_PERMISSIONS: StoryboardSharePermissions = {
   allow_source_layer: false,
 }
 
+// The permission rows surfaced in the dialog, each with a plain-language title and
+// a one-line explanation of what the viewer actually gets. `allow_appendix_download`
+// is intentionally absent — the technical-appendix download is no longer offered in
+// the download menu — but its stored value is preserved through save (see saveShare).
+const PERMISSION_ROWS: {
+  key: keyof StoryboardSharePermissions
+  title: string
+  description: string
+}[] = [
+  {
+    key: "allow_pdf_download",
+    title: "Download the PDF",
+    description: "Viewers can save the deck as a print-ready PDF.",
+  },
+  {
+    key: "allow_notes_download",
+    title: "Download speaker notes",
+    description: "Share your presenter notes as a Markdown file.",
+  },
+  {
+    key: "allow_source_layer",
+    title: "Show source evidence",
+    description: "Let viewers open the panel linking each slide to its spec and plan.",
+  },
+]
+
 interface ShareState {
   enabled: boolean
   slug: string | null
@@ -50,6 +76,18 @@ function responseToState(response: StoryboardShareResponse): ShareState {
   }
 }
 
+function permissionsEqual(
+  a: StoryboardSharePermissions,
+  b: StoryboardSharePermissions,
+): boolean {
+  return (
+    a.allow_pdf_download === b.allow_pdf_download &&
+    a.allow_notes_download === b.allow_notes_download &&
+    a.allow_appendix_download === b.allow_appendix_download &&
+    a.allow_source_layer === b.allow_source_layer
+  )
+}
+
 export function StoryboardShareModal({
   storyboardId,
   initialEnabled,
@@ -63,22 +101,31 @@ export function StoryboardShareModal({
   const [permissions, setPermissions] = useState(() =>
     mergePermissions(initialPermissions),
   )
+  // The permissions last persisted to the server; "Save changes" is only offered
+  // when the working set drifts from this, so the dialog never fires a redundant
+  // save and there is no per-toggle network race.
+  const [savedPermissions, setSavedPermissions] = useState(() =>
+    mergePermissions(initialPermissions),
+  )
   const [isBusy, setIsBusy] = useState(false)
   const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle")
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
   const currentUrl = useMemo(() => shareUrl(slug), [slug])
+  const isDirty = useMemo(
+    () => !permissionsEqual(permissions, savedPermissions),
+    [permissions, savedPermissions],
+  )
 
-  function updatePermission(
-    key: keyof StoryboardSharePermissions,
-    value: boolean,
-  ) {
+  function updatePermission(key: keyof StoryboardSharePermissions, value: boolean) {
     setPermissions((current) => ({ ...current, [key]: value }))
+    setCopyState("idle")
   }
 
   function applyShareState(next: ShareState) {
     setEnabled(next.enabled)
     setSlug(next.slug)
     setPermissions(next.permissions)
+    setSavedPermissions(next.permissions)
     onShareChanged?.(next)
   }
 
@@ -86,6 +133,8 @@ export function StoryboardShareModal({
     setIsBusy(true)
     setErrorMessage(null)
     try {
+      // `permissions` carries every key (including the hidden allow_appendix_download)
+      // so a previously granted value is never silently dropped on save.
       const response = await shareStoryboard(storyboardId, permissions)
       applyShareState(responseToState(response))
     } catch {
@@ -100,8 +149,7 @@ export function StoryboardShareModal({
     setErrorMessage(null)
     try {
       await disableStoryboardShare(storyboardId)
-      const next = { enabled: false, slug: null, permissions }
-      applyShareState(next)
+      applyShareState({ enabled: false, slug: null, permissions })
     } catch {
       setErrorMessage("Sharing could not be disabled.")
     } finally {
@@ -132,109 +180,149 @@ export function StoryboardShareModal({
     }
   }
 
+  const statusText = errorMessage
+    ? errorMessage
+    : copyState === "copied"
+      ? "Link copied"
+      : copyState === "failed"
+        ? "Copy failed — select the link and copy it manually."
+        : isBusy
+          ? "Saving…"
+          : isDirty && enabled
+            ? "You have unsaved permission changes."
+            : ""
+  const statusRole = errorMessage || copyState === "failed" ? "alert" : "status"
+
   return (
-    <div className="storyboard-share-modal" role="dialog" aria-modal="true">
-      <div className="storyboard-share-modal__panel">
-        <header>
+    <div
+      className="sb-share-overlay"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="sb-share-title"
+      onClick={(event) => {
+        if (event.target === event.currentTarget) onClose()
+      }}
+    >
+      <div className="sb-share">
+        <header className="sb-share__head">
           <div>
-            <span>Storyboard sharing</span>
-            <h2>Public launch link</h2>
+            <p className="sb-share__eyebrow">Share</p>
+            <h2 id="sb-share-title">Share this storyboard</h2>
+            <p className="sb-share__sub">
+              Publish a link anyone can open in their browser — no SpecForge account
+              needed.
+            </p>
           </div>
-          <button type="button" onClick={onClose} aria-label="Close share modal">
-            Close
+          <button
+            type="button"
+            className="sb-share__close"
+            onClick={onClose}
+            aria-label="Close share dialog"
+          >
+            ✕
           </button>
         </header>
 
-        <label className="storyboard-share-modal__switch">
-          <input
-            type="checkbox"
-            checked={enabled}
-            onChange={(event) => {
-              if (event.currentTarget.checked) {
-                void saveShare()
-              } else {
-                void disableShare()
-              }
-            }}
+        <div className="sb-share__master">
+          <div className="sb-share__master-copy">
+            <strong>Public link</strong>
+            <span>
+              {enabled
+                ? "Anyone with the link can view this deck."
+                : "Only you can open this storyboard right now."}
+            </span>
+          </div>
+          <button
+            type="button"
+            role="switch"
+            aria-checked={enabled}
+            aria-label="Public link"
+            className={`sb-switch${enabled ? " is-on" : ""}`}
             disabled={isBusy}
-          />
-          <span>{enabled ? "Public" : "Disabled"}</span>
-        </label>
-
-        <div className="storyboard-share-modal__url">
-          <input readOnly value={currentUrl || "Enable sharing to create /sb link"} />
-          <button type="button" onClick={() => void copyShareLink()} disabled={!currentUrl}>
-            Copy
+            onClick={() => (enabled ? void disableShare() : void saveShare())}
+          >
+            <span className="sb-switch__dot" />
           </button>
         </div>
 
-        <fieldset className="storyboard-share-modal__permissions">
-          <legend>Public permissions</legend>
-          <label>
-            <input
-              type="checkbox"
-              checked={permissions.allow_pdf_download}
-              onChange={(event) =>
-                updatePermission("allow_pdf_download", event.currentTarget.checked)
-              }
-            />
-            Allow PDF download
-          </label>
-          <label>
-            <input
-              type="checkbox"
-              checked={permissions.allow_notes_download}
-              onChange={(event) =>
-                updatePermission("allow_notes_download", event.currentTarget.checked)
-              }
-            />
-            Allow speaker notes download
-          </label>
-          <label>
-            <input
-              type="checkbox"
-              checked={permissions.allow_appendix_download}
-              onChange={(event) =>
-                updatePermission("allow_appendix_download", event.currentTarget.checked)
-              }
-            />
-            Allow technical appendix download
-          </label>
-          <label>
-            <input
-              type="checkbox"
-              checked={permissions.allow_source_layer}
-              onChange={(event) =>
-                updatePermission("allow_source_layer", event.currentTarget.checked)
-              }
-            />
-            Allow source layer
-          </label>
-        </fieldset>
+        <div className={`sb-share__link${enabled && currentUrl ? "" : " is-empty"}`}>
+          {enabled && currentUrl ? (
+            <>
+              <div className="sb-share__link-row">
+                <input
+                  className="sb-share__link-url"
+                  readOnly
+                  value={currentUrl}
+                  aria-label="Public storyboard link"
+                  onFocus={(event) => event.currentTarget.select()}
+                />
+                <button
+                  type="button"
+                  className="sb-share__copy"
+                  onClick={() => void copyShareLink()}
+                >
+                  {copyState === "copied" ? "Copied" : "Copy link"}
+                </button>
+              </div>
+              <button
+                type="button"
+                className="sb-share__rotate"
+                onClick={() => void rotateShare()}
+                disabled={isBusy}
+              >
+                Generate new link
+              </button>
+              <span className="sb-share__rotate-hint">
+                Replaces the current link — the old one stops working immediately.
+              </span>
+            </>
+          ) : (
+            <p className="sb-share__link-empty">
+              Turn on the public link above to get a shareable URL.
+            </p>
+          )}
+        </div>
 
-        <footer>
-          <button type="button" onClick={() => void saveShare()} disabled={isBusy}>
-            {enabled ? "Save permissions" : "Enable public link"}
-          </button>
-          <button
-            type="button"
-            onClick={() => void rotateShare()}
-            disabled={isBusy || !enabled}
-          >
-            Rotate link
-          </button>
-          <button
-            type="button"
-            onClick={() => void disableShare()}
-            disabled={isBusy || !enabled}
-          >
-            Disable
-          </button>
+        <div className="sb-share__perms">
+          <p className="sb-share__perms-title">What viewers can do</p>
+          {PERMISSION_ROWS.map((row) => (
+            <label key={row.key} className="sb-perm">
+              <span className="sb-perm__text">
+                <strong>{row.title}</strong>
+                <span>{row.description}</span>
+              </span>
+              <input
+                type="checkbox"
+                checked={permissions[row.key]}
+                onChange={(event) =>
+                  updatePermission(row.key, event.currentTarget.checked)
+                }
+              />
+              <span className="sb-perm__track" aria-hidden="true">
+                <span className="sb-perm__thumb" />
+              </span>
+            </label>
+          ))}
+        </div>
+
+        <footer className="sb-share__foot">
+          <p className={`sb-share__status sb-share__status--${statusRole}`} role={statusRole}>
+            {statusText}
+          </p>
+          <div className="sb-share__foot-actions">
+            <button type="button" className="sb-btn sb-btn--ghost" onClick={onClose}>
+              Done
+            </button>
+            <button
+              type="button"
+              className="sb-btn sb-btn--primary"
+              onClick={() => void saveShare()}
+              disabled={isBusy || !enabled || !isDirty}
+            >
+              Save changes
+            </button>
+          </div>
         </footer>
-
-        {copyState === "copied" && <p role="status">Copied /sb link.</p>}
-        {copyState === "failed" && <p role="alert">Copy failed.</p>}
-        {errorMessage && <p role="alert">{errorMessage}</p>}
       </div>
     </div>
   )

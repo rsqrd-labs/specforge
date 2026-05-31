@@ -48,13 +48,16 @@ describe("StoryboardShareModal", () => {
       />,
     )
 
-    expect(screen.getByLabelText(/allow PDF download/i)).toBeChecked()
-    expect(screen.getByLabelText(/allow speaker notes download/i)).not.toBeChecked()
-    expect(screen.getByLabelText(/allow technical appendix download/i)).not.toBeChecked()
-    expect(screen.getByLabelText(/allow source layer/i)).not.toBeChecked()
+    expect(screen.getByLabelText(/download the PDF/i)).toBeChecked()
+    expect(screen.getByLabelText(/download speaker notes/i)).not.toBeChecked()
+    expect(screen.getByLabelText(/show source evidence/i)).not.toBeChecked()
+    // The technical-appendix toggle is no longer surfaced.
+    expect(screen.queryByLabelText(/appendix/i)).toBeNull()
 
-    await user.click(screen.getByRole("button", { name: /enable public link/i }))
+    await user.click(screen.getByRole("switch", { name: /public link/i }))
 
+    // Every permission key — including the now-hidden appendix grant — is still
+    // sent, so a previously stored value is never silently dropped.
     expect(shareStoryboard).toHaveBeenCalledWith("storyboard-1", {
       allow_pdf_download: true,
       allow_notes_download: false,
@@ -88,10 +91,10 @@ describe("StoryboardShareModal", () => {
     const shareInput = screen.getByDisplayValue(/\/sb\/old123/) as HTMLInputElement
     expect(shareInput.value).toContain("/sb/old123")
     expect(shareInput.value).not.toContain("/p/old123")
-    await user.click(screen.getByRole("button", { name: /copy/i }))
-    expect(await screen.findByText(/copied \/sb link/i)).toBeInTheDocument()
+    await user.click(screen.getByRole("button", { name: /copy link/i }))
+    expect(await screen.findByText(/link copied/i)).toBeInTheDocument()
 
-    await user.click(screen.getByRole("button", { name: /rotate link/i }))
+    await user.click(screen.getByRole("button", { name: /generate new link/i }))
     await waitFor(() =>
       expect(screen.getByDisplayValue(/\/sb\/new789/)).toBeInTheDocument(),
     )
@@ -101,7 +104,7 @@ describe("StoryboardShareModal", () => {
       permissions: { ...DEFAULT_TEST_PERMISSIONS, allow_source_layer: true },
     })
 
-    await user.click(screen.getByRole("button", { name: /disable/i }))
+    await user.click(screen.getByRole("switch", { name: /public link/i }))
     expect(disableStoryboardShare).toHaveBeenCalledWith("storyboard-1")
   })
 })
