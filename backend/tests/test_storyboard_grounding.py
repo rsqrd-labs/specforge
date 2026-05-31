@@ -87,12 +87,16 @@ def _payload() -> dict:
         )
         notes[slide_id] = {
             "slide_id": slide_id,
-            "talk_track": "Talk through the source-backed point.",
+            "talk_track": (
+                "Talk through the source-backed point in detail. Name the concrete "
+                "product capability from the finalised sources, explain why it "
+                "matters to this audience, and land the takeaway before moving on."
+            ),
             "transition": "Move forward.",
             "timing_seconds": 45,
             "pause_cue": "Pause briefly.",
             "demo_cue": "",
-            "backup_points": ["Backup point."],
+            "backup_points": ["Backup point.", "Second backup point."],
         }
 
     plan_ref = {

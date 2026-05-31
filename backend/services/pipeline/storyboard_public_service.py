@@ -78,7 +78,14 @@ _PUBLIC_DOWNLOAD_ORDER: tuple[str, ...] = ("pdf", "demo-script", "notes", "appen
 
 # Neutral, schema-valid constants used to redact gated text when the matching
 # permission is off (kept non-empty to satisfy the payload schema's minLength).
-_REDACTED_NOTE = "Speaker notes are private for this Storyboard."
+# Long enough to satisfy the tightened talk_track depth floor (storyboard-v1.4)
+# so the redacted public presentation is still a structurally valid payload.
+_REDACTED_NOTE = (
+    "Speaker notes are private for this Storyboard. The presenter has not shared "
+    "the per-slide talk track; enable the notes permission to reveal the full "
+    "presenter guidance for this slide."
+)
+_REDACTED_BACKUP = "Backup points are private for this Storyboard."
 _REDACTED_APPENDIX = (
     "The technical appendix is available with the presenter's permission."
 )
@@ -397,8 +404,9 @@ def _public_note(note: dict[str, Any], *, reveal: bool) -> dict[str, Any]:
             "demo_cue": note.get("demo_cue", ""),
             "backup_points": list(note.get("backup_points") or []),
         }
-    # Redacted: preserve the key and structure, blank the text. timing is kept
-    # (not secret); backup_points → [] dodges the per-item minLength.
+    # Redacted: preserve the key and structure, blank the secret text. timing is
+    # kept (not secret); the talk track and backup points carry non-secret
+    # placeholders sized to satisfy the payload depth floor without leaking notes.
     return {
         "slide_id": note.get("slide_id", ""),
         "talk_track": _REDACTED_NOTE,
@@ -406,7 +414,10 @@ def _public_note(note: dict[str, Any], *, reveal: bool) -> dict[str, Any]:
         "timing_seconds": note.get("timing_seconds", 5),
         "pause_cue": _REDACTED_LINE,
         "demo_cue": "",
-        "backup_points": [],
+        "backup_points": [
+            _REDACTED_BACKUP,
+            "Enable the notes permission to reveal Q&A backup points.",
+        ],
     }
 
 

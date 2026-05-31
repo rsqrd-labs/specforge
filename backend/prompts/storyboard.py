@@ -25,12 +25,18 @@ import json
 import re
 from collections.abc import Awaitable, Callable
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationInfo,
+    model_validator,
+)
 
 from prompts.base import SECURITY_AND_PRIVACY_RULES, wrap_untrusted_content
 from services.pipeline.storyboard_source import StoryboardSourcePackage
 
-STORYBOARD_PROMPT_VERSION = "storyboard-v1.3"
+STORYBOARD_PROMPT_VERSION = "storyboard-v1.4"
 
 # The main keynote has exactly six visible top-level acts, in this exact order.
 # Validation and Execution Plan are deliberately NOT acts — they belong in the
@@ -73,6 +79,15 @@ ALLOWED_VISUAL_KINDS: tuple[str, ...] = (
 )
 
 _SOURCE_ENUM = ("SPEC", "PLAN", "HARNESS", "TASKS")
+
+# Speaker-note depth floor (storyboard-v1.4). A modest minimum keeps stub notes
+# ("Talk about the product.") from validating; the prompt asks for ~80-160 words.
+# Enforced on fresh generations; grandfathered for carried-over notes when a
+# caller passes ``context={GRANDFATHER_NOTE_DEPTH: True}`` (section regeneration
+# of a pre-v1.4 Storyboard re-validates the whole spliced payload).
+_TALK_TRACK_MIN_CHARS = 120
+_BACKUP_POINTS_MIN = 2
+GRANDFATHER_NOTE_DEPTH = "grandfather_note_depth"
 
 _ID_PATTERN = r"^[a-z0-9-]+$"
 _MAX_EXCERPT_CHARS = 1200
@@ -138,7 +153,22 @@ class SpeakerNote(BaseModel):
     backup_points: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
-    def _validate_notes(self) -> "SpeakerNote":
+    def _validate_notes(self, info: ValidationInfo) -> "SpeakerNote":
+        # Depth floor (storyboard-v1.4): the deck stays sparse, so presenter depth
+        # must live in the talk track and Q&A backups. The floor is enforced on
+        # freshly generated notes but grandfathered when a caller validates a
+        # spliced payload that carries over notes written under an older prompt
+        # (see ``GRANDFATHER_NOTE_DEPTH``) — tightening it must never break
+        # section regeneration on a pre-v1.4 Storyboard.
+        if not (info.context or {}).get(GRANDFATHER_NOTE_DEPTH):
+            if len(self.talk_track) < _TALK_TRACK_MIN_CHARS:
+                raise ValueError(
+                    f"talk_track must be at least {_TALK_TRACK_MIN_CHARS} characters"
+                )
+            if len(self.backup_points) < _BACKUP_POINTS_MIN:
+                raise ValueError(
+                    f"backup_points must have at least {_BACKUP_POINTS_MIN} entries"
+                )
         if _FORBIDDEN_VIDEO_DEMO_RE.search(self.demo_cue):
             raise ValueError("demo_cue must not request or describe a video demo")
         for field_name, text in (
@@ -401,7 +431,7 @@ sections and all eight architecture layers, but do not rename keys:
 {
   "title": "SpecForge Launch Keynote",
   "theme": {
-    "palette": ["#101418", "#1FB6FF", "#F5A623"],
+    "palette": ["#0B1020", "#6D28D9", "#1FB6FF", "#F5A623", "#10B981", "#EC4899"],
     "typography": "Modern geometric sans",
     "motif": "Layered product glass",
     "transition_style": "Cinematic fades",
@@ -417,7 +447,14 @@ sections and all eight architecture layers, but do not rename keys:
           "type": "thesis",
           "headline": "One concise headline",
           "visible_text": "One sparse visible line.",
-          "visual": {"kind": "hero"},
+          "visual": {
+            "kind": "bullets",
+            "points": [
+              "Concrete sourced point",
+              "Second sourced point",
+              "Third sourced point"
+            ]
+          },
           "speaker_notes_ref": "slide-1",
           "sources": ["SPEC", "PLAN"]
         }
@@ -457,12 +494,15 @@ sections and all eight architecture layers, but do not rename keys:
   "notes": {
     "slide-1": {
       "slide_id": "slide-1",
-      "talk_track": "Presenter talk track.",
-      "transition": "Transition to next slide.",
+      "talk_track": "A rich, source-grounded 4-6 sentence presenter script.",
+      "transition": "A one-to-two sentence bridge into the next slide.",
       "timing_seconds": 45,
       "pause_cue": "Pause for emphasis.",
       "demo_cue": "",
-      "backup_points": ["One Q&A backup point."]
+      "backup_points": [
+        "First source-backed Q&A point.",
+        "Second source-backed Q&A point."
+      ]
     }
   },
   "demo_script_md": "## Demo\\n1. Show the product workflow.",
@@ -507,16 +547,39 @@ VISUALS — visual.kind must be one of these exact renderer-supported layouts:
 that implies a generated asset or media file. The trusted renderer draws the
 visuals from structured data.
 
+VISUAL DESCRIPTORS — make every slide's visual carry real structured content so
+the renderer paints a designed panel instead of a bare colour motif. In addition
+to kind, populate descriptor keys on the visual object:
+  - For bullets / product / walkthrough / trust / thesis / closing slides, add a
+    "points" array of 3 to 5 short, concrete, source-backed phrases (each at most
+    8 words — a capability, a guarantee, a step, a layer — never a full sentence
+    and never marketing copy).
+  - For metric slides, add "value" (a short source-backed figure or label, e.g.
+    "4 pipeline stages" or "80% coverage gate") and a "label" naming what it
+    measures. Only use numbers that appear in the finalised sources; never invent
+    a metric.
+Keep these descriptors sparse and factual; they are drawn as the slide's visual,
+not as extra body text, and they must obey the same grounding and no-filler rules
+as the rest of the deck.
+
 SLIDE RULES — one idea per slide. Headlines are at most 18 words. Visible slide
 text stays sparse: at most 45 visible words per slide unless diagram labels
-require more. The main deck stays sparse; depth lives in speaker notes and the
-technical appendix, not on the slides.
+require more. The main deck stays sparse; depth lives in speaker notes, the
+visual descriptors, and the technical appendix, not in long slide paragraphs.
 
-SPEAKER NOTES — provide one note per slide keyed by the slide id, each with a
-talk track, a transition, timing (seconds), a pause cue, a concise live
-walkthrough cue when the sources support one, and backup points for Q&A. Leave
-demo_cue as an empty string when there is no source-backed live action. Never
-mention or request a video demo.
+SPEAKER NOTES — this is where the depth lives, so make every note substantial.
+Provide one note per slide keyed by the slide id. Each talk_track is a rich,
+specific presenter script of roughly 4 to 6 sentences (about 80 to 160 words):
+open with the point of the slide, name the concrete product detail or
+architecture component from the sources, explain why it matters to the audience,
+and land the takeaway — all grounded, never generic. The transition is a real
+one to two sentence bridge to the next slide. Set realistic timing in seconds.
+The pause_cue names the exact moment to pause for effect. Provide at least two
+backup_points per slide for Q&A, each a concrete, source-backed fact a presenter
+can deploy under questioning. Add a concise live walkthrough cue in demo_cue when
+the sources support one, otherwise leave demo_cue an empty string. Write like a
+seasoned keynote speaker briefing a colleague — detailed and specific, never
+padded with launch-copy filler. Never mention or request a video demo.
 
 WALKTHROUGH SCRIPT — keep the API field name demo_script_md, but its Markdown
 content is a source-backed live walkthrough script. It maps concrete product
@@ -533,9 +596,15 @@ were given, exactly as written, such as "SPEC:overview" rather than "SPEC";
 never fabricate or paraphrase a citation id. Key source_map entries by slide id,
 and copy citation excerpts verbatim from the provided source excerpt text.
 
-VISUAL IDENTITY — provide a theme expressing the product's visual identity: a
-colour palette (3-8 #RRGGBB hex values), a typography mood, a motif, a transition
-style, and a diagram style.
+VISUAL IDENTITY — provide a theme that is distinctive to THIS product, not a
+house style. The deck renderer drives the cover gradient, the per-act accent
+rotation, the slide accents, and the visual cards directly from your palette, so
+the palette is what makes each keynote look different. Provide 5 to 8 #RRGGBB hex
+values with real range: a deep anchor colour, two or three vivid accents that
+suit the product's domain, and a brighter highlight — chosen so the six acts can
+each take a visibly different accent. Avoid a flat, near-monochrome palette.
+Also give a typography mood, a motif (a short evocative phrase describing the
+deck's look and feel), a transition style, and a diagram style.
 
 RENDERING SAFETY — you produce structured content only. NEVER emit HTML, CSS,
 JavaScript, a <script> tag or any generated script, inline event handlers,

@@ -77,9 +77,7 @@ HTML_CSP = (
 # re-validate here before inlining into CSS so a malformed value can never break
 # out of the colour context. Falls back to brand defaults.
 _HEX_RE = re.compile(r"^#[0-9A-Fa-f]{6}$")
-_REMOTE_REFERENCE_RE = re.compile(
-    r"(?i)\bhttps?://[^\s<>'\")]+|//[^\s<>'\")]+"
-)
+_REMOTE_REFERENCE_RE = re.compile(r"(?i)\bhttps?://[^\s<>'\")]+|//[^\s<>'\")]+")
 _DEFAULT_ACCENT = "#6d28d9"
 _DEFAULT_ACCENT_2 = "#0ea5e9"
 
@@ -202,70 +200,183 @@ def _clean(value: Any) -> str:
     return _REMOTE_REFERENCE_RE.sub("", sanitize_text(str(value))).strip()
 
 
-def _hex_or(default: str, value: Any) -> str:
-    return value if isinstance(value, str) and _HEX_RE.match(value) else default
+# Human label per inert visual.kind — mirrors the live deck's VISUAL_KIND_LABEL so
+# the offline package reads the same as the presented deck. The renderer draws the
+# visual from the slide's own structured descriptors, never from raw source text.
+_VISUAL_KIND_LABEL: dict[str, str] = {
+    "hero": "Vision",
+    "thesis": "Thesis",
+    "product": "Product",
+    "walkthrough": "Walkthrough",
+    "architecture": "Architecture",
+    "trust": "Trust & reliability",
+    "closing": "Close",
+    "appendix_pointer": "Appendix",
+    "diagram_ref": "Diagram",
+    "bullets": "Highlights",
+    "metric": "Key metric",
+}
+_VISUAL_POINTS_MAX = 5
 
 
-def _source_refs_for_slide(
-    source_map: dict[str, Any], slide_id: str
-) -> list[dict[str, Any]]:
-    refs: list[dict[str, Any]] = []
-    for key, value in source_map.items():
-        if key == slide_id or key.startswith(f"{slide_id}."):
-            refs.extend(ref for ref in value if isinstance(ref, dict))
-    return refs
+def _safe_palette(theme: dict[str, Any]) -> list[str]:
+    """Return the validated #RRGGBB palette, or a vivid fallback with range.
+
+    Every colour is re-checked here before it is inlined into CSS so a malformed
+    value can never break out of the colour context, and so per-act rotation
+    always has at least two distinct hues to cycle.
+    """
+
+    raw = theme.get("palette") or []
+    cleaned = [c for c in raw if isinstance(c, str) and _HEX_RE.match(c)]
+    return cleaned if len(cleaned) >= 2 else [_DEFAULT_ACCENT, _DEFAULT_ACCENT_2]
+
+
+# Dark base the accents are blended toward when used as *text*, and the luminance
+# ceiling a text colour must clear to stay readable on the light card surfaces.
+_INK_BASE = (22, 15, 46)  # #160f2e
+_INK_MAX_LUMINANCE = 105.0  # 0-255 scale
+
+
+def _relative_luminance(r: int, g: int, b: int) -> float:
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b
+
+
+def _readable_ink(hex_colour: str) -> str:
+    """Darken an accent until it is legible as text on a light card.
+
+    The palette accent is used as-is for fills, borders, rails and badges (which
+    carry their own contrast), but a pale accent (amber, cyan, mint) used as text
+    washes out. We blend the accent toward a dark base, increasing the blend until
+    the result clears a luminance ceiling — so the hue survives but the text is
+    always readable, whatever palette the model produced.
+    """
+
+    if not _HEX_RE.match(hex_colour):
+        return "#160f2e"
+    r = int(hex_colour[1:3], 16)
+    g = int(hex_colour[3:5], 16)
+    b = int(hex_colour[5:7], 16)
+    for accent_weight in (0.72, 0.55, 0.4, 0.28):
+        nr = round(r * accent_weight + _INK_BASE[0] * (1 - accent_weight))
+        ng = round(g * accent_weight + _INK_BASE[1] * (1 - accent_weight))
+        nb = round(b * accent_weight + _INK_BASE[2] * (1 - accent_weight))
+        if _relative_luminance(nr, ng, nb) <= _INK_MAX_LUMINANCE:
+            return f"#{nr:02x}{ng:02x}{nb:02x}"
+    return f"#{nr:02x}{ng:02x}{nb:02x}"
+
+
+def _visual_points(visual: Any) -> list[str]:
+    if not isinstance(visual, dict):
+        return []
+    for key in ("points", "items", "bullets", "highlights"):
+        value = visual.get(key)
+        if isinstance(value, list):
+            points = [_clean(v) for v in value if isinstance(v, str) and v.strip()]
+            if points:
+                return points[:_VISUAL_POINTS_MAX]
+    return []
+
+
+def _visual_metric(visual: Any) -> dict[str, str] | None:
+    if not isinstance(visual, dict):
+        return None
+    raw_value = visual.get("value") or visual.get("metric") or visual.get("stat")
+    if not isinstance(raw_value, (str, int, float)):
+        return None
+    raw_label = visual.get("label") or visual.get("caption") or visual.get("unit")
+    return {
+        "value": _clean(str(raw_value)),
+        "label": _clean(raw_label) if isinstance(raw_label, str) else "",
+    }
 
 
 def _build_deck_context(content: dict[str, Any], workspace_name: str) -> dict[str, Any]:
     theme = content.get("theme") or {}
-    palette = theme.get("palette") or []
-    accent = _hex_or(_DEFAULT_ACCENT, palette[0] if len(palette) > 0 else None)
-    accent_2 = _hex_or(_DEFAULT_ACCENT_2, palette[1] if len(palette) > 1 else None)
+    palette = _safe_palette(theme)
+    accent = palette[0]
+    accent_2 = palette[1] if len(palette) > 1 else palette[0]
 
-    sections: list[dict[str, Any]] = []
-    source_map = content.get("source_map") or {}
-    if not isinstance(source_map, dict):
-        source_map = {}
-    for section in content.get("sections") or []:
+    # One flat list of slide "pages" (each renders to its own A4 page). Every
+    # slide carries its act's rotating accent so the printed deck shifts colour
+    # act by act, exactly like the live deck.
+    pages: list[dict[str, Any]] = []
+    slide_no = 0
+    for index, section in enumerate(content.get("sections") or []):
         section_title = _clean(section.get("title"))
-        slides: list[dict[str, Any]] = []
+        act_accent = palette[index % len(palette)]
+        act_accent_2 = palette[(index + 1) % len(palette)]
         for slide in section.get("slides") or []:
-            slide_id = _clean(slide.get("id"))
-            refs = _source_refs_for_slide(source_map, slide_id)
-            first_ref = refs[0] if refs else {}
-            slides.append(
+            visual = slide.get("visual") or {}
+            kind = _clean(visual.get("kind")) if isinstance(visual, dict) else ""
+            slide_no += 1
+            pages.append(
                 {
+                    "slide_no": slide_no,
+                    "act_no": index + 1,
+                    "act_title": section_title,
+                    "accent": act_accent,
+                    "accent_2": act_accent_2,
+                    "ink": _readable_ink(act_accent),
                     "headline": _clean(slide.get("headline")),
                     "visible_text": _clean(slide.get("visible_text")),
-                    "visual_kind": _clean(first_ref.get("source_id")),
-                    "visual_detail": _clean(first_ref.get("excerpt"))[:260],
+                    "visual_label": _VISUAL_KIND_LABEL.get(kind, "Highlight"),
+                    "visual_points": _visual_points(visual),
+                    "visual_metric": _visual_metric(visual),
                     "sources": [
                         s for s in (slide.get("sources") or []) if s in _VALID_SOURCES
                     ],
                 }
             )
-        sections.append({"title": section_title, "slides": slides})
 
-    architecture_layers: list[dict[str, Any]] = []
+    # The architecture reveal is its own page: every layer takes the next palette
+    # colour so the eight planes read as a colourful stack (mirrors the live deck).
+    architecture: dict[str, Any] | None = None
     for diagram in content.get("diagrams") or []:
         if diagram.get("type") == _ARCH_REVEAL_TYPE:
-            for layer in diagram.get("layers") or []:
-                architecture_layers.append(
+            layers: list[dict[str, Any]] = []
+            for layer_index, layer in enumerate(diagram.get("layers") or []):
+                layer_accent = palette[layer_index % len(palette)]
+                layer_accent_2 = palette[(layer_index + 1) % len(palette)]
+                layers.append(
                     {
+                        "number": layer_index + 1,
                         "kind": _clean(layer.get("kind")),
                         "label": _clean(layer.get("label")),
                         "summary": _clean(layer.get("summary")),
+                        "accent": layer_accent,
+                        "accent_2": layer_accent_2,
+                        "ink": _readable_ink(layer_accent),
+                        # White number sits on the badge fill, so the fill itself
+                        # must be dark enough — use the ink gradient, not the raw
+                        # (possibly pale) accents.
+                        "ink_2": _readable_ink(layer_accent_2),
                     }
                 )
+            if layers:
+                architecture = {
+                    "accent": accent,
+                    "accent_2": accent_2,
+                    "ink": _readable_ink(accent),
+                    "layers": layers,
+                }
             break
+
+    total_slides = len(pages) + (1 if architecture else 0)
 
     return {
         "title": _clean(content.get("title")) or _clean(workspace_name) or "Storyboard",
         "motif": _clean(theme.get("motif")),
         "accent_color": accent,
         "accent_color_2": accent_2,
-        "sections": sections,
-        "architecture_layers": architecture_layers,
+        # The cover carries white text, so its gradient must be dark regardless of
+        # how pale the palette is — use the ink (darkened) accents for the cover.
+        "cover_accent": _readable_ink(accent),
+        "cover_accent_2": _readable_ink(accent_2),
+        "palette": palette,
+        "pages": pages,
+        "architecture": architecture,
+        "total_slides": total_slides,
         "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
     }
 

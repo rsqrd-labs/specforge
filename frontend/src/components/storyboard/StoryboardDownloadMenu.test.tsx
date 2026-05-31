@@ -33,7 +33,7 @@ describe("StoryboardDownloadMenu", () => {
     )
 
     expect(screen.getByRole("button", { name: /HTML package/i })).toBeInTheDocument()
-    expect(screen.getByRole("button", { name: /^PDF/i })).toBeInTheDocument()
+    expect(screen.getByRole("button", { name: /download pdf/i })).toBeInTheDocument()
     expect(screen.getByRole("button", { name: /speaker notes/i })).toBeInTheDocument()
     expect(screen.getByRole("button", { name: /walkthrough script/i })).toBeInTheDocument()
     expect(screen.getByRole("button", { name: /technical appendix/i })).toBeInTheDocument()
@@ -56,11 +56,11 @@ describe("StoryboardDownloadMenu", () => {
     )
 
     expect(screen.queryByRole("button", { name: /HTML package/i })).toBeNull()
-    expect(screen.getByRole("button", { name: /^PDF/i })).toBeInTheDocument()
+    expect(screen.getByRole("button", { name: /download pdf/i })).toBeInTheDocument()
     expect(screen.queryByRole("button", { name: /speaker notes/i })).toBeNull()
     expect(screen.queryByRole("button", { name: /technical appendix/i })).toBeNull()
 
-    await user.click(screen.getByRole("button", { name: /^PDF/i }))
+    await user.click(screen.getByRole("button", { name: /download pdf/i }))
     expect(downloadPublicStoryboard).toHaveBeenCalledWith("public123", "pdf")
 
     rerender(

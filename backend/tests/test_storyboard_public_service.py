@@ -34,7 +34,12 @@ pytestmark_db = pytest.mark.skipif(
     reason="TEST_DATABASE_URL not set — integration test skipped.",
 )
 
-_SECRET_TALK = "SECRET-TALK-TRACK"
+# Long enough to clear the talk_track depth floor while staying a unique,
+# searchable sentinel for the redaction assertions below.
+_SECRET_TALK = (
+    "SECRET-TALK-TRACK that runs deliberately long so it clears the speaker-note "
+    "depth floor while remaining a unique searchable sentinel for redaction tests."
+)
 _SECRET_PAUSE = "SECRET-PAUSE-CUE"
 _SECRET_BACKUP = "SECRET-BACKUP-POINT"
 _SECRET_APPENDIX = "SECRET-TECHNICAL-APPENDIX"
@@ -92,7 +97,7 @@ def _full_payload() -> dict:
             "timing_seconds": 45,
             "pause_cue": _SECRET_PAUSE,
             "demo_cue": "",
-            "backup_points": [_SECRET_BACKUP],
+            "backup_points": [_SECRET_BACKUP, "Second backup point for Q&A."],
         }
     layers = [
         {

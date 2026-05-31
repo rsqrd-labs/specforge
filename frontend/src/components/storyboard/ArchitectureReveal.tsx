@@ -72,6 +72,10 @@ export function ArchitectureReveal({
   const primary = safeHex(palette[0], "#8f4e00")
   const secondary = safeHex(palette[1], "#a1385f")
   const accent = safeHex(palette[2], "#565e74")
+  // Full guarded palette for per-layer accent rotation (falls back to the three
+  // derived hues when the deck palette is short), so eight layers stay colourful.
+  const cycle = palette.filter((colour) => /^#[0-9A-Fa-f]{6}$/.test(colour))
+  const rotation = cycle.length >= 2 ? cycle : [primary, secondary, accent]
 
   return (
     <figure
@@ -93,14 +97,27 @@ export function ArchitectureReveal({
             LAYER_COPY[layer.kind as keyof typeof LAYER_COPY] ||
             layer.kind
           const sourceId = layer.source_refs[0]?.source_id
+          // Each layer takes the next palette colour (with the following one as a
+          // gradient partner) so the eight planes read as a colourful, distinct
+          // stack rather than a monochrome grid. The whole-deck guard already
+          // validated these, and safeHex re-checks before they reach the DOM.
+          const layerAccent = rotation[index % rotation.length]
+          const layerAccent2 = rotation[(index + 1) % rotation.length]
           return (
             <li
               key={layer.id}
               className={`architecture-layer-card ${active ? "visible" : "pending"}`}
               data-layer-kind={layer.kind}
+              style={
+                {
+                  "--layer-accent": layerAccent,
+                  "--layer-accent-2": layerAccent2,
+                  "--layer-index": index,
+                } as CSSProperties
+              }
             >
               <span className="architecture-layer-card__index">{index + 1}</span>
-              <div>
+              <div className="architecture-layer-card__body">
                 <span className="architecture-layer-card__kind">{layer.kind}</span>
                 <strong>{layer.label}</strong>
                 <p>{summary}</p>

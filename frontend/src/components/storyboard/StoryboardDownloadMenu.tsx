@@ -36,7 +36,7 @@ const OWNER_DOWNLOADS: DownloadItem[] = [
   {
     kind: "pdf",
     label: "PDF",
-    description: "Static presentation PDF.",
+    description: "Print-ready deck — one designed slide per page.",
   },
   {
     kind: "notes",
@@ -55,9 +55,20 @@ const OWNER_DOWNLOADS: DownloadItem[] = [
   },
 ]
 
+// File extension per download kind, so the browser saves a usable file (the
+// previous name had no extension, e.g. "storyboard-deck-pdf"). Notes are always
+// requested as Markdown from this menu; the rendered notes PDF is not offered here.
+const DOWNLOAD_EXTENSION: Record<StoryboardDownloadKind, string> = {
+  html: "html",
+  pdf: "pdf",
+  notes: "md",
+  "demo-script": "md",
+  appendix: "md",
+}
+
 function safeFilename(title: string, kind: StoryboardDownloadKind): string {
   const base = title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")
-  return `storyboard-${base || "deck"}-${kind}`
+  return `storyboard-${base || "deck"}-${kind}.${DOWNLOAD_EXTENSION[kind]}`
 }
 
 function triggerBrowserDownload(blob: Blob, filename: string) {
@@ -108,6 +119,13 @@ export function StoryboardDownloadMenu({
     () => (mode === "owner" ? OWNER_DOWNLOADS : publicItems(permissions, downloads)),
     [downloads, mode, permissions],
   )
+  // The PDF is the headline artifact — surface it as the primary action and demote
+  // the rest to a secondary "More formats" group.
+  const pdfItem = useMemo(() => items.find((item) => item.kind === "pdf"), [items])
+  const otherItems = useMemo(
+    () => items.filter((item) => item.kind !== "pdf"),
+    [items],
+  )
 
   async function handleDownload(kind: StoryboardDownloadKind) {
     setPendingKind(kind)
@@ -144,19 +162,40 @@ export function StoryboardDownloadMenu({
       </header>
 
       {items.length > 0 ? (
-        <div className="storyboard-download-menu__items">
-          {items.map((item) => (
+        <>
+          {pdfItem && (
             <button
-              key={item.kind}
               type="button"
-              onClick={() => void handleDownload(item.kind)}
+              className="storyboard-download-menu__primary"
+              onClick={() => void handleDownload("pdf")}
               disabled={pendingKind !== null}
             >
-              <span>{item.label}</span>
-              <small>{item.description}</small>
+              <span className="storyboard-download-menu__primary-label">
+                {pendingKind === "pdf" ? "Preparing PDF…" : "Download PDF"}
+              </span>
+              <small>{pdfItem.description}</small>
             </button>
-          ))}
-        </div>
+          )}
+
+          {otherItems.length > 0 && (
+            <div className="storyboard-download-menu__more">
+              <span className="storyboard-download-menu__more-label">More formats</span>
+              <div className="storyboard-download-menu__items">
+                {otherItems.map((item) => (
+                  <button
+                    key={item.kind}
+                    type="button"
+                    onClick={() => void handleDownload(item.kind)}
+                    disabled={pendingKind !== null}
+                  >
+                    <span>{item.label}</span>
+                    <small>{item.description}</small>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+        </>
       ) : (
         <p>No public downloads are enabled for this Storyboard.</p>
       )}

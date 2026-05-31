@@ -124,7 +124,11 @@ def test_render_deck_html_includes_content_and_csp() -> None:
     assert "SpecForge Launch Keynote" in html
     assert "Opening Thesis" in html
     assert "From idea to engineered spec" in html
-    assert "SPEC:overview" in html
+    # The visual is drawn from the slide's own visual.kind (a hero -> "Vision"
+    # label), never from raw source ids or arbitrary descriptor text dumped onto
+    # the slide. Grounding stays in the source chips.
+    assert "Vision" in html
+    assert "SPEC:overview" not in html
     assert "full-bleed" not in html
     assert "Browser SPA" in html
     # Embedded CSP meta with all required directives.
@@ -136,6 +140,55 @@ def test_render_deck_html_includes_content_and_csp() -> None:
     # No external resource references of any kind.
     assert "http://" not in html
     assert "https://" not in html
+
+
+def test_visual_descriptors_drive_the_slide_panel() -> None:
+    payload = _payload()
+    payload["sections"][0]["slides"][0]["visual"] = {
+        "kind": "metric",
+        "value": "4 stages",
+        "label": "Spec to Tasks",
+    }
+    html = renderer.render_deck_html(payload, "Acme")
+    assert "Key metric" in html  # metric visual label
+    assert "4 stages" in html
+    assert "Spec to Tasks" in html
+
+    payload["sections"][0]["slides"][0]["visual"] = {
+        "kind": "bullets",
+        "points": ["Stream every stage", "Diff and version", "Human review gate"],
+    }
+    html = renderer.render_deck_html(payload, "Acme")
+    assert "Highlights" in html  # bullets visual label
+    assert "Stream every stage" in html
+    assert "Human review gate" in html
+
+
+def test_each_act_inlines_a_distinct_palette_accent() -> None:
+    payload = _payload()
+    palette = ["#112233", "#445566", "#778899"]
+    payload["theme"]["palette"] = palette
+    # Two acts so per-act rotation picks up two different palette colours.
+    payload["sections"].append(
+        {
+            "id": "act-1",
+            "title": "Product Vision",
+            "slides": [
+                {
+                    "id": "s1",
+                    "type": "product",
+                    "headline": "Second act",
+                    "visible_text": "",
+                    "visual": {"kind": "product"},
+                    "speaker_notes_ref": "s1",
+                    "sources": ["SPEC"],
+                }
+            ],
+        }
+    )
+    html = renderer.render_deck_html(payload, "Acme")
+    assert "--a: #112233" in html  # act 1 accent
+    assert "--a: #445566" in html  # act 2 accent rotated forward
 
 
 def test_palette_only_valid_hex_is_inlined() -> None:

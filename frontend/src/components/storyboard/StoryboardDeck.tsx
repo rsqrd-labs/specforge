@@ -1,4 +1,5 @@
 import {
+  type CSSProperties,
   useCallback,
   useEffect,
   useMemo,
@@ -84,6 +85,52 @@ const VISUAL_KIND_LABEL: Record<string, string> = {
 
 const VISUAL_POINTS_MAX = 5
 
+// Every palette colour the LLM emits is validated as #RRGGBB at generation time;
+// we guard again here before injecting into a style object so a malformed value
+// can never reach the DOM. React style objects are not a JS-injection vector, but
+// validating is cheap defence-in-depth and guarantees the deck stays legible.
+const HEX_RE = /^#[0-9a-fA-F]{6}$/
+
+// A vivid, accessible fallback so an empty/invalid palette still renders a
+// distinctive deck rather than collapsing to a single flat colour.
+const FALLBACK_PALETTE = [
+  "#6d28d9",
+  "#0ea5e9",
+  "#f59e0b",
+  "#10b981",
+  "#ec4899",
+  "#3b82f6",
+]
+
+function safeHex(value: unknown, fallback: string): string {
+  return typeof value === "string" && HEX_RE.test(value) ? value : fallback
+}
+
+// Keep only valid hex colours; fall back to the brand palette when the model
+// supplied fewer than two usable colours so per-act rotation always has range.
+function safePalette(palette: string[] | undefined): string[] {
+  const cleaned = (palette ?? []).filter(
+    (colour): colour is string => typeof colour === "string" && HEX_RE.test(colour),
+  )
+  return cleaned.length >= 2 ? cleaned : FALLBACK_PALETTE
+}
+
+// The accent for a given act — cycles the palette so moving across the six acts
+// visibly shifts the deck's colour, the core fix for "it always looks the same".
+function actAccent(palette: string[], index: number): string {
+  return palette[index % palette.length]
+}
+
+// Map the free-text transition_style mood onto one of three vetted CSS animation
+// classes. The string never reaches CSS; we only ever emit a fixed class name,
+// so this stays an allow-list (no free-text → CSS injection surface).
+function transitionClass(style: string | undefined): "fade" | "glide" | "rise" {
+  const mood = (style ?? "").toLowerCase()
+  if (/(slide|glide|push|pan|sweep)/.test(mood)) return "glide"
+  if (/(fade|dissolve|cinematic|cross)/.test(mood)) return "fade"
+  return "rise"
+}
+
 // Descriptor keys are pure data: read them defensively (any may be absent) and
 // render only strings. React escapes every value, so nothing is ever executed.
 function asStringList(value: unknown): string[] {
@@ -167,20 +214,17 @@ function SlideVisual({
   slide: StoryboardSlide | null
   palette: string[] | undefined
 }) {
-  const swatches = (palette && palette.length > 0 ? palette : ["#1FB6FF"]).slice(
-    0,
-    4,
-  )
-  const accent = palette?.[1] ?? palette?.[0] ?? "#1FB6FF"
+  const safe = safePalette(palette)
+  const swatches = safe.slice(0, 4)
   const kind = slide?.visual?.kind ?? "hero"
   const label = VISUAL_KIND_LABEL[kind] ?? "Highlight"
   const metric = visualMetric(slide?.visual)
   const points = visualPoints(slide?.visual)
   return (
-    <div className="storyboard-visual-card" style={{ borderColor: accent }}>
-      <span className="storyboard-visual-kind" style={{ color: accent }}>
-        {label}
-      </span>
+    <div className="storyboard-visual-card">
+      {/* The kind label colour is themed but darkened (in CSS, mixed toward a dark
+          ink) so it stays legible even when the act accent is a pale hue. */}
+      <span className="storyboard-visual-kind">{label}</span>
       {metric ? (
         <div className="storyboard-visual-metric">
           <strong>{metric.value}</strong>
@@ -305,6 +349,27 @@ export function StoryboardDeck({
   const canShowDeck = state === "ready" || state === "stale"
   const activeSlide = canShowDeck ? slides[activeSlideIndex] ?? null : null
   const activeSectionIndex = activeSlide?.sectionIndex ?? 0
+  const palette = useMemo(() => safePalette(payload?.theme.palette), [payload])
+  const transition = useMemo(
+    () => transitionClass(payload?.theme.transition_style),
+    [payload],
+  )
+  // Themed CSS custom properties scoped to the deck subtree. The base ink/surface
+  // stays neutral and readable; the palette drives only the accent, the per-act
+  // accent (which rotates as you move through the six acts), and the cover/stage
+  // gradients — so each deck looks distinct without ever risking body contrast.
+  const deckStyle = useMemo<CSSProperties>(() => {
+    const accent = safeHex(palette[0], "#6d28d9")
+    const accent2 = safeHex(palette[1] ?? palette[0], "#0ea5e9")
+    const act = safeHex(actAccent(palette, activeSectionIndex), accent)
+    const actNext = safeHex(actAccent(palette, activeSectionIndex + 1), accent2)
+    return {
+      "--sb-accent": accent,
+      "--sb-accent-2": accent2,
+      "--sb-act-accent": act,
+      "--sb-act-accent-2": actNext,
+    } as CSSProperties
+  }, [palette, activeSectionIndex])
   const presenterAllowed =
     isOwner || allowPresenterMode || sharePermissions?.allow_notes_download === true
   const sourceAllowed =
@@ -429,7 +494,8 @@ export function StoryboardDeck({
   return (
     <section
       ref={shellRef}
-      className={`storyboard-deck-shell ${isPresentationMode ? "fullscreen" : ""}`}
+      className={`storyboard-deck-shell storyboard-theme-${transition} ${isPresentationMode ? "fullscreen" : ""}`}
+      style={deckStyle}
       aria-label="StoryboardDeck"
       tabIndex={-1}
     >
@@ -491,7 +557,21 @@ export function StoryboardDeck({
       </nav>
 
       <div className="storyboard-stage-frame">
-        <article className="storyboard-slide" aria-live="polite">
+        {/* Ambient, palette-driven motion behind the slide. It lives outside the
+            keyed <article> so it drifts continuously rather than restarting on
+            every slide change, and recolours as the active act's accent shifts. */}
+        <div className="storyboard-stage-decor" aria-hidden="true">
+          <span className="storyboard-decor-orb storyboard-decor-orb--1" />
+          <span className="storyboard-decor-orb storyboard-decor-orb--2" />
+          <span className="storyboard-decor-grid" />
+        </div>
+        <article
+          key={activeSlideIndex}
+          className={`storyboard-slide storyboard-slide--${slide?.type ?? "thesis"}${
+            isArchitectureSlide ? " storyboard-slide--arch" : ""
+          }`}
+          aria-live="polite"
+        >
           <div className="storyboard-slide-content">
             <span className="storyboard-slide-act">{section.title}</span>
             <h2>{slide?.headline}</h2>

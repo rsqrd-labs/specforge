@@ -2,10 +2,14 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    {# Trusted, codebase-owned template (T-255). The LLM never contributes
+    {# Trusted, codebase-owned print deck (T-255). The LLM never contributes
        markup: every dynamic value below is structured, already-sanitised text
-       and is HTML-escaped by Jinja autoescape. No <script>, no remote assets,
-       no external fonts — the deck is a self-contained offline package. #}
+       and is HTML-escaped by Jinja autoescape. Every colour is a validated
+       #RRGGBB hex (re-checked in the renderer), so inlining it into a style
+       attribute or a CSS custom property cannot break out of the colour context.
+       One designed slide per page; print-native (no backdrop-filter, blend modes
+       or background-clip:text — none of which survive WeasyPrint). No <script>,
+       no remote assets, no external fonts — a self-contained offline package. #}
     <meta
       http-equiv="Content-Security-Policy"
       content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; frame-ancestors 'none'"
@@ -14,173 +18,414 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>{{ title }} — SpecForge Storyboard</title>
     <style>
-      /* All CSS inlined; no external resource fetches (Storyboard Delivery
-         Directive §5 — never reference remote assets or external fonts). */
-      :root {
-        --sb-ink: #0f172a;
-        --sb-muted: #475569;
-        --sb-border: #e2e8f0;
-        --sb-accent: {{ accent_color }};
-        --sb-accent-2: {{ accent_color_2 }};
-        --sb-bg: #ffffff;
-      }
       @page {
         size: A4 landscape;
-        margin: 16mm 16mm 16mm 16mm;
-        @bottom-right {
-          content: "Slide " counter(page) " of " counter(pages);
-          font-family: "Helvetica", "Arial", sans-serif;
-          font-size: 9pt;
-          color: #64748b;
-        }
+        margin: 0;
       }
       * { box-sizing: border-box; }
       body {
         margin: 0;
         font-family: "Helvetica", "Arial", sans-serif;
-        font-size: 12pt;
-        line-height: 1.5;
-        color: var(--sb-ink);
-        background: var(--sb-bg);
+        color: #11152b;
+        -webkit-print-color-adjust: exact;
+        print-color-adjust: exact;
       }
-      .deck { max-width: 1100px; margin: 0 auto; padding: 24px; }
-      .slide {
-        border: 1px solid var(--sb-border);
-        border-radius: 14px;
-        padding: 28px 32px;
-        margin: 0 0 22px 0;
-        page-break-inside: avoid;
-        background: #ffffff;
+
+      /* Each .page is exactly one printed slide. WeasyPrint's flexbox does not
+         reliably grow/center, so the page is a fixed-size positioning canvas and
+         every region is absolutely placed inside it — no flex grow, no content
+         flow that could overflow and split one slide across two printed pages. */
+      .page {
+        position: relative;
+        width: 297mm;
+        height: 210mm;
+        overflow: hidden;
+        page-break-before: always;
       }
-      .slide--cover {
-        border: none;
-        background: linear-gradient(135deg, var(--sb-accent), var(--sb-accent-2));
-        color: #ffffff;
-        padding: 64px 40px;
-        page-break-after: always;
-      }
-      .slide--cover h1 { color: #ffffff; font-size: 34pt; margin: 0 0 12px 0; }
-      .slide--cover .motif { font-size: 14pt; opacity: 0.92; }
-      .act {
-        text-transform: uppercase;
-        letter-spacing: 0.08em;
-        font-size: 9.5pt;
+      .page:first-child { page-break-before: avoid; }
+
+      .page__foot {
+        position: absolute;
+        left: 24mm;
+        right: 24mm;
+        bottom: 9mm;
+        display: flex;
+        justify-content: space-between;
+        font-size: 8pt;
         font-weight: 700;
-        color: var(--sb-accent);
-        margin: 0 0 6px 0;
-      }
-      .act-header {
-        page-break-after: avoid;
-        margin: 30px 0 12px 0;
-        padding-bottom: 6px;
-        border-bottom: 2px solid var(--sb-accent);
-      }
-      .act-header h2 { margin: 0; font-size: 18pt; }
-      h3.headline { margin: 0 0 8px 0; font-size: 16pt; line-height: 1.25; }
-      .visible-text { color: var(--sb-muted); margin: 0 0 10px 0; }
-      .visual {
-        font-size: 9.5pt;
-        color: var(--sb-muted);
-        background: #f8fafc;
-        border: 1px solid var(--sb-border);
-        border-radius: 8px;
-        padding: 8px 12px;
-        margin: 8px 0 0 0;
-      }
-      .visual .label { font-weight: 700; color: var(--sb-ink); }
-      .sources {
-        margin: 10px 0 0 0;
-        font-size: 8.5pt;
-        color: var(--sb-muted);
-      }
-      .source-chip {
-        display: inline-block;
-        border: 1px solid var(--sb-border);
-        border-radius: 999px;
-        padding: 1px 9px;
-        margin: 0 4px 4px 0;
-      }
-      .arch { margin-top: 8px; }
-      .arch-layer {
-        border-left: 3px solid var(--sb-accent);
-        padding: 6px 0 6px 12px;
-        margin: 8px 0;
-      }
-      .arch-layer .layer-kind {
-        text-transform: uppercase;
-        font-size: 8.5pt;
-        letter-spacing: 0.06em;
-        color: var(--sb-accent);
-        font-weight: 700;
-      }
-      .arch-layer .layer-label { font-weight: 700; }
-      .arch-layer .layer-summary { color: var(--sb-muted); font-size: 10pt; }
-      .footer {
-        margin-top: 18px;
-        padding-top: 10px;
-        border-top: 1px solid var(--sb-border);
-        font-size: 8.5pt;
         color: #94a3b8;
+        letter-spacing: 0.02em;
+      }
+
+      /* ---- Cover ---------------------------------------------------------- */
+      .page--cover {
+        padding: 0;
+        background: linear-gradient(135deg, {{ cover_accent }}, {{ cover_accent_2 }});
+        color: #ffffff;
+      }
+      .cover-inner {
+        height: 100%;
+        padding: 34mm 30mm;
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+      }
+      .cover-kicker {
+        font-size: 11pt;
+        font-weight: 800;
+        letter-spacing: 0.22em;
+        text-transform: uppercase;
+        opacity: 0.85;
+        margin-bottom: 8mm;
+      }
+      .cover-title {
+        font-size: 54pt;
+        font-weight: 800;
+        line-height: 1.02;
+        letter-spacing: -0.01em;
+        margin: 0;
+      }
+      .cover-motif {
+        margin-top: 8mm;
+        font-size: 15pt;
+        line-height: 1.4;
+        max-width: 200mm;
+        opacity: 0.94;
+      }
+      .cover-swatches { margin-top: 16mm; font-size: 0; }
+      .cover-swatches span {
+        display: inline-block;
+        width: 18mm;
+        height: 3mm;
+        margin-right: 3mm;
+        border-radius: 999px;
+        background: rgba(255, 255, 255, 0.88);
+      }
+      .cover-brand {
+        position: absolute;
+        left: 30mm;
+        bottom: 16mm;
+        font-size: 9pt;
+        font-weight: 700;
+        letter-spacing: 0.04em;
+        opacity: 0.85;
+      }
+
+      /* ---- Slide page ----------------------------------------------------- */
+      .page--slide {
+        /* A pale, per-act themed wash (white veil over the act gradient) keeps
+           the page airy while still carrying the slide's colour. */
+        background:
+          linear-gradient(rgba(255, 255, 255, 0.93), rgba(255, 255, 255, 0.93)),
+          linear-gradient(135deg, var(--a), var(--a2));
+      }
+      .page--slide::before {
+        content: "";
+        position: absolute;
+        left: 0;
+        top: 0;
+        bottom: 0;
+        width: 8mm;
+        background: linear-gradient(180deg, var(--a), var(--a2));
+      }
+      .kicker {
+        position: absolute;
+        top: 15mm;
+        left: 24mm;
+        right: 24mm;
+        font-size: 9.5pt;
+        font-weight: 800;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+        color: var(--ink);
+      }
+      .kicker .kicker__act { color: #94a3b8; }
+      .slide-body {
+        position: absolute;
+        top: 40mm;
+        left: 24mm;
+        right: 24mm;
+        bottom: 20mm;
+        display: grid;
+        grid-template-columns: 1.08fr 0.92fr;
+        gap: 16mm;
+        align-items: center;
+      }
+      .headline {
+        margin: 0;
+        font-size: 30pt;
+        font-weight: 800;
+        line-height: 1.08;
+        letter-spacing: -0.01em;
+        color: #11152b;
+      }
+      .headline-rule {
+        width: 26mm;
+        height: 1.5mm;
+        border-radius: 999px;
+        background: linear-gradient(90deg, var(--a), var(--a2));
+        margin: 6mm 0;
+      }
+      .visible-text {
+        margin: 0;
+        font-size: 13.5pt;
+        line-height: 1.45;
+        color: #475569;
+        max-width: 120mm;
+      }
+      .chips { margin-top: 8mm; }
+      .chip {
+        display: inline-block;
+        border: 1px solid #e2e8f0;
+        border-radius: 999px;
+        padding: 1mm 3mm;
+        margin: 0 1.5mm 1.5mm 0;
+        font-size: 8.5pt;
+        font-weight: 800;
+        color: #64748b;
+      }
+
+      /* Visual card — translucent panel with a gradient top strip + accent rail. */
+      .vcard {
+        position: relative;
+        border: 1px solid var(--a);
+        border-radius: 6mm;
+        background: rgba(255, 255, 255, 0.72);
+        padding: 10mm 11mm;
+        overflow: hidden;
+        min-height: 64mm;
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+      }
+      .vcard::before {
+        content: "";
+        position: absolute;
+        top: 0;
+        left: 0;
+        right: 0;
+        height: 1.6mm;
+        background: linear-gradient(90deg, var(--a), var(--a2));
+      }
+      .vcard__label {
+        font-size: 9pt;
+        font-weight: 800;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+        color: var(--ink);
+        margin-bottom: 6mm;
+      }
+      .vcard__metric {
+        font-size: 34pt;
+        font-weight: 800;
+        line-height: 1.04;
+        color: var(--ink);
+        letter-spacing: -0.02em;
+      }
+      .vcard__metric-label {
+        display: inline-block;
+        margin-top: 5mm;
+        border: 1px solid var(--a);
+        border-radius: 999px;
+        padding: 1.5mm 4mm;
+        font-size: 9.5pt;
+        font-weight: 700;
+        color: var(--ink);
+      }
+      .vcard__points { margin: 0; padding: 0; list-style: none; }
+      .vcard__points li {
+        position: relative;
+        padding: 2.5mm 0 2.5mm 8mm;
+        font-size: 12pt;
+        font-weight: 600;
+        color: #1f2937;
+        line-height: 1.3;
+      }
+      .vcard__points li::before {
+        content: "";
+        position: absolute;
+        left: 0;
+        top: 4.6mm;
+        width: 3mm;
+        height: 3mm;
+        border-radius: 50%;
+        background: linear-gradient(135deg, var(--a), var(--a2));
+      }
+      /* Block bars (not flex) so WeasyPrint sizes them reliably. */
+      .vcard__motif span {
+        display: block;
+        width: 100%;
+        height: 9mm;
+        margin-bottom: 4mm;
+        border-radius: 2.5mm;
+      }
+      .vcard__motif span:last-child { margin-bottom: 0; }
+
+      /* ---- Architecture page --------------------------------------------- */
+      .arch-head {
+        position: absolute;
+        top: 15mm;
+        left: 24mm;
+        right: 24mm;
+      }
+      .arch-head .kicker {
+        position: static;
+        color: var(--ink);
+      }
+      .arch-head h2 {
+        margin: 2mm 0 0;
+        font-size: 24pt;
+        font-weight: 800;
+        letter-spacing: -0.01em;
+      }
+      .arch-grid {
+        position: absolute;
+        top: 40mm;
+        left: 24mm;
+        right: 24mm;
+        bottom: 11mm;
+        display: grid;
+        grid-template-columns: repeat(4, 1fr);
+        grid-auto-rows: min-content;
+        gap: 5mm;
+        align-content: center;
+      }
+      .arch-card {
+        position: relative;
+        border: 1px solid var(--a);
+        border-radius: 4.5mm;
+        background: rgba(255, 255, 255, 0.72);
+        padding: 5mm 5mm 5mm 7mm;
+        overflow: hidden;
+      }
+      .arch-card::before {
+        content: "";
+        position: absolute;
+        left: 0;
+        top: 0;
+        bottom: 0;
+        width: 2.5mm;
+        background: linear-gradient(180deg, var(--a), var(--a2));
+      }
+      .arch-card__num {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 8mm;
+        height: 8mm;
+        border-radius: 2.4mm;
+        background: linear-gradient(140deg, var(--ink), var(--ink2));
+        color: #fff;
+        font-size: 11pt;
+        font-weight: 800;
+        margin-bottom: 2.5mm;
+      }
+      .arch-card__kind {
+        font-size: 7pt;
+        font-weight: 800;
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+        color: var(--ink);
+      }
+      .arch-card__label {
+        margin: 1mm 0 0;
+        font-size: 11pt;
+        font-weight: 800;
+        line-height: 1.12;
+        color: #11152b;
+      }
+      .arch-card__summary {
+        margin: 1.5mm 0 0;
+        font-size: 8.5pt;
+        line-height: 1.28;
+        color: #64748b;
       }
     </style>
   </head>
   <body>
-    <main class="deck">
-      <section class="slide slide--cover">
-        <h1>{{ title }}</h1>
-        {% if motif %}<div class="motif">{{ motif }}</div>{% endif %}
-      </section>
-
-      {% for section in sections %}
-      <div class="act-header">
-        <div class="act">Act {{ loop.index }}</div>
-        <h2>{{ section.title }}</h2>
-      </div>
-      {% for slide in section.slides %}
-      <section class="slide">
-        <h3 class="headline">{{ slide.headline }}</h3>
-        {% if slide.visible_text %}
-        <p class="visible-text">{{ slide.visible_text }}</p>
-        {% endif %}
-        {% if slide.visual_kind %}
-        <div class="visual">
-          <span class="label">{{ slide.visual_kind }}</span>
-          {% if slide.visual_detail %} — {{ slide.visual_detail }}{% endif %}
-        </div>
-        {% endif %}
-        {% if slide.sources %}
-        <div class="sources">
-          {% for src in slide.sources %}
-          <span class="source-chip">{{ src }}</span>
+    {# ---- Cover ---- #}
+    <section class="page page--cover">
+      <div class="cover-inner">
+        <div class="cover-kicker">SpecForge Launch Keynote</div>
+        <h1 class="cover-title">{{ title }}</h1>
+        {% if motif %}<div class="cover-motif">{{ motif }}</div>{% endif %}
+        <div class="cover-swatches">
+          {% for colour in palette %}
+          <span style="background: {{ colour }};"></span>
           {% endfor %}
         </div>
-        {% endif %}
-      </section>
-      {% endfor %}
-      {% endfor %}
-
-      {% if architecture_layers %}
-      <div class="act-header">
-        <div class="act">Architecture Reveal</div>
-        <h2>System Architecture</h2>
       </div>
-      <section class="slide arch">
-        {% for layer in architecture_layers %}
-        <div class="arch-layer">
-          <div class="layer-kind">{{ layer.kind }}</div>
-          <div class="layer-label">{{ layer.label }}</div>
-          {% if layer.summary %}
-          <div class="layer-summary">{{ layer.summary }}</div>
+      <div class="cover-brand">Generated by SpecForge · {{ generated_at }}</div>
+    </section>
+
+    {# ---- One designed slide per page ---- #}
+    {% for page in pages %}
+    <section class="page page--slide" style="--a: {{ page.accent }}; --a2: {{ page.accent_2 }}; --ink: {{ page.ink }};">
+      <div class="kicker">
+        <span class="kicker__act">Act {{ page.act_no }}</span> · {{ page.act_title }}
+      </div>
+      <div class="slide-body">
+        <div class="slide-body__copy">
+          <h2 class="headline">{{ page.headline }}</h2>
+          <div class="headline-rule"></div>
+          {% if page.visible_text %}<p class="visible-text">{{ page.visible_text }}</p>{% endif %}
+          {% if page.sources %}
+          <div class="chips">
+            {% for src in page.sources %}<span class="chip">{{ src }}</span>{% endfor %}
+          </div>
           {% endif %}
         </div>
-        {% endfor %}
-      </section>
-      {% endif %}
-
-      <div class="footer">
-        Generated by SpecForge · {{ generated_at }} · Offline keynote package.
-        Source-backed claims map to finalised SPEC / PLAN / HARNESS / TASKS.
+        <div class="vcard">
+          <div class="vcard__label">{{ page.visual_label }}</div>
+          {% if page.visual_metric %}
+          <div class="vcard__metric">{{ page.visual_metric.value }}</div>
+          {% if page.visual_metric.label %}
+          <div class="vcard__metric-label">{{ page.visual_metric.label }}</div>
+          {% endif %}
+          {% elif page.visual_points %}
+          <ul class="vcard__points">
+            {% for point in page.visual_points %}<li>{{ point }}</li>{% endfor %}
+          </ul>
+          {% else %}
+          <div class="vcard__motif" aria-hidden="true">
+            <span style="background: {{ page.accent }};"></span>
+            <span style="background: {{ page.accent_2 }};"></span>
+            <span style="background: {{ accent_color_2 }};"></span>
+          </div>
+          {% endif %}
+        </div>
       </div>
-    </main>
+      <div class="page__foot">
+        <span>{{ title }}</span>
+        <span>{{ page.slide_no }} / {{ total_slides }}</span>
+      </div>
+    </section>
+    {% endfor %}
+
+    {# ---- Architecture reveal ---- #}
+    {% if architecture %}
+    <section class="page page--arch" style="--a: {{ architecture.accent }}; --a2: {{ architecture.accent_2 }}; --ink: {{ architecture.ink }};">
+      <div class="arch-head">
+        <div>
+          <div class="kicker">Architecture Reveal</div>
+          <h2>System Architecture</h2>
+        </div>
+      </div>
+      <div class="arch-grid">
+        {% for layer in architecture.layers %}
+        <div class="arch-card" style="--a: {{ layer.accent }}; --a2: {{ layer.accent_2 }}; --ink: {{ layer.ink }}; --ink2: {{ layer.ink_2 }};">
+          <span class="arch-card__num">{{ layer.number }}</span>
+          <span class="arch-card__kind">{{ layer.kind }}</span>
+          <div class="arch-card__label">{{ layer.label }}</div>
+          {% if layer.summary %}<p class="arch-card__summary">{{ layer.summary }}</p>{% endif %}
+        </div>
+        {% endfor %}
+      </div>
+      <div class="page__foot">
+        <span>{{ title }}</span>
+        <span>{{ total_slides }} / {{ total_slides }}</span>
+      </div>
+    </section>
+    {% endif %}
   </body>
 </html>

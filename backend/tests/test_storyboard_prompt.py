@@ -16,6 +16,7 @@ import pytest
 
 from prompts.storyboard import (
     ALLOWED_VISUAL_KINDS,
+    GRANDFATHER_NOTE_DEPTH,
     REQUIRED_ARCHITECTURE_LAYERS,
     REQUIRED_SECTION_TITLES,
     STORYBOARD_PROMPT_VERSION,
@@ -63,12 +64,16 @@ def _slide(slide_id: str, slide_type: str) -> dict[str, Any]:
 def _note(slide_id: str) -> dict[str, Any]:
     return {
         "slide_id": slide_id,
-        "talk_track": "Say this.",
+        "talk_track": (
+            "Say this clearly and with intent. Open on the slide's single point, "
+            "name the specific product detail drawn from the finalised sources, "
+            "explain why it matters to the audience, and close on the takeaway."
+        ),
         "transition": "Then move on.",
         "timing_seconds": 30,
         "pause_cue": "Pause here.",
         "demo_cue": "",
-        "backup_points": ["A backup point"],
+        "backup_points": ["A backup point", "A second backup point"],
     }
 
 
@@ -134,10 +139,34 @@ def test_valid_payload_validates() -> None:
     assert [s.title for s in payload.sections] == list(REQUIRED_SECTION_TITLES)
 
 
+def test_note_depth_floor_enforced_on_fresh_generation() -> None:
+    data = _valid_payload()
+    # A stub note: short talk track and a single backup point.
+    data["notes"]["s0"]["talk_track"] = "Too short."
+    data["notes"]["s0"]["backup_points"] = ["only one"]
+    with pytest.raises(Exception) as exc:
+        StoryboardPayload.model_validate(data)
+    message = str(exc.value).lower()
+    assert "talk_track" in message or "backup_points" in message
+
+
+def test_note_depth_floor_grandfathered_for_carried_over_notes() -> None:
+    # Section regeneration re-validates the whole spliced payload, which may carry
+    # pre-v1.4 short notes from untouched acts. The grandfather context must let
+    # those through so tightening the floor never breaks regen on existing decks.
+    data = _valid_payload()
+    data["notes"]["s0"]["talk_track"] = "Too short."
+    data["notes"]["s0"]["backup_points"] = ["only one"]
+    payload = StoryboardPayload.model_validate(
+        data, context={GRANDFATHER_NOTE_DEPTH: True}
+    )
+    assert payload.notes["s0"].talk_track == "Too short."
+
+
 def test_storyboard_prompt_names_canonical_payload_keys_and_bad_aliases() -> None:
     """The live model needs exact field names, not conceptual aliases."""
 
-    assert STORYBOARD_PROMPT_VERSION == "storyboard-v1.3"
+    assert STORYBOARD_PROMPT_VERSION == "storyboard-v1.4"
     required_keys = [
         "palette",
         "typography",
@@ -312,15 +341,20 @@ def test_rejects_video_demo_cues_and_scripts() -> None:
 
 def test_rejects_generic_launch_copy_filler() -> None:
     data = _valid_payload()
-    data["sections"][0]["slides"][0]["headline"] = (
-        "Empower Your Business with Seamless Workflow Automation"
-    )
+    data["sections"][0]["slides"][0][
+        "headline"
+    ] = "Empower Your Business with Seamless Workflow Automation"
     with pytest.raises(Exception) as exc:
         StoryboardPayload.model_validate(data)
     assert "generic launch-copy" in str(exc.value).lower()
 
     data = _valid_payload()
-    data["notes"]["s0"]["talk_track"] = "Join the revolution in operational excellence."
+    # Long enough to clear the talk_track length floor so the marketing-filler
+    # check (not the min_length check) is what rejects it.
+    data["notes"]["s0"]["talk_track"] = (
+        "Open the slide and set the stage for the audience, then pivot hard into "
+        "operational excellence as the throughline for everything that follows here."
+    )
     with pytest.raises(Exception) as exc:
         StoryboardPayload.model_validate(data)
     assert "generic launch-copy" in str(exc.value).lower()

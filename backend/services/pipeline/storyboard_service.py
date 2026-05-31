@@ -64,6 +64,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from models import CreditLedger, Storyboard, Workspace
 from prompts.storyboard import (
+    GRANDFATHER_NOTE_DEPTH,
     SYSTEM_PROMPT,
     StoryboardPayload,
     StoryboardPayloadError,
@@ -673,7 +674,14 @@ async def _run_section_generation(
         # failure (fail closed → refund → base section stays active).
         spliced = _splice_section(base_payload, new_payload, section_id)
         try:
-            payload = StoryboardPayload.model_validate(spliced)
+            # The regenerated section's notes already passed the v1.4 depth floor
+            # in ``new_payload``; the carried-over acts may predate it, so the
+            # whole-payload structural re-validation grandfathers note depth. The
+            # floor still gates fresh generations, just not stored legacy notes.
+            payload = StoryboardPayload.model_validate(
+                spliced,
+                context={GRANDFATHER_NOTE_DEPTH: True},
+            )
         except Exception as exc:  # noqa: BLE001 — converted to typed failure below
             raise StoryboardPayloadError(
                 "schema", "spliced section payload failed validation"
