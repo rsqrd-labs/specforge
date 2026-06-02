@@ -197,6 +197,24 @@ class TokenProvider:
             await self._write_cache(key, token, ttl)
         return token
 
+    async def refresh(self, installation_id: int) -> str:
+        """Force a fresh mint, discarding any cached token.
+
+        Used by the API client after a 401: GitHub may have rotated the
+        installation token out from under a still-cached value, so the cache
+        entry is invalidated and :meth:`get` re-mints. Bounded to one retry by
+        the caller — SpecForge never loops on a known-invalid token.
+        """
+        await self._invalidate(installation_id)
+        return await self.get(installation_id)
+
+    async def _invalidate(self, installation_id: int) -> None:
+        """Drop the cached token for an installation (best-effort)."""
+        try:
+            await self._redis.delete(_cache_key(installation_id))
+        except Exception:  # pragma: no cover — Redis transport failure
+            logger.warning("github token cache invalidation failed")
+
     @staticmethod
     def _cache_ttl(expires_at: datetime) -> int:
         """Seconds to cache: token lifetime minus the refresh-ahead margin."""

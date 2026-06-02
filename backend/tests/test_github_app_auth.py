@@ -228,3 +228,24 @@ async def test_near_expiry_token_is_not_cached_past_its_refresh_window() -> None
 
     await provider.get(202)
     assert auth.calls == 2
+
+
+async def test_refresh_invalidates_cache_and_re_mints() -> None:
+    # refresh() is the seam the API client uses after a 401: it must drop the
+    # cached token and mint a fresh one, even though the cached entry is still
+    # within its TTL.
+    auth = _CountingAuth(lifetime_seconds=3600)
+    redis = _FakeRedis()
+    provider = TokenProvider(auth, redis)  # type: ignore[arg-type]
+
+    first = await provider.get(303)
+    assert first == "tok-1"
+    assert auth.calls == 1
+    assert _cache_key(303) in redis.store  # cached and still fresh
+
+    refreshed = await provider.refresh(303)
+    assert refreshed == "tok-2"  # a genuinely new mint, not the cached value
+    assert auth.calls == 2
+    # The new token is what a subsequent get() now serves from cache.
+    assert await provider.get(303) == "tok-2"
+    assert auth.calls == 2

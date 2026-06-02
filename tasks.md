@@ -15499,6 +15499,7 @@ The credential core of the GitHub App (spec §8). Three distinct credentials, ne
 **Priority:** P0
 **Phase:** A
 **Harness:** `harness/tests/backend/test_phase24_github_living_contract.py -k "t268"`
+**Status:** ✅ Done — 2026-06-02 (github_api_client.py dual-mode: legacy static-token path retained, new App path resolves a per-call installation token via injected TokenProvider+installation_id and re-mints once on a 401; per-client GitHubCircuitBreaker → GitHubUnavailableError; bounded httpx Timeout/Limits via make_shared_async_client; TokenProvider.refresh added to github_app_auth.py. `-k "t268"` green (2/2); test_client_remints_token_on_401_once + breaker-trip + per-call-resolution tests; all 17 Phase-13 client tests retained; full backend suite green, no regression. Governor pass-through (req 4) deferred to T-274 as specified — no stub.)
 
 **Description:**
 Refactor the Phase-13 `github_api_client.py` so it no longer holds a static user token in `__init__`. Each request resolves a short-lived installation token from the injected `TokenProvider` + `installation_id`. Retain all typed errors and existing methods; later tasks add branch/PR/GraphQL/checks methods.

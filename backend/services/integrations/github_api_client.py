@@ -1,29 +1,52 @@
 """Thin async GitHub REST API wrapper with typed exceptions.
 
 Scope discipline: this module has zero knowledge of business logic,
-database, or SpecForge models. It receives a plaintext token and performs
-only the operations the export service needs. All 401 responses raise
-``GitHubTokenExpiredError`` before any other branch — the service layer
-relies on this invariant to delete invalid tokens.
+database, or SpecForge models. It performs only the operations the export
+service needs.
+
+Two token modes (Phase 21 — T-268):
+
+- **Installation mode (v2, GitHub App):** the client holds no token. Each
+  request resolves a short-lived installation token per call from an injected
+  ``InstallationTokenSource`` (the T-267 ``TokenProvider``) keyed by
+  ``installation_id``. On a 401 — the token may have rotated under us — the
+  token is re-minted **exactly once** and the request retried; a second 401
+  raises ``GitHubTokenExpiredError``.
+- **Static mode (v1, legacy OAuth):** the client holds a plaintext token passed
+  at construction. A 401 raises ``GitHubTokenExpiredError`` immediately (there
+  is no installation to re-mint from).
+
+A per-client :class:`GitHubCircuitBreaker` trips after repeated network/5xx/429
+failures and raises :class:`GitHubUnavailableError` on subsequent calls, so a
+caller can surface "sync paused" instead of hammering a degraded GitHub. Breaker
+accounting is additive: it never changes how a single response maps to a typed
+error (429 → ``GitHubRateLimitError``, 5xx → ``GitHubAPIError``).
 
 Supported operations: create_repo, get_file_sha, upsert_file,
-create_issue, update_issue. No bidirectional sync: SpecForge never reads
-issue state from GitHub.
+create_issue, update_issue. Later tasks add branch/PR/GraphQL/checks methods.
 """
 
 from __future__ import annotations
 
 import base64
 import logging
-from typing import Any
+import time
+from typing import Any, Protocol
 
 import httpx
 
 logger = logging.getLogger(__name__)
 
 GITHUB_API_BASE = "https://api.github.com"
-_DEFAULT_TIMEOUT_SECONDS = 30.0
 _GITHUB_ACCEPT = "application/vnd.github+json"
+
+# Bounded timeouts for GitHub REST calls. Unlike the LLM adapters (read=300s for
+# streaming), GitHub calls are short request/response round-trips, so the read
+# timeout is tight. connect/write/pool follow the project default.
+_REQUEST_TIMEOUT = httpx.Timeout(connect=10.0, read=30.0, write=10.0, pool=5.0)
+# Bounded connection pool so a burst of export issue-creates cannot exhaust
+# sockets against api.github.com.
+_CONNECTION_LIMITS = httpx.Limits(max_connections=20, max_keepalive_connections=10)
 
 
 # ---------------------------------------------------------------------------
@@ -40,15 +63,24 @@ class GitHubRepoExistsError(Exception):
 
 
 class GitHubTokenExpiredError(Exception):
-    """GitHub returned 401 — the stored token is no longer valid.
+    """GitHub returned 401 — the token is no longer valid.
 
-    The service layer must delete the UserIntegration row when this is
-    raised. SpecForge never retries with a known-invalid token.
+    In installation mode this is raised only after a single re-mint also
+    returns 401. SpecForge never retries with a known-invalid token.
     """
 
 
 class GitHubRateLimitError(Exception):
     """GitHub returned 429 or a rate-limit primary/secondary signal."""
+
+
+class GitHubUnavailableError(Exception):
+    """The circuit breaker is open — GitHub is being treated as unavailable.
+
+    Raised before a request is sent once repeated failures have tripped the
+    breaker, so callers surface "sync paused" rather than hammering a degraded
+    GitHub. Distinct from a one-off ``GitHubAPIError``.
+    """
 
 
 class GitHubAPIError(Exception):
@@ -61,6 +93,89 @@ class GitHubAPIError(Exception):
 
 
 # ---------------------------------------------------------------------------
+# Token source + circuit breaker
+# ---------------------------------------------------------------------------
+
+
+class InstallationTokenSource(Protocol):
+    """Structural type for the T-267 ``TokenProvider``.
+
+    Decouples this module from ``github_app_auth`` (scope discipline) while
+    documenting the surface the client depends on.
+    """
+
+    async def get(self, installation_id: int) -> str: ...
+
+    async def refresh(self, installation_id: int) -> str: ...
+
+
+class GitHubCircuitBreaker:
+    """Per-client circuit breaker following the T-217 failure-window pattern.
+
+    Counts failures that signal a degraded GitHub (network errors, 5xx, 429).
+    When ``failure_threshold`` failures occur within ``window_seconds`` the
+    breaker opens and rejects calls with :class:`GitHubUnavailableError` for
+    ``cooldown_seconds``, after which it half-opens to allow one trial request;
+    a success closes it, a failure re-opens it.
+
+    Default scope is per-client-instance (one export job). Cross-installation
+    persistence is the per-installation governor's job (T-274); this breaker
+    stops a single job from hammering a degraded GitHub. A monotonic clock is
+    used so wall-clock changes cannot wedge the breaker open.
+    """
+
+    def __init__(
+        self,
+        *,
+        failure_threshold: int = 5,
+        window_seconds: float = 60.0,
+        cooldown_seconds: float = 30.0,
+    ) -> None:
+        self._threshold = failure_threshold
+        self._window = window_seconds
+        self._cooldown = cooldown_seconds
+        self._failures = 0
+        self._window_start = 0.0
+        self._open_until: float | None = None
+        self._half_open = False
+
+    def before_request(self) -> None:
+        """Raise GitHubUnavailableError if the breaker is open; else permit."""
+        if self._open_until is None:
+            return
+        now = time.monotonic()
+        if now < self._open_until:
+            raise GitHubUnavailableError(
+                "GitHub is temporarily unavailable (circuit breaker open)"
+            )
+        # Cooldown elapsed → allow a single half-open trial request.
+        self._open_until = None
+        self._half_open = True
+
+    def record_success(self) -> None:
+        self._failures = 0
+        self._window_start = 0.0
+        self._open_until = None
+        self._half_open = False
+
+    def record_failure(self) -> None:
+        now = time.monotonic()
+        if self._half_open:
+            # The half-open trial failed — re-open immediately.
+            self._half_open = False
+            self._open_until = now + self._cooldown
+            self._failures = 0
+            return
+        if self._window_start == 0.0 or now - self._window_start > self._window:
+            self._window_start = now
+            self._failures = 0
+        self._failures += 1
+        if self._failures >= self._threshold:
+            self._open_until = now + self._cooldown
+            self._failures = 0
+
+
+# ---------------------------------------------------------------------------
 # Client
 # ---------------------------------------------------------------------------
 
@@ -68,16 +183,42 @@ class GitHubAPIError(Exception):
 class GitHubAPIClient:
     """Async wrapper around the GitHub REST API.
 
-    The wrapper accepts a shared ``httpx.AsyncClient`` so callers can reuse
-    a connection pool across multiple operations (the export service makes
-    O(N) issue creates per push).
+    The wrapper accepts a shared ``httpx.AsyncClient`` so callers can reuse a
+    connection pool across multiple operations (the export service makes O(N)
+    issue creates per push). Exactly one auth source must be supplied: a static
+    ``token`` (legacy OAuth) or a ``token_provider`` + ``installation_id``
+    (GitHub App).
     """
 
-    def __init__(self, token: str, client: httpx.AsyncClient) -> None:
-        if not token:
-            raise ValueError("GitHubAPIClient requires a non-empty token")
+    def __init__(
+        self,
+        *,
+        client: httpx.AsyncClient,
+        token: str | None = None,
+        token_provider: InstallationTokenSource | None = None,
+        installation_id: int | None = None,
+        breaker: GitHubCircuitBreaker | None = None,
+    ) -> None:
+        if token is not None and token_provider is not None:
+            raise ValueError(
+                "GitHubAPIClient takes either a static token or a token_provider, "
+                "not both"
+            )
+        if token_provider is not None:
+            if installation_id is None:
+                raise ValueError(
+                    "GitHubAPIClient requires installation_id with a token_provider"
+                )
+        elif token is not None:
+            if not token:
+                raise ValueError("GitHubAPIClient requires a non-empty token")
+        else:
+            raise ValueError("GitHubAPIClient requires a token or a token_provider")
         self._token = token
+        self._token_provider = token_provider
+        self._installation_id = installation_id
         self._client = client
+        self._breaker = breaker if breaker is not None else GitHubCircuitBreaker()
 
     # ----- repo -----
 
@@ -210,9 +351,29 @@ class GitHubAPIClient:
         *,
         json: dict[str, Any] | None = None,
     ) -> httpx.Response:
+        """Send a request, resolving the token per call and applying the breaker.
+
+        A 401 in installation mode re-mints the token once and retries; a second
+        401 (or any 401 in static mode) raises ``GitHubTokenExpiredError``.
+        """
+        return await self._send(method, path, json=json, allow_remint=True)
+
+    async def _send(
+        self,
+        method: str,
+        path: str,
+        *,
+        json: dict[str, Any] | None,
+        allow_remint: bool,
+    ) -> httpx.Response:
+        # Breaker first: a tripped breaker rejects before any token resolution
+        # or network call, so a degraded GitHub is not hammered.
+        self._breaker.before_request()
+
+        token = await self._resolve_token()
         url = f"{GITHUB_API_BASE}{path}"
         headers = {
-            "Authorization": f"Bearer {self._token}",
+            "Authorization": f"Bearer {token}",
             "Accept": _GITHUB_ACCEPT,
             "X-GitHub-Api-Version": "2022-11-28",
             "User-Agent": "SpecForge/1.0",
@@ -223,17 +384,40 @@ class GitHubAPIClient:
                 url,
                 headers=headers,
                 json=json,
+                timeout=_REQUEST_TIMEOUT,
             )
         except httpx.HTTPError as exc:
-            raise GitHubAPIError(0, f"network error: {exc}") from exc
+            # Network/timeout failure counts toward the breaker. The exception
+            # class name only — never an interpolated untrusted string.
+            self._breaker.record_failure()
+            raise GitHubAPIError(0, f"network error: {type(exc).__name__}") from exc
 
-        # 401 is mapped here before anything else so callers cannot
-        # accidentally treat it as a generic API error.
+        # 401 is mapped here before anything else so callers cannot accidentally
+        # treat it as a generic API error. A 401 means GitHub is up (auth issue,
+        # not downtime), so it is a breaker success.
         if response.status_code == 401:
+            self._breaker.record_success()
+            if allow_remint and self._token_provider is not None:
+                await self._token_provider.refresh(self._installation_id)  # type: ignore[arg-type]
+                return await self._send(method, path, json=json, allow_remint=False)
             raise GitHubTokenExpiredError(
-                "GitHub returned 401; the stored token is no longer valid"
+                "GitHub returned 401; the token is no longer valid"
             )
+
+        # Degraded-GitHub signals trip the breaker; the response is still
+        # returned so the calling method maps it to its typed error.
+        if response.status_code >= 500 or response.status_code == 429:
+            self._breaker.record_failure()
+        else:
+            self._breaker.record_success()
         return response
+
+    async def _resolve_token(self) -> str:
+        """Resolve the bearer token for this request (per-call in App mode)."""
+        if self._token_provider is not None:
+            return await self._token_provider.get(self._installation_id)  # type: ignore[arg-type]
+        assert self._token is not None  # guaranteed by __init__  # nosec B101
+        return self._token
 
     def _raise_for_status(self, response: httpx.Response) -> None:
         status = response.status_code
@@ -256,13 +440,44 @@ class GitHubAPIClient:
 
 
 def make_github_client(token: str, client: httpx.AsyncClient) -> GitHubAPIClient:
-    """Factory function for dependency injection.
+    """Factory for the legacy static-token (v1 OAuth) path.
 
     Tests inject a custom ``httpx.AsyncClient`` (often with a ``MockTransport``)
     via this entry point so the production call sites can build clients
     against the real ``httpx.AsyncClient`` without modification.
     """
     return GitHubAPIClient(token=token, client=client)
+
+
+def make_app_github_client(
+    token_provider: InstallationTokenSource,
+    installation_id: int,
+    client: httpx.AsyncClient,
+    *,
+    breaker: GitHubCircuitBreaker | None = None,
+) -> GitHubAPIClient:
+    """Factory for the GitHub App path: per-call installation tokens (T-268).
+
+    The worker (T-269+) builds one client per export job; the token is resolved
+    fresh on each request from ``token_provider`` and re-minted once on a 401.
+    """
+    return GitHubAPIClient(
+        client=client,
+        token_provider=token_provider,
+        installation_id=installation_id,
+        breaker=breaker,
+    )
+
+
+def make_shared_async_client() -> httpx.AsyncClient:
+    """Build the shared httpx client for GitHub calls.
+
+    Bounded timeouts and a bounded connection pool (spec §12 robustness) so a
+    slow or degraded GitHub cannot stall the worker or exhaust sockets.
+    Production call sites reuse one client across many operations; tests inject
+    their own ``MockTransport`` client instead.
+    """
+    return httpx.AsyncClient(timeout=_REQUEST_TIMEOUT, limits=_CONNECTION_LIMITS)
 
 
 # ---------------------------------------------------------------------------
