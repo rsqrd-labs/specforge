@@ -321,7 +321,7 @@ def test_t265_migration_0016_alters_integration_pushes_with_new_columns() -> Non
     )
 
 
-def test_t265_migration_replaces_provider_unique_with_partial_active_repo_index() -> None:
+def test_t265_migration_replaces_provider_unique_with_partial_live_repo_index() -> None:
     src = _combined_migrations()
     # the old one-active-push-per-provider constraint is dropped
     assert "uq_integration_push_workspace_provider" in src and re.search(
@@ -329,11 +329,26 @@ def test_t265_migration_replaces_provider_unique_with_partial_active_repo_index(
     ), (
         "Migration must DROP uq_integration_push_workspace_provider (was workspace+provider). T-265."
     )
-    # replaced with one-active-push-per-repo: partial unique index keyed on repo_id
-    assert "repo_id" in src and re.search(
-        r"postgresql_where|WHERE status\s*=\s*'active'|status = 'active'", src, re.I
-    ), (
-        "Migration must add a partial unique index (workspace_id, repo_id) WHERE status='active'. T-265."
+    # Replaced with one-LIVE-push-per-repo partial unique index keyed on repo_id.
+    # The status enum is pending/completed/failed/stale — there is NO 'active' literal,
+    # so the predicate MUST be `status <> 'failed'`. A `status = 'active'` predicate matches
+    # zero rows and silently disables the uniqueness guard. (Scoped to the integration_pushes
+    # index by name so the legitimate stripe_credit_packs `status='active'` index is ignored.)
+    m = re.search(
+        r"create_index\(\s*[\"']uq_integration_push_workspace_repo_active[\"'].*?"
+        r"postgresql_where\s*=\s*sa\.text\(\s*[\"']([^\"']+)[\"']",
+        src,
+        re.S,
+    )
+    assert m, (
+        "Migration must create the (workspace_id, repo_id) partial unique index "
+        "'uq_integration_push_workspace_repo_active' with a postgresql_where predicate. T-265."
+    )
+    predicate = m.group(1).lower()
+    assert "failed" in predicate and "'active'" not in predicate, (
+        f"The (workspace_id, repo_id) partial unique index predicate must be `status <> 'failed'` "
+        f"(one live push per repo), not {m.group(1)!r}. A `status='active'` predicate matches zero "
+        "rows and disables the guard. T-265."
     )
     assert re.search(r"create_index\([^\)]*repo_id|ix_integration_pushes_repo_id", src), (
         "Migration must index integration_pushes.repo_id for webhook reconciliation. T-265."
@@ -394,6 +409,35 @@ def test_t266_github_schemas_define_install_export_and_sync_models() -> None:
     _assert_any(src, ["SyncStateResponse", "SyncState", "TaskCompletion"], "schemas/github.py sync state")
     for mode in ["files_to_default", "pr_with_tests"]:
         assert mode in src, f"GitHubExportRequest must accept export_mode {mode!r}. T-266/T-276."
+
+
+def test_t266_export_request_targets_an_installation() -> None:
+    """Audit gap: a user may install on several accounts; the export must name which
+    installation/token to use, and GET must return the list to pick from."""
+    schemas = read_backend_file("schemas", "github.py")
+    assert "installation_id" in schemas, (
+        "GitHubExportRequest must carry installation_id so a multi-install user's export resolves "
+        "which installation (and token) to create/use the repo under. T-266/T-269."
+    )
+    integrations = read_backend_file("routers", "integrations.py")
+    assert re.search(r"InstallationList|list\[|List\[", schemas + integrations), (
+        "GET /integrations/github must return the LIST of the user's installations (org + personal) "
+        "so the export picker can choose a target. T-266/T-270."
+    )
+
+
+def test_t266_find_live_push_helper_centralizes_live_push_lookup() -> None:
+    """Audit gap: the 'live push' (non-failed row) lookup must live in ONE helper so the
+    status<>'failed' rule cannot drift back into a `status='active'` query."""
+    helper = _read_backend_optional("services", "integrations", "push_repo.py") or ""
+    users = (
+        (_read_backend_optional("services", "integrations", "github_reconcile.py") or "")
+        + (_read_backend_optional("routers", "workspace.py") or "")
+    )
+    assert "find_live_push" in helper or "find_live_push" in users, (
+        "T-266 must add a find_live_push(workspace_id, repo_id) helper (the single non-failed row) "
+        "used by reconcile/sync/re-export, so the partial-index definition lives in one place. T-266/T-272/T-273."
+    )
 
 
 # ===========================================================================
@@ -522,6 +566,21 @@ def test_t269_export_moves_off_request_path_and_returns_202() -> None:
         "The export handler must ENQUEUE a worker job, not run push_to_github inline. T-269."
     )
     assert "202" in handler, "The export handler must return 202 (accepted), not block on GitHub I/O. T-269."
+
+
+def test_t269_export_persists_repo_id_installation_and_source_version() -> None:
+    """Audit gap: without these three fields on the push row, token re-mint (reconcile),
+    confused-deputy resolution, and drift-compare are all inert."""
+    blob = (
+        (_read_backend_optional("services", "pipeline", "github_export_service.py") or "")
+        + (_read_backend_optional("worker.py") or "")
+        + (_read_backend_optional("services", "queue.py") or "")
+    )
+    for field in ["repo_id", "source_stage_version_id", "installation_id"]:
+        assert field in blob, (
+            f"export_push must persist {field} on the IntegrationPush row on success "
+            "(repo_id from repository.id) so reconcile/drift/token-mint work. T-269/T-273."
+        )
 
 
 # ===========================================================================
@@ -666,6 +725,16 @@ def test_t272_out_of_order_events_gated_on_timestamp() -> None:
     )
 
 
+def test_t272_dispatcher_routes_pr_and_check_events_to_pr_check() -> None:
+    """Audit gap: the webhook enqueues ONE dispatcher; it must fan out by (event, action).
+    pull_request fans out to BOTH reconcile (closed+merged) and pr_check (opened/synchronize)."""
+    src = read_backend_file("services", "integrations", "github_reconcile.py")
+    assert "pr_check" in src and "check_suite" in src, (
+        "The reconcile_event dispatcher must route check_suite / pull_request(opened|synchronize) to "
+        "pr_check — not blindly reconcile every delivery. T-271/T-272/T-282."
+    )
+
+
 # ===========================================================================
 # T-273 — Drift, backfill, resync
 # ===========================================================================
@@ -696,6 +765,21 @@ def test_t273_backfill_filters_pull_request_rows() -> None:
     )
     assert "pull_request" in src, (
         "Backfill must filter out rows carrying a 'pull_request' key (those are PRs, not issues). T-273."
+    )
+
+
+def test_t273_reconcile_drift_recovers_stuck_pending_pushes() -> None:
+    """Audit gap: a crashed export leaves a 'pending' push which — under the working
+    partial index — blocks ALL re-export of that repo. The cron must sweep stale-pending."""
+    blob = (
+        (_read_backend_optional("services", "integrations", "github_reconcile.py") or "")
+        + (_read_backend_optional("worker.py") or "")
+    )
+    assert "pending" in blob and re.search(
+        r"stuck|stale|older than|timeout|reconcile_drift|threshold", blob, re.I
+    ), (
+        "reconcile_drift must sweep pushes stuck in 'pending' (crashed worker) and fail/re-enqueue them "
+        "so the repo is not permanently locked out of re-export. T-273."
     )
 
 
@@ -828,9 +912,15 @@ def test_t279_increment_generation_treats_baseline_immutable_and_pins_refs() -> 
 
 
 def test_t279_task_ref_scheme_is_content_derived_and_stable() -> None:
-    """Edge: unstable task_refs duplicate issues across increments."""
-    blob = read_backend_file("services", "pipeline", "increment_service.py") + (
-        _read_backend_optional("services", "integrations", "task_parser.py") or ""
+    """Edge: unstable task_refs duplicate issues across increments. Per the audit the scheme
+    is DEFINED in Phase A (task_parser.compute_task_ref) and reused everywhere — not invented
+    here in C′ — so export/agent-issues/increments all share one matching key."""
+    parser = _read_backend_optional("services", "integrations", "task_parser.py") or ""
+    blob = parser + read_backend_file("services", "pipeline", "increment_service.py")
+    assert "compute_task_ref" in parser, (
+        "task_parser must define compute_task_ref (the stable, content-derived task_ref) so the "
+        "matching key is decided in Phase A and consumed by export (T-269), agent issues (T-277), "
+        "and increments (T-279/T-280). T-266/T-279."
     )
     assert re.search(r"hash|content.?derived|stable|slug", blob, re.I), (
         "task_ref must be content-derived/stable so the same task updates the same issue (spec Assumption 23). T-279."
@@ -855,6 +945,19 @@ def test_t280_idea_backlog_endpoints_and_github_flow_back() -> None:
     blob = _combined_github_services()
     assert "enhancement" in blob or "idea" in blob.lower(), (
         "GitHub issues labelled idea/enhancement must flow back into increment_ideas. T-280."
+    )
+
+
+def test_t280_increment_rest_endpoints_registered() -> None:
+    """Audit gap: the frontend timeline (T-289) calls these; without them the
+    increment surface is generation-only with no way to list or push."""
+    src = read_backend_file("routers", "workspace.py")
+    assert "/workspaces/{id}/increments" in src, (
+        "Increment REST endpoints (GET/POST /workspaces/{id}/increments and "
+        "POST /workspaces/{id}/increments/{inc_id}/push) must be registered. T-280."
+    )
+    assert re.search(r"increments/\{[^}]*\}/push|/push", src), (
+        "An increment push endpoint (POST .../increments/{inc_id}/push) must enqueue increment_push. T-280."
     )
 
 
