@@ -15419,6 +15419,7 @@ Land the Phase 21 schema in Alembic migration `0016_github_living_integration.py
 **Priority:** P0
 **Phase:** A
 **Harness:** `harness/tests/backend/test_phase24_github_living_contract.py -k "t265 or t266"`
+**Status:** ✅ Done — 2026-06-02 (schemas/github.py, `find_live_push` helper in services/integrations/push_repo.py, `compute_task_ref` in task_parser.py; ORM models landed in T-265. `-k "t265 or t266"` green (13/13), full backend suite green with no regression. compute_task_ref is the Phase-A matching key consumed later by export/agent-issues/increments — the legacy synchronous export is intentionally not rewired (superseded by T-269).)
 
 **Description:**
 Add the ORM models for the new tables, extend the existing push models, and define the Pydantic request/response schemas. All other Phase 21 code depends on these.
