@@ -6,14 +6,14 @@ tags:
   - asdd
 created: 2026-04-25
 status: final
-version: 2.4.0
+version: 2.5.0
 stage: plan
 depends-on: "[[SpecForge V1 SPEC]]"
 ---
 
 # SpecForge V1 — PLAN.md
 
-> [!note] Derived From This plan is derived from [[SpecForge V1 SPEC]] v1.5.0. Every architectural decision traces back to a requirement in that document. Where a decision goes beyond what the spec explicitly states, it is called out as a **planning decision** with a rationale.
+> [!note] Derived From This plan is derived from [[SpecForge V1 SPEC]] v2.0.0. Every architectural decision traces back to a requirement in that document. Where a decision goes beyond what the spec explicitly states, it is called out as a **planning decision** with a rationale.
 
 ---
 
@@ -34,6 +34,7 @@ depends-on: "[[SpecForge V1 SPEC]]"
 - [[#21. Phase 21 — Stripe Payments Integration]]
 - [[#22. Phase 22 — Prompt Pipeline Quality Hardening]]
 - [[#23. Phase 23 — Storyboard Product Keynote Generation]]
+- [[#24. Phase 24 — GitHub Living System of Record]]
 
 ---
 
@@ -4808,6 +4809,528 @@ After Phase 23 is implemented:
 - [ ] Billing smoke: insufficient balance blocks; failure refunds; duplicate generate does not double-charge
 
 ---
+
+## 24. Phase 24 — GitHub Living System of Record
+
+> [!note]
+> Source: This phase implements `V1 spec.md` v2.0.0 §4.14 (GitHub — Living System of Record), the rewritten §4.9 / §8 (GitHub **App** identity), §10 (altered `IntegrationPush` / `IntegrationPushTask`; new `GitHubInstallation`, `GitHubWebhookEvent`, `Increment`, `IncrementIdea`), §11 (Integrations install/webhook + GitHub Sync & Increments endpoints), §12 (production bar: queue/worker, webhook SLOs, App/webhook security, per-installation governor, observability), and §13 Assumptions 8–10 (revised) + 21–25 (new).
+>
+> **This phase supersedes Phase 13 (§17).** Phase 13 built a one-way, **synchronous**, per-user-OAuth export. Phase 24 replaces the identity (OAuth token → GitHub App), moves all GitHub I/O off the request path onto a durable worker, and makes the integration bidirectional, executable, agent-ready, and continuously evolving. Per this plan's append-only convention, §17 is **not** edited — the v1 OAuth path is retained behind a flag for migration and is deprecated by this phase, not deleted.
+
+### 24.1 Product Objective
+
+Turn the one-shot GitHub export into a **living system of record**. After a user installs the SpecForge GitHub App on chosen repositories, the finalised workspace becomes the live source of truth for the repo as it is built:
+
+- **Bidirectional:** closing a task's issue (or merging its PR) flips that task to `done` inside SpecForge — the workspace becomes a live dashboard.
+- **Executable:** an optional export mode opens the Harness stage as a pull request — failing tests + CI + per-task stubs — so the repo starts red and goes green as work lands.
+- **Agent-ready:** every issue is shaped into an optimal coding-agent prompt and repo-level `AGENTS.md` context is generated.
+- **Verifiable:** a Projects board reflects live task state and a SpecForge status check judges each PR diff against its task's acceptance criteria.
+- **Continuous:** the workspace evolves as a timeline of increments that absorb new features as scoped deltas instead of a frozen one-shot.
+
+Delivery is phased A → D (spec §4.14). Each phase is independently shippable; **Phase B is the "now it's core" cut line** (issue-closed → task-done). Every part is built to the production bar in spec §12.
+
+> [!important] Planning decision — durable background worker (new infrastructure)
+> Phase 24 is the first phase to run work **outside** the FastAPI process. The spec (§4.14.2, §12) requires a durable Redis-backed queue + worker because the v1 mechanism (`asyncio.create_task`) dies on deploy and synchronous export times out on large task lists. **We adopt `arq`** (async-native, Redis-backed, matches the existing `redis[asyncio]` stack; lighter than Celery/RQ). This adds: a new `arq` dependency, a new long-running **worker process**, and a new **`worker` service in `docker compose`** sharing the backend image and `REDIS_URL`. All GitHub write/sync work becomes idempotent, retryable, checkpointed jobs. This is a planning decision beyond the literal spec, justified by §12's "no durable job queue today" constraint.
+
+### 24.2 Architecture Summary
+
+GitHub work is split between the **request path** (verify, enqueue, return fast) and the **worker** (all GitHub I/O, reconciliation, generation). Repository calls are authenticated with short-lived **installation tokens** minted from the App and cached in Redis.
+
+```
+                      ┌──────────────────────── FastAPI (request path) ─────────────────────────┐
+  GitHub  ──webhook──▶│  /integrations/github/webhook                                            │
+ (events)            │   raw bytes → HMAC verify (2 secrets) → dedup(delivery_id) → ENQUEUE → 2xx│
+                      │  /integrations/github/install · /setup    (App install flow)             │
+  User  ───REST──────▶│  POST /workspaces/{id}/export/github  → ENQUEUE → 202                     │
+                      │  POST .../sync/* · /increments/* · /ideas  → ENQUEUE → 202                │
+                      └───────────────┬──────────────────────────────────────────────┬──────────┘
+                                      │ enqueue (arq)                                  │ read
+                              ┌───────▼─────────┐                          ┌───────────▼─────────┐
+                              │  Redis queue    │                          │   PostgreSQL        │
+                              │  + token cache  │                          │  github_installations│
+                              │ gh:inst_token:{}│                          │  integration_pushes  │
+                              └───────┬─────────┘                          │  integration_push_   │
+                                      │ dequeue                            │   tasks               │
+            ┌─────────────────────────▼──────────────────────────┐        │  github_webhook_events│
+            │            arq WORKER (new process)                 │        │  increments / ideas   │
+            │  TokenProvider: App JWT → mint inst token → cache   │───────▶└───────────────────────┘
+            │  jobs (idempotent, checkpointed, retry+backoff):    │
+            │   • export_push (files_to_default | pr_with_tests)  │  per-installation rate governor
+            │   • reconcile_event (issue/PR closed → task done)   │  + per-repo write serialization
+            │   • backfill / drift recompute                      │────────REST/GraphQL────▶ GitHub API
+            │   • increment_push · projects_sync · pr_check       │
+            │   dead-letter + alert + manual replay on max retry  │
+            └─────────────────────────────────────────────────────┘
+```
+
+Key design decisions:
+
+- **Three credentials, never conflated (spec §8).** App private key (secret manager) signs a short App JWT (`iat = now−60s`, `exp ≤ +600s`); the App JWT mints per-installation tokens (1 h TTL); a token cache (`gh:inst_token:{id}`, ~55 m TTL, refresh-ahead) keeps minting off the hot path. The client resolves a token per call via a `TokenProvider`.
+- **Webhook handler is O(1).** Verify → dedup → enqueue → ack, mirroring the Stripe receiver (Phase 21 §21.4 T-234). Reconciliation never runs inline. p99 ack < 300 ms (spec §12).
+- **Reconcile on the immutable `repo_id`,** never `repo_full_name` (repos get renamed/transferred). Completion keys off **issue closure**; `done_via=pr_merge|manual`.
+- **Idempotent + checkpointed jobs.** Inbound keyed by `X-GitHub-Delivery`, outbound by push/increment id. Multi-step ops (branch → files → PR; per-issue) resume from the last completed step and never duplicate. Side effects are re-derivable from the push ledger (outbox discipline).
+- **Append-only ledger, repo-keyed.** `integration_pushes` is altered (not replaced): one **active** push per repo via a partial unique index; legacy Phase-13 rows are tolerated.
+- **Two distinct "harnesses."** The **exported** repo's scaffolding (T-276, the failing tests we push into the user's repo) is separate from SpecForge's **own** harness contract tests for this phase (T-285). Do not conflate them.
+
+### 24.3 Task Breakdown
+
+Tasks T-265 through T-286. The `Phase` column maps to spec §4.14's A–D delivery; **`X` = cross-cutting** (production bar applied across all phases). `tasks.md` entries are generated from this section after the plan is accepted.
+
+| Task | Phase | Area | Description | Priority |
+|---|---|---|---|---|
+| T-265 | A | Data model | Migration `0016` — new `github_installations`, `github_webhook_events`; **ALTER** `integration_pushes` + `integration_push_tasks` (repo-key, sync fields) | Critical |
+| T-266 | A | Models/schemas | ORM models + Pydantic schemas for installs, pushes, push-tasks, webhook events | Critical |
+| T-267 | A | App auth | `github_app_auth` — App JWT signing + installation-token minting + Redis refresh-ahead `TokenProvider` | Critical |
+| T-268 | A | API client | Refactor `github_api_client` to resolve installation tokens per call via `TokenProvider`; typed errors retained | Critical |
+| T-269 | A | Queue/worker | `arq` worker process + docker-compose service; job base (idempotency, retry/backoff/jitter, dead-letter); move export onto `export_push` job | Critical |
+| T-270 | A | Install flow | `/integrations/github/install` + `/setup`; lifecycle webhooks (`installation`, `installation_repositories`); v1-OAuth migration prompt | Critical |
+| T-271 | A | Webhook ingest | `POST /integrations/github/webhook` — HMAC verify (2 secrets) → dedup → enqueue → 2xx; CSRF + rate-limit exemptions | Critical |
+| T-272 | B | Reconcile | `reconcile_event` job — `issues`/`pull_request` closed+merged → task `done`; repo_id resolution; out-of-order timestamp gating | Critical |
+| T-273 | B | Drift/backfill | Drift detection vs `source_stage_version_id`; `backfill` job (`issues?state=all&since=`, filter PRs); `resync` endpoint | High |
+| T-274 | B | Rate governor | Per-installation token-bucket governor + per-repo write serialization; header-aware backoff on 403/429 + requeue | High |
+| T-275 | B | Frontend — sync | `TaskCompletionPanel` (shipped/total, issue/PR links), drift banner, disconnected state | High |
+| T-276 | C | PR export mode | `pr_with_tests` builder (branch/PR plumbing, per-stack scaffold, CI workflow, task stubs); `Workflows:write` 403 + 409 SHA-retry handling | High |
+| T-277 | C | Agent-ready | Enriched issue sections + YAML header; `AGENTS.md`/`CLAUDE.md` managed-section generator (never clobber); labels; stable spec anchors | High |
+| T-278 | C′ | Increments data | Migration `0017` — `increments`, `increment_ideas`; `increment_id` FKs on pushes/push-tasks | High |
+| T-279 | C′ | Delta generation | Delta-aware increment generation (baseline immutable, additive append, pinned `task_ref`s, blast-radius phase-two) + `task_ref` scheme | High |
+| T-280 | C′ | Incremental sync | New-issues-only push, changed-update, obsolete-close-with-note, milestone+PR per increment; idea backlog + GitHub `idea`/`enhancement` flow-back | High |
+| T-281 | D | Projects board | GraphQL path on the client (`addProjectV2ItemById`, field discovery) + REST milestones; columns/labels/milestones mapping | Medium |
+| T-282 | D | Status checks | `check_run` posting (`Checks:write`) + commit-Status fallback; **new** PR-diff evaluator job (judge-model, fail-open, cost-capped, debounced) | Medium |
+| T-283 | X | Security/limits | New rate tiers, confused-deputy authz, secret rotation (two webhook secrets), token-cache security, audit rows | Critical |
+| T-284 | X | Observability | `specforge_github_*` metrics + structlog schema + Sentry on the worker | Medium |
+| T-285 | X | Tests/harness | Backend + frontend + `harness/tests/backend/test_phase24_github_living_contract.py` cross-codebase contract suite | Critical |
+| T-286 | X | Docs/release | RUNBOOK (token rotation, dead-letter replay, sync-paused), local webhook dev (`smee`), release gate, smoke checklist | Medium |
+
+### 24.4 Backend Implementation Detail — Phase A (Foundation)
+
+#### T-265 — DB Migration `0016_github_living_integration.py`
+
+The latest migration is `0015_storyboards.py`; this is `0016`. The original GitHub tables came from `0007_github_integration.py`. This migration **creates two tables and alters two existing ones**.
+
+```python
+# --- new tables ---
+op.create_table("github_installations",
+    sa.Column("id",                  sa.UUID,        primary_key=True),
+    sa.Column("installation_id",     sa.BigInteger,  nullable=False),   # GitHub's numeric id
+    sa.Column("account_login",       sa.Text,        nullable=False),
+    sa.Column("account_type",        sa.Text,        nullable=False),   # User | Organization
+    sa.Column("repository_selection",sa.Text,        nullable=False),   # all | selected
+    sa.Column("user_id",             sa.UUID,        sa.ForeignKey("users.id", ondelete="SET NULL"), nullable=True),
+    sa.Column("suspended_at",        sa.TIMESTAMPTZ),
+    sa.Column("created_at",          sa.TIMESTAMPTZ, nullable=False, server_default=sa.text("now()")),
+    sa.Column("updated_at",          sa.TIMESTAMPTZ, nullable=False, server_default=sa.text("now()")),
+    sa.UniqueConstraint("installation_id", name="uq_github_installation_installation_id"),
+)
+
+op.create_table("github_webhook_events",      # idempotency/dedup — mirrors stripe_webhook_events
+    sa.Column("id",           sa.UUID,        primary_key=True),
+    sa.Column("delivery_id",  sa.Text,        nullable=False),          # X-GitHub-Delivery
+    sa.Column("event_type",   sa.Text,        nullable=False),
+    sa.Column("received_at",  sa.TIMESTAMPTZ, nullable=False, server_default=sa.text("now()")),
+    sa.Column("processed_at", sa.TIMESTAMPTZ),
+    sa.UniqueConstraint("delivery_id", name="uq_github_webhook_event_delivery_id"),
+)
+
+# --- alter integration_pushes (exists since 0007) ---
+op.add_column("integration_pushes", sa.Column("installation_id", sa.UUID, sa.ForeignKey("github_installations.id"), nullable=True))
+op.add_column("integration_pushes", sa.Column("repo_id",                 sa.BigInteger, nullable=True))  # immutable reconcile key
+op.add_column("integration_pushes", sa.Column("export_mode",             sa.Text, nullable=False, server_default="files_to_default"))
+op.add_column("integration_pushes", sa.Column("branch_name",            sa.Text, nullable=True))
+op.add_column("integration_pushes", sa.Column("pr_number",              sa.Integer, nullable=True))
+op.add_column("integration_pushes", sa.Column("source_stage_version_id", sa.UUID, sa.ForeignKey("stage_versions.id"), nullable=True))
+op.add_column("integration_pushes", sa.Column("increment_id",          sa.UUID, nullable=True))  # FK added in 0017
+
+# replace the old one-active-push-per-provider constraint with one-active-push-per-repo
+op.drop_constraint("uq_integration_push_workspace_provider", "integration_pushes", type_="unique")
+op.create_index("uq_integration_push_workspace_repo_active", "integration_pushes",
+                ["workspace_id", "repo_id"], unique=True,
+                postgresql_where=sa.text("status = 'active'"))
+op.create_index("ix_integration_pushes_repo_id", "integration_pushes", ["repo_id"])
+
+# --- alter integration_push_tasks ---
+op.add_column("integration_push_tasks", sa.Column("increment_id", sa.UUID, nullable=True))  # FK added in 0017
+op.add_column("integration_push_tasks", sa.Column("state",        sa.Text, nullable=False, server_default="open"))  # open | done
+op.add_column("integration_push_tasks", sa.Column("done_at",      sa.TIMESTAMPTZ))
+op.add_column("integration_push_tasks", sa.Column("done_via",     sa.Text))   # pr_merge | manual
+op.add_column("integration_push_tasks", sa.Column("synced_at",    sa.TIMESTAMPTZ))
+op.create_index("ix_integration_push_tasks_issue_number", "integration_push_tasks", ["external_issue_number"])
+```
+
+> [!important] Planning decision — `repo_id` backfill on existing rows
+> Legacy Phase-13 pushes have **no `repo_id`** (the column is new and nullable). We **leave them null** rather than fetching from the API at migration time: Postgres treats nulls as distinct, so the partial unique index `(workspace_id, repo_id) WHERE status='active'` tolerates legacy rows, and those rows belong to the deprecated OAuth path that the worker no longer drives. `repo_id` is populated on the **next** export under the App (the worker reads `repository.id` from the create/lookup response). New `status` value `stale` is also now valid (spec §10). Rollback drops the new indexes/columns and restores `uq_integration_push_workspace_provider`.
+
+The column set matches spec §10 exactly (`IntegrationPush` += `installation_id`/`repo_id`/`export_mode`/`branch_name`/`pr_number`/`source_stage_version_id`/`increment_id`; `IntegrationPushTask` += `increment_id`/`state`/`done_at`/`done_via`/`synced_at`). The `increment_id` FK targets are added in `0017` (T-278) so this migration does not depend on the increments tables.
+
+#### T-266 — ORM Models + Schemas
+
+- `backend/models/github_installation.py` — `GitHubInstallation` (fields per T-265). Add `GitHubWebhookEvent` to `models/integration.py` (or a new `models/github_webhook_event.py`).
+- Extend the existing `IntegrationPush` / `IntegrationPushTask` models with the new columns and `Mapped[...]` types; add `state: Mapped[Literal["open","done"]]`, `done_via: Mapped[Literal["pr_merge","manual"] | None]`.
+- `backend/schemas/github.py` — `InstallationStatus`, `GitHubExportRequest` (`export_mode: Literal["files_to_default","pr_with_tests"]`, repo target), `PushStatusResponse` (status, mode, branch, pr_number, shipped/total), `SyncStateResponse` (per-task `state`/issue/PR/`done_via`, `out_of_sync: bool`), `WebhookAck`. Reuse `ParsedTask` from Phase 13's `task_parser` unchanged.
+
+#### T-267 — GitHub App Auth + Token Provider
+
+`backend/services/integrations/github_app_auth.py` — the credential core (spec §8). **No DB, no business logic.**
+
+```python
+class GitHubAppAuth:
+    def app_jwt(self) -> str:
+        # RS256, signed with GITHUB_APP_PRIVATE_KEY (PyJWT — RS256 already used for JWT_PRIVATE_KEY)
+        # iat = now-60s (clock skew), exp = now+540s (≤10m), iss = GITHUB_APP_ID
+        ...
+    async def mint_installation_token(self, installation_id: int) -> tuple[str, datetime]:
+        # POST /app/installations/{id}/access_tokens  (auth: app_jwt) → (token, expires_at)
+        ...
+
+class TokenProvider:
+    # Redis-cached, refresh-ahead.  Key: gh:inst_token:{installation_id}
+    async def get(self, installation_id: int) -> str:
+        # cache hit (TTL > 5m left) → return; else mint, cache (TTL ~55m), return.
+        # Fernet-encrypt the cached value at rest when Redis is shared (reuse key_vault).
+        ...
+```
+
+Planning decisions: reuse the existing RS256 tooling and `key_vault`. The App private key is read from `GITHUB_APP_PRIVATE_KEY` (secret manager / Railway secret), **never** persisted in the DB. Token-mint outcomes increment `specforge_github_token_mint_total{source=mint|cache}`.
+
+#### T-268 — GitHub API Client Refactor
+
+The Phase-13 `github_api_client.py` took a static plaintext `token` in `__init__`. Refactor so `_request` resolves a token **per call** from the injected `TokenProvider` + `installation_id`, transparently re-minting on a 401 (one retry). The existing typed errors (`GitHubTokenExpiredError`, `GitHubRateLimitError`, `GitHubAPIError`) and the create/upsert/issue methods are retained. New methods are added in later tasks (T-276 branch/PR, T-281 GraphQL, T-282 checks) — the client surface is not finished in Phase A. The shared `httpx.AsyncClient` gets bounded timeouts, a bounded connection pool, and a circuit breaker (spec §12 robustness) — reuse the breaker pattern from Phase 20 / T-217.
+
+#### T-269 — Queue + Worker (`arq`)
+
+New `backend/worker.py` (arq `WorkerSettings`) and `backend/services/queue.py` (enqueue helpers). Add the `worker` service to `docker-compose.yml` (same image/env as `backend`, command `arq worker.WorkerSettings`).
+
+- **Job base contract:** every job is idempotent (keyed by `X-GitHub-Delivery` for inbound, `push_id`/`increment_id` for outbound), records progress for **checkpointed resume**, and is safe to run at-least-once. Retries: exponential backoff + jitter, `max_tries=5`, then move to a **dead-letter** record + `specforge_github_job_deadlettered_total` + alert; a RUNBOOK manual-replay path re-enqueues by id.
+- **Move export off the request path:** the Phase-13 `push_to_github(...)` body becomes the `export_push` job. The route now enqueues and returns `202` with the `push_id`; the worker performs the create-repo → upsert-files → parse-tasks → issues flow, committing after each issue (so a mid-run rate-limit resumes) exactly as the ledger already allows.
+- **Jobs registered:** `export_push`, `reconcile_event`, `backfill_repo`, `increment_push`, `projects_sync`, `pr_check`. A periodic `reconcile_drift` cron (arq scheduled) recomputes drift and catches missed events.
+
+#### T-270 — App Install Flow + Lifecycle
+
+`backend/routers/integrations.py` (extend):
+
+- `GET /integrations/github/install` → returns `https://github.com/apps/{GITHUB_APP_SLUG}/installations/new?state=…` (one-time state in Redis, bound to user id, 10-min TTL — same pattern as Phase 13 T-GH-03).
+- `GET /integrations/github/setup` → install callback; validates `state`, reads `installation_id` + `setup_action`, upserts `GitHubInstallation`, optionally runs identity OAuth (App `client_id`) to capture the username, redirects to `/settings?github_installed=true`.
+- `GET /integrations/github` → installed account, `repository_selection`, username, and whether the user is still on the legacy OAuth path (migration prompt).
+- `DELETE /integrations/github` → revoke the installation locally (CSRF-protected).
+
+Lifecycle webhook handlers (dispatched from T-271's ingest): `installation` (`suspend`/`unsuspend`/`deleted` → set/clear `suspended_at`, mark affected pushes `stale`, surface "disconnected") and `installation_repositories` (`added`/`removed`).
+
+#### T-271 — Webhook Ingest (mirror the Stripe receiver)
+
+`POST /integrations/github/webhook` in `routers/integrations.py`. **Copy the Phase 21 T-234 pattern** (raw-bytes-before-parse, constant-time HMAC, delivery dedup):
+
+```python
+@router.post("/integrations/github/webhook")
+async def github_webhook(request: Request, db: AsyncSession = Depends(get_db)):
+    raw = await request.body()                       # cap body size BEFORE parse
+    sig = request.headers["X-Hub-Signature-256"]
+    if not verify_hmac(raw, sig, settings.github_app_webhook_secrets):   # try BOTH secrets (rotation)
+        raise HTTPException(400)                      # O(1) reject — no DB/queue work yet
+    delivery_id = request.headers["X-GitHub-Delivery"]
+    event_type  = request.headers["X-GitHub-Event"]
+    try:
+        db.add(GitHubWebhookEvent(delivery_id=delivery_id, event_type=event_type))
+        await db.commit()                             # unique violation = duplicate → skip
+    except IntegrityError:
+        return {"status": "duplicate"}                # idempotent
+    await enqueue("reconcile_event", delivery_id, event_type, raw)
+    return {"status": "queued"}                       # 2xx, p99 < 300ms
+```
+
+Middleware exemptions (T-283): `/integrations/github/webhook` is exempt from CSRF and per-IP rate limiting (GitHub retry schedule must not be blocked) — the HMAC gate is the DoS guard. `verify_hmac` accepts a list of secrets so a rotation window validates against both.
+
+### 24.5 Backend Implementation Detail — Phase B (The Loop)
+
+#### T-272 — Reconcile Job
+
+`backend/services/integrations/github_reconcile.py`, run on the worker as `reconcile_event(delivery_id, event_type, raw)`. The job re-parses the stored raw payload and dispatches by `event_type`:
+
+- `issues` (`closed`/`reopened`/`edited`), `pull_request` (`closed` with `merged: true`), and the lifecycle events from T-270.
+- **Resolution path (confused-deputy safe):** `payload.repository.id` (immutable `repo_id`) → `IntegrationPush` with that `repo_id` **under a recorded installation for that owner** → its `IntegrationPushTask` rows → match `external_issue_number`. Payload identity is never trusted to widen scope (spec §12).
+- **Completion attribution:** key off **issue closure**. A PR with `Closes #N` also fires `issues/closed`, so set `state='done'`, `done_at=now()`, and `done_via='pr_merge'` when the closer is a merged PR, else `'manual'`. Never infer task↔PR from branch names.
+- **Idempotent + out-of-order safe:** the `github_webhook_events` row already deduped the delivery; additionally gate transitions on the event timestamp so a late `reopened` cannot regress a task closed by a newer event. Re-running the job is a no-op.
+
+```python
+async def reconcile_event(ctx, delivery_id, event_type, raw):
+    payload = json.loads(raw)
+    repo_id = payload["repository"]["id"]
+    push = await find_active_push(db, repo_id)          # None → ignore (not ours)
+    if push is None: return
+    if event_type == "issues" and payload["action"] in ("closed", "reopened", "edited"):
+        await apply_issue_state(db, push, payload["issue"], event_ts=payload_ts(payload))
+    ...
+    await mark_processed(db, delivery_id)               # set processed_at
+```
+
+#### T-273 — Drift Detection + Backfill + Resync
+
+- **Drift:** on Tasks re-finalise (`StageManager.finalise()` for `tasks`), compare the stage's current `StageVersion` to each active push's `source_stage_version_id`. If they differ, mark the push `status='stale'` (reusing the v1 `stale` concept) and expose `out_of_sync: true` on `GET /workspaces/{id}/sync`. `POST /workspaces/{id}/sync/resync` enqueues an `export_push` that updates only changed tasks' issues.
+- **Backfill:** `backfill_repo` job lists `GET /repos/{repo}/issues?state=all&since={last_synced}` — **filtering out rows with a `pull_request` key** (PRs surface on the issues endpoint) — and reconciles task states. Runs on reconnect and on the periodic `reconcile_drift` cron to recover events missed while the worker was down.
+
+#### T-274 — Per-Installation Rate Governor + Per-Repo Serialization
+
+`backend/services/integrations/github_governor.py`: a token-bucket governor keyed by `installation_id` honouring GitHub primary (~5,000/hr) and secondary (~80/min content) limits. On every response it reads `X-RateLimit-Remaining` / `Retry-After`; on `403`/`429` it backs off and **requeues** the job rather than failing it. Content writes to a single repo are **serialized** (a per-`repo_id` Redis lock) to avoid stale-SHA `409`s and secondary-limit throttling. Many installations run concurrently with per-tenant fairness/bulkheads; global concurrency is capped (arq `max_jobs`). Backpressure: queue depth is monitored (`specforge_github_queue_depth`) and shed/deferred when saturated.
+
+#### T-275 — Frontend: Task-Completion + Sync State
+
+- `frontend/src/components/workspace/TaskCompletionPanel.tsx` — sibling of `CoveragePanel` / `TaskValidationPanel`. Shows "9 / 14 shipped", per-task `state` with deep links to issue and PR, and `done_via`. Reads `GET /workspaces/{id}/sync`.
+- Drift banner: when `out_of_sync`, show "Tasks changed since last push — Re-sync changed tasks" calling `POST .../sync/resync`.
+- Disconnected state: when the install is suspended/removed, show "GitHub sync paused — reconnect" (driven by install status).
+- `api.ts` + `types/github.ts` additions for sync/install/export-mode payloads.
+
+### 24.6 Backend Implementation Detail — Phases C / C′ / D
+
+#### T-276 — PR + Harness-Tests Export Mode
+
+New builder `backend/services/integrations/pr_export_builder.py` beside Phase-13's `_build_file_map`. When `export_mode='pr_with_tests'`:
+
+- **Branch + PR plumbing — new client methods (T-268 client):** `get_ref(repo, "heads/{default}")` → base SHA → `create_branch(repo, "specforge/inc-{n}", base_sha)` → upsert files **on that branch** → `create_pull_request(repo, head, base, title, body)`. **`upsert_file` gains a `branch` param** (`PUT /contents` `body.branch`; reads pass `?ref=`).
+- **Scaffold contents:** one failing test per harness contract, a CI workflow `.github/workflows/specforge.yml`, the directory skeleton, and a stub file per task tagged with its `task_ref`. **Translation is stack-specific** — the Plan stage names the stack; a template per stack (start `pytest` + `vitest`) drives the scaffold; early versions scaffold (red) rather than implement. *(This exported scaffolding is the user's repo harness — distinct from SpecForge's own contract tests in T-285.)*
+- **Permission gotcha:** pushing `.github/workflows/*` needs App **`Workflows: write`**; a 403 only on that path surfaces as a clear actionable error, not a silent failure.
+- **Idempotent re-export:** reuse the existing branch/PR (`branch_name`/`pr_number` on the push) — never duplicate. A content-write `409` (stale SHA) triggers **refetch-SHA-and-retry**. PR body uses `Closes #N` to link issues to their tests.
+- `export_mode` is a persisted per-workspace toggle (default `files_to_default` = the Phase-13 behaviour).
+
+#### T-277 — Agent-Ready Issues + `AGENTS.md`
+
+- Enrich `task_parser` output (Phase 13) into fixed issue sections — **Context · Acceptance criteria · Files · The test that must pass · Spec links** — with an optional machine-readable YAML header (`task_ref`, `stage`, `spec_anchors`, `test_path`) for orchestrators. Labels: `specforge`, `stage:tasks`, `ready-for-agent`.
+- `backend/services/integrations/agents_md_builder.py` generates `AGENTS.md` (and/or `CLAUDE.md`) from the four stages. **Never clobber:** write only inside delimited markers (`<!-- specforge:start -->` … `<!-- specforge:end -->`); preserve any user content outside them.
+- **Stable spec anchors** by section id — reuse `artifact_validator`'s `SECTION_CONTRACTS` headings / stage versions so links survive refinement (ties to the `task_ref` scheme, T-279).
+
+#### T-278 — Increments Migration `0017` + Models
+
+`0017_increments.py`: `create_table("increments", …)` and `create_table("increment_ideas", …)` exactly per spec §10 (`increments`: `workspace_id`, `sequence`, `title`, `status`, `baseline_version_ids` JSONB, timestamps, unique `(workspace_id, sequence)`; `increment_ideas`: `workspace_id`, `increment_id?`, `source`, `external_ref?`, `text`, `status`). Then add the deferred FKs from `0016`: `increment_id` on `integration_pushes` and `integration_push_tasks` → `increments.id`. Models in `backend/models/increment.py`.
+
+#### T-279 — Delta-Aware Increment Generation
+
+`backend/services/pipeline/increment_service.py`:
+
+- **Input:** finalised stages (baseline, immutable context) + a new feature request. **Output:** a diff vs. baseline, not a fresh pipeline. The prompt must treat the baseline as immutable (else it regresses to full regeneration).
+- *Additive* → append sections/tasks; existing content **pinned** via stable `task_ref`s. *Behaviour-changing* → compute **blast radius**, mark affected items `stale`, re-run harness/critic **only** on affected areas (blast-radius analysis is the **phase-two** cut; MVP ships additive).
+- **Planning decision — `task_ref` scheme (load-bearing, spec Assumption 23):** a `task_ref` is stable and **content-derived** (e.g. a short hash of the task's normalized title + stage), so a refinement or increment updates the same issue instead of duplicating it. Decided here, before incremental export (T-280) consumes it.
+
+#### T-280 — Incremental GitHub Sync
+
+`increment_push` worker job. **Reads live repo state first** (via §24.5 reconcile/backfill) so it layers on shipped work, then: new tasks → **new issues only**; changed tasks → update their issue; obsoleted tasks → close with a note; **one milestone per increment**; **one PR per increment** (reuses T-276 plumbing). Idea backlog: `GET/POST /workspaces/{id}/ideas`; GitHub issues labelled `idea`/`enhancement` flow back into `increment_ideas` (`source='github'`) via the T-272 reconcile path.
+
+#### T-281 — Projects Board (GraphQL) + Milestones
+
+Projects v2 is **GraphQL-only** — the REST client cannot manage it. Add a GraphQL path to the client (`graphql(query, variables)`, plus `add_project_v2_item`, project/field-id discovery). Map: columns ← task status, milestones ← Plan phases, labels ← stage, dependencies ← sub-issues (task-list fallback). Milestones are REST (`POST /repos/{repo}/milestones`). The `projects_sync` job keeps the board aligned with task state; T-272 reconcile keeps SpecForge aligned with the board.
+
+#### T-282 — Status Checks + PR-Diff Evaluator (new)
+
+- Post a **check run** (`POST /repos/{repo}/check-runs`, needs `Checks: write`) on each PR; the simpler commit **Status API** is the v1 fallback (planning decision: ship Status first if Checks integration slips).
+- A `pull_request` / `check_suite` webhook enqueues a `pr_check` job that fetches the PR diff and judges it against the task's acceptance criteria, posting ✓ or ✗ with findings.
+- **The evaluator is NEW — not the critic (spec Assumption 25).** `backend/services/integrations/pr_evaluator.py` reuses the critic's *pattern* (prompt → structured verdict → **fail-open**: a judge error never blocks the PR) but is a **distinct module** judging *external PR code against per-task criteria* — a harder, unbounded problem. It is **not** `services/pipeline/critic.py` and must not import it as the evaluator. Cost controls (spec §12): cap LLM-check concurrency, a per-tenant/day budget, **debounce** rapid PR pushes (post "pending", then update).
+
+### 24.7 Config & Secrets (T-283)
+
+Add to `config.py` `Settings` (document in `CLAUDE.md` / `.env.example`). Keep existing `github_client_id`/`github_client_secret` until the OAuth path is retired.
+
+```python
+github_app_id: str = ""
+github_app_slug: str = ""                 # for /apps/{slug}/installations/new
+github_app_private_key: str = ""          # RS256 PEM — secret manager, NOT the DB
+github_app_webhook_secret: str = ""       # current signing secret
+github_app_webhook_secret_prev: str = ""  # accepted during rotation (verify against both)
+github_app_client_id: str = ""            # optional identity OAuth
+github_app_client_secret: str = ""
+```
+
+`validate_production_settings()`: in production, if the GitHub App is enabled, require `github_app_id`, `github_app_slug`, `github_app_private_key`, and `github_app_webhook_secret` to be set, and reject an empty private key. `github_app_webhook_secrets` is a derived list `[secret, prev]` filtered to non-empty, passed to `verify_hmac`.
+
+### 24.8 Security Invariants (T-283)
+
+1. **Webhook = public DoS surface.** HMAC verified in constant time and rejected O(1) **before** any DB/queue work; body size capped; CSRF + per-IP rate-limit exempt (HMAC is the guard). Mirrors Phase 21's webhook boundary.
+2. **Confused-deputy authz.** A webhook event for repo X may only mutate `IntegrationPush` rows whose `repo_id == X` **and** whose recorded installation belongs to that owner. Install A can never touch workspace B. Payload identity alone is never trusted.
+3. **Token cache = credentials.** Installation tokens are short-TTL, namespaced (`gh:inst_token:{id}`), access-restricted, and Fernet-encrypted at rest when Redis is shared. Never logged. App private key lives in a secret manager, never in the DB.
+4. **Secret rotation.** Two webhook secrets accepted during a rotation window; installation tokens re-minted on key rollover. Runbook documented (T-286).
+5. **Least privilege.** App requests only the permissions in spec §8 (Metadata r, Contents rw, Issues rw, Pull requests rw, Checks w, Workflows w, Projects rw).
+6. **Untrusted strings.** Repo/branch/PR names and PR diffs are treated as untrusted in any rendered surface — same sanitiser policy as public share / PDF / Storyboard.
+7. **Audit.** Every state-changing GitHub action is a structlog audit row (consistent schema). Raw payloads, tokens, the private key, and PR diff contents are never logged.
+8. **IDOR.** Owner-scoped sync/increment endpoints return 404 (not 403) on non-owned workspaces.
+
+### 24.9 Rate Limits (T-283)
+
+Add to the Redis sliding-window middleware (spec §12):
+
+| Tier | Scope | Limit | Window |
+|---|---|---:|---|
+| GitHub Export | Per user | 3 | 1 hour |
+| GitHub Sync / Resync / Backfill | Per user | 10 | 1 hour |
+| GitHub Increment Push | Per user | 5 | 1 hour |
+| GitHub Webhook | Exempt | — (HMAC-validated; no per-IP cap) | — |
+| GitHub API (outbound governor) | Per installation | token bucket (~5,000/hr primary; ~80/min secondary content) | — |
+
+The outbound governor (T-274) is enforced on the **worker**, not the request middleware.
+
+### 24.10 Observability (T-284)
+
+Prometheus metrics in `services/observability.py`:
+
+| Metric | Labels | Description |
+|---|---|---|
+| `specforge_github_webhook_received_total` | `event_type` | Inbound deliveries received |
+| `specforge_github_webhook_verified_total` | none | Passed HMAC verification |
+| `specforge_github_webhook_deduped_total` | `event_type` | Skipped as duplicate |
+| `specforge_github_webhook_failed_total` | `error_type` | Processing failures |
+| `specforge_github_reconcile_lag_seconds` | none | event-received → task-state-updated histogram |
+| `specforge_github_export_total` | `export_mode`, `outcome` | Export jobs completed |
+| `specforge_github_pr_total` | `outcome` | PRs opened/updated |
+| `specforge_github_check_total` | `verdict` | Status checks posted (pass/fail/error) |
+| `specforge_github_token_mint_total` | `source` | Tokens minted vs. cache-served |
+| `specforge_github_job_retries_total` | `job` | Worker job retries |
+| `specforge_github_job_deadlettered_total` | `job` | Jobs dead-lettered after max attempts |
+| `specforge_github_queue_depth` | none | Background queue depth (backpressure) |
+
+Structlog event names: `github.installed`, `github.uninstalled`, `github.webhook.received`, `github.webhook.duplicate_skipped`, `github.reconcile.task_done`, `github.export.completed`, `github.pr.opened`, `github.check.posted`, `github.increment.pushed`, `github.sync.paused`. Each includes `installation_id`, `workspace_id`, `repo_id`, `delivery_id`, `event_type`, `action`, `status`, `push_id` where available. Sentry runs on the worker. **Never log** tokens, the private key, raw payloads, or PR diffs.
+
+### 24.11 Tests & Harness Contract (T-285)
+
+> [!important] Two "harnesses" — do not conflate
+> This section is **SpecForge's own** cross-codebase contract suite for Phase 24. It is unrelated to the failing-test scaffolding that T-276 **pushes into the user's repository**. The file below guards that the tasks generated from this plan actually wire up the structures the plan specifies.
+
+Add `harness/tests/backend/test_phase24_github_living_contract.py`. Contract assertions, grouped by workstream:
+
+**App identity & token (Phase A)**
+1. `services/integrations/github_app_auth.py` defines `GitHubAppAuth.app_jwt`, `mint_installation_token`, and a Redis-cached `TokenProvider.get`.
+2. The App JWT is RS256 with `iat` backdated and `exp ≤ 600s`; the private key is read from `settings.github_app_private_key`, never from a DB model.
+3. `github_api_client` resolves a token per request via `TokenProvider` + `installation_id` (no static token in `__init__`) and re-mints once on 401.
+4. Token mints increment `specforge_github_token_mint_total` with a `source` label.
+
+**Data model (Phase A / C′)**
+5. Migration `0016` creates `github_installations` (unique `installation_id`) and `github_webhook_events` (unique `delivery_id`).
+6. `0016` **drops** `uq_integration_push_workspace_provider` and **adds** the partial unique index `(workspace_id, repo_id) WHERE status='active'` plus an index on `repo_id`.
+7. `integration_pushes` has `installation_id`, `repo_id`, `export_mode`, `branch_name`, `pr_number`, `source_stage_version_id`, `increment_id`; `integration_push_tasks` has `state`, `done_at`, `done_via`, `synced_at`, `increment_id` — matching spec §10.
+8. Migration `0017` creates `increments` (unique `(workspace_id, sequence)`) and `increment_ideas`, and adds the `increment_id` FKs.
+
+**Queue / worker (Phase A / X)**
+9. `worker.py` exposes an arq `WorkerSettings` registering `export_push`, `reconcile_event`, `backfill_repo`, `increment_push`, `projects_sync`, `pr_check`, and a periodic `reconcile_drift`.
+10. `docker-compose.yml` defines a `worker` service running the arq worker against `REDIS_URL`.
+11. The export route **enqueues** and returns `202` with a `push_id` (export no longer runs inline in the handler).
+12. Jobs declare bounded retries with backoff and a dead-letter path (`specforge_github_job_deadlettered_total`).
+
+**Webhook ingest & reconcile (Phase A / B)**
+13. `POST /integrations/github/webhook` reads the **raw body before parsing**, verifies `X-Hub-Signature-256` against a **list** of secrets (rotation), and returns 400 on mismatch **before** any enqueue/DB write.
+14. The webhook is registered exempt from CSRF and per-IP rate limiting (middleware allowlist).
+15. A duplicate `X-GitHub-Delivery` is skipped via the `github_webhook_events` unique constraint (idempotent), and the handler enqueues rather than reconciling inline.
+16. `reconcile_event` resolves the push by `payload.repository.id` (immutable `repo_id`), not `repo_full_name`, and only mutates pushes under a recorded installation for that owner.
+17. Closing an issue sets the matching task `state='done'`; a merged-PR closer sets `done_via='pr_merge'`, else `'manual'`; transitions are gated on event timestamp (out-of-order safe).
+18. `backfill_repo` lists `issues?state=all&since=` and **filters out rows carrying a `pull_request` key**.
+19. Re-finalising Tasks marks the active push `stale` / `out_of_sync` (drift), exposed on `GET /workspaces/{id}/sync`.
+
+**PR export & agent-ready (Phase C)**
+20. `pr_export_builder` adds `create_branch`, `create_pull_request`, and a `branch`-aware `upsert_file` to the client; PR mode emits `.github/workflows/specforge.yml`, per-stack failing tests, and `task_ref`-tagged stubs.
+21. A `Workflows: write` 403 on a `.github/workflows/*` push surfaces a distinct, actionable error; a content `409` triggers refetch-SHA-and-retry; re-export reuses `branch_name`/`pr_number`.
+22. `agents_md_builder` writes only inside delimited managed markers and preserves pre-existing file content (never clobbers).
+23. Issues are emitted with the fixed sections (Context / Acceptance criteria / Files / The test that must pass / Spec links) and labels `specforge`, `stage:tasks`, `ready-for-agent`.
+
+**Increments (Phase C′)**
+24. `increment_service` treats baseline stage versions as immutable context and produces additive deltas with stable, content-derived `task_ref`s (same ref → same issue, no duplicate).
+25. `increment_push` creates **new issues only** for new tasks, updates changed tasks' issues, closes obsoleted issues with a note, and creates one milestone + one PR per increment.
+26. GitHub issues labelled `idea`/`enhancement` flow into `increment_ideas` with `source='github'`.
+
+**Projects board & checks (Phase D)**
+27. The client has a GraphQL path (`add_project_v2_item` / field discovery); milestones use REST.
+28. `pr_evaluator` is a **distinct module** from `services/pipeline/critic.py`, judges the PR diff against per-task acceptance criteria, is **fail-open** (judge error → no block), and is cost-capped/debounced.
+29. Check runs post via `Checks: write` (or commit Status fallback) with a `verdict` recorded in `specforge_github_check_total`.
+
+**Cross-cutting (X)**
+30. Rate-limit middleware defines the GitHub Export / Sync / Increment tiers and exempts the webhook; the per-installation governor reads `X-RateLimit-Remaining`/`Retry-After` and requeues on 403/429.
+31. `observability.py` defines all `specforge_github_*` metrics in §24.10.
+32. No code path logs an installation token, the App private key, a raw webhook payload, or a PR diff.
+33. Frontend exposes `TaskCompletionPanel` and a drift/disconnected banner; `types/github.ts` includes sync, install, and `export_mode` types.
+
+**Backend unit tests** (`tests/test_phase24_*`):
+
+- `test_app_jwt_is_rs256_and_short_lived`
+- `test_token_provider_caches_and_refreshes_ahead`
+- `test_client_remints_token_on_401_once`
+- `test_export_enqueues_and_returns_202`
+- `test_export_job_is_idempotent_and_resumable`
+- `test_webhook_rejects_bad_signature_before_any_db_write`
+- `test_webhook_accepts_either_rotation_secret`
+- `test_webhook_duplicate_delivery_is_skipped`
+- `test_reconcile_resolves_by_repo_id_not_full_name`
+- `test_reconcile_confused_deputy_install_a_cannot_touch_workspace_b`
+- `test_issue_close_flips_task_done_with_correct_done_via`
+- `test_out_of_order_reopen_does_not_regress_done_task`
+- `test_backfill_filters_out_pull_request_rows`
+- `test_tasks_refinalise_marks_push_out_of_sync`
+- `test_pr_mode_opens_branch_and_pr_and_links_closes_n`
+- `test_pr_mode_workflows_write_403_surfaces_clear_error`
+- `test_pr_mode_content_409_refetches_sha_and_retries`
+- `test_agents_md_never_clobbers_existing_content`
+- `test_increment_generation_pins_existing_task_refs`
+- `test_increment_push_creates_only_new_issues`
+- `test_pr_evaluator_is_not_the_critic_and_fails_open`
+- `test_governor_backs_off_and_requeues_on_secondary_limit`
+
+**Frontend tests:**
+
+- `TaskCompletionPanel` renders shipped/total and issue/PR links from `GET /sync`.
+- Drift banner appears when `out_of_sync` and calls `/sync/resync`.
+- Disconnected state renders when the install is suspended/removed.
+- Settings shows "Install GitHub App" for a non-installed user and "Installed on @account · N repos" when installed.
+
+**Manual validation:**
+
+- Install the App on a test repo (via `smee.io` / `gh webhook forward` → local `/integrations/github/webhook`, §24.13).
+- Export `files_to_default`; verify files + issues; close an issue on GitHub → task flips to **done** in SpecForge within the SLO.
+- Export `pr_with_tests`; verify one PR with a **red** harness CI run; merge it → its tasks flip done via `pr_merge`.
+- Re-finalise Tasks → push shows out-of-sync → Re-sync updates only changed issues.
+- Create an increment ("add two features") → only new issues under a new milestone, on top of shipped work.
+- Kill the worker mid-export → restart → resumes with no duplicate repo/issues.
+- Suspend/uninstall the App → "sync paused" surfaces; backfill recovers on reconnect.
+
+### 24.12 Risks & Mitigations
+
+| Risk | Likelihood | Impact | Mitigation |
+|---|---|---|---|
+| Existing OAuth users can't auto-upgrade to the App | High | Medium | Run both modes behind a flag, discriminate on `provider`; prompt re-install; legacy path stays read-only until retired (spec Assumption 22). |
+| Worker is new infra — deploy/ops surface SpecForge hasn't had | Medium | High | `arq` on the existing Redis; new `worker` compose service mirrors backend image; dead-letter + alert + manual replay; load-test before enabling in prod. |
+| Webhook flood / DoS on a public endpoint | Medium | High | HMAC verify-before-work, O(1) reject, body cap, dedup; reconciliation always off-path; bulkheads so a `push` flood can't starve `issues`. |
+| Secondary rate limits / 409s on concurrent content writes | High | Medium | Per-installation token-bucket governor + per-repo write serialization; back off on 403/429 and requeue; refetch-SHA-and-retry on 409. |
+| Confused-deputy: an event mutates the wrong tenant's data | Low | High | Authz on immutable `repo_id` **and** recorded installation owner; payload identity never trusted; contract + unit test. |
+| `task_ref` churn duplicates issues across increments | Medium | High | Content-derived stable `task_ref` decided in T-279 **before** incremental export; tested (`test_increment_generation_pins_existing_task_refs`). |
+| Harness→real-test translation wrong for a stack | Medium | Medium | Template per stack (start pytest/vitest); scaffold red, don't implement; PR mode stays flagged per-stack until a template exists (spec Assumption 24). |
+| PR-diff evaluator mistaken for the existing critic | Medium | Medium | Distinct module, fail-open, cost-capped; contract test asserts it does not import `critic.py` as the evaluator (spec Assumption 25). |
+| Token cache leak treated as a credential breach | Low | High | Short TTL, namespaced, access-restricted Redis, Fernet at rest; private key in secret manager; never logged; rotation runbook. |
+| `github_webhook_events` table grows unbounded | Medium | Low | Retention/TTL or date-partition; indexes per §24.10; periodic prune job. |
+
+### 24.13 Dev Environment, Docs & Release Gate (T-286)
+
+**Dev environment:** webhooks need public ingress — use `smee.io` or `gh webhook forward` → local `/integrations/github/webhook`. Register a **separate dev GitHub App** (own id/key/webhook secret). Add the `worker` service to `docker compose` so local runs exercise the queue.
+
+**Docs to update *after* implementation:**
+- `RUNBOOK.md`: App key + webhook-secret rotation (two-secret window), installation-token re-mint, dead-letter inspection + manual replay, "sync paused" / circuit-breaker recovery, backfill trigger, increment-push troubleshooting.
+- `CLAUDE.md` + `.env.example`: new `GITHUB_APP_*` config; the new `worker` process and compose service.
+- `docs/OBSERVABILITY_RUNBOOK.md`: dashboards/alerts for webhook failures, reconcile lag, dead-letter rate, queue depth, token-mint cache-hit ratio, check verdicts.
+- `docs/PRODUCTION_RELEASE_GATE.md` + `docs/SMOKE_TEST_CHECKLIST.md`: the §24.11 manual flow as an operator checklist.
+- `tasks.md`: generate T-265 through T-286 only after this plan is accepted.
+
+**Release gate (phase-gated — ship A→D, not all at once):**
+- **Phase A:** installs persist; every API call uses a cached installation token; no static user token in the write path; export runs on the worker and returns 202; webhook acks p99 < 300 ms; signed-fixture tests (valid/invalid/replayed/out-of-order) pass.
+- **Phase B (the "core" gate):** closing an issue flips its task to done within SLO; backfill recovers missed-while-down events; confused-deputy authz test proves install A can't touch workspace B; kill-worker-mid-reconcile resumes without dupes.
+- **Phase C:** a finalized workspace opens one PR with a red harness CI run; re-export updates it in place; `Workflows: write` 403 and 409 retry both handled.
+- **Phase C′:** "add two features" pushes only new issues under a new milestone on top of shipped v1 work.
+- **Phase D:** tasks appear on a board reflecting live state; PRs carry a SpecForge check; LLM-check cost capped per tenant/day.
+
+### 24.14 Validation
+
+After Phase 24 is implemented:
+
+- [ ] `cd backend && uv run alembic upgrade head` — `0016` + `0017` apply cleanly; rollback restores the prior constraint
+- [ ] `cd backend && uv run pytest tests/test_phase24_github_app_auth.py tests/test_phase24_webhook.py tests/test_phase24_reconcile.py -q`
+- [ ] `cd backend && uv run pytest ../harness/tests/backend/test_phase24_github_living_contract.py -q`
+- [ ] `cd backend && uv run pytest tests/ -q --cov=services --cov-fail-under=80`
+- [ ] `cd frontend && pnpm tsc --noEmit && pnpm test -- github`
+- [ ] `git diff --check`
+- [ ] Worker boots: `docker compose up worker` connects to Redis and registers all jobs
+- [ ] Manual end-to-end via `smee` per §24.11 (install → export → close issue → task done → increment)
+- [ ] Security smoke: malformed/replayed/out-of-order signed webhooks; confirm O(1) reject and no state mutation
+
+---
+
+_SpecForge V1 PLAN.md · Version 2.5.0 · 2026-06-02 — added Phase 24 GitHub Living System of Record (T-265 through T-286), superseding Phase 13's one-shot export. Migrates per-user OAuth → GitHub **App** identity (App JWT → Redis-cached installation tokens via `TokenProvider`); introduces the first durable background **worker** (`arq` + new docker-compose service) and moves export off the request path; adds a signature-verified webhook (mirroring the Stripe receiver) with delivery dedup, idempotent/checkpointed reconcile jobs, drift detection + backfill, and a per-installation rate governor with per-repo write serialization. Adds the `pr_with_tests` export mode (branch/PR plumbing, per-stack red harness scaffold, CI workflow, `Workflows:write`/409 handling), agent-ready issues + non-clobbering `AGENTS.md`, delta-aware Increments with content-stable `task_ref`s and incremental new-issues-only sync, a Projects v2 GraphQL board + milestones, and a SpecForge status check backed by a **new** fail-open PR-diff evaluator (distinct from `critic.py`). Migration `0016` ALTERs `integration_pushes`/`integration_push_tasks` (repo-keyed partial-unique active push, sync fields) and creates `github_installations` + `github_webhook_events`; `0017` adds `increments` + `increment_ideas`. New `GITHUB_APP_*` config with production guard, two-secret webhook rotation, confused-deputy authz, token-cache-as-credentials security, GitHub rate-limit tiers, `specforge_github_*` metrics, a cross-codebase harness contract (`test_phase24_github_living_contract.py`), and phase-gated A→D release criteria. Phase 13 (§17) is retained unedited per the append-only convention._
 
 _SpecForge V1 PLAN.md · Version 2.4.0 · 2026-05-30 — added Phase 23 Storyboard Product Keynote Generation covering T-250 through T-264: paid 25-credit browser-native product keynote generation, six-act launch narrative, architecture reveal, source-backed claims, presenter notes, demo script, technical appendix, trusted HTML/PDF/download renderer, `/sb/{slug}` public sharing, permission-filtered public assets, idempotent credit deduction/refund, stale Storyboard propagation, Storyboard-specific rate limits, observability, comprehensive harness contract, and documentation/release-gate requirements._
 

@@ -6,11 +6,13 @@ tags:
 - specforge
 - spec
 - v1
-- asdd created: 2026-04-25 status: final version: 1.5.0 stage: spec
+- v2
+- github
+- asdd created: 2026-04-25 status: final version: 2.0.0 stage: spec
 
 ---
 
-# SpecForge V1 — SPEC.md
+# SpecForge — SPEC.md
 
 > [!tip] Core Hypothesis Developers find enough value in the ASDD pipeline output to use it in real projects.
 
@@ -31,7 +33,7 @@ tags:
 - [[#11. API Contracts]]
 - [[#12. Non-Functional Requirements]]
 - [[#13. Assumptions]]
-- [[#14. Out of Scope for V1]]
+- [[#14. Out of Scope]]
 
 ---
 
@@ -46,6 +48,8 @@ SPEC.md → PLAN.md → HARNESS → TASKS.md
 V1 validates one core hypothesis: developers find enough value in the pipeline output to use it in real projects.
 
 Once the four-stage workspace is finalised, SpecForge can also generate premium downstream artifacts from the same source of truth: exports for builders, public links for reviewers, and Storyboard keynotes for presenting the product vision and architecture to an audience.
+
+Beyond one-shot delivery, a finalised workspace can be connected to GitHub as a **living system of record**. What began as a one-way export becomes bidirectional: SpecForge installs as a GitHub App, runs all repository work on a durable background worker, opens the Harness stage as an executable pull request, and listens to repository events so that shipping work — closing an issue, merging its PR — flows back and flips the matching task to **done** inside SpecForge. The workspace then evolves as a versioned timeline that absorbs new features as scoped increments rather than freezing at the first export. This capability is described in full in §4.14 and is the headline of the v2 capability layer.
 
 ---
 
@@ -69,6 +73,13 @@ Once the four-stage workspace is finalised, SpecForge can also generate premium 
 - Surface harness coverage prominently in the workspace summary so the harness stage is recognisable as a differentiator rather than a buried artefact
 - Allow users to purchase additional credits in a single pack (200 credits for $9, valid 30 days from purchase date) via Stripe Hosted Checkout so the product has a clear monetisation path from V1
 - Allow users to generate a paid **Storyboard**: a browser-native, shareable, downloadable product keynote presentation that turns a finalised workspace into a stunning big-tech-style launch narrative with architecture diagrams, presenter notes, source-backed claims, and a technical appendix
+- Connect a workspace to GitHub through a **GitHub App** identity — per-repo least-privilege installation tokens, bot authorship, and webhooks — replacing the per-user OAuth token in the write path, so the integration can listen as well as push (§4.14.1)
+- Run all GitHub repository work on a **durable background worker** off the request path, so export, sync, PR creation, and checks survive deploys, retry safely, and never time out a user request (§4.14.2, §12)
+- Make the integration **bidirectional**: a signature-verified GitHub webhook turns a generator into a live dashboard — closing a task's issue or merging its pull request flips that task to **done** inside SpecForge, and spec/repo drift is detected and surfaced (§4.14.3)
+- Offer an **executable export mode** that opens the Harness stage as a pull request — failing tests, a CI workflow, and per-task stubs — so the repository starts red and goes green as work lands (TDD-from-spec) (§4.14.4)
+- Make every exported issue an **optimal coding-agent prompt** (Context · Acceptance criteria · Files · The test that must pass · Spec links) and seed repo-level agent context (`AGENTS.md` / `CLAUDE.md`) from the four stages (§4.14.5)
+- Surface a real project-management layer on GitHub — a **Projects board** reflecting live task state and milestones from Plan phases — and post a **SpecForge status check** on pull requests that judges the diff against each task's acceptance criteria (§4.14.6)
+- Evolve a finalised workspace as a versioned **timeline of increments** that absorbs new features as scoped deltas — appending only new tasks and pushing only new issues under a new milestone, on top of already-shipped work — instead of a frozen one-shot or a full re-run (§4.14.7)
 
 ### Non-Goals for V1
 
@@ -81,7 +92,6 @@ Once the four-stage workspace is finalised, SpecForge can also generate premium 
 - Chat panel per stage
 - Mobile responsiveness
 - Self-host documentation
-- Bidirectional sync
 - Enterprise features of any kind
 - Native PowerPoint / Apple Keynote file export for Storyboard; V1 Storyboards are browser-native HTML/PDF/notes artifacts
 
@@ -310,6 +320,9 @@ Success: "Exported to github.com/username/repo-name"
 
 **GitHub Issue format:** Each `T-NNN` task becomes one issue titled `T-NNN: {task title}`, with the full task body — phase, risk, description, steps, acceptance criteria, and harness references — preserved as the issue body. Issues are created in task order.
 
+> [!note] Export is no longer one-shot
+> §4.14 promotes this export from a one-way, synchronous, OAuth-token operation into a connection to a **living system of record**: GitHub App identity, a background worker (export no longer blocks the request and never times out on long task lists), a choice between *files-only* and *PR-with-tests* export modes, bidirectional sync that flips tasks to done, and increment-aware re-export. The flow above remains the default *files-only* mode; the additions are described in §4.14. A workspace must be connected via the GitHub App (§4.14.1) for any GitHub export.
+
 #### Export PDF
 
 Click **Export PDF** → backend renders SPEC.md, PLAN.md, and TASKS.md to a single branded PDF and the browser downloads `specforge-{workspace-name}.pdf` immediately. The harness directory is **not** included in the PDF — PDFs are for human audiences (founders, clients, investors, PMs) who want a readable artefact, not a runnable scaffold.
@@ -349,21 +362,30 @@ When the user enables sharing the workspace gets a random 6-character public slu
 
 ### 4.9 GitHub Connection
 
-A GitHub connection is required for the Export to GitHub flow. Users connect once from Settings.
+A GitHub connection is required for any GitHub export or sync. From v2 the connection is a **GitHub App installation**, not a per-user OAuth token. Users install once from Settings; the App is granted to the specific repositories the user selects.
 
 ```
 Settings → Integrations → Connect GitHub
          ↓
-GitHub OAuth consent (scope: repo, read:user)
+"Install GitHub App" → github.com/apps/{slug}/installations/new
          ↓
-User authorises SpecForge
+User picks the account/org and the repositories to grant
          ↓
-Token stored encrypted in key vault
+GitHub redirects back with installation_id + setup_action
          ↓
-Settings shows: "✓ Connected as @username"  [Disconnect]
+SpecForge persists the installation (no long-lived user token stored)
+         ↓
+Settings shows: "✓ Installed on @account · N repositories"  [Configure on GitHub] [Disconnect]
 ```
 
-Disconnecting removes the stored token. Previously exported repos and issues on GitHub are not affected. If a GitHub token is found to be expired or revoked during an export attempt, it is deleted automatically and the user is prompted to reconnect.
+All repository work (push, issues, branches, PRs, checks) is performed with a short-lived **installation access token** minted on demand from the App credentials and cached server-side — see §4.14.1 and §8. SpecForge never stores a long-lived user token in the write path.
+
+**Optional identity:** a one-time user-to-server OAuth via the App's `client_id` may run only to learn the installer's GitHub username for display in Settings. It is not used for any repository call.
+
+**Lifecycle.** SpecForge handles `installation` (suspend / unsuspend / **deleted**) and `installation_repositories` (added / **removed**) events. On uninstall or a repository being removed from the install, SpecForge **stops syncing the affected pushes, marks them stale, and surfaces "disconnected" in the workspace UI**; the push ledger is retained (not purged) so history and re-connect remain intact. Disconnecting from Settings revokes the installation; previously created repos, issues, and PRs on GitHub are unaffected.
+
+> [!note] Migration from the v1 OAuth integration
+> Workspaces connected under the v1 `repo, read:user` OAuth token cannot auto-upgrade — installing an App is a user action. The two modes run side by side behind a flag, discriminated on `provider`; v1-connected users are prompted to re-install the App. Once re-installed, all new work uses installation tokens.
 
 ### 4.10 Dashboard
 
@@ -642,6 +664,123 @@ The acceptance bar is human and product-facing: one click should produce a Story
 
 ---
 
+### 4.14 GitHub — Living System of Record
+
+In v1, GitHub export was a one-way, one-shot operation: create a repo, push four files, and open one issue per task. Value ended at export — nothing flowed back, and the spec and the repository drifted apart the moment work began. v2 turns the integration into a **bidirectional, executable, agent-ready, verifiable, and continuously evolving** system of record. The finalised workspace stops being a frozen artifact and becomes the live source of truth for a repository as it is built.
+
+This capability ships in phases. Each phase is independently shippable and leaves the product more useful than the last.
+
+| Phase | Ships | The user can now… |
+|---|---|---|
+| **A — Foundation** | GitHub App identity (§4.14.1) · background worker (§4.14.2) · webhook ingest + dedup (§4.14.3) | Install the App on chosen repos; export runs off the request path and never times out; GitHub events are received and verified |
+| **B — The loop** | Bidirectional reconcile + completion UI + drift detection (§4.14.3) | **Close an issue (or merge its PR) and watch the task flip to done in SpecForge** — the integration is now core, not a hand-off |
+| **C — Executable** | PR + harness-tests export mode (§4.14.4) · agent-ready issues + `AGENTS.md` (§4.14.5) | Open the spec as a pull request with a red harness CI run that a coding agent can drive green |
+| **C′ — Living** | Increments + incremental sync (§4.14.7) | Say "add two features" and have only the new tasks appended and only the new issues pushed under a new milestone, on top of shipped v1 work |
+| **D — Team-grade** | Projects board + status checks (§4.14.6) | See a GitHub Projects board reflecting live task state, with a SpecForge ✓ check on each PR |
+
+Every part of §4.14 is built to the production bar in §12 (secure · scalable · reliable · robust) — these are acceptance criteria, not extras.
+
+#### 4.14.1 GitHub App identity *(Phase A — foundation)*
+
+The per-user OAuth token is replaced by a **GitHub App** identity, giving per-repository least privilege, webhook delivery, the Checks API, bot authorship, and no expiry juggling. The App uses three distinct credentials:
+
+1. **App JWT** — short-lived, RS256-signed with the App private key; used only to call the App-level API and to mint installation tokens.
+2. **Installation access token** — minted per installation (1-hour TTL), scoped to that install's granted repositories and permissions; performs all repository work. Minting is itself rate-limited, so tokens are cached server-side (short TTL, refresh-ahead) and resolved per request.
+3. **User-to-server token** *(optional)* — only to learn the installer's identity for display; never used for repository calls.
+
+The App requests the **least privilege** each feature needs (see the permission table in §8): Metadata (read), Contents (read+write), Issues (read+write), Pull requests (read+write), Checks (write), Workflows (write, only to push `.github/workflows/*`), and Projects (read+write). The private key lives in a secret manager, never in the database.
+
+#### 4.14.2 Background processing *(Phase A — prerequisite for sync, PR export, checks)*
+
+v1 export ran **inline in the request** and would time out on long task lists. v2 introduces a **durable, Redis-backed job queue and worker**. Endpoints **enqueue and return immediately (202)**; the worker performs all GitHub I/O. The webhook receiver stays O(1) — verify, enqueue, acknowledge — and never does repository work on the request path.
+
+- **Idempotent jobs**, keyed by GitHub delivery id or push id, so retried deliveries and duplicate triggers never double-apply.
+- **Retries** with exponential backoff and jitter, a maximum attempt count, then a **dead-letter** state with an alert and a manual replay path.
+- A **periodic reconcile/backfill** job recovers events missed while the worker was down and recomputes drift.
+- A **per-installation rate-limit governor** reads GitHub's rate-limit headers, backs off on 403/429, serialises content writes per repository (to avoid stale-SHA 409s and secondary-limit throttling), and runs many installations concurrently with per-tenant fairness so one tenant cannot starve others.
+
+#### 4.14.3 Bidirectional sync *(Phase B — the smallest slice that makes it "core")*
+
+GitHub tells SpecForge when reality changes. A new **unauthenticated, signature-verified webhook endpoint** (`POST /integrations/github/webhook`) mirrors the proven Stripe receiver pattern: read the raw body, verify the `X-Hub-Signature-256` HMAC in constant time, dedup on the `X-GitHub-Delivery` id, then enqueue and return 2xx. Reconciliation always runs on the worker, never inline.
+
+```
+GitHub: user closes issue #42 (or merges the PR that closes it)
+        ↓
+Webhook delivered → HMAC verified → delivery id deduped → enqueued → 2xx
+        ↓
+Worker resolves repository by immutable repo_id → IntegrationPush → its tasks
+        ↓
+Task whose external_issue_number = 42 → state = done
+        done_via = pr_merge (closed by a merged PR) | manual
+        ↓
+Workspace task-completion view updates: "9 / 14 shipped"  ↗ links to issue / PR
+```
+
+- **Reconcile on the immutable `repo_id`**, not the repository's full name — repositories get renamed and transferred.
+- **Completion attribution:** key off **issue closure** (a PR with `Closes #N` also fires an `issues/closed` event); record whether the closer was a merged PR. Task ↔ PR is never inferred from branch names.
+- **Drift detection:** compare the `StageVersion` that produced a push against the current finalised Tasks. If tasks changed after the push, the push is marked **out-of-sync** and the UI offers "re-sync changed tasks" — reusing the v1 `stale` concept.
+- **Backfill:** on reconnect and on a nightly job, list `issues?state=all&since=…` (filtering out pull-request rows) to recover anything missed while the worker was down.
+- **UI:** a task-completion panel — a sibling of the existing `CoveragePanel` / `TaskValidationPanel` — shows shipped vs. total with deep links to each issue and PR.
+
+All handlers are idempotent (deliveries are at-least-once and retried) and gate state transitions on event timestamps so out-of-order deliveries cannot regress a task.
+
+#### 4.14.4 PR + harness-tests export mode *(Phase C — the executable wedge: TDD-from-spec)*
+
+A second export mode, `pr_with_tests`, exports the **Harness stage as executable scaffolding via a pull request** rather than as inert files on the default branch. The PR contains a failing test per harness contract, a CI workflow (`.github/workflows/specforge.yml`), the directory skeleton, and a stub file per task tagged with its `task_ref`. The repository starts **red** and goes green as work lands.
+
+```
+files_to_default  (default)  → push four files + skeleton to the default branch  (the v1 behaviour)
+pr_with_tests                → branch specforge/inc-{n} from default HEAD
+                               → write harness tests + CI + task stubs on that branch
+                               → open one pull request ("Closes #N" links issues to their tests)
+```
+
+- Each issue names the test path that must pass and its acceptance criteria; the PR body links issues to tests via `Closes #N`.
+- Pushing under `.github/workflows/*` requires the App's **Workflows: write** permission; the absence of it surfaces as a clear, actionable error rather than a silent 403.
+- The mode is a persisted per-workspace toggle (`files_to_default` | `pr_with_tests`); the default preserves the v1 behaviour.
+- **Harness-to-real-test translation is stack-specific** — the Plan stage names the stack, and a template per stack (starting with pytest and vitest) drives the scaffold. Early versions scaffold rather than implement.
+- Re-export reuses the existing branch and PR in place — it never duplicates — and refetches a stale SHA and retries on a content-write 409.
+
+#### 4.14.5 Agent-ready issues + context files *(Phase C — low risk, high leverage)*
+
+Each exported issue is shaped into an **optimal coding-agent prompt** with fixed sections — **Context · Acceptance criteria · Files · The test that must pass · Spec links** — plus an optional machine-readable header (YAML: `task_ref`, `stage`, `spec_anchors`, `test_path`) for orchestrators. Issues are labelled `specforge`, `stage:tasks`, and `ready-for-agent`.
+
+SpecForge also generates repo-level agent context — `AGENTS.md` (and/or `CLAUDE.md`) — from the four stages. It **never clobbers** an existing file: it writes only into a clearly delimited, managed section, leaving any user content intact. Spec links use stable anchors derived from section ids (reusing the harness validator's section contracts / stage versions) so they survive refinement.
+
+The acceptance bar: a coding agent can pick up an issue and produce a PR that satisfies the issue's named harness test **without fetching any extra context**. *(A separate spike — an MCP server / Action that lets an agent fetch the live spec mid-task — has its own read-auth model and is tracked as future work, §14.)*
+
+#### 4.14.6 Projects board + status checks *(Phase D — team-grade polish)*
+
+SpecForge surfaces a real project-management layer on GitHub and a verification signal on pull requests:
+
+- **Projects board (GitHub Projects v2).** Columns track task status, milestones map to Plan phases, labels map to stage, and dependencies map to sub-issues (with a task-list fallback). Projects v2 is GraphQL-only, so this uses a GraphQL path alongside the REST client; milestones themselves are REST. Bidirectional sync (§4.14.3) keeps the board and SpecForge in agreement.
+- **Status checks.** SpecForge posts a **check run** on each pull request (the simpler commit Status API is the v1-of-this-feature fallback). A `pull_request` / `check_suite` webhook triggers a worker job that fetches the PR diff and judges it against the task's acceptance criteria, posting a SpecForge ✓ or a ✗ with findings.
+- **Scoped honestly:** this reuses the existing critic's *judge-model pattern* (prompt → structured verdict → fail-open), but the **evaluator is new**. The existing critic/evals judge SpecForge's own generated artifacts against fixed invariants; this judges *external PR code* against per-task criteria — a harder, less bounded problem, with cost capped per §12.
+
+#### 4.14.7 Increments — the living workspace *(Phase C′ — rides on sync and PR export)*
+
+A workspace becomes a versioned **timeline** — v1 → Increment 1 → Increment 2 → … — that absorbs new features as **deltas** rather than freezing at the first export. This avoids the two bad paths: starting a new workspace (loses context) or re-running the whole pipeline (churns the spec and re-issues everything).
+
+```
+Finalised workspace (baseline) + "add two features"
+        ↓
+Delta-aware generation: output is a DIFF vs. baseline, baseline treated as immutable context
+        ↓
+Additive → append sections / tasks; existing content pinned (stable task_refs)
+Behaviour-changing → compute blast radius; mark affected items stale;
+                     re-run harness / critic ONLY on affected areas
+        ↓
+Incremental GitHub sync (reads live repo state first):
+   new tasks → new issues · changed tasks → update their issue ·
+   obsoleted tasks → closed with a note · one milestone + one PR per increment
+```
+
+- **Idea backlog:** a lightweight inbox captures features mid-build and batches them into an increment when ready. GitHub issues labelled `idea` / `enhancement` flow back into the backlog via the §4.14.3 webhook.
+- **Stable, content-derived `task_ref`s are load-bearing** — they are what lets an increment update the right issue instead of duplicating it. The scheme is fixed before incremental export ships (§13).
+- **MVP scope:** "add two features" appends tasks and pushes **only the new issues** under a new milestone, layered on already-shipped work. Behaviour-changing blast-radius analysis is a fast follow.
+
+---
+
 ## 5. Pipeline Stages — Detailed Specification
 
 ### 5.1 SPEC.md
@@ -910,20 +1049,32 @@ On first sign-in an account is created automatically from the Google profile. Na
 
 Refresh tokens rotate on every use. If an already-used refresh token is presented — indicating possible token theft — all tokens for that user are immediately revoked and a security event is logged.
 
-### GitHub OAuth (Integration Only)
+### GitHub App (Integration Only)
 
-GitHub OAuth is used exclusively to obtain a GitHub access token for the Export to GitHub feature. It does not create or replace a SpecForge account — the user must already be signed in via Google.
+GitHub is connected for the export and sync features only. It does not create or replace a SpecForge account — the user must already be signed in via Google. From v2 the connection is a **GitHub App installation**, not a per-user OAuth token (see §4.9, §4.14.1).
 
-The GitHub OAuth flow is initiated from Settings → Integrations. On completion, the access token is encrypted with Fernet (same key vault as user-supplied LLM API keys) and stored in `UserIntegration`. The plaintext token is never written to logs or error responses.
+**Three credentials, kept distinct.** The App private key (RS256 PEM) lives in a secret manager — never in the database. It signs a short-lived **App JWT** (`iat` set ~60 s in the past to absorb clock skew, `exp` ≤ 10 minutes) used only for App-level calls and minting tokens. Each repository call uses a per-installation **installation access token** (1-hour TTL) minted via `POST /app/installations/{id}/access_tokens`. An optional user-to-server token is used only to learn the installer's username for display.
 
-| OAuth scope | Reason |
-|---|---|
-| `repo` | Create repositories, push files, create issues |
-| `read:user` | Display the connected GitHub username in Settings |
+**Token cache = credentials.** Installation tokens are cached server-side (Redis key `gh:inst_token:{id}`, ~55-minute TTL, refresh-ahead) so token minting is not itself rate-limited on the hot path. The cache namespace is short-TTL, access-restricted, and Fernet-encrypted at rest when Redis is shared. A token is never written to logs, errors, or audit fields.
 
-The flow uses a one-time CSRF state parameter (32-byte random hex stored in the user's session for the duration of the flow). The callback endpoint rejects any request where the state does not match.
+| App permission | Level | Reason |
+|---|---|---|
+| Metadata | read | Baseline repository access |
+| Contents | read+write | Push files, create branches (export, PR mode, increments) |
+| Issues | read+write | Create/update issues, bidirectional sync |
+| Pull requests | read+write | Open and update PRs (PR mode, increments) |
+| Checks | write | Post the SpecForge status check (§4.14.6) |
+| Workflows | write | Push `.github/workflows/*` in PR mode (§4.14.4) |
+| Projects | read+write | Manage the Projects board (§4.14.6) |
 
-If a GitHub API call returns 401 at any point after connection, the stored token is deleted and the user is prompted to reconnect. SpecForge never retries with a known-invalid token.
+**Install flow CSRF.** The install/callback flow carries a one-time state parameter validated on return; the callback rejects any mismatch.
+
+**Secret rotation.** Two valid webhook signing secrets are accepted during rotation (each delivery is verified against both); installation tokens are re-minted on a key rollover. The rotation runbook is documented in `RUNBOOK.md`.
+
+**Lifecycle & failure.** `installation` and `installation_repositories` webhooks keep the install row accurate (suspend / unsuspend / deleted / repos added / removed). On a `401`/`403` indicating a revoked or insufficient install, SpecForge stops syncing the affected pushes, marks them stale, and prompts re-install — it never retries with a known-invalid token.
+
+> [!note] v1 OAuth retained for migration only
+> The v1 per-user OAuth integration (`repo, read:user`, Fernet token in `UserIntegration`) is kept behind a flag, discriminated on `provider`, until all connected users have re-installed the App. It is the legacy path, not the write path, in v2.
 
 ---
 
@@ -1118,37 +1269,116 @@ Stores an encrypted OAuth token for a connected external service. One row per us
 
 Unique constraint: `(user_id, provider)`.
 
+> [!note] `UserIntegration` is the legacy v1 path
+> It stores the per-user OAuth token retained only for migration (§4.9, §8). v2 repository access is identified by `GitHubInstallation` and authenticated with short-lived installation tokens that are **not** persisted in the database.
+
+### GitHub Installation
+
+One row per GitHub App installation. Identifies which account/org granted the App and which repositories it can act on. The App private key and minted installation tokens are **not** stored here — the key lives in a secret manager and tokens are cached short-TTL in Redis.
+
+|Field|Type|Constraints|
+|---|---|---|
+|id|UUID|Primary key|
+|installation_id|BIGINT|Unique, not null — GitHub's installation id|
+|account_login|TEXT|Not null — the org/user the App is installed on|
+|account_type|TEXT|`User` / `Organization`|
+|repository_selection|TEXT|`all` / `selected`|
+|user_id|UUID|Nullable FK → users.id — the SpecForge user who installed, if known via identity OAuth|
+|suspended_at|TIMESTAMPTZ|Nullable — set when GitHub reports the install suspended|
+|created_at|TIMESTAMPTZ||
+|updated_at|TIMESTAMPTZ||
+
+Unique constraint: `installation_id`.
+
 ### Integration Push
 
-Records each GitHub export attempt. One row per workspace per provider; re-export updates this row in place.
+Records the GitHub push for a workspace. Re-export reuses the existing active push for a repository rather than creating a new one. Reconciliation keys on the immutable `repo_id` (repositories get renamed and transferred), never on `repo_full_name`.
 
 |Field|Type|Constraints|
 |---|---|---|
 |id|UUID|Primary key|
 |workspace_id|UUID|FK → workspaces.id|
 |user_id|UUID|FK → users.id|
+|installation_id|UUID|Nullable FK → github_installations.id — null for legacy v1 OAuth pushes|
 |provider|TEXT|`github`|
-|repo_full_name|TEXT|e.g. `username/repo-name`|
+|repo_id|BIGINT|GitHub's immutable numeric repository id — the reconciliation key|
+|repo_full_name|TEXT|e.g. `username/repo-name` — display only; may change on rename/transfer|
 |repo_url|TEXT|Full HTTPS URL|
-|status|TEXT|`pending` / `completed` / `failed`|
+|export_mode|TEXT|`files_to_default` / `pr_with_tests` (default `files_to_default`)|
+|branch_name|TEXT|Nullable — set in PR mode, e.g. `specforge/inc-1`|
+|pr_number|INTEGER|Nullable — set in PR mode|
+|source_stage_version_id|UUID|Nullable FK → stage_versions.id — the Tasks version that produced this push (drift detection)|
+|increment_id|UUID|Nullable FK → increments.id — the increment this push belongs to|
+|status|TEXT|`pending` / `completed` / `failed` / `stale`|
 |pushed_at|TIMESTAMPTZ|Set on completion|
 |created_at|TIMESTAMPTZ||
 
-Unique constraint: `(workspace_id, provider)`.
+Unique constraint: `(workspace_id, repo_id)` for the active push — one active push per repo; re-export reuses it. Index on `repo_id` for webhook reconciliation.
 
 ### Integration Push Task
 
-Maps each task to its created GitHub Issue number, enabling idempotent re-export.
+Maps each task to its GitHub Issue and tracks the issue's completion state for bidirectional sync.
 
 |Field|Type|Constraints|
 |---|---|---|
 |id|UUID|Primary key|
 |push_id|UUID|FK → integration_pushes.id|
-|task_ref|TEXT|e.g. `T-001`|
+|task_ref|TEXT|e.g. `T-001` — content-stable across increments|
 |external_issue_number|INTEGER|GitHub issue number|
+|increment_id|UUID|Nullable FK → increments.id — the increment that introduced/last changed this task|
+|state|TEXT|`open` / `done` (default `open`)|
+|done_at|TIMESTAMPTZ|Nullable — when the issue was observed closed|
+|done_via|TEXT|Nullable — `pr_merge` (closed by a merged PR) / `manual`|
+|synced_at|TIMESTAMPTZ|Nullable — last reconcile against GitHub|
 |created_at|TIMESTAMPTZ||
 
-Unique constraint: `(push_id, task_ref)`.
+Unique constraint: `(push_id, task_ref)`. Index on `external_issue_number` for webhook lookups.
+
+### GitHub Webhook Event
+
+Idempotency + dedup table for inbound GitHub deliveries — mirrors `StripeWebhookEvent`. A second insert for the same `delivery_id` raises a unique-constraint error the handler catches and skips, making every webhook handler idempotent. Subject to retention/TTL to bound growth (§12).
+
+|Field|Type|Constraints|
+|---|---|---|
+|id|UUID|Primary key|
+|delivery_id|TEXT|Unique, not null — the `X-GitHub-Delivery` header|
+|event_type|TEXT|Not null — e.g. `issues`, `pull_request`, `installation`|
+|received_at|TIMESTAMPTZ|Not null, default now()|
+|processed_at|TIMESTAMPTZ|Nullable — set when the worker finishes reconciliation|
+
+Unique constraint: `delivery_id`.
+
+### Increment
+
+A versioned delta layered on a finalised workspace baseline (§4.14.7). Increment 0 is the original baseline; each subsequent increment captures an additive or behaviour-changing change set.
+
+|Field|Type|Constraints|
+|---|---|---|
+|id|UUID|Primary key|
+|workspace_id|UUID|FK → workspaces.id|
+|sequence|INTEGER|Not null — 1, 2, 3… per workspace|
+|title|TEXT|Not null, max 200 chars|
+|status|TEXT|`draft` / `generating` / `ready` / `pushed` / `stale`|
+|baseline_version_ids|JSONB|Stage version ids treated as immutable baseline context for delta generation|
+|created_at|TIMESTAMPTZ||
+|updated_at|TIMESTAMPTZ||
+
+Unique constraint: `(workspace_id, sequence)`.
+
+### Increment Idea
+
+A lightweight backlog item — a feature captured mid-build, batched into an increment when ready. Ideas can originate in SpecForge or flow back from GitHub issues labelled `idea` / `enhancement` via the §4.14.3 webhook.
+
+|Field|Type|Constraints|
+|---|---|---|
+|id|UUID|Primary key|
+|workspace_id|UUID|FK → workspaces.id|
+|increment_id|UUID|Nullable FK → increments.id — set when the idea is pulled into an increment|
+|source|TEXT|`user` / `github`|
+|external_ref|TEXT|Nullable — e.g. `gh-issue:123` when sourced from GitHub|
+|text|TEXT|Not null — the captured feature idea|
+|status|TEXT|`open` / `planned` / `done` / `dismissed`|
+|created_at|TIMESTAMPTZ||
 
 ### Eval Result
 
@@ -1304,10 +1534,32 @@ The renderer owns final visual presentation. The LLM produces structured content
 
 ### Integrations
 
-|Method|Endpoint|Description|
-|---|---|---|
-|GET|/integrations/github|Return GitHub connection status and username|
-|DELETE|/integrations/github|Disconnect GitHub — delete stored token|
+|Method|Endpoint|Auth|CSRF|Description|
+|---|---|---|---|---|
+|GET|/integrations/github|Required|No|Return GitHub connection status: installed account, repository selection, username|
+|GET|/integrations/github/install|Required|No|Return the GitHub App install URL (`/apps/{slug}/installations/new`) to start the flow|
+|GET|/integrations/github/setup|Required|No|Install callback — persist `installation_id` + `setup_action`, optional identity OAuth|
+|DELETE|/integrations/github|Required|Yes|Disconnect — revoke the installation locally; GitHub repos/issues unaffected|
+|POST|/integrations/github/webhook|None|Exempt|GitHub App webhook; authenticated by `X-Hub-Signature-256` HMAC-SHA256 (two secrets accepted during rotation); verifies → dedups on `X-GitHub-Delivery` → enqueues → 2xx. No Bearer token.|
+
+> [!important] Webhook security boundary
+> `/integrations/github/webhook` carries no Bearer token and is exempt from CSRF. Its only authentication is the `X-Hub-Signature-256` HMAC, verified in constant time **before any DB or queue work**. Body size is capped and the handler is O(1) (verify → dedup → enqueue → ack); reconciliation runs on the worker. It is exempt from per-IP rate limiting so GitHub's retry schedule is never blocked — the HMAC gate is the DoS guard. An event for repository X may only mutate pushes whose `repo_id == X` under a recorded installation for that owner (confused-deputy guard — payload identity is never trusted alone).
+
+### GitHub Sync & Increments
+
+|Method|Endpoint|Auth|CSRF|Description|
+|---|---|---|---|---|
+|GET|/workspaces/{id}/sync|Required|No|Return live task-completion state for the workspace's push: shipped/total, per-task issue/PR links, drift (out-of-sync) status|
+|POST|/workspaces/{id}/sync/backfill|Required|Yes|Enqueue a reconcile/backfill against GitHub to recover missed events (202)|
+|POST|/workspaces/{id}/sync/resync|Required|Yes|Re-sync changed tasks when the push is marked out-of-sync after a Tasks re-finalise (202)|
+|GET|/workspaces/{id}/increments|Required|No|List the workspace's increment timeline, newest first|
+|POST|/workspaces/{id}/increments|Required|Yes|Generate a new increment from a feature request as a delta vs. baseline; returns increment id + generation status|
+|POST|/workspaces/{id}/increments/{inc_id}/push|Required|Yes|Enqueue incremental GitHub sync for the increment — new issues only, one milestone + one PR (202)|
+|GET|/workspaces/{id}/ideas|Required|No|List the idea backlog (user-captured + GitHub `idea`/`enhancement` issues)|
+|POST|/workspaces/{id}/ideas|Required|Yes|Capture a feature idea into the backlog|
+
+> [!note] All GitHub write paths return 202
+> Export, sync, resync, and increment pushes enqueue a worker job and return 202 — never blocking the request on GitHub I/O. Clients poll `GET /workspaces/{id}/export/github` or `GET /workspaces/{id}/sync` for status. Jobs are idempotent and resumable (§12).
 
 ### Workspaces
 
@@ -1319,8 +1571,8 @@ The renderer owns final visual presentation. The LLM produces structured content
 |PATCH|/workspaces/{id}|Update workspace name|
 |DELETE|/workspaces/{id}|Archive workspace (soft delete)|
 |POST|/workspaces/{id}/export|Download zip of all four stages|
-|POST|/workspaces/{id}/export/github|Push workspace to a new GitHub repo; create issues|
-|GET|/workspaces/{id}/export/github|Return latest GitHub push record for this workspace|
+|POST|/workspaces/{id}/export/github|Enqueue a GitHub push (202); body selects `export_mode` (`files_to_default` \| `pr_with_tests`) and target repo; runs on the worker|
+|GET|/workspaces/{id}/export/github|Return latest GitHub push record, status, mode, branch/PR, and task completion summary|
 |POST|/workspaces/{id}/export/pdf|Render and stream back a branded PDF of the finalised workspace|
 |POST|/workspaces/{id}/share|Enable public sharing — returns the public slug and URL|
 |DELETE|/workspaces/{id}/share|Disable public sharing — preserves the slug for re-enable|
@@ -1412,14 +1664,27 @@ The renderer owns final visual presentation. The LLM produces structured content
 |SSE stream first token latency|Under 2 seconds from request to first token rendered|
 |API response time (non-streaming)|Under 500ms at p95|
 |Editor responsiveness during streaming|Must not block the UI thread|
+|GitHub webhook acknowledgement|p99 < 300 ms (verify → dedup → enqueue → ack); reconciliation is off-path on the worker|
+|GitHub sync lag (event → task flips in UI)|p95 within target SLO under steady-state load|
+|GitHub export / PR / increment push|Returns 202 immediately; completes on the worker within rate limits, regardless of task count|
 
 > [!note] 2 seconds to first token is the critical threshold. Beyond this the user perceives the generation as broken.
+
+> [!note] The webhook is a public ingress surface. Its 300 ms p99 budget exists because the handler does no GitHub or LLM I/O on the request path — it only verifies the signature, dedups the delivery, and enqueues. All real work is the worker's.
 
 ### Reliability
 
 - LLM gateway handles provider errors gracefully — partial content discarded, credits refunded, clear error shown with one-click retry
 - SSE stream drops trigger automatic client reconnection up to three times before showing an error
 - Credit deductions are atomic — no deduction without a corresponding LLM call, no LLM call without a successful deduction
+
+**GitHub integration reliability (§4.14).** All GitHub work runs on a **durable, Redis-backed queue + worker** — the only background mechanism in v1 was in-process `asyncio.create_task`, which dies on deploy and is insufficient for webhooks, checks, and large exports.
+
+- **Idempotent, resumable jobs** keyed by `X-GitHub-Delivery` (inbound) or push id (outbound), so retried deliveries and duplicate triggers never double-apply. Multi-step operations (branch → files → PR; per-issue creation) are **checkpointed** so a crash or mid-run rate-limit resumes from the last completed step and never duplicates.
+- **Outbox / re-derivable side effects.** "Write DB + call GitHub" must not half-complete: persist intent, perform the call on the worker, mark done — or make every external call idempotent and reconstructable from the push ledger. A crash leaves recoverable, not corrupt, state.
+- **Retries** with exponential backoff + jitter, a max attempt count, then a **dead-letter** state with an alert and a manual replay path. A **periodic reconcile/backfill** recovers events missed while the worker was down (`issues?state=all&since=…`, filtering out PR rows) and recomputes drift.
+- **Graceful degradation.** A circuit breaker trips the shared GitHub client on a GitHub outage; the UI surfaces "sync paused" and the system relies on backfill to catch up. State is never silently dropped.
+- **Out-of-order safety.** Event handlers gate state transitions on event timestamps so a late-arriving delivery cannot regress a task that is already done.
 
 ### Security
 
@@ -1429,7 +1694,11 @@ The renderer owns final visual presentation. The LLM produces structured content
 - All LLM output validated for system prompt leakage before delivery to client
 - SQL injection prevented by ORM-only database access — no raw SQL strings
 - Rate limiting applied at global, per-user, and per-user LLM tiers via Redis sliding window
-- GitHub OAuth access tokens stored encrypted with Fernet; plaintext never written to logs, errors, or audit fields. Auto-deleted on 401 from GitHub API.
+- GitHub integration uses a **GitHub App** identity (§8). The App private key lives in a secret manager, never in the database. Installation tokens are short-lived (1 h), cached server-side with a short TTL, namespaced, access-restricted, and Fernet-encrypted at rest when Redis is shared; plaintext tokens are never written to logs, errors, or audit fields. The App requests **least privilege** per feature (§8 permissions table). Legacy v1 OAuth tokens (Fernet-encrypted in `UserIntegration`, auto-deleted on 401) are retained only for migration.
+- The GitHub webhook is a **public DoS surface**: its `X-Hub-Signature-256` HMAC is verified in constant time and rejected (O(1)) **before any DB or queue work**; the body size is capped; the endpoint sits behind the integration's own controls rather than per-IP rate limiting so Stripe-style retry storms from GitHub are not blocked while invalid signatures are dropped immediately.
+- **Multi-tenant authorisation (confused-deputy guard).** A webhook event for repository X may only mutate `IntegrationPush` rows whose `repo_id == X` **and** whose installation SpecForge recorded for that owner. Payload identity is never trusted on its own. Installation A can never touch workspace B's pushes.
+- **Secret rotation.** Two webhook signing secrets are accepted during rotation (each delivery verified against both); installation tokens are re-minted on App key rollover. The runbook is documented in `RUNBOOK.md`.
+- Repository, branch, and PR strings from GitHub are treated as untrusted input in any rendered surface (same sanitisation policy as public share / PDF / Storyboard). Every state-changing GitHub action is audited as a structlog row.
 - Stripe webhook requests authenticated by HMAC-SHA256 `Stripe-Signature` header with a 300-second timestamp tolerance. Invalid signature → 400 (no Sentry noise). Expired timestamp → 400.
 - Stripe secret keys (`sk_live_*`, `sk_test_*`) and webhook signing secrets (`whsec_*`) scrubbed from all log, error, and trace pipelines alongside existing secret patterns.
 - `GET /billing/status` lookups are scoped by `user_id` in addition to `session_id` to prevent IDOR — a user cannot poll another user's checkout session status. Returns 404 (not 403) on ownership mismatch to avoid confirming existence.
@@ -1450,6 +1719,10 @@ The renderer owns final visual presentation. The LLM produces structured content
 |User LLM Daily|Per user|200 LLM calls|24 hours|
 |Auth Login|Per IP|5 attempts|5 minutes|
 |GitHub Export|Per user|3 exports|1 hour|
+|GitHub Sync / Resync / Backfill|Per user|10 requests|1 hour|
+|GitHub Increment Push|Per user|5 pushes|1 hour|
+|GitHub Webhook|Exempt|HMAC-validated; no per-IP cap (GitHub retry schedule must not be blocked)|—|
+|GitHub API (outbound governor)|Per installation|Token bucket honouring GitHub primary (~5,000/hr) + secondary (~80/min content) limits; reads `X-RateLimit-Remaining`/`Retry-After`, backs off on 403/429, serialises content writes per repo|—|
 |PDF Export|Per user|10 exports|1 hour|
 |Spec Clarify|Per user|6 calls|1 hour|
 |Public Share Toggle|Per user|20 toggles|1 hour|
@@ -1465,6 +1738,14 @@ The renderer owns final visual presentation. The LLM produces structured content
 ### Scalability
 
 V1 is designed for hundreds of concurrent users, not thousands. Railway's default configuration is sufficient. The stateless FastAPI design supports horizontal scaling when needed — Redis handles all session state.
+
+**GitHub integration scalability (§4.14).** The queue + worker (a separate process, added to `docker compose`) absorbs all GitHub I/O so request handlers stay fast.
+
+- **Per-installation rate-limit governor** with a token bucket honouring GitHub primary (~5,000/hr) and secondary (~80/min content-creation) limits; content writes are **serialised per repository** to avoid stale-SHA 409s and secondary-limit throttling.
+- **Fairness / bulkheads:** many installations run concurrently with per-tenant fairness and bulkheads between event types, so one tenant — or a `push` flood — cannot starve another tenant's `issues` reconciliation. Global concurrency is capped.
+- **Backpressure:** a bounded, monitored queue depth; work is shed or deferred when saturated (a monorepo push fans out).
+- **Bounded DB growth:** retention/TTL (or date-partitioning) for `github_webhook_event`; indexes on `delivery_id` (unique), `IntegrationPush(repo_id)`, and `IntegrationPushTask(external_issue_number)`.
+- **Feature cost control (§4.14.6 checks):** LLM-check concurrency is capped with a per-tenant/day budget; rapid PR pushes are debounced (post "pending", then update).
 
 ### Observability
 
@@ -1521,6 +1802,25 @@ Recommended Grafana alert rules (documented in `RUNBOOK.md §9`):
 
 Structlog Storyboard events include `storyboard_id`, `workspace_id`, `user_id`, `version`, `action`, `status`, `credit_ledger_id`, and `source_stage_version_ids`. Speaker notes, source excerpts, raw generated JSON, and technical appendix content are never logged.
 
+**GitHub integration observability (§4.14)** — the following metrics are emitted for the living-integration flows, and the worker reports to Sentry:
+
+|Metric|Description|
+|---|---|
+|`specforge_github_webhook_received_total`|Inbound webhook deliveries received (labelled by `event_type`)|
+|`specforge_github_webhook_verified_total`|Deliveries passing HMAC verification|
+|`specforge_github_webhook_deduped_total`|Deliveries skipped as duplicates (labelled by `event_type`)|
+|`specforge_github_webhook_failed_total`|Webhook processing failures (labelled by `error_type`)|
+|`specforge_github_reconcile_lag_seconds`|Histogram of event-received → task-state-updated lag|
+|`specforge_github_export_total`|Export jobs completed, labelled by `export_mode` and outcome|
+|`specforge_github_pr_total`|Pull requests opened/updated, labelled by outcome|
+|`specforge_github_check_total`|SpecForge status checks posted, labelled by verdict (pass/fail/error)|
+|`specforge_github_token_mint_total`|Installation tokens minted vs. served from cache (labelled by `source`)|
+|`specforge_github_job_retries_total`|Worker job retries, labelled by job type|
+|`specforge_github_job_deadlettered_total`|Jobs moved to dead-letter after max attempts|
+|`specforge_github_queue_depth`|Current background queue depth (backpressure signal)|
+
+Structlog GitHub events include `installation_id`, `workspace_id`, `repo_id`, `delivery_id`, `event_type`, `action`, `status`, and `push_id`. Installation tokens, the App private key, raw webhook payloads, and PR diff contents are never logged. Every state-changing GitHub action is an audit row (structlog, consistent schema). Load tests exercise webhook ingestion and export throughput in staging per §12 (burst above steady-state; verify acks within p99, queue drains, breaker trips and recovers, nothing dropped).
+
 ---
 
 ## 13. Assumptions
@@ -1537,11 +1837,11 @@ Structlog Storyboard events include `storyboard_id`, `workspace_id`, `user_id`, 
 
 **Assumption 5 — Google OAuth is sufficient for sign-in.** GitHub OAuth is used only for the export integration, not for authentication. Enterprise SSO is explicitly out of scope.
 
-**Assumption 8 — One repo per workspace is the right export model.** Users want to start a fresh repo each time rather than push updates into an existing one. Re-export updates the previously created repo in place.
+**Assumption 8 — One repo per workspace, kept in sync, is the right model.** A workspace maps to one repository; re-export and increments reuse it in place (keyed on the immutable `repo_id`), rather than spawning a fresh repo each time. v2 makes that repo a living target rather than a one-shot drop. Other export targets — existing repo, subdirectory, chosen branch, monorepo — remain an open product decision, revisited if users ask; the data model keys on `repo_id` so it does not foreclose them.
 
-**Assumption 9 — GitHub Issues are the right unit for tasks.** Developers working in GitHub use Issues as their unit of work. No GitHub Projects, Milestones, or Labels are created in the initial export; users can add these on GitHub after export.
+**Assumption 9 — Issues, plus an opt-in Projects/Milestones/Labels layer, is the right unit for tasks.** Developers working in GitHub use Issues as the base unit of work, so every task is still an issue. v2 *adds* (no longer withholds) a team-grade layer: stage/`ready-for-agent` labels on every issue, milestones mapped to Plan phases and increments, and an optional GitHub Projects v2 board reflecting live task state (§4.14.6). If teams find the board redundant with their own process it stays opt-in.
 
-**Assumption 10 — Synchronous export is acceptable.** A workspace with 30 tasks will take roughly 30 seconds end-to-end under normal GitHub API conditions. If this is consistently too slow, a background job with SSE progress streaming can be added using the same pattern as stage generation.
+**Assumption 10 — Export and sync must run off the request path.** The v1 assumption that a synchronous ~30-second export is acceptable does **not** hold for webhooks, checks, large task lists, or increment pushes, and the only v1 background mechanism (`asyncio.create_task`) dies on deploy. v2 therefore requires a durable queue + worker: endpoints enqueue and return 202, and the worker does all GitHub I/O (§4.14.2, §12). This is a hard requirement, not an optimisation — it cannot be retrofitted cheaply, so it ships in Phase A.
 
 **Assumption 6 — A single credit pack at $9 is the right pricing entry point.** A single no-choice purchase removes decision paralysis. If conversion data shows users wanting larger or smaller packs, tiered pricing can be introduced without a schema change (the `stripe_credit_packs` table is pack-agnostic). 200 credits = 5 full four-stage pipeline runs, which should be enough for users to validate SpecForge on a real project.
 
@@ -1567,9 +1867,19 @@ Structlog Storyboard events include `storyboard_id`, `workspace_id`, `user_id`, 
 
 **Assumption 20 — Source-backed claims are a differentiator, not visual clutter.** The main Storyboard must stay cinematic and sparse, but the optional source layer gives technical buyers confidence that claims are derived from SPEC, PLAN, HARNESS, and TASKS rather than generic marketing text. If public viewers find the source layer confusing, it remains owner-only by default.
 
+**Assumption 21 — Closing the loop is what turns export into "core".** The hypothesis behind §4.14 is that bidirectional sync — closing an issue or merging its PR flips a task to done in SpecForge — is the moment a generator becomes a live dashboard worth returning to. If usage shows users export but never connect the loop, the App-migration cost is not yet justified and PR/board features are reprioritised. Phase B is deliberately the smallest slice that tests this.
+
+**Assumption 22 — A GitHub App is worth the migration cost over per-user OAuth.** The App buys per-repo least privilege, webhooks, the Checks API, and bot authorship — none of which the OAuth token supports. The cost is that existing OAuth users must re-install (an install is a user action, not auto-upgradable). The two modes run side by side behind a flag; if re-install conversion is poor, the prompt and value messaging are revised rather than forcing the cutover.
+
+**Assumption 23 — Stable, content-derived `task_ref`s survive refinement and increments.** Incremental sync depends on a task keeping the same `task_ref` across regenerations and increments so its issue is updated, not duplicated. The scheme is decided before incremental export ships and is load-bearing. If refinement churns refs and issues duplicate, the scheme is wrong and must be fixed before C′.
+
+**Assumption 24 — Harness-to-real-test translation can start stack-specific and shallow.** PR mode (§4.14.4) templates the scaffold per stack named by the Plan (starting pytest/vitest) and early versions scaffold failing tests rather than implement them. If a finalized workspace cannot reliably produce a red-but-coherent CI run for its stack, PR mode stays behind a flag for that stack until a template exists.
+
+**Assumption 25 — The PR status-check evaluator is a new, bounded problem — not the existing critic.** §4.14.6 reuses the critic's judge-model *pattern* (prompt → structured verdict → fail-open) but judges *external PR code against per-task acceptance criteria*, which is harder and less bounded than judging SpecForge's own artifacts against fixed invariants. v1 of the check may use a heuristic/diff evaluator before a full judge-model, and LLM-check cost is capped per §12. It is not planned as "wire up the existing evaluator."
+
 ---
 
-## 14. Out of Scope for V1
+## 14. Out of Scope
 
 | Feature                              | When           |
 | ------------------------------------ | -------------- |
@@ -1590,11 +1900,13 @@ Structlog Storyboard events include `storyboard_id`, `workspace_id`, `user_id`, 
 | API access for programmatic use      | V3             |
 | Audit logging                        | V3 Enterprise  |
 | Enterprise SSO or SAML               | V3 Enterprise  |
-| Bidirectional ticket sync            | V3 Enterprise  |
+| Live-spec MCP server / Action for agents (the §4.14.5 spike) | Post-v2 |
+| GitLab / Bitbucket living integration | Post-v2       |
+| Behaviour-changing increment blast-radius analysis (additive increments ship first) | v2 fast-follow |
 
 ---
 
-## V1 Success Metrics
+## Success Metrics
 
 |Metric|Target|Meaning|
 |---|---|---|
@@ -1605,9 +1917,15 @@ Structlog Storyboard events include `storyboard_id`, `workspace_id`, `user_id`, 
 |Return rate|≥ 40%|% of users who complete one workspace and start a second|
 |Credit purchase conversion|≥ 10%|% of users who exhaust free credits and purchase a pack|
 |Credit expiry waste|< 20%|% of purchased credits that expire unused — indicates over-buying or insufficient re-engagement|
-|Qualitative signal|10 user interviews|Did they use the output in a real project?|
+|GitHub App connect rate|≥ 40%|% of GitHub-exporting workspaces connected via the App (vs. legacy OAuth)|
+|Loop-closed rate|≥ 25%|% of connected workspaces where at least one task flips to done from a GitHub event — the core §4.14 hypothesis (Assumption 21)|
+|PR-mode adoption|≥ 20%|% of connected workspaces that export in `pr_with_tests` mode|
+|Increment usage|≥ 15%|% of connected workspaces that create at least one increment after baseline|
+|Qualitative signal|10 user interviews|Did they use the output in a real project? Did the repo stay in sync as they built?|
 
 ---
+
+_SpecForge SPEC.md · Version 2.0.0 · 2026-06-02 — **GitHub: one-shot export → living system of record.** Major version: this reverses three v1 commitments, so existing sections were reconciled, not just appended. §1 Overview frames the bidirectional living integration; §2 Goals adds seven living-GitHub goals (App identity, background worker, bidirectional sync, PR/harness export mode, agent-ready issues + `AGENTS.md`, Projects board + status checks, increments) and §2 Non-Goals **removes "Bidirectional sync"**; §4.8 notes export is no longer one-shot and §4.9 is rewritten from per-user OAuth to GitHub App installation; new §4.14 specifies the full A–D phased capability — App identity (three credentials, cached installation tokens), durable queue + worker, signature-verified webhook + reconcile + drift, `files_to_default`/`pr_with_tests` export modes, agent-ready issues, Projects v2 board + check runs, and increments with an idea backlog; §8 is rewritten as "GitHub App (Integration Only)" covering the three credentials, token cache, least-privilege permission table, and secret rotation; §10 alters `IntegrationPush` (rekeyed on immutable `repo_id`, new `(workspace_id, repo_id)` constraint, +`export_mode`/`branch_name`/`pr_number`/`source_stage_version_id`/`increment_id`/`installation_id`) and `IntegrationPushTask` (+`state`/`done_at`/`done_via`/`synced_at`/`increment_id`), and adds `GitHubInstallation`, `GitHubWebhookEvent`, `Increment`, and `IncrementIdea` tables; §11 expands Integrations (install/setup/webhook) and adds a GitHub Sync & Increments endpoint group (all GitHub writes return 202); §12 folds in the production bar — webhook ack p99 < 300 ms and sync-lag SLOs, queue/worker reliability with idempotent checkpointed jobs + outbox + dead-letter + backfill, App/webhook security (HMAC-before-work, confused-deputy authz, secret rotation, token-cache-as-credentials, least privilege), new rate-limit tiers + per-installation governor, scalability (per-install fairness/bulkheads, bounded DB growth), and GitHub observability metrics; §13 **revises Assumptions 8/9/10** (one synced repo per workspace; Issues + opt-in Projects/Milestones/Labels; export must run off the request path) and adds Assumptions 21–25 (loop-closing as "core", App-migration cost, stable `task_ref`s, stack-specific PR scaffolding, the new PR evaluator); §14 **removes "Bidirectional ticket sync"** and adds the live-spec MCP spike, GitLab/Bitbucket, and behaviour-changing blast-radius analysis as post-v2; Success Metrics adds GitHub connect rate, loop-closed rate, PR-mode adoption, and increment usage._
 
 _SpecForge V1 SPEC.md · Version 1.5.0 · 2026-05-30 — added Storyboard paid product-keynote generation: §2 adds Storyboard as a paid goal and excludes native PPTX/Keynote export from V1; §4.8 adds the Create Storyboard action; new §4.13 defines six-act keynote structure, credit pricing, cinematic architecture reveal, browser presentation mode, presenter mode, launch page, source-backed confidence layer, product demo script, visual identity generator, hidden technical appendix, sharing controls, downloads, and signature slide moments; §6 adds Storyboard generation interaction mode; §9 adds Storyboard credit ledger reasons and pricing/refund rules; §10 adds Storyboard data model and JSON contract; §11 adds Storyboard API and public route contracts; §12 adds Storyboard security, rate limits, and observability metrics; §13 adds assumptions for paid Storyboard value, browser-native presentation, and source-backed claims; §14 adds native slide export as V2; Success Metrics adds Storyboard generation and presentation/share targets._
 
