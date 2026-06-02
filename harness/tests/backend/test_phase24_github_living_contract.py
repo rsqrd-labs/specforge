@@ -336,7 +336,7 @@ def test_t265_migration_replaces_provider_unique_with_partial_live_repo_index() 
     # index by name so the legitimate stripe_credit_packs `status='active'` index is ignored.)
     m = re.search(
         r"create_index\(\s*[\"']uq_integration_push_workspace_repo_active[\"'].*?"
-        r"postgresql_where\s*=\s*sa\.text\(\s*[\"']([^\"']+)[\"']",
+        r"postgresql_where\s*=\s*sa\.text\(\s*\"([^\"]+)\"",
         src,
         re.S,
     )

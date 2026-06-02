@@ -1,29 +1,52 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 from uuid import UUID as PythonUUID
 
-from sqlalchemy import ForeignKey, Text, UniqueConstraint, func, text
+from sqlalchemy import BigInteger, ForeignKey, Index, Integer, Text, func, text
 from sqlalchemy.dialects.postgresql import TIMESTAMP, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from models import Base
 
 if TYPE_CHECKING:
+    from models.github_installation import GitHubInstallation
     from models.integration_push_task import IntegrationPushTask
+    from models.stage_version import StageVersion
     from models.user import User
     from models.workspace import Workspace
 
 
 class IntegrationPush(Base):
+    """A GitHub push for a workspace (Phase 21 living system of record, spec §10).
+
+    Rekeyed from the Phase-13 ``(workspace_id, provider)`` onto the immutable
+    ``repo_id`` (repositories get renamed and transferred, so ``repo_full_name``
+    is display-only). Re-export reuses the single live push for a repo rather
+    than creating a new one.
+
+    Constraints mirror migration ``0016_github_living_integration.py``
+    one-for-one to keep the ORM and schema from drifting: the legacy
+    ``uq_integration_push_workspace_provider`` unique constraint is gone, and a
+    partial unique index enforces **one live push per repo**. The status enum is
+    exactly ``pending`` / ``completed`` / ``failed`` / ``stale`` — there is no
+    ``'active'`` literal; a "live" push is the single non-``failed`` row, which
+    is what the index predicate keys on. ``repo_id`` is nullable so legacy
+    Phase-13 rows (no repo id, backfilled lazily on the next App export) survive
+    under the partial index (Postgres treats nulls as distinct).
+    """
+
     __tablename__ = "integration_pushes"
     __table_args__ = (
-        UniqueConstraint(
+        Index(
+            "uq_integration_push_workspace_repo_active",
             "workspace_id",
-            "provider",
-            name="uq_integration_push_workspace_provider",
+            "repo_id",
+            unique=True,
+            postgresql_where=text("status <> 'failed'"),
         ),
+        Index("ix_integration_pushes_repo_id", "repo_id"),
     )
 
     id: Mapped[PythonUUID] = mapped_column(
@@ -42,10 +65,39 @@ class IntegrationPush(Base):
         ForeignKey("users.id", ondelete="CASCADE"),
         nullable=False,
     )
+    # v2 App identity. Nullable: legacy v1 OAuth pushes have no installation.
+    installation_id: Mapped[PythonUUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("github_installations.id"),
+        nullable=True,
+    )
     provider: Mapped[str] = mapped_column(Text, nullable=False)
+    # GitHub's immutable numeric repository id — the reconciliation key. Nullable
+    # for legacy rows; backfilled on the next App export (T-269).
+    repo_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     repo_full_name: Mapped[str | None] = mapped_column(Text)
     repo_url: Mapped[str | None] = mapped_column(Text)
-    status: Mapped[str] = mapped_column(
+    export_mode: Mapped[Literal["files_to_default", "pr_with_tests"]] = mapped_column(
+        Text,
+        nullable=False,
+        server_default=text("'files_to_default'"),
+    )
+    # Set in pr_with_tests mode, e.g. specforge/inc-1.
+    branch_name: Mapped[str | None] = mapped_column(Text)
+    pr_number: Mapped[int | None] = mapped_column(Integer)
+    # The Tasks stage version that produced this push (drift detection).
+    source_stage_version_id: Mapped[PythonUUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("stage_versions.id"),
+        nullable=True,
+    )
+    # The increment this push belongs to. FK target (increments.id) added in
+    # migration 0017 (T-278); kept a plain column here until then.
+    increment_id: Mapped[PythonUUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        nullable=True,
+    )
+    status: Mapped[Literal["pending", "completed", "failed", "stale"]] = mapped_column(
         Text,
         nullable=False,
         server_default=text("'pending'"),
@@ -61,6 +113,8 @@ class IntegrationPush(Base):
 
     workspace: Mapped["Workspace"] = relationship()
     user: Mapped["User"] = relationship()
+    installation: Mapped["GitHubInstallation | None"] = relationship()
+    source_stage_version: Mapped["StageVersion | None"] = relationship()
     tasks: Mapped[list["IntegrationPushTask"]] = relationship(
         back_populates="push",
         cascade="all, delete-orphan",

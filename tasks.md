@@ -15377,6 +15377,7 @@ Document Storyboard operations and release criteria. The feature is not complete
 **Priority:** P0
 **Phase:** A (Foundation)
 **Harness:** `harness/tests/backend/test_phase24_github_living_contract.py -k "t265"`
+**Status:** ✅ Done — 2026-06-02 (migration `0016` + ORM models; `-k "t265"` green, `alembic upgrade head`/`downgrade -1` round-trips cleanly, full backend suite green with no Phase-13 regression)
 
 **Description:**
 Land the Phase 21 schema in Alembic migration `0016_github_living_integration.py` (the latest existing migration is `0015_storyboards.py`; the original GitHub tables came from `0007_github_integration.py`). This migration **creates two new tables and ALTERs two existing ones** — it must not recreate `integration_pushes`/`integration_push_tasks`. Column names must match `V1 spec.md` §10 exactly.

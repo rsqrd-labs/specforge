@@ -7,6 +7,8 @@ class Base(DeclarativeBase):
 
 from models.credit_ledger import CreditLedger  # noqa: E402
 from models.eval_result import EvalResult  # noqa: E402
+from models.github_installation import GitHubInstallation  # noqa: E402
+from models.github_webhook_event import GitHubWebhookEvent  # noqa: E402
 from models.integration_push import IntegrationPush  # noqa: E402
 from models.integration_push_task import IntegrationPushTask  # noqa: E402
 from models.stage import Stage  # noqa: E402
@@ -23,6 +25,8 @@ __all__ = [
     "Base",
     "CreditLedger",
     "EvalResult",
+    "GitHubInstallation",
+    "GitHubWebhookEvent",
     "IntegrationPush",
     "IntegrationPushTask",
     "Stage",

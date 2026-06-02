@@ -48,7 +48,6 @@ from uuid import UUID
 
 import httpx
 from sqlalchemy import delete, select
-from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models import (
@@ -392,28 +391,36 @@ async def _upsert_push_row(
     workspace_id: UUID,
     user_id: UUID,
 ) -> IntegrationPush:
-    """Insert a new push row or set an existing one back to ``in_progress``.
+    """Reuse the workspace's existing github push or create one, marking it
+    ``in_progress``.
 
-    The unique constraint on (workspace_id, provider) means at most one
-    row exists per provider; this upsert ensures a fresh "in_progress"
-    marker without disturbing repo_full_name / repo_url on re-export.
+    Historically this was a single ``INSERT ... ON CONFLICT`` on the
+    ``uq_integration_push_workspace_provider`` constraint. Phase 21's migration
+    ``0016`` rekeys the table onto the immutable ``repo_id`` and drops that
+    constraint (a live push is now one per ``(workspace_id, repo_id)``). Legacy
+    v1-OAuth pushes carry no ``repo_id`` (the partial index treats their NULL
+    keys as distinct), so the legacy path keeps its "one push per workspace"
+    semantics at the application level: look the row up by
+    ``(workspace_id, provider)`` and reset its status, otherwise insert. Repo
+    fields (``repo_full_name`` / ``repo_url``) are left untouched on re-export.
     """
-    stmt = (
-        insert(IntegrationPush)
-        .values(
+    result = await db.execute(
+        select(IntegrationPush).where(
+            IntegrationPush.workspace_id == workspace_id,
+            IntegrationPush.provider == GITHUB_PROVIDER,
+        )
+    )
+    push = result.scalar_one_or_none()
+    if push is None:
+        push = IntegrationPush(
             workspace_id=workspace_id,
             user_id=user_id,
             provider=GITHUB_PROVIDER,
             status="in_progress",
         )
-        .on_conflict_do_update(
-            constraint="uq_integration_push_workspace_provider",
-            set_={"status": "in_progress"},
-        )
-        .returning(IntegrationPush)
-    )
-    result = await db.execute(stmt)
-    push = result.scalar_one()
+        db.add(push)
+    else:
+        push.status = "in_progress"
     await db.commit()
     await db.refresh(push)
     return push
