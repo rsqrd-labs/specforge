@@ -1303,17 +1303,17 @@ def test_t249_ci_workflow_gates_on_asdd_prompt_version_bump() -> None:
 
 def test_t249_runbook_section_10_documents_prompt_experimentation() -> None:
     """T-249 — RUNBOOK.md §10 must document the prompt-experimentation workflow."""
-    path = REPO_ROOT / "RUNBOOK.md"
-    assert path.exists(), "RUNBOOK.md must exist."
+    path = REPO_ROOT / "docs" / "RUNBOOK.md"
+    assert path.exists(), "docs/RUNBOOK.md must exist."
     src = path.read_text(encoding="utf-8")
     assert ("§10" in src or "## 10" in src or "## 10." in src or
             "# 10." in src), (
-        "RUNBOOK.md must include a §10 section documenting the prompt-"
+        "docs/RUNBOOK.md must include a §10 section documenting the prompt-"
         "experimentation workflow (branch → edit prompt → bump version → run "
         "eval → review delta → merge).  T-249."
     )
     assert "prompt_eval" in src or "prompt experimentation" in src.lower(), (
-        "RUNBOOK.md §10 must reference the prompt_eval suite or 'prompt "
+        "docs/RUNBOOK.md §10 must reference the prompt_eval suite or 'prompt "
         "experimentation' by name.  T-249."
     )
 

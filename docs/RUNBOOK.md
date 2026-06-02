@@ -705,6 +705,13 @@ offline prompt eval suite for prompt changes. The relevant files are:
   local CLI.
 - `.github/workflows/prompt-eval.yml` for the PR gate on prompt changes.
 
+### When To Run The Eval Suite
+
+- Any structural change to a stage prompt, including a new mandatory section or
+  a changed verification checklist.
+- Any change to the critic prompt template in `services/pipeline/critic.py`.
+- Any change to `SECTION_CONTRACTS` in `artifact_validator.py`.
+
 ### Required Workflow For Prompt Changes
 
 1. Branch from `main`.
