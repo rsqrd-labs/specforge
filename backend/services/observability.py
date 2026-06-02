@@ -172,6 +172,16 @@ BILLING_CHECKOUT_RATE_LIMITED = Counter(
     "POST /billing/checkout requests rejected by the 5/hour rate limit",
 )
 
+# GitHub App installation-token resolutions (Phase 21 — T-267). The cache keeps
+# minting off the hot path (GitHub rate-limits token minting), so the ratio of
+# source="mint" to source="cache" is the cache-hit signal.
+GITHUB_TOKEN_MINT_TOTAL = Counter(
+    "specforge_github_token_mint_total",
+    "GitHub installation token resolutions, by source: 'mint' = a new token "
+    "minted from GitHub, 'cache' = served from the Redis token cache.",
+    labelnames=["source"],
+)
+
 PIPELINE_UPSTREAM_SECTION_SKIPPED = Counter(
     "pipeline_upstream_section_skipped_total",
     "Count of upstream sections skipped during section-aware injection "
@@ -275,9 +285,7 @@ STORYBOARD_SOURCE_MISSING = Counter(
     labelnames=["source", "section"],
 )
 
-_STORYBOARD_ACTION_LABELS = frozenset(
-    {"generate", "regenerate", "regenerate_section"}
-)
+_STORYBOARD_ACTION_LABELS = frozenset({"generate", "regenerate", "regenerate_section"})
 _STORYBOARD_ERROR_TYPE_LABELS = frozenset(
     {
         "payload_parse",
@@ -288,9 +296,7 @@ _STORYBOARD_ERROR_TYPE_LABELS = frozenset(
         "unexpected",
     }
 )
-_STORYBOARD_REFUND_REASON_LABELS = frozenset(
-    {"generation_failed", "stuck_recovery"}
-)
+_STORYBOARD_REFUND_REASON_LABELS = frozenset({"generation_failed", "stuck_recovery"})
 _STORYBOARD_DOWNLOAD_KIND_LABELS = frozenset(
     {"html", "pdf", "notes-md", "notes-pdf", "demo-script", "appendix"}
 )
@@ -600,9 +606,7 @@ def record_storyboard_section_regenerated() -> None:
     STORYBOARD_SECTION_REGENERATED.inc()
 
 
-def record_storyboard_generation_duration(
-    action: str, duration_seconds: float
-) -> None:
+def record_storyboard_generation_duration(action: str, duration_seconds: float) -> None:
     if duration_seconds >= 0:
         STORYBOARD_GENERATION_DURATION.labels(
             action=_storyboard_action(action)

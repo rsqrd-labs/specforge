@@ -15459,6 +15459,7 @@ Add the ORM models for the new tables, extend the existing push models, and defi
 **Priority:** P0
 **Phase:** A
 **Harness:** `harness/tests/backend/test_phase24_github_living_contract.py -k "t267"`
+**Status:** ✅ Done — 2026-06-02 (services/integrations/github_app_auth.py: GitHubAppAuth.app_jwt (RS256, iat−60s, exp+540s), mint_installation_token (201, no secret leakage), TokenProvider with Fernet-encrypted refresh-ahead Redis cache `gh:inst_token:{id}`; github_app_id/github_app_private_key in config.py; specforge_github_token_mint_total{source} in observability.py. `-k "t267"` green (3/3); 5 unit tests; full backend suite green, no regression. Signs with python-jose to match the existing JWT_PRIVATE_KEY path — see commit note.)
 
 **Description:**
 The credential core of the GitHub App (spec §8). Three distinct credentials, never conflated: the App JWT (signs App-level calls, mints tokens), the installation access token (does all repo work), and an optional user-to-server identity token. No DB writes, no business logic.

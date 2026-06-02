@@ -60,6 +60,13 @@ class Settings(BaseSettings):
     github_client_id: str = ""
     github_client_secret: str = ""
 
+    # GitHub App (Phase 21 living integration) — leave blank to disable.
+    # github_app_id is GitHub's numeric App id used as the App-JWT `iss`.
+    # github_app_private_key is the RS256 PEM that signs the App JWT; it is a
+    # secret-manager value and is never persisted to the database (spec §8).
+    github_app_id: str = ""
+    github_app_private_key: str = ""
+
     # Stripe Payments (Phase 18) — leave blank to disable billing UI.
     # Use sk_test_* keys for development; sk_live_* keys for production only.
     stripe_secret_key: str = ""
