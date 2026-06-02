@@ -4944,7 +4944,7 @@ op.add_column("integration_pushes", sa.Column("increment_id",          sa.UUID, 
 op.drop_constraint("uq_integration_push_workspace_provider", "integration_pushes", type_="unique")
 op.create_index("uq_integration_push_workspace_repo_active", "integration_pushes",
                 ["workspace_id", "repo_id"], unique=True,
-                postgresql_where=sa.text("status = 'active'"))
+                postgresql_where=sa.text("status <> 'failed'"))  # one LIVE push per repo; enum has no 'active'
 op.create_index("ix_integration_pushes_repo_id", "integration_pushes", ["repo_id"])
 
 # --- alter integration_push_tasks ---
@@ -4957,7 +4957,7 @@ op.create_index("ix_integration_push_tasks_issue_number", "integration_push_task
 ```
 
 > [!important] Planning decision — `repo_id` backfill on existing rows
-> Legacy Phase-13 pushes have **no `repo_id`** (the column is new and nullable). We **leave them null** rather than fetching from the API at migration time: Postgres treats nulls as distinct, so the partial unique index `(workspace_id, repo_id) WHERE status='active'` tolerates legacy rows, and those rows belong to the deprecated OAuth path that the worker no longer drives. `repo_id` is populated on the **next** export under the App (the worker reads `repository.id` from the create/lookup response). New `status` value `stale` is also now valid (spec §10). Rollback drops the new indexes/columns and restores `uq_integration_push_workspace_provider`.
+> Legacy Phase-13 pushes have **no `repo_id`** (the column is new and nullable). We **leave them null** rather than fetching from the API at migration time: Postgres treats nulls as distinct, so the partial unique index `(workspace_id, repo_id) WHERE status <> 'failed'` tolerates legacy rows, and those rows belong to the deprecated OAuth path that the worker no longer drives. `repo_id` is populated on the **next** export under the App (the worker reads `repository.id` from the create/lookup response). The status enum stays `pending/completed/failed/stale` (spec §10) — there is **no `'active'` literal**; the "live push" is the single non-`failed` row, which is exactly what the partial index keys on (a `status='active'` predicate would match nothing and disable the guard). Rollback drops the new indexes/columns and restores `uq_integration_push_workspace_provider`.
 
 The column set matches spec §10 exactly (`IntegrationPush` += `installation_id`/`repo_id`/`export_mode`/`branch_name`/`pr_number`/`source_stage_version_id`/`increment_id`; `IntegrationPushTask` += `increment_id`/`state`/`done_at`/`done_via`/`synced_at`). The `increment_id` FK targets are added in `0017` (T-278) so this migration does not depend on the increments tables.
 
@@ -5198,7 +5198,7 @@ Add `harness/tests/backend/test_phase24_github_living_contract.py`. Contract ass
 
 **Data model (Phase A / C′)**
 5. Migration `0016` creates `github_installations` (unique `installation_id`) and `github_webhook_events` (unique `delivery_id`).
-6. `0016` **drops** `uq_integration_push_workspace_provider` and **adds** the partial unique index `(workspace_id, repo_id) WHERE status='active'` plus an index on `repo_id`.
+6. `0016` **drops** `uq_integration_push_workspace_provider` and **adds** the partial unique index `(workspace_id, repo_id) WHERE status <> 'failed'` (one live push per repo; the enum has no `'active'` literal) plus an index on `repo_id`.
 7. `integration_pushes` has `installation_id`, `repo_id`, `export_mode`, `branch_name`, `pr_number`, `source_stage_version_id`, `increment_id`; `integration_push_tasks` has `state`, `done_at`, `done_via`, `synced_at`, `increment_id` — matching spec §10.
 8. Migration `0017` creates `increments` (unique `(workspace_id, sequence)`) and `increment_ideas`, and adds the `increment_id` FKs.
 
