@@ -34,17 +34,13 @@ from database import get_db, get_redis
 from main import create_app
 from middleware.auth import get_current_user
 from models import User
+from models.github_installation import GitHubInstallation
 from models.integration_push import IntegrationPush
+from routers import workspace as workspace_router
 from services.integrations import github_auth_service
-from services.integrations.github_api_client import (
-    GitHubAPIError,
-    GitHubNotConnectedError,
-    GitHubRateLimitError,
-    GitHubRepoExistsError,
-    GitHubTokenExpiredError,
-)
 from services.pipeline import github_export_service
 from services.pipeline.export_service import ExportNotReadyError
+from services.queue import QueueUnavailableError
 from services.security.csrf import generate_csrf_token
 
 # ---------------------------------------------------------------------------
@@ -378,6 +374,38 @@ def _make_push_row(*, status: str, repo: str = "octocat/x", count: int = 5) -> A
     return push
 
 
+_INSTALLATION_UUID = uuid4()
+
+
+def _make_installation(*, suspended: bool = False) -> Any:
+    """Build a stub GitHubInstallation owned by the canonical _USER."""
+    return GitHubInstallation(
+        id=_INSTALLATION_UUID,
+        installation_id=556677,
+        account_login="octo",
+        account_type="User",
+        repository_selection="all",
+        user_id=_USER_ID,
+        suspended_at=datetime.now(UTC) if suspended else None,
+    )
+
+
+def _make_pending_push() -> Any:
+    return IntegrationPush(
+        id=uuid4(),
+        workspace_id=uuid4(),
+        user_id=_USER_ID,
+        provider="github",
+        status="pending",
+    )
+
+
+def _export_body(**overrides: Any) -> dict[str, Any]:
+    body = {"installation_id": str(_INSTALLATION_UUID), "repo_name": "proj"}
+    body.update(overrides)
+    return body
+
+
 class TestGitHubExport:
     """Cover POST and GET /workspaces/{id}/export/github + error mapping."""
 
@@ -386,139 +414,136 @@ class TestGitHubExport:
         async with _client(app) as client:
             response = await client.post(
                 f"/workspaces/{_workspace_id()}/export/github",
-                json={"repo_name": "x", "visibility": "public"},
+                json=_export_body(),
             )
         assert response.status_code == 401
 
     @pytest.mark.asyncio
-    async def test_post_export_success_returns_202_with_response_shape(
+    async def test_post_export_enqueues_and_returns_202(
         self, authed_app: Any, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        push = _make_push_row(status="success", repo="octocat/proj", count=12)
+        push = _make_pending_push()
+        enqueued: list[Any] = []
 
-        async def fake_push(**kwargs: Any) -> Any:
+        async def fake_load(db: Any, installation_id: Any, user_id: Any) -> Any:
+            return _make_installation()
+
+        async def fake_prepare(db: Any, **kwargs: Any) -> Any:
             return push
 
-        monkeypatch.setattr(github_export_service, "push_to_github", fake_push)
+        async def fake_enqueue(job: str, *args: Any, **kwargs: Any) -> str:
+            enqueued.append((job, args, kwargs.get("job_id")))
+            return str(push.id)
+
+        monkeypatch.setattr(github_export_service, "load_owned_installation", fake_load)
+        monkeypatch.setattr(github_export_service, "prepare_export_push", fake_prepare)
+        monkeypatch.setattr(workspace_router, "enqueue", fake_enqueue)
 
         async with _client(authed_app) as client:
             response = await client.post(
                 f"/workspaces/{_workspace_id()}/export/github",
-                json={"repo_name": "proj", "visibility": "private"},
+                json=_export_body(repo_name="proj", export_mode="pr_with_tests"),
                 headers=_auth_headers(),
             )
         assert response.status_code == 202
         body = response.json()
-        assert body["status"] == "success"
-        assert body["repo_full_name"] == "octocat/proj"
-        assert body["issue_count"] == 12
-        assert "push_id" in body
+        assert body["push_id"] == str(push.id)
+        assert body["status"] == "pending"
+        # The job was enqueued off the request path, keyed by push_id.
+        assert enqueued and enqueued[0][0] == "export_push"
+        assert enqueued[0][2] == str(push.id)
 
     @pytest.mark.asyncio
-    async def test_post_export_not_connected_maps_to_403(
+    async def test_post_export_no_owned_installation_returns_403(
         self, authed_app: Any, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        async def fake_push(**kwargs: Any) -> Any:
-            raise GitHubNotConnectedError()
+        async def fake_load(db: Any, installation_id: Any, user_id: Any) -> None:
+            return None
 
-        monkeypatch.setattr(github_export_service, "push_to_github", fake_push)
+        monkeypatch.setattr(github_export_service, "load_owned_installation", fake_load)
 
         async with _client(authed_app) as client:
             response = await client.post(
                 f"/workspaces/{_workspace_id()}/export/github",
-                json={"repo_name": "x", "visibility": "public"},
+                json=_export_body(),
                 headers=_auth_headers(),
             )
         assert response.status_code == 403
-        assert "Connect from Settings" in response.json()["detail"]
+        assert "Install the GitHub App" in response.json()["detail"]
 
     @pytest.mark.asyncio
-    async def test_post_export_token_expired_maps_to_403(
+    async def test_post_export_suspended_installation_returns_403(
         self, authed_app: Any, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        async def fake_push(**kwargs: Any) -> Any:
-            raise GitHubTokenExpiredError()
+        async def fake_load(db: Any, installation_id: Any, user_id: Any) -> Any:
+            return _make_installation(suspended=True)
 
-        monkeypatch.setattr(github_export_service, "push_to_github", fake_push)
+        monkeypatch.setattr(github_export_service, "load_owned_installation", fake_load)
 
         async with _client(authed_app) as client:
             response = await client.post(
                 f"/workspaces/{_workspace_id()}/export/github",
-                json={"repo_name": "x", "visibility": "public"},
+                json=_export_body(),
                 headers=_auth_headers(),
             )
         assert response.status_code == 403
-        assert "Reconnect" in response.json()["detail"]
-
-    @pytest.mark.asyncio
-    async def test_post_export_repo_exists_maps_to_409(
-        self, authed_app: Any, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        async def fake_push(**kwargs: Any) -> Any:
-            raise GitHubRepoExistsError()
-
-        monkeypatch.setattr(github_export_service, "push_to_github", fake_push)
-
-        async with _client(authed_app) as client:
-            response = await client.post(
-                f"/workspaces/{_workspace_id()}/export/github",
-                json={"repo_name": "dup", "visibility": "public"},
-                headers=_auth_headers(),
-            )
-        assert response.status_code == 409
-        assert "already exists" in response.json()["detail"].lower()
+        assert "suspended" in response.json()["detail"].lower()
 
     @pytest.mark.asyncio
     async def test_post_export_not_ready_maps_to_409(
         self, authed_app: Any, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        async def fake_push(**kwargs: Any) -> Any:
+        async def fake_load(db: Any, installation_id: Any, user_id: Any) -> Any:
+            return _make_installation()
+
+        async def fake_prepare(db: Any, **kwargs: Any) -> Any:
             raise ExportNotReadyError("Stage 'tasks' is not finalised")
 
-        monkeypatch.setattr(github_export_service, "push_to_github", fake_push)
+        monkeypatch.setattr(github_export_service, "load_owned_installation", fake_load)
+        monkeypatch.setattr(github_export_service, "prepare_export_push", fake_prepare)
 
         async with _client(authed_app) as client:
             response = await client.post(
                 f"/workspaces/{_workspace_id()}/export/github",
-                json={"repo_name": "x", "visibility": "public"},
+                json=_export_body(),
                 headers=_auth_headers(),
             )
         assert response.status_code == 409
 
     @pytest.mark.asyncio
-    async def test_post_export_rate_limit_error_maps_to_429(
+    async def test_post_export_queue_unavailable_returns_503(
         self, authed_app: Any, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        async def fake_push(**kwargs: Any) -> Any:
-            raise GitHubRateLimitError()
+        push = _make_pending_push()
+        unstarted: list[Any] = []
 
-        monkeypatch.setattr(github_export_service, "push_to_github", fake_push)
+        async def fake_load(db: Any, installation_id: Any, user_id: Any) -> Any:
+            return _make_installation()
+
+        async def fake_prepare(db: Any, **kwargs: Any) -> Any:
+            return push
+
+        async def fake_enqueue(job: str, *args: Any, **kwargs: Any) -> str:
+            raise QueueUnavailableError("down")
+
+        async def fake_unstart(db: Any, p: Any) -> None:
+            unstarted.append(p)
+
+        monkeypatch.setattr(github_export_service, "load_owned_installation", fake_load)
+        monkeypatch.setattr(github_export_service, "prepare_export_push", fake_prepare)
+        monkeypatch.setattr(github_export_service, "mark_push_unstarted", fake_unstart)
+        monkeypatch.setattr(workspace_router, "enqueue", fake_enqueue)
 
         async with _client(authed_app) as client:
             response = await client.post(
                 f"/workspaces/{_workspace_id()}/export/github",
-                json={"repo_name": "x", "visibility": "public"},
+                json=_export_body(),
                 headers=_auth_headers(),
             )
-        assert response.status_code == 429
-
-    @pytest.mark.asyncio
-    async def test_post_export_api_error_maps_to_502(
-        self, authed_app: Any, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        async def fake_push(**kwargs: Any) -> Any:
-            raise GitHubAPIError(500, "boom")
-
-        monkeypatch.setattr(github_export_service, "push_to_github", fake_push)
-
-        async with _client(authed_app) as client:
-            response = await client.post(
-                f"/workspaces/{_workspace_id()}/export/github",
-                json={"repo_name": "x", "visibility": "public"},
-                headers=_auth_headers(),
-            )
-        assert response.status_code == 502
-        assert "unexpected" in response.json()["detail"].lower()
+        # Fail closed: 503, never an inline synchronous fallback.
+        assert response.status_code == 503
+        assert "unavailable" in response.json()["detail"].lower()
+        assert unstarted == [push]  # the prepared push was marked failed
 
     @pytest.mark.asyncio
     async def test_get_export_no_prior_push_returns_404(
@@ -565,12 +590,18 @@ class TestGitHubRateLimit:
     async def test_fourth_post_returns_429_with_rate_limit_detail(
         self, authed_app: Any, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        push = _make_push_row(status="success", count=0)
+        async def fake_load(db: Any, installation_id: Any, user_id: Any) -> Any:
+            return _make_installation()
 
-        async def fake_push(**kwargs: Any) -> Any:
-            return push
+        async def fake_prepare(db: Any, **kwargs: Any) -> Any:
+            return _make_pending_push()
 
-        monkeypatch.setattr(github_export_service, "push_to_github", fake_push)
+        async def fake_enqueue(job: str, *args: Any, **kwargs: Any) -> str:
+            return "job-id"
+
+        monkeypatch.setattr(github_export_service, "load_owned_installation", fake_load)
+        monkeypatch.setattr(github_export_service, "prepare_export_push", fake_prepare)
+        monkeypatch.setattr(workspace_router, "enqueue", fake_enqueue)
 
         ws_id = _workspace_id()
         headers = _auth_headers(real_jwt=True)
@@ -579,7 +610,7 @@ class TestGitHubRateLimit:
             for _ in range(3):
                 response = await client.post(
                     f"/workspaces/{ws_id}/export/github",
-                    json={"repo_name": "x", "visibility": "public"},
+                    json=_export_body(),
                     headers=headers,
                 )
                 assert response.status_code == 202
@@ -587,7 +618,7 @@ class TestGitHubRateLimit:
             # 4th call hits the rate limit before reaching the service
             response = await client.post(
                 f"/workspaces/{ws_id}/export/github",
-                json={"repo_name": "x", "visibility": "public"},
+                json=_export_body(),
                 headers=headers,
             )
         assert response.status_code == 429

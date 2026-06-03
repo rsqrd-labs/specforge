@@ -41,6 +41,7 @@ dependencies = [
     "jinja2==3.*",
     "pygments==2.*",
     "markdown==3.*",
+    "arq>=0.28.0",
 ]
 
 [project.optional-dependencies]

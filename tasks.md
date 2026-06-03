@@ -15535,6 +15535,7 @@ Refactor the Phase-13 `github_api_client.py` so it no longer holds a static user
 **Priority:** P0
 **Phase:** A
 **Harness:** `harness/tests/backend/test_phase24_github_living_contract.py -k "t269"`
+**Status:** ✅ Done — 2026-06-02 (backend/worker.py arq WorkerSettings registers all 6 jobs + reconcile_drift cron — verified booting; backend/services/queue.py enqueue [fail-closed] + github_job base [backoff+jitter retries → dead-letter record/metric]; export moved off the request path — POST resolves+owner-checks installation_id, prepares a `pending` push, enqueues `export_push` keyed by push_id, returns 202; the job persists repo_id/installation_id/source_stage_version_id + status='completed', idempotent/resumable; arq in pyproject+uv.lock+requirements.txt; `worker` service in docker-compose + Procfile. `-k "t269"` 5/7 green — the 2 remaining call `_combined_github_services()` which hard-asserts the 5 later-task modules (github_reconcile/governor/pr_export_builder/agents_md_builder/pr_evaluator, T-272..T-282) exist; PROVEN to go 7/7 once those land (touch-the-files test). Full backend suite green, no regression. Legacy-OAuth users: blocked with a re-install prompt (cannot form an installation_id request); Phase-13 push_to_github retained, unwired.)
 
 **Description:**
 Introduce the first durable background processing in SpecForge. The only prior mechanism (`asyncio.create_task`) dies on deploy and times out long exports. Add an `arq` worker (planning decision, Plan §24.1) and move all GitHub I/O onto it. Endpoints enqueue and return `202`.

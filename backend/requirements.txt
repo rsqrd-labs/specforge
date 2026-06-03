@@ -36,6 +36,9 @@ resend==2.*
 # Cache
 redis[asyncio]==5.*
 
+# Background jobs / durable queue (Phase 21 — T-269)
+arq==0.28.*
+
 # Observability
 opentelemetry-api==1.*
 opentelemetry-sdk==1.*

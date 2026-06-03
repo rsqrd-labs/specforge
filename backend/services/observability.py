@@ -182,6 +182,26 @@ GITHUB_TOKEN_MINT_TOTAL = Counter(
     labelnames=["source"],
 )
 
+# Durable worker job metrics (Phase 21 — T-269). Retries and dead-letters are the
+# reliability signal for the GitHub job queue; queue depth is the backpressure
+# signal operators alert on.
+GITHUB_JOB_RETRIES_TOTAL = Counter(
+    "specforge_github_job_retries_total",
+    "GitHub worker job attempts that failed transiently and were retried "
+    "(exponential backoff + jitter), labelled by job name.",
+    labelnames=["job"],
+)
+GITHUB_JOB_DEADLETTERED_TOTAL = Counter(
+    "specforge_github_job_deadlettered_total",
+    "GitHub worker jobs that exhausted max_tries and were moved to the "
+    "dead-letter record for manual replay, labelled by job name.",
+    labelnames=["job"],
+)
+GITHUB_QUEUE_DEPTH = Gauge(
+    "specforge_github_queue_depth",
+    "Approximate number of GitHub worker jobs currently queued/in-flight.",
+)
+
 PIPELINE_UPSTREAM_SECTION_SKIPPED = Counter(
     "pipeline_upstream_section_skipped_total",
     "Count of upstream sections skipped during section-aware injection "

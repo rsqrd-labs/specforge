@@ -9,8 +9,8 @@ from config import settings
 from database import get_db, get_redis
 from middleware.auth import get_current_user
 from models import User, Workspace
+from schemas.github import GitHubExportRequest
 from schemas.integration import (
-    GitHubExportRequest,
     GitHubExportResponse,
     IntegrationPushRead,
 )
@@ -24,18 +24,12 @@ from schemas.workspace import (
     WorkspaceUpdate,
 )
 from services.coverage_utils import derive_coverage_summaries, derive_coverage_summary
-from services.integrations.github_api_client import (
-    GitHubAPIError,
-    GitHubNotConnectedError,
-    GitHubRateLimitError,
-    GitHubRepoExistsError,
-    GitHubTokenExpiredError,
-)
 from services.llm.provider_status import is_provider_configured
 from services.pipeline import github_export_service, pdf_export_service, spec_clarifier
 from services.pipeline.critic import AUDIT_EVENT_CRITIC_DISABLED
 from services.pipeline.export_service import ExportNotReadyError, build_export
 from services.pipeline.spec_clarifier import ClarificationValidationError
+from services.queue import QueueUnavailableError, enqueue
 from services.sharing import public_share_service
 from services.sharing.public_share_service import (
     WorkspaceNotFinalisedError,
@@ -306,62 +300,74 @@ async def export_workspace_to_github(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> GitHubExportResponse:
-    """Push a finalised workspace to a new GitHub repository.
+    """Enqueue a GitHub App export of a finalised workspace; return 202.
 
-    Idempotent: re-export updates files in place and updates existing
-    issues rather than creating duplicates. The rate-limit middleware
-    caps this endpoint at 3 successful POSTs per user per hour.
+    All GitHub I/O runs on the durable worker (T-269): this handler resolves and
+    owner-checks the target installation, creates/resets the ``pending`` push
+    row, enqueues the ``export_push`` job keyed by ``push_id`` (so a duplicate
+    submit dedups), and returns ``202`` with the ``push_id`` to poll. It never
+    blocks on GitHub.
+
+    **Legacy v1-OAuth users** have no ``GitHubInstallation`` and cannot form this
+    request (it requires ``installation_id``); they are prompted to install the
+    GitHub App. The Phase-13 synchronous ``push_to_github`` path is retained in
+    the codebase for the flagged legacy path but is not driven by this route.
+
+    Fails closed: if the queue is unreachable the push is marked failed and a
+    503 is returned — never an inline synchronous fallback.
     """
+    # 1. Resolve + owner-check the target installation (confused-deputy guard).
+    installation = await github_export_service.load_owned_installation(
+        db, payload.installation_id, user.id
+    )
+    if installation is None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Install the GitHub App and choose an installation you own.",
+        )
+    if installation.suspended_at is not None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="This GitHub App installation is suspended. Re-enable it on GitHub.",
+        )
+
+    # 2. Validate + create/reset the pending push row (no GitHub I/O here).
     try:
-        push = await github_export_service.push_to_github(
+        push = await github_export_service.prepare_export_push(
+            db,
             workspace_id=id,
             user_id=user.id,
-            repo_name=payload.repo_name,
-            visibility=payload.visibility,
-            db=db,
+            installation=installation,
+            export_mode=payload.export_mode,
         )
-    except GitHubNotConnectedError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="GitHub not connected. Connect from Settings.",
-        ) from exc
-    except GitHubTokenExpiredError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="GitHub connection expired. Reconnect from Settings.",
-        ) from exc
-    except GitHubRepoExistsError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="A repo with that name already exists in your GitHub account.",
-        ) from exc
-    except GitHubRateLimitError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail="GitHub API rate limit reached. Wait a few minutes and try again.",
-        ) from exc
     except ExportNotReadyError as exc:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=str(exc),
         ) from exc
-    except GitHubAPIError as exc:
-        logger.warning(
-            "github_export.api_error",
-            extra={"github_status": exc.status, "github_message": exc.message},
+
+    # 3. Enqueue off the request path. job_id = push_id dedups duplicate submits.
+    try:
+        await enqueue(
+            "export_push",
+            str(push.id),
+            payload.repo_name,
+            payload.visibility,
+            job_id=str(push.id),
         )
+    except QueueUnavailableError as exc:
+        await github_export_service.mark_push_unstarted(db, push)
         raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail="GitHub returned an unexpected error.",
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Background processing is unavailable; export was not started.",
         ) from exc
 
-    issue_count = getattr(push, "issue_count", 0) or 0
     return GitHubExportResponse(
         push_id=push.id,
         status=push.status,
         repo_full_name=push.repo_full_name,
         repo_url=push.repo_url,
-        issue_count=int(issue_count),
+        issue_count=0,
     )
 
 

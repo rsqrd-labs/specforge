@@ -50,10 +50,13 @@ import httpx
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from database import get_shared_redis
 from models import (
+    GitHubInstallation,
     IntegrationPush,
     IntegrationPushTask,
     Stage,
+    StageVersion,
     UserIntegration,
     Workspace,
 )
@@ -64,8 +67,11 @@ from services.integrations.github_api_client import (
     GitHubRateLimitError,
     GitHubRepoExistsError,
     GitHubTokenExpiredError,
+    make_app_github_client,
     make_github_client,
+    make_shared_async_client,
 )
+from services.integrations.github_app_auth import make_token_provider
 from services.integrations.task_parser import parse_tasks
 from services.pipeline.export_service import ExportNotReadyError, parse_harness_files
 from services.security import key_vault
@@ -206,6 +212,249 @@ async def get_push(
 
 
 # ---------------------------------------------------------------------------
+# App-mode export (Phase 21 — T-269): request path prepares, worker executes
+# ---------------------------------------------------------------------------
+
+
+async def load_owned_installation(
+    db: AsyncSession,
+    installation_id: UUID,
+    user_id: UUID,
+) -> GitHubInstallation | None:
+    """Return the installation iff it exists and is owned by ``user_id``.
+
+    The owner check is the confused-deputy guard: a user may only export under an
+    installation they linked, never another tenant's.
+    """
+    result = await db.execute(
+        select(GitHubInstallation).where(GitHubInstallation.id == installation_id)
+    )
+    installation = result.scalar_one_or_none()
+    if installation is None or installation.user_id != user_id:
+        return None
+    return installation
+
+
+async def prepare_export_push(
+    db: AsyncSession,
+    *,
+    workspace_id: UUID,
+    user_id: UUID,
+    installation: GitHubInstallation,
+    export_mode: str,
+) -> IntegrationPush:
+    """Validate and create/reset the ``pending`` push row for an App export.
+
+    Runs on the request path before enqueuing the ``export_push`` job. Validates
+    workspace ownership and that every stage is finalised (raising
+    :class:`ExportNotReadyError`), then reuses the workspace's single GitHub push
+    row (or creates one), binding it to the target installation and resetting it
+    to ``pending`` so :func:`run_export_push` can drive it on the worker.
+
+    The actual GitHub I/O — repo creation, file push, issue creation — happens on
+    the worker, never here.
+    """
+    await _load_workspace(db, workspace_id, user_id)
+    await _load_finalised_stages(db, workspace_id)
+
+    result = await db.execute(
+        select(IntegrationPush).where(
+            IntegrationPush.workspace_id == workspace_id,
+            IntegrationPush.provider == GITHUB_PROVIDER,
+        )
+    )
+    push = result.scalar_one_or_none()
+    if push is None:
+        push = IntegrationPush(
+            workspace_id=workspace_id,
+            user_id=user_id,
+            provider=GITHUB_PROVIDER,
+            status="pending",
+        )
+        db.add(push)
+    else:
+        push.status = "pending"
+    push.installation_id = installation.id
+    push.export_mode = export_mode
+    await db.commit()
+    await db.refresh(push)
+    return push
+
+
+async def run_export_push(
+    push_id: UUID,
+    repo_name: str,
+    visibility: str,
+    *,
+    db: AsyncSession,
+    client: GitHubAPIClient | None = None,
+) -> IntegrationPush | None:
+    """Execute a prepared App-mode export (the body of the ``export_push`` job).
+
+    Idempotent and resumable (keyed by ``push_id``): a re-run after a crash or
+    rate-limit resumes from the ledger — it never re-creates a repo whose
+    ``repo_full_name`` is already recorded, nor an issue already in
+    ``integration_push_tasks``. A push already ``completed`` is a no-op.
+
+    On success it persists the three fields the rest of the loop depends on —
+    ``repo_id`` (from ``repository.id``), ``installation_id`` (already bound by
+    :func:`prepare_export_push`), and ``source_stage_version_id`` (the Tasks
+    ``StageVersion`` that produced this push) — and sets ``status='completed'``.
+    Without these, token re-mint/confused-deputy (T-272), drift compare (T-273),
+    and the ``find_live_push`` lookup (T-266) are all inert.
+
+    ``client`` is injected by tests; in production an App-mode client is built
+    from the bound installation's token provider.
+    """
+    push = await _load_push_by_id(db, push_id)
+    if push is None:
+        logger.warning("github_export.push_missing", extra={"push_id": str(push_id)})
+        return None
+    if push.status == "completed":
+        return push  # already done — at-least-once safe
+
+    installation = await _load_installation(db, push.installation_id)
+    if installation is None:
+        await _mark_push_failed(db, push, status="failed")
+        raise GitHubNotConnectedError("GitHub App installation not found for this push")
+
+    workspace = await _load_workspace_by_id(db, push.workspace_id)
+    stages = await _load_finalised_stages(db, push.workspace_id)
+    source_version_id = await _resolve_source_stage_version_id(db, stages["tasks"])
+
+    if client is not None:
+        return await _drive_app_export(
+            db=db,
+            workspace=workspace,
+            stages=stages,
+            push=push,
+            client=client,
+            repo_name=repo_name,
+            visibility=visibility,
+            source_version_id=source_version_id,
+        )
+
+    async with make_shared_async_client() as http:
+        token_provider = make_token_provider(get_shared_redis(), http)
+        built = make_app_github_client(
+            token_provider, installation.installation_id, http
+        )
+        return await _drive_app_export(
+            db=db,
+            workspace=workspace,
+            stages=stages,
+            push=push,
+            client=built,
+            repo_name=repo_name,
+            visibility=visibility,
+            source_version_id=source_version_id,
+        )
+
+
+async def _drive_app_export(
+    *,
+    db: AsyncSession,
+    workspace: Workspace,
+    stages: dict[str, Stage],
+    push: IntegrationPush,
+    client: GitHubAPIClient,
+    repo_name: str,
+    visibility: str,
+    source_version_id: UUID | None,
+) -> IntegrationPush:
+    try:
+        return await _run_app_export(
+            db=db,
+            workspace=workspace,
+            stages=stages,
+            push=push,
+            client=client,
+            repo_name=repo_name,
+            visibility=visibility,
+            source_version_id=source_version_id,
+        )
+    except Exception:
+        # Any failure marks the push failed and re-raises so the worker base
+        # contract can retry/backoff and ultimately dead-letter. v2 status is
+        # 'failed' so find_live_push (status <> 'failed') excludes it.
+        await _mark_push_failed(db, push, status="failed")
+        raise
+
+
+async def _run_app_export(
+    *,
+    db: AsyncSession,
+    workspace: Workspace,
+    stages: dict[str, Stage],
+    push: IntegrationPush,
+    client: GitHubAPIClient,
+    repo_name: str,
+    visibility: str,
+    source_version_id: UUID | None,
+) -> IntegrationPush:
+    # Step 1 — create repo (first run only). Resume skips this when the repo is
+    # already recorded, so a re-run never creates a second repo.
+    if push.repo_full_name is None:
+        repo_data = await client.create_repo(
+            repo_name, private=(visibility == "private")
+        )
+        full_name = repo_data.get("full_name")
+        repo_id = repo_data.get("id")
+        html_url = repo_data.get("html_url")
+        if not isinstance(full_name, str):
+            raise GitHubAPIError(0, "create_repo response missing full_name")
+        push.repo_full_name = full_name
+        push.repo_url = html_url if isinstance(html_url, str) else None
+        # repo_id is the immutable reconciliation key (T-266/T-272/T-273).
+        if isinstance(repo_id, int):
+            push.repo_id = repo_id
+        await db.commit()
+        await db.refresh(push)
+
+    assert push.repo_full_name is not None  # nosec B101 — set by the branch above
+
+    # Step 2 — push files (idempotent: upsert with the current blob SHA).
+    files_to_push = _build_file_map(stages)
+    commit_message = f"chore: SpecForge export — {workspace.name}"
+    for path, content in files_to_push.items():
+        sha = await client.get_file_sha(push.repo_full_name, path)
+        await client.upsert_file(
+            push.repo_full_name, path, content, sha, commit_message
+        )
+
+    # Step 3 — create/update issues sequentially, committing each new issue so a
+    # mid-run rate-limit resumes without recreating issues 1..N-1.
+    existing_tasks = await _load_existing_push_tasks(db, push.id)
+    for parsed in parse_tasks(stages["tasks"].content or ""):
+        existing_number = existing_tasks.get(parsed.ref)
+        if existing_number is not None:
+            await client.update_issue(
+                push.repo_full_name, existing_number, parsed.title, parsed.body_md
+            )
+        else:
+            number = await client.create_issue(
+                push.repo_full_name, parsed.title, parsed.body_md
+            )
+            db.add(
+                IntegrationPushTask(
+                    push_id=push.id,
+                    task_ref=parsed.ref,
+                    external_issue_number=number,
+                )
+            )
+            await db.commit()
+
+    # Step 4 — finalise. Persist the three loop-critical fields and complete.
+    push.source_stage_version_id = source_version_id
+    push.status = "completed"
+    push.pushed_at = datetime.now(UTC)
+    await db.commit()
+    await db.refresh(push)
+    push.issue_count = await _count_issues(db, push.id)  # type: ignore[attr-defined]
+    return push
+
+
+# ---------------------------------------------------------------------------
 # Core orchestration
 # ---------------------------------------------------------------------------
 
@@ -328,9 +577,20 @@ async def _handle_token_expired(
     await _mark_push_failed(db, push)
 
 
-async def _mark_push_failed(db: AsyncSession, push: IntegrationPush) -> None:
+async def mark_push_unstarted(db: AsyncSession, push: IntegrationPush) -> None:
+    """Mark a just-prepared push ``failed`` when enqueue could not start it.
+
+    Leaves no dangling non-``failed`` row that ``find_live_push`` would treat as
+    a live push for the repo.
+    """
+    await _mark_push_failed(db, push, status="failed")
+
+
+async def _mark_push_failed(
+    db: AsyncSession, push: IntegrationPush, *, status: str = "error"
+) -> None:
     try:
-        push.status = "error"
+        push.status = status
         await db.commit()
     except Exception:
         logger.exception("github_export.mark_failed_commit_error")
@@ -424,6 +684,56 @@ async def _upsert_push_row(
     await db.commit()
     await db.refresh(push)
     return push
+
+
+async def _load_push_by_id(
+    db: AsyncSession,
+    push_id: UUID,
+) -> IntegrationPush | None:
+    result = await db.execute(
+        select(IntegrationPush).where(IntegrationPush.id == push_id)
+    )
+    return result.scalar_one_or_none()
+
+
+async def _load_workspace_by_id(db: AsyncSession, workspace_id: UUID) -> Workspace:
+    """Load a workspace by id (worker context — ownership already enforced when
+    the export was enqueued)."""
+    result = await db.execute(select(Workspace).where(Workspace.id == workspace_id))
+    workspace = result.scalar_one_or_none()
+    if workspace is None:
+        raise ExportNotReadyError("Workspace not found")
+    return workspace
+
+
+async def _load_installation(
+    db: AsyncSession,
+    installation_id: UUID | None,
+) -> GitHubInstallation | None:
+    if installation_id is None:
+        return None
+    result = await db.execute(
+        select(GitHubInstallation).where(GitHubInstallation.id == installation_id)
+    )
+    return result.scalar_one_or_none()
+
+
+async def _resolve_source_stage_version_id(
+    db: AsyncSession,
+    tasks_stage: Stage,
+) -> UUID | None:
+    """Return the StageVersion id of the Tasks stage's current version.
+
+    Persisted on the push so drift detection (T-273) can compare the pushed
+    Tasks version against the workspace's latest finalised Tasks.
+    """
+    result = await db.execute(
+        select(StageVersion.id).where(
+            StageVersion.stage_id == tasks_stage.id,
+            StageVersion.version == tasks_stage.current_version,
+        )
+    )
+    return result.scalar_one_or_none()
 
 
 async def _load_existing_push_tasks(

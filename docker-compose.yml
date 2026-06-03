@@ -56,6 +56,26 @@ services:
       - ./backend:/app
     entrypoint: ["/bin/sh", "-c", "uv sync --frozen --no-dev && uv run --no-sync alembic upgrade head && uv run --no-sync uvicorn main:app --reload --reload-dir /app/routers --reload-dir /app/services --reload-dir /app/models --reload-dir /app/middleware --reload-dir /app/prompts --reload-dir /app/schemas --reload-dir /app/config --reload-exclude '.venv/*' --reload-exclude 'tests/*' --reload-exclude '.pytest_cache/*' --reload-exclude '.ruff_cache/*' --host 0.0.0.0 --port 8000"]
 
+  worker:
+    # Durable background worker (Phase 21 — T-269). Shares the backend image and
+    # REDIS_URL/DATABASE_URL with `api`; runs the arq worker that performs all
+    # GitHub I/O off the request path. No migrations here — `api` owns those.
+    build: ./backend
+    env_file:
+      - backend/.env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://specforge:specforge@db:5432/specforge
+      REDIS_URL: redis://redis:6379/0
+      FRONTEND_URL: http://localhost:5173
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./backend:/app
+    entrypoint: ["/bin/sh", "-c", "uv sync --frozen --no-dev && uv run --no-sync arq worker.WorkerSettings"]
+
   frontend:
     image: node:22-alpine
     working_dir: /app
