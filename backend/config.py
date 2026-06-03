@@ -76,6 +76,14 @@ class Settings(BaseSettings):
     github_app_webhook_secret: str = ""
     github_app_webhook_secret_prev: str = ""
 
+    # Increment generation (Phase 21 — T-279). The MVP ships the *additive* path
+    # only: an increment appends new tasks with their existing content pinned by
+    # stable, content-derived task_refs. Behaviour-changing increments (compute
+    # blast radius, mark affected items stale, re-run harness/critic only on the
+    # affected areas) are the phase-two cut and stay gated off until that work
+    # lands; flip this to true only once the blast-radius path is implemented.
+    increment_blast_radius_enabled: bool = False
+
     # Stripe Payments (Phase 18) — leave blank to disable billing UI.
     # Use sk_test_* keys for development; sk_live_* keys for production only.
     stripe_secret_key: str = ""

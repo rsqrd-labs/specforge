@@ -85,6 +85,10 @@ class ParsedTask:
             five fixed sections. This is what the v2 export hands to
             ``create_issue``.
         labels: The labels the agent-ready issue carries (:data:`AGENT_LABELS`).
+        raw_body: The task's source body between its heading and the next ``###``,
+            preserved verbatim. Increment generation (T-279) re-appends this under
+            a renumbered heading when it grows TASKS.md, so the appended section
+            matches the source document's shape exactly.
     """
 
     ref: str
@@ -92,6 +96,7 @@ class ParsedTask:
     body_md: str
     agent_body_md: str = ""
     labels: tuple[str, ...] = field(default_factory=tuple)
+    raw_body: str = ""
 
 
 def parse_tasks(content: str) -> list[ParsedTask]:
@@ -133,6 +138,7 @@ def parse_tasks(content: str) -> list[ParsedTask]:
                 body_md=body_md,
                 agent_body_md=agent_body_md,
                 labels=AGENT_LABELS,
+                raw_body=raw_body,
             )
         )
 
