@@ -85,3 +85,26 @@ async def find_live_pushes_for_event(
         )
     )
     return result.scalars().all()
+
+
+async def find_workspace_live_push(
+    db: AsyncSession,
+    workspace_id: UUID,
+) -> IntegrationPush | None:
+    """Return the workspace's live (non-``failed``) GitHub push, or ``None``.
+
+    Used by the sync surface (T-273): a workspace syncs one repo (spec
+    Assumption 8), but the ``(workspace_id, repo_id)`` index does not forbid a
+    second live row, so this orders newest-first and takes the first rather than
+    assuming exactly one.
+    """
+    result = await db.execute(
+        select(IntegrationPush)
+        .where(
+            IntegrationPush.workspace_id == workspace_id,
+            IntegrationPush.provider == "github",
+            IntegrationPush.status != _NON_FAILED_STATUS,
+        )
+        .order_by(IntegrationPush.created_at.desc())
+    )
+    return result.scalars().first()

@@ -35,10 +35,24 @@ import structlog
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from models import GitHubWebhookEvent, IntegrationPushTask
+from models import (
+    GitHubInstallation,
+    GitHubWebhookEvent,
+    IntegrationPush,
+    IntegrationPushTask,
+    Stage,
+    StageVersion,
+)
 from services.integrations import github_install_service
+from services.integrations.github_api_client import (
+    make_app_github_client,
+    make_shared_async_client,
+)
+from services.integrations.github_app_auth import make_token_provider
 from services.integrations.push_repo import find_live_pushes_for_event
 from services.observability import GITHUB_RECONCILE_LAG_SECONDS
+
+GITHUB_PROVIDER = "github"
 
 logger = structlog.get_logger(__name__)
 
@@ -393,3 +407,253 @@ def _audit_done(
         installation_id=installation.get("id"),
         done_via=done_via,
     )
+
+
+# ---------------------------------------------------------------------------
+# Backfill — recover events missed while the worker was down (T-273)
+# ---------------------------------------------------------------------------
+
+
+# A push stuck in 'pending' whose arq job no longer exists is treated as a
+# crashed export and failed, so the partial unique index (status <> 'failed')
+# stops blocking re-export of that repo. We key on arq job ABSENCE rather than a
+# created_at age threshold: integration_pushes has no per-attempt timestamp
+# (created_at is the first export's time and the row is reused), so a time
+# threshold would false-positive a healthy re-export. The arq job_timeout
+# (T-269) backstops a genuinely hung job.
+
+
+async def backfill_repo(
+    ctx: dict[str, Any],
+    push_id: str,
+    *,
+    db: AsyncSession | None = None,
+    client: Any = None,
+) -> None:
+    """Reconcile a push's task states from GitHub's issues list (T-273).
+
+    Recovers closures/reopens missed while the worker was down. Idempotent with
+    the webhook reconcile path: it reuses the same out-of-order-gated
+    transitions, so re-seeing a state is a no-op and a webhook-set ``pr_merge``
+    is never downgraded to ``manual``.
+    """
+    if db is not None:
+        await _run_backfill(db, push_id, client)
+        return
+    from database import AsyncSessionLocal
+
+    async with AsyncSessionLocal() as session:
+        await _run_backfill(session, push_id, client)
+
+
+async def _run_backfill(db: AsyncSession, push_id: str, client: Any) -> None:
+    push = (
+        await db.execute(select(IntegrationPush).where(IntegrationPush.id == push_id))
+    ).scalar_one_or_none()
+    if push is None or push.repo_full_name is None or push.repo_id is None:
+        return
+    installation = (
+        await db.execute(
+            select(GitHubInstallation).where(
+                GitHubInstallation.id == push.installation_id
+            )
+        )
+    ).scalar_one_or_none()
+    if installation is None:
+        return
+
+    tasks = list(
+        (
+            await db.execute(
+                select(IntegrationPushTask).where(
+                    IntegrationPushTask.push_id == push.id
+                )
+            )
+        ).scalars()
+    )
+    if not tasks:
+        return
+    by_number = {t.external_issue_number: t for t in tasks}
+    since = _last_synced_iso(tasks)
+
+    if client is not None:
+        issues = await client.list_issues(push.repo_full_name, state="all", since=since)
+    else:
+        async with make_shared_async_client() as http:
+            from database import get_shared_redis
+
+            provider = make_token_provider(get_shared_redis(), http)
+            built = make_app_github_client(provider, installation.installation_id, http)
+            issues = await built.list_issues(
+                push.repo_full_name, state="all", since=since
+            )
+
+    changed = False
+    for issue in issues:
+        # GitHub's issues endpoint also returns PRs — they carry a
+        # 'pull_request' key. Filtering them out is mandatory (a PR is not a task
+        # issue).
+        if "pull_request" in issue:
+            continue
+        number = issue.get("number")
+        task = by_number.get(number) if isinstance(number, int) else None
+        if task is None:
+            continue
+        event_ts = _parse_ts(issue.get("updated_at"))
+        if event_ts is None:
+            continue
+        if issue.get("state") == "closed":
+            if _apply_done(task, done_via="manual", event_ts=event_ts):
+                changed = True
+        elif issue.get("state") == "open":
+            if _apply_reopen(task, event_ts=event_ts):
+                changed = True
+    if changed:
+        await db.commit()
+
+
+def _last_synced_iso(tasks: list[IntegrationPushTask]) -> str | None:
+    """The most recent ``synced_at`` across a push's tasks, as an ISO string —
+    the ``since`` cursor so backfill only pulls rows updated after the last
+    reconcile. ``None`` (no prior sync) pulls the full history."""
+    stamps = [t.synced_at for t in tasks if t.synced_at is not None]
+    if not stamps:
+        return None
+    latest = max(stamps)
+    if latest.tzinfo is None:
+        latest = latest.replace(tzinfo=UTC)
+    return latest.astimezone(UTC).isoformat()
+
+
+# ---------------------------------------------------------------------------
+# Periodic drift reconciliation (cron) — stuck-pending sweep + backfill
+# ---------------------------------------------------------------------------
+
+
+async def reconcile_drift(
+    ctx: dict[str, Any],
+    *,
+    db: AsyncSession | None = None,
+    enqueue_fn: Any = None,
+    is_job_alive: Any = None,
+) -> None:
+    """Periodic cron (T-273): sweep crashed 'pending' pushes and re-backfill.
+
+    1. Stuck-pending sweep (release-blocking): a push 'pending' whose arq job is
+       gone is a crashed export; mark it 'failed' so the repo is not permanently
+       locked out of re-export by the live partial index.
+    2. Catch missed events: enqueue ``backfill_repo`` for each completed push.
+    """
+    if is_job_alive is None:
+        is_job_alive = _arq_job_alive_checker((ctx or {}).get("redis"))
+    if db is not None:
+        await _run_reconcile_drift(db, enqueue_fn, is_job_alive)
+        return
+    from database import AsyncSessionLocal
+
+    async with AsyncSessionLocal() as session:
+        await _run_reconcile_drift(session, enqueue_fn, is_job_alive)
+
+
+async def _run_reconcile_drift(
+    db: AsyncSession, enqueue_fn: Any, is_job_alive: Any
+) -> int:
+    pending = list(
+        (
+            await db.execute(
+                select(IntegrationPush).where(IntegrationPush.status == "pending")
+            )
+        ).scalars()
+    )
+    swept = 0
+    for push in pending:
+        if not await is_job_alive(str(push.id)):
+            push.status = "failed"  # unblock re-export of this repo
+            swept += 1
+            logger.warning(
+                "github.reconcile.stuck_pending_failed", push_id=str(push.id)
+            )
+    if swept:
+        await db.commit()
+
+    completed = list(
+        (
+            await db.execute(
+                select(IntegrationPush).where(IntegrationPush.status == "completed")
+            )
+        ).scalars()
+    )
+    for push in completed:
+        await _enqueue(enqueue_fn, "backfill_repo", str(push.id))
+    return swept
+
+
+def _arq_job_alive_checker(redis: Any) -> Any:
+    """Return an ``async (push_id) -> bool`` that reports whether the push's arq
+    job still exists. The push_id is the job_id (T-269). Conservative when the
+    queue is unreachable: report alive so a real export is never falsely swept."""
+
+    async def _alive(push_id: str) -> bool:
+        if redis is None:
+            return True
+        from arq.jobs import Job, JobStatus
+
+        status = await Job(job_id=push_id, redis=redis).status()
+        return status != JobStatus.not_found
+
+    return _alive
+
+
+# ---------------------------------------------------------------------------
+# Drift detection on Tasks re-finalise (called from StageManager.finalise)
+# ---------------------------------------------------------------------------
+
+
+async def mark_pushes_stale_on_tasks_drift(db: AsyncSession, workspace_id: Any) -> None:
+    """Mark a workspace's live GitHub pushes ``stale`` when Tasks has drifted.
+
+    Called inside ``StageManager.finalise`` (same transaction) when the Tasks
+    stage is re-finalised: any non-``failed`` push whose
+    ``source_stage_version_id`` differs from the workspace's current finalised
+    Tasks ``StageVersion`` is now out of sync. The caller commits.
+    """
+    current_version_id = await _current_tasks_version_id(db, workspace_id)
+    if current_version_id is None:
+        return
+    pushes = list(
+        (
+            await db.execute(
+                select(IntegrationPush).where(
+                    IntegrationPush.workspace_id == workspace_id,
+                    IntegrationPush.provider == GITHUB_PROVIDER,
+                    IntegrationPush.status != "failed",
+                )
+            )
+        ).scalars()
+    )
+    for push in pushes:
+        if (
+            push.source_stage_version_id is not None
+            and push.source_stage_version_id != current_version_id
+        ):
+            push.status = "stale"
+
+
+async def _current_tasks_version_id(db: AsyncSession, workspace_id: Any) -> Any:
+    stage = (
+        await db.execute(
+            select(Stage).where(
+                Stage.workspace_id == workspace_id, Stage.type == "tasks"
+            )
+        )
+    ).scalar_one_or_none()
+    if stage is None:
+        return None
+    return (
+        await db.execute(
+            select(StageVersion.id).where(
+                StageVersion.stage_id == stage.id,
+                StageVersion.version == stage.current_version,
+            )
+        )
+    ).scalar_one_or_none()

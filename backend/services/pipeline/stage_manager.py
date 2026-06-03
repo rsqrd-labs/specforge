@@ -542,7 +542,9 @@ class StageManager:
         try:
             if not await sliding_window_check(redis, f"llm:{user.id}", 10, 60):
                 raise RateLimitError(retry_after=60)
-            if not await sliding_window_check(redis, f"llm_daily:{user.id}", 200, 86400):  # noqa: E501
+            if not await sliding_window_check(
+                redis, f"llm_daily:{user.id}", 200, 86400
+            ):  # noqa: E501
                 raise RateLimitError(retry_after=86400)
         except RedisError:  # Only Redis connection failures — NOT RateLimitError.
             # Redis unavailable — fail open, matching RateLimitMiddleware behavior.
@@ -675,6 +677,7 @@ class StageManager:
                     from services.llm.provider_status import (  # noqa: PLC0415
                         record_provider_failure,
                     )
+
                     record_provider_failure(route.provider, exc)
                 # Increment SSE failure counter so streaming failures are
                 # visible in dashboards even before the 3-min recovery loop
@@ -946,7 +949,9 @@ class StageManager:
         try:
             if not await sliding_window_check(redis, f"llm:{user.id}", 10, 60):
                 raise RateLimitError(retry_after=60)
-            if not await sliding_window_check(redis, f"llm_daily:{user.id}", 200, 86400):  # noqa: E501
+            if not await sliding_window_check(
+                redis, f"llm_daily:{user.id}", 200, 86400
+            ):  # noqa: E501
                 raise RateLimitError(retry_after=86400)
         except RedisError:  # Only Redis connection failures — NOT RateLimitError.
             # Redis unavailable — fail open, matching RateLimitMiddleware behavior.
@@ -1176,6 +1181,18 @@ class StageManager:
 
         await mark_workspace_storyboards_stale(db, stage.workspace_id)
 
+        # Re-finalising Tasks drifts any live GitHub push built from the prior
+        # Tasks version: its issues no longer match the spec. Mark such pushes
+        # stale in THIS transaction so GET /sync surfaces out_of_sync and the
+        # user can re-sync (T-273). Lazy import avoids the import cycle, mirroring
+        # the storyboard-stale call above.
+        if stage.type == "tasks":
+            from services.integrations.github_reconcile import (  # noqa: PLC0415
+                mark_pushes_stale_on_tasks_drift,
+            )
+
+            await mark_pushes_stale_on_tasks_drift(db, stage.workspace_id)
+
         redis = await self._redis_client()
         await self._invalidate_stage_cache(stage.workspace_id, stage.type, redis)
         content = stage.content or ""
@@ -1370,9 +1387,7 @@ class StageManager:
         spec = await redis.get(f"{_STAGE_CACHE_PREFIX}{workspace_id}:spec") or ""
         return spec, None
 
-    async def _critic_deps(
-        self, workspace_id: UUID, stage_type: str
-    ) -> dict[str, str]:
+    async def _critic_deps(self, workspace_id: UUID, stage_type: str) -> dict[str, str]:
         """Upstream dependency contents for the critic, from the stage cache.
 
         Finalised upstream stages are cached on finalise(); the critic reads
@@ -1384,8 +1399,7 @@ class StageManager:
         deps: dict[str, str] = {}
         for dep_type in STAGE_DEPENDENCIES[stage_type]:
             deps[dep_type] = (
-                await redis.get(f"{_STAGE_CACHE_PREFIX}{workspace_id}:{dep_type}")
-                or ""
+                await redis.get(f"{_STAGE_CACHE_PREFIX}{workspace_id}:{dep_type}") or ""
             )
         return deps
 
@@ -1478,7 +1492,9 @@ class StageManager:
         try:
             if not await sliding_window_check(redis, f"llm:{user.id}", 10, 60):
                 raise RateLimitError(retry_after=60)
-            if not await sliding_window_check(redis, f"llm_daily:{user.id}", 200, 86400):  # noqa: E501
+            if not await sliding_window_check(
+                redis, f"llm_daily:{user.id}", 200, 86400
+            ):  # noqa: E501
                 raise RateLimitError(retry_after=86400)
         except RedisError:  # Only Redis connection failures — NOT RateLimitError.
             # Redis unavailable — fail open, matching RateLimitMiddleware behavior.

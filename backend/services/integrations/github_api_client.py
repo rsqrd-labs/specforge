@@ -342,6 +342,41 @@ class GitHubAPIClient:
             return
         self._raise_for_status(response)
 
+    async def list_issues(
+        self,
+        repo: str,
+        *,
+        state: str = "all",
+        since: str | None = None,
+        max_pages: int = 20,
+    ) -> list[dict[str, Any]]:
+        """GET /repos/{owner}/{repo}/issues — paginated, for backfill (T-273).
+
+        Returns raw issue rows. NOTE: GitHub's issues endpoint also returns pull
+        requests (each carries a ``pull_request`` key); the caller must filter
+        those out. ``since`` is an ISO-8601 timestamp to fetch only rows updated
+        after the last sync. Pagination is bounded by ``max_pages`` as a safety
+        cap.
+        """
+        issues: list[dict[str, Any]] = []
+        for page in range(1, max_pages + 1):
+            path = (
+                f"/repos/{repo}/issues?state={state}&per_page=100&page={page}"
+                "&sort=updated&direction=asc"
+            )
+            if since:
+                path += f"&since={since}"
+            response = await self._request("GET", path)
+            if response.status_code != 200:
+                self._raise_for_status(response)
+            batch = response.json()
+            if not isinstance(batch, list) or not batch:
+                break
+            issues.extend(batch)
+            if len(batch) < 100:
+                break
+        return issues
+
     # ----- internals -----
 
     async def _request(

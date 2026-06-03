@@ -3,13 +3,19 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Response, status
 from redis.asyncio import Redis
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config import settings
 from database import get_db, get_redis
 from middleware.auth import get_current_user
-from models import User, Workspace
-from schemas.github import GitHubExportRequest
+from models import IntegrationPushTask, User, Workspace
+from schemas.github import (
+    GitHubExportRequest,
+    PushStatusResponse,
+    SyncStateResponse,
+    TaskSyncState,
+)
 from schemas.integration import (
     GitHubExportResponse,
     IntegrationPushRead,
@@ -24,6 +30,7 @@ from schemas.workspace import (
     WorkspaceUpdate,
 )
 from services.coverage_utils import derive_coverage_summaries, derive_coverage_summary
+from services.integrations.push_repo import find_workspace_live_push
 from services.llm.provider_status import is_provider_configured
 from services.pipeline import github_export_service, pdf_export_service, spec_clarifier
 from services.pipeline.critic import AUDIT_EVENT_CRITIC_DISABLED
@@ -406,6 +413,127 @@ async def get_workspace_github_push(
         pushed_at=push.pushed_at,
         created_at=push.created_at,
     )
+
+
+# ---------------------------------------------------------------------------
+# GitHub bidirectional sync (Phase 21 — T-273). Owner-scoped; all GitHub I/O
+# runs on the worker (resync/backfill return 202). Routes:
+#   GET  /workspaces/{id}/sync          — live task-completion + drift
+#   POST /workspaces/{id}/sync/resync   — re-push changed tasks' issues (202)
+#   POST /workspaces/{id}/sync/backfill — recover missed events (202)
+# ---------------------------------------------------------------------------
+
+
+@router.get("/{id}/sync", response_model=SyncStateResponse)
+async def get_workspace_sync(
+    id: UUID,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> SyncStateResponse:
+    """Return the workspace's live GitHub task-completion + drift state.
+
+    ``out_of_sync`` is the persisted drift signal: re-finalising Tasks marks the
+    push ``stale`` (T-273 drift hook), which surfaces here. 404 when the
+    workspace is not owned by the caller or has no live push (never 403, so
+    workspace existence is not leaked).
+    """
+    await workspace_service.get(id, user.id, db)  # 404 if not owned
+    push = await find_workspace_live_push(db, id)
+    if push is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No GitHub push found for this workspace.",
+        )
+    tasks = list(
+        (
+            await db.execute(
+                select(IntegrationPushTask).where(
+                    IntegrationPushTask.push_id == push.id
+                )
+            )
+        ).scalars()
+    )
+    shipped = sum(1 for t in tasks if t.state == "done")
+    return SyncStateResponse(
+        push_id=push.id,
+        status=push.status,
+        out_of_sync=(push.status == "stale"),
+        shipped=shipped,
+        total=len(tasks),
+        tasks=[TaskSyncState.model_validate(t) for t in tasks],
+    )
+
+
+@router.post(
+    "/{id}/sync/resync",
+    response_model=PushStatusResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def resync_workspace(
+    id: UUID,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> PushStatusResponse:
+    """Re-sync the workspace's GitHub issues to the current spec (202).
+
+    Resets the live push to ``pending`` and enqueues ``export_push`` (keyed by
+    push_id), which idempotently updates each existing task's issue in place and
+    creates issues for any new tasks. Fails closed (503) if the queue is down.
+    """
+    await workspace_service.get(id, user.id, db)  # 404 if not owned
+    push = await find_workspace_live_push(db, id)
+    if push is None or push.repo_full_name is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No GitHub push to re-sync for this workspace.",
+        )
+    push.status = "pending"
+    await db.commit()
+    repo_name = push.repo_full_name.split("/")[-1]
+    try:
+        await enqueue(
+            "export_push", str(push.id), repo_name, "private", job_id=str(push.id)
+        )
+    except QueueUnavailableError as exc:
+        await github_export_service.mark_push_unstarted(db, push)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Background processing is unavailable; re-sync was not started.",
+        ) from exc
+    await db.refresh(push)
+    return PushStatusResponse.model_validate(push)
+
+
+@router.post(
+    "/{id}/sync/backfill",
+    response_model=PushStatusResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def backfill_workspace(
+    id: UUID,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> PushStatusResponse:
+    """Recover task states from GitHub's issues list (202).
+
+    Enqueues ``backfill_repo`` to reconcile closures/reopens missed while the
+    worker was down. Idempotent with the webhook reconcile path.
+    """
+    await workspace_service.get(id, user.id, db)  # 404 if not owned
+    push = await find_workspace_live_push(db, id)
+    if push is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No GitHub push to backfill for this workspace.",
+        )
+    try:
+        await enqueue("backfill_repo", str(push.id))
+    except QueueUnavailableError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Background processing is unavailable; backfill was not started.",
+        ) from exc
+    return PushStatusResponse.model_validate(push)
 
 
 # ---------------------------------------------------------------------------
