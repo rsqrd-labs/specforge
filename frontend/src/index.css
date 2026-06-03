@@ -7945,6 +7945,238 @@ button:disabled {
   margin-top: 10px;
 }
 
+/* ---------------------------------------------------------------------------
+ * GitHub task-completion panel (Phase 21 — T-275)
+ * Sibling of the coverage panels. The hero is a thin saffron progress fill;
+ * the fraction is secondary; lotus appears once, only on a merged-PR check.
+ * Banners are calm slate, never alarm-red.
+ * ------------------------------------------------------------------------- */
+
+.ws-sync-count {
+  flex: 0 0 auto;
+  font-size: 12px;
+  font-weight: 900;
+  letter-spacing: 0.01em;
+  color: var(--color-primary);
+  white-space: nowrap;
+}
+
+.ws-sync-count-sep {
+  color: var(--color-on-surface-variant);
+  font-weight: 700;
+  opacity: 0.75;
+}
+
+.ws-sync-progress {
+  position: relative;
+  height: 6px;
+  border-radius: 999px;
+  background: rgba(86, 94, 116, 0.14);
+  overflow: hidden;
+}
+
+.ws-sync-progress-fill {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(
+    90deg,
+    var(--color-primary),
+    var(--color-primary-container)
+  );
+  /* The one delight on the hero: the fill eases up when a task flips to done. */
+  transition: width 0.38s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+/* Every task shipped — a single restrained lotus accent on the full bar. */
+.ws-sync-progress.complete .ws-sync-progress-fill {
+  background: linear-gradient(
+    90deg,
+    var(--color-primary),
+    var(--color-secondary) 96%
+  );
+}
+
+.ws-sync-progress-caption {
+  margin: 7px 0 0;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--color-on-surface-variant);
+}
+
+/* --- calm banners (drift + disconnected) --- */
+.ws-sync-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+  padding: 8px 11px;
+  border-radius: 8px;
+  border: 1px solid rgba(86, 94, 116, 0.24);
+  background: rgba(86, 94, 116, 0.07);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.ws-sync-banner-icon {
+  display: inline-flex;
+  color: var(--color-tertiary);
+}
+
+.ws-sync-banner-text {
+  flex: 1 1 auto;
+  color: var(--color-on-surface-variant);
+}
+
+.ws-sync-banner-action {
+  flex: 0 0 auto;
+  border: none;
+  background: none;
+  padding: 0;
+  font: inherit;
+  font-weight: 800;
+  color: var(--color-primary);
+  cursor: pointer;
+  text-decoration: none;
+  transition: opacity 0.15s;
+}
+
+.ws-sync-banner-action:hover {
+  opacity: 0.78;
+}
+
+.ws-sync-banner-action:disabled {
+  color: var(--color-on-surface-variant);
+  cursor: default;
+  opacity: 0.7;
+}
+
+/* --- task rows --- */
+.ws-sync-task-list {
+  list-style: none;
+  margin: 12px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.ws-sync-task {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 6px 8px;
+  border-radius: 8px;
+}
+
+.ws-sync-check {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  color: rgba(86, 94, 116, 0.42);
+  transition: color 0.3s ease;
+}
+
+/* A shipped task: saffron check; lotus when closed via a merged PR. */
+.ws-sync-check.done {
+  color: var(--color-primary);
+}
+
+.ws-sync-check.done.via-pr {
+  color: var(--color-secondary);
+}
+
+.ws-sync-task-ref {
+  flex: 0 0 auto;
+  font-size: 12px;
+  font-weight: 800;
+  color: var(--color-on-surface);
+  font-variant-numeric: tabular-nums;
+}
+
+.ws-sync-task.open .ws-sync-task-ref {
+  color: var(--color-on-surface-variant);
+}
+
+.ws-sync-task-via {
+  flex: 0 0 auto;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--color-on-surface-variant);
+  opacity: 0.8;
+}
+
+.ws-sync-task-link {
+  margin-left: auto;
+  flex: 0 0 auto;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--color-tertiary);
+  text-decoration: none;
+  white-space: nowrap;
+  transition: color 0.15s;
+}
+
+.ws-sync-task-link:hover {
+  color: var(--color-primary);
+}
+
+/* The delight: a row that flips open→done between polls highlights once. */
+.ws-sync-task.just-shipped {
+  animation: ws-sync-flash 1.3s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+@keyframes ws-sync-flash {
+  0% {
+    background: rgba(255, 153, 51, 0.26);
+  }
+  100% {
+    background: transparent;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ws-sync-progress-fill {
+    transition: none;
+  }
+  .ws-sync-task.just-shipped {
+    animation: none;
+  }
+}
+
+/* --- first-load skeleton (two rows + a bar), never a bare spinner --- */
+.ws-sync-skeleton {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.ws-sync-skeleton-bar,
+.ws-sync-skeleton-row {
+  background: linear-gradient(
+    90deg,
+    rgba(86, 94, 116, 0.06),
+    rgba(86, 94, 116, 0.13),
+    rgba(86, 94, 116, 0.06)
+  );
+  background-size: 200% 100%;
+  border-radius: 8px;
+  animation: shimmer 1.4s linear infinite;
+}
+
+.ws-sync-skeleton-bar {
+  height: 6px;
+  border-radius: 999px;
+}
+
+.ws-sync-skeleton-row {
+  height: 22px;
+}
+
 .ws-validation-ok-chip {
   display: inline-flex;
   align-items: center;

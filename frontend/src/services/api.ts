@@ -19,6 +19,13 @@ import type {
   WorkspaceWithStages,
 } from "../types/workspace"
 import type {
+  GitHubExportMode,
+  Increment,
+  IncrementIdea,
+  InstallationList,
+  SyncState,
+} from "../types/github"
+import type {
   EvalResult,
   RefineResponse,
   Stage,
@@ -635,6 +642,11 @@ export interface GitHubIntegration {
 export interface GitHubExportRequest {
   repo_name: string
   visibility: "public" | "private"
+  // v2 (GitHub App) fields. Optional so the legacy Phase-13 modal still
+  // type-checks; the mode-aware modal (T-288) supplies both. The export request
+  // carries the export_mode union: "files_to_default" | "pr_with_tests".
+  installation_id?: string
+  export_mode?: GitHubExportMode
 }
 
 export interface GitHubExportResponse {
@@ -697,6 +709,145 @@ export async function getGitHubPush(
     }
     throw error
   }
+}
+
+// ---------------------------------------------------------------------------
+// GitHub living integration — App install, sync, increments (Phase 21 / T-275)
+// ---------------------------------------------------------------------------
+
+/**
+ * Return the GitHub App installation URL to start the install flow.
+ *
+ * The backend 503s when the App is not configured; that maps to `null` so the
+ * UI renders a clear "GitHub disabled" affordance instead of throwing.
+ */
+export async function getGitHubInstallUrl(): Promise<string | null> {
+  try {
+    const response = await api.get<{ url: string }>(
+      "/integrations/github/install",
+    )
+    return response.data.url
+  } catch (error) {
+    if (axios.isAxiosError(error) && error.response?.status === 503) {
+      return null
+    }
+    throw error
+  }
+}
+
+/** List the signed-in user's GitHub App installations + the v1→App flag. */
+export async function getGitHubInstallations(): Promise<InstallationList> {
+  // A user with no installation is a normal state, not an error.
+  try {
+    const response = await api.get<InstallationList>(
+      "/integrations/github/installations",
+    )
+    return response.data
+  } catch (error) {
+    if (axios.isAxiosError(error) && error.response?.status === 404) {
+      return { installations: [], on_legacy_oauth: false }
+    }
+    throw error
+  }
+}
+
+/**
+ * Fetch a workspace's live GitHub task-completion + drift state.
+ *
+ * Mirrors `getGitHubPush`: a 404 (never pushed, stale, or disabled) is a normal
+ * empty state, mapped to `null` so callers never have to catch — a stale or
+ * never-pushed workspace is normal, not an error.
+ */
+export async function getGitHubSync(
+  workspaceId: string,
+): Promise<SyncState | null> {
+  try {
+    const response = await api.get<SyncState>(`/workspaces/${workspaceId}/sync`)
+    return response.data
+  } catch (error) {
+    if (axios.isAxiosError(error) && error.response?.status === 404) {
+      return null
+    }
+    throw error
+  }
+}
+
+/** Re-sync the workspace's GitHub issues to the current spec (202). */
+export async function resyncWorkspace(
+  workspaceId: string,
+): Promise<IntegrationPushRead> {
+  const response = await api.post<IntegrationPushRead>(
+    `/workspaces/${workspaceId}/sync/resync`,
+  )
+  return response.data
+}
+
+/** Recover task states from GitHub's issues list — reconcile missed events (202). */
+export async function backfillWorkspace(
+  workspaceId: string,
+): Promise<IntegrationPushRead> {
+  const response = await api.post<IntegrationPushRead>(
+    `/workspaces/${workspaceId}/sync/backfill`,
+  )
+  return response.data
+}
+
+/** List the workspace's increment timeline (T-279/T-280 backend). */
+export async function listIncrements(
+  workspaceId: string,
+): Promise<Increment[]> {
+  try {
+    const response = await api.get<Increment[]>(
+      `/workspaces/${workspaceId}/increments`,
+    )
+    return response.data
+  } catch (error) {
+    if (axios.isAxiosError(error) && error.response?.status === 404) {
+      return []
+    }
+    throw error
+  }
+}
+
+/** Generate a new increment from a feature request as a delta vs. baseline. */
+export async function createIncrement(
+  workspaceId: string,
+  body: { title: string },
+): Promise<Increment> {
+  const response = await api.post<Increment>(
+    `/workspaces/${workspaceId}/increments`,
+    body,
+  )
+  return response.data
+}
+
+/** List the workspace's idea backlog (T-280 backend). */
+export async function listIdeas(
+  workspaceId: string,
+): Promise<IncrementIdea[]> {
+  try {
+    const response = await api.get<IncrementIdea[]>(
+      `/workspaces/${workspaceId}/ideas`,
+    )
+    return response.data
+  } catch (error) {
+    if (axios.isAxiosError(error) && error.response?.status === 404) {
+      return []
+    }
+    throw error
+  }
+}
+
+/** Capture a feature idea into the workspace's backlog. */
+export async function createIdea(
+  workspaceId: string,
+  body: { text: string },
+): Promise<IncrementIdea> {
+  const response = await api.post<IncrementIdea>(
+    `/workspaces/${workspaceId}/ideas`,
+    body,
+  )
+  return response.data
 }
 
 // ---------------------------------------------------------------------------

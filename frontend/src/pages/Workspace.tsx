@@ -17,7 +17,9 @@ import { StreamingOverlay } from "../components/workspace/StreamingOverlay"
 import { MarkdownRenderer } from "../components/workspace/MarkdownRenderer"
 import { ProblemStatementPanel } from "../components/workspace/ProblemStatementPanel"
 import { TaskValidationPanel } from "../components/workspace/TaskValidationPanel"
+import { TaskCompletionPanel } from "../components/workspace/TaskCompletionPanel"
 import { ExportGitHubModal } from "../components/workspace/ExportGitHubModal"
+import { useGitHubSync } from "../hooks/useGitHubSync"
 // ExportPDFButton — T-USE-08 contract; PDF export logic is inlined in handlePdfExport
 import type { } from "../components/workspace/ExportPDFButton"
 import { HarnessCoverageChip } from "../components/workspace/HarnessCoverageChip"
@@ -298,6 +300,10 @@ export default function Workspace() {
   const { start: startStream, isStreaming, error: streamError } = useStream(
     activeStage?.id ?? null,
   )
+
+  // Live GitHub task-completion + drift state (T-275). Only polls on the Tasks
+  // stage, where the completion panel is shown beside the coverage panels.
+  const githubSync = useGitHubSync(id, activeStage?.type === "tasks")
 
   // T-247 critic quality gate: findings surfaced when a generation is held back.
   const activeGate = activeStage ? qualityGateMap[activeStage.id] : undefined
@@ -1172,7 +1178,8 @@ export default function Workspace() {
   const showRightPanel =
     Boolean(diffResult) ||
     (activeStage.type === "harness" && evalResult !== null) ||
-    (activeStage.type === "tasks" && genuineGapIssues.length > 0)
+    (activeStage.type === "tasks" &&
+      (genuineGapIssues.length > 0 || githubSync.data !== null))
   const finalisedCount = stages.filter((stage) => stage.status === "finalised").length
   const readiness = stages.length === 0 ? 0 : Math.round((finalisedCount / stages.length) * 100)
   const currentStageIndex = STAGE_ORDER.indexOf(activeStage.type)
@@ -1821,6 +1828,20 @@ export default function Workspace() {
                         return h ? () => setActiveStageId(h.id) : undefined
                       })()}
                     />
+                    {/* Tasks-stage only — matches useGitHubSync's `enabled` so
+                        the panel never renders (and never sticks on its loading
+                        skeleton) on the harness stage that shares this aside. */}
+                    {activeStage.type === "tasks" && (
+                      <TaskCompletionPanel
+                        data={githubSync.data}
+                        repoFullName={githubSync.repoFullName}
+                        repoUrl={githubSync.repoUrl}
+                        connection={githubSync.connection}
+                        loading={githubSync.loading}
+                        resyncing={githubSync.resyncing}
+                        onResync={() => void githubSync.resync()}
+                      />
+                    )}
                   </>
                 )}
               </aside>

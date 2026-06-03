@@ -73,3 +73,75 @@ export function ShareIcon() {
     </svg>
   )
 }
+
+/**
+ * A task that has shipped — a checkmark inside a soft ring. The single
+ * celebratory glyph of the sync panel; tinted lotus when closed via a merged PR
+ * (see `.ws-sync-check.via-pr`), saffron otherwise. Drawn to match the existing
+ * 16-grid / 1.75 stroke, not borrowed from an icon set.
+ */
+export function ShippedCheckIcon() {
+  return (
+    <svg
+      viewBox="0 0 16 16"
+      width="14"
+      height="14"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.75"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <circle cx="8" cy="8" r="6.25" />
+      <polyline points="5,8.2 7.1,10.2 11,6" />
+    </svg>
+  )
+}
+
+/** A git branch glyph — two nodes on a trunk feeding a branch node. */
+export function BranchIcon() {
+  return (
+    <svg
+      viewBox="0 0 16 16"
+      width="14"
+      height="14"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.75"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <circle cx="4" cy="3.5" r="1.5" />
+      <circle cx="4" cy="12.5" r="1.5" />
+      <circle cx="12" cy="3.5" r="1.5" />
+      <line x1="4" y1="5" x2="4" y2="11" />
+      <path d="M12 5v1.5a3 3 0 0 1-3 3H4" />
+    </svg>
+  )
+}
+
+/**
+ * Drift — two diverging arrows. Reads as "these have moved apart", a calm
+ * informational note for the resync banner (slate, never alarm-red).
+ */
+export function DriftIcon() {
+  return (
+    <svg
+      viewBox="0 0 16 16"
+      width="14"
+      height="14"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.75"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M2.5 4.5h4l-1.4-1.4M2.5 4.5l1.4 1.4" />
+      <path d="M13.5 11.5h-4l1.4-1.4M13.5 11.5l-1.4 1.4" />
+      <line x1="3" y1="11.5" x2="13" y2="4.5" opacity="0.5" />
+    </svg>
+  )
+}
