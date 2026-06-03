@@ -227,6 +227,15 @@ GITHUB_WEBHOOK_FAILED_TOTAL = Counter(
     labelnames=["error_type"],
 )
 
+# Bidirectional-sync reconcile lag (Phase 21 — T-272): seconds from a webhook
+# delivery being received to the worker finishing its reconciliation. This is
+# the headline SLO for "closing an issue flips the task done in SpecForge".
+GITHUB_RECONCILE_LAG_SECONDS = Histogram(
+    "specforge_github_reconcile_lag_seconds",
+    "Seconds from webhook receipt to reconcile completion.",
+    buckets=(0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 300.0),
+)
+
 PIPELINE_UPSTREAM_SECTION_SKIPPED = Counter(
     "pipeline_upstream_section_skipped_total",
     "Count of upstream sections skipped during section-aware injection "

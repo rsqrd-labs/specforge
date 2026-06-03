@@ -16,11 +16,13 @@ literal; the enum is ``pending``/``completed``/``failed``/``stale``).
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from uuid import UUID
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from models.github_installation import GitHubInstallation
 from models.integration_push import IntegrationPush
 
 # The canonical "live push" predicate, mirroring the partial unique index
@@ -50,3 +52,36 @@ async def find_live_push(
         )
     )
     return result.scalar_one_or_none()
+
+
+async def find_live_pushes_for_event(
+    db: AsyncSession,
+    repo_id: int,
+    installation_id: int,
+) -> Sequence[IntegrationPush]:
+    """Return the live pushes a GitHub webhook delivery may mutate.
+
+    The confused-deputy guard (spec §12): a delivery for ``repo_id`` may only
+    touch pushes whose recorded :class:`GitHubInstallation` matches the
+    delivery's own ``installation.id`` (``installation_id`` here is GitHub's
+    numeric id from the payload). An event from install A can never reach a push
+    under install B, even for the same repo.
+
+    Unlike :func:`find_live_push`, this is **not** keyed on the full
+    ``(workspace_id, repo_id)`` unique tuple — two workspaces may export to the
+    same repo under the same installation — so it returns *all* matching live
+    pushes (zero ⇒ not ours, ignore). Callers iterate; never assume one row.
+    """
+    result = await db.execute(
+        select(IntegrationPush)
+        .join(
+            GitHubInstallation,
+            IntegrationPush.installation_id == GitHubInstallation.id,
+        )
+        .where(
+            IntegrationPush.repo_id == repo_id,
+            IntegrationPush.status != _NON_FAILED_STATUS,
+            GitHubInstallation.installation_id == installation_id,
+        )
+    )
+    return result.scalars().all()
