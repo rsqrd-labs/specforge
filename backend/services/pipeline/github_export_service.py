@@ -61,7 +61,7 @@ from models import (
     UserIntegration,
     Workspace,
 )
-from services.integrations import pr_export_builder
+from services.integrations import agents_md_builder, pr_export_builder
 from services.integrations.github_api_client import (
     GitHubAPIClient,
     GitHubAPIError,
@@ -509,6 +509,7 @@ async def _write_files_to_default(
     for path, content in files_to_push.items():
         sha = await client.get_file_sha(repo, path)
         await client.upsert_file(repo, path, content, sha, commit_message)
+    await _push_agents_md(client, repo, stages)
     await _sync_issues(db, client, repo, push, tasks)
 
 
@@ -541,6 +542,8 @@ async def _write_pr_with_tests(
     for path, content in docs.items():
         sha = await client.get_file_sha(repo, path)
         await client.upsert_file(repo, path, content, sha, docs_message)
+    # Repo-level agent context on the default branch alongside the docs.
+    await _push_agents_md(client, repo, stages)
 
     # 2. Issues (records issue numbers used for the PR's Closes #N links).
     issue_numbers = await _sync_issues(db, client, repo, push, tasks)
@@ -596,12 +599,19 @@ async def _sync_issues(
     issue_numbers: dict[str, int] = dict(existing)
     for parsed in tasks:
         existing_number = existing.get(parsed.ref)
+        # Agent-ready body + labels (T-277): the issue is an optimal agent prompt.
         if existing_number is not None:
             await client.update_issue(
-                repo, existing_number, parsed.title, parsed.body_md
+                repo,
+                existing_number,
+                parsed.title,
+                parsed.agent_body_md,
+                labels=parsed.labels,
             )
         else:
-            number = await client.create_issue(repo, parsed.title, parsed.body_md)
+            number = await client.create_issue(
+                repo, parsed.title, parsed.agent_body_md, labels=parsed.labels
+            )
             db.add(
                 IntegrationPushTask(
                     push_id=push.id,
@@ -612,6 +622,37 @@ async def _sync_issues(
             await db.commit()
             issue_numbers[parsed.ref] = number
     return issue_numbers
+
+
+async def _push_agents_md(
+    client: GitHubAPIClient,
+    repo: str,
+    stages: dict[str, Stage],
+    *,
+    branch: str | None = None,
+) -> None:
+    """Write a non-clobbering ``AGENTS.md`` to the repo (T-277).
+
+    Reads any existing file first so a hand-written ``AGENTS.md`` is preserved —
+    only SpecForge's delimited managed block is (re)generated. Deterministic
+    output means a re-sync with unchanged stages produces an identical file (no
+    spurious commit).
+    """
+    stage_md = {stage_type: (stages[stage_type].content or "") for stage_type in stages}
+    existing = await client.get_file_content(repo, "AGENTS.md", ref=branch)
+    existing_text = existing[0] if existing else None
+    existing_sha = existing[1] if existing else None
+    content = agents_md_builder.build_agents_md(stage_md, existing=existing_text)
+    if existing is not None and content == existing_text:
+        return  # idempotent — nothing changed, skip the write (no empty commit)
+    await client.upsert_file(
+        repo,
+        "AGENTS.md",
+        content,
+        existing_sha,
+        "docs: SpecForge agent context",
+        branch=branch,
+    )
 
 
 # ---------------------------------------------------------------------------

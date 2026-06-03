@@ -281,6 +281,38 @@ class GitHubAPIClient:
 
     # ----- contents (files) -----
 
+    async def get_file_content(
+        self, repo: str, path: str, *, ref: str | None = None
+    ) -> tuple[str, str] | None:
+        """GET a file's decoded text + blob SHA, or ``None`` on 404 (T-277).
+
+        Used by the non-clobbering ``AGENTS.md`` write to read the current file
+        before regenerating its managed block. GitHub returns base64 with
+        embedded newlines, so the payload is whitespace-stripped before decoding.
+        """
+        url = f"/repos/{repo}/contents/{_quote_path(path)}"
+        if ref is not None:
+            url += f"?ref={quote(ref, safe='')}"
+        response = await self._request("GET", url)
+        if response.status_code == 404:
+            return None
+        if response.status_code == 200:
+            body = response.json()
+            if not isinstance(body, dict):
+                raise GitHubAPIError(
+                    response.status_code, f"bad contents body for {path}"
+                )
+            sha = body.get("sha")
+            encoded = body.get("content")
+            if not isinstance(sha, str) or not isinstance(encoded, str):
+                raise GitHubAPIError(
+                    response.status_code, f"contents response missing fields for {path}"
+                )
+            text = base64.b64decode("".join(encoded.split())).decode("utf-8")
+            return text, sha
+        self._raise_for_status(response)
+        return None  # unreachable
+
     async def get_file_sha(
         self, repo: str, path: str, *, ref: str | None = None
     ) -> str | None:
@@ -466,12 +498,27 @@ class GitHubAPIClient:
 
     # ----- issues -----
 
-    async def create_issue(self, repo: str, title: str, body: str) -> int:
-        """POST /repos/{owner}/{repo}/issues. Returns the new issue number."""
+    async def create_issue(
+        self,
+        repo: str,
+        title: str,
+        body: str,
+        *,
+        labels: tuple[str, ...] | list[str] | None = None,
+    ) -> int:
+        """POST /repos/{owner}/{repo}/issues. Returns the new issue number.
+
+        ``labels`` (T-277) are attached on creation; GitHub auto-creates any
+        label that does not yet exist on the repo, so no separate ensure step is
+        needed.
+        """
+        payload: dict[str, Any] = {"title": title, "body": body}
+        if labels:
+            payload["labels"] = list(labels)
         response = await self._request(
             "POST",
             f"/repos/{repo}/issues",
-            json={"title": title, "body": body},
+            json=payload,
         )
         if response.status_code == 201:
             data = response.json()
@@ -492,12 +539,17 @@ class GitHubAPIClient:
         number: int,
         title: str,
         body: str,
+        *,
+        labels: tuple[str, ...] | list[str] | None = None,
     ) -> None:
         """PATCH /repos/{owner}/{repo}/issues/{number}."""
+        payload: dict[str, Any] = {"title": title, "body": body}
+        if labels:
+            payload["labels"] = list(labels)
         response = await self._request(
             "PATCH",
             f"/repos/{repo}/issues/{number}",
-            json={"title": title, "body": body},
+            json=payload,
         )
         if response.status_code == 200:
             return

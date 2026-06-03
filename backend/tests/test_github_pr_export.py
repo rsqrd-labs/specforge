@@ -334,17 +334,24 @@ class _PRStubClient:
     ) -> str | None:
         return self.shas.get((path, ref) if ref else path)  # type: ignore[arg-type]
 
+    async def get_file_content(
+        self, repo: str, path: str, *, ref: str | None = None
+    ) -> tuple[str, str] | None:
+        return None  # AGENTS.md does not exist yet in these tests
+
     async def upsert_file(
         self, repo, path, content, sha, commit_message, *, branch=None
     ) -> None:
         self.upserts.append((path, branch))
 
-    async def create_issue(self, repo: str, title: str, body: str) -> int:
+    async def create_issue(
+        self, repo: str, title: str, body: str, *, labels=None
+    ) -> int:
         self.issues_created.append(title)
         self._issue_counter += 1
         return self._issue_counter
 
-    async def update_issue(self, repo, number, title, body) -> None:
+    async def update_issue(self, repo, number, title, body, *, labels=None) -> None:
         self.issues_updated.append(number)
 
     async def get_ref(self, repo: str, ref: str) -> str:

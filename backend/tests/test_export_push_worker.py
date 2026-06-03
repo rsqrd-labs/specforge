@@ -81,20 +81,38 @@ class _StubClient:
             "id": 556677,
         }
 
-    async def get_file_sha(self, repo: str, path: str) -> str | None:
+    async def get_file_sha(
+        self, repo: str, path: str, *, ref: str | None = None
+    ) -> str | None:
         return self.shas.get(path)
 
+    async def get_file_content(
+        self, repo: str, path: str, *, ref: str | None = None
+    ) -> tuple[str, str] | None:
+        return None  # AGENTS.md does not exist yet in these tests
+
     async def upsert_file(
-        self, repo: str, path: str, content: str, sha: str | None, commit_message: str
+        self,
+        repo: str,
+        path: str,
+        content: str,
+        sha: str | None,
+        commit_message: str,
+        *,
+        branch: str | None = None,
     ) -> None:
         self.upserted_files.append((repo, path, sha))
 
-    async def create_issue(self, repo: str, title: str, body: str) -> int:
+    async def create_issue(
+        self, repo: str, title: str, body: str, *, labels=None
+    ) -> int:
         self.issues_created.append((title, body))
         self._issue_counter += 1
         return self._issue_counter
 
-    async def update_issue(self, repo: str, number: int, title: str, body: str) -> None:
+    async def update_issue(
+        self, repo: str, number: int, title: str, body: str, *, labels=None
+    ) -> None:
         self.issues_updated.append((number, title))
 
 
