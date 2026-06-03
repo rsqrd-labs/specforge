@@ -43,6 +43,7 @@ Idempotent re-export:
 from __future__ import annotations
 
 import logging
+from contextlib import nullcontext
 from datetime import UTC, datetime
 from uuid import UUID
 
@@ -67,11 +68,17 @@ from services.integrations.github_api_client import (
     GitHubRateLimitError,
     GitHubRepoExistsError,
     GitHubTokenExpiredError,
+    GitHubUnavailableError,
     make_app_github_client,
     make_github_client,
     make_shared_async_client,
 )
 from services.integrations.github_app_auth import make_token_provider
+from services.integrations.github_governor import (
+    GitHubThrottledError,
+    InstallationRateGovernor,
+    make_governor,
+)
 from services.integrations.task_parser import parse_tasks
 from services.pipeline.export_service import ExportNotReadyError, parse_harness_files
 from services.security import key_vault
@@ -323,21 +330,30 @@ async def run_export_push(
     source_version_id = await _resolve_source_stage_version_id(db, stages["tasks"])
 
     if client is not None:
+        # Injected client (tests): no governor — serialization/budget are no-ops.
         return await _drive_app_export(
             db=db,
             workspace=workspace,
             stages=stages,
             push=push,
             client=client,
+            governor=None,
             repo_name=repo_name,
             visibility=visibility,
             source_version_id=source_version_id,
         )
 
     async with make_shared_async_client() as http:
-        token_provider = make_token_provider(get_shared_redis(), http)
+        redis = get_shared_redis()
+        token_provider = make_token_provider(redis, http)
+        # Per-installation governor (T-274): budgets every call against GitHub's
+        # primary/secondary limits and serializes this repo's content writes.
+        governor = make_governor(installation.installation_id, redis)
         built = make_app_github_client(
-            token_provider, installation.installation_id, http
+            token_provider,
+            installation.installation_id,
+            http,
+            governor=governor,
         )
         return await _drive_app_export(
             db=db,
@@ -345,6 +361,7 @@ async def run_export_push(
             stages=stages,
             push=push,
             client=built,
+            governor=governor,
             repo_name=repo_name,
             visibility=visibility,
             source_version_id=source_version_id,
@@ -358,6 +375,7 @@ async def _drive_app_export(
     stages: dict[str, Stage],
     push: IntegrationPush,
     client: GitHubAPIClient,
+    governor: InstallationRateGovernor | None,
     repo_name: str,
     visibility: str,
     source_version_id: UUID | None,
@@ -369,12 +387,20 @@ async def _drive_app_export(
             stages=stages,
             push=push,
             client=client,
+            governor=governor,
             repo_name=repo_name,
             visibility=visibility,
             source_version_id=source_version_id,
         )
+    except (GitHubThrottledError, GitHubUnavailableError):
+        # Backpressure (T-274) and a tripped circuit breaker are NOT failures:
+        # the push stays live (non-'failed', so find_live_push still sees it) and
+        # the worker requeues — throttle defers off the try budget, breaker-open
+        # surfaces "sync paused" and retries. Marking 'failed' here would wrongly
+        # drop the live push and skip the resume.
+        raise
     except Exception:
-        # Any failure marks the push failed and re-raises so the worker base
+        # A genuine failure marks the push failed and re-raises so the worker base
         # contract can retry/backoff and ultimately dead-letter. v2 status is
         # 'failed' so find_live_push (status <> 'failed') excludes it.
         await _mark_push_failed(db, push, status="failed")
@@ -388,12 +414,15 @@ async def _run_app_export(
     stages: dict[str, Stage],
     push: IntegrationPush,
     client: GitHubAPIClient,
+    governor: InstallationRateGovernor | None,
     repo_name: str,
     visibility: str,
     source_version_id: UUID | None,
 ) -> IntegrationPush:
     # Step 1 — create repo (first run only). Resume skips this when the repo is
-    # already recorded, so a re-run never creates a second repo.
+    # already recorded, so a re-run never creates a second repo. A brand-new repo
+    # has no concurrent writer yet, so this single create runs outside the
+    # per-repo lock (which keys on repo_id, only known after this step).
     if push.repo_full_name is None:
         repo_data = await client.create_repo(
             repo_name, private=(visibility == "private")
@@ -413,36 +442,45 @@ async def _run_app_export(
 
     assert push.repo_full_name is not None  # nosec B101 — set by the branch above
 
-    # Step 2 — push files (idempotent: upsert with the current blob SHA).
-    files_to_push = _build_file_map(stages)
-    commit_message = f"chore: SpecForge export — {workspace.name}"
-    for path, content in files_to_push.items():
-        sha = await client.get_file_sha(push.repo_full_name, path)
-        await client.upsert_file(
-            push.repo_full_name, path, content, sha, commit_message
-        )
+    # Steps 2–3 — all content writes to this repo are serialized under a
+    # per-repo_id lock (T-274) so two concurrent jobs cannot race on the blob SHA
+    # (stale-SHA 409) or trip GitHub's secondary abuse-detection on one repo.
+    lock = (
+        governor.repo_write_lock(push.repo_id)
+        if governor is not None
+        else nullcontext()
+    )
+    async with lock:
+        # Step 2 — push files (idempotent: upsert with the current blob SHA).
+        files_to_push = _build_file_map(stages)
+        commit_message = f"chore: SpecForge export — {workspace.name}"
+        for path, content in files_to_push.items():
+            sha = await client.get_file_sha(push.repo_full_name, path)
+            await client.upsert_file(
+                push.repo_full_name, path, content, sha, commit_message
+            )
 
-    # Step 3 — create/update issues sequentially, committing each new issue so a
-    # mid-run rate-limit resumes without recreating issues 1..N-1.
-    existing_tasks = await _load_existing_push_tasks(db, push.id)
-    for parsed in parse_tasks(stages["tasks"].content or ""):
-        existing_number = existing_tasks.get(parsed.ref)
-        if existing_number is not None:
-            await client.update_issue(
-                push.repo_full_name, existing_number, parsed.title, parsed.body_md
-            )
-        else:
-            number = await client.create_issue(
-                push.repo_full_name, parsed.title, parsed.body_md
-            )
-            db.add(
-                IntegrationPushTask(
-                    push_id=push.id,
-                    task_ref=parsed.ref,
-                    external_issue_number=number,
+        # Step 3 — create/update issues sequentially, committing each new issue so
+        # a mid-run rate-limit resumes without recreating issues 1..N-1.
+        existing_tasks = await _load_existing_push_tasks(db, push.id)
+        for parsed in parse_tasks(stages["tasks"].content or ""):
+            existing_number = existing_tasks.get(parsed.ref)
+            if existing_number is not None:
+                await client.update_issue(
+                    push.repo_full_name, existing_number, parsed.title, parsed.body_md
                 )
-            )
-            await db.commit()
+            else:
+                number = await client.create_issue(
+                    push.repo_full_name, parsed.title, parsed.body_md
+                )
+                db.add(
+                    IntegrationPushTask(
+                        push_id=push.id,
+                        task_ref=parsed.ref,
+                        external_issue_number=number,
+                    )
+                )
+                await db.commit()
 
     # Step 4 — finalise. Persist the three loop-critical fields and complete.
     push.source_stage_version_id = source_version_id

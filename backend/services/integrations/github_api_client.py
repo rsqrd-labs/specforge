@@ -109,6 +109,20 @@ class InstallationTokenSource(Protocol):
     async def refresh(self, installation_id: int) -> str: ...
 
 
+class RateGovernor(Protocol):
+    """Structural type for the T-274 per-installation rate governor.
+
+    Decouples this module from ``github_governor`` (scope discipline). When a
+    governor is supplied, ``acquire`` reserves budget before each request and
+    ``observe`` reads the rate-limit headers off each response — either may raise
+    ``GitHubThrottledError`` to requeue the worker job on backpressure.
+    """
+
+    async def acquire(self, *, write: bool) -> None: ...
+
+    async def observe(self, response: httpx.Response) -> None: ...
+
+
 class GitHubCircuitBreaker:
     """Per-client circuit breaker following the T-217 failure-window pattern.
 
@@ -198,6 +212,7 @@ class GitHubAPIClient:
         token_provider: InstallationTokenSource | None = None,
         installation_id: int | None = None,
         breaker: GitHubCircuitBreaker | None = None,
+        governor: RateGovernor | None = None,
     ) -> None:
         if token is not None and token_provider is not None:
             raise ValueError(
@@ -219,6 +234,7 @@ class GitHubAPIClient:
         self._installation_id = installation_id
         self._client = client
         self._breaker = breaker if breaker is not None else GitHubCircuitBreaker()
+        self._governor = governor
 
     # ----- repo -----
 
@@ -405,6 +421,13 @@ class GitHubAPIClient:
         # or network call, so a degraded GitHub is not hammered.
         self._breaker.before_request()
 
+        # Governor budget reservation (T-274): consume a primary token for every
+        # request and a secondary token for content-creating writes. Exhaustion
+        # raises GitHubThrottledError → the worker requeues the job (no token is
+        # spent and no GitHub call is made).
+        if self._governor is not None:
+            await self._governor.acquire(write=_is_write_method(method))
+
         token = await self._resolve_token()
         url = f"{GITHUB_API_BASE}{path}"
         headers = {
@@ -438,6 +461,14 @@ class GitHubAPIClient:
             raise GitHubTokenExpiredError(
                 "GitHub returned 401; the token is no longer valid"
             )
+
+        # Governor observation (T-274) runs BEFORE breaker accounting so a plain
+        # rate-limit 429/403 requeues the job as backpressure rather than tripping
+        # the breaker into a false "GitHub unavailable" state. It realigns the
+        # budget to GitHub's reported remaining on a healthy response and raises
+        # GitHubThrottledError on a rate-limit response.
+        if self._governor is not None:
+            await self._governor.observe(response)
 
         # Degraded-GitHub signals trip the breaker; the response is still
         # returned so the calling method maps it to its typed error.
@@ -490,17 +521,21 @@ def make_app_github_client(
     client: httpx.AsyncClient,
     *,
     breaker: GitHubCircuitBreaker | None = None,
+    governor: RateGovernor | None = None,
 ) -> GitHubAPIClient:
     """Factory for the GitHub App path: per-call installation tokens (T-268).
 
     The worker (T-269+) builds one client per export job; the token is resolved
     fresh on each request from ``token_provider`` and re-minted once on a 401.
+    When a per-installation ``governor`` (T-274) is supplied, every call is
+    budgeted and every response is observed for rate-limit headers.
     """
     return GitHubAPIClient(
         client=client,
         token_provider=token_provider,
         installation_id=installation_id,
         breaker=breaker,
+        governor=governor,
     )
 
 
@@ -518,6 +553,11 @@ def make_shared_async_client() -> httpx.AsyncClient:
 # ---------------------------------------------------------------------------
 # Module helpers
 # ---------------------------------------------------------------------------
+
+
+def _is_write_method(method: str) -> bool:
+    """True for content-creating verbs that count against the secondary limit."""
+    return method.upper() in {"POST", "PUT", "PATCH", "DELETE"}
 
 
 def _is_already_exists(response: httpx.Response) -> bool:

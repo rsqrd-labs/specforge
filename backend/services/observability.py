@@ -201,6 +201,18 @@ GITHUB_QUEUE_DEPTH = Gauge(
     "specforge_github_queue_depth",
     "Approximate number of GitHub worker jobs currently queued/in-flight.",
 )
+# Per-installation rate governor (Phase 21 — T-274). A throttle is healthy
+# backpressure (GitHub 403/429 or local token-bucket exhaustion), distinct from a
+# job failure: the job is requeued off the dead-letter try budget. The rate of
+# throttles by reason is the signal that an installation is pushing GitHub's
+# limits and may need write batching.
+GITHUB_THROTTLED_TOTAL = Counter(
+    "specforge_github_throttled_total",
+    "GitHub worker jobs requeued by the per-installation rate governor "
+    "(backpressure, not failure), labelled by job name and throttle reason "
+    "(primary_limit, secondary_limit, repo_contended).",
+    labelnames=["job", "reason"],
+)
 
 # Inbound webhook ingest metrics (Phase 21 — T-271). received/verified track the
 # HMAC gate; deduped counts retried deliveries skipped idempotently; failed is
