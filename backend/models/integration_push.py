@@ -91,10 +91,11 @@ class IntegrationPush(Base):
         ForeignKey("stage_versions.id"),
         nullable=True,
     )
-    # The increment this push belongs to. FK target (increments.id) added in
-    # migration 0017 (T-278); kept a plain column here until then.
+    # The increment this push belongs to. FK target (increments.id) wired in
+    # migration 0017 (T-278); SET NULL so a push survives an increment delete.
     increment_id: Mapped[PythonUUID | None] = mapped_column(
         UUID(as_uuid=True),
+        ForeignKey("increments.id", ondelete="SET NULL"),
         nullable=True,
     )
     status: Mapped[Literal["pending", "completed", "failed", "stale"]] = mapped_column(

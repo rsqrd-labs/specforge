@@ -51,9 +51,10 @@ class IntegrationPushTask(Base):
     task_ref: Mapped[str] = mapped_column(Text, nullable=False)
     external_issue_number: Mapped[int] = mapped_column(Integer, nullable=False)
     # The increment that introduced/last changed this task. FK target
-    # (increments.id) added in migration 0017 (T-278); plain column until then.
+    # (increments.id) wired in migration 0017 (T-278); SET NULL on increment delete.
     increment_id: Mapped[PythonUUID | None] = mapped_column(
         UUID(as_uuid=True),
+        ForeignKey("increments.id", ondelete="SET NULL"),
         nullable=True,
     )
     state: Mapped[Literal["open", "done"]] = mapped_column(
