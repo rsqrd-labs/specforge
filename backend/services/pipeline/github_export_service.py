@@ -61,6 +61,7 @@ from models import (
     UserIntegration,
     Workspace,
 )
+from services.integrations import pr_export_builder
 from services.integrations.github_api_client import (
     GitHubAPIClient,
     GitHubAPIError,
@@ -79,7 +80,7 @@ from services.integrations.github_governor import (
     InstallationRateGovernor,
     make_governor,
 )
-from services.integrations.task_parser import parse_tasks
+from services.integrations.task_parser import ParsedTask, parse_tasks
 from services.pipeline.export_service import ExportNotReadyError, parse_harness_files
 from services.security import key_vault
 
@@ -88,6 +89,14 @@ logger = logging.getLogger(__name__)
 GITHUB_PROVIDER = "github"
 _STAGE_FILES = {"spec": "SPEC.md", "plan": "PLAN.md", "tasks": "TASKS.md"}
 _HTTP_TIMEOUT_SECONDS = 30.0
+
+# PR-mode (T-276) constants. A new repo is created with no commits, so its
+# default branch only exists after the first push; ``create_repo`` makes a
+# repo whose default branch is ``main``. The increment branch name is
+# deterministic so a resumed export reuses the same branch (create → 422 no-op)
+# instead of opening a second PR.
+_DEFAULT_BRANCH = "main"
+_INCREMENT_BRANCH = "specforge/inc-1"
 
 # Type alias for a GitHubAPIClient factory. Tests inject a stub here so they
 # do not need to construct an httpx.AsyncClient.
@@ -444,43 +453,34 @@ async def _run_app_export(
 
     # Steps 2–3 — all content writes to this repo are serialized under a
     # per-repo_id lock (T-274) so two concurrent jobs cannot race on the blob SHA
-    # (stale-SHA 409) or trip GitHub's secondary abuse-detection on one repo.
+    # (stale-SHA 409) or trip GitHub's secondary abuse-detection on one repo. PR
+    # mode dispatches *inside* this wrapped + locked path so it inherits the
+    # T-274 throttle/breaker handling and the serialization for free.
     lock = (
         governor.repo_write_lock(push.repo_id)
         if governor is not None
         else nullcontext()
     )
+    tasks = parse_tasks(stages["tasks"].content or "")
     async with lock:
-        # Step 2 — push files (idempotent: upsert with the current blob SHA).
-        files_to_push = _build_file_map(stages)
-        commit_message = f"chore: SpecForge export — {workspace.name}"
-        for path, content in files_to_push.items():
-            sha = await client.get_file_sha(push.repo_full_name, path)
-            await client.upsert_file(
-                push.repo_full_name, path, content, sha, commit_message
+        if push.export_mode == "pr_with_tests":
+            await _write_pr_with_tests(
+                db=db,
+                client=client,
+                push=push,
+                workspace=workspace,
+                stages=stages,
+                tasks=tasks,
             )
-
-        # Step 3 — create/update issues sequentially, committing each new issue so
-        # a mid-run rate-limit resumes without recreating issues 1..N-1.
-        existing_tasks = await _load_existing_push_tasks(db, push.id)
-        for parsed in parse_tasks(stages["tasks"].content or ""):
-            existing_number = existing_tasks.get(parsed.ref)
-            if existing_number is not None:
-                await client.update_issue(
-                    push.repo_full_name, existing_number, parsed.title, parsed.body_md
-                )
-            else:
-                number = await client.create_issue(
-                    push.repo_full_name, parsed.title, parsed.body_md
-                )
-                db.add(
-                    IntegrationPushTask(
-                        push_id=push.id,
-                        task_ref=parsed.ref,
-                        external_issue_number=number,
-                    )
-                )
-                await db.commit()
+        else:
+            await _write_files_to_default(
+                db=db,
+                client=client,
+                push=push,
+                workspace=workspace,
+                stages=stages,
+                tasks=tasks,
+            )
 
     # Step 4 — finalise. Persist the three loop-critical fields and complete.
     push.source_stage_version_id = source_version_id
@@ -490,6 +490,128 @@ async def _run_app_export(
     await db.refresh(push)
     push.issue_count = await _count_issues(db, push.id)  # type: ignore[attr-defined]
     return push
+
+
+async def _write_files_to_default(
+    *,
+    db: AsyncSession,
+    client: GitHubAPIClient,
+    push: IntegrationPush,
+    workspace: Workspace,
+    stages: dict[str, Stage],
+    tasks: list[ParsedTask],
+) -> None:
+    """Phase-13 export: push every file to the default branch, create issues."""
+    assert push.repo_full_name is not None  # nosec B101
+    repo = push.repo_full_name
+    files_to_push = _build_file_map(stages)
+    commit_message = f"chore: SpecForge export — {workspace.name}"
+    for path, content in files_to_push.items():
+        sha = await client.get_file_sha(repo, path)
+        await client.upsert_file(repo, path, content, sha, commit_message)
+    await _sync_issues(db, client, repo, push, tasks)
+
+
+async def _write_pr_with_tests(
+    *,
+    db: AsyncSession,
+    client: GitHubAPIClient,
+    push: IntegrationPush,
+    workspace: Workspace,
+    stages: dict[str, Stage],
+    tasks: list[ParsedTask],
+) -> None:
+    """Open the Harness stage as an executable pull request (T-276).
+
+    Docs (SPEC/PLAN/TASKS) land on the default branch as the base; the harness
+    contracts, the CI workflow, and one red stub per task land on a deterministic
+    increment branch; a single PR links the issues via ``Closes #N``. Every step
+    is idempotent so a resumed export updates in place and never duplicates the
+    branch or the PR.
+    """
+    assert push.repo_full_name is not None  # nosec B101
+    repo = push.repo_full_name
+
+    # 1. Docs → default branch (establishes `main` on a fresh, empty repo).
+    docs = {
+        filename: stages[stage_type].content or ""
+        for stage_type, filename in _STAGE_FILES.items()
+    }
+    docs_message = f"docs: SpecForge spec — {workspace.name}"
+    for path, content in docs.items():
+        sha = await client.get_file_sha(repo, path)
+        await client.upsert_file(repo, path, content, sha, docs_message)
+
+    # 2. Issues (records issue numbers used for the PR's Closes #N links).
+    issue_numbers = await _sync_issues(db, client, repo, push, tasks)
+
+    # 3. Branch off the default branch base. Deterministic name + 422-tolerant
+    #    create → a resumed export reuses the same branch instead of failing.
+    if push.branch_name is None:
+        push.branch_name = _INCREMENT_BRANCH
+    base_sha = await client.get_ref(repo, f"heads/{_DEFAULT_BRANCH}")
+    await client.create_branch(repo, push.branch_name, base_sha)
+    await db.commit()
+
+    # 4. Harness contracts + CI workflow + per-task red stubs → the branch.
+    harness_files = parse_harness_files(stages["harness"].content or "")
+    stacks = pr_export_builder.detect_stacks(
+        stages["plan"].content or "", harness_files
+    )
+    scaffold = pr_export_builder.build_scaffold(
+        harness_files=harness_files, tasks=tasks, stacks=stacks
+    )
+    scaffold_message = f"test: SpecForge harness — {workspace.name}"
+    for path, content in scaffold.items():
+        sha = await client.get_file_sha(repo, path, ref=push.branch_name)
+        await client.upsert_file(
+            repo, path, content, sha, scaffold_message, branch=push.branch_name
+        )
+
+    # 5. One PR, reused on re-export (persisted pr_number → never duplicated).
+    if push.pr_number is None:
+        body = pr_export_builder.build_pr_body(
+            tasks=tasks, issue_numbers=issue_numbers, stacks=stacks
+        )
+        title = f"SpecForge harness — {workspace.name}"
+        push.pr_number = await client.create_pull_request(
+            repo, head=push.branch_name, base=_DEFAULT_BRANCH, title=title, body=body
+        )
+        await db.commit()
+
+
+async def _sync_issues(
+    db: AsyncSession,
+    client: GitHubAPIClient,
+    repo: str,
+    push: IntegrationPush,
+    tasks: list[ParsedTask],
+) -> dict[str, int]:
+    """Create/update one issue per task; return the ``{task_ref: issue#}`` map.
+
+    Each new issue is committed immediately so a mid-run rate-limit resumes
+    without recreating issues 1..N-1.
+    """
+    existing = await _load_existing_push_tasks(db, push.id)
+    issue_numbers: dict[str, int] = dict(existing)
+    for parsed in tasks:
+        existing_number = existing.get(parsed.ref)
+        if existing_number is not None:
+            await client.update_issue(
+                repo, existing_number, parsed.title, parsed.body_md
+            )
+        else:
+            number = await client.create_issue(repo, parsed.title, parsed.body_md)
+            db.add(
+                IntegrationPushTask(
+                    push_id=push.id,
+                    task_ref=parsed.ref,
+                    external_issue_number=number,
+                )
+            )
+            await db.commit()
+            issue_numbers[parsed.ref] = number
+    return issue_numbers
 
 
 # ---------------------------------------------------------------------------

@@ -32,6 +32,7 @@ import base64
 import logging
 import time
 from typing import Any, Protocol
+from urllib.parse import quote
 
 import httpx
 
@@ -39,6 +40,10 @@ logger = logging.getLogger(__name__)
 
 GITHUB_API_BASE = "https://api.github.com"
 _GITHUB_ACCEPT = "application/vnd.github+json"
+
+# Bounded retries for a stale-SHA 409 on a content write (T-276): refetch the
+# current SHA and retry, but never loop forever on a persistent conflict.
+_UPSERT_MAX_ATTEMPTS = 3
 
 # Bounded timeouts for GitHub REST calls. Unlike the LLM adapters (read=300s for
 # streaming), GitHub calls are short request/response round-trips, so the read
@@ -72,6 +77,17 @@ class GitHubTokenExpiredError(Exception):
 
 class GitHubRateLimitError(Exception):
     """GitHub returned 429 or a rate-limit primary/secondary signal."""
+
+
+class GitHubWorkflowsPermissionError(Exception):
+    """A write to ``.github/workflows/*`` was refused with 403 (T-276).
+
+    GitHub rejects a CI-workflow write when the App installation lacks the
+    ``Workflows: write`` permission. This is a distinct, actionable condition
+    (re-approve the App's permissions) — not a generic API error and not a
+    rate-limit — so PR-mode export surfaces it as such rather than dead-lettering
+    with an opaque 403.
+    """
 
 
 class GitHubUnavailableError(Exception):
@@ -265,15 +281,19 @@ class GitHubAPIClient:
 
     # ----- contents (files) -----
 
-    async def get_file_sha(self, repo: str, path: str) -> str | None:
+    async def get_file_sha(
+        self, repo: str, path: str, *, ref: str | None = None
+    ) -> str | None:
         """GET /repos/{owner}/{repo}/contents/{path}.
 
-        Returns the blob SHA if the file exists, or ``None`` on 404.
+        Returns the blob SHA if the file exists, or ``None`` on 404. ``ref``
+        (a branch/tag/SHA) reads the file on that branch — required by PR mode so
+        the SHA matches the branch being written, not the default branch.
         """
-        response = await self._request(
-            "GET",
-            f"/repos/{repo}/contents/{_quote_path(path)}",
-        )
+        url = f"/repos/{repo}/contents/{_quote_path(path)}"
+        if ref is not None:
+            url += f"?ref={quote(ref, safe='')}"
+        response = await self._request("GET", url)
         if response.status_code == 404:
             return None
         if response.status_code == 200:
@@ -295,29 +315,154 @@ class GitHubAPIClient:
         content: str,
         sha: str | None,
         commit_message: str,
+        *,
+        branch: str | None = None,
     ) -> None:
         """PUT /repos/{owner}/{repo}/contents/{path}.
 
-        When ``sha`` is provided this updates an existing file; otherwise
-        it creates one. The content is base64-encoded.
+        When ``sha`` is provided this updates an existing file; otherwise it
+        creates one. ``branch`` writes on a named branch (PR mode). The content
+        is base64-encoded.
+
+        Resilience (T-276):
+
+        - A ``409`` (the blob SHA went stale under a concurrent write) is
+          recovered by re-reading the current SHA **on the same branch** and
+          retrying, bounded by :data:`_UPSERT_MAX_ATTEMPTS` so a persistent
+          conflict cannot loop forever.
+        - A ``403`` on a ``.github/workflows/*`` path means the App lacks the
+          ``Workflows: write`` permission; it raises
+          :class:`GitHubWorkflowsPermissionError` (a distinct, actionable error)
+          rather than an opaque API error.
         """
         encoded = base64.b64encode(content.encode("utf-8")).decode("ascii")
-        body: dict[str, Any] = {
-            "message": commit_message,
-            "content": encoded,
-        }
-        if sha is not None:
-            body["sha"] = sha
+        current_sha = sha
+        for attempt in range(1, _UPSERT_MAX_ATTEMPTS + 1):
+            body: dict[str, Any] = {
+                "message": commit_message,
+                "content": encoded,
+            }
+            if current_sha is not None:
+                body["sha"] = current_sha
+            if branch is not None:
+                body["branch"] = branch
 
+            response = await self._request(
+                "PUT",
+                f"/repos/{repo}/contents/{_quote_path(path)}",
+                json=body,
+            )
+            if response.status_code in (200, 201):
+                return
+
+            # Workflows:write 403 on a CI-workflow path — distinct, actionable.
+            if response.status_code == 403 and _is_workflow_path(path):
+                raise GitHubWorkflowsPermissionError(
+                    "The GitHub App lacks 'Workflows: write' permission required "
+                    f"to push {path!r}. Re-approve the App's permissions on GitHub, "
+                    "then re-export."
+                )
+
+            # Stale-SHA 409: refetch the SHA on the write branch and retry.
+            if response.status_code == 409 and attempt < _UPSERT_MAX_ATTEMPTS:
+                current_sha = await self.get_file_sha(repo, path, ref=branch)
+                continue
+
+            self._raise_for_status(response)
+            return  # unreachable — _raise_for_status always raises on non-2xx
+
+    # ----- git refs / branches / pulls (PR mode, T-276) -----
+
+    async def get_ref(self, repo: str, ref: str) -> str:
+        """GET /repos/{owner}/{repo}/git/ref/{ref} → the referenced commit SHA.
+
+        ``ref`` is unprefixed, e.g. ``"heads/main"``. Raises ``GitHubAPIError``
+        if the ref does not exist (an empty repo has no default branch yet).
+        """
         response = await self._request(
-            "PUT",
-            f"/repos/{repo}/contents/{_quote_path(path)}",
-            json=body,
+            "GET", f"/repos/{repo}/git/ref/{quote(ref, safe='/')}"
         )
-        if response.status_code in (200, 201):
-            return
-
+        if response.status_code == 200:
+            body = response.json()
+            obj = body.get("object") if isinstance(body, dict) else None
+            sha = obj.get("sha") if isinstance(obj, dict) else None
+            if isinstance(sha, str):
+                return sha
+            raise GitHubAPIError(response.status_code, f"ref {ref} missing object.sha")
         self._raise_for_status(response)
+        raise GitHubAPIError(response.status_code, response.text)  # unreachable
+
+    async def create_branch(self, repo: str, branch: str, base_sha: str) -> None:
+        """POST /repos/{owner}/{repo}/git/refs — create ``refs/heads/{branch}``.
+
+        Idempotent: a ``422`` ("Reference already exists") on re-export is a
+        no-op, so a resumed PR export reuses the same branch instead of failing.
+        """
+        response = await self._request(
+            "POST",
+            f"/repos/{repo}/git/refs",
+            json={"ref": f"refs/heads/{branch}", "sha": base_sha},
+        )
+        if response.status_code == 201:
+            return
+        if response.status_code == 422 and _ref_already_exists(response):
+            return  # branch already present — idempotent
+        self._raise_for_status(response)
+
+    async def create_pull_request(
+        self, repo: str, *, head: str, base: str, title: str, body: str
+    ) -> int:
+        """POST /repos/{owner}/{repo}/pulls → the new PR number.
+
+        Idempotent under resume: if a PR already exists for ``head`` (a crash
+        between create and persisting ``pr_number``), GitHub 422s; we recover the
+        existing PR number by listing open pulls for the head branch instead of
+        opening a duplicate.
+        """
+        response = await self._request(
+            "POST",
+            f"/repos/{repo}/pulls",
+            json={"title": title, "head": head, "base": base, "body": body},
+        )
+        if response.status_code == 201:
+            data = response.json()
+            number = data.get("number") if isinstance(data, dict) else None
+            if isinstance(number, int):
+                return number
+            raise GitHubAPIError(
+                response.status_code, "pull creation response missing 'number'"
+            )
+        if response.status_code == 422:
+            existing = await self.find_open_pull_number(repo, head=head)
+            if existing is not None:
+                return existing
+        self._raise_for_status(response)
+        raise GitHubAPIError(response.status_code, response.text)  # unreachable
+
+    async def find_open_pull_number(self, repo: str, *, head: str) -> int | None:
+        """GET /repos/{owner}/{repo}/pulls?head=… → an open PR number, or None.
+
+        ``head`` may be a bare branch name or ``owner:branch``; GitHub expects
+        the latter, so we pass it through and also match the branch suffix.
+        """
+        response = await self._request(
+            "GET",
+            f"/repos/{repo}/pulls?state=open&head={quote(head, safe=':')}",
+        )
+        if response.status_code != 200:
+            return None
+        rows = response.json()
+        if not isinstance(rows, list):
+            return None
+        branch = head.split(":", 1)[-1]
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            ref = (row.get("head") or {}).get("ref") if isinstance(row, dict) else None
+            number = row.get("number")
+            if isinstance(number, int) and (ref == branch or ref == head):
+                return number
+        return None
 
     # ----- issues -----
 
@@ -558,6 +703,23 @@ def make_shared_async_client() -> httpx.AsyncClient:
 def _is_write_method(method: str) -> bool:
     """True for content-creating verbs that count against the secondary limit."""
     return method.upper() in {"POST", "PUT", "PATCH", "DELETE"}
+
+
+def _is_workflow_path(path: str) -> bool:
+    """True for a CI-workflow file requiring the App's Workflows:write scope."""
+    return path.lstrip("/").startswith(".github/workflows/")
+
+
+def _ref_already_exists(response: httpx.Response) -> bool:
+    """True if a 422 from create-ref means the branch already exists."""
+    try:
+        body = response.json()
+    except ValueError:
+        return False
+    if not isinstance(body, dict):
+        return False
+    message = (body.get("message") or "").lower()
+    return "already exists" in message or "reference already exists" in message
 
 
 def _is_already_exists(response: httpx.Response) -> bool:
