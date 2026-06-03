@@ -64,8 +64,12 @@ class Settings(BaseSettings):
     # github_app_id is GitHub's numeric App id used as the App-JWT `iss`.
     # github_app_private_key is the RS256 PEM that signs the App JWT; it is a
     # secret-manager value and is never persisted to the database (spec §8).
+    # github_app_slug is the App's public slug, used to build the installation
+    # URL (https://github.com/apps/{slug}/installations/new). Leave blank to
+    # disable the App install flow (the Phase-13 OAuth path remains available).
     github_app_id: str = ""
     github_app_private_key: str = ""
+    github_app_slug: str = ""
 
     # Stripe Payments (Phase 18) — leave blank to disable billing UI.
     # Use sk_test_* keys for development; sk_live_* keys for production only.
