@@ -27,6 +27,7 @@ _EXEMPT_PATHS = frozenset(
         "/auth/callback",  # exempt: OAuth provider callback — no auth token yet
         "/auth/refresh",  # exempt: exchanges HTTP-only refresh cookie for a new token
         "/billing/webhook",  # Stripe webhook — no browser session, no CSRF token
+        "/integrations/github/webhook",  # GitHub webhook — HMAC-verified, no session
     }
 )
 

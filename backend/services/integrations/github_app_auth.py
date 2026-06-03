@@ -32,7 +32,10 @@ Observability: every resolution increments
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import logging
+from collections.abc import Iterable
 from datetime import UTC, datetime, timedelta
 
 import httpx
@@ -59,6 +62,39 @@ _JWT_CLOCK_SKEW_SECONDS = 60
 # cache entry _REFRESH_AHEAD_SECONDS earlier so a hit is always safely fresh.
 _CACHE_KEY_PREFIX = "gh:inst_token:"
 _REFRESH_AHEAD_SECONDS = 300  # 5 minutes
+
+_WEBHOOK_SIG_PREFIX = "sha256="
+
+
+def verify_webhook_signature(
+    raw_body: bytes,
+    signature_header: str | None,
+    secrets: Iterable[str],
+) -> bool:
+    """Constant-time HMAC-SHA256 verification of a GitHub webhook delivery.
+
+    GitHub signs the *raw* request bytes and sends ``X-Hub-Signature-256:
+    sha256=<hex>``. The signature is checked against every provided secret so a
+    rotation window validates against both the current and previous secret
+    (spec §8/§12). Empty secrets are ignored; comparison uses
+    ``hmac.compare_digest`` (no early-exit timing leak). Returns ``True`` on the
+    first match, else ``False`` — the caller rejects a ``False`` with 400 before
+    any DB or background work.
+    """
+    if not signature_header or not signature_header.startswith(_WEBHOOK_SIG_PREFIX):
+        return False
+    provided = signature_header[len(_WEBHOOK_SIG_PREFIX) :]
+    matched = False
+    for secret in secrets:
+        if not secret:
+            continue
+        expected = hmac.new(
+            secret.encode("utf-8"), raw_body, hashlib.sha256
+        ).hexdigest()
+        # Evaluate every secret (no short-circuit) to keep timing uniform.
+        if hmac.compare_digest(expected, provided):
+            matched = True
+    return matched
 
 
 class GitHubAppAuthError(Exception):

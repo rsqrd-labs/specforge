@@ -70,6 +70,11 @@ class Settings(BaseSettings):
     github_app_id: str = ""
     github_app_private_key: str = ""
     github_app_slug: str = ""
+    # Webhook HMAC signing secrets. Two are accepted so a secret rotation does
+    # not drop in-flight deliveries: every inbound signature is checked against
+    # the current secret and, if set, the previous one (spec §8/§12).
+    github_app_webhook_secret: str = ""
+    github_app_webhook_secret_prev: str = ""
 
     # Stripe Payments (Phase 18) — leave blank to disable billing UI.
     # Use sk_test_* keys for development; sk_live_* keys for production only.

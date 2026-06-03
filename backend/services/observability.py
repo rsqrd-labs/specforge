@@ -202,6 +202,31 @@ GITHUB_QUEUE_DEPTH = Gauge(
     "Approximate number of GitHub worker jobs currently queued/in-flight.",
 )
 
+# Inbound webhook ingest metrics (Phase 21 — T-271). received/verified track the
+# HMAC gate; deduped counts retried deliveries skipped idempotently; failed is
+# labelled by error_type (bad_signature, missing_headers, enqueue_unavailable).
+GITHUB_WEBHOOK_RECEIVED_TOTAL = Counter(
+    "specforge_github_webhook_received_total",
+    "GitHub webhook deliveries that passed the HMAC gate, by event type.",
+    labelnames=["event_type"],
+)
+GITHUB_WEBHOOK_VERIFIED_TOTAL = Counter(
+    "specforge_github_webhook_verified_total",
+    "GitHub webhook deliveries whose signature verified against a current or "
+    "previous (rotation) secret.",
+)
+GITHUB_WEBHOOK_DEDUPED_TOTAL = Counter(
+    "specforge_github_webhook_deduped_total",
+    "Retried GitHub webhook deliveries (same X-GitHub-Delivery) skipped as "
+    "duplicates, by event type.",
+    labelnames=["event_type"],
+)
+GITHUB_WEBHOOK_FAILED_TOTAL = Counter(
+    "specforge_github_webhook_failed_total",
+    "GitHub webhook deliveries rejected before dispatch, by error_type.",
+    labelnames=["error_type"],
+)
+
 PIPELINE_UPSTREAM_SECTION_SKIPPED = Counter(
     "pipeline_upstream_section_skipped_total",
     "Count of upstream sections skipped during section-aware injection "

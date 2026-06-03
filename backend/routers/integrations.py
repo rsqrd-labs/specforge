@@ -18,9 +18,12 @@ Phase 21 GitHub **App** install routes (T-270):
   export picker.
 - ``DELETE /integrations/github/{installation_id}`` — locally revoke one
   installation (CSRF-protected by the global middleware; GitHub is unaffected).
+- ``POST /integrations/github/webhook`` — the public GitHub event ingress
+  (HMAC-verified, CSRF/rate-limit exempt). Verifies, dedups, hands the delivery
+  to the worker, and returns a fast 2xx. All routing happens on the worker.
 
 OAuth initiation/callback routes live in ``routers/auth.py``. Lifecycle webhook
-events are dispatched here from T-271's reconcile path via
+events are dispatched from T-271's reconcile path via
 :func:`handle_lifecycle_event`.
 """
 
@@ -33,19 +36,28 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.responses import RedirectResponse
 from redis.asyncio import Redis
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config import settings
 from database import get_db, get_redis
 from middleware.auth import get_current_user
-from models import User
+from models import GitHubWebhookEvent, User
 from schemas.github import InstallationList, InstallationOption
 from schemas.integration import GitHubStatusResponse
 from services.integrations import github_auth_service, github_install_service
+from services.integrations.github_app_auth import verify_webhook_signature
 from services.integrations.github_install_service import (
     AppNotConfiguredError,
     InstallStateError,
 )
+from services.observability import (
+    GITHUB_WEBHOOK_DEDUPED_TOTAL,
+    GITHUB_WEBHOOK_FAILED_TOTAL,
+    GITHUB_WEBHOOK_RECEIVED_TOTAL,
+    GITHUB_WEBHOOK_VERIFIED_TOTAL,
+)
+from services.queue import QueueUnavailableError, enqueue
 
 logger = logging.getLogger(__name__)
 
@@ -185,6 +197,85 @@ async def revoke_github_installation(
     """
     await github_install_service.revoke_installation(db, installation_id, user.id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+# ---------------------------------------------------------------------------
+# Webhook ingress (T-271) — verify → dedup → dispatch → fast 2xx
+# ---------------------------------------------------------------------------
+
+
+@router.post("/github/webhook")
+async def github_webhook(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, str]:
+    """Public ingress for GitHub App webhook deliveries.
+
+    Mirrors the audited Stripe receiver. Ordering is a hard security contract:
+    the raw bytes are read first, the HMAC-SHA256 signature is verified
+    (constant-time, against the current and previous secret for rotation) and a
+    mismatch is rejected with 400 *before* any database or background work, the
+    delivery is recorded for idempotency (a retry is skipped), and the event is
+    handed to the worker for routing. The handler stays O(1) and never branches
+    on event type — all fan-out happens on the worker (``reconcile_event``,
+    T-272). No GitHub or LLM I/O on the request path; the body size is capped by
+    the global middleware.
+    """
+    secrets = [
+        settings.github_app_webhook_secret,
+        settings.github_app_webhook_secret_prev,
+    ]
+    if not any(secrets):
+        # App webhook not configured → the route is effectively disabled.
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
+
+    raw_body = await request.body()
+    signature = request.headers.get("X-Hub-Signature-256")
+    if not verify_webhook_signature(raw_body, signature, secrets):
+        GITHUB_WEBHOOK_FAILED_TOTAL.labels(error_type="bad_signature").inc()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="invalid signature"
+        )
+
+    delivery_id = request.headers.get("X-GitHub-Delivery")
+    event_type = request.headers.get("X-GitHub-Event")
+    if not delivery_id or not event_type:
+        GITHUB_WEBHOOK_FAILED_TOTAL.labels(error_type="missing_headers").inc()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="missing delivery headers",
+        )
+
+    GITHUB_WEBHOOK_VERIFIED_TOTAL.inc()
+    GITHUB_WEBHOOK_RECEIVED_TOTAL.labels(event_type=event_type).inc()
+
+    # Idempotency: record the delivery before dispatch. A unique violation on
+    # delivery_id means GitHub re-delivered this event — skip it.
+    try:
+        async with db.begin_nested():
+            db.add(GitHubWebhookEvent(delivery_id=delivery_id, event_type=event_type))
+            await db.flush()
+    except IntegrityError:
+        GITHUB_WEBHOOK_DEDUPED_TOTAL.labels(event_type=event_type).inc()
+        return {"status": "duplicate"}
+
+    # Hand off to the worker, THEN commit (at-least-once). If the handoff fails
+    # the dedup row is never committed, so GitHub's retry re-delivers and
+    # reconcile_event (idempotent by delivery_id, T-272) runs once. This
+    # deliberately reorders the Plan §24.4 sketch (commit-then-handoff), which
+    # would silently drop an event on a transient broker failure. The worker is
+    # the single dumb dispatcher: the raw bytes are passed so it re-parses and
+    # fans out by (event_type, action).
+    try:
+        await enqueue("reconcile_event", delivery_id, event_type, raw_body)
+    except QueueUnavailableError as exc:
+        GITHUB_WEBHOOK_FAILED_TOTAL.labels(error_type="enqueue_unavailable").inc()
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="background processing temporarily unavailable",
+        ) from exc
+    await db.commit()
+    return {"status": "queued"}
 
 
 # ---------------------------------------------------------------------------

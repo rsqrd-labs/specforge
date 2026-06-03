@@ -20,8 +20,11 @@ from services.observability import BILLING_CHECKOUT_RATE_LIMITED
 logger = logging.getLogger(__name__)
 
 _LOGIN_PATHS = frozenset({"/auth/google", "/auth/callback"})
-# /billing/webhook is exempt so Stripe retries are not rate-limited.
-_BYPASS_PATHS = frozenset({"/health", "/billing/webhook"})
+# /billing/webhook and /integrations/github/webhook are exempt so Stripe/GitHub
+# retry schedules are never blocked — the HMAC signature is the DoS guard.
+_BYPASS_PATHS = frozenset(
+    {"/health", "/billing/webhook", "/integrations/github/webhook"}
+)
 _LOCAL_FALLBACK_MAX_KEYS = 10_000
 # Evict this many oldest entries when the cap is exceeded.  Single-item
 # eviction cannot keep up with a burst of distinct IPs; bulk removal bounds

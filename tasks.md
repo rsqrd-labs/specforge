@@ -15617,6 +15617,7 @@ Replace the connect step with a GitHub **App installation** (spec §4.9). Persis
 **Priority:** P0
 **Phase:** A
 **Harness:** `harness/tests/backend/test_phase24_github_living_contract.py -k "t271"`
+**Status:** ✅ Done — 2026-06-02 (POST /integrations/github/webhook `github_webhook` in routers/integrations.py, mirroring the Stripe receiver: raw bytes → constant-time HMAC verify against [secret, secret_prev] rotation pair → 400-before-any-work; X-GitHub-Delivery dedup via GitHubWebhookEvent insert [IntegrityError → {status:duplicate}]; single dumb `enqueue("reconcile_event", delivery_id, event_type, raw)` → {status:queued}, O(1), no event-type branching. verify_webhook_signature helper in github_app_auth.py; github_app_webhook_secret/_prev in config; 4 webhook metrics in observability.py; path added to csrf `_EXEMPT_PATHS` + rate_limit `_BYPASS_PATHS`. Crash-safe enqueue-before-commit [at-least-once; deliberately reorders the Plan §24.4 commit-then-enqueue sketch which drops events on broker blip]; enqueue failure → 503 [GitHub retries]; unconfigured → 404. `-k "t271"` 5/5; 11 tests [signed fixtures: bad-sig-before-db-write, either-rotation-secret, duplicate-skipped, missing-headers, 503-no-commit, 404-disabled, body-size-413 via full ASGI stack]; full suite green; coverage 80.28%.)
 
 **Description:**
 The public ingress for GitHub events. **Copy the proven Stripe webhook pattern** (Phase 18 T-234): raw bytes before parse, constant-time HMAC, delivery dedup, enqueue, fast 2xx. No GitHub or LLM I/O on the request path.
