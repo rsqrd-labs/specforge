@@ -43,6 +43,29 @@ _GITHUB_EXPORT_LIMIT = 3
 _GITHUB_EXPORT_WINDOW_SECONDS = 3600
 _GITHUB_EXPORT_DETAIL = "GitHub export rate limit reached. Maximum 3 exports per hour."
 
+# GitHub Sync tier (Phase 21 — T-283): 10 resync/backfill calls per user per
+# hour. Applies to the POST sync actions that enqueue worker jobs
+# (/sync/resync, /sync/backfill); the cheap GET /sync state read the live panel
+# polls is intentionally unmetered.
+_GITHUB_SYNC_PATH_RE = re.compile(r"^/workspaces/[^/]+/sync/(?:resync|backfill)/?$")
+_GITHUB_SYNC_LIMIT = 10
+_GITHUB_SYNC_WINDOW_SECONDS = 3600
+_GITHUB_SYNC_DETAIL = (
+    "GitHub sync rate limit reached. Maximum 10 resync/backfill calls per hour."
+)
+
+# GitHub Increment Push tier (Phase 21 — T-283): 5 increment pushes per user per
+# hour. Applies to POST /workspaces/{id}/increments/{inc_id}/push only — the
+# increment *generation* endpoint is credit-gated separately (T-279).
+_GITHUB_INCREMENT_PUSH_PATH_RE = re.compile(
+    r"^/workspaces/[^/]+/increments/[^/]+/push/?$"
+)
+_GITHUB_INCREMENT_PUSH_LIMIT = 5
+_GITHUB_INCREMENT_PUSH_WINDOW_SECONDS = 3600
+_GITHUB_INCREMENT_PUSH_DETAIL = (
+    "GitHub increment push rate limit reached. Maximum 5 pushes per hour."
+)
+
 # Spec Clarification tier (Phase 14): 6 judge-model calls per user per
 # hour. Applies to POST /workspaces/{id}/clarify only. The PATCH endpoint
 # (which persists answers without calling an LLM) is intentionally
@@ -370,6 +393,34 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
                 return _rate_limited_custom(
                     detail=_GITHUB_EXPORT_DETAIL,
                     retry_after_seconds=_GITHUB_EXPORT_WINDOW_SECONDS,
+                )
+
+        if user_id and request.method == "POST" and _GITHUB_SYNC_PATH_RE.match(path):
+            allowed = await check(
+                f"github_sync:{user_id}",
+                _GITHUB_SYNC_LIMIT,
+                _GITHUB_SYNC_WINDOW_SECONDS,
+            )
+            if not allowed:
+                return _rate_limited_custom(
+                    detail=_GITHUB_SYNC_DETAIL,
+                    retry_after_seconds=_GITHUB_SYNC_WINDOW_SECONDS,
+                )
+
+        if (
+            user_id
+            and request.method == "POST"
+            and _GITHUB_INCREMENT_PUSH_PATH_RE.match(path)
+        ):
+            allowed = await check(
+                f"github_increment_push:{user_id}",
+                _GITHUB_INCREMENT_PUSH_LIMIT,
+                _GITHUB_INCREMENT_PUSH_WINDOW_SECONDS,
+            )
+            if not allowed:
+                return _rate_limited_custom(
+                    detail=_GITHUB_INCREMENT_PUSH_DETAIL,
+                    retry_after_seconds=_GITHUB_INCREMENT_PUSH_WINDOW_SECONDS,
                 )
 
         if user_id and request.method == "POST" and _CLARIFY_PATH_RE.match(path):

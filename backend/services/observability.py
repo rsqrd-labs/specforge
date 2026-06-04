@@ -405,6 +405,14 @@ _SENSITIVE_KEYS = {
     "stripe_secret_key",
     "stripe_webhook_secret",
     "token",
+    # GitHub App credentials (Phase 21 — T-283). Key matching is exact, so the
+    # App private key and the various installation-token field names are listed
+    # explicitly even though their values are also caught by the patterns below.
+    "github_app_private_key",
+    "github_app_webhook_secret_prev",
+    "access_token",
+    "installation_token",
+    "inst_token",
 }
 _LOG_RECORD_BUILTINS = set(logging.LogRecord("", 0, "", 0, "", (), None).__dict__)
 _SECRET_PATTERNS: tuple[re.Pattern[str], ...] = (
@@ -422,6 +430,11 @@ _SECRET_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"sk_(?:live|test)_[A-Za-z0-9_-]{24,}"),
     # Stripe webhook signing secrets
     re.compile(r"whsec_[A-Za-z0-9/+=]{24,}"),
+    # GitHub tokens (Phase 21 — T-283): installation (ghs_), user-to-server
+    # (ghu_), OAuth (gho_), PAT (ghp_), and refresh (ghr_). Installation tokens
+    # are credentials — scrub the value wherever it appears, not just under a
+    # known key.
+    re.compile(r"gh[pousr]_[A-Za-z0-9]{20,}"),
 )
 
 

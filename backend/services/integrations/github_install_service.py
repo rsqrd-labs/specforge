@@ -75,7 +75,7 @@ class InstallationAccount:
 
 def app_install_enabled() -> bool:
     """True when the GitHub App is configured enough to offer the install flow."""
-    return bool(settings.github_app_slug and settings.github_app_id)
+    return settings.github_app_enabled
 
 
 # ---------------------------------------------------------------------------

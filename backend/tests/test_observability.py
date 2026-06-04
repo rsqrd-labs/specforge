@@ -288,6 +288,29 @@ def test_redact_sensitive_data_masks_nested_secrets() -> None:
     assert redacted["payload"] == ["refresh_token=[REDACTED]", "[REDACTED]"]
 
 
+def test_redact_masks_github_app_private_key_and_installation_token() -> None:
+    """T-283: the GitHub App private key (by key) and installation tokens (by
+    key AND by value, wherever a ghs_/ghu_ token appears) are scrubbed."""
+    value = {
+        "github_app_private_key": "-----BEGIN RSA PRIVATE KEY-----abc-----END...",
+        "inst_token": "ghs_1234567890abcdefghijklmnopqrstuvwxyz",
+        "access_token": "ghu_abcdefghijklmnopqrstuvwxyz1234567890",
+        "installation_token": "ghs_zzzzzzzzzzzzzzzzzzzzzzzzzzzzzz",
+        "note": "resolved token ghs_1234567890abcdefghijklmnopqrstuvwxyz for inst",
+    }
+
+    redacted = redact_sensitive_data(value)
+
+    assert redacted["github_app_private_key"] == "[REDACTED]"
+    assert redacted["inst_token"] == "[REDACTED]"
+    assert redacted["access_token"] == "[REDACTED]"
+    assert redacted["installation_token"] == "[REDACTED]"
+    # The token value is scrubbed even when embedded in a free-text string under
+    # a non-secret key.
+    assert "ghs_" not in redacted["note"]
+    assert "[REDACTED]" in redacted["note"]
+
+
 def test_structlog_redaction_processor_runs_before_rendering() -> None:
     event = redact_structlog_event(
         None,

@@ -516,3 +516,83 @@ async def test_storyboard_owner_download_rate_limit_is_per_user(
     assert response.status_code == 429
     assert response.headers["Retry-After"] == "3600"
     assert "30 downloads" in response.json()["detail"]
+
+
+# ---------------------------------------------------------------------------
+# GitHub Sync + Increment Push tiers (Phase 21 — T-283)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["resync", "backfill"])
+async def test_github_sync_rate_limit_blocks_eleventh_call(
+    monkeypatch: pytest.MonkeyPatch, action: str
+) -> None:
+    user_id = "user-github-sync"
+    fake_redis = _FakeRedis()
+    _fill_window(fake_redis, f"github_sync:{user_id}", 10)
+    monkeypatch.setattr(
+        rate_limit_module,
+        "decode_access_token_claims",
+        lambda token: {"sub": user_id} if token == "storyboard-token" else None,
+    )
+
+    response = await _rate_limited_request(
+        method="POST",
+        path=f"/workspaces/workspace-1/sync/{action}",
+        fake_redis=fake_redis,
+        user_id=user_id,
+    )
+
+    assert response.status_code == 429
+    assert response.headers["Retry-After"] == "3600"
+    assert "10 resync/backfill" in response.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_github_sync_state_read_is_not_rate_limited(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The live panel polls GET /sync; it must not share the resync/backfill cap."""
+    user_id = "user-github-sync-read"
+    fake_redis = _FakeRedis()
+    _fill_window(fake_redis, f"github_sync:{user_id}", 10)
+    monkeypatch.setattr(
+        rate_limit_module,
+        "decode_access_token_claims",
+        lambda token: {"sub": user_id} if token == "storyboard-token" else None,
+    )
+
+    response = await _rate_limited_request(
+        method="GET",
+        path="/workspaces/workspace-1/sync",
+        fake_redis=fake_redis,
+        user_id=user_id,
+    )
+
+    assert response.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_github_increment_push_rate_limit_blocks_sixth_push(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    user_id = "user-github-increment"
+    fake_redis = _FakeRedis()
+    _fill_window(fake_redis, f"github_increment_push:{user_id}", 5)
+    monkeypatch.setattr(
+        rate_limit_module,
+        "decode_access_token_claims",
+        lambda token: {"sub": user_id} if token == "storyboard-token" else None,
+    )
+
+    response = await _rate_limited_request(
+        method="POST",
+        path="/workspaces/workspace-1/increments/inc-1/push",
+        fake_redis=fake_redis,
+        user_id=user_id,
+    )
+
+    assert response.status_code == 429
+    assert response.headers["Retry-After"] == "3600"
+    assert "5 pushes" in response.json()["detail"]

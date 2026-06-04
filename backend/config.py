@@ -75,6 +75,38 @@ class Settings(BaseSettings):
     # the current secret and, if set, the previous one (spec §8/§12).
     github_app_webhook_secret: str = ""
     github_app_webhook_secret_prev: str = ""
+    # Optional identity OAuth for the App (learning the installing user's login).
+    # The integration works without these; leave blank to disable identity OAuth.
+    github_app_client_id: str = ""
+    github_app_client_secret: str = ""
+
+    @property
+    def github_app_enabled(self) -> bool:
+        """True when the GitHub App is configured (its identity is present).
+
+        The single source of truth for "is the App on": the App cannot mint a JWT
+        or build an install URL without both the numeric id and the public slug,
+        so those two define "enabled" (matching ``github_install_service``). When
+        enabled in production, ``validate_production_settings`` requires the
+        signing key + webhook secret too.
+        """
+        return bool(self.github_app_id and self.github_app_slug)
+
+    @property
+    def github_app_webhook_secrets(self) -> list[str]:
+        """The non-empty webhook signing secrets, current first (for rotation).
+
+        Passed to ``verify_hmac`` so an inbound signature is accepted against the
+        current secret and, during a rotation window, the previous one.
+        """
+        return [
+            s
+            for s in (
+                self.github_app_webhook_secret,
+                self.github_app_webhook_secret_prev,
+            )
+            if s
+        ]
 
     # Increment generation (Phase 21 — T-279). The MVP ships the *additive* path
     # only: an increment appends new tasks with their existing content pinned by
@@ -162,6 +194,25 @@ def validate_production_settings() -> None:
             "Using a test key in production silently accepts test card numbers "
             "without charging real money."
         )
+
+    # GitHub App guard (Phase 21 — T-283). When the App is enabled (id + slug
+    # set), production must also have the signing key and webhook secret, or the
+    # install/JWT/webhook paths fail at runtime instead of at startup. An empty
+    # private key is rejected explicitly: without it no installation token can be
+    # minted, so every App-backed GitHub write would silently 401-loop.
+    if settings.github_app_enabled:
+        if not settings.github_app_private_key.strip():
+            errors.append(
+                "GITHUB_APP_PRIVATE_KEY must be set when the GitHub App is "
+                "enabled (GITHUB_APP_ID + GITHUB_APP_SLUG present). It is the "
+                "RS256 PEM that signs the App JWT; without it no installation "
+                "token can be minted."
+            )
+        if not settings.github_app_webhook_secret.strip():
+            errors.append(
+                "GITHUB_APP_WEBHOOK_SECRET must be set when the GitHub App is "
+                "enabled, or inbound webhooks cannot be signature-verified."
+            )
 
     if errors:
         raise RuntimeError("; ".join(errors))

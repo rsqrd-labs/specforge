@@ -221,11 +221,11 @@ async def github_webhook(
     T-272). No GitHub or LLM I/O on the request path; the body size is capped by
     the global middleware.
     """
-    secrets = [
-        settings.github_app_webhook_secret,
-        settings.github_app_webhook_secret_prev,
-    ]
-    if not any(secrets):
+    # Current secret first, then the previous one during a rotation window (T-271).
+    # Centralised on Settings (T-283) so the [secret, prev] derivation lives in one
+    # place; an empty list means the App webhook is unconfigured.
+    secrets = settings.github_app_webhook_secrets
+    if not secrets:
         # App webhook not configured → the route is effectively disabled.
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
 
