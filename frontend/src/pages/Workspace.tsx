@@ -42,6 +42,7 @@ import {
   generateStoryboard,
   getStageEval,
   getApiErrorMessage,
+  getGitHubInstallations,
   getGitHubIntegration,
   getLatestStoryboard,
   getStoryboard,
@@ -282,11 +283,25 @@ export default function Workspace() {
     null,
   )
 
+  // "Connected enough to export" under the GitHub App living system means an
+  // active App installation; we also honour a legacy OAuth connection so a
+  // mid-migration user isn't locked out of the export entry point (the modal
+  // itself nudges them to install the App when no installation_id exists).
   useEffect(() => {
     let cancelled = false
-    getGitHubIntegration()
-      .then((g) => {
-        if (!cancelled) setIsGitHubConnected(g.connected)
+    Promise.all([
+      getGitHubInstallations().catch(() => ({
+        installations: [],
+        on_legacy_oauth: false,
+      })),
+      getGitHubIntegration().catch(() => ({ connected: false })),
+    ])
+      .then(([installs, legacy]) => {
+        if (cancelled) return
+        const hasActiveApp = installs.installations.some(
+          (i: { suspended: boolean }) => !i.suspended,
+        )
+        setIsGitHubConnected(hasActiveApp || legacy.connected)
       })
       .catch(() => {
         if (!cancelled) setIsGitHubConnected(false)
@@ -1884,7 +1899,6 @@ export default function Workspace() {
         <ExportGitHubModal
           workspaceId={id}
           workspaceName={currentWorkspace?.name ?? ""}
-          isConnected={isGitHubConnected}
           taskCount={taskCount}
           onClose={() => setShowGitHubExport(false)}
         />

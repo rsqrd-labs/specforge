@@ -148,6 +148,35 @@ export function InstalledShieldIcon() {
 }
 
 /**
+ * Pull request — a branch rail feeding a second rail whose tip turns up into an
+ * arrowhead: "this branch is asking to merge." The glyph of the `pr_with_tests`
+ * export mode and its success hero. Drawn to the same 16-grid / 1.75 stroke as
+ * {@link BranchIcon}, not borrowed from an icon set.
+ */
+export function PullRequestIcon() {
+  return (
+    <svg
+      viewBox="0 0 16 16"
+      width="14"
+      height="14"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.75"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <circle cx="4" cy="3.5" r="1.5" />
+      <circle cx="4" cy="12.5" r="1.5" />
+      <line x1="4" y1="5" x2="4" y2="11" />
+      <circle cx="12" cy="12.5" r="1.5" />
+      <line x1="12" y1="11" x2="12" y2="6" />
+      <polyline points="9.9,6 12,3.5 14.1,6" />
+    </svg>
+  )
+}
+
+/**
  * Drift — two diverging arrows. Reads as "these have moved apart", a calm
  * informational note for the resync banner (slate, never alarm-red).
  */

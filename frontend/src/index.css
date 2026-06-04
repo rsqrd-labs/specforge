@@ -6265,17 +6265,36 @@ button:disabled {
   text-align: center;
 }
 
-.github-modal-success-icon {
+/* A shipped artifact is a celebration — lotus, never green (Phase 21 design
+   directive). One-shot bloom on completion, then settled. */
+.gh-success-lotus {
   width: 46px;
   height: 46px;
   border-radius: 50%;
-  background: rgba(34, 197, 94, 0.10);
-  border: 1.5px solid rgba(34, 197, 94, 0.30);
+  background: rgba(161, 56, 95, 0.10);
+  border: 1.5px solid rgba(161, 56, 95, 0.28);
   display: flex;
   align-items: center;
   justify-content: center;
-  color: #166534;
-  font-size: 22px;
+  color: var(--color-secondary);
+  animation: gh-lotus-bloom 0.6s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+@keyframes gh-lotus-bloom {
+  0% {
+    transform: scale(0.6);
+    opacity: 0;
+    box-shadow: 0 0 0 0 rgba(161, 56, 95, 0.28);
+  }
+  60% {
+    transform: scale(1.06);
+    opacity: 1;
+  }
+  100% {
+    transform: scale(1);
+    opacity: 1;
+    box-shadow: 0 0 0 8px rgba(161, 56, 95, 0);
+  }
 }
 
 .github-modal-success-title {
@@ -6290,6 +6309,228 @@ button:disabled {
   text-decoration: underline;
   word-break: break-all;
   cursor: pointer;
+}
+
+/* ─── Export mode — segmented choice (T-288) ───────────── */
+.gh-mode-group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.gh-mode-option {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: 100%;
+  padding: 12px 14px;
+  text-align: left;
+  border-radius: 12px;
+  border: 1px solid rgba(143, 78, 0, 0.18);
+  background: rgba(255, 255, 255, 0.55);
+  font-family: inherit;
+  cursor: pointer;
+  transition: border-color 0.16s, background 0.16s, box-shadow 0.16s;
+}
+
+.gh-mode-option:hover {
+  border-color: rgba(143, 78, 0, 0.30);
+  background: rgba(143, 78, 0, 0.04);
+}
+
+.gh-mode-option.selected {
+  border-color: var(--color-primary);
+  background: rgba(143, 78, 0, 0.08);
+  box-shadow: 0 0 0 3px rgba(143, 78, 0, 0.12);
+}
+
+.gh-mode-option-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.gh-mode-radio {
+  flex: none;
+  width: 15px;
+  height: 15px;
+  border-radius: 50%;
+  border: 1.5px solid rgba(143, 78, 0, 0.35);
+  transition: border-color 0.16s, box-shadow 0.16s;
+}
+
+.gh-mode-option.selected .gh-mode-radio {
+  border-color: var(--color-primary);
+  box-shadow: inset 0 0 0 3.5px var(--color-primary);
+}
+
+.gh-mode-option-icon {
+  display: inline-flex;
+  color: var(--color-on-surface-variant);
+}
+
+.gh-mode-option.selected .gh-mode-option-icon {
+  color: var(--color-primary);
+}
+
+.gh-mode-option-title {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--color-on-surface);
+}
+
+.gh-mode-recommended {
+  margin-left: auto;
+  padding: 2px 8px;
+  border-radius: 9999px;
+  background: rgba(143, 78, 0, 0.08);
+  border: 1px solid rgba(143, 78, 0, 0.16);
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: var(--color-primary);
+}
+
+.gh-mode-option-consequence {
+  padding-left: 23px;
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--color-on-surface-variant);
+}
+
+/* The concrete branch preview that slides in when PR-with-tests is chosen. */
+.gh-branch-preview {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12.5px;
+  color: var(--color-on-surface-variant);
+  animation: gh-branch-slide 0.32s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.gh-branch-preview-icon {
+  display: inline-flex;
+  color: var(--color-primary);
+}
+
+.gh-branch-preview code {
+  font-family: inherit;
+  font-weight: 700;
+  color: var(--color-on-surface);
+}
+
+@keyframes gh-branch-slide {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* ─── Staged async progress checklist (T-288) ──────────── */
+.gh-stage-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin: 0;
+  padding: 16px 8px;
+  list-style: none;
+}
+
+.gh-stage {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  transition: opacity 0.3s ease;
+}
+
+.gh-stage.pending {
+  opacity: 0.4;
+}
+
+.gh-stage-tick {
+  flex: none;
+  width: 18px;
+  height: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--color-primary);
+}
+
+.gh-stage-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: rgba(143, 78, 0, 0.25);
+}
+
+.gh-stage.active .gh-stage-dot {
+  background: var(--color-primary);
+  animation: gh-stage-pulse 1.3s ease-in-out infinite;
+}
+
+.gh-stage.done .gh-stage-tick {
+  animation: gh-tick-in 0.4s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.gh-stage-label {
+  font-size: 14px;
+  color: var(--color-on-surface-variant);
+}
+
+.gh-stage.active .gh-stage-label {
+  color: var(--color-on-surface);
+  font-weight: 600;
+}
+
+.gh-stage.done .gh-stage-label {
+  color: var(--color-on-surface);
+}
+
+@keyframes gh-stage-pulse {
+  0%, 100% { transform: scale(0.7); opacity: 0.45; }
+  50%      { transform: scale(1);   opacity: 1; }
+}
+
+@keyframes gh-tick-in {
+  from { transform: scale(0.5); opacity: 0; }
+  to   { transform: scale(1);   opacity: 1; }
+}
+
+/* ─── Modal install-resolution skeleton (T-288) ────────── */
+.gh-modal-loading {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 18px 0;
+}
+
+.gh-modal-loading-line {
+  height: 12px;
+  border-radius: 6px;
+  width: 60%;
+  background: linear-gradient(
+    90deg,
+    rgba(143, 78, 0, 0.08),
+    rgba(143, 78, 0, 0.14),
+    rgba(143, 78, 0, 0.08)
+  );
+  background-size: 200% 100%;
+  animation: gh-skeleton-shimmer 1.4s ease-in-out infinite;
+}
+
+.gh-modal-loading-line.wide {
+  width: 85%;
+}
+
+@keyframes gh-skeleton-shimmer {
+  0%   { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
 }
 
 .github-modal-not-connected {
