@@ -131,6 +131,17 @@ class GitHubProjectsPermissionError(Exception):
     """
 
 
+class GitHubChecksPermissionError(Exception):
+    """A check-run write was refused for lack of the App's ``Checks: write`` (T-282).
+
+    A non-rate-limit ``403`` on ``POST /repos/{repo}/check-runs`` means the
+    installation lacks ``Checks: write``. The PR-diff evaluator catches this and
+    **falls back to the commit Status API** (the planned v1 path), rather than
+    failing the job — distinct + actionable, mirroring
+    :class:`GitHubWorkflowsPermissionError`.
+    """
+
+
 # ---------------------------------------------------------------------------
 # Token source + circuit breaker
 # ---------------------------------------------------------------------------
@@ -928,6 +939,154 @@ class GitHubAPIClient:
             },
         )
 
+    # ----- pull requests / status checks (T-282) -----
+
+    async def get_pull_request(self, repo: str, number: int) -> dict[str, Any] | None:
+        """GET /repos/{owner}/{repo}/pulls/{number} → the PR JSON, or ``None``.
+
+        The PR-diff evaluator needs the head commit SHA (check runs attach to a
+        SHA), the head ``ref`` (branch fallback), and the body (``Closes #N``
+        task linkage). ``None`` if the PR cannot be read.
+        """
+        response = await self._request("GET", f"/repos/{repo}/pulls/{number}")
+        if response.status_code != 200:
+            return None
+        data = response.json()
+        return data if isinstance(data, dict) else None
+
+    async def get_pull_request_diff(self, repo: str, number: int) -> str | None:
+        """GET the PR's unified diff via the ``diff`` media type (T-282).
+
+        Returns the raw diff text (untrusted — the caller bounds + wraps it before
+        prompting), or ``None`` if it cannot be read.
+        """
+        response = await self._request(
+            "GET",
+            f"/repos/{repo}/pulls/{number}",
+            accept="application/vnd.github.v3.diff",
+        )
+        if response.status_code != 200:
+            return None
+        return response.text
+
+    async def post_check_run(
+        self,
+        repo: str,
+        *,
+        name: str,
+        head_sha: str,
+        status: str,
+        conclusion: str | None = None,
+        title: str,
+        summary: str,
+    ) -> int | None:
+        """POST /repos/{owner}/{repo}/check-runs → the new check run id (T-282).
+
+        Needs ``Checks: write``. A non-rate-limit ``403`` raises
+        :class:`GitHubChecksPermissionError` so the evaluator falls back to the
+        commit Status API. ``status`` is ``queued``/``in_progress``/``completed``;
+        ``conclusion`` (``success``/``failure``/``neutral``) is set only when
+        completed.
+        """
+        return await self._write_check_run(
+            "POST",
+            f"/repos/{repo}/check-runs",
+            name=name,
+            head_sha=head_sha,
+            status=status,
+            conclusion=conclusion,
+            title=title,
+            summary=summary,
+        )
+
+    async def update_check_run(
+        self,
+        repo: str,
+        check_run_id: int,
+        *,
+        status: str,
+        conclusion: str | None = None,
+        title: str,
+        summary: str,
+    ) -> int | None:
+        """PATCH a check run to a new status/conclusion (T-282).
+
+        Used to move the "pending" check posted up front to its completed verdict
+        ("post pending, then update").
+        """
+        return await self._write_check_run(
+            "PATCH",
+            f"/repos/{repo}/check-runs/{check_run_id}",
+            status=status,
+            conclusion=conclusion,
+            title=title,
+            summary=summary,
+        )
+
+    async def _write_check_run(
+        self,
+        method: str,
+        path: str,
+        *,
+        name: str | None = None,
+        head_sha: str | None = None,
+        status: str,
+        conclusion: str | None,
+        title: str,
+        summary: str,
+    ) -> int | None:
+        payload: dict[str, Any] = {
+            "status": status,
+            "output": {"title": title, "summary": summary},
+        }
+        if name is not None:
+            payload["name"] = name
+        if head_sha is not None:
+            payload["head_sha"] = head_sha
+        if conclusion is not None:
+            payload["conclusion"] = conclusion
+        response = await self._request(method, path, json=payload)
+        if response.status_code in (200, 201):
+            data = response.json()
+            run_id = data.get("id") if isinstance(data, dict) else None
+            return run_id if isinstance(run_id, int) else None
+        if response.status_code == 403 and not _is_rate_limited(response):
+            raise GitHubChecksPermissionError(
+                "The GitHub App lacks 'Checks: write'; falling back to the commit "
+                "Status API."
+            )
+        self._raise_for_status(response)
+        return None  # unreachable
+
+    async def post_commit_status(
+        self,
+        repo: str,
+        sha: str,
+        *,
+        state: str,
+        context: str,
+        description: str,
+    ) -> None:
+        """POST /repos/{owner}/{repo}/statuses/{sha} (T-282 v1 fallback).
+
+        The commit Status API is the simpler v1 of the SpecForge check, used when
+        ``Checks: write`` is unavailable. ``state`` is ``success``/``failure``/
+        ``pending``/``error`` (the Status API has no ``neutral`` — the evaluator
+        maps a fail-open neutral to ``success`` so it never red-lights a PR).
+        """
+        response = await self._request(
+            "POST",
+            f"/repos/{repo}/statuses/{quote(sha, safe='')}",
+            json={
+                "state": state,
+                "context": context,
+                "description": description[:140],
+            },
+        )
+        if response.status_code in (200, 201):
+            return
+        self._raise_for_status(response)
+
     # ----- internals -----
 
     async def _request(
@@ -936,13 +1095,18 @@ class GitHubAPIClient:
         path: str,
         *,
         json: dict[str, Any] | None = None,
+        accept: str | None = None,
     ) -> httpx.Response:
         """Send a request, resolving the token per call and applying the breaker.
 
         A 401 in installation mode re-mints the token once and retries; a second
         401 (or any 401 in static mode) raises ``GitHubTokenExpiredError``.
+        ``accept`` overrides the default JSON media type (e.g. the diff media type
+        for a PR diff).
         """
-        return await self._send(method, path, json=json, allow_remint=True)
+        return await self._send(
+            method, path, json=json, allow_remint=True, accept=accept
+        )
 
     async def _send(
         self,
@@ -951,6 +1115,7 @@ class GitHubAPIClient:
         *,
         json: dict[str, Any] | None,
         allow_remint: bool,
+        accept: str | None = None,
     ) -> httpx.Response:
         # Breaker first: a tripped breaker rejects before any token resolution
         # or network call, so a degraded GitHub is not hammered.
@@ -967,7 +1132,7 @@ class GitHubAPIClient:
         url = f"{GITHUB_API_BASE}{path}"
         headers = {
             "Authorization": f"Bearer {token}",
-            "Accept": _GITHUB_ACCEPT,
+            "Accept": accept or _GITHUB_ACCEPT,
             "X-GitHub-Api-Version": "2022-11-28",
             "User-Agent": "SpecForge/1.0",
         }
@@ -992,7 +1157,9 @@ class GitHubAPIClient:
             self._breaker.record_success()
             if allow_remint and self._token_provider is not None:
                 await self._token_provider.refresh(self._installation_id)  # type: ignore[arg-type]
-                return await self._send(method, path, json=json, allow_remint=False)
+                return await self._send(
+                    method, path, json=json, allow_remint=False, accept=accept
+                )
             raise GitHubTokenExpiredError(
                 "GitHub returned 401; the token is no longer valid"
             )
