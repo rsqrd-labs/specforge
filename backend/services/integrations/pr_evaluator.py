@@ -64,6 +64,11 @@ from prompts.base import wrap_untrusted_content
 from services.integrations.github_api_client import GitHubChecksPermissionError
 from services.integrations.task_parser import parse_tasks
 from services.llm.gateway import call_judge_model
+from services.observability import (
+    GITHUB_AUDIT_CHECK_POSTED,
+    GITHUB_CHECK_TOTAL,
+    github_audit,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -292,6 +297,7 @@ async def _drive_pr_check(
                 "This PR does not close a SpecForge-tracked task issue, so there "
                 "are no acceptance criteria to judge.",
             ),
+            push,
         )
         await _redis_set(redis, done_key, head_sha, _DAY_SECONDS)
         return
@@ -316,6 +322,7 @@ async def _drive_pr_check(
                 "The daily SpecForge PR-check budget for this installation is "
                 "reached; this check is neutral and does not block the PR.",
             ),
+            push,
         )
         await _redis_set(redis, done_key, head_sha, _DAY_SECONDS)
         return
@@ -324,7 +331,7 @@ async def _drive_pr_check(
     pending = await _post_pending(client, repo, head_sha)
     diff = await client.get_pull_request_diff(repo, pr_number)
     verdict = _verdict_for(await _judge(db, push, criteria, diff))
-    await _post_verdict(client, repo, head_sha, verdict, check_run_id=pending)
+    await _post_verdict(client, repo, head_sha, verdict, push, check_run_id=pending)
 
     # 6. Record: dedup this SHA + arm the debounce window.
     await _redis_set(redis, done_key, head_sha, _DAY_SECONDS)
@@ -493,6 +500,7 @@ async def _post_verdict(
     repo: str,
     head_sha: str,
     verdict: _Verdict,
+    push: IntegrationPush,
     *,
     check_run_id: int | None = None,
 ) -> None:
@@ -501,7 +509,10 @@ async def _post_verdict(
     Updates the pending check run when ``check_run_id`` is known, else creates a
     completed one. On a missing ``Checks: write`` permission, falls back to a
     commit status — where the fail-open ``neutral`` maps to a non-blocking
-    ``success`` (the Status API has no neutral state).
+    ``success`` (the Status API has no neutral state). Every posted verdict (the
+    judged result and the no-task / over-budget neutrals) is counted + audited
+    here so the ``check_total`` metric and the ``github.check.posted`` event are
+    emitted from one place (T-284).
     """
     try:
         if check_run_id is not None:
@@ -531,6 +542,14 @@ async def _post_verdict(
             context=STATUS_CONTEXT,
             description=verdict.title,
         )
+    GITHUB_CHECK_TOTAL.labels(verdict=verdict.conclusion).inc()
+    github_audit(
+        GITHUB_AUDIT_CHECK_POSTED,
+        push_id=str(push.id),
+        workspace_id=str(push.workspace_id),
+        repo_id=push.repo_id,
+        status=verdict.conclusion,
+    )
 
 
 # The commit Status API has no "neutral"; fail-open neutral maps to a

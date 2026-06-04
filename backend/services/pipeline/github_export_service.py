@@ -81,6 +81,13 @@ from services.integrations.github_governor import (
     make_governor,
 )
 from services.integrations.task_parser import ParsedTask, parse_tasks
+from services.observability import (
+    GITHUB_AUDIT_EXPORT_COMPLETED,
+    GITHUB_AUDIT_PR_OPENED,
+    GITHUB_EXPORT_TOTAL,
+    GITHUB_PR_TOTAL,
+    github_audit,
+)
 from services.pipeline.export_service import ExportNotReadyError, parse_harness_files
 from services.security import key_vault
 
@@ -412,6 +419,7 @@ async def _drive_app_export(
         # A genuine failure marks the push failed and re-raises so the worker base
         # contract can retry/backoff and ultimately dead-letter. v2 status is
         # 'failed' so find_live_push (status <> 'failed') excludes it.
+        GITHUB_EXPORT_TOTAL.labels(export_mode=push.export_mode, outcome="failed").inc()
         await _mark_push_failed(db, push, status="failed")
         raise
 
@@ -489,6 +497,14 @@ async def _run_app_export(
     await db.commit()
     await db.refresh(push)
     push.issue_count = await _count_issues(db, push.id)  # type: ignore[attr-defined]
+    GITHUB_EXPORT_TOTAL.labels(export_mode=push.export_mode, outcome="completed").inc()
+    github_audit(
+        GITHUB_AUDIT_EXPORT_COMPLETED,
+        push_id=str(push.id),
+        workspace_id=str(push.workspace_id),
+        repo_id=push.repo_id,
+        status="completed",
+    )
     # Forward-sync the Projects v2 board + milestones (T-281) off the completed
     # push. Best-effort: the export has already committed, so a queue outage must
     # never fail it.
@@ -585,6 +601,14 @@ async def _write_pr_with_tests(
             repo, head=push.branch_name, base=_DEFAULT_BRANCH, title=title, body=body
         )
         await db.commit()
+        GITHUB_PR_TOTAL.labels(outcome="opened").inc()
+        github_audit(
+            GITHUB_AUDIT_PR_OPENED,
+            push_id=str(push.id),
+            workspace_id=str(push.workspace_id),
+            repo_id=push.repo_id,
+            status="opened",
+        )
 
 
 async def _sync_issues(

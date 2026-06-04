@@ -14,6 +14,7 @@ pipeline quality counters.
 | Langfuse | Optional LLM traces, prompt lookup, eval score links, and dataset collection | Disabled when `LANGFUSE_SECRET_KEY` is blank |
 | Stripe billing counters | Checkout, webhook, credit grant, duplicate delivery, dispute, and rate-limit signals | Enabled when the billing router is loaded; billing can still be disabled with blank Stripe keys |
 | Prompt quality counters | Validator failures, skipped upstream sections, and critic-regeneration credit usage | Enabled with the pipeline; used by Phase 19 release gates |
+| GitHub integration metrics | Webhook, reconcile-lag, export/PR/check, token-mint, job-retry/dead-letter, and queue-depth signals from the App + worker (Phase 21) | Enabled when the GitHub App is configured; the worker runs `configure_logging()` + Sentry on startup |
 
 Detailed setup steps live in `docs/INTEGRATION_API_SETUP_HANDBOOK.md`. This
 runbook is for operations and incident response.
@@ -213,6 +214,51 @@ and duplicate delivery is visible but harmless.
 
 Expected result: prompt gates are quiet during normal generation. Any increase
 after a prompt deploy is treated as a release investigation signal.
+
+### GitHub Integration Metrics
+
+The Phase 21 living GitHub integration (App identity + durable `arq` worker)
+emits the `specforge_github_*` family. The webhook receiver runs on the API
+process; export / increment / PR-check / reconcile metrics are emitted by the
+**worker** process, so `/metrics` reflects them only where the worker shares the
+registry scrape (operate the worker behind its own scrape target if deployed
+separately). A labelled counter has no series until its first observation.
+
+| Metric | Type | Labels | Use |
+|---|---|---|---|
+| `specforge_github_webhook_received_total` | Counter | `event_type` | Deliveries that passed the HMAC gate |
+| `specforge_github_webhook_verified_total` | Counter | none | Signatures verified (current or rotation secret) |
+| `specforge_github_webhook_deduped_total` | Counter | `event_type` | Retried deliveries skipped idempotently |
+| `specforge_github_webhook_failed_total` | Counter | `error_type` | Deliveries rejected before dispatch (`bad_signature`, `missing_headers`, `enqueue_unavailable`) |
+| `specforge_github_reconcile_lag_seconds` | Histogram | none | Webhook-receipt → reconcile-completion latency (sync SLO) |
+| `specforge_github_export_total` | Counter | `export_mode`, `outcome` | Worker exports by mode and `completed`/`failed` |
+| `specforge_github_pr_total` | Counter | `outcome` | Pull requests opened by SpecForge |
+| `specforge_github_check_total` | Counter | `verdict` | PR acceptance checks posted (`success`/`failure`/`neutral`) |
+| `specforge_github_token_mint_total` | Counter | `source` | Installation-token resolutions (`mint` vs `cache`) |
+| `specforge_github_job_retries_total` | Counter | `job` | Worker jobs retried with backoff |
+| `specforge_github_job_deadlettered_total` | Counter | `job` | Worker jobs dead-lettered after the try budget |
+| `specforge_github_queue_depth` | Gauge | none | Approximate queued-job depth (backpressure) |
+
+Structured audit events (`github.installed`, `github.uninstalled`,
+`github.webhook.received`, `github.webhook.duplicate_skipped`,
+`github.reconcile.task_done`, `github.export.completed`, `github.pr.opened`,
+`github.check.posted`, `github.increment.pushed`, `github.sync.paused`) carry
+only id-shaped fields (`installation_id`, `workspace_id`, `repo_id`,
+`delivery_id`, `event_type`, `action`, `status`, `push_id`). Tokens, the App
+private key, raw webhook payloads, and PR diffs are never logged; the worker runs
+`configure_logging()` on startup so its rows are structured and pass the same
+redaction filter as the API.
+
+#### Recommended Grafana alerts
+
+| Alert | PromQL starter | Response |
+|---|---|---|
+| Webhook failure rate high | `sum(rate(specforge_github_webhook_failed_total[15m])) / clamp_min(sum(rate(specforge_github_webhook_received_total[15m])), 1) > 0.05` | Inspect signature/rotation config and queue health; `bad_signature` spikes can mean a stale `GITHUB_APP_WEBHOOK_SECRET` after rotation |
+| Reconcile lag high | `histogram_quantile(0.95, sum by (le) (rate(specforge_github_reconcile_lag_seconds_bucket[15m]))) > 60` | Worker saturation or GitHub API throttling — check queue depth and the per-installation governor throttle counter |
+| Dead-letter rate elevated | `sum(rate(specforge_github_job_deadlettered_total[1h])) > 0` | A job exhausted its retry budget; inspect the dead-letter records and the failing `job` label |
+| Queue depth growing | `max_over_time(specforge_github_queue_depth[10m]) > 500` | Worker throughput cannot keep up; scale workers or check for a stuck job |
+| Token cache-hit ratio low | `sum(rate(specforge_github_token_mint_total{source="mint"}[15m])) / clamp_min(sum(rate(specforge_github_token_mint_total[15m])), 1) > 0.5` | The installation-token cache is missing too often — check Redis health and the cache TTL/namespace |
+| Check verdict neutral surge | `sum(rate(specforge_github_check_total{verdict="neutral"}[15m])) / clamp_min(sum(rate(specforge_github_check_total[15m])), 1) > 0.5` | The fail-open evaluator is degraded (judge model / budget / no linked task), not that PRs are failing — check the judge provider and the per-tenant budget |
 
 ## Incident Response
 

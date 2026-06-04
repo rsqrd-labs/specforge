@@ -130,12 +130,19 @@ async def reconcile_drift(ctx: dict[str, Any]) -> None:
 
 
 async def _on_startup(ctx: dict[str, Any]) -> None:
-    """Initialise worker-process services: Sentry, the shared Redis client.
+    """Initialise worker-process services: logging, Sentry, the shared Redis client.
 
-    Sentry runs on the worker (Plan §24.10) so background-job failures are
-    captured. The shared Redis client is registered so services that resolve it
-    outside a request (the token provider in ``run_export_push``) reuse one pool.
+    ``configure_logging()`` is run here (T-284) because the worker is a separate
+    process that never goes through the FastAPI ``setup_observability`` path: it
+    installs the structlog redaction processor + the stdlib ``SensitiveDataFilter``
+    so worker audit rows (export/PR/check/increment/reconcile) are structured and
+    never leak a token or key. Sentry runs on the worker (Plan §24.10) so
+    background-job failures are captured. The shared Redis client is registered so
+    services that resolve it outside a request reuse one pool.
     """
+    from services.observability import configure_logging
+
+    configure_logging()
     if settings.sentry_dsn:
         sentry_sdk.init(
             dsn=settings.sentry_dsn,

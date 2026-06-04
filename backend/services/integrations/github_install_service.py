@@ -41,6 +41,12 @@ from services.integrations.github_api_client import (
     make_shared_async_client,
 )
 from services.integrations.github_app_auth import GitHubAppAuth
+from services.observability import (
+    GITHUB_AUDIT_INSTALLED,
+    GITHUB_AUDIT_SYNC_PAUSED,
+    GITHUB_AUDIT_UNINSTALLED,
+    github_audit,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -190,6 +196,7 @@ async def upsert_installation(
         )
     )
     row = result.scalar_one_or_none()
+    created = row is None
     if row is None:
         row = GitHubInstallation(
             installation_id=installation_id,
@@ -207,6 +214,12 @@ async def upsert_installation(
         row.suspended_at = None
     await db.commit()
     await db.refresh(row)
+    github_audit(
+        GITHUB_AUDIT_INSTALLED,
+        installation_id=installation_id,
+        action="created" if created else "updated",
+        status="active",
+    )
     return row
 
 
@@ -286,6 +299,12 @@ async def apply_installation_event(
         row.suspended_at = datetime.now(UTC)
         await _mark_pushes_stale(db, row.id)
         await db.commit()
+        github_audit(
+            GITHUB_AUDIT_SYNC_PAUSED,
+            installation_id=installation_id,
+            action="suspend",
+            status="suspended",
+        )
     elif action == "unsuspend":
         row.suspended_at = None
         await db.commit()
@@ -293,6 +312,11 @@ async def apply_installation_event(
         await _detach_and_stale_pushes(db, row.id)
         await db.delete(row)
         await db.commit()
+        github_audit(
+            GITHUB_AUDIT_UNINSTALLED,
+            installation_id=installation_id,
+            action="deleted",
+        )
 
 
 async def apply_installation_repositories_event(
@@ -323,6 +347,12 @@ async def apply_installation_repositories_event(
         .values(status="stale")
     )
     await db.commit()
+    github_audit(
+        GITHUB_AUDIT_SYNC_PAUSED,
+        installation_id=installation_id,
+        action="repositories_removed",
+        status="stale",
+    )
 
 
 # ---------------------------------------------------------------------------

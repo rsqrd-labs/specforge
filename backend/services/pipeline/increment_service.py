@@ -77,6 +77,12 @@ from services.integrations.task_parser import (
 )
 from services.llm.base import ProviderError, ProviderTimeoutError
 from services.llm.gateway import get_llm
+from services.observability import (
+    GITHUB_AUDIT_INCREMENT_PUSHED,
+    GITHUB_AUDIT_PR_OPENED,
+    GITHUB_PR_TOTAL,
+    github_audit,
+)
 from services.llm.output_budget import output_budget_for_operation
 from services.llm.routing import LLMRoutingError, resolve_llm_route
 from services.pipeline.diff_engine import markdown_fences_balanced
@@ -746,6 +752,14 @@ async def _drive_increment_push(
     increment.updated_at = datetime.now(UTC)
     await db.commit()
 
+    github_audit(
+        GITHUB_AUDIT_INCREMENT_PUSHED,
+        push_id=str(push.id),
+        workspace_id=str(push.workspace_id),
+        repo_id=push.repo_id,
+        status="pushed",
+    )
+
     # Forward-sync the Projects v2 board + milestones (T-281) so the increment's
     # new issues land on the board. Best-effort: the push has already committed.
     from services.integrations import github_projects
@@ -895,6 +909,14 @@ async def _open_increment_pr(
         title = f"SpecForge increment {increment.sequence}: {increment.title}"
         await client.create_pull_request(
             repo, head=branch, base=_DEFAULT_BRANCH, title=title, body=body
+        )
+        GITHUB_PR_TOTAL.labels(outcome="opened").inc()
+        github_audit(
+            GITHUB_AUDIT_PR_OPENED,
+            push_id=str(push.id),
+            workspace_id=str(push.workspace_id),
+            repo_id=push.repo_id,
+            status="opened",
         )
 
 

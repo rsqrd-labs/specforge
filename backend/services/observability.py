@@ -248,6 +248,86 @@ GITHUB_RECONCILE_LAG_SECONDS = Histogram(
     buckets=(0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 300.0),
 )
 
+# Workspace exports to GitHub (Phase 21 — T-284), by export mode
+# (files_to_default / pr_with_tests) and outcome (completed / failed). Tracks
+# export volume + failure rate per mode.
+GITHUB_EXPORT_TOTAL = Counter(
+    "specforge_github_export_total",
+    "GitHub exports run by the worker, by export_mode and outcome.",
+    labelnames=["export_mode", "outcome"],
+)
+# Pull requests opened by SpecForge (Phase 21 — T-284): the pr_with_tests export
+# and per-increment PRs. ``outcome`` is ``opened`` (reserved for future
+# failure attribution).
+GITHUB_PR_TOTAL = Counter(
+    "specforge_github_pr_total",
+    "Pull requests opened by SpecForge, by outcome.",
+    labelnames=["outcome"],
+)
+# SpecForge PR-acceptance checks posted (Phase 21 — T-284), by verdict
+# (success / failure / neutral). ``neutral`` is the fail-open verdict (judge
+# unavailable / no linked task / budget reached), so a rising neutral rate is
+# the signal the evaluator is degraded, not that PRs are failing.
+GITHUB_CHECK_TOTAL = Counter(
+    "specforge_github_check_total",
+    "SpecForge PR acceptance checks posted, by verdict.",
+    labelnames=["verdict"],
+)
+
+# ---------------------------------------------------------------------------
+# GitHub structured audit events (Phase 21 — T-284)
+# ---------------------------------------------------------------------------
+#
+# The audit-event vocabulary is anchored here as the single source of truth
+# (mirroring AUDIT_EVENT_CRITIC_DISABLED in critic.py). Events are emitted at
+# the state-changing sites across the GitHub integration via ``github_audit``;
+# several of those sites (the install service, the webhook router) live in
+# modules outside the services blob, so centralising the names here also keeps
+# the vocabulary discoverable and testable in one place.
+GITHUB_AUDIT_INSTALLED = "github.installed"
+GITHUB_AUDIT_UNINSTALLED = "github.uninstalled"
+GITHUB_AUDIT_WEBHOOK_RECEIVED = "github.webhook.received"
+GITHUB_AUDIT_WEBHOOK_DUPLICATE_SKIPPED = "github.webhook.duplicate_skipped"
+GITHUB_AUDIT_RECONCILE_TASK_DONE = "github.reconcile.task_done"
+GITHUB_AUDIT_EXPORT_COMPLETED = "github.export.completed"
+GITHUB_AUDIT_PR_OPENED = "github.pr.opened"
+GITHUB_AUDIT_CHECK_POSTED = "github.check.posted"
+GITHUB_AUDIT_INCREMENT_PUSHED = "github.increment.pushed"
+GITHUB_AUDIT_SYNC_PAUSED = "github.sync.paused"
+
+# The structured fields an audit event may carry. Only id-shaped values ever go
+# here — never a token, the App private key, a raw webhook payload, or a PR diff
+# (T-284 / spec §12.5). Redaction (redact_structlog_event) is defence-in-depth on
+# top of this ids-only contract.
+_GITHUB_AUDIT_FIELDS = (
+    "installation_id",
+    "workspace_id",
+    "repo_id",
+    "delivery_id",
+    "event_type",
+    "action",
+    "status",
+    "push_id",
+)
+
+_github_audit_logger = structlog.get_logger("github.audit")
+
+
+def github_audit(event: str, **fields: Any) -> None:
+    """Emit a structured GitHub audit log row (Phase 21 — T-284).
+
+    ``event`` is one of the ``GITHUB_AUDIT_*`` names. Only the recognised
+    id-shaped fields in :data:`_GITHUB_AUDIT_FIELDS` are passed through, and any
+    that are ``None`` ("where available") are dropped, so every row carries a
+    consistent, minimal, content-free schema. Callers must never pass a token,
+    private key, raw payload, or PR diff.
+    """
+    payload = {
+        key: fields[key] for key in _GITHUB_AUDIT_FIELDS if fields.get(key) is not None
+    }
+    _github_audit_logger.info(event, **payload)
+
+
 PIPELINE_UPSTREAM_SECTION_SKIPPED = Counter(
     "pipeline_upstream_section_skipped_total",
     "Count of upstream sections skipped during section-aware injection "

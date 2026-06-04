@@ -52,10 +52,13 @@ from services.integrations.github_install_service import (
     InstallStateError,
 )
 from services.observability import (
+    GITHUB_AUDIT_WEBHOOK_DUPLICATE_SKIPPED,
+    GITHUB_AUDIT_WEBHOOK_RECEIVED,
     GITHUB_WEBHOOK_DEDUPED_TOTAL,
     GITHUB_WEBHOOK_FAILED_TOTAL,
     GITHUB_WEBHOOK_RECEIVED_TOTAL,
     GITHUB_WEBHOOK_VERIFIED_TOTAL,
+    github_audit,
 )
 from services.queue import QueueUnavailableError, enqueue
 
@@ -257,6 +260,12 @@ async def github_webhook(
             await db.flush()
     except IntegrityError:
         GITHUB_WEBHOOK_DEDUPED_TOTAL.labels(event_type=event_type).inc()
+        github_audit(
+            GITHUB_AUDIT_WEBHOOK_DUPLICATE_SKIPPED,
+            delivery_id=delivery_id,
+            event_type=event_type,
+            status="duplicate",
+        )
         return {"status": "duplicate"}
 
     # Hand off to the worker, THEN commit (at-least-once). If the handoff fails
@@ -275,6 +284,12 @@ async def github_webhook(
             detail="background processing temporarily unavailable",
         ) from exc
     await db.commit()
+    github_audit(
+        GITHUB_AUDIT_WEBHOOK_RECEIVED,
+        delivery_id=delivery_id,
+        event_type=event_type,
+        status="queued",
+    )
     return {"status": "queued"}
 
 
