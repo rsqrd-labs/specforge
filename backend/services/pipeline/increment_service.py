@@ -746,6 +746,12 @@ async def _drive_increment_push(
     increment.updated_at = datetime.now(UTC)
     await db.commit()
 
+    # Forward-sync the Projects v2 board + milestones (T-281) so the increment's
+    # new issues land on the board. Best-effort: the push has already committed.
+    from services.integrations import github_projects
+
+    await github_projects.trigger_board_sync(push.id)
+
 
 async def _reconcile_live_state(
     db: AsyncSession, push: IntegrationPush, client: Any

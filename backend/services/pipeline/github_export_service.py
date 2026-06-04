@@ -61,7 +61,7 @@ from models import (
     UserIntegration,
     Workspace,
 )
-from services.integrations import agents_md_builder, pr_export_builder
+from services.integrations import agents_md_builder, github_projects, pr_export_builder
 from services.integrations.github_api_client import (
     GitHubAPIClient,
     GitHubAPIError,
@@ -489,6 +489,10 @@ async def _run_app_export(
     await db.commit()
     await db.refresh(push)
     push.issue_count = await _count_issues(db, push.id)  # type: ignore[attr-defined]
+    # Forward-sync the Projects v2 board + milestones (T-281) off the completed
+    # push. Best-effort: the export has already committed, so a queue outage must
+    # never fail it.
+    await github_projects.trigger_board_sync(push.id)
     return push
 
 

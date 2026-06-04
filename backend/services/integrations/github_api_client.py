@@ -108,6 +108,29 @@ class GitHubAPIError(Exception):
         self.message = message
 
 
+class GitHubGraphQLError(Exception):
+    """A GraphQL request returned an ``errors`` array (T-281).
+
+    The GitHub GraphQL endpoint answers ``200 OK`` even when a query fails,
+    carrying the failure in a top-level ``errors`` array, so a 200 is not success
+    on its own. This is raised when that array is non-empty and the failure is
+    not a recognised permission problem (which maps to
+    :class:`GitHubProjectsPermissionError`).
+    """
+
+
+class GitHubProjectsPermissionError(Exception):
+    """A Projects v2 GraphQL call was refused for lack of the App's scope (T-281).
+
+    GitHub reports a missing ``Projects`` (read/write) permission as a
+    ``FORBIDDEN``/"resource not accessible by integration" GraphQL error. The
+    Projects board is opt-in and additive, so the board sync surfaces this as a
+    distinct, actionable condition (re-approve the App's permissions) and skips
+    the board rather than dead-lettering the job with an opaque error — exactly
+    like :class:`GitHubWorkflowsPermissionError` for CI-workflow writes.
+    """
+
+
 # ---------------------------------------------------------------------------
 # Token source + circuit breaker
 # ---------------------------------------------------------------------------
@@ -634,6 +657,38 @@ class GitHubAPIClient:
             return
         self._raise_for_status(response)
 
+    async def get_issue_node_id(self, repo: str, number: int) -> str | None:
+        """GET an issue's GraphQL ``node_id`` (T-281).
+
+        Projects v2 items reference their content by GraphQL node id, not the
+        REST issue number, so the board sync resolves each task issue's node id
+        before adding it to the board. Returns ``None`` if the issue cannot be
+        read.
+        """
+        response = await self._request("GET", f"/repos/{repo}/issues/{number}")
+        if response.status_code != 200:
+            return None
+        data = response.json()
+        node_id = data.get("node_id") if isinstance(data, dict) else None
+        return node_id if isinstance(node_id, str) else None
+
+    async def set_issue_milestone(
+        self, repo: str, number: int, milestone: int | None
+    ) -> None:
+        """PATCH an issue's milestone (T-281). ``None`` clears the assignment.
+
+        Used by the board sync to file each task issue under its phase milestone.
+        Re-assigning the same milestone is a harmless idempotent no-op PATCH.
+        """
+        response = await self._request(
+            "PATCH",
+            f"/repos/{repo}/issues/{number}",
+            json={"milestone": milestone},
+        )
+        if response.status_code == 200:
+            return
+        self._raise_for_status(response)
+
     async def ensure_milestone(
         self, repo: str, title: str, *, description: str | None = None
     ) -> int | None:
@@ -685,6 +740,193 @@ class GitHubAPIClient:
             if len(rows) < 100:
                 return None
         return None
+
+    # ----- GraphQL / Projects v2 (T-281) -----
+
+    async def graphql(
+        self, query: str, variables: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        """POST a GraphQL query/mutation to ``/graphql`` and return ``data``.
+
+        Projects v2 is GraphQL-only, so this is the single low-level entry point
+        for the board sync. It goes through the same per-call token resolution,
+        governor budgeting, and circuit breaker as the REST path.
+
+        GitHub's GraphQL endpoint answers **HTTP 200 even on failure**, carrying
+        the failure in a top-level ``errors`` array, so a 200 is not success on
+        its own: a non-empty ``errors`` raises
+        :class:`GitHubProjectsPermissionError` when GitHub reports the App lacks
+        Projects access, else :class:`GitHubGraphQLError`.
+        """
+        body: dict[str, Any] = {"query": query}
+        if variables is not None:
+            body["variables"] = variables
+        response = await self._request("POST", "/graphql", json=body)
+        if response.status_code != 200:
+            self._raise_for_status(response)
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise GitHubGraphQLError("GraphQL response was not a JSON object")
+        errors = payload.get("errors")
+        if errors:
+            message = _graphql_error_message(errors)
+            if _graphql_errors_forbidden(errors):
+                raise GitHubProjectsPermissionError(
+                    "The GitHub App lacks the 'Projects' permission required to "
+                    "manage the Projects v2 board. Re-approve the App's "
+                    f"permissions on GitHub, then re-sync. ({message})"
+                )
+            raise GitHubGraphQLError(f"GraphQL error: {message}")
+        data = payload.get("data")
+        if not isinstance(data, dict):
+            raise GitHubGraphQLError("GraphQL response missing 'data'")
+        return data
+
+    async def get_repo_node_ids(self, repo: str) -> tuple[str, str] | None:
+        """Return ``(repository_node_id, owner_node_id)`` for ``owner/name``.
+
+        The owner node id is required to create/look up a Projects v2 board (a
+        board is owned by a user or org, not a repo); the repository node id
+        links a freshly created board back to the repo. ``None`` if the
+        repository node cannot be resolved.
+        """
+        owner, _, name = repo.partition("/")
+        data = await self.graphql(
+            "query($owner:String!,$name:String!){"
+            "repository(owner:$owner,name:$name){id owner{id}}}",
+            {"owner": owner, "name": name},
+        )
+        repository = data.get("repository")
+        if not isinstance(repository, dict):
+            return None
+        repo_id = repository.get("id")
+        owner_obj = repository.get("owner")
+        owner_id = owner_obj.get("id") if isinstance(owner_obj, dict) else None
+        if isinstance(repo_id, str) and isinstance(owner_id, str):
+            return repo_id, owner_id
+        return None
+
+    async def ensure_project_v2(
+        self, owner_id: str, title: str, *, repository_id: str | None = None
+    ) -> str | None:
+        """Return the node id of the owner's Projects v2 board titled ``title``.
+
+        Idempotent (mirrors :meth:`ensure_milestone`): ``createProjectV2`` is
+        **not** idempotent — a naive re-run would spawn a second board — so the
+        live boards are listed first and a matching title is reused; only a
+        genuine miss creates one. A freshly created board is linked to
+        ``repository_id`` when supplied. Returns ``None`` if GitHub neither lists
+        nor accepts the board.
+        """
+        existing = await self._find_project_v2_id(owner_id, title)
+        if existing is not None:
+            return existing
+        input_fields: dict[str, Any] = {"ownerId": owner_id, "title": title}
+        if repository_id is not None:
+            input_fields["repositoryId"] = repository_id
+        data = await self.graphql(
+            "mutation($input:CreateProjectV2Input!){"
+            "createProjectV2(input:$input){projectV2{id}}}",
+            {"input": input_fields},
+        )
+        created = (data.get("createProjectV2") or {}).get("projectV2")
+        node_id = created.get("id") if isinstance(created, dict) else None
+        return node_id if isinstance(node_id, str) else None
+
+    async def _find_project_v2_id(self, owner_id: str, title: str) -> str | None:
+        """Locate an owner's Projects v2 board by exact title, or ``None``."""
+        cursor: str | None = None
+        for _ in range(1, 21):  # bounded; an owner rarely has >2000 boards
+            data = await self.graphql(
+                "query($owner:ID!,$cursor:String){node(id:$owner){"
+                "... on ProjectV2Owner{projectsV2(first:100,after:$cursor){"
+                "nodes{id title} pageInfo{hasNextPage endCursor}}}}}",
+                {"owner": owner_id, "cursor": cursor},
+            )
+            node = data.get("node")
+            projects = node.get("projectsV2") if isinstance(node, dict) else None
+            if not isinstance(projects, dict):
+                return None
+            for row in projects.get("nodes") or []:
+                if isinstance(row, dict) and row.get("title") == title:
+                    pid = row.get("id")
+                    if isinstance(pid, str):
+                        return pid
+            page = projects.get("pageInfo") or {}
+            if not page.get("hasNextPage"):
+                return None
+            cursor = page.get("endCursor")
+            if not isinstance(cursor, str):
+                return None
+        return None
+
+    async def get_project_v2_status_field(
+        self, project_id: str
+    ) -> tuple[str, dict[str, str]] | None:
+        """Return the board's ``Status`` single-select field id + its options.
+
+        Returns ``(field_id, {option_name: option_id})``. GitHub auto-creates a
+        ``Status`` field (Todo / In Progress / Done) on every new board; the
+        board sync maps a task's ``open``/``done`` state onto these options.
+        ``None`` if the board has no single-select ``Status`` field.
+        """
+        data = await self.graphql(
+            "query($project:ID!){node(id:$project){... on ProjectV2{"
+            'field(name:"Status"){... on ProjectV2SingleSelectField{'
+            "id options{id name}}}}}}",
+            {"project": project_id},
+        )
+        node = data.get("node")
+        field = node.get("field") if isinstance(node, dict) else None
+        if not isinstance(field, dict):
+            return None
+        field_id = field.get("id")
+        if not isinstance(field_id, str):
+            return None
+        options: dict[str, str] = {}
+        for opt in field.get("options") or []:
+            if isinstance(opt, dict):
+                name = opt.get("name")
+                opt_id = opt.get("id")
+                if isinstance(name, str) and isinstance(opt_id, str):
+                    options[name] = opt_id
+        return field_id, options
+
+    async def add_project_v2_item(self, project_id: str, content_id: str) -> str | None:
+        """Add an issue (by node id) to a board; return the project item id.
+
+        Server-idempotent: ``addProjectV2ItemById`` returns the *existing* item
+        if the content is already on the board, so re-running the sync never
+        duplicates a card. ``None`` if GitHub does not return an item id.
+        """
+        data = await self.graphql(
+            "mutation($project:ID!,$content:ID!){addProjectV2ItemById("
+            "input:{projectId:$project,contentId:$content}){item{id}}}",
+            {"project": project_id, "content": content_id},
+        )
+        item = (data.get("addProjectV2ItemById") or {}).get("item")
+        item_id = item.get("id") if isinstance(item, dict) else None
+        return item_id if isinstance(item_id, str) else None
+
+    async def set_project_v2_item_status(
+        self, project_id: str, item_id: str, field_id: str, option_id: str
+    ) -> None:
+        """Set a board item's single-select ``Status`` to ``option_id`` (column).
+
+        Idempotent: setting the value to its current option is a harmless no-op.
+        """
+        await self.graphql(
+            "mutation($project:ID!,$item:ID!,$field:ID!,$option:String!){"
+            "updateProjectV2ItemFieldValue(input:{projectId:$project,"
+            "itemId:$item,fieldId:$field,value:{singleSelectOptionId:$option}})"
+            "{projectV2Item{id}}}",
+            {
+                "project": project_id,
+                "item": item_id,
+                "field": field_id,
+                "option": option_id,
+            },
+        )
 
     # ----- internals -----
 
@@ -915,6 +1157,38 @@ def _short_error_message(response: httpx.Response) -> str:
         if isinstance(message, str):
             return message[:200]
     return (response.text or "")[:200]
+
+
+def _graphql_error_message(errors: Any) -> str:
+    """Concatenate a bounded, human-readable summary of a GraphQL errors array."""
+    messages: list[str] = []
+    if isinstance(errors, list):
+        for err in errors:
+            if isinstance(err, dict):
+                msg = err.get("message")
+                if isinstance(msg, str):
+                    messages.append(msg)
+    return ("; ".join(messages) or "unknown GraphQL error")[:200]
+
+
+def _graphql_errors_forbidden(errors: Any) -> bool:
+    """True if a GraphQL errors array signals a missing App permission/scope.
+
+    GitHub reports an insufficient App permission as a ``FORBIDDEN`` error type
+    or a "resource not accessible by integration" message, distinct from a query
+    that merely returned no data.
+    """
+    if not isinstance(errors, list):
+        return False
+    for err in errors:
+        if not isinstance(err, dict):
+            continue
+        if err.get("type") == "FORBIDDEN":
+            return True
+        message = (err.get("message") or "").lower()
+        if "not accessible by integration" in message or "must have" in message:
+            return True
+    return False
 
 
 def _quote_path(path: str) -> str:
