@@ -299,6 +299,44 @@ jobs:
           CSRF_SECRET: "ci-test-csrf-secret-value-long-enough"
           ENVIRONMENT: "test"
 
+      # Phase 21 — GitHub Living System of Record (T-265–T-286). The structural
+      # contract + the T-285 behavioral suite (the latter runs in the main
+      # Pytest step above via tests/test_phase24_behavioral.py).
+      - name: Phase 24 GitHub living harness contracts
+        run: >-
+          uv run pytest
+          ../harness/tests/backend/test_phase24_github_living_contract.py
+          -q
+        env:
+          DATABASE_URL: "postgresql+asyncpg://postgres:postgres@localhost:5432/test"
+          REDIS_URL: "redis://localhost:6379/0"
+          TEST_DATABASE_URL: "postgresql+asyncpg://postgres:postgres@localhost:5432/test"
+          TEST_REDIS_URL: "redis://localhost:6379/0"
+          JWT_PRIVATE_KEY: "ci-test-private-key"
+          JWT_PUBLIC_KEY: "ci-test-public-key"
+          GOOGLE_CLIENT_ID: "ci-test-client-id"
+          GOOGLE_CLIENT_SECRET: "ci-test-client-secret"
+          FRONTEND_URL: "http://localhost:5173"
+          ANTHROPIC_API_KEY: "ci-test-anthropic-key"
+          OPENAI_API_KEY: "ci-test-openai-key"
+          GOOGLE_API_KEY: "ci-test-google-key"
+          ENCRYPTION_MASTER_KEY: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+          CSRF_SECRET: "ci-test-csrf-secret-value-long-enough"
+          ENVIRONMENT: "test"
+
+  worker-image:
+    name: Worker Image Build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # The Phase 21 durable worker (Procfile `worker: arq worker.WorkerSettings`,
+      # the docker-compose `worker` service) ships the backend image. Building it
+      # here proves the worker image is deployable before main is allowed to ship.
+      - name: Build backend / worker image
+        run: docker build -t specforge-worker:ci ./backend
+
   frontend:
     name: Frontend
     runs-on: ubuntu-latest
@@ -337,12 +375,18 @@ jobs:
       - name: Phase 14 V1.3 usefulness frontend contracts
         run: pnpm vitest run --config vitest.harness.config.ts ../harness/tests/frontend/phase14-v13-usefulness.contract.test.ts
 
+      # Phase 24 (GitHub living) frontend harness — the backend-backed blocks are
+      # green today; the Settings-install and export-mode blocks depend on the
+      # unbuilt T-287/T-288 surfaces (the phase schedules them after T-286). This
+      # step is wired in once T-287–T-289 land so it stays green and never blocks
+      # deploy. Tracked in docs/PRODUCTION_RELEASE_GATE.md (Phase 21 gate).
+
       - name: Build
         run: pnpm build
 
   deploy:
     name: Deploy
-    needs: [secrets, backend, frontend]
+    needs: [secrets, backend, worker-image, frontend]
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     steps:

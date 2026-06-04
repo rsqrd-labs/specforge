@@ -20,6 +20,7 @@ billing alerts, and prompt pipeline quality gates.
 9. [Billing Alerts](#9-billing-alerts)
 10. [Prompt Pipeline Quality Gates And Eval Workflow](#10-prompt-pipeline-quality-gates-and-eval-workflow)
 11. [Storyboard Operations](#11-storyboard-operations)
+12. [GitHub Living Integration — App, Worker & Webhook Ops](#12-github-living-integration--app-worker--webhook-ops)
 
 ---
 
@@ -1019,3 +1020,300 @@ and source excerpts are hidden until the owner enables the matching permission.
    `frame-ancestors 'none'`.
 7. File a security incident if any private field or gated content is exposed by
    default. Keep sharing disabled until the fix, tests, and release gate pass.
+
+---
+
+## 12. GitHub Living Integration — App, Worker & Webhook Ops
+
+Operational procedures for the Phase 21 GitHub Living System of Record: the
+SpecForge **GitHub App** identity, the durable **arq worker** that runs all
+GitHub I/O off the request path, and the signature-verified **webhook** that
+flows repository events back into SpecForge.
+
+**Architecture recap (where things run):**
+
+- **API process** (`web` in `Procfile`, `api` in `docker-compose.yml`) accepts
+  the export/sync/increment requests, owns migrations, and **enqueues** jobs —
+  it never blocks on GitHub.
+- **Worker process** (`worker: arq worker.WorkerSettings` in `Procfile`, the
+  `worker` service in `docker-compose.yml`) drains the arq queue on the shared
+  Redis and performs every GitHub call. Jobs: `export_push`, `reconcile_event`,
+  `backfill_repo`, `increment_push`, `projects_sync`, `pr_check`, plus the
+  periodic `reconcile_drift` cron.
+- **Config:** the App is enabled when `GITHUB_APP_ID` + `GITHUB_APP_SLUG` are
+  set. In production, `validate_production_settings()` additionally requires
+  `GITHUB_APP_PRIVATE_KEY` and `GITHUB_APP_WEBHOOK_SECRET` (see `config.py`).
+  The private key lives in the secret manager — **never** in the DB.
+
+**Endpoints (all on already-registered routers):**
+
+- `POST /integrations/github/webhook` — inbound GitHub deliveries (HMAC-verified,
+  CSRF- and rate-limit-exempt).
+- `GET /workspaces/{id}/sync` — live task-completion + drift state.
+- `POST /workspaces/{id}/sync/resync` — re-push changed tasks' issues (202).
+- `POST /workspaces/{id}/sync/backfill` — recover missed events (202).
+- `POST /workspaces/{id}/export/github` — enqueue an export (202).
+- `GET|POST /workspaces/{id}/increments`, `GET|POST /workspaces/{id}/ideas`.
+
+---
+
+### §12.1 — GitHub App Private-Key Rotation
+
+**Impact:** `GITHUB_APP_PRIVATE_KEY` is the RS256 PEM that signs the short-lived
+App JWT (`iss = GITHUB_APP_ID`, `exp ≤ 600s`). The JWT is exchanged for
+per-installation access tokens. Rotating it invalidates the old key for **new**
+JWT signing immediately; already-minted installation tokens keep working until
+their own (short) TTL expires. There is no two-key window for the App private
+key — GitHub holds the matching public key, so the new key is live the moment
+you generate it on GitHub.
+
+**Rotation steps:**
+
+1. In the GitHub App settings (`https://github.com/settings/apps/<slug>` or the
+   org equivalent), generate a **new** private key. GitHub lets multiple keys
+   coexist, so generate before deleting.
+2. Store the new PEM in the secret manager and update `GITHUB_APP_PRIVATE_KEY`
+   in the Railway environment (both the `web` and `worker` services share it).
+3. Redeploy. The next App-JWT mint uses the new key. Confirm token mints still
+   succeed:
+
+   ```bash
+   # specforge_github_token_mint_total should keep incrementing with no rise in
+   # webhook_failed / 401-driven re-mints.
+   curl -s -H "Authorization: Bearer $METRICS_TOKEN" "$API_URL/metrics" \
+     | grep -E 'specforge_github_token_mint_total'
+   ```
+
+4. Once mints are healthy, **delete the old key** in the GitHub App settings.
+
+**Verification:** trigger any sync (`POST /workspaces/{id}/sync/backfill`) and
+confirm the worker logs `github.token.minted` (never the token value) and the
+job completes.
+
+**Rollback:** the old key is still valid on GitHub until you delete it in step 4
+— revert `GITHUB_APP_PRIVATE_KEY` to the previous PEM and redeploy.
+
+---
+
+### §12.2 — Webhook Secret Rotation (Two-Secret Window)
+
+**Impact:** `GITHUB_APP_WEBHOOK_SECRET` signs the `X-Hub-Signature-256` HMAC on
+every inbound delivery. The webhook handler verifies the signature **before**
+any DB/queue work, in constant time, against **both** the current and previous
+secret so a rotation never drops deliveries.
+
+The accepted-secrets list is `settings.github_app_webhook_secrets` =
+`[GITHUB_APP_WEBHOOK_SECRET, GITHUB_APP_WEBHOOK_SECRET_PREV]` (empty entries are
+ignored). This is the two-secret window.
+
+**Rotation steps:**
+
+1. Generate a new secret:
+
+   ```bash
+   python -c "import secrets; print(secrets.token_hex(32))"
+   ```
+
+2. Move the **current** secret into the previous slot and set the new one as
+   current, then redeploy `web` (the worker does not verify signatures):
+
+   ```
+   GITHUB_APP_WEBHOOK_SECRET=<new_secret>          # signs nothing yet — accepted
+   GITHUB_APP_WEBHOOK_SECRET_PREV=<old_secret>     # still accepted during window
+   ```
+
+3. Update the **GitHub App's** webhook secret to `<new_secret>`. From this
+   moment GitHub signs with the new secret; SpecForge accepts both, so no
+   delivery is rejected.
+4. Watch the verify/fail metrics through at least one delivery cycle:
+
+   ```bash
+   curl -s -H "Authorization: Bearer $METRICS_TOKEN" "$API_URL/metrics" \
+     | grep -E 'specforge_github_webhook_(verified|failed)_total'
+   ```
+
+   `verified` should keep climbing; `failed` must stay flat. A spike in
+   `failed` means GitHub is still signing with the old secret or the env was
+   mis-set — do **not** remove `*_PREV` yet.
+5. After the window (recommend ≥ 24h, or once you have confirmed deliveries
+   verifying against the new secret), clear the previous slot and redeploy:
+
+   ```
+   GITHUB_APP_WEBHOOK_SECRET_PREV=
+   ```
+
+**Rollback:** if `failed` spikes, set `GITHUB_APP_WEBHOOK_SECRET` back to the
+old value and revert the GitHub App secret; the previous slot already accepts
+it, so recovery is immediate.
+
+---
+
+### §12.3 — Installation-Token Re-Mint
+
+Installation tokens are short-TTL, namespaced, never logged, and Fernet-encrypted
+at rest when Redis is shared. The client resolves a token **per request** via the
+Redis-cached `TokenProvider` and **re-mints once on a 401** automatically — no
+operator action is needed for the normal expiry path.
+
+**Force a re-mint** (e.g. after a suspected cache poisoning, or a manual GitHub
+permission change):
+
+```bash
+# The token cache key is namespaced per installation (gh:inst_token:{id}) and
+# Fernet-encrypted at rest. Drop it so the next call re-mints. (Never print the
+# value — it is an installation credential.)
+redis-cli --scan --pattern 'gh:inst_token:*' | xargs -r redis-cli del
+```
+
+Then trigger any sync; confirm `specforge_github_token_mint_total` increments
+(its `source` label distinguishes a cache hit from a fresh mint) and the job
+succeeds. A persistent re-mint storm (many mints per
+minute, rising `webhook_failed`/job retries) points at a **revoked installation
+or an invalid App private key** — check §12.1 and the install's status on GitHub.
+
+---
+
+### §12.4 — Dead-Letter Inspection & Manual Replay
+
+Every GitHub job runs with bounded retries + exponential backoff + jitter. After
+the max-attempt cap it is **dead-lettered** (counted by
+`specforge_github_job_deadlettered_total`) and alerts fire. Jobs are idempotent
+and checkpointed (inbound keyed by `X-GitHub-Delivery`, outbound by
+`push_id`/`increment_id`), so a replay never duplicates side effects.
+
+**Alert trigger:** `increase(specforge_github_job_deadlettered_total[15m]) > 0`.
+
+**Inspect the dead-letter queue (arq stores results/failures in Redis):**
+
+```bash
+# List arq result keys; failed jobs carry the exception in their result blob.
+redis-cli --scan --pattern 'arq:result:*' | head -50
+
+# Inspect one job's stored result (job_id == push_id for export jobs):
+redis-cli get "arq:result:<job_id>"
+```
+
+**Manual replay** — re-enqueue the same job by its stable key. Because the job_id
+is the `push_id`/`increment_id`/`delivery_id`, re-submitting dedups and resumes
+from the last completed checkpoint:
+
+```bash
+cd backend
+# Re-enqueue an export/resync by push_id:
+uv run python -c "
+import asyncio
+from services.queue import enqueue
+asyncio.run(enqueue('export_push', '<push_id>', '<repo_name>', 'private', job_id='<push_id>'))
+"
+```
+
+For an inbound delivery, prefer **backfill** (§12.6) over replaying a raw webhook
+— backfill reconstructs state from the issues API and is out-of-order safe.
+
+**After replay:** confirm the push/issue reaches `completed`/`done` and the
+dead-letter counter stops rising.
+
+---
+
+### §12.5 — "Sync Paused" / Circuit-Breaker Recovery
+
+The shared httpx client has bounded timeouts, a bounded pool, and a **circuit
+breaker** that trips on a sustained GitHub outage. While open, jobs raise
+`GitHubUnavailableError`, the push stays **live** (non-`failed`, so
+`find_live_push` still sees it), the worker requeues, and the UI surfaces
+**"Sync paused — reconnect GitHub"**. This is *not* a failure state — no push is
+marked `failed` and no credit is lost.
+
+**Diagnose:**
+
+```bash
+# Throttle/breaker pressure shows up here:
+curl -s -H "Authorization: Bearer $METRICS_TOKEN" "$API_URL/metrics" \
+  | grep -E 'specforge_github_throttled_total|specforge_github_queue_depth'
+
+# Worker logs the breaker-open event:
+#   github.sync.paused  (and the LLM-style breaker open/close transitions)
+```
+
+**Recovery is automatic** once GitHub returns: the breaker half-opens, a probe
+succeeds, and queued jobs drain. Operator actions:
+
+1. Confirm GitHub itself is healthy (`https://www.githubstatus.com`).
+2. If the queue is backing up, confirm the worker process is alive
+   (`Procfile` `worker`; `docker compose ps worker`) and Redis is reachable.
+3. If a single installation is the cause (its `Retry-After` keeps deferring),
+   the per-installation governor is doing its job — fairness/bulkheads keep
+   other tenants flowing; no action needed beyond monitoring.
+
+Do **not** manually mark pushes `failed` to "clear" a paused state — that drops
+the live push and breaks resume. Let the breaker and requeue recover.
+
+---
+
+### §12.6 — Backfill Trigger (Recover Missed Events)
+
+Backfill reconciles a repo's task states from GitHub's **issues API**
+(`issues?state=all&since=`), filtering out rows carrying a `pull_request` key. It
+recovers closures/reopens missed while the worker was down and is idempotent with
+the webhook path (a webhook-set `pr_merge` is never downgraded to `manual`).
+Transitions are gated on event timestamp, so backfill is out-of-order safe.
+
+**Trigger for one workspace (returns 202, runs on the worker):**
+
+```bash
+curl -i -X POST "$API_URL/workspaces/$WORKSPACE_ID/sync/backfill" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" -H "X-CSRF-Token: $CSRF"
+```
+
+The periodic `reconcile_drift` cron also enqueues `backfill_repo` for every
+`completed` push and **fails stuck `pending` pushes whose arq job no longer
+exists** (a crashed export), so the repo becomes re-exportable. To force the
+sweep immediately:
+
+```bash
+cd backend
+uv run python -c "
+import asyncio
+from services.queue import enqueue
+asyncio.run(enqueue('reconcile_drift', job_id='reconcile_drift:manual'))
+"
+```
+
+**Verify:** `GET /workspaces/{id}/sync` reflects the corrected task states and
+`specforge_github_reconcile_lag_seconds` returns to baseline.
+
+---
+
+### §12.7 — Increment-Push Troubleshooting
+
+An increment is an additive delta on top of the shipped baseline. `increment_push`
+creates **new issues only** for new tasks (content-derived `task_ref` dedups —
+same ref → same issue, no duplicate), updates changed tasks' issues, closes
+obsoleted issues with a note, and creates one milestone + one PR per increment.
+
+**Common symptoms & fixes:**
+
+| Symptom | Likely cause | Action |
+|---|---|---|
+| Increment stuck in `pending` | worker down or job dead-lettered | §12.4 — inspect & replay `increment_push <increment_id>` (idempotent) |
+| Duplicate issues for the "same" task | `task_ref` churn (title changed) | Expected if the task content genuinely changed; otherwise check `compute_task_ref` inputs — re-export updates in place by `task_ref` |
+| New issues land outside the milestone | milestone create raced/failed | Replay the job; milestone creation is idempotent and re-links existing issues |
+| `409` on a content write | concurrent write / stale SHA | Handled automatically (refetch-SHA-and-retry) + per-repo write serialization; a persistent 409 means another writer — confirm only the worker writes |
+| `403` on `.github/workflows/*` | App lacks `Workflows: write` | Surfaced as a distinct actionable error; grant the permission on the installation and re-run |
+
+**Inspect an increment's push ledger:**
+
+```sql
+SELECT ip.id, ip.status, ip.increment_id, ip.branch_name, ip.pr_number
+FROM integration_pushes ip
+WHERE ip.increment_id = '<increment_id>';
+
+SELECT task_ref, state, external_issue_number, done_via
+FROM integration_push_tasks
+WHERE increment_id = '<increment_id>'
+ORDER BY external_issue_number;
+```
+
+Re-running the push after any fix is always safe — the job resumes from the
+ledger and never re-creates an issue already recorded in
+`integration_push_tasks`.

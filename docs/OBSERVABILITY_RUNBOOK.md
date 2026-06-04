@@ -339,6 +339,41 @@ Decision:
 - Keep the app online but pause checkout promotion if duplicate counters rise
   while grants remain correct.
 
+### GitHub Worker / Webhook / Sync Errors (Phase 21)
+
+Impact: GitHub events may stop flowing back (issue closes not flipping tasks to
+done), exports/increments may queue without completing, or the UI may show
+"sync paused". User generation and billing are unaffected — all GitHub I/O is
+off the request path.
+
+Checks:
+
+- Inspect the `specforge_github_*` family and the alerts above:
+  `webhook_failed_total{error_type}`, `reconcile_lag_seconds` p95,
+  `job_deadlettered_total{job}`, `queue_depth`, and the
+  `token_mint_total{source}` cache-hit ratio.
+- Confirm the **worker** process is alive (`Procfile` `worker`; `docker compose
+  ps worker`) and Redis is reachable — exports/reconciles run there, not on the
+  API.
+- Check worker logs for `github.sync.paused` (circuit breaker open on a GitHub
+  outage) and for rising job retries.
+- A `bad_signature` spike right after a webhook-secret change means GitHub is
+  still signing with the old secret or `GITHUB_APP_WEBHOOK_SECRET_PREV` was
+  cleared too early (RUNBOOK §12.2).
+- A re-mint storm (`token_mint_total{source="mint"}` rising sharply) points at a
+  revoked installation or an invalid App private key (RUNBOOK §12.1/§12.3).
+
+Decision:
+
+- "Sync paused" / breaker-open is **self-healing** once GitHub recovers — do not
+  mark pushes failed; monitor `queue_depth` draining.
+- A sustained dead-letter rate is a release/ops signal: inspect and manually
+  replay the idempotent job (RUNBOOK §12.4); never re-run a non-idempotent path.
+- Webhook ack p99 ≥ 300 ms or reconcile p95 over SLO with healthy GitHub →
+  scale the worker / check the per-installation governor throttle counter.
+- None of these is a generation/billing rollback condition; they gate the
+  GitHub-living release surface only.
+
 ### Prompt Validator Failures
 
 Impact: generated artifacts may be missing required architecture, security,
@@ -421,6 +456,9 @@ Go:
 - Langfuse enabled mode fails open under outage testing.
 - Stripe checkout/webhook metrics match the Stripe dashboard when billing is
   enabled, and duplicate delivery is idempotent.
+- GitHub (when the App is enabled): webhook ack p99 < 300 ms, reconcile lag p95
+  within SLO, dead-letter rate at zero, queue depth stable, and the
+  installation-token cache-hit ratio healthy.
 - Prompt validator and critic-regeneration metrics are at expected baseline.
 - Prompt/output telemetry export has been approved before enabling Langfuse in
   production.
@@ -435,4 +473,6 @@ No-go:
 - Prompt validator failures or critic-regeneration credit usage spike after a
   prompt deploy.
 - Prompt or model output telemetry is enabled in production without approval.
+- An installation token, the App private key, a raw webhook payload, or a PR
+  diff appears in logs, traces, Sentry events, or Langfuse payloads.
 - Secrets appear in logs, traces, Sentry events, or Langfuse payloads.

@@ -181,6 +181,42 @@ integration is intentionally disabled for the environment.
 
 ---
 
+## Phase 21 — GitHub Living System of Record
+
+**Prerequisites:** the GitHub **App** is enabled (`GITHUB_APP_ID` +
+`GITHUB_APP_SLUG`, plus `GITHUB_APP_PRIVATE_KEY` and
+`GITHUB_APP_WEBHOOK_SECRET`). Webhooks need public ingress — forward
+`smee.io` / `gh webhook forward` → `{BACKEND_URL}/integrations/github/webhook`
+(register a **separate dev App** with its own id/key/secret). The **worker**
+process must be running (`docker compose ps worker`, or `arq worker.WorkerSettings`).
+This is the §24.11 manual end-to-end flow and the **final Phase 21 checkpoint —
+re-run it after T-287–T-289**. Skip when the App is intentionally disabled (the
+Phase-13 OAuth path covers that environment).
+
+This flow ships A→D — verify each phase before enabling the next surface in prod.
+
+| # | Phase | Test | Result | Notes |
+|---|---|------|--------|-------|
+| P21-1 | A | From `/settings`, **Install GitHub App** → GitHub install screen → choose repos → return with `?github_installed=true`. Settings shows **Installed on @account · N repositories**. The install row persists in `github_installations`. | 🔲 | T-287 surface |
+| P21-2 | A | Export a finalised workspace with **Files** mode. POST `/workspaces/{id}/export/github` returns **202** with a `push_id` (no inline block). The worker creates the repo, pushes `SPEC/PLAN/HARNESS/TASKS` + `harness/`, and opens one Issue per task. | 🔲 | |
+| P21-3 | A | Every GitHub call uses a **cached installation token** (no static user token in the write path); webhook **ack p99 < 300 ms** under the signed-fixture load. | 🔲 | |
+| P21-4 | A | Signed-fixture security smoke: send **invalid**, **replayed** (duplicate `X-GitHub-Delivery`), and **out-of-order** signed deliveries. Each is rejected/deduped **before** any DB/queue write (O(1)); no task state mutates. | 🔲 | |
+| P21-5 | B | **Close an issue** on GitHub → its task flips to **done** in SpecForge within SLO; `GET /workspaces/{id}/sync` shows shipped count rise and `done_via='manual'`. | 🔲 | |
+| P21-6 | B | **Confused-deputy**: a delivery for install A cannot mutate a workspace exported under install B (proven by the authz contract; spot-check with two installs if available). | 🔲 | |
+| P21-7 | B | **Kill the worker mid-reconcile/export**, restart → the job resumes from the ledger with **no duplicate** repo/issues/PR. | 🔲 | |
+| P21-8 | B | **Backfill** recovers missed-while-down events: stop the worker, close an issue, restart, run `POST /workspaces/{id}/sync/backfill` (202) → the task flips done; a webhook-set `pr_merge` is never downgraded to `manual`. | 🔲 | |
+| P21-9 | C | Export **PR with tests** mode → exactly **one PR** opens on a `specforge/...` branch with a **red** harness CI run (`.github/workflows/specforge.yml` + failing per-stack tests). Re-export updates the same branch/PR **in place** (no duplicate). | 🔲 | T-288 surface |
+| P21-10 | C | Merge that PR → its linked tasks flip **done** via `done_via='pr_merge'`. A `Workflows: write` 403 surfaces a distinct actionable error; a content 409 refetches SHA and retries. | 🔲 | |
+| P21-11 | B/C′ | **Re-finalise Tasks** → the push shows **out-of-sync** (drift banner). **Re-sync** (`POST /sync/resync`, 202) updates **only changed** issues. | 🔲 | |
+| P21-12 | C′ | Create an **increment** ("add two features") → only **new issues** appear under a **new milestone** on top of shipped v1 work; unchanged tasks are not re-created (stable `task_ref`). | 🔲 | T-289 surface |
+| P21-13 | C′ | A GitHub issue labelled `idea`/`enhancement` flows into the **idea backlog** with `source='github'`. | 🔲 | T-289 surface |
+| P21-14 | D | Tasks appear on a **Projects v2 board** reflecting live state; merged/closed items move; milestones reflect the increment. | 🔲 | |
+| P21-15 | D | A PR carries a **SpecForge check** (the fail-open PR-diff evaluator, distinct from the critic). A judge error posts a **neutral** check (never blocks); the LLM-check cost is **capped per tenant/day**. | 🔲 | |
+| P21-16 | A/B | **Suspend / uninstall** the App → the UI surfaces **"sync paused — reconnect GitHub"** (not an error); no push is marked failed. Re-install → backfill recovers and sync resumes. | 🔲 | |
+| P21-17 | X | Dead-letter path: force a job past its retry budget → `specforge_github_job_deadlettered_total` increments and the alert fires; manual replay (RUNBOOK §12.4) of the idempotent job recovers with no duplicates. | 🔲 | |
+
+---
+
 ## Phase 18 — Stripe Billing
 
 **Prerequisites:** Stripe is enabled in staging with test credentials, and the
@@ -313,6 +349,7 @@ With Langfuse unconfigured (`LANGFUSE_SECRET_KEY` blank):
 | HARNESS + TASKS | 4 | | | |
 | Export | 2 | | | |
 | Phase 13 — GitHub | 15 | | | |
+| Phase 21 — GitHub Living (App enabled) | 17 | | | |
 | Phase 18 — Billing | 7 | | | |
 | Phase 19 — Prompt Quality | 6 | | | |
 | Credits Edge Cases | 3 | | | |
@@ -320,7 +357,7 @@ With Langfuse unconfigured (`LANGFUSE_SECRET_KEY` blank):
 | Stale State | 3 | | | |
 | Infrastructure | 4 | | | |
 | Sign-out | 2 | | | |
-| **Total** | **74** | | | |
+| **Total** | **91** | | | |
 
 Optional/additional checks:
 

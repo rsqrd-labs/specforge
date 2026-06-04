@@ -202,6 +202,45 @@ Pass criteria:
 - No critical smoke item fails.
 - Any non-critical note has an owner and explicit acceptance.
 
+### GitHub Living System of Record Release Gate (Phase 21)
+
+This gate ships **phase by phase (A → D), not all at once** (spec §4.14,
+`Plan v1.md` §24.13). Each phase is release-blocking for the surface it enables;
+a later phase must not ship against an earlier phase that has not passed. It is
+the **final checkpoint** of Phase 21 and **must be re-run after T-287–T-289**
+(the frontend Settings-install, export-mode, and increments surfaces).
+
+**Locally verifiable now (CI / a clean checkout):**
+
+| Check | Command / evidence | Blocks release if |
+|---|---|---|
+| Worker image builds | `docker build ./backend` succeeds; the image runs `arq worker.WorkerSettings` | The backend/worker image fails to build |
+| Worker registers all jobs | `uv run python -c "from worker import WorkerSettings; print([f.__name__ for f in WorkerSettings.functions])"` lists `export_push, reconcile_event, backfill_repo, increment_push, projects_sync, pr_check` + one `reconcile_drift` cron | Any job or the cron is unregistered |
+| Migrations round-trip | `uv run alembic upgrade head` then `downgrade -1`/`upgrade head` for `0016` + `0017` apply cleanly and restore the prior constraint | Migration or rollback fails on a clean DB |
+| Backend contract green | `uv run pytest ../harness/tests/backend/test_phase24_github_living_contract.py -q` is fully green | Any Phase 24 backend contract is red |
+| Behavioral suite green | `uv run pytest tests/ -q --cov=services --cov-fail-under=80` (incl. `tests/test_phase24_behavioral.py`) | Coverage drops below 80% or a behavioral pin fails |
+| Frontend contract | `pnpm vitest run --config vitest.harness.config.ts phase24-github-living` — backend-backed describe blocks green; the **Settings-install** and **export-mode** blocks land with **T-287/T-288** | A *backend-backed* frontend block is red (the two pending blocks are tracked, not blocking until T-287/T-288) |
+| Secrets never logged | grep/contract: no code path logs an installation token, the App private key, a raw webhook payload, or a PR diff | Any of those appears in a log call |
+
+**Phase-gated criteria (verify in staging via `docs/SMOKE_TEST_CHECKLIST.md`
+§"Phase 21" — the manual end-to-end flow):**
+
+| Phase | Release-blocking criteria | Blocks release if |
+|---|---|---|
+| **A — Foundation** | Installs persist; every API call uses a **cached installation token**; no static user token in the write path; export runs on the worker and returns **202**; webhook ack **p99 < 300 ms**; signed-fixture tests (valid / invalid / replayed / out-of-order) pass | A write uses a static token, export blocks the request, ack p99 ≥ 300 ms, or a malformed/replayed signature is accepted |
+| **B — The loop ("now it's core")** | Closing an issue flips its task to **done within SLO**; **backfill** recovers missed-while-down events; the confused-deputy authz test proves install A cannot touch workspace B; **kill-worker-mid-reconcile** resumes without dupes | A close does not reach SLO, backfill loses events, cross-tenant mutation is possible, or a restart duplicates side effects |
+| **C — Executable** | A finalized workspace opens **one PR** with a **red** harness CI run; re-export updates it **in place**; `Workflows: write` 403 and content 409 retry are both handled | A duplicate PR/branch appears, re-export forks state, or a 403/409 surfaces as an opaque failure |
+| **C′ — Living** | "Add two features" pushes **only new issues** under a **new milestone** on top of shipped v1 work (no duplicate issues for unchanged tasks) | An increment re-creates existing issues or pushes outside its milestone |
+| **D — Team-grade** | Tasks appear on a board reflecting **live** state; PRs carry a **SpecForge check**; the LLM-check cost is **capped per tenant/day** | The board drifts from live state, the check is absent, or the evaluator has no per-tenant cost cap |
+
+Pass criteria:
+
+- Every locally-verifiable check is green in CI / on a clean checkout.
+- Each phase's staging criteria pass before that phase's surface is enabled in
+  production; do not enable Phase C/C′/D against an un-passed Phase A/B.
+- The full gate is **re-run after T-287–T-289** land the remaining frontend
+  surfaces; the two pending frontend contract blocks must then be green.
+
 ## Observability Gate
 
 Metrics:
@@ -224,6 +263,18 @@ Metrics:
 - Storyboard dashboards include generation failure rate, refund spike detection,
   public view volume, download failures, PDF render latency, and source-missing
   counts.
+- GitHub counters are present when the App is enabled:
+  `specforge_github_webhook_received_total`,
+  `specforge_github_webhook_verified_total`,
+  `specforge_github_webhook_failed_total`,
+  `specforge_github_reconcile_lag_seconds`, `specforge_github_export_total`,
+  `specforge_github_pr_total`, `specforge_github_check_total`,
+  `specforge_github_token_mint_total`, `specforge_github_job_retries_total`,
+  `specforge_github_job_deadlettered_total`, and
+  `specforge_github_queue_depth`.
+- GitHub dashboards/alerts cover webhook failure rate, reconcile lag p95,
+  dead-letter rate, queue depth, token-mint cache-hit ratio, and check verdicts
+  (see `docs/OBSERVABILITY_RUNBOOK.md`).
 
 Sentry:
 
