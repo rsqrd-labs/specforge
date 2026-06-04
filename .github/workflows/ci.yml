@@ -375,11 +375,11 @@ jobs:
       - name: Phase 14 V1.3 usefulness frontend contracts
         run: pnpm vitest run --config vitest.harness.config.ts ../harness/tests/frontend/phase14-v13-usefulness.contract.test.ts
 
-      # Phase 24 (GitHub living) frontend harness — the backend-backed blocks are
-      # green today; the Settings-install and export-mode blocks depend on the
-      # unbuilt T-287/T-288 surfaces (the phase schedules them after T-286). This
-      # step is wired in once T-287–T-289 land so it stays green and never blocks
-      # deploy. Tracked in docs/PRODUCTION_RELEASE_GATE.md (Phase 21 gate).
+      # Phase 24 (GitHub living) frontend harness — all blocks are green now that
+      # the install (T-287), export-mode (T-288), and increments/ideas (T-289)
+      # surfaces have landed. Tracked in docs/PRODUCTION_RELEASE_GATE.md (Phase 21).
+      - name: Phase 24 GitHub living frontend harness contracts
+        run: pnpm vitest run --config vitest.harness.config.ts ../harness/tests/frontend/phase24-github-living.contract.test.ts
 
       - name: Build
         run: pnpm build

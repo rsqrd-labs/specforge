@@ -88,14 +88,25 @@ describe("GitHub living-integration api client", () => {
     expect(String(post.mock.calls[0][0])).toBe("/workspaces/ws-9/sync/resync")
   })
 
-  it("createIncrement POSTs the feature title to the increments endpoint", async () => {
-    const post = vi
-      .spyOn(api, "post")
-      .mockResolvedValueOnce({ data: { id: "inc-1", sequence: 1, title: "Add billing" } })
-    const inc = await createIncrement("ws-9", { title: "Add billing" })
+  it("createIncrement POSTs the feature request to the increments endpoint", async () => {
+    const post = vi.spyOn(api, "post").mockResolvedValueOnce({
+      data: {
+        id: "inc-1",
+        sequence: 1,
+        title: "Add billing",
+        status: "ready",
+        new_task_count: 3,
+      },
+    })
+    const inc = await createIncrement("ws-9", {
+      feature_request: "Add a billing page with Stripe checkout",
+    })
     expect(inc.title).toBe("Add billing")
+    expect(inc.new_task_count).toBe(3)
     const [url, body] = post.mock.calls[0]
     expect(String(url)).toBe("/workspaces/ws-9/increments")
-    expect(body).toEqual({ title: "Add billing" })
+    expect(body).toEqual({
+      feature_request: "Add a billing page with Stripe checkout",
+    })
   })
 })

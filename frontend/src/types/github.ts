@@ -92,34 +92,47 @@ export type IncrementStatus =
   | "pushed"
   | "stale"
 
-/** A versioned delta layered on the finalised workspace baseline. Increment 0
- *  is the original baseline; each subsequent `sequence` is an additive or
- *  behaviour-changing change set. */
+/** Delta generation mode. The MVP ships `additive`; `behaviour_changing`
+ *  (blast-radius analysis) is gated behind a backend flag (T-279). */
+export type IncrementMode = "additive" | "behaviour_changing"
+
+/** One entry on the workspace's increment timeline — a versioned delta layered
+ *  on the finalised baseline (mirrors backend `IncrementRead`). The baseline is
+ *  `sequence` 0; each subsequent increment is an additive change set. */
 export interface Increment {
   id: string
-  workspace_id: string
   sequence: number
   title: string
   status: IncrementStatus
-  baseline_version_ids: string[]
   created_at: string
   updated_at: string
+}
+
+/** Result of `POST /increments` — the new increment plus its delta size
+ *  (mirrors backend `IncrementGenerateResponse`). */
+export interface IncrementGenerateResponse extends Increment {
+  new_task_count: number
+}
+
+/** The 202 ack for `POST /increments/{inc_id}/push`. */
+export interface IncrementPushAck {
+  increment_id: string
+  status: IncrementStatus
 }
 
 export type IncrementIdeaSource = "user" | "github"
 export type IncrementIdeaStatus = "open" | "planned" | "done" | "dismissed"
 
 /** A lightweight backlog item — a feature captured mid-build, batched into an
- *  increment when ready. May originate in SpecForge or flow back from a GitHub
- *  issue labelled `idea`/`enhancement`. */
+ *  increment when ready (mirrors backend `IdeaRead`). May originate in SpecForge
+ *  (`source: "user"`) or flow back from a GitHub issue labelled
+ *  `idea`/`enhancement` (`source: "github"`, carrying its `external_ref`). */
 export interface IncrementIdea {
   id: string
-  workspace_id: string
-  increment_id: string | null
   source: IncrementIdeaSource
   external_ref: string | null
-  text: string
   status: IncrementIdeaStatus
+  text: string
+  increment_id: string | null
   created_at: string
-  updated_at: string
 }

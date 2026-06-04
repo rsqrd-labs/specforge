@@ -47,11 +47,8 @@ import {
   getGitHubPush,
 } from "../../services/api"
 import type { GitHubExportMode } from "../../types/github"
-import {
-  BranchIcon,
-  PullRequestIcon,
-  ShippedCheckIcon,
-} from "../shared/icons"
+import { BranchIcon, PullRequestIcon, ShippedCheckIcon } from "../shared/icons"
+import { StagedProgress } from "./StagedProgress"
 
 interface ExportGitHubModalProps {
   workspaceId: string
@@ -461,27 +458,7 @@ export function ExportGitHubModal({
               </div>
             </>
           ) : phase === "progress" ? (
-            <ol className="gh-stage-list" aria-live="polite">
-              {stages.map((label, i) => {
-                const state =
-                  i < stageIndex ? "done" : i === stageIndex ? "active" : "pending"
-                return (
-                  <li key={label} className={`gh-stage ${state}`}>
-                    <span className="gh-stage-tick" aria-hidden="true">
-                      {state === "done" ? (
-                        <ShippedCheckIcon />
-                      ) : (
-                        <span className="gh-stage-dot" />
-                      )}
-                    </span>
-                    <span className="gh-stage-label">
-                      {label}
-                      {state === "active" ? "…" : ""}
-                    </span>
-                  </li>
-                )
-              })}
-            </ol>
+            <StagedProgress stages={stages} stageIndex={stageIndex} />
           ) : phase === "still_working" ? (
             <div className="github-modal-not-connected">
               <p>

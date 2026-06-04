@@ -177,6 +177,30 @@ export function PullRequestIcon() {
 }
 
 /**
+ * Idea — a spark: one bright four-point star with a smaller companion. The
+ * provenance/quiet glyph of the idea backlog — a thought worth keeping, not a
+ * clichéd lightbulb (and never an emoji). Same 16-grid / 1.75 stroke family.
+ */
+export function IdeaIcon() {
+  return (
+    <svg
+      viewBox="0 0 16 16"
+      width="14"
+      height="14"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.6"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M6 1.5c.5 2.4 1.1 3 3.5 3.5-2.4.5-3 1.1-3.5 3.5-.5-2.4-1.1-3-3.5-3.5 2.4-.5 3-1.1 3.5-3.5Z" />
+      <path d="M11.5 8.5c.3 1.4.6 1.7 2 2-1.4.3-1.7.6-2 2-.3-1.4-.6-1.7-2-2 1.4-.3 1.7-.6 2-2Z" />
+    </svg>
+  )
+}
+
+/**
  * Drift — two diverging arrows. Reads as "these have moved apart", a calm
  * informational note for the resync banner (slate, never alarm-red).
  */

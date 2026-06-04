@@ -18,6 +18,7 @@ import { MarkdownRenderer } from "../components/workspace/MarkdownRenderer"
 import { ProblemStatementPanel } from "../components/workspace/ProblemStatementPanel"
 import { TaskValidationPanel } from "../components/workspace/TaskValidationPanel"
 import { TaskCompletionPanel } from "../components/workspace/TaskCompletionPanel"
+import { IncrementTimeline } from "../components/workspace/IncrementTimeline"
 import { ExportGitHubModal } from "../components/workspace/ExportGitHubModal"
 import { useGitHubSync } from "../hooks/useGitHubSync"
 // ExportPDFButton — T-USE-08 contract; PDF export logic is inlined in handlePdfExport
@@ -1858,6 +1859,19 @@ export default function Workspace() {
                         onResync={() => void githubSync.resync()}
                       />
                     )}
+                    {/* The living-workspace timeline: only once the baseline is
+                        finalised and a GitHub App install is live (an increment
+                        is a delta on a shipped baseline). */}
+                    {activeStage.type === "tasks" &&
+                      allFinalised &&
+                      githubSync.connection === "connected" &&
+                      id && (
+                        <IncrementTimeline
+                          workspaceId={id}
+                          enabled
+                          hasBaselinePush={githubSync.data !== null}
+                        />
+                      )}
                   </>
                 )}
               </aside>

@@ -21,7 +21,10 @@ import type {
 import type {
   GitHubExportMode,
   Increment,
+  IncrementGenerateResponse,
   IncrementIdea,
+  IncrementMode,
+  IncrementPushAck,
   InstallationList,
   SyncState,
 } from "../types/github"
@@ -821,14 +824,35 @@ export async function listIncrements(
   }
 }
 
-/** Generate a new increment from a feature request as a delta vs. baseline. */
+/**
+ * Generate a new increment from a feature request as a delta vs. the finalised
+ * baseline (synchronous, credit-aware, 201). `feature_request` must be ≥ 8
+ * chars; `mode` defaults to `additive` (the MVP path — `behaviour_changing` is
+ * gated server-side). Returns the new increment plus its delta size.
+ */
 export async function createIncrement(
   workspaceId: string,
-  body: { title: string },
-): Promise<Increment> {
-  const response = await api.post<Increment>(
+  body: { feature_request: string; mode?: IncrementMode },
+): Promise<IncrementGenerateResponse> {
+  const response = await api.post<IncrementGenerateResponse>(
     `/workspaces/${workspaceId}/increments`,
     body,
+  )
+  return response.data
+}
+
+/**
+ * Enqueue an incremental GitHub sync for a finalised increment (202). Pushes
+ * only the new issues (and, in `pr_with_tests` mode, one PR) layered on the
+ * already-shipped baseline. Requires a live baseline push to exist — the
+ * backend 409s otherwise.
+ */
+export async function pushIncrement(
+  workspaceId: string,
+  incrementId: string,
+): Promise<IncrementPushAck> {
+  const response = await api.post<IncrementPushAck>(
+    `/workspaces/${workspaceId}/increments/${incrementId}/push`,
   )
   return response.data
 }
