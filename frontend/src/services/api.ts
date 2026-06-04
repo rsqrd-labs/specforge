@@ -752,6 +752,18 @@ export async function getGitHubInstallations(): Promise<InstallationList> {
 }
 
 /**
+ * Locally revoke one GitHub App installation the caller owns (Settings
+ * disconnect). The backend is idempotent and returns 204 even for a
+ * missing/unowned id (it never leaks which installations exist), and GitHub
+ * repos/issues are left untouched.
+ */
+export async function revokeGitHubInstallation(
+  installationId: string,
+): Promise<void> {
+  await api.delete(`/integrations/github/${installationId}`)
+}
+
+/**
  * Fetch a workspace's live GitHub task-completion + drift state.
  *
  * Mirrors `getGitHubPush`: a 404 (never pushed, stale, or disabled) is a normal

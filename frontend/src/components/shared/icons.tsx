@@ -123,6 +123,31 @@ export function BranchIcon() {
 }
 
 /**
+ * Installed — a shield cradling a check. The settled-trust glyph of the
+ * Settings App-install panel: "this tool is installed in your house, and it is
+ * safe." Lotus-tinted on the installed confirmation. Drawn to the same 16-grid /
+ * 1.75 stroke, not borrowed — a shield, not a generic checkmark.
+ */
+export function InstalledShieldIcon() {
+  return (
+    <svg
+      viewBox="0 0 16 16"
+      width="14"
+      height="14"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.75"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M8 1.75 13 3.5v4c0 3.2-2.1 5.6-5 6.75-2.9-1.15-5-3.55-5-6.75v-4Z" />
+      <polyline points="5.6,7.9 7.4,9.7 10.6,5.9" />
+    </svg>
+  )
+}
+
+/**
  * Drift — two diverging arrows. Reads as "these have moved apart", a calm
  * informational note for the resync banner (slate, never alarm-red).
  */
