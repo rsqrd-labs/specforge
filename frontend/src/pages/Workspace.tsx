@@ -1390,6 +1390,7 @@ export default function Workspace() {
                     <button
                       type="button"
                       role="menuitem"
+                      data-testid="workspace-github-btn"
                       className={`ws-export-item ${allFinalised && isGitHubConnected ? "ready" : ""}`}
                       disabled={!canExport || !isGitHubConnected}
                       onClick={() => { setShowGitHubExport(true); setShowExportMenu(false) }}

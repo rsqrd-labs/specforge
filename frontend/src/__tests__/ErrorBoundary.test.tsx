@@ -127,8 +127,12 @@ describe("ErrorBoundary", () => {
     // so we scan all calls for the [ErrorBoundary] prefix rather than asserting on
     // the first call only.
     expect(consoleSpy).toHaveBeenCalled()
-    const allMessages = consoleSpy.mock.calls.map((args) => String(args[0]))
-    expect(allMessages.some((msg) => msg.includes("[ErrorBoundary]"))).toBe(true)
+    const allMessages = consoleSpy.mock.calls.map((args: unknown[]) =>
+      String(args[0]),
+    )
+    expect(allMessages.some((msg: string) => msg.includes("[ErrorBoundary]"))).toBe(
+      true,
+    )
   })
 
   it("renders fallback even when onError prop is absent", () => {
