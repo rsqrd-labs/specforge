@@ -11,15 +11,26 @@ if str(BACKEND_ROOT) not in sys.path:
 
 @pytest.fixture(autouse=True)
 def _reset_shared_redis():
-    """Reset the module-level shared Redis singleton between tests.
+    """Reset the module-level + singleton-cached Redis clients between tests.
 
-    Some tests inject a _NoopRedis (lacking 'delete') via create_app().
-    Without this reset, that stale client leaks into subsequent tests that
-    call credit_service.invalidate() -> _invalidate() -> redis.delete().
-    H-2 — T-219.
+    Two leaks across pytest-asyncio's per-test event loops
+    (``asyncio_default_test_loop_scope=function``) must be cleared so a Redis
+    client created on one test's loop is never reused on the next:
+
+    1. ``database._shared_redis`` — the global injected by ``create_app`` /
+       the lifespan (some tests inject a ``_NoopRedis`` lacking ``delete``).
+    2. ``credit_service._redis`` — the ``CreditService`` singleton caches its
+       own copy from the first ``get_shared_redis()`` call and never refreshes
+       it; left set, a later test's ``credit_service.invalidate()`` ->
+       ``redis.delete()`` runs against a connection bound to a now-closed loop
+       and raises ``RuntimeError: Event loop is closed``.
+
+    Both are reset to ``None`` after each test so the next test lazily rebuilds
+    a fresh client on its own loop. H-2 — T-219 / Phase 21.
     """
     import database
+    from services.credit_service import credit_service
 
-    original = database._shared_redis
     yield
-    database._shared_redis = original
+    database._shared_redis = None
+    credit_service._redis = None
