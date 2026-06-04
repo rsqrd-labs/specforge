@@ -596,3 +596,68 @@ async def test_github_increment_push_rate_limit_blocks_sixth_push(
     assert response.status_code == 429
     assert response.headers["Retry-After"] == "3600"
     assert "5 pushes" in response.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_webhook_not_blocked_by_generic_ip_cap() -> None:
+    """A provider's redelivery burst above the generic 1000/min IP cap must NOT
+    be throttled on the webhook path (LF-1 review remediation).
+
+    The generic ``ip:`` window is pre-loaded past its 1000 limit; a webhook POST
+    from that IP must still pass, because webhook ingress uses only the separate,
+    generous ``webhook_ip`` backstop — never the generic per-IP cap.
+    """
+    fake_redis = _FakeRedis()
+    now = time.time()
+    fake_redis._sets["ratelimit:ip:203.0.113.50"] = {
+        f"req_{i}": now - i * 0.001 for i in range(1500)
+    }
+
+    app = FastAPI()
+    app.add_middleware(RateLimitMiddleware, trusted_proxy_ips="127.0.0.1")
+    app.state.redis = fake_redis
+
+    @app.post("/integrations/github/webhook")
+    async def webhook() -> dict:
+        return {"ok": True}
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            "/integrations/github/webhook",
+            headers={"X-Forwarded-For": "203.0.113.50"},
+        )
+
+    assert response.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_webhook_flood_backstop_blocks_single_ip() -> None:
+    """A single-source flood beyond the webhook backstop is rejected (LF-1).
+
+    Pre-loading the ``webhook_ip`` window to its limit makes the next webhook POST
+    from that IP a 429 — blunting a bogus-delivery flood before the HMAC check.
+    """
+    fake_redis = _FakeRedis()
+    now = time.time()
+    fake_redis._sets["ratelimit:webhook_ip:203.0.113.51"] = {
+        f"hit_{i}": now - i * 0.001 for i in range(6000)
+    }
+
+    app = FastAPI()
+    app.add_middleware(RateLimitMiddleware, trusted_proxy_ips="127.0.0.1")
+    app.state.redis = fake_redis
+
+    @app.post("/billing/webhook")
+    async def webhook() -> dict:
+        return {"ok": True}
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            "/billing/webhook",
+            headers={"X-Forwarded-For": "203.0.113.51"},
+        )
+
+    assert response.status_code == 429
+    assert "Retry-After" in response.headers

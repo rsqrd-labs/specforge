@@ -262,14 +262,28 @@ export async function handleUnauthorizedResponse(
   }
 }
 
+// Default request timeout. A moderate ceiling so a stalled connection fails
+// recoverably instead of hanging a request (and its UI) forever. Streaming stage
+// generation does NOT ride this client — it uses fetch() in sseService — so this
+// never truncates a long-lived stream. The few synchronous LLM-backed endpoints
+// (increment generation, clarification) and the PDF render legitimately run
+// longer than this and pass an explicit longer per-request timeout below.
+export const DEFAULT_API_TIMEOUT_MS = 30_000
+// Backend synchronous-LLM handlers are bounded by llm_complete_timeout_seconds
+// (45s); allow generous headroom over that so a legitimate long generation is
+// never aborted client-side.
+export const LLM_SYNC_API_TIMEOUT_MS = 90_000
+
 export const api = axios.create({
   baseURL: import.meta.env.VITE_API_URL,
   withCredentials: true,
+  timeout: DEFAULT_API_TIMEOUT_MS,
 })
 
 const refreshApi = axios.create({
   baseURL: import.meta.env.VITE_API_URL,
   withCredentials: true,
+  timeout: DEFAULT_API_TIMEOUT_MS,
 })
 
 api.interceptors.request.use(async (config) => {
@@ -442,7 +456,7 @@ export async function exportWorkspacePdf(id: string): Promise<Blob> {
   const response = await api.post<Blob>(
     `/workspaces/${id}/export/pdf`,
     undefined,
-    { responseType: "blob" },
+    { responseType: "blob", timeout: LLM_SYNC_API_TIMEOUT_MS },
   )
   return response.data
 }
@@ -559,6 +573,8 @@ export async function requestClarification(
   try {
     const response = await api.post<ClarifyResponse>(
       `/workspaces/${workspaceId}/clarify`,
+      undefined,
+      { timeout: LLM_SYNC_API_TIMEOUT_MS },
     )
     if (response.status === 204 || !response.data || !response.data.questions) {
       return null
@@ -837,6 +853,8 @@ export async function createIncrement(
   const response = await api.post<IncrementGenerateResponse>(
     `/workspaces/${workspaceId}/increments`,
     body,
+    // Synchronous LLM delta generation — allow headroom over the default.
+    { timeout: LLM_SYNC_API_TIMEOUT_MS },
   )
   return response.data
 }

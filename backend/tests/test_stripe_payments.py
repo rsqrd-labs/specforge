@@ -319,12 +319,8 @@ async def test_checkout_session_creation() -> None:
     # reach the patched create_async.  Stub both for the duration of the test.
     with (
         patch.object(settings, "stripe_secret_key", "sk_test_dummy"),
-        patch.object(
-            settings, "stripe_success_url", "https://example.test/billing"
-        ),
-        patch.object(
-            settings, "stripe_cancel_url", "https://example.test/billing"
-        ),
+        patch.object(settings, "stripe_success_url", "https://example.test/billing"),
+        patch.object(settings, "stripe_cancel_url", "https://example.test/billing"),
         patch(
             "stripe.checkout.Session.create_async",
             new_callable=AsyncMock,
@@ -928,6 +924,39 @@ async def test_checkout_rate_limit() -> None:
     assert (
         "5 purchases per hour" in detail
     ), f"Rate-limit detail must mention '5 purchases per hour', got: {detail!r}"
+
+
+@pytest.mark.asyncio
+async def test_checkout_created_metric_increments() -> None:
+    """A successful POST /billing/checkout increments BILLING_CHECKOUT_CREATED.
+
+    Wires the payments-path observability counter the review flagged as a stub.
+    """
+    from services.observability import BILLING_CHECKOUT_CREATED
+
+    async def _fake_user():
+        return _USER_A
+
+    app = create_app(redis_client=_NoopRedis())
+    app.dependency_overrides[get_current_user] = _fake_user
+
+    async def _fake_db():
+        yield _NoopSession()
+
+    app.dependency_overrides[get_db] = _fake_db
+
+    before = BILLING_CHECKOUT_CREATED._value.get()
+    with patch(
+        "services.stripe_service.stripe_service.create_checkout_session",
+        new_callable=AsyncMock,
+        return_value="https://checkout.stripe.com/test",
+    ):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.post("/billing/checkout")
+
+    assert resp.status_code == 200
+    assert BILLING_CHECKOUT_CREATED._value.get() == before + 1
 
 
 # ===========================================================================

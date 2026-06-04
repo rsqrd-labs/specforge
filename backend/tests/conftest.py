@@ -1,3 +1,4 @@
+import fnmatch
 import sys
 from pathlib import Path
 
@@ -7,6 +8,38 @@ BACKEND_ROOT = Path(__file__).resolve().parents[1]
 
 if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
+
+
+class FakeRedis:
+    """Minimal in-memory async Redis double for unit tests.
+
+    Implements the small surface the auth user-cache uses (get/set/delete/
+    scan_iter) so cache-hit behaviour can be asserted deterministically without
+    a live Redis. ``ex`` is accepted and ignored — tests do not exercise TTL
+    expiry, only hit/miss/invalidate semantics.
+    """
+
+    def __init__(self) -> None:
+        self._store: dict[str, str] = {}
+
+    async def get(self, key: str) -> str | None:
+        return self._store.get(key)
+
+    async def set(self, key: str, value: str, ex: int | None = None) -> None:
+        self._store[key] = value
+
+    async def delete(self, *keys: str) -> int:
+        removed = 0
+        for key in keys:
+            if key in self._store:
+                del self._store[key]
+                removed += 1
+        return removed
+
+    async def scan_iter(self, match: str | None = None):
+        for key in list(self._store):
+            if match is None or fnmatch.fnmatch(key, match):
+                yield key
 
 
 @pytest.fixture(autouse=True)

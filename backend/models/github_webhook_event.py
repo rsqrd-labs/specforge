@@ -12,9 +12,12 @@ INSERT order matters (mirrors the Stripe receiver): record the delivery first,
 return early on conflict, only then enqueue the reconcile job. Reversing the
 steps creates a crash window where a GitHub retry could double-process.
 
-Retention note:
-    Grows at one row per delivery. A future cleanup job should delete rows older
-    than GitHub's redelivery window to bound growth (spec §12).
+Retention:
+    Grows at one row per delivery. Bounded by the daily retention purge
+    (``worker.purge_webhook_events`` → ``services.maintenance``), which deletes
+    rows older than ``WEBHOOK_EVENT_RETENTION_DAYS`` (30d) — well beyond GitHub's
+    redelivery window, so dedup protection is never lost for an in-flight retry
+    (spec §12).
 
 Phase 21 — T-265 / T-266 (spec §10).
 """

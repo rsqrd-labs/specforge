@@ -14,10 +14,12 @@ INSERT order matters (Phase 18 Payments Directive §5):
 Reversing steps 1 and 3 would create a crash window where a Stripe retry
 after a process crash could double-credit the user.
 
-Retention note:
-    This table grows at one row per processed event.  A future cleanup job
-    should delete rows older than 30 days (Stripe's retry window is 72 hours).
-    -- TODO: add retention cleanup for stripe_webhook_events (Phase 18+)
+Retention:
+    Grows at one row per processed event.  Bounded by the daily retention purge
+    (``worker.purge_webhook_events`` → ``services.maintenance``), which deletes
+    rows older than ``WEBHOOK_EVENT_RETENTION_DAYS`` (30d) — well beyond Stripe's
+    72-hour retry window, so dedup protection is never lost for an in-flight
+    retry.
 
 Phase 18 — T-226.
 """

@@ -38,6 +38,7 @@ from schemas.billing import (
     PackHistoryItem,
 )
 from services.observability import (
+    BILLING_CHECKOUT_CREATED,
     BILLING_WEBHOOK_DUPLICATE,
     BILLING_WEBHOOK_ERROR,
     BILLING_WEBHOOK_RECEIVED,
@@ -114,7 +115,7 @@ async def create_checkout(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail="Failed to create checkout session. Please try again.",
         ) from exc
-    # TODO T-236: import and increment BILLING_CHECKOUT_CREATED counter
+    BILLING_CHECKOUT_CREATED.inc()
     return CheckoutResponse(checkout_url=checkout_url)
 
 
@@ -163,7 +164,8 @@ async def get_billing_status(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Session not found",
         )
-    # TODO T-236: import and increment BILLING_STATUS_COMPLETED counter
+    # Hit-rate for this read-only poll is covered by the global REQUEST_COUNT
+    # metric (labelled by route + status); no bespoke counter needed.
     return BillingStatusResponse(
         status="completed",
         credits_added=pack.credits_purchased,
@@ -194,7 +196,8 @@ async def get_billing_history(
         .limit(50)
     )
     packs = result.scalars().all()
-    # TODO T-236: import and increment BILLING_HISTORY_FETCHED counter
+    # Hit-rate for this read-only listing is covered by the global REQUEST_COUNT
+    # metric (labelled by route + status); no bespoke counter needed.
     return [PackHistoryItem.model_validate(p) for p in packs]
 
 
@@ -317,5 +320,6 @@ async def stripe_webhook(
         # Return 200 — Stripe won't retry; partial DB state is clean.
         return {"status": "error_logged"}
 
-    # TODO T-236: increment BILLING_WEBHOOK_RECEIVED counter
+    # BILLING_WEBHOOK_RECEIVED is incremented at the top of this handler (before
+    # the idempotency check), per its definition; nothing to count here.
     return {"status": "ok"}

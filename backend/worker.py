@@ -57,6 +57,10 @@ _JOB_TIMEOUT_SECONDS = 1800
 _KEEP_RESULT_SECONDS = 0
 # Periodic drift reconciliation interval (minutes).
 _DRIFT_CRON_MINUTES = {0, 15, 30, 45}
+# Daily webhook-idempotency retention purge — off-peak, off the top of the hour
+# so it never coincides with a drift-reconcile tick.
+_PURGE_CRON_HOUR = {3}
+_PURGE_CRON_MINUTE = {17}
 
 
 @github_job("export_push")
@@ -129,6 +133,24 @@ async def reconcile_drift(ctx: dict[str, Any]) -> None:
     await github_reconcile.reconcile_drift(ctx)
 
 
+async def purge_webhook_events(ctx: dict[str, Any]) -> None:
+    """Daily: bound the webhook idempotency tables' growth (retention purge).
+
+    Not wrapped in the ``github_job`` retry/dead-letter contract: a transient
+    failure is harmless because the 30-day retention window makes a missed daily
+    run inconsequential, and the next cron tick retries. Exceptions are caught
+    and logged so a blip never surfaces as a worker error.
+    """
+    from database import AsyncSessionLocal
+    from services.maintenance import purge_expired_webhook_events
+
+    try:
+        async with AsyncSessionLocal() as db:
+            await purge_expired_webhook_events(db)
+    except Exception:  # pragma: no cover — best-effort; next daily tick retries
+        logger.exception("maintenance.webhook_events_purge_failed")
+
+
 async def _on_startup(ctx: dict[str, Any]) -> None:
     """Initialise worker-process services: logging, Sentry, the shared Redis client.
 
@@ -186,7 +208,13 @@ class WorkerSettings:
             reconcile_drift,
             minute=_DRIFT_CRON_MINUTES,
             run_at_startup=False,
-        )
+        ),
+        cron(
+            purge_webhook_events,
+            hour=_PURGE_CRON_HOUR,
+            minute=_PURGE_CRON_MINUTE,
+            run_at_startup=False,
+        ),
     ]
     redis_settings = _redis_settings()
     max_jobs = _MAX_JOBS

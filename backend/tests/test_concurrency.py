@@ -17,7 +17,7 @@ from uuid import UUID, uuid4
 
 import pytest
 
-from middleware.auth import _USER_CACHE, invalidate_user_cache
+from middleware.auth import invalidate_user_cache
 from services.auth_service import OAUTH_STATE_PREFIX, AuthError, AuthService
 from services.credit_service import CreditService
 from services.pipeline.stage_manager import StageStateError
@@ -370,58 +370,86 @@ async def test_sse_cleanup_done_set_before_completion_event() -> None:
 
 @pytest.mark.asyncio
 async def test_credit_invalidate_removes_entry_from_auth_cache() -> None:
-    """H-4 — credit deduct/refund must flush the auth middleware in-process cache.
+    """LF-1 — credit deduct/refund must flush the shared (Redis) auth cache.
 
-    After a deduct() or refund(), the caller expects the next request to see
-    the updated credit_balance rather than a stale 30-second cache entry.
-    ``credit_service._invalidate(user_id)`` calls ``invalidate_user_cache``
-    which pops the entry from ``_USER_CACHE``.
+    After a deduct() or refund(), the caller expects the next request — on ANY
+    worker — to see the updated credit_balance rather than a stale cache entry.
+    ``credit_service._invalidate(user_id)`` awaits ``invalidate_user_cache``
+    which deletes the user's Redis cache key.
     """
+    import database
+    from middleware import auth
+    from models import User
+    from tests.conftest import FakeRedis
+
+    fake = FakeRedis()
+    database._initialize_redis(fake)
     user_id = uuid4()
 
-    # Plant a fake cache entry.
-    _USER_CACHE[user_id] = (999999.0, {"credit_balance": 100, "id": str(user_id)})
+    await auth._cache_user(
+        User(
+            id=user_id,
+            email="cache@example.com",
+            google_id="g",
+            name="Cache",
+            avatar_url=None,
+            credit_balance=100,
+        )
+    )
+    assert await fake.get(auth._cache_key(user_id)) is not None
 
-    # Simulate what _invalidate() does:
-    invalidate_user_cache(user_id)
+    await invalidate_user_cache(user_id)
 
     assert (
-        user_id not in _USER_CACHE
-    ), "invalidate_user_cache must remove the user entry from _USER_CACHE (H-4)"
+        await fake.get(auth._cache_key(user_id)) is None
+    ), "invalidate_user_cache must delete the user's Redis cache key (LF-1)"
 
 
 @pytest.mark.asyncio
 async def test_credit_invalidate_is_idempotent() -> None:
-    """H-4 — invalidate_user_cache must be safe to call for a missing key.
+    """LF-1 — invalidate_user_cache must be safe to call for a missing key.
 
     If the entry was already evicted or was never cached, calling
     invalidate_user_cache must not raise.
     """
+    import database
+    from middleware import auth
+    from tests.conftest import FakeRedis
+
+    fake = FakeRedis()
+    database._initialize_redis(fake)
     user_id = uuid4()
     # The user is NOT in the cache — must not raise.
-    invalidate_user_cache(user_id)
-    assert user_id not in _USER_CACHE
+    await invalidate_user_cache(user_id)
+    assert await fake.get(auth._cache_key(user_id)) is None
 
 
 @pytest.mark.asyncio
 async def test_credit_deduct_invalidates_cache_via_redis_and_auth() -> None:
-    """H-4 — CreditService.deduct() invalidates both Redis and in-process caches.
+    """LF-1 — CreditService.deduct() invalidates both the balance and auth caches.
 
-    When a deduction succeeds, _invalidate() deletes the Redis key so the
-    next balance read fetches fresh data, and also removes the auth-cache
-    entry so the middleware serves an accurate credit_balance on the next
-    request.
+    When a deduction succeeds, _invalidate() deletes the Redis balance key so the
+    next balance read fetches fresh data, and awaits invalidate_user_cache() which
+    deletes the shared auth-cache key so the middleware serves an accurate
+    credit_balance on the next request — on any worker.
     """
+    import database
+    from middleware import auth
+    from tests.conftest import FakeRedis
+
     user_id = uuid4()
-    redis = _FakeRedis()
+    redis = FakeRedis()
+    # The deduct path resolves the auth cache via the shared client; point both
+    # at one fake so the test observes both deletions.
+    database._initialize_redis(redis)
     credit_key = f"credits:{user_id}"
     await redis.set(credit_key, "100")
 
     user = _make_user(user_id=user_id)
     db = _FakeCreditDB(user)
 
-    # Plant an auth-cache entry to confirm it is evicted.
-    _USER_CACHE[user_id] = (999999.0, {"credit_balance": 100, "id": str(user_id)})
+    # Plant a sentinel auth-cache entry to confirm it is evicted.
+    await redis.set(auth._cache_key(user_id), "sentinel")
 
     service = CreditService(redis_client=redis)
 
@@ -430,9 +458,9 @@ async def test_credit_deduct_invalidates_cache_via_redis_and_auth() -> None:
     # Redis balance cache must be cleared.
     assert (
         await redis.get(credit_key) is None
-    ), "deduct() must delete the Redis credit balance cache entry (H-4)"
+    ), "deduct() must delete the Redis credit balance cache entry (LF-1)"
 
-    # Auth middleware in-process cache must also be cleared.
+    # Shared auth cache key must also be cleared.
     assert (
-        user_id not in _USER_CACHE
-    ), "deduct() must evict the user entry from the auth middleware cache (H-4)"
+        await redis.get(auth._cache_key(user_id)) is None
+    ), "deduct() must evict the user entry from the shared auth cache (LF-1)"

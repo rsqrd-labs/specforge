@@ -20,11 +20,19 @@ from services.observability import BILLING_CHECKOUT_RATE_LIMITED
 logger = logging.getLogger(__name__)
 
 _LOGIN_PATHS = frozenset({"/auth/google", "/auth/callback"})
-# /billing/webhook and /integrations/github/webhook are exempt so Stripe/GitHub
-# retry schedules are never blocked — the HMAC signature is the DoS guard.
-_BYPASS_PATHS = frozenset(
-    {"/health", "/billing/webhook", "/integrations/github/webhook"}
-)
+_BYPASS_PATHS = frozenset({"/health"})
+
+# Webhook ingress (/billing/webhook, /integrations/github/webhook) is exempt from
+# every functional/per-user rate tier so a provider's retry/redelivery schedule
+# — including a post-outage backlog replayed from a small pool of IPs — is never
+# throttled. A single coarse per-IP flood backstop still applies as
+# defence-in-depth: it is sized far above any realistic Stripe/GitHub delivery
+# rate from one IP, so it never drops a legitimate delivery, but it blunts a
+# single-source flood of bogus posts before the (cheap, verify-before-work) HMAC
+# check. The HMAC signature remains the primary DoS guard.
+_WEBHOOK_PATHS = frozenset({"/billing/webhook", "/integrations/github/webhook"})
+_WEBHOOK_IP_LIMIT = 6000
+_WEBHOOK_IP_WINDOW_SECONDS = 60
 _LOCAL_FALLBACK_MAX_KEYS = 10_000
 # Evict this many oldest entries when the cap is exceeded.  Single-item
 # eviction cannot keep up with a burst of distinct IPs; bulk removal bounds
@@ -305,6 +313,18 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         path: str,
         check: RateLimitCheck,
     ) -> Response | None:
+        # Webhook ingress: a generous per-IP flood backstop only — never the
+        # generic 1000/min IP cap (a provider redelivery backlog can briefly
+        # exceed it) and never a per-user tier (webhooks are unauthenticated).
+        if path in _WEBHOOK_PATHS:
+            if not await check(
+                f"webhook_ip:{ip}",
+                _WEBHOOK_IP_LIMIT,
+                _WEBHOOK_IP_WINDOW_SECONDS,
+            ):
+                return _rate_limited(_WEBHOOK_IP_WINDOW_SECONDS)
+            return None
+
         if not await check(f"ip:{ip}", 1000, 60):
             return _rate_limited(60)
 

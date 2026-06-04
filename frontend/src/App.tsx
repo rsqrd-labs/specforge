@@ -6,7 +6,11 @@ import Billing from "./pages/Billing"
 import Dashboard from "./pages/Dashboard"
 import Landing from "./pages/Landing"
 import Settings from "./pages/Settings"
-import Workspace from "./pages/Workspace"
+
+// The Workspace editor pulls in CodeMirror (the single largest dependency).
+// Lazy-load it so the landing/dashboard first paint never pays for the editor
+// bundle — it loads only when a workspace is opened (LF-1 review remediation).
+const Workspace = lazy(() => import("./pages/Workspace"))
 
 // T-USE-10: the public read-only view is registered OUTSIDE the auth guard
 // and lazy-loaded so unauthenticated visitors don't pay the full bundle.
@@ -52,7 +56,9 @@ export default function App() {
           path="/workspace/:id"
           element={
             <ProtectedRoute>
-              <Workspace />
+              <Suspense fallback={null}>
+                <Workspace />
+              </Suspense>
             </ProtectedRoute>
           }
         />

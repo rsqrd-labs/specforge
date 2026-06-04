@@ -1,7 +1,6 @@
-import time
-from collections import OrderedDict
+import json
+import logging
 from datetime import datetime
-from typing import Any
 from uuid import UUID
 
 from fastapi import Depends, HTTPException, status
@@ -10,26 +9,38 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.requests import Request
 
-from database import get_db
+from database import get_db, get_shared_redis
 from models import User
 from services.auth_service import AuthError, auth_service
 
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/google", auto_error=False)
-_USER_CACHE_TTL_SECONDS = 30
-_USER_CACHE_MAX_SIZE = 4096
+logger = logging.getLogger(__name__)
 
-# NOTE: _USER_CACHE is per-process. In multi-worker deployments (uvicorn
-# --workers > 1 or Railway horizontal scaling), invalidate_user_cache() only
-# clears the cache in the worker that receives the invalidation call. Other
-# workers may continue serving stale credit_balance values for up to
-# _USER_CACHE_TTL_SECONDS (default: 30 s).
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/google", auto_error=False)
+
+# Short-lived authenticated-user cache, backed by Redis (LF-1).
 #
-# For single-worker deployments this is not a problem. For multi-worker
-# deployments, the 30-second TTL bounds the maximum staleness window.
+# This is a Redis-backed L2 cache (not a per-process dict) so that an
+# invalidation — issued after any credit_balance mutation — propagates to EVERY
+# API worker, not just the one that handled the mutating request. With the prior
+# in-process OrderedDict, a multi-worker / horizontally-scaled deployment served
+# stale credit_balance values for up to the TTL on workers that never saw the
+# invalidation. The authoritative credit deduction is always a fresh
+# SELECT FOR UPDATE in credit_service (so this never affected charging
+# correctness); the cache exists to avoid a User row read per request and to
+# keep the *displayed* balance coherent across workers.
 #
-# TODO(LF-1): migrate to Redis-backed user cache for multi-worker deployments.
-# See docs/RUNBOOK.md §4 for detection and workaround procedures.
-_USER_CACHE: OrderedDict[UUID, tuple[float, dict[str, Any]]] = OrderedDict()
+# Resilience: every Redis interaction is best-effort. A cache read/write/delete
+# failure (Redis down or a transport error) is logged and swallowed, falling
+# through to the authoritative database read — a degraded cache must never break
+# authentication. An in-request memo (request.state) collapses repeated
+# get_current_user dependencies in a single request to one resolution.
+_USER_CACHE_TTL_SECONDS = 30
+_USER_CACHE_PREFIX = "authuser:"
+_REQUEST_USER_ATTR = "_auth_cached_user"
+
+
+def _cache_key(user_id: UUID) -> str:
+    return f"{_USER_CACHE_PREFIX}{user_id}"
 
 
 async def get_current_user(
@@ -53,9 +64,17 @@ async def get_current_user(
     except (KeyError, ValueError) as exc:
         raise _unauthorized() from exc
 
+    # In-request memo: several dependencies may depend on get_current_user in one
+    # request; resolve the user (and any Redis/DB hit) exactly once. Keyed on the
+    # token subject so a memo can never return a different user.
+    memo = getattr(request.state, _REQUEST_USER_ATTR, None)
+    if memo is not None and memo.id == user_id:
+        return memo
+
     user = await _load_user(db, user_id)
     if user is None:
         raise _unauthorized()
+    setattr(request.state, _REQUEST_USER_ATTR, user)
     return user
 
 
@@ -74,38 +93,20 @@ async def get_optional_user(
 
 
 async def _load_user(db: AsyncSession, user_id: UUID) -> User | None:
-    cached = _cached_user(user_id)
+    cached = await _cached_user(user_id)
     if cached is not None:
         return cached
 
     result = await db.execute(select(User).where(User.id == user_id))
     user = result.scalar_one_or_none()
     if user is not None:
-        _cache_user(user)
+        await _cache_user(user)
     return user
 
 
-def _cached_user(user_id: UUID) -> User | None:
-    cached = _USER_CACHE.get(user_id)
-    if cached is None:
-        return None
-
-    expires_at, payload = cached
-    if expires_at <= time.monotonic():
-        _USER_CACHE.pop(user_id, None)
-        return None
-
-    _USER_CACHE.move_to_end(user_id)
-    return User(**payload)
-
-
-def _cache_user(user: User) -> None:
-    user_id = user.id
-    if user_id is None:
-        return
-
-    payload = {
-        "id": user.id,
+def _serialize_user(user: User) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "id": str(user.id),
         "email": user.email,
         "google_id": user.google_id,
         "name": user.name,
@@ -114,29 +115,95 @@ def _cache_user(user: User) -> None:
     }
     created_at = getattr(user, "created_at", None)
     if isinstance(created_at, datetime):
-        payload["created_at"] = created_at
-
-    _USER_CACHE[user_id] = (time.monotonic() + _USER_CACHE_TTL_SECONDS, payload)
-    _USER_CACHE.move_to_end(user_id)
-    while len(_USER_CACHE) > _USER_CACHE_MAX_SIZE:
-        _USER_CACHE.popitem(last=False)
+        payload["created_at"] = created_at.isoformat()
+    return payload
 
 
-def clear_user_cache(user_id: UUID | None = None) -> None:
-    if user_id is None:
-        _USER_CACHE.clear()
-        return
-    _USER_CACHE.pop(user_id, None)
+def _deserialize_user(payload: dict[str, object]) -> User:
+    fields: dict[str, object] = {
+        "id": UUID(str(payload["id"])),
+        "email": payload["email"],
+        "google_id": payload["google_id"],
+        "name": payload["name"],
+        "avatar_url": payload["avatar_url"],
+        "credit_balance": int(payload["credit_balance"]),  # type: ignore[arg-type]
+    }
+    created_at = payload.get("created_at")
+    if isinstance(created_at, str):
+        fields["created_at"] = datetime.fromisoformat(created_at)
+    return User(**fields)
 
 
-def invalidate_user_cache(user_id: UUID) -> None:
-    """Remove ``user_id`` from the auth middleware cache.
+async def _cached_user(user_id: UUID) -> User | None:
+    """Return the Redis-cached user, or None on miss / unusable entry / Redis error.
 
-    Call this after any operation that modifies the user's credit_balance so
-    the next request re-reads the authoritative value from the database rather
-    than serving a stale cache entry.  H-4 — T-180.
+    Never raises into the auth path: a Redis failure logs a non-sensitive warning
+    and is treated as a miss so the caller reads the authoritative DB row.
     """
-    _USER_CACHE.pop(user_id, None)
+    try:
+        raw = await get_shared_redis().get(_cache_key(user_id))
+    except Exception:
+        logger.warning("auth.user_cache_read_failed", exc_info=True)
+        return None
+    if not raw:
+        return None
+    try:
+        payload = json.loads(raw)
+        if not isinstance(payload, dict):
+            return None
+        return _deserialize_user(payload)
+    except (ValueError, TypeError, KeyError):
+        # Corrupt / schema-changed entry — treat as a miss and re-read.
+        logger.warning("auth.user_cache_entry_unusable")
+        return None
+
+
+async def _cache_user(user: User) -> None:
+    """Cache the user's display fields with the short TTL (best-effort)."""
+    if user.id is None:
+        return
+    try:
+        await get_shared_redis().set(
+            _cache_key(user.id),
+            json.dumps(_serialize_user(user)),
+            ex=_USER_CACHE_TTL_SECONDS,
+        )
+    except Exception:
+        logger.warning("auth.user_cache_write_failed", exc_info=True)
+
+
+async def clear_user_cache(user_id: UUID | None = None) -> None:
+    """Drop a single user's cache entry, or all entries when ``user_id`` is None.
+
+    Best-effort: a Redis error is logged and swallowed (a stale entry self-expires
+    within the TTL). Clearing all entries scans only the ``authuser:`` keyspace.
+    """
+    redis = get_shared_redis()
+    try:
+        if user_id is None:
+            keys = [
+                key async for key in redis.scan_iter(match=f"{_USER_CACHE_PREFIX}*")
+            ]
+            if keys:
+                await redis.delete(*keys)
+        else:
+            await redis.delete(_cache_key(user_id))
+    except Exception:
+        logger.warning("auth.user_cache_clear_failed", exc_info=True)
+
+
+async def invalidate_user_cache(user_id: UUID) -> None:
+    """Remove ``user_id`` from the shared cache so the next request re-reads the DB.
+
+    Call this after any operation that modifies the user's credit_balance. Because
+    the cache is Redis-backed, the invalidation is visible to every worker, not
+    only the one that handled the mutating request (LF-1). Best-effort: a Redis
+    error is logged and swallowed — the stale entry self-expires within the TTL.
+    """
+    try:
+        await get_shared_redis().delete(_cache_key(user_id))
+    except Exception:
+        logger.warning("auth.user_cache_invalidate_failed", exc_info=True)
 
 
 def _unauthorized() -> HTTPException:

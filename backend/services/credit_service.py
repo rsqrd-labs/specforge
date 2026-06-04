@@ -303,14 +303,15 @@ class CreditService:
                 user_id,
                 exc_info=True,
             )
-        # Also flush the in-process auth middleware cache so the next request
-        # reflects the updated credit_balance immediately rather than serving
-        # the 30-second stale entry.  H-4 — T-180.
+        # Also flush the shared auth middleware cache so the next request — on
+        # ANY worker — reflects the updated credit_balance immediately rather
+        # than serving a stale entry. The cache is Redis-backed, so this
+        # invalidation propagates cross-worker (LF-1, was H-4 — T-180).
         # Lazy import to avoid a circular dependency:
         #   auth_service → credit_service → middleware.auth → auth_service.
         from middleware.auth import invalidate_user_cache  # noqa: PLC0415
 
-        invalidate_user_cache(user_id)
+        await invalidate_user_cache(user_id)
 
     async def invalidate(self, user_id: UUID) -> None:
         """Public alias for post-commit cache invalidation.
