@@ -505,16 +505,20 @@ class GitHubAPIClient:
         body: str,
         *,
         labels: tuple[str, ...] | list[str] | None = None,
+        milestone: int | None = None,
     ) -> int:
         """POST /repos/{owner}/{repo}/issues. Returns the new issue number.
 
         ``labels`` (T-277) are attached on creation; GitHub auto-creates any
         label that does not yet exist on the repo, so no separate ensure step is
-        needed.
+        needed. ``milestone`` (T-280) is the milestone *number* a new increment
+        issue is filed under so the increment's work is grouped on GitHub.
         """
         payload: dict[str, Any] = {"title": title, "body": body}
         if labels:
             payload["labels"] = list(labels)
+        if milestone is not None:
+            payload["milestone"] = milestone
         response = await self._request(
             "POST",
             f"/repos/{repo}/issues",
@@ -589,6 +593,98 @@ class GitHubAPIClient:
             if len(batch) < 100:
                 break
         return issues
+
+    async def get_issue_state(self, repo: str, number: int) -> str | None:
+        """GET /repos/{owner}/{repo}/issues/{number} → ``"open"``/``"closed"``.
+
+        Used by incremental sync (T-280) to read live state before closing an
+        obsoleted issue, so a re-run never re-comments on an issue it already
+        closed. Returns ``None`` if the issue cannot be read.
+        """
+        response = await self._request("GET", f"/repos/{repo}/issues/{number}")
+        if response.status_code != 200:
+            return None
+        data = response.json()
+        state = data.get("state") if isinstance(data, dict) else None
+        return state if isinstance(state, str) else None
+
+    async def add_issue_comment(self, repo: str, number: int, body: str) -> None:
+        """POST /repos/{owner}/{repo}/issues/{number}/comments."""
+        response = await self._request(
+            "POST",
+            f"/repos/{repo}/issues/{number}/comments",
+            json={"body": body},
+        )
+        if response.status_code in (200, 201):
+            return
+        self._raise_for_status(response)
+
+    async def close_issue(self, repo: str, number: int) -> None:
+        """PATCH an issue to ``state="closed"`` (T-280, obsoleted tasks).
+
+        A close is reversible (the issue and its history remain), unlike a delete.
+        Re-closing an already-closed issue is a harmless no-op PATCH.
+        """
+        response = await self._request(
+            "PATCH",
+            f"/repos/{repo}/issues/{number}",
+            json={"state": "closed"},
+        )
+        if response.status_code == 200:
+            return
+        self._raise_for_status(response)
+
+    async def ensure_milestone(
+        self, repo: str, title: str, *, description: str | None = None
+    ) -> int | None:
+        """Return the number of the milestone titled ``title``, creating it once.
+
+        Idempotent (T-280): an increment push reads live milestones first and
+        reuses a matching title rather than opening a duplicate, so re-running a
+        push files new issues under the same milestone. Returns ``None`` only if
+        GitHub neither lists nor accepts the milestone (best-effort — a missing
+        milestone never blocks the issue work).
+        """
+        existing = await self._find_milestone_number(repo, title)
+        if existing is not None:
+            return existing
+        payload: dict[str, Any] = {"title": title}
+        if description:
+            payload["description"] = description
+        response = await self._request(
+            "POST", f"/repos/{repo}/milestones", json=payload
+        )
+        if response.status_code == 201:
+            data = response.json()
+            number = data.get("number") if isinstance(data, dict) else None
+            if isinstance(number, int):
+                return number
+        if response.status_code == 422:
+            # Already exists (a concurrent create or a title-uniqueness clash) —
+            # recover its number from the live list rather than failing.
+            return await self._find_milestone_number(repo, title)
+        return None
+
+    async def _find_milestone_number(self, repo: str, title: str) -> int | None:
+        """Locate an existing milestone by exact title, or ``None``."""
+        for page in range(1, 11):  # bounded; a repo rarely has >1000 milestones
+            response = await self._request(
+                "GET",
+                f"/repos/{repo}/milestones?state=all&per_page=100&page={page}",
+            )
+            if response.status_code != 200:
+                return None
+            rows = response.json()
+            if not isinstance(rows, list) or not rows:
+                return None
+            for row in rows:
+                if isinstance(row, dict) and row.get("title") == title:
+                    number = row.get("number")
+                    if isinstance(number, int):
+                        return number
+            if len(rows) < 100:
+                return None
+        return None
 
     # ----- internals -----
 

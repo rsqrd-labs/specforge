@@ -38,6 +38,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from models import (
     GitHubInstallation,
     GitHubWebhookEvent,
+    IncrementIdea,
     IntegrationPush,
     IntegrationPushTask,
     Stage,
@@ -51,6 +52,7 @@ from services.integrations.github_api_client import (
 from services.integrations.github_app_auth import make_token_provider
 from services.integrations.push_repo import find_live_pushes_for_event
 from services.observability import GITHUB_RECONCILE_LAG_SECONDS
+from services.security.sanitizer import sanitize_text
 
 GITHUB_PROVIDER = "github"
 
@@ -67,6 +69,12 @@ _CLOSING_KEYWORDS_RE = re.compile(
 _ISSUE_ACTIONS = {"closed", "reopened", "edited"}
 _PR_CHECK_ACTIONS = {"opened", "synchronize", "reopened"}
 _LIFECYCLE_ACTIONS = {"suspend", "unsuspend", "deleted"}
+
+# Issue events that may surface a backlog idea, and the labels that mark one
+# (T-280). A GitHub issue tagged ``idea``/``enhancement`` flows back into the
+# workspace's idea backlog as ``source='github'``.
+_IDEA_ACTIONS = {"opened", "reopened", "labeled", "edited"}
+_IDEA_LABELS = {"idea", "enhancement"}
 
 
 async def reconcile_event(
@@ -103,8 +111,11 @@ async def _dispatch(
     payload = json.loads(raw)
     action = payload.get("action")
 
-    if event_type == "issues" and action in _ISSUE_ACTIONS:
-        await _reconcile_issue(db, payload, action)
+    if event_type == "issues":
+        if action in _ISSUE_ACTIONS:
+            await _reconcile_issue(db, payload, action)
+        if action in _IDEA_ACTIONS:
+            await _capture_idea(db, payload)
     elif event_type == "pull_request":
         if action == "closed" and (payload.get("pull_request") or {}).get("merged"):
             await _reconcile_merged_pr(db, payload)
@@ -180,6 +191,76 @@ async def _reconcile_merged_pr(db: AsyncSession, payload: dict[str, Any]) -> Non
             changed = _apply_done(task, done_via="pr_merge", event_ts=event_ts)
             if changed:
                 _audit_done(task, payload, done_via="pr_merge")
+
+
+async def _capture_idea(db: AsyncSession, payload: dict[str, Any]) -> None:
+    """Flow a GitHub ``idea``/``enhancement`` issue into the workspace backlog.
+
+    Confused-deputy scoped: the idea is attached only to workspaces whose live
+    push matches the delivery's ``(repo_id, installation_id)`` — an issue from
+    one installation can never seed another's backlog. Idempotent at-least-once:
+    deduped on ``(workspace_id, external_ref)`` so re-seeing the same issue
+    (``labeled`` then ``edited`` then a redelivery) inserts at most one row.
+    """
+    repo_id, installation_id = _identity(payload)
+    if repo_id is None or installation_id is None:
+        return
+    issue = payload.get("issue") or {}
+    number = issue.get("number")
+    if not isinstance(number, int) or not _has_idea_label(issue):
+        return
+
+    pushes = await find_live_pushes_for_event(db, repo_id, installation_id)
+    if not pushes:
+        return  # not ours / wrong installation → ignore
+
+    external_ref = f"gh-issue:{number}"
+    raw_title = issue.get("title")
+    text = (
+        sanitize_text(str(raw_title)).strip() if isinstance(raw_title, str) else ""
+    ) or f"GitHub issue #{number}"
+
+    seen: set[Any] = set()
+    for push in pushes:
+        workspace_id = push.workspace_id
+        if workspace_id in seen:
+            continue
+        seen.add(workspace_id)
+        already = (
+            await db.execute(
+                select(IncrementIdea).where(
+                    IncrementIdea.workspace_id == workspace_id,
+                    IncrementIdea.external_ref == external_ref,
+                )
+            )
+        ).scalar_one_or_none()
+        if already is not None:
+            continue
+        db.add(
+            IncrementIdea(
+                workspace_id=workspace_id,
+                source="github",
+                external_ref=external_ref,
+                text=text,
+                status="open",
+            )
+        )
+        logger.info(
+            "github.reconcile.idea_captured",
+            workspace_id=str(workspace_id),
+            external_ref=external_ref,
+            repo_id=repo_id,
+            installation_id=installation_id,
+        )
+
+
+def _has_idea_label(issue: dict[str, Any]) -> bool:
+    """True if the issue carries an ``idea`` or ``enhancement`` label."""
+    for label in issue.get("labels") or []:
+        name = label.get("name") if isinstance(label, dict) else label
+        if isinstance(name, str) and name.lower() in _IDEA_LABELS:
+            return True
+    return False
 
 
 async def _matched_tasks(

@@ -9,12 +9,20 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from config import settings
 from database import get_db, get_redis
 from middleware.auth import get_current_user
-from models import IntegrationPushTask, User, Workspace
+from models import Increment, IncrementIdea, IntegrationPushTask, User, Workspace
 from schemas.github import (
     GitHubExportRequest,
     PushStatusResponse,
     SyncStateResponse,
     TaskSyncState,
+)
+from schemas.increment import (
+    IdeaCreate,
+    IdeaRead,
+    IncrementCreate,
+    IncrementGenerateResponse,
+    IncrementPushResponse,
+    IncrementRead,
 )
 from schemas.integration import (
     GitHubExportResponse,
@@ -30,13 +38,22 @@ from schemas.workspace import (
     WorkspaceUpdate,
 )
 from services.coverage_utils import derive_coverage_summaries, derive_coverage_summary
+from services.credit_service import InsufficientCreditsError
 from services.integrations.push_repo import find_workspace_live_push
 from services.llm.provider_status import is_provider_configured
 from services.pipeline import github_export_service, pdf_export_service, spec_clarifier
 from services.pipeline.critic import AUDIT_EVENT_CRITIC_DISABLED
 from services.pipeline.export_service import ExportNotReadyError, build_export
+from services.pipeline.increment_service import (
+    IncrementBaselineError,
+    IncrementError,
+    IncrementGenerationError,
+    IncrementModeNotSupportedError,
+    increment_service,
+)
 from services.pipeline.spec_clarifier import ClarificationValidationError
 from services.queue import QueueUnavailableError, enqueue
+from services.security.sanitizer import sanitize_text
 from services.sharing import public_share_service
 from services.sharing.public_share_service import (
     WorkspaceNotFinalisedError,
@@ -534,6 +551,211 @@ async def backfill_workspace(
             detail="Background processing is unavailable; backfill was not started.",
         ) from exc
     return PushStatusResponse.model_validate(push)
+
+
+# ---------------------------------------------------------------------------
+# Increments timeline + idea backlog (Phase 21 — T-280). Owner-scoped. Generation
+# (POST /increments) runs the T-279 delta synchronously and is credit-aware; the
+# GitHub push (POST /increments/{inc_id}/push) enqueues the worker and returns
+# 202. Routes:
+#   GET  /workspaces/{id}/increments                — timeline, newest first
+#   POST /workspaces/{id}/increments                — generate a delta (T-279)
+#   POST /workspaces/{id}/increments/{inc_id}/push  — enqueue increment_push (202)
+#   GET  /workspaces/{id}/ideas                     — backlog, newest first
+#   POST /workspaces/{id}/ideas                     — capture a user idea
+# ---------------------------------------------------------------------------
+
+
+@router.get("/{id}/increments", response_model=list[IncrementRead])
+async def list_increments(
+    id: UUID,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> list[IncrementRead]:
+    """Return the workspace's increment timeline, newest first (owner-scoped)."""
+    await workspace_service.get(id, user.id, db)  # 404 if not owned
+    rows = (
+        (
+            await db.execute(
+                select(Increment)
+                .where(Increment.workspace_id == id)
+                .order_by(Increment.sequence.desc())
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return [IncrementRead.model_validate(r) for r in rows]
+
+
+@router.post(
+    "/{id}/increments",
+    response_model=IncrementGenerateResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_increment(
+    id: UUID,
+    payload: IncrementCreate,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> IncrementGenerateResponse:
+    """Generate a delta increment from a feature request (T-279).
+
+    Synchronous + credit-aware: the baseline (finalised stages) is immutable
+    context and the output is appended to TASKS.md as a new version with stable
+    ``task_ref``s. Returns the new increment plus the count of appended tasks. The
+    GitHub push is a separate 202 call.
+
+    Errors map to: 404 (not owned), 409 (workspace not finalised / mode gated
+    off), 402 (insufficient credits), 422 (no delta produced).
+    """
+    await workspace_service.get(id, user.id, db)  # 404 if not owned
+    try:
+        result = await increment_service.generate_increment(
+            id, payload.feature_request, user, db, mode=payload.mode
+        )
+    except IncrementBaselineError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail=str(exc)
+        ) from exc
+    except IncrementModeNotSupportedError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail=str(exc)
+        ) from exc
+    except InsufficientCreditsError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_402_PAYMENT_REQUIRED, detail=str(exc)
+        ) from exc
+    except IncrementGenerationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)
+        ) from exc
+    except IncrementError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)
+        ) from exc
+
+    increment = (
+        await db.execute(select(Increment).where(Increment.id == result.increment_id))
+    ).scalar_one()
+    response = IncrementGenerateResponse.model_validate(increment)
+    response.new_task_count = len(result.new_tasks)
+    return response
+
+
+@router.post(
+    "/{id}/increments/{inc_id}/push",
+    response_model=IncrementPushResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def push_increment(
+    id: UUID,
+    inc_id: UUID,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> IncrementPushResponse:
+    """Enqueue an incremental GitHub sync for the increment (202).
+
+    Pushes only the new issues under a new milestone (and, in pr_with_tests mode,
+    one PR), layered on already-shipped work. ``job_id=inc_id`` dedups a
+    double-submit. Requires a finalised increment and a live baseline push; fails
+    closed (503) if the queue is down.
+    """
+    await workspace_service.get(id, user.id, db)  # 404 if not owned
+    increment = (
+        await db.execute(
+            select(Increment).where(
+                Increment.id == inc_id, Increment.workspace_id == id
+            )
+        )
+    ).scalar_one_or_none()
+    if increment is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Increment not found."
+        )
+    if increment.status in ("draft", "generating"):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Increment is not ready to push.",
+        )
+    push = await find_workspace_live_push(db, id)
+    if push is None or push.repo_full_name is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Connect and export this workspace to GitHub before pushing an "
+            "increment.",
+        )
+    try:
+        await enqueue("increment_push", str(inc_id), job_id=str(inc_id))
+    except QueueUnavailableError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Background processing is unavailable; increment push was not "
+            "started.",
+        ) from exc
+    return IncrementPushResponse(increment_id=inc_id, status=increment.status)
+
+
+@router.get("/{id}/ideas", response_model=list[IdeaRead])
+async def list_ideas(
+    id: UUID,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> list[IdeaRead]:
+    """Return the workspace's idea backlog, newest first (owner-scoped).
+
+    Includes both user-captured ideas and ones flowed back from GitHub issues
+    labelled ``idea``/``enhancement`` via the reconcile path (T-272/T-280).
+    """
+    await workspace_service.get(id, user.id, db)  # 404 if not owned
+    rows = (
+        (
+            await db.execute(
+                select(IncrementIdea)
+                .where(IncrementIdea.workspace_id == id)
+                .order_by(IncrementIdea.created_at.desc())
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return [IdeaRead.model_validate(r) for r in rows]
+
+
+@router.post(
+    "/{id}/ideas",
+    response_model=IdeaRead,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_idea(
+    id: UUID,
+    payload: IdeaCreate,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> IdeaRead:
+    """Capture a mid-build feature idea into the workspace backlog (source=user).
+
+    The free-text idea is sanitised with the same policy as public share / PDF
+    before persistence.
+    """
+    await workspace_service.get(id, user.id, db)  # 404 if not owned
+    text = sanitize_text(payload.text).strip()
+    if not text:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Idea text is empty after sanitisation.",
+        )
+    idea = IncrementIdea(
+        workspace_id=id,
+        source="user",
+        external_ref=None,
+        text=text,
+        status="open",
+    )
+    db.add(idea)
+    await db.commit()
+    await db.refresh(idea)
+    return IdeaRead.model_validate(idea)
 
 
 # ---------------------------------------------------------------------------
