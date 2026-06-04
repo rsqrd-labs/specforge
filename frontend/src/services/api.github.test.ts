@@ -1,0 +1,101 @@
+import { afterEach, describe, expect, it, vi } from "vitest"
+
+import {
+  api,
+  createIncrement,
+  getGitHubInstallUrl,
+  getGitHubInstallations,
+  getGitHubSync,
+  listIncrements,
+  resyncWorkspace,
+} from "./api"
+
+// Behavioral coverage for the Phase-21 (T-275) GitHub living-integration client
+// functions, beyond the structural string-match contract. The invariant under
+// test: a never-pushed / stale / App-disabled workspace is a *normal* empty
+// state, so the read fetchers map the expected 404/503 to a safe value and only
+// real failures propagate.
+
+function axiosError(status: number): unknown {
+  // Shape that axios.isAxiosError recognises (isAxiosError === true).
+  return Object.assign(new Error(`HTTP ${status}`), {
+    isAxiosError: true,
+    response: { status },
+  })
+}
+
+describe("GitHub living-integration api client", () => {
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it("getGitHubSync maps a 404 (never pushed / stale) to null, not a throw", async () => {
+    vi.spyOn(api, "get").mockRejectedValueOnce(axiosError(404))
+    await expect(getGitHubSync("ws-1")).resolves.toBeNull()
+  })
+
+  it("getGitHubSync returns the live sync state on success", async () => {
+    vi.spyOn(api, "get").mockResolvedValueOnce({
+      data: {
+        push_id: "push-1",
+        status: "completed",
+        out_of_sync: true,
+        shipped: 1,
+        total: 2,
+        tasks: [],
+      },
+    })
+    const state = await getGitHubSync("ws-1")
+    expect(state?.out_of_sync).toBe(true)
+    expect(state?.shipped).toBe(1)
+  })
+
+  it("getGitHubSync re-throws a non-404 error (it does not swallow real failures)", async () => {
+    vi.spyOn(api, "get").mockRejectedValueOnce(axiosError(500))
+    await expect(getGitHubSync("ws-1")).rejects.toThrow()
+  })
+
+  it("getGitHubInstallations maps a 404 to the empty, non-legacy state", async () => {
+    vi.spyOn(api, "get").mockRejectedValueOnce(axiosError(404))
+    const result = await getGitHubInstallations()
+    expect(result.installations).toEqual([])
+    expect(result.on_legacy_oauth).toBe(false)
+  })
+
+  it("getGitHubInstallUrl maps a 503 (App not configured) to null, not a throw", async () => {
+    vi.spyOn(api, "get").mockRejectedValueOnce(axiosError(503))
+    await expect(getGitHubInstallUrl()).resolves.toBeNull()
+  })
+
+  it("getGitHubInstallUrl returns the install URL on success", async () => {
+    vi.spyOn(api, "get").mockResolvedValueOnce({
+      data: { url: "https://github.com/apps/specforge/installations/new" },
+    })
+    await expect(getGitHubInstallUrl()).resolves.toContain("/installations/new")
+  })
+
+  it("listIncrements maps a 404 to an empty timeline", async () => {
+    vi.spyOn(api, "get").mockRejectedValueOnce(axiosError(404))
+    await expect(listIncrements("ws-1")).resolves.toEqual([])
+  })
+
+  it("resyncWorkspace POSTs the resync endpoint and returns the pending push", async () => {
+    const post = vi
+      .spyOn(api, "post")
+      .mockResolvedValueOnce({ data: { id: "push-2", status: "pending" } })
+    const push = await resyncWorkspace("ws-9")
+    expect(push.status).toBe("pending")
+    expect(String(post.mock.calls[0][0])).toBe("/workspaces/ws-9/sync/resync")
+  })
+
+  it("createIncrement POSTs the feature title to the increments endpoint", async () => {
+    const post = vi
+      .spyOn(api, "post")
+      .mockResolvedValueOnce({ data: { id: "inc-1", sequence: 1, title: "Add billing" } })
+    const inc = await createIncrement("ws-9", { title: "Add billing" })
+    expect(inc.title).toBe("Add billing")
+    const [url, body] = post.mock.calls[0]
+    expect(String(url)).toBe("/workspaces/ws-9/increments")
+    expect(body).toEqual({ title: "Add billing" })
+  })
+})
