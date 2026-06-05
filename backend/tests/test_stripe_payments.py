@@ -1,20 +1,20 @@
-"""Unit/integration tests for Phase 18 Stripe Payments — T-237.
+"""Unit/integration tests for the retained Stripe service — T-237 / Phase 22.
 
-Correctness invariants tested
-------------------------------
+After the Lemon Squeezy migration most of the Phase-18 Stripe *router* tests were
+superseded: checkout/status/history moved to the Lemon flow (T-296,
+``tests/test_billing_router.py``) and the ``/billing/webhook`` receiver became the
+Lemon receiver (T-297, ``tests/test_billing_webhook.py``). What remains here
+exercises the **retained** ``stripe_service`` directly (it still backs the T-303
+late-Stripe grace path and stays in history per the append-only convention):
+
 1. Checkout session creation — user_id in metadata, URL returned
 2. Webhook event handling — credits granted on checkout.session.completed
-3. Idempotency — duplicate stripe_event_id returns already_processed
-4. Signature validation — tampered header → 400
-5. IDOR prevention — billing/status returns 404 for wrong user
 6. Lazy expiry — get_balance sweeps expired packs (PostgreSQL)
 7. FIFO drain order — deduct drains soonest-expiring pack first (PostgreSQL)
 8. Dispute revocation — credits revoked capped at min(remaining, balance) (PostgreSQL)
-9. Checkout rate limit — 6th request in one hour returns 429
-10. Livemode mismatch — mismatched livemode/environment → 400
 
-Tests 1–5 and 9–10 use pure mocking (always run).
-Tests 6–8 require TEST_DATABASE_URL (PostgreSQL) — skipped if not set.
+Tests 1–2 use pure mocking (always run). Tests 6–8 require TEST_DATABASE_URL
+(PostgreSQL) — skipped if not set.
 """
 
 from __future__ import annotations
@@ -27,11 +27,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
-from httpx import ASGITransport, AsyncClient
 
 from config import settings
-from database import get_db
-from main import create_app
 from models import User
 
 # ---------------------------------------------------------------------------
@@ -49,114 +46,6 @@ _requires_pg = pytest.mark.skipif(
         "to run against a real PostgreSQL instance.  T-237."
     ),
 )
-
-# ---------------------------------------------------------------------------
-# Shared test user
-# ---------------------------------------------------------------------------
-
-_USER_A_ID = uuid4()
-_USER_B_ID = uuid4()
-
-_USER_A = User(
-    id=_USER_A_ID,
-    email="user_a@example.com",
-    google_id="google-a",
-    name="User A",
-    avatar_url=None,
-    credit_balance=200,
-    created_at=datetime.now(UTC),
-)
-_USER_B = User(
-    id=_USER_B_ID,
-    email="user_b@example.com",
-    google_id="google-b",
-    name="User B",
-    avatar_url=None,
-    credit_balance=0,
-    created_at=datetime.now(UTC),
-)
-
-
-# ---------------------------------------------------------------------------
-# Redis stub (satisfies the rate-limit middleware; always allows by default)
-# ---------------------------------------------------------------------------
-
-
-class _FakeRedisPipeline:
-    def zremrangebyscore(self, *args: Any) -> "_FakeRedisPipeline":
-        return self
-
-    def zadd(self, *args: Any) -> "_FakeRedisPipeline":
-        return self
-
-    def zcard(self, *args: Any) -> "_FakeRedisPipeline":
-        return self
-
-    def expire(self, *args: Any) -> "_FakeRedisPipeline":
-        return self
-
-    async def execute(self) -> list:
-        return [0, 1, 1, 1]
-
-
-class _NoopRedis:
-    """Redis stub that always allows every rate-limit check."""
-
-    async def eval(self, *args: Any, **kwargs: Any) -> int:
-        return 1
-
-    def pipeline(self) -> _FakeRedisPipeline:
-        return _FakeRedisPipeline()
-
-
-# ---------------------------------------------------------------------------
-# DB stubs
-# ---------------------------------------------------------------------------
-
-
-class _IdempotencyFakeSession:
-    """Session stub that raises IntegrityError on flush after the first add().
-
-    Used to simulate the duplicate-event path in the webhook handler:
-      - First request: flush succeeds.
-      - Second request: flush raises IntegrityError (UNIQUE constraint on
-        stripe_event_id), causing the router to return {"status": "already_processed"}.
-    """
-
-    def __init__(self, raise_on_flush: bool = False) -> None:
-        self._raise = raise_on_flush
-        self.added: list[Any] = []
-
-    async def execute(self, statement: Any) -> Any:
-        result = MagicMock()
-        result.scalar_one_or_none.return_value = None
-        return result
-
-    async def scalar(self, statement: Any) -> Any:
-        return None
-
-    def add(self, obj: Any) -> None:
-        self.added.append(obj)
-
-    def begin_nested(self) -> "_ConditionalSavepoint":
-        return _ConditionalSavepoint(self)
-
-    async def flush(self) -> None:
-        if self._raise:
-            from sqlalchemy.exc import IntegrityError
-
-            raise IntegrityError(None, None, Exception("UNIQUE constraint"))
-
-
-class _ConditionalSavepoint:
-    def __init__(self, session: _IdempotencyFakeSession) -> None:
-        self._session = session
-
-    async def __aenter__(self) -> "_ConditionalSavepoint":
-        return self
-
-    async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> bool:
-        return False  # propagate exceptions
 
 
 # ===========================================================================
@@ -295,110 +184,11 @@ async def test_webhook_checkout_completed_grants_credits() -> None:
     ), "Credits granted must match settings.stripe_credits_per_purchase"
 
 
-# ===========================================================================
-# Test 3 — Idempotency: duplicate event returns already_processed
-# ===========================================================================
-
-
-@pytest.mark.asyncio
-async def test_webhook_idempotency() -> None:
-    """Duplicate stripe_event_id returns {"status": "already_processed"}.
-
-    Invariant: exactly one credit grant per stripe_event_id.  Without the
-    idempotency guard, Stripe's 72-hour retry window means every delivery
-    failure causes double-crediting on the retry.
-    """
-    stripe_event_id = f"evt_{uuid4().hex}"
-    event_type = "checkout.session.completed"
-
-    # Build a valid-ish event dict (used by both mock construct_event calls).
-    mock_event = {
-        "id": stripe_event_id,
-        "type": event_type,
-        "created": int(time.time()),
-        "livemode": settings.environment.lower() == "production",
-        "data": {
-            "object": {
-                "id": f"cs_test_{uuid4().hex}",
-                "payment_status": "paid",
-                "metadata": {"user_id": str(uuid4())},
-            }
-        },
-    }
-
-    # First request: INSERT succeeds.
-    first_db = _IdempotencyFakeSession(raise_on_flush=False)
-    # Second request: INSERT raises IntegrityError (duplicate stripe_event_id).
-    second_db = _IdempotencyFakeSession(raise_on_flush=True)
-
-    # Alternate which fake DB get_db returns.
-    call_count = 0
-    sessions = [first_db, second_db]
-
-    async def _alternating_db():
-        nonlocal call_count
-        yield sessions[call_count % 2]
-        call_count += 1
-
-    app = create_app(redis_client=_NoopRedis())
-    app.dependency_overrides[get_db] = _alternating_db
-
-    with (
-        patch("stripe.Webhook.construct_event", return_value=mock_event),
-        patch(
-            "services.stripe_service.stripe_service.handle_event",
-            new_callable=AsyncMock,
-        ),
-    ):
-        transport = ASGITransport(app=app)
-        async with AsyncClient(transport=transport, base_url="http://test") as client:
-            resp1 = await client.post(
-                "/billing/webhook",
-                content=b'{"test":"payload"}',
-                headers={"Stripe-Signature": "t=1,v1=abc"},
-            )
-            resp2 = await client.post(
-                "/billing/webhook",
-                content=b'{"test":"payload"}',
-                headers={"Stripe-Signature": "t=1,v1=abc"},
-            )
-
-    assert resp1.status_code == 200
-    assert resp1.json()["status"] == "ok", "First delivery must succeed"
-
-    assert resp2.status_code == 200
-    assert resp2.json()["status"] == "already_processed", (
-        "Duplicate stripe_event_id must return 'already_processed' — "
-        "this prevents double-crediting on Stripe retry."
-    )
-
-
-# ===========================================================================
-# Test 4 — Invalid Stripe signature returns 400
-# ===========================================================================
-
-
-@pytest.mark.asyncio
-async def test_webhook_invalid_signature() -> None:
-    """A tampered or missing Stripe-Signature header returns HTTP 400.
-
-    Invariant: all credits flow through this webhook.  Without HMAC
-    validation, any HTTP client can inject fake checkout.session.completed
-    events and self-credit unlimited credits.
-    """
-    app = create_app(redis_client=_NoopRedis())
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        resp = await client.post(
-            "/billing/webhook",
-            content=b'{"id":"evt_fake","type":"checkout.session.completed"}',
-            headers={"Stripe-Signature": "t=9999,v1=tampered_signature_value"},
-        )
-
-    assert resp.status_code == 400, (
-        "Tampered Stripe-Signature must be rejected with HTTP 400. "
-        "Accepting it would allow unauthenticated credit injection."
-    )
+# Tests 3 & 4 — webhook idempotency + signature rejection tested the retired
+# Phase-18 Stripe /billing/webhook receiver. The endpoint is now the Lemon
+# receiver (T-297); duplicate-identity idempotency and the HMAC signature matrix
+# are covered against it in tests/test_billing_webhook.py. The late-Stripe webhook
+# grace path is T-303.
 
 
 # Test 5 — IDOR prevention on /billing/status — migrated to the Lemon-only
@@ -726,48 +516,6 @@ async def test_dispute_revocation() -> None:
 # Lemon-only attempt-first flow in tests/test_billing_router.py (T-296).
 
 
-# ===========================================================================
-# Test 10 — Livemode mismatch returns 400
-# ===========================================================================
-
-
-@pytest.mark.asyncio
-async def test_webhook_livemode_mismatch() -> None:
-    """Webhook event with livemode != server environment returns HTTP 400.
-
-    Invariant: a test-mode endpoint receiving live events (or vice versa)
-    would silently grant credits from test payments that never charged real
-    money.  The livemode guard catches this misconfiguration at the first
-    webhook delivery rather than silently granting credits.
-    """
-    # Force a livemode mismatch: event says livemode=True, but we're in
-    # development (non-production) environment.
-    is_production = settings.environment.lower() == "production"
-    mismatched_livemode = not is_production  # opposite of what server expects
-
-    mock_event = {
-        "id": f"evt_{uuid4().hex}",
-        "type": "checkout.session.completed",
-        "created": int(time.time()),
-        "livemode": mismatched_livemode,  # wrong livemode for this environment
-        "data": {"object": {}},
-    }
-
-    app = create_app(redis_client=_NoopRedis())
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        with patch("stripe.Webhook.construct_event", return_value=mock_event):
-            resp = await client.post(
-                "/billing/webhook",
-                content=b'{"test":"payload"}',
-                headers={"Stripe-Signature": "t=1,v1=abc"},
-            )
-
-    assert resp.status_code == 400, (
-        "Livemode mismatch must return HTTP 400.  Accepting it would grant "
-        "credits from test payments with no real money charged."
-    )
-    assert "livemode" in resp.json().get("detail", "").lower(), (
-        "Response detail must mention 'livemode' so operators know why the "
-        "webhook was rejected."
-    )
+# Test 10 — the Stripe livemode-mismatch guard was specific to the retired Stripe
+# webhook. The Lemon receiver enforces the equivalent test/live guard
+# (test_mode vs lemonsqueezy_test_mode), covered in tests/test_billing_webhook.py.

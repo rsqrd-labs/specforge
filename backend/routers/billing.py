@@ -19,24 +19,32 @@ is the sole credit-grant authority; this router never grants credits.
 ``user_id`` (404 on any mismatch — no resource-existence leak). The raw nonce is
 never returned by any endpoint; only its hash is persisted.
 
-The ``POST /billing/webhook`` handler below is the retained Phase-18 Stripe
-receiver. It is **intentionally left in place** for T-296: the Lemon webhook
-rewrite is T-297 and the late-Stripe grace path is T-303. Its CSRF / rate-limit
-exemptions (``middleware/csrf.py``, ``middleware/rate_limit.py``) are reused.
+``POST /billing/webhook`` is the durable, **verify-before-work** Lemon receiver
+(T-297): it reads the raw body, verifies the ``X-Signature`` HMAC against the
+two-secret rotation list (constant-time), parses, sanitises into an allow-listed
+``normalized_payload`` (no PII, no raw nonce, no signature — only
+``sha256(checkout_nonce)``), **commits** a ``billing_webhook_events`` inbox row,
+then enqueues ``billing_process_webhook`` by row id. It performs **no** money
+mutation inline — the signed ``order_created`` event is the sole grant authority,
+and the worker (T-298/T-299/T-300) reads only the sanitised inbox. CSRF /
+rate-limit exemptions (``middleware/csrf.py``, ``middleware/rate_limit.py``) are
+reused. The late-Stripe grace adapter into the same inbox is T-303.
 
 Phase 18 — T-230/T-231/T-232/T-234 (Stripe, superseded at runtime).
-Phase 22 — T-296 (Lemon-only checkout flow + ``checkout_ref`` polling).
+Phase 22 — T-296 (Lemon-only checkout flow + ``checkout_ref`` polling),
+           T-297 (durable Lemon webhook ingestion → sanitised inbox → enqueue).
 """
 
 from __future__ import annotations
 
 import hashlib
+import hmac
+import json
 import logging
 import secrets
 from datetime import datetime, timedelta, timezone
+from typing import Any
 
-import stripe
-import stripe.error
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
@@ -45,9 +53,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from config import settings
 from database import get_db
 from middleware.auth import get_current_user
-from models import BillingCheckoutAttempt, BillingCreditPack, User
+from models import BillingCheckoutAttempt, BillingCreditPack, BillingWebhookEvent, User
 from models.stripe_credit_pack import StripeCreditPack
-from models.stripe_webhook_event import StripeWebhookEvent
 from schemas.billing import (
     BillingStatusResponse,
     CheckoutResponse,
@@ -58,16 +65,21 @@ from services.lemonsqueezy_service import LemonSqueezyError, lemonsqueezy_servic
 from services.observability import (
     BILLING_CHECKOUT_CREATED,
     BILLING_WEBHOOK_DUPLICATE,
-    BILLING_WEBHOOK_ERROR,
     BILLING_WEBHOOK_RECEIVED,
 )
-from services.stripe_service import stripe_service
+from services.queue import enqueue
 
 logger = logging.getLogger(__name__)
 
 # High-entropy byte budget for the polling ref and the one-time nonce. 32 bytes
 # (256 bits) of os.urandom via secrets — non-sequential, non-guessable (SR4/#10).
 _REF_ENTROPY_BYTES = 32
+
+# Lemon webhook (T-297). Only order events are actionable (grant / reverse); the
+# worker dispatches on ``event_name``. Other verified events are acknowledged 200
+# without an inbox row so the inbox is not bloated with non-actionable traffic.
+_LEMON_ORDER_EVENTS = frozenset({"order_created", "order_refunded"})
+_LEMON_OBJECT_TYPE = "orders"
 
 router = APIRouter(prefix="/billing", tags=["billing"])
 
@@ -338,118 +350,269 @@ async def get_billing_history(
 
 
 @router.post("/webhook", status_code=status.HTTP_200_OK)
-async def stripe_webhook(
+async def lemon_webhook(
     request: Request,
     db: AsyncSession = Depends(get_db),
 ) -> dict:
-    """Stripe webhook event handler (retained Phase-18 receiver).
+    """Lemon Squeezy webhook receiver — verify, sanitise, persist, enqueue (T-297).
 
-    Left intact by T-296: the Lemon webhook rewrite is T-297 and the late-Stripe
-    grace path is T-303. CSRF and rate-limit exemptions for this path are reused.
+    The durable trust boundary. It performs **no** money mutation inline:
 
-    Security contract (Phase 18 Payments Directive):
-    1. Raw bytes read BEFORE any JSON parsing (Stripe signature covers raw bytes).
-    2. Stripe-Signature validated with tolerance=300 (5-min clock skew window).
-    3. Idempotency row inserted BEFORE event processing (crash-safe ordering).
-    4. IntegrityError on duplicate stripe_event_id → return 200 immediately.
-    5. No get_current_user dependency — Stripe has no browser session.
-    6. Raw payload NEVER logged — only structured fields.
-    7. Always returns 200 — Stripe retries on non-2xx (including 429, 500).
+    1. Read the raw body BEFORE any parse — the HMAC covers the exact bytes.
+    2. Verify ``X-Signature`` = HMAC-SHA256(raw, secret), constant-time, against
+       every secret in ``lemonsqueezy_webhook_secrets`` (current + previous, for
+       the rotation window). Missing / malformed / non-matching → 400.
+    3. Parse JSON only after verification. Require ``X-Event-Name`` ==
+       ``meta.event_name`` and, for order events, ``data.type == "orders"`` and a
+       matching ``test_mode`` — else 400. Non-order events are acknowledged 200.
+    4. ``order_created`` requires ``custom_data.checkout_nonce``: hash it to
+       ``checkout_nonce_hash_from_webhook`` and DROP the raw nonce. ``order_refunded``
+       hashes it only if present (a signed refund is never rejected for a missing
+       nonce). Build an allow-listed ``normalized_payload`` — no PII, no URLs, no
+       signature, no raw nonce, no unknown custom fields — and **commit** the
+       ``billing_webhook_events`` inbox row. A duplicate 4-part identity raises
+       ``IntegrityError`` (SAVEPOINT) → ``BILLING_WEBHOOK_DUPLICATE`` → 200.
+    5. Enqueue ``billing_process_webhook`` by the inbox row id with the
+       deterministic ``billing_wh:{id}`` job id (dedups against the wrapper-retry
+       and the pending-sweep). If the enqueue fails the 60s sweep (T-298) recovers
+       it, so still return 200. Raw bytes never reach arq or the DB.
+
+    No ``get_current_user`` dependency — the provider has no browser session. The
+    endpoint is CSRF- and rate-limit-exempt (``middleware/csrf.py`` /
+    ``middleware/rate_limit.py``).
     """
-    # Structured function-entry trace (DEBUG only — zero cost in production).
     logger.debug("billing.webhook_received", extra={"method": request.method})
-    # Step 1: Read raw body BEFORE any other parsing.
-    # This is mandatory: Stripe's HMAC-SHA256 signature covers the exact raw bytes.
-    # Any intermediate parsing (e.g. await request.json()) alters the byte sequence
-    # and produces an InvalidSignatureError even with a valid signature.
-    payload = await request.body()
-    sig_header = request.headers.get("Stripe-Signature", "")
 
-    # Step 2: Validate Stripe HMAC-SHA256 signature.
-    try:
-        event = stripe.Webhook.construct_event(
-            payload=payload,
-            sig_header=sig_header,
-            secret=settings.stripe_webhook_secret,
-            tolerance=300,  # 5-minute clock skew tolerance (Stripe recommendation)
-        )
-    except stripe.error.SignatureVerificationError as exc:
-        logger.warning("billing.webhook_invalid_signature error=%s", exc)
+    # Step 1: raw bytes BEFORE any parse — the HMAC is computed over these exact
+    # bytes; ``await request.json()`` would re-serialise and break verification.
+    raw = await request.body()
+    signature = request.headers.get("X-Signature", "")
+
+    # Step 2: constant-time HMAC over the two-secret rotation list. Fail closed.
+    if not _verify_lemon_signature(raw, signature):
+        logger.warning("billing.webhook_invalid_signature")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid Stripe signature",
-        ) from exc
-    except Exception as exc:
-        logger.error("billing.webhook_construct_failed error=%s", exc, exc_info=True)
+            detail="Invalid signature",
+        )
+
+    # Step 3: parse only after the signature is proven.
+    try:
+        payload = json.loads(raw)
+    except (ValueError, UnicodeDecodeError) as exc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Malformed webhook payload",
         ) from exc
-
-    stripe_event_id = event["id"]
-    event_type = event["type"]
-
-    # Step 2b: Livemode guard — reject test events in production and vice versa.
-    # A misconfigured webhook endpoint (e.g., test endpoint receiving live events)
-    # would silently grant credits from test payments that never charged real money.
-    is_production = settings.environment.lower() == "production"
-    if event.get("livemode") is not None and event.get("livemode") != is_production:
-        logger.warning(
-            "billing.webhook_livemode_mismatch stripe_event_id=%s livemode=%s env=%s",
-            stripe_event_id,
-            event.get("livemode"),
-            settings.environment,
-        )
+    if not isinstance(payload, dict):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Webhook livemode does not match server environment",
+            detail="Malformed webhook payload",
         )
 
-    # Count every event that passes signature + livemode validation, before the
-    # idempotency check.  Labelled by event_type for per-event-type dashboards.
-    BILLING_WEBHOOK_RECEIVED.labels(event_type=event_type).inc()
+    meta = payload.get("meta") if isinstance(payload.get("meta"), dict) else {}
+    data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+    event_name = meta.get("event_name")
+    header_event_name = request.headers.get("X-Event-Name", "")
 
-    # Step 3: INSERT idempotency row BEFORE processing the event.
-    # If the process crashes between this INSERT and the event handler, the next
-    # retry will find the row and return 200 (already_processed) — no double-credit.
-    # An IntegrityError means a concurrent or previous delivery of the same event
-    # already wrote this row — return 200 immediately (idempotent success).
-    idempotency_row = StripeWebhookEvent(
-        stripe_event_id=stripe_event_id,
-        event_type=event_type,
+    # X-Event-Name header must match the signed body's meta.event_name.
+    if not event_name or header_event_name != event_name:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Event name mismatch",
+        )
+
+    # Only order events are actionable; acknowledge anything else without storing.
+    if event_name not in _LEMON_ORDER_EVENTS:
+        logger.info("billing.webhook_ignored_event event_name=%s", event_name)
+        return {"status": "ignored"}
+
+    if data.get("type") != _LEMON_OBJECT_TYPE:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Unexpected object type",
+        )
+
+    attributes = (
+        data.get("attributes") if isinstance(data.get("attributes"), dict) else {}
+    )
+
+    # test/live guard — a test-store event must never settle against live config.
+    test_mode = attributes.get("test_mode")
+    if test_mode is not None and bool(test_mode) != settings.lemonsqueezy_test_mode:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Webhook test mode does not match server configuration",
+        )
+
+    order_id = data.get("id")
+    if not order_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Missing order id",
+        )
+    order_id = str(order_id)
+
+    custom_data = (
+        meta.get("custom_data") if isinstance(meta.get("custom_data"), dict) else {}
+    )
+
+    # Step 4: nonce → hash, then DROP the raw nonce (it never enters the payload).
+    raw_nonce = custom_data.get("checkout_nonce")
+    if event_name == "order_created" and not raw_nonce:
+        # order_created is the grant authority — the nonce is required to prove the
+        # checkout attempt. (A signed refund, by contrast, is processed regardless.)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Missing checkout nonce",
+        )
+    nonce_hash = (
+        hashlib.sha256(str(raw_nonce).encode("utf-8")).hexdigest()
+        if raw_nonce
+        else None
+    )
+
+    normalized_payload = _build_normalized_payload(
+        event_name=event_name,
+        order_id=order_id,
+        attributes=attributes,
+        custom_data=custom_data,
+        nonce_hash=nonce_hash,
+    )
+    payload_hash = _payload_hash(normalized_payload)
+
+    # Commit the sanitised inbox row. The 4-part identity
+    # (provider, event_name, provider_object_id, payload_hash) is UNIQUE, so a
+    # byte-identical redelivery raises IntegrityError → dedup → 200.
+    row = BillingWebhookEvent(
+        provider="lemonsqueezy",
+        event_name=event_name,
+        provider_object_type=_LEMON_OBJECT_TYPE,
+        provider_object_id=order_id,
+        payload_hash=payload_hash,
+        status="received",
+        normalized_payload=normalized_payload,
     )
     try:
-        async with db.begin_nested():  # SAVEPOINT — isolates the INSERT
-            db.add(idempotency_row)
-            await db.flush()
+        async with db.begin_nested():  # SAVEPOINT isolates the unique-violation
+            db.add(row)
+            await db.flush()  # populates row.id and trips the unique index
     except IntegrityError:
-        # Step 4: Duplicate event — already processed or concurrently processing.
+        await db.rollback()
         logger.info(
-            "billing.webhook_duplicate_event stripe_event_id=%s", stripe_event_id
+            "billing.webhook_duplicate event_name=%s order_id=%s",
+            event_name,
+            order_id,
         )
         BILLING_WEBHOOK_DUPLICATE.inc()
         return {"status": "already_processed"}
 
-    # Step 5: Process the event inside a SAVEPOINT.
-    # Wrapping handle_event in begin_nested() isolates its DB writes from the outer
-    # transaction.  If handle_event raises, the SAVEPOINT auto-rolls-back all partial
-    # changes — no committed pack row without a corresponding credit.
-    #
-    # The outer transaction (which holds the idempotency row) still commits on return.
+    await db.commit()
+    BILLING_WEBHOOK_RECEIVED.labels(event_type=event_name).inc()
+
+    # Step 5: enqueue by row id. Never pass raw bytes through arq. If the enqueue
+    # fails (Redis blip), the row is durably 'received' and the 60s pending sweep
+    # (T-298) re-enqueues it — so acknowledge 200 regardless.
+    webhook_event_id = str(row.id)
     try:
-        async with db.begin_nested():  # SAVEPOINT — isolates handle_event side-effects
-            await stripe_service.handle_event(db, dict(event))
-    except Exception as exc:
-        # SAVEPOINT auto-rolled back; outer txn (idempotency row) will still commit.
-        logger.error(
-            "billing.webhook_handle_failed stripe_event_id=%s event_type=%s error=%s",
-            stripe_event_id,
-            event_type,
-            exc,
-            exc_info=True,
+        await enqueue(
+            "billing_process_webhook",
+            webhook_event_id,
+            job_id=f"billing_wh:{webhook_event_id}",
         )
-        BILLING_WEBHOOK_ERROR.labels(error_type=type(exc).__name__).inc()
-        # Return 200 — Stripe won't retry; partial DB state is clean.
-        return {"status": "error_logged"}
+    except Exception:
+        logger.error(
+            "billing.webhook_enqueue_failed webhook_event_id=%s", webhook_event_id
+        )
 
     return {"status": "ok"}
+
+
+def _verify_lemon_signature(raw: bytes, signature: str) -> bool:
+    """Constant-time HMAC-SHA256 verification over the two-secret rotation list.
+
+    Returns True only when ``signature`` (the hex ``X-Signature`` header) matches
+    the HMAC of ``raw`` under one of the configured webhook secrets. Fails closed:
+    an empty header or an empty secret list (no secret configured) returns False,
+    so a misconfigured server rejects rather than accepts forged deliveries.
+    """
+    if not signature:
+        return False
+    matched = False
+    for secret in settings.lemonsqueezy_webhook_secrets:
+        if not secret:
+            continue
+        expected = hmac.new(secret.encode("utf-8"), raw, hashlib.sha256).hexdigest()
+        # Compare every secret (no short-circuit) — constant-time per comparison.
+        if hmac.compare_digest(expected, signature):
+            matched = True
+    return matched
+
+
+def _build_normalized_payload(
+    *,
+    event_name: str,
+    order_id: str,
+    attributes: dict[str, Any],
+    custom_data: dict[str, Any],
+    nonce_hash: str | None,
+) -> dict[str, Any]:
+    """Build the allow-listed, PII-free sanitised inbox payload (Plan §25.6 T-297).
+
+    This is the **only** thing the worker (T-298/T-299/T-300) reads, so it is the
+    contract those tasks consume. It is an explicit allow-list: every field is
+    copied by name, so provider PII (``user_email``/``user_name``), URLs
+    (``urls.receipt``), the signature, the API key, the raw nonce, and any
+    unrecognised ``custom_data`` field are inherently excluded. The custom block
+    is exactly the seven keys SpecForge itself set on the checkout.
+    """
+    first_item = (
+        attributes.get("first_order_item")
+        if isinstance(attributes.get("first_order_item"), dict)
+        else {}
+    )
+    return {
+        "provider": "lemonsqueezy",
+        "event_name": event_name,
+        "order_id": order_id,
+        "store_id": attributes.get("store_id"),
+        "customer_id": attributes.get("customer_id"),
+        "order_item_id": first_item.get("id"),
+        "product_id": first_item.get("product_id"),
+        "variant_id": first_item.get("variant_id"),
+        "status": attributes.get("status"),
+        "currency": attributes.get("currency"),
+        "test_mode": attributes.get("test_mode"),
+        # Economics (cents). order_total/subtotal + refunded_amount drive the
+        # proportional, tax-normalised reversal in T-300; item price anchors the
+        # grant validation in T-299.
+        "item_price_cents": first_item.get("price"),
+        "order_subtotal_cents": attributes.get("subtotal"),
+        "order_total_cents": attributes.get("total"),
+        "discount_total_cents": attributes.get("discount_total"),
+        "refunded": attributes.get("refunded"),
+        "refunded_amount_cents": attributes.get("refunded_amount"),
+        "created_at": attributes.get("created_at"),
+        "updated_at": attributes.get("updated_at"),
+        # SpecForge-set custom data — exactly the allow-listed keys. The raw nonce
+        # is replaced by its sha256; everything else the provider echoed is dropped.
+        "custom": {
+            "user_id": custom_data.get("user_id"),
+            "checkout_ref": custom_data.get("checkout_ref"),
+            "checkout_nonce_hash_from_webhook": nonce_hash,
+            "environment": custom_data.get("environment"),
+            "credits": custom_data.get("credits"),
+            "price_cents": custom_data.get("price_cents"),
+            "currency": custom_data.get("currency"),
+        },
+    }
+
+
+def _payload_hash(normalized_payload: dict[str, Any]) -> str:
+    """sha256 over the canonical (sorted-key) JSON of the sanitised payload.
+
+    Part of the inbox dedup identity: a byte-identical provider redelivery yields
+    the same hash and trips the unique index.
+    """
+    canonical = json.dumps(normalized_payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
