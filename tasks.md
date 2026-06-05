@@ -16311,7 +16311,7 @@ The moment-of-use feeling: looking at a clean product changelog you're proud of 
 
 ## Phase 22 — Lemon Squeezy Billing Migration
 
-> Implements `V1 spec.md` v2.1.0 (§4.12, §9, §10, §11, §12, §13) and `Plan v1.md` §25, verified by `harness/tests/backend/test_phase25_lemonsqueezy_billing_contract.py` (83 contracts) + `harness/tests/frontend/phase25-lemonsqueezy-billing.contract.test.ts` (7 contracts). (As with prior phases, the tasks.md phase number — 22 — runs ahead of the plan's §25 / the `phase25`-named harness; both naming systems are intentional and consistent with Phase 21 ↔ Plan §24 ↔ `phase24` harness.) Replaces Stripe Hosted Checkout with **Lemon Squeezy** at runtime; the Phase 18 Stripe tasks (T-226–T-238) are superseded at runtime, not deleted. **The A→C dependency order is strict and load-bearing:** Group A (foundation: migration → models → config → queue → CreditService) must fully land and be green before Group C (the money paths) — building a money path on a half-migrated CreditService is the worst failure mode for this phase. Stripe SDK/import removal is **not** in this phase (gated ≥7 days post-cutover; see Plan §25.9 step 8).
+> Implements `V1 spec.md` v2.1.0 (§4.12, §9, §10, §11, §12, §13) and `Plan v1.md` §25, verified by `harness/tests/backend/test_phase25_lemonsqueezy_billing_contract.py` (83 contracts) + `harness/tests/frontend/phase25-lemonsqueezy-billing.contract.test.ts` (7 contracts). (As with prior phases, the tasks.md phase number — 22 — runs ahead of the plan's §25 / the `phase25`-named harness; both naming systems are intentional and consistent with Phase 21 ↔ Plan §24 ↔ `phase24` harness.) Replaces Stripe Hosted Checkout with **Lemon Squeezy** at runtime; the Phase 18 Stripe tasks (T-226–T-238) are superseded at runtime, not deleted. **The A→C dependency order is strict and load-bearing:** Group A (foundation: migration → models → config → queue → CreditService) must fully land and be green before Group C (the money paths) — building a money path on a half-migrated CreditService is the worst failure mode for this phase. Stripe SDK/import removal is **not** in this phase (gated ≥7 days post-cutover; see Plan §25.9 step 8) — it is tracked as **T-308** (the gated decommission task at the end of this phase), so the removal is an explicit status-tracked obligation rather than prose.
 
 ---
 
@@ -16717,6 +16717,8 @@ Apply full/partial refunds and fraud reversals exactly once, with tax-normalised
 
 **Security / reliability requirements:** The two-component `refund:billing:{pack_id}:{cents}` reason (with the ledger index) is the per-level idempotency barrier — a replay of the same/lower amount is a no-op. Single-ordered locking matches `deduct()` (no deadlock). `users.credit_balance` never goes negative.
 
+**Verification requirement (event-catalog coverage):** Before enabling Lemon in production, confirm against Lemon Squeezy's **current** webhook catalog that one-time-order chargebacks/disputes surface through the `order_refunded`/`fraudulent` revocation inputs this task already handles (Lemon is the Merchant of Record and absorbs chargebacks). Treat this as a checklist item, not an assumption baked into code — anything the catalog exposes that is *not* an explicit input here is backstopped by reconcile lane 2 (T-301, the local-pack `get_order` re-check), never silently dropped. Record the verified event list in the T-307 release gate.
+
 **Acceptance criteria:**
 1. `-k "t300"` passes.
 2. Behavioural tests (T-306): full refund revokes all remaining once; partial uses the floor formula and only the unprocessed delta; tax-inclusive refund normalised through order total; replay same/lower is a no-op (durable processed state only); zero-effective refund still advances processed state; refund-after-spend creates debt; refund-after-expiry creates no debt; signed `order_refunded` without custom data still revokes a pack found by provider order id; missing-pack-with-proof retries then audited no-op after expiry; missing-pack-without-proof audited, no unrelated revoke.
@@ -16817,14 +16819,14 @@ The exceptional, human-evidenced support path that grants credits for a provably
 **Depends on:** T-299, T-300
 
 **Description:**
-Make new checkout Lemon-only and keep a bounded Stripe webhook compatibility window so already-created Stripe sessions still credit/reverse correctly. **The Stripe SDK/import is NOT removed in this phase** (gated follow-up, ≥7 days post-cutover).
+Make new checkout Lemon-only and keep a bounded Stripe webhook compatibility window so already-created Stripe sessions still credit/reverse correctly. **The Stripe SDK/import is NOT removed in this phase** — that removal is the gated follow-up **T-308** (≥7 days post-cutover).
 
 **Implementation requirements:**
 
 1. `POST /billing/checkout` no longer calls the Stripe path (`stripe_service.create_checkout_session`) — it is the Lemon attempt flow (T-296) only.
 2. Keep `POST /billing/webhook` able to process valid **late Stripe** events for a 7-day grace window via a small Stripe-shaped adapter that normalises into the **same** inbox/processing helpers: a late `checkout.session.completed` writes a `BillingCreditPack` with `provider='stripe'` using the same grant semantics (provider checkout/order uniqueness prevents double-credit); a late dispute revokes via the **same** T-300 helper. Do not resurrect the old inline Stripe grant code.
 3. After the grace window the endpoint is Lemon-only: requests bearing Stripe webhook headers are rejected **before any DB write** with `{"status":"ignored_provider_disabled"}` and no claim of Stripe signature verification.
-4. **Do not remove** the `stripe` dependency or runtime imports in this phase; do not rely on a "no pending Stripe checkout" guard (old sessions were never durably recorded).
+4. **Do not remove** the `stripe` dependency or runtime imports in this phase; do not rely on a "no pending Stripe checkout" guard (old sessions were never durably recorded). The removal is **T-308**'s job, gated on the grace window provably closing.
 
 **Security / reliability requirements:** Late-Stripe events go through the same idempotency barriers (provider uniqueness + ledger reason). The post-grace rejection performs no signature verification claim and no DB write.
 
@@ -16993,6 +16995,48 @@ Replace Stripe setup docs with Lemon docs and add the billing-ops runbook + rele
 **Affected modules/files:** `docs/PRODUCTION_RELEASE_GATE.md`, `docs/RUNBOOK.md`, `docs/LOCAL_TESTING_HANDBOOK.md`, `docs/SMOKE_TEST_CHECKLIST.md`, `docs/OBSERVABILITY_RUNBOOK.md`, `CLAUDE.md`, `README.md`.
 
 ---
+
+### T-308 — Stripe Decommission (Gated Follow-Up · ≥7 Days Post-Cutover · NOT a Phase-22 Completion Gate)
+
+**Category:** Backend / Migration / Decommission
+**Severity:** Medium
+**Priority:** P2
+**Phase:** E (Gated Decommission — runs **only** after the grace window closes; explicitly **not** part of the Phase-22 green-gate)
+**Harness:** **Outside** the 83-contract `phase25` file, which deliberately pins Stripe *present* at `test_t303_stripe_dependency_still_present`. The decommission's own harness is authored **at execution** and must **retire/flip** that contract (assert the dependency is now *absent*). Do **not** add a `-k "t308"` selector to the phase25 file — there is no such contract in it.
+**Status:** ⬜ BLOCKED — **do not start** until the operational gate below is met. Tracking-only until then; running "finish Phase 22" must **not** pull this task in.
+**Depends on:** T-303 (grace adapter live), T-306 (full contract green) — **plus a hard operational gate**: ≥7 days elapsed since the production checkout cutover **AND** zero `specforge_billing_webhook_received_total{provider="stripe"}` increments over the preceding 72h **AND** the Stripe grace flag disabled in prod.
+
+**Description:**
+Remove the now-dead Stripe runtime once the 7-day late-webhook grace window has provably closed. This is the deferred second half of T-303, made an explicit, status-tracked task so it is not lost as a prose footnote (the failure mode where dead payment code lingers for years). **Audit data is retained** — only executable Stripe code/config and the SDK dependency are removed.
+
+**Implementation requirements:**
+
+1. **Pre-flight gate (abort if any check fails):** verify the operational gate in *Depends on* — cutover + 7 days, zero `provider="stripe"` webhook receipts in the last 72h, grace flag off. Attach the evidence to the PR. This is a hard precondition, not advisory.
+2. **Remove the grace adapter (T-303 step 2):** delete the Stripe-shaped normaliser and the late-`checkout.session.completed`/late-dispute path from `routers/billing.py` and the billing worker/service. `POST /billing/webhook` now returns `{"status":"ignored_provider_disabled"}` unconditionally for Stripe-shaped requests (already the post-grace behaviour from T-303 step 3) — no signature-verification claim, no DB write.
+3. **Remove the SDK + service:** delete `backend/services/stripe_service.py`, every `import stripe` / `from stripe …`, and the `stripe==11.*` line in `backend/pyproject.toml`; regenerate `uv.lock`.
+4. **Remove the scoped config guard:** delete the now-unreachable `sk_test_*` production guard in `config.py` (T-292 scoped it off; this deletes it) plus the `STRIPE_SECRET_KEY`/`STRIPE_*` settings and the `.env.example` Stripe block.
+5. **Trim observability:** remove the `sk_live_*`/`sk_test_*`/`whsec_*` Stripe secret patterns from `observability.py` `_SECRET_PATTERNS` (the Lemon patterns from T-304 stay); retire any Stripe-only metric/structured-event names that no longer have a call site.
+6. **RETAIN — do not touch:** the `stripe_credit_packs` and `stripe_webhook_events` tables, their ORM models (`models/stripe_credit_pack.py`, `models/stripe_webhook_event.py`), and the backfilled `provider='stripe'` rows in `billing_credit_packs` — the historical financial audit trail. **No migration drops a Stripe table in this task.**
+7. **Harness/CI:** flip `test_t303_stripe_dependency_still_present` to assert the dependency is *gone* (or relocate it to the decommission phase's harness); `pip-audit` no longer scans `stripe`.
+
+**Security / reliability requirements:** The operational gate is a hard precondition — removing the grace adapter while any in-flight Stripe webhook can still arrive would silently drop a paid-order credit or a dispute reversal. Retaining the audit tables preserves the financial record after the code is gone. The post-removal endpoint makes no Stripe signature-verification claim and writes nothing for a Stripe-shaped request.
+
+**Acceptance criteria:**
+1. The operational-gate evidence is attached to the PR; `grep -rn "import stripe\|from stripe\|stripe_service\|sk_test_\|whsec_" backend/` returns nothing outside the retained `models/stripe_*.py` and migration history.
+2. `cd backend && uv run pytest tests/ -q` is green with the `stripe` package uninstalled; the flipped t303 contract passes; `uv run alembic upgrade head` still exposes the retained Stripe audit tables.
+3. `ruff`/`black` clean; CI green without the `stripe` dependency.
+
+**Testing requirements:** Post-removal import/grep guard; retained-audit-table assertion; webhook returns `ignored_provider_disabled` with no DB write for a Stripe-shaped request.
+
+**Rollback considerations:** Re-add the `stripe` dependency and restore `stripe_service.py` + the grace adapter from git history; the audit tables/rows were never removed, so no data restore is needed.
+
+**Estimated complexity:** S · **Estimated implementation risk:** Low (deletion-only, gated; audit tables explicitly out of scope).
+
+**Affected modules/files:** `backend/services/stripe_service.py` (delete), `backend/routers/billing.py`, `backend/services/billing_worker.py`/service (grace adapter), `backend/config.py`, `backend/services/observability.py`, `backend/pyproject.toml`, `backend/.env.example`, the decommission-phase harness. **Retained:** `backend/models/stripe_credit_pack.py`, `backend/models/stripe_webhook_event.py`.
+
+---
+
+_tasks.md · SpecForge V1 · Version 2.10.1 · 2026-06-05 — Phase 22 post-review amendments (close the gaps from the design review): (1) **added T-308** — the gated Stripe decommission (≥7 days post-cutover, hard operational gate on zero `provider="stripe"` webhook receipts) that removes `stripe_service.py`, the `stripe` SDK dependency, the scoped `sk_test_*` config guard, the `sk_live_*`/`whsec_*` observability patterns, and the T-303 grace adapter, while **retaining** the `stripe_credit_packs`/`stripe_webhook_events` audit tables + backfilled rows; it sits **outside** the 83-contract `phase25` harness and must flip `test_t303_stripe_dependency_still_present`. So the Stripe removal is now an explicit status-tracked task, not a prose pointer to Plan §25.9 step 8. (2) **Cross-referenced T-308** from the Phase-22 header and from T-303 (description + step 4). (3) **T-300** gained an event-catalog **verification requirement** — confirm Lemon's current webhook catalog maps one-time-order chargebacks/disputes onto the `order_refunded`/`fraudulent` inputs (Lemon is Merchant of Record; reconcile lane 2 backstops the rest), recorded as a checklist item not an in-code assumption. No existing task's economics, idempotency, or security invariants were changed; the account-deletion RESTRICT-FK settlement remains the documented ops step in T-307 (no user-deletion endpoint exists in V1, so no code path is added). The original 18-task set (2.10.0) is unchanged; T-308 brings Phase 22 to 19 tasks._
 
 _tasks.md · SpecForge V1 · Version 2.10.0 · 2026-06-05 — Phase 22 Lemon Squeezy Billing Migration T-290 through T-307 (18 tasks implementing `V1 spec.md` v2.1.0 §9-12 and `Plan v1.md` §25, verified by the `phase25`-named backend + frontend harness contracts; supersedes the Phase 18 Stripe tasks at runtime without deleting them). Strict A→C ordering. Backend: migration 0018 (six provider-neutral billing tables — checkout_attempts/credit_packs/credit_debts/admin_corrections/webhook_events/reconciliation_cursors — three credit_ledger reason-uniqueness indexes, and an idempotent balance-preserving Stripe→neutral backfill; Stripe tables retained); ORM models + reworked billing schemas; LEMONSQUEEZY_* + admin_user_emails config with a scoped production guard; a generic queue wrapper (GitHub throttle + gh:deadletter preserved) + billing_job→billing:deadletter; CreditService onto BillingCreditPack with credits_consumed/expired tracking + a debt-first grant helper; LemonSqueezyService (httpx JSON:API checkout + get_order); the attempt-first Lemon-only billing API (checkout_ref polling, IDOR-safe status, 7-day Stripe-session grace); raw-body two-secret-HMAC webhook ingestion → sanitised durable inbox → enqueue-by-id; the durable worker job + 60s pending-sweep (stale-processing reclaim, deterministic billing_wh:{id} dedup, failed-state-in-separate-txn) + retention purge + crons; order_created processing anchored to the checkout-attempt snapshot (not live config) with the full validation checklist and provider-order/ledger idempotency; order_refunded/fraud with tax-normalised proportional revocation, the two-component refund:billing:{pack}:{cents} idempotency reason, single-ordered deadlock-safe pack locking, and recoverable billing-credit debt (expired value never debt); the cursor-locked three-lane reconcile that never auto-grants and bounds provider I/O; an allowlist-gated, idempotent, audited admin-correction path; Stripe cutover (Lemon-only checkout + late-Stripe-event grace adapter, no SDK removal); provider-labelled specforge_billing_* metrics + Lemon redaction + structured events + alerts; behavioural test suite + full contract green-gate. Frontend (Modern Indica, evolves the existing Billing page — saffron/lotus/slate, glassmorphism, no new tokens): BillingCreditPack rename, checkout_ref polling, payment-reversal debt as a distinct matter-of-fact slate note never summed into usable balance, no visible Stripe copy, plus the /credits/balance billing_debt_credits backend field. Docs/RUNBOOK/release-gate/smoke updated; Stripe SDK/import removal deferred to a gated follow-up ≥7 days post-cutover._
 
