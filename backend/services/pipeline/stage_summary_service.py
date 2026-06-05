@@ -38,7 +38,9 @@ def summarize_stage_content(stage_type: str, content: str) -> StageSummary:
     source_hash = content_hash(content)
     headings = _extract_headings(content)
     requirement_ids = sorted(set(_REQ_ID_RE.findall(content)))
-    api_paths = sorted({f"{method} {path}" for method, path in _API_RE.findall(content)})
+    api_paths = sorted(
+        {f"{method} {path}" for method, path in _API_RE.findall(content)}
+    )
     entities = sorted(set(_ENTITY_RE.findall(content)))
 
     sections = {
@@ -60,7 +62,9 @@ def summarize_stage_content(stage_type: str, content: str) -> StageSummary:
     rendered = "\n\n".join(
         f"## {section}\n{sections[section]}" for section in SUMMARY_SECTIONS
     )
-    return StageSummary(stage_type=stage_type, source_hash=source_hash, content=rendered)
+    return StageSummary(
+        stage_type=stage_type, source_hash=source_hash, content=rendered
+    )
 
 
 def _extract_headings(content: str) -> list[str]:

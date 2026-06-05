@@ -420,15 +420,9 @@ async def test_generate_stream_timeout_records_provider_failure() -> None:
             "_load_workspace",
             AsyncMock(return_value=mocks["fake_workspace"]),
         ),
-        patch.object(
-            stage_manager, "_assert_dependencies_finalised", AsyncMock()
-        ),
-        patch(
-            "services.pipeline.stage_manager.assert_valid_problem_statement"
-        ),
-        patch(
-            "services.pipeline.stage_manager.scan", return_value=scan_result
-        ),
+        patch.object(stage_manager, "_assert_dependencies_finalised", AsyncMock()),
+        patch("services.pipeline.stage_manager.assert_valid_problem_statement"),
+        patch("services.pipeline.stage_manager.scan", return_value=scan_result),
         patch.object(
             stage_manager, "_redis_client", AsyncMock(return_value=mocks["fake_redis"])
         ),
@@ -453,15 +447,9 @@ async def test_generate_stream_timeout_records_provider_failure() -> None:
             "services.pipeline.stage_manager.get_cached_generation",
             AsyncMock(return_value=None),
         ),
-        patch(
-            "services.pipeline.stage_manager.credit_service", mock_credit
-        ),
-        patch(
-            "services.pipeline.stage_manager.get_llm", return_value=fake_adapter
-        ),
-        patch(
-            "services.llm.provider_status.record_provider_failure"
-        ) as mock_rpf,
+        patch("services.pipeline.stage_manager.credit_service", mock_credit),
+        patch("services.pipeline.stage_manager.get_llm", return_value=fake_adapter),
+        patch("services.llm.provider_status.record_provider_failure") as mock_rpf,
     ):
         exc = await _drain_generate(
             stage_manager,
@@ -471,9 +459,9 @@ async def test_generate_stream_timeout_records_provider_failure() -> None:
         )
 
     # generate() wraps TimeoutError into ProviderTimeoutError before re-raising.
-    assert isinstance(exc, ProviderTimeoutError), (
-        f"Expected ProviderTimeoutError from generate() on timeout path, got {exc!r}"
-    )
+    assert isinstance(
+        exc, ProviderTimeoutError
+    ), f"Expected ProviderTimeoutError from generate() on timeout path, got {exc!r}"
 
     # The critical assertion: record_provider_failure must be called exactly once.
     mock_rpf.assert_called_once()
@@ -489,7 +477,9 @@ async def test_generate_stream_timeout_records_provider_failure() -> None:
 
 
 @pytest.mark.asyncio
-async def test_generate_provider_error_does_not_double_count_record_provider_failure() -> None:  # noqa: E501
+async def test_generate_provider_error_does_not_double_count_record_provider_failure() -> (  # noqa: E501
+    None
+):
     """T-217 — generate() must NOT call record_provider_failure for ProviderError.
 
     Background: InstrumentedAdapter.stream() calls record_provider_failure in
@@ -536,15 +526,9 @@ async def test_generate_provider_error_does_not_double_count_record_provider_fai
             "_load_workspace",
             AsyncMock(return_value=mocks["fake_workspace"]),
         ),
-        patch.object(
-            stage_manager, "_assert_dependencies_finalised", AsyncMock()
-        ),
-        patch(
-            "services.pipeline.stage_manager.assert_valid_problem_statement"
-        ),
-        patch(
-            "services.pipeline.stage_manager.scan", return_value=scan_result
-        ),
+        patch.object(stage_manager, "_assert_dependencies_finalised", AsyncMock()),
+        patch("services.pipeline.stage_manager.assert_valid_problem_statement"),
+        patch("services.pipeline.stage_manager.scan", return_value=scan_result),
         patch.object(
             stage_manager, "_redis_client", AsyncMock(return_value=mocks["fake_redis"])
         ),
@@ -569,15 +553,9 @@ async def test_generate_provider_error_does_not_double_count_record_provider_fai
             "services.pipeline.stage_manager.get_cached_generation",
             AsyncMock(return_value=None),
         ),
-        patch(
-            "services.pipeline.stage_manager.credit_service", mock_credit
-        ),
-        patch(
-            "services.pipeline.stage_manager.get_llm", return_value=fake_adapter
-        ),
-        patch(
-            "services.llm.provider_status.record_provider_failure"
-        ) as mock_rpf,
+        patch("services.pipeline.stage_manager.credit_service", mock_credit),
+        patch("services.pipeline.stage_manager.get_llm", return_value=fake_adapter),
+        patch("services.llm.provider_status.record_provider_failure") as mock_rpf,
     ):
         exc = await _drain_generate(
             stage_manager,
@@ -587,9 +565,9 @@ async def test_generate_provider_error_does_not_double_count_record_provider_fai
         )
 
     # generate() re-raises ProviderError unchanged (no wrapping for non-timeout).
-    assert isinstance(exc, ProviderError), (
-        f"Expected ProviderError from generate() on provider error path, got {exc!r}"
-    )
+    assert isinstance(
+        exc, ProviderError
+    ), f"Expected ProviderError from generate() on provider error path, got {exc!r}"
 
     # The critical assertion: generate()'s except block must NOT call
     # record_provider_failure for ProviderError (the isinstance guard prevents it).

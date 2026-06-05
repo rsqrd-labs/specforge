@@ -9,6 +9,7 @@ exercise the SQL here. Instead we validate the catalog itself:
   first generations.
 - Categories are in the enum locked by the model's CHECK constraint.
 """
+
 from __future__ import annotations
 
 import re
@@ -50,9 +51,9 @@ def test_slugs_are_unique_and_kebab_case() -> None:
 
 def test_categories_match_enum() -> None:
     for entry in STARTER_TEMPLATES:
-        assert entry["category"] in _ALLOWED_CATEGORIES, (
-            f"{entry['slug']}: category {entry['category']!r} not in enum"
-        )
+        assert (
+            entry["category"] in _ALLOWED_CATEGORIES
+        ), f"{entry['slug']}: category {entry['category']!r} not in enum"
 
 
 def test_problem_statements_meet_minimum_length() -> None:

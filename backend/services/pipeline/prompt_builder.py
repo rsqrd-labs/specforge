@@ -12,7 +12,6 @@ import prompts.harness as harness_prompts
 import prompts.plan as plan_prompts
 import prompts.spec as spec_prompts
 import prompts.tasks as tasks_prompts
-from config import settings
 from database import get_shared_redis
 from models import Stage, Workspace
 from services.observability import PIPELINE_UPSTREAM_SECTION_SKIPPED

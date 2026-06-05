@@ -13,6 +13,7 @@ without an account. Defence-in-depth:
 - The auth middleware does not protect this router; the route prefix is
   in the documented exemption list.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -36,9 +37,9 @@ _CACHE_CONTROL = "public, max-age=60, stale-while-revalidate=600"
 
 def _etag_for(response: PublicWorkspaceResponse) -> str:
     """Derive a stable, cheap ETag from the `shared_at` bumper."""
-    digest = hashlib.sha256(
-        response.shared_at.isoformat().encode("utf-8")
-    ).hexdigest()[:16]
+    digest = hashlib.sha256(response.shared_at.isoformat().encode("utf-8")).hexdigest()[
+        :16
+    ]
     return f'W/"{digest}"'
 
 

@@ -33,9 +33,9 @@ _INSTANCE_CACHE_MAX = 256
 # Adapters older than this are evicted on cache hit and rebuilt fresh.
 # Ensures stale httpx connection pools are recycled periodically.  L-1 — T-223.
 _INSTANCE_CACHE_TTL_SECONDS: float = 3600.0
-_INSTANCES: OrderedDict[
-    tuple[str, str, str], tuple["BaseLLMAdapter", float]
-] = OrderedDict()
+_INSTANCES: OrderedDict[tuple[str, str, str], tuple["BaseLLMAdapter", float]] = (
+    OrderedDict()
+)
 
 # Hard wall-clock cap on any single non-streaming generation call routed
 # through the gateway.  Prevents a hung provider from holding a credit

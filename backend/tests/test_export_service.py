@@ -173,7 +173,9 @@ def test_something():
     files = parse_harness_files(content)
 
     assert files == {
-        "harness/conftest.py": "import pytest\n\n@pytest.fixture\ndef client():\n    return None\n",
+        "harness/conftest.py": (
+            "import pytest\n\n@pytest.fixture\ndef client():\n" "    return None\n"
+        ),
         "harness/tests/unit/test_core.py": "def test_something():\n    assert True\n",
         "harness/schemas/api.json": '{"type": "object"}\n',
     }

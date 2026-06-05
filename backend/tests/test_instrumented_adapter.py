@@ -363,9 +363,7 @@ async def test_cost_metrics_and_logs_exclude_prompt_and_output_content() -> None
     mock_client = _mock_langfuse()
 
     with (
-        patch.object(
-            langfuse_service, "get_langfuse_client", return_value=mock_client
-        ),
+        patch.object(langfuse_service, "get_langfuse_client", return_value=mock_client),
         patch("services.llm.instrumented_adapter.logger.info") as mock_log,
     ):
         await wrapped.complete(system_prompt, user_prompt, 50)

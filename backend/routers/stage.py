@@ -25,8 +25,8 @@ from schemas.stage import (
     StageVersionResponse,
 )
 from services.credit_service import InsufficientCreditsError
-from services.llm.base import ProviderError, ProviderTimeoutError
 from services.evals.online_eval import _validate_task_references
+from services.llm.base import ProviderError, ProviderTimeoutError
 from services.pipeline.artifact_validator import MissingSectionError
 from services.pipeline.critic import StageQualityGateError
 from services.pipeline.stage_manager import (
@@ -448,9 +448,7 @@ async def revalidate_tasks(
     harness_content = harness_stage.content if harness_stage else ""
 
     tasks_without_ref = _validate_task_references(stage.content, harness_content or "")
-    flagged = any(
-        i.get("gap_type") != "GENERATION_FAILURE" for i in tasks_without_ref
-    )
+    flagged = any(i.get("gap_type") != "GENERATION_FAILURE" for i in tasks_without_ref)
 
     # Fetch the existing eval for the current version to preserve quality scores
     eval_result_row = await db.execute(

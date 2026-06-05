@@ -53,8 +53,7 @@ def test_normalize_refine_replacement_preserves_selected_boundary_whitespace() -
     replacement = " - improved bullet "
 
     assert (
-        normalize_refine_replacement(selected, replacement)
-        == "\n- improved bullet\n"
+        normalize_refine_replacement(selected, replacement) == "\n- improved bullet\n"
     )
 
 

@@ -217,11 +217,7 @@ def models_for_tier(provider: str, tier: str) -> list[str]:
         raise ValueError(f"Unknown model tier: {tier!r}")
 
     models = PROVIDER_CAPABILITY_REGISTRY[provider]["models"]
-    return [
-        model
-        for model, config in models.items()
-        if config["tier"] == tier
-    ]
+    return [model for model, config in models.items() if config["tier"] == tier]
 
 
 def model_tier(provider: str, model: str) -> str:

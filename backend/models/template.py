@@ -36,7 +36,7 @@ class Template(Base):
     __table_args__ = (
         UniqueConstraint("slug", name="uq_templates_slug"),
         CheckConstraint(
-            "category IN ('auth', 'payments', 'content', 'realtime', 'agent', 'tooling')",
+            "category IN ('auth', 'payments', 'content', 'realtime', 'agent', 'tooling')",  # noqa: E501
             name="ck_templates_category",
         ),
     )

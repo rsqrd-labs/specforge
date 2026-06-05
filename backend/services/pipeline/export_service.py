@@ -43,7 +43,7 @@ def _safe_harness_path(filename: str) -> str | None:
     # Strip a leading "harness/" prefix the LLM includes in headings — we
     # always re-add it below via PurePosixPath("harness", path).
     if normalized.startswith("harness/"):
-        normalized = normalized[len("harness/"):]
+        normalized = normalized[len("harness/") :]
     if not normalized:
         return None
 

@@ -75,8 +75,7 @@ def test_get_llm_rebuilds_adapter_after_ttl_expires(
     second = get_llm("anthropic", "claude-sonnet-4-6")
 
     assert first is not second, (
-        "get_llm() must return a fresh adapter after TTL expiry.  "
-        "L-1 — T-223."
+        "get_llm() must return a fresh adapter after TTL expiry.  " "L-1 — T-223."
     )
     # The cache should contain only the newly-built adapter (the stale one was
     # evicted before insertion of the new one).

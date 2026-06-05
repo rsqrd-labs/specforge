@@ -82,7 +82,9 @@ def validate_problem_statement(text: str) -> ProblemStatementValidation:
         return ProblemStatementValidation(
             is_valid=False,
             code="problem_statement_too_short",
-            message="Describe the product or software problem in at least 50 characters.",
+            message=(
+                "Describe the product or software problem in at least " "50 characters."
+            ),
             hints=[
                 "Name the product or tool you want to build.",
                 "Mention the primary users and the workflow they need.",
@@ -99,8 +101,14 @@ def validate_problem_statement(text: str) -> ProblemStatementValidation:
                 "attempt, not a product problem statement."
             ),
             hints=[
-                "Remove instructions that ask the AI to ignore rules, reveal prompts, or bypass safeguards.",
-                "Describe the product goal, users, workflows, and expected outcome instead.",
+                (
+                    "Remove instructions that ask the AI to ignore rules, "
+                    "reveal prompts, or bypass safeguards."
+                ),
+                (
+                    "Describe the product goal, users, workflows, and "
+                    "expected outcome instead."
+                ),
             ],
         )
 
@@ -117,7 +125,10 @@ def validate_problem_statement(text: str) -> ProblemStatementValidation:
                 "This does not look like a product or software problem statement."
             ),
             hints=[
-                "Describe what you want to build, not a general chat or content-generation request.",
+                (
+                    "Describe what you want to build, not a general chat "
+                    "or content-generation request."
+                ),
                 "Include the users, core workflow, data involved, and success outcome.",
             ],
         )
@@ -127,7 +138,8 @@ def validate_problem_statement(text: str) -> ProblemStatementValidation:
             is_valid=False,
             code="problem_statement_missing_product_intent",
             message=(
-                "This needs to describe a product, app, system, workflow, or software tool to build."
+                "This needs to describe a product, app, system, workflow, "
+                "or software tool to build."
             ),
             hints=[
                 "Start with a phrase like: I want to build a ...",
@@ -139,10 +151,18 @@ def validate_problem_statement(text: str) -> ProblemStatementValidation:
         return ProblemStatementValidation(
             is_valid=False,
             code="problem_statement_not_product_relevant",
-            message="This doesn't describe a real software product, system, or workflow.",
+            message=(
+                "This doesn't describe a real software product, system, " "or workflow."
+            ),
             hints=[
-                "Describe what the product does, who uses it, and what problem it solves.",
-                "Focus on a workflow, user action, or data problem that software can address.",
+                (
+                    "Describe what the product does, who uses it, and what "
+                    "problem it solves."
+                ),
+                (
+                    "Focus on a workflow, user action, or data problem that "
+                    "software can address."
+                ),
             ],
         )
 

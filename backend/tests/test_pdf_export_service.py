@@ -5,6 +5,7 @@ Docker image but not always on every local dev box. When the native libs
 cannot be loaded the whole module fails to import — we skip the suite
 rather than failing CI for an environment issue.
 """
+
 from __future__ import annotations
 
 import pytest
@@ -37,9 +38,7 @@ class _FakeStage:
 
 def _sample_stages() -> dict[str, _FakeStage]:
     return {
-        "spec": _FakeStage(
-            "# SPEC\n\n## Goals\n\n- Build a thing.\n- Ship a thing.\n"
-        ),
+        "spec": _FakeStage("# SPEC\n\n## Goals\n\n- Build a thing.\n- Ship a thing.\n"),
         "plan": _FakeStage("# PLAN\n\n```python\nfrom x import y\n```\n"),
         "tasks": _FakeStage(
             "# TASKS\n\n## Effort Summary\n\n- Estimate range: ~1 week\n"

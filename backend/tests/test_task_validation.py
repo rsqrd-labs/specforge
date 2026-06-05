@@ -13,7 +13,6 @@ from services.evals.online_eval import (
     run_eval,
 )
 
-
 _HARNESS = """\
 ## File: harness/tests/test_auth.py
 
@@ -148,7 +147,9 @@ class TestExtractHarnessRefs:
         assert _extract_harness_refs("") == set()
 
     def test_harness_without_code_blocks_returns_empty_set(self) -> None:
-        assert _extract_harness_refs("## File: tests/test_x.py\n\nNo code block.") == set()
+        assert (
+            _extract_harness_refs("## File: tests/test_x.py\n\nNo code block.") == set()
+        )
 
 
 class TestRefMatchesHarness:
@@ -172,7 +173,9 @@ class TestRefMatchesHarness:
         assert _ref_matches_harness("test_standalone", self.known)
 
     def test_nonexistent_ref_returns_false(self) -> None:
-        assert not _ref_matches_harness("tests/test_auth.py::TestAuth::test_bogus", self.known)
+        assert not _ref_matches_harness(
+            "tests/test_auth.py::TestAuth::test_bogus", self.known
+        )
         assert not _ref_matches_harness("test_does_not_exist", self.known)
 
 
@@ -203,7 +206,10 @@ class TestValidateTaskReferences:
         assert failures[0]["task_number"] == 2
 
     def test_remediation_includes_file_path_hint_when_available(self) -> None:
-        tasks = "### T-001: Task\n\n**Harness refs:** `tests/auth/test_login.py::TestLogin::test_missing`\n"
+        tasks = (
+            "### T-001: Task\n\n**Harness refs:** "
+            "`tests/auth/test_login.py::TestLogin::test_missing`\n"
+        )
         issues = _validate_task_references(tasks, _HARNESS)
         assert issues[0]["gap_type"] == "GENUINE_GAP"
         assert "tests/auth/test_login.py" in issues[0]["remediation"]
@@ -217,7 +223,7 @@ class TestValidateTaskReferences:
 
 @pytest.mark.asyncio
 async def test_run_eval_tasks_uses_structural_parser_when_harness_provided() -> None:
-    """When harness_content is given, structural parser overrides LLM tasks_without_ref."""
+    """When harness_content is given, structural parser overrides LLM tasks_without_ref."""  # noqa: E501
     from tests.test_online_eval import _FakeDB, _FakeJudge
 
     db = _FakeDB()
@@ -225,7 +231,8 @@ async def test_run_eval_tasks_uses_structural_parser_when_harness_provided() -> 
     judge_response = (
         '{"scores": {"requirements_coverage": 80, "specificity_testability": 75, '
         '"traceability": 70, "feasibility": 80, "clarity": 75}, '
-        '"coverage_percent": null, "uncovered_reqs": [], "tasks_without_ref": [], "risks": []}'
+        '"coverage_percent": null, "uncovered_reqs": [], '
+        '"tasks_without_ref": [], "risks": []}'
     )
     tasks_with_broken_ref = (
         "### T-001: Implement login\n\n"
@@ -234,7 +241,9 @@ async def test_run_eval_tasks_uses_structural_parser_when_harness_provided() -> 
         "**Estimate:** S\n"
     )
 
-    with patch("services.evals.online_eval.get_llm", return_value=_FakeJudge(judge_response)):
+    with patch(
+        "services.evals.online_eval.get_llm", return_value=_FakeJudge(judge_response)
+    ):
         result = await run_eval(
             uuid4(),
             "tasks",
@@ -262,7 +271,9 @@ async def test_run_eval_tasks_falls_back_to_llm_when_no_harness_content() -> Non
         '"tasks_without_ref": [{"task": "T-01", "reason": "no test ref"}]}'
     )
 
-    with patch("services.evals.online_eval.get_llm", return_value=_FakeJudge(judge_response)):
+    with patch(
+        "services.evals.online_eval.get_llm", return_value=_FakeJudge(judge_response)
+    ):
         result = await run_eval(uuid4(), "tasks", "tasks content", "spec", db)
 
     assert result is not None
@@ -279,7 +290,8 @@ async def test_run_eval_tasks_generation_failure_does_not_flag() -> None:
     judge_response = (
         '{"scores": {"requirements_coverage": 80, "specificity_testability": 75, '
         '"traceability": 70, "feasibility": 80, "clarity": 75}, '
-        '"coverage_percent": null, "uncovered_reqs": [], "tasks_without_ref": [], "risks": []}'
+        '"coverage_percent": null, "uncovered_reqs": [], '
+        '"tasks_without_ref": [], "risks": []}'
     )
     # Task with no **Harness refs:** field — GENERATION_FAILURE.
     # Priority/Estimate present so the T-164 field validators don't fire and
@@ -292,7 +304,9 @@ async def test_run_eval_tasks_generation_failure_does_not_flag() -> None:
         "**Estimated size:** S\n"
     )
 
-    with patch("services.evals.online_eval.get_llm", return_value=_FakeJudge(judge_response)):
+    with patch(
+        "services.evals.online_eval.get_llm", return_value=_FakeJudge(judge_response)
+    ):
         result = await run_eval(
             uuid4(),
             "tasks",

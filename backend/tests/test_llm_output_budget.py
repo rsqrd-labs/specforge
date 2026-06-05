@@ -22,9 +22,9 @@ def test_output_budgets_cover_generation_and_refine_operations() -> None:
 
 
 def test_focused_refine_budget_is_smaller_than_full_regenerate() -> None:
-    assert OUTPUT_TOKEN_BUDGETS["refine.focused"] < OUTPUT_TOKEN_BUDGETS[
-        "regenerate.full"
-    ]
+    assert (
+        OUTPUT_TOKEN_BUDGETS["refine.focused"] < OUTPUT_TOKEN_BUDGETS["regenerate.full"]
+    )
     assert OUTPUT_TOKEN_BUDGETS["refine.focused"] <= 768
 
 

@@ -4,6 +4,7 @@ Mirrors harness/schemas/template.schema.json exactly. `extra="forbid"`
 locks the response shape so we can't accidentally leak future columns
 through the unauthenticated GET /templates endpoint.
 """
+
 from __future__ import annotations
 
 from datetime import datetime

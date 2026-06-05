@@ -5,6 +5,7 @@ the active set ordered by sort_order so the dashboard strip is stable
 across deploys. Inactive templates are hidden but kept in the table for
 historical Workspace.template_slug references — never delete.
 """
+
 from __future__ import annotations
 
 import logging

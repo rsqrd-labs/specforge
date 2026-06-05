@@ -8,7 +8,6 @@ from uuid import UUID, uuid4
 
 from authlib.integrations.httpx_client import AsyncOAuth2Client
 from jose import ExpiredSignatureError, JWTError, jwt
-from redis.asyncio import Redis
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 

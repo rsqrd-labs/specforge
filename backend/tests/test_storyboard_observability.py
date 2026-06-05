@@ -205,15 +205,24 @@ def test_storyboard_generation_event_fields_and_error_types_are_bounded() -> Non
         "user_id": str(sb.user_id),
         "credit_ledger_id": str(ledger_id),
     }
-    assert storyboard_service._payload_error_type(
-        StoryboardPayloadError("parse", "llm completion timed out")
-    ) == "timeout"
-    assert storyboard_service._payload_error_type(
-        StoryboardPayloadError("parse", "llm provider error")
-    ) == "provider"
-    assert storyboard_service._payload_error_type(
-        StoryboardPayloadError("schema", "missing section")
-    ) == "payload_schema"
+    assert (
+        storyboard_service._payload_error_type(
+            StoryboardPayloadError("parse", "llm completion timed out")
+        )
+        == "timeout"
+    )
+    assert (
+        storyboard_service._payload_error_type(
+            StoryboardPayloadError("parse", "llm provider error")
+        )
+        == "provider"
+    )
+    assert (
+        storyboard_service._payload_error_type(
+            StoryboardPayloadError("schema", "missing section")
+        )
+        == "payload_schema"
+    )
 
 
 class _Result:

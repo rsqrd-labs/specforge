@@ -54,6 +54,7 @@ def _render_clarification_block(raw: str) -> str:
         return ""
     return "\n".join(lines) + "\n"
 
+
 SYSTEM_PROMPT = f"""{ASDD_METHODOLOGY_OVERVIEW}
 
 {SECURITY_AND_PRIVACY_RULES}

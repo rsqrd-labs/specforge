@@ -77,14 +77,14 @@ from services.integrations.task_parser import (
 )
 from services.llm.base import ProviderError, ProviderTimeoutError
 from services.llm.gateway import get_llm
+from services.llm.output_budget import output_budget_for_operation
+from services.llm.routing import LLMRoutingError, resolve_llm_route
 from services.observability import (
     GITHUB_AUDIT_INCREMENT_PUSHED,
     GITHUB_AUDIT_PR_OPENED,
     GITHUB_PR_TOTAL,
     github_audit,
 )
-from services.llm.output_budget import output_budget_for_operation
-from services.llm.routing import LLMRoutingError, resolve_llm_route
 from services.pipeline.diff_engine import markdown_fences_balanced
 from services.security.output_validator import validate
 from services.security.prompt_guard import scan

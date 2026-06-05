@@ -192,8 +192,6 @@ def _to_dict(value: Any) -> dict:
         return dumped if isinstance(dumped, dict) else {}
     if hasattr(value, "__dict__"):
         return {
-            key: item
-            for key, item in vars(value).items()
-            if not key.startswith("_")
+            key: item for key, item in vars(value).items() if not key.startswith("_")
         }
     return {}

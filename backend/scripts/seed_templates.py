@@ -16,6 +16,7 @@ To extend, add a new entry to STARTER_TEMPLATES below. The `slug` is
 the stable identifier — never rename one in place; instead add a new
 slug and mark the old one `active=False`.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -81,9 +82,7 @@ STARTER_TEMPLATES: list[dict[str, Any]] = [
     {
         "slug": "slack-bot",
         "name": "Slack bot",
-        "description": (
-            "Stateful Slack bot with slash commands, modals, and OAuth."
-        ),
+        "description": ("Stateful Slack bot with slash commands, modals, and OAuth."),
         "category": "tooling",
         "problem_statement": (
             "I need a Slack bot that helps teams run weekly standups. The bot "

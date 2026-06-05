@@ -27,7 +27,9 @@ from services.pipeline.spec_clarifier import (
 )
 
 
-def _workspace(problem_statement: str = "Build a thing for a person.") -> SimpleNamespace:
+def _workspace(
+    problem_statement: str = "Build a thing for a person.",
+) -> SimpleNamespace:
     return SimpleNamespace(
         id=uuid4(),
         provider="anthropic",
@@ -96,9 +98,7 @@ def test_parse_questions_drops_malformed_entries() -> None:
 
 def test_parse_questions_caps_at_five() -> None:
     raw = json.dumps(
-        [
-            {"question": f"Q{i}", "why_it_matters": f"W{i}"} for i in range(20)
-        ]
+        [{"question": f"Q{i}", "why_it_matters": f"W{i}"} for i in range(20)]
     )
     assert len(_parse_questions(raw)) == 5
 
@@ -144,9 +144,7 @@ async def test_request_clarifying_questions_swallows_provider_errors(
 async def test_request_clarifying_questions_caches_questions(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    raw = json.dumps(
-        [{"question": "Who?", "why_it_matters": "Persona drives FRs."}]
-    )
+    raw = json.dumps([{"question": "Who?", "why_it_matters": "Persona drives FRs."}])
     fake_adapter = SimpleNamespace(complete=AsyncMock(return_value=raw))
     monkeypatch.setattr(spec_clarifier, "get_llm", lambda *a, **k: fake_adapter)
 
@@ -185,9 +183,7 @@ async def test_persist_answers_sanitises_html_in_answers() -> None:
     workspace_id = uuid4()
     redis = _FakeRedis()
     question = "What is the constraint?"
-    await redis.setex(
-        f"clarify_round:{workspace_id}", 900, json.dumps([question])
-    )
+    await redis.setex(f"clarify_round:{workspace_id}", 900, json.dumps([question]))
 
     captured: dict = {}
 
@@ -238,7 +234,7 @@ async def test_persist_answers_raises_when_round_expired() -> None:
 
 
 def test_spec_clarifier_module_has_no_credit_charges() -> None:
-    """Hard contract: clarification is FREE; the file must not import or call any credit-deduction API."""
+    """Hard contract: clarification is FREE; the file must not import or call any credit-deduction API."""  # noqa: E501
     from pathlib import Path
 
     source = (
@@ -248,6 +244,6 @@ def test_spec_clarifier_module_has_no_credit_charges() -> None:
         / "spec_clarifier.py"
     ).read_text(encoding="utf-8")
     for forbidden in ("credit_service.deduct", "deduct_credits", "spend_credits"):
-        assert forbidden not in source, (
-            f"spec_clarifier.py must NEVER call '{forbidden}'."
-        )
+        assert (
+            forbidden not in source
+        ), f"spec_clarifier.py must NEVER call '{forbidden}'."

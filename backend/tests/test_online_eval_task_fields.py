@@ -4,6 +4,7 @@ These exercise `_validate_task_fields` directly and the wired
 `_validate_task_references` path so the merged `tasks_without_ref` list
 carries both flavours of structural issue without any UI shape change.
 """
+
 from __future__ import annotations
 
 from services.evals.online_eval import (

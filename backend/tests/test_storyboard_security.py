@@ -4,9 +4,6 @@ from pathlib import Path
 
 import pytest
 from httpx import ASGITransport, AsyncClient
-
-import middleware.csrf as csrf_module
-from services.pipeline import storyboard_public_service, storyboard_renderer
 from test_storyboard_router import (
     _STORYBOARD_ID,
     _USER_ID,
@@ -14,6 +11,9 @@ from test_storyboard_router import (
     _client,
     _storyboard,
 )
+
+import middleware.csrf as csrf_module
+from services.pipeline import storyboard_public_service, storyboard_renderer
 
 
 def test_public_allow_list_redacts_private_storyboard_material_by_default() -> None:
@@ -115,9 +115,7 @@ async def test_storyboard_mutations_require_csrf(
         csrf_module,
         "decode_access_token_claims",
         lambda token: (
-            {"sub": str(_USER_ID), "type": "access"}
-            if token == "valid-token"
-            else None
+            {"sub": str(_USER_ID), "type": "access"} if token == "valid-token" else None
         ),
     )
     app = _app(db_value=_storyboard(status="ready"))

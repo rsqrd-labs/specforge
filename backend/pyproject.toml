@@ -75,6 +75,13 @@ line-length = 88
 [tool.ruff.lint]
 select = ["E", "F", "I"]
 
+[tool.ruff.lint.per-file-ignores]
+# Prompt bodies are markdown tables / prose inside triple-quoted f-strings.
+# Reflowing them changes the LLM prompt bytes (would trip the Phase-19 eval and
+# the ASDD_PROMPT_VERSION gate), and a line inside a triple-quoted block cannot
+# carry an inline `# noqa`, so E501 is ignored for the whole prompts package.
+"prompts/*.py" = ["E501"]
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]

@@ -204,7 +204,11 @@ def _parse_task_blocks(tasks_content: str) -> list[dict[str, Any]]:
 
         if refs_start is None:
             tasks.append(
-                {"task_number": task_num, "task_title": task_title, "harness_refs": None}
+                {
+                    "task_number": task_num,
+                    "task_title": task_title,
+                    "harness_refs": None,
+                }
             )
             continue
 
@@ -250,7 +254,7 @@ def _extract_harness_refs(harness_content: str) -> set[str]:
             raw_path = heading_m.group(1).strip()
             normalized = raw_path.replace("\\", "/")
             if normalized.startswith("harness/"):
-                normalized = normalized[len("harness/"):]
+                normalized = normalized[len("harness/") :]
             j = i + 1
             while j < len(lines) and lines[j].strip() == "":
                 j += 1
@@ -286,7 +290,7 @@ def _ref_matches_harness(ref: str, known_refs: set[str]) -> bool:
     """Lenient match: strip harness/ prefix, try full path, Class::method, bare name."""
     normalized = ref.strip().replace("\\", "/")
     if normalized.startswith("harness/"):
-        normalized = normalized[len("harness/"):]
+        normalized = normalized[len("harness/") :]
     if normalized in known_refs:
         return True
     parts = normalized.split("::")
@@ -304,7 +308,7 @@ def _build_gap_details(
     """
     normalized = missing_ref.strip().replace("\\", "/")
     if normalized.startswith("harness/"):
-        normalized = normalized[len("harness/"):]
+        normalized = normalized[len("harness/") :]
 
     parts = normalized.split("::")
 
@@ -424,9 +428,7 @@ def _validate_task_fields(tasks_content: str) -> list[dict[str, Any]]:
                     "reason": reason,
                     "referenced_test": None,
                     "gap_type": "MISSING_ESTIMATE",
-                    "remediation": (
-                        "Add `**Estimate:** S` (or M/L/XL) to this task."
-                    ),
+                    "remediation": ("Add `**Estimate:** S` (or M/L/XL) to this task."),
                     "harness_file": None,
                     "code_stub": None,
                 }
@@ -480,7 +482,10 @@ def _validate_task_references(
                     {
                         "task_number": task_num,
                         "task_title": task_title,
-                        "reason": f"`{missing}` is referenced but not found in the harness.",
+                        "reason": (
+                            f"`{missing}` is referenced but not found "
+                            "in the harness."
+                        ),
                         "referenced_test": missing,
                         "gap_type": "GENUINE_GAP",
                         "remediation": remediation,
@@ -831,7 +836,8 @@ async def run_eval(
     ):
         flagged = True
     if stage_type == "tasks" and tasks_without_ref:
-        # GENERATION_FAILURE is a prompt quality issue — only GENUINE_GAP flags the result
+        # GENERATION_FAILURE is a prompt quality issue — only GENUINE_GAP
+        # flags the result
         flagged = any(
             i.get("gap_type") != "GENERATION_FAILURE" for i in tasks_without_ref
         )
