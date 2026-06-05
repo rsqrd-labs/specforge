@@ -1,13 +1,16 @@
-"""Pydantic schemas for the Billing / Stripe Payments API.
+"""Pydantic schemas for the Billing API.
 
-Phase 18 — T-230.
+Phase 18 — T-230 (Stripe). Reworked in Phase 22 — T-291 for the provider-neutral
+Lemon Squeezy billing flow (Plan §25.6). The schemas never echo the checkout nonce,
+the webhook signature, or any raw provider payload (Plan §25 SR4).
 
 Schema inventory
 ----------------
-PackageResponse       GET /billing/package    (T-230)
-CheckoutResponse      POST /billing/checkout  (T-231)
-BillingStatusResponse GET /billing/status     (T-232)
-PackHistoryItem       GET /billing/history    (T-233)
+PackageResponse        GET  /billing/package           (+currency)
+CheckoutResponse       POST /billing/checkout          (+checkout_ref)
+BillingStatusResponse  GET  /billing/status
+PackHistoryItem        GET  /billing/history           (sourced from BillingCreditPack)
+AdminCorrectionRequest POST /billing/admin/correction  (T-302)
 """
 
 from __future__ import annotations
@@ -16,7 +19,7 @@ from datetime import datetime
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, HttpUrl
 
 
 class PackageResponse(BaseModel):
@@ -27,26 +30,34 @@ class PackageResponse(BaseModel):
     """
 
     credits: int = Field(ge=1, description="Credits granted per purchase")
-    price_cents: int = Field(ge=1, description="Price in US cents (e.g. 900 = $9.00)")
+    price_cents: int = Field(ge=1, description="Price in cents (e.g. 900 = $9.00)")
     validity_days: int = Field(
         ge=1, description="Days until the purchased pack expires"
     )
-    currency: str = Field(default="usd", description="ISO 4217 currency code")
+    currency: str = Field(default="USD", description="ISO 4217 currency code")
 
 
 class CheckoutResponse(BaseModel):
-    """Stripe Checkout Session URL — returned by POST /billing/checkout (T-231)."""
+    """Checkout hand-off — returned by POST /billing/checkout (T-296).
 
-    checkout_url: str = Field(description="Stripe-hosted checkout page URL")
+    ``checkout_url`` is the provider-hosted checkout page; ``checkout_ref`` is the
+    high-entropy local key the frontend polls /billing/status by. ``checkout_ref`` is
+    optional here only so the retained Stripe grace-path router (rewritten in T-296)
+    keeps validating — the Lemon flow always populates it.
+    """
+
+    checkout_url: str = Field(description="Provider-hosted checkout page URL")
+    checkout_ref: str | None = Field(
+        default=None, description="Local polling key for GET /billing/status"
+    )
 
 
 class BillingStatusResponse(BaseModel):
-    """Polling response for a checkout session — GET /billing/status (T-232).
+    """Polling response for a checkout — GET /billing/status (T-296).
 
-    ``status`` is 'pending' while the Stripe webhook has not yet fired, and
-    'completed' once the pack is active in the database.
-    ``credits_added`` is 0 while pending.
-    ``expires_at`` is None while pending, populated once the pack is active.
+    ``status`` is 'pending' until the signed provider webhook grants the pack, and
+    'completed' once the pack is active in the database. ``credits_added`` is 0 while
+    pending; ``expires_at`` is None while pending, populated once the pack is active.
     """
 
     status: Literal["pending", "completed"]
@@ -59,17 +70,47 @@ class BillingStatusResponse(BaseModel):
 
 
 class PackHistoryItem(BaseModel):
-    """One row in the user's purchase history — GET /billing/history (T-233).
+    """One row in the user's purchase history — GET /billing/history.
 
-    Maps directly to a ``StripeCreditPack`` ORM row.
+    Sourced from a ``BillingCreditPack`` ORM row (owner-scoped at the router). The
+    status union covers the neutral pack lifecycle; the retained Stripe statuses are a
+    subset, so legacy ``StripeCreditPack`` rows validate during the grace window too.
     """
 
     id: UUID
     credits_purchased: int = Field(ge=0)
     credits_remaining: int = Field(ge=0)
     price_cents: int = Field(ge=0)
-    status: Literal["active", "consumed", "expired", "disputed"]
+    status: Literal["active", "consumed", "expired", "refunded", "disputed"]
     purchased_at: datetime
     expires_at: datetime
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class AdminCorrectionRequest(BaseModel):
+    """Body for the exceptional admin credit-correction support path — POST
+    /billing/admin/correction (T-302).
+
+    An evidence-backed manual grant for an order the automatic webhook pipeline could
+    not settle. Authorisation is by the ``admin_emails`` allowlist at the router; the
+    write is append-only and unique on ``(provider, provider_order_id)`` so it cannot
+    be applied twice for the same order.
+    """
+
+    provider: Literal["lemonsqueezy", "stripe"] = Field(
+        default="lemonsqueezy", description="Billing provider of the corrected order"
+    )
+    provider_order_id: str = Field(
+        min_length=1, description="Provider order id the correction settles"
+    )
+    target_user_id: UUID = Field(description="User to credit")
+    credits: int = Field(ge=1, description="Credits to grant")
+    price_cents: int = Field(ge=1, description="Recorded order price in cents")
+    currency: str = Field(min_length=1, description="ISO 4217 currency code")
+    reason: str = Field(min_length=1, description="Support justification (audited)")
+    evidence_url: HttpUrl = Field(
+        description="Link to the supporting evidence (ticket, provider dashboard)"
+    )
+
+    model_config = ConfigDict(str_strip_whitespace=True)

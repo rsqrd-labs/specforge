@@ -5,6 +5,14 @@ class Base(DeclarativeBase):
     pass
 
 
+from models.billing_admin_correction import BillingAdminCorrection  # noqa: E402
+from models.billing_checkout_attempt import BillingCheckoutAttempt  # noqa: E402
+from models.billing_credit_debt import BillingCreditDebt  # noqa: E402
+from models.billing_credit_pack import BillingCreditPack  # noqa: E402
+from models.billing_reconciliation_cursor import (  # noqa: E402
+    BillingReconciliationCursor,
+)
+from models.billing_webhook_event import BillingWebhookEvent  # noqa: E402
 from models.credit_ledger import CreditLedger  # noqa: E402
 from models.eval_result import EvalResult  # noqa: E402
 from models.github_installation import GitHubInstallation  # noqa: E402
@@ -24,6 +32,12 @@ from models.workspace import Workspace  # noqa: E402
 
 __all__ = [
     "Base",
+    "BillingAdminCorrection",
+    "BillingCheckoutAttempt",
+    "BillingCreditDebt",
+    "BillingCreditPack",
+    "BillingReconciliationCursor",
+    "BillingWebhookEvent",
     "CreditLedger",
     "EvalResult",
     "GitHubInstallation",

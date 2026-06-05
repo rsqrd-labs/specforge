@@ -16366,7 +16366,7 @@ Land the provider-neutral billing schema in Alembic migration `0018_billing_neut
 **Priority:** P0
 **Phase:** A
 **Harness:** `harness/tests/backend/test_phase25_lemonsqueezy_billing_contract.py -k "t291"`
-**Status:** ⬜ Not started
+**Status:** ✅ Done — 2026-06-05 (six neutral ORM models under `models/billing_*.py` — `BillingCheckoutAttempt/CreditPack/CreditDebt/AdminCorrection/WebhookEvent/ReconciliationCursor` — mirroring the 0018 DDL with app-level CHECKs + matching `ondelete` FKs for defence-in-depth, registered in `models/__init__.py`; `StripeCreditPack`/`StripeWebhookEvent` retained. `schemas/billing.py` reworked: `PackageResponse` (+`currency`, default USD), `CheckoutResponse` (+optional `checkout_ref` so the retained Stripe grace router keeps validating until the T-296 rewrite), `PackHistoryItem` status union widened to `active|consumed|expired|refunded|disputed` (kept field-compatible with both ORM models — no required `currency` so legacy Stripe rows still validate), and a validated `AdminCorrectionRequest` (`HttpUrl` evidence, positive credits/price). New `tests/test_billing_models_schemas.py` (18 tests, no DB): model import/registration, accounting-column mapping, provider-PK cursor, RESTRICT source-pack FK, schema accept/reject. `-k "t291"` green (5/5), `t290` stays green (22/22 combined); full backend suite green (911 passed, 38 skipped) with no regression; ruff + black clean.)
 **Depends on:** T-290
 
 **Description:**
