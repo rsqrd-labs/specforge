@@ -31,10 +31,13 @@ import structlog
 from arq import create_pool
 from arq.connections import ArqRedis, RedisSettings
 from arq.worker import Retry
+from prometheus_client import Counter
 
 from config import settings
 from services.integrations.github_governor import GitHubThrottledError
 from services.observability import (
+    BILLING_JOB_DEADLETTERED_TOTAL,
+    BILLING_JOB_RETRIES_TOTAL,
     GITHUB_JOB_DEADLETTERED_TOTAL,
     GITHUB_JOB_RETRIES_TOTAL,
     GITHUB_THROTTLED_TOTAL,
@@ -49,8 +52,14 @@ JOB_MAX_TRIES = 5
 _RETRY_BACKOFF_BASE_SECONDS = 5.0
 _RETRY_BACKOFF_CAP_SECONDS = 600.0
 
-# Redis key holding dead-letter records (a capped list) for manual replay.
-DEAD_LETTER_KEY = "gh:deadletter"
+# Redis keys holding dead-letter records (capped lists) for manual replay. Each
+# job lane has its own list so a billing credit-grant failure is never lost in,
+# or confused with, the GitHub export dead-letter stream (Plan §25.6 T-293).
+GH_DEAD_LETTER_KEY = "gh:deadletter"
+BILLING_DEAD_LETTER_KEY = "billing:deadletter"
+# Back-compat alias: the GitHub key kept its original name for any external
+# replay tooling that referenced it.
+DEAD_LETTER_KEY = GH_DEAD_LETTER_KEY
 _DEAD_LETTER_MAX = 1000
 
 _pool: ArqRedis | None = None
@@ -144,11 +153,14 @@ async def record_dead_letter(
     job_id: str | None,
     args: tuple[Any, ...],
     error: str,
+    dead_letter_key: str,
 ) -> None:
-    """Append a dead-letter record to Redis for manual replay (RUNBOOK).
+    """Append a dead-letter record to the given Redis list for manual replay.
 
-    Stores only the job name, id, sanitized args, and the error class name —
-    never tokens, the App private key, or raw payloads (Plan §24.10).
+    ``dead_letter_key`` routes the record to the per-lane list (``gh:deadletter``
+    for GitHub jobs, ``billing:deadletter`` for billing jobs) so the two streams
+    stay separate. Stores only the job name, id, sanitized args, and the error
+    class name — never tokens, secrets, or raw payloads (Plan §24.10 / §25.6).
     """
     record = json.dumps(
         {
@@ -160,10 +172,10 @@ async def record_dead_letter(
         }
     )
     try:
-        await pool.lpush(DEAD_LETTER_KEY, record)
-        await pool.ltrim(DEAD_LETTER_KEY, 0, _DEAD_LETTER_MAX - 1)
+        await pool.lpush(dead_letter_key, record)
+        await pool.ltrim(dead_letter_key, 0, _DEAD_LETTER_MAX - 1)
     except Exception:  # pragma: no cover — best-effort; never mask the failure
-        logger.error("github.queue.dead_letter_persist_failed", job=job)
+        logger.error("queue.dead_letter_persist_failed", job=job)
 
 
 async def _requeue_throttled(
@@ -214,63 +226,113 @@ async def _requeue_throttled(
 
 F = TypeVar("F", bound=Callable[..., Awaitable[Any]])
 
+# A special handler short-circuits the dead-letter path for a specific exception
+# type, receiving (ctx, name, args, kwargs, exc). Used for GitHub throttling.
+SpecialHandler = Callable[
+    [dict[str, Any], str, tuple[Any, ...], dict[str, Any], BaseException],
+    Awaitable[None],
+]
 
-def github_job(name: str) -> Callable[[F], F]:
-    """Decorator giving a worker job the shared base contract.
 
-    On a transient failure the job retries with exponential backoff + jitter
-    (incrementing ``specforge_github_job_retries_total``) up to
-    :data:`JOB_MAX_TRIES`; after the cap it is dead-lettered (record + alert log
-    + ``specforge_github_job_deadlettered_total``) and the exception is
-    swallowed so arq does not retry forever. Idempotency/resume is the job
-    body's responsibility (it is keyed by ``push_id``/``increment_id`` and must
-    not duplicate side effects on re-run).
+def make_job_wrapper(
+    *,
+    retries_metric: Counter,
+    deadletter_metric: Counter,
+    dead_letter_key: str,
+    special_handlers: dict[type[BaseException], SpecialHandler] | None = None,
+    log_event_prefix: str = "job",
+) -> Callable[[str], Callable[[F], F]]:
+    """Build a job-decorator factory sharing the durable base contract.
+
+    The single, parameterised implementation behind both ``github_job`` and
+    ``billing_job`` (Plan §25.6 T-293). On a transient failure the job retries
+    with exponential backoff + jitter (incrementing ``retries_metric``) up to
+    :data:`JOB_MAX_TRIES`; after the cap it is dead-lettered to ``dead_letter_key``
+    (record + alert log + ``deadletter_metric``) and the exception is swallowed so
+    arq does not retry forever. Idempotency/resume is the job body's
+    responsibility (jobs are keyed by their argument id and must not duplicate
+    side effects on re-run).
+
+    ``special_handlers`` maps an exception type → an async handler invoked
+    **before** the generic Exception/dead-letter path, so a registered exception
+    (e.g. ``GitHubThrottledError``) can requeue off the try budget rather than
+    counting toward dead-lettering. This is the load-bearing distinction that a
+    naive ``github_job = generic(fn)`` would lose.
     """
+    handlers = special_handlers or {}
+    handled_types = tuple(handlers)
 
-    def decorator(fn: F) -> F:
-        @functools.wraps(fn)
-        async def wrapper(ctx: dict[str, Any], *args: Any, **kwargs: Any) -> Any:
-            job_try = int(ctx.get("job_try", 1) or 1)
-            try:
-                return await fn(ctx, *args, **kwargs)
-            except Retry:
-                raise
-            except GitHubThrottledError as throttle:
-                # Backpressure, not failure (T-274): the per-installation governor
-                # hit a GitHub rate limit (403/429) or its token bucket / per-repo
-                # lock is saturated. Requeue the job deferred WITHOUT consuming the
-                # dead-letter try budget — re-enqueue self rather than raising
-                # ``Retry`` (which would increment job_try and eventually
-                # dead-letter a perfectly healthy job under sustained throttling).
-                await _requeue_throttled(ctx, name, args, kwargs, throttle)
-                return None
-            except Exception as exc:
-                error = type(exc).__name__
-                if job_try >= JOB_MAX_TRIES:
-                    GITHUB_JOB_DEADLETTERED_TOTAL.labels(job=name).inc()
-                    logger.error(
-                        "github.job.deadlettered",
-                        job=name,
-                        job_id=ctx.get("job_id"),
-                        attempts=job_try,
-                        error=error,
-                    )
-                    await record_dead_letter(
-                        ctx["redis"],
-                        job=name,
-                        job_id=ctx.get("job_id"),
-                        args=args,
-                        error=error,
-                    )
-                    # Swallow so arq marks the job finished (dead-lettered),
-                    # not re-queued indefinitely. Manual replay re-enqueues by id.
+    def job_decorator(name: str) -> Callable[[F], F]:
+        def wrap(fn: F) -> F:
+            @functools.wraps(fn)
+            async def wrapper(ctx: dict[str, Any], *args: Any, **kwargs: Any) -> Any:
+                job_try = int(ctx.get("job_try", 1) or 1)
+                try:
+                    return await fn(ctx, *args, **kwargs)
+                except Retry:
+                    raise
+                except handled_types as exc:
+                    # Backpressure, not failure: a registered handler requeues the
+                    # job (deferred, off the dead-letter try budget) instead of
+                    # consuming it. Resolve by isinstance so a subclass still maps
+                    # to its handler.
+                    handler = next(h for t, h in handlers.items() if isinstance(exc, t))
+                    await handler(ctx, name, args, kwargs, exc)
                     return None
-                GITHUB_JOB_RETRIES_TOTAL.labels(job=name).inc()
-                logger.warning(
-                    "github.job.retry", job=name, attempt=job_try, error=error
-                )
-                raise Retry(defer=_retry_backoff_seconds(job_try)) from exc
+                except Exception as exc:
+                    error = type(exc).__name__
+                    if job_try >= JOB_MAX_TRIES:
+                        deadletter_metric.labels(job=name).inc()
+                        logger.error(
+                            f"{log_event_prefix}.deadlettered",
+                            job=name,
+                            job_id=ctx.get("job_id"),
+                            attempts=job_try,
+                            error=error,
+                        )
+                        await record_dead_letter(
+                            ctx["redis"],
+                            job=name,
+                            job_id=ctx.get("job_id"),
+                            args=args,
+                            error=error,
+                            dead_letter_key=dead_letter_key,
+                        )
+                        # Swallow so arq marks the job finished (dead-lettered),
+                        # not re-queued indefinitely. Manual replay re-enqueues by id.
+                        return None
+                    retries_metric.labels(job=name).inc()
+                    logger.warning(
+                        f"{log_event_prefix}.retry",
+                        job=name,
+                        attempt=job_try,
+                        error=error,
+                    )
+                    raise Retry(defer=_retry_backoff_seconds(job_try)) from exc
 
-        return wrapper  # type: ignore[return-value]
+            return wrapper  # type: ignore[return-value]
 
-    return decorator
+        return wrap
+
+    return job_decorator
+
+
+# GitHub job lane — preserves the throttle special-case (requeue-not-deadletter)
+# and the gh:deadletter routing + github.job.* log events exactly (T-293 / R6).
+github_job = make_job_wrapper(
+    retries_metric=GITHUB_JOB_RETRIES_TOTAL,
+    deadletter_metric=GITHUB_JOB_DEADLETTERED_TOTAL,
+    dead_letter_key=GH_DEAD_LETTER_KEY,
+    special_handlers={GitHubThrottledError: _requeue_throttled},
+    log_event_prefix="github.job",
+)
+
+# Billing job lane — no special handlers (billing jobs never throttle on the
+# GitHub governor); failures retry then dead-letter to billing:deadletter.
+billing_job = make_job_wrapper(
+    retries_metric=BILLING_JOB_RETRIES_TOTAL,
+    deadletter_metric=BILLING_JOB_DEADLETTERED_TOTAL,
+    dead_letter_key=BILLING_DEAD_LETTER_KEY,
+    special_handlers=None,
+    log_event_prefix="billing.job",
+)

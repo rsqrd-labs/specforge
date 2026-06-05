@@ -197,6 +197,23 @@ GITHUB_JOB_DEADLETTERED_TOTAL = Counter(
     "dead-letter record for manual replay, labelled by job name.",
     labelnames=["job"],
 )
+
+# Billing worker job metrics (Phase 22 — T-293). The same retry/dead-letter
+# reliability signal as the GitHub queue, but for the separate billing job lane
+# (its own ``billing:deadletter`` Redis list) so a credit grant is never starved
+# or confused with a GitHub export. Surfaced/alerted on in T-304.
+BILLING_JOB_RETRIES_TOTAL = Counter(
+    "specforge_billing_job_retries_total",
+    "Billing worker job attempts that failed transiently and were retried "
+    "(exponential backoff + jitter), labelled by job name.",
+    labelnames=["job"],
+)
+BILLING_JOB_DEADLETTERED_TOTAL = Counter(
+    "specforge_billing_job_deadlettered_total",
+    "Billing worker jobs that exhausted max_tries and were moved to the "
+    "'billing:deadletter' record for manual replay, labelled by job name.",
+    labelnames=["job"],
+)
 GITHUB_QUEUE_DEPTH = Gauge(
     "specforge_github_queue_depth",
     "Approximate number of GitHub worker jobs currently queued/in-flight.",
