@@ -149,6 +149,11 @@ BILLING_CREDITS_CONSUMED = Counter(
     "specforge_billing_credits_consumed_total",
     "Credits drained by FIFO pack drain in _drain_packs()",
 )
+BILLING_CREDIT_DEBT_RECOVERED = Counter(
+    "specforge_billing_credit_debt_recovered_total",
+    "Credits from a new grant applied to repay pending billing_credit_debts "
+    "(debt-first recovery) before any usable surplus is added (Phase 22 — T-294).",
+)
 BILLING_PACK_DISPUTED = Counter(
     "specforge_billing_pack_disputed_total",
     "Credit packs revoked due to Stripe charge disputes",

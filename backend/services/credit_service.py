@@ -11,9 +11,12 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database import get_shared_redis
-from models import CreditLedger, User
-from models.stripe_credit_pack import StripeCreditPack
-from services.observability import BILLING_CREDITS_CONSUMED, BILLING_CREDITS_EXPIRED
+from models import BillingCreditDebt, BillingCreditPack, CreditLedger, User
+from services.observability import (
+    BILLING_CREDIT_DEBT_RECOVERED,
+    BILLING_CREDITS_CONSUMED,
+    BILLING_CREDITS_EXPIRED,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -78,11 +81,11 @@ class CreditService:
             return
         # Lock and fetch expired active packs.
         result = await db.execute(
-            select(StripeCreditPack)
+            select(BillingCreditPack)
             .where(
-                StripeCreditPack.user_id == user_id,
-                StripeCreditPack.status == "active",
-                StripeCreditPack.expires_at <= now,
+                BillingCreditPack.user_id == user_id,
+                BillingCreditPack.status == "active",
+                BillingCreditPack.expires_at <= now,
             )
             .with_for_update()
         )
@@ -91,6 +94,10 @@ class CreditService:
             return
         total_expired = sum(p.credits_remaining for p in expired_packs)
         for pack in expired_packs:
+            # Move the lapsed remainder into credits_expired BEFORE zeroing it so
+            # the conservation invariant (remaining + consumed + expired +
+            # debt_recovered == purchased) holds across the lifecycle (T-294).
+            pack.credits_expired += pack.credits_remaining
             pack.status = "expired"
             pack.credits_remaining = 0
         # Deduct expired credits from user balance (floor at 0 — defensive).
@@ -114,12 +121,14 @@ class CreditService:
         if amount <= 0:
             return
         result = await db.execute(
-            select(StripeCreditPack)
+            select(BillingCreditPack)
             .where(
-                StripeCreditPack.user_id == user_id,
-                StripeCreditPack.status == "active",
+                BillingCreditPack.user_id == user_id,
+                BillingCreditPack.status == "active",
             )
-            .order_by(StripeCreditPack.expires_at.asc())  # FIFO: soonest-expiring first
+            .order_by(
+                BillingCreditPack.expires_at.asc()
+            )  # FIFO: soonest-expiring first
             .with_for_update()
         )
         packs = result.scalars().all()
@@ -129,6 +138,9 @@ class CreditService:
                 break
             drain = min(pack.credits_remaining, remaining)
             pack.credits_remaining -= drain
+            # Track lifetime consumption so the conservation invariant holds and
+            # refunds can compute the still-revocable amount (T-294).
+            pack.credits_consumed += drain
             remaining -= drain
             if pack.credits_remaining == 0:
                 pack.status = "consumed"
@@ -168,6 +180,117 @@ class CreditService:
         await db.flush()
         await self._invalidate(user_id)
         return entry
+
+    async def grant_credits_with_debt_recovery(
+        self,
+        db: AsyncSession,
+        *,
+        user_id: UUID,
+        pack: BillingCreditPack,
+        granted_credits: int,
+        ledger_reason: str,
+    ) -> CreditLedger | None:
+        """Apply a positive billing grant, repaying pending debt before usable balance.
+
+        The single grant path for every positive billing credit (purchase — T-299,
+        admin correction — T-302). ``pack`` is the freshly-created, in-session
+        ``BillingCreditPack`` for this order (``credits_remaining == granted_credits``);
+        ``ledger_reason`` is the order's idempotency reason
+        (``billing_purchase:…`` / ``admin_billing_correction:…``).
+
+        Debt-first (Plan §25 DC5): any pending ``billing_credit_debts`` (a shortfall
+        from an earlier reversal the user had already spent) is settled oldest-first
+        out of the new pack BEFORE the user sees usable credits. Each settled slice
+        moves ``take`` credits from ``pack.credits_remaining`` into
+        ``pack.credits_debt_recovered`` and ``debt.credits_recovered`` (so the
+        conservation invariant ``remaining + consumed + expired + debt_recovered ==
+        purchased`` is preserved) and writes a zero-amount audit ledger row
+        ``debt_recovery:billing:{debt_id}:{pack_id}``. Only the surplus
+        (``granted_credits - total_recovered``) increases ``user.credit_balance`` and
+        is recorded by the single ``ledger_reason`` row (amount may be 0).
+
+        Lock order is the canonical user → (debts) so it never deadlocks with
+        deduct/expire (which lock user → packs). The whole mutation set is wrapped in
+        a SAVEPOINT: a duplicate grant (same order) collides on the ledger-reason
+        unique index and is rolled back to an idempotent no-op, leaving the caller's
+        outer transaction intact (mirrors ``refund()``).
+
+        Returns the surplus ``CreditLedger`` row, or ``None`` if the grant was a
+        duplicate (already applied). The caller commits and then calls
+        ``invalidate(user_id)``.
+        """
+        # Lock the user row first (canonical order shared with deduct/expire).
+        user = await self._get_user(db, user_id, lock=True)
+        if user is None:
+            raise ValueError(f"User {user_id} not found")
+
+        # Lock pending debts oldest-first so concurrent grants settle deterministically.
+        debts_result = await db.execute(
+            select(BillingCreditDebt)
+            .where(
+                BillingCreditDebt.user_id == user_id,
+                BillingCreditDebt.status == "pending",
+            )
+            .order_by(BillingCreditDebt.created_at.asc())
+            .with_for_update()
+        )
+        pending_debts = debts_result.scalars().all()
+
+        surplus_entry = CreditLedger(
+            user_id=user_id,
+            amount=0,  # finalised below once total_recovered is known
+            reason=ledger_reason,
+        )
+        recovered_slices: list[tuple[BillingCreditDebt, int]] = []
+        try:
+            async with db.begin_nested():
+                grant_left = granted_credits
+                total_recovered = 0
+                for debt in pending_debts:
+                    if grant_left <= 0:
+                        break
+                    outstanding = debt.credits_owed - debt.credits_recovered
+                    take = min(grant_left, outstanding)
+                    if take <= 0:
+                        continue
+                    pack.credits_remaining -= take
+                    pack.credits_debt_recovered += take
+                    debt.credits_recovered += take
+                    if debt.credits_recovered >= debt.credits_owed:
+                        debt.status = "recovered"
+                    debt.updated_at = datetime.now(timezone.utc)
+                    db.add(
+                        CreditLedger(
+                            user_id=user_id,
+                            amount=0,
+                            reason=f"debt_recovery:billing:{debt.id}:{pack.id}",
+                        )
+                    )
+                    recovered_slices.append((debt, take))
+                    grant_left -= take
+                    total_recovered += take
+
+                surplus = granted_credits - total_recovered
+                surplus_entry.amount = surplus
+                user.credit_balance = int(user.credit_balance or 0) + surplus
+                db.add(surplus_entry)
+                await db.flush()
+        except IntegrityError:
+            # The ledger-reason unique index rejected a duplicate grant for this
+            # order; the SAVEPOINT rolled back every mutation above (pack/debt/
+            # balance + ledger rows), leaving the outer transaction intact. Treat
+            # as idempotent — the credits were already granted.
+            logger.warning(
+                "credit.grant.duplicate user_id=%s reason=%s",
+                user_id,
+                ledger_reason,
+            )
+            return None
+
+        for _debt, take in recovered_slices:
+            BILLING_CREDIT_DEBT_RECOVERED.inc(take)
+        await self._invalidate(user_id)
+        return surplus_entry
 
     async def deduct(
         self,

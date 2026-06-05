@@ -83,17 +83,22 @@ class _FakeCreditDB:
 
     async def execute(self, statement: Any) -> Any:
         self._execute_count += 1
-        # T-229: _expire_user_packs / _drain_packs query stripe_credit_packs.
-        # This test doesn't set up any packs — return empty list so the sweep
-        # methods find nothing to expire/drain.  _ScalarResult(None).scalars()
-        # already returns _ScalarAll(None) whose .all() returns [].
+        # _expire_user_packs / _drain_packs query the credit-pack table (T-229;
+        # migrated to billing_credit_packs in T-294). This test doesn't set up any
+        # packs — return an empty list so the sweep methods find nothing to expire/
+        # drain.  _ScalarResult(None).scalars() returns _ScalarAll(None) whose
+        # .all() returns [].
         try:
             froms = (
                 statement.get_final_froms()
                 if hasattr(statement, "get_final_froms")
                 else statement.froms
             )
-            if any(getattr(f, "name", None) == "stripe_credit_packs" for f in froms):
+            if any(
+                getattr(f, "name", None)
+                in ("stripe_credit_packs", "billing_credit_packs")
+                for f in froms
+            ):
                 return _ScalarResult(None)
         except AttributeError:
             pass

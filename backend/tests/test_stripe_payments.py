@@ -585,7 +585,7 @@ async def test_lazy_expiry_sweeps_expired_packs() -> None:
     )
 
     from models import Base
-    from models.stripe_credit_pack import StripeCreditPack
+    from models.billing_credit_pack import BillingCreditPack
     from services.credit_service import CreditService
 
     engine = create_async_engine(TEST_DATABASE_URL, echo=False)
@@ -608,14 +608,18 @@ async def test_lazy_expiry_sweeps_expired_packs() -> None:
                 created_at=datetime.now(UTC),
             )
             session.add(user)
+            await session.flush()  # ensure the user row exists before the FK insert
 
-            pack = StripeCreditPack(
+            pack = BillingCreditPack(
                 id=uuid4(),
                 user_id=user_id,
-                stripe_session_id=f"cs_test_expiry_{uuid4().hex}",
+                provider="lemonsqueezy",
+                provider_checkout_id=f"chk_expiry_{uuid4().hex}",
                 credits_purchased=200,
                 credits_remaining=200,
                 price_cents=900,
+                currency="USD",
+                paid_item_amount_cents=900,
                 status="active",
                 purchased_at=datetime.now(UTC) - timedelta(days=35),
                 expires_at=datetime.now(UTC) - timedelta(days=5),  # expired 5 days ago
@@ -630,7 +634,7 @@ async def test_lazy_expiry_sweeps_expired_packs() -> None:
             from sqlalchemy import select
 
             result = await session.execute(
-                select(StripeCreditPack).where(StripeCreditPack.user_id == user_id)
+                select(BillingCreditPack).where(BillingCreditPack.user_id == user_id)
             )
             swept_pack = result.scalar_one_or_none()
 
@@ -641,6 +645,9 @@ async def test_lazy_expiry_sweeps_expired_packs() -> None:
     assert (
         swept_pack.credits_remaining == 0
     ), "Lazy expiry must set pack.credits_remaining = 0"
+    assert (
+        swept_pack.credits_expired == 200
+    ), "Lazy expiry must move the lapsed remainder into credits_expired (T-294)"
     assert balance == 0, "Balance after sweeping the only expired pack must be 0"
 
     await redis.aclose()
@@ -669,7 +676,7 @@ async def test_fifo_drain_order() -> None:
     )
 
     from models import Base
-    from models.stripe_credit_pack import StripeCreditPack
+    from models.billing_credit_pack import BillingCreditPack
     from services.credit_service import CreditService
 
     engine = create_async_engine(TEST_DATABASE_URL, echo=False)
@@ -695,15 +702,19 @@ async def test_fifo_drain_order() -> None:
                 created_at=datetime.now(UTC),
             )
             session.add(user)
+            await session.flush()  # ensure the user row exists before the FK inserts
 
             # pack_a expires in 5 days (soonest — should be drained first)
-            pack_a = StripeCreditPack(
+            pack_a = BillingCreditPack(
                 id=pack_a_id,
                 user_id=user_id,
-                stripe_session_id=f"cs_test_fifo_a_{uuid4().hex}",
+                provider="lemonsqueezy",
+                provider_checkout_id=f"chk_fifo_a_{uuid4().hex}",
                 credits_purchased=100,
                 credits_remaining=100,
                 price_cents=900,
+                currency="USD",
+                paid_item_amount_cents=900,
                 status="active",
                 purchased_at=datetime.now(UTC),
                 expires_at=datetime.now(UTC) + timedelta(days=5),
@@ -712,13 +723,16 @@ async def test_fifo_drain_order() -> None:
             session.add(pack_a)
 
             # pack_b expires in 15 days (later — should NOT be touched)
-            pack_b = StripeCreditPack(
+            pack_b = BillingCreditPack(
                 id=pack_b_id,
                 user_id=user_id,
-                stripe_session_id=f"cs_test_fifo_b_{uuid4().hex}",
+                provider="lemonsqueezy",
+                provider_checkout_id=f"chk_fifo_b_{uuid4().hex}",
                 credits_purchased=100,
                 credits_remaining=100,
                 price_cents=900,
+                currency="USD",
+                paid_item_amount_cents=900,
                 status="active",
                 purchased_at=datetime.now(UTC),
                 expires_at=datetime.now(UTC) + timedelta(days=15),
@@ -733,13 +747,16 @@ async def test_fifo_drain_order() -> None:
             from sqlalchemy import select
 
             res = await session.execute(
-                select(StripeCreditPack).where(StripeCreditPack.user_id == user_id)
+                select(BillingCreditPack).where(BillingCreditPack.user_id == user_id)
             )
             packs = {p.id: p for p in res.scalars().all()}
 
     assert (
         packs[pack_a_id].credits_remaining == 50
     ), "pack_a (expires in 5 days) must be drained first — 100 - 50 = 50 remaining"
+    assert (
+        packs[pack_a_id].credits_consumed == 50
+    ), "FIFO drain must increment credits_consumed by the drained amount (T-294)"
     assert packs[pack_b_id].credits_remaining == 100, (
         "pack_b (expires in 15 days) must be untouched — "
         "FIFO drains soonest-expiring pack first"
