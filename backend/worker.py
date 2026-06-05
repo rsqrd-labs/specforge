@@ -37,6 +37,7 @@ from services.observability import GITHUB_QUEUE_DEPTH
 from services.queue import (
     JOB_MAX_TRIES,
     _redis_settings,
+    billing_job,
     close_arq_pool,
     github_job,
 )
@@ -61,6 +62,15 @@ _DRIFT_CRON_MINUTES = {0, 15, 30, 45}
 # so it never coincides with a drift-reconcile tick.
 _PURGE_CRON_HOUR = {3}
 _PURGE_CRON_MINUTE = {17}
+
+# Billing crons (Phase 22 — T-298). The 60s sweep recovers queue outages and
+# crashed-worker rows; billing_reconcile is the 15-minute backstop staggered off
+# the GitHub drift ticks ({0,15,30,45}) and the purges; the billing purge runs
+# off-peak and clear of every other tick.
+_BILLING_SWEEP_CRON_SECOND = {0}
+_BILLING_RECONCILE_CRON_MINUTE = {7, 22, 37, 52}
+_BILLING_PURGE_CRON_HOUR = {3}
+_BILLING_PURGE_CRON_MINUTE = {42}
 
 
 @github_job("export_push")
@@ -151,6 +161,44 @@ async def purge_webhook_events(ctx: dict[str, Any]) -> None:
         logger.exception("maintenance.webhook_events_purge_failed")
 
 
+@billing_job("billing_process_webhook")
+async def billing_process_webhook(ctx: dict[str, Any], webhook_event_id: str) -> None:
+    """Process one Lemon webhook inbox row exactly once (implemented in T-298).
+
+    Wrapped in the ``billing_job`` contract: a failure persisted by the body is
+    re-raised here so the wrapper retries with backoff, then dead-letters to
+    ``billing:deadletter`` after ``JOB_MAX_TRIES``.
+    """
+    from services import billing_worker
+
+    await billing_worker.billing_process_webhook(ctx, webhook_event_id)
+
+
+async def billing_process_pending_webhooks(ctx: dict[str, Any]) -> None:
+    """Cron (60s): recover queue-outage + crashed-worker inbox rows (T-298).
+
+    Plain cron — the body catches and logs; a transient blip is recovered by the
+    next tick, so a failure must never surface as a worker error.
+    """
+    from services import billing_worker
+
+    await billing_worker.billing_process_pending_webhooks(ctx)
+
+
+async def billing_reconcile(ctx: dict[str, Any]) -> None:
+    """Cron (15m): reconciliation backstop — Lane 1 inbox replay (T-298/T-301)."""
+    from services import billing_worker
+
+    await billing_worker.billing_reconcile(ctx)
+
+
+async def purge_billing_events(ctx: dict[str, Any]) -> None:
+    """Cron (daily): bound the billing inbox + terminal checkout attempts (T-298)."""
+    from services import billing_worker
+
+    await billing_worker.purge_billing_events(ctx)
+
+
 async def _on_startup(ctx: dict[str, Any]) -> None:
     """Initialise worker-process services: logging, Sentry, the shared Redis client.
 
@@ -202,6 +250,7 @@ class WorkerSettings:
         increment_push,
         projects_sync,
         pr_check,
+        billing_process_webhook,
     ]
     cron_jobs = [
         cron(
@@ -213,6 +262,22 @@ class WorkerSettings:
             purge_webhook_events,
             hour=_PURGE_CRON_HOUR,
             minute=_PURGE_CRON_MINUTE,
+            run_at_startup=False,
+        ),
+        cron(
+            billing_process_pending_webhooks,
+            second=_BILLING_SWEEP_CRON_SECOND,
+            run_at_startup=False,
+        ),
+        cron(
+            billing_reconcile,
+            minute=_BILLING_RECONCILE_CRON_MINUTE,
+            run_at_startup=False,
+        ),
+        cron(
+            purge_billing_events,
+            hour=_BILLING_PURGE_CRON_HOUR,
+            minute=_BILLING_PURGE_CRON_MINUTE,
             run_at_startup=False,
         ),
     ]
