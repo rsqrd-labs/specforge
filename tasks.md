@@ -16402,7 +16402,7 @@ Add one SQLAlchemy model per neutral table, register them, and rework `schemas/b
 **Priority:** P0
 **Phase:** A
 **Harness:** `harness/tests/backend/test_phase25_lemonsqueezy_billing_contract.py -k "t292"`
-**Status:** ⬜ Not started
+**Status:** ✅ Done — 2026-06-05 (config.py: 14 `lemonsqueezy_*` settings + `admin_user_emails`, all blank/safe defaults so Lemon ships disabled; derived `lemonsqueezy_enabled` (api key + store + variant), `lemonsqueezy_webhook_secrets` (current→prev tuple, non-empty only), `admin_emails` (lower-cased parsed set, empty default). `validate_production_settings()` gains the Lemon guard (when enabled in prod: require webhook secret, HTTPS success URL, positive price/credits/validity, non-empty currency, `test_mode is False` — api/store/variant already guaranteed by `enabled`, so not re-checked) and **scopes** the Stripe `sk_test_*` guard behind `not lemonsqueezy_enabled` so a stale test key fails startup only while Stripe is still the active checkout provider. `.env.example` updated (Lemon block blank=disabled, `ADMIN_USER_EMAILS=`, Stripe block annotated as superseded/grace-path). Stripe settings retained. New `tests/test_lemonsqueezy_config.py` (14 tests): derived props, per-field production-guard failures asserting error identity, complete-live-config passes, dev no-op, and BOTH directions of the scoped Stripe guard (ignored when Lemon enabled; still raises when Lemon disabled). `-k "t292"` green (4/4); full backend suite green (925 passed, 38 skipped) no regression; ruff + black clean.)
 **Depends on:** —
 
 **Description:**

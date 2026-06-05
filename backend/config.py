@@ -130,7 +130,87 @@ class Settings(BaseSettings):
     stripe_success_url: str = ""  # e.g. https://app.specforge.dev/billing
     stripe_cancel_url: str = ""  # e.g. https://app.specforge.dev/billing
 
+    # Lemon Squeezy billing (Phase 22) — the provider-neutral checkout that
+    # supersedes Stripe at runtime. Leave the api key / store id / variant id
+    # blank to ship with checkout DISABLED (GET /billing/package still works;
+    # POST /billing/checkout returns 503). When all three are set the integration
+    # is "enabled" (``lemonsqueezy_enabled``) and, in production,
+    # ``validate_production_settings`` requires a complete LIVE config. There is
+    # deliberately no ``lemonsqueezy_cancel_url`` (Plan §25.6 T-292).
+    lemonsqueezy_api_key: str = ""
+    # HMAC signing secrets for the X-Signature webhook header. Two are accepted so
+    # a secret rotation does not drop in-flight deliveries (current + previous).
+    lemonsqueezy_webhook_secret: str = ""
+    lemonsqueezy_webhook_secret_prev: str = ""
+    lemonsqueezy_store_id: str = ""
+    lemonsqueezy_variant_id: str = ""
+    lemonsqueezy_price_cents: int = 900  # $9.00 — 200 credits per purchase
+    lemonsqueezy_currency: str = "USD"
+    lemonsqueezy_credits_per_purchase: int = 200
+    lemonsqueezy_credit_validity_days: int = 30
+    lemonsqueezy_success_url: str = ""  # e.g. https://app.specforge.dev/billing
+    # test_mode gates whether checkouts are created against Lemon's test store.
+    # Production must run with this False (the production guard enforces it).
+    lemonsqueezy_test_mode: bool = True
+    # How long a created checkout attempt stays pollable before it is swept to
+    # 'expired' by the retention job (T-298).
+    lemonsqueezy_checkout_ttl_minutes: int = 30
+    lemonsqueezy_api_base: str = "https://api.lemonsqueezy.com"
+    # Upper bound on provider API calls per reconcile run (bounds lane 2, T-301).
+    lemonsqueezy_reconcile_max_calls_per_run: int = 200
+
+    # Comma-separated allowlist of admin emails authorised to issue billing admin
+    # corrections (T-302). The codebase has no role column, so this allowlist is
+    # the ONLY admin authorization surface — an empty value means no admin exists
+    # and the correction endpoint 403s for everyone (closed by default).
+    admin_user_emails: str = ""
+
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+
+    @property
+    def lemonsqueezy_enabled(self) -> bool:
+        """True when Lemon Squeezy checkout is configured.
+
+        The single source of truth for "is Lemon billing on": a checkout cannot be
+        minted without the API key, the store, and the variant, so those three
+        define "enabled". When enabled in production,
+        ``validate_production_settings`` additionally requires a complete LIVE
+        config (webhook secret, HTTPS success URL, live mode, …).
+        """
+        return bool(
+            self.lemonsqueezy_api_key
+            and self.lemonsqueezy_store_id
+            and self.lemonsqueezy_variant_id
+        )
+
+    @property
+    def lemonsqueezy_webhook_secrets(self) -> tuple[str, ...]:
+        """The non-empty webhook signing secrets, current first (for rotation).
+
+        Passed to the inbound HMAC verifier so a signature is accepted against the
+        current secret and, during a rotation window, the previous one.
+        """
+        return tuple(
+            s
+            for s in (
+                self.lemonsqueezy_webhook_secret,
+                self.lemonsqueezy_webhook_secret_prev,
+            )
+            if s
+        )
+
+    @property
+    def admin_emails(self) -> set[str]:
+        """The parsed, lower-cased billing-admin allowlist (empty when unset).
+
+        An empty set authorises no one — the admin-correction support path (T-302)
+        is closed by default and there is no implicit admin.
+        """
+        return {
+            email.strip().lower()
+            for email in self.admin_user_emails.split(",")
+            if email.strip()
+        }
 
 
 settings = Settings()
@@ -187,13 +267,55 @@ def validate_production_settings() -> None:
     # attempts a purchase — using the same accumulate-then-raise pattern as all
     # other production checks above.  An empty stripe_secret_key (billing
     # disabled) passes the guard: "".startswith("sk_test_") is False.
-    if settings.stripe_secret_key.startswith("sk_test_"):
+    #
+    # SCOPED (Phase 22 — T-292): the guard only fires while Stripe is still the
+    # active checkout provider, i.e. when Lemon Squeezy is NOT enabled. Once Lemon
+    # is the sole checkout provider (the cutover, T-303), a stale STRIPE_SECRET_KEY
+    # left in the environment must not fail startup — Stripe checkout creation is
+    # disabled in code, so a test key can no longer charge anything.
+    if not settings.lemonsqueezy_enabled and settings.stripe_secret_key.startswith(
+        "sk_test_"
+    ):
         errors.append(
             "STRIPE_SECRET_KEY is a test key (sk_test_*). "
             "Production deployments must use a live key (sk_live_*). "
             "Using a test key in production silently accepts test card numbers "
             "without charging real money."
         )
+
+    # Lemon Squeezy production guard (Phase 22 — T-292 / SR7). When Lemon is
+    # enabled (api key + store + variant all set), production must run a complete
+    # LIVE config or the checkout/webhook paths fail at runtime instead of at
+    # startup. The api key, store id, and variant id are already guaranteed
+    # non-empty by ``lemonsqueezy_enabled``, so they are not re-checked here; a
+    # half-configured Lemon (missing one of those three) is "disabled" and
+    # intentionally fails to-disabled (checkout 503s, package/history still work).
+    if settings.lemonsqueezy_enabled:
+        if not settings.lemonsqueezy_webhook_secret.strip():
+            errors.append(
+                "LEMONSQUEEZY_WEBHOOK_SECRET must be set when Lemon Squeezy "
+                "billing is enabled — inbound webhooks (the sole credit-grant "
+                "authority) cannot be signature-verified without it."
+            )
+        if not settings.lemonsqueezy_success_url.lower().startswith("https://"):
+            errors.append("LEMONSQUEEZY_SUCCESS_URL must use HTTPS in production.")
+        if settings.lemonsqueezy_price_cents <= 0:
+            errors.append("LEMONSQUEEZY_PRICE_CENTS must be a positive integer.")
+        if settings.lemonsqueezy_credits_per_purchase <= 0:
+            errors.append(
+                "LEMONSQUEEZY_CREDITS_PER_PURCHASE must be a positive integer."
+            )
+        if settings.lemonsqueezy_credit_validity_days <= 0:
+            errors.append(
+                "LEMONSQUEEZY_CREDIT_VALIDITY_DAYS must be a positive integer."
+            )
+        if not settings.lemonsqueezy_currency.strip():
+            errors.append("LEMONSQUEEZY_CURRENCY must be non-empty.")
+        if settings.lemonsqueezy_test_mode is not False:
+            errors.append(
+                "LEMONSQUEEZY_TEST_MODE must be False in production "
+                "(live mode required); a test-mode store charges nothing."
+            )
 
     # GitHub App guard (Phase 21 — T-283). When the App is enabled (id + slug
     # set), production must also have the signing key and webhook secret, or the
