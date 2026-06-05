@@ -16322,7 +16322,7 @@ The moment-of-use feeling: looking at a clean product changelog you're proud of 
 **Priority:** P0
 **Phase:** A (Foundation)
 **Harness:** `harness/tests/backend/test_phase25_lemonsqueezy_billing_contract.py -k "t290"`
-**Status:** ⬜ Not started
+**Status:** ✅ Done — 2026-06-05 (migration `0018_billing_neutral_tables.py`: six provider-neutral billing tables + lemonsqueezy-only reconciliation cursor, three `credit_ledger` reason-uniqueness indexes preserving `uq_credit_ledger_refund_reason`, and the idempotent `ON CONFLICT (provider, provider_checkout_id) DO NOTHING` Stripe→neutral backfill — verbatim DDL via raw `op.execute` so the harness's exact CHECK/predicate substrings match. `-k "t290"` green (17/17); `alembic upgrade head` + `downgrade -1`/`upgrade head` round-trips cleanly with the Stripe tables surviving the downgrade; new seeded-DB integration test `tests/test_billing_migration_0018.py` (2 tests, `TEST_DATABASE_URL`-gated like the Stripe integration tests) proves balance preservation, per-status accounting, disputed `credits_revoked=0`, and ON-CONFLICT idempotency against a real Postgres; ruff + black clean; full backend suite green (893 passed, 38 skipped) with no regression.)
 **Depends on:** — (the latest existing migration is `0017_increments.py`)
 
 **Description:**
