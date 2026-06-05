@@ -71,7 +71,7 @@ Beyond one-shot delivery, a finalised workspace can be connected to GitHub as a 
 - Let users download a branded PDF of the finalised spec for audiences that do not work with Markdown
 - Offer a small library of starter templates on the landing dashboard so a first-time user can begin from a worked example rather than a blank textarea
 - Surface harness coverage prominently in the workspace summary so the harness stage is recognisable as a differentiator rather than a buried artefact
-- Allow users to purchase additional credits in a single pack (200 credits for $9, valid 30 days from purchase date) via Stripe Hosted Checkout so the product has a clear monetisation path from V1
+- Allow users to purchase additional credits in a single pack (200 credits for $9, valid 30 days from purchase date) via Lemon Squeezy hosted checkout so the product has a clear monetisation path from V1
 - Allow users to generate a paid **Storyboard**: a browser-native, shareable, downloadable product keynote presentation that turns a finalised workspace into a stunning big-tech-style launch narrative with architecture diagrams, presenter notes, source-backed claims, and a technical appendix
 - Connect a workspace to GitHub through a **GitHub App** identity — per-repo least-privilege installation tokens, bot authorship, and webhooks — replacing the per-user OAuth token in the write path, so the integration can listen as well as push (§4.14.1)
 - Run all GitHub repository work on a **durable background worker** off the request path, so export, sync, PR creation, and checks survive deploys, retry safely, and never time out a user request (§4.14.2, §12)
@@ -148,7 +148,7 @@ User clicks **Create Workspace** on the dashboard. Prompted for:
 
 A placeholder in the problem statement field guides them on what a good problem statement looks like.
 
-**Start from a template (optional):** Above the form, a strip of starter templates ("Stripe-like checkout," "Linear-like ticketing," "Slack bot for X," etc.) is available. Clicking a template card pre-fills the workspace name and problem statement, which the user can then edit before continuing. See §4.11.
+**Start from a template (optional):** Above the form, a strip of starter templates ("Subscription checkout flow," "Linear-like ticketing," "Slack bot for X," etc.) is available. Clicking a template card pre-fills the workspace name and problem statement, which the user can then edit before continuing. See §4.11.
 
 They click Create and land in the workspace view.
 
@@ -395,7 +395,7 @@ Above the workspace grid, a **Start from a template** strip surfaces the curated
 
 Credit balance shown prominently. A **Buy Credits** button is always visible next to the credit meter for users who want to top up proactively. When credits expire or run out:
 
-> [!danger] Credit Exhaustion State "You're out of credits. Buy 200 credits for $9 →" links directly to `/billing`. No waitlist, no form — one click to Stripe Checkout.
+> [!danger] Credit Exhaustion State "You're out of credits. Buy 200 credits for $9 →" links directly to `/billing`. No waitlist, no form — one click to Lemon Squeezy checkout.
 
 When a purchased pack is within 7 days of expiry, a warning chip appears on the credit meter: "⚠ X credits expire in N days — Buy more →". This gives users enough lead time to purchase a new pack before their current one lapses mid-pipeline.
 
@@ -406,7 +406,7 @@ A curated library of worked starter templates is available on the dashboard and 
 ```
 Dashboard → "Start from a template" strip
         ↓
-User clicks a template card (e.g. "Stripe-like checkout")
+User clicks a template card (e.g. "Subscription checkout flow")
         ↓
 Workspace creation form opens, pre-filled with:
   - workspace name (editable)
@@ -439,21 +439,22 @@ Billing page shows:
         ↓
 User clicks "Buy Credits →"
         ↓
-POST /billing/checkout → redirect to Stripe Hosted Checkout
+POST /billing/checkout → backend records a local checkout attempt (with a
+  one-time checkout nonce), then redirects to Lemon Squeezy hosted checkout
         ↓
-User enters card details on Stripe's page (no card data on SpecForge servers)
+User enters card details on Lemon Squeezy's page (no card data on SpecForge servers)
         ↓
-Stripe redirects back to /billing?session_id={id}&success=1
+Lemon Squeezy redirects back to /billing?checkout_ref={ref}&success=1
         ↓
-Billing page polls GET /billing/status?session_id={id} (2 s interval, max 10 attempts)
-until status = 'active'
+Billing page polls GET /billing/status?checkout_ref={ref} (2 s interval, max 10 attempts)
+until the purchase is complete
         ↓
 Success state: "200 credits added. Expires {date}."
 Balance updates immediately.
 ```
 
 > [!important] Webhook is the authoritative credit source
-> Credits are granted by the backend on receipt of Stripe's `checkout.session.completed` webhook — not by the success redirect. The redirect polling is only to confirm the webhook has already processed. If the user closes the tab immediately after payment, the webhook still fires and credits are still granted.
+> Credits are granted by the backend on receipt of Lemon Squeezy's signed `order_created` webhook — not by the success redirect. The grant is allowed **only** when the webhook's signed custom data proves the originating checkout attempt (`checkout_ref` plus the stored checkout-nonce hash). The success redirect, the receipt URL, the customer email, the order number, and amount/time matching are never treated as proof of payment. The redirect polling is only to confirm the webhook has already processed. If the user closes the tab immediately after payment, the webhook still fires and credits are still granted.
 
 **Billing page sections:**
 
@@ -461,7 +462,7 @@ Balance updates immediately.
 2. **Package card** — single package: 200 credits · $9.00 · 30-day validity · "Buy Credits →" CTA. Package details are loaded from `GET /billing/package` so the price can be updated server-side without a frontend deploy.
 3. **Purchase history** — accordion list of past packs with status badges: `Active` (green, shows credits remaining and expiry date) · `Expired` (grey) · `Refunded` (yellow)
 
-**Cancelled checkout:** If the user cancels on Stripe's page, they are redirected to `/billing?cancelled=1`. The pending pack row is created but remains `status='pending'` until the checkout window expires on Stripe's side. No credits are granted for a cancelled session.
+**Abandoned or cancelled checkout:** Lemon Squeezy checkout has only a success redirect — there is no separate cancel URL. If the user abandons or closes the Lemon Squeezy page without paying, no webhook fires and no credits are granted. The local checkout attempt simply remains pending until it lapses at its `expires_at` (30 minutes after creation), after which it is marked expired by the reconciliation sweep. No credits are ever granted for an abandoned attempt.
 
 ### 4.13 Storyboard — Product Keynote
 
@@ -701,7 +702,7 @@ v1 export ran **inline in the request** and would time out on long task lists. v
 
 #### 4.14.3 Bidirectional sync *(Phase B — the smallest slice that makes it "core")*
 
-GitHub tells SpecForge when reality changes. A new **unauthenticated, signature-verified webhook endpoint** (`POST /integrations/github/webhook`) mirrors the proven Stripe receiver pattern: read the raw body, verify the `X-Hub-Signature-256` HMAC in constant time, dedup on the `X-GitHub-Delivery` id, then enqueue and return 2xx. Reconciliation always runs on the worker, never inline.
+GitHub tells SpecForge when reality changes. A new **unauthenticated, signature-verified webhook endpoint** (`POST /integrations/github/webhook`) mirrors the proven billing webhook receiver pattern: read the raw body, verify the `X-Hub-Signature-256` HMAC in constant time, dedup on the `X-GitHub-Delivery` id, then enqueue and return 2xx. Reconciliation always runs on the worker, never inline.
 
 ```
 GitHub: user closes issue #42 (or merges the PR that closes it)
@@ -1004,7 +1005,7 @@ Task Validation
   No harness test referenced. Add test reference →
 
 ⚠ Task 7 — "Build payment flow"
-  References test_stripe_webhook which does not exist
+  References test_payment_webhook which does not exist
   in harness. Fix reference →
 ```
 
@@ -1082,9 +1083,9 @@ GitHub is connected for the export and sync features only. It does not create or
 
 ### Credit Ledger
 
-> [!note] Design Rule The credit ledger is append-only. Every balance change is a new row. Credits are never updated in place. Every deduction, credit grant, expiry, refund, purchase, and Storyboard generation is a distinct ledger entry with a descriptive `reason` field (`signup_bonus`, `stripe_purchase:{pack_id}`, `generate`, `storyboard_generate:{storyboard_id}`, `storyboard_section:{storyboard_id}:{section_id}`, `refund:{ledger_id}`, `expiry:{pack_id}`, `stripe_refund:{pack_id}`).
+> [!note] Design Rule The credit ledger is append-only. Every balance change is a new row. Credits are never updated in place. Every deduction, credit grant, expiry, refund, purchase, payment reversal, debt recovery, and Storyboard generation is a distinct ledger entry with a descriptive `reason` field (`signup_bonus`, `billing_purchase:{provider}:{order_id}`, `generate`, `storyboard_generate:{storyboard_id}`, `storyboard_section:{storyboard_id}:{section_id}`, `refund:{ledger_id}`, `expiry:{pack_id}`, `refund:billing:{pack_id}:{refunded_item_cents}`, `debt_recovery:billing:{debt_id}:{pack_id}`, `admin_billing_correction:{provider}:{order_id}`).
 
-`user.credit_balance` is a denormalised integer kept in sync with the ledger. It is the fast path for balance reads and is cache-backed in Redis (5-minute TTL). Invariant: `credit_balance >= SUM(stripe_credit_packs.credits_remaining)` for all active packs owned by that user at any point in time.
+`user.credit_balance` is a denormalised integer kept in sync with the ledger. It is the fast path for balance reads and is cache-backed in Redis (5-minute TTL). Invariant: `credit_balance >= SUM(billing_credit_packs.credits_remaining)` for all active packs owned by that user at any point in time. Outstanding payment-reversal **credit debt** (see "Refunds, Reversals, and Credit Debt" below) is tracked separately and is never counted as usable balance; `credit_balance` itself can never go negative.
 
 ### Credit Deduction Flow
 
@@ -1117,7 +1118,7 @@ Call succeeds? → Deduction stands
 
 ### Purchased Credits
 
-Users can buy one credit pack at a time via Stripe Hosted Checkout. V1 ships with a single package; price and credit count are configurable server-side.
+Users can buy one credit pack at a time via Lemon Squeezy hosted checkout. V1 ships with a single package; price, credit count, currency, and validity are configurable server-side.
 
 | | |
 |---|---|
@@ -1125,9 +1126,9 @@ Users can buy one credit pack at a time via Stripe Hosted Checkout. V1 ships wit
 | Price | $9.00 USD |
 | Validity | 30 days from purchase date |
 | Currency | USD only in V1 |
-| Refund policy | Unused credits revoked on Stripe refund; no negative balance |
+| Refund policy | Credits revoked in proportion to the refunded amount; value already spent becomes recoverable credit debt; usable balance never goes negative |
 
-**Purchase is authoritative on webhook receipt**, not on success redirect. Credits become available in the user's balance as soon as `checkout.session.completed` is processed by the backend. If payment fails or is cancelled, no credits are granted.
+**Purchase is authoritative on webhook receipt**, not on success redirect. Credits become available in the user's balance as soon as Lemon Squeezy's signed `order_created` webhook is verified and processed by the backend, and only when its custom data proves the originating checkout attempt (`checkout_ref` plus the stored checkout-nonce hash). If payment fails, is abandoned, or the proof does not match, no credits are granted.
 
 ### Storyboard Credit Costs
 
@@ -1158,17 +1159,21 @@ When credits are deducted for an LLM action, the cost is drawn from the user's a
 - The `credits_remaining` field accurately reflects what would be lost if a pack expired right now
 - Platform credits (no pack row) are always consumed last
 
-### Stripe Refunds and Disputes
+### Refunds, Reversals, and Credit Debt
 
-If a user disputes a charge or requests a refund:
+Refunds are automatic and cover both full and partial refunds. Lemon Squeezy `refunded`, `partial_refund`, and `fraudulent` order states are all treated as revocation inputs, whether they arrive on a signed `order_refunded` webhook or are detected during reconciliation (see §12).
 
-1. Stripe fires `charge.refunded` or `charge.dispute.created`
-2. Backend looks up the pack by `stripe_payment_intent_id`
-3. Revokes `MIN(pack.credits_remaining, user.credit_balance)` credits
-4. Creates a negative ledger entry (`reason: stripe_refund:{pack_id}`)
-5. Sets pack `status = 'refunded'`, `credits_remaining = 0`
+When a reversal is processed:
 
-Disputed charges are revoked immediately on `dispute.created` and are **not** automatically reinstated if the dispute is resolved in the seller's favour — reinstatement is a manual admin action.
+1. The backend finds the credit pack by its provider order id — never by email, receipt URL, or amount matching.
+2. The refunded money is normalised to an item-credit amount: the provider's refunded total is measured against the order total so that **tax-inclusive refunds do not over-revoke credits**. A full refund (or a `fraudulent` order) revokes the pack's full refundable value.
+3. Credits are revoked in proportion to the refunded item value, drawing first from the refunded pack's own remaining credits, then — when that pack was already partly spent — from the user's other active packs in soonest-expiring (FIFO) order, so a reversal cannot be escaped by having spent the refunded pack. Only value that still cannot be reclaimed this way becomes credit debt (below).
+4. A negative ledger entry is written (`reason: refund:billing:{pack_id}:{refunded_item_cents}`, where the cents suffix records the cumulative refunded-item level so a later, larger partial refund is a new entry while a replay of the same amount is idempotent).
+5. If `new_refunded_item == paid_item`, the pack is set `status = 'refunded'`; on a partial refund the pack stays `active` while credits remain, or becomes `consumed` once `credits_remaining` reaches zero.
+
+**Payment reversals never let a user keep spent value.** If a refund or fraud reversal exceeds the credits the user can currently give back — because some were already spent — the shortfall is recorded as **billing credit debt** against that user. The debt is automatically recovered from future credit grants: the next purchase (or any positive grant) repays the outstanding debt *before* those credits become usable, with a zero-or-reduced usable surplus written to the balance. `credit_balance` is never driven negative by a reversal. **Credits that expired unused are not converted into debt** — only consumed, debt-recovered, or still-remaining value can be reclaimed by a reversal.
+
+Replaying the same or a lower refund amount is a no-op beyond advancing the durable processed state; the provider-order/checkout uniqueness and ledger-reason uniqueness guarantee a reversal is applied at most once.
 
 ### Credit Display
 
@@ -1179,6 +1184,7 @@ Disputed charges are revoked immediately on `dispute.created` and are **not** au
 |Below 10 credits|Low-credit warning shown|
 |Active pack within 7 days of expiry|"⚠ X credits expire in N days — Buy more →" chip|
 |Zero credits|"You're out of credits. Buy 200 credits for $9 →"|
+|Outstanding payment-reversal debt|"N credits from a reversed payment will be recovered from your next top-up" — shown distinctly, never added to the usable balance|
 |Billing page|Balance, earliest expiry date, purchase card, history|
 
 ---
@@ -1336,7 +1342,7 @@ Unique constraint: `(push_id, task_ref)`. Index on `external_issue_number` for w
 
 ### GitHub Webhook Event
 
-Idempotency + dedup table for inbound GitHub deliveries — mirrors `StripeWebhookEvent`. A second insert for the same `delivery_id` raises a unique-constraint error the handler catches and skips, making every webhook handler idempotent. Subject to retention/TTL to bound growth (§12).
+Idempotency + dedup table for inbound GitHub deliveries — mirrors the billing webhook inbox (`BillingWebhookEvent`). A second insert for the same `delivery_id` raises a unique-constraint error the handler catches and skips, making every webhook handler idempotent. Subject to retention/TTL to bound growth (§12).
 
 |Field|Type|Constraints|
 |---|---|---|
@@ -1396,35 +1402,125 @@ A lightweight backlog item — a feature captured mid-build, batched into an inc
 |flagged|BOOLEAN|Default false|
 |created_at|TIMESTAMPTZ||
 
-### Stripe Credit Pack
+> [!note] Provider-neutral billing tables
+> The billing data model is provider-neutral: `provider` distinguishes `lemonsqueezy` (the V1 payment provider) from historical rows. Legacy payment-provider audit data is retained read-only for history; the runtime credit tables below are the single source of truth for accounting. The migration that populates them from prior data is specified in PLAN.md, not here.
 
-One row per Stripe Checkout session. Created with `status='pending'` when the checkout session is initiated; updated to `status='active'` when `checkout.session.completed` fires. Tracks remaining credits for FIFO drain and lazy expiry.
+### Billing Checkout Attempt
+
+One row per checkout the user starts. Created and committed **before** the user is redirected to the provider, so SpecForge is always the authority for what checkout was attempted. Holds the proof material that a later webhook must match before any credit is granted.
 
 |Field|Type|Constraints|
 |---|---|---|
 |id|UUID|Primary key|
 |user_id|UUID|FK → users.id, CASCADE|
-|stripe_checkout_session_id|TEXT|Unique, not null|
-|stripe_payment_intent_id|TEXT|Unique, nullable — populated on checkout completion|
-|credits_purchased|INTEGER|Not null, check > 0|
-|credits_remaining|INTEGER|Not null, check ≥ 0 and ≤ credits_purchased — decremented FIFO on deduct; drives expiry calculation|
+|provider|TEXT|`lemonsqueezy` (provider-neutral)|
+|checkout_ref|TEXT|Unique, not null — public opaque reference used for status polling and redirect|
+|checkout_nonce_hash|TEXT|Not null — `sha256(checkout_nonce)`; the raw nonce is sent to the provider as custom data but never stored|
+|provider_checkout_id|TEXT|Nullable — set after the provider creates the checkout|
+|provider_order_id|TEXT|Nullable — set when the matching order completes|
+|credits|INTEGER|Not null, check > 0 — credits this attempt will grant|
 |price_cents|INTEGER|Not null, check > 0|
-|expires_at|TIMESTAMPTZ|Not null — set to `created_at + 30 days` on activation|
-|status|TEXT|`pending` / `active` / `expired` / `refunded`|
+|currency|TEXT|Not null|
+|validity_days|INTEGER|Not null, check > 0|
+|status|TEXT|`created` / `provider_created` / `completed` / `expired` / `failed`|
+|expires_at|TIMESTAMPTZ|Not null — attempt lapses if unpaid (default now + 30 min)|
+|completed_at|TIMESTAMPTZ|Nullable|
+|success_redirect_seen_at|TIMESTAMPTZ|Nullable — support telemetry only; never payment proof|
 |created_at|TIMESTAMPTZ||
 
-Indexes: `(user_id)`, `(user_id, expires_at)` WHERE `status = 'active'` for lazy-expiry lookups.
+Unique partial index on `(provider, provider_checkout_id)` where present. Index on `(user_id, created_at DESC)`.
 
-### Stripe Webhook Event
+### Billing Credit Pack
 
-Idempotency table. One row per processed Stripe event. A second insert for the same `stripe_event_id` raises a unique constraint error, which the handler catches and silently skips — making every webhook handler idempotent regardless of event type.
+One row per completed purchase. Created when a verified, proof-matched purchase webhook is processed. Tracks remaining credits for FIFO drain and lazy expiry, and the lifetime accounting needed to apply proportional reversals exactly once.
 
 |Field|Type|Constraints|
 |---|---|---|
 |id|UUID|Primary key|
-|stripe_event_id|TEXT|Unique, not null — e.g. `evt_1AbC...`|
-|event_type|TEXT|Not null — e.g. `checkout.session.completed`|
-|processed_at|TIMESTAMPTZ|Not null, default now()|
+|user_id|UUID|FK → users.id, CASCADE|
+|provider|TEXT|`lemonsqueezy` (provider-neutral)|
+|provider_checkout_id|TEXT|Nullable, unique per provider when present|
+|provider_order_id|TEXT|Nullable, unique per provider when present — the reversal lookup key|
+|provider_customer_id|TEXT|Nullable|
+|provider_variant_id|TEXT|Nullable|
+|credits_purchased|INTEGER|Not null, check > 0|
+|credits_remaining|INTEGER|Not null, check ≥ 0 and ≤ credits_purchased — decremented FIFO on deduct; drives expiry|
+|credits_consumed|INTEGER|Not null, default 0 — drained by user-initiated usage|
+|credits_expired|INTEGER|Not null, default 0 — moved out by lazy expiry|
+|credits_debt_recovered|INTEGER|Not null, default 0 — surrendered to repay this user's billing debt before becoming usable|
+|credits_revoked|INTEGER|Not null, default 0 — total target revoked by reversals against this pack|
+|price_cents|INTEGER|Not null, check > 0|
+|currency|TEXT|Not null|
+|paid_item_amount_cents|INTEGER|Not null, check > 0 — the configured item price; the basis for proportional refund math|
+|provider_order_total_cents|INTEGER|Nullable — provider order total (may include tax); used to normalise refund amounts|
+|provider_refunded_total_cents_seen|INTEGER|Not null, default 0 — highest provider refunded total processed|
+|refunded_item_amount_cents_processed|INTEGER|Not null, default 0 — highest normalised item-refund processed (idempotency)|
+|status|TEXT|`active` / `consumed` / `expired` / `refunded` / `disputed`|
+|purchased_at|TIMESTAMPTZ|Not null — from the provider order's created time|
+|expires_at|TIMESTAMPTZ|Not null — `purchased_at + validity_days`|
+|created_at|TIMESTAMPTZ||
+
+Indexes: `(user_id, expires_at)` WHERE `status = 'active'` for lazy-expiry lookups; `(user_id, purchased_at DESC)` for history.
+
+### Billing Credit Debt
+
+Records payment-reversal value that could not be revoked immediately because the credits were already spent or expired-out. Recovered automatically from future credit grants before any surplus becomes usable.
+
+|Field|Type|Constraints|
+|---|---|---|
+|id|UUID|Primary key|
+|user_id|UUID|FK → users.id, CASCADE|
+|source_pack_id|UUID|FK → billing_credit_packs.id, RESTRICT — the reversed pack; unique (one debt row per pack)|
+|provider|TEXT|`lemonsqueezy` (provider-neutral)|
+|provider_order_id|TEXT|Nullable|
+|credits_owed|INTEGER|Not null, check > 0|
+|credits_recovered|INTEGER|Not null, default 0, check ≤ credits_owed|
+|status|TEXT|`pending` / `recovered`|
+|reason|TEXT|Not null — e.g. `refund`, `fraudulent`|
+|created_at|TIMESTAMPTZ||
+|updated_at|TIMESTAMPTZ||
+
+Index on `(user_id, created_at)` WHERE `status = 'pending'` for oldest-first recovery.
+
+### Billing Admin Correction
+
+Append-only audit row for the exceptional support path that grants credits for a provably-paid order whose first-purchase webhook was never received with valid proof (see §12). Requires human evidence; never bypasses debt recovery.
+
+|Field|Type|Constraints|
+|---|---|---|
+|id|UUID|Primary key|
+|admin_user_id|UUID|FK → users.id, RESTRICT|
+|target_user_id|UUID|FK → users.id, RESTRICT|
+|billing_credit_pack_id|UUID|Nullable FK → billing_credit_packs.id|
+|provider|TEXT|`lemonsqueezy` (provider-neutral)|
+|provider_order_id|TEXT|Not null — unique per provider (blocks double-granting)|
+|credits|INTEGER|Not null, check > 0|
+|price_cents|INTEGER|Not null, check > 0|
+|currency|TEXT|Not null|
+|reason|TEXT|Not null|
+|evidence_url|TEXT|Not null|
+|created_at|TIMESTAMPTZ||
+
+### Billing Webhook Event
+
+Durable, sanitised inbox. A verified provider webhook is acknowledged only after a sanitised row is committed here (or an identical row is detected as a duplicate); the credit side effects then run on the background worker against the stored normalised payload, never against re-parsed raw bytes. Idempotent on the `(provider, event_name, provider_object_id, payload_hash)` identity.
+
+|Field|Type|Constraints|
+|---|---|---|
+|id|UUID|Primary key|
+|provider|TEXT|`lemonsqueezy` (provider-neutral)|
+|event_name|TEXT|Not null — e.g. `order_created`, `order_refunded`|
+|provider_object_type|TEXT|Not null — e.g. `orders`|
+|provider_object_id|TEXT|Not null|
+|payload_hash|TEXT|Not null|
+|status|TEXT|`received` / `processing` / `processed` / `failed`|
+|retry_count|INTEGER|Not null, default 0|
+|last_error|TEXT|Nullable|
+|normalized_payload|JSONB|Not null — sanitised; never contains the raw checkout nonce, signature, email, or receipt URL|
+|received_at|TIMESTAMPTZ|Not null, default now()|
+|processed_at|TIMESTAMPTZ|Nullable|
+
+Unique index on `(provider, event_name, provider_object_id, payload_hash)`. Index on pending/failed/processing rows for the recovery sweep. Subject to retention/TTL to bound growth (§12).
 
 ---
 
@@ -1617,21 +1713,23 @@ The renderer owns final visual presentation. The LLM produces structured content
 
 |Method|Endpoint|Description|
 |---|---|---|
-|GET|/credits/balance|Return current balance, generation cost, and earliest pack expiry info (`expires_soon`, `next_expiry_at`)|
+|GET|/credits/balance|Return current usable balance, generation cost, earliest pack expiry info (`expires_soon`, `next_expiry_at`), and outstanding `billing_debt_credits` (unrecovered payment-reversal debt, shown separately from usable balance)|
 |GET|/credits/history|Return credit ledger entries (paginated)|
 
 ### Billing
 
 |Method|Endpoint|Auth|CSRF|Description|
 |---|---|---|---|---|
-|GET|/billing/package|Required|No|Return the single available credit package (`credits`, `price_cents`, `validity_days`)|
-|POST|/billing/checkout|Required|Yes|Create a Stripe Checkout session; returns `{checkout_url}` for frontend redirect|
-|GET|/billing/status|Required|No|Poll checkout session status by `?session_id=...`; ownership-scoped by `user_id`; returns `{status, expires_at}`|
-|GET|/billing/history|Required|No|Return user's pack purchase history (paginated)|
-|POST|/billing/webhook|None|Exempt|Stripe webhook endpoint; authenticated by `Stripe-Signature` HMAC-SHA256; no Bearer token|
+|GET|/billing/package|Required|No|Return the single available credit package (`credits`, `price_cents`, `validity_days`, `currency`)|
+|POST|/billing/checkout|Required|Yes|Record a local checkout attempt, create a Lemon Squeezy hosted checkout, and return `{checkout_url, checkout_ref}` for frontend redirect|
+|GET|/billing/status|Required|No|Poll a checkout by `?checkout_ref=...`; ownership-scoped by `user_id` in the same query; returns 200 only once the purchase has completed, 404 for unknown/mismatched/pending/expired references|
+|GET|/billing/history|Required|No|Return the user's credit-pack purchase history from `billing_credit_packs` (paginated, newest first)|
+|POST|/billing/webhook|None|Exempt|Lemon Squeezy webhook endpoint; authenticated by `X-Signature` HMAC-SHA256 over the raw body; no Bearer token|
 
 > [!important] Webhook security boundary
-> `/billing/webhook` carries no Bearer token and is exempt from CSRF enforcement. Its only authentication mechanism is the `Stripe-Signature` header validated against `STRIPE_WEBHOOK_SECRET` with a 300-second timestamp tolerance. The endpoint is also exempt from all per-IP rate limiting — Stripe's retry schedule must not be blocked.
+> `/billing/webhook` carries no Bearer token and is exempt from CSRF enforcement. Its only authentication mechanism is the Lemon Squeezy `X-Signature` header, verified as an HMAC-SHA256 over the **raw request body** in constant time against the configured webhook secret (current **and** previous secret accepted during a rotation window). The JSON is parsed only after the signature verifies, and `X-Event-Name` must match `meta.event_name`. The endpoint is also exempt from all per-IP rate limiting — the provider's retry schedule must not be blocked.
+
+Credit grants and reversals are not performed inline on this request: a verified event is sanitised, committed to the durable `BillingWebhookEvent` inbox, acknowledged, and processed on the background worker (§12).
 
 ### Providers
 
@@ -1695,15 +1793,17 @@ The renderer owns final visual presentation. The LLM produces structured content
 - SQL injection prevented by ORM-only database access — no raw SQL strings
 - Rate limiting applied at global, per-user, and per-user LLM tiers via Redis sliding window
 - GitHub integration uses a **GitHub App** identity (§8). The App private key lives in a secret manager, never in the database. Installation tokens are short-lived (1 h), cached server-side with a short TTL, namespaced, access-restricted, and Fernet-encrypted at rest when Redis is shared; plaintext tokens are never written to logs, errors, or audit fields. The App requests **least privilege** per feature (§8 permissions table). Legacy v1 OAuth tokens (Fernet-encrypted in `UserIntegration`, auto-deleted on 401) are retained only for migration.
-- The GitHub webhook is a **public DoS surface**: its `X-Hub-Signature-256` HMAC is verified in constant time and rejected (O(1)) **before any DB or queue work**; the body size is capped; the endpoint sits behind the integration's own controls rather than per-IP rate limiting so Stripe-style retry storms from GitHub are not blocked while invalid signatures are dropped immediately.
+- The GitHub webhook is a **public DoS surface**: its `X-Hub-Signature-256` HMAC is verified in constant time and rejected (O(1)) **before any DB or queue work**; the body size is capped; the endpoint sits behind the integration's own controls rather than per-IP rate limiting so provider retry storms from GitHub are not blocked while invalid signatures are dropped immediately.
 - **Multi-tenant authorisation (confused-deputy guard).** A webhook event for repository X may only mutate `IntegrationPush` rows whose `repo_id == X` **and** whose installation SpecForge recorded for that owner. Payload identity is never trusted on its own. Installation A can never touch workspace B's pushes.
 - **Secret rotation.** Two webhook signing secrets are accepted during rotation (each delivery verified against both); installation tokens are re-minted on App key rollover. The runbook is documented in `RUNBOOK.md`.
 - Repository, branch, and PR strings from GitHub are treated as untrusted input in any rendered surface (same sanitisation policy as public share / PDF / Storyboard). Every state-changing GitHub action is audited as a structlog row.
-- Stripe webhook requests authenticated by HMAC-SHA256 `Stripe-Signature` header with a 300-second timestamp tolerance. Invalid signature → 400 (no Sentry noise). Expired timestamp → 400.
-- Stripe secret keys (`sk_live_*`, `sk_test_*`) and webhook signing secrets (`whsec_*`) scrubbed from all log, error, and trace pipelines alongside existing secret patterns.
-- `GET /billing/status` lookups are scoped by `user_id` in addition to `session_id` to prevent IDOR — a user cannot poll another user's checkout session status. Returns 404 (not 403) on ownership mismatch to avoid confirming existence.
-- PII boundary with Stripe: only the user's email is passed to Stripe (for checkout form pre-fill). No card data touches SpecForge servers at any point. `client_reference_id` carries only the opaque UUID `user_id`.
-- Production guard: `STRIPE_SECRET_KEY` must be set and must not be a test key (`sk_test_*`) in production; enforced at startup alongside existing production validation checks.
+- Lemon Squeezy webhook requests authenticated by an HMAC-SHA256 `X-Signature` over the raw request body, compared in constant time against the configured webhook secret (current and previous secret both accepted during a rotation window). The body is read as raw bytes and the signature verified **before** any JSON parsing or DB/queue work; `X-Event-Name` must match `meta.event_name`. Missing, malformed, wrong-secret, or mutated-body signatures → 400 (no Sentry noise).
+- **Signed custom data is the sole automatic grant authority.** A first-time credit grant is allowed only from a signed `order_created` webhook whose sanitised custom data proves `checkout_ref` plus the stored checkout-nonce hash against a local checkout attempt (or from an already-committed inbox row carrying that same proof). Credits are never granted from order-list/retrieve results, customer email, receipt URL, redirect URL, order number, or amount/time correlation. A forged `user_id` without a matching nonce hash grants nothing.
+- **Durable webhook ingestion.** A verified event is acknowledged only after a sanitised `BillingWebhookEvent` row is committed (or a duplicate is detected); the credit side effects run on the background worker against the stored normalised payload. A pending-row sweep plus periodic reconciliation recover any event whose enqueue or processing was interrupted, so an acknowledged webhook is never silently lost. Reconciliation may detect missed reversals by re-reading the exact provider order by id, but may **not** auto-grant a first purchase without the signed proof above — those go to an audited, evidence-backed admin correction path.
+- The raw checkout nonce, Lemon Squeezy API key, webhook signing secrets, `X-Signature`, signed checkout URLs, receipt URLs, and customer email/name are scrubbed from all log, error, and trace pipelines alongside existing secret patterns; the sanitised inbox payload excludes all of them.
+- `GET /billing/status` lookups are scoped by `user_id` in addition to `checkout_ref`, filtered in a single query to prevent IDOR — a user cannot poll another user's checkout. Returns 404 (not 403) on unknown, mismatched, pending, or expired references to avoid confirming existence.
+- PII boundary with Lemon Squeezy: only the user's email is passed to the provider (for checkout form pre-fill). No card data touches SpecForge servers at any point. Checkout custom data carries only the opaque `user_id`, `checkout_ref`, and the one-time checkout nonce — the nonce is sent to the provider but only its hash is stored.
+- Production guard: when Lemon Squeezy is enabled in production, startup requires the API key, webhook secret, store id, variant id, an HTTPS success URL, positive price/credits/validity, a non-empty currency, and live (non-test) mode; otherwise startup fails.
 - Storyboard public links expose only the generated Storyboard payload and owner-enabled downloads. They never expose account email, credit balance, billing history, private workspace lists, draft stage content, previous Storyboard versions, or raw prompts.
 - Storyboard source excerpts are sanitized, bounded in length, and sourced only from finalised stage versions. The source layer is disabled on public links by default.
 - Storyboard HTML downloads contain no arbitrary LLM-generated scripts. Deck rendering uses the trusted frontend renderer over structured JSON; generated Markdown, diagram labels, notes, and appendix content pass through the same sanitization policy as public share and PDF export.
@@ -1759,31 +1859,44 @@ V1 is designed for hundreds of concurrent users, not thousands. Railway's defaul
 - All LLM observability is **optional** and degrades gracefully when Langfuse is unavailable or unconfigured. The platform falls back to local prompt templates and skips trace/score submission silently.
 - **No user-facing feature depends on Langfuse availability.** Stage generation, refine, finalise, eval scoring, credit accounting, and export work identically with or without Langfuse configured.
 
-**Billing observability** — the following Prometheus counters are emitted for all Stripe billing events:
+**Billing observability** — the following Prometheus metrics are emitted for all billing events. A `provider` label distinguishes payment providers; no high-cardinality labels (user id, order id, checkout ref, webhook id) are ever attached.
 
 |Metric|Description|
 |---|---|
-|`specforge_billing_checkout_created_total`|Stripe Checkout sessions initiated|
-|`specforge_billing_purchase_completed_total`|Purchases completed and credits granted|
-|`specforge_billing_purchase_revenue_cents_total`|Total revenue from completed purchases|
-|`specforge_billing_credits_granted_total`|Credits added via Stripe purchase|
-|`specforge_billing_refunds_total`|Refund events processed|
-|`specforge_billing_credits_revoked_total`|Credits revoked on refund or dispute|
-|`specforge_billing_disputes_total`|Dispute events processed|
-|`specforge_billing_webhook_errors_total`|Webhook processing failures (labelled by `error_type`)|
+|`specforge_billing_checkout_created_total{provider}`|Checkout attempts created|
+|`specforge_billing_checkout_completed_total{provider}`|Checkouts completed and credits granted|
+|`specforge_billing_purchase_revenue_cents_total{provider}`|Total revenue from completed purchases|
+|`specforge_billing_checkout_api_error_total{provider,error_type}`|Provider checkout-creation API errors|
+|`specforge_billing_checkout_expired_total{provider}`|Checkout attempts that lapsed unpaid|
+|`specforge_billing_unrecoverable_checkout_total{provider}`|Paid-but-unprovable checkouts requiring admin correction|
+|`specforge_billing_webhook_received_total{provider,event_type}`|Webhook events received|
+|`specforge_billing_webhook_duplicate_total{provider}`|Webhook events skipped as duplicates|
+|`specforge_billing_webhook_error_total{provider,error_type}`|Webhook processing failures|
+|`specforge_billing_webhook_pending_age_seconds`|Age of the oldest unprocessed inbox row|
+|`specforge_billing_credits_granted_total{provider}`|Credits added via purchase|
+|`specforge_billing_credits_revoked_total{provider,reason}`|Credits revoked by refund/fraud reversal|
+|`specforge_billing_credit_debt_created_total{provider,reason}`|Billing credit debt created when a reversal exceeded usable credits|
+|`specforge_billing_credit_debt_recovered_total{provider}`|Billing credit debt recovered from later grants|
 |`specforge_billing_credits_expired_total`|Credits expired by lazy-expiry mechanism|
-|`specforge_billing_webhook_duplicates_total`|Webhook events skipped as duplicates (labelled by `event_type`)|
+|`specforge_billing_admin_correction_total{provider}`|Admin billing corrections applied|
+|`specforge_billing_reconcile_mismatch_total{provider}`|Reconciliation mismatches detected|
+|`specforge_billing_job_retries_total{job}`|Billing worker job retries|
+|`specforge_billing_job_deadlettered_total{job}`|Billing worker jobs sent to the dead-letter store|
 
-Structlog billing events follow a consistent schema — fields always include `event_type`, `stripe_event_id`, `user_id`, and `pack_id`; email and raw payloads are never logged. Key event names: `billing.checkout.created`, `billing.purchase.activated`, `billing.refund.processed`, `billing.dispute.flagged`, `billing.webhook.duplicate_skipped`, `billing.expiry.run`.
+Structlog billing events follow a consistent schema — fields always include `event_type`, `provider`, `user_id`, and `pack_id`; email, raw payloads, signatures, and the checkout nonce are never logged. Key event names: `billing.checkout.created`, `billing.purchase.activated`, `billing.refund.processed`, `billing.debt.created`, `billing.debt.recovered`, `billing.webhook.duplicate_skipped`, `billing.expiry.run`, `billing.reconcile.run`, `billing.admin_correction`.
 
 Recommended Grafana alert rules (documented in `RUNBOOK.md §9`):
 
 |Alert|Expression|Severity|
 |---|---|---|
-|Webhook errors|`rate(specforge_billing_webhook_errors_total[5m]) > 0`|Warning|
-|Dispute spike|`increase(specforge_billing_disputes_total[24h]) > 5`|Critical|
-|Zero purchases 72 h|`increase(specforge_billing_purchase_completed_total[72h]) == 0`|Warning|
+|Webhook errors|`rate(specforge_billing_webhook_error_total[5m]) > 0`|Warning|
+|Webhook backlog|`specforge_billing_webhook_pending_age_seconds > 300`|Critical|
+|Reversal spike|`increase(specforge_billing_credits_revoked_total[24h]) > 5`|Critical|
+|Unprovable paid checkout|`increase(specforge_billing_unrecoverable_checkout_total[1h]) > 0`|Critical|
+|Unrecovered debt|`increase(specforge_billing_credit_debt_created_total[24h]) > 0`|Warning|
+|Zero purchases 72 h|`increase(specforge_billing_checkout_completed_total[72h]) == 0`|Warning|
 |Unexpected expiry spike|`rate(specforge_billing_credits_expired_total[1h]) > 500`|Warning|
+|Billing job dead-letters|`increase(specforge_billing_job_deadlettered_total[1h]) > 0`|Critical|
 
 **Storyboard observability** — the following metrics are emitted for the paid keynote flow:
 
@@ -1843,7 +1956,7 @@ Structlog GitHub events include `installation_id`, `workspace_id`, `repo_id`, `d
 
 **Assumption 10 — Export and sync must run off the request path.** The v1 assumption that a synchronous ~30-second export is acceptable does **not** hold for webhooks, checks, large task lists, or increment pushes, and the only v1 background mechanism (`asyncio.create_task`) dies on deploy. v2 therefore requires a durable queue + worker: endpoints enqueue and return 202, and the worker does all GitHub I/O (§4.14.2, §12). This is a hard requirement, not an optimisation — it cannot be retrofitted cheaply, so it ships in Phase A.
 
-**Assumption 6 — A single credit pack at $9 is the right pricing entry point.** A single no-choice purchase removes decision paralysis. If conversion data shows users wanting larger or smaller packs, tiered pricing can be introduced without a schema change (the `stripe_credit_packs` table is pack-agnostic). 200 credits = 5 full four-stage pipeline runs, which should be enough for users to validate SpecForge on a real project.
+**Assumption 6 — A single credit pack at $9 is the right pricing entry point.** A single no-choice purchase removes decision paralysis. If conversion data shows users wanting larger or smaller packs, tiered pricing can be introduced without a schema change (the `billing_credit_packs` table is pack-agnostic). 200 credits = 5 full four-stage pipeline runs, which should be enough for users to validate SpecForge on a real project.
 
 **Assumption 7 — Langfuse is an optional observability enhancement.** Its unavailability must never surface to users or affect credit accounting, stage generation, or eval scoring. The system runs identically with `LANGFUSE_SECRET_KEY` unset; when it is set, Langfuse becomes an additional sink for prompt-level traces, prompt versions, eval scores, and dataset items. If a Langfuse call fails for any reason — network error, auth failure, rate limit, schema rejection — the failure is logged and swallowed. No user-facing flow may raise on a Langfuse error.
 
@@ -1855,11 +1968,15 @@ Structlog GitHub events include `installation_id`, `workspace_id`, `repo_id`, `d
 
 **Assumption 14 — A small curated template library is enough for cold-start.** 6–10 hand-tuned templates covering the most common SaaS / agent / developer-tool starting points are expected to remove the blank-page problem for a typical first-time user. If template attach rate is below ~25% the library is expanded; if a long tail of niches is requested, user-authored templates are revisited for V2.
 
-**Assumption 15 — Stripe Hosted Checkout is acceptable UX for a developer audience.** A full-page redirect to Stripe's checkout page is industry-standard and removes all PCI scope from SpecForge. If user research shows meaningful drop-off at the redirect step, an embedded Stripe Payment Element can replace it without changes to the backend billing logic.
+**Assumption 15 — Lemon Squeezy hosted checkout is acceptable UX for a developer audience.** A full-page redirect to the provider's hosted checkout is industry-standard and removes all PCI scope from SpecForge. If user research shows meaningful drop-off at the redirect step, an embedded checkout can replace it without changes to the backend billing logic.
 
-**Assumption 16 — 30-day credit validity is long enough to avoid frustration but short enough to drive re-purchase.** If expiry triggers significant support requests ("my credits expired while I was away") the validity period can be extended server-side via `STRIPE_CREDIT_VALIDITY_DAYS` without a schema migration. If credits are expiring with significant remaining balances (visible in `specforge_billing_credits_expired_total`), the expiry period is too short.
+**Assumption 16 — 30-day credit validity is long enough to avoid frustration but short enough to drive re-purchase.** If expiry triggers significant support requests ("my credits expired while I was away") the validity period can be extended server-side via `LEMONSQUEEZY_CREDIT_VALIDITY_DAYS` without a schema migration. If credits are expiring with significant remaining balances (visible in `specforge_billing_credits_expired_total`), the expiry period is too short.
 
-**Assumption 17 — Webhook delivery is sufficiently reliable for credit granting.** Stripe retries failed webhooks for up to 72 hours with exponential backoff. If the backend is down for longer than that — an extreme scenario — purchased credits would not be granted automatically. A manual admin script that replays events from Stripe's event log is the recovery path; documenting this in `RUNBOOK.md §9` is sufficient for V1.
+**Assumption 17 — A durable inbox plus reconciliation makes webhook-driven crediting reliable.** Lemon Squeezy retries failed deliveries, and SpecForge does not depend on a single delivery succeeding: a verified event is committed to the `BillingWebhookEvent` inbox before acknowledgement, a 60-second sweep drains any unprocessed rows, and a periodic reconciliation re-reads exact provider orders to catch missed reversals. The one case automation cannot resolve is a first purchase whose signed-proof webhook was *never* committed — those are deliberately **not** auto-granted from order-list/email/redirect evidence, and instead flow to the audited, evidence-backed admin correction path (`RUNBOOK.md §9`). If support volume for unprovable paid checkouts is non-trivial, the redirect→pending alerting thresholds are tuned rather than relaxing the grant-authority rule.
+
+**Assumption 26 — Signed checkout custom data is the only safe automatic grant authority.** Treating provider order-list/retrieve results, receipt URLs, emails, order numbers, or success redirects as proof of payment would let a shared or replayed checkout URL grant credits to the wrong account. Binding every grant to a server-generated `checkout_ref` plus a one-time nonce (stored only as a hash) is expected to be both safe and operationally sufficient. If a meaningful number of legitimate purchases cannot be matched, the checkout-attempt lifecycle — not the grant rule — is revisited.
+
+**Assumption 27 — Recoverable credit debt is fairer than forgiving spent value.** When a user spends credits and then the payment is reversed, recording recoverable billing debt (recovered from future grants before they become usable) is expected to be acceptable and abuse-resistant, while never driving a balance negative or blocking continued free-tier use. If debt recovery proves confusing or rarely collectible in practice, the policy can be softened to write-off below a threshold without a schema change.
 
 **Assumption 18 — Storyboard is valuable enough to be paid.** A 25-credit price is expected to feel fair because Storyboard produces a separate launch artifact: keynote, architecture reveal, speaker notes, demo script, downloadable materials, and share page. If users frequently abandon at the confirmation modal, lower the price or offer a preview mode.
 
@@ -1924,6 +2041,8 @@ Structlog GitHub events include `installation_id`, `workspace_id`, `repo_id`, `d
 |Qualitative signal|10 user interviews|Did they use the output in a real project? Did the repo stay in sync as they built?|
 
 ---
+
+_SpecForge SPEC.md · Version 2.1.0 · 2026-06-05 — **Billing: Stripe replaced by Lemon Squeezy, with reversal-safe credit accounting.** The payment provider for one-time credit packs becomes Lemon Squeezy hosted checkout; all Stripe product copy and integration nouns are removed (the unrelated "Subscription checkout flow" starter-template example is renamed off the word "Stripe"). §2 Goal restates the purchase goal on Lemon Squeezy. §4.10/§4.11 update the exhaustion CTA and template example; §4.12 rewrites the purchase flow around a pre-redirect checkout attempt with a one-time nonce, `checkout_ref` polling, `order_created` as the authoritative (proof-bound) credit source, and provider-cancel-less abandonment. §9 rewrites the ledger reasons and balance invariant onto `billing_credit_packs`, restates the package/refund policy, and replaces "Stripe Refunds and Disputes" with "Refunds, Reversals, and Credit Debt" — proportional, tax-normalised reversals and recoverable payment-reversal debt that never drives the balance negative or converts expired value. §10 removes `StripeCreditPack`/`StripeWebhookEvent` and adds the provider-neutral `BillingCheckoutAttempt`, `BillingCreditPack`, `BillingCreditDebt`, `BillingAdminCorrection`, and durable `BillingWebhookEvent` inbox models (legacy provider audit data retained read-only; the populating migration lives in PLAN.md). §11 updates `/credits/balance` (+`billing_debt_credits`) and the Billing endpoints/webhook boundary (Lemon `X-Signature` raw-body HMAC, two-secret rotation, durable-inbox-then-worker). §12 replaces the Stripe security rules with signed-custom-data-as-sole-grant-authority, durable webhook ingestion + reconciliation, the Lemon-aware production guard, and a provider-labelled billing metric set plus debt/reconcile/dead-letter alerts. §13 updates Assumptions 6/15/16/17 and adds Assumptions 26–27 (signed-proof grant authority; recoverable credit debt). Stripe-specific migration mechanics (backfill, cutover grace, retained-table internals) are deliberately deferred to PLAN.md._
 
 _SpecForge SPEC.md · Version 2.0.0 · 2026-06-02 — **GitHub: one-shot export → living system of record.** Major version: this reverses three v1 commitments, so existing sections were reconciled, not just appended. §1 Overview frames the bidirectional living integration; §2 Goals adds seven living-GitHub goals (App identity, background worker, bidirectional sync, PR/harness export mode, agent-ready issues + `AGENTS.md`, Projects board + status checks, increments) and §2 Non-Goals **removes "Bidirectional sync"**; §4.8 notes export is no longer one-shot and §4.9 is rewritten from per-user OAuth to GitHub App installation; new §4.14 specifies the full A–D phased capability — App identity (three credentials, cached installation tokens), durable queue + worker, signature-verified webhook + reconcile + drift, `files_to_default`/`pr_with_tests` export modes, agent-ready issues, Projects v2 board + check runs, and increments with an idea backlog; §8 is rewritten as "GitHub App (Integration Only)" covering the three credentials, token cache, least-privilege permission table, and secret rotation; §10 alters `IntegrationPush` (rekeyed on immutable `repo_id`, new `(workspace_id, repo_id)` constraint, +`export_mode`/`branch_name`/`pr_number`/`source_stage_version_id`/`increment_id`/`installation_id`) and `IntegrationPushTask` (+`state`/`done_at`/`done_via`/`synced_at`/`increment_id`), and adds `GitHubInstallation`, `GitHubWebhookEvent`, `Increment`, and `IncrementIdea` tables; §11 expands Integrations (install/setup/webhook) and adds a GitHub Sync & Increments endpoint group (all GitHub writes return 202); §12 folds in the production bar — webhook ack p99 < 300 ms and sync-lag SLOs, queue/worker reliability with idempotent checkpointed jobs + outbox + dead-letter + backfill, App/webhook security (HMAC-before-work, confused-deputy authz, secret rotation, token-cache-as-credentials, least privilege), new rate-limit tiers + per-installation governor, scalability (per-install fairness/bulkheads, bounded DB growth), and GitHub observability metrics; §13 **revises Assumptions 8/9/10** (one synced repo per workspace; Issues + opt-in Projects/Milestones/Labels; export must run off the request path) and adds Assumptions 21–25 (loop-closing as "core", App-migration cost, stable `task_ref`s, stack-specific PR scaffolding, the new PR evaluator); §14 **removes "Bidirectional ticket sync"** and adds the live-spec MCP spike, GitLab/Bitbucket, and behaviour-changing blast-radius analysis as post-v2; Success Metrics adds GitHub connect rate, loop-closed rate, PR-mode adoption, and increment usage._
 

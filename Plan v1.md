@@ -5330,6 +5330,639 @@ After Phase 24 is implemented:
 
 ---
 
+## 25. Phase 25 — Lemon Squeezy Billing Migration
+
+**Version:** 2.6.0
+**Source:** `V1 spec.md` v2.1.0 §4.12, §9, §10, §11, §12, §13 — Credit Purchase Flow, Refunds/Reversals/Credit Debt, the provider-neutral Billing data model, Billing endpoints, signed-webhook grant authority, and Assumptions 26–27. Decision-complete migration directive recorded in `HANDOFF.md`.
+**Tasks:** T-290 through T-307 (18 tasks in `tasks.md`)
+**Harness:** `harness/tests/backend/test_phase25_lemonsqueezy_billing_contract.py`
+**Supersedes:** Phase 21 (§21) Stripe Payments Integration. Phase 21 remains in this document unedited per the append-only convention; its runtime code paths are replaced by this phase. The §7 `# Stripe Payments` env block is superseded by the config in T-292.
+
+---
+
+### 25.1 Goal & Scope
+
+Replace Stripe Hosted Checkout with **Lemon Squeezy hosted checkout** for the one-time 200-credit / $9 / 30-day pack, while preserving all existing paid-credit history and the FIFO-drain / lazy-expiry accounting. SpecForge remains the sole authority for checkout attempts, credit grants, idempotency, refunds, reconciliation, and pack expiry.
+
+Three behaviours are new relative to Phase 21 and are load-bearing:
+
+1. **Signed-webhook-as-sole-grant-authority.** Credits are granted only from a signed `order_created` webhook whose sanitised custom data proves `checkout_ref` + the stored `sha256(checkout_nonce)` against a local checkout attempt. No grant may be inferred from order list/retrieve, email, receipt URL, redirect, order number, or amount/time correlation.
+2. **Durable, worker-driven processing.** A verified webhook is sanitised and committed to a `billing_webhook_events` inbox before acknowledgement; credit side effects run on the `arq` worker against the stored normalised payload, never against re-parsed raw bytes. A 60-second pending-sweep and a 15-minute reconciliation recover any interrupted event.
+3. **Reversal-safe credit debt.** Refund/fraud reversals revoke credits proportional to the tax-normalised refunded item amount; value already spent becomes recoverable `billing_credit_debts` recovered from future grants before they become usable. `users.credit_balance` is never driven negative; expired-unused value is never converted to debt.
+
+**In scope:** the Lemon checkout + webhook + reconcile pipeline; the provider-neutral billing tables and the Stripe→neutral backfill; CreditService migration onto `BillingCreditPack`; the admin-correction support path; a 7-day Stripe webhook compatibility window; frontend rename + debt display; observability; docs.
+
+**Explicitly out of scope (do not build):** dual-provider checkout, subscriptions, dashboard-only payment links, manual-only refunds, a Lemon SDK (use `httpx`), and **the removal of Stripe runtime/SDK** — removal is a gated follow-up (see 25.10 Rollout, step "Stripe removal"), never part of this phase's initial deploy.
+
+---
+
+### 25.2 Prerequisites
+
+- Post-Phase 24 codebase (T-265–T-289 implemented; `0017` is the latest migration; the `arq` worker + `services.queue` exist).
+- A Lemon Squeezy store with one **variant** representing the credit pack, an API key, and a webhook endpoint configured for `order_created` + `order_refunded` with a signing secret.
+- `LEMONSQUEEZY_*` secrets available in Railway (see T-292). Leave the API key blank to ship the code with checkout disabled (package/history still work).
+
+---
+
+### 25.3 Architecture Summary
+
+```
+POST /billing/checkout ──► commit billing_checkout_attempts(status=created, nonce_hash)
+   (API process,             │
+    enqueues nothing)        ├─► LemonSqueezyService.create_checkout (httpx, JSON:API)
+                             └─► update attempt(status=provider_created, provider_checkout_id) ─commit─► return {checkout_url, checkout_ref}
+
+Lemon ──signed webhook──► POST /billing/webhook
+   verify X-Signature over RAW bytes (current+prev secret, constant time)
+   ─► sanitise → commit billing_webhook_events(status=received, normalized_payload)
+   ─► enqueue billing_process_webhook(row_id)  [row id only; never raw bytes]
+   ─► 200 (even if enqueue fails — pending-sweep recovers)
+
+arq worker (generic billing_job wrapper, billing:deadletter):
+   billing_process_webhook(row_id)        SELECT … FOR UPDATE; processing→processed
+       order_created   → validate checklist → BillingCreditPack + grant-helper(debt-first) + ledger
+       order_refunded  → find pack by provider_order_id → proportional revoke → debt → ledger
+   billing_process_pending_webhooks()  every 60s  — drains received/failed, reclaims stale processing
+   billing_reconcile()                 every 15m  — 3 lanes; cursor-locked; never auto-grants
+```
+
+The API process **only enqueues** (in fact, for billing it only writes the inbox row and enqueues); all money mutations are on the worker, inside a transaction, idempotent on provider order/checkout uniqueness **and** a second ledger-reason uniqueness barrier.
+
+---
+
+### 25.4 Structured Context (for harness + tasks generation)
+
+#### Decisions
+
+- D1. Lemon Squeezy is the only provider for new checkout creation after deploy. Stripe checkout creation is disabled in code.
+- D2. Runtime credit accounting moves to provider-neutral `billing_*` tables. Stripe tables are retained read-only for audit and the temporary webhook-compat path; **not** dropped in this phase.
+- D3. SpecForge config is authoritative for credit amount, item price, currency, and validity — never the provider payload's economics beyond the validated item price.
+- D4. The signed webhook custom-data proof (`checkout_ref` + nonce hash) is the only automatic first-grant authority. Reconciliation never invents this proof from provider order search.
+- D5. Refunds are automatic and proportional; over-spent reversals become recoverable debt. Expired value is never debt.
+- D6. Webhook durability: acknowledge only after the sanitised inbox row commits (or a duplicate is detected). Process on the worker.
+- D7. No Lemon SDK; use the existing `httpx` dependency. Keep `stripe==11.*` until the gated removal step.
+
+#### Entities (new tables — full schema in T-290)
+
+`billing_checkout_attempts`, `billing_credit_packs`, `billing_credit_debts`, `billing_admin_corrections`, `billing_webhook_events`, `billing_reconciliation_cursors`. Stripe tables (`stripe_credit_packs`, `stripe_webhook_events`) retained.
+
+#### APIs
+
+| Method | Endpoint | Auth | CSRF | Notes |
+|---|---|---|---|---|
+| GET | `/billing/package` | None | No | `credits`, `price_cents`, `validity_days`, `currency` from config. Available even when checkout disabled. |
+| POST | `/billing/checkout` | Required | Yes | 5/user/hour. Returns `{checkout_url, checkout_ref}`. 503 if Lemon disabled; 502 on Lemon error/orphan. |
+| GET | `/billing/status` | Required | No | Filter by `checkout_ref` **and** `user_id` in one query. Legacy `session_id` accepted **only** during the grace window. 200 only when completed + pack exists; 404 for unknown/mismatch/pending/expired. |
+| GET | `/billing/history` | Required | No | Reads `billing_credit_packs`; 50 newest-first. |
+| POST | `/billing/webhook` | None | Exempt | Lemon `X-Signature` HMAC-SHA256 over raw body; rate-limit exempt. |
+| POST | `/billing/admin/correction` | Admin | Yes | Exceptional support path (T-302). |
+| GET | `/credits/balance` | Required | No | Adds `billing_debt_credits`. |
+
+#### Security Requirements
+
+- SR1. Verify `X-Signature` over **raw bytes** against current+previous secret, constant time; parse JSON only after; require `X-Event-Name == meta.event_name`; `data.type == "orders"` for both order events. Missing/malformed/wrong-secret/mutated → 400.
+- SR2. Reject test/live mismatch before persisting processable work.
+- SR3. First-grant requires `checkout_ref` + nonce-hash match against a local attempt belonging to the sanitised `user_id`. Forged `user_id` without matching nonce hash grants nothing.
+- SR4. Never store the raw checkout nonce; store only `sha256(nonce)`. Sanitised inbox payload excludes nonce, signature, email, name, receipt/checkout URLs, and unrecognised custom fields.
+- SR5. Redaction adds: Lemon API key, webhook secrets, `X-Signature`, signed checkout URLs, receipt URLs, customer email/name, raw nonce, secret-shaped custom-data values.
+- SR6. `/billing/status` is IDOR-safe (single user-scoped query; 404 on mismatch).
+- SR7. Production guard (T-292): Lemon-enabled-in-prod requires API key, webhook secret, store id, variant id, HTTPS success URL, positive price/credits/validity, non-empty currency, `test_mode is False`.
+- SR8. The admin-correction endpoint is authorised solely by the `admin_user_emails` allowlist via `require_admin` (T-292/T-302); an empty allowlist denies everyone. It is CSRF-protected, rate-limited, and writes both an immutable audit row and a structured audit log.
+
+#### Data Constraints
+
+- DC1. `users.credit_balance` stays `>= SUM(billing_credit_packs.credits_remaining)` for active packs; never negative.
+- DC2. Per pack: `credits_remaining <= credits_purchased`; `credits_remaining + credits_consumed + credits_expired + credits_debt_recovered <= credits_purchased`; `refunded_item_amount_cents_processed <= paid_item_amount_cents`; `credits_revoked <= credits_purchased`; `provider_refunded_total_cents_seen <= provider_order_total_cents` when the total is present.
+- DC3. Idempotency is layered: primary = `(provider, provider_order_id)` / `(provider, provider_checkout_id)` partial-unique indexes; secondary = `CreditLedger` reason-uniqueness (DC4).
+- DC5. **Retention & growth:** `billing_webhook_events` (terminal `processed`) and `billing_checkout_attempts` (terminal `expired`/`failed`/`completed`) are bounded by the daily `purge_billing_events` job (T-298); neither grows unbounded. `billing_credit_debts.source_pack_id` and `billing_admin_corrections.*` user FKs are `ON DELETE RESTRICT`, so account deletion must settle pending debt first (T-290).
+- DC6. **Grant economics are anchored to the checkout-attempt snapshot** (`credits`/`price_cents`/`currency`/`validity_days`), not to live `LEMONSQUEEZY_*` config, so a config change cannot break or mis-price an in-flight checkout (T-299).
+- DC4. Ledger reason strings are **verbatim** (the suffixes are load-bearing):
+  - purchase: `billing_purchase:lemonsqueezy:<provider_order_id>`
+  - reversal: `refund:billing:<pack_id>:<new_refunded_item_cents>` — the `:<cents>` suffix encodes the cumulative refunded-item level so a later, **larger** partial refund writes a new row while a replay of the same/lower amount collides and no-ops.
+  - debt recovery (audit, amount 0): `debt_recovery:billing:<debt_id>:<pack_id>`
+  - admin correction: `admin_billing_correction:<provider>:<provider_order_id>`
+  - Note: the existing `uq_credit_ledger_refund_reason` (`(user_id, reason) WHERE reason LIKE 'refund:%'`) **also** matches `refund:billing:%` rows. This is harmless and intentional — it is strictly weaker than the new `(reason)`-only billing index, and billing reasons embed globally-unique ids. Do not "fix" the overlap.
+
+#### Downstream Constraints
+
+- Frontend renames `StripeCreditPack`→`BillingCreditPack`, adds `checkout_ref` to `CheckoutResponse`, polls by `checkout_ref`, renders `billing_debt_credits` as debt (never usable balance), and removes visible Stripe copy.
+- `worker.py` must keep importing `github_job` by name (the GitHub jobs are unchanged); it additionally imports `billing_job` and registers the three billing jobs/crons.
+- Docs (RUNBOOK, release gate, smoke checklist, local handbook, observability) updated in T-307.
+
+---
+
+### 25.5 Task Breakdown (A→D, dependency-ordered)
+
+> The DAG is strict: **Group A (foundation) must fully land before Group C (money paths)**. Building a money path on a half-migrated CreditService is the worst failure mode for this phase. Each task's Definition of Done maps to the named `HANDOFF.md` Test Plan items called out in its notes.
+
+| Group | Task | Description | Priority | Depends on |
+|---|---|---|---|---|
+| **A** | T-290 | Migration `0018_billing_neutral_tables.py` — 6 neutral tables + ledger reason indexes + idempotent Stripe→neutral backfill | Critical | — |
+| **A** | T-291 | ORM models + `schemas/billing.py` rework for the 6 tables (Stripe models retained) | Critical | T-290 |
+| **A** | T-292 | Config — `LEMONSQUEEZY_*` settings, derived props, production guard; scope the Stripe guard | Critical | — |
+| **A** | T-293 | Refactor `services.queue` → generic `make_job_wrapper`; `github_job`/`billing_job` thin configs; `billing:deadletter` | Critical | — |
+| **A** | T-294 | `CreditService` onto `BillingCreditPack` (track `credits_consumed`/`credits_expired`) + billing grant helper with debt recovery | Critical | T-291 |
+| **B** | T-295 | `LemonSqueezyService.create_checkout` (`httpx`, JSON:API, bounded timeouts, ≤2 retries) | High | T-292 |
+| **B** | T-296 | Billing API: `/package`, `/checkout` (attempt-first), `/status` (`checkout_ref`+grace), `/history` + schemas | High | T-291, T-295 |
+| **B** | T-297 | `POST /billing/webhook` ingestion — HMAC, guards, sanitise→inbox→enqueue-by-id | Critical | T-291, T-293 |
+| **B** | T-298 | `billing_process_webhook` worker job + `billing_process_pending_webhooks` (60s) + worker registration | Critical | T-293, T-297 |
+| **C** | T-299 | `order_created` processing — validation checklist + grant helper + idempotency | Critical | T-294, T-298 |
+| **C** | T-300 | `order_refunded`/fraud/debt — normalisation math + proportional revoke + debt + status transitions | Critical | T-294, T-298 |
+| **C** | T-301 | `billing_reconcile` cron — cursor lock + 3 lanes + no-auto-grant rule | Critical | T-299, T-300 |
+| **C** | T-302 | Admin billing correction service + `POST /billing/admin/correction` | High | T-294 |
+| **D** | T-303 | Stripe cutover — disable new checkout; late-Stripe webhook compat into `billing_*` via same helpers | High | T-299, T-300 |
+| **D** | T-304 | Observability — provider-labelled metrics, structlog schema, redaction, Grafana alerts | High | T-297–T-301 |
+| **D** | T-305 | Frontend — `BillingCreditPack` rename, `checkout_ref` polling, debt display, remove Stripe copy | Medium | T-296 |
+| **D** | T-306 | Tests + harness contract `test_phase25_lemonsqueezy_billing_contract.py` | High | all above |
+| **D** | T-307 | Docs + production release gate + RUNBOOK billing ops | Medium | all above |
+
+---
+
+### 25.6 Implementation Detail
+
+#### T-290 — Migration `0018_billing_neutral_tables.py` (after `0017`)
+
+Create six tables. Money columns are `INTEGER` cents; all timestamps `TIMESTAMPTZ`. The `provider` CHECK on every table **must allow `'stripe'`** (the backfill inserts `provider='stripe'` rows) — **except** `billing_reconciliation_cursors`, which is `lemonsqueezy`-only.
+
+```sql
+CREATE TABLE billing_checkout_attempts (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    checkout_ref TEXT NOT NULL UNIQUE,
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    provider TEXT NOT NULL CHECK (provider IN ('lemonsqueezy','stripe')),
+    provider_checkout_id TEXT NULL,
+    checkout_nonce_hash TEXT NOT NULL,
+    credits INTEGER NOT NULL CHECK (credits > 0),
+    price_cents INTEGER NOT NULL CHECK (price_cents > 0),
+    currency TEXT NOT NULL,
+    validity_days INTEGER NOT NULL CHECK (validity_days > 0),
+    status TEXT NOT NULL DEFAULT 'created'
+        CHECK (status IN ('created','provider_created','completed','expired','failed')),
+    provider_order_id TEXT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    expires_at TIMESTAMPTZ NOT NULL,
+    completed_at TIMESTAMPTZ NULL,
+    success_redirect_seen_at TIMESTAMPTZ NULL
+);
+CREATE INDEX ix_billing_checkout_attempts_user_created
+    ON billing_checkout_attempts(user_id, created_at DESC);
+CREATE UNIQUE INDEX uq_billing_checkout_attempts_provider_checkout
+    ON billing_checkout_attempts(provider, provider_checkout_id)
+    WHERE provider_checkout_id IS NOT NULL;
+
+CREATE TABLE billing_credit_packs (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    provider TEXT NOT NULL CHECK (provider IN ('lemonsqueezy','stripe')),
+    provider_checkout_id TEXT NULL,
+    provider_order_id TEXT NULL,
+    provider_customer_id TEXT NULL,
+    provider_variant_id TEXT NULL,
+    credits_purchased INTEGER NOT NULL CHECK (credits_purchased > 0),
+    credits_remaining INTEGER NOT NULL CHECK (credits_remaining >= 0),
+    credits_consumed INTEGER NOT NULL DEFAULT 0 CHECK (credits_consumed >= 0),
+    credits_expired INTEGER NOT NULL DEFAULT 0 CHECK (credits_expired >= 0),
+    credits_debt_recovered INTEGER NOT NULL DEFAULT 0 CHECK (credits_debt_recovered >= 0),
+    credits_revoked INTEGER NOT NULL DEFAULT 0 CHECK (credits_revoked >= 0),
+    price_cents INTEGER NOT NULL CHECK (price_cents > 0),
+    currency TEXT NOT NULL,
+    paid_item_amount_cents INTEGER NOT NULL CHECK (paid_item_amount_cents > 0),
+    provider_order_total_cents INTEGER NULL
+        CHECK (provider_order_total_cents IS NULL OR provider_order_total_cents >= 0),
+    provider_refunded_total_cents_seen INTEGER NOT NULL DEFAULT 0
+        CHECK (provider_refunded_total_cents_seen >= 0),
+    refunded_item_amount_cents_processed INTEGER NOT NULL DEFAULT 0
+        CHECK (refunded_item_amount_cents_processed >= 0),
+    status TEXT NOT NULL DEFAULT 'active'
+        CHECK (status IN ('active','consumed','expired','refunded','disputed')),
+    purchased_at TIMESTAMPTZ NOT NULL,
+    expires_at TIMESTAMPTZ NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT ck_bcp_remaining_leq_purchased CHECK (credits_remaining <= credits_purchased),
+    CONSTRAINT ck_bcp_accounting_sum CHECK
+        (credits_remaining + credits_consumed + credits_expired + credits_debt_recovered <= credits_purchased),
+    CONSTRAINT ck_bcp_refunded_item_leq_paid CHECK
+        (refunded_item_amount_cents_processed <= paid_item_amount_cents),
+    CONSTRAINT ck_bcp_refunded_total_leq_order CHECK
+        (provider_order_total_cents IS NULL OR provider_refunded_total_cents_seen <= provider_order_total_cents),
+    CONSTRAINT ck_bcp_revoked_leq_purchased CHECK (credits_revoked <= credits_purchased)
+);
+CREATE UNIQUE INDEX uq_billing_credit_packs_provider_order
+    ON billing_credit_packs(provider, provider_order_id) WHERE provider_order_id IS NOT NULL;
+CREATE UNIQUE INDEX uq_billing_credit_packs_provider_checkout
+    ON billing_credit_packs(provider, provider_checkout_id) WHERE provider_checkout_id IS NOT NULL;
+CREATE INDEX ix_billing_credit_packs_user_active
+    ON billing_credit_packs(user_id, expires_at) WHERE status = 'active';
+CREATE INDEX ix_billing_credit_packs_user_history
+    ON billing_credit_packs(user_id, purchased_at DESC);
+
+CREATE TABLE billing_credit_debts (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    source_pack_id UUID NOT NULL REFERENCES billing_credit_packs(id) ON DELETE RESTRICT,
+    provider TEXT NOT NULL CHECK (provider IN ('lemonsqueezy','stripe')),
+    provider_order_id TEXT NULL,
+    credits_owed INTEGER NOT NULL CHECK (credits_owed > 0),
+    credits_recovered INTEGER NOT NULL DEFAULT 0 CHECK (credits_recovered >= 0),
+    status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','recovered')),
+    reason TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT ck_bcd_recovered_leq_owed CHECK (credits_recovered <= credits_owed)
+);
+CREATE UNIQUE INDEX uq_billing_credit_debts_source_pack ON billing_credit_debts(source_pack_id);
+CREATE INDEX ix_billing_credit_debts_user_pending
+    ON billing_credit_debts(user_id, created_at) WHERE status = 'pending';
+
+CREATE TABLE billing_admin_corrections (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    admin_user_id UUID NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+    target_user_id UUID NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+    billing_credit_pack_id UUID NULL REFERENCES billing_credit_packs(id) ON DELETE RESTRICT,
+    provider TEXT NOT NULL CHECK (provider IN ('lemonsqueezy','stripe')),
+    provider_order_id TEXT NOT NULL,
+    credits INTEGER NOT NULL CHECK (credits > 0),
+    price_cents INTEGER NOT NULL CHECK (price_cents > 0),
+    currency TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    evidence_url TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX uq_billing_admin_corrections_provider_order
+    ON billing_admin_corrections(provider, provider_order_id);
+-- Append-only: do not add UPDATE/DELETE application paths.
+
+CREATE TABLE billing_webhook_events (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    provider TEXT NOT NULL CHECK (provider IN ('lemonsqueezy','stripe')),
+    event_name TEXT NOT NULL,
+    provider_object_type TEXT NOT NULL,
+    provider_object_id TEXT NOT NULL,
+    payload_hash TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'received'
+        CHECK (status IN ('received','processing','processed','failed')),
+    retry_count INTEGER NOT NULL DEFAULT 0 CHECK (retry_count >= 0),
+    last_error TEXT NULL,
+    normalized_payload JSONB NOT NULL,
+    received_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    processed_at TIMESTAMPTZ NULL
+);
+CREATE UNIQUE INDEX uq_billing_webhook_events_identity
+    ON billing_webhook_events(provider, event_name, provider_object_id, payload_hash);
+CREATE INDEX ix_billing_webhook_events_pending
+    ON billing_webhook_events(status, received_at)
+    WHERE status IN ('received','failed','processing');
+
+CREATE TABLE billing_reconciliation_cursors (
+    provider TEXT PRIMARY KEY CHECK (provider IN ('lemonsqueezy')),
+    last_successful_run_at TIMESTAMPTZ NOT NULL DEFAULT '1970-01-01 00:00:00+00',
+    last_run_started_at TIMESTAMPTZ NULL,
+    last_run_completed_at TIMESTAMPTZ NULL,
+    last_error TEXT NULL,
+    state JSONB NOT NULL DEFAULT '{}'::jsonb,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+INSERT INTO billing_reconciliation_cursors(provider) VALUES ('lemonsqueezy')
+    ON CONFLICT (provider) DO NOTHING;
+```
+
+**Ledger reason indexes** (second idempotency barrier — preserve the existing one):
+
+```sql
+CREATE UNIQUE INDEX uq_credit_ledger_billing_purchase_reason
+    ON credit_ledger(reason) WHERE reason LIKE 'billing_purchase:%';
+CREATE UNIQUE INDEX uq_credit_ledger_billing_reversal_reason
+    ON credit_ledger(reason)
+    WHERE reason LIKE 'refund:billing:%' OR reason LIKE 'debt_recovery:billing:%';
+CREATE UNIQUE INDEX uq_credit_ledger_admin_billing_correction_reason
+    ON credit_ledger(reason) WHERE reason LIKE 'admin_billing_correction:%';
+```
+
+**Backfill (idempotent, same migration).** Insert every `stripe_credit_packs` row into `billing_credit_packs`. Use `INSERT … SELECT … ON CONFLICT (provider, provider_checkout_id) WHERE provider_checkout_id IS NOT NULL DO NOTHING` so a partially-applied migration is re-runnable. Mapping (HANDOFF §Data Model And Migration):
+
+- `provider='stripe'`; `currency='USD'`; `provider_checkout_id=stripe_session_id`; `provider_order_id=stripe_payment_intent_id`.
+- `credits_consumed = (credits_purchased - credits_remaining)` when old status ∈ {`active`,`consumed`} else `0`.
+- `credits_expired = (credits_purchased - credits_remaining)` when old status = `expired` else `0` (audit approximation — old rows did not distinguish partially-consumed-then-expired).
+- `credits_debt_recovered = 0`; `credits_revoked = 0` for **every** backfilled row, **including** old `disputed` rows.
+- `paid_item_amount_cents = price_cents`; `provider_order_total_cents = price_cents`.
+- `provider_refunded_total_cents_seen = price_cents` and `refunded_item_amount_cents_processed = price_cents` **only** when old status = `disputed`, else `0`.
+- Preserve `credits_purchased`, `credits_remaining`, `price_cents`, `status`, `purchased_at`, `expires_at`, `created_at` (old `disputed`/`active`/`consumed`/`expired` statuses are all valid in the new CHECK).
+- **Do not** modify `users.credit_balance`. **Do not** infer historical Stripe dispute revoke amounts from `credits_remaining` (current Stripe dispute handling zeroes `credits_remaining` even when the effective revoke was smaller). Historical Stripe dispute audit stays in the Stripe tables + `stripe_dispute:*` ledger rows; neutral `credits_revoked` is authoritative only for reversals processed **after** this migration.
+
+Rollback: drop the six tables (reverse FK order: debts/corrections/packs before users-referencing) and the three ledger indexes. **Keep** the Stripe tables.
+
+**Account-deletion interaction (intentional).** `billing_credit_debts.source_pack_id` (→ packs) and `billing_admin_corrections.{admin_user_id,target_user_id}` (→ users) are `ON DELETE RESTRICT`, while `billing_credit_packs.user_id` is `CASCADE`. A user with an outstanding debt or any admin-correction row therefore **cannot** be hard-deleted until billing is settled — this is deliberate (money/audit integrity). The account-deletion path (existing/future) must run a **pre-delete settlement step**: close/forgive pending `billing_credit_debts` for the user (writing a terminal audit reason) before the user row is removed; admin-correction rows are append-only audit and are retained (anonymise the user reference at the application layer rather than deleting). Document this in `RUNBOOK.md` (T-307).
+
+**Retention.** `billing_webhook_events` and terminal `billing_checkout_attempts` are bounded by the daily `purge_billing_events` job (T-298), mirroring `github_webhook_events` — they are not pruned by this migration.
+
+**DoD → HANDOFF tests:** "Stripe pack backfill preserves `users.credit_balance`"; "Backfilled disputed packs set `credits_revoked=0` and do not infer revoke from `credits_remaining`"; "Backfilled packs drain FIFO and increment `credits_consumed`".
+
+#### T-291 — ORM Models + Schemas
+
+`backend/models/`: `billing_checkout_attempt.py`, `billing_credit_pack.py`, `billing_credit_debt.py`, `billing_admin_correction.py`, `billing_webhook_event.py`, `billing_reconciliation_cursor.py`, mirroring the DDL (same CHECKs at app level for defence-in-depth, matching the existing `StripeCreditPack` style). Register in `models/__init__.py`. Keep `StripeCreditPack`/`StripeWebhookEvent`. Rework `schemas/billing.py`: `PackageResponse` (+`currency`), `CheckoutResponse` (+`checkout_ref`), `BillingStatusResponse`, `PackHistoryItem` renamed/sourced from `BillingCreditPack`, plus an `AdminCorrectionRequest`.
+
+#### T-292 — Config & Production Guard
+
+Add to `Settings` (defaults shown; superseding the §7 Stripe block):
+
+```python
+lemonsqueezy_api_key: str = ""
+lemonsqueezy_webhook_secret: str = ""
+lemonsqueezy_webhook_secret_prev: str = ""
+lemonsqueezy_store_id: str = ""
+lemonsqueezy_variant_id: str = ""
+lemonsqueezy_price_cents: int = 900
+lemonsqueezy_currency: str = "USD"
+lemonsqueezy_credits_per_purchase: int = 200
+lemonsqueezy_credit_validity_days: int = 30
+lemonsqueezy_success_url: str = ""
+lemonsqueezy_test_mode: bool = True
+lemonsqueezy_checkout_ttl_minutes: int = 30
+lemonsqueezy_api_base: str = "https://api.lemonsqueezy.com"
+lemonsqueezy_reconcile_max_calls_per_run: int = 200   # bounds reconcile lane-2 (T-301)
+admin_user_emails: str = ""   # comma-separated allowlist authorising billing admin corrections
+```
+
+Derived: `lemonsqueezy_enabled` (api key + store id + variant id all set); `lemonsqueezy_webhook_secrets` → tuple of current then previous, non-empty only; `admin_emails` → parsed lower-cased set from `admin_user_emails` (empty set when unset). A `require_admin` FastAPI dependency (T-302) authorises the admin-correction endpoint by membership in `admin_emails`; an **empty** allowlist denies everyone (the endpoint 403s), so the support path is closed by default and there is no implicit admin. In `validate_production_settings()`: when `lemonsqueezy_enabled` and `environment=="production"`, require api key, webhook secret, store id, variant id, HTTPS `lemonsqueezy_success_url`, positive price/credits/validity, non-empty currency, and `lemonsqueezy_test_mode is False` — accumulate-then-raise like existing checks. **Scope the existing Stripe `sk_test_*` guard** so it only fires when Stripe checkout is still enabled (the grace path); a stale `STRIPE_SECRET_KEY=sk_test_*` must not fail startup once Stripe checkout is disabled. When Lemon is **not** enabled, `/billing/checkout` returns 503 but `/billing/package` still works. Do **not** add a `lemonsqueezy_cancel_url`.
+
+**DoD → HANDOFF tests:** "Production config has no `lemonsqueezy_cancel_url` requirement"; "Production config rejects invalid Lemon setup and ignores stale Stripe test key when Stripe is disabled".
+
+#### T-293 — Generic Queue Wrapper (refactor `services/queue.py`)
+
+Parameterise the existing `github_job` into a generic factory **without changing GitHub behaviour**. The trap: `github_job` catches `GitHubThrottledError` *before* the dead-letter path and requeues off the try budget — a naive `github_job = generic(fn)` would dead-letter throttles. Pass the special-exception handler explicitly:
+
+```python
+def make_job_wrapper(*, retries_metric, deadletter_metric, dead_letter_key,
+                     special_handlers=None):  # special_handlers: {ExcType: async handler}
+    def decorator(name):
+        def wrap(fn):
+            @functools.wraps(fn)
+            async def wrapper(ctx, *args, **kwargs):
+                job_try = int(ctx.get("job_try", 1) or 1)
+                try:
+                    return await fn(ctx, *args, **kwargs)
+                except Retry:
+                    raise
+                except tuple(special_handlers or {}) as exc:        # e.g. throttle
+                    await special_handlers[type(exc)](ctx, name, args, kwargs, exc)
+                    return None
+                except Exception as exc:
+                    error = type(exc).__name__
+                    if job_try >= JOB_MAX_TRIES:
+                        deadletter_metric.labels(job=name).inc()
+                        await record_dead_letter(ctx["redis"], job=name,
+                            job_id=ctx.get("job_id"), args=args, error=error,
+                            dead_letter_key=dead_letter_key)
+                        return None
+                    retries_metric.labels(job=name).inc()
+                    raise Retry(defer=_retry_backoff_seconds(job_try)) from exc
+            return wrapper
+        return decorator
+    return decorator  # callable: wrapper(name) -> decorator
+
+github_job = make_job_wrapper(
+    retries_metric=GITHUB_JOB_RETRIES_TOTAL, deadletter_metric=GITHUB_JOB_DEADLETTERED_TOTAL,
+    dead_letter_key="gh:deadletter", special_handlers={GitHubThrottledError: _requeue_throttled})
+billing_job = make_job_wrapper(
+    retries_metric=BILLING_JOB_RETRIES_TOTAL, deadletter_metric=BILLING_JOB_DEADLETTERED_TOTAL,
+    dead_letter_key="billing:deadletter", special_handlers=None)
+```
+
+`record_dead_letter` gains a `dead_letter_key` param (GitHub passes `"gh:deadletter"`). `_requeue_throttled`'s signature is adapted to `(ctx, name, args, kwargs, exc)`. New metrics `BILLING_JOB_RETRIES_TOTAL`/`BILLING_JOB_DEADLETTERED_TOTAL` (`{job}`) in observability. **`worker.py` keeps importing `github_job` by name.** Same `JOB_MAX_TRIES`, backoff, and jitter.
+
+**DoD (regression):** a test asserts GitHub still **requeues-not-deadletters** on `GitHubThrottledError` and still writes to `gh:deadletter`; a billing job dead-letters to `billing:deadletter` after `JOB_MAX_TRIES`.
+
+#### T-294 — CreditService onto `BillingCreditPack` + Grant Helper
+
+In `services/credit_service.py`, replace the `StripeCreditPack` import/queries with `BillingCreditPack`:
+
+- `_expire_user_packs()` — same lock order (user row first), query `BillingCreditPack` active+`expires_at<=now`; before zeroing, **increment `credits_expired` by the pack's previous `credits_remaining`**, then set `credits_remaining=0`, `status='expired'`. Keep `BILLING_CREDITS_EXPIRED`.
+- `_drain_packs()` — FIFO `expires_at ASC`; **increment `credits_consumed` by the drained amount**; set `status='consumed'` at zero.
+- New `grant_credits_with_debt_recovery(db, *, user_id, pack, granted_credits, ledger_reason)`:
+  1. Lock pending `billing_credit_debts` for the user oldest-first (`created_at ASC`, `FOR UPDATE`).
+  2. For each debt while grant remains: `take = min(grant_left, owed - recovered)`; `pack.credits_remaining -= take`; `pack.credits_debt_recovered += take`; `debt.credits_recovered += take`; write a **zero-amount** `CreditLedger` reason `debt_recovery:billing:<debt_id>:<pack_id>`; mark debt `recovered` when fully repaid; emit `BILLING_CREDIT_DEBT_RECOVERED`.
+  3. `surplus = granted_credits - total_recovered`; `user.credit_balance += surplus`; write one `CreditLedger` amount `surplus` (including `0`) reason `ledger_reason` (the purchase/correction reason). 
+  4. Flush; rely on the SAVEPOINT/`IntegrityError` pattern (as in `refund()`) for the ledger-reason uniqueness barrier.
+
+Every positive grant path (purchase, admin correction) calls this helper; ad-hoc `credit()` for signup/system grants is unchanged. Post-commit, call `credit_service.invalidate(user_id)`.
+
+**DoD → HANDOFF tests:** "Future credit grants recover pending billing debt before increasing usable `credit_balance`"; "Refund after credits expired unused does not create debt for the expired value" (the expiry side); lazy-expiry increments `credits_expired`; FIFO drain increments `credits_consumed`.
+
+#### T-295 — LemonSqueezyService (checkout creation)
+
+`backend/services/lemonsqueezy_service.py`, using `httpx.AsyncClient` (connect 10s / read 30s / write 10s / pool 5s; bounded `httpx.Limits`). Headers: `Accept`/`Content-Type: application/vnd.api+json`, `Authorization: Bearer {api_key}`. `POST {settings.lemonsqueezy_api_base}/v1/checkouts` with attributes `custom_price=attempt.price_cents`, `test_mode`, `expires_at=attempt.expires_at`, `product_options.enabled_variants=[variant_id]`, `product_options.redirect_url="{success_url}?checkout_ref={checkout_ref}"`, `checkout_options.discount=false`, `checkout_data.email=user.email` (UX only), and `checkout_data.custom` = `{user_id, checkout_ref, checkout_nonce (raw), environment, credits, price_cents, currency}`; relationships `store={store_id}`, `variant={variant_id}`. Retry ≤2 on network/429/5xx with exponential backoff + jitter; never retry 4xx validation/auth. On exhaustion → raise so the caller marks the attempt `failed` and returns 502. Returns `(provider_checkout_id, checkout_url)`. Also expose `get_order(provider_order_id)` (`GET /v1/orders/{id}`, same client/timeouts/headers) used by reconcile lane 2 (T-301) — it normalises status + refund totals and **surfaces `429`/`Retry-After`** to the caller so the lane can back off; it must never be used to *discover* or prove an order, only to re-read one SpecForge already has by id.
+
+**DoD → HANDOFF tests:** exact JSON:API headers/relationships/custom price/enabled variant/discount-off/redirect/custom data/expiry; retries only transient; marks attempt failed after exhaustion.
+
+#### T-296 — Billing API (`routers/billing.py` rewrite)
+
+- `GET /package` → config values incl. `currency`.
+- `POST /checkout` (5/user/hour, auth, CSRF): generate a **high-entropy random** `checkout_ref` (≥128 bits, URL-safe, non-sequential — e.g. `secrets.token_urlsafe(32)`) and a **separate** high-entropy `checkout_nonce`; store only `sha256(checkout_nonce)`. `checkout_ref` is not a secret (it rides in the redirect URL) but must not be guessable/enumerable so it leaks no purchase-volume signal and cannot be probed against the user-scoped `/status` lookup. **Commit** `billing_checkout_attempts(status='created', provider='lemonsqueezy', expires_at=now+lemonsqueezy_checkout_ttl_minutes)` *before* calling Lemon, **snapshotting the economics at creation** — `credits=lemonsqueezy_credits_per_purchase`, `price_cents=lemonsqueezy_price_cents`, `currency=lemonsqueezy_currency`, `validity_days=lemonsqueezy_credit_validity_days` — so the later grant is anchored to what was offered (DC6). Call `LemonSqueezyService` (passing `attempt.price_cents` as `custom_price` and the raw nonce as custom data). **Update + commit** attempt `status='provider_created'`, `provider_checkout_id`. Only **after** that commit return `{checkout_url, checkout_ref}`. If Lemon succeeds but the provider-created commit fails → return safe 502, never expose the URL, emit `billing.checkout.orphaned` operator alert. If Lemon fails → mark attempt `failed`, 502.
+- `GET /status?checkout_ref=…` (auth): single query filtering `checkout_ref` **and** `user_id`. During the grace window only, also accept `session_id` (maps to a Stripe attempt/pack). When polling by `checkout_ref` and the attempt is the user's, set `success_redirect_seen_at` if null (telemetry only). Return 200 only when the attempt is `completed` and the pack exists; else 404.
+- `GET /history` → `billing_credit_packs` for the user, 50 newest-first.
+
+**DoD → HANDOFF tests:** "`/billing/status` filters by `checkout_ref` and `user_id` in one query"; "Legacy `session_id` polling works only during the grace path".
+
+#### T-297 — Webhook Ingestion `POST /billing/webhook`
+
+Exempt from CSRF + rate limit (already listed in middleware; keep). Steps:
+1. `raw = await request.body()` **before** any parse.
+2. Verify `X-Signature` = HMAC-SHA256(raw, secret) for **each** secret in `lemonsqueezy_webhook_secrets`, constant-time (`hmac.compare_digest`). None match → 400. Missing/malformed header → 400.
+3. Parse JSON. Require `X-Event-Name == payload.meta.event_name` and `data.type == "orders"` for `order_created`/`order_refunded`. Reject test/live mismatch (`test_mode` vs `lemonsqueezy_test_mode`) → 400.
+4. For `order_created`: require `meta.custom_data.checkout_nonce`; compute `checkout_nonce_hash_from_webhook = sha256(nonce)`; **drop the raw nonce** before building `normalized_payload`. For `order_refunded`: compute the hash only if the nonce is present; do **not** reject a signed refund solely for missing custom data.
+5. Build the sanitised `normalized_payload` (allow-list below), compute `payload_hash` over it, and **commit** a `billing_webhook_events` row (`provider='lemonsqueezy'`, `provider_object_type='orders'`, `provider_object_id=order_id`, `status='received'`). Duplicate `(provider,event_name,provider_object_id,payload_hash)` → `IntegrityError` in a SAVEPOINT → emit `BILLING_WEBHOOK_DUPLICATE`, return 200.
+6. `enqueue("billing_process_webhook", str(row.id), job_id=f"billing_wh:{row.id}")`. If enqueue raises → still return 200 (the 60s sweep recovers). Never pass raw bytes through arq.
+
+**`normalized_payload` allow-list (store ONLY these):** event name; object id; store id; customer id; variant/order-item ids; order status; currency; `first_order_item.price` as `item_price_cents`; order subtotal as `order_subtotal_cents`; discount total; refunded amount; created/updated timestamps; custom `user_id`; custom `checkout_ref`; custom `checkout_nonce_hash_from_webhook` (when present); custom `environment`; custom `credits`; custom `price_cents`; custom `currency`.
+
+**`normalized_payload` exclusions (NEVER store):** customer email; customer name; receipt URLs; full checkout URL; signature; API key; raw `meta.custom_data.checkout_nonce`; every unrecognised custom-data field. Redaction is the fallback only for logs/errors generated before sanitised persistence.
+
+**DoD → HANDOFF tests:** valid HMAC passes / missing-malformed-wrong-secret-mutated fail; current+previous secret both accepted; header event name must match `meta.event_name`; computes hash for `order_created`, only-when-present for `order_refunded`, never stores raw nonce.
+
+#### T-298 — Webhook Worker Job + Pending Sweep
+
+`services/billing_worker.py` (or `services/billing/processing.py`):
+
+- `@billing_job("billing_process_webhook")` `async def billing_process_webhook(ctx, webhook_event_id)`:
+  - `SELECT … FOR UPDATE` the row. If `status=='processed'` → return (no side effects). The `FOR UPDATE` serialises the wrapper-retry and the sweep against each other so only one runner ever mutates a given row.
+  - Set `status='processing'`, **commit** (so the claim and the 5-minute reclaim clock are durable), then process by `event_name` (T-299/T-300) in its own transaction. On success → `status='processed'`, `processed_at=now`, commit.
+  - On failure: **roll back the side-effect transaction, then in a separate, fresh transaction** persist `status='failed'`, `retry_count += 1`, `last_error`, and **commit that** — the failed-state write must not share the rolled-back transaction or the status is lost. Only then **raise**, so the `billing_job` wrapper schedules an arq `Retry` to the cap (then dead-letters to `billing:deadletter`).
+- **Single re-driver identity.** Both the wrapper's arq `Retry` and the pending-sweep re-enqueue use the **same deterministic** `job_id=f"billing_wh:{row_id}"` (matching ingestion). arq dedups on that id, so an in-flight/deferred retry and a sweep enqueue can never become two concurrent jobs for one row; whichever lands first runs, the other is dropped. (With `keep_result=0` the id frees on completion, so a genuinely-needed re-drive still enqueues.)
+- `async def billing_process_pending_webhooks(ctx)` — **not** wrapped in `billing_job` (a missed tick is harmless; next tick retries; catch+log like `purge_webhook_events`). It must:
+  - select `received` rows and retryable `failed` rows whose backoff (`retry_count`-based) has elapsed;
+  - **reclaim `processing` rows older than 5 minutes** by moving them to `failed` and incrementing `retry_count` (covers a worker that crashed mid-process);
+  - enqueue `billing_process_webhook(str(row_id))` **with `job_id=f"billing_wh:{row_id}"`** (row id only as the arg; never raw bytes);
+  - use `FOR UPDATE SKIP LOCKED` and a bounded batch;
+  - never fetch from Lemon, never replace reconciliation.
+- `async def purge_billing_events(ctx)` — daily retention (mirrors `purge_webhook_events`): delete `billing_webhook_events` in terminal `processed` state older than the retention window (e.g. 30 days) and `billing_checkout_attempts` in terminal `expired`/`failed`/`completed` state older than the window. Bounded batch; best-effort (catch+log).
+
+**Worker isolation (money-path bulkhead).** By default, billing jobs run on the **existing shared `arq` worker / default queue** so the system works out-of-the-box (do **not** route them to a queue no worker consumes — that would silently never run them). The starvation risk is real but bounded at V1 scale: a burst of long GitHub exports (`job_timeout=1800`, `_MAX_JOBS=20`) can delay short credit-grant jobs. Provide a **documented, opt-in scale-out** for when billing throughput needs isolation: a dedicated `queue_name="billing"` consumed by a **separate `BillingWorkerSettings` worker process** added to the `Procfile` and `docker-compose.yml` (mirroring the existing `worker` service), with the T-297/T-301 enqueue calls routed to that queue via `_queue_name` only when the dedicated worker is deployed. The `webhook_pending_age_seconds` alert (T-304) is the trigger to turn it on. Document both modes in `RUNBOOK.md` (T-307). The 60s pending-sweep is the safety net regardless of which mode is active.
+
+Register in `worker.py`: add `billing_process_webhook` to `functions`; add `cron(billing_process_pending_webhooks, second={0})` (every 60s), `cron(billing_reconcile, minute={7,22,37,52})` (every 15m, **staggered off** the GitHub `reconcile_drift` `{0,15,30,45}` ticks and the `{17}`-minute purge to avoid load spikes), and `cron(purge_billing_events, hour={3}, minute={42})` to `cron_jobs`. Import `billing_job` alongside `github_job`.
+
+**DoD → HANDOFF tests:** "Queue outage after inbox insert is recovered by `billing_process_pending_webhooks` within 60s"; "Stale `processing` rows older than 5 minutes are reclaimed"; a wrapper-retry and a sweep enqueue for the same row produce **one** processing run (dedup); a forced side-effect failure leaves the row durably `failed` with `retry_count` advanced (failed-state survives the rollback).
+
+#### T-299 — `order_created` Processing
+
+Grant credits only when **all** of the following hold (verbatim checklist — the harness asserts each negative):
+
+- local checkout attempt exists by `checkout_ref`;
+- attempt belongs to sanitised custom `user_id`;
+- sanitised `checkout_nonce_hash_from_webhook` equals the attempt's stored `checkout_nonce_hash`;
+- attempt status ∈ {`created`, `provider_created`, `completed`};
+- the Lemon order payload is **not** required to contain a checkout id; do **not** infer checkout id from the order identifier, receipt URLs, relationships, or order number; ownership is proven **only** by `checkout_ref` + nonce hash;
+- Lemon store id == `LEMONSQUEEZY_STORE_ID`;
+- Lemon variant/order-item includes `LEMONSQUEEZY_VARIANT_ID`;
+- Lemon `test_mode` == `LEMONSQUEEZY_TEST_MODE`;
+- order status is exactly `paid`;
+- currency matches the **checkout attempt's snapshotted `currency`** case-insensitively;
+- discount total is zero;
+- sanitised `item_price_cents` == the **checkout attempt's snapshotted `price_cents`** (validate the **item price**, never the order total/subtotal — Lemon may add tax).
+
+> **Anchor to the attempt snapshot, not live config (refines HANDOFF).** `billing_checkout_attempts` snapshots `price_cents`/`credits`/`currency`/`validity_days` at checkout creation — these columns exist so a purchase is honoured at the price the user was actually offered. Validating and granting from those snapshot values (the price Lemon was told to charge via `custom_price`) rather than re-reading `LEMONSQUEEZY_*` config makes an in-flight checkout immune to a config change between creation and the webhook. (The HANDOFF text checks against config; this is a deliberate, safer refinement. `LEMONSQUEEZY_*` config remains the default for *new* attempts and the production-guard surface.)
+
+Then, in **one transaction**: lock the user row; lock the checkout attempt row; if a `BillingCreditPack` already exists for `(provider, provider_order_id)` or `(provider, provider_checkout_id)` → mark the webhook row processed and return (no second grant). Else create the `BillingCreditPack` from the **attempt snapshot**: `credits_purchased = credits_remaining = attempt.credits` (the grant helper then decrements `credits_remaining` for any debt repayment), `paid_item_amount_cents = attempt.price_cents`, `currency = attempt.currency`, `purchased_at` = Lemon order `created_at`, `expires_at = purchased_at + attempt.validity_days`, `provider_order_total_cents` = Lemon order total, and the provider order/customer/variant/checkout ids (copy `provider_checkout_id` from the attempt). Call `grant_credits_with_debt_recovery(..., ledger_reason=f"billing_purchase:lemonsqueezy:{order_id}")` so pending debts are repaid before any surplus becomes usable. Mark the attempt `completed`; mark the webhook row `processed`. On any uniqueness conflict, roll back the side-effect transaction, reload the existing pack, mark the webhook row processed, write no second ledger row. After commit, call the public post-commit credit-cache invalidation. Emit `BILLING_CHECKOUT_COMPLETED`/`BILLING_CREDITS_GRANTED` with `provider="lemonsqueezy"`.
+
+**DoD → HANDOFF tests:** grants when payload has no checkout id but ref+nonce match; does not infer checkout id; rejects wrong store/variant/currency/price/discount/test-mode/unpaid/failed/pending/refunded/partial_refund/fraudulent; duplicate `order_created` and duplicate inbox rows do not double-credit; duplicate with a different `payload_hash` still does not double-credit (provider-order + ledger uniqueness win); forged `user_id` without matching nonce grants nothing.
+
+#### T-300 — `order_refunded` / Fraud / Debt
+
+`order_refunded` covers full and partial; treat Lemon `fraudulent`, `refunded`, `partial_refund` as revocation inputs (webhook **and** reconciliation). Find the pack by `(provider='lemonsqueezy', provider_order_id=order_id)`.
+
+If no pack exists: (a) valid `checkout_ref`+nonce proof for one of our attempts → keep the row `failed` with retryable reason `pack_not_yet_granted` so a delayed `order_created` runs first; (b) matching attempt expired and still no pack after 24h of retries → mark `processed` with a sanitised audit note, no balance change; (c) no ownership proof → mark `processed` after a sanitised "could not link to SpecForge" audit note; never revoke unrelated credits.
+
+**Normalise refund money (verbatim):**
+- `paid_item_cents = pack.paid_item_amount_cents`.
+- `provider_total_cents = max(pack.provider_order_total_cents, paid_item_cents)` when a total exists, else `paid_item_cents`.
+- `provider_refunded_total_cents = clamp(lemon_refunded_amount_cents, 0, provider_total_cents)`.
+- full refund / fraudulent / `provider_refunded_total_cents >= provider_total_cents` → `new_refunded_item_cents = paid_item_cents`.
+- else `new_refunded_item_cents = floor(paid_item_cents * provider_refunded_total_cents / provider_total_cents)` (avoids over-revoking on tax-inclusive refunds).
+
+**Refund credit math (verbatim):**
+- `old_refunded_item_cents = pack.refunded_item_amount_cents_processed`.
+- if `new_refunded_item_cents <= old_refunded_item_cents` → set `provider_refunded_total_cents_seen = max(existing, provider_refunded_total_cents)`, mark processed, no balance change.
+- `refundable_value_credits = pack.credits_purchased - pack.credits_expired`.
+- `target_revoked_credits = floor(refundable_value_credits * new_refunded_item_cents / paid_item_cents)`; if `new_refunded_item_cents == paid_item_cents` force `= refundable_value_credits`.
+- `credits_to_revoke = target_revoked_credits - pack.credits_revoked`; if `<= 0` → mark processed after advancing the processed refund fields.
+
+**Lock order (deadlock-safe):** lock the user row first, then acquire **all** of the user's active packs in a **single** `SELECT … FOR UPDATE ORDER BY expires_at ASC` — the source pack included in that one ordered set — before any mutation. This makes the lock-**acquisition** order byte-for-byte identical to `deduct()`/`_drain_packs()` (user → packs by `expires_at ASC`); locking the source pack *separately first* (as the HANDOFF wording implies) would acquire pack locks out of `expires_at` order when the source is not the soonest-expiring, and could deadlock against a concurrent `deduct()`. The revocation *math* still spends the source pack's `credits_remaining` first, then the others FIFO — but only after every needed row is already locked in the canonical order. In one transaction when `credits_to_revoke > 0`: drain the source pack's `credits_remaining` first; if more is needed drain other active packs FIFO and increment their `credits_debt_recovered`; decrement `users.credit_balance` by the **immediately drained** amount only (never below zero); if the reversal still exceeds immediately recoverable credits, create/update the source pack's `billing_credit_debts` row (`credits_owed += unrecovered_delta`); `pack.credits_revoked += credits_to_revoke` (incl. debt delta); `provider_refunded_total_cents_seen = max(existing, provider_refunded_total_cents)`; `refunded_item_amount_cents_processed = max(old, new)`; write `CreditLedger` reason `refund:billing:<pack_id>:<new_refunded_item_cents>` amount `-immediate_revoke` (incl. `0`). Status: `new_refunded_item_cents == paid_item_cents` → `refunded`; partial with `credits_remaining > 0` → stay `active`; `credits_remaining == 0` and partial → `consumed` unless already `expired`. **Expired credits are never converted to debt.** Emit `BILLING_CREDITS_REVOKED{reason}`, `BILLING_CREDIT_DEBT_CREATED{reason}` as applicable.
+
+**DoD → HANDOFF tests:** full refund revokes all remaining once; partial uses the floor formula and only the unprocessed delta; tax-normalisation through order total; replay same/lower is a no-op except durable processed state; zero-effective refund still advances processed state; refund after spend creates debt; refund after expiry creates no debt; signed `order_refunded` without custom data still revokes a pack found by provider order id; missing-pack-with-proof retries then resolves as audited no-op after expiry; missing-pack-without-proof audited, no unrelated revoke.
+
+#### T-301 — `billing_reconcile` Cron (every 15m)
+
+`@billing` cron (or plain cron wrapped like the pending sweep). Authoritative state in `billing_reconciliation_cursors` (not Redis). Acquire the cursor row `SELECT … FOR UPDATE NOWAIT`; if it is already locked by another run, `NOWAIT` raises a lock-not-available error — **catch it and return cleanly** (skip this tick; it is not a failure and must not retry/dead-letter). Run `billing_reconcile` like the pending sweep (plain cron, catch+log), not under the `billing_job` retry/dead-letter contract. Exactly **three lanes**, bounded batches each:
+
+1. **Inbox replay** — enqueue committed `received` rows, retryable `failed` rows, and reclaimed stale `processing` rows. This is the **only** automatic path for a missed `order_created` side effect (the inbox row carries the signed custom-data proof).
+2. **Local-pack provider check (bounded)** — retrieve **that exact order by id** from Lemon for a *bounded, cursor-paged* set of local Lemon packs, normalise its current status/refund totals, and run the same refund/fraud helper as T-300. The candidate set is **not** "all packs ever": restrict to packs that can still change — `status IN ('active','refunded')` (terminal `expired`/`consumed`-and-fully-refunded packs are excluded) — ordered by `provider_order_id`, resuming from the last processed id stored in `billing_reconciliation_cursors.state`, and capped at `lemonsqueezy_reconcile_max_calls_per_run` order-fetches per run (the cursor advances so successive runs sweep the rest). Honour Lemon's API rate limits: on `429`/`Retry-After` (and `5xx`) back off and stop the lane early, leaving the cursor where it is; never let lane 2 exhaust the API. Stripe-provider packs are never fetched here. Catches missed refund/fraud even if the webhook was lost, without unbounded API fan-out.
+3. **Checkout-attempt hygiene** — expire local attempts past `expires_at`; alert on aggregate stale/pending patterns.
+
+Reconciliation must **never** use Lemon order listing, email, receipt URL, order number, amount, currency, time window, or redirect success as proof an ungranted checkout was paid. If an `order_created` was never committed and no signed normalised payload with `checkout_ref`+nonce exists, the run must: leave the attempt uncredited; expire it at TTL; emit an operator alert if the frontend saw a success redirect or support reports a paid order; require a provider-signed webhook replay **or** an explicit admin correction before any grant. At run start set `last_run_started_at=now()`; advance `last_successful_run_at` **only** after every selected batch commits; on failure roll back the failed txn, persist `last_error`, leave `last_successful_run_at` unchanged.
+
+**DoD → HANDOFF tests:** replays committed inbox rows and processes refund/fraud by exact order id; refuses to auto-grant a missed `order_created` from list/email/receipt/amount/redirect; advances the cursor only after batches succeed and leaves it unchanged on failure.
+
+#### T-302 — Admin Billing Correction (exceptional support path)
+
+`POST /billing/admin/correction` and a service method. **Authorization:** a `require_admin` dependency (T-292) that resolves the authenticated user and asserts their email is in `settings.admin_emails`; otherwise **403** (and an empty allowlist denies everyone — there is no implicit admin, since the `User` model has no role column). The endpoint requires auth + CSRF and is rate-limited (a low per-user/hour tier, e.g. 10/hour) like other mutating routes. Every call emits a structured `billing.admin_correction` audit log in addition to the immutable DB row. Request body: Lemon order id, target user id, credit amount, currency, price, reason, evidence link. First check for an existing `BillingCreditPack` **or** `billing_admin_corrections` row with the same `(provider, provider_order_id)` → reject/no-op (never grant twice). Else, in **one transaction**, write `BillingCreditPack`, run `grant_credits_with_debt_recovery(..., ledger_reason=f"admin_billing_correction:{provider}:{order_id}")` (corrected credits still repay pending debt first), and an immutable `billing_admin_corrections` audit row. Emit `BILLING_ADMIN_CORRECTION{provider}`.
+
+**DoD → HANDOFF tests:** creates pack + ledger + immutable audit row atomically; applies debt recovery before usable credit; second call for the same order is a no-op.
+
+#### T-303 — Stripe Cutover (grace path; **no SDK removal here**)
+
+- Disable new Stripe checkout creation in code (the old `POST /billing/checkout` Stripe branch is gone — the route is Lemon-only).
+- Keep `POST /billing/webhook` able to process valid **late Stripe** events for a **7-day** grace window: a late `checkout.session.completed` writes a `BillingCreditPack` with `provider='stripe'` using the **same** grant semantics (and the provider checkout/order uniqueness prevents double-credit); a late dispute revokes via the **same** neutral T-300 helper. Implement these as a small Stripe-shaped adapter that normalises into the same inbox/processing helpers; do not resurrect the old inline Stripe grant code.
+- Do **not** rely on a "no pending Stripe checkout" guard (old sessions were never durably recorded).
+- After the grace window the endpoint is Lemon-only: requests bearing Stripe webhook headers are rejected **before any DB write** with `{"status":"ignored_provider_disabled"}` and no claim of Stripe signature verification. **SDK/import removal is the gated follow-up step in 25.10 — not this task.**
+
+#### T-304 — Observability
+
+Metrics (provider-labelled; **labelled counters require `.labels(...).inc()` at every call site** — fine because `stripe_service` is replaced). Keep names where dashboards depend; `credits_expired_total` stays **label-less** (lazy expiry is provider-agnostic). Final set: `specforge_billing_checkout_created_total{provider}`, `_checkout_completed_total{provider}`, `_purchase_revenue_cents_total{provider}`, `_checkout_api_error_total{provider,error_type}`, `_checkout_expired_total{provider}`, `_unrecoverable_checkout_total{provider}`, `_webhook_received_total{provider,event_type}`, `_webhook_duplicate_total{provider}`, `_webhook_error_total{provider,error_type}`, `_webhook_pending_age_seconds`, `_credits_granted_total{provider}`, `_credits_revoked_total{provider,reason}`, `_credit_debt_created_total{provider,reason}`, `_credit_debt_recovered_total{provider}`, `_credits_expired_total` (no label), `_admin_correction_total{provider}`, `_reconcile_mismatch_total{provider}`, `_job_retries_total{job}`, `_job_deadlettered_total{job}`.
+
+**Fate of existing-but-not-in-HANDOFF counters (no dangling refs):** `specforge_billing_pack_disputed_total` → **retired** (folded into `credits_revoked_total{reason="disputed"}`); `specforge_billing_credits_consumed_total` → **kept label-less** (drain accounting, provider-agnostic, still incremented in `_drain_packs`); `specforge_billing_checkout_rate_limited_total` → **kept** (rate-limit middleware emits it; unchanged). Adding `{provider}` to the three pre-existing kept counters (`checkout_created/completed`, `credits_granted`) is a label-set widening — existing aggregating queries/alerts still sum across providers.
+
+Redaction (`services/observability.py`): add to `_SENSITIVE_KEYS` `lemonsqueezy_api_key`, `lemonsqueezy_webhook_secret`, `lemonsqueezy_webhook_secret_prev`, `checkout_nonce`; add `_SECRET_PATTERNS` for the Lemon key shape and `X-Signature` hex. Structlog billing events: fields `event_type`, `provider`, `user_id`, `pack_id`; never email/raw payload/signature/nonce. Event names: `billing.checkout.created`, `billing.purchase.activated`, `billing.refund.processed`, `billing.debt.created`, `billing.debt.recovered`, `billing.webhook.duplicate_skipped`, `billing.expiry.run`, `billing.reconcile.run`, `billing.admin_correction`, `billing.checkout.orphaned`. Grafana alerts (RUNBOOK §9): webhook error rate; `webhook_pending_age_seconds > 300`; reversal spike; unprovable paid checkout; debt created; zero `checkout_completed` 72h; expiry spike; `job_deadlettered` > 0.
+
+#### T-305 — Frontend
+
+`frontend/src/types/billing.ts`: rename `StripeCreditPack`→`BillingCreditPack` (status union `active|consumed|expired|refunded|disputed`); `CheckoutResponse` += `checkout_ref`; `BillingPackage` += `currency`. `Billing.tsx`: redirect to `checkout_url`, poll `GET /billing/status?checkout_ref=…` (2s, ≤30s); history from `BillingCreditPack`. `CreditMeter`/balance: read `billing_debt_credits` from `/credits/balance` and render it as **payment-reversal debt**, visually distinct, never added to usable balance. Remove all visible Stripe copy (CTA, success/cancel text). `schemas/credits.py` + `/credits/balance` add `billing_debt_credits` (sum of pending `billing_credit_debts.credits_owed - credits_recovered` for the user).
+
+**DoD → HANDOFF tests:** receives `checkout_ref`, redirects, polls by `checkout_ref`; completion/timeout/pending/error render; history uses `BillingCreditPack`; non-zero `billing_debt_credits` shown as debt, never usable; no visible Stripe copy.
+
+#### T-306 — Tests + Harness Contract
+
+Backend unit + integration suites covering the full HANDOFF §Test Plan (each DoD bullet above is a named test). New harness contract `harness/tests/backend/test_phase25_lemonsqueezy_billing_contract.py`: `/billing/package` shape incl. `currency`; `/billing/checkout` requires auth and returns `checkout_ref`; `/billing/webhook` with no `X-Signature` → 400; `/billing/webhook` CSRF-exempt; `/billing/status?checkout_ref=X` cross-user → 404; `/credits/balance` exposes `billing_debt_credits`. Retire/replace the Phase-21 Stripe harness contract so CI asserts the neutral/Lemon behaviour instead of `StripeCreditPack`.
+
+#### T-307 — Docs & Release Gate
+
+Update `docs/PRODUCTION_RELEASE_GATE.md` (Lemon live-webhook verification — endpoint points to `POST /billing/webhook`, same live secret, a successful signed `order_created` test delivery before enabling checkout), `docs/LOCAL_TESTING_HANDBOOK.md` (Lemon test-mode + webhook forwarding), `docs/SMOKE_TEST_CHECKLIST.md`, `docs/OBSERVABILITY_RUNBOOK.md`, and `docs/RUNBOOK.md` (new billing section: API-key + webhook-secret rotation, dead-letter replay from `billing:deadletter`, pending-row recovery, reconcile operations, admin-correction runbook with evidence/audit). Replace Stripe setup docs with Lemon setup docs.
+
+---
+
+### 25.7 Security Invariants
+
+1. Signed custom data is the only automatic first-grant authority (SR3/D4). Order list/retrieve, email, receipt URL, redirect, order number, amount/time are never proof.
+2. HMAC over raw bytes, current+previous secret, constant time, before any parse/DB/queue work (SR1). Test/live mismatch rejected pre-persist (SR2).
+3. Raw nonce never stored or logged; only `sha256(nonce)` persists (SR4/SR5).
+4. `/billing/status` IDOR-safe; 404 on mismatch (SR6).
+5. Money mutations only on the worker, inside a transaction, idempotent on provider-order/checkout uniqueness **and** ledger-reason uniqueness (DC3/DC4).
+6. `users.credit_balance` never negative; over-spent reversals become recoverable debt; expired value never debt (DC1/D5).
+7. Production guard blocks an incomplete or test-mode Lemon config in prod (SR7).
+
+### 25.8 Risks & Mitigations
+
+- **R1 — Half-migrated CreditService.** A money path on `StripeCreditPack`-era code double-counts. *Mitigation:* strict A→C DAG; T-294 lands and its tests pass before T-299/T-300.
+- **R2 — Tax-inclusive over-revocation.** Lemon refund amounts can include tax. *Mitigation:* normalise through order total (T-300); named tax-refund test.
+- **R3 — Partial-refund replay double-revoke.** *Mitigation:* monotonic `refunded_item_amount_cents_processed` + the `:<cents>` ledger-reason barrier; same/lower replay is a no-op.
+- **R4 — Lost webhook.** *Mitigation:* durable inbox + 60s sweep + reconcile inbox-replay lane; `webhook_pending_age_seconds` alert.
+- **R5 — Unprovable paid checkout (first purchase webhook never committed).** *Mitigation:* never auto-grant; operator alert + admin-correction path with evidence/audit.
+- **R6 — Queue-refactor regression in GitHub jobs.** *Mitigation:* `github_job` keeps its throttle special-handler + `gh:deadletter`; explicit regression test.
+- **R7 — Orphaned Lemon checkout** (created at provider, local commit failed). *Mitigation:* 502 without exposing URL + `billing.checkout.orphaned` alert; the attempt is still at `created` (an allowed grant status), so a later signed `order_created` matching `checkout_ref`+nonce still grants correctly, and reconcile lane 3 expires it at TTL if never paid.
+- **R8 — Refund/deduct deadlock.** Locking the source pack before others (out of `expires_at` order) could deadlock a concurrent spend. *Mitigation:* T-300 locks all of the user's active packs in one `FOR UPDATE ORDER BY expires_at ASC` (canonical order identical to `deduct()`), then applies the math.
+- **R9 — Webhook-inbox / checkout-attempt table growth.** Unbounded rows over time. *Mitigation:* daily `purge_billing_events` retention job (T-298); `billing_webhook_events` indexed for the pending scan only.
+- **R10 — Reconcile lane 2 exhausts the Lemon API.** A naive "check every pack" fan-out hits rate limits. *Mitigation:* bounded, cursor-paged candidate set (`active`/`refunded` only), per-run call cap, and `429`/`Retry-After` backoff that stops the lane early (T-301).
+- **R11 — Credit-grant latency starved by GitHub exports** on the shared worker. *Mitigation:* billing jobs on a dedicated `queue_name="billing"` so they can be drained by a separate/reserved-concurrency worker, scaled independently (T-298).
+- **R12 — Missing admin authorization model.** The codebase has no admin role. *Mitigation:* `admin_user_emails` allowlist + `require_admin` (T-292/T-302); closed-by-default (empty allowlist → 403 for all); CSRF + rate limit + audit row + audit log.
+- **R13 — Config drift mis-prices an in-flight checkout.** A price/credits change between checkout creation and the webhook. *Mitigation:* validate and grant from the attempt snapshot, not live config (T-299, DC6).
+- **R14 — Lost `failed` status on worker crash/rollback.** If the `failed`/`retry_count` write shares the rolled-back side-effect transaction it never persists. *Mitigation:* T-298 writes the failed-state in a separate committed transaction before raising; the 5-minute `processing` reclaim is a backstop.
+
+### 25.9 Rollout & Release Gate
+
+1. Deploy `0018` + neutral models with Stripe runtime still working.
+2. Backfill verified: row counts, statuses, and `users.credit_balance` invariant unchanged.
+3. Deploy Lemon code with `LEMONSQUEEZY_API_KEY` blank (checkout disabled; package/history work).
+4. Configure Lemon in staging; run the full manual release gates (HANDOFF §Manual release gates).
+5. Enable Lemon checkout in production; disable new Stripe checkout creation.
+6. Keep the Stripe webhook compat path for **exactly 7 days**.
+7. Before the 7-day mark, disable the Stripe webhook endpoint in Stripe and confirm no new deliveries.
+8. **Stripe removal (gated follow-up, ≥7 days post-cutover, not this deploy):** remove Stripe runtime imports + the `stripe` dependency from `requirements.txt`/`pyproject.toml`/`uv.lock`; reject Stripe-shaped requests without DB writes; leave the Stripe audit tables in place.
+9. Re-run the Lemon live-webhook gate after Stripe removal so the single remaining `/billing/webhook` is proven Lemon-only.
+10. Stripe audit tables remain until a separate explicit cleanup project drops them.
+
+### 25.10 Validation
+
+After Phase 25 (pre-cutover):
+
+- [ ] `cd backend && uv run alembic upgrade head` — `0018` applies; backfill is re-runnable (`alembic downgrade -1 && upgrade head` twice leaves identical row counts); rollback keeps Stripe tables.
+- [ ] `cd backend && uv run pytest tests/test_phase25_*.py -q` — unit + integration suites pass (each HANDOFF test-plan item present).
+- [ ] `cd backend && uv run pytest ../harness/tests/backend/test_phase25_lemonsqueezy_billing_contract.py -q`
+- [ ] `cd backend && uv run pytest tests/ -q --cov=services --cov-fail-under=80`
+- [ ] GitHub-job regression: throttle requeues-not-deadletters; `gh:deadletter` unchanged; billing dead-letters to `billing:deadletter`.
+- [ ] `cd frontend && pnpm tsc --noEmit && pnpm test -- billing` — `BillingCreditPack`, `checkout_ref` polling, debt display; no Stripe copy.
+- [ ] Worker boots: `billing_process_webhook` registered (default shared queue); `billing_process_pending_webhooks` (60s), `billing_reconcile` (`{7,22,37,52}`), and `purge_billing_events` (daily) crons scheduled; `github_job` import intact. Optional dedicated `BillingWorkerSettings` worker, when deployed, drains the `billing` queue.
+- [ ] Concurrency/reliability: a wrapper-retry + a sweep enqueue for one row run once (dedup on `billing_wh:{id}`); a forced side-effect failure leaves the row durably `failed` with `retry_count` advanced; a stale `processing` row is reclaimed after 5 min.
+- [ ] Deadlock: concurrent `deduct()` + `order_refunded` for the same user complete without deadlock (single ordered pack-lock acquisition).
+- [ ] Snapshot anchoring: a price change between checkout creation and the `order_created` webhook still grants the attempt's snapshotted credits at the snapshotted price (no rejection).
+- [ ] Admin authz: `/billing/admin/correction` returns 403 for a non-allowlisted user and when `admin_user_emails` is empty; a duplicate correction for the same `(provider, order_id)` is a no-op.
+- [ ] Retention: `purge_billing_events` deletes only terminal-state, past-window `billing_webhook_events` / `billing_checkout_attempts` rows.
+- [ ] Reconcile lane 2 is bounded: a run never exceeds `lemonsqueezy_reconcile_max_calls_per_run` Lemon fetches and backs off on `429`.
+- [ ] `uv run ruff check . && uv run black --check . && git diff --check`
+- [ ] Manual (staging Lemon test mode): signed `order_created` grants exactly the configured credits once; duplicate replay leaves balance unchanged; partial refund revokes deterministic proportional credits; tax-bearing partial refund matches normalised math; full refund revokes all + marks `refunded`; refund-after-spend creates debt and a later purchase repays it before adding usable balance; missed-committed-row recovered by inbox reconcile; missed-uncommitted first purchase is **not** auto-granted (exercise the admin-correction runbook with evidence/audit).
+- [ ] Production config validation passes only with live Lemon settings; a stale Stripe `sk_test_*` does not fail startup once Stripe checkout is disabled.
+
+---
+
+_SpecForge V1 PLAN.md · Version 2.6.0 · 2026-06-05 — added Phase 25 Lemon Squeezy Billing Migration (T-290 through T-307), superseding Phase 21's Stripe integration at runtime (Phase 21 retained per the append-only convention). Migration `0018` adds six provider-neutral billing tables (`billing_checkout_attempts`/`_credit_packs`/`_credit_debts`/`_admin_corrections`/`_webhook_events`/`_reconciliation_cursors`), three `credit_ledger` reason-uniqueness indexes, and an idempotent Stripe→neutral backfill (balance-preserving; disputed rows `credits_revoked=0`); Stripe tables are retained for audit. Introduces signed-webhook-as-sole-grant-authority (`checkout_ref` + `sha256(checkout_nonce)`), a durable sanitised webhook inbox processed on the `arq` worker (`billing_process_webhook` + 60s pending-sweep + 15m three-lane `billing_reconcile`), tax-normalised proportional refunds with recoverable `billing_credit_debts`, and an evidence-backed admin-correction path. Refactors `services.queue` into a generic job wrapper (GitHub throttle behaviour + `gh:deadletter` preserved; billing uses `billing:deadletter`); migrates `CreditService` onto `BillingCreditPack` with `credits_consumed`/`credits_expired` tracking and a debt-first grant helper. Adds `LEMONSQUEEZY_*` config + production guard (scoping the legacy Stripe test-key guard), `LemonSqueezyService` (httpx JSON:API checkout), the rewritten Lemon-only billing router (`checkout_ref` polling, 7-day Stripe webhook grace), provider-labelled `specforge_billing_*` metrics + debt/reconcile/dead-letter alerts, frontend `BillingCreditPack` rename + `billing_debt_credits` display, a Phase-25 harness contract, and a 10-step rollout with Stripe SDK removal gated ≥7 days post-cutover. Verbatim ledger reasons: `billing_purchase:lemonsqueezy:<order_id>`, `refund:billing:<pack_id>:<cents>`, `debt_recovery:billing:<debt_id>:<pack_id>`, `admin_billing_correction:<provider>:<order_id>`. Post-authoring staff-review hardening folded in: a concrete `admin_user_emails` allowlist + `require_admin` (the codebase had no admin role); grant/validation anchored to the checkout-attempt snapshot rather than live config (in-flight price-change safety); a `purge_billing_events` retention job for the webhook inbox + checkout attempts; bounded, cursor-paged, 429-aware reconcile lane 2; a dedicated `billing` arq queue so credit grants are not starved by GitHub exports; deadlock-safe single-ordered pack locking in refunds; deterministic `billing_wh:{id}` dedup across the wrapper-retry and the pending-sweep with the `failed`-state write committed in a separate transaction; high-entropy `checkout_ref`; staggered billing crons; and an account-deletion settlement note for the RESTRICT FKs._
+
 _SpecForge V1 PLAN.md · Version 2.5.0 · 2026-06-02 — added Phase 24 GitHub Living System of Record (T-265 through T-286), superseding Phase 13's one-shot export. Migrates per-user OAuth → GitHub **App** identity (App JWT → Redis-cached installation tokens via `TokenProvider`); introduces the first durable background **worker** (`arq` + new docker-compose service) and moves export off the request path; adds a signature-verified webhook (mirroring the Stripe receiver) with delivery dedup, idempotent/checkpointed reconcile jobs, drift detection + backfill, and a per-installation rate governor with per-repo write serialization. Adds the `pr_with_tests` export mode (branch/PR plumbing, per-stack red harness scaffold, CI workflow, `Workflows:write`/409 handling), agent-ready issues + non-clobbering `AGENTS.md`, delta-aware Increments with content-stable `task_ref`s and incremental new-issues-only sync, a Projects v2 GraphQL board + milestones, and a SpecForge status check backed by a **new** fail-open PR-diff evaluator (distinct from `critic.py`). Migration `0016` ALTERs `integration_pushes`/`integration_push_tasks` (repo-keyed partial-unique active push, sync fields) and creates `github_installations` + `github_webhook_events`; `0017` adds `increments` + `increment_ideas`. New `GITHUB_APP_*` config with production guard, two-secret webhook rotation, confused-deputy authz, token-cache-as-credentials security, GitHub rate-limit tiers, `specforge_github_*` metrics, a cross-codebase harness contract (`test_phase24_github_living_contract.py`), and phase-gated A→D release criteria. Phase 13 (§17) is retained unedited per the append-only convention._
 
 _SpecForge V1 PLAN.md · Version 2.4.0 · 2026-05-30 — added Phase 23 Storyboard Product Keynote Generation covering T-250 through T-264: paid 25-credit browser-native product keynote generation, six-act launch narrative, architecture reveal, source-backed claims, presenter notes, demo script, technical appendix, trusted HTML/PDF/download renderer, `/sb/{slug}` public sharing, permission-filtered public assets, idempotent credit deduction/refund, stale Storyboard propagation, Storyboard-specific rate limits, observability, comprehensive harness contract, and documentation/release-gate requirements._
