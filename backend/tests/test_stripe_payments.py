@@ -32,7 +32,6 @@ from httpx import ASGITransport, AsyncClient
 from config import settings
 from database import get_db
 from main import create_app
-from middleware.auth import get_current_user
 from models import User
 
 # ---------------------------------------------------------------------------
@@ -100,36 +99,6 @@ class _FakeRedisPipeline:
         return [0, 1, 1, 1]
 
 
-class _CountingFakeRedis:
-    """FakeRedis that enforces the sliding-window rate limit semantics.
-
-    Mirrors the in-process fallback in RateLimitMiddleware but is Redis-aware
-    so the billing_checkout:{user_id} key is properly tracked.
-    """
-
-    def __init__(self) -> None:
-        self._sets: dict[str, dict[str, float]] = {}
-
-    async def eval(self, script: str, num_keys: int, *args: Any) -> int:
-        key = args[0]
-        window_start = float(args[2])
-        limit = int(args[3])
-        member = args[4]
-        now_score = float(args[1])
-
-        ss = self._sets.setdefault(key, {})
-        expired = [m for m, s in ss.items() if s <= window_start]
-        for m in expired:
-            del ss[m]
-        if len(ss) >= limit:
-            return 0
-        ss[member] = now_score
-        return 1
-
-    def pipeline(self) -> _FakeRedisPipeline:
-        return _FakeRedisPipeline()
-
-
 class _NoopRedis:
     """Redis stub that always allows every rate-limit check."""
 
@@ -143,48 +112,6 @@ class _NoopRedis:
 # ---------------------------------------------------------------------------
 # DB stubs
 # ---------------------------------------------------------------------------
-
-
-class _NoopSession:
-    """Minimal async session stub for tests that don't need real DB."""
-
-    async def execute(self, statement: Any) -> Any:
-        result = MagicMock()
-        result.scalar_one_or_none.return_value = None
-        result.scalars.return_value = iter([])
-        return result
-
-    async def scalar(self, statement: Any) -> Any:
-        return None
-
-    async def flush(self) -> None:
-        pass
-
-    def add(self, obj: Any) -> None:
-        pass
-
-    def begin_nested(self) -> "_SavepointCtx":
-        return _SavepointCtx()
-
-
-class _SavepointCtx:
-    """Savepoint context that always succeeds (no IntegrityError)."""
-
-    async def __aenter__(self) -> "_SavepointCtx":
-        return self
-
-    async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> bool:
-        return False  # never suppress exceptions
-
-
-class _IntegrityErrorSavepoint:
-    """Savepoint that raises IntegrityError on flush — simulates duplicate event."""
-
-    async def __aenter__(self) -> "_IntegrityErrorSavepoint":
-        return self
-
-    async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> bool:
-        return False
 
 
 class _IdempotencyFakeSession:
@@ -230,66 +157,6 @@ class _ConditionalSavepoint:
 
     async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> bool:
         return False  # propagate exceptions
-
-
-class _StatusCheckSession:
-    """Session stub for billing/status IDOR test.
-
-    Returns None for any db.scalar() call — simulates the case where
-    the queried session_id exists for user_A but is not visible to user_B.
-    """
-
-    async def scalar(self, statement: Any) -> Any:
-        return None  # user_B sees nothing (404 expected)
-
-    async def execute(self, statement: Any) -> Any:
-        result = MagicMock()
-        result.scalar_one_or_none.return_value = None
-        return result
-
-    def begin_nested(self) -> _SavepointCtx:
-        return _SavepointCtx()
-
-    async def flush(self) -> None:
-        pass
-
-    def add(self, obj: Any) -> None:
-        pass
-
-
-# ---------------------------------------------------------------------------
-# App factory helpers
-# ---------------------------------------------------------------------------
-
-
-def _make_app(
-    *,
-    user: User = _USER_A,
-    redis: Any = None,
-    db_override: Any = None,
-):
-    """Build a FastAPI app with injected auth + optional DB override."""
-    if redis is None:
-        redis = _NoopRedis()
-    app = create_app(redis_client=redis)
-
-    async def _fake_user():
-        return user
-
-    app.dependency_overrides[get_current_user] = _fake_user
-
-    if db_override is not None:
-        # db_override is either a session instance or a callable factory.
-        if callable(db_override) and not isinstance(db_override, type):
-            app.dependency_overrides[get_db] = db_override
-        else:
-
-            async def _fake_db():
-                yield db_override
-
-            app.dependency_overrides[get_db] = _fake_db
-
-    return app
 
 
 # ===========================================================================
@@ -534,33 +401,9 @@ async def test_webhook_invalid_signature() -> None:
     )
 
 
-# ===========================================================================
-# Test 5 — IDOR prevention: billing/status 404 for wrong user
-# ===========================================================================
-
-
-@pytest.mark.asyncio
-async def test_billing_status_idor_prevention() -> None:
-    """GET /billing/status returns 404 when session_id belongs to a different user.
-
-    Invariant: returning 403 would confirm the session exists for another
-    user (resource-existence leakage).  404 reveals nothing — it covers
-    both "session not found" and "session belongs to someone else".
-    """
-    app = _make_app(user=_USER_B, db_override=_StatusCheckSession())
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        resp = await client.get(
-            "/billing/status",
-            params={"session_id": "cs_test_belongs_to_user_a"},
-            headers={"Authorization": "Bearer fake-token"},
-        )
-
-    assert resp.status_code == 404, (
-        "GET /billing/status must return 404 (not 403, not 200) when the "
-        "session_id belongs to a different user.  403 would confirm the "
-        "session exists for someone else (resource-existence leakage)."
-    )
+# Test 5 — IDOR prevention on /billing/status — migrated to the Lemon-only
+# checkout_ref flow in tests/test_billing_router.py (T-296). Both the
+# checkout_ref path and the legacy session_id grace path are covered there.
 
 
 # ===========================================================================
@@ -878,102 +721,9 @@ async def test_dispute_revocation() -> None:
     await engine.dispose()
 
 
-# ===========================================================================
-# Test 9 — Checkout rate limit: 6th request returns 429
-# ===========================================================================
-
-
-@pytest.mark.asyncio
-async def test_checkout_rate_limit() -> None:
-    """The 6th POST /billing/checkout within one hour returns HTTP 429.
-
-    Invariant: without this limit, a script can create hundreds of Stripe
-    Checkout Sessions per hour, inflating Stripe API costs and potentially
-    triggering Stripe's fraud-detection for the platform account.
-    """
-    counting_redis = _CountingFakeRedis()
-
-    async def _fake_user():
-        return _USER_A
-
-    app = create_app(redis_client=counting_redis)
-    app.dependency_overrides[get_current_user] = _fake_user
-
-    async def _fake_db():
-        yield _NoopSession()
-
-    app.dependency_overrides[get_db] = _fake_db
-
-    # The rate-limit middleware extracts user_id from the Authorization
-    # header via decode_access_token_claims().  Without a real JWT, that
-    # returns None and the per-user billing_checkout limit never engages.
-    # Patch it to return a valid claims dict so the limit is enforced.
-    with (
-        patch(
-            "middleware.rate_limit.decode_access_token_claims",
-            return_value={"sub": str(_USER_A_ID)},
-        ),
-        patch(
-            "services.stripe_service.stripe_service.create_checkout_session",
-            new_callable=AsyncMock,
-            return_value="https://checkout.stripe.com/test",
-        ),
-    ):
-        transport = ASGITransport(app=app)
-        async with AsyncClient(transport=transport, base_url="http://test") as client:
-            responses = []
-            for _ in range(6):
-                resp = await client.post(
-                    "/billing/checkout",
-                    headers={"Authorization": "Bearer fake-token"},
-                )
-                responses.append(resp)
-
-    statuses = [r.status_code for r in responses]
-    assert all(
-        s == 200 for s in statuses[:5]
-    ), f"First 5 checkout requests must succeed (200), got: {statuses[:5]}"
-    assert responses[5].status_code == 429, (
-        f"6th checkout request must be rate-limited (429), "
-        f"got: {responses[5].status_code}"
-    )
-    detail = responses[5].json().get("detail", "")
-    assert (
-        "5 purchases per hour" in detail
-    ), f"Rate-limit detail must mention '5 purchases per hour', got: {detail!r}"
-
-
-@pytest.mark.asyncio
-async def test_checkout_created_metric_increments() -> None:
-    """A successful POST /billing/checkout increments BILLING_CHECKOUT_CREATED.
-
-    Wires the payments-path observability counter the review flagged as a stub.
-    """
-    from services.observability import BILLING_CHECKOUT_CREATED
-
-    async def _fake_user():
-        return _USER_A
-
-    app = create_app(redis_client=_NoopRedis())
-    app.dependency_overrides[get_current_user] = _fake_user
-
-    async def _fake_db():
-        yield _NoopSession()
-
-    app.dependency_overrides[get_db] = _fake_db
-
-    before = BILLING_CHECKOUT_CREATED._value.get()
-    with patch(
-        "services.stripe_service.stripe_service.create_checkout_session",
-        new_callable=AsyncMock,
-        return_value="https://checkout.stripe.com/test",
-    ):
-        transport = ASGITransport(app=app)
-        async with AsyncClient(transport=transport, base_url="http://test") as client:
-            resp = await client.post("/billing/checkout")
-
-    assert resp.status_code == 200
-    assert BILLING_CHECKOUT_CREATED._value.get() == before + 1
+# Test 9 — Checkout rate limit (6th → 429) and the checkout-created metric were
+# tied to the retired Stripe checkout route. They are re-implemented against the
+# Lemon-only attempt-first flow in tests/test_billing_router.py (T-296).
 
 
 # ===========================================================================

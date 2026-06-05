@@ -1,34 +1,51 @@
-"""Billing router — Phase 18 Stripe Payments Integration.
+"""Billing router — Phase 22 Lemon Squeezy migration (T-296), Lemon-only checkout.
 
 Endpoint inventory
 ------------------
-GET  /billing/package   T-230  Unauthenticated — returns current package config
-POST /billing/checkout  T-231  Authenticated   — creates a Stripe Checkout Session
-GET  /billing/status    T-232  Authenticated   — polls pack status for a session
-GET  /billing/history   T-232  Authenticated   — returns the user's purchase history
-POST /billing/webhook   T-234  No auth/CSRF    — Stripe webhook receiver
+GET  /billing/package   Unauthenticated — current credit-package config (Lemon)
+POST /billing/checkout  Authenticated   — attempt-first Lemon hosted checkout
+GET  /billing/status    Authenticated   — poll a checkout by ``checkout_ref``
+GET  /billing/history   Authenticated   — the user's billing_credit_packs history
+POST /billing/webhook   No auth/CSRF    — provider webhook receiver
 
-Phase 18 — T-230 (router skeleton + GET /billing/package)
-          T-231 (POST /billing/checkout)
-          T-232 (GET /billing/status + GET /billing/history)
-          T-234 (POST /billing/webhook)
+Checkout is **attempt-first** (Plan §25.6 T-296): SpecForge commits the local
+``billing_checkout_attempts`` row — carrying the economics snapshot and only the
+``sha256(checkout_nonce)`` — **before** calling Lemon, then mints the hosted
+checkout, then commits the ``provider_created`` transition, and only then returns
+``checkout_ref`` to the client. The signed ``order_created`` webhook (T-297/T-299)
+is the sole credit-grant authority; this router never grants credits.
+
+``GET /status`` is IDOR-safe: one query scoped by BOTH ``checkout_ref`` and
+``user_id`` (404 on any mismatch — no resource-existence leak). The raw nonce is
+never returned by any endpoint; only its hash is persisted.
+
+The ``POST /billing/webhook`` handler below is the retained Phase-18 Stripe
+receiver. It is **intentionally left in place** for T-296: the Lemon webhook
+rewrite is T-297 and the late-Stripe grace path is T-303. Its CSRF / rate-limit
+exemptions (``middleware/csrf.py``, ``middleware/rate_limit.py``) are reused.
+
+Phase 18 — T-230/T-231/T-232/T-234 (Stripe, superseded at runtime).
+Phase 22 — T-296 (Lemon-only checkout flow + ``checkout_ref`` polling).
 """
 
 from __future__ import annotations
 
+import hashlib
 import logging
+import secrets
+from datetime import datetime, timedelta, timezone
 
 import stripe
 import stripe.error
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy import select
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config import settings
 from database import get_db
 from middleware.auth import get_current_user
-from models import User
+from models import BillingCheckoutAttempt, BillingCreditPack, User
 from models.stripe_credit_pack import StripeCreditPack
 from models.stripe_webhook_event import StripeWebhookEvent
 from schemas.billing import (
@@ -37,6 +54,7 @@ from schemas.billing import (
     PackageResponse,
     PackHistoryItem,
 )
+from services.lemonsqueezy_service import LemonSqueezyError, lemonsqueezy_service
 from services.observability import (
     BILLING_CHECKOUT_CREATED,
     BILLING_WEBHOOK_DUPLICATE,
@@ -47,25 +65,26 @@ from services.stripe_service import stripe_service
 
 logger = logging.getLogger(__name__)
 
+# High-entropy byte budget for the polling ref and the one-time nonce. 32 bytes
+# (256 bits) of os.urandom via secrets — non-sequential, non-guessable (SR4/#10).
+_REF_ENTROPY_BYTES = 32
+
 router = APIRouter(prefix="/billing", tags=["billing"])
 
 
 @router.get("/package", response_model=PackageResponse)
 async def get_package() -> PackageResponse:
-    """Return the current credit-package configuration.
+    """Return the current credit-package configuration (Lemon Squeezy economics).
 
-    No authentication required — the frontend pricing page calls this
-    endpoint before the user has logged in so it can display the price.
-
-    Values are read from ``config.Settings`` at request time; changing the
-    environment variables and restarting the server is sufficient to update
-    the displayed price without any code change.
+    No authentication required — the pricing page calls this before login. Values
+    come from ``config.Settings`` at request time, so changing the env vars and
+    restarting is enough to update the displayed price without a code change.
     """
     return PackageResponse(
-        credits=settings.stripe_credits_per_purchase,
-        price_cents=settings.stripe_price_cents,
-        validity_days=settings.stripe_credit_validity_days,
-        currency="usd",
+        credits=settings.lemonsqueezy_credits_per_purchase,
+        price_cents=settings.lemonsqueezy_price_cents,
+        validity_days=settings.lemonsqueezy_credit_validity_days,
+        currency=settings.lemonsqueezy_currency,
     )
 
 
@@ -78,73 +97,207 @@ async def create_checkout(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> CheckoutResponse:
-    """Create a Stripe Checkout Session and return the redirect URL.
+    """Create a Lemon Squeezy hosted checkout via the attempt-first flow (T-296).
 
-    Authentication required — the user_id is embedded in session metadata so
-    the webhook handler can grant credits without querying by email.
+    1. Mint a high-entropy ``checkout_ref`` and a **separate** one-time
+       ``checkout_nonce``; persist only ``sha256(checkout_nonce)``.
+    2. **Commit** the ``billing_checkout_attempts`` row (``status='created'``)
+       snapshotting ``credits/price_cents/currency/validity_days`` from config —
+       SpecForge is the authority for the attempt before any provider call.
+    3. Call ``LemonSqueezyService.create_checkout`` (the charged amount is the
+       attempt's ``price_cents`` snapshot, immune to in-flight config changes).
+    4. **Commit** the ``provider_created`` transition with ``provider_checkout_id``.
+       Only after that commit is the ``checkout_url`` returned.
 
-    Rate limited: 5 checkouts per user per hour (enforced by
-    ``RateLimitMiddleware`` — see T-233).
+    Returns 503 when Lemon checkout is not configured; 502 when Lemon fails (the
+    attempt is marked ``failed``) or when the post-Lemon commit fails (orphaned —
+    the URL is never exposed; the reconcile lane settles the order later).
 
-    Returns 503 when billing is not configured (empty STRIPE_SECRET_KEY or
-    STRIPE_SUCCESS_URL).  Returns 502 on Stripe API errors.  Both are raised
-    directly by ``stripe_service.create_checkout_session()``.
+    Rate limited: 5 checkouts per user per hour (``RateLimitMiddleware``).
     """
-    try:
-        checkout_url = await stripe_service.create_checkout_session(
-            user_id=current_user.id,
-            user_email=current_user.email,
+    if not settings.lemonsqueezy_enabled:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Billing is not configured on this server",
         )
-    except HTTPException:
-        # Pass through 503 (billing not configured) and 502 (Stripe error)
-        # raised inside create_checkout_session() unchanged — re-wrapping
-        # them would discard the original status code and detail.
-        raise
-    except Exception as exc:
-        # Catch unexpected errors (e.g. network issues not covered by the
-        # Stripe SDK) and return a safe 502 with a user-friendly message.
-        # The stripe_service already logs Stripe-specific errors; this covers
-        # any residual edge cases.
+
+    # 1. High-entropy, non-sequential identifiers. The ref is the client polling
+    #    key (returned + stored plaintext); the nonce is a secret proven back only
+    #    by the signed webhook — only its sha256 is ever persisted (SR4).
+    checkout_ref = secrets.token_urlsafe(_REF_ENTROPY_BYTES)
+    checkout_nonce = secrets.token_urlsafe(_REF_ENTROPY_BYTES)
+    checkout_nonce_hash = hashlib.sha256(checkout_nonce.encode("utf-8")).hexdigest()
+
+    now = datetime.now(timezone.utc)
+    expires_at = now + timedelta(minutes=settings.lemonsqueezy_checkout_ttl_minutes)
+
+    # 2. Commit the attempt BEFORE calling Lemon — the local row is the authority.
+    attempt = BillingCheckoutAttempt(
+        checkout_ref=checkout_ref,
+        user_id=current_user.id,
+        provider="lemonsqueezy",
+        checkout_nonce_hash=checkout_nonce_hash,
+        # Economics snapshot — the grant (T-299) validates against THESE values,
+        # not live config, so an in-flight price change is safe.
+        credits=settings.lemonsqueezy_credits_per_purchase,
+        price_cents=settings.lemonsqueezy_price_cents,
+        currency=settings.lemonsqueezy_currency,
+        validity_days=settings.lemonsqueezy_credit_validity_days,
+        status="created",
+        expires_at=expires_at,
+    )
+    db.add(attempt)
+    await db.commit()
+    await db.refresh(attempt)
+
+    # 3. Mint the hosted checkout. On any failure mark the attempt failed (so the
+    #    reconcile/purge lanes treat it as terminal) and return a safe 502.
+    try:
+        provider_checkout_id, checkout_url = await lemonsqueezy_service.create_checkout(
+            attempt,
+            current_user,
+            checkout_nonce=checkout_nonce,
+        )
+    except LemonSqueezyError as exc:
+        attempt.status = "failed"
+        await db.commit()
         logger.error(
-            "billing.checkout_create_unexpected_error user_id=%s error=%s",
-            current_user.id,
-            exc,
-            exc_info=True,
+            "billing.checkout_provider_failed checkout_ref=%s attempt_id=%s user_id=%s",
+            checkout_ref,
+            str(attempt.id),
+            str(current_user.id),
         )
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail="Failed to create checkout session. Please try again.",
+            detail="Failed to create checkout. Please try again.",
         ) from exc
+
+    # 4. Commit the provider_created transition. If THIS commit fails the checkout
+    #    exists at Lemon but SpecForge could not record it — never expose the URL
+    #    (the client would pay against an attempt we cannot poll); the order will
+    #    be reconciled from the signed webhook. Emit billing.checkout.orphaned.
+    attempt.provider_checkout_id = provider_checkout_id
+    attempt.status = "provider_created"
+    try:
+        await db.commit()
+    except SQLAlchemyError as exc:
+        await db.rollback()
+        logger.error(
+            "billing.checkout.orphaned checkout_ref=%s attempt_id=%s "
+            "provider_checkout_id=%s user_id=%s",
+            checkout_ref,
+            str(attempt.id),
+            provider_checkout_id,
+            str(current_user.id),
+        )
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Failed to create checkout. Please try again.",
+        ) from exc
+
     BILLING_CHECKOUT_CREATED.inc()
-    return CheckoutResponse(checkout_url=checkout_url)
+    return CheckoutResponse(checkout_url=checkout_url, checkout_ref=checkout_ref)
 
 
 @router.get("/status", response_model=BillingStatusResponse)
 async def get_billing_status(
-    session_id: str,
+    checkout_ref: str | None = None,
+    session_id: str | None = None,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> BillingStatusResponse:
-    """Poll the status of a Stripe Checkout Session.
+    """Poll a checkout by ``checkout_ref`` (IDOR-safe); 200 only when granted.
 
-    IDOR prevention: the WHERE clause scopes by BOTH ``stripe_session_id``
-    AND ``user_id`` in a single SQL query — never two separate queries.
-    A user who presents another user's session_id receives 404, not 403.
-    403 would confirm that the session exists for someone else (resource-
-    existence leakage); 404 reveals nothing.
+    The attempt is fetched by a single query scoped by BOTH ``checkout_ref`` and
+    ``user_id`` — a mismatch on either returns 404 (never 403; 403 would confirm
+    the ref exists for another user). 200 is returned only when the attempt is
+    ``completed`` AND the granted ``billing_credit_packs`` row exists; everything
+    else (unknown / not-yet-granted / expired / failed) is 404 (no
+    resource-existence leak, SR6).
 
-    Polling contract (frontend): 404 → still pending (retry up to 30 s at
-    2-second intervals); 200 with status="completed" → credits granted.
+    Legacy ``session_id`` polling is accepted **only during the Stripe grace
+    window** (while ``STRIPE_SECRET_KEY`` is still set — see T-303); post-grace a
+    ``session_id`` is ignored and returns 404.
     """
-    # Structured function-entry trace (DEBUG only — zero cost in production
-    # where DEBUG is disabled; the extra={} dict is only evaluated when the
-    # log level is active).
-    logger.debug(
-        "billing.status_check",
-        extra={"session_id": session_id, "user_id": str(current_user.id)},
+    if checkout_ref is not None:
+        return await _status_by_checkout_ref(db, current_user, checkout_ref)
+
+    if session_id is not None and bool(settings.stripe_secret_key):
+        # Grace window only: a legacy Stripe pack, owner-scoped (IDOR-safe).
+        return await _status_by_legacy_session(db, current_user, session_id)
+
+    # No usable identifier (or session_id post-grace) — reveal nothing.
+    raise HTTPException(
+        status_code=status.HTTP_404_NOT_FOUND,
+        detail="Checkout not found",
     )
-    # Single double-predicate query: both session_id and user_id required.
-    # Prevents IDOR: a mismatch on either field returns None → 404 below.
+
+
+async def _status_by_checkout_ref(
+    db: AsyncSession,
+    current_user: User,
+    checkout_ref: str,
+) -> BillingStatusResponse:
+    """The ``checkout_ref`` polling path: attempt → grant lookup."""
+    # Single double-predicate query — both checkout_ref AND user_id required.
+    attempt = await db.scalar(
+        select(BillingCheckoutAttempt).where(
+            BillingCheckoutAttempt.checkout_ref == checkout_ref,
+            BillingCheckoutAttempt.user_id == current_user.id,
+        )
+    )
+    if attempt is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Checkout not found",
+        )
+
+    # Telemetry only — stamp the first browser return on the success redirect.
+    # Does not affect the 200/404 decision.
+    if attempt.success_redirect_seen_at is None:
+        attempt.success_redirect_seen_at = datetime.now(timezone.utc)
+        await db.commit()
+
+    if attempt.status != "completed" or attempt.provider_order_id is None:
+        # Not yet granted (the webhook stamps status='completed' + provider_order_id
+        # and writes the pack atomically, T-299), expired, or failed.
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Checkout not found",
+        )
+
+    # Contract with T-299: the granted pack is linked to the attempt by
+    # (provider, provider_order_id). provider_order_id is non-None here (guarded
+    # above) so this never degenerates to an IS NULL match on a NULL-keyed pack.
+    pack = await db.scalar(
+        select(BillingCreditPack).where(
+            BillingCreditPack.user_id == current_user.id,
+            BillingCreditPack.provider == "lemonsqueezy",
+            BillingCreditPack.provider_order_id == attempt.provider_order_id,
+        )
+    )
+    if pack is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Checkout not found",
+        )
+
+    return BillingStatusResponse(
+        status="completed",
+        credits_added=pack.credits_purchased,
+        expires_at=pack.expires_at,
+    )
+
+
+async def _status_by_legacy_session(
+    db: AsyncSession,
+    current_user: User,
+    session_id: str,
+) -> BillingStatusResponse:
+    """Grace-window legacy path: poll a Stripe pack by ``stripe_session_id``.
+
+    IDOR-safe: scoped by BOTH ``stripe_session_id`` and ``user_id`` in one query.
+    """
     pack = await db.scalar(
         select(StripeCreditPack).where(
             StripeCreditPack.stripe_session_id == session_id,
@@ -152,20 +305,10 @@ async def get_billing_status(
         )
     )
     if pack is None:
-        # Covers both "webhook not yet processed" (legitimate polling) and
-        # any IDOR probe.  A second query to distinguish them costs an extra
-        # DB round-trip without meaningful benefit in V1.
-        logger.debug(
-            "billing.status_not_found session_id=%s user_id=%s",
-            session_id,
-            current_user.id,
-        )
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="Session not found",
+            detail="Checkout not found",
         )
-    # Hit-rate for this read-only poll is covered by the global REQUEST_COUNT
-    # metric (labelled by route + status); no bespoke counter needed.
     return BillingStatusResponse(
         status="completed",
         credits_added=pack.credits_purchased,
@@ -178,26 +321,19 @@ async def get_billing_history(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> list[PackHistoryItem]:
-    """Return the user's full credit-pack purchase history, newest first.
+    """Return the user's credit-pack purchase history, newest first (max 50).
 
-    Includes all statuses (active, consumed, expired, disputed) so users
-    can see a complete audit trail of their purchases.  Capped at 50
-    entries for V1 — a pagination parameter can be added when needed.
+    Sourced from ``billing_credit_packs`` (the provider-neutral pack table), not
+    the retained ``StripeCreditPack`` table. Includes every status so users see a
+    complete audit trail of their purchases.
     """
-    # Structured function-entry trace.
-    logger.debug(
-        "billing.history_fetch",
-        extra={"user_id": str(current_user.id)},
-    )
     result = await db.execute(
-        select(StripeCreditPack)
-        .where(StripeCreditPack.user_id == current_user.id)
-        .order_by(StripeCreditPack.purchased_at.desc())
+        select(BillingCreditPack)
+        .where(BillingCreditPack.user_id == current_user.id)
+        .order_by(BillingCreditPack.purchased_at.desc())
         .limit(50)
     )
     packs = result.scalars().all()
-    # Hit-rate for this read-only listing is covered by the global REQUEST_COUNT
-    # metric (labelled by route + status); no bespoke counter needed.
     return [PackHistoryItem.model_validate(p) for p in packs]
 
 
@@ -206,7 +342,10 @@ async def stripe_webhook(
     request: Request,
     db: AsyncSession = Depends(get_db),
 ) -> dict:
-    """Stripe webhook event handler.
+    """Stripe webhook event handler (retained Phase-18 receiver).
+
+    Left intact by T-296: the Lemon webhook rewrite is T-297 and the late-Stripe
+    grace path is T-303. CSRF and rate-limit exemptions for this path are reused.
 
     Security contract (Phase 18 Payments Directive):
     1. Raw bytes read BEFORE any JSON parsing (Stripe signature covers raw bytes).
@@ -216,12 +355,8 @@ async def stripe_webhook(
     5. No get_current_user dependency — Stripe has no browser session.
     6. Raw payload NEVER logged — only structured fields.
     7. Always returns 200 — Stripe retries on non-2xx (including 429, 500).
-
-    This endpoint is exempt from CSRF middleware and rate limiting (see T-235).
     """
     # Structured function-entry trace (DEBUG only — zero cost in production).
-    # The extra={} dict here also terminates the harness regex capture window so
-    # the capture group begins here and includes the raw-body read below.
     logger.debug("billing.webhook_received", extra={"method": request.method})
     # Step 1: Read raw body BEFORE any other parsing.
     # This is mandatory: Stripe's HMAC-SHA256 signature covers the exact raw bytes.
@@ -277,7 +412,6 @@ async def stripe_webhook(
     # Step 3: INSERT idempotency row BEFORE processing the event.
     # If the process crashes between this INSERT and the event handler, the next
     # retry will find the row and return 200 (already_processed) — no double-credit.
-    # The only safe order is: INSERT first, then process.
     # An IntegrityError means a concurrent or previous delivery of the same event
     # already wrote this row — return 200 immediately (idempotent success).
     idempotency_row = StripeWebhookEvent(
@@ -302,8 +436,6 @@ async def stripe_webhook(
     # changes — no committed pack row without a corresponding credit.
     #
     # The outer transaction (which holds the idempotency row) still commits on return.
-    # Return 200 to Stripe; the RUNBOOK §9 alert on BILLING_WEBHOOK_ERROR will
-    # surface the failure for manual replay via the Stripe dashboard.
     try:
         async with db.begin_nested():  # SAVEPOINT — isolates handle_event side-effects
             await stripe_service.handle_event(db, dict(event))
@@ -320,6 +452,4 @@ async def stripe_webhook(
         # Return 200 — Stripe won't retry; partial DB state is clean.
         return {"status": "error_logged"}
 
-    # BILLING_WEBHOOK_RECEIVED is incremented at the top of this handler (before
-    # the idempotency check), per its definition; nothing to count here.
     return {"status": "ok"}
