@@ -165,6 +165,18 @@ BILLING_PACK_DISPUTED = Counter(
     "specforge_billing_pack_disputed_total",
     "Credit packs revoked due to Stripe charge disputes",
 )
+BILLING_CREDITS_REVOKED = Counter(
+    "specforge_billing_credits_revoked_total",
+    "Credits revoked by a refund / fraud reversal (Phase 22 — T-300). The "
+    "provider-neutral successor to pack_disputed; T-304 owns the wider rollout.",
+    ["provider", "reason"],
+)
+BILLING_CREDIT_DEBT_CREATED = Counter(
+    "specforge_billing_credit_debt_created_total",
+    "Credits a reversal could not immediately recover (the user had already spent "
+    "them) and which became recoverable billing_credit_debts (Phase 22 — T-300).",
+    ["provider", "reason"],
+)
 BILLING_WEBHOOK_RECEIVED = Counter(
     "specforge_billing_webhook_received_total",
     "All webhook events received (before idempotency check)",

@@ -64,7 +64,9 @@ from models.billing_webhook_event import BillingWebhookEvent
 from services.credit_service import credit_service
 from services.observability import (
     BILLING_CHECKOUT_COMPLETED,
+    BILLING_CREDIT_DEBT_CREATED,
     BILLING_CREDITS_GRANTED,
+    BILLING_CREDITS_REVOKED,
     BILLING_PURCHASE_REVENUE_CENTS,
 )
 from services.queue import JOB_MAX_TRIES, QueueUnavailableError, enqueue
@@ -700,6 +702,197 @@ async def handle_order_created(ctx: dict, webhook_event_id: str) -> None:
     )
 
 
-# Wire the handler at import so it is present whenever the worker (or the dispatch
-# path) loads this module — T-300 registers ``order_refunded`` the same way.
+# ---------------------------------------------------------------------------
+# order_refunded / fraud — proportional revocation + recoverable debt (T-300)
+# ---------------------------------------------------------------------------
+#
+# `order_refunded` covers full and partial refunds; Lemon `fraudulent` (a chargeback
+# the Merchant of Record absorbs) is a full-revocation input on the same event. The
+# pack is found ONLY by `(provider, provider_order_id)` — never inferred from custom
+# data. The money math (tax-normalised floor, monotonic processed level, single-
+# ordered pack lock, recoverable debt) lives in `credit_service.apply_refund_reversal`
+# so it is co-located with `deduct`/`grant`; this handler owns event routing, the
+# no-pack proof branches, and the inbox-row state machine.
+
+# Lemon order statuses that mean a *full* reversal even when the signed refunded
+# amount is zero (a fraud chargeback can carry refunded_amount=0). The amount-based
+# `>= provider_total` clause in apply_refund_reversal is the PRIMARY full-refund
+# detector (robust to enum/spelling drift, per the T-300 event-catalog caveat); these
+# strings are a supplementary signal that the catalog confirmation (T-307) validates.
+_FULL_REVERSAL_STATUSES = frozenset({"refunded", "fraudulent"})
+
+# How long a refund whose order_created has not yet landed is retried before it is
+# given up as an audited no-op (Plan §25.6 T-300). `received_at` (never updated) is
+# the clock.
+_REFUND_GIVE_UP_HOURS = 24
+
+
+def _custom_user_id(custom: dict) -> UUID | None:
+    """Parse the sanitised custom ``user_id`` to a UUID, or None if absent/malformed."""
+    try:
+        return UUID(str(custom.get("user_id")))
+    except (ValueError, TypeError):
+        return None
+
+
+async def handle_order_refunded(ctx: dict, webhook_event_id: str) -> None:
+    """Apply a refund / fraud reversal exactly once, or route the no-pack branches.
+
+    Idempotent: the monotonic ``refunded_item_amount_cents_processed`` gate plus the
+    two-component ``refund:billing:{pack_id}:{cents}`` ledger reason make a replay of
+    the same or a lower refund level a no-op (durable processed state only).
+    """
+    wid = UUID(webhook_event_id)
+
+    async with AsyncSessionLocal() as db:
+        webhook = await db.scalar(
+            select(BillingWebhookEvent)
+            .where(BillingWebhookEvent.id == wid)
+            .with_for_update()
+        )
+        if webhook is None or webhook.status == "processed":
+            return
+        payload = webhook.normalized_payload or {}
+        custom = payload.get("custom") or {}
+        order_id = payload.get("order_id")
+        order_status = payload.get("status")
+        refunded_amount = _coerce_int(payload.get("refunded_amount_cents")) or 0
+        is_fraud = order_status == "fraudulent"
+        full_or_fraud = order_status in _FULL_REVERSAL_STATUSES
+        reason_label = "fraud" if is_fraud else "refund"
+
+        # The pack is found ONLY by provider order id (a signed refund with no custom
+        # data still revokes). No lock here — apply_refund_reversal re-locks under the
+        # canonical order.
+        source_pack = await db.scalar(
+            select(BillingCreditPack)
+            .where(
+                BillingCreditPack.provider == "lemonsqueezy",
+                BillingCreditPack.provider_order_id == order_id,
+            )
+            .limit(1)
+        )
+
+        if source_pack is None:
+            await _refund_without_pack(db, webhook, custom, order_id)
+            return
+
+        user_id = source_pack.user_id
+        outcome = await credit_service.apply_refund_reversal(
+            db,
+            source_pack=source_pack,
+            lemon_refunded_amount_cents=refunded_amount,
+            full_or_fraud=full_or_fraud,
+            reason_label=reason_label,
+        )
+        webhook.status = "processed"
+        webhook.processed_at = _now()
+        await db.commit()
+
+    # Post-commit: evict the credit-balance cache, then record telemetry.
+    await credit_service.invalidate(user_id)
+    if outcome.credits_revoked > 0:
+        BILLING_CREDITS_REVOKED.labels(
+            provider="lemonsqueezy", reason=reason_label
+        ).inc(outcome.credits_revoked)
+    if outcome.debt_created > 0:
+        BILLING_CREDIT_DEBT_CREATED.labels(
+            provider="lemonsqueezy", reason=reason_label
+        ).inc(outcome.debt_created)
+    logger.info(
+        "billing.order_refunded.processed",
+        provider="lemonsqueezy",
+        order_id=order_id,
+        user_id=str(user_id),
+        reason=reason_label,
+        new_refunded_item_cents=outcome.new_refunded_item_cents,
+        credits_revoked=outcome.credits_revoked,
+        immediate_revoke=outcome.immediate_revoke,
+        debt_created=outcome.debt_created,
+        applied=outcome.applied,
+    )
+
+
+async def _refund_without_pack(
+    db, webhook: BillingWebhookEvent, custom: dict, order_id: str | None
+) -> None:
+    """Resolve a refund whose pack does not (yet) exist — never revoke other credits.
+
+    (a) valid ``checkout_ref`` + nonce proof and not yet given up → re-queue the row as
+        ``received`` (off the dead-letter budget) so a delayed ``order_created`` grants
+        the pack first and the next attempt revokes it. **Refinement of the spec's
+        literal "keep failed":** ``failed`` rows stop being swept once ``retry_count``
+        reaches ``JOB_MAX_TRIES`` (5), which is minutes — far short of the 24h horizon;
+        ``received`` rows are re-enqueued unconditionally by the 60s sweep, so resetting
+        to ``received`` is the only channel that actually retries for 24h.
+    (b) the proven attempt has expired and 24h have elapsed since first receipt → give
+        up as a ``processed`` audited no-op (no balance change).
+    (c) no ownership proof → ``processed`` audited no-op ("could not link"); a forged or
+        unrelated order can never revoke SpecForge credits.
+    """
+    checkout_ref = custom.get("checkout_ref")
+    nonce_hash = custom.get("checkout_nonce_hash_from_webhook")
+    custom_user_id = _custom_user_id(custom)
+
+    attempt = None
+    if checkout_ref:
+        attempt = await db.scalar(
+            select(BillingCheckoutAttempt).where(
+                BillingCheckoutAttempt.checkout_ref == checkout_ref
+            )
+        )
+    proof_valid = (
+        attempt is not None
+        and nonce_hash is not None
+        and attempt.checkout_nonce_hash == nonce_hash
+        and custom_user_id is not None
+        and custom_user_id == attempt.user_id
+    )
+
+    if not proof_valid:
+        # (c) no proof — audited no-op, never touch unrelated credits.
+        webhook.status = "processed"
+        webhook.processed_at = _now()
+        webhook.last_error = "refund_could_not_link_to_specforge"
+        await db.commit()
+        logger.warning(
+            "billing.order_refunded.unlinked",
+            order_id=order_id,
+            checkout_ref=checkout_ref,
+            webhook_event_id=str(webhook.id),
+        )
+        return
+
+    now = _now()
+    attempt_expired = attempt.status == "expired" or attempt.expires_at < now
+    elapsed = now - webhook.received_at
+    if attempt_expired and elapsed > timedelta(hours=_REFUND_GIVE_UP_HOURS):
+        # (b) the order_created will never arrive — give up as an audited no-op.
+        webhook.status = "processed"
+        webhook.processed_at = now
+        webhook.last_error = "refund_pack_never_granted_attempt_expired"
+        await db.commit()
+        logger.warning(
+            "billing.order_refunded.pack_never_granted",
+            order_id=order_id,
+            checkout_ref=checkout_ref,
+            webhook_event_id=str(webhook.id),
+        )
+        return
+
+    # (a) the grant is plausibly just delayed — re-queue for a later attempt.
+    webhook.status = "received"
+    webhook.last_error = "pack_not_yet_granted"
+    await db.commit()
+    logger.info(
+        "billing.order_refunded.pack_not_yet_granted",
+        order_id=order_id,
+        checkout_ref=checkout_ref,
+        webhook_event_id=str(webhook.id),
+    )
+
+
+# Wire the handlers at import so they are present whenever the worker (or the dispatch
+# path) loads this module.
 register_event_handler("order_created", handle_order_created)
+register_event_handler("order_refunded", handle_order_refunded)

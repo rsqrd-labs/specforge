@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from uuid import UUID
 
 from redis.asyncio import Redis
 from redis.exceptions import RedisError
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -33,6 +34,23 @@ CREDIT_COSTS = {
 
 class InsufficientCreditsError(Exception):
     pass
+
+
+@dataclass(frozen=True)
+class RefundOutcome:
+    """Result of :meth:`CreditService.apply_refund_reversal` (Phase 22 — T-300).
+
+    ``applied`` is True only when a revocation ledger row was written (i.e.
+    ``credits_revoked > 0``); the monotonic-replay and zero-effective branches
+    advance the pack's processed fields and return ``applied=False`` with all
+    credit counters at 0. The caller commits and emits the metrics.
+    """
+
+    new_refunded_item_cents: int
+    credits_revoked: int
+    immediate_revoke: int
+    debt_created: int
+    applied: bool
 
 
 class CreditService:
@@ -291,6 +309,230 @@ class CreditService:
             BILLING_CREDIT_DEBT_RECOVERED.inc(take)
         await self._invalidate(user_id)
         return surplus_entry
+
+    async def apply_refund_reversal(
+        self,
+        db: AsyncSession,
+        *,
+        source_pack: BillingCreditPack,
+        lemon_refunded_amount_cents: int,
+        full_or_fraud: bool,
+        reason_label: str,
+    ) -> RefundOutcome:
+        """Apply a tax-normalised, proportional, exactly-once refund/fraud reversal.
+
+        The shared credit-mutation half of the T-300 money path (the billing worker
+        owns event routing + idempotency). ``source_pack`` is the pack found by
+        ``(provider, provider_order_id)``; ``lemon_refunded_amount_cents`` is the
+        provider's cumulative refunded amount (may include tax); ``full_or_fraud`` is
+        the worker's amount-primary full-refund decision; ``reason_label`` is the
+        metric/debt reason (``refund`` / ``fraud``).
+
+        Normalisation + credit math are verbatim from Plan §25.6 T-300. Locking is
+        byte-for-byte identical to :meth:`deduct` (expire sweep → lock user → lock all
+        active packs ``ORDER BY expires_at ASC FOR UPDATE``, source pack included) so a
+        concurrent ``deduct`` can never deadlock. The revocation drains the source
+        pack's ``credits_remaining`` first, then other active packs FIFO (the drained
+        slices land in their ``credits_debt_recovered`` so the conservation invariant
+        holds), decrements ``users.credit_balance`` by the immediately drained amount
+        only (never below zero), and turns any still-unrecoverable remainder into a
+        recoverable ``billing_credit_debts`` row on the source pack. **Expired credits
+        are never converted to debt** (``refundable_value = purchased − expired``).
+
+        Idempotency is the caller's ledger-reason barrier plus this method's monotonic
+        ``refunded_item_amount_cents_processed`` gate: a replay of the same or a lower
+        refund level only advances the seen-total and returns ``applied=False``. Does
+        not commit; the caller commits and invalidates the credit cache.
+        """
+        user_id = source_pack.user_id
+
+        # Canonical lock order (identical to deduct): sweep lapsed expiry first so
+        # credits_expired is current, then lock the user, then every active pack +
+        # the source pack in one ORDER BY expires_at ASC FOR UPDATE.
+        await self._expire_user_packs(db, user_id)
+        user = await self._get_user(db, user_id, lock=True)
+        locked = (
+            (
+                await db.execute(
+                    select(BillingCreditPack)
+                    .where(
+                        BillingCreditPack.user_id == user_id,
+                        or_(
+                            BillingCreditPack.status == "active",
+                            BillingCreditPack.id == source_pack.id,
+                        ),
+                    )
+                    .order_by(BillingCreditPack.expires_at.asc())
+                    .with_for_update()
+                )
+            )
+            .scalars()
+            .all()
+        )
+        source = next((p for p in locked if p.id == source_pack.id), None)
+        if source is None:  # the source row vanished between lookup and lock
+            raise ValueError(
+                f"refund source pack {source_pack.id} not found under lock"
+            )
+
+        # 1. Normalise refund money through the order total (tax-inclusive safe).
+        paid_item_cents = source.paid_item_amount_cents
+        order_total = source.provider_order_total_cents
+        provider_total_cents = (
+            max(order_total, paid_item_cents)
+            if order_total is not None
+            else paid_item_cents
+        )
+        # clamp(refunded, 0, provider_total)
+        provider_refunded_total_cents = min(
+            max(lemon_refunded_amount_cents, 0), provider_total_cents
+        )
+        if full_or_fraud or provider_refunded_total_cents >= provider_total_cents:
+            new_refunded_item_cents = paid_item_cents
+        else:
+            new_refunded_item_cents = (
+                paid_item_cents * provider_refunded_total_cents
+            ) // provider_total_cents
+
+        old_refunded_item_cents = source.refunded_item_amount_cents_processed
+
+        # 2. Monotonic replay gate — same/lower refund level is a no-op.
+        if new_refunded_item_cents <= old_refunded_item_cents:
+            source.provider_refunded_total_cents_seen = max(
+                source.provider_refunded_total_cents_seen, provider_refunded_total_cents
+            )
+            return RefundOutcome(new_refunded_item_cents, 0, 0, 0, applied=False)
+
+        # 3. Credit math. Expired value is never reclaimed.
+        refundable_value_credits = source.credits_purchased - source.credits_expired
+        if new_refunded_item_cents == paid_item_cents:
+            target_revoked_credits = refundable_value_credits
+        else:
+            target_revoked_credits = (
+                refundable_value_credits * new_refunded_item_cents
+            ) // paid_item_cents
+        credits_to_revoke = target_revoked_credits - source.credits_revoked
+        if credits_to_revoke <= 0:
+            # Zero-effective refund: advance the processed fields, no balance change.
+            source.refunded_item_amount_cents_processed = max(
+                old_refunded_item_cents, new_refunded_item_cents
+            )
+            source.provider_refunded_total_cents_seen = max(
+                source.provider_refunded_total_cents_seen, provider_refunded_total_cents
+            )
+            return RefundOutcome(new_refunded_item_cents, 0, 0, 0, applied=False)
+
+        # 4. Revoke: drain the source pack's remaining first, then other active
+        #    packs FIFO (their drained slices recorded as credits_debt_recovered).
+        immediate_revoke = 0
+        need = credits_to_revoke
+        take_source = min(source.credits_remaining, need)
+        source.credits_remaining -= take_source
+        immediate_revoke += take_source
+        need -= take_source
+        if need > 0:
+            for pack in locked:  # already ORDER BY expires_at ASC (FIFO)
+                if need <= 0:
+                    break
+                if pack.id == source.id or pack.status != "active":
+                    continue
+                take = min(pack.credits_remaining, need)
+                if take <= 0:
+                    continue
+                pack.credits_remaining -= take
+                pack.credits_debt_recovered += take
+                if pack.credits_remaining == 0:
+                    pack.status = "consumed"
+                immediate_revoke += take
+                need -= take
+
+        # 5. Any still-unrecoverable remainder becomes recoverable debt on the source.
+        debt_created = need
+        if debt_created > 0:
+            await self._upsert_refund_debt(db, source, debt_created, reason_label)
+
+        source.credits_revoked += credits_to_revoke
+        source.provider_refunded_total_cents_seen = max(
+            source.provider_refunded_total_cents_seen, provider_refunded_total_cents
+        )
+        source.refunded_item_amount_cents_processed = max(
+            old_refunded_item_cents, new_refunded_item_cents
+        )
+
+        # Balance drops by the immediately drained amount only; never below zero.
+        if user is not None:
+            user.credit_balance = max(
+                0, int(user.credit_balance or 0) - immediate_revoke
+            )
+
+        # Two-component reason: refund:billing:<pack_id>:<new_refunded_item_cents> —
+        # the cents suffix is the per-level idempotency barrier (a one-component reason
+        # would collide on the second partial refund and silently skip it).
+        db.add(
+            CreditLedger(
+                user_id=user_id,
+                amount=-immediate_revoke,
+                reason=f"refund:billing:{source.id}:{new_refunded_item_cents}",
+            )
+        )
+
+        # 6. Source pack status transition.
+        if new_refunded_item_cents == paid_item_cents:
+            source.status = "refunded"
+        elif source.credits_remaining > 0:
+            if source.status != "expired":
+                source.status = "active"
+        else:
+            if source.status != "expired":
+                source.status = "consumed"
+
+        await db.flush()
+        return RefundOutcome(
+            new_refunded_item_cents,
+            credits_to_revoke,
+            immediate_revoke,
+            debt_created,
+            applied=True,
+        )
+
+    async def _upsert_refund_debt(
+        self,
+        db: AsyncSession,
+        source_pack: BillingCreditPack,
+        amount: int,
+        reason_label: str,
+    ) -> None:
+        """Create or extend the source pack's recoverable debt row (T-300).
+
+        One debt per source pack (``source_pack_id`` is UNIQUE). A later purchase's
+        ``grant_credits_with_debt_recovery`` repays it oldest-first. If a prior debt
+        was already ``recovered`` and a new refund extends it, it flips back to
+        ``pending``.
+        """
+        debt = await db.scalar(
+            select(BillingCreditDebt)
+            .where(BillingCreditDebt.source_pack_id == source_pack.id)
+            .with_for_update()
+        )
+        if debt is None:
+            db.add(
+                BillingCreditDebt(
+                    user_id=source_pack.user_id,
+                    source_pack_id=source_pack.id,
+                    provider=source_pack.provider,
+                    provider_order_id=source_pack.provider_order_id,
+                    credits_owed=amount,
+                    credits_recovered=0,
+                    status="pending",
+                    reason=f"refund_exceeded_remaining:{reason_label}",
+                )
+            )
+        else:
+            debt.credits_owed += amount
+            debt.updated_at = datetime.now(timezone.utc)
+            if debt.credits_recovered < debt.credits_owed:
+                debt.status = "pending"
+        await db.flush()
 
     async def deduct(
         self,
