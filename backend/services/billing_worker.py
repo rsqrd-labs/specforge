@@ -25,10 +25,10 @@ This module owns the durable scaffolding:
   * :func:`purge_billing_events` — daily retention purge bounding the inbox and the
     terminal checkout attempts.
 
-The per-``event_name`` money handlers (``order_created`` → T-299, ``order_refunded``
-→ T-300) register themselves in :data:`_EVENT_HANDLERS` via
-:func:`register_event_handler`; this task ships the registry empty. The
-``arq``-registered wrappers and cron schedules live in ``worker.py``.
+The per-``event_name`` money handlers register themselves in :data:`_EVENT_HANDLERS`
+via :func:`register_event_handler` at module import: ``order_created`` (T-299) is
+wired below; ``order_refunded`` (T-300) joins it. The ``arq``-registered wrappers and
+cron schedules live in ``worker.py``.
 
 Handler contract (what T-299/T-300 must conform to)
 ---------------------------------------------------
@@ -52,11 +52,21 @@ from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 import structlog
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, or_, select, update
+from sqlalchemy.exc import IntegrityError
 
+from config import settings
 from database import AsyncSessionLocal
+from models import User
 from models.billing_checkout_attempt import BillingCheckoutAttempt
+from models.billing_credit_pack import BillingCreditPack
 from models.billing_webhook_event import BillingWebhookEvent
+from services.credit_service import credit_service
+from services.observability import (
+    BILLING_CHECKOUT_COMPLETED,
+    BILLING_CREDITS_GRANTED,
+    BILLING_PURCHASE_REVENUE_CENTS,
+)
 from services.queue import JOB_MAX_TRIES, QueueUnavailableError, enqueue
 
 logger = structlog.get_logger(__name__)
@@ -406,3 +416,290 @@ async def purge_billing_events(ctx: dict) -> None:
         )
     except Exception:  # pragma: no cover - best-effort; the next daily tick retries
         logger.exception("billing.purge.failed")
+
+
+# ---------------------------------------------------------------------------
+# order_created — grant credits for a verified, proof-matched paid order (T-299)
+# ---------------------------------------------------------------------------
+#
+# Validation and the grant are anchored to the checkout-attempt SNAPSHOT
+# (``attempt.credits`` / ``attempt.price_cents`` / ``attempt.currency`` /
+# ``attempt.validity_days``), never live ``LEMONSQUEEZY_*`` config (Plan §25 DC6) —
+# a config change between checkout creation and the webhook must not break or
+# mis-price an in-flight purchase. Ownership is proven ONLY by ``checkout_ref`` +
+# the stored nonce hash; a checkout id is never inferred from the order id, receipt,
+# relationships, or order number. The signed-but-informational custom
+# ``credits``/``price_cents`` echoed by Lemon are deliberately ignored.
+
+# A checkout attempt is still grant-eligible in any of these statuses (a redelivered
+# webhook may arrive after the attempt is already ``completed``; idempotency below
+# still guards against a second grant).
+_GRANTABLE_ATTEMPT_STATUSES = frozenset({"created", "provider_created", "completed"})
+
+
+def _coerce_int(value: object) -> int | None:
+    """Best-effort coercion of a JSON scalar to ``int`` (Lemon sends ints)."""
+    if isinstance(value, bool):  # bool is an int subclass — reject it explicitly
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.strip().lstrip("-").isdigit():
+        return int(value)
+    return None
+
+
+def _parse_order_timestamp(value: object) -> datetime:
+    """Parse Lemon's ISO order ``created_at`` (anchor for expiry); fall back to now."""
+    if isinstance(value, str):
+        try:
+            return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            pass
+    return _now()
+
+
+def _order_created_rejection(
+    payload: dict, custom: dict, attempt: BillingCheckoutAttempt | None
+) -> str | None:
+    """Run the T-299 validation checklist; return a rejection reason, or None to grant.
+
+    Every term in the checklist is terminal on failure (no retry, no reconcile
+    first-grant) — a returned reason marks the webhook ``processed`` with a sanitised
+    warning so a config error (wrong store/variant) is alertable rather than silent.
+    """
+    if attempt is None:
+        return "attempt_not_found"
+    # Ownership is proven by checkout_ref (already used to load the attempt) + the
+    # nonce hash + the sanitised custom user_id — never inferred from the order id.
+    raw_user_id = custom.get("user_id")
+    try:
+        custom_user_id = UUID(str(raw_user_id))
+    except (ValueError, TypeError):
+        return "user_id_invalid"
+    if custom_user_id != attempt.user_id:
+        return "user_id_mismatch"
+    if custom.get("checkout_nonce_hash_from_webhook") != attempt.checkout_nonce_hash:
+        return "nonce_mismatch"
+    if attempt.status not in _GRANTABLE_ATTEMPT_STATUSES:
+        return "attempt_status_invalid"
+    # Provider-side invariants come from live config (the store/variant/test_mode the
+    # platform is wired to); economics come from the attempt snapshot.
+    if str(payload.get("store_id")) != settings.lemonsqueezy_store_id:
+        return "store_mismatch"
+    if str(payload.get("variant_id")) != settings.lemonsqueezy_variant_id:
+        return "variant_mismatch"
+    if payload.get("test_mode") != settings.lemonsqueezy_test_mode:
+        return "test_mode_mismatch"
+    if payload.get("status") != "paid":
+        return "status_not_paid"
+    order_currency = str(payload.get("currency") or "")
+    if order_currency.upper() != attempt.currency.upper():
+        return "currency_mismatch"
+    if _coerce_int(payload.get("discount_total_cents")) != 0:
+        return "discount_present"
+    # Validate the ITEM price against the attempt snapshot, never the order
+    # total/subtotal — Lemon may add tax on top of the item price.
+    if _coerce_int(payload.get("item_price_cents")) != attempt.price_cents:
+        return "price_mismatch"
+    return None
+
+
+async def _find_existing_pack(
+    db, *, order_id: str | None, provider_checkout_id: str | None
+) -> BillingCreditPack | None:
+    """Reload an already-granted pack for this order/checkout (the idempotency key).
+
+    Matches on ``(provider, provider_order_id)`` OR ``(provider, provider_checkout_id)``
+    — guarding against a NULL key matching another NULL-keyed pack.
+    """
+    conditions = []
+    if order_id is not None:
+        conditions.append(BillingCreditPack.provider_order_id == order_id)
+    if provider_checkout_id is not None:
+        conditions.append(
+            BillingCreditPack.provider_checkout_id == provider_checkout_id
+        )
+    if not conditions:
+        return None
+    return await db.scalar(
+        select(BillingCreditPack)
+        .where(BillingCreditPack.provider == "lemonsqueezy")
+        .where(or_(*conditions))
+        .limit(1)
+    )
+
+
+async def _ack_order_processed(wid: UUID) -> None:
+    """Mark the webhook row ``processed`` in a fresh session (post-rollback ack).
+
+    Used after an idempotency conflict poisons the grant transaction: the pack was
+    already granted by a prior delivery, so we reload nothing here — just durably
+    acknowledge this redelivery so the sweep stops re-driving it. No second ledger row.
+    """
+    await _mark_processed(wid)
+
+
+async def handle_order_created(ctx: dict, webhook_event_id: str) -> None:
+    """Grant credits for a verified, proof-matched paid ``order_created`` (T-299).
+
+    Idempotent: a duplicate ``order_created`` (or a redelivered inbox row, even with a
+    different ``payload_hash``) reloads the existing pack and writes no second grant —
+    enforced by the ``(provider, provider_order_id)`` / ``(provider,
+    provider_checkout_id)`` pack uniqueness and the ``billing_purchase:`` ledger index.
+    """
+    wid = UUID(webhook_event_id)
+
+    async with AsyncSessionLocal() as db:
+        webhook = await db.scalar(
+            select(BillingWebhookEvent)
+            .where(BillingWebhookEvent.id == wid)
+            .with_for_update()
+        )
+        if webhook is None or webhook.status == "processed":
+            return
+        payload = webhook.normalized_payload or {}
+        custom = payload.get("custom") or {}
+        order_id = payload.get("order_id")
+        checkout_ref = custom.get("checkout_ref")
+
+        # Locate the attempt by checkout_ref (the ownership key) and lock it.
+        attempt: BillingCheckoutAttempt | None = None
+        if checkout_ref:
+            attempt = await db.scalar(
+                select(BillingCheckoutAttempt)
+                .where(BillingCheckoutAttempt.checkout_ref == checkout_ref)
+                .with_for_update()
+            )
+
+        reason = _order_created_rejection(payload, custom, attempt)
+        if reason is not None:
+            webhook.status = "processed"
+            webhook.processed_at = _now()
+            await db.commit()
+            logger.warning(
+                "billing.order_created.rejected",
+                reason=reason,
+                order_id=order_id,
+                checkout_ref=checkout_ref,
+                webhook_event_id=str(wid),
+            )
+            return
+
+        # attempt is non-None and proof-matched past this point.
+        user_id = attempt.user_id
+        credits = attempt.credits
+        price_cents = attempt.price_cents
+        currency = attempt.currency
+        validity_days = attempt.validity_days
+        provider_checkout_id = attempt.provider_checkout_id
+
+        # Lock the user row (canonical user→pack order shared with deduct/expire).
+        user = await db.scalar(select(User).where(User.id == user_id).with_for_update())
+        if user is None:  # FK guarantees this never happens; fail loud if it does.
+            raise RuntimeError(f"user {user_id} missing for granted attempt")
+
+        # Idempotency pre-check under the lock: a prior delivery already granted.
+        existing = await _find_existing_pack(
+            db, order_id=order_id, provider_checkout_id=provider_checkout_id
+        )
+        if existing is not None:
+            attempt.status = "completed"
+            if attempt.completed_at is None:
+                attempt.completed_at = _now()
+            webhook.status = "processed"
+            webhook.processed_at = _now()
+            await db.commit()
+            logger.info(
+                "billing.order_created.duplicate",
+                order_id=order_id,
+                pack_id=str(existing.id),
+                webhook_event_id=str(wid),
+            )
+            return
+
+        # Create the pack from the ATTEMPT SNAPSHOT (not live config — DC6).
+        purchased_at = _parse_order_timestamp(payload.get("created_at"))
+        customer_id = payload.get("customer_id")
+        variant_id = payload.get("variant_id")
+        pack = BillingCreditPack(
+            user_id=user_id,
+            provider="lemonsqueezy",
+            provider_checkout_id=provider_checkout_id,
+            provider_order_id=order_id,
+            provider_customer_id=None if customer_id is None else str(customer_id),
+            provider_variant_id=None if variant_id is None else str(variant_id),
+            credits_purchased=credits,
+            credits_remaining=credits,
+            price_cents=price_cents,
+            currency=currency,
+            paid_item_amount_cents=price_cents,
+            provider_order_total_cents=_coerce_int(payload.get("order_total_cents")),
+            status="active",
+            purchased_at=purchased_at,
+            expires_at=purchased_at + timedelta(days=validity_days),
+        )
+        db.add(pack)
+
+        try:
+            # flush surfaces a (provider, provider_order_id|checkout_id) uniqueness
+            # conflict (a racing duplicate that committed first) before we grant.
+            await db.flush()
+            granted = await credit_service.grant_credits_with_debt_recovery(
+                db,
+                user_id=user_id,
+                pack=pack,
+                granted_credits=credits,
+                ledger_reason=f"billing_purchase:lemonsqueezy:{order_id}",
+            )
+        except IntegrityError:
+            # A concurrent delivery won the insert; roll back this poisoned tx and
+            # acknowledge the redelivery in a fresh session. No second grant.
+            await db.rollback()
+            await _ack_order_processed(wid)
+            logger.info(
+                "billing.order_created.duplicate_conflict",
+                order_id=order_id,
+                webhook_event_id=str(wid),
+            )
+            return
+
+        if granted is None:
+            # The ledger-reason index rejected a duplicate grant; grant()'s SAVEPOINT
+            # rolled back its own rows but our pre-grant pack flush is still pending —
+            # never commit it. Roll back and ack the duplicate.
+            await db.rollback()
+            await _ack_order_processed(wid)
+            logger.info(
+                "billing.order_created.duplicate_ledger",
+                order_id=order_id,
+                webhook_event_id=str(wid),
+            )
+            return
+
+        attempt.status = "completed"
+        attempt.completed_at = _now()
+        webhook.status = "processed"
+        webhook.processed_at = _now()
+        await db.commit()
+
+    # Post-commit: evict the credit-balance cache, then record telemetry. The two
+    # shared counters stay unlabelled (Stripe still emits them bare; T-304 owns
+    # provider labelling) — provider context rides in the structured log.
+    await credit_service.invalidate(user_id)
+    BILLING_CHECKOUT_COMPLETED.inc()
+    BILLING_CREDITS_GRANTED.inc(credits)
+    BILLING_PURCHASE_REVENUE_CENTS.inc(price_cents)
+    logger.info(
+        "billing.order_created.granted",
+        provider="lemonsqueezy",
+        order_id=order_id,
+        user_id=str(user_id),
+        pack_id=str(pack.id),
+        credits_granted=credits,
+        paid_item_cents=price_cents,
+    )
+
+
+# Wire the handler at import so it is present whenever the worker (or the dispatch
+# path) loads this module — T-300 registers ``order_refunded`` the same way.
+register_event_handler("order_created", handle_order_created)

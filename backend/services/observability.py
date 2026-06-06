@@ -141,6 +141,13 @@ BILLING_CREDITS_GRANTED = Counter(
     "specforge_billing_credits_granted_total",
     "Total credits granted to users via Stripe purchase",
 )
+BILLING_PURCHASE_REVENUE_CENTS = Counter(
+    "specforge_billing_purchase_revenue_cents_total",
+    "Gross paid-item revenue (cents) recognised when a verified order_created "
+    "grant lands, anchored to the checkout-attempt snapshot price (Phase 22 — "
+    "T-299). Unlabelled today; T-304 consolidates provider labelling across the "
+    "specforge_billing_* family.",
+)
 BILLING_CREDITS_EXPIRED = Counter(
     "specforge_billing_credits_expired_total",
     "Credits swept by lazy expiry in _expire_user_packs()",

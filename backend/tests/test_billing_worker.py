@@ -256,6 +256,10 @@ async def test_failure_persists_failed_in_separate_transaction(
 
 
 async def test_order_event_without_handler_fails_loud(session, cleanup_events) -> None:
+    # order_created is registered at import by T-299; exercise the genuine
+    # no-handler branch by removing it (the autouse restore_handlers fixture
+    # restores the registry afterwards).
+    billing_worker._EVENT_HANDLERS.pop("order_created", None)
     row = await _insert_event(session, cleanup_events, event_name="order_created")
     with pytest.raises(RuntimeError):
         await billing_worker.billing_process_webhook({}, str(row.id))
