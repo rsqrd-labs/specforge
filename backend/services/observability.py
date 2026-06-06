@@ -177,6 +177,13 @@ BILLING_CREDIT_DEBT_CREATED = Counter(
     "them) and which became recoverable billing_credit_debts (Phase 22 — T-300).",
     ["provider", "reason"],
 )
+BILLING_ADMIN_CORRECTION = Counter(
+    "specforge_billing_admin_correction_total",
+    "Evidence-backed admin credit corrections applied for an order the automatic "
+    "webhook pipeline could not settle (Phase 22 — T-302). Incremented only on a "
+    "real grant — the idempotent duplicate no-op does not count.",
+    ["provider"],
+)
 BILLING_WEBHOOK_RECEIVED = Counter(
     "specforge_billing_webhook_received_total",
     "All webhook events received (before idempotency check)",

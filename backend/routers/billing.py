@@ -53,16 +53,26 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from config import settings
 from database import get_db
 from middleware.auth import get_current_user
-from models import BillingCheckoutAttempt, BillingCreditPack, BillingWebhookEvent, User
+from models import (
+    BillingAdminCorrection,
+    BillingCheckoutAttempt,
+    BillingCreditPack,
+    BillingWebhookEvent,
+    User,
+)
 from models.stripe_credit_pack import StripeCreditPack
 from schemas.billing import (
+    AdminCorrectionRequest,
+    AdminCorrectionResponse,
     BillingStatusResponse,
     CheckoutResponse,
     PackageResponse,
     PackHistoryItem,
 )
+from services.credit_service import credit_service
 from services.lemonsqueezy_service import LemonSqueezyError, lemonsqueezy_service
 from services.observability import (
+    BILLING_ADMIN_CORRECTION,
     BILLING_CHECKOUT_CREATED,
     BILLING_WEBHOOK_DUPLICATE,
     BILLING_WEBHOOK_RECEIVED,
@@ -82,6 +92,24 @@ _LEMON_ORDER_EVENTS = frozenset({"order_created", "order_refunded"})
 _LEMON_OBJECT_TYPE = "orders"
 
 router = APIRouter(prefix="/billing", tags=["billing"])
+
+
+async def require_admin(
+    current_user: User = Depends(get_current_user),
+) -> User:
+    """Authorise the billing-admin allowlist, else 403 (T-302).
+
+    The ``admin_user_emails`` allowlist (``settings.admin_emails``, lower-cased) is
+    the **only** authorization surface — the ``User`` model has no role column. An
+    empty allowlist authorises no one, so the admin-correction support path is closed
+    by default and there is no implicit admin.
+    """
+    if current_user.email.lower() not in settings.admin_emails:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin authorization required",
+        )
+    return current_user
 
 
 @router.get("/package", response_model=PackageResponse)
@@ -347,6 +375,183 @@ async def get_billing_history(
     )
     packs = result.scalars().all()
     return [PackHistoryItem.model_validate(p) for p in packs]
+
+
+@router.post(
+    "/admin/correction",
+    response_model=AdminCorrectionResponse,
+    status_code=status.HTTP_200_OK,
+)
+async def admin_correction(
+    body: AdminCorrectionRequest,
+    admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+) -> AdminCorrectionResponse:
+    """Exceptional, evidence-backed manual credit grant (T-302).
+
+    The support path for a provably-paid order whose first-purchase webhook never
+    arrived with valid proof. Authorised only by ``require_admin`` (the
+    ``admin_user_emails`` allowlist); also requires auth + CSRF and is rate-limited
+    (10/admin/hour, ``RateLimitMiddleware``).
+
+    Idempotent on ``(provider, provider_order_id)``: if a ``BillingCreditPack`` or a
+    prior ``billing_admin_corrections`` row already exists for the order, this is a
+    no-op (``applied=False``) — never a second grant. Otherwise, in one transaction,
+    it creates the pack, runs ``grant_credits_with_debt_recovery`` (so the corrected
+    credits repay pending debt before any usable surplus — debt recovery is never
+    bypassed) under the ``admin_billing_correction:{provider}:{order_id}`` ledger
+    reason, and writes the immutable ``billing_admin_corrections`` audit row. The
+    pack/audit ``(provider, order_id)`` unique indexes and the ledger-reason index are
+    a triple idempotency barrier against a concurrent double-submit.
+    """
+    provider = body.provider
+    order_id = body.provider_order_id
+
+    # Idempotency pre-check: a pack OR a prior correction for this exact order.
+    existing_pack = await db.scalar(
+        select(BillingCreditPack.id).where(
+            BillingCreditPack.provider == provider,
+            BillingCreditPack.provider_order_id == order_id,
+        )
+    )
+    existing_correction = await db.scalar(
+        select(BillingAdminCorrection.id).where(
+            BillingAdminCorrection.provider == provider,
+            BillingAdminCorrection.provider_order_id == order_id,
+        )
+    )
+    if existing_pack is not None or existing_correction is not None:
+        logger.info(
+            "billing.admin_correction.noop provider=%s order_id=%s admin_user_id=%s",
+            provider,
+            order_id,
+            str(admin.id),
+        )
+        return AdminCorrectionResponse(
+            applied=False,
+            provider=provider,
+            provider_order_id=order_id,
+            credits_granted=0,
+        )
+
+    target = await db.scalar(select(User).where(User.id == body.target_user_id))
+    if target is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Target user not found",
+        )
+
+    now = datetime.now(timezone.utc)
+    expires_at = now + timedelta(days=settings.lemonsqueezy_credit_validity_days)
+    pack = BillingCreditPack(
+        user_id=body.target_user_id,
+        provider=provider,
+        provider_order_id=order_id,
+        credits_purchased=body.credits,
+        credits_remaining=body.credits,
+        price_cents=body.price_cents,
+        currency=body.currency,
+        paid_item_amount_cents=body.price_cents,
+        provider_order_total_cents=body.price_cents,
+        status="active",
+        purchased_at=now,
+        expires_at=expires_at,
+    )
+    db.add(pack)
+
+    try:
+        # flush surfaces a (provider, provider_order_id) pack-uniqueness conflict
+        # (a racing duplicate that committed first) before we grant.
+        await db.flush()
+        granted = await credit_service.grant_credits_with_debt_recovery(
+            db,
+            user_id=body.target_user_id,
+            pack=pack,
+            granted_credits=body.credits,
+            ledger_reason=f"admin_billing_correction:{provider}:{order_id}",
+        )
+    except IntegrityError:
+        await db.rollback()
+        logger.info(
+            "billing.admin_correction.duplicate_conflict provider=%s order_id=%s",
+            provider,
+            order_id,
+        )
+        return AdminCorrectionResponse(
+            applied=False,
+            provider=provider,
+            provider_order_id=order_id,
+            credits_granted=0,
+        )
+
+    if granted is None:
+        # The admin_billing_correction:% ledger index rejected a duplicate; grant()'s
+        # SAVEPOINT rolled back its rows but the flushed pack is still pending — never
+        # commit it (the T-299 half-state landmine). Roll back to an idempotent no-op.
+        await db.rollback()
+        logger.info(
+            "billing.admin_correction.duplicate_ledger provider=%s order_id=%s",
+            provider,
+            order_id,
+        )
+        return AdminCorrectionResponse(
+            applied=False,
+            provider=provider,
+            provider_order_id=order_id,
+            credits_granted=0,
+        )
+
+    db.add(
+        BillingAdminCorrection(
+            admin_user_id=admin.id,
+            target_user_id=body.target_user_id,
+            billing_credit_pack_id=pack.id,
+            provider=provider,
+            provider_order_id=order_id,
+            credits=body.credits,
+            price_cents=body.price_cents,
+            currency=body.currency,
+            reason=body.reason,
+            evidence_url=str(body.evidence_url),
+        )
+    )
+    try:
+        await db.commit()
+    except IntegrityError:
+        # The audit-row (provider, order_id) unique index rejected a concurrent
+        # duplicate that committed between our pre-check and here. Nothing of ours
+        # persists — idempotent no-op.
+        await db.rollback()
+        logger.info(
+            "billing.admin_correction.duplicate_audit provider=%s order_id=%s",
+            provider,
+            order_id,
+        )
+        return AdminCorrectionResponse(
+            applied=False,
+            provider=provider,
+            provider_order_id=order_id,
+            credits_granted=0,
+        )
+
+    await credit_service.invalidate(body.target_user_id)
+    BILLING_ADMIN_CORRECTION.labels(provider=provider).inc()
+    logger.info(
+        "billing.admin_correction.applied provider=%s order_id=%s admin_user_id=%s "
+        "target_user_id=%s credits=%d pack_id=%s",
+        provider,
+        order_id,
+        str(admin.id),
+        str(body.target_user_id),
+        body.credits,
+        str(pack.id),
+    )
+    return AdminCorrectionResponse(
+        applied=True,
+        provider=provider,
+        provider_order_id=order_id,
+        credits_granted=body.credits,
+    )
 
 
 @router.post("/webhook", status_code=status.HTTP_200_OK)

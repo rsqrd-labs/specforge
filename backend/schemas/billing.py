@@ -114,3 +114,20 @@ class AdminCorrectionRequest(BaseModel):
     )
 
     model_config = ConfigDict(str_strip_whitespace=True)
+
+
+class AdminCorrectionResponse(BaseModel):
+    """Result of POST /billing/admin/correction (T-302).
+
+    ``applied`` is True when this call performed the grant; False when an existing
+    pack or correction for the same ``(provider, provider_order_id)`` made it an
+    idempotent no-op (never a second grant). ``credits_granted`` is the corrected
+    credit amount on the applied path, 0 on the no-op path.
+    """
+
+    applied: bool = Field(description="True if this call granted; False on duplicate")
+    provider: str = Field(description="Billing provider of the corrected order")
+    provider_order_id: str = Field(
+        description="Provider order id the correction settles"
+    )
+    credits_granted: int = Field(ge=0, description="Credits granted by this call")

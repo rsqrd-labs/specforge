@@ -115,6 +115,16 @@ _BILLING_CHECKOUT_LIMIT = 5
 _BILLING_CHECKOUT_WINDOW_SECONDS = 3600
 _BILLING_CHECKOUT_DETAIL = "Checkout rate limit reached. Maximum 5 purchases per hour."
 
+# Billing admin-correction tier (Phase 22, T-302): 10 corrections per admin per
+# hour. A low cap on the exceptional, allowlist-gated manual-grant support path so a
+# compromised or mistaken admin session cannot mass-grant credits.
+_BILLING_ADMIN_CORRECTION_PATH_RE = re.compile(r"^/billing/admin/correction/?$")
+_BILLING_ADMIN_CORRECTION_LIMIT = 10
+_BILLING_ADMIN_CORRECTION_WINDOW_SECONDS = 3600
+_BILLING_ADMIN_CORRECTION_DETAIL = (
+    "Admin correction rate limit reached. Maximum 10 corrections per hour."
+)
+
 # Storyboard Generate tier (Phase 20, T-261): 3 full generations per user per
 # hour. Applies to the initial workspace generation and full Storyboard
 # regeneration; section regeneration has its own cheaper, higher-volume tier.
@@ -500,6 +510,22 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
                 return _rate_limited_custom(
                     detail=_BILLING_CHECKOUT_DETAIL,
                     retry_after_seconds=_BILLING_CHECKOUT_WINDOW_SECONDS,
+                )
+
+        if (
+            user_id
+            and request.method == "POST"
+            and _BILLING_ADMIN_CORRECTION_PATH_RE.match(path)
+        ):
+            allowed = await check(
+                f"billing_admin_correction:{user_id}",
+                _BILLING_ADMIN_CORRECTION_LIMIT,
+                _BILLING_ADMIN_CORRECTION_WINDOW_SECONDS,
+            )
+            if not allowed:
+                return _rate_limited_custom(
+                    detail=_BILLING_ADMIN_CORRECTION_DETAIL,
+                    retry_after_seconds=_BILLING_ADMIN_CORRECTION_WINDOW_SECONDS,
                 )
 
         if (

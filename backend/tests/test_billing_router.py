@@ -586,3 +586,51 @@ async def test_history_reads_billing_credit_packs() -> None:
     assert len(rows) == 1
     assert rows[0]["credits_purchased"] == 200
     assert rows[0]["status"] == "active"
+
+
+# ---------------------------------------------------------------------------
+# POST /admin/correction — wired require_admin authorization (T-302)
+# ---------------------------------------------------------------------------
+#
+# These drive the real Depends(require_admin) chain through the ASGI app to prove
+# the endpoint is wired and CSRF lets an authenticated request reach authz. The
+# grant/idempotency/debt money-path correctness is covered against a real Postgres
+# in test_billing_admin_correction.py.
+
+_ADMIN_CORRECTION_BODY = {
+    "provider": "lemonsqueezy",
+    "provider_order_id": "ord_admin_http",
+    "target_user_id": str(uuid4()),
+    "credits": 200,
+    "price_cents": 900,
+    "currency": "USD",
+    "reason": "paid order, webhook never arrived",
+    "evidence_url": "https://support.specforge.dev/tickets/1",
+}
+
+
+@pytest.mark.asyncio
+async def test_admin_correction_forbidden_for_non_admin() -> None:
+    session = _FakeSession()
+    app = _make_app(session)  # _USER (buyer@example.com) is the authenticated user
+    with _Patches([patch.object(settings, "admin_user_emails", "admin@specforge.dev")]):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.post(
+                "/billing/admin/correction", json=_ADMIN_CORRECTION_BODY
+            )
+    assert resp.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_admin_correction_forbidden_when_allowlist_empty() -> None:
+    session = _FakeSession()
+    app = _make_app(session)
+    # Empty allowlist authorises no one — not even an otherwise-plausible admin.
+    with _Patches([patch.object(settings, "admin_user_emails", "")]):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.post(
+                "/billing/admin/correction", json=_ADMIN_CORRECTION_BODY
+            )
+    assert resp.status_code == 403
