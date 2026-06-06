@@ -48,20 +48,28 @@ committed to ``processing``. It:
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 import structlog
-from sqlalchemy import delete, or_, select, update
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy import delete, func, or_, select, update
+from sqlalchemy.exc import DBAPIError, IntegrityError
 
 from config import settings
 from database import AsyncSessionLocal
 from models import User
 from models.billing_checkout_attempt import BillingCheckoutAttempt
 from models.billing_credit_pack import BillingCreditPack
+from models.billing_reconciliation_cursor import BillingReconciliationCursor
 from models.billing_webhook_event import BillingWebhookEvent
 from services.credit_service import credit_service
+from services.lemonsqueezy_service import (
+    LemonOrder,
+    LemonSqueezyError,
+    LemonSqueezyRateLimitError,
+    lemonsqueezy_service,
+)
 from services.observability import (
     BILLING_CHECKOUT_COMPLETED,
     BILLING_CREDIT_DEBT_CREATED,
@@ -99,6 +107,29 @@ _PURGE_BATCH = 1000
 # Terminal rows older than this are safe to delete (R9 / DC5). Generous relative
 # to the provider redelivery window so dedup protection is never lost early.
 _RETENTION_DAYS = 30
+
+# Lemon order statuses that mean a *full* reversal even when the signed refunded
+# amount is zero (a fraud chargeback can carry refunded_amount=0). The amount-based
+# `>= provider_total` clause in apply_refund_reversal is the PRIMARY full-refund
+# detector (robust to enum/spelling drift, per the T-300 event-catalog caveat); these
+# strings are a supplementary signal that the catalog confirmation (T-307) validates.
+# Shared by the webhook handler (T-300) and reconcile lane 2 (T-301).
+_FULL_REVERSAL_STATUSES = frozenset({"refunded", "fraudulent"})
+
+# How long a refund whose order_created has not yet landed is retried before it is
+# given up as an audited no-op (Plan §25.6 T-300). `received_at` (never updated) is
+# the clock.
+_REFUND_GIVE_UP_HOURS = 24
+
+# Reconcile (T-301). The single 'lemonsqueezy' cursor row is the run-state anchor.
+_RECONCILE_PROVIDER = "lemonsqueezy"
+# Postgres SQLSTATE for a FOR UPDATE NOWAIT that found the row already locked.
+_LOCK_NOT_AVAILABLE_SQLSTATE = "55P03"
+# Lane 2 sweeps packs that can still change refund/fraud state.
+_RECONCILE_LIVE_PACK_STATUSES = ("active", "refunded")
+# Lane 3 bounded expiry batch + the stale-attempt count that trips an operator alert.
+_RECONCILE_ATTEMPT_BATCH = 500
+_RECONCILE_STALE_ATTEMPT_ALERT = 200
 
 # A money/state handler for one event_name. See the module "Handler contract".
 EventHandler = Callable[[dict, str], Awaitable[None]]
@@ -252,23 +283,311 @@ async def billing_process_pending_webhooks(ctx: dict) -> None:
         logger.exception("billing.sweep.failed")
 
 
-async def billing_reconcile(ctx: dict) -> None:
-    """15-minute reconciliation backstop (cron; catch + log).
+@dataclass
+class _Lane2Result:
+    """Lane-2 outcome: the advanced cursor state, calls spent, reversals applied."""
 
-    T-298 ships **Lane 1 — inbox replay**: re-enqueue committed ``received``,
-    retryable ``failed``, and reclaimed stale ``processing`` rows (the inbox row
-    carries the signed proof, so this is the only safe automatic recovery). T-301
-    adds Lane 2 (cursor-locked, bounded provider re-read for refund/fraud) and
-    Lane 3 (checkout-attempt hygiene); it must **never** auto-grant from provider
-    listing/email/receipt/amount.
+    state: dict
+    calls: int
+    reversals: int
+
+
+def _is_lock_not_available(exc: DBAPIError) -> bool:
+    """True when a ``FOR UPDATE NOWAIT`` failed because the row was already locked."""
+    return getattr(getattr(exc, "orig", None), "sqlstate", None) == (
+        _LOCK_NOT_AVAILABLE_SQLSTATE
+    )
+
+
+def _order_has_reversal(order: LemonOrder) -> bool:
+    """True when a re-read order shows a refund/fraud the local pack may have missed."""
+    return (
+        order.refunded
+        or order.refunded_amount_cents > 0
+        or order.status in ("refunded", "partial_refund", "fraudulent")
+    )
+
+
+def _reversal_decision(order_status: str | None) -> tuple[bool, str]:
+    """Map a Lemon order status to ``(full_or_fraud, reason_label)`` for the helper.
+
+    Shared by the ``order_refunded`` webhook handler (T-300) and reconcile lane 2
+    (T-301) so both classify a reversal identically.
     """
-    try:
-        ids = await _claim_pending_ids(reclaim_stale=True)
-        await _enqueue_ids(ctx, ids)
+    full_or_fraud = order_status in _FULL_REVERSAL_STATUSES
+    reason_label = "fraud" if order_status == "fraudulent" else "refund"
+    return full_or_fraud, reason_label
+
+
+async def billing_reconcile(ctx: dict) -> None:
+    """15-minute reconciliation backstop (plain cron; catch + log — never raises).
+
+    Authoritative run-state lives in the single ``billing_reconciliation_cursors``
+    row (Postgres, not Redis). The row is claimed ``SELECT … FOR UPDATE NOWAIT`` and
+    the lock is **held in this session for the entire run** — that is the single-
+    active-run guarantee: an overlapping cron tick gets a lock-not-available error
+    and skips cleanly (not a failure, no retry/dead-letter). Three bounded lanes run
+    in order; on success the cursor state + ``last_successful_run_at`` advance and the
+    lock releases atomically; on failure the run rolls back (cursor unchanged) and
+    only ``last_error`` is persisted.
+
+    Lane 1 — inbox replay: re-enqueue committed ``received``/retryable ``failed``/
+    reclaimed stale ``processing`` rows. The inbox row carries the signed
+    ``checkout_ref`` + nonce proof, so this is the **only** automatic path to recover
+    a missed ``order_created`` grant.
+    Lane 2 — bounded local-pack provider re-read: for live Lemon packs, ``get_order``
+    by id and run the same T-300 refund/fraud helper. Capped at
+    ``lemonsqueezy_reconcile_max_calls_per_run`` and cursor-paged by
+    ``provider_order_id``; backs off + stops (cursor unchanged) on 429/5xx.
+    Lane 3 — checkout-attempt hygiene: expire local attempts past ``expires_at`` and
+    alert on aggregate stale/pending patterns.
+
+    It **never** invents a first grant from order listing/email/receipt/order
+    number/amount/currency/time window/redirect — an unprovable paid checkout goes to
+    the admin-correction path (T-302), never an automatic grant.
+    """
+    async with AsyncSessionLocal() as lock_db:
+        # 1. Claim the single-run lock on the cursor row (NOWAIT → skip if held).
+        try:
+            cursor = await lock_db.scalar(
+                select(BillingReconciliationCursor)
+                .where(BillingReconciliationCursor.provider == _RECONCILE_PROVIDER)
+                .with_for_update(nowait=True)
+            )
+        except DBAPIError as exc:
+            await lock_db.rollback()
+            if _is_lock_not_available(exc):
+                logger.info("billing.reconcile.skip_locked")
+                return
+            logger.exception("billing.reconcile.cursor_lock_failed")
+            return
+        if cursor is None:
+            # The migration seeds the single 'lemonsqueezy' row; its absence is a
+            # deploy/migration fault, not something a tick should paper over.
+            logger.warning("billing.reconcile.cursor_missing")
+            return
+
+        # Held until the final commit/rollback — do NOT commit mid-run (that would
+        # release the lock and break the single-active-run guarantee).
+        cursor.last_run_started_at = _now()
+
+        try:
+            replayed = await _reconcile_lane1(ctx)
+            lane2 = await _reconcile_lane2(state=dict(cursor.state or {}))
+            expired_attempts = await _reconcile_lane3()
+        except Exception:
+            await lock_db.rollback()  # discards last_run_started_at; cursor unchanged
+            logger.exception("billing.reconcile.failed")
+            await _persist_reconcile_error()
+            return
+
+        # Success: advance the cursor + timestamps atomically and release the lock.
+        cursor.state = lane2.state
+        cursor.last_successful_run_at = _now()
+        cursor.last_run_completed_at = _now()
+        cursor.last_error = None
+        cursor.updated_at = _now()
+        await lock_db.commit()
+        logger.info(
+            "billing.reconcile.done",
+            replayed=replayed,
+            lane2_calls=lane2.calls,
+            lane2_reversals=lane2.reversals,
+            expired_attempts=expired_attempts,
+        )
+
+
+async def _reconcile_lane1(ctx: dict) -> int:
+    """Lane 1 — re-enqueue pending inbox rows (idempotent, own sessions); count out."""
+    ids = await _claim_pending_ids(reclaim_stale=True)
+    await _enqueue_ids(ctx, ids)
+    if ids:
+        logger.info("billing.reconcile.replayed", count=len(ids))
+    return len(ids)
+
+
+async def _reconcile_lane2(*, state: dict) -> _Lane2Result:
+    """Lane 2 — bounded provider re-read of live local packs (refund/fraud backstop).
+
+    Reads up to ``lemonsqueezy_reconcile_max_calls_per_run`` live Lemon packs ordered
+    by ``provider_order_id`` and resuming after the cursor's ``lane2_last_order_id``;
+    ``get_order`` each, and on a missed refund/fraud runs the same T-300 helper in its
+    own committed session (so a single bad order never poisons the batch). On a 429/
+    provider error it backs off and stops the lane with the cursor at the last
+    successfully processed id (it advances next run). When the ordered scan is
+    exhausted the cursor resets to the start so reconciliation is continuous. Never
+    grants — ``apply_refund_reversal`` only revokes, never credits.
+    """
+    max_calls = settings.lemonsqueezy_reconcile_max_calls_per_run
+    last_id = str(state.get("lane2_last_order_id") or "")
+
+    async with AsyncSessionLocal() as db:
+        candidates = (
+            await db.execute(
+                select(BillingCreditPack.id, BillingCreditPack.provider_order_id)
+                .where(
+                    BillingCreditPack.provider == _RECONCILE_PROVIDER,
+                    BillingCreditPack.status.in_(_RECONCILE_LIVE_PACK_STATUSES),
+                    BillingCreditPack.provider_order_id.isnot(None),
+                    BillingCreditPack.provider_order_id > last_id,
+                )
+                .order_by(BillingCreditPack.provider_order_id.asc())
+                .limit(max_calls)
+            )
+        ).all()
+
+    calls = 0
+    reversals = 0
+    new_last = last_id
+    stopped_early = False
+    for pack_id, order_id in candidates:
+        try:
+            order = await lemonsqueezy_service.get_order(order_id)
+        except LemonSqueezyRateLimitError as exc:
+            logger.warning(
+                "billing.reconcile.lane2_rate_limited",
+                retry_after=round(exc.retry_after, 1),
+                order_id=order_id,
+            )
+            stopped_early = True
+            break
+        except LemonSqueezyError:
+            logger.warning("billing.reconcile.lane2_provider_error", order_id=order_id)
+            stopped_early = True
+            break
+        calls += 1
+
+        if _order_has_reversal(order):
+            if await _reconcile_apply_reversal(pack_id, order):
+                reversals += 1
+
+        # Advance only after a successful get_order (+ any reversal commit).
+        new_last = order_id
+
+    # A full, uninterrupted scan that returned fewer than the cap means we reached
+    # the end of the ordered set — reset so the next run sweeps from the start.
+    if not stopped_early and len(candidates) < max_calls:
+        new_last = ""
+
+    state["lane2_last_order_id"] = new_last
+    return _Lane2Result(state=state, calls=calls, reversals=reversals)
+
+
+async def _reconcile_apply_reversal(pack_id: UUID, order: LemonOrder) -> bool:
+    """Run the T-300 reversal helper for one re-read order in its own session.
+
+    Returns True if a revocation was actually applied (a webhook the path missed).
+    """
+    full_or_fraud, reason_label = _reversal_decision(order.status)
+    async with AsyncSessionLocal() as db:
+        pack = await db.scalar(
+            select(BillingCreditPack).where(BillingCreditPack.id == pack_id)
+        )
+        if pack is None:  # deleted between the candidate read and now — skip
+            return False
+        user_id = pack.user_id
+        outcome = await credit_service.apply_refund_reversal(
+            db,
+            source_pack=pack,
+            lemon_refunded_amount_cents=order.refunded_amount_cents,
+            full_or_fraud=full_or_fraud,
+            reason_label=reason_label,
+        )
+        await db.commit()
+
+    await credit_service.invalidate(user_id)
+    if outcome.credits_revoked > 0:
+        BILLING_CREDITS_REVOKED.labels(
+            provider=_RECONCILE_PROVIDER, reason=reason_label
+        ).inc(outcome.credits_revoked)
+    if outcome.debt_created > 0:
+        BILLING_CREDIT_DEBT_CREATED.labels(
+            provider=_RECONCILE_PROVIDER, reason=reason_label
+        ).inc(outcome.debt_created)
+    if outcome.applied:
+        logger.warning(
+            "billing.reconcile.mismatch",
+            provider=_RECONCILE_PROVIDER,
+            order_id=order.provider_order_id,
+            reason=reason_label,
+            credits_revoked=outcome.credits_revoked,
+            debt_created=outcome.debt_created,
+        )
+    return outcome.applied
+
+
+async def _reconcile_lane3() -> int:
+    """Lane 3 — expire local checkout attempts past their TTL; alert on stale buildup.
+
+    Returns the number of attempts expired this run.
+    """
+    now = _now()
+    async with AsyncSessionLocal() as db:
+        ids = (
+            (
+                await db.execute(
+                    select(BillingCheckoutAttempt.id)
+                    .where(
+                        BillingCheckoutAttempt.status.in_(
+                            ("created", "provider_created")
+                        ),
+                        BillingCheckoutAttempt.expires_at < now,
+                    )
+                    .order_by(BillingCheckoutAttempt.expires_at)
+                    .limit(_RECONCILE_ATTEMPT_BATCH)
+                    .with_for_update(skip_locked=True)
+                )
+            )
+            .scalars()
+            .all()
+        )
         if ids:
-            logger.info("billing.reconcile.replayed", count=len(ids))
-    except Exception:  # pragma: no cover - best-effort; the next tick retries
-        logger.exception("billing.reconcile.failed")
+            await db.execute(
+                update(BillingCheckoutAttempt)
+                .where(BillingCheckoutAttempt.id.in_(ids))
+                .values(status="expired")
+            )
+
+        # Aggregate stale/pending alert: attempts still open after expiry would be a
+        # webhook-delivery or checkout-flow regression worth an operator's attention.
+        still_open = await db.scalar(
+            select(func.count())
+            .select_from(BillingCheckoutAttempt)
+            .where(
+                BillingCheckoutAttempt.status.in_(("created", "provider_created")),
+                BillingCheckoutAttempt.expires_at < now,
+            )
+        )
+        await db.commit()
+
+    if ids:
+        logger.info("billing.reconcile.attempts_expired", count=len(ids))
+    if still_open and still_open >= _RECONCILE_STALE_ATTEMPT_ALERT:
+        logger.warning(
+            "billing.reconcile.stale_attempts_high",
+            open_past_ttl=still_open,
+            threshold=_RECONCILE_STALE_ATTEMPT_ALERT,
+        )
+    return len(ids)
+
+
+async def _persist_reconcile_error() -> None:
+    """Persist the failed run's ``last_error`` without advancing success state."""
+    try:
+        async with AsyncSessionLocal() as db:
+            cursor = await db.scalar(
+                select(BillingReconciliationCursor).where(
+                    BillingReconciliationCursor.provider == _RECONCILE_PROVIDER
+                )
+            )
+            if cursor is None:
+                return
+            cursor.last_error = "reconcile run failed; see billing.reconcile.failed log"
+            cursor.last_run_started_at = _now()
+            cursor.updated_at = _now()
+            await db.commit()
+    except Exception:  # pragma: no cover - best-effort error annotation
+        logger.exception("billing.reconcile.error_persist_failed")
 
 
 async def _claim_pending_ids(*, reclaim_stale: bool) -> list[UUID]:
@@ -714,18 +1033,6 @@ async def handle_order_created(ctx: dict, webhook_event_id: str) -> None:
 # so it is co-located with `deduct`/`grant`; this handler owns event routing, the
 # no-pack proof branches, and the inbox-row state machine.
 
-# Lemon order statuses that mean a *full* reversal even when the signed refunded
-# amount is zero (a fraud chargeback can carry refunded_amount=0). The amount-based
-# `>= provider_total` clause in apply_refund_reversal is the PRIMARY full-refund
-# detector (robust to enum/spelling drift, per the T-300 event-catalog caveat); these
-# strings are a supplementary signal that the catalog confirmation (T-307) validates.
-_FULL_REVERSAL_STATUSES = frozenset({"refunded", "fraudulent"})
-
-# How long a refund whose order_created has not yet landed is retried before it is
-# given up as an audited no-op (Plan §25.6 T-300). `received_at` (never updated) is
-# the clock.
-_REFUND_GIVE_UP_HOURS = 24
-
 
 def _custom_user_id(custom: dict) -> UUID | None:
     """Parse the sanitised custom ``user_id`` to a UUID, or None if absent/malformed."""
@@ -757,9 +1064,7 @@ async def handle_order_refunded(ctx: dict, webhook_event_id: str) -> None:
         order_id = payload.get("order_id")
         order_status = payload.get("status")
         refunded_amount = _coerce_int(payload.get("refunded_amount_cents")) or 0
-        is_fraud = order_status == "fraudulent"
-        full_or_fraud = order_status in _FULL_REVERSAL_STATUSES
-        reason_label = "fraud" if is_fraud else "refund"
+        full_or_fraud, reason_label = _reversal_decision(order_status)
 
         # The pack is found ONLY by provider order id (a signed refund with no custom
         # data still revokes). No lock here — apply_refund_reversal re-locks under the
