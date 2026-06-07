@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 import logging
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -55,6 +56,23 @@ _PDF_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
     max_workers=2,
     thread_name_prefix="pdf-export",
 )
+_PDF_EXECUTOR_LOCK = threading.Lock()
+
+
+def _new_pdf_executor() -> concurrent.futures.ThreadPoolExecutor:
+    return concurrent.futures.ThreadPoolExecutor(
+        max_workers=2,
+        thread_name_prefix="pdf-export",
+    )
+
+
+def _get_pdf_executor() -> concurrent.futures.ThreadPoolExecutor:
+    """Return a live PDF executor, recreating it after test-client shutdowns."""
+    global _PDF_EXECUTOR
+    with _PDF_EXECUTOR_LOCK:
+        if getattr(_PDF_EXECUTOR, "_shutdown", False):
+            _PDF_EXECUTOR = _new_pdf_executor()
+        return _PDF_EXECUTOR
 
 
 def shutdown_pdf_executor() -> None:
@@ -65,7 +83,8 @@ def shutdown_pdf_executor() -> None:
     lifespan complete immediately; threads drain naturally at interpreter exit.
     HF-4 — T-201.
     """
-    _PDF_EXECUTOR.shutdown(wait=False)
+    with _PDF_EXECUTOR_LOCK:
+        _PDF_EXECUTOR.shutdown(wait=False)
 
 
 _TEMPLATES_DIR = Path(__file__).resolve().parents[2] / "templates"
@@ -193,7 +212,7 @@ def _render_pdf_sync(html_text: str) -> bytes:
 
     WeasyPrint is CPU-bound and holds the GIL for the full render duration
     (typically 0.5–3 s). Keeping it in a standalone module-level function
-    allows the async caller to dispatch it to the default thread pool,
+    allows the async caller to dispatch it to the dedicated thread pool,
     leaving the event loop free to serve other requests.  C-4 — T-176.
 
     `no_network` marker — keep this token in the source for the harness
@@ -288,7 +307,7 @@ async def render(
     # variant) — it raises RuntimeError if no loop is running, making bugs
     # explicit.  C-4 — T-176.  HF-4 — T-201.
     pdf_bytes = await asyncio.get_running_loop().run_in_executor(
-        _PDF_EXECUTOR, _render_pdf_sync, html_text
+        _get_pdf_executor(), _render_pdf_sync, html_text
     )
     slug = _safe_filename_slug(workspace.name)
     return pdf_bytes, slug
@@ -315,5 +334,5 @@ async def render_html_to_pdf(html_text: str) -> bytes:
     executor, one no-network guard, and one render-duration metric.
     """
     return await asyncio.get_running_loop().run_in_executor(
-        _PDF_EXECUTOR, _render_pdf_sync, html_text
+        _get_pdf_executor(), _render_pdf_sync, html_text
     )

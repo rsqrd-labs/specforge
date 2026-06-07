@@ -97,4 +97,14 @@ def test_no_network_url_fetcher_allows_data_urls() -> None:
         "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkAAIAAAoAAv/lxKUAAAAASUVORK5CYII="
     )
     result = no_network_url_fetcher(one_pixel)
-    assert "mime_type" in result or "file_obj" in result or "string" in result
+    if isinstance(result, dict):
+        assert "mime_type" in result or "file_obj" in result or "string" in result
+        return
+
+    try:
+        assert hasattr(result, "read")
+        assert result.content_type == "image/png"
+    finally:
+        close = getattr(result, "close", None)
+        if callable(close):
+            close()

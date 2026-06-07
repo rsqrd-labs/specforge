@@ -129,3 +129,22 @@ def test_shutdown_pdf_executor_is_callable() -> None:
         "shutdown_pdf_executor must be a callable registered in the FastAPI "
         "lifespan to release the PDF thread pool on process exit. HF-4 — T-201."
     )
+
+
+@pytest.mark.asyncio
+async def test_render_html_to_pdf_recreates_executor_after_shutdown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PE-5 — later tests can render after a TestClient lifespan shutdown."""
+
+    monkeypatch.setattr(
+        pdf_module,
+        "_render_pdf_sync",
+        lambda html_text: f"%PDF-{html_text}".encode("utf-8"),
+    )
+
+    pdf_module.shutdown_pdf_executor()
+
+    pdf = await pdf_module.render_html_to_pdf("after-shutdown")
+
+    assert pdf == b"%PDF-after-shutdown"
