@@ -106,6 +106,7 @@ class CreditService:
                 BillingCreditPack.expires_at <= now,
             )
             .with_for_update()
+            .execution_options(populate_existing=True)
         )
         expired_packs = result.scalars().all()
         if not expired_packs:
@@ -148,6 +149,7 @@ class CreditService:
                 BillingCreditPack.expires_at.asc()
             )  # FIFO: soonest-expiring first
             .with_for_update()
+            .execution_options(populate_existing=True)
         )
         packs = result.scalars().all()
         remaining = amount
@@ -174,7 +176,12 @@ class CreditService:
     ) -> User | None:
         statement = select(User).where(User.id == user_id)
         if lock:
-            statement = statement.with_for_update()
+            # populate_existing so a locked read refreshes an already-identity-mapped
+            # row to committed DB state — a FOR UPDATE that returned a stale cached
+            # instance would silently lose a concurrent writer's update (T-306).
+            statement = statement.with_for_update().execution_options(
+                populate_existing=True
+            )
         result = await db.execute(statement)
         return result.scalar_one_or_none()
 
@@ -364,6 +371,10 @@ class CreditService:
                     )
                     .order_by(BillingCreditPack.expires_at.asc())
                     .with_for_update()
+                    # Authoritative locked read: refresh any pre-loaded pack (the
+                    # caller passes an already-fetched source_pack) to committed state
+                    # so a concurrent deduct's drain is never lost (T-306).
+                    .execution_options(populate_existing=True)
                 )
             )
             .scalars()
