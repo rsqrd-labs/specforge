@@ -668,10 +668,12 @@ not long-lived secrets.
 
 Billing runs on **Lemon Squeezy** (Phase 22). Lemon is the Merchant of Record,
 so it owns tax, chargebacks, and disputes; chargebacks/disputes surface to
-SpecForge through `order_refunded`/fraud revocation inputs. The legacy Stripe SDK
-and its `stripe_credit_packs` / `stripe_webhook_events` audit tables are
-**retained** behind a bounded late-webhook grace window; full removal is the
-gated follow-up **T-308**.
+SpecForge through `order_refunded`/fraud revocation inputs. The Stripe runtime is
+**fully decommissioned** (T-308): there is no Stripe SDK, config, or webhook
+processing — `POST /billing/webhook` answers a Stripe-shaped request (a
+`Stripe-Signature` header) with `{"status":"ignored_provider_disabled"}` and no
+DB write. Only the read-only `stripe_credit_packs` / `stripe_webhook_events`
+audit tables (the historical financial record) remain.
 
 Architecture recap (so the procedures below make sense):
 
@@ -694,7 +696,8 @@ Architecture recap (so the procedures below make sense):
 
 The following alert rules correspond to the provider-labelled counters defined in
 `services/observability.py` (Phase 22 — T-304). `{provider}` is `lemonsqueezy`
-(and `stripe` only for retained grace/audit series).
+(the only runtime emitter; `provider="stripe"` series persist only as historical
+audit data after the T-308 decommission).
 
 | Alert | Condition | Severity | Action |
 |---|---|---|---|

@@ -104,9 +104,9 @@ you merge to `main`.
 
 Dependencies installed but not currently required for runtime setup:
 `resend` and `supabase`. Lemon Squeezy is the runtime billing provider (Phase 22)
-and is documented below. The legacy Stripe SDK is retained only for the bounded
-late-webhook grace window (see "Stripe (legacy — grace window only)" below); new
-checkout is Lemon-only.
+and is documented below. The Stripe runtime was fully decommissioned (T-308) —
+there is no Stripe SDK, config, or webhook path anymore; only the read-only Stripe
+audit tables remain (see "Stripe (decommissioned)" below).
 
 ---
 
@@ -448,16 +448,18 @@ Common errors:
   `billing.webhook.*` and the `billing_webhook_events` inbox row. The 60s
   pending-sweep and the 15-minute reconcile recover a missed enqueue.
 
-#### Stripe (legacy — grace window only)
+#### Stripe (decommissioned — T-308)
 
-Stripe was the Phase-18 provider. New checkout is **Lemon-only**; the Stripe SDK
-and its `stripe_credit_packs` / `stripe_webhook_events` audit tables are retained
-only for a bounded **late-webhook grace window** so in-flight Stripe orders and
-disputes still settle after cutover. The grace path at `POST /billing/webhook`
-branches on the `Stripe-Signature` header and is open **only while
-`STRIPE_WEBHOOK_SECRET` is set** — close the window by unsetting that secret.
-Full Stripe removal is the gated follow-up T-308 (≥7 days post-cutover, zero
-`provider="stripe"` webhook receipts). Do not configure Stripe for a new install.
+Stripe was the Phase-18 provider; it has been **fully decommissioned** (T-308).
+There is no Stripe SDK, no `STRIPE_*` settings, and no Stripe webhook processing:
+`POST /billing/webhook` answers any Stripe-shaped request (one carrying a
+`Stripe-Signature` header) with `{"status":"ignored_provider_disabled"}` before
+any body read, signature claim, or DB write. The bounded late-webhook grace
+adapter that briefly bridged the cutover has been removed. The only Stripe
+artifacts left are the **read-only audit tables** `stripe_credit_packs` /
+`stripe_webhook_events` and their backfilled `provider='stripe'` rows (the
+historical financial record); no runtime path reads or writes them. There is
+nothing to configure — do not set any `STRIPE_*` variables.
 
 ---
 

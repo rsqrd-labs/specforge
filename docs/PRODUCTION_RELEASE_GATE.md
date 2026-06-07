@@ -47,7 +47,9 @@ uv run pytest \
   ../harness/tests/backend/test_phase25_lemonsqueezy_billing_contract.py \
   -q
 uv run bandit -r config.py database.py main.py middleware models prompts routers schemas services
-uv run pip-audit --strict
+# PYSEC-2026-161 (starlette) is a tracked, currently-unfixable advisory — see the
+# note under "Tracked security exceptions" below. All other advisories fail the gate.
+uv run pip-audit --strict --ignore-vuln PYSEC-2026-161
 ```
 
 Prompt quality gate:
@@ -90,8 +92,17 @@ Pass criteria:
 - Prompt eval report shows no unapproved per-grader regression against the
   selected baseline.
 - Bandit reports no unresolved issues.
-- `pip-audit --strict` reports no known vulnerabilities.
+- `pip-audit --strict` reports no known vulnerabilities except the tracked
+  exceptions below.
 - Production smoke passes against staging with live LLM smoke enabled.
+
+### Tracked security exceptions
+
+| Advisory | Package | Status | Justification / exit plan |
+|---|---|---|---|
+| PYSEC-2026-161 | `starlette` (0.50.0) | Acknowledged, suppressed via `--ignore-vuln` | Fix is `starlette>=1.0.1`, but `fastapi==0.124.*` hard-caps `starlette<0.51` and no **stable** FastAPI release yet supports starlette 1.0 (only pre-releases). We stay on the latest fastapi-compatible starlette (0.50.0). **Exit plan:** drop the ignore and bump `fastapi`+`starlette` together once a stable FastAPI supports starlette ≥1.0. Re-check each release. |
+
+All other `pip-audit` advisories must fail the gate (no blanket suppression).
 
 ## Environment Gate
 
@@ -159,25 +170,27 @@ Pass criteria:
 
 ### Billing Cutover & Gated Stripe Removal (Phase 22 rollout)
 
-The Lemon Squeezy migration supersedes Stripe **at runtime** without deleting the
-Stripe code in the same release (Plan §25.9):
+The Lemon Squeezy migration superseded Stripe **at runtime** (Plan §25.9), and
+the Stripe runtime has since been **fully decommissioned** (T-308):
 
 1. Deploy with Lemon enabled and verify the live webhook (above). New checkout is
    Lemon-only.
-2. The Stripe SDK and the `stripe_credit_packs` / `stripe_webhook_events` audit
-   tables are **retained**. A bounded late-webhook **grace window** at
-   `POST /billing/webhook` (branching on the `Stripe-Signature` header) keeps
-   settling in-flight Stripe orders/disputes; it is open only while
-   `STRIPE_WEBHOOK_SECRET` is set — close the window by unsetting that secret.
-3. **Gated Stripe decommission (T-308)** is a separate, status-tracked follow-up
-   that runs **only** after a hard operational gate: ≥7 days since the production
-   checkout cutover **and** zero `specforge_billing_webhook_received_total{provider="stripe"}`
-   increments over the preceding 72h **and** the grace flag disabled. It removes
-   `stripe_service.py`, the `stripe` SDK dependency, the scoped config guard, the
-   Stripe observability patterns, and the grace adapter — while **retaining** the
-   Stripe audit tables and backfilled rows. It is **not** a Phase-22 completion
-   gate and is outside the `phase25` contract (which deliberately pins Stripe
-   present until then). Attach the operational-gate evidence to the T-308 PR.
+2. **Stripe runtime decommissioned (T-308 — done).** The `stripe` SDK,
+   `stripe_service.py`, the `STRIPE_*` settings + scoped config guard, the Stripe
+   observability patterns, and the bounded late-webhook grace adapter are all
+   removed. `POST /billing/webhook` now answers any Stripe-shaped request (a
+   `Stripe-Signature` header) with `{"status":"ignored_provider_disabled"}` before
+   any body read, signature claim, or DB write.
+3. **Retained audit trail.** The `stripe_credit_packs` / `stripe_webhook_events`
+   tables and their backfilled `provider='stripe'` rows are kept as the historical
+   financial record; no migration drops a Stripe table and no runtime path reads
+   them.
+4. **Operational-gate prerequisite for T-308 (record before relying on this).**
+   T-308 may only be deployed once: ≥7 days since the production checkout cutover
+   **and** zero `specforge_billing_webhook_received_total{provider="stripe"}`
+   increments over the preceding 72h **and** the grace flag disabled. Confirm and
+   attach this evidence in the deploy record before shipping the decommission to
+   production — it cannot be reconstructed after the fact.
 
 ## Manual Smoke Gate
 

@@ -77,8 +77,9 @@ Important metric families:
 - `specforge_billing_*` for Lemon Squeezy checkout, webhook, credit
   grant/revoke, debt created/recovered, reconcile mismatch, admin correction,
   expiry, consumption, the `webhook_pending_age_seconds` gauge, and checkout
-  rate-limit signals. Most are labelled `{provider}` (`lemonsqueezy`, and
-  `stripe` only for retained grace/audit series).
+  rate-limit signals. Most are labelled `{provider}` (`lemonsqueezy` is the only
+  runtime emitter; `provider="stripe"` series persist only as historical audit
+  data after the T-308 decommission).
 - `specforge_storyboard_*` for Storyboard generation, public views, downloads,
   missing source sections, credit deduction, and refund behavior. Watch
   `specforge_storyboard_generation_failed_total` for failure spikes and alert
