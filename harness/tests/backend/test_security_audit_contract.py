@@ -127,5 +127,15 @@ def test_compose_does_not_publish_datastores_on_all_interfaces() -> None:
 
     assert '"5432:5432"' not in compose
     assert '"6379:6379"' not in compose
-    assert "127.0.0.1:5432:5432" in compose
-    assert "127.0.0.1:6379:6379" in compose
+    assert _compose_binds_port_to_localhost(compose, 5432)
+    assert _compose_binds_port_to_localhost(compose, 6379)
+
+
+def _compose_binds_port_to_localhost(compose: str, port: int) -> bool:
+    short_form = f"127.0.0.1:{port}:{port}" in compose
+    long_form = (
+        f"target: {port}" in compose
+        and f"published: {port}" in compose
+        and 'host_ip: "127.0.0.1"' in compose
+    )
+    return short_form or long_form

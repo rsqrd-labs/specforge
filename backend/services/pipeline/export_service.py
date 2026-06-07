@@ -21,7 +21,8 @@ _STAGE_FILES = {
 }
 _HARNESS_FALLBACK = "harness/HARNESS.md"
 _FILE_HEADING_RE = re.compile(r"^#{2,3}\s+File:\s+(?P<filename>.+)$")
-_FENCE_OPEN_RE = re.compile(r"^(?P<fence>`{3,})[a-zA-Z0-9]*$")
+_FENCE_OPEN_RE = re.compile(r"^(?P<fence>`{3,})[a-zA-Z0-9_-]*$")
+_FENCE_FILE_RE = re.compile(r"^(?P<fence>`{3,})[a-zA-Z0-9_-]+\s+(?P<filename>.+?)\s*$")
 _WINDOWS_RESERVED_NAMES = frozenset(
     {"CON", "PRN", "AUX", "NUL"}
     | {f"COM{i}" for i in range(1, 10)}
@@ -63,7 +64,21 @@ def _safe_harness_path(filename: str) -> str | None:
     return safe_path.as_posix()
 
 
-def _parse_labelled_harness_files(harness_content: str) -> dict[str, str]:
+def _read_fenced_block(
+    lines: list[str],
+    fence_index: int,
+    fence: str,
+) -> tuple[str, int] | None:
+    content_start = fence_index + 1
+    k = content_start
+    while k < len(lines) and lines[k].rstrip() != fence:
+        k += 1
+    if k >= len(lines):
+        return None
+    return "\n".join(lines[content_start:k]) + "\n", k
+
+
+def _parse_labelled_harness_files(harness_content: str) -> tuple[dict[str, str], bool]:
     """State-machine parser: finds ## / ### File: headings and captures the
     immediately-following fenced code block as the file's content.
 
@@ -71,6 +86,7 @@ def _parse_labelled_harness_files(harness_content: str) -> dict[str, str]:
     files whose content contains ``` (e.g. README.md) are handled correctly.
     """
     files: dict[str, str] = {}
+    found_labelled_block = False
     lines = harness_content.split("\n")
     i = 0
     while i < len(lines):
@@ -85,24 +101,36 @@ def _parse_labelled_harness_files(harness_content: str) -> dict[str, str]:
                 fence_match = _FENCE_OPEN_RE.match(lines[j].rstrip())
                 if fence_match:
                     fence = fence_match.group("fence")  # e.g. "```"
-                    content_start = j + 1
-                    k = content_start
-                    while k < len(lines) and lines[k].rstrip() != fence:
-                        k += 1
-                    if k < len(lines):  # found matching closing fence
-                        content = "\n".join(lines[content_start:k]) + "\n"
+                    fenced_block = _read_fenced_block(lines, j, fence)
+                    if fenced_block is not None:
+                        content, k = fenced_block
+                        found_labelled_block = True
                         path = _safe_harness_path(filename)
                         if path:
                             files[path] = content
                         i = k + 1
                         continue
+        fence_file_match = _FENCE_FILE_RE.match(lines[i].rstrip())
+        if fence_file_match:
+            fence = fence_file_match.group("fence")
+            fenced_block = _read_fenced_block(lines, i, fence)
+            if fenced_block is not None:
+                content, k = fenced_block
+                found_labelled_block = True
+                path = _safe_harness_path(fence_file_match.group("filename"))
+                if path:
+                    files[path] = content
+                i = k + 1
+                continue
         i += 1
-    return files
+    return files, found_labelled_block
 
 
 def parse_harness_files(harness_content: str) -> dict[str, str]:
-    files = _parse_labelled_harness_files(harness_content)
-    return files or {_HARNESS_FALLBACK: harness_content}
+    files, found_labelled_block = _parse_labelled_harness_files(harness_content)
+    if files or found_labelled_block:
+        return files
+    return {_HARNESS_FALLBACK: harness_content}
 
 
 async def build_export(workspace_id: UUID, user_id: UUID, db: AsyncSession) -> bytes:
