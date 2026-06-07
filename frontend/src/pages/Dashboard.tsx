@@ -16,7 +16,7 @@ import {
 } from "../services/api"
 import { useUserStore } from "../store/userStore"
 import { useWorkspaceStore } from "../store/workspaceStore"
-import type { StripeCreditPack } from "../types/billing"
+import type { BillingCreditPack } from "../types/billing"
 import type { Stage, StageStatus } from "../types/stage"
 import type { Template } from "../types/template"
 import type { Workspace, WorkspaceWithStages } from "../types/workspace"
@@ -237,7 +237,7 @@ export default function Dashboard() {
   const clearUser = useUserStore((state) => state.clearUser)
   const [balance, setBalance] = useState<number | null>(null)
   const [generationCost, setGenerationCost] = useState<number>(10)
-  const [billingPacks, setBillingPacks] = useState<StripeCreditPack[]>([])
+  const [billingPacks, setBillingPacks] = useState<BillingCreditPack[]>([])
   const [showCreate, setShowCreate] = useState(false)
   const [starterWorkspace, setStarterWorkspace] = useState<
     (typeof STARTER_WORKSPACES)[number] | null

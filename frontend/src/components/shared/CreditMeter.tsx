@@ -1,10 +1,10 @@
 import { Link, useNavigate } from "react-router-dom"
 
-import type { StripeCreditPack } from "../../types/billing"
+import type { BillingCreditPack } from "../../types/billing"
 
 interface CreditMeterProps {
   balance: number
-  packs?: StripeCreditPack[]
+  packs?: BillingCreditPack[]
   variant?: "default" | "inverse"
 }
 
@@ -39,7 +39,7 @@ function expiryLabel(expiresAt: string, daysRemaining: number): string {
   return formatShortDate(expiresAt)
 }
 
-function getExpiryWarning(packs: StripeCreditPack[]): ExpiryWarning | null {
+function getExpiryWarning(packs: BillingCreditPack[]): ExpiryWarning | null {
   const soonest = packs
     .filter((pack) => pack.status === "active" && pack.credits_remaining > 0)
     .map((pack) => {

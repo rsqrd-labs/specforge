@@ -5945,9 +5945,48 @@ button:disabled {
   color: var(--color-on-surface-variant);
 }
 
+/* Payment-reversal outcomes read as calm and matter-of-fact (slate), never as a
+   red error — a reversal is honest accounting, not an alarm (T-305). */
+.billing-status-chip.refunded,
 .billing-status-chip.disputed {
-  background: var(--color-error-container);
-  color: var(--color-on-error-container);
+  background: var(--color-tertiary-container);
+  color: var(--color-on-tertiary-container);
+}
+
+/* A single quiet slate note beside the balance for unrecovered reversal debt.
+   role="note" — informational, never a red alert, and visually distinct from (and
+   never summed into) the usable balance figure (T-305 / §11). */
+.billing-debt-note {
+  margin: 12px 0 0;
+  max-width: 42ch;
+  border-left: 2px solid var(--color-tertiary);
+  padding: 2px 0 2px 12px;
+  color: var(--color-tertiary);
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.5;
+}
+
+/* One-shot saffron tick-up when newly purchased credits land on the balance. */
+@keyframes billing-balance-tick {
+  0% {
+    transform: translateY(6px);
+    opacity: 0.45;
+  }
+  100% {
+    transform: translateY(0);
+    opacity: 1;
+  }
+}
+
+.billing-balance-value.landed {
+  animation: billing-balance-tick 0.6s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .billing-balance-value.landed {
+    animation: none;
+  }
 }
 
 .credit-meter {

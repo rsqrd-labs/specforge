@@ -68,12 +68,19 @@ _LEDGER_ENTRIES = [
 
 
 class _FakeDB:
+    def __init__(self, debt_scalar: int = 0) -> None:
+        self._debt_scalar = debt_scalar
+
     async def execute(self, statement: Any) -> Any:
         from unittest.mock import MagicMock
 
         result = MagicMock()
         result.scalars.return_value = iter(_LEDGER_ENTRIES)
         return result
+
+    async def scalar(self, statement: Any) -> Any:
+        # The /balance endpoint issues a single scalar() for the pending-debt sum.
+        return self._debt_scalar
 
     async def commit(self) -> None:
         pass
@@ -107,7 +114,34 @@ async def test_get_balance_returns_balance(app) -> None:
             response = await client.get("/credits/balance")
 
     assert response.status_code == 200
-    assert response.json()["balance"] == 50
+    body = response.json()
+    assert body["balance"] == 50
+    # No pending reversal debt → 0, never folded into balance (T-305).
+    assert body["billing_debt_credits"] == 0
+
+
+@pytest.mark.asyncio
+async def test_get_balance_reports_pending_reversal_debt(app) -> None:
+    async def _fake_db():
+        yield _FakeDB(debt_scalar=75)
+
+    app.dependency_overrides[get_db] = _fake_db
+
+    with patch(
+        "services.credit_service.credit_service.get_balance",
+        new_callable=AsyncMock,
+        return_value=20,
+    ):
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            response = await client.get("/credits/balance")
+
+    assert response.status_code == 200
+    body = response.json()
+    # Debt is surfaced separately and the usable balance is untouched by it (T-305).
+    assert body["balance"] == 20
+    assert body["billing_debt_credits"] == 75
 
 
 @pytest.mark.asyncio

@@ -5,12 +5,12 @@ export interface BillingPackage {
   currency: string
 }
 
-export interface StripeCreditPack {
+export interface BillingCreditPack {
   id: string
   credits_purchased: number
   credits_remaining: number
   price_cents: number
-  status: "active" | "consumed" | "expired" | "disputed"
+  status: "active" | "consumed" | "expired" | "refunded" | "disputed"
   purchased_at: string
   expires_at: string
 }
@@ -23,4 +23,5 @@ export interface BillingStatusResponse {
 
 export interface CheckoutResponse {
   checkout_url: string
+  checkout_ref: string
 }

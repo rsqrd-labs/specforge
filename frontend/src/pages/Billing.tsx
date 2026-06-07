@@ -1,7 +1,9 @@
 /*
-Visual hierarchy: current balance first, the single credit pack offer second,
-and purchase history third. Tiny delight: the SF mark pulses during webhook
-polling and resolves into a lotus-tinted check when credits are confirmed.
+Visual hierarchy: current balance first (with any payment-reversal debt shown as a
+quiet, distinct slate note beside it — never folded into the usable figure), the
+single credit pack offer second, and purchase history third. Tiny delight: the SF
+mark pulses while we settle the checkout, and the balance figure gives a gentle
+saffron tick-up when new credits land.
 */
 import { useCallback, useEffect, useMemo, useState } from "react"
 import { Link, useSearchParams } from "react-router-dom"
@@ -14,16 +16,17 @@ import {
   getApiErrorMessage,
   getCredits,
 } from "../services/api"
-import type { BillingPackage, StripeCreditPack } from "../types/billing"
+import type { BillingCreditPack, BillingPackage } from "../types/billing"
 
 type LoadState = "loading" | "ready" | "error"
 type PollingStatus = "idle" | "processing" | "completed" | "timeout" | "error"
 
-const statusLabels: Record<StripeCreditPack["status"], string> = {
+const statusLabels: Record<BillingCreditPack["status"], string> = {
   active: "Active",
   consumed: "Consumed",
   expired: "Expired",
-  disputed: "Disputed",
+  refunded: "Refunded",
+  disputed: "Refunded",
 }
 
 function formatDate(value: string | null | undefined, withYear = true): string {
@@ -50,7 +53,7 @@ function formatPrice(priceCents: number, currency: string): string {
   }
 }
 
-function activePackSummary(packs: StripeCreditPack[]): string | null {
+function activePackSummary(packs: BillingCreditPack[]): string | null {
   const activePacks = packs.filter(
     (pack) => pack.status === "active" && pack.credits_remaining > 0,
   )
@@ -101,23 +104,21 @@ function PaymentStatusPanel({
 }: PaymentStatusPanelProps) {
   if (status === "idle") return null
 
-  const isCompleted = status === "completed"
-
   return (
     <section className={`billing-payment-status ${status}`} aria-live="polite">
       <div className="billing-payment-mark" aria-hidden="true">
-        {isCompleted ? "✓" : <span>SF</span>}
+        <span>SF</span>
       </div>
       {status === "processing" && (
         <>
-          <h1>Processing your payment…</h1>
+          <h1>Adding your credits…</h1>
           <p>This usually takes a few seconds.</p>
         </>
       )}
       {status === "completed" && (
         <>
           <h1>
-            {creditsAdded ?? 0} credits added · valid until {formatDate(expiresAt)}
+            {creditsAdded ?? 0} credits added · expires {formatDate(expiresAt)}
           </h1>
           <p>Your balance has been refreshed.</p>
           <Link to="/dashboard" className="billing-status-link">
@@ -143,19 +144,22 @@ function PaymentStatusPanel({
 
 export default function Billing() {
   const [searchParams] = useSearchParams()
-  const sessionId = searchParams.get("session_id")
+  const checkoutRef = searchParams.get("checkout_ref")
 
   const [loadState, setLoadState] = useState<LoadState>("loading")
   const [billingPackage, setBillingPackage] = useState<BillingPackage | null>(null)
-  const [packs, setPacks] = useState<StripeCreditPack[]>([])
+  const [packs, setPacks] = useState<BillingCreditPack[]>([])
   const [balance, setBalance] = useState<number | null>(null)
+  const [debtCredits, setDebtCredits] = useState(0)
   const [checkoutError, setCheckoutError] = useState<string | null>(null)
   const [isStartingCheckout, setIsStartingCheckout] = useState(false)
   const [pollingStatus, setPollingStatus] = useState<PollingStatus>(
-    sessionId ? "processing" : "idle",
+    checkoutRef ? "processing" : "idle",
   )
   const [creditsAdded, setCreditsAdded] = useState<number | null>(null)
   const [completedExpiresAt, setCompletedExpiresAt] = useState<string | null>(null)
+  // One-shot delight: tick the balance up in saffron when new credits land.
+  const [balanceJustLanded, setBalanceJustLanded] = useState(false)
 
   const loadBillingData = useCallback(async (showLoading = true) => {
     if (showLoading) setLoadState("loading")
@@ -169,6 +173,9 @@ export default function Billing() {
       setBillingPackage(packageResponse)
       setPacks(historyResponse)
       setBalance(creditsResponse.balance)
+      // Payment-reversal debt is read here but rendered as a distinct note — it is
+      // never added into the usable `balance` figure.
+      setDebtCredits(creditsResponse.billing_debt_credits)
       setLoadState("ready")
     } catch {
       setLoadState("error")
@@ -180,14 +187,14 @@ export default function Billing() {
   }, [loadBillingData])
 
   useEffect(() => {
-    if (!sessionId) {
+    if (!checkoutRef) {
       setPollingStatus("idle")
       setCreditsAdded(null)
       setCompletedExpiresAt(null)
       return
     }
 
-    const checkoutSessionId = sessionId
+    const ref = checkoutRef
     let elapsed = 0
     let inFlight = false
     let stopped = false
@@ -206,8 +213,9 @@ export default function Billing() {
       if (inFlight) return
       inFlight = true
       try {
-        // Polling endpoint: GET /billing/status?session_id=...
-        const result = await fetchBillingStatus(checkoutSessionId)
+        // Polling endpoint: GET /billing/status?checkout_ref=...
+        // A null result is a 404 = "not granted yet" (pending); a thrown error is real.
+        const result = await fetchBillingStatus(ref)
         if (stopped) return
 
         if (result?.status === "completed") {
@@ -215,6 +223,7 @@ export default function Billing() {
           setPollingStatus("completed")
           setCreditsAdded(result.credits_added)
           setCompletedExpiresAt(result.expires_at)
+          setBalanceJustLanded(true)
           void loadBillingData(false)
         } else if (elapsed >= 30) {
           stopPolling()
@@ -246,7 +255,7 @@ export default function Billing() {
       stopped = true
       stopPolling()
     }
-  }, [loadBillingData, sessionId])
+  }, [loadBillingData, checkoutRef])
 
   const balanceSummary = useMemo(() => activePackSummary(packs), [packs])
 
@@ -259,7 +268,7 @@ export default function Billing() {
       window.location.href = response.checkout_url
     } catch (error) {
       setCheckoutError(
-        getApiErrorMessage(error, "Could not open Stripe Checkout. Please try again."),
+        getApiErrorMessage(error, "Could not open checkout. Please try again."),
       )
       setIsStartingCheckout(false)
     }
@@ -306,10 +315,20 @@ export default function Billing() {
             <section className="billing-balance-panel" aria-labelledby="billing-balance-title">
               <div>
                 <p className="billing-eyebrow">Credit balance</p>
-                <h1 id="billing-balance-title" className="billing-balance-value">
+                <h1
+                  id="billing-balance-title"
+                  className={`billing-balance-value${balanceJustLanded ? " landed" : ""}`}
+                  onAnimationEnd={() => setBalanceJustLanded(false)}
+                >
                   {balance ?? "—"}
                 </h1>
                 <p className="billing-balance-label">credits remaining</p>
+                {debtCredits > 0 && (
+                  <p className="billing-debt-note" role="note">
+                    {debtCredits} {debtCredits === 1 ? "credit" : "credits"} from a
+                    reversed payment will be recovered from your next top-up.
+                  </p>
+                )}
               </div>
               <p className="billing-balance-summary">
                 {balanceSummary ?? "Purchased credits will appear here after checkout."}
@@ -332,7 +351,7 @@ export default function Billing() {
                   onClick={() => void handleBuyCredits()}
                   disabled={isStartingCheckout}
                 >
-                  {isStartingCheckout ? "Opening Stripe…" : "Buy Credits →"}
+                  {isStartingCheckout ? "Opening checkout…" : "Buy Credits →"}
                 </button>
                 {checkoutError && (
                   <p className="billing-checkout-error" role="alert">

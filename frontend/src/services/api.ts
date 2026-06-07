@@ -8,10 +8,10 @@ import axios, {
 
 import type { User } from "../types/user"
 import type {
+  BillingCreditPack,
   BillingPackage,
   BillingStatusResponse,
   CheckoutResponse,
-  StripeCreditPack,
 } from "../types/billing"
 import type {
   CreateWorkspacePayload,
@@ -55,6 +55,8 @@ interface GoogleCallbackResponse {
 export interface CreditBalance {
   balance: number
   generation_cost: number
+  /** Unrecovered payment-reversal debt — shown distinctly, never folded into balance. */
+  billing_debt_credits: number
 }
 
 export interface ProviderModel {
@@ -611,14 +613,15 @@ export async function createCheckoutSession(): Promise<CheckoutResponse> {
 }
 
 export async function fetchBillingStatus(
-  sessionId: string,
+  checkoutRef: string,
 ): Promise<BillingStatusResponse | null> {
   try {
     const response = await api.get<BillingStatusResponse>("/billing/status", {
-      params: { session_id: sessionId },
+      params: { checkout_ref: checkoutRef },
     })
     return response.data
   } catch (error) {
+    // 404 means "not granted yet" (still pending) — not a real error.
     if (axios.isAxiosError(error) && error.response?.status === 404) {
       return null
     }
@@ -626,8 +629,8 @@ export async function fetchBillingStatus(
   }
 }
 
-export async function fetchBillingHistory(): Promise<StripeCreditPack[]> {
-  const response = await api.get<StripeCreditPack[]>("/billing/history")
+export async function fetchBillingHistory(): Promise<BillingCreditPack[]> {
+  const response = await api.get<BillingCreditPack[]>("/billing/history")
   return response.data
 }
 
