@@ -120,3 +120,16 @@ class IntegrationPush(Base):
         back_populates="push",
         cascade="all, delete-orphan",
     )
+
+    @property
+    def issue_count(self) -> int:
+        """Transient count populated by export/status service queries."""
+        count = getattr(self, "_issue_count", None)
+        if count is not None:
+            return int(count)
+        tasks = getattr(self, "tasks", None)
+        return len(tasks or [])
+
+    @issue_count.setter
+    def issue_count(self, value: int) -> None:
+        self._issue_count = int(value or 0)

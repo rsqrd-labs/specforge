@@ -36,7 +36,7 @@ class UserIntegration(Base):
         index=True,
     )
     provider: Mapped[str] = mapped_column(Text, nullable=False)
-    encrypted_token: Mapped[str] = mapped_column(Text, nullable=False)
+    encrypted_token = mapped_column(Text, nullable=False)
     github_username: Mapped[str | None] = mapped_column(Text)
     connected_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True),

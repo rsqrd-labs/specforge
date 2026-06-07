@@ -125,6 +125,26 @@ async def disconnect_github(user_id: UUID, db: AsyncSession) -> None:
     await db.commit()
 
 
+async def begin_oauth(user_id: UUID, redis: Any) -> str:
+    """Compatibility alias for the Phase-13 OAuth entry point."""
+    return await get_github_oauth_url(user_id, redis)
+
+
+async def complete_oauth(
+    code: str,
+    state: str,
+    db: AsyncSession,
+    redis: Any,
+) -> UserIntegration:
+    """Compatibility alias for the Phase-13 OAuth callback entry point."""
+    return await handle_github_callback(code, state, db, redis)
+
+
+async def revoke(user_id: UUID, db: AsyncSession) -> None:
+    """Compatibility alias for the Phase-13 disconnect entry point."""
+    await disconnect_github(user_id, db)
+
+
 async def get_integration(
     user_id: UUID,
     db: AsyncSession,

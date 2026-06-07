@@ -369,6 +369,16 @@ async def export_workspace_to_github(
             status_code=status.HTTP_409_CONFLICT,
             detail=str(exc),
         ) from exc
+    except github_export_service.GitHubRateLimitError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="GitHub API rate limit exceeded.",
+        ) from exc
+    except github_export_service.GitHubAPIError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="GitHub API request failed.",
+        ) from exc
 
     # 3. Enqueue off the request path. job_id = push_id dedups duplicate submits.
     try:
