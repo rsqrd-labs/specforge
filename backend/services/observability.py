@@ -126,31 +126,57 @@ CSRF_REPLAY_REJECTIONS = Counter(
     "CSRF tokens rejected because the nonce was already consumed in Redis",
 )
 
-# Billing / Stripe counters (Phase 18) — T-236
-# ---------------------------------------------
-# These counters power the four Grafana alert rules documented in RUNBOOK §9.
+# Billing counters (Phase 18 → Phase 22 — T-236, provider-labelled in T-304)
+# -------------------------------------------------------------------------
+# These counters power the Grafana alert rules documented in RUNBOOK §9. Phase 22
+# (T-304) widened the money-path counters with a ``provider`` label so the same
+# series serve both the live Lemon Squeezy path and the bounded late-Stripe grace
+# window (T-303); aggregating queries/alerts still sum across providers. Labelled
+# counters REQUIRE ``.labels(...).inc()`` at every call site. ``credits_expired``
+# stays label-less — lazy expiry is provider-agnostic.
 BILLING_CHECKOUT_CREATED = Counter(
     "specforge_billing_checkout_created_total",
-    "Stripe Checkout Sessions created via POST /billing/checkout",
+    "Hosted checkouts created via POST /billing/checkout",
+    ["provider"],
 )
 BILLING_CHECKOUT_COMPLETED = Counter(
     "specforge_billing_checkout_completed_total",
-    "checkout.session.completed webhook events received and processed",
+    "Paid-order webhook events received and turned into a credit grant",
+    ["provider"],
 )
 BILLING_CREDITS_GRANTED = Counter(
     "specforge_billing_credits_granted_total",
-    "Total credits granted to users via Stripe purchase",
+    "Total credits granted to users via a verified purchase",
+    ["provider"],
 )
 BILLING_PURCHASE_REVENUE_CENTS = Counter(
     "specforge_billing_purchase_revenue_cents_total",
-    "Gross paid-item revenue (cents) recognised when a verified order_created "
-    "grant lands, anchored to the checkout-attempt snapshot price (Phase 22 — "
-    "T-299). Unlabelled today; T-304 consolidates provider labelling across the "
-    "specforge_billing_* family.",
+    "Gross paid-item revenue (cents) recognised when a verified order grant lands, "
+    "anchored to the checkout-attempt snapshot price (Phase 22 — T-299).",
+    ["provider"],
+)
+BILLING_CHECKOUT_API_ERROR = Counter(
+    "specforge_billing_checkout_api_error_total",
+    "POST /billing/checkout failures, by error_type: 'provider_error' (the provider "
+    "checkout API failed) or 'orphaned_commit' (the post-provider commit failed so "
+    "the URL was never exposed — reconciled later). Phase 22 — T-304.",
+    ["provider", "error_type"],
+)
+BILLING_CHECKOUT_EXPIRED = Counter(
+    "specforge_billing_checkout_expired_total",
+    "Local checkout attempts expired past their TTL by reconcile lane 3 "
+    "(Phase 22 — T-301/T-304).",
+    ["provider"],
+)
+BILLING_UNRECOVERABLE_CHECKOUT = Counter(
+    "specforge_billing_unrecoverable_checkout_total",
+    "Paid order webhooks the automatic pipeline could not turn into a grant "
+    "(the unprovable-paid-checkout path → admin correction T-302). Phase 22 — T-304.",
+    ["provider"],
 )
 BILLING_CREDITS_EXPIRED = Counter(
     "specforge_billing_credits_expired_total",
-    "Credits swept by lazy expiry in _expire_user_packs()",
+    "Credits swept by lazy expiry in _expire_user_packs() (provider-agnostic)",
 )
 BILLING_CREDITS_CONSUMED = Counter(
     "specforge_billing_credits_consumed_total",
@@ -160,15 +186,13 @@ BILLING_CREDIT_DEBT_RECOVERED = Counter(
     "specforge_billing_credit_debt_recovered_total",
     "Credits from a new grant applied to repay pending billing_credit_debts "
     "(debt-first recovery) before any usable surplus is added (Phase 22 — T-294).",
-)
-BILLING_PACK_DISPUTED = Counter(
-    "specforge_billing_pack_disputed_total",
-    "Credit packs revoked due to Stripe charge disputes",
+    ["provider"],
 )
 BILLING_CREDITS_REVOKED = Counter(
     "specforge_billing_credits_revoked_total",
-    "Credits revoked by a refund / fraud reversal (Phase 22 — T-300). The "
-    "provider-neutral successor to pack_disputed; T-304 owns the wider rollout.",
+    "Credits revoked by a refund / fraud / dispute reversal (Phase 22 — T-300). The "
+    "provider-neutral successor to the retired pack_disputed_total — a dispute folds "
+    "in as reason='disputed'.",
     ["provider", "reason"],
 )
 BILLING_CREDIT_DEBT_CREATED = Counter(
@@ -184,19 +208,32 @@ BILLING_ADMIN_CORRECTION = Counter(
     "real grant — the idempotent duplicate no-op does not count.",
     ["provider"],
 )
+BILLING_RECONCILE_MISMATCH = Counter(
+    "specforge_billing_reconcile_mismatch_total",
+    "Reversals the reconcile backstop applied because the webhook path missed them "
+    "(a local pack out of sync with the provider's order). Phase 22 — T-301/T-304.",
+    ["provider"],
+)
 BILLING_WEBHOOK_RECEIVED = Counter(
     "specforge_billing_webhook_received_total",
     "All webhook events received (before idempotency check)",
-    ["event_type"],
+    ["provider", "event_type"],
 )
 BILLING_WEBHOOK_DUPLICATE = Counter(
     "specforge_billing_webhook_duplicate_total",
     "Webhook events rejected as duplicates by the idempotency guard",
+    ["provider"],
 )
 BILLING_WEBHOOK_ERROR = Counter(
     "specforge_billing_webhook_error_total",
-    "Webhook events that failed during handle_event processing",
-    ["error_type"],
+    "Webhook events that failed during processing",
+    ["provider", "error_type"],
+)
+BILLING_WEBHOOK_PENDING_AGE_SECONDS = Gauge(
+    "specforge_billing_webhook_pending_age_seconds",
+    "Age (seconds) of the oldest not-yet-processed billing_webhook_events row, "
+    "refreshed by the 60s recovery sweep. The lost-webhook alert (>300s) and the "
+    "trigger to scale out a dedicated billing worker (Phase 22 — T-304).",
 )
 BILLING_CHECKOUT_RATE_LIMITED = Counter(
     "specforge_billing_checkout_rate_limited_total",
@@ -532,6 +569,20 @@ _SENSITIVE_KEYS = {
     "set_cookie",
     "stripe_secret_key",
     "stripe_webhook_secret",
+    # Lemon Squeezy billing credentials (Phase 22 — T-304). The API key is also
+    # caught by the Bearer/JWT patterns and the webhook secrets by ``_secret``
+    # suffix, but exact key names are listed so a structured field is scrubbed
+    # regardless of how it is logged. ``checkout_nonce`` is the raw secret proven
+    # back by the signed webhook — only its sha256 is ever persisted (SR4).
+    "lemonsqueezy_api_key",
+    "lemonsqueezy_webhook_secret",
+    "lemonsqueezy_webhook_secret_prev",
+    "checkout_nonce",
+    # Webhook signature headers, scrubbed by key (the patterns below also catch them
+    # inline in free text). Normalisation lower-cases and maps '-'→'_', so
+    # ``X-Signature`` / ``Stripe-Signature`` match these.
+    "x_signature",
+    "stripe_signature",
     "token",
     # GitHub App credentials (Phase 21 — T-283). Key matching is exact, so the
     # App private key and the various installation-token field names are listed
@@ -563,6 +614,17 @@ _SECRET_PATTERNS: tuple[re.Pattern[str], ...] = (
     # are credentials — scrub the value wherever it appears, not just under a
     # known key.
     re.compile(r"gh[pousr]_[A-Za-z0-9]{20,}"),
+    # Lemon Squeezy API keys (Phase 22 — T-304): JWTs (three base64url segments).
+    # Scrubbed wherever they appear; the Bearer pattern also catches them in an
+    # Authorization header. Three dot-separated segments keep this specific so it
+    # never matches arbitrary text or a bare sha256 hash.
+    re.compile(r"eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}"),
+    # Webhook signature headers (Phase 22 — T-304): the Lemon ``X-Signature`` (hex
+    # HMAC-SHA256) and the Stripe ``Stripe-Signature`` (``t=…,v1=<hex>``). Keyed on
+    # the header name so the intentionally-logged nonce/payload sha256 hashes (also
+    # 64-hex) are NOT scrubbed.
+    re.compile(r"(?i)(x-signature\s*[:=]\s*)['\"]?[0-9a-f]{16,}['\"]?"),
+    re.compile(r"(?i)(stripe-signature\s*[:=]\s*)['\"]?[^'\"\s,;}]+['\"]?"),
 )
 
 

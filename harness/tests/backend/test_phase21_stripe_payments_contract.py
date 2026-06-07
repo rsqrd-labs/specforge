@@ -70,14 +70,13 @@ Design invariants enforced here:
 from __future__ import annotations
 
 import re
-from pathlib import Path
 
-from conftest import BACKEND_ROOT, REPO_ROOT, import_backend, read_backend_file
-
+from conftest import BACKEND_ROOT, REPO_ROOT, read_backend_file
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _find_function_body(source: str, fn_name: str) -> str | None:
     """Extract the body of a top-level or method function by name.
@@ -106,13 +105,13 @@ def test_t226_migration_directory_has_stripe_migration() -> None:
     both stripe_credit_packs and stripe_webhook_events tables.
     """
     versions_dir = BACKEND_ROOT / "migrations" / "versions"
-    assert versions_dir.exists(), (
-        "backend/migrations/versions/ directory must exist.  T-226."
-    )
+    assert (
+        versions_dir.exists()
+    ), "backend/migrations/versions/ directory must exist.  T-226."
     migration_files = list(versions_dir.glob("*.py"))
-    assert migration_files, (
-        "backend/migrations/versions/ must contain at least one migration file.  T-226."
-    )
+    assert (
+        migration_files
+    ), "backend/migrations/versions/ must contain at least one migration file.  T-226."
 
     combined = "\n".join(f.read_text(encoding="utf-8") for f in migration_files)
 
@@ -154,11 +153,10 @@ def test_t226_migration_has_unique_index_on_stripe_event_id() -> None:
         f.read_text(encoding="utf-8") for f in versions_dir.glob("*.py")
     )
 
-    has_unique = (
-        "uq_stripe_webhook_events_stripe_event_id" in combined
-        or (
-            "stripe_event_id" in combined
-            and re.search(r"unique[_\s]*index|UniqueConstraint|UNIQUE", combined, re.IGNORECASE)
+    has_unique = "uq_stripe_webhook_events_stripe_event_id" in combined or (
+        "stripe_event_id" in combined
+        and re.search(
+            r"unique[_\s]*index|UniqueConstraint|UNIQUE", combined, re.IGNORECASE
         )
     )
     assert has_unique, (
@@ -181,11 +179,10 @@ def test_t226_migration_has_unique_index_on_stripe_session_id() -> None:
         f.read_text(encoding="utf-8") for f in versions_dir.glob("*.py")
     )
 
-    has_unique = (
-        "uq_stripe_credit_packs_session_id" in combined
-        or (
-            "stripe_session_id" in combined
-            and re.search(r"unique[_\s]*index|UniqueConstraint|UNIQUE", combined, re.IGNORECASE)
+    has_unique = "uq_stripe_credit_packs_session_id" in combined or (
+        "stripe_session_id" in combined
+        and re.search(
+            r"unique[_\s]*index|UniqueConstraint|UNIQUE", combined, re.IGNORECASE
         )
     )
     assert has_unique, (
@@ -263,14 +260,11 @@ def test_t226_migration_has_partial_or_composite_index_for_active_packs() -> Non
         f.read_text(encoding="utf-8") for f in versions_dir.glob("*.py")
     )
 
-    has_active_index = (
-        "ix_stripe_credit_packs_user_active" in combined
-        or (
-            "stripe_credit_packs" in combined
-            and "user_id" in combined
-            and "expires_at" in combined
-            and re.search(r"create_index|CREATE INDEX", combined, re.IGNORECASE)
-        )
+    has_active_index = "ix_stripe_credit_packs_user_active" in combined or (
+        "stripe_credit_packs" in combined
+        and "user_id" in combined
+        and "expires_at" in combined
+        and re.search(r"create_index|CREATE INDEX", combined, re.IGNORECASE)
     )
     assert has_active_index, (
         "The stripe_credit_packs migration must create a composite index on "
@@ -296,9 +290,9 @@ def test_t226_migration_has_downgrade_function() -> None:
             stripe_migration = content
             break
 
-    assert stripe_migration is not None, (
-        "No migration file for stripe_credit_packs found.  T-226."
-    )
+    assert (
+        stripe_migration is not None
+    ), "No migration file for stripe_credit_packs found.  T-226."
     assert "def downgrade" in stripe_migration, (
         "The Stripe migration must define a downgrade() function that drops "
         "stripe_credit_packs and stripe_webhook_events.  T-226."
@@ -396,15 +390,15 @@ def test_t227_validate_production_settings_rejects_test_key() -> None:
         "deploying with test keys in production.  T-227."
     )
 
-    assert "validate_production_settings" in source, (
-        "config.py must define or import validate_production_settings().  T-227."
-    )
+    assert (
+        "validate_production_settings" in source
+    ), "config.py must define or import validate_production_settings().  T-227."
 
     # Extract the validate_production_settings function body to check the guard
     fn_body = _find_function_body(source, "validate_production_settings")
-    assert fn_body is not None, (
-        "validate_production_settings() not found in config.py.  T-227."
-    )
+    assert (
+        fn_body is not None
+    ), "validate_production_settings() not found in config.py.  T-227."
 
     assert "sk_test_" in fn_body, (
         "validate_production_settings() must contain a check for 'sk_test_' "
@@ -479,9 +473,9 @@ def test_t228_create_checkout_uses_user_id_in_metadata() -> None:
     source = read_backend_file("services", "stripe_service.py")
 
     fn_body = _find_function_body(source, "create_checkout_session")
-    assert fn_body is not None, (
-        "create_checkout_session() not found in stripe_service.py.  T-228."
-    )
+    assert (
+        fn_body is not None
+    ), "create_checkout_session() not found in stripe_service.py.  T-228."
 
     assert "metadata" in fn_body, (
         "create_checkout_session() must pass 'metadata' to stripe.checkout.Session.create() "
@@ -637,9 +631,7 @@ def test_t229_get_balance_calls_expire_user_packs() -> None:
     source = read_backend_file("services", "credit_service.py")
 
     fn_body = _find_function_body(source, "get_balance")
-    assert fn_body is not None, (
-        "get_balance() not found in credit_service.py.  T-229."
-    )
+    assert fn_body is not None, "get_balance() not found in credit_service.py.  T-229."
 
     assert "_expire_user_packs" in fn_body, (
         "get_balance() must call _expire_user_packs() before reading credit_balance.  "
@@ -657,9 +649,7 @@ def test_t229_deduct_calls_expire_user_packs() -> None:
     source = read_backend_file("services", "credit_service.py")
 
     fn_body = _find_function_body(source, "deduct")
-    assert fn_body is not None, (
-        "deduct() not found in credit_service.py.  T-229."
-    )
+    assert fn_body is not None, "deduct() not found in credit_service.py.  T-229."
 
     assert "_expire_user_packs" in fn_body, (
         "deduct() must call _expire_user_packs() before checking or deducting the "
@@ -679,9 +669,7 @@ def test_t229_deduct_calls_drain_packs() -> None:
     source = read_backend_file("services", "credit_service.py")
 
     fn_body = _find_function_body(source, "deduct")
-    assert fn_body is not None, (
-        "deduct() not found in credit_service.py.  T-229."
-    )
+    assert fn_body is not None, "deduct() not found in credit_service.py.  T-229."
 
     assert "_drain_packs" in fn_body, (
         "deduct() must call _drain_packs() after recording the CreditLedger entry.  "
@@ -710,15 +698,19 @@ def test_t229_drain_packs_orders_by_expires_at_asc() -> None:
                 found_source = s
                 break
 
-    assert found_source is not None, (
-        "_drain_packs() not found in credit_service.py or stripe_service.py.  T-229."
-    )
+    assert (
+        found_source is not None
+    ), "_drain_packs() not found in credit_service.py or stripe_service.py.  T-229."
 
     fn_body = _find_function_body(found_source, "_drain_packs")
     assert fn_body is not None, "Could not extract _drain_packs() body.  T-229."
 
     # Must contain expires_at with ascending order.
-    has_asc = re.search(r"expires_at.*\.asc\(\)|order_by.*expires_at.*asc|ASC.*expires_at", fn_body, re.IGNORECASE)
+    has_asc = re.search(
+        r"expires_at.*\.asc\(\)|order_by.*expires_at.*asc|ASC.*expires_at",
+        fn_body,
+        re.IGNORECASE,
+    )
     assert has_asc, (
         "_drain_packs() must ORDER BY expires_at ASC to implement FIFO expiry drain.  "
         "Ordering by DESC drains the longest-lived pack first (wrong).  "
@@ -728,7 +720,11 @@ def test_t229_drain_packs_orders_by_expires_at_asc() -> None:
     )
 
     # Must NOT order by expires_at DESC.
-    has_wrong_desc = re.search(r"expires_at.*\.desc\(\)|order_by.*expires_at.*desc|DESC.*expires_at", fn_body, re.IGNORECASE)
+    has_wrong_desc = re.search(
+        r"expires_at.*\.desc\(\)|order_by.*expires_at.*desc|DESC.*expires_at",
+        fn_body,
+        re.IGNORECASE,
+    )
     assert not has_wrong_desc, (
         "_drain_packs() must NOT ORDER BY expires_at DESC.  Descending order drains "
         "the longest-lived pack first, which leaves short-lived packs to expire unused.  "
@@ -746,9 +742,9 @@ def test_t229_expire_user_packs_uses_with_for_update_on_packs() -> None:
     source = read_backend_file("services", "credit_service.py")
 
     fn_body = _find_function_body(source, "_expire_user_packs")
-    assert fn_body is not None, (
-        "_expire_user_packs() not found in credit_service.py.  T-229."
-    )
+    assert (
+        fn_body is not None
+    ), "_expire_user_packs() not found in credit_service.py.  T-229."
 
     assert "with_for_update" in fn_body or "FOR UPDATE" in fn_body, (
         "_expire_user_packs() must use SELECT FOR UPDATE (.with_for_update()) when "
@@ -862,8 +858,7 @@ def test_t230_package_endpoint_does_not_require_auth() -> None:
 
     # Find the package endpoint definition and check nearby lines.
     pkg_match = re.search(
-        r'@\w+\.get\s*\(\s*["\']/?(?:billing/)?package["\'][^\n]*\n'
-        r'(?:.*\n){0,5}',
+        r'@\w+\.get\s*\(\s*["\']/?(?:billing/)?package["\'][^\n]*\n' r"(?:.*\n){0,5}",
         source,
     )
     if pkg_match:
@@ -912,8 +907,7 @@ def test_t231_checkout_endpoint_requires_auth() -> None:
     source = read_backend_file("routers", "billing.py")
 
     checkout_match = re.search(
-        r'@\w+\.post\s*\(\s*["\']/?(?:billing/)?checkout["\'][^\n]*\n'
-        r'(?:.*\n){0,8}',
+        r'@\w+\.post\s*\(\s*["\']/?(?:billing/)?checkout["\'][^\n]*\n' r"(?:.*\n){0,8}",
         source,
     )
     if checkout_match:
@@ -970,9 +964,7 @@ def test_t231_checkout_rate_limit_is_five_per_hour() -> None:
 def test_t232_status_endpoint_exists() -> None:
     """T-232 — GET /billing/status must exist in billing router."""
     source = read_backend_file("routers", "billing.py")
-    has_status = re.search(
-        r'@\w+\.get\s*\(\s*["\']/?(?:billing/)?status["\']', source
-    )
+    has_status = re.search(r'@\w+\.get\s*\(\s*["\']/?(?:billing/)?status["\']', source)
     assert has_status, (
         "routers/billing.py must define GET /status (or /billing/status).  "
         "The frontend success page polls this to confirm credits were granted.  T-232."
@@ -995,7 +987,7 @@ def test_t232_status_endpoint_scopes_by_both_session_id_and_user_id() -> None:
     # Extract the status endpoint handler body.
     status_fn_match = re.search(
         r'@\w+\.get\s*\(\s*["\']/?(?:billing/)?status["\'][^\n]*\n'
-        r'(?:async\s+)?def\s+\w+[^{]*\n((?:.*\n){0,40})',
+        r"(?:async\s+)?def\s+\w+[^{]*\n((?:.*\n){0,40})",
         source,
     )
     handler_body = status_fn_match.group(1) if status_fn_match else source
@@ -1026,7 +1018,7 @@ def test_t232_status_endpoint_returns_404_not_403_on_mismatch() -> None:
     # Find the status handler body.
     status_fn_match = re.search(
         r'@\w+\.get\s*\(\s*["\']/?(?:billing/)?status["\'][^\n]*\n'
-        r'(?:async\s+)?def\s+\w+[^{]*\n((?:.*\n){0,40})',
+        r"(?:async\s+)?def\s+\w+[^{]*\n((?:.*\n){0,40})",
         source,
     )
     if status_fn_match:
@@ -1066,7 +1058,7 @@ def test_t233_history_is_sorted_desc_and_capped() -> None:
 
     history_fn_match = re.search(
         r'@\w+\.get\s*\(\s*["\']/?(?:billing/)?history["\'][^\n]*\n'
-        r'(?:async\s+)?def\s+\w+[^{]*\n((?:.*\n){0,30})',
+        r"(?:async\s+)?def\s+\w+[^{]*\n((?:.*\n){0,30})",
         source,
     )
     if history_fn_match:
@@ -1082,7 +1074,11 @@ def test_t233_history_is_sorted_desc_and_capped() -> None:
             "(.desc()) so the most recent purchase appears first.  T-233."
         )
 
-        assert "limit(50)" in handler_body or ".limit(50)" in handler_body or "50" in handler_body, (
+        assert (
+            "limit(50)" in handler_body
+            or ".limit(50)" in handler_body
+            or "50" in handler_body
+        ), (
             "GET /billing/history must cap results at 50 entries (.limit(50)).  "
             "Without a limit, a user with many purchases could trigger a full "
             "table scan and large response payload.  T-233."
@@ -1118,12 +1114,14 @@ def test_t234_webhook_reads_raw_body() -> None:
 
     webhook_fn_match = re.search(
         r'@\w+\.post\s*\(\s*["\']/?(?:billing/)?webhook["\'][^\n]*\n'
-        r'(?:async\s+)?def\s+\w+[^{]*\n((?:.*\n){0,40})',
+        r"(?:async\s+)?def\s+\w+[^{]*\n((?:.*\n){0,40})",
         source,
     )
     if webhook_fn_match:
         handler_body = webhook_fn_match.group(1)
-        assert "request.body()" in handler_body or "await request.body" in handler_body, (
+        assert (
+            "request.body()" in handler_body or "await request.body" in handler_body
+        ), (
             "POST /billing/webhook must read the raw body with 'await request.body()' "
             "BEFORE any JSON parsing.  stripe.Webhook.construct_event() validates the "
             "HMAC over the exact raw bytes; JSON parsing can alter whitespace and break "
@@ -1249,7 +1247,7 @@ def test_t234_webhook_does_not_require_jwt_auth() -> None:
     # Find the webhook function definition.
     webhook_match = re.search(
         r'@\w+\.post\s*\(\s*["\']/?(?:billing/)?webhook["\'][^\n]*\n'
-        r'((?:async\s+)?def\s+\w+[^\n]*\n(?:.*\n){0,10})',
+        r"((?:async\s+)?def\s+\w+[^\n]*\n(?:.*\n){0,10})",
         source,
     )
     if webhook_match:
@@ -1275,14 +1273,14 @@ def test_t234_webhook_does_not_log_raw_payload() -> None:
 
     webhook_fn_match = re.search(
         r'@\w+\.post\s*\(\s*["\']/?(?:billing/)?webhook["\'][^\n]*\n'
-        r'(?:async\s+)?def\s+\w+[^{]*\n((?:.*\n){0,60})',
+        r"(?:async\s+)?def\s+\w+[^{]*\n((?:.*\n){0,60})",
         source,
     )
     if webhook_fn_match:
         handler_body = webhook_fn_match.group(1)
 
         raw_payload_in_log = re.search(
-            r'logger\.\w+\s*\([^)]*(?:payload|raw|event\s*=\s*event|body)[^)]*\)',
+            r"logger\.\w+\s*\([^)]*(?:payload|raw|event\s*=\s*event|body)[^)]*\)",
             handler_body,
         )
         assert not raw_payload_in_log, (
@@ -1460,9 +1458,7 @@ def test_t236_stripe_live_test_key_in_secret_patterns() -> None:
     """T-236 — _SECRET_PATTERNS must include a regex matching sk_live_* and sk_test_* keys."""
     source = read_backend_file("services", "observability.py")
 
-    has_stripe_pattern = re.search(
-        r'sk_(?:live|test)|sk_live|sk_test', source
-    )
+    has_stripe_pattern = re.search(r"sk_(?:live|test)|sk_live|sk_test", source)
     assert has_stripe_pattern, (
         "services/observability.py _SECRET_PATTERNS must include a regex that matches "
         "Stripe API keys: re.compile(r'sk_(?:live|test)_[A-Za-z0-9]{24,}').  "
@@ -1475,7 +1471,7 @@ def test_t236_whsec_in_secret_patterns() -> None:
     """T-236 — _SECRET_PATTERNS must include a regex matching whsec_* webhook secrets."""
     source = read_backend_file("services", "observability.py")
 
-    has_whsec_pattern = re.search(r'whsec_', source)
+    has_whsec_pattern = re.search(r"whsec_", source)
     assert has_whsec_pattern, (
         "services/observability.py _SECRET_PATTERNS must include a regex that matches "
         "Stripe webhook secrets: re.compile(r'whsec_[A-Za-z0-9/+=]{24,}').  "
@@ -1533,12 +1529,22 @@ def test_t236_billing_credits_consumed_counter_defined() -> None:
 
 
 def test_t236_billing_pack_disputed_counter_defined() -> None:
-    """T-236 — specforge_billing_pack_disputed_total Counter must be defined."""
+    """T-236 → SUPERSEDED by Phase 22 (T-304): pack_disputed_total is RETIRED.
+
+    The Phase-18 ``specforge_billing_pack_disputed_total`` is folded into the
+    provider-neutral ``specforge_billing_credits_revoked_total{provider,reason}``
+    (a dispute is ``reason='disputed'``) per Plan §25.6 / tasks.md T-304. The
+    high-priority dispute signal is preserved under the successor counter, so this
+    contract now asserts the fold rather than the retired name.
+    """
     source = read_backend_file("services", "observability.py")
-    assert "specforge_billing_pack_disputed_total" in source, (
-        "services/observability.py must define 'specforge_billing_pack_disputed_total'.  "
-        "Disputes are high-priority signals — an alert on this counter gives "
-        "operators immediate visibility into fraudulent activity.  T-236."
+    assert "specforge_billing_pack_disputed_total" not in source, (
+        "specforge_billing_pack_disputed_total is retired in Phase 22 (T-304) — it "
+        "must NOT remain defined (no dangling refs)."
+    )
+    assert "specforge_billing_credits_revoked_total" in source, (
+        "Dispute reversals must be counted by the provider-neutral successor "
+        "specforge_billing_credits_revoked_total{provider,reason='disputed'}. T-304."
     )
 
 
@@ -1582,11 +1588,14 @@ def test_t236_billing_checkout_rate_limited_counter_defined() -> None:
 
 
 def test_t236_all_10_billing_counters_are_defined() -> None:
-    """T-236 — All 10 specforge_billing_* counters must be defined.
+    """T-236 → updated for Phase 22 (T-304): the core billing counters are defined.
 
-    This is a completeness check.  Plan §21.4 T-236 documents exactly 10
-    counters.  If any are missing, the observability gap will not be caught
-    until an incident makes it obvious.
+    The Phase-18 set documented 10 counters. Phase 22 (Plan §25.6 T-304) retires
+    ``pack_disputed_total`` (folded into ``credits_revoked_total{reason='disputed'}``)
+    and adds the provider-labelled set; the authoritative completeness check for the
+    Phase-22 metric set lives in the phase25 contract
+    (``test_t304_required_billing_metrics_defined``). This historical check now
+    asserts the retained counters plus the dispute successor.
     """
     source = read_backend_file("services", "observability.py")
 
@@ -1596,7 +1605,7 @@ def test_t236_all_10_billing_counters_are_defined() -> None:
         "specforge_billing_credits_granted_total",
         "specforge_billing_credits_expired_total",
         "specforge_billing_credits_consumed_total",
-        "specforge_billing_pack_disputed_total",
+        "specforge_billing_credits_revoked_total",  # successor to pack_disputed
         "specforge_billing_webhook_received_total",
         "specforge_billing_webhook_duplicate_total",
         "specforge_billing_webhook_error_total",
@@ -1605,9 +1614,9 @@ def test_t236_all_10_billing_counters_are_defined() -> None:
 
     missing = [c for c in expected_counters if c not in source]
     assert not missing, (
-        f"The following Prometheus billing counters are missing from observability.py:\n"
+        "The following Prometheus billing counters are missing from observability.py:\n"
         + "\n".join(f"  - {c}" for c in missing)
-        + "\n\nAll 10 billing counters are required per Plan §21.4 T-236."
+        + "\n\nSee Plan §25.6 T-304 for the Phase-22 metric set."
     )
 
 
@@ -1626,7 +1635,8 @@ def test_billing_router_registered_in_main() -> None:
     source = read_backend_file("main.py")
 
     has_billing_import = re.search(
-        r"from\s+routers\s+import.*billing|import.*billing.*router|billing.*router", source
+        r"from\s+routers\s+import.*billing|import.*billing.*router|billing.*router",
+        source,
     )
     assert has_billing_import, (
         "main.py must import the billing router "
@@ -1737,7 +1747,12 @@ def test_t237_unit_tests_cover_webhook_idempotency() -> None:
 def test_t237_unit_tests_cover_idor_prevention() -> None:
     """T-237 — test_stripe_payments.py must include an IDOR prevention test."""
     source = read_backend_file("tests", "test_stripe_payments.py")
-    assert "idor" in source.lower() or "mismatch" in source.lower() or "wrong_user" in source.lower() or "different_user" in source.lower(), (
+    assert (
+        "idor" in source.lower()
+        or "mismatch" in source.lower()
+        or "wrong_user" in source.lower()
+        or "different_user" in source.lower()
+    ), (
         "test_stripe_payments.py must include a test for IDOR prevention on "
         "GET /billing/status: a user querying another user's session_id must "
         "receive 404.  T-237."
@@ -1757,7 +1772,11 @@ def test_t237_unit_tests_cover_lazy_expiry() -> None:
 def test_t237_unit_tests_cover_fifo_drain() -> None:
     """T-237 — test_stripe_payments.py must include a FIFO drain order test."""
     source = read_backend_file("tests", "test_stripe_payments.py")
-    assert "fifo" in source.lower() or "drain" in source.lower() or "order" in source.lower(), (
+    assert (
+        "fifo" in source.lower()
+        or "drain" in source.lower()
+        or "order" in source.lower()
+    ), (
         "test_stripe_payments.py must include a test verifying that _drain_packs() "
         "drains the soonest-expiring pack first when multiple active packs exist.  "
         "T-237."
@@ -1787,7 +1806,9 @@ def test_t237_unit_tests_cover_invalid_signature() -> None:
 def test_t237_unit_tests_cover_checkout_session_creation() -> None:
     """T-237 — test_stripe_payments.py must include a checkout session creation test."""
     source = read_backend_file("tests", "test_stripe_payments.py")
-    assert "checkout_session" in source.lower() or "create_checkout" in source.lower(), (
+    assert (
+        "checkout_session" in source.lower() or "create_checkout" in source.lower()
+    ), (
         "test_stripe_payments.py must include a test that create_checkout_session() "
         "calls stripe.checkout.Session.create() with the correct parameters "
         "(mode='payment', metadata with user_id, success_url, cancel_url).  T-237."
@@ -1859,7 +1880,9 @@ def test_t238_billing_types_file_exists() -> None:
 
 def test_t238_billing_types_has_billing_package_interface() -> None:
     """T-238 — billing.ts must define BillingPackage interface."""
-    source = (REPO_ROOT / "frontend" / "src" / "types" / "billing.ts").read_text(encoding="utf-8")
+    source = (REPO_ROOT / "frontend" / "src" / "types" / "billing.ts").read_text(
+        encoding="utf-8"
+    )
     assert "BillingPackage" in source, (
         "frontend/src/types/billing.ts must define the BillingPackage interface "
         "(credits, price_cents, validity_days, currency).  T-238."
@@ -1868,7 +1891,9 @@ def test_t238_billing_types_has_billing_package_interface() -> None:
 
 def test_t238_billing_types_has_stripe_credit_pack_interface() -> None:
     """T-238 — billing.ts must define StripeCreditPack interface."""
-    source = (REPO_ROOT / "frontend" / "src" / "types" / "billing.ts").read_text(encoding="utf-8")
+    source = (REPO_ROOT / "frontend" / "src" / "types" / "billing.ts").read_text(
+        encoding="utf-8"
+    )
     assert "StripeCreditPack" in source, (
         "frontend/src/types/billing.ts must define the StripeCreditPack interface "
         "(id, credits_purchased, credits_remaining, status, purchased_at, expires_at).  "
@@ -1878,7 +1903,9 @@ def test_t238_billing_types_has_stripe_credit_pack_interface() -> None:
 
 def test_t238_billing_types_has_billing_status_response_interface() -> None:
     """T-238 — billing.ts must define BillingStatusResponse interface."""
-    source = (REPO_ROOT / "frontend" / "src" / "types" / "billing.ts").read_text(encoding="utf-8")
+    source = (REPO_ROOT / "frontend" / "src" / "types" / "billing.ts").read_text(
+        encoding="utf-8"
+    )
     assert "BillingStatusResponse" in source, (
         "frontend/src/types/billing.ts must define the BillingStatusResponse interface "
         "(status: 'pending' | 'completed', credits_added, expires_at).  "
@@ -1888,7 +1915,9 @@ def test_t238_billing_types_has_billing_status_response_interface() -> None:
 
 def test_t238_billing_types_has_checkout_response_interface() -> None:
     """T-238 — billing.ts must define CheckoutResponse interface."""
-    source = (REPO_ROOT / "frontend" / "src" / "types" / "billing.ts").read_text(encoding="utf-8")
+    source = (REPO_ROOT / "frontend" / "src" / "types" / "billing.ts").read_text(
+        encoding="utf-8"
+    )
     assert "CheckoutResponse" in source or "checkout_url" in source, (
         "frontend/src/types/billing.ts must define the CheckoutResponse interface "
         "(checkout_url: string) matching the POST /billing/checkout response.  T-238."
@@ -1902,11 +1931,13 @@ def test_t238_billing_types_stripe_credit_pack_has_status_union() -> None:
     through without a type error.  The union type catches mismatches at
     compile time.
     """
-    source = (REPO_ROOT / "frontend" / "src" / "types" / "billing.ts").read_text(encoding="utf-8")
+    source = (REPO_ROOT / "frontend" / "src" / "types" / "billing.ts").read_text(
+        encoding="utf-8"
+    )
     has_status_union = re.search(
         r'"active"\s*\|\s*"consumed"'
         r'|"consumed"\s*\|\s*"expired"'
-        r'|active.*consumed.*expired.*disputed',
+        r"|active.*consumed.*expired.*disputed",
         source,
     )
     assert has_status_union, (
@@ -1923,7 +1954,9 @@ def test_t238_billing_page_polls_billing_status() -> None:
     'completed' or a timeout is reached.  Without polling, users are shown a
     success page that does not reflect whether credits were actually granted.
     """
-    source = (REPO_ROOT / "frontend" / "src" / "pages" / "Billing.tsx").read_text(encoding="utf-8")
+    source = (REPO_ROOT / "frontend" / "src" / "pages" / "Billing.tsx").read_text(
+        encoding="utf-8"
+    )
     assert "billing/status" in source or "/status" in source, (
         "Billing.tsx must call GET /billing/status to confirm credits were granted "
         "after the Stripe redirect.  The success page must poll until status is "
@@ -1933,7 +1966,9 @@ def test_t238_billing_page_polls_billing_status() -> None:
 
 def test_t238_billing_page_calls_billing_package_endpoint() -> None:
     """T-238 — Billing.tsx must fetch GET /billing/package to display the offer dynamically."""
-    source = (REPO_ROOT / "frontend" / "src" / "pages" / "Billing.tsx").read_text(encoding="utf-8")
+    source = (REPO_ROOT / "frontend" / "src" / "pages" / "Billing.tsx").read_text(
+        encoding="utf-8"
+    )
     assert "billing/package" in source or "/package" in source, (
         "Billing.tsx must fetch GET /billing/package to display the current offer "
         "(price, credits, validity).  Hard-coding prices in the component means "
@@ -1943,7 +1978,9 @@ def test_t238_billing_page_calls_billing_package_endpoint() -> None:
 
 def test_t238_billing_page_calls_billing_history_endpoint() -> None:
     """T-238 — Billing.tsx must fetch GET /billing/history for the purchase history table."""
-    source = (REPO_ROOT / "frontend" / "src" / "pages" / "Billing.tsx").read_text(encoding="utf-8")
+    source = (REPO_ROOT / "frontend" / "src" / "pages" / "Billing.tsx").read_text(
+        encoding="utf-8"
+    )
     assert "billing/history" in source or "/history" in source, (
         "Billing.tsx must fetch GET /billing/history to populate the purchase history "
         "table.  Users need visibility into past purchases for support and reconciliation.  "
@@ -1977,7 +2014,9 @@ def test_t238_credit_meter_has_expiry_warning() -> None:
     Without this warning, users discover expired credits only after a generation
     attempt fails.
     """
-    credit_meter_path = REPO_ROOT / "frontend" / "src" / "components" / "shared" / "CreditMeter.tsx"
+    credit_meter_path = (
+        REPO_ROOT / "frontend" / "src" / "components" / "shared" / "CreditMeter.tsx"
+    )
     if not credit_meter_path.exists():
         # Some implementations may embed this in a different file.
         return
@@ -2009,9 +2048,7 @@ def test_env_example_documents_stripe_vars() -> None:
     missing var at runtime, and have no documented format to follow.
     """
     env_example_path = BACKEND_ROOT / ".env.example"
-    assert env_example_path.exists(), (
-        "backend/.env.example must exist.  T-227."
-    )
+    assert env_example_path.exists(), "backend/.env.example must exist.  T-227."
     content = env_example_path.read_text(encoding="utf-8")
 
     stripe_vars = [

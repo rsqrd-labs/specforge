@@ -73,6 +73,7 @@ from services.credit_service import credit_service
 from services.lemonsqueezy_service import LemonSqueezyError, lemonsqueezy_service
 from services.observability import (
     BILLING_ADMIN_CORRECTION,
+    BILLING_CHECKOUT_API_ERROR,
     BILLING_CHECKOUT_CREATED,
     BILLING_WEBHOOK_DUPLICATE,
     BILLING_WEBHOOK_RECEIVED,
@@ -209,6 +210,9 @@ async def create_checkout(
     except LemonSqueezyError as exc:
         attempt.status = "failed"
         await db.commit()
+        BILLING_CHECKOUT_API_ERROR.labels(
+            provider="lemonsqueezy", error_type="provider_error"
+        ).inc()
         logger.error(
             "billing.checkout_provider_failed checkout_ref=%s attempt_id=%s user_id=%s",
             checkout_ref,
@@ -230,6 +234,9 @@ async def create_checkout(
         await db.commit()
     except SQLAlchemyError as exc:
         await db.rollback()
+        BILLING_CHECKOUT_API_ERROR.labels(
+            provider="lemonsqueezy", error_type="orphaned_commit"
+        ).inc()
         logger.error(
             "billing.checkout.orphaned checkout_ref=%s attempt_id=%s "
             "provider_checkout_id=%s user_id=%s",
@@ -243,7 +250,7 @@ async def create_checkout(
             detail="Failed to create checkout. Please try again.",
         ) from exc
 
-    BILLING_CHECKOUT_CREATED.inc()
+    BILLING_CHECKOUT_CREATED.labels(provider="lemonsqueezy").inc()
     return CheckoutResponse(checkout_url=checkout_url, checkout_ref=checkout_ref)
 
 
@@ -724,11 +731,13 @@ async def lemon_webhook(
             event_name,
             order_id,
         )
-        BILLING_WEBHOOK_DUPLICATE.inc()
+        BILLING_WEBHOOK_DUPLICATE.labels(provider="lemonsqueezy").inc()
         return {"status": "already_processed"}
 
     await db.commit()
-    BILLING_WEBHOOK_RECEIVED.labels(event_type=event_name).inc()
+    BILLING_WEBHOOK_RECEIVED.labels(
+        provider="lemonsqueezy", event_type=event_name
+    ).inc()
 
     # Step 5: enqueue by row id. Never pass raw bytes through arq. If the enqueue
     # fails (Redis blip), the row is durably 'received' and the 60s pending sweep
@@ -1005,11 +1014,11 @@ async def _handle_stripe_grace_webhook(request: Request, db: AsyncSession) -> di
     except IntegrityError:
         await db.rollback()
         logger.info("billing.stripe_grace.duplicate event_id=%s", event_id)
-        BILLING_WEBHOOK_DUPLICATE.inc()
+        BILLING_WEBHOOK_DUPLICATE.labels(provider="stripe").inc()
         return {"status": "already_processed"}
 
     await db.commit()
-    BILLING_WEBHOOK_RECEIVED.labels(event_type=event_type).inc()
+    BILLING_WEBHOOK_RECEIVED.labels(provider="stripe", event_type=event_type).inc()
 
     webhook_event_id = str(row.id)
     try:

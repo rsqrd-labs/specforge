@@ -36,7 +36,7 @@ from services.observability import (
     BILLING_CHECKOUT_COMPLETED,
     BILLING_CHECKOUT_CREATED,
     BILLING_CREDITS_GRANTED,
-    BILLING_PACK_DISPUTED,
+    BILLING_CREDITS_REVOKED,
 )
 
 logger = logging.getLogger(__name__)
@@ -149,7 +149,7 @@ class StripeService:
                 detail="Failed to create checkout session. Please try again.",
             ) from exc
 
-        BILLING_CHECKOUT_CREATED.inc()
+        BILLING_CHECKOUT_CREATED.labels(provider="stripe").inc()
         return session.url  # type: ignore[return-value]
 
     async def handle_event(self, db: AsyncSession, event: dict) -> None:
@@ -284,8 +284,10 @@ class StripeService:
             expires_at.isoformat(),
         )
 
-        BILLING_CHECKOUT_COMPLETED.inc()
-        BILLING_CREDITS_GRANTED.inc(settings.stripe_credits_per_purchase)
+        BILLING_CHECKOUT_COMPLETED.labels(provider="stripe").inc()
+        BILLING_CREDITS_GRANTED.labels(provider="stripe").inc(
+            settings.stripe_credits_per_purchase
+        )
 
     async def _handle_dispute_created(
         self,
@@ -386,7 +388,10 @@ class StripeService:
             revoke,
         )
 
-        BILLING_PACK_DISPUTED.inc()
+        # Reversals are counted by the provider-neutral credits_revoked counter
+        # (Phase 22 — T-304); a dispute folds in as reason='disputed'. The legacy
+        # pack_disputed_total is retired. ``revoke`` is the credits clawed back.
+        BILLING_CREDITS_REVOKED.labels(provider="stripe", reason="disputed").inc(revoke)
 
 
 # Module-level singleton — imported by name in the billing router:

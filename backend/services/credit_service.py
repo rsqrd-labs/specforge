@@ -306,7 +306,7 @@ class CreditService:
             return None
 
         for _debt, take in recovered_slices:
-            BILLING_CREDIT_DEBT_RECOVERED.inc(take)
+            BILLING_CREDIT_DEBT_RECOVERED.labels(provider=pack.provider).inc(take)
         await self._invalidate(user_id)
         return surplus_entry
 

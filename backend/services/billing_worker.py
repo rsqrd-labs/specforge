@@ -72,10 +72,15 @@ from services.lemonsqueezy_service import (
 )
 from services.observability import (
     BILLING_CHECKOUT_COMPLETED,
+    BILLING_CHECKOUT_EXPIRED,
     BILLING_CREDIT_DEBT_CREATED,
     BILLING_CREDITS_GRANTED,
     BILLING_CREDITS_REVOKED,
     BILLING_PURCHASE_REVENUE_CENTS,
+    BILLING_RECONCILE_MISMATCH,
+    BILLING_UNRECOVERABLE_CHECKOUT,
+    BILLING_WEBHOOK_ERROR,
+    BILLING_WEBHOOK_PENDING_AGE_SECONDS,
 )
 from services.queue import JOB_MAX_TRIES, QueueUnavailableError, enqueue
 
@@ -256,7 +261,9 @@ async def _persist_failed(wid: UUID, exc: BaseException) -> None:
         row.status = "failed"
         row.retry_count = (row.retry_count or 0) + 1
         row.last_error = _format_error(exc)
+        provider = row.provider
         await db.commit()
+    BILLING_WEBHOOK_ERROR.labels(provider=provider, error_type=type(exc).__name__).inc()
     logger.warning("billing.process.failed", webhook_event_id=str(wid))
 
 
@@ -273,14 +280,35 @@ async def billing_process_pending_webhooks(ctx: dict) -> None:
     committed ``received`` rows and retryable ``failed`` rows. Uses ``FOR UPDATE
     SKIP LOCKED`` + a bounded batch and the deterministic ``billing_wh:{id}`` job id
     so an in-flight wrapper-retry is never double-driven. Never fetches from Lemon.
+    Also refreshes the ``webhook_pending_age_seconds`` gauge (the lost-webhook
+    alert, T-304).
     """
     try:
         ids = await _claim_pending_ids(reclaim_stale=True)
         await _enqueue_ids(ctx, ids)
         if ids:
             logger.info("billing.sweep.enqueued", count=len(ids))
+        await _refresh_pending_age_gauge()
     except Exception:  # pragma: no cover - best-effort; the next tick retries
         logger.exception("billing.sweep.failed")
+
+
+async def _refresh_pending_age_gauge() -> None:
+    """Set ``webhook_pending_age_seconds`` to the age of the oldest unprocessed row.
+
+    The lost-webhook signal (T-304): any ``billing_webhook_events`` row not yet
+    ``processed`` is a grant/reversal still owed. We publish the age of the oldest
+    such row (``received_at`` never moves) so the >300s alert fires when the sweep +
+    reconcile lanes cannot drain the inbox. Zero when the inbox is clear.
+    """
+    async with AsyncSessionLocal() as db:
+        oldest = await db.scalar(
+            select(func.min(BillingWebhookEvent.received_at)).where(
+                BillingWebhookEvent.status != "processed"
+            )
+        )
+    age = 0.0 if oldest is None else max(0.0, (_now() - oldest).total_seconds())
+    BILLING_WEBHOOK_PENDING_AGE_SECONDS.set(age)
 
 
 @dataclass
@@ -505,6 +533,7 @@ async def _reconcile_apply_reversal(pack_id: UUID, order: LemonOrder) -> bool:
             provider=_RECONCILE_PROVIDER, reason=reason_label
         ).inc(outcome.debt_created)
     if outcome.applied:
+        BILLING_RECONCILE_MISMATCH.labels(provider=_RECONCILE_PROVIDER).inc()
         logger.warning(
             "billing.reconcile.mismatch",
             provider=_RECONCILE_PROVIDER,
@@ -561,6 +590,7 @@ async def _reconcile_lane3() -> int:
         await db.commit()
 
     if ids:
+        BILLING_CHECKOUT_EXPIRED.labels(provider=_RECONCILE_PROVIDER).inc(len(ids))
         logger.info("billing.reconcile.attempts_expired", count=len(ids))
     if still_open and still_open >= _RECONCILE_STALE_ATTEMPT_ALERT:
         logger.warning(
@@ -902,6 +932,12 @@ async def handle_order_created(ctx: dict, webhook_event_id: str) -> None:
             webhook.status = "processed"
             webhook.processed_at = _now()
             await db.commit()
+            # A rejected order that the provider reports as *paid* is money we took
+            # but could not turn into credits — the unprovable-paid-checkout path
+            # that needs an admin correction (T-302). Count it so it is alertable;
+            # a non-paid rejection (e.g. status_not_paid) is benign and excluded.
+            if payload.get("status") == "paid":
+                BILLING_UNRECOVERABLE_CHECKOUT.labels(provider="lemonsqueezy").inc()
             logger.warning(
                 "billing.order_created.rejected",
                 reason=reason,
@@ -1008,13 +1044,12 @@ async def handle_order_created(ctx: dict, webhook_event_id: str) -> None:
         webhook.processed_at = _now()
         await db.commit()
 
-    # Post-commit: evict the credit-balance cache, then record telemetry. The two
-    # shared counters stay unlabelled (Stripe still emits them bare; T-304 owns
-    # provider labelling) — provider context rides in the structured log.
+    # Post-commit: evict the credit-balance cache, then record provider-labelled
+    # telemetry (T-304); provider context also rides in the structured log.
     await credit_service.invalidate(user_id)
-    BILLING_CHECKOUT_COMPLETED.inc()
-    BILLING_CREDITS_GRANTED.inc(credits)
-    BILLING_PURCHASE_REVENUE_CENTS.inc(price_cents)
+    BILLING_CHECKOUT_COMPLETED.labels(provider="lemonsqueezy").inc()
+    BILLING_CREDITS_GRANTED.labels(provider="lemonsqueezy").inc(credits)
+    BILLING_PURCHASE_REVENUE_CENTS.labels(provider="lemonsqueezy").inc(price_cents)
     logger.info(
         "billing.order_created.granted",
         provider="lemonsqueezy",
@@ -1351,9 +1386,9 @@ async def handle_stripe_checkout_completed(ctx: dict, webhook_event_id: str) -> 
         await db.commit()
 
     await credit_service.invalidate(user_id)
-    BILLING_CHECKOUT_COMPLETED.inc()
-    BILLING_CREDITS_GRANTED.inc(credits)
-    BILLING_PURCHASE_REVENUE_CENTS.inc(price_cents)
+    BILLING_CHECKOUT_COMPLETED.labels(provider="stripe").inc()
+    BILLING_CREDITS_GRANTED.labels(provider="stripe").inc(credits)
+    BILLING_PURCHASE_REVENUE_CENTS.labels(provider="stripe").inc(price_cents)
     logger.info(
         "billing.stripe_grace.granted",
         provider="stripe",

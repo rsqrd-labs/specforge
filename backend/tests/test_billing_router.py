@@ -428,7 +428,8 @@ async def test_checkout_created_metric_increments() -> None:
     async def _ok(attempt, user, *, checkout_nonce):  # type: ignore[no-untyped-def]
         return "co_x", "https://pay.lemonsqueezy.com/x"
 
-    before = BILLING_CHECKOUT_CREATED._value.get()
+    created = BILLING_CHECKOUT_CREATED.labels(provider="lemonsqueezy")
+    before = created._value.get()
     with _Patches(_enable_lemon()):
         with patch.object(lemonsqueezy_service, "create_checkout", _ok):
             transport = ASGITransport(app=app)
@@ -438,7 +439,7 @@ async def test_checkout_created_metric_increments() -> None:
                 resp = await client.post("/billing/checkout")
 
     assert resp.status_code == 200
-    assert BILLING_CHECKOUT_CREATED._value.get() == before + 1
+    assert created._value.get() == before + 1
 
 
 # ---------------------------------------------------------------------------
