@@ -35,6 +35,7 @@ from sqlalchemy.ext.asyncio import (
     async_sessionmaker,
     create_async_engine,
 )
+from sqlalchemy.pool import NullPool
 
 from models import Base
 from models.credit_ledger import CreditLedger
@@ -55,23 +56,23 @@ pytestmark = pytest.mark.skipif(
 
 
 # ---------------------------------------------------------------------------
-# Module-scoped fixtures — create schema once per test module
+# Per-test fixtures — avoid sharing asyncpg pools across event-loop scopes
 # ---------------------------------------------------------------------------
 
 
-@pytest_asyncio.fixture(scope="module")
+@pytest_asyncio.fixture
 async def db_engine():
-    """Create engine + all tables for this module; dispose after all tests."""
-    engine = create_async_engine(TEST_DATABASE_URL, echo=False)
+    """Create an isolated engine for this test; dispose it after completion."""
+    engine = create_async_engine(TEST_DATABASE_URL, echo=False, poolclass=NullPool)
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all, checkfirst=True)
     yield engine
     await engine.dispose()
 
 
-@pytest_asyncio.fixture(scope="module")
+@pytest_asyncio.fixture
 async def redis_client():
-    """Real Redis client for the test module; closed after all tests."""
+    """Real Redis client for one test; closed before the next test starts."""
     client: Redis = Redis.from_url(TEST_REDIS_URL, decode_responses=True)
     yield client
     await client.aclose()
