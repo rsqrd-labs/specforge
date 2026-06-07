@@ -859,8 +859,10 @@ class StageManager:
                     "eval_task.timeout_cancelled stage_id=%s",
                     stage_id,
                 )
-            except Exception:
-                pass
+            except Exception:  # pragma: no cover - best-effort eval collection
+                logger.warning(
+                    "eval_collection_failed stage_id=%s", stage_id, exc_info=True
+                )
         except Exception as exc:
             if span_id and not span_finished:
                 await self._mark_langfuse_span_failed(span_id, exc)
@@ -1581,8 +1583,10 @@ class StageManager:
                     "eval_task.timeout_cancelled stage_id=%s",
                     stage_id,
                 )
-            except Exception:
-                pass
+            except Exception:  # pragma: no cover - best-effort eval collection
+                logger.warning(
+                    "eval_collection_failed stage_id=%s", stage_id, exc_info=True
+                )
 
         except (ProviderError, TimeoutError) as exc:
             # On provider failure the stage remains in its pre-patch status

@@ -800,8 +800,8 @@ async def _handle_token_expired(
         # be gone or may not be, but we still want a status on the push.
         try:
             await db.rollback()
-        except Exception:  # pragma: no cover — best-effort
-            pass
+        except Exception:  # pragma: no cover - best-effort rollback
+            logger.exception("github_export.token_expiry_rollback_failed")
 
     await _mark_push_failed(db, push)
 
@@ -825,8 +825,8 @@ async def _mark_push_failed(
         logger.exception("github_export.mark_failed_commit_error")
         try:
             await db.rollback()
-        except Exception:  # pragma: no cover
-            pass
+        except Exception:  # pragma: no cover - best-effort rollback
+            logger.exception("github_export.mark_failed_rollback_error")
 
 
 # ---------------------------------------------------------------------------

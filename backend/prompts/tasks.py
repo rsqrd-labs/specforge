@@ -207,7 +207,7 @@ Task design rules:
   gzipped, with a target ceiling of +15 KB per task. If exceeded, the task
   must reference the PLAN.md Frontend Architecture bundle-budget entry
   that justifies the exception.
-"""
+"""  # nosec B608
 
 
 async def get_system_prompt() -> str:
@@ -343,4 +343,4 @@ in your output):
   states and at least one accessibility assertion in Acceptance Criteria
   [specificity_testability, requirements_coverage].
 
-Return only TASKS.md. Do not include any preamble, commentary, or summary."""
+Return only TASKS.md. Do not include any preamble, commentary, or summary."""  # nosec B608
