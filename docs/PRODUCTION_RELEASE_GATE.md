@@ -20,7 +20,8 @@ Record these before starting the gate:
 | Frontend image/build | |
 | Database migration required | Yes / No |
 | Langfuse enabled in production | Yes / No |
-| Stripe billing enabled in production | Yes / No |
+| Lemon Squeezy billing enabled in production | Yes / No |
+| Verified Lemon webhook event list (recorded) | |
 | `ASDD_PROMPT_VERSION` | |
 | Prompt eval baseline | |
 
@@ -43,6 +44,7 @@ uv run pytest \
   ../harness/tests/backend/test_phase21_stripe_payments_contract.py \
   ../harness/tests/backend/test_phase22_prompt_pipeline_contract.py \
   ../harness/tests/backend/test_phase23_storyboard_contract.py \
+  ../harness/tests/backend/test_phase25_lemonsqueezy_billing_contract.py \
   -q
 uv run bandit -r config.py database.py main.py middleware models prompts routers schemas services
 uv run pip-audit --strict
@@ -82,7 +84,7 @@ Pass criteria:
 - Formatting and lint pass.
 - Unit tests pass.
 - Security and production-readiness harness contracts pass.
-- Stripe billing and prompt pipeline harness contracts pass.
+- Lemon Squeezy billing (`phase25`) and prompt pipeline harness contracts pass.
 - Storyboard backend/frontend harness contracts and focused Storyboard tests
   pass.
 - Prompt eval report shows no unapproved per-grader regression against the
@@ -110,17 +112,22 @@ Production must satisfy these backend requirements:
 | `GITHUB_CLIENT_ID` | Blank to disable GitHub export; set both vars together |
 | `GITHUB_CLIENT_SECRET` | Required when `GITHUB_CLIENT_ID` is set |
 
-Stripe billing requirements:
+Lemon Squeezy billing requirements (Phase 22):
 
 | Variable | Requirement |
 |---|---|
-| `STRIPE_SECRET_KEY` | Blank to disable billing; `sk_live_*` required when billing is enabled in production |
-| `STRIPE_WEBHOOK_SECRET` | Required when billing is enabled |
-| `STRIPE_PRICE_CENTS` | Positive integer package price in cents |
-| `STRIPE_CREDITS_PER_PURCHASE` | Positive integer credit grant per pack |
-| `STRIPE_CREDIT_VALIDITY_DAYS` | Positive integer expiry window |
-| `STRIPE_SUCCESS_URL` | HTTPS frontend billing URL, normally `{FRONTEND_URL}/billing` |
-| `STRIPE_CANCEL_URL` | HTTPS frontend billing URL, normally `{FRONTEND_URL}/billing` |
+| `LEMONSQUEEZY_API_KEY` | Blank to disable billing; required to enable checkout |
+| `LEMONSQUEEZY_STORE_ID` | Required to enable checkout |
+| `LEMONSQUEEZY_VARIANT_ID` | Required to enable checkout |
+| `LEMONSQUEEZY_WEBHOOK_SECRET` | Required (live secret) when billing is enabled |
+| `LEMONSQUEEZY_WEBHOOK_SECRET_PREV` | Set only during a secret-rotation window |
+| `LEMONSQUEEZY_PRICE_CENTS` | Positive integer package price in cents |
+| `LEMONSQUEEZY_CURRENCY` | Non-empty ISO 4217 currency code |
+| `LEMONSQUEEZY_CREDITS_PER_PURCHASE` | Positive integer credit grant per pack |
+| `LEMONSQUEEZY_CREDIT_VALIDITY_DAYS` | Positive integer expiry window |
+| `LEMONSQUEEZY_SUCCESS_URL` | HTTPS frontend billing URL, normally `{FRONTEND_URL}/billing` (no cancel URL) |
+| `LEMONSQUEEZY_TEST_MODE` | **Must be `false`** in production |
+| `ADMIN_USER_EMAILS` | Comma-separated allowlist for billing admin corrections (empty = nobody) |
 
 Langfuse production requirements:
 
@@ -135,14 +142,42 @@ Langfuse production requirements:
 Pass criteria:
 
 - Application startup validation succeeds in the production-like environment.
-- If billing is enabled, Stripe webhooks are configured for the staging backend
-  and a test checkout has completed end to end.
+- **Before enabling checkout in production**, verify the Lemon **live** webhook:
+  it points to `POST /billing/webhook`, is subscribed to `order_created` (and
+  `order_refunded`), uses the configured live `LEMONSQUEEZY_WEBHOOK_SECRET`, and a
+  signed `order_created` **test delivery succeeds** (200 + an inbox row + the
+  grant). Record the verified event list in the release record above (confirm
+  against Lemon's current catalog that chargebacks/disputes map to the
+  `order_refunded`/fraud inputs — Lemon is Merchant of Record).
 - Langfuse is either intentionally disabled or explicitly approved for
   prompt/output telemetry export.
 - No development secrets, CI placeholders, or local URLs are present in
   production variables.
-- No `sk_test_*` Stripe key is present in production. The backend rejects this
-  at startup, but the gate should catch it before deploy.
+- `LEMONSQUEEZY_TEST_MODE=false` in production with an HTTPS
+  `LEMONSQUEEZY_SUCCESS_URL`. The backend rejects a half-configured or test-mode
+  Lemon at startup, but the gate should catch it before deploy.
+
+### Billing Cutover & Gated Stripe Removal (Phase 22 rollout)
+
+The Lemon Squeezy migration supersedes Stripe **at runtime** without deleting the
+Stripe code in the same release (Plan §25.9):
+
+1. Deploy with Lemon enabled and verify the live webhook (above). New checkout is
+   Lemon-only.
+2. The Stripe SDK and the `stripe_credit_packs` / `stripe_webhook_events` audit
+   tables are **retained**. A bounded late-webhook **grace window** at
+   `POST /billing/webhook` (branching on the `Stripe-Signature` header) keeps
+   settling in-flight Stripe orders/disputes; it is open only while
+   `STRIPE_WEBHOOK_SECRET` is set — close the window by unsetting that secret.
+3. **Gated Stripe decommission (T-308)** is a separate, status-tracked follow-up
+   that runs **only** after a hard operational gate: ≥7 days since the production
+   checkout cutover **and** zero `specforge_billing_webhook_received_total{provider="stripe"}`
+   increments over the preceding 72h **and** the grace flag disabled. It removes
+   `stripe_service.py`, the `stripe` SDK dependency, the scoped config guard, the
+   Stripe observability patterns, and the grace adapter — while **retaining** the
+   Stripe audit tables and backfilled rows. It is **not** a Phase-22 completion
+   gate and is outside the `phase25` contract (which deliberately pins Stripe
+   present until then). Attach the operational-gate evidence to the T-308 PR.
 
 ## Manual Smoke Gate
 
@@ -159,8 +194,8 @@ Minimum release-blocking coverage:
 - Stage finalise unlocks downstream stages.
 - Full SPEC to TASKS path can complete.
 - Export zip downloads and contains expected files.
-- Billing package, checkout redirect, status polling, and history work when
-  Stripe billing is enabled.
+- Billing package, checkout redirect, `checkout_ref` status polling, and history
+  work when Lemon Squeezy billing is enabled.
 - `/health` and `/metrics` are reachable as expected.
 - Prompt pipeline output includes required Phase 19 sections and the eval suite
   report has been reviewed.
@@ -248,9 +283,14 @@ Metrics:
 - `/metrics` requires the intended token or trusted-source access.
 - Staging scrape target is healthy.
 - Production scrape target is ready before deploy.
-- Billing counters are present: `specforge_billing_checkout_created_total`,
+- Billing counters are present (provider-labelled):
+  `specforge_billing_checkout_created_total`,
   `specforge_billing_checkout_completed_total`,
-  `specforge_billing_webhook_error_total`, and duplicate/rate-limit counters.
+  `specforge_billing_credits_granted_total`,
+  `specforge_billing_credits_revoked_total`,
+  `specforge_billing_webhook_error_total`, the
+  `specforge_billing_webhook_pending_age_seconds` gauge, and
+  duplicate/rate-limit counters.
 - Prompt quality counters are present: `pipeline_validator_failures_total`,
   `pipeline_upstream_section_skipped_total`, and
   `specforge_billing_credits_critic_regen_total`.
@@ -309,8 +349,8 @@ Confirm:
 - Prompt-injection defenses and output validation remain enabled.
 - Prompt changes are versioned through `ASDD_PROMPT_VERSION` and gated by
   `harness/prompt_eval`.
-- Stripe webhook HMAC validation, idempotency, livemode guard, CSRF exemption,
-  and checkout rate limit are enabled.
+- Lemon `X-Signature` HMAC validation (two-secret, fail-closed), durable-inbox
+  idempotency, CSRF exemption, and the checkout rate limit are enabled.
 - Langfuse payloads go through the shared redaction path.
 - Langfuse production enablement has explicit content-capture acknowledgement.
 - Storyboard public responses are allow-list based and noindex.
@@ -347,8 +387,9 @@ Rollback triggers:
 - Authentication is unavailable.
 - Workspace creation or stage generation is broadly unavailable.
 - Credit deductions occur without successful generation and refund paths fail.
-- Stripe checkout completes but credits are not granted, or webhook errors
-  affect multiple users.
+- Lemon checkout completes but credits are not granted, or webhook/worker errors
+  affect multiple users (watch `webhook_pending_age_seconds` and
+  `billing:deadletter`).
 - Prompt validator failures or critic-regeneration credit spikes appear after
   deploy and cannot be mitigated by reverting the prompt/version.
 - Storyboard generation debits credits without an exactly-once refund on

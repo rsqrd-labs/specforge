@@ -2,7 +2,7 @@
 
 Use this runbook when validating, operating, or troubleshooting SpecForge
 observability. It covers the observability paths used by the application:
-Prometheus metrics, Sentry, Langfuse, Stripe billing counters, and prompt
+Prometheus metrics, Sentry, Langfuse, Lemon Squeezy billing counters, and prompt
 pipeline quality counters.
 
 ## Scope
@@ -12,7 +12,7 @@ pipeline quality counters.
 | Prometheus metrics | Health, request, auth, rate-limit, credit, and LLM operation metrics from `/metrics` | Enabled; protected by token or localhost-only access |
 | Sentry | Backend and frontend exception reporting | Disabled when DSNs are blank |
 | Langfuse | Optional LLM traces, prompt lookup, eval score links, and dataset collection | Disabled when `LANGFUSE_SECRET_KEY` is blank |
-| Stripe billing counters | Checkout, webhook, credit grant, duplicate delivery, dispute, and rate-limit signals | Enabled when the billing router is loaded; billing can still be disabled with blank Stripe keys |
+| Lemon Squeezy billing counters | Provider-labelled checkout, webhook, credit grant/revoke, debt, reconcile, admin-correction, pending-age, and rate-limit signals (Phase 22) | Enabled when the billing router is loaded; checkout can still be disabled with blank Lemon keys |
 | Prompt quality counters | Validator failures, skipped upstream sections, and critic-regeneration credit usage | Enabled with the pipeline; used by Phase 19 release gates |
 | GitHub integration metrics | Webhook, reconcile-lag, export/PR/check, token-mint, job-retry/dead-letter, and queue-depth signals from the App + worker (Phase 21) | Enabled when the GitHub App is configured; the worker runs `configure_logging()` + Sentry on startup |
 
@@ -52,8 +52,10 @@ Production startup validation is enforced in `backend/config.py`:
 - If Langfuse is enabled in production, `LANGFUSE_HOST` must use HTTPS.
 - If Langfuse is enabled in production,
   `LANGFUSE_CONTENT_CAPTURE_ACK=true` is required.
-- If `STRIPE_SECRET_KEY` is set in production, it must not be a `sk_test_*`
-  key. Leave it blank to intentionally disable billing.
+- If Lemon billing is enabled in production, `LEMONSQUEEZY_TEST_MODE` must be
+  `false`, `LEMONSQUEEZY_SUCCESS_URL` must be HTTPS, and
+  `LEMONSQUEEZY_WEBHOOK_SECRET` must be set. Leave the three core Lemon keys
+  blank to intentionally disable checkout.
 
 ## Normal Validation
 
@@ -72,8 +74,11 @@ and dashboard scrape targets are healthy.
 
 Important metric families:
 
-- `specforge_billing_*` for Stripe checkout, webhook, credit grant, duplicate,
-  dispute, expiry, consumption, and checkout rate-limit signals.
+- `specforge_billing_*` for Lemon Squeezy checkout, webhook, credit
+  grant/revoke, debt created/recovered, reconcile mismatch, admin correction,
+  expiry, consumption, the `webhook_pending_age_seconds` gauge, and checkout
+  rate-limit signals. Most are labelled `{provider}` (`lemonsqueezy`, and
+  `stripe` only for retained grace/audit series).
 - `specforge_storyboard_*` for Storyboard generation, public views, downloads,
   missing source sections, credit deduction, and refund behavior. Watch
   `specforge_storyboard_generation_failed_total` for failure spikes and alert
@@ -190,18 +195,21 @@ not depend on Langfuse availability.
 
 ### Billing Metrics
 
-1. In staging with Stripe test credentials, load `GET /billing/package`.
-2. Create a Checkout Session through the billing page.
-3. Complete checkout and let the Stripe webhook reach `/billing/webhook`.
-4. Confirm `specforge_billing_checkout_created_total`,
-   `specforge_billing_checkout_completed_total`, and
-   `specforge_billing_credits_granted_total` increment.
-5. Replay the same event from Stripe or the Stripe CLI and confirm
-   `specforge_billing_webhook_duplicate_total` increments without granting
-   credits twice.
+1. In staging with Lemon Squeezy test-store credentials, load
+   `GET /billing/package`.
+2. Create a checkout through the billing page (a `billing_checkout_attempts` row
+   is committed before Lemon is called).
+3. Complete checkout and let the Lemon `order_created` webhook reach
+   `/billing/webhook`.
+4. Confirm `specforge_billing_checkout_created_total{provider="lemonsqueezy"}`,
+   `specforge_billing_checkout_completed_total{provider="lemonsqueezy"}`, and
+   `specforge_billing_credits_granted_total{provider="lemonsqueezy"}` increment.
+5. Replay the same Lemon event and confirm
+   `specforge_billing_webhook_duplicate_total{provider="lemonsqueezy"}`
+   increments without granting credits twice.
 
-Expected result: checkout and webhook counters reflect the Stripe dashboard,
-and duplicate delivery is visible but harmless.
+Expected result: checkout and webhook counters reflect the Lemon dashboard, and
+duplicate delivery is visible but harmless.
 
 ### Prompt Quality Metrics
 
@@ -324,13 +332,18 @@ processing recovers.
 
 Checks:
 
-- Verify `STRIPE_WEBHOOK_SECRET` matches the Stripe endpoint.
-- Inspect Stripe dashboard delivery logs for `/billing/webhook`.
-- Check logs for `billing.webhook_invalid_signature`,
-  `billing.webhook_livemode_mismatch`, and `billing.webhook_handle_failed`.
-- Confirm `stripe_webhook_events.stripe_event_id` has one row per processed
-  event and duplicate deliveries return `already_processed`.
-- Confirm production is using live Stripe keys and staging is using test keys.
+- Verify `LEMONSQUEEZY_WEBHOOK_SECRET` (and `_PREV` during a rotation window)
+  matches the Lemon webhook signing secret.
+- Inspect Lemon dashboard delivery logs for `/billing/webhook`.
+- Check logs for `billing.webhook.*` failures and `billing.job.*` worker errors.
+- Confirm the `billing_webhook_events` inbox has one row per Lemon event id and
+  duplicate deliveries return `already_processed`
+  (`specforge_billing_webhook_duplicate_total`).
+- Watch `specforge_billing_webhook_pending_age_seconds` — a value `> 300` means
+  the inbox is not draining (queue outage or crashed worker). The 60s sweep
+  re-enqueues stale rows; the 15-minute reconcile is the backstop.
+- Confirm `LEMONSQUEEZY_TEST_MODE` is `false` in production and `true` in
+  staging.
 
 Decision:
 
@@ -338,6 +351,9 @@ Decision:
   credits.
 - Keep the app online but pause checkout promotion if duplicate counters rise
   while grants remain correct.
+- A sustained high `webhook_pending_age_seconds` is the trigger to scale the
+  billing worker out to a dedicated `queue_name="billing"` consumer (see
+  `RUNBOOK.md` §9).
 
 ### GitHub Worker / Webhook / Sync Errors (Phase 21)
 
@@ -454,8 +470,9 @@ Go:
 - Sentry DSNs are correct or intentionally blank.
 - Langfuse disabled mode has no behavioral delta.
 - Langfuse enabled mode fails open under outage testing.
-- Stripe checkout/webhook metrics match the Stripe dashboard when billing is
-  enabled, and duplicate delivery is idempotent.
+- Lemon Squeezy checkout/webhook metrics match the Lemon dashboard when billing
+  is enabled, duplicate delivery is idempotent, and
+  `webhook_pending_age_seconds` stays well under 300.
 - GitHub (when the App is enabled): webhook ack p99 < 300 ms, reconcile lag p95
   within SLO, dead-letter rate at zero, queue depth stable, and the
   installation-token cache-hit ratio healthy.
@@ -468,8 +485,8 @@ No-go:
 - Production startup validation fails.
 - `/metrics` is exposed without the intended protection.
 - Langfuse failure breaks generation, refine, eval, credits, or prompt fallback.
-- Stripe checkout completes without credit grants, or webhook HMAC/livemode
-  validation is misconfigured.
+- Lemon checkout completes without credit grants, or the `X-Signature` HMAC
+  verification is misconfigured.
 - Prompt validator failures or critic-regeneration credit usage spike after a
   prompt deploy.
 - Prompt or model output telemetry is enabled in production without approval.

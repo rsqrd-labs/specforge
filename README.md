@@ -23,6 +23,7 @@ Core capabilities:
 - Human review gates between stages.
 - Stage refinement with diff preview and accept/reject flow.
 - Credit accounting for generation and accepted refinements.
+- Paid credit packs through Lemon Squeezy hosted checkout (Phase 22), with signed webhooks, idempotent grants, and refund/dispute handling. See `docs/INTEGRATION_API_SETUP_HANDBOOK.md` for setup and `docs/RUNBOOK.md` §9 for billing ops. Leave the `LEMONSQUEEZY_*` keys blank to disable checkout.
 - Provider-aware LLM routing for Anthropic, OpenAI, and Google.
 - User-supplied provider API keys, encrypted at rest, with platform key fallback.
 - Online evaluation and quality indicators for generated stages.

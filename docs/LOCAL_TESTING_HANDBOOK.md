@@ -158,25 +158,34 @@ have access to:
 You only need one. Leave the others blank in the config file — the app will
 only show providers with valid keys.
 
-### Stripe billing keys (optional)
+### Lemon Squeezy billing keys (optional)
 
-Leave Stripe blank for normal local development. The billing page still loads
-and `GET /billing/package` still returns the configured package, but checkout
-creation returns a safe 503 until Stripe is configured.
+Leave Lemon Squeezy blank for normal local development. The billing page still
+loads and `GET /billing/package` still returns the configured package, but
+checkout creation returns a safe 503 until Lemon is configured.
 
 To test paid credit packs locally:
 
-1. Create a Stripe test account or use an existing Stripe test mode project.
-2. Copy a test secret key (`sk_test_...`) into `STRIPE_SECRET_KEY`.
-3. Install the Stripe CLI and run:
+1. Create a Lemon Squeezy store in **test mode** and a single-charge product
+   variant for the credit pack.
+2. Copy the store id into `LEMONSQUEEZY_STORE_ID`, the variant id into
+   `LEMONSQUEEZY_VARIANT_ID`, and a test API key into `LEMONSQUEEZY_API_KEY`.
+3. Set `LEMONSQUEEZY_TEST_MODE=true`.
+4. In the Lemon dashboard (Settings → Webhooks) create a webhook pointing at
+   your forwarded URL (see below) for `{BACKEND_URL}/billing/webhook`, subscribed
+   to `order_created` and `order_refunded`. Copy the signing secret into
+   `LEMONSQUEEZY_WEBHOOK_SECRET`.
+5. Lemon does not ship a local CLI forwarder — expose `localhost:8000` with a
+   tunnel and point the test webhook at it:
 
    ```bash
-   stripe listen --forward-to localhost:8000/billing/webhook
+   # any HTTPS tunnel works; e.g. cloudflared or ngrok
+   cloudflared tunnel --url http://localhost:8000
+   # then set the Lemon test webhook URL to https://<tunnel-host>/billing/webhook
    ```
 
-4. Copy the printed webhook signing secret (`whsec_...`) into
-   `STRIPE_WEBHOOK_SECRET`.
-5. Use `http://localhost:5173/billing` for both success and cancel URLs.
+6. Use `http://localhost:5173/billing` for `LEMONSQUEEZY_SUCCESS_URL` (there is
+   no cancel URL).
 
 ---
 
@@ -266,14 +275,19 @@ FRONTEND_URL=http://localhost:5173
 GITHUB_CLIENT_ID=
 GITHUB_CLIENT_SECRET=
 
-# Stripe billing — leave blank to disable local checkout
-STRIPE_SECRET_KEY=
-STRIPE_WEBHOOK_SECRET=
-STRIPE_PRICE_CENTS=900
-STRIPE_CREDITS_PER_PURCHASE=200
-STRIPE_CREDIT_VALIDITY_DAYS=30
-STRIPE_SUCCESS_URL=http://localhost:5173/billing
-STRIPE_CANCEL_URL=http://localhost:5173/billing
+# Lemon Squeezy billing — leave the three core keys blank to disable local checkout
+LEMONSQUEEZY_API_KEY=
+LEMONSQUEEZY_WEBHOOK_SECRET=
+LEMONSQUEEZY_WEBHOOK_SECRET_PREV=
+LEMONSQUEEZY_STORE_ID=
+LEMONSQUEEZY_VARIANT_ID=
+LEMONSQUEEZY_PRICE_CENTS=900
+LEMONSQUEEZY_CURRENCY=USD
+LEMONSQUEEZY_CREDITS_PER_PURCHASE=200
+LEMONSQUEEZY_CREDIT_VALIDITY_DAYS=30
+LEMONSQUEEZY_SUCCESS_URL=http://localhost:5173/billing
+LEMONSQUEEZY_TEST_MODE=true
+ADMIN_USER_EMAILS=
 
 # LLM providers — fill in whichever you have, leave others as placeholder
 ANTHROPIC_API_KEY=sk-ant-...
@@ -385,8 +399,8 @@ curl http://localhost:8000/billing/package
 ```
 
 Expected: JSON with the current price, credits per purchase, and validity
-window. If Stripe keys are blank, checkout creation is disabled but the package
-endpoint remains available.
+window. If the Lemon keys are blank, checkout creation is disabled but the
+package endpoint remains available.
 
 ### Sign in and run the full flow
 
@@ -407,17 +421,19 @@ end-to-end.
 
 ### Optional billing checkout walkthrough
 
-With Stripe test mode and `stripe listen` running:
+With Lemon Squeezy test mode and the webhook tunnel running:
 
 1. Open [http://localhost:5173/billing](http://localhost:5173/billing).
 2. Confirm the credit pack price and current purchase history load.
-3. Click the buy-credits control and confirm the browser redirects to Stripe
-   Checkout.
-4. Complete checkout with a Stripe test card.
-5. Return to `/billing?session_id=...`; the page should poll
-   `GET /billing/status` until the webhook grants credits.
+3. Click the buy-credits control and confirm the browser redirects to the Lemon
+   Squeezy hosted checkout.
+4. Complete checkout with a Lemon test card.
+5. Return to `/billing?checkout_ref=...`; the page should poll
+   `GET /billing/status?checkout_ref=...` until the `order_created` webhook
+   grants credits.
 6. Confirm the credit balance and purchase history update once. Replaying the
-   webhook should not grant credits a second time.
+   webhook should not grant credits a second time (the durable
+   `billing_webhook_events` inbox dedupes on the Lemon event id).
 
 ---
 
@@ -592,18 +608,21 @@ status and look at `docker compose logs redis`.
 ### Billing checkout returns 503
 
 This is expected when local billing is intentionally disabled. To enable it,
-set `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_SUCCESS_URL`, and
-`STRIPE_CANCEL_URL` in `backend/.env`, then restart the backend.
+set `LEMONSQUEEZY_API_KEY`, `LEMONSQUEEZY_STORE_ID`, `LEMONSQUEEZY_VARIANT_ID`,
+`LEMONSQUEEZY_WEBHOOK_SECRET`, and `LEMONSQUEEZY_SUCCESS_URL` in `backend/.env`,
+then restart the backend.
 
 ### Billing checkout succeeds but credits do not appear
 
-- Confirm `stripe listen --forward-to localhost:8000/billing/webhook` is still
-  running.
-- Confirm `STRIPE_WEBHOOK_SECRET` matches the current Stripe CLI listener.
-- Check backend logs for `billing.webhook_invalid_signature`,
-  `billing.webhook_livemode_mismatch`, or `billing.webhook_handle_failed`.
-- Confirm you completed the Checkout Session created by SpecForge, not a
-  standalone test event without SpecForge metadata.
+- Confirm the webhook tunnel is still running and the Lemon test webhook URL
+  points at `https://<tunnel-host>/billing/webhook`.
+- Confirm `LEMONSQUEEZY_WEBHOOK_SECRET` matches the secret on the Lemon webhook.
+- Check backend logs for `billing.webhook.*` failures and inspect the
+  `billing_webhook_events` inbox row for the order.
+- Confirm you completed the checkout created by SpecForge (it carries the
+  `checkout_ref`/nonce), not a standalone test order without SpecForge metadata.
+- If the enqueue was missed, the 60s pending-sweep and the 15-minute reconcile
+  recover it automatically.
 
 ### Backend starts but immediately crashes
 

@@ -96,15 +96,17 @@ you merge to `main`.
 | Vercel | Production | Hosts the frontend website |
 | GitHub Actions secrets | Production | Lets the automated pipeline deploy to Railway and Vercel |
 | GitHub OAuth App | Optional | GitHub export integration — lets users push spec/plan/tasks to a GitHub repo as files + issues. Leave blank to disable. |
-| Stripe | Optional | Paid credit packs through Stripe Checkout and signed webhooks. Leave blank to disable billing checkout. |
+| Lemon Squeezy | Optional | Paid credit packs through Lemon Squeezy hosted checkout and signed webhooks (Phase 22). Leave blank to disable billing checkout. |
 | Sentry | Optional | Error reporting if something breaks in production |
 | Grafana OTLP | Optional | Distributed tracing (advanced observability) |
 | Langfuse | Optional | LLM call logging and prompt management |
 | Prometheus metrics | Built in | `/metrics` endpoint — no setup needed |
 
 Dependencies installed but not currently required for runtime setup:
-`resend` and `supabase`. Stripe is wired through the billing endpoints and is
-documented below.
+`resend` and `supabase`. Lemon Squeezy is the runtime billing provider (Phase 22)
+and is documented below. The legacy Stripe SDK is retained only for the bounded
+late-webhook grace window (see "Stripe (legacy — grace window only)" below); new
+checkout is Lemon-only.
 
 ---
 
@@ -354,57 +356,108 @@ Common errors:
 
 ---
 
-### Stripe Billing (optional — skip if you do not sell credit packs)
+### Lemon Squeezy Billing (Phase 22 — optional, skip if you do not sell credit packs)
 
-Stripe powers the `/billing` page, hosted Checkout Sessions, and signed
-webhooks that grant purchased credits. Leave `STRIPE_SECRET_KEY` blank to
-disable checkout; the billing package endpoint remains available and the
-frontend surfaces a safe error if a user attempts checkout.
+Lemon Squeezy is the runtime billing provider. It powers the `/billing` page,
+hosted checkout, and the signed webhook that grants purchased credits. Lemon is
+the **Merchant of Record**, so it absorbs sales tax, chargebacks, and disputes.
+Leave `LEMONSQUEEZY_API_KEY` / `LEMONSQUEEZY_STORE_ID` / `LEMONSQUEEZY_VARIANT_ID`
+blank to disable checkout: `GET /billing/package` still returns the configured
+package, but `POST /billing/checkout` returns a safe `503` and the frontend
+surfaces a calm disabled state.
 
-**How to set up Stripe:**
+Checkout is **attempt-first**: SpecForge commits a `billing_checkout_attempts`
+row (snapshotting credits/price/currency/validity) *before* calling Lemon, then
+returns a `checkout_ref` the frontend polls. The webhook proves the order back
+with a one-time `checkout_nonce` (only its `sha256` is ever stored).
 
-1. In Stripe, use test mode for local/staging and live mode for production.
-2. Copy the secret key into `STRIPE_SECRET_KEY`.
-3. Create a webhook endpoint pointing at `{BACKEND_URL}/billing/webhook`.
-4. Subscribe the endpoint to:
-   - `checkout.session.completed`
-   - `charge.dispute.created`
-5. Copy the webhook signing secret into `STRIPE_WEBHOOK_SECRET`.
-6. Set the return URLs to the billing page:
-   - `STRIPE_SUCCESS_URL={FRONTEND_URL}/billing`
-   - `STRIPE_CANCEL_URL={FRONTEND_URL}/billing`
+**How to set up Lemon Squeezy:**
+
+1. Create a Lemon Squeezy store. Use **test mode** for local/staging and a live
+   store for production.
+2. Create a single-charge product variant for the credit pack and copy its
+   numeric id into `LEMONSQUEEZY_VARIANT_ID`; copy the store id into
+   `LEMONSQUEEZY_STORE_ID`.
+3. Create an API key (Settings → API) and copy it into `LEMONSQUEEZY_API_KEY`.
+4. Create a webhook (Settings → Webhooks) pointing at `{BACKEND_URL}/billing/webhook`.
+   Subscribe it to:
+   - `order_created`
+   - `order_refunded`
+   (Chargebacks/disputes surface to SpecForge through `order_refunded`/fraud
+   revocation inputs because Lemon is the Merchant of Record — confirm against
+   Lemon's **current** webhook catalog before go-live and record the list in the
+   release gate. Reconcile lane 2 backstops anything the catalog adds.)
+5. Copy the webhook signing secret into `LEMONSQUEEZY_WEBHOOK_SECRET`. The
+   handler verifies the `X-Signature` HMAC against
+   `[LEMONSQUEEZY_WEBHOOK_SECRET, LEMONSQUEEZY_WEBHOOK_SECRET_PREV]` so secret
+   rotation has a two-secret window (see `RUNBOOK.md` §9).
+6. Set the success return URL to the billing page. There is intentionally **no**
+   cancel URL — `LEMONSQUEEZY_SUCCESS_URL={FRONTEND_URL}/billing`.
 7. Configure the package:
-   - `STRIPE_PRICE_CENTS=900`
-   - `STRIPE_CREDITS_PER_PURCHASE=200`
-   - `STRIPE_CREDIT_VALIDITY_DAYS=30`
+   - `LEMONSQUEEZY_PRICE_CENTS=900`
+   - `LEMONSQUEEZY_CURRENCY=USD`
+   - `LEMONSQUEEZY_CREDITS_PER_PURCHASE=200`
+   - `LEMONSQUEEZY_CREDIT_VALIDITY_DAYS=30`
+8. Set `LEMONSQUEEZY_TEST_MODE=true` for local/staging; it **must be `false`** in
+   production (enforced at startup).
 
 ```env
-STRIPE_SECRET_KEY=sk_test_...       # use sk_live_... in production
-STRIPE_WEBHOOK_SECRET=whsec_...
-STRIPE_PRICE_CENTS=900
-STRIPE_CREDITS_PER_PURCHASE=200
-STRIPE_CREDIT_VALIDITY_DAYS=30
-STRIPE_SUCCESS_URL=http://localhost:5173/billing
-STRIPE_CANCEL_URL=http://localhost:5173/billing
+LEMONSQUEEZY_API_KEY=
+LEMONSQUEEZY_WEBHOOK_SECRET=
+LEMONSQUEEZY_WEBHOOK_SECRET_PREV=        # set during a secret-rotation window only
+LEMONSQUEEZY_STORE_ID=
+LEMONSQUEEZY_VARIANT_ID=
+LEMONSQUEEZY_PRICE_CENTS=900
+LEMONSQUEEZY_CURRENCY=USD
+LEMONSQUEEZY_CREDITS_PER_PURCHASE=200
+LEMONSQUEEZY_CREDIT_VALIDITY_DAYS=30
+LEMONSQUEEZY_SUCCESS_URL=http://localhost:5173/billing
+LEMONSQUEEZY_TEST_MODE=true               # MUST be false in production
+LEMONSQUEEZY_CHECKOUT_TTL_MINUTES=30
+LEMONSQUEEZY_API_BASE=https://api.lemonsqueezy.com
+LEMONSQUEEZY_RECONCILE_MAX_CALLS_PER_RUN=200
+
+# Billing admin allowlist (comma-separated emails) authorised to issue manual
+# billing corrections via POST /billing/admin/correction. Empty = nobody.
+ADMIN_USER_EMAILS=
 ```
 
-Production guardrails:
+Production guardrails (`validate_production_settings()`):
 
-- `STRIPE_SECRET_KEY` may be blank to intentionally disable billing.
-- If set in production, `STRIPE_SECRET_KEY` must be a live key. The backend
-  refuses to start with `sk_test_*` when `ENVIRONMENT=production`.
-- The webhook handler verifies `Stripe-Signature`, stores every processed
-  `stripe_event_id`, and treats duplicate deliveries as idempotent.
-- The webhook livemode guard rejects test events in production and live events
-  in non-production.
+- Lemon is "enabled" only when `LEMONSQUEEZY_API_KEY` + `LEMONSQUEEZY_STORE_ID` +
+  `LEMONSQUEEZY_VARIANT_ID` are all set; a half-configured Lemon is treated as
+  disabled.
+- When enabled in production, the backend refuses to start unless
+  `LEMONSQUEEZY_WEBHOOK_SECRET` is set, `LEMONSQUEEZY_SUCCESS_URL` is HTTPS,
+  price/credits/validity are positive, currency is non-empty, and
+  `LEMONSQUEEZY_TEST_MODE=false`.
+- The webhook handler verifies `X-Signature` (two-secret HMAC, fail-closed),
+  commits each event to the durable `billing_webhook_events` inbox keyed by the
+  Lemon event id (replay is idempotent), then enqueues a worker job. Credit
+  grants are idempotent on `(provider, provider_order_id)` and the
+  `billing_purchase:lemonsqueezy:{order}` ledger reason.
 
 Common errors:
 
-- Checkout returns 503: billing is disabled or `STRIPE_SUCCESS_URL` is blank.
-- Checkout returns 502: Stripe could not create the Checkout Session; check the
-  API key and Stripe dashboard logs.
-- Credits do not appear after payment: verify webhook delivery, signing secret,
-  and logs for `billing.webhook_handle_failed`.
+- Checkout returns 503: Lemon billing is not configured (one of API key / store
+  id / variant id is blank).
+- Checkout returns 502: Lemon could not create the checkout, or the post-Lemon
+  commit failed (the URL is never exposed; reconcile settles the order later).
+- Credits do not appear after payment: verify webhook delivery in the Lemon
+  dashboard, confirm the signing secret, and check logs for
+  `billing.webhook.*` and the `billing_webhook_events` inbox row. The 60s
+  pending-sweep and the 15-minute reconcile recover a missed enqueue.
+
+#### Stripe (legacy — grace window only)
+
+Stripe was the Phase-18 provider. New checkout is **Lemon-only**; the Stripe SDK
+and its `stripe_credit_packs` / `stripe_webhook_events` audit tables are retained
+only for a bounded **late-webhook grace window** so in-flight Stripe orders and
+disputes still settle after cutover. The grace path at `POST /billing/webhook`
+branches on the `Stripe-Signature` header and is open **only while
+`STRIPE_WEBHOOK_SECRET` is set** — close the window by unsetting that secret.
+Full Stripe removal is the gated follow-up T-308 (≥7 days post-cutover, zero
+`provider="stripe"` webhook receipts). Do not configure Stripe for a new install.
 
 ---
 
@@ -503,7 +556,7 @@ first time. Work through these steps in order.
 - A Vercel account ([vercel.com](https://vercel.com)) — free to sign up.
 - Your Google OAuth credentials (from section 2 above).
 - At least one LLM provider API key.
-- Stripe test/live credentials if you plan to enable paid credit packs.
+- Lemon Squeezy test/live store credentials if you plan to enable paid credit packs.
 
 ### Step 1 — Set up Railway (backend + databases)
 
@@ -555,13 +608,18 @@ Railway will host the FastAPI server, PostgreSQL, and Redis.
     | `GOOGLE_API_KEY` | Your Gemini key (or leave blank if not using Gemini) |
     | `GITHUB_CLIENT_ID` | Your GitHub OAuth App client ID (or leave blank to disable GitHub export) |
     | `GITHUB_CLIENT_SECRET` | Your GitHub OAuth App client secret (or leave blank) |
-    | `STRIPE_SECRET_KEY` | Blank to disable billing; `sk_live_...` for production billing |
-    | `STRIPE_WEBHOOK_SECRET` | Stripe webhook signing secret when billing is enabled |
-    | `STRIPE_PRICE_CENTS` | Credit pack price in cents, e.g. `900` |
-    | `STRIPE_CREDITS_PER_PURCHASE` | Credits granted per purchase, e.g. `200` |
-    | `STRIPE_CREDIT_VALIDITY_DAYS` | Credit expiry window, e.g. `30` |
-    | `STRIPE_SUCCESS_URL` | Your frontend billing URL, e.g. `https://your-vercel-url.vercel.app/billing` |
-    | `STRIPE_CANCEL_URL` | Your frontend billing URL, e.g. `https://your-vercel-url.vercel.app/billing` |
+    | `LEMONSQUEEZY_API_KEY` | Blank to disable billing; the Lemon Squeezy API key for production billing |
+    | `LEMONSQUEEZY_STORE_ID` | Lemon store id (required to enable checkout) |
+    | `LEMONSQUEEZY_VARIANT_ID` | Lemon product-variant id for the credit pack |
+    | `LEMONSQUEEZY_WEBHOOK_SECRET` | Lemon webhook signing secret when billing is enabled |
+    | `LEMONSQUEEZY_WEBHOOK_SECRET_PREV` | Previous secret, set only during a rotation window |
+    | `LEMONSQUEEZY_PRICE_CENTS` | Credit pack price in cents, e.g. `900` |
+    | `LEMONSQUEEZY_CURRENCY` | ISO 4217 currency, e.g. `USD` |
+    | `LEMONSQUEEZY_CREDITS_PER_PURCHASE` | Credits granted per purchase, e.g. `200` |
+    | `LEMONSQUEEZY_CREDIT_VALIDITY_DAYS` | Credit expiry window, e.g. `30` |
+    | `LEMONSQUEEZY_SUCCESS_URL` | Your frontend billing URL, e.g. `https://your-vercel-url.vercel.app/billing` |
+    | `LEMONSQUEEZY_TEST_MODE` | `true` for staging; **must be `false`** in production |
+    | `ADMIN_USER_EMAILS` | Comma-separated emails allowed to issue billing admin corrections (empty = nobody) |
     | `ENCRYPTION_MASTER_KEY` | Generated below |
     | `CSRF_SECRET` | Generated below |
     | `METRICS_TOKEN` | Generated below |
@@ -708,8 +766,8 @@ Actions.
 2. Click **Sign in with Google** and complete the flow. You should land on
    `/dashboard` with 50 credits.
 3. Create a workspace and run a SPEC generation. Tokens should stream in.
-4. If Stripe billing is enabled, open `/billing`, create a test checkout in
-   staging, and confirm the webhook grants credits once.
+4. If Lemon Squeezy billing is enabled, open `/billing`, create a test checkout
+   in staging, and confirm the `order_created` webhook grants credits once.
 5. Check the Railway backend logs (Deployments → the running deploy →
    **View Logs**) for any errors.
 
@@ -779,13 +837,18 @@ CSRF_SECRET=long-random-secret
 GITHUB_CLIENT_ID=
 GITHUB_CLIENT_SECRET=
 
-STRIPE_SECRET_KEY=
-STRIPE_WEBHOOK_SECRET=
-STRIPE_PRICE_CENTS=900
-STRIPE_CREDITS_PER_PURCHASE=200
-STRIPE_CREDIT_VALIDITY_DAYS=30
-STRIPE_SUCCESS_URL=http://localhost:5173/billing
-STRIPE_CANCEL_URL=http://localhost:5173/billing
+LEMONSQUEEZY_API_KEY=
+LEMONSQUEEZY_WEBHOOK_SECRET=
+LEMONSQUEEZY_WEBHOOK_SECRET_PREV=
+LEMONSQUEEZY_STORE_ID=
+LEMONSQUEEZY_VARIANT_ID=
+LEMONSQUEEZY_PRICE_CENTS=900
+LEMONSQUEEZY_CURRENCY=USD
+LEMONSQUEEZY_CREDITS_PER_PURCHASE=200
+LEMONSQUEEZY_CREDIT_VALIDITY_DAYS=30
+LEMONSQUEEZY_SUCCESS_URL=http://localhost:5173/billing
+LEMONSQUEEZY_TEST_MODE=true
+ADMIN_USER_EMAILS=
 
 METRICS_TOKEN=
 SENTRY_DSN=
@@ -847,8 +910,11 @@ The backend enforces these rules at startup when `ENVIRONMENT=production`:
 - `FRONTEND_URL` must start with `https://`.
 - `JWT_PRIVATE_KEY` must be a real PEM key (not the CI placeholder).
 - `ENCRYPTION_MASTER_KEY` must not be the CI placeholder value.
-- If `STRIPE_SECRET_KEY` is set, it must not start with `sk_test_` in
-  production. Leave it blank to intentionally disable billing checkout.
+- If Lemon billing is enabled in production (`LEMONSQUEEZY_API_KEY` +
+  `LEMONSQUEEZY_STORE_ID` + `LEMONSQUEEZY_VARIANT_ID` all set),
+  `LEMONSQUEEZY_WEBHOOK_SECRET` must be set, `LEMONSQUEEZY_SUCCESS_URL` must use
+  `https://`, and `LEMONSQUEEZY_TEST_MODE` must be `false`. Leave the three core
+  keys blank to intentionally disable billing checkout.
 - If `LANGFUSE_SECRET_KEY` is set, `LANGFUSE_PUBLIC_KEY` must also be set,
   `LANGFUSE_HOST` must use `https://`, and `LANGFUSE_CONTENT_CAPTURE_ACK`
   must be `true`.
@@ -896,8 +962,9 @@ Expected: a JSON object with a `providers` array containing `anthropic`,
 curl http://localhost:8000/billing/package
 ```
 
-Expected: JSON with price, credits, and validity window. Blank Stripe keys are
-valid for local development and mean checkout creation is disabled.
+Expected: JSON with price, credits, and validity window. Blank Lemon Squeezy
+keys are valid for local development and mean checkout creation is disabled
+(`POST /billing/checkout` returns 503).
 
 ### Browser walkthrough
 
@@ -965,14 +1032,17 @@ Check:
 
 Check:
 
-- `STRIPE_SECRET_KEY` is set only when billing checkout should be enabled.
-- In production, the key starts with `sk_live_`; `sk_test_` keys are rejected
-  by startup validation.
-- `STRIPE_SUCCESS_URL` and `STRIPE_CANCEL_URL` point to `{FRONTEND_URL}/billing`.
-- Stripe webhook endpoint is `{BACKEND_URL}/billing/webhook` and uses the same
-  signing secret as `STRIPE_WEBHOOK_SECRET`.
-- Backend logs for `billing.webhook_invalid_signature`,
-  `billing.webhook_livemode_mismatch`, or `billing.webhook_handle_failed`.
+- `LEMONSQUEEZY_API_KEY`, `LEMONSQUEEZY_STORE_ID`, and `LEMONSQUEEZY_VARIANT_ID`
+  are all set only when billing checkout should be enabled.
+- In production, `LEMONSQUEEZY_TEST_MODE` is `false` and
+  `LEMONSQUEEZY_SUCCESS_URL` uses `https://`; otherwise startup validation fails.
+- `LEMONSQUEEZY_SUCCESS_URL` points to `{FRONTEND_URL}/billing` (there is no
+  cancel URL).
+- The Lemon webhook endpoint is `{BACKEND_URL}/billing/webhook`, uses the
+  `LEMONSQUEEZY_WEBHOOK_SECRET` signing secret, and is subscribed to
+  `order_created` / `order_refunded`.
+- Backend logs for `billing.webhook.*` failures and the `billing_webhook_events`
+  inbox row for the order.
 
 ### CSRF failures (requests return 403)
 

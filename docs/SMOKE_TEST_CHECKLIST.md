@@ -217,22 +217,25 @@ This flow ships A→D — verify each phase before enabling the next surface in 
 
 ---
 
-## Phase 18 — Stripe Billing
+## Phase 22 — Lemon Squeezy Billing
 
-**Prerequisites:** Stripe is enabled in staging with test credentials, and the
-webhook endpoint is `{BACKEND_URL}/billing/webhook`. If billing is
-intentionally disabled for the environment, run P18-7 and mark P18-1 through
-P18-6 as not applicable with release-owner approval.
+**Prerequisites:** Lemon Squeezy is enabled in staging with test-store
+credentials (`LEMONSQUEEZY_API_KEY` / `_STORE_ID` / `_VARIANT_ID` set,
+`LEMONSQUEEZY_TEST_MODE=true`), and the webhook endpoint is
+`{BACKEND_URL}/billing/webhook` subscribed to `order_created` / `order_refunded`.
+If billing is intentionally disabled for the environment, run P22-8 and mark
+P22-1 through P22-7 as not applicable with release-owner approval.
 
 | # | Test | Result | Notes |
 |---|------|--------|-------|
-| P18-1 | Open `/billing` → package price, credit amount, current balance, and purchase history load. | 🔲 | |
-| P18-2 | Click buy credits → browser redirects to Stripe Checkout for the configured pack. | 🔲 | |
-| P18-3 | Complete test checkout → return to `/billing?session_id=...`; status polling grants credits once. | 🔲 | |
-| P18-4 | Purchase history shows the completed pack, credit amount, and expiry date. | 🔲 | |
-| P18-5 | Replay the same Stripe event → duplicate is accepted as idempotent and credits are not granted twice. | 🔲 | |
-| P18-6 | Send a webhook with an invalid signature → API returns 400 and no credits are granted. | 🔲 | |
-| P18-7 | With Stripe intentionally disabled, buy credits shows a safe disabled/error state and no checkout session is created. | 🔲 | |
+| P22-1 | Open `/billing` → package price, credit amount, current balance, and purchase history load (no Stripe copy is visible). | 🔲 | |
+| P22-2 | Click buy credits → browser redirects to the Lemon Squeezy hosted checkout for the configured variant. | 🔲 | |
+| P22-3 | Complete test checkout → return to `/billing?checkout_ref=...`; `GET /billing/status?checkout_ref=...` polling grants credits once. | 🔲 | |
+| P22-4 | Purchase history shows the completed pack, credit amount, and expiry date. | 🔲 | |
+| P22-5 | Replay the same Lemon event → the durable inbox dedupes on the event id; credits are not granted twice. | 🔲 | |
+| P22-6 | Send a webhook with an invalid `X-Signature` → API returns 400 and no credits are granted. | 🔲 | |
+| P22-7 | Trigger an `order_refunded` (or test dispute) → the pack is revoked, balance drops, and any over-spend becomes recoverable billing debt (shown as a calm slate note, never summed into the usable balance). | 🔲 | |
+| P22-8 | With Lemon intentionally disabled, buy credits shows a safe disabled state and `POST /billing/checkout` returns 503 (no checkout is created). | 🔲 | |
 
 ---
 
@@ -350,7 +353,7 @@ With Langfuse unconfigured (`LANGFUSE_SECRET_KEY` blank):
 | Export | 2 | | | |
 | Phase 13 — GitHub | 15 | | | |
 | Phase 21 — GitHub Living (App enabled) | 17 | | | |
-| Phase 18 — Billing | 7 | | | |
+| Phase 22 — Billing (Lemon Squeezy) | 8 | | | |
 | Phase 19 — Prompt Quality | 6 | | | |
 | Credits Edge Cases | 3 | | | |
 | Rate Limiting | 1 | | | |

@@ -2,8 +2,8 @@
 
 Operational procedures for SpecForge V1 on-call engineers and SREs.  
 Covers: circuit breaker, finalise race incident response, credit refund
-procedures, auth cache limitations, dependency version management, Stripe
-billing alerts, and prompt pipeline quality gates.
+procedures, auth cache limitations, dependency version management, Lemon Squeezy
+billing alerts and ops, and prompt pipeline quality gates.
 
 ---
 
@@ -17,7 +17,7 @@ billing alerts, and prompt pipeline quality gates.
 6. [Langfuse Docker Image — Version Management](#6-langfuse-docker-image--version-management)
 7. [Database Migrations — Alembic Runbook](#7-database-migrations--alembic-runbook)
 8. [Secret Rotation Procedures](#8-secret-rotation-procedures)
-9. [Billing Alerts](#9-billing-alerts)
+9. [Billing Alerts And Lemon Squeezy Ops](#9-billing-alerts-and-lemon-squeezy-ops)
 10. [Prompt Pipeline Quality Gates And Eval Workflow](#10-prompt-pipeline-quality-gates-and-eval-workflow)
 11. [Storyboard Operations](#11-storyboard-operations)
 12. [GitHub Living Integration — App, Worker & Webhook Ops](#12-github-living-integration--app-worker--webhook-ops)
@@ -288,7 +288,8 @@ Key metrics to monitor:
 | `sse_stream_duration_seconds` | P95 > 120s → streaming hung |
 | `pdf_export_duration_seconds` | P95 > 10s → PDF rendering slow |
 | `eval_failure_total` | Sustained increase → eval service degraded |
-| `specforge_billing_webhook_error_total` | Any increase → Stripe webhook processing error |
+| `specforge_billing_webhook_error_total` | Any increase → billing webhook processing error |
+| `specforge_billing_webhook_pending_age_seconds` | `> 300` → billing inbox not draining (queue outage / crashed worker) |
 | `specforge_billing_checkout_rate_limited_total` | Sustained increase → checkout abuse or broken retry loop |
 | `pipeline_validator_failures_total` | Any increase → prompt output missing mandatory sections |
 | `pipeline_upstream_section_skipped_total` | Sustained increase → upstream stage lacks required context |
@@ -663,32 +664,195 @@ not long-lived secrets.
 
 ---
 
-## 9. Billing Alerts
+## 9. Billing Alerts And Lemon Squeezy Ops
 
-The following Grafana alert rules correspond to the Prometheus counters defined in `services/observability.py` (Phase 18 — T-236).
+Billing runs on **Lemon Squeezy** (Phase 22). Lemon is the Merchant of Record,
+so it owns tax, chargebacks, and disputes; chargebacks/disputes surface to
+SpecForge through `order_refunded`/fraud revocation inputs. The legacy Stripe SDK
+and its `stripe_credit_packs` / `stripe_webhook_events` audit tables are
+**retained** behind a bounded late-webhook grace window; full removal is the
+gated follow-up **T-308**.
+
+Architecture recap (so the procedures below make sense):
+
+- `POST /billing/checkout` is **attempt-first** — a `billing_checkout_attempts`
+  row is committed (snapshotting credits/price/currency/validity) before Lemon is
+  called; the frontend polls `GET /billing/status?checkout_ref=…`.
+- `POST /billing/webhook` verifies the `X-Signature` HMAC (two-secret list),
+  commits the event to the durable `billing_webhook_events` **inbox** keyed by the
+  Lemon event id, then **enqueues** `billing_process_webhook` on the arq worker.
+  The HTTP path never grants credits inline.
+- The worker grant is idempotent on `(provider, provider_order_id)` and the
+  `billing_purchase:lemonsqueezy:{order}` ledger reason. Refund/fraud revocation
+  is idempotent on the `refund:billing:{pack}:{cents}` reason; over-spent value
+  becomes **recoverable billing debt** (expired value is never debt).
+- Two crons keep the system honest: a **60s pending-sweep**
+  (`billing_process_pending_webhooks`) and a **15-minute reconcile**
+  (`billing_reconcile`, three lanes).
+
+### 9.1 Grafana Alerts
+
+The following alert rules correspond to the provider-labelled counters defined in
+`services/observability.py` (Phase 22 — T-304). `{provider}` is `lemonsqueezy`
+(and `stripe` only for retained grace/audit series).
 
 | Alert | Condition | Severity | Action |
 |---|---|---|---|
-| BillingWebhookErrorRate | `rate(specforge_billing_webhook_error_total[5m]) > 0` | Warning | Check logs for `billing.webhook_handle_failed`; inspect Stripe dashboard for event details; use Stripe retry after the handler is fixed. Delete a `stripe_webhook_events` row only with incident-lead approval and only after confirming credits were not granted |
-| BillingCheckoutDropped | `checkout.session.completed` events stagnant while `checkout_created` rising (5-min window) | Warning | Check Stripe webhook delivery logs; verify `/billing/webhook` is reachable and returning 200; inspect CSRF/rate-limit exemptions |
-| BillingDisputeCreated | `specforge_billing_pack_disputed_total` increments | Warning | Review Stripe dispute in the dashboard; contact user if fraudulent; credits already revoked automatically |
-| BillingWebhookDuplicate | `rate(specforge_billing_webhook_duplicate_total[1h]) > 10` | Info | Normal if Stripe is retrying; investigate if above 100/hour — may indicate the webhook endpoint is failing silently after `already_processed` return |
+| BillingWebhookErrorRate | `rate(specforge_billing_webhook_error_total[5m]) > 0` | Warning | Check logs for `billing.webhook.*` / `billing.job.*`; inspect Lemon dashboard delivery logs. Webhook retries are safe — the inbox dedupes on the event id. Delete a `billing_webhook_events` row only with incident-lead approval and only after confirming credits were not granted |
+| BillingWebhookPendingAge | `specforge_billing_webhook_pending_age_seconds > 300` | Warning | The inbox is not draining (queue outage or crashed worker). Confirm the worker process is up and Redis is reachable; the 60s sweep re-enqueues stale rows. A sustained breach is the trigger to scale the billing worker out (§9.6) |
+| BillingCheckoutDropped | `rate(specforge_billing_checkout_completed_total[30m]) == 0` while `checkout_created` rising; **or** zero `checkout_completed` over 72h | Warning | Verify `/billing/webhook` is reachable and returning 200; check Lemon webhook delivery logs and the inbox; inspect CSRF/rate-limit exemptions |
+| BillingReversalSpike | `rate(specforge_billing_credits_revoked_total[1h])` above baseline | Warning | A burst of `order_refunded`/fraud revocations. Review the Lemon dashboard; confirm reversals are legitimate and debt was created where expected |
+| BillingUnprovablePaidCheckout | `increase(specforge_billing_unrecoverable_checkout_total[1h]) > 0` | Warning | An `order_created` was rejected while the provider reports the order **paid**. Reconcile cannot auto-grant this — settle via the admin-correction path (§9.5) with evidence |
+| BillingDebtCreated | `increase(specforge_billing_credit_debt_created_total[1h]) > 0` | Info | A reversal exceeded remaining balance and created recoverable debt. Expected after refunds on spent credits; investigate if the rate is abnormal |
+| BillingReconcileMismatch | `increase(specforge_billing_reconcile_mismatch_total[1h]) > 0` | Warning | Reconcile lane 2 applied a reversal the webhook path missed. Investigate why the webhook was lost (delivery, signature, inbox) |
+| BillingExpirySpike | `rate(specforge_billing_credits_expired_total[1h])` above baseline | Info | Unusual volume of credits lazily expiring; correlate with a past purchase cohort, not a fault |
+| BillingJobDeadlettered | `increase(specforge_billing_job_deadlettered_total[15m]) > 0` | Critical | A billing job exhausted retries and landed in `billing:deadletter`. Inspect and replay (§9.3) |
+| BillingWebhookDuplicate | `rate(specforge_billing_webhook_duplicate_total[1h]) > 100` | Info | Normal if Lemon is retrying; investigate above 100/hour — the endpoint may be failing silently after the `already_processed` return |
 
-### Billing Endpoint Recovery
+### 9.2 Billing Endpoint Recovery
 
 - `GET /billing/package` is public and should keep returning the configured
   package even when checkout is disabled.
 - `POST /billing/checkout` requires authentication and is rate limited to five
-  attempts per user per hour. A 503 means billing is intentionally disabled or
-  missing `STRIPE_SECRET_KEY` / `STRIPE_SUCCESS_URL`; a 502 means Stripe could
-  not create the Checkout Session.
+  attempts per user per hour. A **503** means Lemon billing is not configured
+  (one of `LEMONSQUEEZY_API_KEY` / `_STORE_ID` / `_VARIANT_ID` is blank); a
+  **502** means Lemon could not create the checkout, or the post-Lemon commit
+  failed (the URL is never exposed; reconcile settles the order later).
 - `POST /billing/webhook` is exempt from browser CSRF and app rate limits, but
-  every event must pass Stripe signature validation. Webhook retries are safe:
-  `stripe_webhook_events.stripe_event_id` is unique and duplicate deliveries
-  return `already_processed`.
-- In production, a `sk_test_*` Stripe secret is rejected at startup. If staging
-  test webhooks are accidentally pointed at production, the livemode guard
-  rejects them before credits are granted.
+  every event must pass `X-Signature` HMAC verification before any DB/queue work.
+  Webhook retries are safe: the `billing_webhook_events` inbox is unique per Lemon
+  event id and duplicate deliveries return `already_processed`.
+- In production, Lemon enablement requires `LEMONSQUEEZY_WEBHOOK_SECRET`, an HTTPS
+  `LEMONSQUEEZY_SUCCESS_URL`, and `LEMONSQUEEZY_TEST_MODE=false` — half-configured
+  Lemon fails `validate_production_settings()` at startup.
+
+### 9.3 Dead-Letter Replay (`billing:deadletter`)
+
+Billing jobs that exhaust `JOB_MAX_TRIES` are routed to the Redis list
+`billing:deadletter` (the GitHub stream uses the separate `gh:deadletter` — never
+mix them). The constants are `BILLING_DEAD_LETTER_KEY` in
+`backend/services/queue.py`.
+
+1. Inspect depth and the head record:
+   ```bash
+   redis-cli -u "$REDIS_URL" LLEN billing:deadletter
+   redis-cli -u "$REDIS_URL" LINDEX billing:deadletter 0
+   ```
+   Each record carries the job function (`billing_process_webhook`) and its args
+   (the `billing_webhook_events` row id).
+2. **Find root cause first** in the logs (`billing.job.*` / `_persist_failed`)
+   before replaying — replaying a poison job just dead-letters it again.
+3. The underlying inbox row is still present and idempotent. The safest replay is
+   to let the **60s sweep**/**15-minute reconcile lane 1** re-enqueue it: confirm
+   the row's status is `received`/retryable `failed` and wait one cron tick.
+4. To force it immediately, re-enqueue `billing_process_webhook` with the inbox
+   row id (e.g. via an arq enqueue against `WorkerSettings`' Redis), then
+   `LREM billing:deadletter 1 <record>` once it processes cleanly. Grants stay
+   idempotent on `(provider, provider_order_id)`, so a double replay cannot
+   double-credit.
+
+### 9.4 Pending-Row Recovery & Reconcile
+
+- **Pending sweep (60s):** `billing_process_pending_webhooks` reclaims inbox rows
+  stuck in `received`/`failed`/stale `processing` (e.g. after a queue outage or a
+  crashed worker) and refreshes `specforge_billing_webhook_pending_age_seconds`
+  to the age of the oldest non-`processed` row. A rising gauge is the primary
+  "lost webhook" signal.
+- **Reconcile (15-minute backstop):** `billing_reconcile` holds the single
+  `billing_reconciliation_cursors` row under `SELECT … FOR UPDATE NOWAIT` (an
+  overlapping tick skips cleanly) and runs three bounded lanes:
+  - **Lane 1 — inbox replay:** re-enqueues committed/retryable rows. This is the
+    only automatic path that recovers a missed `order_created` (the signed
+    `checkout_ref`+nonce row is the proof).
+  - **Lane 2 — provider re-read:** for live Lemon packs, `get_order` is called
+    (bounded by `LEMONSQUEEZY_RECONCILE_MAX_CALLS_PER_RUN`); a missed
+    refund/fraud applies the **same** `apply_refund_reversal` and increments
+    `reconcile_mismatch`.
+  - **Lane 3 — hygiene:** expires checkout attempts past `expires_at` and emits a
+    stale-attempt operator count.
+- **Reconcile never auto-grants.** It only re-enqueues signed inbox rows and
+  revokes on existing packs — there is no code path that invents a first grant
+  from order listing/amount/email. An unprovable paid checkout is settled via the
+  admin-correction path (§9.5).
+
+### 9.5 Admin-Correction Runbook (`POST /billing/admin/correction`)
+
+The exceptional, evidence-backed manual grant for an order the automatic pipeline
+could not settle (e.g. `BillingUnprovablePaidCheckout`).
+
+- **Authorisation:** the caller's email must be in `ADMIN_USER_EMAILS`
+  (comma-separated). An empty allowlist authorises nobody — the path is closed by
+  default. There is no role column in V1.
+- **Request body:** `provider` (`lemonsqueezy`), `provider_order_id`,
+  `target_user_id`, `credits`, `price_cents`, `currency`, a `reason`
+  justification, and an `evidence_url` (the support ticket or the Lemon dashboard
+  order). The `evidence_url` is **required**.
+- **Idempotency:** the write is append-only and unique on
+  `(provider, provider_order_id)`. A repeat call returns `applied: false`,
+  `credits_granted: 0` — never a second grant. Every call is audited
+  (`billing_admin_corrections` row + `specforge_billing_admin_correction_total`).
+- **Procedure:** confirm the order is genuinely paid in the Lemon dashboard and
+  that no pack already exists for the order id; capture the evidence URL; issue
+  the correction; verify the user's balance moved by exactly `credits`.
+
+### 9.6 Optional Dedicated Billing Worker (Scale-Out)
+
+By default, billing jobs run on the shared `WorkerSettings` worker (the same
+process that drains the GitHub queue) on the default queue — works out of the box;
+never route billing to a queue with no consumer. For scale-out under sustained
+load (the trigger is a persistently high `webhook_pending_age_seconds`), a
+dedicated `queue_name="billing"` consumed by a separate `BillingWorkerSettings`
+worker may be added (its own `Procfile` line + `docker-compose` service, sharing
+the backend image and Redis). This is an optional future operational step, not
+currently wired — add it only when the shared worker can no longer keep the
+pending age low.
+
+### 9.7 Account-Deletion Settlement (RESTRICT FKs)
+
+`billing_credit_debts` and `billing_admin_corrections` hold **`ON DELETE
+RESTRICT`** foreign keys to `users` / `billing_credit_packs` so the financial
+audit trail can never be silently orphaned. V1 exposes **no** user-deletion
+endpoint, so this is a **manual ops procedure**, not a code path:
+
+1. Before removing a user row (a GDPR erasure or support deletion), first settle
+   billing state: confirm there is **no open (unrecovered) debt** for the user
+   (`billing_credit_debts` where `credits_owed > credits_recovered`); recover or
+   write it off per finance policy.
+2. The `RESTRICT` FKs will **block** the delete while any debt/correction row
+   references the user or their packs. Do not `CASCADE` or hand-delete the audit
+   rows to force the delete — that destroys the financial record. Retain the audit
+   rows (anonymise the user PII elsewhere if required by the erasure request) and
+   record the settlement in the deletion ticket.
+
+### 9.8 Lemon API-Key & Webhook-Secret Rotation
+
+**Webhook secret (two-secret window).** The handler verifies `X-Signature`
+against `settings.lemonsqueezy_webhook_secrets` =
+`[LEMONSQUEEZY_WEBHOOK_SECRET, LEMONSQUEEZY_WEBHOOK_SECRET_PREV]` (blank entries
+ignored), so rotation is zero-downtime:
+
+1. Generate the new secret in the Lemon dashboard (do not save it on the webhook
+   yet).
+2. Stage both secrets in the backend env — the new one is accepted but signs
+   nothing yet:
+   ```env
+   LEMONSQUEEZY_WEBHOOK_SECRET=<new_secret>       # accepted
+   LEMONSQUEEZY_WEBHOOK_SECRET_PREV=<old_secret>  # still accepted during window
+   ```
+   Redeploy. Both secrets now verify.
+3. Update the **Lemon webhook** to sign with `<new_secret>`. Deliveries now sign
+   with the new secret and still verify against `LEMONSQUEEZY_WEBHOOK_SECRET`.
+4. Watch `specforge_billing_webhook_error_total` and the inbox for one delivery
+   cycle. If `bad_signature`/error spikes, set `LEMONSQUEEZY_WEBHOOK_SECRET` back
+   to the old value and investigate.
+5. Close the window: clear `LEMONSQUEEZY_WEBHOOK_SECRET_PREV=` and redeploy. The
+   old secret no longer verifies.
+
+**API key.** `LEMONSQUEEZY_API_KEY` is used only for outbound calls
+(`create_checkout`, `get_order`), so there is no two-key acceptance window:
+create the new key in Lemon, set `LEMONSQUEEZY_API_KEY=<new>`, redeploy, confirm
+a test checkout creates and `get_order` succeeds (reconcile lane 2), then revoke
+the old key in Lemon. The key is never logged (redacted by `observability.py`).
 
 ## 10. Prompt Pipeline Quality Gates And Eval Workflow
 
