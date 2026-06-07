@@ -91,6 +91,14 @@ _REF_ENTROPY_BYTES = 32
 _LEMON_ORDER_EVENTS = frozenset({"order_created", "order_refunded"})
 _LEMON_OBJECT_TYPE = "orders"
 
+# Late-Stripe grace (T-303). New checkout is Lemon-only; these are the only Stripe
+# events the bounded compatibility window still settles — a late credit and a late
+# reversal — normalised into the SAME neutral inbox + worker processing helpers.
+_STRIPE_GRACE_EVENTS = frozenset(
+    {"checkout.session.completed", "charge.dispute.created"}
+)
+_STRIPE_OBJECT_TYPE = "event"
+
 router = APIRouter(prefix="/billing", tags=["billing"])
 
 
@@ -588,6 +596,13 @@ async def lemon_webhook(
     """
     logger.debug("billing.webhook_received", extra={"method": request.method})
 
+    # Late-Stripe grace (T-303). A Stripe webhook carries a ``Stripe-Signature``
+    # header (Lemon uses ``X-Signature``), so the shape is unambiguous. Delegate to
+    # the bounded grace adapter — which, when the window is closed, rejects BEFORE any
+    # body read, signature claim, or DB write.
+    if request.headers.get("Stripe-Signature") is not None:
+        return await _handle_stripe_grace_webhook(request, db)
+
     # Step 1: raw bytes BEFORE any parse — the HMAC is computed over these exact
     # bytes; ``await request.json()`` would re-serialise and break verification.
     raw = await request.body()
@@ -821,3 +836,191 @@ def _payload_hash(normalized_payload: dict[str, Any]) -> str:
     """
     canonical = json.dumps(normalized_payload, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+# ---------------------------------------------------------------------------
+# Late-Stripe webhook grace adapter (T-303)
+# ---------------------------------------------------------------------------
+#
+# New checkout is Lemon-only (T-296). This bounded window keeps already-created
+# Stripe sessions settling: a late ``checkout.session.completed`` and a late
+# ``charge.dispute.created`` are verified, sanitised into the SAME neutral
+# ``billing_webhook_events`` inbox (``provider='stripe'``), and processed by the
+# durable worker via the SAME ``grant_credits_with_debt_recovery`` /
+# ``apply_refund_reversal`` helpers (T-303 worker handlers). The old inline Stripe
+# grant code is not resurrected. Idempotency keys match migration 0018's Stripe→
+# neutral backfill exactly — ``provider_checkout_id = session id``,
+# ``provider_order_id = payment_intent id`` — so a redelivery of an already-settled
+# (or already-backfilled) order cannot double-credit, and a dispute finds the pack by
+# the payment-intent the charge event carries.
+
+
+def _verify_stripe_signature(raw: bytes, signature_header: str) -> bool:
+    """Constant-time verification of Stripe's ``Stripe-Signature`` scheme.
+
+    The header is ``t=<unix>,v1=<hex>[,v1=<hex>…]``; the signed payload is
+    ``f"{t}.{raw}"`` HMAC-SHA256'd under ``STRIPE_WEBHOOK_SECRET``. We verify with
+    stdlib ``hmac`` (the same pattern as the Lemon verifier) rather than the SDK.
+    Fails closed on a missing header/secret or any malformed field. Replay is
+    independently neutralised by the inbox dedup identity + idempotent processing, so
+    no timestamp-tolerance check is enforced here.
+    """
+    secret = settings.stripe_webhook_secret
+    if not secret or not signature_header:
+        return False
+    timestamp: str | None = None
+    candidates: list[str] = []
+    for part in signature_header.split(","):
+        key, _, value = part.strip().partition("=")
+        if key == "t":
+            timestamp = value
+        elif key == "v1":
+            candidates.append(value)
+    if not timestamp or not candidates:
+        return False
+    signed_payload = timestamp.encode("utf-8") + b"." + raw
+    expected = hmac.new(
+        secret.encode("utf-8"), signed_payload, hashlib.sha256
+    ).hexdigest()
+    matched = False
+    for candidate in candidates:
+        # Compare every v1 (no short-circuit) — constant-time per comparison.
+        if hmac.compare_digest(expected, candidate):
+            matched = True
+    return matched
+
+
+def _build_stripe_normalized_payload(event: dict[str, Any]) -> dict[str, Any] | None:
+    """Allow-listed, PII-free sanitised inbox payload for a late Stripe event (T-303).
+
+    Returns None when the event is not actionable (unpaid session, missing user
+    metadata / payment intent, dispute without a payment intent) — the caller then
+    acknowledges 200 without storing. Like the Lemon builder this is an explicit
+    allow-list: card data, emails, receipts, and the raw event never enter the row.
+    """
+    event_type = event.get("type")
+    obj = (
+        event.get("data", {}).get("object", {})
+        if isinstance(event.get("data"), dict)
+        else {}
+    )
+    if not isinstance(obj, dict):
+        return None
+
+    if event_type == "checkout.session.completed":
+        if obj.get("payment_status") != "paid":
+            return None
+        payment_intent_id = obj.get("payment_intent")
+        user_id = (obj.get("metadata") or {}).get("user_id")
+        session_id = obj.get("id")
+        if not payment_intent_id or not user_id or not session_id:
+            return None
+        return {
+            "provider": "stripe",
+            "event_name": event_type,
+            "event_id": event.get("id"),
+            "session_id": str(session_id),
+            "payment_intent_id": str(payment_intent_id),
+            "user_id": str(user_id),
+            "amount_total_cents": obj.get("amount_total"),
+            "currency": str(obj.get("currency") or "").upper() or "USD",
+            "created": event.get("created"),
+        }
+
+    if event_type == "charge.dispute.created":
+        payment_intent_id = obj.get("payment_intent")
+        if not payment_intent_id:
+            return None
+        return {
+            "provider": "stripe",
+            "event_name": event_type,
+            "event_id": event.get("id"),
+            "payment_intent_id": str(payment_intent_id),
+            "created": event.get("created"),
+        }
+
+    return None
+
+
+async def _handle_stripe_grace_webhook(request: Request, db: AsyncSession) -> dict:
+    """Verify + sanitise + enqueue a late Stripe event during the grace window (T-303).
+
+    Closed window → ``{"status": "ignored_provider_disabled"}`` with **no** body read,
+    signature-verification claim, or DB write. Open window → verify the Stripe
+    signature, normalise an actionable event into the neutral inbox (``provider=
+    'stripe'``, 4-part dedup identity on the Stripe event id), and enqueue
+    ``billing_process_webhook``; the worker performs every money mutation.
+    """
+    if not settings.stripe_webhook_grace_open:
+        logger.info("billing.stripe_grace.provider_disabled")
+        return {"status": "ignored_provider_disabled"}
+
+    raw = await request.body()
+    signature = request.headers.get("Stripe-Signature", "")
+    if not _verify_stripe_signature(raw, signature):
+        logger.warning("billing.stripe_grace.invalid_signature")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid signature",
+        )
+
+    try:
+        event = json.loads(raw)
+    except (ValueError, UnicodeDecodeError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Malformed webhook payload",
+        ) from exc
+    if not isinstance(event, dict):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Malformed webhook payload",
+        )
+
+    event_type = event.get("type")
+    event_id = event.get("id")
+    if event_type not in _STRIPE_GRACE_EVENTS or not event_id:
+        logger.info("billing.stripe_grace.ignored_event event_type=%s", event_type)
+        return {"status": "ignored"}
+
+    normalized_payload = _build_stripe_normalized_payload(event)
+    if normalized_payload is None:
+        logger.info("billing.stripe_grace.not_actionable event_type=%s", event_type)
+        return {"status": "ignored"}
+
+    payload_hash = _payload_hash(normalized_payload)
+    row = BillingWebhookEvent(
+        provider="stripe",
+        event_name=event_type,
+        provider_object_type=_STRIPE_OBJECT_TYPE,
+        provider_object_id=str(event_id),
+        payload_hash=payload_hash,
+        status="received",
+        normalized_payload=normalized_payload,
+    )
+    try:
+        async with db.begin_nested():  # SAVEPOINT isolates the unique-violation
+            db.add(row)
+            await db.flush()
+    except IntegrityError:
+        await db.rollback()
+        logger.info("billing.stripe_grace.duplicate event_id=%s", event_id)
+        BILLING_WEBHOOK_DUPLICATE.inc()
+        return {"status": "already_processed"}
+
+    await db.commit()
+    BILLING_WEBHOOK_RECEIVED.labels(event_type=event_type).inc()
+
+    webhook_event_id = str(row.id)
+    try:
+        await enqueue(
+            "billing_process_webhook",
+            webhook_event_id,
+            job_id=f"billing_wh:{webhook_event_id}",
+        )
+    except Exception:
+        logger.error(
+            "billing.stripe_grace.enqueue_failed webhook_event_id=%s", webhook_event_id
+        )
+
+    return {"status": "ok"}

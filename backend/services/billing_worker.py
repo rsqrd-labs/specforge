@@ -826,12 +826,17 @@ def _order_created_rejection(
 
 
 async def _find_existing_pack(
-    db, *, order_id: str | None, provider_checkout_id: str | None
+    db,
+    *,
+    order_id: str | None,
+    provider_checkout_id: str | None,
+    provider: str = "lemonsqueezy",
 ) -> BillingCreditPack | None:
     """Reload an already-granted pack for this order/checkout (the idempotency key).
 
     Matches on ``(provider, provider_order_id)`` OR ``(provider, provider_checkout_id)``
-    — guarding against a NULL key matching another NULL-keyed pack.
+    — guarding against a NULL key matching another NULL-keyed pack. ``provider``
+    defaults to lemonsqueezy; the T-303 late-Stripe grace path passes ``"stripe"``.
     """
     conditions = []
     if order_id is not None:
@@ -844,7 +849,7 @@ async def _find_existing_pack(
         return None
     return await db.scalar(
         select(BillingCreditPack)
-        .where(BillingCreditPack.provider == "lemonsqueezy")
+        .where(BillingCreditPack.provider == provider)
         .where(or_(*conditions))
         .limit(1)
     )
@@ -1197,7 +1202,255 @@ async def _refund_without_pack(
     )
 
 
+# ---------------------------------------------------------------------------
+# Late-Stripe grace handlers (T-303) — process the bounded compatibility window
+# ---------------------------------------------------------------------------
+#
+# New checkout is Lemon-only; these settle an already-created Stripe session whose
+# webhook arrives late, via the SAME neutral helpers. Keys match migration 0018's
+# Stripe→neutral backfill exactly (provider_checkout_id = session id, provider_order_id
+# = payment_intent) so a redelivery of an already-settled/backfilled order cannot
+# double-credit, and a dispute finds the pack by the payment-intent it carries.
+
+
+def _stripe_event_timestamp(value: object) -> datetime:
+    """Parse a Stripe unix ``created`` timestamp (expiry anchor); fall back to now."""
+    if isinstance(value, bool):  # bool is an int subclass — never a timestamp
+        return _now()
+    if isinstance(value, (int, float)):
+        try:
+            return datetime.fromtimestamp(value, UTC)
+        except (ValueError, OverflowError, OSError):
+            pass
+    return _now()
+
+
+async def handle_stripe_checkout_completed(ctx: dict, webhook_event_id: str) -> None:
+    """Grant credits for a late Stripe ``checkout.session.completed`` (T-303 grace).
+
+    Idempotent on the backfill-aligned keys (``provider_order_id`` = payment intent,
+    ``provider_checkout_id`` = session id) plus the ``billing_purchase:stripe:`` ledger
+    reason, so a redelivery of an already-settled or migration-backfilled order is a
+    no-op. Economics come from the Stripe config (the single fixed product); the same
+    debt-first grant helper applies.
+    """
+    wid = UUID(webhook_event_id)
+
+    async with AsyncSessionLocal() as db:
+        webhook = await db.scalar(
+            select(BillingWebhookEvent)
+            .where(BillingWebhookEvent.id == wid)
+            .with_for_update()
+        )
+        if webhook is None or webhook.status == "processed":
+            return
+        payload = webhook.normalized_payload or {}
+        session_id = payload.get("session_id")
+        payment_intent_id = payload.get("payment_intent_id")
+        raw_user_id = payload.get("user_id")
+        try:
+            user_id = UUID(str(raw_user_id))
+        except (ValueError, TypeError):
+            webhook.status = "processed"
+            webhook.processed_at = _now()
+            webhook.last_error = "stripe_grace_invalid_user_id"
+            await db.commit()
+            logger.warning(
+                "billing.stripe_grace.invalid_user_id",
+                session_id=session_id,
+                webhook_event_id=str(wid),
+            )
+            return
+
+        credits = settings.stripe_credits_per_purchase
+        price_cents = settings.stripe_price_cents
+        currency = payload.get("currency") or "USD"
+        order_total = _coerce_int(payload.get("amount_total_cents")) or price_cents
+        purchased_at = _stripe_event_timestamp(payload.get("created"))
+        expires_at = purchased_at + timedelta(days=settings.stripe_credit_validity_days)
+
+        user = await db.scalar(select(User).where(User.id == user_id).with_for_update())
+        if user is None:
+            webhook.status = "processed"
+            webhook.processed_at = _now()
+            webhook.last_error = "stripe_grace_user_not_found"
+            await db.commit()
+            logger.warning(
+                "billing.stripe_grace.user_not_found",
+                session_id=session_id,
+                webhook_event_id=str(wid),
+            )
+            return
+
+        existing = await _find_existing_pack(
+            db,
+            order_id=payment_intent_id,
+            provider_checkout_id=session_id,
+            provider="stripe",
+        )
+        if existing is not None:
+            webhook.status = "processed"
+            webhook.processed_at = _now()
+            await db.commit()
+            logger.info(
+                "billing.stripe_grace.duplicate",
+                session_id=session_id,
+                pack_id=str(existing.id),
+                webhook_event_id=str(wid),
+            )
+            return
+
+        pack = BillingCreditPack(
+            user_id=user_id,
+            provider="stripe",
+            provider_checkout_id=session_id,
+            provider_order_id=payment_intent_id,
+            credits_purchased=credits,
+            credits_remaining=credits,
+            price_cents=price_cents,
+            currency=currency,
+            paid_item_amount_cents=price_cents,
+            provider_order_total_cents=order_total,
+            status="active",
+            purchased_at=purchased_at,
+            expires_at=expires_at,
+        )
+        db.add(pack)
+
+        try:
+            await db.flush()
+            granted = await credit_service.grant_credits_with_debt_recovery(
+                db,
+                user_id=user_id,
+                pack=pack,
+                granted_credits=credits,
+                ledger_reason=f"billing_purchase:stripe:{session_id}",
+            )
+        except IntegrityError:
+            await db.rollback()
+            await _ack_order_processed(wid)
+            logger.info(
+                "billing.stripe_grace.duplicate_conflict",
+                session_id=session_id,
+                webhook_event_id=str(wid),
+            )
+            return
+
+        if granted is None:
+            await db.rollback()
+            await _ack_order_processed(wid)
+            logger.info(
+                "billing.stripe_grace.duplicate_ledger",
+                session_id=session_id,
+                webhook_event_id=str(wid),
+            )
+            return
+
+        webhook.status = "processed"
+        webhook.processed_at = _now()
+        await db.commit()
+
+    await credit_service.invalidate(user_id)
+    BILLING_CHECKOUT_COMPLETED.inc()
+    BILLING_CREDITS_GRANTED.inc(credits)
+    BILLING_PURCHASE_REVENUE_CENTS.inc(price_cents)
+    logger.info(
+        "billing.stripe_grace.granted",
+        provider="stripe",
+        session_id=session_id,
+        payment_intent_id=payment_intent_id,
+        user_id=str(user_id),
+        pack_id=str(pack.id),
+        credits_granted=credits,
+    )
+
+
+async def handle_stripe_dispute_created(ctx: dict, webhook_event_id: str) -> None:
+    """Revoke credits for a late Stripe ``charge.dispute.created`` (T-303 grace).
+
+    Finds the pack by ``(provider='stripe', provider_order_id=payment_intent)`` — the
+    backfill-aligned key the charge event carries — and revokes via the SAME neutral
+    T-300 ``apply_refund_reversal`` helper (full reversal, ``reason='disputed'``). No
+    pack found → an audited no-op (never revoke unrelated credits).
+    """
+    wid = UUID(webhook_event_id)
+    reason_label = "disputed"
+
+    async with AsyncSessionLocal() as db:
+        webhook = await db.scalar(
+            select(BillingWebhookEvent)
+            .where(BillingWebhookEvent.id == wid)
+            .with_for_update()
+        )
+        if webhook is None or webhook.status == "processed":
+            return
+        payload = webhook.normalized_payload or {}
+        payment_intent_id = payload.get("payment_intent_id")
+
+        source_pack = None
+        if payment_intent_id:
+            source_pack = await db.scalar(
+                select(BillingCreditPack)
+                .where(
+                    BillingCreditPack.provider == "stripe",
+                    BillingCreditPack.provider_order_id == payment_intent_id,
+                )
+                .limit(1)
+            )
+
+        if source_pack is None:
+            webhook.status = "processed"
+            webhook.processed_at = _now()
+            webhook.last_error = "stripe_grace_dispute_could_not_link"
+            await db.commit()
+            logger.warning(
+                "billing.stripe_grace.dispute_unlinked",
+                payment_intent_id=payment_intent_id,
+                webhook_event_id=str(wid),
+            )
+            return
+
+        user_id = source_pack.user_id
+        # Full reversal: a dispute claws back the whole charge. full_or_fraud=True
+        # forces new == paid_item regardless of the amount we pass.
+        outcome = await credit_service.apply_refund_reversal(
+            db,
+            source_pack=source_pack,
+            lemon_refunded_amount_cents=(
+                source_pack.provider_order_total_cents
+                or source_pack.paid_item_amount_cents
+            ),
+            full_or_fraud=True,
+            reason_label=reason_label,
+        )
+        webhook.status = "processed"
+        webhook.processed_at = _now()
+        await db.commit()
+
+    await credit_service.invalidate(user_id)
+    if outcome.credits_revoked > 0:
+        BILLING_CREDITS_REVOKED.labels(provider="stripe", reason=reason_label).inc(
+            outcome.credits_revoked
+        )
+    if outcome.debt_created > 0:
+        BILLING_CREDIT_DEBT_CREATED.labels(provider="stripe", reason=reason_label).inc(
+            outcome.debt_created
+        )
+    logger.info(
+        "billing.stripe_grace.dispute_processed",
+        provider="stripe",
+        payment_intent_id=payment_intent_id,
+        user_id=str(user_id),
+        credits_revoked=outcome.credits_revoked,
+        debt_created=outcome.debt_created,
+        applied=outcome.applied,
+    )
+
+
 # Wire the handlers at import so they are present whenever the worker (or the dispatch
-# path) loads this module.
+# path) loads this module. The Lemon order events (T-299/T-300) and the late-Stripe
+# grace events (T-303) all dispatch by event_name through the same neutral pipeline.
 register_event_handler("order_created", handle_order_created)
 register_event_handler("order_refunded", handle_order_refunded)
+register_event_handler("checkout.session.completed", handle_stripe_checkout_completed)
+register_event_handler("charge.dispute.created", handle_stripe_dispute_created)

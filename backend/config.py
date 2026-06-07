@@ -200,6 +200,20 @@ class Settings(BaseSettings):
         )
 
     @property
+    def stripe_webhook_grace_open(self) -> bool:
+        """True while late Stripe webhooks are still honoured (T-303 grace window).
+
+        New checkout is Lemon-only (T-296); this is purely a bounded compatibility
+        window so an already-created Stripe session whose ``checkout.session.completed``
+        (or a late dispute) was not yet processed still settles correctly. It requires
+        ``STRIPE_WEBHOOK_SECRET`` — without it a Stripe signature cannot be verified, so
+        the window is closed. Ops closes the window by unsetting the secret; the 7-day
+        bound and the SDK/import removal are the gated follow-up (T-308). When closed,
+        a Stripe-shaped request is rejected before any DB write or signature claim.
+        """
+        return bool(self.stripe_webhook_secret)
+
+    @property
     def admin_emails(self) -> set[str]:
         """The parsed, lower-cased billing-admin allowlist (empty when unset).
 
