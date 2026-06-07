@@ -8,10 +8,11 @@
  * legacy-OAuth users.
  */
 
-import { useState } from "react"
+import { useEffect, useState } from "react"
 import { useLocation, useNavigate } from "react-router-dom"
 
 import GitHubConnection from "../components/settings/GitHubConnection"
+import { getGitHubIntegration } from "../services/api"
 
 const RETURN_TO_KEY = "specforge:settings_return_to"
 
@@ -35,6 +36,12 @@ export default function Settings() {
 
   const stateFrom = (location.state as { from?: string } | null)?.from
   const [returnTo] = useState(() => resolveReturnTo(stateFrom))
+
+  useEffect(() => {
+    getGitHubIntegration().catch((error) => {
+      console.error("[Settings] failed to load GitHub integration status:", error)
+    })
+  }, [])
 
   function handleBack() {
     sessionStorage.removeItem(RETURN_TO_KEY)
