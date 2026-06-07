@@ -57,6 +57,10 @@ jobs:
     defaults:
       run:
         working-directory: backend
+    env:
+      # Keep uv's virtualenv outside backend/ so source-scanning harness tests
+      # do not walk dependency files under backend/.venv.
+      UV_PROJECT_ENVIRONMENT: ../.venv/backend
     steps:
       - name: Checkout
         uses: actions/checkout@v4

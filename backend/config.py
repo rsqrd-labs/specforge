@@ -51,6 +51,7 @@ class Settings(BaseSettings):
 
     db_pool_size: int = 20
     db_max_overflow: int = 10
+    # LLM circuit-breaker rejections emit specforge_llm_circuit_rejections_total.
     llm_stream_timeout_seconds: int = 120
     llm_long_stream_timeout_seconds: int = 300
     llm_complete_timeout_seconds: int = 45
