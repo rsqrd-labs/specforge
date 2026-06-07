@@ -74,6 +74,7 @@ from services.observability import (
     BILLING_CHECKOUT_COMPLETED,
     BILLING_CHECKOUT_EXPIRED,
     BILLING_CREDIT_DEBT_CREATED,
+    BILLING_CREDIT_DEBT_RECOVERED,
     BILLING_CREDITS_GRANTED,
     BILLING_CREDITS_REVOKED,
     BILLING_PURCHASE_REVENUE_CENTS,
@@ -125,6 +126,13 @@ _FULL_REVERSAL_STATUSES = frozenset({"refunded", "fraudulent"})
 # given up as an audited no-op (Plan §25.6 T-300). `received_at` (never updated) is
 # the clock.
 _REFUND_GIVE_UP_HOURS = 24
+
+# Sentinel ``last_error`` for a signed refund still waiting on its out-of-order
+# ``order_created`` grant (the _refund_without_pack branch-a re-queue). These rows
+# are NOT re-driven by the 60s sweep (that would re-run them ~1440×/24h for no gain);
+# they ride the 15-minute reconcile lane 1 instead — the grant must land first
+# anyway, so a ≤15-minute revocation latency on this rare out-of-order case is fine.
+_PACK_NOT_YET_GRANTED = "pack_not_yet_granted"
 
 # Reconcile (T-301). The single 'lemonsqueezy' cursor row is the run-state anchor.
 _RECONCILE_PROVIDER = "lemonsqueezy"
@@ -284,7 +292,11 @@ async def billing_process_pending_webhooks(ctx: dict) -> None:
     alert, T-304).
     """
     try:
-        ids = await _claim_pending_ids(reclaim_stale=True)
+        # The 60s sweep excludes refunds parked on their out-of-order grant — those
+        # ride the 15-minute reconcile lane 1 (T-308 review hardening).
+        ids = await _claim_pending_ids(
+            reclaim_stale=True, exclude_deferred_retries=True
+        )
         await _enqueue_ids(ctx, ids)
         if ids:
             logger.info("billing.sweep.enqueued", count=len(ids))
@@ -620,12 +632,20 @@ async def _persist_reconcile_error() -> None:
         logger.exception("billing.reconcile.error_persist_failed")
 
 
-async def _claim_pending_ids(*, reclaim_stale: bool) -> list[UUID]:
+async def _claim_pending_ids(
+    *, reclaim_stale: bool, exclude_deferred_retries: bool = False
+) -> list[UUID]:
     """Reclaim stale ``processing`` rows, then return pending ids to re-enqueue.
 
     One transaction: lock + reclaim abandoned ``processing`` rows, then select the
     pending set (``received`` ∪ retryable ``failed``, which now includes the
     just-reclaimed rows). ``FOR UPDATE SKIP LOCKED`` skips rows a live worker holds.
+
+    ``exclude_deferred_retries`` (the 60s sweep passes True) drops ``received`` rows
+    tagged ``_PACK_NOT_YET_GRANTED`` — a signed refund waiting on its out-of-order
+    grant. Those ride the 15-minute reconcile lane 1 instead (which passes the
+    default False), so the sweep does not re-run them every 60s for the whole 24h
+    give-up horizon. A first-delivery refund (``last_error`` NULL) is never deferred.
     """
     async with AsyncSessionLocal() as db:
         if reclaim_stale:
@@ -660,12 +680,21 @@ async def _claim_pending_ids(*, reclaim_stale: bool) -> list[UUID]:
                     )
                 )
 
+        received_clause = BillingWebhookEvent.status == "received"
+        if exclude_deferred_retries:
+            # Skip refunds parked waiting on their out-of-order grant; the 15-min
+            # reconcile lane re-drives those. NULL last_error (a fresh delivery) is
+            # always included.
+            received_clause = received_clause & (
+                (BillingWebhookEvent.last_error.is_(None))
+                | (BillingWebhookEvent.last_error != _PACK_NOT_YET_GRANTED)
+            )
         pending = (
             (
                 await db.execute(
                     select(BillingWebhookEvent.id)
                     .where(
-                        (BillingWebhookEvent.status == "received")
+                        received_clause
                         | (
                             (BillingWebhookEvent.status == "failed")
                             & (BillingWebhookEvent.retry_count < JOB_MAX_TRIES)
@@ -1050,6 +1079,11 @@ async def handle_order_created(ctx: dict, webhook_event_id: str) -> None:
     BILLING_CHECKOUT_COMPLETED.labels(provider="lemonsqueezy").inc()
     BILLING_CREDITS_GRANTED.labels(provider="lemonsqueezy").inc(credits)
     BILLING_PURCHASE_REVENUE_CENTS.labels(provider="lemonsqueezy").inc(price_cents)
+    # Debt repaid out of this grant (granted − surplus). Emitted post-commit so a
+    # failed outer commit can never leave an over-counted recovery metric.
+    recovered = credits - granted.amount
+    if recovered > 0:
+        BILLING_CREDIT_DEBT_RECOVERED.labels(provider="lemonsqueezy").inc(recovered)
     logger.info(
         "billing.order_created.granted",
         provider="lemonsqueezy",
@@ -1225,9 +1259,11 @@ async def _refund_without_pack(
         )
         return
 
-    # (a) the grant is plausibly just delayed — re-queue for a later attempt.
+    # (a) the grant is plausibly just delayed — re-queue for a later attempt. The row
+    # stays 'received' but is tagged so the 60s sweep skips it; the 15-minute reconcile
+    # lane 1 re-drives it until the grant lands or the 24h give-up fires above.
     webhook.status = "received"
-    webhook.last_error = "pack_not_yet_granted"
+    webhook.last_error = _PACK_NOT_YET_GRANTED
     await db.commit()
     logger.info(
         "billing.order_refunded.pack_not_yet_granted",

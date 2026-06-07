@@ -81,6 +81,7 @@ from services.observability import (
     BILLING_ADMIN_CORRECTION,
     BILLING_CHECKOUT_API_ERROR,
     BILLING_CHECKOUT_CREATED,
+    BILLING_CREDIT_DEBT_RECOVERED,
     BILLING_WEBHOOK_DUPLICATE,
     BILLING_WEBHOOK_RECEIVED,
 )
@@ -516,6 +517,11 @@ async def admin_correction(
 
     await credit_service.invalidate(body.target_user_id)
     BILLING_ADMIN_CORRECTION.labels(provider=provider).inc()
+    # Debt repaid out of this correction (granted − surplus). Emitted post-commit so
+    # a failed outer commit can never leave an over-counted recovery metric.
+    recovered = body.credits - granted.amount
+    if recovered > 0:
+        BILLING_CREDIT_DEBT_RECOVERED.labels(provider=provider).inc(recovered)
     logger.info(
         "billing.admin_correction.applied provider=%s order_id=%s admin_user_id=%s "
         "target_user_id=%s credits=%d pack_id=%s",

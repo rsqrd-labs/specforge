@@ -355,6 +355,46 @@ async def test_sweep_reenqueues_retryable_failed(session, cleanup_events) -> Non
     assert any(str(row.id) in c[0] for c in pool.calls)
 
 
+async def test_sweep_defers_pack_not_yet_granted_to_reconcile(
+    session, cleanup_events
+) -> None:
+    """A refund parked on its out-of-order grant is skipped by the 60s sweep but
+    re-driven by the 15-minute reconcile lane (T-308 review hardening)."""
+    row = await _insert_event(
+        session, cleanup_events, event_name="order_refunded", status="received"
+    )
+    row.last_error = billing_worker._PACK_NOT_YET_GRANTED
+    await session.commit()
+
+    # 60s sweep: the deferred row is NOT enqueued.
+    pool = _RecordingPool()
+    await billing_worker.billing_process_pending_webhooks({"redis": pool})
+    assert not any(str(row.id) in c[0] for c in pool.calls)
+
+    # Direct claim with the sweep's exclusion drops it; the default (reconcile
+    # lane 1) still returns it so it keeps retrying on the slow cadence.
+    swept = await billing_worker._claim_pending_ids(
+        reclaim_stale=False, exclude_deferred_retries=True
+    )
+    assert row.id not in swept
+    reconciled = await billing_worker._claim_pending_ids(reclaim_stale=False)
+    assert row.id in reconciled
+
+
+async def test_sweep_includes_fresh_refund_without_last_error(
+    session, cleanup_events
+) -> None:
+    """A first-delivery refund (no last_error) is never deferred — the sweep drives
+    it immediately even with the exclusion on."""
+    row = await _insert_event(
+        session, cleanup_events, event_name="order_refunded", status="received"
+    )
+    swept = await billing_worker._claim_pending_ids(
+        reclaim_stale=False, exclude_deferred_retries=True
+    )
+    assert row.id in swept
+
+
 async def test_sweep_dedup_job_id_matches_request_path(session, cleanup_events) -> None:
     """The sweep's job id equals the request-path id, so arq collapses them."""
     row = await _insert_event(session, cleanup_events, status="received")

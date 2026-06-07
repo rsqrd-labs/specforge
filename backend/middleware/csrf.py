@@ -26,7 +26,7 @@ _EXEMPT_PATHS = frozenset(
         "/auth/google",  # exempt: initiates OAuth redirect — no session exists yet
         "/auth/callback",  # exempt: OAuth provider callback — no auth token yet
         "/auth/refresh",  # exempt: exchanges HTTP-only refresh cookie for a new token
-        "/billing/webhook",  # Stripe webhook — no browser session, no CSRF token
+        "/billing/webhook",  # Lemon Squeezy webhook — HMAC-verified, no browser session
         "/integrations/github/webhook",  # GitHub webhook — HMAC-verified, no session
     }
 )

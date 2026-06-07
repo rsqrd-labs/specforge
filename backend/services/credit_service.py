@@ -14,7 +14,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from database import get_shared_redis
 from models import BillingCreditDebt, BillingCreditPack, CreditLedger, User
 from services.observability import (
-    BILLING_CREDIT_DEBT_RECOVERED,
     BILLING_CREDITS_CONSUMED,
     BILLING_CREDITS_EXPIRED,
 )
@@ -266,7 +265,6 @@ class CreditService:
             amount=0,  # finalised below once total_recovered is known
             reason=ledger_reason,
         )
-        recovered_slices: list[tuple[BillingCreditDebt, int]] = []
         try:
             async with db.begin_nested():
                 grant_left = granted_credits
@@ -291,7 +289,6 @@ class CreditService:
                             reason=f"debt_recovery:billing:{debt.id}:{pack.id}",
                         )
                     )
-                    recovered_slices.append((debt, take))
                     grant_left -= take
                     total_recovered += take
 
@@ -312,8 +309,10 @@ class CreditService:
             )
             return None
 
-        for _debt, take in recovered_slices:
-            BILLING_CREDIT_DEBT_RECOVERED.labels(provider=pack.provider).inc(take)
+        # NOTE: the BILLING_CREDIT_DEBT_RECOVERED metric is emitted by the CALLER
+        # after its outer commit (the recovered amount = granted_credits − surplus),
+        # not here — this method does not commit, so emitting mid-transaction would
+        # over-count if the caller's commit later fails.
         await self._invalidate(user_id)
         return surplus_entry
 
