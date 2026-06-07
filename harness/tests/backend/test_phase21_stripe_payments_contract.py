@@ -972,37 +972,25 @@ def test_t232_status_endpoint_exists() -> None:
 
 
 def test_t232_status_endpoint_scopes_by_both_session_id_and_user_id() -> None:
-    """T-232 — GET /billing/status WHERE clause must include session_id AND user_id.
+    """T-232 → updated for Phase 22 (T-303/T-306): /billing/status stays IDOR-safe.
 
-    Scoping by session_id alone is an IDOR vulnerability: any authenticated user
-    who guesses (or scrapes) a session_id can check whether someone else's
-    checkout completed.  The WHERE clause must include BOTH predicates to prevent
-    cross-user information leakage.
-
-    This test verifies both predicates appear in the handler body in proximity
-    (within a single select().where() call pattern).
+    Phase 22 (Plan §25) replaces the Stripe ``session_id`` poll key with the Lemon
+    ``checkout_ref`` (``session_id`` survives only inside the bounded Stripe grace
+    window, T-303). The load-bearing invariant is unchanged: every status lookup is
+    scoped by ``user_id`` so a guessed/scraped ref can never reveal another user's
+    checkout. This asserts that scoping over the current poll key; the authoritative
+    behavioural IDOR test is the phase25 ``checkout_ref`` 404 case.
     """
     source = read_backend_file("routers", "billing.py")
 
-    # Extract the status endpoint handler body.
-    status_fn_match = re.search(
-        r'@\w+\.get\s*\(\s*["\']/?(?:billing/)?status["\'][^\n]*\n'
-        r"(?:async\s+)?def\s+\w+[^{]*\n((?:.*\n){0,40})",
-        source,
-    )
-    handler_body = status_fn_match.group(1) if status_fn_match else source
-
-    # Must contain both user_id and stripe_session_id (or session_id) as filters.
-    has_session_id = re.search(r"session_id|stripe_session_id", handler_body)
-    has_user_id = re.search(r"user_id|current_user\.id", handler_body)
-
-    assert has_session_id and has_user_id, (
-        "GET /billing/status handler must filter on BOTH stripe_session_id AND user_id.  "
-        "Filtering only on session_id is an IDOR vulnerability: any authenticated user "
-        "can check whether another user's checkout completed by guessing or scraping "
-        "session IDs.  The correct query is: "
-        "select(StripeCreditPack).where(stripe_session_id == X, user_id == current_user.id).  "
-        "T-232."
+    # The poll key is now the Lemon checkout_ref (session_id only during grace).
+    assert (
+        "checkout_ref" in source
+    ), "GET /billing/status must poll by the Lemon checkout_ref (Phase 22). T-303."
+    # The IDOR guard is unchanged: lookups are scoped by user_id == current_user.id.
+    assert re.search(r"user_id\s*==\s*current_user\.id", source), (
+        "GET /billing/status lookups must be scoped by user_id (current_user.id) — "
+        "scoping by the poll key alone is an IDOR leak. T-232 / T-303."
     )
 
 
@@ -1053,36 +1041,26 @@ def test_t233_history_endpoint_exists() -> None:
 
 
 def test_t233_history_is_sorted_desc_and_capped() -> None:
-    """T-233 — GET /billing/history must sort by purchased_at DESC and limit to 50."""
+    """T-233 → updated for Phase 22 (T-296/T-306): /billing/history sorts DESC, caps 50.
+
+    Phase 22 reads the provider-neutral ``BillingCreditPack`` (renamed from
+    ``StripeCreditPack``); the contract — newest-first, capped at 50 — is unchanged.
+    """
     source = read_backend_file("routers", "billing.py")
 
-    history_fn_match = re.search(
-        r'@\w+\.get\s*\(\s*["\']/?(?:billing/)?history["\'][^\n]*\n'
-        r"(?:async\s+)?def\s+\w+[^{]*\n((?:.*\n){0,30})",
-        source,
+    # The history endpoint reads the provider-neutral pack (Phase 22 rename).
+    assert "BillingCreditPack" in source, (
+        "GET /billing/history must read BillingCreditPack (renamed from "
+        "StripeCreditPack in Phase 22). T-296."
     )
-    if history_fn_match:
-        handler_body = history_fn_match.group(1)
-
-        assert "purchased_at" in handler_body or "created_at" in handler_body, (
-            "GET /billing/history must sort results by purchased_at (or created_at) "
-            "so the most recent purchase appears first.  T-233."
-        )
-
-        assert ".desc()" in handler_body or "DESC" in handler_body, (
-            "GET /billing/history must sort results in descending order "
-            "(.desc()) so the most recent purchase appears first.  T-233."
-        )
-
-        assert (
-            "limit(50)" in handler_body
-            or ".limit(50)" in handler_body
-            or "50" in handler_body
-        ), (
-            "GET /billing/history must cap results at 50 entries (.limit(50)).  "
-            "Without a limit, a user with many purchases could trigger a full "
-            "table scan and large response payload.  T-233."
-        )
+    # Newest-first, descending — accept purchased_at or created_at as the sort key.
+    assert (
+        re.search(r"(purchased_at|created_at)\.desc\(\)", source) or "DESC" in source
+    ), "GET /billing/history must sort newest-first (purchased_at.desc()). T-233."
+    # Capped at 50 so a heavy account never triggers an unbounded scan/payload.
+    assert (
+        "limit(50)" in source or ".limit(50)" in source
+    ), "GET /billing/history must cap results at 50 entries (.limit(50)). T-233."
 
 
 # ---------------------------------------------------------------------------
@@ -1147,65 +1125,53 @@ def test_t234_webhook_validates_stripe_signature() -> None:
 
 
 def test_t234_webhook_uses_tolerance_300() -> None:
-    """T-234 — construct_event must be called with tolerance=300.
+    """T-234 → RETIRED by Phase 22 (T-297/T-303/T-306): no Stripe tolerance window.
 
-    Stripe's recommended clock-skew tolerance is 300 seconds (5 minutes).
-    Without a tolerance parameter, the default may differ across library
-    versions.  Explicitly passing tolerance=300 documents the intent and
-    prevents accidental breakage on library upgrades.
+    The Phase-18 receiver called ``stripe.Webhook.construct_event(..., tolerance=300)``.
+    Phase 22 replaces it with the Lemon receiver, which verifies an HMAC-SHA256 over
+    the raw body (``_verify_lemon_signature``, fail-closed) with **no** timestamp
+    tolerance, and the bounded late-Stripe grace adapter (``_verify_stripe_signature``,
+    stdlib ``hmac``) likewise enforces no clock-skew window — replay is neutralised by
+    the durable inbox dedup + idempotent processing instead. So a ``tolerance=300``
+    construct_event call must no longer exist in the router.
     """
     source = read_backend_file("routers", "billing.py")
 
-    has_tolerance = re.search(r"tolerance\s*=\s*300", source)
-    assert has_tolerance, (
-        "stripe.Webhook.construct_event() must be called with tolerance=300 (seconds).  "
-        "This is Stripe's recommended 5-minute clock-skew window.  Without an explicit "
-        "tolerance, the value varies by library version and could silently change on "
-        "upgrade.  T-234."
+    assert "construct_event" not in source and not re.search(
+        r"tolerance\s*=\s*300", source
+    ), (
+        "The Stripe construct_event(tolerance=300) path is retired in Phase 22 — the "
+        "Lemon/grace receivers verify HMAC fail-closed with no timestamp tolerance "
+        "(replay handled by the durable inbox). T-297/T-303."
     )
 
 
 def test_t234_webhook_idempotency_insert_before_handle_event() -> None:
-    """T-234 — StripeWebhookEvent INSERT must come BEFORE handle_event call.
+    """T-234 → updated for Phase 22 (T-297/T-298/T-306): durable-inbox idempotency.
 
-    The correct pattern is:
-      1. SELECT stripe_webhook_events WHERE stripe_event_id = X
-      2. If exists: return {"status": "already_processed"}
-      3. INSERT stripe_webhook_events (stripe_event_id = X)  ← BEFORE handle_event
-      4. handle_event(db, event)
-
-    Inserting after handle_event leaves a window where a crash between
-    handle_event completion and the INSERT causes the event to be re-processed
-    on Stripe's retry, double-crediting the user.
+    The Phase-18 pattern inserted a ``StripeWebhookEvent`` row before calling
+    ``handle_event`` inline. Phase 22 replaces inline processing with a **durable
+    inbox**: the verified event is committed as a ``BillingWebhookEvent`` row (a
+    duplicate 4-part identity trips the unique index → ``already_processed``) and the
+    money work is enqueued by row id to the worker. The same crash-window invariant
+    holds — the inbox row is persisted BEFORE the work is dispatched (``enqueue``), so
+    a crash never loses the event. This asserts the inbox insert precedes the enqueue.
     """
     source = read_backend_file("routers", "billing.py")
 
-    # Both the idempotency INSERT and handle_event must appear in the handler.
-    assert "StripeWebhookEvent" in source or "stripe_webhook_event" in source.lower(), (
-        "The webhook handler must reference StripeWebhookEvent to implement "
-        "idempotency.  Without it, Stripe retries double-credit users.  T-234."
+    assert "BillingWebhookEvent" in source, (
+        "The webhook receiver must persist a durable BillingWebhookEvent inbox row "
+        "for idempotency (Phase 22 replaces inline StripeWebhookEvent). T-297/T-298."
     )
-
-    assert "handle_event" in source, (
-        "The webhook handler must call stripe_service.handle_event() to process "
-        "the Stripe event.  T-234."
+    # The durable inbox row must be committed BEFORE the work is enqueued — a crash
+    # after enqueue is safe (the row exists); a crash before would lose the event.
+    insert_pos = source.find("BillingWebhookEvent(")
+    enqueue_pos = source.find("enqueue(")
+    assert insert_pos != -1 and enqueue_pos != -1 and insert_pos < enqueue_pos, (
+        "The BillingWebhookEvent inbox insert must precede the enqueue so the event "
+        "is durable before dispatch — the Phase-22 form of insert-before-process. "
+        "T-297/T-298."
     )
-
-    # Check relative ordering in the source text (INSERT/add must precede handle_event).
-    insert_pos = max(
-        source.find("StripeWebhookEvent("),
-        source.find("db.add("),
-        source.find("insert(StripeWebhookEvent"),
-    )
-    handle_pos = source.find("handle_event")
-
-    if insert_pos != -1 and handle_pos != -1:
-        assert insert_pos < handle_pos, (
-            "In the webhook handler, the StripeWebhookEvent INSERT must appear "
-            "BEFORE the handle_event() call.  Inserting after handle_event leaves a "
-            "window where a crash between successful processing and the INSERT causes "
-            "Stripe retries to double-credit the user.  T-234."
-        )
 
 
 def test_t234_webhook_catches_integrity_error_for_duplicate_events() -> None:
@@ -1350,35 +1316,32 @@ def test_t235_webhook_path_in_csrf_exempt_paths() -> None:
 
 
 def test_t235_webhook_path_in_rate_limit_bypass_paths() -> None:
-    """T-235 — /billing/webhook must be in RateLimitMiddleware._BYPASS_PATHS.
+    """T-235 → updated (Phase 21 GitHub + Phase 22 / T-306): webhook is rate-exempt.
 
-    Stripe can deliver multiple events in rapid succession for the same
-    checkout session (e.g., payment_intent.succeeded then checkout.session.completed).
-    If /billing/webhook is rate-limited, legitimate events will be rejected with
-    429, causing Stripe to retry (which may also get rate-limited) and eventually
-    disable the endpoint.
+    The webhook ingress was refactored into a dedicated ``_WEBHOOK_PATHS`` frozenset
+    (shared by ``/billing/webhook`` and ``/integrations/github/webhook``) consulted in
+    the dispatch path, replacing the original ``_BYPASS_PATHS`` membership. The
+    invariant is unchanged: ``/billing/webhook`` is exempt from the per-user rate limit
+    so a provider burst is never 429'd. This asserts the path lives in the consulted
+    webhook-exemption frozenset.
     """
     source = read_backend_file("middleware", "rate_limit.py")
 
     assert "/billing/webhook" in source, (
-        "middleware/rate_limit.py _BYPASS_PATHS frozenset must include "
-        "'/billing/webhook' as a literal string.  Stripe can burst multiple "
-        "events for one session — rate limiting the webhook causes 429 rejections "
-        "and eventual endpoint disable.  T-235."
+        "middleware/rate_limit.py must exempt '/billing/webhook' from rate limiting — "
+        "a provider burst must never be 429'd. T-235."
     )
-
-    # Must be in the frozenset, not just in a comment.
-    bypass_match = re.search(
-        r"_BYPASS_PATHS\s*=\s*frozenset\s*\(\s*\{([^}]+)\}",
+    # Must live inside a consulted exemption frozenset (_WEBHOOK_PATHS or the legacy
+    # _BYPASS_PATHS), not just a comment — check every such frozenset literal.
+    exempt_sets = re.findall(
+        r"_(?:WEBHOOK|BYPASS)_PATHS\s*=\s*frozenset\s*\(\s*\{([^}]+)\}",
         source,
         re.DOTALL,
     )
-    if bypass_match:
-        bypass_set_contents = bypass_match.group(1)
-        assert "/billing/webhook" in bypass_set_contents, (
-            "'/billing/webhook' must appear inside the _BYPASS_PATHS frozenset literal "
-            "in rate_limit.py, not just in a comment.  T-235."
-        )
+    assert any("/billing/webhook" in s for s in exempt_sets), (
+        "'/billing/webhook' must appear inside the consulted rate-limit exemption "
+        "frozenset (_WEBHOOK_PATHS) in rate_limit.py, not just in a comment. T-235."
+    )
 
 
 def test_t235_csrf_exempt_paths_uses_literal_string_not_prefix() -> None:
@@ -1890,15 +1853,23 @@ def test_t238_billing_types_has_billing_package_interface() -> None:
 
 
 def test_t238_billing_types_has_stripe_credit_pack_interface() -> None:
-    """T-238 — billing.ts must define StripeCreditPack interface."""
+    """T-238 → renamed by Phase 22 (T-305/T-306): the pack type is BillingCreditPack.
+
+    Phase 22 renames the frontend ``StripeCreditPack`` interface to the provider-
+    neutral ``BillingCreditPack`` (same shape: id, credits_purchased,
+    credits_remaining, status, purchased_at, expires_at) and removes the old name
+    entirely. The contract is that the pack interface exists under the new name.
+    """
     source = (REPO_ROOT / "frontend" / "src" / "types" / "billing.ts").read_text(
         encoding="utf-8"
     )
-    assert "StripeCreditPack" in source, (
-        "frontend/src/types/billing.ts must define the StripeCreditPack interface "
-        "(id, credits_purchased, credits_remaining, status, purchased_at, expires_at).  "
-        "T-238."
+    assert "BillingCreditPack" in source, (
+        "frontend/src/types/billing.ts must define the BillingCreditPack interface "
+        "(renamed from StripeCreditPack in Phase 22). T-305."
     )
+    assert (
+        "StripeCreditPack" not in source
+    ), "The old StripeCreditPack type name must be removed entirely (Phase 22). T-305."
 
 
 def test_t238_billing_types_has_billing_status_response_interface() -> None:
