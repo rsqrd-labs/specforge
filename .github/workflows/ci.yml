@@ -88,6 +88,38 @@ jobs:
       - name: Install dependencies
         run: uv sync --frozen --all-groups
 
+      - name: Generate test JWT keypair
+        # Some backend tests exercise real RS256 auth paths. Generate a fresh
+        # throwaway keypair in CI so those paths use valid PEM without storing
+        # a private key in the repository.
+        run: |
+          uv run python - <<'PY' >> "$GITHUB_ENV"
+          from cryptography.hazmat.primitives import serialization
+          from cryptography.hazmat.primitives.asymmetric import rsa
+
+          private_key = rsa.generate_private_key(
+              public_exponent=65537,
+              key_size=2048,
+          )
+          private_pem = private_key.private_bytes(
+              encoding=serialization.Encoding.PEM,
+              format=serialization.PrivateFormat.TraditionalOpenSSL,
+              encryption_algorithm=serialization.NoEncryption(),
+          ).decode("utf-8")
+          public_pem = private_key.public_key().public_bytes(
+              encoding=serialization.Encoding.PEM,
+              format=serialization.PublicFormat.SubjectPublicKeyInfo,
+          ).decode("utf-8")
+
+          for name, value in (
+              ("JWT_PRIVATE_KEY", private_pem),
+              ("JWT_PUBLIC_KEY", public_pem),
+          ):
+              print(f"{name}<<__SPECFORGE_CI_JWT_KEY__")
+              print(value, end="")
+              print("__SPECFORGE_CI_JWT_KEY__")
+          PY
+
       - name: Apply database migrations
         run: |
           echo "::group::Reset test database"
@@ -100,8 +132,6 @@ jobs:
           DATABASE_URL: "postgresql+asyncpg://postgres:postgres@localhost:5432/test"
           TEST_DATABASE_URL: "postgresql+asyncpg://postgres:postgres@localhost:5432/test"
           REDIS_URL: "redis://localhost:6379/0"
-          JWT_PRIVATE_KEY: "ci-test-private-key"
-          JWT_PUBLIC_KEY: "ci-test-public-key"
           GOOGLE_CLIENT_ID: "ci-test-client-id"
           GOOGLE_CLIENT_SECRET: "ci-test-client-secret"
           FRONTEND_URL: "http://localhost:5173"
@@ -151,8 +181,6 @@ jobs:
           REDIS_URL: "redis://localhost:6379/0"
           TEST_DATABASE_URL: "postgresql+asyncpg://postgres:postgres@localhost:5432/test"
           TEST_REDIS_URL: "redis://localhost:6379/0"
-          JWT_PRIVATE_KEY: "ci-test-private-key"
-          JWT_PUBLIC_KEY: "ci-test-public-key"
           GOOGLE_CLIENT_ID: "ci-test-client-id"
           GOOGLE_CLIENT_SECRET: "ci-test-client-secret"
           FRONTEND_URL: "http://localhost:5173"
@@ -175,8 +203,6 @@ jobs:
           DATABASE_URL: "postgresql+asyncpg://postgres:postgres@localhost:5432/test"
           TEST_DATABASE_URL: "postgresql+asyncpg://postgres:postgres@localhost:5432/test"
           REDIS_URL: "redis://localhost:6379/0"
-          JWT_PRIVATE_KEY: "ci-test-private-key"
-          JWT_PUBLIC_KEY: "ci-test-public-key"
           GOOGLE_CLIENT_ID: "ci-test-client-id"
           GOOGLE_CLIENT_SECRET: "ci-test-client-secret"
           FRONTEND_URL: "http://localhost:5173"
@@ -202,8 +228,6 @@ jobs:
           REDIS_URL: "redis://localhost:6379/0"
           TEST_DATABASE_URL: "postgresql+asyncpg://postgres:postgres@localhost:5432/test"
           TEST_REDIS_URL: "redis://localhost:6379/0"
-          JWT_PRIVATE_KEY: "ci-test-private-key"
-          JWT_PUBLIC_KEY: "ci-test-public-key"
           GOOGLE_CLIENT_ID: "ci-test-client-id"
           GOOGLE_CLIENT_SECRET: "ci-test-client-secret"
           FRONTEND_URL: "http://localhost:5173"
@@ -221,8 +245,6 @@ jobs:
           REDIS_URL: "redis://localhost:6379/0"
           TEST_DATABASE_URL: "postgresql+asyncpg://postgres:postgres@localhost:5432/test"
           TEST_REDIS_URL: "redis://localhost:6379/0"
-          JWT_PRIVATE_KEY: "ci-test-private-key"
-          JWT_PUBLIC_KEY: "ci-test-public-key"
           GOOGLE_CLIENT_ID: "ci-test-client-id"
           GOOGLE_CLIENT_SECRET: "ci-test-client-secret"
           FRONTEND_URL: "http://localhost:5173"
@@ -246,8 +268,6 @@ jobs:
         env:
           DATABASE_URL: "postgresql+asyncpg://postgres:postgres@localhost:5432/test"
           REDIS_URL: "redis://localhost:6379/0"
-          JWT_PRIVATE_KEY: "ci-test-private-key"
-          JWT_PUBLIC_KEY: "ci-test-public-key"
           GOOGLE_CLIENT_ID: "ci-test-client-id"
           GOOGLE_CLIENT_SECRET: "ci-test-client-secret"
           FRONTEND_URL: "http://localhost:5173"
@@ -267,8 +287,6 @@ jobs:
         env:
           DATABASE_URL: "postgresql+asyncpg://postgres:postgres@localhost:5432/test"
           REDIS_URL: "redis://localhost:6379/0"
-          JWT_PRIVATE_KEY: "ci-test-private-key"
-          JWT_PUBLIC_KEY: "ci-test-public-key"
           GOOGLE_CLIENT_ID: "ci-test-client-id"
           GOOGLE_CLIENT_SECRET: "ci-test-client-secret"
           FRONTEND_URL: "http://localhost:5173"
@@ -287,8 +305,6 @@ jobs:
         env:
           DATABASE_URL: "postgresql+asyncpg://postgres:postgres@localhost:5432/test"
           REDIS_URL: "redis://localhost:6379/0"
-          JWT_PRIVATE_KEY: "ci-test-private-key"
-          JWT_PUBLIC_KEY: "ci-test-public-key"
           GOOGLE_CLIENT_ID: "ci-test-client-id"
           GOOGLE_CLIENT_SECRET: "ci-test-client-secret"
           FRONTEND_URL: "http://localhost:5173"
@@ -314,8 +330,6 @@ jobs:
         env:
           DATABASE_URL: "postgresql+asyncpg://postgres:postgres@localhost:5432/test"
           REDIS_URL: "redis://localhost:6379/0"
-          JWT_PRIVATE_KEY: "ci-test-private-key"
-          JWT_PUBLIC_KEY: "ci-test-public-key"
           GOOGLE_CLIENT_ID: "ci-test-client-id"
           GOOGLE_CLIENT_SECRET: "ci-test-client-secret"
           FRONTEND_URL: "http://localhost:5173"
@@ -341,8 +355,6 @@ jobs:
           REDIS_URL: "redis://localhost:6379/0"
           TEST_DATABASE_URL: "postgresql+asyncpg://postgres:postgres@localhost:5432/test"
           TEST_REDIS_URL: "redis://localhost:6379/0"
-          JWT_PRIVATE_KEY: "ci-test-private-key"
-          JWT_PUBLIC_KEY: "ci-test-public-key"
           GOOGLE_CLIENT_ID: "ci-test-client-id"
           GOOGLE_CLIENT_SECRET: "ci-test-client-secret"
           FRONTEND_URL: "http://localhost:5173"
@@ -366,8 +378,6 @@ jobs:
           REDIS_URL: "redis://localhost:6379/0"
           TEST_DATABASE_URL: "postgresql+asyncpg://postgres:postgres@localhost:5432/test"
           TEST_REDIS_URL: "redis://localhost:6379/0"
-          JWT_PRIVATE_KEY: "ci-test-private-key"
-          JWT_PUBLIC_KEY: "ci-test-public-key"
           GOOGLE_CLIENT_ID: "ci-test-client-id"
           GOOGLE_CLIENT_SECRET: "ci-test-client-secret"
           FRONTEND_URL: "http://localhost:5173"
