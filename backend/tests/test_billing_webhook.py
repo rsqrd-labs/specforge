@@ -37,8 +37,8 @@ from database import get_db
 from main import create_app
 from models import BillingWebhookEvent
 
-_SECRET = "whsec_current"
-_PREV_SECRET = "whsec_previous"
+_SECRET = "lemonsec_current"
+_PREV_SECRET = "lemonsec_previous"
 
 
 # ---------------------------------------------------------------------------
@@ -273,7 +273,7 @@ async def test_wrong_secret_rejected() -> None:
     raw = json.dumps(body).encode("utf-8")
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
-        resp = await _post(client, body, signature=_sign(raw, "whsec_attacker"))
+        resp = await _post(client, body, signature=_sign(raw, "lemonsec_attacker"))
     assert resp.status_code == 400
 
 

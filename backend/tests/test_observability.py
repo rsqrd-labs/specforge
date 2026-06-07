@@ -312,9 +312,10 @@ def test_redact_masks_github_app_private_key_and_installation_token() -> None:
 
 
 def test_redact_masks_lemonsqueezy_secrets_and_nonce() -> None:
-    """T-304: the Lemon API key, both webhook secrets, and the raw checkout nonce
-    are scrubbed by key; the API-key JWT and the X-Signature/Stripe-Signature hex
-    are scrubbed by value wherever they appear."""
+    """T-304/T-308: the Lemon API key, both webhook secrets, and the raw checkout
+    nonce are scrubbed by key; the API-key JWT and the X-Signature hex are scrubbed
+    by value wherever they appear. (The Stripe-Signature pattern was retired with
+    the Stripe decommission — no Stripe signatures exist anymore.)"""
     value = {
         "lemonsqueezy_api_key": "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.abcDEF123_-xyz",
         "lemonsqueezy_webhook_secret": "supersecretsigningvalue",
@@ -322,7 +323,6 @@ def test_redact_masks_lemonsqueezy_secrets_and_nonce() -> None:
         "checkout_nonce": "raw-nonce-never-logged",
         "headers": {
             "X-Signature": "a" * 64,
-            "Stripe-Signature": "t=1700000000,v1=" + "b" * 64,
         },
         "note": "key eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.abcDEF123_-xyz used",
         "log_line": "X-Signature: " + "e" * 64 + " verified",
@@ -336,7 +336,6 @@ def test_redact_masks_lemonsqueezy_secrets_and_nonce() -> None:
     assert redacted["checkout_nonce"] == "[REDACTED]"
     # Signature header values are scrubbed by key (structured header fields).
     assert redacted["headers"]["X-Signature"] == "[REDACTED]"
-    assert redacted["headers"]["Stripe-Signature"] == "[REDACTED]"
     # The API-key JWT is scrubbed even embedded in free text under a non-secret key.
     assert "eyJhbGci" not in redacted["note"]
     assert "[REDACTED]" in redacted["note"]

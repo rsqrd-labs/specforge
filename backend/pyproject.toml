@@ -23,7 +23,6 @@ dependencies = [
     "google-genai==1.*",
     "cryptography==46.*",
     "bleach==6.*",
-    "stripe==11.*",
     "resend==2.*",
     "redis[asyncio]==5.*",
     "opentelemetry-api==1.*",

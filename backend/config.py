@@ -116,20 +116,6 @@ class Settings(BaseSettings):
     # lands; flip this to true only once the blast-radius path is implemented.
     increment_blast_radius_enabled: bool = False
 
-    # Stripe Payments (Phase 18) — leave blank to disable billing UI.
-    # Use sk_test_* keys for development; sk_live_* keys for production only.
-    stripe_secret_key: str = ""
-    stripe_webhook_secret: str = ""
-    stripe_price_cents: int = 900  # $9.00 — 200 credits per purchase
-    stripe_credits_per_purchase: int = 200
-    stripe_credit_validity_days: int = 30
-    # IMPORTANT: STRIPE_SUCCESS_URL must point to /billing (NOT /billing/success).
-    # T-238 registers /billing as the authenticated billing route.  The Billing
-    # component detects ?session_id= on that route and enters polling mode.
-    # There is no /billing/success route — users land on a 404 if you set this wrong.
-    stripe_success_url: str = ""  # e.g. https://app.specforge.dev/billing
-    stripe_cancel_url: str = ""  # e.g. https://app.specforge.dev/billing
-
     # Lemon Squeezy billing (Phase 22) — the provider-neutral checkout that
     # supersedes Stripe at runtime. Leave the api key / store id / variant id
     # blank to ship with checkout DISABLED (GET /billing/package still works;
@@ -200,20 +186,6 @@ class Settings(BaseSettings):
         )
 
     @property
-    def stripe_webhook_grace_open(self) -> bool:
-        """True while late Stripe webhooks are still honoured (T-303 grace window).
-
-        New checkout is Lemon-only (T-296); this is purely a bounded compatibility
-        window so an already-created Stripe session whose ``checkout.session.completed``
-        (or a late dispute) was not yet processed still settles correctly. It requires
-        ``STRIPE_WEBHOOK_SECRET`` — without it a Stripe signature cannot be verified, so
-        the window is closed. Ops closes the window by unsetting the secret; the 7-day
-        bound and the SDK/import removal are the gated follow-up (T-308). When closed,
-        a Stripe-shaped request is rejected before any DB write or signature claim.
-        """
-        return bool(self.stripe_webhook_secret)
-
-    @property
     def admin_emails(self) -> set[str]:
         """The parsed, lower-cased billing-admin allowlist (empty when unset).
 
@@ -274,28 +246,6 @@ def validate_production_settings() -> None:
                 "output content after secret-shaped redaction; only enable it "
                 "after approving that telemetry data flow."
             )
-
-    # Stripe production key guard.  A test key (sk_test_*) in production means
-    # payments appear to succeed via test cards but no real money is charged.
-    # This guard catches the misconfiguration at startup — before any user
-    # attempts a purchase — using the same accumulate-then-raise pattern as all
-    # other production checks above.  An empty stripe_secret_key (billing
-    # disabled) passes the guard: "".startswith("sk_test_") is False.
-    #
-    # SCOPED (Phase 22 — T-292): the guard only fires while Stripe is still the
-    # active checkout provider, i.e. when Lemon Squeezy is NOT enabled. Once Lemon
-    # is the sole checkout provider (the cutover, T-303), a stale STRIPE_SECRET_KEY
-    # left in the environment must not fail startup — Stripe checkout creation is
-    # disabled in code, so a test key can no longer charge anything.
-    if not settings.lemonsqueezy_enabled and settings.stripe_secret_key.startswith(
-        "sk_test_"
-    ):
-        errors.append(
-            "STRIPE_SECRET_KEY is a test key (sk_test_*). "
-            "Production deployments must use a live key (sk_live_*). "
-            "Using a test key in production silently accepts test card numbers "
-            "without charging real money."
-        )
 
     # Lemon Squeezy production guard (Phase 22 — T-292 / SR7). When Lemon is
     # enabled (api key + store + variant all set), production must run a complete

@@ -129,9 +129,10 @@ CSRF_REPLAY_REJECTIONS = Counter(
 # Billing counters (Phase 18 → Phase 22 — T-236, provider-labelled in T-304)
 # -------------------------------------------------------------------------
 # These counters power the Grafana alert rules documented in RUNBOOK §9. Phase 22
-# (T-304) widened the money-path counters with a ``provider`` label so the same
-# series serve both the live Lemon Squeezy path and the bounded late-Stripe grace
-# window (T-303); aggregating queries/alerts still sum across providers. Labelled
+# (T-304) widened the money-path counters with a ``provider`` label; the live
+# Lemon Squeezy path is the only runtime emitter since the Stripe decommission
+# (T-308), though the ``provider`` label and the retained ``provider='stripe'``
+# audit rows mean aggregating queries/alerts still sum across providers. Labelled
 # counters REQUIRE ``.labels(...).inc()`` at every call site. ``credits_expired``
 # stays label-less — lazy expiry is provider-agnostic.
 BILLING_CHECKOUT_CREATED = Counter(
@@ -567,8 +568,6 @@ _SENSITIVE_KEYS = {
     "secret",
     "set-cookie",
     "set_cookie",
-    "stripe_secret_key",
-    "stripe_webhook_secret",
     # Lemon Squeezy billing credentials (Phase 22 — T-304). The API key is also
     # caught by the Bearer/JWT patterns and the webhook secrets by ``_secret``
     # suffix, but exact key names are listed so a structured field is scrubbed
@@ -578,11 +577,10 @@ _SENSITIVE_KEYS = {
     "lemonsqueezy_webhook_secret",
     "lemonsqueezy_webhook_secret_prev",
     "checkout_nonce",
-    # Webhook signature headers, scrubbed by key (the patterns below also catch them
+    # Webhook signature header, scrubbed by key (the pattern below also catches it
     # inline in free text). Normalisation lower-cases and maps '-'→'_', so
-    # ``X-Signature`` / ``Stripe-Signature`` match these.
+    # ``X-Signature`` matches this.
     "x_signature",
-    "stripe_signature",
     "token",
     # GitHub App credentials (Phase 21 — T-283). Key matching is exact, so the
     # App private key and the various installation-token field names are listed
@@ -605,10 +603,6 @@ _SECRET_PATTERNS: tuple[re.Pattern[str], ...] = (
     ),
     re.compile(r"(?i)(refresh[_-]?token\s*[:=]\s*)['\"]?[^'\"\s,;}]+['\"]?"),
     re.compile(r"(?i)(authorization\s*[:=]\s*)['\"]?[^'\"\s,;}]+['\"]?"),
-    # Stripe secret keys: sk_live_* (production) and sk_test_* (development)
-    re.compile(r"sk_(?:live|test)_[A-Za-z0-9_-]{24,}"),
-    # Stripe webhook signing secrets
-    re.compile(r"whsec_[A-Za-z0-9/+=]{24,}"),
     # GitHub tokens (Phase 21 — T-283): installation (ghs_), user-to-server
     # (ghu_), OAuth (gho_), PAT (ghp_), and refresh (ghr_). Installation tokens
     # are credentials — scrub the value wherever it appears, not just under a
@@ -619,12 +613,10 @@ _SECRET_PATTERNS: tuple[re.Pattern[str], ...] = (
     # Authorization header. Three dot-separated segments keep this specific so it
     # never matches arbitrary text or a bare sha256 hash.
     re.compile(r"eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}"),
-    # Webhook signature headers (Phase 22 — T-304): the Lemon ``X-Signature`` (hex
-    # HMAC-SHA256) and the Stripe ``Stripe-Signature`` (``t=…,v1=<hex>``). Keyed on
-    # the header name so the intentionally-logged nonce/payload sha256 hashes (also
-    # 64-hex) are NOT scrubbed.
+    # Webhook signature header (Phase 22 — T-304): the Lemon ``X-Signature`` (hex
+    # HMAC-SHA256). Keyed on the header name so the intentionally-logged
+    # nonce/payload sha256 hashes (also 64-hex) are NOT scrubbed.
     re.compile(r"(?i)(x-signature\s*[:=]\s*)['\"]?[0-9a-f]{16,}['\"]?"),
-    re.compile(r"(?i)(stripe-signature\s*[:=]\s*)['\"]?[^'\"\s,;}]+['\"]?"),
 )
 
 

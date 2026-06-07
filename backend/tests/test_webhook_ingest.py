@@ -30,8 +30,8 @@ from services.integrations.github_app_auth import verify_webhook_signature
 
 pytestmark = pytest.mark.asyncio
 
-_SECRET = "whsec_current"
-_PREV = "whsec_previous"
+_SECRET = "ghsecret_current"
+_PREV = "ghsecret_previous"
 _WEBHOOK_PATH = "/integrations/github/webhook"
 
 

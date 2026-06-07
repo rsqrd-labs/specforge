@@ -30,7 +30,6 @@ cryptography==46.*
 bleach==6.*
 
 # Payments and Email
-stripe==11.*
 resend==2.*
 
 # Cache

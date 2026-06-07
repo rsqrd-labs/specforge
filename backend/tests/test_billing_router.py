@@ -33,7 +33,6 @@ from database import get_db
 from main import create_app
 from middleware.auth import get_current_user
 from models import BillingCheckoutAttempt, BillingCreditPack, User
-from models.stripe_credit_pack import StripeCreditPack
 from services.lemonsqueezy_service import LemonSqueezyError, lemonsqueezy_service
 
 _USER_ID = uuid4()
@@ -504,56 +503,15 @@ async def test_status_checkout_ref_cross_user_returns_404_idor() -> None:
 
 
 @pytest.mark.asyncio
-async def test_status_session_id_grace_on_returns_200() -> None:
-    pack = StripeCreditPack(
-        user_id=_USER_ID,
-        stripe_session_id="cs_legacy",
-        credits_purchased=200,
-        credits_remaining=200,
-        price_cents=900,
-        status="active",
-        purchased_at=datetime.now(timezone.utc),
-        expires_at=datetime.now(timezone.utc) + timedelta(days=30),
-    )
-    session = _FakeSession(scalars_seq=[pack])
-    app = _make_app(session)
-
-    # Grace window active while STRIPE_SECRET_KEY is still set.
-    with _Patches([patch.object(settings, "stripe_secret_key", "sk_test_x")]):
-        transport = ASGITransport(app=app)
-        async with AsyncClient(transport=transport, base_url="http://test") as client:
-            resp = await client.get(
-                "/billing/status", params={"session_id": "cs_legacy"}
-            )
-
-    assert resp.status_code == 200
-    assert resp.json()["credits_added"] == 200
-
-
-@pytest.mark.asyncio
-async def test_status_session_id_grace_on_cross_user_404_idor() -> None:
-    session = _FakeSession(scalars_seq=[None])  # not visible to this user
-    app = _make_app(session)
-    with _Patches([patch.object(settings, "stripe_secret_key", "sk_test_x")]):
-        transport = ASGITransport(app=app)
-        async with AsyncClient(transport=transport, base_url="http://test") as client:
-            resp = await client.get(
-                "/billing/status", params={"session_id": "cs_other"}
-            )
-    assert resp.status_code == 404
-
-
-@pytest.mark.asyncio
-async def test_status_session_id_post_grace_returns_404() -> None:
-    # No Stripe key → grace over → session_id ignored entirely (never queried).
+async def test_status_legacy_session_id_ignored_after_decommission() -> None:
+    # T-308: the legacy Stripe ``session_id`` polling path is gone. A request with
+    # only session_id has no usable identifier and is answered 404 (the StripeCreditPack
+    # table is never queried — a pack present in the session is not returned).
     session = _FakeSession(scalars_seq=[_active_pack()])
     app = _make_app(session)
-    with _Patches([patch.object(settings, "stripe_secret_key", "")]):
-        transport = ASGITransport(app=app)
-        async with AsyncClient(transport=transport, base_url="http://test") as client:
-            resp = await client.get(
-                "/billing/status", params={"session_id": "cs_legacy"}
-            )
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get("/billing/status", params={"session_id": "cs_legacy"})
     assert resp.status_code == 404
 
 

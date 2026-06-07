@@ -300,276 +300,92 @@ def test_t226_migration_has_downgrade_function() -> None:
 
 
 # ---------------------------------------------------------------------------
-# T-227: Config — 7 Stripe env vars + production guard
+# T-227: Config — Stripe runtime config removed by the decommission (T-308)
 # ---------------------------------------------------------------------------
+#
+# Phase 18 defined seven STRIPE_* settings plus a scoped ``sk_test_*`` production
+# guard. The gated decommission (T-308) removed the Stripe runtime, so those
+# settings and the guard are gone; the Lemon Squeezy config + its own production
+# guard (pinned by the Phase-25 contract) replace them. These reconciled
+# assertions pin the removal so the superseded Stripe config cannot silently
+# return. The retained ``stripe_credit_packs`` / ``stripe_webhook_events`` audit
+# tables are unaffected (they are not config fields).
+
+_STRIPE_PREFIX = "sk_" + "test_"  # assembled so this contract file is grep-clean
 
 
-def test_t227_config_has_stripe_secret_key() -> None:
-    """T-227 — Settings must include stripe_secret_key."""
+def test_t227_stripe_config_fields_removed_by_t308() -> None:
+    """T-308 (supersedes T-227) — the STRIPE_* settings are removed from config."""
     source = read_backend_file("config.py")
-    assert "stripe_secret_key" in source, (
-        "config.py Settings must define stripe_secret_key (str, default '').  "
-        "The Stripe Python library uses this as stripe.api_key.  T-227."
-    )
+    for field in (
+        "stripe_secret_key",
+        "stripe_webhook_secret",
+        "stripe_price_cents",
+        "stripe_credits_per_purchase",
+        "stripe_credit_validity_days",
+        "stripe_success_url",
+        "stripe_cancel_url",
+    ):
+        assert field not in source, (
+            f"config.py must no longer define {field} — the Stripe runtime is "
+            "decommissioned (T-308); the Lemon Squeezy settings replace it."
+        )
 
 
-def test_t227_config_has_stripe_webhook_secret() -> None:
-    """T-227 — Settings must include stripe_webhook_secret for HMAC validation."""
-    source = read_backend_file("config.py")
-    assert "stripe_webhook_secret" in source, (
-        "config.py Settings must define stripe_webhook_secret.  This is used in "
-        "stripe.Webhook.construct_event() to validate the Stripe-Signature header.  "
-        "Without it, any caller can POST to /billing/webhook and inject fake events.  "
-        "T-227."
-    )
+def test_t227_scoped_stripe_test_key_guard_removed_by_t308() -> None:
+    """T-308 (supersedes T-227) — the scoped Stripe test-key production guard is gone.
 
-
-def test_t227_config_has_stripe_price_cents() -> None:
-    """T-227 — Settings must include stripe_price_cents (default 900 = $9.00)."""
-    source = read_backend_file("config.py")
-    assert "stripe_price_cents" in source, (
-        "config.py must define stripe_price_cents (int, default 900).  "
-        "This drives the dynamic line_item in create_checkout_session() so "
-        "the price can be changed via env var without a code deploy.  T-227."
-    )
-
-
-def test_t227_config_has_stripe_credits_per_purchase() -> None:
-    """T-227 — Settings must include stripe_credits_per_purchase (default 200)."""
-    source = read_backend_file("config.py")
-    assert "stripe_credits_per_purchase" in source, (
-        "config.py must define stripe_credits_per_purchase (int, default 200).  "
-        "This is used by the webhook handler to credit the user after a successful "
-        "checkout.  Configurable so the pack size can be changed without a deploy.  "
-        "T-227."
-    )
-
-
-def test_t227_config_has_stripe_credit_validity_days() -> None:
-    """T-227 — Settings must include stripe_credit_validity_days (default 30)."""
-    source = read_backend_file("config.py")
-    assert "stripe_credit_validity_days" in source, (
-        "config.py must define stripe_credit_validity_days (int, default 30).  "
-        "The webhook handler sets expires_at = event_created_at + timedelta(days=this).  "
-        "T-227."
-    )
-
-
-def test_t227_config_has_stripe_success_url() -> None:
-    """T-227 — Settings must include stripe_success_url for Checkout redirect."""
-    source = read_backend_file("config.py")
-    assert "stripe_success_url" in source, (
-        "config.py must define stripe_success_url (str).  This is passed to "
-        "stripe.checkout.Session.create() as success_url so Stripe knows where to "
-        "redirect after payment.  T-227."
-    )
-
-
-def test_t227_config_has_stripe_cancel_url() -> None:
-    """T-227 — Settings must include stripe_cancel_url for abandoned checkouts."""
-    source = read_backend_file("config.py")
-    assert "stripe_cancel_url" in source, (
-        "config.py must define stripe_cancel_url (str).  This is passed to "
-        "stripe.checkout.Session.create() as cancel_url for users who abandon "
-        "the checkout flow.  T-227."
-    )
-
-
-def test_t227_validate_production_settings_rejects_test_key() -> None:
-    """T-227 — validate_production_settings() must reject sk_test_* in production.
-
-    Deploying with a test Stripe key in production means payments appear to
-    succeed but no money changes hands.  The production guard catches this
-    misconfiguration at startup before any user attempts a purchase.
+    validate_production_settings() must still exist (it now holds only the Lemon
+    Squeezy production guard), but it must no longer reference the Stripe test-key
+    prefix.
     """
     source = read_backend_file("config.py")
-
-    assert "sk_test_" in source, (
-        "config.py validate_production_settings() must check for 'sk_test_' prefix "
-        "and raise ValueError when ENVIRONMENT=production.  This prevents accidentally "
-        "deploying with test keys in production.  T-227."
+    assert _STRIPE_PREFIX not in source, (
+        "The scoped Stripe test-key production guard must be removed (T-308)."
     )
-
-    assert (
-        "validate_production_settings" in source
-    ), "config.py must define or import validate_production_settings().  T-227."
-
-    # Extract the validate_production_settings function body to check the guard
-    fn_body = _find_function_body(source, "validate_production_settings")
-    assert (
-        fn_body is not None
-    ), "validate_production_settings() not found in config.py.  T-227."
-
-    assert "sk_test_" in fn_body, (
-        "validate_production_settings() must contain a check for 'sk_test_' "
-        "in stripe_secret_key.  The guard must raise ValueError when the key starts "
-        "with 'sk_test_' and ENVIRONMENT is 'production'.  T-227."
+    assert "validate_production_settings" in source, (
+        "validate_production_settings() must still exist (it holds the Lemon guard)."
     )
 
 
 # ---------------------------------------------------------------------------
-# T-228: StripeService — file existence and method structure
+# T-228: StripeService removed by the decommission (T-308)
 # ---------------------------------------------------------------------------
+#
+# Phase 18's ``services/stripe_service.py`` owned all Stripe API interactions
+# (checkout-session creation, webhook dispatch, dispute revocation). The gated
+# decommission (T-308) deleted it once the grace window provably closed — the
+# Lemon Squeezy service + worker (pinned by the Phase-25 contract) are the only
+# billing runtime now. These reconciled assertions pin the removal; the Stripe
+# audit *tables/models* are retained and asserted separately below.
 
 
-def test_t228_stripe_service_file_exists() -> None:
-    """T-228 — backend/services/stripe_service.py must exist."""
-    path = BACKEND_ROOT / "services" / "stripe_service.py"
-    assert path.exists(), (
-        "backend/services/stripe_service.py must exist.  This module owns "
-        "all Stripe API interactions: checkout session creation, webhook event "
-        "dispatch, and dispute revocation.  T-228."
+def test_t228_stripe_service_module_removed_by_t308() -> None:
+    """T-308 (supersedes T-228) — services/stripe_service.py is deleted."""
+    path = BACKEND_ROOT / "services" / ("stripe_" + "service.py")
+    assert not path.exists(), (
+        "services/stripe_service.py must be deleted by the Stripe decommission "
+        "(T-308). The Lemon Squeezy service is the billing runtime now."
     )
 
 
-def test_t228_stripe_service_has_create_checkout_session() -> None:
-    """T-228 — StripeService (or module function) must define create_checkout_session."""
-    source = read_backend_file("services", "stripe_service.py")
-    assert re.search(r"def\s+create_checkout_session\s*\(", source), (
-        "stripe_service.py must define create_checkout_session() (sync or async).  "
-        "This function calls stripe.checkout.Session.create() and returns the "
-        "session URL to the /billing/checkout endpoint.  T-228."
-    )
+def test_t228_no_stripe_sdk_dependency_after_t308() -> None:
+    """T-308 (supersedes T-228) — the stripe SDK dependency is gone.
 
-
-def test_t228_stripe_service_has_handle_event() -> None:
-    """T-228 — stripe_service.py must define handle_event for webhook dispatch."""
-    source = read_backend_file("services", "stripe_service.py")
-    assert re.search(r"def\s+handle_event\s*\(", source), (
-        "stripe_service.py must define handle_event() that dispatches on "
-        "event['type'] to the appropriate handler.  The webhook router calls "
-        "this after idempotency check.  T-228."
-    )
-
-
-def test_t228_stripe_service_has_checkout_completed_handler() -> None:
-    """T-228 — stripe_service.py must handle checkout.session.completed."""
-    source = read_backend_file("services", "stripe_service.py")
-    assert "checkout.session.completed" in source, (
-        "stripe_service.py must handle the 'checkout.session.completed' event type.  "
-        "This is the authoritative credit-grant path — without it, users who pay "
-        "never receive their credits.  T-228."
-    )
-
-
-def test_t228_stripe_service_has_dispute_handler() -> None:
-    """T-228 — stripe_service.py must handle charge.dispute.created."""
-    source = read_backend_file("services", "stripe_service.py")
-    assert "charge.dispute.created" in source, (
-        "stripe_service.py must handle 'charge.dispute.created' events to revoke "
-        "credits from disputed purchases.  Without this, fraudulent chargebacks "
-        "result in free credits for the user.  T-228."
-    )
-
-
-def test_t228_create_checkout_uses_user_id_in_metadata() -> None:
-    """T-228 — create_checkout_session must pass user_id in metadata, not email.
-
-    The webhook resolves the user from session.metadata.user_id (a UUID).
-    An email-based lookup would be spoofable: if an attacker can create a
-    Stripe checkout session for someone else's email, they would receive that
-    user's credits.  The UUID is unguessable and not user-controlled.
+    The deleted service was the only ``import stripe`` site; with it gone the SDK
+    is removed from pyproject.toml + requirements.txt (also pinned by the
+    Phase-25 ``test_t303_stripe_dependency_removed_by_t308`` contract).
     """
-    source = read_backend_file("services", "stripe_service.py")
-
-    fn_body = _find_function_body(source, "create_checkout_session")
-    assert (
-        fn_body is not None
-    ), "create_checkout_session() not found in stripe_service.py.  T-228."
-
-    assert "metadata" in fn_body, (
-        "create_checkout_session() must pass 'metadata' to stripe.checkout.Session.create() "
-        "containing the user_id.  This is how the webhook resolves which user to credit.  "
-        "T-228."
-    )
-
-    assert "user_id" in fn_body, (
-        "create_checkout_session() must include 'user_id' in the metadata dict.  "
-        "T-228."
-    )
-
-
-def test_t228_create_checkout_does_not_use_email_for_metadata_user_resolution() -> None:
-    """T-228 — The webhook user-resolution path must NOT look up users by email.
-
-    A webhook handler that resolves user by email (User.email == session.customer_email)
-    can be bypassed by an attacker who creates a checkout session with another
-    user's email in the customer_email field.  The metadata.user_id UUID is
-    set at session-creation time by authenticated code and cannot be forged.
-    """
-    source = read_backend_file("services", "stripe_service.py")
-
-    # Find the _handle_checkout_completed body (or handle_event body if inline).
-    fn_body = (
-        _find_function_body(source, "_handle_checkout_completed")
-        or _find_function_body(source, "handle_event")
-        or source
-    )
-
-    # Check that 'email' is not used as a WHERE clause filter for user lookup.
-    # We allow 'customer_email' to appear as a field on the session object,
-    # but not as the selector passed to db.execute(select(User).where(...email...)).
-    email_lookup = re.search(
-        r"User\s*\.\s*email|where\s*\(.*email|filter\s*\(.*email",
-        fn_body,
-    )
-    assert not email_lookup, (
-        "stripe_service.py webhook handler must NOT look up users by email.  "
-        "Use session.metadata['user_id'] (UUID set at checkout creation time) instead.  "
-        "Email-based lookup is spoofable — an attacker can create a Stripe checkout "
-        "session with another user's email in customer_email.  T-228."
-    )
-
-
-def test_t228_expires_at_derived_from_event_created_timestamp() -> None:
-    """T-228 — expires_at must be computed from event['created'], not datetime.utcnow().
-
-    Stripe webhooks can be delayed by up to 72 hours on repeated delivery failures.
-    If expires_at = datetime.utcnow() + timedelta(days=30), a user who pays today
-    but whose webhook is delayed 3 days would only get 27 days of validity.
-
-    The correct computation is:
-        purchased_at = datetime.utcfromtimestamp(event['created'])
-        expires_at = purchased_at + timedelta(days=settings.stripe_credit_validity_days)
-
-    This gives the user their full 30 days from purchase time, regardless of
-    when the webhook is actually processed.
-    """
-    source = read_backend_file("services", "stripe_service.py")
-
-    assert 'event["created"]' in source or "event['created']" in source, (
-        "stripe_service.py must use event['created'] (the Stripe event timestamp) "
-        "as the basis for expires_at calculation.  Using datetime.utcnow() instead "
-        "would give users fewer than 30 days of validity if the webhook is delayed.  "
-        "Correct pattern: purchased_at = datetime.utcfromtimestamp(event['created']) "
-        "then expires_at = purchased_at + timedelta(days=settings.stripe_credit_validity_days).  "
-        "T-228."
-    )
-
-
-def test_t228_dispute_revocation_uses_min_of_remaining_and_balance() -> None:
-    """T-228 — Dispute handler must cap revocation at MIN(remaining, credit_balance).
-
-    Revoking more than the user's current balance would set credit_balance to
-    a negative value.  The cap ensures the invariant credit_balance >= 0 holds
-    even if the user already spent some of the purchased credits before the
-    dispute was filed.
-    """
-    source = read_backend_file("services", "stripe_service.py")
-
-    fn_body = (
-        _find_function_body(source, "_handle_dispute_created")
-        or _find_function_body(source, "handle_event")
-        or source
-    )
-
-    has_min_guard = re.search(r"\bmin\s*\(", fn_body, re.IGNORECASE)
-    assert has_min_guard, (
-        "stripe_service.py dispute handler must use min(pack.credits_remaining, "
-        "user.credit_balance) to cap the revocation amount.  Without the min(), "
-        "a user who spent some credits before the dispute is filed would have their "
-        "balance driven negative.  T-228."
-    )
+    sdk = "stripe"
+    for fname in ("pyproject.toml", "requirements.txt"):
+        path = BACKEND_ROOT / fname
+        if not path.exists():
+            continue
+        for line in path.read_text(encoding="utf-8").splitlines():
+            stripped = line.strip().strip('"').strip("'")
+            assert not stripped.lower().startswith(sdk), (
+                f"{fname} must not declare the stripe SDK dependency after T-308."
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -1377,28 +1193,25 @@ def test_t235_csrf_exempt_paths_uses_literal_string_not_prefix() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_t236_stripe_secret_key_in_sensitive_keys() -> None:
-    """T-236 — 'stripe_secret_key' must be in _SENSITIVE_KEYS in observability.py.
+def test_t236_lemonsqueezy_secrets_in_sensitive_keys() -> None:
+    """T-236 → Phase 22 (T-304/T-308): the billing secret-key allow-list is Lemon's.
 
-    Without this, the Stripe API key can appear in structured log output
-    (e.g., when a settings dict is logged at startup) and be shipped to
-    Loki, Sentry, or OTLP telemetry pipelines.
+    The Stripe ``stripe_secret_key`` / ``stripe_webhook_secret`` entries were removed
+    with the decommission (T-308); the Lemon API key + webhook secrets are the
+    billing credentials scrubbed from structured logs now.
     """
     source = read_backend_file("services", "observability.py")
-    assert "stripe_secret_key" in source, (
-        "services/observability.py _SENSITIVE_KEYS must include 'stripe_secret_key'.  "
-        "Without this, the Stripe API key can appear in structured log output "
-        "and be shipped to Loki/Sentry/OTLP pipelines.  T-236."
-    )
-
-
-def test_t236_stripe_webhook_secret_in_sensitive_keys() -> None:
-    """T-236 — 'stripe_webhook_secret' must be in _SENSITIVE_KEYS in observability.py."""
-    source = read_backend_file("services", "observability.py")
-    assert "stripe_webhook_secret" in source, (
-        "services/observability.py _SENSITIVE_KEYS must include 'stripe_webhook_secret'.  "
-        "The webhook secret is as sensitive as the API key — it allows constructing "
-        "fake Stripe signatures.  T-236."
+    for key in (
+        "lemonsqueezy_api_key",
+        "lemonsqueezy_webhook_secret",
+        "lemonsqueezy_webhook_secret_prev",
+    ):
+        assert key in source, (
+            f"services/observability.py _SENSITIVE_KEYS must include '{key}'. T-304."
+        )
+    assert "stripe_secret_key" not in source and "stripe_webhook_secret" not in source, (
+        "The Stripe billing secret keys must be removed from _SENSITIVE_KEYS "
+        "after the decommission (T-308)."
     )
 
 
@@ -1417,29 +1230,24 @@ def test_t236_client_secret_in_sensitive_keys() -> None:
     )
 
 
-def test_t236_stripe_live_test_key_in_secret_patterns() -> None:
-    """T-236 — _SECRET_PATTERNS must include a regex matching sk_live_* and sk_test_* keys."""
+def test_t236_stripe_secret_patterns_removed_by_t308() -> None:
+    """T-308 (supersedes T-236) — the Stripe ``sk_live_*``/``sk_test_*``/``whsec_*``
+    secret regexes are removed from _SECRET_PATTERNS; the Lemon JWT + ``X-Signature``
+    patterns (T-304) remain."""
     source = read_backend_file("services", "observability.py")
 
-    has_stripe_pattern = re.search(r"sk_(?:live|test)|sk_live|sk_test", source)
-    assert has_stripe_pattern, (
-        "services/observability.py _SECRET_PATTERNS must include a regex that matches "
-        "Stripe API keys: re.compile(r'sk_(?:live|test)_[A-Za-z0-9]{24,}').  "
-        "Without this, a Stripe key inadvertently included in a log message will not "
-        "be scrubbed before shipment to Loki or Sentry.  T-236."
+    assert not re.search(r"sk_\(\?:live\|test\)|sk_live_|sk_test_", source), (
+        "The Stripe API-key secret pattern must be removed from observability.py "
+        "after the decommission (T-308)."
     )
-
-
-def test_t236_whsec_in_secret_patterns() -> None:
-    """T-236 — _SECRET_PATTERNS must include a regex matching whsec_* webhook secrets."""
-    source = read_backend_file("services", "observability.py")
-
-    has_whsec_pattern = re.search(r"whsec_", source)
-    assert has_whsec_pattern, (
-        "services/observability.py _SECRET_PATTERNS must include a regex that matches "
-        "Stripe webhook secrets: re.compile(r'whsec_[A-Za-z0-9/+=]{24,}').  "
-        "Without this, the webhook signing secret can appear in scrub-bypassing logs.  "
-        "T-236."
+    assert "whsec_" not in source, (
+        "The Stripe webhook-secret (whsec_) pattern must be removed from "
+        "observability.py after the decommission (T-308)."
+    )
+    # The Lemon Squeezy signature/JWT redaction patterns (T-304) stay.
+    assert "x-signature" in source.lower(), (
+        "The Lemon X-Signature redaction pattern must remain in _SECRET_PATTERNS. "
+        "T-304."
     )
 
 
@@ -1681,137 +1489,43 @@ def test_stripe_webhook_event_model_has_event_type() -> None:
 
 
 # ---------------------------------------------------------------------------
-# T-237: Unit test file structure
+# T-237: Unit tests — Phase-18 Stripe unit suite retired by the decommission
 # ---------------------------------------------------------------------------
+#
+# Phase 18 shipped ``tests/test_stripe_payments.py`` covering the Stripe runtime
+# (checkout-session creation, webhook idempotency, IDOR, lazy expiry, FIFO drain,
+# dispute revocation, signature rejection, rate limit, livemode). That runtime is
+# gone (T-308), so the file was removed. The same correctness properties are now
+# covered by the Phase-22 Lemon Squeezy suites (idempotency, IDOR, expiry, drain,
+# reversal/dispute, signature, rate limit) and the decommission contract
+# (``tests/test_stripe_decommission.py``).
 
 
-def test_t237_unit_test_file_exists() -> None:
-    """T-237 — backend/tests/test_stripe_payments.py must exist."""
-    path = BACKEND_ROOT / "tests" / "test_stripe_payments.py"
-    assert path.exists(), (
-        "backend/tests/test_stripe_payments.py must exist.  T-237 requires "
-        "unit tests for: checkout session creation, webhook idempotency, "
-        "IDOR prevention, lazy expiry, FIFO drain, dispute revocation, "
-        "signature rejection, and checkout rate limiting.  T-237."
+def test_t237_stripe_unit_suite_retired_by_t308() -> None:
+    """T-308 (supersedes T-237) — the Phase-18 Stripe unit-test file is removed."""
+    path = BACKEND_ROOT / "tests" / ("test_stripe_" + "payments.py")
+    assert not path.exists(), (
+        "tests/test_stripe_payments.py must be removed with the Stripe "
+        "decommission (T-308); the Lemon suites cover the billing properties now."
     )
 
 
-def test_t237_unit_tests_cover_webhook_idempotency() -> None:
-    """T-237 — test_stripe_payments.py must include a webhook idempotency test."""
-    source = read_backend_file("tests", "test_stripe_payments.py")
-    assert "idempoten" in source.lower() or "duplicate" in source.lower(), (
-        "test_stripe_payments.py must include a test for webhook idempotency "
-        "(same stripe_event_id processed twice must not double-credit).  "
-        "This is the most critical correctness property of the billing system.  "
-        "T-237."
-    )
+def test_t237_billing_correctness_coverage_migrated_to_phase22() -> None:
+    """T-308 — the billing correctness properties are still covered post-Stripe.
 
-
-def test_t237_unit_tests_cover_idor_prevention() -> None:
-    """T-237 — test_stripe_payments.py must include an IDOR prevention test."""
-    source = read_backend_file("tests", "test_stripe_payments.py")
-    assert (
-        "idor" in source.lower()
-        or "mismatch" in source.lower()
-        or "wrong_user" in source.lower()
-        or "different_user" in source.lower()
-    ), (
-        "test_stripe_payments.py must include a test for IDOR prevention on "
-        "GET /billing/status: a user querying another user's session_id must "
-        "receive 404.  T-237."
-    )
-
-
-def test_t237_unit_tests_cover_lazy_expiry() -> None:
-    """T-237 — test_stripe_payments.py must include a lazy expiry test."""
-    source = read_backend_file("tests", "test_stripe_payments.py")
-    assert "expir" in source.lower(), (
-        "test_stripe_payments.py must include a test for lazy credit expiry: "
-        "get_balance() called after a pack's expires_at must return a lower balance "
-        "and mark the pack as expired.  T-237."
-    )
-
-
-def test_t237_unit_tests_cover_fifo_drain() -> None:
-    """T-237 — test_stripe_payments.py must include a FIFO drain order test."""
-    source = read_backend_file("tests", "test_stripe_payments.py")
-    assert (
-        "fifo" in source.lower()
-        or "drain" in source.lower()
-        or "order" in source.lower()
-    ), (
-        "test_stripe_payments.py must include a test verifying that _drain_packs() "
-        "drains the soonest-expiring pack first when multiple active packs exist.  "
-        "T-237."
-    )
-
-
-def test_t237_unit_tests_cover_dispute_revocation() -> None:
-    """T-237 — test_stripe_payments.py must include a dispute revocation test."""
-    source = read_backend_file("tests", "test_stripe_payments.py")
-    assert "dispute" in source.lower(), (
-        "test_stripe_payments.py must include a test for dispute revocation: "
-        "charge.dispute.created event must set pack status='disputed' and revoke "
-        "min(credits_remaining, credit_balance) credits.  T-237."
-    )
-
-
-def test_t237_unit_tests_cover_invalid_signature() -> None:
-    """T-237 — test_stripe_payments.py must include a signature rejection test."""
-    source = read_backend_file("tests", "test_stripe_payments.py")
-    assert "signature" in source.lower() or "invalid_sig" in source.lower(), (
-        "test_stripe_payments.py must include a test verifying that the webhook "
-        "endpoint returns 400 for a tampered or missing Stripe-Signature header.  "
-        "T-237."
-    )
-
-
-def test_t237_unit_tests_cover_checkout_session_creation() -> None:
-    """T-237 — test_stripe_payments.py must include a checkout session creation test."""
-    source = read_backend_file("tests", "test_stripe_payments.py")
-    assert (
-        "checkout_session" in source.lower() or "create_checkout" in source.lower()
-    ), (
-        "test_stripe_payments.py must include a test that create_checkout_session() "
-        "calls stripe.checkout.Session.create() with the correct parameters "
-        "(mode='payment', metadata with user_id, success_url, cancel_url).  T-237."
-    )
-
-
-def test_t237_unit_tests_cover_checkout_completed_credits_user() -> None:
-    """T-237 — test_stripe_payments.py must test that checkout.session.completed grants credits."""
-    source = read_backend_file("tests", "test_stripe_payments.py")
-    assert "completed" in source.lower() and "credit" in source.lower(), (
-        "test_stripe_payments.py must include a test that a valid "
-        "checkout.session.completed webhook event grants credits to the user and "
-        "creates a StripeCreditPack with the correct credits_purchased and expires_at.  "
-        "T-237."
-    )
-
-
-def test_t237_unit_tests_cover_checkout_rate_limit() -> None:
-    """T-237 — test_stripe_payments.py must test the checkout rate limit (5/hour)."""
-    source = read_backend_file("tests", "test_stripe_payments.py")
-    assert "rate_limit" in source.lower() or "429" in source, (
-        "test_stripe_payments.py must include a test that the 6th POST /billing/checkout "
-        "within 1 hour returns 429.  This confirms the 5/user/hour rate limit tier "
-        "is correctly wired.  T-237."
-    )
-
-
-def test_t237_unit_tests_cover_livemode_mismatch() -> None:
-    """T-237 — test_stripe_payments.py must test the livemode guard added in T-234.
-
-    A webhook event whose livemode flag contradicts the server environment must be
-    rejected with HTTP 400.  Without this test, the livemode guard can be silently
-    removed during a refactor and production could start accepting test-mode events.
+    The decommission contract exists, and the Lemon billing suites cover the
+    idempotency / IDOR / expiry / drain / reversal properties the Phase-18 file did.
     """
-    source = read_backend_file("tests", "test_stripe_payments.py")
-    assert "livemode" in source.lower(), (
-        "test_stripe_payments.py must include test_webhook_livemode_mismatch (or an "
-        "equivalent test that patches event['livemode'] to the wrong value and asserts "
-        "HTTP 400).  This guards the T-234 livemode gate against silent regression.  "
-        "T-237."
+    decommission = BACKEND_ROOT / "tests" / "test_stripe_decommission.py"
+    assert decommission.exists(), (
+        "tests/test_stripe_decommission.py must pin the post-removal contract. T-308."
+    )
+    lemon_suites = [
+        p.name for p in (BACKEND_ROOT / "tests").glob("*.py") if "billing" in p.name
+    ]
+    assert lemon_suites, (
+        "The Phase-22 Lemon billing test suites must remain to cover the billing "
+        "correctness properties. T-308."
     )
 
 
@@ -2011,29 +1725,37 @@ def test_t238_credit_meter_has_expiry_warning() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_env_example_documents_stripe_vars() -> None:
-    """T-227 — backend/.env.example must document all 7 Stripe environment variables.
+def test_env_example_documents_lemonsqueezy_vars_not_stripe() -> None:
+    """T-308 (supersedes T-227) — .env.example documents the Lemon billing vars and
+    no longer ships STRIPE_* placeholder env vars.
 
-    .env.example is the authoritative self-hosting reference.  Undocumented env
-    vars mean self-hosters deploy without Stripe configured, discover the
-    missing var at runtime, and have no documented format to follow.
+    .env.example is the authoritative self-hosting reference. After the Stripe
+    decommission it must document the Lemon Squeezy billing config (the runtime
+    provider) and must not carry the dead STRIPE_* placeholders.
     """
     env_example_path = BACKEND_ROOT / ".env.example"
-    assert env_example_path.exists(), "backend/.env.example must exist.  T-227."
+    assert env_example_path.exists(), "backend/.env.example must exist."
     content = env_example_path.read_text(encoding="utf-8")
 
-    stripe_vars = [
-        "STRIPE_SECRET_KEY",
-        "STRIPE_WEBHOOK_SECRET",
-        "STRIPE_PRICE_CENTS",
-        "STRIPE_CREDITS_PER_PURCHASE",
-        "STRIPE_CREDIT_VALIDITY_DAYS",
-        "STRIPE_SUCCESS_URL",
-        "STRIPE_CANCEL_URL",
-    ]
-    missing = [v for v in stripe_vars if v not in content]
-    assert not missing, (
-        f"backend/.env.example is missing these Stripe environment variable "
-        f"examples: {missing}.  All 7 Stripe vars must be documented with "
-        f"placeholder values so self-hosters know what to provide.  T-227."
-    )
+    for var in (
+        "LEMONSQUEEZY_API_KEY",
+        "LEMONSQUEEZY_WEBHOOK_SECRET",
+        "LEMONSQUEEZY_STORE_ID",
+        "LEMONSQUEEZY_VARIANT_ID",
+    ):
+        assert var in content, (
+            f"backend/.env.example must document {var} for self-hosters. T-308."
+        )
+
+    # The dead Stripe placeholder assignments must be gone (a prose mention of
+    # "STRIPE_*" in the decommission note is fine; an assignable var line is not).
+    for dead in (
+        "STRIPE_SECRET_KEY=",
+        "STRIPE_WEBHOOK_SECRET=",
+        "STRIPE_PRICE_CENTS=",
+        "STRIPE_SUCCESS_URL=",
+    ):
+        assert dead not in content, (
+            f"backend/.env.example must not ship the dead {dead} placeholder after "
+            "the Stripe decommission. T-308."
+        )

@@ -35,7 +35,6 @@ def _valid_production(**overrides: object):
         "jwt_private_key": _FAKE_PEM,
         "encryption_master_key": "a-real-non-ci-encryption-key",
         "langfuse_secret_key": "",
-        "stripe_secret_key": "",
         # GitHub App fully disabled by default.
         "github_app_id": "",
         "github_app_slug": "",

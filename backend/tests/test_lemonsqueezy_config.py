@@ -1,12 +1,13 @@
-"""Lemon Squeezy config + production-guard tests (Phase 22 — T-292).
+"""Lemon Squeezy config + production-guard tests (Phase 22 — T-292 / T-308).
 
 Covers the derived properties (``lemonsqueezy_enabled`` /
 ``lemonsqueezy_webhook_secrets`` / ``admin_emails``) and the production startup
-guard, which (a) refuses to boot a Lemon-enabled production deployment whose live
+guard, which refuses to boot a Lemon-enabled production deployment whose live
 config is incomplete (blank webhook secret, non-HTTPS success URL, non-positive
-economics, empty currency, or test_mode left True), and (b) SCOPES the legacy Stripe
-``sk_test_*`` guard so a stale test key fails startup only while Stripe is still the
-active checkout provider (Lemon not enabled) — never once Lemon is the sole provider.
+economics, empty currency, or test_mode left True). The legacy Stripe test-key
+startup guard was removed with the Stripe decommission (T-308) — no ``STRIPE_*``
+setting is read anymore, so a Lemon-disabled production simply boots with
+checkout off.
 
 The harness for t292 is pure substring matching; these unit tests are the real
 verification that each guard branch fires for the right reason (asserting the error
@@ -31,9 +32,9 @@ def _valid_production(**overrides: object):
     """Patch ``config.settings`` to an OTHERWISE-VALID production config.
 
     Every unrelated production check (metrics token, HTTPS frontend, real JWT PEM,
-    non-CI encryption key, Langfuse disabled, no Stripe test key, GitHub App off) is
-    satisfied, AND a complete LIVE Lemon config is set — so a raised error can only
-    come from the Lemon/Stripe branch under test, not an unrelated check.
+    non-CI encryption key, Langfuse disabled, GitHub App off) is satisfied, AND a
+    complete LIVE Lemon config is set — so a raised error can only come from the
+    Lemon branch under test, not an unrelated check.
     """
     base: dict[str, object] = {
         "environment": "production",
@@ -42,7 +43,6 @@ def _valid_production(**overrides: object):
         "jwt_private_key": _FAKE_PEM,
         "encryption_master_key": "a-real-non-ci-encryption-key",
         "langfuse_secret_key": "",
-        "stripe_secret_key": "",
         # GitHub App fully disabled.
         "github_app_id": "",
         "github_app_slug": "",
@@ -51,7 +51,7 @@ def _valid_production(**overrides: object):
         "github_app_webhook_secret_prev": "",
         # Complete LIVE Lemon config (enabled + passes the production guard).
         "lemonsqueezy_api_key": "lsq-live-key",
-        "lemonsqueezy_webhook_secret": "lsq-whsec",
+        "lemonsqueezy_webhook_secret": "lsq-secret",
         "lemonsqueezy_webhook_secret_prev": "",
         "lemonsqueezy_store_id": "store_1",
         "lemonsqueezy_variant_id": "variant_1",
@@ -225,33 +225,24 @@ def test_prod_guard_rejects_empty_currency() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Production guard — scoped Stripe sk_test_* guard (both directions)
+# Production guard — Lemon disabled (Stripe runtime decommissioned, T-308)
 # ---------------------------------------------------------------------------
 
 
-def test_stale_stripe_test_key_ignored_when_lemon_enabled() -> None:
-    """AC2: a stale sk_test_* must NOT fail startup once Lemon is the provider."""
-    patches = _valid_production(stripe_secret_key="sk_test_stale")
-    _apply(patches)
-    try:
-        validate_production_settings()  # must not raise — Lemon is enabled
-    finally:
-        _undo(patches)
+def test_lemon_disabled_production_boots_without_stripe_guard() -> None:
+    """T-308: with Lemon disabled, production boots — there is no Stripe guard.
 
-
-def test_stale_stripe_test_key_still_raises_when_lemon_disabled() -> None:
-    """Regression protection: pre-cutover (Lemon off), the sk_test_* guard fires."""
+    The legacy Stripe test-key guard was removed with the Stripe decommission; a
+    Lemon-disabled production deployment simply runs with checkout off and must not
+    fail startup on any billing check.
+    """
     patches = _valid_production(
-        stripe_secret_key="sk_test_stale",
-        # Disable Lemon so Stripe is still the active checkout provider.
         lemonsqueezy_api_key="",
         lemonsqueezy_store_id="",
         lemonsqueezy_variant_id="",
     )
     _apply(patches)
     try:
-        with pytest.raises(RuntimeError) as exc:
-            validate_production_settings()
-        assert "STRIPE_SECRET_KEY" in str(exc.value)
+        validate_production_settings()  # must not raise — billing simply off
     finally:
         _undo(patches)

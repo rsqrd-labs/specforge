@@ -1127,18 +1127,31 @@ def test_t303_late_stripe_grace_provider_disabled_marker() -> None:
     )
 
 
-def test_t303_stripe_dependency_still_present() -> None:
-    """T-303 — the stripe dependency is NOT removed in this phase (gated follow-up)."""
-    pyproject = (BACKEND_ROOT / "pyproject.toml")
-    reqs = (BACKEND_ROOT / "requirements.txt")
-    text = ""
-    if pyproject.exists():
-        text += pyproject.read_text(encoding="utf-8")
-    if reqs.exists():
-        text += reqs.read_text(encoding="utf-8")
-    assert "stripe" in text.lower(), (
-        "The stripe dependency must remain during the 7-day grace path — SDK removal "
-        "is a gated follow-up (Rollout step 8), not part of this phase. T-303."
+def test_t303_stripe_dependency_removed_by_t308() -> None:
+    """T-308 (flips T-303) — the stripe SDK dependency is removed post-cutover.
+
+    T-303 deliberately kept the ``stripe`` dependency present for the bounded
+    grace window; the gated decommission (T-308) removes it once the window has
+    provably closed. This contract is flipped to assert the dependency is gone
+    from both ``pyproject.toml`` and ``requirements.txt`` (the retained
+    ``stripe_credit_packs`` / ``stripe_webhook_events`` audit tables are NOT a
+    dependency line, so they are unaffected).
+    """
+    pyproject = BACKEND_ROOT / "pyproject.toml"
+    reqs = BACKEND_ROOT / "requirements.txt"
+
+    def _has_stripe_dep(path) -> bool:
+        if not path.exists():
+            return False
+        for line in path.read_text(encoding="utf-8").splitlines():
+            stripped = line.strip().strip('"').strip("'")
+            if stripped.lower().startswith("stripe"):
+                return True
+        return False
+
+    assert not _has_stripe_dep(pyproject) and not _has_stripe_dep(reqs), (
+        "The stripe SDK dependency must be removed by the gated decommission "
+        "(pyproject.toml + requirements.txt). T-308."
     )
 
 
