@@ -134,12 +134,33 @@ def test_credit_service_can_deduct_multiple_times_with_same_reason() -> None:
         async def delete(self, *keys):
             for k in keys: self._s.pop(k, None)
 
+    class _PacksResult:
+        def __init__(self, packs):
+            self._packs = list(packs)
+        def scalars(self): return self
+        def all(self): return list(self._packs)
+
     class _DB:
-        def __init__(self, user, rows):
+        def __init__(self, user, rows, packs=None):
             self._user = user
             self._rows = list(rows)
+            self._packs = list(packs or [])
             self.added = []
         async def execute(self, _stmt):
+            try:
+                froms = (
+                    _stmt.get_final_froms()
+                    if hasattr(_stmt, "get_final_froms")
+                    else _stmt.froms
+                )
+                if any(
+                    getattr(from_, "name", None)
+                    in ("stripe_credit_packs", "billing_credit_packs")
+                    for from_ in froms
+                ):
+                    return _PacksResult(self._packs)
+            except AttributeError:
+                pass
             return self
         def scalars(self): return self
         def all(self): return list(self._rows)
