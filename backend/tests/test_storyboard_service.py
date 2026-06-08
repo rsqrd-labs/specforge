@@ -334,10 +334,11 @@ async def inline_generation(db_engine, monkeypatch):
     factory = async_sessionmaker(db_engine, expire_on_commit=False)
 
     async def _await_inline(coro):
-        # Run the would-be background coroutine inline. `return` (rather than a
-        # bare `await`) keeps CodeQL py/ineffectual-statement happy — `await`
-        # is side-effecting, but the rule only sees a discarded expression
-        # statement; the returned value is harmless (callers ignore it).
+        # Run the would-be background coroutine inline. Use `return await` (not
+        # a bare `await` expression statement) to avoid a static-analysis false
+        # positive such as CodeQL `py/ineffectual-statement` while preserving
+        # the intended side effects of awaiting the coroutine; callers ignore
+        # the returned value.
         return await coro
 
     monkeypatch.setattr(storyboard_service, "_spawn_background", _await_inline)
