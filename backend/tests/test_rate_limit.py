@@ -34,8 +34,8 @@ class _FakeRedis:
         now_score = float(args[1])
 
         ss = self._sets.setdefault(key, {})
-        # ZREMRANGEBYSCORE -inf window_start
-        expired = [m for m, s in ss.items() if s <= window_start]
+        # Remove only strictly older entries; keep score == window_start
+        expired = [m for m, s in ss.items() if s < window_start]
         for m in expired:
             del ss[m]
         # ZCARD → conditional ZADD
