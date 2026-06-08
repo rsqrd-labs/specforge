@@ -296,7 +296,11 @@ async def test_governor_backs_off_and_requeues_on_secondary_limit() -> None:
     gov = InstallationRateGovernor(None, installation_id=1)
 
     def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(429, headers={"Retry-After": "30"}, json={"message": "x"})
+        return httpx.Response(
+            429,
+            headers={"Retry-After": "30"},
+            json={"message": "Rate limit exceeded"},
+        )
 
     transport = httpx.MockTransport(handler)
     http = httpx.AsyncClient(transport=transport)
@@ -332,7 +336,11 @@ async def test_sustained_throttling_never_dead_letters() -> None:
     gov = InstallationRateGovernor(None, installation_id=1)
 
     def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(429, headers={"Retry-After": "5"}, json={"message": "x"})
+        return httpx.Response(
+            429,
+            headers={"Retry-After": "5"},
+            json={"message": "Rate limit exceeded"},
+        )
 
     http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     client = make_app_github_client(_FakeTokenSource(), 1, http, governor=gov)
