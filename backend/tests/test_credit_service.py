@@ -93,6 +93,8 @@ class _FakeDB:
             ):
                 return _EmptyPacksResult()
         except AttributeError:
+            # Statement shape isn't FROM-introspectable; fall through to the
+            # default dispatch below.
             pass
         # Counter-based dispatch for refund() tests that use entity_lookup.
         # refund() does not call _expire_user_packs, so these counters are

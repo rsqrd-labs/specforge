@@ -446,6 +446,7 @@ def _retry_after_seconds(response: httpx.Response) -> float:
         try:
             return max(1.0, float(retry_after))
         except ValueError:
+            # Malformed Retry-After header — ignore it and try x-ratelimit-reset.
             pass
     reset = response.headers.get("x-ratelimit-reset")
     if reset is not None:
@@ -456,5 +457,7 @@ def _retry_after_seconds(response: httpx.Response) -> float:
             if delta > 0:
                 return min(delta, _PRIMARY_WINDOW_SECONDS)
         except ValueError:
+            # Malformed x-ratelimit-reset header — fall back to the default
+            # secondary backoff window below.
             pass
     return _SECONDARY_WINDOW_SECONDS

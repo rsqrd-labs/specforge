@@ -115,6 +115,8 @@ class _FakeDB:
             if any(getattr(f, "name", None) == "workspaces" for f in froms):
                 return _FakeResult(self._workspace_name)
         except Exception:
+            # Statement shape isn't FROM-introspectable; fall through to the
+            # default result below.
             pass
         return _FakeResult(self._value)
 

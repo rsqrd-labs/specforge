@@ -120,6 +120,7 @@ def create_app(redis_client: Redis | None = None) -> FastAPI:
         try:
             await task
         except asyncio.CancelledError:
+            # Expected: we just cancelled the recovery loop during shutdown.
             pass
         # Drain any queued Langfuse events before the consumer thread is
         # dropped by interpreter shutdown. No-op when Langfuse is disabled.

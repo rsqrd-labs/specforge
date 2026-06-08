@@ -109,6 +109,8 @@ def main() -> int:
             skipped_already_new += 1
             continue
         except InvalidToken:
+            # Not decryptable with the new key ⇒ this row is not yet rotated;
+            # fall through to the old-key decrypt below.
             pass
 
         # --- Decrypt with old key ---

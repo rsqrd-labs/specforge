@@ -160,6 +160,8 @@ def test_credit_service_can_deduct_multiple_times_with_same_reason() -> None:
                 ):
                     return _PacksResult(self._packs)
             except AttributeError:
+                # Statement shape isn't FROM-introspectable; fall through to the
+                # default result below.
                 pass
             return self
         def scalars(self): return self

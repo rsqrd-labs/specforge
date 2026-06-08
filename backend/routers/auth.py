@@ -99,6 +99,8 @@ async def logout(
         try:
             await auth_service.revoke(refresh_token)
         except AuthError:
+            # Logout is best-effort: an already-invalid or expired token can't
+            # be revoked, but we still clear the cookie below regardless.
             pass
 
     response.delete_cookie(

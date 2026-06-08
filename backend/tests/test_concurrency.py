@@ -101,6 +101,8 @@ class _FakeCreditDB:
             ):
                 return _ScalarResult(None)
         except AttributeError:
+            # Statement shape isn't FROM-introspectable; fall through to the
+            # default User result below.
             pass
         # All User-table queries return the user unconditionally.
         return _ScalarResult(self.user)
