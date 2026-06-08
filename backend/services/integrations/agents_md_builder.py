@@ -105,8 +105,10 @@ def _render_managed_block(stages: dict[str, str]) -> str:
     parts: list[str] = [
         "# Agent context",
         "",
-        "_Managed by SpecForge — edit outside the markers; this block is "
-        "regenerated on every sync._",
+        (
+            "_Managed by SpecForge — edit outside the markers; this block is "
+            "regenerated on every sync._"
+        ),
         "",
         "## What this project is",
         _excerpt(spec),

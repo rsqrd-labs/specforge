@@ -35,10 +35,12 @@ def _render_clarification_block(raw: str) -> str:
         "",
         "## Clarifications",
         "",
-        "Before writing the spec, the user answered the following clarifying "
-        "questions. Use these answers as authoritative additional context "
-        "alongside the problem statement. Each Q&A pair represents the user's "
-        "intent for an aspect of the spec.",
+        (
+            "Before writing the spec, the user answered the following clarifying "
+            "questions. Use these answers as authoritative additional context "
+            "alongside the problem statement. Each Q&A pair represents the user's "
+            "intent for an aspect of the spec."
+        ),
         "",
     ]
     for entry in pairs:

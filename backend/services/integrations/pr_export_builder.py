@@ -126,9 +126,11 @@ def build_pr_body(
     lines = [
         "## SpecForge — executable harness",
         "",
-        "This pull request opens the Harness stage as an **executable spec**: "
-        "failing tests, a CI workflow, and one stub per task. The harness starts "
-        "**red** and goes green as each task is implemented.",
+        (
+            "This pull request opens the Harness stage as an **executable spec**: "
+            "failing tests, a CI workflow, and one stub per task. The harness starts "
+            "**red** and goes green as each task is implemented."
+        ),
         "",
         f"**Stacks:** {stack_label}",
         "",
