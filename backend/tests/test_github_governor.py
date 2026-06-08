@@ -432,9 +432,17 @@ async def test_repo_lock_released_on_failure() -> None:
     redis = _FakeRedis()
     gov = InstallationRateGovernor(redis, installation_id=1)
 
-    with pytest.raises(RuntimeError):
+    # Equivalent to `with pytest.raises(RuntimeError):` but written as an
+    # explicit try/except to work around a CodeQL false positive: CodeQL does
+    # not model pytest.raises.__exit__ suppressing the exception, so it treats
+    # everything after the `with` block as unreachable (py/unreachable-statement).
+    raised = False
+    try:
         async with gov.repo_write_lock(repo_id=77):
             raise RuntimeError("boom")
+    except RuntimeError:
+        raised = True
+    assert raised
 
     # The lock is free — a subsequent writer acquires immediately.
     entered = False
