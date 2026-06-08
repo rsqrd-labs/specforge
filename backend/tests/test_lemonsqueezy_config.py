@@ -21,7 +21,6 @@ from unittest.mock import patch
 import pytest
 
 import config
-from config import validate_production_settings
 
 # A syntactically valid PEM head so the JWT-key production check passes; the value
 # is never used to sign anything in these tests.
@@ -140,7 +139,7 @@ def test_prod_guard_passes_with_complete_live_lemon() -> None:
     patches = _valid_production()
     _apply(patches)
     try:
-        validate_production_settings()  # must not raise
+        config.validate_production_settings()  # must not raise
     finally:
         _undo(patches)
 
@@ -154,7 +153,7 @@ def test_dev_environment_ignores_lemon_guard() -> None:
     )
     _apply(patches)
     try:
-        validate_production_settings()  # must not raise in development
+        config.validate_production_settings()  # must not raise in development
     finally:
         _undo(patches)
 
@@ -164,7 +163,7 @@ def test_prod_guard_rejects_test_mode_true() -> None:
     _apply(patches)
     try:
         with pytest.raises(RuntimeError) as exc:
-            validate_production_settings()
+            config.validate_production_settings()
         assert "LEMONSQUEEZY_TEST_MODE" in str(exc.value)
     finally:
         _undo(patches)
@@ -175,7 +174,7 @@ def test_prod_guard_rejects_blank_webhook_secret() -> None:
     _apply(patches)
     try:
         with pytest.raises(RuntimeError) as exc:
-            validate_production_settings()
+            config.validate_production_settings()
         assert "LEMONSQUEEZY_WEBHOOK_SECRET" in str(exc.value)
     finally:
         _undo(patches)
@@ -188,7 +187,7 @@ def test_prod_guard_rejects_non_https_success_url() -> None:
     _apply(patches)
     try:
         with pytest.raises(RuntimeError) as exc:
-            validate_production_settings()
+            config.validate_production_settings()
         assert "LEMONSQUEEZY_SUCCESS_URL" in str(exc.value)
     finally:
         _undo(patches)
@@ -207,7 +206,7 @@ def test_prod_guard_rejects_non_positive_economics(field: str, token: str) -> No
     _apply(patches)
     try:
         with pytest.raises(RuntimeError) as exc:
-            validate_production_settings()
+            config.validate_production_settings()
         assert token in str(exc.value)
     finally:
         _undo(patches)
@@ -218,7 +217,7 @@ def test_prod_guard_rejects_empty_currency() -> None:
     _apply(patches)
     try:
         with pytest.raises(RuntimeError) as exc:
-            validate_production_settings()
+            config.validate_production_settings()
         assert "LEMONSQUEEZY_CURRENCY" in str(exc.value)
     finally:
         _undo(patches)
@@ -243,6 +242,6 @@ def test_lemon_disabled_production_boots_without_stripe_guard() -> None:
     )
     _apply(patches)
     try:
-        validate_production_settings()  # must not raise — billing simply off
+        config.validate_production_settings()  # must not raise — billing simply off
     finally:
         _undo(patches)

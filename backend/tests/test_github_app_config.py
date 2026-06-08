@@ -13,7 +13,6 @@ from unittest.mock import patch
 import pytest
 
 import config
-from config import validate_production_settings
 
 # A syntactically valid PEM head so the JWT-key production check passes; the
 # value is never used to sign anything in these tests.
@@ -108,7 +107,7 @@ def test_prod_guard_passes_when_app_disabled() -> None:
     patches = _valid_production()
     _apply(patches)
     try:
-        validate_production_settings()  # must not raise
+        config.validate_production_settings()  # must not raise
     finally:
         _undo(patches)
 
@@ -125,7 +124,7 @@ def test_prod_guard_fails_on_empty_private_key_when_app_enabled() -> None:
     _apply(patches)
     try:
         with pytest.raises(RuntimeError) as exc:
-            validate_production_settings()
+            config.validate_production_settings()
         assert "GITHUB_APP_PRIVATE_KEY" in str(exc.value)
     finally:
         _undo(patches)
@@ -141,7 +140,7 @@ def test_prod_guard_fails_on_empty_webhook_secret_when_app_enabled() -> None:
     _apply(patches)
     try:
         with pytest.raises(RuntimeError) as exc:
-            validate_production_settings()
+            config.validate_production_settings()
         assert "GITHUB_APP_WEBHOOK_SECRET" in str(exc.value)
     finally:
         _undo(patches)
@@ -156,7 +155,7 @@ def test_prod_guard_passes_when_app_fully_configured() -> None:
     )
     _apply(patches)
     try:
-        validate_production_settings()  # must not raise
+        config.validate_production_settings()  # must not raise
     finally:
         _undo(patches)
 
@@ -172,6 +171,6 @@ def test_dev_environment_ignores_app_guard() -> None:
     )
     _apply(patches)
     try:
-        validate_production_settings()  # must not raise in development
+        config.validate_production_settings()  # must not raise in development
     finally:
         _undo(patches)

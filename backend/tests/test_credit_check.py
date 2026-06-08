@@ -5,7 +5,7 @@ from uuid import uuid4
 import pytest
 from fastapi import HTTPException
 
-from middleware.credit_check import require_credits
+import middleware.credit_check as credit_check
 from models import User
 
 
@@ -35,10 +35,8 @@ def _make_user() -> User:
 async def test_require_credits_passes_when_balance_sufficient(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import middleware.credit_check as mod
-
-    monkeypatch.setattr(mod, "credit_service", _FakeCreditService(50))
-    checker = require_credits(10)
+    monkeypatch.setattr(credit_check, "credit_service", _FakeCreditService(50))
+    checker = credit_check.require_credits(10)
     await checker(user=_make_user(), db=_FakeDB())
 
 
@@ -46,10 +44,8 @@ async def test_require_credits_passes_when_balance_sufficient(
 async def test_require_credits_raises_402_when_balance_zero(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import middleware.credit_check as mod
-
-    monkeypatch.setattr(mod, "credit_service", _FakeCreditService(0))
-    checker = require_credits(10)
+    monkeypatch.setattr(credit_check, "credit_service", _FakeCreditService(0))
+    checker = credit_check.require_credits(10)
     with pytest.raises(HTTPException) as exc_info:
         await checker(user=_make_user(), db=_FakeDB())
     assert exc_info.value.status_code == 402
