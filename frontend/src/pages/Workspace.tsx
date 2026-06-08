@@ -324,27 +324,6 @@ export default function Workspace() {
   // T-247 critic quality gate: findings surfaced when a generation is held back.
   const activeGate = activeStage ? qualityGateMap[activeStage.id] : undefined
 
-  const handleGateRegenerate = useCallback(() => {
-    if (!activeStage) return
-    clearQualityGate(activeStage.id)
-    void startStream("generate")
-  }, [activeStage, clearQualityGate, startStream])
-
-  const handleGateOverride = useCallback(async () => {
-    if (!activeStage || !currentWorkspace) return
-    // Owner escape hatch: disable the gate for the workspace, then regenerate.
-    // The backend re-enforces owner-only and writes the critic_disabled audit row.
-    await setWorkspaceCritic(currentWorkspace.id, true)
-    setCurrentWorkspace({ ...currentWorkspace, disable_critic: true })
-    clearQualityGate(activeStage.id)
-    void startStream("generate")
-  }, [activeStage, currentWorkspace, setCurrentWorkspace, clearQualityGate, startStream])
-
-  const handleGateDismiss = useCallback(() => {
-    if (!activeStage) return
-    clearQualityGate(activeStage.id)
-  }, [activeStage, clearQualityGate])
-
   const stages = useMemo(() => {
     const workspaceStageIds = new Set(
       currentWorkspace?.stages.map((stage) => stage.id) ?? [],
@@ -670,6 +649,41 @@ export default function Workspace() {
     },
     [activeStage, startStream, setStage, refreshWorkspace],
   )
+
+  const handleGateRegenerate = useCallback(async () => {
+    if (!activeStage) return
+    clearQualityGate(activeStage.id)
+    await runGeneration("regenerate")
+  }, [activeStage, clearQualityGate, runGeneration])
+
+  const handleGateOverride = useCallback(async () => {
+    if (!activeStage || !currentWorkspace) return
+    try {
+      // Owner escape hatch: disable the gate for the workspace, then regenerate.
+      // The backend re-enforces owner-only and writes the critic_disabled audit row.
+      const workspace = await setWorkspaceCritic(currentWorkspace.id, true)
+      setCurrentWorkspace(workspace)
+      setStages(workspace.stages)
+      clearQualityGate(activeStage.id)
+      await runGeneration("regenerate")
+    } catch (error) {
+      setGenericError(
+        getApiErrorMessage(error, "Could not override the quality gate."),
+      )
+    }
+  }, [
+    activeStage,
+    clearQualityGate,
+    currentWorkspace,
+    runGeneration,
+    setCurrentWorkspace,
+    setStages,
+  ])
+
+  const handleGateDismiss = useCallback(() => {
+    if (!activeStage) return
+    clearQualityGate(activeStage.id)
+  }, [activeStage, clearQualityGate])
 
   const requestGeneration = useCallback(
     async (action: "generate" | "regenerate") => {

@@ -28,7 +28,7 @@ export function StreamingOverlay({
     const issueCount = isMissingSections ? missing.length : findings.length
     return (
       <div
-        className="streaming-overlay quality-gate-overlay pointer-events-auto"
+        className="streaming-overlay quality-gate-overlay"
         role="alertdialog"
         aria-label="Quality gate findings"
       >

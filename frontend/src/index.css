@@ -9142,6 +9142,105 @@ button:disabled {
   backdrop-filter: blur(1px);
 }
 
+.quality-gate-overlay {
+  pointer-events: auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(15, 23, 42, 0.34);
+}
+
+.quality-gate-panel {
+  pointer-events: auto;
+  width: min(640px, 100%);
+  max-height: min(620px, calc(100% - 32px));
+  overflow: auto;
+  border-radius: 8px;
+  border: 1px solid rgba(143, 78, 0, 0.22);
+  background: rgba(255, 252, 248, 0.98);
+  box-shadow: 0 24px 70px rgba(43, 35, 26, 0.24);
+  padding: 22px;
+}
+
+.quality-gate-title {
+  margin: 0;
+  color: var(--color-on-surface);
+  font-size: 18px;
+  font-weight: 800;
+}
+
+.quality-gate-subtitle {
+  margin: 8px 0 0;
+  color: var(--color-on-surface-variant);
+  font-size: 14px;
+  line-height: 1.55;
+}
+
+.quality-gate-findings {
+  display: grid;
+  gap: 10px;
+  margin: 18px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.quality-gate-finding {
+  border-radius: 8px;
+  border: 1px solid rgba(143, 78, 0, 0.16);
+  background: rgba(143, 78, 0, 0.06);
+  padding: 11px 12px;
+  color: var(--color-on-surface);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.quality-gate-kind {
+  font-weight: 800;
+}
+
+.quality-gate-ref {
+  color: var(--color-primary);
+  font-weight: 700;
+}
+
+.quality-gate-detail {
+  color: var(--color-on-surface-variant);
+}
+
+.quality-gate-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 18px;
+}
+
+.quality-gate-actions .btn {
+  min-height: 40px;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  padding: 0 14px;
+  font-size: 13px;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.quality-gate-actions .btn-primary {
+  background: var(--color-primary);
+  color: white;
+}
+
+.quality-gate-actions .btn-secondary {
+  border-color: rgba(143, 78, 0, 0.26);
+  background: rgba(143, 78, 0, 0.08);
+  color: var(--color-primary);
+}
+
+.quality-gate-actions .btn-ghost {
+  background: transparent;
+  color: var(--color-on-surface-variant);
+}
+
 .streaming-badge {
   position: absolute;
   bottom: 18px;

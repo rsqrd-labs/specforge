@@ -4,12 +4,13 @@ import { createSSEConnection } from "../services/sseService"
 const apiMocks = vi.hoisted(() => ({
   accessToken: null as string | null,
   csrfToken: null as string | null,
+  getCsrfToken: vi.fn<() => Promise<string | null>>(),
   refreshAccessToken: vi.fn<() => Promise<string | null>>(),
 }))
 
 vi.mock("../services/api", () => ({
   getAccessToken: () => apiMocks.accessToken,
-  getCsrfToken: () => Promise.resolve(apiMocks.csrfToken),
+  getCsrfToken: apiMocks.getCsrfToken,
   refreshAccessToken: apiMocks.refreshAccessToken,
 }))
 
@@ -41,6 +42,10 @@ beforeEach(() => {
   vi.spyOn(console, "warn").mockImplementation(() => {})
   apiMocks.accessToken = null
   apiMocks.csrfToken = null
+  apiMocks.getCsrfToken.mockReset()
+  apiMocks.getCsrfToken.mockImplementation(() =>
+    Promise.resolve(apiMocks.csrfToken),
+  )
   apiMocks.refreshAccessToken.mockReset()
 })
 
@@ -204,6 +209,39 @@ describe("createSSEConnection retry behaviour", () => {
     expect(onDone).toHaveBeenCalledWith("s1")
     expect(onError).not.toHaveBeenCalled()
     expect(console.warn).not.toHaveBeenCalled()
+  })
+
+  it("uses a fresh CSRF token for each retry attempt", async () => {
+    const doneBody = 'data: {"done":true,"stage_id":"s1"}\n\n'
+    apiMocks.accessToken = "valid"
+    apiMocks.getCsrfToken
+      .mockResolvedValueOnce("csrf-used")
+      .mockResolvedValueOnce("csrf-fresh")
+
+    vi.spyOn(globalThis, "fetch")
+      .mockImplementationOnce(() => mockFetchFail(403))
+      .mockImplementationOnce(() => mockFetchOk(doneBody))
+
+    const onDone = vi.fn()
+    const onError = vi.fn()
+
+    createSSEConnection("/stream", vi.fn(), onDone, onError, vi.fn())
+
+    await vi.advanceTimersByTimeAsync(1000)
+    await vi.runAllTimersAsync()
+
+    const firstHeaders = (
+      vi.mocked(globalThis.fetch).mock.calls[0][1] as RequestInit
+    ).headers as Headers
+    const secondHeaders = (
+      vi.mocked(globalThis.fetch).mock.calls[1][1] as RequestInit
+    ).headers as Headers
+
+    expect(apiMocks.getCsrfToken).toHaveBeenCalledTimes(2)
+    expect(firstHeaders.get("X-CSRF-Token")).toBe("csrf-used")
+    expect(secondHeaders.get("X-CSRF-Token")).toBe("csrf-fresh")
+    expect(onDone).toHaveBeenCalledWith("s1")
+    expect(onError).not.toHaveBeenCalled()
   })
 
   it("surfaces a quality_gate_failed event and stops without retrying", async () => {

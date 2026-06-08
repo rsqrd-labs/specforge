@@ -80,12 +80,10 @@ export interface ProviderCatalog {
 }
 
 let accessToken: string | null = null
-let csrfToken: string | null = null
 let refreshPromise: Promise<string | null> | null = null
 
 export function setAccessToken(token: string | null): void {
   accessToken = token
-  csrfToken = null
 }
 
 export function getAccessToken(): string | null {
@@ -155,10 +153,6 @@ export function attachAuthorizationHeader(
 }
 
 export async function getCsrfToken(): Promise<string | null> {
-  if (csrfToken) {
-    return csrfToken
-  }
-
   const token = getAccessToken()
   if (!token) {
     return null
@@ -176,8 +170,7 @@ export async function getCsrfToken(): Promise<string | null> {
     "/auth/csrf-token",
     { headers: config.headers },
   )
-  csrfToken = response.data.csrf_token
-  return csrfToken
+  return response.data.csrf_token
 }
 
 export async function refreshAccessToken(): Promise<string | null> {
