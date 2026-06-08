@@ -94,6 +94,11 @@ const MODE_STAGES: Record<GitHubExportMode, string[]> = {
 
 const STAGE_ADVANCE_MS = 2200
 const POLL_INTERVAL_MS = 1500
+// Client-side timeout for the export enqueue POST. The call should resolve fast
+// (it returns 202 and hands off to the worker); if the request itself hangs we
+// abort via AbortController so the modal falls back to the recoverable error
+// state instead of spinning forever (L-4 — T-189b).
+const EXPORT_REQUEST_TIMEOUT_MS = 30_000
 // After ~60s without a terminal status the export is still progressing on the
 // worker; we hand off to a calm "still working" state the user can close (the
 // TaskCompletionPanel is where they watch it finish) — never a red error.
@@ -259,17 +264,36 @@ export function ExportGitHubModal({
     setPollReady(false)
     setPhase("progress")
 
+    // Bound the enqueue POST: if it hangs, abort so we surface a recoverable
+    // error instead of an infinite spinner (L-4 — T-189b).
+    const controller = new AbortController()
+    const timeoutId = window.setTimeout(
+      () => controller.abort(),
+      EXPORT_REQUEST_TIMEOUT_MS,
+    )
     try {
       // 202 — the export is enqueued on the worker; we poll for the outcome.
-      await exportWorkspaceToGitHub(workspaceId, {
-        repo_name: repoName,
-        visibility,
-        installation_id: installationId,
-        export_mode: exportMode,
-      })
+      await exportWorkspaceToGitHub(
+        workspaceId,
+        {
+          repo_name: repoName,
+          visibility,
+          installation_id: installationId,
+          export_mode: exportMode,
+        },
+        controller.signal,
+      )
       if (mounted.current) setPollReady(true)
     } catch (caught) {
       if (!mounted.current) return
+      if (controller.signal.aborted) {
+        // The export is idempotent (keyed by push_id), so retrying is safe.
+        setError(
+          "The export request timed out. Check your connection and try again.",
+        )
+        setPhase("error")
+        return
+      }
       const status =
         typeof caught === "object" && caught !== null && "response" in caught
           ? (caught as { response?: { status?: number } }).response?.status
@@ -289,6 +313,8 @@ export function ExportGitHubModal({
         ),
       )
       setPhase("error")
+    } finally {
+      window.clearTimeout(timeoutId)
     }
   }, [repoName, visibility, exportMode, installationId, workspaceId])
 

@@ -134,12 +134,16 @@ describe("ExportGitHubModal", () => {
     fireEvent.click(screen.getByRole("button", { name: /export/i }))
 
     await waitFor(() =>
-      expect(mockExport).toHaveBeenCalledWith("ws-1", {
-        repo_name: "my-spec",
-        visibility: "public",
-        installation_id: "inst-row-1",
-        export_mode: "pr_with_tests",
-      }),
+      expect(mockExport).toHaveBeenCalledWith(
+        "ws-1",
+        {
+          repo_name: "my-spec",
+          visibility: "public",
+          installation_id: "inst-row-1",
+          export_mode: "pr_with_tests",
+        },
+        expect.any(AbortSignal),
+      ),
     )
 
     // Staged progress (not a bare spinner): the per-mode stages render.

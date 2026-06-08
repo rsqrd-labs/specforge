@@ -708,10 +708,12 @@ export async function deleteGitHubIntegration(): Promise<void> {
 export async function exportWorkspaceToGitHub(
   id: string,
   body: GitHubExportRequest,
+  signal?: AbortSignal,
 ): Promise<GitHubExportResponse> {
   const response = await api.post<GitHubExportResponse>(
     `/workspaces/${id}/export/github`,
     body,
+    { signal },
   )
   return response.data
 }
