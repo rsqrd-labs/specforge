@@ -80,10 +80,11 @@ class _FakeRedis:
         raise AssertionError("unexpected script")
 
     def _token_bucket(self, key: str, rest: tuple[Any, ...]) -> list[Any]:
-        capacity = float(rest[0])
-        refill = float(rest[1])
-        now = float(rest[2])
-        requested = float(rest[4])
+        capacity_raw, refill_raw, now_raw, _, requested_raw = rest
+        capacity = float(capacity_raw)
+        refill = float(refill_raw)
+        now = float(now_raw)
+        requested = float(requested_raw)
         bucket = self.hashes.get(key)
         tokens = bucket["tokens"] if bucket else capacity
         ts = bucket["ts"] if bucket else now
