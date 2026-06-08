@@ -701,8 +701,6 @@ async def test_storyboard_finalise_marks_ready_storyboards_stale(
 ):
     """End-to-end: StageManager.finalise() propagates stale in one transaction."""
 
-    from unittest.mock import AsyncMock
-
     from services.pipeline.stage_manager import StageManager
 
     user_id, workspace_id = seed
@@ -731,7 +729,7 @@ async def test_storyboard_finalise_marks_ready_storyboards_stale(
     class _U:
         id = user_id
 
-    manager = StageManager(redis_client=AsyncMock())
+    manager = StageManager(redis_client=redis_client)
     async with factory() as session:
         await manager.finalise(stage_id, _U(), session)
 
