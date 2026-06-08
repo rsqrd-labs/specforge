@@ -53,7 +53,6 @@ Task map:
 from __future__ import annotations
 
 import re
-from pathlib import Path
 
 from conftest import BACKEND_ROOT, REPO_ROOT, read_backend_file
 

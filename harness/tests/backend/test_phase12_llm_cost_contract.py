@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import inspect
 import json
-from pathlib import Path
 from typing import Any
 
 from conftest import BACKEND_ROOT, REPO_ROOT, import_backend, read_backend_file

@@ -13,12 +13,10 @@ Finding references map to docs/CODE_REVIEW.md:
 """
 from __future__ import annotations
 
-import ast
 import inspect
 import re
-import textwrap
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 

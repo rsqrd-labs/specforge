@@ -32,8 +32,7 @@ from unittest.mock import AsyncMock
 import pytest
 import pytest_asyncio
 from sqlalchemy import delete
-from sqlalchemy.ext.asyncio import (  # noqa: F401
-    AsyncSession,
+from sqlalchemy.ext.asyncio import (
     async_sessionmaker,
     create_async_engine,
 )
