@@ -154,9 +154,11 @@ class InstallationTokenSource(Protocol):
     documenting the surface the client depends on.
     """
 
-    async def get(self, installation_id: int) -> str: ...
+    async def get(self, installation_id: int) -> str:
+        pass
 
-    async def refresh(self, installation_id: int) -> str: ...
+    async def refresh(self, installation_id: int) -> str:
+        pass
 
 
 class RateGovernor(Protocol):
@@ -168,9 +170,11 @@ class RateGovernor(Protocol):
     ``GitHubThrottledError`` to requeue the worker job on backpressure.
     """
 
-    async def acquire(self, *, write: bool) -> None: ...
+    async def acquire(self, *, write: bool) -> None:
+        pass
 
-    async def observe(self, response: httpx.Response) -> None: ...
+    async def observe(self, response: httpx.Response) -> None:
+        pass
 
 
 class GitHubCircuitBreaker:

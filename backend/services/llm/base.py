@@ -26,7 +26,9 @@ class BaseLLMAdapter(ABC):
     @abstractmethod
     async def stream(
         self, system: str, user: str, max_tokens: int
-    ) -> AsyncGenerator[str, None]: ...
+    ) -> AsyncGenerator[str, None]:
+        pass
 
     @abstractmethod
-    async def complete(self, system: str, user: str, max_tokens: int) -> str: ...
+    async def complete(self, system: str, user: str, max_tokens: int) -> str:
+        pass

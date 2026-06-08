@@ -35,19 +35,26 @@ class AuthError(Exception):
 
 
 class RedisSessionStore(Protocol):
-    async def set(self, name: str, value: str, ex: int) -> Any: ...
+    async def set(self, name: str, value: str, ex: int) -> Any:
+        pass
 
-    async def get(self, name: str) -> Any: ...
+    async def get(self, name: str) -> Any:
+        pass
 
-    async def delete(self, *names: str) -> Any: ...
+    async def delete(self, *names: str) -> Any:
+        pass
 
-    async def sadd(self, name: str, *values: str) -> Any: ...
+    async def sadd(self, name: str, *values: str) -> Any:
+        pass
 
-    async def srem(self, name: str, *values: str) -> Any: ...
+    async def srem(self, name: str, *values: str) -> Any:
+        pass
 
-    async def smembers(self, name: str) -> Any: ...
+    async def smembers(self, name: str) -> Any:
+        pass
 
-    async def expire(self, name: str, time: int) -> Any: ...
+    async def expire(self, name: str, time: int) -> Any:
+        pass
 
 
 class AuthService:
