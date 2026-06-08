@@ -17,7 +17,7 @@ python-dotenv==1.*
 
 # Authentication
 authlib==1.*
-python-jose[cryptography]==3.*
+pyjwt[crypto]==2.*
 passlib==1.*
 
 # LLM Providers

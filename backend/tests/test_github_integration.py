@@ -208,7 +208,7 @@ def _real_jwt_for_user() -> str:
     from datetime import UTC, datetime, timedelta
     from uuid import uuid4 as _uuid4
 
-    from jose import jwt as _jwt
+    import jwt as _jwt
 
     now = datetime.now(UTC)
     claims = {

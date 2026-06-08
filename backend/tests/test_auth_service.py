@@ -4,10 +4,10 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID, uuid4
 
+import jwt
 import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
-from jose import jwt
 
 from models import User
 from services.auth_service import AuthError, AuthService
@@ -354,6 +354,47 @@ def test_verify_access_token_with_expired_token_raises(
             "exp": datetime.now(UTC) - timedelta(minutes=15),
         },
         private_key,
+        algorithm="RS256",
+    )
+
+    with pytest.raises(AuthError):
+        service.verify_access_token(token)
+
+
+def test_verify_access_token_with_malformed_token_raises(
+    signing_keys: tuple[str, str],
+) -> None:
+    """A non-JWT string hits the jwt.PyJWTError branch (T-309: PyJWT migration)."""
+    service = make_service(signing_keys)
+
+    with pytest.raises(AuthError):
+        service.verify_access_token("not.a.valid.jwt")
+
+
+def test_verify_access_token_signed_with_wrong_key_raises(
+    signing_keys: tuple[str, str],
+) -> None:
+    """A valid-shaped token signed by a different key must fail signature
+    verification through the jwt.PyJWTError branch — not slip past it."""
+    service = make_service(signing_keys)
+    other_private_key = (
+        rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        .private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PrivateFormat.PKCS8,
+            encryption_algorithm=serialization.NoEncryption(),
+        )
+        .decode()
+    )
+    token = jwt.encode(
+        {
+            "sub": str(uuid4()),
+            "jti": str(uuid4()),
+            "type": "access",
+            "iat": datetime.now(UTC),
+            "exp": datetime.now(UTC) + timedelta(minutes=15),
+        },
+        other_private_key,
         algorithm="RS256",
     )
 

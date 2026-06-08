@@ -12,10 +12,10 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 
 import httpx
+import jwt
 import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
-from jose import jwt
 
 from services.integrations.github_app_auth import (
     GitHubAppAuth,

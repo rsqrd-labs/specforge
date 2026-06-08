@@ -16,7 +16,7 @@ dependencies = [
     "pydantic-settings==2.*",
     "python-dotenv==1.*",
     "authlib==1.*",
-    "python-jose[cryptography]==3.*",
+    "pyjwt[crypto]==2.*",
     "passlib==1.*",
     "anthropic==0.40.*",
     "openai==1.57.*",

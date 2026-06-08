@@ -6,8 +6,8 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
 from uuid import UUID, uuid4
 
+import jwt
 from authlib.integrations.httpx_client import AsyncOAuth2Client
-from jose import ExpiredSignatureError, JWTError, jwt
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -246,9 +246,9 @@ class AuthService:
     def _decode_token(self, token: str) -> dict[str, Any]:
         try:
             return jwt.decode(token, self.jwt_public_key, algorithms=["RS256"])
-        except ExpiredSignatureError as exc:
+        except jwt.ExpiredSignatureError as exc:
             raise AuthError("Token has expired") from exc
-        except JWTError as exc:
+        except jwt.PyJWTError as exc:
             raise AuthError("Invalid token") from exc
 
     async def _store_refresh_session(self, jti: str, user_id: str) -> None:
@@ -350,5 +350,5 @@ def decode_access_token_claims(token: str) -> dict[str, Any] | None:
         if claims.get("type") != "access":
             return None
         return claims
-    except JWTError:
+    except jwt.PyJWTError:
         return None

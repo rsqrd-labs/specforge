@@ -17043,7 +17043,7 @@ Remove the now-dead Stripe runtime once the 7-day late-webhook grace window has 
 **Priority:** P2
 **Phase:** Standalone hardening — **no ordering dependency**, safe to run at any time; touches only JWT plumbing + dependency manifests.
 **Harness:** No existing harness contract references `jose` / `python-jose` (verified by `grep -rln "jose" harness/` → no match), so **no contract flips and nothing in the harness breaks**. The behavioural auth tests (`backend/tests/test_auth_service.py`, `test_github_app_auth.py`, `test_github_integration.py`) are the guardrail and must stay green.
-**Status:** ☐ Not started
+**Status:** ✅ Done — 2026-06-08 (swapped `python-jose[cryptography]==3.*` → `pyjwt[crypto]==2.*` in both `pyproject.toml` and `requirements.txt`; `import jwt` + `jwt.ExpiredSignatureError`/`jwt.PyJWTError` in `auth_service.py` and `import jwt` in `github_app_auth.py`; three test import lines updated. `uv lock && uv sync` removed `ecdsa`, `python-jose`, and `rsa` from the tree (pyjwt 2.13.0 already present via `supabase-auth`). RS256 token bytes unchanged. AC verified: no `jose`/`python-jose`/`ecdsa` refs remain (source/tests/manifests/lock); the 34 guardrail auth tests green; ruff + black clean; `import main` boots with jose/ecdsa uninstalled. Full suite shows no new failures vs main — the only failures/errors are pre-existing DB/Redis-gated suites (`Connect call failed 127.0.0.1:5432`). CVE-2024-23342 `ecdsa` alert no longer applies.)
 **Depends on:** None.
 
 **Description:**

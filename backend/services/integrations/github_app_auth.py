@@ -39,7 +39,7 @@ from collections.abc import Iterable
 from datetime import UTC, datetime, timedelta
 
 import httpx
-from jose import jwt
+import jwt
 from redis.asyncio import Redis
 
 from config import settings
