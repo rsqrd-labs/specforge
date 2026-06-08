@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import re
 
-import pytest
 from harness_utils import REPO_ROOT, import_backend, read_backend_file
 
 

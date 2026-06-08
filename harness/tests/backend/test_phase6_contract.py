@@ -16,13 +16,11 @@ Second-pass review finding references:
 """
 from __future__ import annotations
 
-import ast
 import re
 from pathlib import Path
 
-import pytest
 
-from conftest import import_backend, read_backend_file
+from conftest import read_backend_file
 
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
