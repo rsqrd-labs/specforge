@@ -509,7 +509,6 @@ def test_phase14_public_share_slug_alphabet_excludes_ambiguous_chars() -> None:
     assert "ALPHABET" in text or "alphabet" in text or "string." in text, (
         "public_share_service.py must define a slug alphabet constant."
     )
-    forbidden_chars = ["'0'", '"0"', "'o'", '"o"', "'1'", '"1"', "'l'", '"l"']
     has_filtered_alphabet = (
         "abcdefghjkmnpqrstuvwxyz" in text
         or "ABCDEFGHJKLMNPQRSTUVWXYZ" in text

@@ -95,7 +95,6 @@ def test_auth_service_get_google_auth_url_does_not_discard_state() -> None:
     get_url_start = source.find("def get_google_auth_url")
     assert get_url_start != -1
 
-    next_def = source.find("\n    ", get_url_start + 1)
     url_body = source[get_url_start:get_url_start + 600]
 
     # The state must not be silently discarded via `_state`
@@ -704,7 +703,6 @@ async def test_credit_service_refund_guard_does_not_double_credit() -> None:
     from uuid import uuid4
 
     module = import_backend("services.credit_service")
-    CreditLedger = import_backend("models.credit_ledger").CreditLedger
     service = module.CreditService()
 
     inserted: list = []
@@ -739,13 +737,8 @@ async def test_credit_service_refund_guard_does_not_double_credit() -> None:
             pass
 
     db = FakeDB()
-    # First call
+    # First call exercises the happy path (finds the original deduction).
     await service.refund(db, original_entry_id)
-    first_inserts = len(db._inserted)
-
-    # Second call — reset call counter but mark as already-refunded
-    db._call = 0
-    db._call_override = True
 
     class IdempotentDB:
         def __init__(self):
@@ -896,11 +889,8 @@ def test_generate_and_regenerate_share_stream_helper() -> None:
     """
     source = read_backend_file("routers", "stage.py")
 
-    # Count how many times the identical error-catch pattern appears
-    dependency_error_count = source.count("StageDependencyError")
-    rate_limit_error_count = source.count("RateLimitError")
-
-    # If the pattern appears more than once in distinct handlers, duplication exists
+    # Duplication is detected by checking whether both handlers define the same
+    # inline error handling, below.
     generate_idx = source.find("async def generate_stage")
     regenerate_idx = source.find("async def regenerate_stage")
 

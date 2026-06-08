@@ -874,7 +874,6 @@ class StageManager:
                         span_id,
                         RuntimeError("stage generation interrupted before completion"),
                     )
-                    span_finished = True
                 # Client disconnected before generation completed. The request-scoped
                 # db session may be torn down, so open a fresh one for cleanup.
                 from database import AsyncSessionLocal
@@ -1068,7 +1067,6 @@ class StageManager:
         )
 
         span_id: str | None = None
-        span_finished = False
         try:
             if trace_id:
                 span_id = await self._start_langfuse_span(
@@ -1130,12 +1128,13 @@ class StageManager:
             await credit_service.refund(db, deduction.id, user.id)
             if span_id:
                 await self._mark_langfuse_span_failed(span_id, exc)
-                span_finished = True
             if isinstance(exc, TimeoutError):
                 raise ProviderError(route.provider, exc) from exc
             raise
         except Exception as exc:
-            if span_id and not span_finished:
+            # Distinct from the clause above (mutually exclusive), so the span
+            # has not been marked failed yet on this path.
+            if span_id:
                 await self._mark_langfuse_span_failed(span_id, exc)
             raise
 

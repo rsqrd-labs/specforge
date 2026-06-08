@@ -453,14 +453,7 @@ def test_phase15_rate_limit_fallback_bulk_eviction() -> None:
 def test_phase15_csrf_token_contains_nonce() -> None:
     # T-185 / M-3: The current HMAC-only token is deterministic given user_id
     # and timestamp — no replay protection. A nonce makes each token unique.
-    # Look in security services and middleware for CSRF token generation.
-    csrf_candidates = [
-        BACKEND_ROOT / "services" / "security" / "csrf.py",
-        BACKEND_ROOT / "services" / "security" / "csrf_service.py",
-        BACKEND_ROOT / "middleware" / "csrf.py",
-        BACKEND_ROOT / "middleware" / "rate_limit.py",
-    ]
-    # Also search any file containing "csrf" in its name.
+    # Search any file containing "csrf" in its name or early content.
     all_backend_files = list(BACKEND_ROOT.rglob("*.py"))
     csrf_files = [
         f
