@@ -543,7 +543,7 @@ class TestGitHubExport:
         # Fail closed: 503, never an inline synchronous fallback.
         assert response.status_code == 503
         assert "unavailable" in response.json()["detail"].lower()
-        assert unstarted == [push]  # the prepared push was marked failed
+        assert unstarted == [push]  # the prepared push was marked unstarted
 
     @pytest.mark.asyncio
     async def test_get_export_no_prior_push_returns_404(
