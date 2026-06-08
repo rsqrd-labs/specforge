@@ -200,6 +200,13 @@ async def test_acquire_fails_open_without_redis() -> None:
 
 
 def _resp(status: int, *, headers: dict[str, str] | None = None, body: Any = None):
+    """Create a mock ``httpx.Response`` for tests.
+
+    Args:
+        status: HTTP status code to set on the response.
+        headers: Optional response headers.
+        body: Optional JSON-serializable response body.
+    """
     return httpx.Response(status, headers=headers or {}, json=body)
 
 
