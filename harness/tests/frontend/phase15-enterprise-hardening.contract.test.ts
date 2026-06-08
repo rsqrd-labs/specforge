@@ -406,7 +406,8 @@ describe("phase15 frontend debt sweep (L-3 through L-6)", () => {
       }
     }
     // Also accept error boundary in the strip component itself.
-    if (!hasErrorBoundary && stripSource) {
+    // (stripSource is non-null here — the early `return` above guarantees it.)
+    if (!hasErrorBoundary) {
       hasErrorBoundary =
         stripSource.includes("ErrorBoundary") ||
         stripSource.includes("componentDidCatch")

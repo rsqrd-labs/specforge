@@ -517,9 +517,7 @@ export default function Workspace() {
   ])
 
   useEffect(() => {
-    if (streamError) {
-      if (streamError) setError(streamError)
-    }
+    if (streamError) setError(streamError)
   }, [streamError])
 
   useEffect(() => {
@@ -1553,7 +1551,7 @@ export default function Workspace() {
               Create Storyboard
             </button>
           </section>
-        ) : !latestStoryboard && !isStoryboardLoading ? (
+        ) : !isStoryboardLoading ? (
           <section className="storyboard-entry-card muted" aria-label="Storyboard locked">
             <div>
               <span className="storyboard-status-badge locked">Locked</span>
