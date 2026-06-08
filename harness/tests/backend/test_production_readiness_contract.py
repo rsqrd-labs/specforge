@@ -45,8 +45,10 @@ def test_credit_ledger_constraint_is_not_broad_unique_on_user_reason() -> None:
         "uq_credit_ledger_refund_reason" in all_migration_sources
         or (
             "LIKE 'refund:%'" in all_migration_sources
-            or "LIKE" in all_migration_sources
-            and "refund" in all_migration_sources
+            or (
+                "LIKE" in all_migration_sources
+                and "refund" in all_migration_sources
+            )
         )
     )
 
