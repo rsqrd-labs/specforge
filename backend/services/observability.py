@@ -606,8 +606,11 @@ _SECRET_PATTERNS: tuple[re.Pattern[str], ...] = (
     # GitHub tokens (Phase 21 — T-283): installation (ghs_), user-to-server
     # (ghu_), OAuth (gho_), PAT (ghp_), and refresh (ghr_). Installation tokens
     # are credentials — scrub the value wherever it appears, not just under a
-    # known key.
-    re.compile(r"gh[pousr]_[A-Za-z0-9]{20,}"),
+    # known key. The char class includes ``.``/``-``/``_`` so it also matches the
+    # new JWT-based *stateless* installation-token format (``ghs_`` + two dots,
+    # ~520 chars; GitHub's recommended regex is ``ghs_[A-Za-z0-9.\-_]{36,}``) —
+    # an alphanumeric-only class would leak the dotted JWT tail in logs.
+    re.compile(r"gh[pousr]_[A-Za-z0-9._-]{20,}"),
     # Lemon Squeezy API keys (Phase 22 — T-304): JWTs (three base64url segments).
     # Scrubbed wherever they appear; the Bearer pattern also catches them in an
     # Authorization header. Three dot-separated segments keep this specific so it

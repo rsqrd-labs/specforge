@@ -311,6 +311,24 @@ def test_redact_masks_github_app_private_key_and_installation_token() -> None:
     assert "[REDACTED]" in redacted["note"]
 
 
+def test_redact_masks_new_stateless_installation_token_format() -> None:
+    """GitHub App stateless installation tokens (changelog 2026-05-15) are the
+    JWT-based ``ghs_`` + two dots, ~520-char format. The scrubber must redact the
+    *whole* token — an alphanumeric-only pattern would stop at the first dot and
+    leak the dotted JWT tail (incl. the signature segment) in logs."""
+    header = "eyJhbGci-OiJ_" + "A" * 200
+    payload = "B" * 180
+    signature = "C" * 120
+    token = f"ghs_{header}.{payload}.{signature}"
+
+    redacted = redact_sensitive_data(f"minted installation token {token} for inst 42")
+
+    assert token not in redacted
+    # The signature segment in particular must not survive partial redaction.
+    assert signature not in redacted
+    assert "[REDACTED]" in redacted
+
+
 def test_redact_masks_lemonsqueezy_secrets_and_nonce() -> None:
     """T-304/T-308: the Lemon API key, both webhook secrets, and the raw checkout
     nonce are scrubbed by key; the API-key JWT and the X-Signature hex are scrubbed
