@@ -256,6 +256,11 @@ async def test_observe_realigns_bucket_to_reported_remaining() -> None:
 
 
 class _FakeTokenSource:
+    """Test double for installation token retrieval/refresh.
+
+    Always returns the same fixed token value.
+    """
+
     async def get(self, installation_id: int) -> str:
         return "tok"
 
