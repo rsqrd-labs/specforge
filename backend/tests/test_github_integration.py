@@ -93,13 +93,17 @@ class _FakeRedis:
         self,
         script: str,
         numkeys: int,
-        key: str,
-        now_str: str,
-        window_start_str: str,
-        limit_str: str,
-        member: str,
-        ttl_str: str,
+        *args: str,
     ) -> int:
+        if len(args) < 5:
+            raise ValueError("expected at least 5 eval args: key, now, window_start, limit, member")
+
+        key = args[0]
+        now_str = args[1]
+        window_start_str = args[2]
+        limit_str = args[3]
+        member = args[4]
+
         now = float(now_str)
         window_start = float(window_start_str)
         limit = int(limit_str)
