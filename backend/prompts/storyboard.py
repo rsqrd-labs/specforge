@@ -300,8 +300,6 @@ class StoryboardTheme(BaseModel):
 
     @model_validator(mode="after")
     def _palette_is_hex(self) -> "StoryboardTheme":
-        import re
-
         hex_re = re.compile(r"^#[0-9A-Fa-f]{6}$")
         for colour in self.palette:
             if not hex_re.match(colour):
