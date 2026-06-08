@@ -289,6 +289,15 @@ async def test_oauth_replay_auth_service_rejects_missing_state() -> None:
 # ---------------------------------------------------------------------------
 
 
+def _cleanup_runs(cleanup_done: bool) -> bool:
+    """Model the finally-block guard in ``StageManager.generate()``.
+
+    The disconnect-cleanup/refund path runs only when the stream did *not*
+    complete, i.e. ``if not _cleanup_done``.
+    """
+    return not cleanup_done
+
+
 def test_sse_cleanup_done_flag_semantics() -> None:
     """SSE lifecycle — _cleanup_done=True skips the disconnect cleanup path.
 
@@ -297,18 +306,7 @@ def test_sse_cleanup_done_flag_semantics() -> None:
     successfully.  This test confirms the design contract: once set, the flag
     gates the cleanup path to be a no-op.
     """
-    # Simulate the finally-block guard logic inline to confirm the contract.
-    _cleanup_done = False
-
-    # Simulate normal completion path (sets _cleanup_done=True before finally).
-    _cleanup_done = True
-
-    # The guard: ``if not _cleanup_done: ... refund ...``
-    cleanup_executed = False
-    if not _cleanup_done:
-        cleanup_executed = True  # pragma: no cover
-
-    assert not cleanup_executed, (
+    assert not _cleanup_runs(cleanup_done=True), (
         "cleanup_done=True must prevent the disconnect-cleanup/refund path from "
         "executing (SSE lifecycle contract)"
     )
@@ -320,13 +318,7 @@ def test_sse_cleanup_done_false_triggers_cleanup() -> None:
     When a stream terminates via exception before ``_cleanup_done`` is set,
     the finally block must execute the disconnect-cleanup/refund path.
     """
-    _cleanup_done = False
-
-    cleanup_executed = False
-    if not _cleanup_done:
-        cleanup_executed = True
-
-    assert cleanup_executed, (
+    assert _cleanup_runs(cleanup_done=False), (
         "cleanup_done=False must allow the disconnect-cleanup path to execute "
         "on stream failure (SSE lifecycle contract)"
     )
