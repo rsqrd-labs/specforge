@@ -80,10 +80,11 @@ class _FakeRedis:
         raise AssertionError("unexpected script")
 
     def _token_bucket(self, key: str, rest: tuple[Any, ...]) -> list[Any]:
-        capacity = float(rest[0])
-        refill = float(rest[1])
-        now = float(rest[2])
-        requested = float(rest[4])
+        capacity_raw, refill_raw, now_raw, _, requested_raw = rest
+        capacity = float(capacity_raw)
+        refill = float(refill_raw)
+        now = float(now_raw)
+        requested = float(requested_raw)
         bucket = self.hashes.get(key)
         tokens = bucket["tokens"] if bucket else capacity
         ts = bucket["ts"] if bucket else now
@@ -200,6 +201,13 @@ async def test_acquire_fails_open_without_redis() -> None:
 
 
 def _resp(status: int, *, headers: dict[str, str] | None = None, body: Any = None):
+    """Create a mock ``httpx.Response`` for tests.
+
+    Args:
+        status: HTTP status code to set on the response.
+        headers: Optional response headers.
+        body: Optional JSON-serializable response body.
+    """
     return httpx.Response(status, headers=headers or {}, json=body)
 
 
@@ -256,6 +264,11 @@ async def test_observe_realigns_bucket_to_reported_remaining() -> None:
 
 
 class _FakeTokenSource:
+    """Test double for installation token retrieval/refresh.
+
+    Always returns the same fixed token value.
+    """
+
     async def get(self, installation_id: int) -> str:
         return "tok"
 
@@ -296,7 +309,11 @@ async def test_governor_backs_off_and_requeues_on_secondary_limit() -> None:
     gov = InstallationRateGovernor(None, installation_id=1)
 
     def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(429, headers={"Retry-After": "30"}, json={"message": "x"})
+        return httpx.Response(
+            429,
+            headers={"Retry-After": "30"},
+            json={"message": "Rate limit exceeded"},
+        )
 
     transport = httpx.MockTransport(handler)
     http = httpx.AsyncClient(transport=transport)
@@ -332,7 +349,11 @@ async def test_sustained_throttling_never_dead_letters() -> None:
     gov = InstallationRateGovernor(None, installation_id=1)
 
     def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(429, headers={"Retry-After": "5"}, json={"message": "x"})
+        return httpx.Response(
+            429,
+            headers={"Retry-After": "5"},
+            json={"message": "Rate limit exceeded"},
+        )
 
     http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     client = make_app_github_client(_FakeTokenSource(), 1, http, governor=gov)
