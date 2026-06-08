@@ -121,7 +121,7 @@ describe("T-055: Quality badge in StageNavigator", () => {
         eval_result: makeEvalResult({ overall_score: 80 }),
       }),
     ]
-    const { container } = render(
+    render(
       <StageNavigator
         stages={stages}
         activeStageId="s1"

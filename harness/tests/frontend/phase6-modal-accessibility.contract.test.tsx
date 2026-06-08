@@ -3,13 +3,11 @@
  * RED before T-093 is implemented (no useFocusTrap, no ARIA attributes on modals).
  * GREEN after useFocusTrap.ts is created and all three modals apply it.
  */
-import { render, screen, fireEvent } from "@testing-library/react"
-import { describe, expect, it, vi } from "vitest"
+import { describe, expect, it } from "vitest"
 import { readFileSync } from "node:fs"
 import { existsSync } from "node:fs"
 import { fileURLToPath } from "node:url"
 import { resolve, dirname } from "node:path"
-import { useRef } from "react"
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const REPO_ROOT = resolve(__dirname, "../../..")

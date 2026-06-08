@@ -34,7 +34,6 @@ import { fileURLToPath } from "node:url"
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const REPO_ROOT = resolve(__dirname, "../../..")
-const FRONTEND_SRC = resolve(REPO_ROOT, "frontend/src")
 
 async function tryRead(relPath: string): Promise<string | null> {
   try {
