@@ -195,8 +195,9 @@ async def test_rate_limit_middleware_returns_429_when_ip_limit_exceeded() -> Non
 async def test_rate_limit_middleware_allows_20th_hourly_login_attempt() -> None:
     fake_redis = _FakeRedis()
     now = time.time()
+    LOGIN_ATTEMPT_AGE_OFFSET_SECONDS = 600
     fake_redis._sets["ratelimit:login_hourly:203.0.113.10"] = {
-        f"login_{i}": now - 600 - i for i in range(19)
+        f"login_{i}": now - LOGIN_ATTEMPT_AGE_OFFSET_SECONDS - i for i in range(19)
     }
 
     app = FastAPI()
