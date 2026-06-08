@@ -17036,6 +17036,95 @@ Remove the now-dead Stripe runtime once the 7-day late-webhook grace window has 
 
 ---
 
+### T-309 — Replace `python-jose` with PyJWT (eliminate the vulnerable transitive `ecdsa` dependency)
+
+**Category:** Backend / Dependency / Security Hardening
+**Severity:** Low (defense-in-depth — the vulnerable code path is unreachable in this codebase today)
+**Priority:** P2
+**Phase:** Standalone hardening — **no ordering dependency**, safe to run at any time; touches only JWT plumbing + dependency manifests.
+**Harness:** No existing harness contract references `jose` / `python-jose` (verified by `grep -rln "jose" harness/` → no match), so **no contract flips and nothing in the harness breaks**. The behavioural auth tests (`backend/tests/test_auth_service.py`, `test_github_app_auth.py`, `test_github_integration.py`) are the guardrail and must stay green.
+**Status:** ☐ Not started
+**Depends on:** None.
+
+**Description:**
+Migrate all JWT signing/verification off the barely-maintained `python-jose` onto **PyJWT**, permanently removing the transitive `ecdsa` package (CVE-2024-23342) — and `rsa` — from the dependency tree. This is a dependency-hygiene change with **no behavioural impact**: the same JWTs (RS256, same keys, same claims, same TTLs) are produced and verified, by the same `cryptography` backend.
+
+**Background / why (full context for the implementing agent):**
+- Dependabot flags **`ecdsa` 0.19.2** — **CVE-2024-23342 / GHSA-wj6h-64fc-37mp** (the "Minerva" timing attack on the P-256 curve: timing `ecdsa.SigningKey.sign_digest()` can leak the per-signature nonce and recover the private key). **ECDSA signing, key generation, and ECDH are affected; signature *verification* is not.** The `python-ecdsa` maintainers consider side-channel attacks out of scope: **there is no planned fix and no patched version**, so "bump the version" is not an option.
+- `ecdsa` is **not a direct dependency**. It is pulled in **transitively and solely by `python-jose`** (`python-jose` → `ecdsa`, `pyasn1`, `rsa`). `python-jose` only loads `ecdsa` for the **EC JWT algorithms (ES256/ES384/ES512)**.
+- This codebase signs and verifies **only RS256** JWTs (see `services/auth_service.py` and `services/integrations/github_app_auth.py`; the GitHub/Lemon webhook verifications are HMAC-SHA256, not ECDSA). **The vulnerable `ecdsa` code is therefore never executed — the alert is not exploitable here today.** The migration is the clean permanent fix rather than a perpetual Dependabot dismissal.
+- **PyJWT 2.13.0 with the `[crypto]` extra is already resolved in `backend/uv.lock`** (pulled by `supabase-auth`), so `cryptography` is already in the tree and **no new compiled dependency is introduced** by this change.
+- **Why low-risk:** PyJWT exposes the identical surface this code uses — `jwt.encode()`, `jwt.decode()`, `jwt.get_unverified_header()` — with the same call signatures; only the import line and two exception class names change. RS256 sign/verify is delegated to `cryptography` in **both** libraries, so token bytes are interchangeable — JWTs issued before the deploy still verify after it (no forced logout, no key rotation). The project uses **no `aud`/audience claim and no EC algorithm**, so none of PyJWT's stricter audience/algorithm validation applies.
+
+**Implementation requirements** (exact edits; line numbers are current-as-of-authoring — match on content, not line number):
+
+1. **`backend/services/auth_service.py`**
+   - Replace the import (line ~10):
+     ```python
+     # from:
+     from jose import ExpiredSignatureError, JWTError, jwt
+     # to:
+     import jwt
+     ```
+   - `_decode_token` (lines ~246–252): map the exception names. PyJWT keeps `ExpiredSignatureError`; `jwt.PyJWTError` is the catch-all base equivalent to jose's `JWTError`. **Preserve the order** — `ExpiredSignatureError` first, because in PyJWT it subclasses `InvalidTokenError`/`PyJWTError`:
+     ```python
+     def _decode_token(self, token: str) -> dict[str, Any]:
+         try:
+             return jwt.decode(token, self.jwt_public_key, algorithms=["RS256"])
+         except jwt.ExpiredSignatureError as exc:
+             raise AuthError("Token has expired") from exc
+         except jwt.PyJWTError as exc:
+             raise AuthError("Invalid token") from exc
+     ```
+   - `decode_access_token_claims` (lines ~346–354): swap the catch-all:
+     ```python
+         except jwt.PyJWTError:
+             return None
+     ```
+   - The `jwt.encode(claims, self.jwt_private_key, algorithm="RS256")` call (line ~238) is **unchanged** — same signature. Its `iat`/`exp` are `datetime` objects; PyJWT accepts `datetime` for `exp`/`iat`/`nbf` and converts to POSIX, exactly as jose did.
+
+2. **`backend/services/integrations/github_app_auth.py`**
+   - Replace the import (line ~42): `from jose import jwt` → `import jwt`.
+   - The `jwt.encode(claims, self._private_key, algorithm="RS256")` call (line ~157) is **unchanged** (claims are integer POSIX timestamps — fully compatible).
+
+3. **Tests — import line only** (every `encode` / `decode` / `get_unverified_header` call is PyJWT-compatible verbatim):
+   - `backend/tests/test_auth_service.py` (line ~10): `from jose import jwt` → `import jwt`.
+   - `backend/tests/test_github_app_auth.py` (line ~18): `from jose import jwt` → `import jwt` (file uses `jwt.get_unverified_header(token)["alg"]` and `jwt.decode(...)` — both exist in PyJWT with the same signature).
+   - `backend/tests/test_github_integration.py` (line ~211): `from jose import jwt as _jwt` → `import jwt as _jwt`.
+   - If any assertion checks a jose-specific exception **type** or message, update it to the PyJWT equivalent (`jwt.ExpiredSignatureError` / `jwt.PyJWTError`) — **do not weaken the assertion**.
+
+4. **Dependency manifests — update BOTH** (the repo pins deps in two places; mirrors how T-308 removed `stripe`):
+   - `backend/pyproject.toml` (line ~19): `"python-jose[cryptography]==3.*",` → `"pyjwt[crypto]==2.*",`
+   - `backend/requirements.txt` (line ~20): `python-jose[cryptography]==3.*` → `pyjwt[crypto]==2.*`
+   - Then `cd backend && uv lock && uv sync`. Confirm via `git diff backend/uv.lock` that **`python-jose` and `ecdsa` are removed** (also `rsa`, whose only parent is `python-jose`). `pyasn1` may remain — it has another parent — which is correct and fine.
+
+5. **Do NOT change anything else.** `JWT_PRIVATE_KEY` / `JWT_PUBLIC_KEY` (RS256 PEM) env vars, the `services/security/token_service.py` `ALGORITHM = "RS256"` constant, `CLAUDE.md`, key handling, claim contents, token TTLs, and the `RS256` algorithm all stay exactly as they are. No migration, no schema, no config-key change.
+
+**Security / reliability requirements:**
+- The decode allow-list `algorithms=["RS256"]` **must be preserved on every `jwt.decode` call** — never widen it and never omit it. (PyJWT raises if `algorithms` is omitted, but the explicit RS256-only list is the security-critical invariant that blocks `alg=none` / algorithm-confusion attacks.)
+- RS256 sign/verify is byte-identical across `python-jose[cryptography]` and `pyjwt[crypto]` (both delegate to `cryptography`), so in-flight tokens issued before the deploy verify after it — no forced logout, no key rotation.
+- Keep `ExpiredSignatureError` **before** the `PyJWTError` catch-all so expired tokens still surface "Token has expired", not the generic "Invalid token".
+
+**Acceptance criteria:**
+1. `grep -rn "from jose\|import jose\|python-jose\|python_jose" backend/` returns **nothing** (source, tests, `pyproject.toml`, `requirements.txt`).
+2. `grep -in "ecdsa" backend/uv.lock` returns **nothing**; `python-jose` is absent from `backend/uv.lock`, `backend/pyproject.toml`, and `backend/requirements.txt`.
+3. `cd backend && uv run pytest tests/test_auth_service.py tests/test_github_app_auth.py tests/test_github_integration.py -q` is green; full `uv run pytest tests/ -q` shows **no new failures versus `main`** (DB/Redis-gated suites that error without Postgres/Redis locally are pre-existing and unrelated to this change).
+4. `cd backend && uv run ruff check .` and `uv run black --check .` are clean.
+5. `cd backend && uv run python -c "import main"` boots with `python-jose` / `ecdsa` uninstalled.
+6. The Dependabot `ecdsa` (CVE-2024-23342) alert no longer applies — the package is gone from the resolved tree.
+
+**Testing requirements:** No new tests are required — the existing auth coverage is the guardrail (`test_auth_service.py` exercises access/refresh sign → verify → expiry; `test_github_app_auth.py` exercises App-JWT mint, header `alg=RS256`, and decode; `test_github_integration.py` mints a signed token). All three must pass **unchanged except their import line**. Add a focused regression assertion only if a gap is found (e.g. an expired-token test that previously caught `jose.ExpiredSignatureError` and now must catch `jwt.ExpiredSignatureError`).
+
+**Rollback considerations:** Revert the import lines, the two exception names, and the two manifest lines, then `uv lock && uv sync` to restore `python-jose`. No data, schema, key, token-format, or migration change is involved, so rollback is a pure dependency + import reversion with zero operational impact.
+
+**Estimated complexity:** S (≈30–45 min) · **Estimated implementation risk:** Low — mechanical, fully covered by existing auth tests, RS256 token bytes unchanged, no schema/key/config impact.
+
+**Affected modules/files:** `backend/services/auth_service.py`, `backend/services/integrations/github_app_auth.py`, `backend/tests/test_auth_service.py`, `backend/tests/test_github_app_auth.py`, `backend/tests/test_github_integration.py`, `backend/pyproject.toml`, `backend/requirements.txt`, `backend/uv.lock` (regenerated). **No** harness contract, migration, config-key, or docs change.
+
+---
+
+_tasks.md · SpecForge V1 · Version 2.11.0 · 2026-06-08 — Security/dependency hardening: **added T-309** — replace `python-jose` with PyJWT to eliminate the transitive `ecdsa` dependency (CVE-2024-23342 "Minerva" P-256 timing attack; no upstream fix planned). `ecdsa` is unreachable today (the codebase signs/verifies RS256 only; `python-jose` pulls `ecdsa` solely for unused EC algorithms), so the migration is dependency hygiene, not an exploit fix. PyJWT 2.13.0`[crypto]` is already in `uv.lock` (via `supabase-auth`); the swap changes only the import line + two exception names in `auth_service.py`/`github_app_auth.py`, three test import lines, and the `python-jose[cryptography]==3.*` pin in both `pyproject.toml` and `requirements.txt`. RS256 token bytes are unchanged (same `cryptography` backend), no harness contract references jose, no migration/schema/key/config change. S · Low risk._
+
 _tasks.md · SpecForge V1 · Version 2.10.1 · 2026-06-05 — Phase 22 post-review amendments (close the gaps from the design review): (1) **added T-308** — the gated Stripe decommission (≥7 days post-cutover, hard operational gate on zero `provider="stripe"` webhook receipts) that removes `stripe_service.py`, the `stripe` SDK dependency, the scoped `sk_test_*` config guard, the `sk_live_*`/`whsec_*` observability patterns, and the T-303 grace adapter, while **retaining** the `stripe_credit_packs`/`stripe_webhook_events` audit tables + backfilled rows; it sits **outside** the 83-contract `phase25` harness and must flip `test_t303_stripe_dependency_still_present`. So the Stripe removal is now an explicit status-tracked task, not a prose pointer to Plan §25.9 step 8. (2) **Cross-referenced T-308** from the Phase-22 header and from T-303 (description + step 4). (3) **T-300** gained an event-catalog **verification requirement** — confirm Lemon's current webhook catalog maps one-time-order chargebacks/disputes onto the `order_refunded`/`fraudulent` inputs (Lemon is Merchant of Record; reconcile lane 2 backstops the rest), recorded as a checklist item not an in-code assumption. No existing task's economics, idempotency, or security invariants were changed; the account-deletion RESTRICT-FK settlement remains the documented ops step in T-307 (no user-deletion endpoint exists in V1, so no code path is added). The original 18-task set (2.10.0) is unchanged; T-308 brings Phase 22 to 19 tasks._
 
 _tasks.md · SpecForge V1 · Version 2.10.0 · 2026-06-05 — Phase 22 Lemon Squeezy Billing Migration T-290 through T-307 (18 tasks implementing `V1 spec.md` v2.1.0 §9-12 and `Plan v1.md` §25, verified by the `phase25`-named backend + frontend harness contracts; supersedes the Phase 18 Stripe tasks at runtime without deleting them). Strict A→C ordering. Backend: migration 0018 (six provider-neutral billing tables — checkout_attempts/credit_packs/credit_debts/admin_corrections/webhook_events/reconciliation_cursors — three credit_ledger reason-uniqueness indexes, and an idempotent balance-preserving Stripe→neutral backfill; Stripe tables retained); ORM models + reworked billing schemas; LEMONSQUEEZY_* + admin_user_emails config with a scoped production guard; a generic queue wrapper (GitHub throttle + gh:deadletter preserved) + billing_job→billing:deadletter; CreditService onto BillingCreditPack with credits_consumed/expired tracking + a debt-first grant helper; LemonSqueezyService (httpx JSON:API checkout + get_order); the attempt-first Lemon-only billing API (checkout_ref polling, IDOR-safe status, 7-day Stripe-session grace); raw-body two-secret-HMAC webhook ingestion → sanitised durable inbox → enqueue-by-id; the durable worker job + 60s pending-sweep (stale-processing reclaim, deterministic billing_wh:{id} dedup, failed-state-in-separate-txn) + retention purge + crons; order_created processing anchored to the checkout-attempt snapshot (not live config) with the full validation checklist and provider-order/ledger idempotency; order_refunded/fraud with tax-normalised proportional revocation, the two-component refund:billing:{pack}:{cents} idempotency reason, single-ordered deadlock-safe pack locking, and recoverable billing-credit debt (expired value never debt); the cursor-locked three-lane reconcile that never auto-grants and bounds provider I/O; an allowlist-gated, idempotent, audited admin-correction path; Stripe cutover (Lemon-only checkout + late-Stripe-event grace adapter, no SDK removal); provider-labelled specforge_billing_* metrics + Lemon redaction + structured events + alerts; behavioural test suite + full contract green-gate. Frontend (Modern Indica, evolves the existing Billing page — saffron/lotus/slate, glassmorphism, no new tokens): BillingCreditPack rename, checkout_ref polling, payment-reversal debt as a distinct matter-of-fact slate note never summed into usable balance, no visible Stripe copy, plus the /credits/balance billing_debt_credits backend field. Docs/RUNBOOK/release-gate/smoke updated; Stripe SDK/import removal deferred to a gated follow-up ≥7 days post-cutover._
