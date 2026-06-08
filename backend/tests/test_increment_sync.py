@@ -318,7 +318,6 @@ async def test_increment_push_creates_only_new_issues(session: AsyncSession) -> 
     increment."""
     seeded = await _seed_baseline(session, tasks_content=_BASELINE_TASKS + _NEW_TASK)
     inc = await _make_increment(session, seeded["workspace"])
-    seeded["push"]  # baseline push
     stub = _StubClient()
     stub.issue_states[101] = "open"
     stub.issue_states[102] = "open"
