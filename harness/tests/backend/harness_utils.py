@@ -23,6 +23,7 @@ def import_backend(module_name: str) -> Any:
         return importlib.import_module(module_name)
     except ModuleNotFoundError as exc:
         pytest.fail(f"Expected backend module '{module_name}' to exist: {exc}")
+        raise  # pragma: no cover - pytest.fail always raises; satisfies flow analysis
 
 
 def read_backend_file(*parts: str) -> str:
