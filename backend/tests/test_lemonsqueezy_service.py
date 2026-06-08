@@ -19,7 +19,7 @@ from uuid import UUID, uuid4
 import httpx
 import pytest
 
-import services.lemonsqueezy_service as lemon_mod
+from services import lemonsqueezy_service as lemon_mod
 from services.lemonsqueezy_service import (
     LemonOrder,
     LemonSqueezyError,

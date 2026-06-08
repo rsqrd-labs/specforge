@@ -8,7 +8,7 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from redis.exceptions import RedisError
 
-import middleware.rate_limit as rate_limit_module
+from middleware import rate_limit as rate_limit_module
 from middleware.rate_limit import (
     RateLimitMiddleware,
     _local_sliding_window_check,

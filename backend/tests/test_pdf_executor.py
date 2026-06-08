@@ -17,7 +17,7 @@ import time
 
 import pytest
 
-import services.pipeline.pdf_export_service as pdf_module
+from services.pipeline import pdf_export_service as pdf_module
 from services.pipeline.pdf_export_service import _PDF_EXECUTOR
 
 # ---------------------------------------------------------------------------
