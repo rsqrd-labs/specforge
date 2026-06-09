@@ -359,8 +359,7 @@ def _markdown_shape_issues(artifact_md: str) -> list[CompletenessIssue]:
             CompletenessIssue(
                 code="dangling_trailing_line",
                 detail=(
-                    "The artifact appears to end mid-table, mid-list, or "
-                    "mid-clause."
+                    "The artifact appears to end mid-table, mid-list, or " "mid-clause."
                 ),
             )
         )

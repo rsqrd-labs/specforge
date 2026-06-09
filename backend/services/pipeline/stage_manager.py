@@ -1028,9 +1028,7 @@ class StageManager:
         deduction = (
             None
             if free
-            else await credit_service.deduct(
-                db, user.id, credit_cost, credit_reason
-            )
+            else await credit_service.deduct(db, user.id, credit_cost, credit_reason)
         )
 
         stage.status = "in_progress"

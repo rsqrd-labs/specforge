@@ -42,8 +42,7 @@ class LLMCompletionInfo:
             return
         self.finish_reason = value
         self.stopped_by_limit = (
-            value in _LIMIT_FINISH_REASONS
-            or value.upper() in _LIMIT_FINISH_REASONS
+            value in _LIMIT_FINISH_REASONS or value.upper() in _LIMIT_FINISH_REASONS
         )
 
 
