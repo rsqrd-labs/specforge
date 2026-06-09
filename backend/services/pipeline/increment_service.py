@@ -98,10 +98,11 @@ logger = logging.getLogger(__name__)
 # passed to ``credit_service.deduct`` with ``reason="increment"``.
 INCREMENT_CREDIT_COST = 5
 
-# Increment generation rides the Tasks routing tiers — it produces TASKS-shaped
-# output and shares the ``tasks.generate`` operation/budget.
+# Increment generation produces TASKS-shaped output and shares the
+# ``tasks.generate`` operation/budget. Keep it on the same strong route as TASKS
+# generation; scoped deltas still need reliable traceability and stable task refs.
 _INCREMENT_OPERATION = "tasks.generate"
-_INCREMENT_TIERS = ("mini", "small")
+_INCREMENT_TIERS = ("strong", None)
 
 # Cap the persisted increment title so an oversized feature request cannot bloat
 # the row; the full request still drives generation.
