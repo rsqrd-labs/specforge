@@ -108,10 +108,10 @@ _RECOVERY_LOCK_TTL = 180  # 3 × _POLL_INTERVAL_SECONDS  H-3 — T-179
 
 STAGE_ORDER = ["spec", "plan", "harness", "tasks"]
 STAGE_GENERATION_TIERS = {
-    "spec": ("strong", "mid"),
-    "plan": ("strong", "mid"),
-    "harness": ("mid", "strong"),
-    "tasks": ("strong", "mid"),
+    "spec": ("strong", None),
+    "plan": ("strong", None),
+    "harness": ("strong", None),
+    "tasks": ("strong", None),
 }
 LONG_GENERATION_STAGES = frozenset({"harness", "tasks"})
 
@@ -247,8 +247,8 @@ def _route_for_refine(workspace: Workspace, mode: str) -> LLMRoute:
     }[mode]
     fallback_tier = {
         "focused": "small",
-        "section": "small",
-        "full": "mid",
+        "section": "strong",
+        "full": None,
     }[mode]
     return resolve_llm_route(
         operation=operation,
@@ -256,6 +256,36 @@ def _route_for_refine(workspace: Workspace, mode: str) -> LLMRoute:
         requested_tier=requested_tier,
         fallback_tier=fallback_tier,
         latency_class="interactive",
+    )
+
+
+def _log_generation_route(
+    *,
+    route: LLMRoute,
+    stage_type: str,
+    action: str,
+    prompt_version: str,
+) -> None:
+    logger.info(
+        "llm.generation_route_resolved",
+        extra={
+            "provider": route.provider,
+            "model": route.model,
+            "model_tier": route.model_tier,
+            "operation": route.operation,
+            "stage_type": stage_type,
+            "action": action,
+            "prompt_version": prompt_version,
+            "output_token_budget": output_budget_for_operation(route.operation),
+            "route_reason": route.reason,
+            "selection_reason": route.selection_reason,
+            "requested_tier": route.requested_tier,
+            "fallback_tier": route.fallback_tier,
+            "fallback_reason": (
+                route.reason if route.reason == "fallback_tier" else None
+            ),
+            "cross_provider_fallback": route.cross_provider_fallback,
+        },
     )
 
 
@@ -1057,6 +1087,12 @@ class StageManager:
                 if action == "regenerate"
                 else _route_for_stage_generation(stage.type, workspace)
             )
+        )
+        _log_generation_route(
+            route=route,
+            stage_type=stage.type,
+            action=action,
+            prompt_version=STAGE_PROMPT_VERSIONS[stage.type],
         )
         system_prompt, user_prompt = await build_prompt(
             stage.type, workspace, db, redis

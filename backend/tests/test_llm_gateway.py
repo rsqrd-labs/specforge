@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncGenerator
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -28,12 +29,12 @@ def test_get_llm_anthropic_returns_adapter() -> None:
 
 
 def test_get_llm_openai_returns_adapter() -> None:
-    adapter = get_llm("openai", "gpt-4o")
+    adapter = get_llm("openai", "gpt-5.5")
     assert adapter.__class__.__name__ == "OpenAIAdapter"
 
 
 def test_get_llm_google_returns_adapter() -> None:
-    adapter = get_llm("google", "gemini-1.5-pro")
+    adapter = get_llm("google", "gemini-3.5-flash")
     assert adapter.__class__.__name__ == "GoogleAdapter"
 
 
@@ -42,10 +43,10 @@ def test_get_llm_rebuilds_adapter_when_provider_key_changes(
 ) -> None:
     clear_llm_cache()
     monkeypatch.setenv("OPENAI_API_KEY", "first-key")
-    first = get_llm("openai", "gpt-4o")
+    first = get_llm("openai", "gpt-5.5")
 
     monkeypatch.setenv("OPENAI_API_KEY", "second-key")
-    second = get_llm("openai", "gpt-4o")
+    second = get_llm("openai", "gpt-5.5")
 
     assert first is not second
     assert len(gateway._INSTANCES) == 2
@@ -130,14 +131,11 @@ async def test_anthropic_adapter_stream_raises_provider_error() -> None:
 async def test_openai_adapter_stream_yields_tokens() -> None:
     async def fake_chunks() -> AsyncGenerator[Any, None]:
         for content in ["Hi", " there"]:
-            chunk = MagicMock()
-            chunk.choices = [MagicMock()]
-            chunk.choices[0].delta.content = content
-            yield chunk
+            yield SimpleNamespace(type="response.output_text.delta", delta=content)
 
-    adapter = get_llm("openai", "gpt-4o")
+    adapter = get_llm("openai", "gpt-5.5")
     with patch.object(
-        adapter._client.chat.completions,
+        adapter._client.responses,
         "create",
         new_callable=AsyncMock,
         return_value=fake_chunks(),
@@ -150,12 +148,12 @@ async def test_openai_adapter_stream_yields_tokens() -> None:
 @pytest.mark.asyncio
 async def test_openai_adapter_complete_returns_string() -> None:
     mock_response = MagicMock()
-    mock_response.choices = [MagicMock()]
-    mock_response.choices[0].message.content = "Done"
+    mock_response.output_text = "Done"
+    mock_response.status = "completed"
 
-    adapter = get_llm("openai", "gpt-4o")
+    adapter = get_llm("openai", "gpt-5.5")
     with patch.object(
-        adapter._client.chat.completions,
+        adapter._client.responses,
         "create",
         new_callable=AsyncMock,
         return_value=mock_response,

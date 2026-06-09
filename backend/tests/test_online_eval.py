@@ -405,8 +405,8 @@ async def test_run_eval_retries_tasks_with_compact_prompt_after_timeout() -> Non
     ("provider", "judge_model"),
     [
         ("anthropic", "claude-haiku-4-5-20251001"),
-        ("openai", "gpt-4o-mini"),
-        ("google", "gemini-1.5-flash"),
+        ("openai", "gpt-5.4-mini"),
+        ("google", "gemini-3.1-flash-lite"),
     ],
 )
 async def test_run_eval_uses_provider_specific_judge_model(
@@ -441,7 +441,7 @@ async def test_run_eval_background_opens_its_own_session() -> None:
             "content",
             "",
             "openai",
-            "gpt-4o-mini",
+            "gpt-5.4-mini",
         )
 
     assert result is None
@@ -454,7 +454,7 @@ async def test_run_eval_background_opens_its_own_session() -> None:
         "",
         db,
         "openai",
-        "gpt-4o-mini",
+        "gpt-5.4-mini",
         None,
         harness_content=None,
     )

@@ -31,6 +31,9 @@ class LLMRoute:
     latency_class: str
     cross_provider_fallback: bool
     reason: str
+    requested_tier: str
+    fallback_tier: str | None
+    selection_reason: str
 
 
 def resolve_llm_route(
@@ -50,6 +53,11 @@ def resolve_llm_route(
         _validate_tier(fallback_tier)
 
     if preferred_model:
+        _validate_preferred_model_operation(
+            preferred_provider,
+            preferred_model,
+            operation,
+        )
         return LLMRoute(
             provider=preferred_provider,
             model=_require_model(preferred_provider, preferred_model),
@@ -58,6 +66,9 @@ def resolve_llm_route(
             latency_class=latency_class,
             cross_provider_fallback=False,
             reason="preferred_model",
+            requested_tier=requested_tier,
+            fallback_tier=fallback_tier,
+            selection_reason="explicit_model",
         )
 
     same_provider_route = _route_for_provider(
@@ -112,8 +123,9 @@ def _route_for_provider(
     ):
         if tier is None:
             continue
-        model = _cheapest_model_for_operation(provider, tier, operation)
-        if model is not None:
+        selected = _model_for_operation(provider, tier, operation)
+        if selected is not None:
+            model, selection_reason = selected
             return LLMRoute(
                 provider=provider,
                 model=model,
@@ -122,28 +134,63 @@ def _route_for_provider(
                 latency_class=latency_class,
                 cross_provider_fallback=cross_provider_fallback,
                 reason=reason,
+                requested_tier=requested_tier,
+                fallback_tier=fallback_tier,
+                selection_reason=selection_reason,
             )
     return None
 
 
-def _cheapest_model_for_operation(
+def _model_for_operation(
     provider: str,
     tier: str,
     operation: str,
-) -> str | None:
-    candidates = []
+) -> tuple[str, str] | None:
+    default_candidates = []
+    active_candidates = []
     for model in models_for_tier(provider, tier):
         config = get_model_cost(provider, model)
+        if config["status"] != "active":
+            continue
         operations = set(config["recommended_operations"])
         if operation not in operations:
             continue
-        cost = float(config["input_cost_per_million"]) + float(
-            config["output_cost_per_million"]
+        sortable = (
+            int(config["routing_priority"]),
+            _estimated_model_cost(config),
+            model,
         )
-        candidates.append((cost, model))
-    if not candidates:
-        return None
-    return min(candidates)[1]
+        active_candidates.append((*sortable, model))
+        if operation in set(config["default_operations"]):
+            default_candidates.append((*sortable, model))
+
+    if default_candidates:
+        return sorted(default_candidates)[0][-1], "active_default"
+    if active_candidates:
+        return sorted(active_candidates)[0][-1], "active_same_tier"
+    return None
+
+
+def _estimated_model_cost(config: dict) -> float:
+    costs = (
+        config["input_cost_per_million"],
+        config["output_cost_per_million"],
+    )
+    if any(value is None for value in costs):
+        return float("inf")
+    return float(costs[0]) + float(costs[1])
+
+
+def _validate_preferred_model_operation(
+    provider: str,
+    model: str,
+    operation: str,
+) -> None:
+    config = get_model_cost(provider, model)
+    if operation not in set(config["recommended_operations"]):
+        raise LLMRoutingError(
+            f"Model {provider}/{model} is not configured for operation {operation!r}."
+        )
 
 
 def _require_model(provider: str, model: str) -> str:

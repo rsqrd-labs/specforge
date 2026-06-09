@@ -8,6 +8,7 @@ import openai
 from config import settings
 from services.llm.base import BaseLLMAdapter, ProviderError
 from services.llm.completion import LLMCompletionInfo
+from services.llm.model_catalog import model_request_policy
 
 # Explicit timeouts prevent a hung provider from blocking a credit reservation
 # indefinitely.  connect/write are short (fast-fail on connection issues);
@@ -19,6 +20,7 @@ class OpenAIAdapter(BaseLLMAdapter):
     def __init__(self, model: str, api_key: str | None = None) -> None:
         self.model = model
         self.last_completion: LLMCompletionInfo | None = None
+        self._request_policy = model_request_policy("openai", model)
         self._client = openai.AsyncOpenAI(
             api_key=api_key or settings.openai_api_key,
             timeout=_DEFAULT_TIMEOUT,
@@ -32,15 +34,52 @@ class OpenAIAdapter(BaseLLMAdapter):
             model=self.model,
             max_tokens=max_tokens,
         )
+        if self._uses_responses_api():
+            async for token in self._stream_responses_api(system, user, max_tokens):
+                yield token
+            return
+        async for token in self._stream_chat_completions(system, user, max_tokens):
+            yield token
+
+    async def _stream_responses_api(
+        self,
+        system: str,
+        user: str,
+        max_tokens: int,
+    ) -> AsyncGenerator[str, None]:
+        try:
+            response = await self._responses_client().create(
+                **self._responses_request(
+                    system=system,
+                    user=user,
+                    max_tokens=max_tokens,
+                    stream=True,
+                ),
+            )
+            async for event in response:
+                _capture_openai_response_completion(self.last_completion, event)
+                delta = _responses_event_text_delta(event)
+                if delta:
+                    yield delta
+        except openai.OpenAIError as exc:
+            raise ProviderError("openai", exc) from exc
+        except RuntimeError as exc:
+            raise ProviderError("openai", exc) from exc
+
+    async def _stream_chat_completions(
+        self,
+        system: str,
+        user: str,
+        max_tokens: int,
+    ) -> AsyncGenerator[str, None]:
         try:
             response = await self._client.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": user},
-                ],
+                **self._chat_request(
+                    system=system,
+                    user=user,
+                    max_tokens=max_tokens,
+                ),
                 stream=True,
-                max_tokens=max_tokens,
             )
             async for chunk in response:
                 # Guard 1: OpenAI sends usage-only chunks where choices=[] to
@@ -74,14 +113,45 @@ class OpenAIAdapter(BaseLLMAdapter):
             model=self.model,
             max_tokens=max_tokens,
         )
+        if self._uses_responses_api():
+            return await self._complete_responses_api(system, user, max_tokens)
+        return await self._complete_chat_completions(system, user, max_tokens)
+
+    async def _complete_responses_api(
+        self,
+        system: str,
+        user: str,
+        max_tokens: int,
+    ) -> str:
+        try:
+            response = await self._responses_client().create(
+                **self._responses_request(
+                    system=system,
+                    user=user,
+                    max_tokens=max_tokens,
+                    stream=False,
+                ),
+            )
+            _capture_openai_response_completion(self.last_completion, response)
+            return _response_output_text(response)
+        except openai.OpenAIError as exc:
+            raise ProviderError("openai", exc) from exc
+        except RuntimeError as exc:
+            raise ProviderError("openai", exc) from exc
+
+    async def _complete_chat_completions(
+        self,
+        system: str,
+        user: str,
+        max_tokens: int,
+    ) -> str:
         try:
             response = await self._client.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": user},
-                ],
-                max_tokens=max_tokens,
+                **self._chat_request(
+                    system=system,
+                    user=user,
+                    max_tokens=max_tokens,
+                ),
             )
             choice = response.choices[0]
             if self.last_completion is not None:
@@ -94,6 +164,84 @@ class OpenAIAdapter(BaseLLMAdapter):
             return choice.message.content or ""
         except openai.OpenAIError as exc:
             raise ProviderError("openai", exc) from exc
+
+    def _uses_responses_api(self) -> bool:
+        return self._request_policy["adapter_api"] == "responses"
+
+    def _responses_client(self):
+        responses = getattr(self._client, "responses", None)
+        if responses is None:
+            raise RuntimeError(
+                "OpenAI Responses API is required for the configured model. "
+                "Upgrade the openai SDK to a version that exposes client.responses."
+            )
+        return responses
+
+    def _responses_request(
+        self,
+        *,
+        system: str,
+        user: str,
+        max_tokens: int,
+        stream: bool,
+    ) -> dict:
+        request = {
+            "model": self.model,
+            "instructions": system,
+            "input": user,
+            "max_output_tokens": max_tokens,
+            "stream": stream,
+        }
+        effort = self._request_policy["reasoning_effort"]
+        if effort:
+            request["reasoning"] = {"effort": effort}
+        return request
+
+    def _chat_request(self, *, system: str, user: str, max_tokens: int) -> dict:
+        return {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            "max_tokens": max_tokens,
+        }
+
+
+def _responses_event_text_delta(event) -> str | None:
+    event_type = str(getattr(event, "type", ""))
+    if event_type == "response.output_text.delta":
+        delta = getattr(event, "delta", None)
+        return str(delta) if delta is not None else None
+    return None
+
+
+def _capture_openai_response_completion(
+    completion: LLMCompletionInfo | None,
+    response_or_event,
+) -> None:
+    if completion is None:
+        return
+    response = getattr(response_or_event, "response", response_or_event)
+    status = getattr(response, "status", None)
+    if status:
+        completion.apply_finish_reason(status)
+    usage = getattr(response, "usage", None)
+    if usage is not None:
+        completion.usage = _object_to_dict(usage)
+
+
+def _response_output_text(response) -> str:
+    output_text = getattr(response, "output_text", None)
+    if output_text:
+        return str(output_text)
+    parts: list[str] = []
+    for item in getattr(response, "output", None) or []:
+        for content in getattr(item, "content", None) or []:
+            text = getattr(content, "text", None)
+            if text:
+                parts.append(str(text))
+    return "".join(parts)
 
 
 def _object_to_dict(value) -> dict:

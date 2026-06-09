@@ -20,7 +20,7 @@ async def test_interactive_operations_reject_batch_path() -> None:
         await complete_background_llm(
             operation="spec.generate",
             provider="openai",
-            model="gpt-4o",
+            model="gpt-5.5",
             system="sys",
             user="user",
             max_tokens=100,
@@ -45,7 +45,7 @@ async def test_eligible_operation_marks_batch_when_provider_supports_it() -> Non
         result = await complete_background_llm(
             operation="eval.score",
             provider="openai",
-            model="gpt-4o-mini",
+            model="gpt-5.4-mini",
             system="sys",
             user="user",
             max_tokens=100,
@@ -55,7 +55,7 @@ async def test_eligible_operation_marks_batch_when_provider_supports_it() -> Non
 
     assert result.output == '{"overall_score": 90}'
     assert result.batch is True
-    adapter_factory.assert_called_once_with("openai", "gpt-4o-mini")
+    adapter_factory.assert_called_once_with("openai", "gpt-5.4-mini")
     assert instrumented_cls.call_args.kwargs["batch"] is True
     assert instrumented_cls.call_args.kwargs["operation"] == "eval.score"
 
@@ -107,7 +107,7 @@ async def test_failed_background_job_is_dead_lettered() -> None:
             await complete_background_llm(
                 operation="eval.score",
                 provider="google",
-                model="gemini-1.5-flash",
+                model="gemini-3.1-flash-lite",
                 system="sys",
                 user="user",
                 max_tokens=100,

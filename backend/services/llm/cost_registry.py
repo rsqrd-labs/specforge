@@ -10,8 +10,13 @@ from collections.abc import Iterable
 from copy import deepcopy
 from typing import Any
 
-REQUIRED_PROVIDERS = frozenset({"anthropic", "openai", "google"})
-MODEL_TIERS = frozenset({"strong", "mid", "mini", "small", "judge", "embedding"})
+from services.llm.model_catalog import (
+    GENERATION_OPERATIONS,
+    MODEL_TIERS,
+    REQUIRED_PROVIDERS,
+    build_provider_capability_registry,
+)
+
 REQUIRED_PROVIDER_CAPABILITIES = frozenset(
     {
         "supports_streaming",
@@ -29,180 +34,20 @@ REQUIRED_MODEL_FIELDS = frozenset(
         "max_context_tokens",
         "default_max_output_tokens",
         "recommended_operations",
+        "default_operations",
+        "display_name",
+        "status",
+        "adapter_api",
+        "supports_reasoning",
+        "supports_thinking",
+        "rollout_notes",
+        "routing_priority",
     }
 )
 
-GENERATION_OPERATIONS = frozenset(
-    {
-        "spec.generate",
-        "plan.generate",
-        "harness.generate",
-        "tasks.generate",
-        "refine.focused",
-        "refine.section",
-        "regenerate.full",
-        "summary.create",
-        "eval.score",
-    }
+PROVIDER_CAPABILITY_REGISTRY: dict[str, dict[str, Any]] = (
+    build_provider_capability_registry()
 )
-
-
-PROVIDER_CAPABILITY_REGISTRY: dict[str, dict[str, Any]] = {
-    "anthropic": {
-        "supports_streaming": True,
-        "supports_prompt_cache_accounting": True,
-        "supports_batch": True,
-        "supports_usage_tokens": True,
-        "models": {
-            "claude-opus-4-7": {
-                "tier": "strong",
-                "input_cost_per_million": 5.0,
-                "cached_input_cost_per_million": 0.5,
-                "output_cost_per_million": 25.0,
-                "max_context_tokens": 200_000,
-                "default_max_output_tokens": 8192,
-                "recommended_operations": [
-                    "spec.generate",
-                    "plan.generate",
-                    "harness.generate",
-                    "tasks.generate",
-                    "regenerate.full",
-                ],
-            },
-            "claude-sonnet-4-6": {
-                "tier": "mid",
-                "input_cost_per_million": 3.0,
-                "cached_input_cost_per_million": 0.3,
-                "output_cost_per_million": 15.0,
-                "max_context_tokens": 200_000,
-                "default_max_output_tokens": 8192,
-                "recommended_operations": [
-                    "plan.generate",
-                    "harness.generate",
-                    "refine.section",
-                ],
-            },
-            "claude-haiku-4-5-20251001": {
-                "tier": "small",
-                "input_cost_per_million": 1.0,
-                "cached_input_cost_per_million": 0.1,
-                "output_cost_per_million": 5.0,
-                "max_context_tokens": 200_000,
-                "default_max_output_tokens": 4096,
-                "recommended_operations": [
-                    "tasks.generate",
-                    "refine.focused",
-                    "summary.create",
-                    "eval.score",
-                ],
-            },
-        },
-    },
-    "openai": {
-        "supports_streaming": True,
-        "supports_prompt_cache_accounting": True,
-        "supports_batch": True,
-        "supports_usage_tokens": True,
-        "models": {
-            "gpt-4o": {
-                "tier": "strong",
-                "input_cost_per_million": 2.5,
-                "cached_input_cost_per_million": 1.25,
-                "output_cost_per_million": 10.0,
-                "max_context_tokens": 128_000,
-                "default_max_output_tokens": 8192,
-                "recommended_operations": [
-                    "spec.generate",
-                    "plan.generate",
-                    "harness.generate",
-                    "tasks.generate",
-                    "regenerate.full",
-                ],
-            },
-            "gpt-4o-mini": {
-                "tier": "mini",
-                "input_cost_per_million": 0.15,
-                "cached_input_cost_per_million": 0.075,
-                "output_cost_per_million": 0.6,
-                "max_context_tokens": 128_000,
-                "default_max_output_tokens": 4096,
-                "recommended_operations": [
-                    "harness.generate",
-                    "tasks.generate",
-                    "refine.focused",
-                    "summary.create",
-                    "eval.score",
-                ],
-            },
-            "o1-preview": {
-                "tier": "strong",
-                "input_cost_per_million": 15.0,
-                "cached_input_cost_per_million": 7.5,
-                "output_cost_per_million": 60.0,
-                "max_context_tokens": 128_000,
-                "default_max_output_tokens": 8192,
-                "recommended_operations": [
-                    "spec.generate",
-                    "plan.generate",
-                    "tasks.generate",
-                    "regenerate.full",
-                ],
-            },
-        },
-    },
-    "google": {
-        "supports_streaming": True,
-        "supports_prompt_cache_accounting": True,
-        "supports_batch": True,
-        "supports_usage_tokens": True,
-        "models": {
-            "gemini-1.5-pro": {
-                "tier": "strong",
-                "input_cost_per_million": 1.25,
-                "cached_input_cost_per_million": 0.125,
-                "output_cost_per_million": 5.0,
-                "max_context_tokens": 1_000_000,
-                "default_max_output_tokens": 8192,
-                "recommended_operations": [
-                    "spec.generate",
-                    "plan.generate",
-                    "harness.generate",
-                    "tasks.generate",
-                    "regenerate.full",
-                ],
-            },
-            "gemini-1.5-flash": {
-                "tier": "small",
-                "input_cost_per_million": 0.075,
-                "cached_input_cost_per_million": 0.01875,
-                "output_cost_per_million": 0.3,
-                "max_context_tokens": 1_000_000,
-                "default_max_output_tokens": 4096,
-                "recommended_operations": [
-                    "tasks.generate",
-                    "refine.focused",
-                    "summary.create",
-                    "eval.score",
-                ],
-            },
-            "gemini-3.5-flash": {
-                "tier": "mini",
-                "input_cost_per_million": 1.5,
-                "cached_input_cost_per_million": 0.15,
-                "output_cost_per_million": 9.0,
-                "max_context_tokens": 1_048_576,
-                "default_max_output_tokens": 8192,
-                "recommended_operations": [
-                    "harness.generate",
-                    "tasks.generate",
-                    "refine.focused",
-                    "refine.section",
-                    "summary.create",
-                ],
-            },
-        },
-    },
-}
 
 
 def get_provider_capabilities(provider: str) -> dict[str, Any]:
@@ -308,6 +153,47 @@ def _validate_model(provider: str, model: str, config: dict[str, Any]) -> None:
             f"{provider}/{model} has invalid recommended operations: "
             f"{sorted(invalid_operations)}"
         )
+
+    default_operations = config["default_operations"]
+    if not isinstance(default_operations, Iterable) or isinstance(
+        default_operations, str | bytes
+    ):
+        raise RuntimeError(f"{provider}/{model} has invalid default_operations")
+
+    invalid_defaults = set(default_operations) - set(operations)
+    if invalid_defaults:
+        raise RuntimeError(
+            f"{provider}/{model} has default operations that are not recommended: "
+            f"{sorted(invalid_defaults)}"
+        )
+
+    status = config["status"]
+    if status not in {"active", "preview", "deprecated"}:
+        raise RuntimeError(f"{provider}/{model} has invalid status: {status!r}")
+    if status in {"preview", "deprecated"} and default_operations:
+        raise RuntimeError(
+            f"{provider}/{model} cannot be a production default with status {status!r}"
+        )
+
+    adapter_api = config["adapter_api"]
+    supported_adapter_apis = {
+        "anthropic": {"messages"},
+        "openai": {"responses", "chat_completions"},
+        "google": {"generate_content"},
+    }[provider]
+    if adapter_api not in supported_adapter_apis:
+        raise RuntimeError(
+            f"{provider}/{model} uses unsupported adapter API: {adapter_api!r}"
+        )
+
+    if not isinstance(config["supports_reasoning"], bool):
+        raise RuntimeError(f"{provider}/{model} has invalid supports_reasoning")
+    if not isinstance(config["supports_thinking"], bool):
+        raise RuntimeError(f"{provider}/{model} has invalid supports_thinking")
+    if not isinstance(config["rollout_notes"], str) or not config["rollout_notes"]:
+        raise RuntimeError(f"{provider}/{model} must define rollout_notes")
+    if not isinstance(config["routing_priority"], int):
+        raise RuntimeError(f"{provider}/{model} has invalid routing_priority")
 
 
 def _is_nonempty_string_iterable(value: object) -> bool:

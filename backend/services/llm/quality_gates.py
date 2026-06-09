@@ -22,30 +22,30 @@ PROMOTION_RULES = [
 ROUTE_QUALITY_GATES: dict[str, dict[str, Any]] = {
     "spec.generate": {
         "baseline_tier": "strong",
-        "candidate_tiers": ["mid"],
+        "candidate_tiers": ["strong"],
         "min_average_quality_score": 0.92,
-        "min_cost_reduction_ratio": 0.25,
+        "min_cost_reduction_ratio": 0.00,
         "requires_security_regression_review": True,
     },
     "plan.generate": {
         "baseline_tier": "strong",
-        "candidate_tiers": ["mid"],
+        "candidate_tiers": ["strong"],
         "min_average_quality_score": 0.90,
-        "min_cost_reduction_ratio": 0.25,
+        "min_cost_reduction_ratio": 0.00,
         "requires_security_regression_review": True,
     },
     "harness.generate": {
-        "baseline_tier": "mid",
-        "candidate_tiers": ["mini"],
+        "baseline_tier": "strong",
+        "candidate_tiers": ["strong"],
         "min_average_quality_score": 0.88,
-        "min_cost_reduction_ratio": 0.35,
+        "min_cost_reduction_ratio": 0.00,
         "requires_security_regression_review": True,
     },
     "tasks.generate": {
         "baseline_tier": "strong",
-        "candidate_tiers": ["mid", "mini", "small"],
+        "candidate_tiers": ["strong"],
         "min_average_quality_score": 0.90,
-        "min_cost_reduction_ratio": 0.25,
+        "min_cost_reduction_ratio": 0.00,
         "requires_security_regression_review": True,
     },
     "refine.focused": {
@@ -64,9 +64,9 @@ ROUTE_QUALITY_GATES: dict[str, dict[str, Any]] = {
     },
     "regenerate.full": {
         "baseline_tier": "strong",
-        "candidate_tiers": ["mid"],
+        "candidate_tiers": ["strong"],
         "min_average_quality_score": 0.92,
-        "min_cost_reduction_ratio": 0.20,
+        "min_cost_reduction_ratio": 0.00,
         "requires_security_regression_review": True,
     },
     "summary.create": {
@@ -86,7 +86,22 @@ ROUTE_QUALITY_GATES: dict[str, dict[str, Any]] = {
 }
 
 PROVIDER_GATE_OVERRIDES: dict[str, dict[str, dict[str, Any]]] = {
-    provider: {} for provider in sorted(REQUIRED_PROVIDERS)
+    "anthropic": {
+        "refine.focused": {"baseline_tier": "small", "candidate_tiers": ["small"]},
+        "summary.create": {"baseline_tier": "small", "candidate_tiers": ["small"]},
+        "eval.score": {"baseline_tier": "small", "candidate_tiers": ["small"]},
+    },
+    "google": {
+        "refine.focused": {"baseline_tier": "small", "candidate_tiers": ["small"]},
+        "refine.section": {"baseline_tier": "strong", "candidate_tiers": ["strong"]},
+        "summary.create": {"baseline_tier": "small", "candidate_tiers": ["small"]},
+        "eval.score": {"baseline_tier": "small", "candidate_tiers": ["small"]},
+    },
+    "openai": {
+        "refine.focused": {"baseline_tier": "mini", "candidate_tiers": ["mini"]},
+        "summary.create": {"baseline_tier": "mini", "candidate_tiers": ["mini"]},
+        "eval.score": {"baseline_tier": "mini", "candidate_tiers": ["mini"]},
+    },
 }
 
 

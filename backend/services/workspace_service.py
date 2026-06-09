@@ -155,7 +155,7 @@ class WorkspaceService:
                 operation="spec.generate",
                 preferred_provider=provider,
                 requested_tier="strong",
-                fallback_tier="mid",
+                fallback_tier=None,
                 latency_class="interactive",
             )
         except LLMRoutingError as exc:

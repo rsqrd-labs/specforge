@@ -53,6 +53,16 @@ def _chunk_delta_none() -> Any:
     return SimpleNamespace(choices=[choice])
 
 
+def _response_event_delta(content: str) -> Any:
+    return SimpleNamespace(type="response.output_text.delta", delta=content)
+
+
+def _response_event_completed() -> Any:
+    usage = SimpleNamespace(input_tokens=4, output_tokens=2)
+    response = SimpleNamespace(status="completed", usage=usage)
+    return SimpleNamespace(type="response.completed", response=response)
+
+
 async def _fake_stream(chunks: list[Any]) -> AsyncIterator[Any]:
     """Yield each chunk in turn as an async iterator."""
     for chunk in chunks:
@@ -70,6 +80,7 @@ def _make_adapter(chunks: list[Any]) -> Any:
 
     adapter = OpenAIAdapter.__new__(OpenAIAdapter)
     adapter.model = "gpt-4o"
+    adapter._request_policy = {"adapter_api": "chat_completions"}
 
     mock_create = AsyncMock()
     mock_create.return_value = _fake_stream(chunks)
@@ -82,6 +93,29 @@ def _make_adapter(chunks: list[Any]) -> Any:
 
     mock_client = MagicMock()
     mock_client.chat = mock_chat
+    adapter._client = mock_client
+
+    return adapter
+
+
+def _make_responses_adapter(events: list[Any]) -> Any:
+    from services.llm.openai_adapter import OpenAIAdapter
+
+    adapter = OpenAIAdapter.__new__(OpenAIAdapter)
+    adapter.model = "gpt-5.5"
+    adapter._request_policy = {
+        "adapter_api": "responses",
+        "reasoning_effort": "high",
+    }
+
+    mock_create = AsyncMock()
+    mock_create.return_value = _fake_stream(events)
+
+    mock_responses = MagicMock()
+    mock_responses.create = mock_create
+
+    mock_client = MagicMock()
+    mock_client.responses = mock_responses
     adapter._client = mock_client
 
     return adapter
@@ -218,6 +252,7 @@ async def test_openai_error_is_wrapped_as_provider_error() -> None:
 
     adapter = OpenAIAdapter.__new__(OpenAIAdapter)
     adapter.model = "gpt-4o"
+    adapter._request_policy = {"adapter_api": "chat_completions"}
 
     async def _raising_stream(*_a: Any, **_kw: Any) -> Any:
         raise openai.APIError("upstream error", request=MagicMock(), body=None)
@@ -233,3 +268,60 @@ async def test_openai_error_is_wrapped_as_provider_error() -> None:
     with pytest.raises(ProviderError):
         async for _ in adapter.stream("sys", "user", 100):
             pass
+
+
+@pytest.mark.asyncio
+async def test_gpt5_stream_uses_responses_api_with_reasoning_effort() -> None:
+    adapter = _make_responses_adapter(
+        [_response_event_delta("new "), _response_event_delta("model")]
+    )
+
+    tokens: list[str] = []
+    async for token in adapter.stream("sys", "user", 8192):
+        tokens.append(token)
+
+    assert tokens == ["new ", "model"]
+    adapter._client.responses.create.assert_awaited_once()
+    kwargs = adapter._client.responses.create.await_args.kwargs
+    assert kwargs["model"] == "gpt-5.5"
+    assert kwargs["max_output_tokens"] == 8192
+    assert kwargs["stream"] is True
+    assert kwargs["reasoning"] == {"effort": "high"}
+    assert kwargs["instructions"] == "sys"
+    assert kwargs["input"] == "user"
+
+
+@pytest.mark.asyncio
+async def test_gpt5_complete_extracts_responses_output_text() -> None:
+    from services.llm.openai_adapter import OpenAIAdapter
+
+    adapter = OpenAIAdapter.__new__(OpenAIAdapter)
+    adapter.model = "gpt-5.5"
+    adapter._request_policy = {
+        "adapter_api": "responses",
+        "reasoning_effort": "high",
+    }
+    response = SimpleNamespace(
+        output_text="Done",
+        status="completed",
+        usage=SimpleNamespace(input_tokens=10, output_tokens=3),
+    )
+    mock_responses = MagicMock()
+    mock_responses.create = AsyncMock(return_value=response)
+    mock_client = MagicMock()
+    mock_client.responses = mock_responses
+    adapter._client = mock_client
+
+    result = await adapter.complete("sys", "user", 4096)
+
+    assert result == "Done"
+    mock_responses.create.assert_awaited_once()
+    kwargs = mock_responses.create.await_args.kwargs
+    assert kwargs["model"] == "gpt-5.5"
+    assert kwargs["max_output_tokens"] == 4096
+    assert kwargs["stream"] is False
+    assert adapter.last_completion is not None
+    assert adapter.last_completion.usage == {
+        "input_tokens": 10,
+        "output_tokens": 3,
+    }

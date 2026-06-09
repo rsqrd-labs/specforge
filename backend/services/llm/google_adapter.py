@@ -9,6 +9,7 @@ from google.genai import types
 from config import settings
 from services.llm.base import BaseLLMAdapter, ProviderError
 from services.llm.completion import LLMCompletionInfo
+from services.llm.model_catalog import model_request_policy
 
 # Explicit read timeout (milliseconds) prevents a hung Gemini connection from
 # blocking a credit reservation indefinitely.  H-6 — T-182.
@@ -19,15 +20,22 @@ class GoogleAdapter(BaseLLMAdapter):
     def __init__(self, model: str, api_key: str | None = None) -> None:
         self.model = model
         self.last_completion: LLMCompletionInfo | None = None
+        self._request_policy = model_request_policy("google", model)
         self._client = genai.Client(
             api_key=api_key or settings.google_api_key,
             http_options=types.HttpOptions(timeout=_DEFAULT_TIMEOUT_MS),
         )
 
     def _config(self, system: str, max_tokens: int) -> types.GenerateContentConfig:
+        thinking_level = self._request_policy["thinking_level"]
         return types.GenerateContentConfig(
             system_instruction=system,
             max_output_tokens=max_tokens,
+            thinking_config=(
+                types.ThinkingConfig(thinking_level=thinking_level)
+                if thinking_level
+                else None
+            ),
         )
 
     async def stream(

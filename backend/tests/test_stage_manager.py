@@ -320,7 +320,7 @@ class _CompletionAwareAdapter:
             content, stopped_by_limit = (_VALID_SPEC_STREAM, False)
         self.last_completion = LLMCompletionInfo.started(
             provider="anthropic",
-            model="claude-opus-4-7",
+            model="claude-opus-4-8",
             max_tokens=max_tokens,
         )
         if stopped_by_limit:
@@ -335,7 +335,7 @@ class _CompletionAwareAdapter:
             content, stopped_by_limit = (_SAFE_PLAN_FINAL_STREAM, False)
         self.last_completion = LLMCompletionInfo.started(
             provider="anthropic",
-            model="claude-opus-4-7",
+            model="claude-opus-4-8",
             max_tokens=max_tokens,
         )
         if stopped_by_limit:
@@ -402,9 +402,10 @@ def test_harness_generation_uses_stronger_route_and_long_timeout() -> None:
     route = stage_manager_module._route_for_stage_generation("harness", workspace)
 
     assert route.provider == "openai"
-    assert route.model == "gpt-4o"
+    assert route.model == "gpt-5.5"
     assert route.model_tier == "strong"
-    assert route.reason == "fallback_tier"
+    assert route.reason == "requested_tier"
+    assert route.selection_reason == "active_default"
     assert (
         stage_manager_module._stream_timeout_for_stage("harness")
         >= stage_manager_module.settings.llm_long_stream_timeout_seconds

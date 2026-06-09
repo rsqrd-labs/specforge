@@ -58,6 +58,11 @@ def main() -> int:
     parser.add_argument("--format", choices=["json", "markdown"], default="json")
     parser.add_argument("--output", type=Path)
     parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Explicitly run the deterministic dry-run mode. This is the default.",
+    )
+    parser.add_argument(
         "--live",
         action="store_true",
         help="Reserved for operator-approved live provider evals. Default is dry-run.",

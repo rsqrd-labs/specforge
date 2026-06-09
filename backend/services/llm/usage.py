@@ -74,6 +74,13 @@ def estimate_cost_usd(
         return None
 
     uncached_input_tokens = max((input_tokens or 0) - cached_input_tokens, 0)
+    if (
+        (uncached_input_tokens and cost["input_cost_per_million"] is None)
+        or (cached_input_tokens and cost["cached_input_cost_per_million"] is None)
+        or ((output_tokens or 0) and cost["output_cost_per_million"] is None)
+    ):
+        return None
+
     total = Decimal("0")
     total += _token_cost(
         uncached_input_tokens,
