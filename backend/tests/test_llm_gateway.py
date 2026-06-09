@@ -91,9 +91,11 @@ async def test_anthropic_adapter_stream_yields_tokens() -> None:
             yield token
 
     mock_stream_ctx = MagicMock()
-    mock_stream_ctx.__aenter__ = AsyncMock(
-        return_value=MagicMock(text_stream=fake_text_stream())
+    mock_response = MagicMock(text_stream=fake_text_stream())
+    mock_response.get_final_message = AsyncMock(
+        return_value=MagicMock(stop_reason="end_turn", usage=MagicMock(input_tokens=3))
     )
+    mock_stream_ctx.__aenter__ = AsyncMock(return_value=mock_response)
     mock_stream_ctx.__aexit__ = AsyncMock(return_value=False)
 
     adapter = get_llm("anthropic", "claude-sonnet-4-6")
@@ -101,6 +103,9 @@ async def test_anthropic_adapter_stream_yields_tokens() -> None:
         tokens = [t async for t in adapter.stream("sys", "user", 100)]
 
     assert tokens == ["Hello", " ", "world"]
+    assert adapter.last_completion is not None
+    assert adapter.last_completion.finish_reason == "end_turn"
+    assert adapter.last_completion.stopped_by_limit is False
 
 
 @pytest.mark.asyncio
