@@ -1,4 +1,4 @@
-import type { QualityGateInfo } from "../../services/sseService"
+import type { QualityGateInfo } from "../../types/stage"
 
 interface StreamingOverlayProps {
   isVisible: boolean
@@ -6,9 +6,9 @@ interface StreamingOverlayProps {
    *  by the gate (T-247).  Rendered as an interactive panel with regenerate
    *  and owner-only override actions. */
   gate?: QualityGateInfo
-  /** Re-run generation for the stage (the failed artifact was not persisted). */
+  /** Re-run generation for the stage, replacing the blocked draft. */
   onRegenerate?: () => void
-  /** Owner escape hatch: disable the critic for this workspace, then regenerate. */
+  /** Accept the current blocked draft without disabling the workspace critic. */
   onOverride?: () => void
   /** Dismiss the findings panel without acting. */
   onDismiss?: () => void
@@ -28,7 +28,7 @@ export function StreamingOverlay({
     const issueCount = isMissingSections ? missing.length : findings.length
     return (
       <div
-        className="streaming-overlay quality-gate-overlay"
+        className="quality-gate-inline"
         role="alertdialog"
         aria-label="Quality gate findings"
       >

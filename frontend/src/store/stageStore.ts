@@ -1,7 +1,6 @@
 import { create } from "zustand"
 import { subscribeWithSelector } from "zustand/middleware"
-import type { QualityGateInfo } from "../services/sseService"
-import type { Stage, StageType } from "../types/stage"
+import type { QualityGateInfo, Stage, StageType } from "../types/stage"
 
 interface StageState {
   stages: Record<string, Stage>
@@ -27,6 +26,10 @@ interface StageState {
 
 const STAGE_ORDER: StageType[] = ["spec", "plan", "harness", "tasks"]
 
+function blockedGate(stage: Stage): QualityGateInfo | null {
+  return stage.quality_gate?.status === "blocked" ? stage.quality_gate : null
+}
+
 export const useStageStore = create<StageState>()(
   subscribeWithSelector((set) => ({
     stages: {},
@@ -35,17 +38,39 @@ export const useStageStore = create<StageState>()(
     qualityGate: {},
 
     setStage: (stage) =>
-      set((state) => ({
-        stages: { ...state.stages, [stage.id]: stage },
-      })),
+      set((state) => {
+        const qualityGate = { ...state.qualityGate }
+        const gate = blockedGate(stage)
+        if (gate) {
+          qualityGate[stage.id] = gate
+        } else {
+          delete qualityGate[stage.id]
+        }
+        return {
+          stages: { ...state.stages, [stage.id]: stage },
+          qualityGate,
+        }
+      }),
 
     setStages: (stages) =>
-      set((state) => ({
-        stages: {
-          ...state.stages,
-          ...Object.fromEntries(stages.map((stage) => [stage.id, stage])),
-        },
-      })),
+      set((state) => {
+        const qualityGate = { ...state.qualityGate }
+        for (const stage of stages) {
+          const gate = blockedGate(stage)
+          if (gate) {
+            qualityGate[stage.id] = gate
+          } else {
+            delete qualityGate[stage.id]
+          }
+        }
+        return {
+          stages: {
+            ...state.stages,
+            ...Object.fromEntries(stages.map((stage) => [stage.id, stage])),
+          },
+          qualityGate,
+        }
+      }),
 
     appendToken: (stageId, token) =>
       set((state) => ({
@@ -81,7 +106,10 @@ export const useStageStore = create<StageState>()(
 
     setQualityGate: (stageId, info) =>
       set((state) => ({
-        qualityGate: { ...state.qualityGate, [stageId]: info },
+        qualityGate: {
+          ...state.qualityGate,
+          [stageId]: { ...info, status: "blocked" },
+        },
       })),
 
     clearQualityGate: (stageId) =>

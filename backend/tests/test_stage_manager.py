@@ -346,6 +346,74 @@ async def test_generate_cache_hit_skips_credit_and_provider_call() -> None:
 
 
 @pytest.mark.asyncio
+async def test_regenerate_bypasses_cache_and_uses_regenerate_credit_reason() -> None:
+    workspace_id = uuid4()
+    spec_stage = _make_stage(
+        workspace_id,
+        "spec",
+        status="draft",
+        content="previous output",
+        version=2,
+    )
+    workspace = _make_workspace([spec_stage])
+    user = _make_user()
+    deduction = CreditLedger(
+        id=uuid4(),
+        user_id=user.id,
+        amount=-10,
+        reason="regenerate",
+    )
+    redis = _FakeRedis()
+    redis._store["cache-key"] = "cached spec output"
+    db = _MultiQueryDB([spec_stage, workspace, [], deduction])
+    svc = StageManager(redis_client=redis)
+
+    async def fake_stream(*args, **kwargs) -> AsyncGenerator[str, None]:
+        yield "fresh regenerated output"
+
+    with (
+        patch(
+            "services.pipeline.stage_manager.build_prompt",
+            new_callable=AsyncMock,
+            return_value=("sys", "user"),
+        ),
+        patch(
+            "services.pipeline.stage_manager.build_generation_cache_key",
+            return_value="cache-key",
+        ),
+        patch(
+            "services.pipeline.stage_manager.credit_service.deduct",
+            new_callable=AsyncMock,
+            return_value=deduction,
+        ) as mock_deduct,
+        patch(
+            "services.pipeline.stage_manager.set_cached_generation",
+            new_callable=AsyncMock,
+        ) as mock_set_cache,
+        patch("services.pipeline.stage_manager.get_llm") as mock_get_llm,
+    ):
+        mock_adapter = MagicMock()
+        mock_adapter.stream = fake_stream
+        mock_get_llm.return_value = mock_adapter
+
+        tokens = []
+        async for token in svc.generate(
+            spec_stage.id,
+            user,
+            db,
+            action="regenerate",
+        ):
+            tokens.append(token)
+
+    assert "fresh regenerated output" in tokens
+    assert spec_stage.content == "fresh regenerated output"
+    assert spec_stage.current_version == 3
+    mock_get_llm.assert_called_once()
+    mock_deduct.assert_awaited_once_with(db, user.id, 10, "regenerate")
+    mock_set_cache.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_generate_cache_miss_writes_completed_output() -> None:
     workspace_id = uuid4()
     spec_stage = _make_stage(workspace_id, "spec", status="draft")
@@ -885,6 +953,72 @@ async def test_finalise_sets_next_stage_to_draft() -> None:
 
     assert spec_stage.status == "finalised"
     assert plan_stage.status == "draft"
+
+
+@pytest.mark.asyncio
+async def test_finalise_rejects_blocked_quality_gate_version() -> None:
+    workspace_id = uuid4()
+    spec_stage = _make_stage(
+        workspace_id,
+        "spec",
+        status="draft",
+        content="blocked content",
+        version=3,
+    )
+    spec_stage.quality_gate_status = "blocked"
+    spec_stage.quality_gate_kind = "critic_findings"
+    spec_stage.quality_gate_payload = {"stage": "spec", "kind": "critic_findings"}
+    spec_stage.quality_gate_version = 3
+    spec_stage.quality_gate_failed_at = datetime.now(UTC)
+
+    svc = StageManager(redis_client=_FakeRedis())
+    db = _MultiQueryDB([spec_stage])
+    user = _make_user()
+
+    with pytest.raises(ValueError, match="blocked by the quality gate"):
+        await svc.finalise(spec_stage.id, user, db)
+
+    assert spec_stage.status == "draft"
+
+
+@pytest.mark.asyncio
+async def test_override_quality_gate_accepts_current_blocked_draft() -> None:
+    workspace_id = uuid4()
+    spec_stage = _make_stage(
+        workspace_id,
+        "spec",
+        status="draft",
+        content="blocked content",
+        version=3,
+    )
+    spec_stage.quality_gate_status = "blocked"
+    spec_stage.quality_gate_kind = "critic_findings"
+    spec_stage.quality_gate_payload = {"stage": "spec", "kind": "critic_findings"}
+    spec_stage.quality_gate_version = 3
+    spec_stage.quality_gate_failed_at = datetime.now(UTC)
+
+    svc = StageManager(redis_client=_FakeRedis())
+    db = _MultiQueryDB([spec_stage])
+    user = _make_user()
+
+    updated = await svc.override_quality_gate(spec_stage.id, user, db)
+
+    assert updated is spec_stage
+    assert spec_stage.quality_gate_status == "overridden"
+    assert spec_stage.quality_gate_version == 3
+
+
+@pytest.mark.asyncio
+async def test_override_quality_gate_rejects_clear_stage() -> None:
+    spec_stage = _make_stage(status="draft", content="clean content", version=1)
+    spec_stage.quality_gate_status = "clear"
+
+    svc = StageManager(redis_client=_FakeRedis())
+    db = _MultiQueryDB([spec_stage])
+    user = _make_user()
+
+    with pytest.raises(ValueError, match="not blocked"):
+        await svc.override_quality_gate(spec_stage.id, user, db)
 
 
 @pytest.mark.asyncio

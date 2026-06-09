@@ -49,10 +49,11 @@ async def _stream_stage(
     db: AsyncSession,
     trace_id: str,
     free: bool = False,
+    action: str = "generate",
 ) -> AsyncGenerator[str, None]:
     try:
         async for token in stage_manager.generate(
-            stage_id, user, db, trace_id=trace_id, free=free
+            stage_id, user, db, trace_id=trace_id, free=free, action=action
         ):
             if (
                 token.startswith('{"done"')
@@ -159,7 +160,8 @@ async def generate_stage(
     await _load_stage(id, db, user.id)
     trace_id = str(uuid4())
     return StreamingResponse(
-        _stream_stage(id, user, db, trace_id), media_type="text/event-stream"
+        _stream_stage(id, user, db, trace_id, action="generate"),
+        media_type="text/event-stream",
     )
 
 
@@ -173,7 +175,8 @@ async def regenerate_stage(
     await _load_stage(id, db, user.id)
     trace_id = str(uuid4())
     return StreamingResponse(
-        _stream_stage(id, user, db, trace_id), media_type="text/event-stream"
+        _stream_stage(id, user, db, trace_id, action="regenerate"),
+        media_type="text/event-stream",
     )
 
 
@@ -367,6 +370,23 @@ async def acknowledge_gate(
     stage.updated_at = datetime.now(UTC)
     await db.commit()
     await db.refresh(stage)
+    return StageResponse.model_validate(stage)
+
+
+@router.post("/{id}/override-quality-gate", response_model=StageResponse)
+async def override_quality_gate(
+    id: UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> StageResponse:
+    await _load_stage(id, db, user.id)
+    try:
+        stage = await stage_manager.override_quality_gate(id, user, db)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        ) from exc
     return StageResponse.model_validate(stage)
 
 

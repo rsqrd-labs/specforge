@@ -4,9 +4,9 @@ Two layers:
 - Security/contract unit tests on the critic module itself (schema cannot carry
   artifact bytes; prompt template is held in code; fail-open on judge failure).
 - Behavioral tests that drive StageManager.generate() with a stubbed
-  critic_review to exercise the regenerate loop, the credit-refund and
-  reset-to-draft cleanup, the quality_gate_failed SSE event, and the
-  disable_critic escape hatch.  The harness-level contract tests are pure
+  critic_review to exercise the regenerate loop, the persisted blocked-draft
+  cleanup, the quality_gate_failed SSE event, and the disable_critic escape
+  hatch.  The harness-level contract tests are pure
   greps; these are where the loop's real correctness is checked.
 """
 
@@ -26,12 +26,11 @@ from pydantic import ValidationError
 
 from models import CreditLedger, Stage, StageVersion, Workspace
 from services.pipeline import critic as critic_module
-from services.pipeline.artifact_validator import SECTION_CONTRACTS
+from services.pipeline.artifact_validator import SECTION_CONTRACTS, MissingSectionError
 from services.pipeline.critic import (
     AUDIT_EVENT_CRITIC_DISABLED,
     CriticFinding,
     StageCriticResult,
-    StageQualityGateError,
     critic_review,
 )
 from services.pipeline.stage_manager import StageManager
@@ -342,7 +341,7 @@ async def test_critic_pass_persists_artifact() -> None:
 
 @pytest.mark.asyncio
 async def test_critic_one_regenerate_cap() -> None:
-    """Second consecutive failure: refund once, reset to draft, raise + SSE."""
+    """Second consecutive failure: save blocked draft, do not refund, emit SSE."""
     svc, stage, workspace, user, deduction, db = _build_generate_env()
     deduct, refund, invalidate, build, validate, set_cache, get_llm = _generate_patches(
         svc, complete_return=_LONG_ARTIFACT
@@ -369,23 +368,69 @@ async def test_critic_one_regenerate_cap() -> None:
     ):
         md.return_value = deduction
         tokens: list[str] = []
-        with pytest.raises(StageQualityGateError):
-            async for t in svc.generate(stage.id, user, db):
-                tokens.append(t)
+        async for t in svc.generate(stage.id, user, db):
+            tokens.append(t)
 
     # Critic consulted twice (initial + after the one regenerate).
     assert mock_critic.await_count == 2
     # Exactly one regenerate happened and was attributed.
     after = REGISTRY.get_sample_value(_REGEN_METRIC, {"stage": "spec"}) or 0.0
     assert after - before == 1.0
-    # Refund happened exactly once; credit cache invalidated.
-    mr.assert_awaited_once()
+    # The user received an inspectable artifact, so the generation remains billed.
+    mr.assert_not_awaited()
     mi.assert_awaited()
-    # Stage reset to a regeneratable draft; failed artifact never cached/persisted.
+    # Stage is a regeneratable, blocked draft; failed artifact is never cached.
     assert stage.status == "draft"
+    assert stage.content == _LONG_ARTIFACT.strip()
+    assert stage.quality_gate_status == "blocked"
+    assert stage.quality_gate_kind == "critic_findings"
+    assert stage.quality_gate_version == stage.current_version
     mc.assert_not_awaited()
-    assert not any(isinstance(a, StageVersion) for a in db.added)
+    assert any(
+        isinstance(a, StageVersion) and a.content == _LONG_ARTIFACT.strip()
+        for a in db.added
+    )
     # The frontend gets the structured failure event.
+    assert any("quality_gate_failed" in t for t in tokens)
+
+
+@pytest.mark.asyncio
+async def test_missing_section_gate_persists_blocked_draft() -> None:
+    """Zero-LLM section gate failures follow the same blocked-draft contract."""
+    svc, stage, workspace, user, deduction, db = _build_generate_env()
+    deduct, refund, invalidate, build, validate, set_cache, get_llm = _generate_patches(
+        svc
+    )
+    missing = ["## Acceptance Criteria"]
+
+    with (
+        deduct as md,
+        refund as mr,
+        invalidate,
+        build,
+        validate,
+        set_cache as mc,
+        get_llm,
+        patch(
+            "services.pipeline.stage_manager.validate_sections",
+            side_effect=MissingSectionError("spec", missing),
+        ),
+        patch(
+            "services.pipeline.stage_manager.critic_review",
+            new_callable=AsyncMock,
+        ) as mock_critic,
+    ):
+        md.return_value = deduction
+        tokens = [t async for t in svc.generate(stage.id, user, db)]
+
+    mock_critic.assert_not_awaited()
+    mr.assert_not_awaited()
+    mc.assert_not_awaited()
+    assert stage.status == "draft"
+    assert stage.quality_gate_status == "blocked"
+    assert stage.quality_gate_kind == "missing_sections"
+    assert stage.quality_gate_payload["missing"] == missing
+    assert any(isinstance(a, StageVersion) for a in db.added)
     assert any("quality_gate_failed" in t for t in tokens)
 
 

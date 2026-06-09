@@ -1,6 +1,23 @@
 export type StageType = "spec" | "plan" | "harness" | "tasks"
 
 export type StageStatus = "locked" | "draft" | "in_progress" | "finalised" | "stale"
+export type QualityGateStatus = "clear" | "blocked" | "overridden"
+
+export interface QualityGateFinding {
+  kind: string
+  detail: string
+  reference: string | null
+}
+
+export interface QualityGateInfo {
+  stage: StageType
+  kind: string | null
+  findings?: QualityGateFinding[]
+  missing?: string[]
+  status?: QualityGateStatus
+  version?: number | null
+  failed_at?: string | null
+}
 
 export interface Stage {
   id: string
@@ -13,6 +30,7 @@ export interface Stage {
   finalised_at: string | null
   review_gate_acknowledged: boolean
   gap_patch_used: boolean
+  quality_gate?: QualityGateInfo | null
   created_at: string
   updated_at: string
 }

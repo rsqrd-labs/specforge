@@ -91,7 +91,7 @@ Design invariants enforced here:
   * critic_review output schema is restricted to findings (no artifact bytes).
   * critic.py defines its prompt template inline (does NOT call load_prompt).
   * One-regenerate cap is enforced (regenerate count tracked).
-  * StageQualityGateError is raised after the second consecutive failure.
+  * A blocked draft is persisted after the second consecutive failure.
   * BILLING_CREDITS_CRITIC_REGEN counter is defined.
   * disable_critic toggle writes an audit event with the actor user_id.
   * services/pipeline/artifact_validator.py exists with SECTION_CONTRACTS dict.
@@ -1040,13 +1040,13 @@ def test_t247_critic_enforces_one_regenerate_cap() -> None:
     )
 
 
-def test_t247_critic_raises_stage_quality_gate_error_on_second_failure() -> None:
-    """T-247 — second consecutive critic failure must raise StageQualityGateError."""
+def test_t247_critic_persists_blocked_draft_on_second_failure() -> None:
+    """T-247 — second consecutive critic failure must persist a blocked draft."""
     src = read_backend_file("services", "pipeline", "critic.py") + \
           read_backend_file("services", "pipeline", "stage_manager.py")
-    assert "StageQualityGateError" in src, (
-        "Critic loop must raise StageQualityGateError after the second "
-        "consecutive failure.  T-247."
+    assert "quality_gate_status" in src and "blocked" in src, (
+        "Critic loop must persist a blocked draft after the second consecutive "
+        "failure so the user can inspect, regenerate, or override.  T-247."
     )
 
 

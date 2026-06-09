@@ -49,13 +49,13 @@ import {
   getStoryboard,
 
   getWorkspace,
+  overrideQualityGate,
   refineStage,
   regenerateStoryboard,
   rejectStageDiff,
   revalidateTasks,
   rollbackStage,
   shareStoryboard,
-  setWorkspaceCritic,
   updateWorkspace,
   updateStageContent,
   downloadStoryboard,
@@ -323,6 +323,7 @@ export default function Workspace() {
 
   // T-247 critic quality gate: findings surfaced when a generation is held back.
   const activeGate = activeStage ? qualityGateMap[activeStage.id] : undefined
+  const qualityGateBlocked = Boolean(activeGate)
 
   const stages = useMemo(() => {
     const workspaceStageIds = new Set(
@@ -447,6 +448,7 @@ export default function Workspace() {
       !activeStage ||
       activeStage.status === "locked" ||
       activeStage.status === "in_progress" ||
+      activeStage.quality_gate?.status === "blocked" ||
       !activeStage.content?.trim()
     ) {
       return
@@ -493,6 +495,7 @@ export default function Workspace() {
     activeStage?.status,
     activeStage?.current_version,
     activeStage?.content,
+    activeStage?.quality_gate?.status,
   ])
 
   useEffect(() => {
@@ -657,15 +660,12 @@ export default function Workspace() {
   }, [activeStage, clearQualityGate, runGeneration])
 
   const handleGateOverride = useCallback(async () => {
-    if (!activeStage || !currentWorkspace) return
+    if (!activeStage) return
     try {
-      // Owner escape hatch: disable the gate for the workspace, then regenerate.
-      // The backend re-enforces owner-only and writes the critic_disabled audit row.
-      const workspace = await setWorkspaceCritic(currentWorkspace.id, true)
-      setCurrentWorkspace(workspace)
-      setStages(workspace.stages)
+      const updatedStage = await overrideQualityGate(activeStage.id)
+      setStage(updatedStage)
       clearQualityGate(activeStage.id)
-      await runGeneration("regenerate")
+      await refreshWorkspace()
     } catch (error) {
       setGenericError(
         getApiErrorMessage(error, "Could not override the quality gate."),
@@ -674,10 +674,8 @@ export default function Workspace() {
   }, [
     activeStage,
     clearQualityGate,
-    currentWorkspace,
-    runGeneration,
-    setCurrentWorkspace,
-    setStages,
+    refreshWorkspace,
+    setStage,
   ])
 
   const handleGateDismiss = useCallback(() => {
@@ -850,6 +848,10 @@ export default function Workspace() {
 
   const handleFinalise = useCallback(async () => {
     if (!activeStage || !id) return
+    if (activeStage.quality_gate?.status === "blocked") {
+      setGenericError("Regenerate or override the quality gate before finalising.")
+      return
+    }
     const finalisedType = activeStage.type
     try {
       const updatedStage = await finaliseStage(activeStage.id)
@@ -1578,6 +1580,16 @@ export default function Workspace() {
           </section>
         ) : null}
 
+        {activeGate && (
+          <StreamingOverlay
+            isVisible={false}
+            gate={activeGate}
+            onRegenerate={handleGateRegenerate}
+            onOverride={handleGateOverride}
+            onDismiss={handleGateDismiss}
+          />
+        )}
+
         {/* Generate bar */}
         <div className="generate-bar">
           <GenerateBar
@@ -1587,6 +1599,7 @@ export default function Workspace() {
             onRefine={requestRefine}
             onFinalise={handleFinalise}
             onUnlock={() => void performRollback(activeStage.current_version)}
+            qualityGateBlocked={qualityGateBlocked}
           />
         </div>
 
@@ -1727,13 +1740,7 @@ export default function Workspace() {
                     <MarkdownRenderer content={activeStage.content ?? ""} />
                   </div>
                 )}
-                <StreamingOverlay
-                  isVisible={isStreaming}
-                  gate={activeGate}
-                  onRegenerate={handleGateRegenerate}
-                  onOverride={handleGateOverride}
-                  onDismiss={handleGateDismiss}
-                />
+                <StreamingOverlay isVisible={isStreaming} />
               </div>
             </section>
           </div>
@@ -1815,13 +1822,7 @@ export default function Workspace() {
                     />
                   </div>
                 )}
-                <StreamingOverlay
-                  isVisible={isStreaming}
-                  gate={activeGate}
-                  onRegenerate={handleGateRegenerate}
-                  onOverride={handleGateOverride}
-                  onDismiss={handleGateDismiss}
-                />
+                <StreamingOverlay isVisible={isStreaming} />
               </div>
             </section>
 

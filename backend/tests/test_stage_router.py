@@ -543,6 +543,66 @@ async def test_acknowledge_gate_marks_stage_reviewed(app) -> None:
 
 
 @pytest.mark.asyncio
+async def test_override_quality_gate_returns_updated_stage(app) -> None:
+    stage = _make_stage(stage_type="plan")
+    stage.quality_gate_status = "overridden"
+    stage.quality_gate_kind = "critic_findings"
+    stage.quality_gate_payload = {
+        "stage": "plan",
+        "kind": "critic_findings",
+        "findings": [
+            {"kind": "MissingSection", "detail": "No ADR", "reference": "ADR"}
+        ],
+    }
+    stage.quality_gate_version = stage.current_version
+    stage.quality_gate_failed_at = datetime.now(UTC)
+    fake_db = _FakeDB(stage)
+
+    async def _fake_db():
+        yield fake_db
+
+    app.dependency_overrides[get_db] = _fake_db
+
+    with patch(
+        "routers.stage.stage_manager.override_quality_gate",
+        new_callable=AsyncMock,
+        return_value=stage,
+    ) as mock_override:
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            response = await client.post(f"/stages/{stage.id}/override-quality-gate")
+
+    assert response.status_code == 200
+    assert response.json()["quality_gate"]["status"] == "overridden"
+    mock_override.assert_awaited_once_with(stage.id, _USER, fake_db)
+
+
+@pytest.mark.asyncio
+async def test_override_quality_gate_returns_409_when_not_blocked(app) -> None:
+    stage = _make_stage(stage_type="plan")
+    fake_db = _FakeDB(stage)
+
+    async def _fake_db():
+        yield fake_db
+
+    app.dependency_overrides[get_db] = _fake_db
+
+    with patch(
+        "routers.stage.stage_manager.override_quality_gate",
+        new_callable=AsyncMock,
+        side_effect=ValueError("Current stage version is not blocked."),
+    ):
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            response = await client.post(f"/stages/{stage.id}/override-quality-gate")
+
+    assert response.status_code == 409
+    assert "not blocked" in response.json()["detail"]
+
+
+@pytest.mark.asyncio
 async def test_refine_preserves_raw_selected_text_for_stage_manager(app) -> None:
     stage = _make_stage()
     captured = {}

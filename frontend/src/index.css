@@ -7423,6 +7423,14 @@ button:disabled {
 
 .gen-btn-primary:active { transform: translateY(0); }
 
+.gen-btn-primary:disabled,
+.gen-btn-secondary:disabled {
+  cursor: not-allowed;
+  opacity: 0.58;
+  transform: none;
+  box-shadow: none;
+}
+
 .gen-btn-compact {
   min-height: 36px;
   padding: 0 14px;
@@ -9149,6 +9157,11 @@ button:disabled {
   justify-content: center;
   padding: 24px;
   background: rgba(15, 23, 42, 0.34);
+}
+
+.quality-gate-inline {
+  pointer-events: auto;
+  margin: 0 0 16px;
 }
 
 .quality-gate-panel {

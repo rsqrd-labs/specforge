@@ -318,6 +318,7 @@ _STAGE_CACHE_TTL = 3600
 _FILE_HEADING_RE = re.compile(r"^(#{2,3})\s+File:\s+(.+?)$", re.MULTILINE)
 
 _RECOVERY_LOCK_KEY = "recovery:leader_lock"
+AUDIT_EVENT_QUALITY_GATE_OVERRIDDEN = "quality_gate_overridden"
 
 
 async def refresh_recovery_lock(redis: "Redis") -> None:
@@ -517,7 +518,14 @@ class StageManager:
         *,
         trace_id: str | None = None,
         free: bool = False,
+        action: str = "generate",
     ) -> AsyncGenerator[str, None]:
+        if action not in {"generate", "regenerate"}:
+            raise PreflightError(
+                "invalid_generation_action",
+                "Invalid generation action.",
+            )
+
         stage = await self._load_stage(stage_id, db, lock=True)
         workspace = await self._load_workspace(stage.workspace_id, db)
 
@@ -557,10 +565,17 @@ class StageManager:
                 user.id,
             )
 
+        credit_reason = "regenerate" if action == "regenerate" else "generate"
+        credit_cost = CREDIT_COSTS[credit_reason]
+
         if not free:
-            _assert_visible_credit_balance(user, CREDIT_COSTS["generate"])
+            _assert_visible_credit_balance(user, credit_cost)
         route = _resolve_preflight_route(
-            lambda: _route_for_stage_generation(stage.type, workspace)
+            lambda: (
+                _route_for_refine(workspace, "full")
+                if action == "regenerate"
+                else _route_for_stage_generation(stage.type, workspace)
+            )
         )
         system_prompt, user_prompt = await build_prompt(
             stage.type, workspace, db, redis
@@ -577,11 +592,16 @@ class StageManager:
             user_instruction_hash=_hash_text(""),
             output_contract_version=f"{stage.type}-v1",
         )
-        cached_output = None if free else await get_cached_generation(redis, cache_key)
+        cached_output = (
+            None
+            if free or action == "regenerate"
+            else await get_cached_generation(redis, cache_key)
+        )
         if cached_output is not None:
             stage.content = cached_output
             stage.current_version += 1
             stage.status = "draft"
+            self._clear_quality_gate(stage)
             stage.updated_at = datetime.now(UTC)
             version = StageVersion(
                 stage_id=stage.id,
@@ -600,7 +620,7 @@ class StageManager:
             None
             if free
             else await credit_service.deduct(
-                db, user.id, CREDIT_COSTS["generate"], "generate"
+                db, user.id, credit_cost, credit_reason
             )
         )
 
@@ -626,7 +646,7 @@ class StageManager:
                     workspace=workspace,
                     user=user,
                     stage=stage,
-                    action="generate",
+                    action=action,
                 )
 
             content_generation_id: str | None = None
@@ -642,7 +662,7 @@ class StageManager:
                         provider=route.provider,
                         model=route.model,
                         stage_type=stage.type,
-                        action="generate",
+                        action=action,
                         model_tier=route.model_tier,
                         prompt_version=STAGE_PROMPT_VERSIONS[stage.type],
                         operation=route.operation,
@@ -734,21 +754,25 @@ class StageManager:
                     validate_sections(stage.type, accumulated, critic_deps)
                 except MissingSectionError as exc:
                     PIPELINE_VALIDATOR_FAILURES.labels(stage=stage.type).inc()
-                    await self._refund_and_reset(db, deduction, stage, user)
+                    gate_payload = {
+                        "stage": stage.type,
+                        "kind": "missing_sections",
+                        "missing": exc.missing,
+                    }
+                    await self._persist_quality_gate_blocked(
+                        db,
+                        redis,
+                        stage,
+                        accumulated,
+                        kind="missing_sections",
+                        payload=gate_payload,
+                    )
                     _cleanup_done = True
                     if span_id:
                         await self._mark_langfuse_span_failed(span_id, exc)
                         span_finished = True
-                    yield json.dumps(
-                        {
-                            "quality_gate_failed": {
-                                "stage": stage.type,
-                                "kind": "missing_sections",
-                                "missing": exc.missing,
-                            }
-                        }
-                    )
-                    raise
+                    yield json.dumps({"quality_gate_failed": gate_payload})
+                    return
                 regenerate_count = 0
                 while True:
                     critic_result = await critic_review(
@@ -761,26 +785,30 @@ class StageManager:
                         break
                     if regenerate_count >= MAX_REGENERATES:
                         # Terminal gate failure after the one regenerate pass.
-                        await self._refund_and_reset(db, deduction, stage, user)
-                        _cleanup_done = True
+                        gate_payload = {
+                            "stage": stage.type,
+                            "kind": "critic_findings",
+                            "findings": [
+                                f.model_dump() for f in critic_result.findings
+                            ],
+                        }
                         gate_error = StageQualityGateError(
                             stage.type, critic_result.findings
                         )
+                        await self._persist_quality_gate_blocked(
+                            db,
+                            redis,
+                            stage,
+                            accumulated,
+                            kind="critic_findings",
+                            payload=gate_payload,
+                        )
+                        _cleanup_done = True
                         if span_id:
                             await self._mark_langfuse_span_failed(span_id, gate_error)
                             span_finished = True
-                        yield json.dumps(
-                            {
-                                "quality_gate_failed": {
-                                    "stage": stage.type,
-                                    "kind": "critic_findings",
-                                    "findings": [
-                                        f.model_dump() for f in critic_result.findings
-                                    ],
-                                }
-                            }
-                        )
-                        raise gate_error
+                        yield json.dumps({"quality_gate_failed": gate_payload})
+                        return
                     # One platform-funded regenerate with the findings injected.
                     accumulated = await self._regenerate_with_findings(
                         route=route,
@@ -808,6 +836,7 @@ class StageManager:
             stage.content = accumulated
             stage.current_version += 1
             stage.status = "draft"
+            self._clear_quality_gate(stage)
             stage.updated_at = datetime.now(UTC)
             version = StageVersion(
                 stage_id=stage.id,
@@ -826,7 +855,8 @@ class StageManager:
                 )
             await db.commit()
             _cleanup_done = True
-            await set_cached_generation(redis, cache_key, accumulated)
+            if action == "generate":
+                await set_cached_generation(redis, cache_key, accumulated)
             if span_id:
                 await self._end_langfuse_span(span_id)
                 span_finished = True
@@ -1160,6 +1190,14 @@ class StageManager:
         stage = await self._load_stage(stage_id, db, lock=True)
         if stage.status != "draft":
             raise ValueError(f"Stage status {stage.status!r} cannot be finalised")
+        if (
+            stage.quality_gate_status == "blocked"
+            and stage.quality_gate_version == stage.current_version
+        ):
+            raise ValueError(
+                "Current stage version is blocked by the quality gate. "
+                "Regenerate or override before finalising."
+            )
 
         stage.status = "finalised"
         stage.finalised_at = datetime.now(UTC)
@@ -1226,6 +1264,7 @@ class StageManager:
         stage.content = version.content
         stage.current_version = version_number
         stage.status = "draft"
+        self._clear_quality_gate(stage)
         stage.updated_at = datetime.now(UTC)
 
         await self._mark_downstream_stale(stage, db)
@@ -1246,6 +1285,7 @@ class StageManager:
         stage.content = sanitize_text(new_content)
         stage.current_version += 1
         stage.status = "draft" if not was_finalised else "stale"
+        self._clear_quality_gate(stage)
         stage.updated_at = datetime.now(UTC)
 
         version = StageVersion(
@@ -1404,6 +1444,79 @@ class StageManager:
             )
         return deps
 
+    def _clear_quality_gate(self, stage: Stage) -> None:
+        stage.quality_gate_status = "clear"
+        stage.quality_gate_kind = None
+        stage.quality_gate_payload = None
+        stage.quality_gate_version = None
+        stage.quality_gate_failed_at = None
+
+    async def _persist_quality_gate_blocked(
+        self,
+        db: AsyncSession,
+        redis: "Redis",
+        stage: Stage,
+        content: str,
+        *,
+        kind: str,
+        payload: dict,
+    ) -> None:
+        blocked_content = _strip_code_fence(content).strip()
+        now = datetime.now(UTC)
+        stage.content = blocked_content
+        stage.current_version += 1
+        stage.status = "draft"
+        stage.quality_gate_status = "blocked"
+        stage.quality_gate_kind = kind
+        stage.quality_gate_payload = payload
+        stage.quality_gate_version = stage.current_version
+        stage.quality_gate_failed_at = now
+        stage.updated_at = now
+        db.add(
+            StageVersion(
+                stage_id=stage.id,
+                version=stage.current_version,
+                content=blocked_content,
+                created_by="ai",
+            )
+        )
+        await db.commit()
+        await self._invalidate_stage_cache(stage.workspace_id, stage.type, redis)
+
+    async def override_quality_gate(
+        self,
+        stage_id: UUID,
+        user,
+        db: AsyncSession,
+    ) -> Stage:
+        stage = await self._load_stage(stage_id, db, lock=True)
+        if stage.status != "draft":
+            raise ValueError("Only draft stages can override a quality gate.")
+        if (
+            stage.quality_gate_status != "blocked"
+            or stage.quality_gate_version != stage.current_version
+        ):
+            raise ValueError(
+                "Current stage version is not blocked by the quality gate."
+            )
+
+        stage.quality_gate_status = "overridden"
+        stage.updated_at = datetime.now(UTC)
+        await db.commit()
+        await db.refresh(stage)
+        logger.info(
+            AUDIT_EVENT_QUALITY_GATE_OVERRIDDEN,
+            extra={
+                "audit_event": AUDIT_EVENT_QUALITY_GATE_OVERRIDDEN,
+                "actor_id": str(user.id),
+                "stage_id": str(stage.id),
+                "workspace_id": str(stage.workspace_id),
+                "quality_gate_kind": stage.quality_gate_kind,
+                "quality_gate_version": stage.quality_gate_version,
+            },
+        )
+        return stage
+
     async def _refund_and_reset(
         self, db: AsyncSession, deduction, stage: Stage, user
     ) -> None:
@@ -1538,6 +1651,7 @@ class StageManager:
             stage.content = merged
             stage.current_version += 1
             stage.status = "draft"
+            self._clear_quality_gate(stage)
             stage.gap_patch_used = True
             stage.updated_at = datetime.now(UTC)
             version = StageVersion(

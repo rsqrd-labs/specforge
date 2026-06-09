@@ -6,6 +6,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 StageType = Literal["spec", "plan", "harness", "tasks"]
 StageStatus = Literal["locked", "draft", "in_progress", "finalised", "stale"]
+QualityGateStatus = Literal["clear", "blocked", "overridden"]
 
 
 class GenerateRequest(BaseModel):
@@ -48,6 +49,18 @@ class EvalResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+class StageQualityGate(BaseModel):
+    status: QualityGateStatus
+    stage: StageType
+    kind: str | None = None
+    findings: list[dict[str, Any]] | None = None
+    missing: list[str] | None = None
+    version: int | None = None
+    failed_at: datetime | None = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
 class StageResponse(BaseModel):
     id: UUID
     workspace_id: UUID
@@ -59,6 +72,7 @@ class StageResponse(BaseModel):
     finalised_at: datetime | None = None
     review_gate_acknowledged: bool = False
     gap_patch_used: bool = False
+    quality_gate: StageQualityGate | None = None
     created_at: datetime
     updated_at: datetime
 

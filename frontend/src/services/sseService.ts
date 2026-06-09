@@ -1,4 +1,4 @@
-import type { EvalResult } from "../types/stage"
+import type { EvalResult, QualityGateInfo } from "../types/stage"
 import { getAccessToken, getCsrfToken, refreshAccessToken } from "./api"
 
 interface SSEControl {
@@ -21,21 +21,6 @@ interface ErrorEvent {
 
 interface EvalEvent {
   eval: EvalResult
-}
-
-export interface QualityGateFinding {
-  kind: string
-  detail: string
-  reference: string | null
-}
-
-export interface QualityGateInfo {
-  stage: string
-  /** "critic_findings" (carries `findings`) or "missing_sections" (carries
-   *  `missing`). */
-  kind: string
-  findings?: QualityGateFinding[]
-  missing?: string[]
 }
 
 interface QualityGateFailedEvent {

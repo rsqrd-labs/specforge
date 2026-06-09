@@ -142,6 +142,22 @@ describe("GenerateBar", () => {
     ).toBeInTheDocument()
   })
 
+  it("disables finalise while quality gate is blocked", () => {
+    const stage = makeStage({ status: "draft", content: "Blocked spec" })
+    render(
+      <GenerateBar
+        stage={stage}
+        onGenerate={noop}
+        onRegenerate={noop}
+        onRefine={noop}
+        onFinalise={noop}
+        onUnlock={noop}
+        qualityGateBlocked
+      />,
+    )
+    expect(screen.getByRole("button", { name: /final quality pass/i })).toBeDisabled()
+  })
+
   it("returns null when stage is locked", () => {
     const stage = makeStage({ status: "locked" })
     const { container } = render(

@@ -2,7 +2,7 @@ import { render, screen } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { describe, expect, it, vi } from "vitest"
 
-import type { QualityGateInfo } from "../../services/sseService"
+import type { QualityGateInfo } from "../../types/stage"
 import "../../index.css"
 import { StreamingOverlay } from "./StreamingOverlay"
 

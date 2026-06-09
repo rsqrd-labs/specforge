@@ -14,7 +14,7 @@ from sqlalchemy import (
     func,
     text,
 )
-from sqlalchemy.dialects.postgresql import TIMESTAMP, UUID
+from sqlalchemy.dialects.postgresql import JSONB, TIMESTAMP, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from models import Base
@@ -34,6 +34,10 @@ class Stage(Base):
         CheckConstraint(
             "status IN ('locked', 'draft', 'in_progress', 'finalised', 'stale')",
             name="ck_stages_status",
+        ),
+        CheckConstraint(
+            "quality_gate_status IN ('clear', 'blocked', 'overridden')",
+            name="ck_stages_quality_gate_status",
         ),
     )
 
@@ -67,6 +71,19 @@ class Stage(Base):
         default=False,
         server_default=text("false"),
     )
+    quality_gate_status: Mapped[str] = mapped_column(
+        String,
+        nullable=False,
+        default="clear",
+        server_default=text("'clear'"),
+    )
+    quality_gate_kind: Mapped[str | None] = mapped_column(String, nullable=True)
+    quality_gate_payload: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    quality_gate_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    quality_gate_failed_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True),
+        nullable=True,
+    )
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True),
         nullable=False,
@@ -88,3 +105,21 @@ class Stage(Base):
         back_populates="stage",
         cascade="all, delete-orphan",
     )
+
+    @property
+    def quality_gate(self) -> dict | None:
+        status = self.quality_gate_status or "clear"
+        if status == "clear":
+            return None
+
+        payload = dict(self.quality_gate_payload or {})
+        payload.setdefault("stage", self.type)
+        payload.setdefault("kind", self.quality_gate_kind)
+        payload["status"] = status
+        payload["version"] = self.quality_gate_version
+        payload["failed_at"] = (
+            self.quality_gate_failed_at.isoformat()
+            if self.quality_gate_failed_at is not None
+            else None
+        )
+        return payload

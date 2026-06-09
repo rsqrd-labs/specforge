@@ -437,6 +437,11 @@ export async function acknowledgeReviewGate(id: string): Promise<Stage> {
   return response.data
 }
 
+export async function overrideQualityGate(id: string): Promise<Stage> {
+  const response = await api.post<Stage>(`/stages/${id}/override-quality-gate`)
+  return response.data
+}
+
 export async function exportWorkspace(id: string): Promise<Blob> {
   const response = await api.post<Blob>(`/workspaces/${id}/export`, undefined, {
     responseType: "blob",
