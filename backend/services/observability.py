@@ -101,6 +101,27 @@ SSE_STREAM_FAILURES = Counter(
     ["stage_type"],
 )
 
+PIPELINE_INCOMPLETE_OUTPUTS = Counter(
+    "specforge_pipeline_incomplete_outputs_total",
+    "Stage generations blocked because the provider output was incomplete",
+    ["stage_type", "provider", "reason"],
+)
+PIPELINE_COMPLETION_REPAIRS = Counter(
+    "specforge_pipeline_completion_repairs_total",
+    "Platform-funded repair attempts for incomplete stage generation chunks",
+    ["stage_type", "provider", "outcome"],
+)
+PIPELINE_PROVIDER_LIMIT_STOPS = Counter(
+    "specforge_pipeline_provider_limit_stops_total",
+    "Provider generations that stopped because max output tokens were reached",
+    ["stage_type", "provider", "model", "operation"],
+)
+PIPELINE_INTERRUPTED_STREAMS = Counter(
+    "specforge_pipeline_interrupted_streams_total",
+    "Stage generation streams interrupted before a usable completed artifact existed",
+    ["stage_type"],
+)
+
 # PDF export duration histogram — WeasyPrint is CPU-bound and blocks the
 # thread-pool executor thread for 0.5–3 s per render. Observing duration
 # makes event-loop-blocking outliers (C-4) visible.

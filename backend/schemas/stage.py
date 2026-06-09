@@ -55,6 +55,9 @@ class StageQualityGate(BaseModel):
     kind: str | None = None
     findings: list[dict[str, Any]] | None = None
     missing: list[str] | None = None
+    reasons: list[dict[str, Any]] | None = None
+    override_allowed: bool | None = None
+    repair_attempted: bool | None = None
     version: int | None = None
     failed_at: datetime | None = None
 

@@ -20,6 +20,7 @@ from prompt_eval.graders.format import (
 )
 from prompt_eval.graders.quality import (
     adr_completeness_pct,
+    artifact_depth_pct,
     banned_phrase_hit_count,
     capacity_model_presence,
     denylist_freshness,
@@ -55,6 +56,7 @@ ALL_GRADERS: tuple[GraderFn, ...] = (
     stride_presence,
     slo_presence,
     fmea_presence,
+    artifact_depth_pct,
     denylist_freshness,
     heading_order_match,
     code_fence_balance,

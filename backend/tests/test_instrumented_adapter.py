@@ -25,6 +25,7 @@ from prometheus_client import generate_latest
 
 from services import langfuse_service
 from services.llm.base import BaseLLMAdapter
+from services.llm.completion import LLMCompletionInfo
 from services.llm.instrumented_adapter import InstrumentedAdapter
 from services.llm.usage import estimate_cost_usd, estimated_usage_from_text
 
@@ -46,6 +47,11 @@ class _FakeAdapter(BaseLLMAdapter):
 
     async def stream(self, system: str, user: str, max_tokens: int):
         self.stream_calls.append((system, user, max_tokens))
+        self.last_completion = LLMCompletionInfo.started(
+            provider="fake",
+            model="fake-model",
+            max_tokens=max_tokens,
+        )
         for token in self._tokens:
             if self._raise_during_stream is not None and token == self._tokens[-1]:
                 raise self._raise_during_stream
@@ -53,6 +59,11 @@ class _FakeAdapter(BaseLLMAdapter):
 
     async def complete(self, system: str, user: str, max_tokens: int) -> str:
         self.complete_calls.append((system, user, max_tokens))
+        self.last_completion = LLMCompletionInfo.started(
+            provider="fake",
+            model="fake-model",
+            max_tokens=max_tokens,
+        )
         if self._raise_during_complete is not None:
             raise self._raise_during_complete
         return self._complete_response
@@ -62,6 +73,18 @@ def _mock_langfuse() -> MagicMock:
     client = MagicMock()
     client.create_generation = AsyncMock(return_value="gen-id-from-test")
     return client
+
+
+def test_completion_info_maps_limit_finish_reasons() -> None:
+    info = LLMCompletionInfo.started(
+        provider="openai",
+        model="gpt-4o",
+        max_tokens=100,
+    )
+    info.apply_finish_reason("length")
+
+    assert info.finish_reason == "length"
+    assert info.stopped_by_limit is True
 
 
 @pytest.mark.asyncio
@@ -85,6 +108,7 @@ async def test_stream_passes_tokens_through_unchanged() -> None:
 
     assert collected == ["one", "two", "three"]
     assert adapter.stream_calls == [("sys", "user", 100)]
+    assert wrapped.last_completion is adapter.last_completion
 
 
 @pytest.mark.asyncio

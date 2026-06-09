@@ -26,7 +26,12 @@ from pydantic import ValidationError
 
 from models import CreditLedger, Stage, StageVersion, Workspace
 from services.pipeline import critic as critic_module
-from services.pipeline.artifact_validator import SECTION_CONTRACTS, MissingSectionError
+from services.pipeline.artifact_validator import (
+    SECTION_CONTRACTS,
+    MissingSectionError,
+    chunk_completion_sentinel,
+    final_completion_sentinel,
+)
 from services.pipeline.critic import (
     AUDIT_EVENT_CRITIC_DISABLED,
     CriticFinding,
@@ -45,6 +50,13 @@ _LONG_ARTIFACT = "\n\n".join(
     f"{heading}\nDetailed content for this section covering the requirement.\n"
     for heading in SECTION_CONTRACTS["spec"]
 )
+_LONG_ARTIFACT_STREAM = (
+    f"{_LONG_ARTIFACT}\n{chunk_completion_sentinel('spec', 'product-scope')}"
+)
+
+
+def _with_final_sentinel(content: str, stage: str = "spec") -> str:
+    return f"{content}\n{final_completion_sentinel(stage)}"
 
 
 # ---------------------------------------------------------------------------
@@ -178,9 +190,9 @@ def _make_user():
 
 async def _fake_stream(*args, **kwargs) -> AsyncGenerator[str, None]:
     # Emit the long artifact in two chunks so it streams like a real generation.
-    half = len(_LONG_ARTIFACT) // 2
-    yield _LONG_ARTIFACT[:half]
-    yield _LONG_ARTIFACT[half:]
+    half = len(_LONG_ARTIFACT_STREAM) // 2
+    yield _LONG_ARTIFACT_STREAM[:half]
+    yield _LONG_ARTIFACT_STREAM[half:]
 
 
 def _build_generate_env(*, disable_critic: bool = False):
@@ -344,7 +356,7 @@ async def test_critic_one_regenerate_cap() -> None:
     """Second consecutive failure: save blocked draft, do not refund, emit SSE."""
     svc, stage, workspace, user, deduction, db = _build_generate_env()
     deduct, refund, invalidate, build, validate, set_cache, get_llm = _generate_patches(
-        svc, complete_return=_LONG_ARTIFACT
+        svc, complete_return=_with_final_sentinel(_LONG_ARTIFACT)
     )
     fail = StageCriticResult(
         passed=False,
@@ -440,7 +452,7 @@ async def test_critic_fail_then_pass_regenerates_once() -> None:
     svc, stage, workspace, user, deduction, db = _build_generate_env()
     regenerated = "## Corrected\n" + _LONG_ARTIFACT
     deduct, refund, invalidate, build, validate, set_cache, get_llm = _generate_patches(
-        svc, complete_return=regenerated
+        svc, complete_return=_with_final_sentinel(regenerated)
     )
     results = [
         StageCriticResult(

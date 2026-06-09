@@ -9,11 +9,20 @@ export interface QualityGateFinding {
   reference: string | null
 }
 
+export interface QualityGateReason {
+  code: string
+  detail: string
+  reference: string | null
+}
+
 export interface QualityGateInfo {
   stage: StageType
   kind: string | null
   findings?: QualityGateFinding[]
   missing?: string[]
+  reasons?: QualityGateReason[]
+  override_allowed?: boolean
+  repair_attempted?: boolean
   status?: QualityGateStatus
   version?: number | null
   failed_at?: string | null

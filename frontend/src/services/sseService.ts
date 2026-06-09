@@ -225,9 +225,9 @@ export function createSSEConnection(
           if ("quality_gate_failed" in data) {
             const info = (data as QualityGateFailedEvent).quality_gate_failed
             onQualityGateFailed(info)
-            // Terminal: the backend refunded the credit and reset the stage to
-            // draft, then ended the stream without a `done`.  Surface it as an
-            // application error so the caller stops waiting and tears down.
+            // Terminal: the backend persisted a blocked draft and ended the
+            // stream without a `done`. Surface it as an application error so
+            // the caller stops waiting and fetches the latest stage.
             onError(
               new StreamError(
                 "quality_gate_failed",

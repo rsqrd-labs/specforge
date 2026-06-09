@@ -18,6 +18,20 @@ const criticGate: QualityGateInfo = {
   ],
 }
 
+const incompleteGate: QualityGateInfo = {
+  stage: "tasks",
+  kind: "incomplete_output",
+  override_allowed: false,
+  repair_attempted: true,
+  reasons: [
+    {
+      code: "provider_stopped_by_limit",
+      detail: "The provider stopped because the output token limit was reached.",
+      reference: "max_tokens",
+    },
+  ],
+}
+
 describe("StreamingOverlay quality gate", () => {
   it("wires regenerate, override, and dismiss actions", async () => {
     const user = userEvent.setup()
@@ -49,7 +63,24 @@ describe("StreamingOverlay quality gate", () => {
 
     expect(
       getComputedStyle(screen.getByRole("alertdialog", { name: /quality gate/i }))
-        .pointerEvents,
+      .pointerEvents,
     ).toBe("auto")
+  })
+
+  it("hides override for incomplete output gates", () => {
+    render(
+      <StreamingOverlay
+        isVisible={false}
+        gate={incompleteGate}
+        onRegenerate={vi.fn()}
+        onOverride={vi.fn()}
+      />,
+    )
+
+    expect(screen.getByRole("button", { name: "Regenerate" })).toBeInTheDocument()
+    expect(
+      screen.queryByRole("button", { name: "Override and continue" }),
+    ).not.toBeInTheDocument()
+    expect(screen.getByText(/stopped before completion/i)).toBeInTheDocument()
   })
 })

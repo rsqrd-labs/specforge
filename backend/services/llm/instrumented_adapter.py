@@ -39,6 +39,7 @@ import structlog
 
 from services import langfuse_service
 from services.llm.base import BaseLLMAdapter
+from services.llm.completion import LLMCompletionInfo
 from services.llm.provider_status import (
     record_provider_failure,
     record_provider_success,
@@ -83,6 +84,7 @@ class InstrumentedAdapter(BaseLLMAdapter):
         # Set after each recorded generation so downstream code (T-127 eval
         # score linking) can attach scores or dataset items to the same id.
         self.last_generation_id: str | None = None
+        self.last_completion: LLMCompletionInfo | None = None
 
     async def stream(
         self, system: str, user: str, max_tokens: int
@@ -99,6 +101,7 @@ class InstrumentedAdapter(BaseLLMAdapter):
         else:
             record_provider_success(self._provider)
         finally:
+            self.last_completion = getattr(self._wrapped, "last_completion", None)
             await self._record_generation(
                 system=system,
                 user=user,
@@ -117,6 +120,7 @@ class InstrumentedAdapter(BaseLLMAdapter):
             record_provider_failure(self._provider, exc)
             raise
         finally:
+            self.last_completion = getattr(self._wrapped, "last_completion", None)
             # response stays "" if the wrapped call raised; recording an empty
             # output preserves trace context without re-raising the error.
             await self._record_generation(

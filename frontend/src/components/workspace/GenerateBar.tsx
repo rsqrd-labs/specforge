@@ -8,6 +8,7 @@ interface GenerateBarProps {
   onFinalise: () => void
   onUnlock: () => void
   qualityGateBlocked?: boolean
+  qualityGateBlockedMessage?: string
 }
 
 export function GenerateBar({
@@ -18,6 +19,7 @@ export function GenerateBar({
   onFinalise,
   onUnlock,
   qualityGateBlocked = false,
+  qualityGateBlockedMessage = "Regenerate or override the quality gate before finalising",
 }: GenerateBarProps) {
   if (stage.status === "locked") return null
 
@@ -75,11 +77,7 @@ export function GenerateBar({
           onClick={onFinalise}
           className="gen-btn-primary"
           disabled={qualityGateBlocked}
-          title={
-            qualityGateBlocked
-              ? "Regenerate or override the quality gate before finalising"
-              : undefined
-          }
+          title={qualityGateBlocked ? qualityGateBlockedMessage : undefined}
         >
           Final quality pass
         </button>

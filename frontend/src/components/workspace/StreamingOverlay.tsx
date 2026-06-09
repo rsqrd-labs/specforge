@@ -24,8 +24,15 @@ export function StreamingOverlay({
   if (gate) {
     const missing = gate.missing ?? []
     const findings = gate.findings ?? []
+    const reasons = gate.reasons ?? []
+    const isIncomplete = gate.kind === "incomplete_output"
     const isMissingSections = gate.kind === "missing_sections" || missing.length > 0
-    const issueCount = isMissingSections ? missing.length : findings.length
+    const issueCount = isIncomplete
+      ? reasons.length || findings.length
+      : isMissingSections
+        ? missing.length
+        : findings.length
+    const canOverride = gate.override_allowed !== false && !isIncomplete
     return (
       <div
         className="quality-gate-inline"
@@ -35,7 +42,11 @@ export function StreamingOverlay({
         <div className="quality-gate-panel">
           <h3 className="quality-gate-title">Quality gate held this generation back</h3>
           <p className="quality-gate-subtitle">
-            {isMissingSections
+            {isIncomplete
+              ? `The generated ${gate.stage} stopped before completion${
+                  gate.repair_attempted ? " after a repair attempt" : ""
+                }. Regenerate to produce a complete version.`
+              : isMissingSections
               ? `The generated ${gate.stage} is missing ${issueCount} required ${
                   issueCount === 1 ? "section" : "sections"
                 }. Regenerate to try again, or override to accept anyway.`
@@ -43,7 +54,21 @@ export function StreamingOverlay({
                   issueCount === 1 ? "issue" : "issues"
                 } in the generated ${gate.stage}. Regenerate to try again, or override to accept anyway.`}
           </p>
-          {isMissingSections ? (
+          {isIncomplete ? (
+            <ul className="quality-gate-findings">
+              {(reasons.length ? reasons : findings).map((reason, index) => (
+                <li key={index} className="quality-gate-finding">
+                  <span className="quality-gate-kind">
+                    {"code" in reason ? reason.code : reason.kind}
+                  </span>
+                  {reason.reference ? (
+                    <span className="quality-gate-ref"> · {reason.reference}</span>
+                  ) : null}
+                  <span className="quality-gate-detail"> — {reason.detail}</span>
+                </li>
+              ))}
+            </ul>
+          ) : isMissingSections ? (
             <ul className="quality-gate-findings">
               {missing.map((heading) => (
                 <li key={heading} className="quality-gate-finding">
@@ -75,7 +100,7 @@ export function StreamingOverlay({
                 Regenerate
               </button>
             ) : null}
-            {onOverride ? (
+            {onOverride && canOverride ? (
               <button
                 type="button"
                 className="btn btn-secondary"

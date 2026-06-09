@@ -7,6 +7,7 @@ import httpx
 
 from config import settings
 from services.llm.base import BaseLLMAdapter, ProviderError
+from services.llm.completion import LLMCompletionInfo
 
 # Explicit timeouts prevent a hung provider from blocking a credit reservation
 # indefinitely.  connect/write are short (fast-fail on connection issues);
@@ -17,6 +18,7 @@ _DEFAULT_TIMEOUT = httpx.Timeout(connect=10.0, read=300.0, write=10.0, pool=5.0)
 class AnthropicAdapter(BaseLLMAdapter):
     def __init__(self, model: str, api_key: str | None = None) -> None:
         self.model = model
+        self.last_completion: LLMCompletionInfo | None = None
         self._client = anthropic.AsyncAnthropic(
             api_key=api_key or settings.anthropic_api_key,
             timeout=_DEFAULT_TIMEOUT,
@@ -25,6 +27,11 @@ class AnthropicAdapter(BaseLLMAdapter):
     async def stream(
         self, system: str, user: str, max_tokens: int
     ) -> AsyncGenerator[str, None]:
+        self.last_completion = LLMCompletionInfo.started(
+            provider="anthropic",
+            model=self.model,
+            max_tokens=max_tokens,
+        )
         try:
             async with self._client.messages.stream(
                 model=self.model,
@@ -34,10 +41,23 @@ class AnthropicAdapter(BaseLLMAdapter):
             ) as stream:
                 async for text in stream.text_stream:
                     yield text
+                final_message = await stream.get_final_message()
+                if self.last_completion is not None:
+                    self.last_completion.apply_finish_reason(
+                        getattr(final_message, "stop_reason", None)
+                    )
+                    usage = getattr(final_message, "usage", None)
+                    if usage is not None:
+                        self.last_completion.usage = _object_to_dict(usage)
         except anthropic.APIError as exc:
             raise ProviderError("anthropic", exc) from exc
 
     async def complete(self, system: str, user: str, max_tokens: int) -> str:
+        self.last_completion = LLMCompletionInfo.started(
+            provider="anthropic",
+            model=self.model,
+            max_tokens=max_tokens,
+        )
         try:
             response = await self._client.messages.create(
                 model=self.model,
@@ -45,6 +65,23 @@ class AnthropicAdapter(BaseLLMAdapter):
                 messages=[{"role": "user", "content": user}],
                 max_tokens=max_tokens,
             )
+            if self.last_completion is not None:
+                self.last_completion.apply_finish_reason(
+                    getattr(response, "stop_reason", None)
+                )
+                usage = getattr(response, "usage", None)
+                if usage is not None:
+                    self.last_completion.usage = _object_to_dict(usage)
             return response.content[0].text
         except anthropic.APIError as exc:
             raise ProviderError("anthropic", exc) from exc
+
+
+def _object_to_dict(value) -> dict:
+    if hasattr(value, "model_dump"):
+        return value.model_dump()
+    if hasattr(value, "dict"):
+        return value.dict()
+    if hasattr(value, "__dict__"):
+        return dict(value.__dict__)
+    return {"value": str(value)}

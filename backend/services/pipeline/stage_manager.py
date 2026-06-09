@@ -6,6 +6,7 @@ import json
 import logging
 import re
 from collections.abc import AsyncGenerator
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import UUID
 
@@ -44,11 +45,21 @@ from services.llm.provider_config import JUDGE_MODELS
 from services.llm.routing import LLMRoute, LLMRoutingError, resolve_llm_route
 from services.observability import (
     BILLING_CREDITS_CRITIC_REGEN,
+    PIPELINE_COMPLETION_REPAIRS,
+    PIPELINE_INCOMPLETE_OUTPUTS,
+    PIPELINE_INTERRUPTED_STREAMS,
+    PIPELINE_PROVIDER_LIMIT_STOPS,
     PIPELINE_VALIDATOR_FAILURES,
     SSE_STREAM_FAILURES,
 )
 from services.pipeline.artifact_validator import (
+    CompletenessIssue,
+    IncompleteArtifactError,
     MissingSectionError,
+    completion_instruction,
+    strip_completion_sentinel,
+    validate_artifact_completeness,
+    validate_completion_sentinel,
     validate_sections,
 )
 from services.pipeline.critic import (
@@ -90,7 +101,7 @@ STAGE_GENERATION_TIERS = {
     "spec": ("strong", "mid"),
     "plan": ("strong", "mid"),
     "harness": ("mid", "strong"),
-    "tasks": ("mini", "small"),
+    "tasks": ("strong", "mid"),
 }
 LONG_GENERATION_STAGES = frozenset({"harness", "tasks"})
 
@@ -305,6 +316,15 @@ def _upstream_artifact_hashes(workspace: Workspace, stage_type: str) -> dict[str
     }
 
 
+def _workspace_stage_deps(workspace: Workspace, stage_type: str) -> dict[str, str]:
+    stages_by_type = {stage.type: stage for stage in workspace.stages}
+    return {
+        dep_type: stages_by_type.get(dep_type).content or ""
+        for dep_type in STAGE_DEPENDENCIES[stage_type]
+        if stages_by_type.get(dep_type) is not None
+    }
+
+
 # Canonical single definition of stage dependency ordering.  L-1 — T-189a.
 STAGE_DEPENDENCIES = {
     "spec": [],
@@ -319,6 +339,22 @@ _FILE_HEADING_RE = re.compile(r"^(#{2,3})\s+File:\s+(.+?)$", re.MULTILINE)
 
 _RECOVERY_LOCK_KEY = "recovery:leader_lock"
 AUDIT_EVENT_QUALITY_GATE_OVERRIDDEN = "quality_gate_overridden"
+INCOMPLETE_OUTPUT_GATE_KIND = "incomplete_output"
+MAX_COMPLETENESS_REPAIRS = 1
+
+
+@dataclass(frozen=True)
+class ArtifactChunkSpec:
+    key: str
+    instruction: str
+
+
+@dataclass(frozen=True)
+class GeneratedArtifact:
+    content: str
+    chunks: list[str]
+    repair_attempted: bool
+    content_generation_id: str | None
 
 
 async def refresh_recovery_lock(redis: "Redis") -> None:
@@ -407,6 +443,165 @@ def _merge_harness_patch(existing: str, patch: str) -> str:
     if not new_sections:
         return existing
     return existing.rstrip() + "\n\n" + "\n\n".join(new_sections)
+
+
+def _chunk_specs_for_stage(stage_type: str) -> list[ArtifactChunkSpec]:
+    if stage_type == "spec":
+        return [
+            ArtifactChunkSpec(
+                "product-scope",
+                (
+                    "Generate only these SPEC.md sections, in order: Overview, "
+                    "Product Goals, User Problems, Non-Goals, Users and Personas, "
+                    "User Journeys, User Flow Diagrams, Functional Requirements."
+                ),
+            ),
+            ArtifactChunkSpec(
+                "system-expectations",
+                (
+                    "Generate only these SPEC.md sections, in order: Non-Functional "
+                    "Requirements, Conceptual Domain Model, Integrations and External "
+                    "Touchpoints, Permissions and Access Expectations, Security, "
+                    "Privacy, and Abuse Expectations, Error Handling and Recovery, "
+                    "High-Level System Context, Feature Interaction Overview."
+                ),
+            ),
+            ArtifactChunkSpec(
+                "validation-risk",
+                (
+                    "Generate only these SPEC.md sections, in order: Acceptance "
+                    "Criteria, Success Metrics, Edge Cases, Constraints, Risks, "
+                    "Assumptions and Open Questions, Out of Scope."
+                ),
+            ),
+        ]
+    if stage_type == "plan":
+        return [
+            ArtifactChunkSpec(
+                "architecture-foundation",
+                (
+                    "Generate only the PLAN.md foundation sections from Planning "
+                    "Summary through Multi-tenancy Stance, preserving all requirement "
+                    "IDs from SPEC.md."
+                ),
+            ),
+            ArtifactChunkSpec(
+                "quality-and-structure",
+                (
+                    "Generate only the PLAN.md sections from Capacity Model through "
+                    "Module Boundaries and Interfaces, with concrete diagrams, tables, "
+                    "interfaces, and trade-offs. If the SPEC describes a UI, web app, "
+                    "dashboard, page, or console, include ## Frontend Architecture "
+                    "in this chunk."
+                ),
+            ),
+            ArtifactChunkSpec(
+                "data-api-security",
+                (
+                    "Generate only the PLAN.md sections from Data Model and "
+                    "Persistence through Privacy and Data Handling, with exact "
+                    "schemas, API contracts, auth rules, and threat controls."
+                ),
+            ),
+            ArtifactChunkSpec(
+                "operations-risk",
+                (
+                    "Generate only the remaining PLAN.md operations sections: Error "
+                    "Handling and Recovery, Observability and Audit Logging, Testing "
+                    "Strategy, Deployment and Operations, Scalability and Performance, "
+                    "Rollout and Migration Plan, Risks and Mitigations, Assumptions "
+                    "and Open Questions."
+                ),
+            ),
+        ]
+    if stage_type == "harness":
+        return [
+            ArtifactChunkSpec(
+                "harness-contract",
+                (
+                    "Generate only HARNESS sections Harness Overview, "
+                    "Requirement-to-Test Matrix, Coverage Plan, and File Tree. The "
+                    "file tree must name every test, fixture, factory, and schema file "
+                    "that the Files section will contain."
+                ),
+            ),
+            ArtifactChunkSpec(
+                "harness-files",
+                (
+                    "Generate only the HARNESS ## Files section. Include every file "
+                    "from the File Tree as a `### File: path` heading followed by one "
+                    "complete fenced code block. No placeholders or omitted files."
+                ),
+            ),
+        ]
+    if stage_type == "tasks":
+        return [
+            ArtifactChunkSpec(
+                "task-overview",
+                (
+                    "Generate only the TASKS.md Effort Summary, Execution Overview, "
+                    "Traceability Overview, Dependency Graph, and Task Sizing Legend. "
+                    "Use the full task inventory you intend to emit so counts and "
+                    "dependencies are internally consistent."
+                ),
+            ),
+            ArtifactChunkSpec(
+                "task-blocks",
+                (
+                    "Generate all implementation phases and every `### T-NNN` task "
+                    "block. Each task must include every required field, concrete "
+                    "steps, exact harness refs, and objective acceptance criteria."
+                ),
+            ),
+        ]
+    return [
+        ArtifactChunkSpec(
+            "full",
+            "Generate the complete artifact for this stage.",
+        )
+    ]
+
+
+def _chunk_user_prompt(
+    base_user_prompt: str,
+    *,
+    stage_type: str,
+    chunk: ArtifactChunkSpec,
+    repair_issues: list[CompletenessIssue] | None = None,
+) -> str:
+    issue_text = ""
+    if repair_issues:
+        issue_lines = "\n".join(
+            f"- {issue.code}: {issue.detail}"
+            + (f" ({issue.reference})" if issue.reference else "")
+            for issue in repair_issues[:12]
+        )
+        issue_text = (
+            "\n\nPrevious attempt failed the completion contract. Regenerate this "
+            f"chunk from scratch and fix these issues:\n{issue_lines}\n"
+        )
+    return (
+        f"{base_user_prompt}\n\n"
+        f"Chunk scope for {stage_type.upper()} [{chunk.key}]:\n"
+        f"{chunk.instruction}\n"
+        f"{issue_text}"
+        f"{completion_instruction(stage_type, chunk_key=chunk.key)}"
+    )
+
+
+def _completion_info(adapter) -> object | None:
+    return getattr(adapter, "last_completion", None)
+
+
+def _completion_stopped_by_limit(adapter) -> bool:
+    completion = _completion_info(adapter)
+    return getattr(completion, "stopped_by_limit", False) is True
+
+
+def _completion_finish_reason(adapter) -> str | None:
+    completion = _completion_info(adapter)
+    reason = getattr(completion, "finish_reason", None)
+    return str(reason) if reason is not None else None
 
 
 class StageDependencyError(Exception):
@@ -510,6 +705,220 @@ class StageManager:
         except Exception:
             logger.exception("langfuse.stage_span_failure_mark_failed")
 
+    async def _generate_complete_artifact(
+        self,
+        *,
+        adapter,
+        route: LLMRoute,
+        system_prompt: str,
+        user_prompt: str,
+        stage_type: str,
+        deps: dict[str, str],
+    ) -> GeneratedArtifact:
+        chunks: list[str] = []
+        repair_attempted = False
+        max_tokens = output_budget_for_operation(route.operation)
+        stream_timeout = _stream_timeout_for_stage(stage_type)
+
+        chunk_specs = _chunk_specs_for_stage(stage_type)
+        for index, chunk in enumerate(chunk_specs):
+            try:
+                chunk_text = await self._generate_chunk_once(
+                    adapter=adapter,
+                    route=route,
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                    stage_type=stage_type,
+                    chunk=chunk,
+                    max_tokens=max_tokens,
+                    stream_timeout=stream_timeout,
+                )
+            except IncompleteArtifactError as exc:
+                if repair_attempted:
+                    raise IncompleteArtifactError(
+                        stage_type,
+                        exc.issues,
+                        partial_content="\n\n".join([*chunks, exc.partial_content]),
+                        repair_attempted=True,
+                    ) from exc
+                repair_attempted = True
+                PIPELINE_COMPLETION_REPAIRS.labels(
+                    stage_type=stage_type,
+                    provider=route.provider,
+                    outcome="attempted",
+                ).inc()
+                try:
+                    chunk_text = await self._generate_chunk_once(
+                        adapter=adapter,
+                        route=route,
+                        system_prompt=system_prompt,
+                        user_prompt=user_prompt,
+                        stage_type=stage_type,
+                        chunk=chunk,
+                        max_tokens=max_tokens,
+                        stream_timeout=stream_timeout,
+                        repair_issues=exc.issues,
+                    )
+                except IncompleteArtifactError as repair_exc:
+                    PIPELINE_COMPLETION_REPAIRS.labels(
+                        stage_type=stage_type,
+                        provider=route.provider,
+                        outcome="failed",
+                    ).inc()
+                    raise IncompleteArtifactError(
+                        stage_type,
+                        repair_exc.issues,
+                        partial_content="\n\n".join(
+                            [*chunks, repair_exc.partial_content]
+                        ),
+                        repair_attempted=True,
+                    ) from repair_exc
+                PIPELINE_COMPLETION_REPAIRS.labels(
+                    stage_type=stage_type,
+                    provider=route.provider,
+                    outcome="succeeded",
+                ).inc()
+            chunks.append(chunk_text)
+            if index < len(chunk_specs) - 1:
+                try:
+                    validate_artifact_completeness(stage_type, chunk_text, deps)
+                except IncompleteArtifactError:
+                    pass
+                else:
+                    return GeneratedArtifact(
+                        content=chunk_text,
+                        chunks=[chunk_text],
+                        repair_attempted=repair_attempted,
+                        content_generation_id=getattr(
+                            adapter,
+                            "last_generation_id",
+                            None,
+                        ),
+                    )
+
+        artifact = "\n\n".join(chunk for chunk in chunks if chunk.strip()).strip()
+        try:
+            validate_artifact_completeness(stage_type, artifact, deps)
+        except IncompleteArtifactError as exc:
+            if repair_attempted:
+                raise IncompleteArtifactError(
+                    stage_type,
+                    exc.issues,
+                    partial_content=artifact,
+                    repair_attempted=True,
+                ) from exc
+            repair_attempted = True
+            PIPELINE_COMPLETION_REPAIRS.labels(
+                stage_type=stage_type,
+                provider=route.provider,
+                outcome="attempted",
+            ).inc()
+            full_repair = ArtifactChunkSpec(
+                "full-repair",
+                (
+                    "Regenerate the complete artifact from scratch. Include every "
+                    "required section and all downstream detail needed by this stage."
+                ),
+            )
+            try:
+                artifact = await self._generate_chunk_once(
+                    adapter=adapter,
+                    route=route,
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                    stage_type=stage_type,
+                    chunk=full_repair,
+                    max_tokens=max_tokens,
+                    stream_timeout=stream_timeout,
+                    repair_issues=exc.issues,
+                )
+                validate_artifact_completeness(stage_type, artifact, deps)
+            except IncompleteArtifactError as repair_exc:
+                PIPELINE_COMPLETION_REPAIRS.labels(
+                    stage_type=stage_type,
+                    provider=route.provider,
+                    outcome="failed",
+                ).inc()
+                raise IncompleteArtifactError(
+                    stage_type,
+                    repair_exc.issues,
+                    partial_content=repair_exc.partial_content or artifact,
+                    repair_attempted=True,
+                ) from repair_exc
+            chunks = [artifact]
+            PIPELINE_COMPLETION_REPAIRS.labels(
+                stage_type=stage_type,
+                provider=route.provider,
+                outcome="succeeded",
+            ).inc()
+
+        return GeneratedArtifact(
+            content=artifact,
+            chunks=chunks,
+            repair_attempted=repair_attempted,
+            content_generation_id=getattr(adapter, "last_generation_id", None),
+        )
+
+    async def _generate_chunk_once(
+        self,
+        *,
+        adapter,
+        route: LLMRoute,
+        system_prompt: str,
+        user_prompt: str,
+        stage_type: str,
+        chunk: ArtifactChunkSpec,
+        max_tokens: int,
+        stream_timeout: float,
+        repair_issues: list[CompletenessIssue] | None = None,
+    ) -> str:
+        accumulated = ""
+        chunk_prompt = _chunk_user_prompt(
+            user_prompt,
+            stage_type=stage_type,
+            chunk=chunk,
+            repair_issues=repair_issues,
+        )
+        async with asyncio.timeout(stream_timeout):
+            async for token in adapter.stream(
+                system_prompt,
+                chunk_prompt,
+                max_tokens=max_tokens,
+            ):
+                accumulated += token
+        accumulated = _strip_code_fence(accumulated)
+        if _completion_stopped_by_limit(adapter):
+            PIPELINE_PROVIDER_LIMIT_STOPS.labels(
+                stage_type=stage_type,
+                provider=route.provider,
+                model=route.model,
+                operation=route.operation,
+            ).inc()
+            raise IncompleteArtifactError(
+                stage_type,
+                [
+                    CompletenessIssue(
+                        code="provider_stopped_by_limit",
+                        detail=(
+                            "The provider stopped because the output token limit "
+                            "was reached."
+                        ),
+                        reference=_completion_finish_reason(adapter),
+                    )
+                ],
+                partial_content=accumulated,
+            )
+        validate_completion_sentinel(stage_type, accumulated, chunk_key=chunk.key)
+        cleaned = strip_completion_sentinel(
+            stage_type,
+            accumulated,
+            chunk_key=chunk.key,
+        )
+        validation = validate(cleaned)
+        if not validation.is_safe:
+            raise SecurityError(f"Output failed validation: {validation.reason}")
+        return cleaned.strip()
+
     async def generate(
         self,
         stage_id: UUID,
@@ -590,7 +999,7 @@ class StageManager:
             problem_statement_hash=_hash_text(workspace.problem_statement),
             upstream_artifact_hashes=_upstream_artifact_hashes(workspace, stage.type),
             user_instruction_hash=_hash_text(""),
-            output_contract_version=f"{stage.type}-v1",
+            output_contract_version=f"{stage.type}-v2-complete",
         )
         cached_output = (
             None
@@ -650,6 +1059,8 @@ class StageManager:
                 )
 
             content_generation_id: str | None = None
+            stream_chunks: list[str] = []
+            deps = _workspace_stage_deps(workspace, stage.type)
             try:
                 adapter = get_llm(route.provider, route.model)
                 if trace_id:
@@ -670,16 +1081,17 @@ class StageManager:
                         batch=False,
                         cross_provider_fallback=route.cross_provider_fallback,
                     )
-                stream_timeout = _stream_timeout_for_stage(stage.type)
-                async with asyncio.timeout(stream_timeout):
-                    async for token in adapter.stream(
-                        system_prompt,
-                        user_prompt,
-                        max_tokens=output_budget_for_operation(route.operation),
-                    ):
-                        accumulated += token
-                        yield token
-                content_generation_id = getattr(adapter, "last_generation_id", None)
+                generated = await self._generate_complete_artifact(
+                    adapter=adapter,
+                    route=route,
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                    stage_type=stage.type,
+                    deps=deps,
+                )
+                accumulated = generated.content
+                stream_chunks = generated.chunks
+                content_generation_id = generated.content_generation_id
             except (ProviderError, TimeoutError) as exc:
                 # Record failure for stream timeouts ONLY — not for ProviderError.
                 # CRITICAL: Do NOT call record_provider_failure() unconditionally here.
@@ -716,8 +1128,27 @@ class StageManager:
                     await self._mark_langfuse_span_failed(span_id, exc)
                     span_finished = True
                 if isinstance(exc, TimeoutError):
-                    raise ProviderTimeoutError(route.provider, stream_timeout) from exc
+                    raise ProviderTimeoutError(
+                        route.provider,
+                        _stream_timeout_for_stage(stage.type),
+                    ) from exc
                 raise exc
+            except IncompleteArtifactError as exc:
+                gate_payload = await self._block_incomplete_output(
+                    db=db,
+                    redis=redis,
+                    stage=stage,
+                    user=user,
+                    deduction=deduction,
+                    route=route,
+                    exc=exc,
+                )
+                _cleanup_done = True
+                if span_id:
+                    await self._mark_langfuse_span_failed(span_id, exc)
+                    span_finished = True
+                yield json.dumps({"quality_gate_failed": gate_payload})
+                return
 
             accumulated = _strip_code_fence(accumulated)
 
@@ -810,13 +1241,31 @@ class StageManager:
                         yield json.dumps({"quality_gate_failed": gate_payload})
                         return
                     # One platform-funded regenerate with the findings injected.
-                    accumulated = await self._regenerate_with_findings(
-                        route=route,
-                        system_prompt=system_prompt,
-                        base_user_prompt=user_prompt,
-                        findings=critic_result.findings,
-                        stage_type=stage.type,
-                    )
+                    try:
+                        accumulated = await self._regenerate_with_findings(
+                            route=route,
+                            system_prompt=system_prompt,
+                            base_user_prompt=user_prompt,
+                            findings=critic_result.findings,
+                            stage_type=stage.type,
+                            deps=critic_deps,
+                        )
+                    except IncompleteArtifactError as exc:
+                        gate_payload = await self._block_incomplete_output(
+                            db=db,
+                            redis=redis,
+                            stage=stage,
+                            user=user,
+                            deduction=deduction,
+                            route=route,
+                            exc=exc,
+                        )
+                        _cleanup_done = True
+                        if span_id:
+                            await self._mark_langfuse_span_failed(span_id, exc)
+                            span_finished = True
+                        yield json.dumps({"quality_gate_failed": gate_payload})
+                        return
                     BILLING_CREDITS_CRITIC_REGEN.labels(stage=stage.type).inc()
                     regenerate_count += 1
                     # The regenerated artifact must clear the same security gate.
@@ -870,6 +1319,10 @@ class StageManager:
                 content_generation_id=content_generation_id,
                 harness_content=harness_content_for_eval,
             )
+            for index, chunk in enumerate(stream_chunks):
+                if index:
+                    yield "\n\n"
+                yield chunk
             yield f'{{"done": true, "stage_id": "{stage_id}"}}'
 
             try:
@@ -917,28 +1370,16 @@ class StageManager:
                         if stuck is not None and stuck.status == "in_progress":
                             if deduction is not None:
                                 await credit_service.refund(cleanup_db, deduction.id)
-                            partial_content = _strip_code_fence(accumulated).strip()
-                            if partial_content:
-                                validation = validate(partial_content)
-                                if validation.is_safe:
-                                    stuck.content = partial_content
-                                    stuck.current_version += 1
-                                    cleanup_db.add(
-                                        StageVersion(
-                                            stage_id=stuck.id,
-                                            version=stuck.current_version,
-                                            content=partial_content,
-                                            created_by="ai",
-                                        )
-                                    )
-                                else:
-                                    logger.warning(
-                                        "stage.interrupted_partial_discarded",
-                                        extra={
-                                            "stage_id": str(stage_id),
-                                            "reason": validation.reason,
-                                        },
-                                    )
+                            PIPELINE_INTERRUPTED_STREAMS.labels(
+                                stage_type=stage.type
+                            ).inc()
+                            logger.warning(
+                                "stage.interrupted_partial_discarded",
+                                extra={
+                                    "stage_id": str(stage_id),
+                                    "stage": stage.type,
+                                },
+                            )
                             stuck.status = "draft"
                             stuck.updated_at = datetime.now(UTC)
                             await cleanup_db.commit()
@@ -1198,6 +1639,13 @@ class StageManager:
                 "Current stage version is blocked by the quality gate. "
                 "Regenerate or override before finalising."
             )
+        if (
+            stage.quality_gate_kind == INCOMPLETE_OUTPUT_GATE_KIND
+            and stage.quality_gate_version == stage.current_version
+        ):
+            raise ValueError(
+                "Current stage version is incomplete. Regenerate before finalising."
+            )
 
         stage.status = "finalised"
         stage.finalised_at = datetime.now(UTC)
@@ -1451,6 +1899,78 @@ class StageManager:
         stage.quality_gate_version = None
         stage.quality_gate_failed_at = None
 
+    def _incomplete_gate_payload(
+        self,
+        stage_type: str,
+        exc: IncompleteArtifactError,
+    ) -> dict:
+        return {
+            "stage": stage_type,
+            "kind": INCOMPLETE_OUTPUT_GATE_KIND,
+            "override_allowed": False,
+            "repair_attempted": exc.repair_attempted,
+            "reasons": [
+                {
+                    "code": issue.code,
+                    "detail": issue.detail,
+                    "reference": issue.reference,
+                }
+                for issue in exc.issues
+            ],
+            "findings": [
+                {
+                    "kind": issue.code,
+                    "detail": issue.detail,
+                    "reference": issue.reference,
+                }
+                for issue in exc.issues
+            ],
+        }
+
+    async def _block_incomplete_output(
+        self,
+        *,
+        db: AsyncSession,
+        redis: "Redis",
+        stage: Stage,
+        user,
+        deduction,
+        route: LLMRoute,
+        exc: IncompleteArtifactError,
+    ) -> dict:
+        first_reason = exc.issues[0].code if exc.issues else "unknown"
+        PIPELINE_INCOMPLETE_OUTPUTS.labels(
+            stage_type=stage.type,
+            provider=route.provider,
+            reason=first_reason,
+        ).inc()
+        if deduction is not None:
+            await credit_service.refund(db, deduction.id)
+        gate_payload = self._incomplete_gate_payload(stage.type, exc)
+        await self._persist_quality_gate_blocked(
+            db,
+            redis,
+            stage,
+            exc.partial_content,
+            kind=INCOMPLETE_OUTPUT_GATE_KIND,
+            payload=gate_payload,
+        )
+        if deduction is not None:
+            await credit_service.invalidate(user.id)
+        logger.warning(
+            "stage.incomplete_output_blocked",
+            extra={
+                "stage_id": str(stage.id),
+                "stage": stage.type,
+                "provider": route.provider,
+                "model": route.model,
+                "operation": route.operation,
+                "reason": first_reason,
+                "repair_attempted": exc.repair_attempted,
+            },
+        )
+        return gate_payload
+
     async def _persist_quality_gate_blocked(
         self,
         db: AsyncSession,
@@ -1499,6 +2019,10 @@ class StageManager:
             raise ValueError(
                 "Current stage version is not blocked by the quality gate."
             )
+        if stage.quality_gate_kind == INCOMPLETE_OUTPUT_GATE_KIND:
+            raise ValueError(
+                "Incomplete stage output cannot be overridden. Regenerate instead."
+            )
 
         stage.quality_gate_status = "overridden"
         stage.updated_at = datetime.now(UTC)
@@ -1543,6 +2067,7 @@ class StageManager:
         base_user_prompt: str,
         findings,
         stage_type: str,
+        deps: dict[str, str],
     ) -> str:
         """One platform-funded, non-streaming regenerate with findings injected.
 
@@ -1565,6 +2090,7 @@ class StageManager:
             "fully resolves every finding. Do not reference this section or the "
             "critic in your output.\n"
             f"{findings_block}"
+            f"{completion_instruction(stage_type)}"
         )
         adapter = get_llm(route.provider, route.model)
         raw = await asyncio.wait_for(
@@ -1575,7 +2101,33 @@ class StageManager:
             ),
             timeout=_stream_timeout_for_stage(stage_type),
         )
-        return _strip_code_fence(raw)
+        raw = _strip_code_fence(raw)
+        if _completion_stopped_by_limit(adapter):
+            PIPELINE_PROVIDER_LIMIT_STOPS.labels(
+                stage_type=stage_type,
+                provider=route.provider,
+                model=route.model,
+                operation=route.operation,
+            ).inc()
+            raise IncompleteArtifactError(
+                stage_type,
+                [
+                    CompletenessIssue(
+                        code="provider_stopped_by_limit",
+                        detail=(
+                            "The provider stopped because the output token limit "
+                            "was reached."
+                        ),
+                        reference=_completion_finish_reason(adapter),
+                    )
+                ],
+                partial_content=raw,
+                repair_attempted=True,
+            )
+        validate_completion_sentinel(stage_type, raw)
+        raw = strip_completion_sentinel(stage_type, raw)
+        validate_artifact_completeness(stage_type, raw, deps)
+        return raw
 
     async def generate_harness_patch(
         self,

@@ -1387,3 +1387,58 @@ def test_phase22_does_not_remove_existing_phase21_invariants() -> None:
         "harness.py must still require security tests — Phase 21's IDOR and "
         "idempotency invariants depend on this.  Phase 22 must not regress.  T-244."
     )
+
+
+def test_issue7_provider_completion_diagnostics_are_wired() -> None:
+    """Issue #7 — provider max-token stops must be observable by StageManager."""
+    base_src = read_backend_file("services", "llm", "base.py")
+    assert "def stream" in base_src and "last_completion" not in base_src, (
+        "BaseLLMAdapter.stream signature must remain stable; completion metadata "
+        "belongs on concrete adapters/wrappers, not the abstract interface."
+    )
+    src = (
+        read_backend_file("services", "llm", "completion.py")
+        + read_backend_file("services", "llm", "openai_adapter.py")
+        + read_backend_file("services", "llm", "anthropic_adapter.py")
+        + read_backend_file("services", "llm", "google_adapter.py")
+        + read_backend_file("services", "llm", "instrumented_adapter.py")
+    )
+    assert "LLMCompletionInfo" in src and "last_completion" in src, (
+        "Provider adapters and InstrumentedAdapter must expose last_completion "
+        "metadata so StageManager can detect token-limit truncation. Issue #7."
+    )
+    assert "stopped_by_limit" in src and "finish_reason" in src, (
+        "Completion diagnostics must normalise finish_reason and stopped_by_limit. "
+        "Issue #7."
+    )
+
+
+def test_issue7_incomplete_output_gate_and_no_partial_disconnect_persistence() -> None:
+    """Issue #7 — incomplete outputs are blocked; interrupted partials are discarded."""
+    src = read_backend_file("services", "pipeline", "stage_manager.py")
+    assert "incomplete_output" in src and "override_allowed" in src, (
+        "StageManager must persist incomplete generations as a regenerate-only "
+        "quality gate. Issue #7."
+    )
+    assert "PIPELINE_INTERRUPTED_STREAMS" in src, (
+        "Interrupted generation streams must be observable. Issue #7."
+    )
+    assert "partial_content = _strip_code_fence(accumulated)" not in src, (
+        "Client disconnect cleanup must not persist accumulated partial_content "
+        "as a normal StageVersion. Issue #7."
+    )
+
+
+def test_issue7_cache_writes_after_completeness_validation() -> None:
+    """Issue #7 — shallow/truncated outputs must never enter generation cache."""
+    src = read_backend_file("services", "pipeline", "stage_manager.py")
+    completeness_pos = src.find("validate_artifact_completeness")
+    cache_pos = src.rfind("set_cached_generation(redis, cache_key")
+    assert completeness_pos >= 0 and cache_pos >= 0, (
+        "StageManager must both validate artifact completeness and write successful "
+        "generations to cache. Issue #7."
+    )
+    assert completeness_pos < cache_pos, (
+        "The completeness validation code path must appear before cache writes so "
+        "incomplete outputs cannot be cached. Issue #7."
+    )

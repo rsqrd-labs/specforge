@@ -324,6 +324,10 @@ export default function Workspace() {
   // T-247 critic quality gate: findings surfaced when a generation is held back.
   const activeGate = activeStage ? qualityGateMap[activeStage.id] : undefined
   const qualityGateBlocked = Boolean(activeGate)
+  const qualityGateBlockedMessage =
+    activeGate?.kind === "incomplete_output"
+      ? "Regenerate a complete version before finalising"
+      : "Regenerate or override the quality gate before finalising"
 
   const stages = useMemo(() => {
     const workspaceStageIds = new Set(
@@ -849,7 +853,11 @@ export default function Workspace() {
   const handleFinalise = useCallback(async () => {
     if (!activeStage || !id) return
     if (activeStage.quality_gate?.status === "blocked") {
-      setGenericError("Regenerate or override the quality gate before finalising.")
+      setGenericError(
+        activeStage.quality_gate.kind === "incomplete_output"
+          ? "Regenerate a complete version before finalising."
+          : "Regenerate or override the quality gate before finalising.",
+      )
       return
     }
     const finalisedType = activeStage.type
@@ -1600,6 +1608,7 @@ export default function Workspace() {
             onFinalise={handleFinalise}
             onUnlock={() => void performRollback(activeStage.current_version)}
             qualityGateBlocked={qualityGateBlocked}
+            qualityGateBlockedMessage={qualityGateBlockedMessage}
           />
         </div>
 

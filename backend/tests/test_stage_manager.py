@@ -10,7 +10,23 @@ from uuid import uuid4
 import pytest
 
 from models import CreditLedger, Stage, StageVersion, Workspace
+from services.llm.completion import LLMCompletionInfo
+from services.pipeline.artifact_validator import (
+    SECTION_CONTRACTS,
+    chunk_completion_sentinel,
+)
 from services.pipeline.stage_manager import StageDependencyError, StageManager
+
+_VALID_SPEC = "\n\n".join(
+    (
+        f"{heading}\nDetailed content for {heading} covering FR-001, NFR-001, "
+        "and SEC-001 with enough implementation-neutral depth."
+    )
+    for heading in SECTION_CONTRACTS["spec"]
+)
+_VALID_SPEC_STREAM = (
+    f"{_VALID_SPEC}\n{chunk_completion_sentinel('spec', 'product-scope')}"
+)
 
 
 def _make_stage(
@@ -155,6 +171,28 @@ class _MultiQueryDB:
         pass
 
 
+class _CompletionAwareAdapter:
+    def __init__(self, attempts: list[tuple[str, bool]]) -> None:
+        self.attempts = attempts
+        self.stream_calls: list[tuple[str, str, int]] = []
+        self.last_completion: LLMCompletionInfo | None = None
+
+    async def stream(self, system: str, user: str, max_tokens: int):
+        self.stream_calls.append((system, user, max_tokens))
+        try:
+            content, stopped_by_limit = self.attempts.pop(0)
+        except IndexError:
+            content, stopped_by_limit = (_VALID_SPEC_STREAM, False)
+        self.last_completion = LLMCompletionInfo.started(
+            provider="anthropic",
+            model="claude-opus-4-7",
+            max_tokens=max_tokens,
+        )
+        if stopped_by_limit:
+            self.last_completion.apply_finish_reason("max_tokens")
+        yield content
+
+
 @pytest.mark.asyncio
 async def test_generate_raises_when_dependency_not_finalised() -> None:
     workspace_id = uuid4()
@@ -267,7 +305,8 @@ async def test_generate_success_deducts_credits_and_saves_version() -> None:
     db = _MultiQueryDB([spec_stage, workspace, [], deduction])
 
     async def fake_stream(*args, **kwargs) -> AsyncGenerator[str, None]:
-        for token in ["Hello", " world"]:
+        half = len(_VALID_SPEC_STREAM) // 2
+        for token in [_VALID_SPEC_STREAM[:half], _VALID_SPEC_STREAM[half:]]:
             yield token
 
     svc = StageManager(redis_client=_FakeRedis())
@@ -293,8 +332,7 @@ async def test_generate_success_deducts_credits_and_saves_version() -> None:
         async for t in svc.generate(spec_stage.id, user, db):
             tokens.append(t)
 
-    assert "Hello" in tokens
-    assert " world" in tokens
+    assert _VALID_SPEC in tokens
     assert any("done" in t for t in tokens)
     assert db._committed
 
@@ -369,7 +407,7 @@ async def test_regenerate_bypasses_cache_and_uses_regenerate_credit_reason() -> 
     svc = StageManager(redis_client=redis)
 
     async def fake_stream(*args, **kwargs) -> AsyncGenerator[str, None]:
-        yield "fresh regenerated output"
+        yield _VALID_SPEC_STREAM
 
     with (
         patch(
@@ -405,8 +443,8 @@ async def test_regenerate_bypasses_cache_and_uses_regenerate_credit_reason() -> 
         ):
             tokens.append(token)
 
-    assert "fresh regenerated output" in tokens
-    assert spec_stage.content == "fresh regenerated output"
+    assert _VALID_SPEC in tokens
+    assert spec_stage.content == _VALID_SPEC
     assert spec_stage.current_version == 3
     mock_get_llm.assert_called_once()
     mock_deduct.assert_awaited_once_with(db, user.id, 10, "regenerate")
@@ -425,8 +463,7 @@ async def test_generate_cache_miss_writes_completed_output() -> None:
     svc = StageManager(redis_client=redis)
 
     async def fake_stream(*args, **kwargs) -> AsyncGenerator[str, None]:
-        for token in ["fresh", " output"]:
-            yield token
+        yield _VALID_SPEC_STREAM
 
     with (
         patch(
@@ -452,7 +489,104 @@ async def test_generate_cache_miss_writes_completed_output() -> None:
         async for _ in svc.generate(spec_stage.id, user, db):
             pass
 
-    assert redis._store["cache-key"] == "fresh output"
+    assert redis._store["cache-key"] == _VALID_SPEC
+
+
+@pytest.mark.asyncio
+async def test_generate_provider_limit_stop_repairs_without_double_charging() -> None:
+    workspace_id = uuid4()
+    spec_stage = _make_stage(workspace_id, "spec", status="draft")
+    workspace = _make_workspace([spec_stage])
+    user = _make_user()
+    deduction = CreditLedger(id=uuid4(), user_id=user.id, amount=-10, reason="generate")
+    db = _MultiQueryDB([spec_stage, workspace, [], deduction])
+    adapter = _CompletionAwareAdapter(
+        [
+            (_VALID_SPEC_STREAM, True),
+            (_VALID_SPEC_STREAM, False),
+        ]
+    )
+    svc = StageManager(redis_client=_FakeRedis())
+
+    with (
+        patch(
+            "services.pipeline.stage_manager.credit_service.deduct",
+            new_callable=AsyncMock,
+            return_value=deduction,
+        ) as mock_deduct,
+        patch(
+            "services.pipeline.stage_manager.credit_service.refund",
+            new_callable=AsyncMock,
+        ) as mock_refund,
+        patch(
+            "services.pipeline.stage_manager.build_prompt",
+            new_callable=AsyncMock,
+            return_value=("sys", "user"),
+        ),
+        patch("services.pipeline.stage_manager.get_llm", return_value=adapter),
+    ):
+        tokens = [token async for token in svc.generate(spec_stage.id, user, db)]
+
+    mock_deduct.assert_awaited_once_with(db, user.id, 10, "generate")
+    mock_refund.assert_not_awaited()
+    assert len(adapter.stream_calls) == 2
+    assert spec_stage.content == _VALID_SPEC
+    assert spec_stage.quality_gate_status == "clear"
+    assert _VALID_SPEC in tokens
+    assert any("done" in token for token in tokens)
+
+
+@pytest.mark.asyncio
+async def test_generate_provider_limit_stop_failed_repair_blocks_and_refunds() -> None:
+    workspace_id = uuid4()
+    spec_stage = _make_stage(workspace_id, "spec", status="draft")
+    workspace = _make_workspace([spec_stage])
+    user = _make_user()
+    deduction = CreditLedger(id=uuid4(), user_id=user.id, amount=-10, reason="generate")
+    db = _MultiQueryDB([spec_stage, workspace, [], deduction])
+    adapter = _CompletionAwareAdapter(
+        [
+            (_VALID_SPEC_STREAM, True),
+            (_VALID_SPEC_STREAM, True),
+        ]
+    )
+    svc = StageManager(redis_client=_FakeRedis())
+
+    with (
+        patch(
+            "services.pipeline.stage_manager.credit_service.deduct",
+            new_callable=AsyncMock,
+            return_value=deduction,
+        ),
+        patch(
+            "services.pipeline.stage_manager.credit_service.refund",
+            new_callable=AsyncMock,
+        ) as mock_refund,
+        patch(
+            "services.pipeline.stage_manager.build_prompt",
+            new_callable=AsyncMock,
+            return_value=("sys", "user"),
+        ),
+        patch(
+            "services.pipeline.stage_manager.set_cached_generation",
+            new_callable=AsyncMock,
+        ) as mock_set_cache,
+        patch("services.pipeline.stage_manager.get_llm", return_value=adapter),
+    ):
+        tokens = [token async for token in svc.generate(spec_stage.id, user, db)]
+
+    mock_refund.assert_awaited_once_with(db, deduction.id)
+    mock_set_cache.assert_not_awaited()
+    assert len(adapter.stream_calls) == 2
+    assert spec_stage.status == "draft"
+    assert spec_stage.quality_gate_status == "blocked"
+    assert spec_stage.quality_gate_kind == "incomplete_output"
+    assert spec_stage.quality_gate_payload["override_allowed"] is False
+    assert spec_stage.quality_gate_payload["repair_attempted"] is True
+    assert spec_stage.quality_gate_payload["reasons"][0]["code"] == (
+        "provider_stopped_by_limit"
+    )
+    assert any("quality_gate_failed" in token for token in tokens)
 
 
 @pytest.mark.asyncio
@@ -465,7 +599,7 @@ async def test_generate_with_trace_id_creates_langfuse_trace_and_span() -> None:
     db = _MultiQueryDB([spec_stage, workspace, [], deduction])
 
     async def fake_stream(*args, **kwargs) -> AsyncGenerator[str, None]:
-        yield "traced output"
+        yield _VALID_SPEC_STREAM
 
     langfuse_client = MagicMock()
     langfuse_client.create_trace = AsyncMock(return_value="trace-1")
@@ -506,7 +640,7 @@ async def test_generate_with_trace_id_creates_langfuse_trace_and_span() -> None:
         async for token in svc.generate(spec_stage.id, user, db, trace_id="trace-1"):
             tokens.append(token)
 
-    assert "traced output" in tokens
+    assert _VALID_SPEC in tokens
     langfuse_client.create_trace.assert_awaited_once()
     trace_kwargs = langfuse_client.create_trace.await_args.kwargs
     assert trace_kwargs["trace_id"] == "trace-1"
@@ -539,7 +673,7 @@ async def test_generate_continues_when_langfuse_trace_creation_fails() -> None:
     db = _MultiQueryDB([spec_stage, workspace, [], deduction])
 
     async def fake_stream(*args, **kwargs) -> AsyncGenerator[str, None]:
-        yield "still works"
+        yield _VALID_SPEC_STREAM
 
     langfuse_client = MagicMock()
     langfuse_client.create_trace = AsyncMock(side_effect=RuntimeError("langfuse down"))
@@ -575,8 +709,8 @@ async def test_generate_continues_when_langfuse_trace_creation_fails() -> None:
         async for token in svc.generate(spec_stage.id, user, db, trace_id="trace-1"):
             tokens.append(token)
 
-    assert "still works" in tokens
-    assert spec_stage.content == "still works"
+    assert _VALID_SPEC in tokens
+    assert spec_stage.content == _VALID_SPEC
     assert db._committed
 
 
@@ -588,9 +722,11 @@ async def test_generate_marks_langfuse_span_failed_on_client_disconnect() -> Non
     user = _make_user()
     deduction = CreditLedger(id=uuid4(), user_id=user.id, amount=-10, reason="generate")
     db = _MultiQueryDB([spec_stage, workspace, [], deduction])
+    stream_entered = asyncio.Event()
 
     async def fake_stream(*args, **kwargs) -> AsyncGenerator[str, None]:
         yield "partial"
+        stream_entered.set()
         await asyncio.sleep(10)
 
     class _FakeCleanupResult:
@@ -640,7 +776,10 @@ async def test_generate_marks_langfuse_span_failed_on_client_disconnect() -> Non
         mock_get_llm.return_value = mock_adapter
 
         stream = svc.generate(spec_stage.id, user, db, trace_id="trace-1")
-        assert await anext(stream) == "partial"
+        task = asyncio.create_task(anext(stream))
+        await asyncio.wait_for(stream_entered.wait(), timeout=1.0)
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
         await stream.aclose()
 
     langfuse_client.end_span.assert_not_awaited()
@@ -648,12 +787,9 @@ async def test_generate_marks_langfuse_span_failed_on_client_disconnect() -> Non
     assert langfuse_client.mark_span_failed.await_args.args[0] == "span-1"
     assert "interrupted" in str(langfuse_client.mark_span_failed.await_args.args[1])
     assert spec_stage.status == "draft"
-    assert spec_stage.content == "partial"
-    assert spec_stage.current_version == 1
-    assert any(
-        isinstance(item, StageVersion) and item.content == "partial"
-        for item in fake_cleanup_db.add.call_args_list[0].args
-    )
+    assert spec_stage.content is None
+    assert spec_stage.current_version == 0
+    fake_cleanup_db.add.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -982,6 +1118,31 @@ async def test_finalise_rejects_blocked_quality_gate_version() -> None:
 
 
 @pytest.mark.asyncio
+async def test_finalise_rejects_legacy_overridden_incomplete_output() -> None:
+    spec_stage = _make_stage(
+        status="draft",
+        content="incomplete content",
+        version=3,
+    )
+    spec_stage.quality_gate_status = "overridden"
+    spec_stage.quality_gate_kind = "incomplete_output"
+    spec_stage.quality_gate_payload = {
+        "stage": "spec",
+        "kind": "incomplete_output",
+        "override_allowed": False,
+    }
+    spec_stage.quality_gate_version = 3
+    spec_stage.quality_gate_failed_at = datetime.now(UTC)
+
+    svc = StageManager(redis_client=_FakeRedis())
+    db = _MultiQueryDB([spec_stage])
+    user = _make_user()
+
+    with pytest.raises(ValueError, match="incomplete"):
+        await svc.finalise(spec_stage.id, user, db)
+
+
+@pytest.mark.asyncio
 async def test_override_quality_gate_accepts_current_blocked_draft() -> None:
     workspace_id = uuid4()
     spec_stage = _make_stage(
@@ -1006,6 +1167,27 @@ async def test_override_quality_gate_accepts_current_blocked_draft() -> None:
     assert updated is spec_stage
     assert spec_stage.quality_gate_status == "overridden"
     assert spec_stage.quality_gate_version == 3
+
+
+@pytest.mark.asyncio
+async def test_override_quality_gate_rejects_incomplete_output() -> None:
+    spec_stage = _make_stage(status="draft", content="blocked content", version=3)
+    spec_stage.quality_gate_status = "blocked"
+    spec_stage.quality_gate_kind = "incomplete_output"
+    spec_stage.quality_gate_payload = {
+        "stage": "spec",
+        "kind": "incomplete_output",
+        "override_allowed": False,
+    }
+    spec_stage.quality_gate_version = 3
+    spec_stage.quality_gate_failed_at = datetime.now(UTC)
+
+    svc = StageManager(redis_client=_FakeRedis())
+    db = _MultiQueryDB([spec_stage])
+    user = _make_user()
+
+    with pytest.raises(ValueError, match="cannot be overridden"):
+        await svc.override_quality_gate(spec_stage.id, user, db)
 
 
 @pytest.mark.asyncio
@@ -1769,7 +1951,7 @@ async def test_generate_uses_select_for_update_on_stage_row() -> None:
     ):
 
         async def fake_stream(*a, **kw) -> AsyncGenerator[str, None]:
-            yield "tok"
+            yield _VALID_SPEC_STREAM
 
         mock_adapter = MagicMock()
         mock_adapter.stream = fake_stream
@@ -1986,7 +2168,7 @@ async def test_generate_eval_task_cancelled_on_timeout(
         return None
 
     async def fake_stream(*args, **kwargs):
-        yield "hello world"
+        yield _VALID_SPEC_STREAM
 
     # Preserve the real wait_for so other callers are unaffected.
     _real_wait_for = asyncio.wait_for

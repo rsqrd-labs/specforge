@@ -8,7 +8,12 @@ import pytest
 
 from services.pipeline.artifact_validator import (
     SECTION_CONTRACTS,
+    IncompleteArtifactError,
     MissingSectionError,
+    chunk_completion_sentinel,
+    strip_completion_sentinel,
+    validate_artifact_completeness,
+    validate_completion_sentinel,
     validate_sections,
 )
 
@@ -60,6 +65,63 @@ def test_validate_sections_frontend_conditional_skipped_when_no_sentinel() -> No
 def test_validate_sections_unknown_stage_is_noop() -> None:
     # A stage with no contract never raises.
     validate_sections("unknown", "", {})
+
+
+def test_validate_completion_sentinel_requires_final_line() -> None:
+    artifact = "## Overview\nDetailed content"
+    with pytest.raises(IncompleteArtifactError) as excinfo:
+        validate_completion_sentinel("spec", artifact, chunk_key="product-scope")
+    assert excinfo.value.issues[0].code == "missing_completion_sentinel"
+
+
+def test_strip_completion_sentinel_removes_internal_marker() -> None:
+    artifact = (
+        "## Overview\nDetailed content\n"
+        f"{chunk_completion_sentinel('spec', 'product-scope')}"
+    )
+    validate_completion_sentinel("spec", artifact, chunk_key="product-scope")
+    assert strip_completion_sentinel("spec", artifact, chunk_key="product-scope") == (
+        "## Overview\nDetailed content"
+    )
+
+
+def test_validate_artifact_completeness_rejects_shallow_required_section() -> None:
+    detailed = "Detailed content that is specific enough for validation."
+    artifact = "\n\n".join(
+        f"{heading}\n{'body' if heading == '## Overview' else detailed}"
+        for heading in SECTION_CONTRACTS["spec"]
+    )
+    with pytest.raises(IncompleteArtifactError) as excinfo:
+        validate_artifact_completeness("spec", artifact)
+    assert excinfo.value.issues[0].code == "shallow_required_section"
+
+
+def test_validate_artifact_completeness_rejects_incomplete_harness_file() -> None:
+    artifact = "\n\n".join(
+        [
+            "## Harness Overview\nDetailed harness strategy and commands.",
+            "## Requirement-to-Test Matrix\nDetailed mapping table for FR-001.",
+            "## Coverage Plan\nDetailed unit and integration coverage plan.",
+            "## File Tree\nharness/tests/test_auth.py",
+            "## Files\n### File: harness/tests/test_auth.py\n```python\n",
+        ]
+    )
+    with pytest.raises(IncompleteArtifactError) as excinfo:
+        validate_artifact_completeness("harness", artifact)
+    codes = {issue.code for issue in excinfo.value.issues}
+    assert "unbalanced_code_fence" in codes
+    assert "incomplete_harness_file_block" in codes
+
+
+def test_validate_artifact_completeness_rejects_incomplete_task_block() -> None:
+    overview = "\n\n".join(
+        f"{heading}\nDetailed content that is specific enough for validation."
+        for heading in SECTION_CONTRACTS["tasks"]
+    )
+    artifact = f"{overview}\n\n### T-001: Create users\n**Phase:** Data Layer\n"
+    with pytest.raises(IncompleteArtifactError) as excinfo:
+        validate_artifact_completeness("tasks", artifact)
+    assert any(issue.code == "incomplete_task_block" for issue in excinfo.value.issues)
 
 
 def test_validate_sections_runs_in_under_5ms_on_200k_artifact() -> None:

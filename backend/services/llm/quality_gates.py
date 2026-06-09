@@ -42,10 +42,10 @@ ROUTE_QUALITY_GATES: dict[str, dict[str, Any]] = {
         "requires_security_regression_review": True,
     },
     "tasks.generate": {
-        "baseline_tier": "mid",
-        "candidate_tiers": ["mini", "small"],
-        "min_average_quality_score": 0.88,
-        "min_cost_reduction_ratio": 0.35,
+        "baseline_tier": "strong",
+        "candidate_tiers": ["mid", "mini", "small"],
+        "min_average_quality_score": 0.90,
+        "min_cost_reduction_ratio": 0.25,
         "requires_security_regression_review": True,
     },
     "refine.focused": {

@@ -314,3 +314,36 @@ def fmea_presence(stage_type: str, artifact_md: str, deps: dict[str, str]):
         score=(len(required) - len(missing)) / len(required),
         findings=[f"FMEA missing {token}" for token in missing],
     )
+
+
+def artifact_depth_pct(stage_type: str, artifact_md: str, deps: dict[str, str]):
+    """quality: generated artifacts retain enough body depth to avoid truncation."""
+
+    minimum_lines = {
+        "spec": 34,
+        "plan": 120,
+        "harness": 77,
+        "tasks": 66,
+    }.get(stage_type, 20)
+    meaningful_lines = [
+        line
+        for line in artifact_md.splitlines()
+        if line.strip() and not line.strip().startswith("<!--")
+    ]
+    score = min(1.0, len(meaningful_lines) / minimum_lines)
+    findings = []
+    if score < 1.0:
+        findings.append(
+            f"{stage_type} artifact has {len(meaningful_lines)} meaningful lines; "
+            f"expected at least {minimum_lines}."
+        )
+    return make_result(
+        name="artifact_depth_pct",
+        axis="quality",
+        score=score,
+        findings=findings,
+        metadata={
+            "meaningful_lines": len(meaningful_lines),
+            "minimum_lines": minimum_lines,
+        },
+    )
