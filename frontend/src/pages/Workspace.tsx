@@ -13,7 +13,11 @@ import { QualityBadge } from "../components/workspace/QualityBadge"
 import { StageEditor, type StageEditorHandle } from "../components/workspace/StageEditor"
 import { StageNavigator } from "../components/workspace/StageNavigator"
 import { StalenessWarning } from "../components/workspace/StalenessWarning"
-import { StreamingOverlay } from "../components/workspace/StreamingOverlay"
+import {
+  StreamingOverlay,
+  type GenerationActivityInfo,
+  type GenerationActivityOperation,
+} from "../components/workspace/StreamingOverlay"
 import { MarkdownRenderer } from "../components/workspace/MarkdownRenderer"
 import { ProblemStatementPanel } from "../components/workspace/ProblemStatementPanel"
 import { TaskValidationPanel } from "../components/workspace/TaskValidationPanel"
@@ -114,6 +118,22 @@ interface StoryboardFlowMessage {
 interface PendingCreditAction {
   action: CreditAction
   stageId: string
+}
+
+function getGenerationActionLabel(operation: GenerationActivityOperation) {
+  switch (operation) {
+    case "focused-patch":
+      return "Preparing focused patch"
+    case "quality-gate-regenerate":
+      return "Regenerating with gate feedback"
+    case "regenerate-gaps":
+      return "Regenerating coverage gaps"
+    case "regenerate":
+      return "Regenerating stage"
+    case "generate":
+    default:
+      return "Generating stage"
+  }
 }
 
 const sleep = (ms: number) =>
@@ -283,6 +303,9 @@ export default function Workspace() {
   const [pendingClarify, setPendingClarify] = useState<PendingCreditAction | null>(
     null,
   )
+  const [generationActivity, setGenerationActivity] =
+    useState<GenerationActivityInfo | null>(null)
+  const generationActivityRef = useRef<GenerationActivityInfo | null>(null)
 
   // "Connected enough to export" under the GitHub App living system means an
   // active App installation; we also honour a legacy OAuth connection so a
@@ -316,6 +339,47 @@ export default function Workspace() {
   const { start: startStream, isStreaming, error: streamError } = useStream(
     activeStage?.id ?? null,
   )
+  const activeGenerationActivity =
+    activeStage && generationActivity?.stageId === activeStage.id
+      ? generationActivity
+      : null
+  const activeBusyOperation = activeGenerationActivity?.operation ?? null
+  const isGenerationBusy = Boolean(generationActivity) || isStreaming || isRefining
+  const isActiveStageBusy =
+    Boolean(activeGenerationActivity) || (isStreaming && !generationActivity)
+
+  const startGenerationActivity = useCallback(
+    (
+      stage: Stage,
+      operation: GenerationActivityOperation,
+      streamed: boolean,
+    ) => {
+      const nextActivity: GenerationActivityInfo = {
+        stageId: stage.id,
+        stageType: stage.type,
+        operation,
+        actionLabel: getGenerationActionLabel(operation),
+        startedAt: Date.now(),
+        streamed,
+      }
+      generationActivityRef.current = nextActivity
+      setGenerationActivity(nextActivity)
+      return nextActivity
+    },
+    [],
+  )
+
+  const clearGenerationActivity = useCallback((stageId?: string) => {
+    if (
+      stageId &&
+      generationActivityRef.current &&
+      generationActivityRef.current.stageId !== stageId
+    ) {
+      return
+    }
+    generationActivityRef.current = null
+    setGenerationActivity(null)
+  }, [])
 
   // Live GitHub task-completion + drift state (T-275). Only polls on the Tasks
   // stage, where the completion panel is shown beside the coverage panels.
@@ -636,34 +700,58 @@ export default function Workspace() {
 
   // Declared before confirmCredits/proceedThroughReviewGate which call it
   const runGeneration = useCallback(
-    async (action: "generate" | "regenerate" | "regenerate-gaps") => {
-      setError(null)
-      if (activeStage) {
-        setEvalResults((existing) => ({ ...existing, [activeStage.id]: null }))
+    async (
+      action: "generate" | "regenerate" | "regenerate-gaps",
+      operation: GenerationActivityOperation = action,
+      activityAlreadyStarted = false,
+    ) => {
+      if (!activeStage || (generationActivityRef.current && !activityAlreadyStarted)) {
+        return
       }
-      const result = await startStream(action)
-      if (!result) return
 
-      setStage(result.stage)
-      if (result.stage.type === "spec") {
-        setSpecViewMode("preview")
+      const stageId = activeStage.id
+      if (!activityAlreadyStarted) {
+        startGenerationActivity(activeStage, operation, true)
       }
-      if (result.evalResult) {
-        setEvalResults((existing) => ({
-          ...existing,
-          [result.stage.id]: result.evalResult,
-        }))
+
+      setError(null)
+      setEvalResults((existing) => ({ ...existing, [stageId]: null }))
+      try {
+        const result = await startStream(action)
+        if (!result) return
+
+        setStage(result.stage)
+        if (result.stage.type === "spec") {
+          setSpecViewMode("preview")
+        }
+        if (result.evalResult) {
+          setEvalResults((existing) => ({
+            ...existing,
+            [result.stage.id]: result.evalResult,
+          }))
+        }
+        await refreshWorkspace()
+      } finally {
+        clearGenerationActivity(stageId)
       }
-      await refreshWorkspace()
     },
-    [activeStage, startStream, setStage, refreshWorkspace],
+    [
+      activeStage,
+      clearGenerationActivity,
+      refreshWorkspace,
+      setStage,
+      startGenerationActivity,
+      startStream,
+    ],
   )
 
   const handleGateRegenerate = useCallback(async () => {
     if (!activeStage) return
+    if (generationActivityRef.current) return
+    startGenerationActivity(activeStage, "quality-gate-regenerate", true)
     clearQualityGate(activeStage.id)
-    await runGeneration("regenerate")
-  }, [activeStage, clearQualityGate, runGeneration])
+    await runGeneration("regenerate", "quality-gate-regenerate", true)
+  }, [activeStage, clearQualityGate, runGeneration, startGenerationActivity])
 
   const handleGateOverride = useCallback(async () => {
     if (!activeStage) return
@@ -691,6 +779,7 @@ export default function Workspace() {
 
   const requestGeneration = useCallback(
     async (action: "generate" | "regenerate") => {
+      if (generationActivityRef.current) return
       if (!activeStage) return
       if (activeStage.type === "spec") {
         const saved = await saveProblemStatement()
@@ -727,6 +816,7 @@ export default function Workspace() {
 
   const requestFreeRegeneration = useCallback(async () => {
     if (!activeStage) return
+    if (generationActivityRef.current) return
     await runGeneration("regenerate-gaps")
   }, [activeStage, runGeneration])
 
@@ -794,7 +884,7 @@ export default function Workspace() {
   }, [pendingReview, stageMap, setStage, runGeneration])
 
   const runRefine = useCallback(async () => {
-    if (refineInFlightRef.current) {
+    if (refineInFlightRef.current || generationActivityRef.current) {
       return
     }
     if (!activeStage || !selection || !refineInstruction.trim()) {
@@ -803,6 +893,7 @@ export default function Workspace() {
     }
 
     refineInFlightRef.current = true
+    startGenerationActivity(activeStage, "focused-patch", false)
     setIsRefining(true)
     try {
       const currentContent = editorRef.current?.getContent()
@@ -826,8 +917,17 @@ export default function Workspace() {
     } finally {
       refineInFlightRef.current = false
       setIsRefining(false)
+      clearGenerationActivity(activeStage.id)
     }
-  }, [activeStage, selection, refineInstruction, refineMode, setStage])
+  }, [
+    activeStage,
+    clearGenerationActivity,
+    refineInstruction,
+    refineMode,
+    selection,
+    setStage,
+    startGenerationActivity,
+  ])
 
   const acceptDiff = useCallback(
     async (proposed: string) => {
@@ -889,7 +989,7 @@ export default function Workspace() {
 
   const handleContentChange = useCallback(
     async (content: string) => {
-      if (!activeStage || isStreaming) return
+      if (!activeStage || isActiveStageBusy) return
       setStage({ ...activeStage, content })
       setEvalResults((existing) => ({ ...existing, [activeStage.id]: null }))
       try {
@@ -899,7 +999,7 @@ export default function Workspace() {
         setGenericError("Could not save the latest edit.")
       }
     },
-    [activeStage, isStreaming, setStage],
+    [activeStage, isActiveStageBusy, setStage],
   )
 
   const handleRevalidateTasks = useCallback(async () => {
@@ -1611,6 +1711,8 @@ export default function Workspace() {
             onRefine={requestRefine}
             onFinalise={handleFinalise}
             onUnlock={() => void performRollback(activeStage.current_version)}
+            isBusy={isGenerationBusy}
+            busyOperation={activeBusyOperation}
             qualityGateBlocked={qualityGateBlocked}
             qualityGateBlockedMessage={qualityGateBlockedMessage}
           />
@@ -1629,7 +1731,7 @@ export default function Workspace() {
                   type="button"
                   className={refineMode === option.mode ? "active" : ""}
                   onClick={() => setRefineMode(option.mode)}
-                  disabled={isRefining}
+                  disabled={isGenerationBusy}
                 >
                   <strong>{option.label}</strong>
                   <span>{option.detail}</span>
@@ -1648,19 +1750,21 @@ export default function Workspace() {
               maxLength={20000}
               placeholder="Describe how to refine the selected text…"
               className="refine-input"
-              disabled={isRefining}
+              disabled={isGenerationBusy}
               autoFocus
             />
             <button
               type="button"
               onClick={() => setShowRefineInput(false)}
               className="gen-btn-secondary refine-cancel-btn"
-              disabled={isRefining}
+              disabled={isGenerationBusy}
             >
               Cancel
             </button>
-            <button type="submit" className="gen-btn-primary" disabled={isRefining}>
-              {isRefining ? "Refining..." : activeRefineMode.label}
+            <button type="submit" className="gen-btn-primary" disabled={isGenerationBusy}>
+              {activeBusyOperation === "focused-patch"
+                ? "Preparing patch..."
+                : activeRefineMode.label}
             </button>
           </form>
         )}
@@ -1690,7 +1794,7 @@ export default function Workspace() {
               stage={activeStage}
               problemStatement={problemDraft}
               isDirty={problemDirty}
-              readOnly={isStreaming}
+              readOnly={isActiveStageBusy}
               onChange={(value) => {
                 setProblemDraft(value)
                 setProblemDirty(true)
@@ -1710,7 +1814,7 @@ export default function Workspace() {
                 </div>
                 <div className="workspace-pane-actions">
                   <QualityBadge evalResult={evalResult} error={isEvalError} />
-                  {!isStreaming && !diffResult && (
+                  {!isActiveStageBusy && !diffResult && (
                     <div className="document-mode-toggle" aria-label="Spec view mode">
                       <button
                         type="button"
@@ -1739,13 +1843,13 @@ export default function Workspace() {
                     onAccept={acceptDiff}
                     onReject={rejectDiff}
                   />
-                ) : isStreaming || specViewMode === "edit" ? (
+                ) : isActiveStageBusy || specViewMode === "edit" ? (
                   <StageEditor
                     key={`${activeStage.id}-${activeStage.status}`}
                     ref={editorRef}
                     stageId={activeStage.id}
                     initialContent={activeStage.content ?? ""}
-                    readOnly={isStreaming}
+                    readOnly={isActiveStageBusy}
                     onContentChange={handleContentChange}
                   />
                 ) : (
@@ -1753,7 +1857,10 @@ export default function Workspace() {
                     <MarkdownRenderer content={activeStage.content ?? ""} />
                   </div>
                 )}
-                <StreamingOverlay isVisible={isStreaming} />
+                <StreamingOverlay
+                  isVisible={Boolean(activeGenerationActivity)}
+                  activity={activeGenerationActivity}
+                />
               </div>
             </section>
           </div>
@@ -1797,7 +1904,7 @@ export default function Workspace() {
                   {activeStage.type === "tasks" && evalResult !== null && genuineGapIssues.length === 0 && (
                     <span className="ws-validation-ok-chip">✓ All tasks valid</span>
                   )}
-                  {activeStage.type === "tasks" && !isStreaming && (
+                  {activeStage.type === "tasks" && !isActiveStageBusy && (
                     <button
                       type="button"
                       className="ws-view-toggle"
@@ -1806,7 +1913,7 @@ export default function Workspace() {
                       Re-validate
                     </button>
                   )}
-                  {activeStage.status !== "locked" && !isStreaming && (
+                  {activeStage.status !== "locked" && !isActiveStageBusy && (
                     <button
                       type="button"
                       onClick={() => setIsEditMode((m) => !m)}
@@ -1818,13 +1925,13 @@ export default function Workspace() {
                 </div>
               </div>
               <div className="stage-card-body">
-                {isEditMode || isStreaming ? (
+                {isEditMode || isActiveStageBusy ? (
                   <StageEditor
                     key={`${activeStage.id}-${activeStage.status}`}
                     ref={editorRef}
                     stageId={activeStage.id}
                     initialContent={activeStage.content ?? ""}
-                    readOnly={isStreaming}
+                    readOnly={isActiveStageBusy}
                     onContentChange={handleContentChange}
                   />
                 ) : (
@@ -1835,7 +1942,10 @@ export default function Workspace() {
                     />
                   </div>
                 )}
-                <StreamingOverlay isVisible={isStreaming} />
+                <StreamingOverlay
+                  isVisible={Boolean(activeGenerationActivity)}
+                  activity={activeGenerationActivity}
+                />
               </div>
             </section>
 

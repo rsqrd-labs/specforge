@@ -1,7 +1,25 @@
-import type { QualityGateInfo } from "../../types/stage"
+import { useEffect, useState } from "react"
+import type { QualityGateInfo, StageType } from "../../types/stage"
+
+export type GenerationActivityOperation =
+  | "generate"
+  | "regenerate"
+  | "regenerate-gaps"
+  | "focused-patch"
+  | "quality-gate-regenerate"
+
+export interface GenerationActivityInfo {
+  stageId: string
+  stageType: StageType
+  operation: GenerationActivityOperation
+  actionLabel: string
+  startedAt: number
+  streamed: boolean
+}
 
 interface StreamingOverlayProps {
   isVisible: boolean
+  activity?: GenerationActivityInfo | null
   /** Critic quality-gate findings, present when a generation was held back
    *  by the gate (T-247).  Rendered as an interactive panel with regenerate
    *  and owner-only override actions. */
@@ -16,11 +34,36 @@ interface StreamingOverlayProps {
 
 export function StreamingOverlay({
   isVisible,
+  activity,
   gate,
   onRegenerate,
   onOverride,
   onDismiss,
 }: StreamingOverlayProps) {
+  const [renderedActivity, setRenderedActivity] =
+    useState<GenerationActivityInfo | null>(activity ?? null)
+  const [isExiting, setIsExiting] = useState(false)
+
+  useEffect(() => {
+    if (activity && isVisible) {
+      setRenderedActivity(activity)
+      setIsExiting(false)
+      return undefined
+    }
+
+    if (!renderedActivity) {
+      return undefined
+    }
+
+    setIsExiting(true)
+    const timeoutId = window.setTimeout(() => {
+      setRenderedActivity(null)
+      setIsExiting(false)
+    }, 220)
+
+    return () => window.clearTimeout(timeoutId)
+  }, [activity, isVisible, renderedActivity])
+
   if (gate) {
     const missing = gate.missing ?? []
     const findings = gate.findings ?? []
@@ -134,14 +177,129 @@ export function StreamingOverlay({
     )
   }
 
-  if (!isVisible) return null
+  if (!renderedActivity) return null
+
+  const copy = getActivityCopy(renderedActivity)
+  const activeStageIndex = STAGE_FLOW.findIndex(
+    (stage) => stage.type === renderedActivity.stageType,
+  )
+  const variant =
+    renderedActivity.operation === "focused-patch"
+      ? "patch"
+      : renderedActivity.operation === "quality-gate-regenerate"
+        ? "gate"
+        : "stream"
 
   return (
-    <div className="streaming-overlay pointer-events-none">
-      <div className="streaming-badge">
-        <span className="streaming-cursor" />
-        Generating…
+    <div
+      className={`streaming-overlay generation-loading-overlay ${isExiting ? "is-exiting" : ""}`}
+      role="status"
+      aria-live="polite"
+      aria-busy="true"
+      aria-label={`${copy.title} for ${copy.stageLabel}`}
+    >
+      <div className={`generation-loading-card ${variant}`}>
+        <div className="generation-flow" aria-hidden="true">
+          <div className="generation-flow-rail">
+            {STAGE_FLOW.map((stage, index) => (
+              <span
+                key={stage.type}
+                className={`generation-flow-node ${
+                  index === activeStageIndex ? "active" : ""
+                } ${index < activeStageIndex ? "complete" : ""}`}
+              >
+                {stage.label}
+              </span>
+            ))}
+          </div>
+          <div className="generation-trace-lane">
+            <span className="generation-trace" />
+          </div>
+        </div>
+
+        <div className="generation-activity-visual" aria-hidden="true">
+          {variant === "patch" ? (
+            <div className="generation-patch-flow">
+              <span className="patch-source-line wide" />
+              <span className="patch-source-line" />
+              <span className="patch-connector" />
+              <span className="patch-result-line wide" />
+              <span className="patch-result-line" />
+            </div>
+          ) : (
+            <div className="generation-document-shimmer">
+              <span className="doc-line wide" />
+              <span className="doc-line" />
+              <span className="doc-line short" />
+              <span className="doc-line wide" />
+            </div>
+          )}
+          {variant === "gate" ? <span className="generation-gate-check" /> : null}
+        </div>
+
+        <div className="generation-loading-copy">
+          <span className="generation-loading-kicker">{copy.stageLabel}</span>
+          <strong>{copy.title}</strong>
+          <p>{copy.detail}</p>
+        </div>
       </div>
     </div>
   )
+}
+
+const STAGE_FLOW: Array<{ type: StageType; label: string }> = [
+  { type: "spec", label: "SPEC" },
+  { type: "plan", label: "PLAN" },
+  { type: "harness", label: "HARNESS" },
+  { type: "tasks", label: "TASKS" },
+]
+
+const STAGE_ACTIVITY_COPY: Record<StageType, string> = {
+  spec: "Structuring requirements",
+  plan: "Designing architecture",
+  harness: "Building validation harness",
+  tasks: "Drafting implementation plan",
+}
+
+function getActivityCopy(activity: GenerationActivityInfo) {
+  const stageLabel =
+    STAGE_FLOW.find((stage) => stage.type === activity.stageType)?.label ?? "STAGE"
+
+  if (activity.operation === "focused-patch") {
+    return {
+      stageLabel,
+      title: "Preparing focused patch",
+      detail: "Reviewing the selected text and shaping a precise edit.",
+    }
+  }
+
+  if (activity.operation === "quality-gate-regenerate") {
+    return {
+      stageLabel,
+      title: "Regenerating with gate feedback",
+      detail: "Applying the flagged findings before the next quality pass.",
+    }
+  }
+
+  if (activity.operation === "regenerate-gaps") {
+    return {
+      stageLabel,
+      title: "Regenerating coverage gaps",
+      detail: "Repairing the missing coverage while preserving the current stage.",
+    }
+  }
+
+  if (activity.operation === "regenerate") {
+    return {
+      stageLabel,
+      title: "Regenerating stage",
+      detail: STAGE_ACTIVITY_COPY[activity.stageType],
+    }
+  }
+
+  return {
+    stageLabel,
+    title: STAGE_ACTIVITY_COPY[activity.stageType],
+    detail: "Keeping the workspace responsive while the artifact is generated.",
+  }
 }

@@ -4,7 +4,11 @@ import { describe, expect, it, vi } from "vitest"
 
 import type { QualityGateInfo } from "../../types/stage"
 import "../../index.css"
-import { StreamingOverlay } from "./StreamingOverlay"
+import {
+  StreamingOverlay,
+  type GenerationActivityInfo,
+  type GenerationActivityOperation,
+} from "./StreamingOverlay"
 
 const criticGate: QualityGateInfo = {
   stage: "plan",
@@ -51,6 +55,53 @@ const technologySafetyGate: QualityGateInfo = {
     },
   ],
 }
+
+function activity(
+  operation: GenerationActivityOperation,
+  stageType: GenerationActivityInfo["stageType"] = "spec",
+): GenerationActivityInfo {
+  return {
+    stageId: `stage-${stageType}`,
+    stageType,
+    operation,
+    actionLabel: operation,
+    startedAt: 0,
+    streamed: operation !== "focused-patch",
+  }
+}
+
+describe("StreamingOverlay generation activity", () => {
+  it.each([
+    ["generate", "spec", "Structuring requirements"],
+    ["generate", "plan", "Designing architecture"],
+    ["generate", "harness", "Building validation harness"],
+    ["generate", "tasks", "Drafting implementation plan"],
+    ["focused-patch", "plan", "Preparing focused patch"],
+    ["quality-gate-regenerate", "tasks", "Regenerating with gate feedback"],
+    ["regenerate-gaps", "tasks", "Regenerating coverage gaps"],
+  ] as const)(
+    "renders accessible status copy for %s on %s",
+    (operation, stageType, expectedCopy) => {
+      render(
+        <StreamingOverlay
+          isVisible
+          activity={activity(operation, stageType)}
+        />,
+      )
+
+      const status = screen.getByRole("status")
+      expect(status).toHaveAttribute("aria-live", "polite")
+      expect(status).toHaveAttribute("aria-busy", "true")
+      expect(status).toHaveTextContent(expectedCopy)
+    },
+  )
+
+  it("keeps the generation overlay inside the document interaction layer", () => {
+    render(<StreamingOverlay isVisible activity={activity("generate", "plan")} />)
+
+    expect(getComputedStyle(screen.getByRole("status")).pointerEvents).toBe("auto")
+  })
+})
 
 describe("StreamingOverlay quality gate", () => {
   it("wires regenerate, override, and dismiss actions", async () => {

@@ -1,4 +1,5 @@
 import type { Stage } from "../../types/stage"
+import type { GenerationActivityOperation } from "./StreamingOverlay"
 
 interface GenerateBarProps {
   stage: Stage
@@ -7,6 +8,8 @@ interface GenerateBarProps {
   onRefine: () => void
   onFinalise: () => void
   onUnlock: () => void
+  isBusy?: boolean
+  busyOperation?: GenerationActivityOperation | null
   qualityGateBlocked?: boolean
   qualityGateBlockedMessage?: string
 }
@@ -18,21 +21,20 @@ export function GenerateBar({
   onRefine,
   onFinalise,
   onUnlock,
+  isBusy = false,
+  busyOperation = null,
   qualityGateBlocked = false,
   qualityGateBlockedMessage = "Regenerate or override the quality gate before finalising",
 }: GenerateBarProps) {
   if (stage.status === "locked") return null
 
-  const generateLabel =
-    stage.type === "spec" || stage.type === "plan"
-      ? "Generate deep architecture pass"
-      : "Generate fast draft"
+  const generateLabel = getGenerateLabel(stage.type)
 
-  if (stage.status === "in_progress") {
+  if (isBusy || stage.status === "in_progress") {
     return (
-      <div className="gen-btn-streaming">
+      <div className="gen-btn-streaming" role="status" aria-live="polite">
         <div className="loading-ring" />
-        <span>Generating…</span>
+        <span>{getBusyLabel(busyOperation)}</span>
       </div>
     )
   }
@@ -40,13 +42,23 @@ export function GenerateBar({
   return (
     <div className="workspace-action-row">
       {(stage.status === "draft" || stage.status === "stale") && !stage.content && (
-        <button type="button" onClick={onGenerate} className="gen-btn-primary">
+        <button
+          type="button"
+          onClick={onGenerate}
+          className="gen-btn-primary"
+          disabled={isBusy}
+        >
           {generateLabel}
         </button>
       )}
 
       {stage.status === "finalised" ? (
-        <button type="button" onClick={onUnlock} className="gen-btn-secondary">
+        <button
+          type="button"
+          onClick={onUnlock}
+          className="gen-btn-secondary"
+          disabled={isBusy}
+        >
           Unlock stage
         </button>
       ) : (stage.status === "stale" ||
@@ -55,6 +67,7 @@ export function GenerateBar({
           type="button"
           onClick={onRegenerate}
           className="gen-btn-secondary gen-btn-deliberate"
+          disabled={isBusy}
         >
           Full stage regenerate
         </button>
@@ -66,6 +79,7 @@ export function GenerateBar({
           onClick={onRefine}
           className="gen-btn-secondary"
           aria-label="Focused patch refine"
+          disabled={isBusy}
         >
           Focused patch
         </button>
@@ -76,7 +90,7 @@ export function GenerateBar({
           type="button"
           onClick={onFinalise}
           className="gen-btn-primary"
-          disabled={qualityGateBlocked}
+          disabled={qualityGateBlocked || isBusy}
           title={qualityGateBlocked ? qualityGateBlockedMessage : undefined}
         >
           Final quality pass
@@ -84,4 +98,33 @@ export function GenerateBar({
       )}
     </div>
   )
+}
+
+function getBusyLabel(operation: GenerationActivityOperation | null) {
+  switch (operation) {
+    case "focused-patch":
+      return "Preparing focused patch..."
+    case "quality-gate-regenerate":
+      return "Regenerating with gate feedback..."
+    case "regenerate-gaps":
+      return "Regenerating coverage gaps..."
+    case "regenerate":
+      return "Regenerating stage..."
+    case "generate":
+    default:
+      return "Generating stage..."
+  }
+}
+
+function getGenerateLabel(stageType: Stage["type"]) {
+  switch (stageType) {
+    case "spec":
+      return "Generate requirements pass"
+    case "plan":
+      return "Generate architecture pass"
+    case "harness":
+      return "Generate validation harness"
+    case "tasks":
+      return "Generate implementation plan"
+  }
 }

@@ -89,7 +89,7 @@ describe("StageNavigator", () => {
 describe("GenerateBar", () => {
   const noop = vi.fn()
 
-  it("shows spinner when stage is in_progress", () => {
+  it("shows a compact busy state when stage is in_progress", () => {
     const stage = makeStage({ status: "in_progress" })
     render(
       <GenerateBar
@@ -101,7 +101,27 @@ describe("GenerateBar", () => {
         onUnlock={noop}
       />,
     )
-    expect(screen.getByText("Generating…")).toBeInTheDocument()
+    expect(screen.getByRole("status")).toHaveTextContent("Generating stage...")
+  })
+
+  it("labels focused patch busy work distinctly", () => {
+    const stage = makeStage({ status: "draft", content: "Existing spec" })
+    render(
+      <GenerateBar
+        stage={stage}
+        onGenerate={noop}
+        onRegenerate={noop}
+        onRefine={noop}
+        onFinalise={noop}
+        onUnlock={noop}
+        isBusy
+        busyOperation="focused-patch"
+      />,
+    )
+    expect(screen.getByRole("status")).toHaveTextContent("Preparing focused patch...")
+    expect(
+      screen.queryByRole("button", { name: /focused patch refine/i }),
+    ).not.toBeInTheDocument()
   })
 
   it("shows Generate button when stage is draft with no content", () => {
