@@ -24,10 +24,10 @@ except OSError as exc:  # pragma: no cover — environment dependent
     )
 
 from services.pipeline.pdf_export_service import (  # noqa: E402
-    _NoNetworkFetch,
     _TEMPLATE_NAME,
     _build_sections,
     _jinja_env,
+    _NoNetworkFetch,
     no_network_url_fetcher,
     render_pdf,
 )

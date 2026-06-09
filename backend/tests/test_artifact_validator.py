@@ -158,15 +158,18 @@ def test_validate_artifact_completeness_rejects_plan_missing_rtm_id() -> None:
             "## Requirement Traceability Matrix\nbody text",
             (
                 "## Requirement Traceability Matrix\n"
-                "| Source ID | Requirement summary | Design response | Verification method "
-                "| Residual risk |\n"
+                "| Source ID | Requirement summary | Design response "
+                "| Verification method | Residual risk |\n"
                 "|---|---|---|---|---|\n"
                 "| FR-001 | Create project. | POST /projects. | contract test | Low |"
             ),
         )
         .replace(
             "## Security Architecture\nbody text",
-            "## Security Architecture\nSEC-001 authentication is enforced by middleware.",
+            (
+                "## Security Architecture\n"
+                "SEC-001 authentication is enforced by middleware."
+            ),
         )
     )
 
