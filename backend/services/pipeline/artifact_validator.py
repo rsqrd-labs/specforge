@@ -752,9 +752,7 @@ def _ref_matches(ref: str, known: set[str]) -> bool:
     if normalized in known:
         return True
     parts = normalized.split("::")
-    return bool(parts) and (
-        parts[-1] in known or "::".join(parts[-2:]) in known
-    )
+    return bool(parts) and (parts[-1] in known or "::".join(parts[-2:]) in known)
 
 
 def _upstream_requirement_ids(deps: dict[str, str]) -> set[str]:

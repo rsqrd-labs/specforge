@@ -64,9 +64,10 @@ def test_frontier_adapter_policy_is_explicit() -> None:
         "reasoning_effort": "high",
         "thinking_level": None,
     }
-    assert model_request_policy("google", "gemini-3.5-flash")[
-        "thinking_level"
-    ] == "high"
-    assert model_request_policy("anthropic", "claude-opus-4-8")[
-        "reasoning_effort"
-    ] == "high"
+    assert (
+        model_request_policy("google", "gemini-3.5-flash")["thinking_level"] == "high"
+    )
+    assert (
+        model_request_policy("anthropic", "claude-opus-4-8")["reasoning_effort"]
+        == "high"
+    )

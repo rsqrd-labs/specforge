@@ -147,24 +147,27 @@ def test_validate_artifact_completeness_rejects_spec_without_evidence() -> None:
         validate_artifact_completeness("spec", artifact)
 
     assert any(
-        issue.code == "missing_evidence_contract"
-        for issue in excinfo.value.issues
+        issue.code == "missing_evidence_contract" for issue in excinfo.value.issues
     )
 
 
 def test_validate_artifact_completeness_rejects_plan_missing_rtm_id() -> None:
-    artifact = _complete_plan_artifact().replace(
-        "## Requirement Traceability Matrix\nbody text",
-        (
-            "## Requirement Traceability Matrix\n"
-            "| Source ID | Requirement summary | Design response | Verification method "
-            "| Residual risk |\n"
-            "|---|---|---|---|---|\n"
-            "| FR-001 | Create project. | POST /projects. | contract test | Low |"
-        ),
-    ).replace(
-        "## Security Architecture\nbody text",
-        "## Security Architecture\nSEC-001 authentication is enforced by middleware.",
+    artifact = (
+        _complete_plan_artifact()
+        .replace(
+            "## Requirement Traceability Matrix\nbody text",
+            (
+                "## Requirement Traceability Matrix\n"
+                "| Source ID | Requirement summary | Design response | Verification method "
+                "| Residual risk |\n"
+                "|---|---|---|---|---|\n"
+                "| FR-001 | Create project. | POST /projects. | contract test | Low |"
+            ),
+        )
+        .replace(
+            "## Security Architecture\nbody text",
+            "## Security Architecture\nSEC-001 authentication is enforced by middleware.",
+        )
     )
 
     with pytest.raises(IncompleteArtifactError) as excinfo:
@@ -175,8 +178,7 @@ def test_validate_artifact_completeness_rejects_plan_missing_rtm_id() -> None:
         )
 
     assert any(
-        issue.code == "rtm_missing_upstream_id"
-        for issue in excinfo.value.issues
+        issue.code == "rtm_missing_upstream_id" for issue in excinfo.value.issues
     )
 
 
@@ -235,8 +237,7 @@ def test_validate_artifact_completeness_rejects_missing_task_harness_ref() -> No
         )
 
     assert any(
-        issue.code == "task_harness_ref_not_found"
-        for issue in excinfo.value.issues
+        issue.code == "task_harness_ref_not_found" for issue in excinfo.value.issues
     )
 
 
@@ -261,8 +262,7 @@ def test_validate_artifact_completeness_rejects_future_task_dependency() -> None
         validate_artifact_completeness("tasks", artifact, {"spec": "FR-001"})
 
     assert any(
-        issue.code == "invalid_task_dependency_order"
-        for issue in excinfo.value.issues
+        issue.code == "invalid_task_dependency_order" for issue in excinfo.value.issues
     )
 
 
