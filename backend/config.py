@@ -56,6 +56,13 @@ class Settings(BaseSettings):
     llm_long_stream_timeout_seconds: int = 300
     llm_complete_timeout_seconds: int = 45
     max_request_body_bytes: int = 1_000_000
+    tech_safety_policy_max_age_days: int = 30
+    tech_safety_osv_cache_ttl_seconds: int = 86_400
+    tech_safety_eol_cache_ttl_seconds: int = 604_800
+    tech_safety_advisory_timeout_seconds: float = 3.0
+    tech_safety_osv_api_base: str = "https://api.osv.dev"
+    tech_safety_eol_api_base: str = "https://endoflife.date/api/v1"
+    tech_safety_blocked_severities: str = "critical,high,unknown"
 
     # GitHub OAuth App — leave blank to disable GitHub export
     github_client_id: str = ""

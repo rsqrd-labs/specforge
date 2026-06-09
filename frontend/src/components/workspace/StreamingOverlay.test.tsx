@@ -32,6 +32,26 @@ const incompleteGate: QualityGateInfo = {
   ],
 }
 
+const technologySafetyGate: QualityGateInfo = {
+  stage: "plan",
+  kind: "technology_safety",
+  override_allowed: false,
+  repair_attempted: true,
+  policy_version: "tech-safety-v1",
+  reasons: [
+    {
+      code: "runtime_eol",
+      severity: "critical",
+      technology: "Node.js",
+      version: "18",
+      source: "local_policy",
+      detail: "Node.js 18 is EOL. Choose Node.js 22 LTS or newer.",
+      reference: "Node.js",
+      remediation: "Choose Node.js 22 LTS or newer.",
+    },
+  ],
+}
+
 describe("StreamingOverlay quality gate", () => {
   it("wires regenerate, override, and dismiss actions", async () => {
     const user = userEvent.setup()
@@ -82,5 +102,23 @@ describe("StreamingOverlay quality gate", () => {
       screen.queryByRole("button", { name: "Override and continue" }),
     ).not.toBeInTheDocument()
     expect(screen.getByText(/stopped before completion/i)).toBeInTheDocument()
+  })
+
+  it("hides override and renders remediation for technology safety gates", () => {
+    render(
+      <StreamingOverlay
+        isVisible={false}
+        gate={technologySafetyGate}
+        onRegenerate={vi.fn()}
+        onOverride={vi.fn()}
+      />,
+    )
+
+    expect(screen.getByRole("button", { name: "Regenerate" })).toBeInTheDocument()
+    expect(
+      screen.queryByRole("button", { name: "Override and continue" }),
+    ).not.toBeInTheDocument()
+    expect(screen.getByText(/unsafe or unsupported technology/i)).toBeInTheDocument()
+    expect(screen.getAllByText(/Node\.js 22 LTS/i).length).toBeGreaterThan(0)
   })
 })

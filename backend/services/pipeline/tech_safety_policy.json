@@ -1,0 +1,73 @@
+{
+  "policy_version": "tech-safety-v1",
+  "last_reviewed": "2026-06-09",
+  "max_age_days": 30,
+  "blocked_severities": ["critical", "high", "unknown"],
+  "near_eol_block_days": 730,
+  "hard_denylists": [
+    {
+      "code": "runtime_eol",
+      "technology": "Python",
+      "pattern": "\\bpython\\s*(?:<=|<|=)?\\s*3\\.(?:[0-9]|10)\\b",
+      "severity": "critical",
+      "remediation": "Use Python 3.12 or the latest stable active Python release."
+    },
+    {
+      "code": "runtime_eol",
+      "technology": "Node.js",
+      "pattern": "\\bnode(?:\\.js)?\\s*(?:<=|<|=)?\\s*(?:1[0-8])\\b",
+      "severity": "critical",
+      "remediation": "Use Node.js 22 LTS or the latest active LTS release."
+    },
+    {
+      "code": "runtime_eol",
+      "technology": "Java",
+      "pattern": "\\bjava\\s*(?:<=|<|=)?\\s*(?:[1-9]|10|11)\\b",
+      "severity": "high",
+      "remediation": "Use Java 21 LTS or a currently supported LTS release."
+    },
+    {
+      "code": "deprecated_model_family",
+      "technology": "OpenAI GPT-3 family",
+      "pattern": "\\bgpt-3(?:\\.5)?(?:-[a-z0-9.-]+)?\\b",
+      "severity": "high",
+      "remediation": "Use a current supported OpenAI model family."
+    },
+    {
+      "code": "deprecated_model_family",
+      "technology": "Google Gemini 1.x family",
+      "pattern": "\\bgemini-1(?:\\.[0-9]+)?(?:-[a-z0-9.-]+)?\\b",
+      "severity": "high",
+      "remediation": "Use a current supported Gemini family."
+    },
+    {
+      "code": "deprecated_model_family",
+      "technology": "Anthropic Claude 1.x/2.x family",
+      "pattern": "\\bclaude-[12](?:\\.[0-9]+)?(?:-[a-z0-9.-]+)?\\b",
+      "severity": "high",
+      "remediation": "Use Claude Sonnet or Opus latest stable."
+    }
+  ],
+  "package_ecosystems": {
+    "@angular/core": "npm",
+    "@nestjs/core": "npm",
+    "django": "PyPI",
+    "express": "npm",
+    "fastapi": "PyPI",
+    "flask": "PyPI",
+    "next": "npm",
+    "react": "npm",
+    "rails": "RubyGems",
+    "spring-boot": "Maven",
+    "vue": "npm"
+  },
+  "lifecycle_products": {
+    "java": "java",
+    "node": "nodejs",
+    "node.js": "nodejs",
+    "postgres": "postgresql",
+    "postgresql": "postgresql",
+    "python": "python",
+    "redis": "redis"
+  }
+}

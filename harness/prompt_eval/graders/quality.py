@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime
+import json
 import re
 from functools import lru_cache
 from pathlib import Path
@@ -11,6 +12,13 @@ from prompt_eval.graders.common import make_result
 # DENYLIST_LAST_REVIEWED anchor.  graders/ -> prompt_eval -> harness -> repo root.
 _PLAN_PROMPT_PATH = (
     Path(__file__).resolve().parents[3] / "backend" / "prompts" / "plan.py"
+)
+_TECH_SAFETY_POLICY_PATH = (
+    Path(__file__).resolve().parents[3]
+    / "backend"
+    / "services"
+    / "pipeline"
+    / "tech_safety_policy.json"
 )
 _REVIEW_DATE_RE = re.compile(r'DENYLIST_LAST_REVIEWED\s*=\s*"(\d{4}-\d{2}-\d{2})"')
 # Directive #8 budget: the denylist must be re-reviewed within 12 months.
@@ -36,6 +44,14 @@ def _read_denylist_review_date() -> datetime.date | None:
         return datetime.date.fromisoformat(match.group(1))
     except ValueError:
         return None
+
+
+@lru_cache(maxsize=1)
+def _read_tech_safety_policy() -> dict:
+    try:
+        return json.loads(_TECH_SAFETY_POLICY_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
 
 
 def _freshness_deadline(reviewed: datetime.date) -> datetime.date:
@@ -109,13 +125,20 @@ def deprecated_api_hit_count(
 ):
     """quality: deprecated runtime, SDK, or LLM family choices are absent."""
 
+    policy = _read_tech_safety_policy()
     patterns = [
-        r"\bPython\s*(?:<=|<|=)?\s*3\.10\b",
-        r"\bNode(?:\.js)?\s*(?:<=|<|=)?\s*18\b",
-        r"\bgpt-3(?:\.5)?\b",
-        r"\bgemini-1\.",
-        r"\bclaude-[12](?:\.|\b)",
+        str(entry.get("pattern"))
+        for entry in policy.get("hard_denylists", [])
+        if entry.get("pattern")
     ]
+    if not patterns:
+        patterns = [
+            r"\bPython\s*(?:<=|<|=)?\s*3\.10\b",
+            r"\bNode(?:\.js)?\s*(?:<=|<|=)?\s*18\b",
+            r"\bgpt-3(?:\.5)?\b",
+            r"\bgemini-1\.",
+            r"\bclaude-[12](?:\.|\b)",
+        ]
     hits: list[str] = []
     for pattern in patterns:
         hits.extend(re.findall(pattern, artifact_md, flags=re.IGNORECASE))

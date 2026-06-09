@@ -122,6 +122,30 @@ PIPELINE_INTERRUPTED_STREAMS = Counter(
     ["stage_type"],
 )
 
+PIPELINE_TECH_SAFETY_FAILURES = Counter(
+    "specforge_pipeline_technology_safety_failures_total",
+    "Stage artifacts blocked by the deterministic technology safety gate",
+    ["stage_type", "code", "severity"],
+)
+
+PIPELINE_TECH_SAFETY_REPAIRS = Counter(
+    "specforge_pipeline_technology_safety_repairs_total",
+    "Platform-funded repair attempts for unsafe generated technology choices",
+    ["stage_type", "provider", "outcome"],
+)
+
+PIPELINE_TECH_SAFETY_LOOKUP_FAILURES = Counter(
+    "specforge_pipeline_technology_safety_lookup_failures_total",
+    "External technology safety lookup failures",
+    ["source", "reason"],
+)
+
+PIPELINE_TECH_SAFETY_FINALISE_BLOCKS = Counter(
+    "specforge_pipeline_technology_safety_finalise_blocks_total",
+    "Finalise attempts blocked by deterministic technology safety validation",
+    ["stage_type", "code"],
+)
+
 # PDF export duration histogram — WeasyPrint is CPU-bound and blocks the
 # thread-pool executor thread for 0.5–3 s per render. Observing duration
 # makes event-loop-blocking outliers (C-4) visible.

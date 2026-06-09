@@ -26,13 +26,15 @@ export function StreamingOverlay({
     const findings = gate.findings ?? []
     const reasons = gate.reasons ?? []
     const isIncomplete = gate.kind === "incomplete_output"
+    const isTechnologySafety = gate.kind === "technology_safety"
     const isMissingSections = gate.kind === "missing_sections" || missing.length > 0
-    const issueCount = isIncomplete
+    const structuredIssues = reasons.length ? reasons : findings
+    const issueCount = isIncomplete || isTechnologySafety
       ? reasons.length || findings.length
       : isMissingSections
         ? missing.length
         : findings.length
-    const canOverride = gate.override_allowed !== false && !isIncomplete
+    const canOverride = gate.override_allowed !== false && !isIncomplete && !isTechnologySafety
     return (
       <div
         className="quality-gate-inline"
@@ -46,6 +48,12 @@ export function StreamingOverlay({
               ? `The generated ${gate.stage} stopped before completion${
                   gate.repair_attempted ? " after a repair attempt" : ""
                 }. Regenerate to produce a complete version.`
+              : isTechnologySafety
+              ? `The generated ${gate.stage} selected unsafe or unsupported technology${
+                  issueCount === 1 ? "" : " choices"
+                }${
+                  gate.repair_attempted ? " after a repair attempt" : ""
+                }. Regenerate with supported choices.`
               : isMissingSections
               ? `The generated ${gate.stage} is missing ${issueCount} required ${
                   issueCount === 1 ? "section" : "sections"
@@ -54,17 +62,23 @@ export function StreamingOverlay({
                   issueCount === 1 ? "issue" : "issues"
                 } in the generated ${gate.stage}. Regenerate to try again, or override to accept anyway.`}
           </p>
-          {isIncomplete ? (
+          {isIncomplete || isTechnologySafety ? (
             <ul className="quality-gate-findings">
-              {(reasons.length ? reasons : findings).map((reason, index) => (
+              {structuredIssues.map((reason, index) => (
                 <li key={index} className="quality-gate-finding">
                   <span className="quality-gate-kind">
-                    {"code" in reason ? reason.code : reason.kind}
+                    {reason.code ?? reason.kind}
                   </span>
+                  {"severity" in reason && reason.severity ? (
+                    <span className="quality-gate-ref"> · {reason.severity}</span>
+                  ) : null}
                   {reason.reference ? (
                     <span className="quality-gate-ref"> · {reason.reference}</span>
                   ) : null}
                   <span className="quality-gate-detail"> — {reason.detail}</span>
+                  {"remediation" in reason && reason.remediation ? (
+                    <span className="quality-gate-detail"> {reason.remediation}</span>
+                  ) : null}
                 </li>
               ))}
             </ul>

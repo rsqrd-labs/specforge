@@ -49,6 +49,9 @@ from services.observability import (
     PIPELINE_INCOMPLETE_OUTPUTS,
     PIPELINE_INTERRUPTED_STREAMS,
     PIPELINE_PROVIDER_LIMIT_STOPS,
+    PIPELINE_TECH_SAFETY_FAILURES,
+    PIPELINE_TECH_SAFETY_FINALISE_BLOCKS,
+    PIPELINE_TECH_SAFETY_REPAIRS,
     PIPELINE_VALIDATOR_FAILURES,
     SSE_STREAM_FAILURES,
 )
@@ -74,6 +77,13 @@ from services.pipeline.diff_engine import (
     normalize_refine_replacement,
 )
 from services.pipeline.prompt_builder import build_prompt
+from services.pipeline.tech_safety import (
+    TECH_SAFETY_GATE_KIND,
+    TechSafetyError,
+    policy_sources,
+    policy_version,
+    validate_technology_safety,
+)
 from services.security.output_validator import validate
 from services.security.problem_statement_gate import (
     ProblemStatementValidationError,
@@ -340,6 +350,7 @@ _FILE_HEADING_RE = re.compile(r"^(#{2,3})\s+File:\s+(.+?)$", re.MULTILINE)
 _RECOVERY_LOCK_KEY = "recovery:leader_lock"
 AUDIT_EVENT_QUALITY_GATE_OVERRIDDEN = "quality_gate_overridden"
 INCOMPLETE_OUTPUT_GATE_KIND = "incomplete_output"
+TECH_SAFETY_OUTPUT_CONTRACT_VERSION = "v3-tech-safety"
 MAX_COMPLETENESS_REPAIRS = 1
 
 
@@ -586,6 +597,20 @@ def _chunk_user_prompt(
         f"{chunk.instruction}\n"
         f"{issue_text}"
         f"{completion_instruction(stage_type, chunk_key=chunk.key)}"
+    )
+
+
+def _finding_value(finding, name: str, default: str | None = None) -> str | None:
+    if isinstance(finding, dict):
+        value = finding.get(name, default)
+    else:
+        value = getattr(finding, name, default)
+    return str(value) if value is not None else None
+
+
+def _finding_label(finding) -> str:
+    return (
+        _finding_value(finding, "kind") or _finding_value(finding, "code") or "finding"
     )
 
 
@@ -999,13 +1024,27 @@ class StageManager:
             problem_statement_hash=_hash_text(workspace.problem_statement),
             upstream_artifact_hashes=_upstream_artifact_hashes(workspace, stage.type),
             user_instruction_hash=_hash_text(""),
-            output_contract_version=f"{stage.type}-v2-complete",
+            output_contract_version=(
+                f"{stage.type}-{TECH_SAFETY_OUTPUT_CONTRACT_VERSION}"
+            ),
         )
         cached_output = (
             None
             if free or action == "regenerate"
             else await get_cached_generation(redis, cache_key)
         )
+        if cached_output is not None:
+            try:
+                await self._assert_technology_safe(
+                    stage.type,
+                    cached_output,
+                    _workspace_stage_deps(workspace, stage.type),
+                    redis,
+                )
+            except TechSafetyError:
+                await redis.delete(cache_key)
+                cached_output = None
+
         if cached_output is not None:
             stage.content = cached_output
             stage.current_version += 1
@@ -1059,6 +1098,7 @@ class StageManager:
             content_generation_id: str | None = None
             stream_chunks: list[str] = []
             deps = _workspace_stage_deps(workspace, stage.type)
+            technology_repair_used = False
             try:
                 adapter = get_llm(route.provider, route.model)
                 if trace_id:
@@ -1166,6 +1206,53 @@ class StageManager:
                     span_finished = True
                 raise SecurityError(f"Output failed validation: {validation.reason}")
 
+            try:
+                accumulated, tech_repaired = await self._ensure_technology_safe(
+                    route=route,
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                    stage_type=stage.type,
+                    content=accumulated,
+                    deps=deps,
+                    redis=redis,
+                    allow_repair=not technology_repair_used,
+                )
+                if tech_repaired:
+                    technology_repair_used = True
+                    stream_chunks = [accumulated]
+            except TechSafetyError as exc:
+                gate_payload = await self._block_technology_safety_output(
+                    db=db,
+                    redis=redis,
+                    stage=stage,
+                    user=user,
+                    deduction=deduction,
+                    route=route,
+                    exc=exc,
+                )
+                _cleanup_done = True
+                if span_id:
+                    await self._mark_langfuse_span_failed(span_id, exc)
+                    span_finished = True
+                yield json.dumps({"quality_gate_failed": gate_payload})
+                return
+            except IncompleteArtifactError as exc:
+                gate_payload = await self._block_incomplete_output(
+                    db=db,
+                    redis=redis,
+                    stage=stage,
+                    user=user,
+                    deduction=deduction,
+                    route=route,
+                    exc=exc,
+                )
+                _cleanup_done = True
+                if span_id:
+                    await self._mark_langfuse_span_failed(span_id, exc)
+                    span_finished = True
+                yield json.dumps({"quality_gate_failed": gate_payload})
+                return
+
             # T-247: critic quality gate.  Runs AFTER output validation and
             # BEFORE persistence + caching, so only a critic-passed artifact is
             # ever cached, persisted, or eval'd (the cache-hit early return is
@@ -1248,6 +1335,7 @@ class StageManager:
                             stage_type=stage.type,
                             deps=critic_deps,
                         )
+                        stream_chunks = [accumulated]
                     except IncompleteArtifactError as exc:
                         gate_payload = await self._block_incomplete_output(
                             db=db,
@@ -1279,6 +1367,53 @@ class StageManager:
                             await self._mark_langfuse_span_failed(span_id, sec_error)
                             span_finished = True
                         raise sec_error
+
+            try:
+                accumulated, tech_repaired = await self._ensure_technology_safe(
+                    route=route,
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                    stage_type=stage.type,
+                    content=accumulated,
+                    deps=deps,
+                    redis=redis,
+                    allow_repair=not technology_repair_used,
+                )
+                if tech_repaired:
+                    technology_repair_used = True
+                    stream_chunks = [accumulated]
+            except TechSafetyError as exc:
+                gate_payload = await self._block_technology_safety_output(
+                    db=db,
+                    redis=redis,
+                    stage=stage,
+                    user=user,
+                    deduction=deduction,
+                    route=route,
+                    exc=exc,
+                )
+                _cleanup_done = True
+                if span_id:
+                    await self._mark_langfuse_span_failed(span_id, exc)
+                    span_finished = True
+                yield json.dumps({"quality_gate_failed": gate_payload})
+                return
+            except IncompleteArtifactError as exc:
+                gate_payload = await self._block_incomplete_output(
+                    db=db,
+                    redis=redis,
+                    stage=stage,
+                    user=user,
+                    deduction=deduction,
+                    route=route,
+                    exc=exc,
+                )
+                _cleanup_done = True
+                if span_id:
+                    await self._mark_langfuse_span_failed(span_id, exc)
+                    span_finished = True
+                yield json.dumps({"quality_gate_failed": gate_payload})
+                return
 
             stage.content = accumulated
             stage.current_version += 1
@@ -1630,6 +1765,21 @@ class StageManager:
         if stage.status != "draft":
             raise ValueError(f"Stage status {stage.status!r} cannot be finalised")
         if (
+            stage.quality_gate_kind == INCOMPLETE_OUTPUT_GATE_KIND
+            and stage.quality_gate_version == stage.current_version
+        ):
+            raise ValueError(
+                "Current stage version is incomplete. Regenerate before finalising."
+            )
+        if (
+            stage.quality_gate_kind == TECH_SAFETY_GATE_KIND
+            and stage.quality_gate_version == stage.current_version
+        ):
+            raise ValueError(
+                "Current stage version has unsafe technology choices. "
+                "Regenerate before finalising."
+            )
+        if (
             stage.quality_gate_status == "blocked"
             and stage.quality_gate_version == stage.current_version
         ):
@@ -1637,13 +1787,27 @@ class StageManager:
                 "Current stage version is blocked by the quality gate. "
                 "Regenerate or override before finalising."
             )
-        if (
-            stage.quality_gate_kind == INCOMPLETE_OUTPUT_GATE_KIND
-            and stage.quality_gate_version == stage.current_version
-        ):
-            raise ValueError(
-                "Current stage version is incomplete. Regenerate before finalising."
+
+        redis = await self._redis_client()
+        try:
+            await self._assert_technology_safe(
+                stage.type,
+                stage.content or "",
+                await self._critic_deps(stage.workspace_id, stage.type),
+                redis,
             )
+        except TechSafetyError as exc:
+            self._mark_current_version_technology_blocked(stage, exc)
+            for finding in exc.findings:
+                PIPELINE_TECH_SAFETY_FINALISE_BLOCKS.labels(
+                    stage_type=stage.type,
+                    code=finding.code,
+                ).inc()
+            await db.commit()
+            raise ValueError(
+                "Current stage version has unsafe technology choices. "
+                "Regenerate before finalising."
+            ) from exc
 
         stage.status = "finalised"
         stage.finalised_at = datetime.now(UTC)
@@ -1678,7 +1842,6 @@ class StageManager:
 
             await mark_pushes_stale_on_tasks_drift(db, stage.workspace_id)
 
-        redis = await self._redis_client()
         await self._invalidate_stage_cache(stage.workspace_id, stage.type, redis)
         content = stage.content or ""
         await redis.set(
@@ -1710,12 +1873,22 @@ class StageManager:
         stage.content = version.content
         stage.current_version = version_number
         stage.status = "draft"
-        self._clear_quality_gate(stage)
         stage.updated_at = datetime.now(UTC)
 
         await self._mark_downstream_stale(stage, db)
 
         redis = await self._redis_client()
+        try:
+            await self._assert_technology_safe(
+                stage.type,
+                stage.content or "",
+                await self._critic_deps(stage.workspace_id, stage.type),
+                redis,
+            )
+        except TechSafetyError as exc:
+            self._mark_current_version_technology_blocked(stage, exc)
+        else:
+            self._clear_quality_gate(stage)
         await self._invalidate_stage_cache(stage.workspace_id, stage.type, redis)
         await db.commit()
         await db.refresh(stage)
@@ -1731,7 +1904,6 @@ class StageManager:
         stage.content = sanitize_text(new_content)
         stage.current_version += 1
         stage.status = "draft" if not was_finalised else "stale"
-        self._clear_quality_gate(stage)
         stage.updated_at = datetime.now(UTC)
 
         version = StageVersion(
@@ -1755,17 +1927,29 @@ class StageManager:
             await self._mark_downstream_stale(stage, db)
 
         redis = await self._redis_client()
+        try:
+            await self._assert_technology_safe(
+                stage.type,
+                stage.content or "",
+                await self._critic_deps(stage.workspace_id, stage.type),
+                redis,
+            )
+        except TechSafetyError as exc:
+            self._mark_current_version_technology_blocked(stage, exc)
+        else:
+            self._clear_quality_gate(stage)
         await self._invalidate_stage_cache(stage.workspace_id, stage.type, redis)
         await db.commit()
         await db.refresh(stage)
-        _schedule_stage_eval(
-            version_id=version_id,
-            stage_type=stage.type,
-            content=new_content,
-            eval_context=eval_context,
-            provider=workspace.provider,
-            harness_content=harness_content_for_eval,
-        )
+        if stage.quality_gate_status != "blocked":
+            _schedule_stage_eval(
+                version_id=version_id,
+                stage_type=stage.type,
+                content=new_content,
+                eval_context=eval_context,
+                provider=workspace.provider,
+                harness_content=harness_content_for_eval,
+            )
         return stage
 
     async def _mark_downstream_stale(self, stage: Stage, db: AsyncSession) -> None:
@@ -1925,6 +2109,169 @@ class StageManager:
             ],
         }
 
+    def _technology_safety_gate_payload(
+        self,
+        stage_type: str,
+        exc: TechSafetyError,
+    ) -> dict:
+        findings = [finding.to_payload() for finding in exc.findings]
+        now = datetime.now(UTC)
+        return {
+            "stage": stage_type,
+            "kind": TECH_SAFETY_GATE_KIND,
+            "override_allowed": False,
+            "repair_attempted": exc.repair_attempted,
+            "policy_version": policy_version(),
+            "verified_at": now.isoformat(),
+            "sources": policy_sources(),
+            "reasons": findings,
+            "findings": findings,
+        }
+
+    def _record_technology_safety_failure(
+        self,
+        stage_type: str,
+        exc: TechSafetyError,
+    ) -> None:
+        for finding in exc.findings:
+            PIPELINE_TECH_SAFETY_FAILURES.labels(
+                stage_type=stage_type,
+                code=finding.code,
+                severity=finding.severity,
+            ).inc()
+
+    async def _assert_technology_safe(
+        self,
+        stage_type: str,
+        content: str,
+        deps: dict[str, str],
+        redis: "Redis",
+    ) -> None:
+        try:
+            await validate_technology_safety(stage_type, content, deps, redis=redis)
+        except TechSafetyError as exc:
+            self._record_technology_safety_failure(stage_type, exc)
+            raise
+
+    async def _ensure_technology_safe(
+        self,
+        *,
+        route: LLMRoute,
+        system_prompt: str,
+        user_prompt: str,
+        stage_type: str,
+        content: str,
+        deps: dict[str, str],
+        redis: "Redis",
+        allow_repair: bool = True,
+    ) -> tuple[str, bool]:
+        try:
+            await self._assert_technology_safe(stage_type, content, deps, redis)
+            return content, False
+        except TechSafetyError as exc:
+            if not allow_repair:
+                raise TechSafetyError(
+                    exc.findings,
+                    stage_type=stage_type,
+                    partial_content=content,
+                    repair_attempted=True,
+                ) from exc
+            PIPELINE_TECH_SAFETY_REPAIRS.labels(
+                stage_type=stage_type,
+                provider=route.provider,
+                outcome="attempted",
+            ).inc()
+            try:
+                repaired = await self._regenerate_with_findings(
+                    route=route,
+                    system_prompt=system_prompt,
+                    base_user_prompt=user_prompt,
+                    findings=exc.findings,
+                    stage_type=stage_type,
+                    deps=deps,
+                )
+                validation = validate(repaired)
+                if not validation.is_safe:
+                    raise SecurityError(
+                        f"Technology-safety repair failed validation: "
+                        f"{validation.reason}"
+                    )
+                await self._assert_technology_safe(stage_type, repaired, deps, redis)
+            except TechSafetyError as repair_exc:
+                PIPELINE_TECH_SAFETY_REPAIRS.labels(
+                    stage_type=stage_type,
+                    provider=route.provider,
+                    outcome="failed",
+                ).inc()
+                raise TechSafetyError(
+                    repair_exc.findings,
+                    stage_type=stage_type,
+                    partial_content=repair_exc.partial_content or content,
+                    repair_attempted=True,
+                ) from repair_exc
+            PIPELINE_TECH_SAFETY_REPAIRS.labels(
+                stage_type=stage_type,
+                provider=route.provider,
+                outcome="succeeded",
+            ).inc()
+            return repaired, True
+
+    async def _block_technology_safety_output(
+        self,
+        *,
+        db: AsyncSession,
+        redis: "Redis",
+        stage: Stage,
+        user,
+        deduction,
+        route: LLMRoute,
+        exc: TechSafetyError,
+    ) -> dict:
+        if deduction is not None:
+            await credit_service.refund(db, deduction.id)
+        gate_payload = self._technology_safety_gate_payload(stage.type, exc)
+        await self._persist_quality_gate_blocked(
+            db,
+            redis,
+            stage,
+            exc.partial_content,
+            kind=TECH_SAFETY_GATE_KIND,
+            payload=gate_payload,
+        )
+        if deduction is not None:
+            await credit_service.invalidate(user.id)
+        logger.warning(
+            "stage.technology_safety_blocked",
+            extra={
+                "stage_id": str(stage.id),
+                "stage": stage.type,
+                "provider": route.provider,
+                "model": route.model,
+                "operation": route.operation,
+                "policy_version": policy_version(),
+                "finding_codes": [finding.code for finding in exc.findings],
+                "sources": policy_sources(),
+            },
+        )
+        return gate_payload
+
+    def _mark_current_version_technology_blocked(
+        self,
+        stage: Stage,
+        exc: TechSafetyError,
+    ) -> None:
+        now = datetime.now(UTC)
+        stage.status = "draft" if stage.status == "finalised" else stage.status
+        stage.quality_gate_status = "blocked"
+        stage.quality_gate_kind = TECH_SAFETY_GATE_KIND
+        stage.quality_gate_payload = self._technology_safety_gate_payload(
+            stage.type,
+            exc,
+        )
+        stage.quality_gate_version = stage.current_version
+        stage.quality_gate_failed_at = now
+        stage.updated_at = now
+
     async def _block_incomplete_output(
         self,
         *,
@@ -2021,6 +2368,10 @@ class StageManager:
             raise ValueError(
                 "Incomplete stage output cannot be overridden. Regenerate instead."
             )
+        if stage.quality_gate_kind == TECH_SAFETY_GATE_KIND:
+            raise ValueError(
+                "Unsafe technology choices cannot be overridden. Regenerate instead."
+            )
 
         stage.quality_gate_status = "overridden"
         stage.updated_at = datetime.now(UTC)
@@ -2076,17 +2427,22 @@ class StageManager:
         the caller increments BILLING_CREDITS_CRITIC_REGEN.
         """
         findings_block = "\n".join(
-            f"- [{f.kind}] {f.detail}"
-            + (f" (reference: {f.reference})" if f.reference else "")
+            f"- [{_finding_label(f)}] "
+            f"{_finding_value(f, 'detail', '') or ''}"
+            + (
+                f" (reference: {_finding_value(f, 'reference')})"
+                if _finding_value(f, "reference")
+                else ""
+            )
             for f in findings
         )
         augmented_user_prompt = (
             f"{base_user_prompt}\n\n"
-            "## Critic Findings — you MUST resolve every item below\n"
-            "Your previous attempt failed the automated quality gate for the "
+            "## Automated Quality Gate Findings — you MUST resolve every item below\n"
+            "Your previous attempt failed an automated quality gate for the "
             "reasons listed here. Produce a complete, corrected artifact that "
             "fully resolves every finding. Do not reference this section or the "
-            "critic in your output.\n"
+            "quality gate in your output.\n"
             f"{findings_block}"
             f"{completion_instruction(stage_type)}"
         )
@@ -2197,6 +2553,17 @@ class StageManager:
                     yield token
 
             merged = _merge_harness_patch(existing_content, accumulated)
+            try:
+                await self._assert_technology_safe(
+                    "harness",
+                    merged,
+                    await self._critic_deps(stage.workspace_id, "harness"),
+                    redis,
+                )
+            except TechSafetyError as exc:
+                raise SecurityError(
+                    "Harness patch introduced unsafe technology choices."
+                ) from exc
 
             stage.content = merged
             stage.current_version += 1

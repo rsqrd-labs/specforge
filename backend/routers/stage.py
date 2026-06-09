@@ -215,6 +215,9 @@ async def _stream_harness_patch(
     except ProviderError as exc:
         payload = json.dumps({"error": "provider_error", "detail": str(exc)})
         yield f"data: {payload}\n\n"
+    except SecurityError as exc:
+        payload = json.dumps({"error": "security_check_failed", "detail": str(exc)})
+        yield f"data: {payload}\n\n"
     except Exception:
         logger.exception(
             "harness_patch_stream_error", extra={"stage_id": str(stage_id)}

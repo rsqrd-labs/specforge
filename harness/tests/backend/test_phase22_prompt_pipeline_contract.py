@@ -107,14 +107,16 @@ Design invariants enforced here:
 
 from __future__ import annotations
 
+import json
 import re
+from datetime import date, timedelta
 
 from conftest import BACKEND_ROOT, REPO_ROOT, read_backend_file
-
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _read_prompt(name: str) -> str:
     """Read a backend/prompts/<name>.py file and return its source.
@@ -164,7 +166,7 @@ def _extract_section(source: str, heading: str) -> str:
     start = source.find(heading)
     if start < 0:
         return ""
-    rest = source[start + len(heading):]
+    rest = source[start + len(heading) :]
     # The next "## " on its own line terminates the section.  Use a regex
     # anchored on a newline so a bare "## " inside a code fence cannot prematurely
     # end the section.
@@ -185,7 +187,10 @@ def test_t239_plan_prompt_requires_architecture_decision_records_section() -> No
     needed to audit architecture decisions later.
     """
     src = _read_plan_prompt()
-    assert "## Architecture Decision Records" in src or "## Architecture Decision Records (ADR)" in src, (
+    assert (
+        "## Architecture Decision Records" in src
+        or "## Architecture Decision Records (ADR)" in src
+    ), (
         "plan.py SYSTEM_PROMPT must include an '## Architecture Decision Records' "
         "section heading.  T-239 (audit F-1)."
     )
@@ -208,9 +213,9 @@ def test_t239_plan_prompt_adr_format_includes_reversal_cost() -> None:
 def test_t239_plan_prompt_adr_format_requires_options_considered() -> None:
     """T-239 — the ADR format must require ≥2 Options Considered with tradeoffs."""
     src = _read_plan_prompt()
-    assert re.search(r"Options Considered|Options considered|options considered", src), (
-        "plan.py ADR format must require an 'Options Considered' field.  T-239."
-    )
+    assert re.search(
+        r"Options Considered|Options considered|options considered", src
+    ), "plan.py ADR format must require an 'Options Considered' field.  T-239."
 
 
 def test_t239_plan_prompt_has_architecture_anti_patterns_denylist() -> None:
@@ -248,17 +253,19 @@ def test_t239_plan_prompt_denylists_premature_sharding() -> None:
 def test_t239_plan_prompt_denylists_dual_write_without_outbox() -> None:
     """T-239 — denylist must call out dual-write without outbox/CDC."""
     src = _read_plan_prompt()
-    assert "dual-write" in src.lower() or "dual write" in src.lower(), (
-        "plan.py anti-pattern denylist must call out 'dual-write' patterns.  T-239."
-    )
+    assert (
+        "dual-write" in src.lower() or "dual write" in src.lower()
+    ), "plan.py anti-pattern denylist must call out 'dual-write' patterns.  T-239."
 
 
 def test_t239_plan_prompt_denylists_sync_external_calls_in_request_path() -> None:
     """T-239 — denylist must call out synchronous external calls in the request path."""
     src = _read_plan_prompt()
-    assert ("sync external calls" in src.lower() or
-            "synchronous external" in src.lower() or
-            "circuit breaker" in src.lower()), (
+    assert (
+        "sync external calls" in src.lower()
+        or "synchronous external" in src.lower()
+        or "circuit breaker" in src.lower()
+    ), (
         "plan.py anti-pattern denylist must call out sync external calls in the "
         "request path without a circuit breaker.  T-239."
     )
@@ -295,9 +302,9 @@ def test_t239_plan_prompt_multi_tenancy_lists_named_options() -> None:
     )
     # At least 2 of the 3 named options must be present (some products may have
     # an additional 'physical isolation' option which is fine).
-    assert len(missing) <= 1, (
-        f"Multi-tenancy stance must list named options.  Missing: {missing}.  T-239."
-    )
+    assert (
+        len(missing) <= 1
+    ), f"Multi-tenancy stance must list named options.  Missing: {missing}.  T-239."
 
 
 # ===========================================================================
@@ -318,9 +325,9 @@ def test_t240_capacity_model_requires_rps_and_latency_budget() -> None:
     """T-240 — Capacity Model must require RPS + p95/p99 latency."""
     src = _read_plan_prompt()
     assert "RPS" in src, "Capacity Model must require RPS targets.  T-240."
-    assert re.search(r"p95|p99|p50/p95/p99", src), (
-        "Capacity Model must require latency budgets (p50/p95/p99).  T-240."
-    )
+    assert re.search(
+        r"p95|p99|p50/p95/p99", src
+    ), "Capacity Model must require latency budgets (p50/p95/p99).  T-240."
 
 
 def test_t240_capacity_model_requires_10x_100x_projection() -> None:
@@ -367,12 +374,14 @@ def test_t240_threat_model_lists_all_stride_categories() -> None:
     """T-240 — STRIDE section must enumerate all 6 categories."""
     src = _read_plan_prompt()
     for category in [
-        "Spoofing", "Tampering", "Repudiation",
-        "Information disclosure", "Denial of service", "Elevation of privilege",
+        "Spoofing",
+        "Tampering",
+        "Repudiation",
+        "Information disclosure",
+        "Denial of service",
+        "Elevation of privilege",
     ]:
-        assert category in src, (
-            f"STRIDE section must enumerate '{category}'.  T-240."
-        )
+        assert category in src, f"STRIDE section must enumerate '{category}'.  T-240."
 
 
 def test_t240_plan_prompt_has_slo_and_error_budget_section() -> None:
@@ -387,12 +396,12 @@ def test_t240_plan_prompt_has_slo_and_error_budget_section() -> None:
 def test_t240_slo_section_requires_availability_latency_correctness() -> None:
     """T-240 — SLO section must require availability + latency + correctness."""
     src = _read_plan_prompt()
-    assert "availability SLO" in src.lower() or "availability" in src.lower(), (
-        "SLO section must require an availability SLO.  T-240."
-    )
-    assert "latency SLO" in src.lower() or "latency" in src.lower(), (
-        "SLO section must require a latency SLO.  T-240."
-    )
+    assert (
+        "availability SLO" in src.lower() or "availability" in src.lower()
+    ), "SLO section must require an availability SLO.  T-240."
+    assert (
+        "latency SLO" in src.lower() or "latency" in src.lower()
+    ), "SLO section must require a latency SLO.  T-240."
 
 
 def test_t240_plan_prompt_has_fmea_section() -> None:
@@ -407,12 +416,12 @@ def test_t240_plan_prompt_has_fmea_section() -> None:
 def test_t240_fmea_requires_blast_radius_and_recovery_time() -> None:
     """T-240 — FMEA must require blast radius + recovery time per failure mode."""
     src = _read_plan_prompt()
-    assert "Blast radius" in src or "blast radius" in src.lower(), (
-        "FMEA section must require a 'Blast radius' field per failure mode.  T-240."
-    )
-    assert "Recovery time" in src or "recovery time" in src.lower(), (
-        "FMEA section must require a 'Recovery time' field per failure mode.  T-240."
-    )
+    assert (
+        "Blast radius" in src or "blast radius" in src.lower()
+    ), "FMEA section must require a 'Blast radius' field per failure mode.  T-240."
+    assert (
+        "Recovery time" in src or "recovery time" in src.lower()
+    ), "FMEA section must require a 'Recovery time' field per failure mode.  T-240."
 
 
 def test_t240_plan_prompt_has_quality_attribute_matrix() -> None:
@@ -433,7 +442,11 @@ def test_t240_quality_attribute_matrix_has_five_named_columns() -> None:
     """
     src = _read_plan_prompt()
     for column in [
-        "Performance", "Scalability", "Reliability", "Security", "Maintainability",
+        "Performance",
+        "Scalability",
+        "Reliability",
+        "Security",
+        "Maintainability",
     ]:
         assert column in src, (
             f"Architecture Quality Attribute Matrix must include '{column}' "
@@ -464,22 +477,20 @@ def test_t241_plan_prompt_technology_stack_requires_version_column() -> None:
 def test_t241_plan_prompt_technology_stack_requires_support_status() -> None:
     """T-241 — Technology Stack must require Support Status (Active/Maintenance/Deprecated/EOL)."""
     src = _read_plan_prompt()
-    assert "Support status" in src or "support status" in src, (
-        "plan.py Technology Stack must require a Support status column.  T-241."
-    )
+    assert (
+        "Support status" in src or "support status" in src
+    ), "plan.py Technology Stack must require a Support status column.  T-241."
     # All four enum values must be enumerated explicitly.
     for level in ["Active", "Maintenance", "Deprecated", "EOL"]:
-        assert level in src, (
-            f"Support status legend must enumerate '{level}'.  T-241."
-        )
+        assert level in src, f"Support status legend must enumerate '{level}'.  T-241."
 
 
 def test_t241_plan_prompt_technology_stack_requires_eol_date() -> None:
     """T-241 — Technology Stack must require an EOL date column."""
     src = _read_plan_prompt()
-    assert "EOL date" in src or "EOL" in src, (
-        "plan.py Technology Stack must require an EOL date per entry.  T-241."
-    )
+    assert (
+        "EOL date" in src or "EOL" in src
+    ), "plan.py Technology Stack must require an EOL date per entry.  T-241."
 
 
 def test_t241_plan_prompt_denylists_eol_python_and_node() -> None:
@@ -511,9 +522,9 @@ def test_t241_plan_prompt_denylists_deprecated_llm_families() -> None:
     """
     src = _read_plan_prompt().lower()
     for family in ["gpt-3", "gemini-1", "claude-1", "claude-2"]:
-        assert family in src, (
-            f"Deprecation denylist must call out the '{family}' family.  T-241."
-        )
+        assert (
+            family in src
+        ), f"Deprecation denylist must call out the '{family}' family.  T-241."
 
 
 def test_t241_plan_prompt_denylists_stale_libraries() -> None:
@@ -528,7 +539,7 @@ def test_t241_plan_prompt_denylists_stale_libraries() -> None:
 def test_t241_tasks_prompt_requires_sca_acceptance_criterion() -> None:
     """T-241 — tasks.py must require an SCA tool acceptance criterion."""
     src = _read_tasks_prompt()
-    assert ("pip-audit" in src or "pnpm audit" in src or "SCA" in src), (
+    assert "pip-audit" in src or "pnpm audit" in src or "SCA" in src, (
         "tasks.py SYSTEM_PROMPT must require an SCA tool (pip-audit / pnpm audit / "
         "equivalent) acceptance criterion for dependency-introducing tasks.  T-241."
     )
@@ -537,8 +548,10 @@ def test_t241_tasks_prompt_requires_sca_acceptance_criterion() -> None:
 def test_t241_tasks_prompt_requires_version_pin_matches_plan() -> None:
     """T-241 — tasks.py must require the pinned version match PLAN.md Technology Stack."""
     src = _read_tasks_prompt()
-    assert ("matches the version recorded in" in src.lower() or
-            "pinned version" in src.lower()), (
+    assert (
+        "matches the version recorded in" in src.lower()
+        or "pinned version" in src.lower()
+    ), (
         "tasks.py SYSTEM_PROMPT must require the pinned dependency version to "
         "match the version recorded in PLAN.md Technology Stack.  T-241."
     )
@@ -547,7 +560,7 @@ def test_t241_tasks_prompt_requires_version_pin_matches_plan() -> None:
 def test_t241_tasks_prompt_blocks_deprecated_or_eol_packages() -> None:
     """T-241 — tasks.py must require that chosen packages are not on Deprecated/EOL line."""
     src = _read_tasks_prompt()
-    assert ("Deprecated" in src and "EOL" in src), (
+    assert "Deprecated" in src and "EOL" in src, (
         "tasks.py must require an acceptance criterion that the chosen package "
         "is not on the Deprecated or EOL support-status line.  T-241."
     )
@@ -612,9 +625,9 @@ def test_t242_frontend_section_requires_loading_error_empty_offline_contract() -
 def test_t242_frontend_section_requires_wcag_and_axe_core_baseline() -> None:
     """T-242 — Frontend section must require WCAG level + axe-core baseline."""
     body = _extract_section(_read_plan_prompt(), "## Frontend Architecture")
-    assert "WCAG" in body, (
-        "The Frontend Architecture section must require a WCAG level.  T-242."
-    )
+    assert (
+        "WCAG" in body
+    ), "The Frontend Architecture section must require a WCAG level.  T-242."
     assert "axe-core" in body or "axe core" in body, (
         "The Frontend Architecture section must require an axe-core baseline.  "
         "T-242."
@@ -633,9 +646,9 @@ def test_t242_frontend_section_requires_bundle_budget() -> None:
 def test_t242_frontend_section_requires_csp_policy() -> None:
     """T-242 — Frontend section must require a CSP policy + Trusted Types stance."""
     body = _extract_section(_read_plan_prompt(), "## Frontend Architecture")
-    assert "CSP" in body, (
-        "The Frontend Architecture section must require a CSP policy.  T-242."
-    )
+    assert (
+        "CSP" in body
+    ), "The Frontend Architecture section must require a CSP policy.  T-242."
     assert "Trusted Types" in body or "trusted types" in body, (
         "The Frontend Architecture section must require a Trusted Types "
         "stance.  T-242."
@@ -654,17 +667,17 @@ def test_t242_frontend_section_requires_browser_support_matrix() -> None:
 def test_t242_frontend_section_requires_design_tokens() -> None:
     """T-242 — Frontend section must require design tokens + dark-mode strategy."""
     body = _extract_section(_read_plan_prompt(), "## Frontend Architecture")
-    assert "design tokens" in body.lower(), (
-        "The Frontend Architecture section must require Design tokens.  T-242."
-    )
+    assert (
+        "design tokens" in body.lower()
+    ), "The Frontend Architecture section must require Design tokens.  T-242."
 
 
 def test_t242_frontend_section_requires_error_boundaries() -> None:
     """T-242 — Frontend section must require error boundaries + fallback UI contract."""
     body = _extract_section(_read_plan_prompt(), "## Frontend Architecture")
-    assert "error boundaries" in body.lower(), (
-        "The Frontend Architecture section must require error boundaries.  T-242."
-    )
+    assert (
+        "error boundaries" in body.lower()
+    ), "The Frontend Architecture section must require error boundaries.  T-242."
 
 
 # ===========================================================================
@@ -692,10 +705,12 @@ def test_t243_tasks_prompt_requires_focus_keyboard_interaction() -> None:
     or 'keyboard interaction' as a recognisable requirement.
     """
     src = _read_tasks_prompt().lower()
-    assert ("focus/keyboard" in src or
-            "where the focus lands" in src or
-            "where focus lands" in src or
-            "keyboard interaction" in src), (
+    assert (
+        "focus/keyboard" in src
+        or "where the focus lands" in src
+        or "where focus lands" in src
+        or "keyboard interaction" in src
+    ), (
         "tasks.py must require focus/keyboard interaction Steps for frontend "
         "tasks using a recognisable phrase ('focus/keyboard', "
         "'where focus lands', or 'keyboard interaction').  T-243."
@@ -743,9 +758,9 @@ def test_t244_harness_prompt_requires_boundary_values_category() -> None:
 def test_t244_harness_prompt_requires_property_based_with_hypothesis() -> None:
     """T-244 — harness.py must require a property-based test category."""
     src = _read_harness_prompt().lower()
-    assert ("property_based" in src or "property-based" in src), (
-        "harness.py must require a property_based test category.  T-244."
-    )
+    assert (
+        "property_based" in src or "property-based" in src
+    ), "harness.py must require a property_based test category.  T-244."
     assert "hypothesis" in src or "fast-check" in src, (
         "harness.py property_based category must name Hypothesis (Python) or "
         "fast-check (TS) by name.  T-244."
@@ -760,9 +775,11 @@ def test_t244_harness_prompt_requires_concurrency_category() -> None:
     writer tests per idempotent resource.
     """
     src = _read_harness_prompt().lower()
-    assert ("n-concurrent-writer" in src or
-            "n concurrent writer" in src or
-            "concurrent-writer" in src), (
+    assert (
+        "n-concurrent-writer" in src
+        or "n concurrent writer" in src
+        or "concurrent-writer" in src
+    ), (
         "harness.py must require an N-concurrent-writer concurrency test per "
         "idempotent resource (not the soft 'concurrency or idempotency tests "
         "where relevant' wording).  T-244."
@@ -799,9 +816,9 @@ def test_t244_harness_prompt_requires_migration_safety_category() -> None:
 def test_t244_harness_prompt_requires_accessibility_category() -> None:
     """T-244 — harness.py must require an accessibility test category."""
     src = _read_harness_prompt().lower()
-    assert "accessibility" in src, (
-        "harness.py must require an accessibility test category.  T-244."
-    )
+    assert (
+        "accessibility" in src
+    ), "harness.py must require an accessibility test category.  T-244."
     assert "axe-core" in src, (
         "harness.py accessibility category must name axe-core (or equivalent) "
         "by name.  T-244."
@@ -824,9 +841,9 @@ def test_t244_harness_prompt_requires_supply_chain_category() -> None:
         "harness.py must require a supply_chain test category (SBOM presence + "
         "lockfile-pinned).  T-244 (audit F-6)."
     )
-    assert "sbom" in src, (
-        "harness.py supply_chain category must require SBOM presence test.  T-244."
-    )
+    assert (
+        "sbom" in src
+    ), "harness.py supply_chain category must require SBOM presence test.  T-244."
 
 
 def test_t244_harness_prompt_rewrites_output_budget_rule_with_never_drop() -> None:
@@ -844,9 +861,9 @@ def test_t244_harness_prompt_rewrites_output_budget_rule_with_never_drop() -> No
         "contract/migration/integration are protected.  T-244."
     )
     for protected in ["integration", "security", "contract", "migration"]:
-        assert protected in src.lower(), (
-            f"harness.py NEVER-drop set must include '{protected}'.  T-244."
-        )
+        assert (
+            protected in src.lower()
+        ), f"harness.py NEVER-drop set must include '{protected}'.  T-244."
 
 
 def test_t244_harness_prompt_output_budget_requires_testcategorygap_record() -> None:
@@ -927,8 +944,11 @@ def test_t246_prompt_builder_has_section_aware_injection() -> None:
     verbatim so downstream stages see the IDs they need by name.
     """
     src = read_backend_file("services", "pipeline", "prompt_builder.py")
-    assert ("section_aware" in src or "_section_aware_injection" in src or
-            "Requirement Traceability Matrix" in src), (
+    assert (
+        "section_aware" in src
+        or "_section_aware_injection" in src
+        or "Requirement Traceability Matrix" in src
+    ), (
         "prompt_builder.py must implement section-aware injection that keeps the "
         "Requirement Traceability Matrix verbatim when the upstream exceeds the "
         "cap.  T-246."
@@ -948,8 +968,10 @@ def test_t246_prompt_builder_emits_section_skipped_metric() -> None:
 def test_t246_section_skipped_metric_registered_in_observability() -> None:
     """T-246 — the new metric must be exported from services.observability."""
     src = read_backend_file("services", "observability.py")
-    assert "pipeline_upstream_section_skipped_total" in src or \
-           "PIPELINE_UPSTREAM_SECTION_SKIPPED" in src, (
+    assert (
+        "pipeline_upstream_section_skipped_total" in src
+        or "PIPELINE_UPSTREAM_SECTION_SKIPPED" in src
+    ), (
         "The pipeline_upstream_section_skipped_total Prometheus counter must be "
         "defined in services/observability.py so dashboards can reach it.  T-246."
     )
@@ -963,9 +985,9 @@ def test_t246_section_skipped_metric_registered_in_observability() -> None:
 def test_t247_critic_module_file_exists() -> None:
     """T-247 — services/pipeline/critic.py must exist."""
     path = BACKEND_ROOT / "services" / "pipeline" / "critic.py"
-    assert path.exists(), (
-        "services/pipeline/critic.py must exist.  T-247 (audit F-7.2)."
-    )
+    assert (
+        path.exists()
+    ), "services/pipeline/critic.py must exist.  T-247 (audit F-7.2)."
 
 
 def test_t247_critic_module_exposes_critic_review_function() -> None:
@@ -997,12 +1019,17 @@ def test_t247_critic_result_schema_excludes_artifact_bytes() -> None:
     # The result model must contain a findings list but no field that accepts
     # full markdown content.  We assert the model body does not contain a
     # field typed as a long string for the artifact.
-    assert re.search(r"findings\s*:\s*list", src) or "list[CriticFinding]" in src, (
-        "StageCriticResult must contain a 'findings: list[...]' field.  T-247."
-    )
+    assert (
+        re.search(r"findings\s*:\s*list", src) or "list[CriticFinding]" in src
+    ), "StageCriticResult must contain a 'findings: list[...]' field.  T-247."
     # No "artifact_md" / "artifact_content" / "rewritten" field — the critic
     # cannot produce a rewrite.
-    for forbidden in ["artifact_md:", "artifact_content:", "rewritten:", "new_artifact:"]:
+    for forbidden in [
+        "artifact_md:",
+        "artifact_content:",
+        "rewritten:",
+        "new_artifact:",
+    ]:
         assert forbidden not in src, (
             f"StageCriticResult must NOT contain a '{forbidden}' field — the "
             f"critic cannot rewrite the artifact directly.  T-247 SECURITY."
@@ -1025,25 +1052,27 @@ def test_t247_critic_prompt_template_held_in_code_not_langfuse() -> None:
 
 def test_t247_critic_enforces_one_regenerate_cap() -> None:
     """T-247 — critic loop must cap regenerates at exactly one per stage."""
-    src = read_backend_file("services", "pipeline", "critic.py") + \
-          read_backend_file("services", "pipeline", "stage_manager.py")
-    assert "regenerate" in src.lower(), (
-        "Critic loop must implement a one-regenerate cap.  T-247."
+    src = read_backend_file("services", "pipeline", "critic.py") + read_backend_file(
+        "services", "pipeline", "stage_manager.py"
     )
+    assert (
+        "regenerate" in src.lower()
+    ), "Critic loop must implement a one-regenerate cap.  T-247."
     # Look for the cap as a literal — either a constant or a counter check.
-    assert (re.search(r"MAX_REGENERATES\s*=\s*1", src) or
-            re.search(r"regenerate_count\s*<\s*1", src) or
-            re.search(r"regenerate_count\s*<=\s*1", src) or
-            re.search(r"regenerate_count\s*==\s*0", src) or
-            "exactly one regenerate" in src.lower()), (
-        "Critic loop must cap regenerates at exactly one per stage.  T-247."
-    )
+    assert (
+        re.search(r"MAX_REGENERATES\s*=\s*1", src)
+        or re.search(r"regenerate_count\s*<\s*1", src)
+        or re.search(r"regenerate_count\s*<=\s*1", src)
+        or re.search(r"regenerate_count\s*==\s*0", src)
+        or "exactly one regenerate" in src.lower()
+    ), "Critic loop must cap regenerates at exactly one per stage.  T-247."
 
 
 def test_t247_critic_persists_blocked_draft_on_second_failure() -> None:
     """T-247 — second consecutive critic failure must persist a blocked draft."""
-    src = read_backend_file("services", "pipeline", "critic.py") + \
-          read_backend_file("services", "pipeline", "stage_manager.py")
+    src = read_backend_file("services", "pipeline", "critic.py") + read_backend_file(
+        "services", "pipeline", "stage_manager.py"
+    )
     assert "quality_gate_status" in src and "blocked" in src, (
         "Critic loop must persist a blocked draft after the second consecutive "
         "failure so the user can inspect, regenerate, or override.  T-247."
@@ -1071,9 +1100,8 @@ def test_t247_billing_credits_critic_regen_counter_defined() -> None:
 
 def test_t247_disable_critic_writes_audit_event() -> None:
     """T-247 SECURITY — toggling disable_critic must write an audit event."""
-    src = (
-        read_backend_file("services", "pipeline", "critic.py") +
-        read_backend_file("models", "__init__.py")
+    src = read_backend_file("services", "pipeline", "critic.py") + read_backend_file(
+        "models", "__init__.py"
     )
     # Either the critic module or the audit-log enum must mention the event.
     assert "critic_disabled" in src, (
@@ -1090,9 +1118,9 @@ def test_t247_disable_critic_writes_audit_event() -> None:
 def test_t248_artifact_validator_module_file_exists() -> None:
     """T-248 — services/pipeline/artifact_validator.py must exist."""
     path = BACKEND_ROOT / "services" / "pipeline" / "artifact_validator.py"
-    assert path.exists(), (
-        "services/pipeline/artifact_validator.py must exist.  T-248 (audit F-7.3)."
-    )
+    assert (
+        path.exists()
+    ), "services/pipeline/artifact_validator.py must exist.  T-248 (audit F-7.3)."
 
 
 def test_t248_validator_has_section_contracts_dict() -> None:
@@ -1108,9 +1136,9 @@ def test_t248_section_contracts_covers_all_four_stages() -> None:
     """T-248 — SECTION_CONTRACTS must include keys for spec / plan / harness / tasks."""
     src = read_backend_file("services", "pipeline", "artifact_validator.py")
     for stage in ["spec", "plan", "harness", "tasks"]:
-        assert f'"{stage}"' in src, (
-            f"SECTION_CONTRACTS must include a '{stage}' key.  T-248."
-        )
+        assert (
+            f'"{stage}"' in src
+        ), f"SECTION_CONTRACTS must include a '{stage}' key.  T-248."
 
 
 def test_t248_section_contracts_plan_includes_t239_t240_t242_additions() -> None:
@@ -1142,9 +1170,9 @@ def test_t248_section_contracts_plan_includes_t239_t240_t242_additions() -> None
 def test_t248_missing_section_error_class_exists() -> None:
     """T-248 — MissingSectionError must be raised with a 'missing' attribute."""
     src = read_backend_file("services", "pipeline", "artifact_validator.py")
-    assert "class MissingSectionError" in src, (
-        "artifact_validator.py must define a MissingSectionError exception.  T-248."
-    )
+    assert (
+        "class MissingSectionError" in src
+    ), "artifact_validator.py must define a MissingSectionError exception.  T-248."
     # The error must expose the absent section list.
     assert "missing" in src, (
         "MissingSectionError must expose a 'missing' attribute listing absent "
@@ -1160,12 +1188,12 @@ def test_t248_validator_runs_before_critic_in_stage_manager() -> None:
     critic call.
     """
     src = read_backend_file("services", "pipeline", "stage_manager.py")
-    assert "artifact_validator" in src or "MissingSectionError" in src, (
-        "stage_manager must import the artifact_validator.  T-248."
-    )
-    assert "critic_review" in src or "StageCriticResult" in src, (
-        "stage_manager must invoke the critic.  T-247 / T-248."
-    )
+    assert (
+        "artifact_validator" in src or "MissingSectionError" in src
+    ), "stage_manager must import the artifact_validator.  T-248."
+    assert (
+        "critic_review" in src or "StageCriticResult" in src
+    ), "stage_manager must invoke the critic.  T-247 / T-248."
     validator_pos = src.find("artifact_validator")
     critic_pos = src.find("critic_review")
     assert validator_pos >= 0 and critic_pos >= 0, (
@@ -1204,17 +1232,17 @@ def test_t248_conditional_frontend_section_sentinel_detection_exists() -> None:
 def test_t249_prompt_eval_directory_exists() -> None:
     """T-249 — harness/prompt_eval/ must exist."""
     path = REPO_ROOT / "harness" / "prompt_eval"
-    assert path.exists() and path.is_dir(), (
-        "harness/prompt_eval/ directory must exist.  T-249 (audit F-7.4)."
-    )
+    assert (
+        path.exists() and path.is_dir()
+    ), "harness/prompt_eval/ directory must exist.  T-249 (audit F-7.4)."
 
 
 def test_t249_golden_workspaces_directory_exists() -> None:
     """T-249 — harness/prompt_eval/golden_workspaces/ must exist with ≥ 3 snapshots."""
     path = REPO_ROOT / "harness" / "prompt_eval" / "golden_workspaces"
-    assert path.exists() and path.is_dir(), (
-        "harness/prompt_eval/golden_workspaces/ directory must exist.  T-249."
-    )
+    assert (
+        path.exists() and path.is_dir()
+    ), "harness/prompt_eval/golden_workspaces/ directory must exist.  T-249."
     snapshots = [p for p in path.iterdir() if p.is_dir()]
     assert len(snapshots) >= 3, (
         f"harness/prompt_eval/golden_workspaces/ must contain ≥ 3 snapshots "
@@ -1226,9 +1254,9 @@ def test_t249_golden_workspaces_directory_exists() -> None:
 def test_t249_graders_directory_exists() -> None:
     """T-249 — harness/prompt_eval/graders/ must exist."""
     path = REPO_ROOT / "harness" / "prompt_eval" / "graders"
-    assert path.exists() and path.is_dir(), (
-        "harness/prompt_eval/graders/ directory must exist.  T-249."
-    )
+    assert (
+        path.exists() and path.is_dir()
+    ), "harness/prompt_eval/graders/ directory must exist.  T-249."
 
 
 def test_t249_graders_cover_four_categories() -> None:
@@ -1242,13 +1270,11 @@ def test_t249_graders_cover_four_categories() -> None:
         "harness/prompt_eval/graders/ must exist (precondition for axis check).  "
         "T-249."
     )
-    combined = "\n".join(
-        p.read_text(encoding="utf-8") for p in path.rglob("*.py")
-    )
+    combined = "\n".join(p.read_text(encoding="utf-8") for p in path.rglob("*.py"))
     for axis in ["coverage", "quality", "format", "safety"]:
-        assert axis in combined.lower(), (
-            f"Graders must include at least one '{axis}' grader axis.  T-249."
-        )
+        assert (
+            axis in combined.lower()
+        ), f"Graders must include at least one '{axis}' grader axis.  T-249."
 
 
 def test_t249_run_py_cli_exists() -> None:
@@ -1269,12 +1295,12 @@ def test_t249_run_py_supports_version_and_baseline_flags() -> None:
         "T-249."
     )
     src = path.read_text(encoding="utf-8")
-    assert "--version" in src, (
-        "run.py must accept a --version flag for the new prompt version.  T-249."
-    )
-    assert "--baseline" in src, (
-        "run.py must accept a --baseline flag for the prior version.  T-249."
-    )
+    assert (
+        "--version" in src
+    ), "run.py must accept a --version flag for the new prompt version.  T-249."
+    assert (
+        "--baseline" in src
+    ), "run.py must accept a --baseline flag for the prior version.  T-249."
 
 
 def test_t249_ci_workflow_for_prompt_eval_exists() -> None:
@@ -1305,8 +1331,7 @@ def test_t249_runbook_section_10_documents_prompt_experimentation() -> None:
     path = REPO_ROOT / "docs" / "RUNBOOK.md"
     assert path.exists(), "docs/RUNBOOK.md must exist."
     src = path.read_text(encoding="utf-8")
-    assert ("§10" in src or "## 10" in src or "## 10." in src or
-            "# 10." in src), (
+    assert "§10" in src or "## 10" in src or "## 10." in src or "# 10." in src, (
         "docs/RUNBOOK.md must include a §10 section documenting the prompt-"
         "experimentation workflow (branch → edit prompt → bump version → run "
         "eval → review delta → merge).  T-249."
@@ -1334,8 +1359,7 @@ def test_phase22_asdd_prompt_version_bumped() -> None:
     # is acceptable.
     match = re.search(r'ASDD_PROMPT_VERSION\s*=\s*"asdd-v(\d+)\.(\d+)\.(\d+)"', src)
     assert match is not None, (
-        "ASDD_PROMPT_VERSION must be defined in backend/prompts/base.py.  "
-        "Phase 22."
+        "ASDD_PROMPT_VERSION must be defined in backend/prompts/base.py.  " "Phase 22."
     )
     major, minor, patch = int(match.group(1)), int(match.group(2)), int(match.group(3))
     # Pre-Phase-22 baseline is 1.7.1.  Phase 22 must bump at least the minor.
@@ -1356,12 +1380,12 @@ def test_critic_and_validator_both_wired_in_stage_manager() -> None:
     Without both calls wired, the quality gates have no enforcement surface.
     """
     src = read_backend_file("services", "pipeline", "stage_manager.py")
-    assert ("artifact_validator" in src or "MissingSectionError" in src), (
-        "stage_manager must invoke the artifact_validator.  T-248."
-    )
-    assert ("critic_review" in src or "StageCriticResult" in src), (
-        "stage_manager must invoke critic_review.  T-247."
-    )
+    assert (
+        "artifact_validator" in src or "MissingSectionError" in src
+    ), "stage_manager must invoke the artifact_validator.  T-248."
+    assert (
+        "critic_review" in src or "StageCriticResult" in src
+    ), "stage_manager must invoke critic_review.  T-247."
 
 
 # ===========================================================================
@@ -1420,9 +1444,9 @@ def test_issue7_incomplete_output_gate_and_no_partial_disconnect_persistence() -
         "StageManager must persist incomplete generations as a regenerate-only "
         "quality gate. Issue #7."
     )
-    assert "PIPELINE_INTERRUPTED_STREAMS" in src, (
-        "Interrupted generation streams must be observable. Issue #7."
-    )
+    assert (
+        "PIPELINE_INTERRUPTED_STREAMS" in src
+    ), "Interrupted generation streams must be observable. Issue #7."
     assert "partial_content = _strip_code_fence(accumulated)" not in src, (
         "Client disconnect cleanup must not persist accumulated partial_content "
         "as a normal StageVersion. Issue #7."
@@ -1441,4 +1465,62 @@ def test_issue7_cache_writes_after_completeness_validation() -> None:
     assert completeness_pos < cache_pos, (
         "The completeness validation code path must appear before cache writes so "
         "incomplete outputs cannot be cached. Issue #7."
+    )
+
+
+def test_issue9_technology_safety_policy_and_validator_are_wired() -> None:
+    """Issue #9 — deterministic technology safety must be a runtime gate."""
+    policy = BACKEND_ROOT / "services" / "pipeline" / "tech_safety_policy.json"
+    validator = BACKEND_ROOT / "services" / "pipeline" / "tech_safety.py"
+    assert (
+        policy.exists()
+    ), "Technology safety must have a committed versioned policy. Issue #9."
+    assert (
+        validator.exists()
+    ), "Technology safety must have a deterministic runtime validator. Issue #9."
+    policy_data = json.loads(policy.read_text(encoding="utf-8"))
+    reviewed = date.fromisoformat(policy_data["last_reviewed"])
+    max_age = int(policy_data["max_age_days"])
+    assert date.today() - reviewed <= timedelta(days=max_age), (
+        "The committed technology safety policy is stale. Re-review and update "
+        "last_reviewed before accepting generated stacks. Issue #9."
+    )
+    src = validator.read_text(encoding="utf-8")
+    assert (
+        "parse_technology_stack" in src and "Technology Stack and Rationale" in src
+    ), "The validator must parse the PLAN Technology Stack table. Issue #9."
+    assert "/v1/querybatch" in src and "endoflife.date" in src, (
+        "Technology safety must include bounded advisory and lifecycle checks. "
+        "Issue #9."
+    )
+
+
+def test_issue9_stage_manager_blocks_before_cache_and_finalise() -> None:
+    """Issue #9 — unsafe technology cannot be cached, finalised, or overridden."""
+    src = read_backend_file("services", "pipeline", "stage_manager.py")
+    validation_pos = src.find("await self._ensure_technology_safe")
+    cache_pos = src.rfind("set_cached_generation(redis, cache_key")
+    assert "TECH_SAFETY_GATE_KIND" in src and "technology_safety" in src, (
+        "StageManager must reuse the quality gate with kind=technology_safety. "
+        "Issue #9."
+    )
+    assert (
+        validation_pos >= 0 and cache_pos >= 0 and validation_pos < cache_pos
+    ), "Technology safety validation must run before cache writes. Issue #9."
+    assert (
+        "Unsafe technology choices cannot be overridden" in src
+    ), "The stage override endpoint must reject technology_safety gates. Issue #9."
+    assert (
+        "Current stage version has unsafe technology choices" in src
+    ), "Finalise must revalidate and reject unsafe technology choices. Issue #9."
+
+
+def test_issue9_prompt_eval_uses_shared_policy_data() -> None:
+    """Issue #9 — eval denylist must not drift from the runtime policy."""
+    src = (REPO_ROOT / "harness" / "prompt_eval" / "graders" / "quality.py").read_text(
+        encoding="utf-8"
+    )
+    assert "tech_safety_policy.json" in src and "hard_denylists" in src, (
+        "Prompt-eval deprecated-choice checks must read the shared tech-safety "
+        "policy instead of maintaining a separate regex list. Issue #9."
     )

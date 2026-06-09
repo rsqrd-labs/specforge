@@ -327,6 +327,8 @@ export default function Workspace() {
   const qualityGateBlockedMessage =
     activeGate?.kind === "incomplete_output"
       ? "Regenerate a complete version before finalising"
+      : activeGate?.kind === "technology_safety"
+        ? "Regenerate with supported technology choices before finalising"
       : "Regenerate or override the quality gate before finalising"
 
   const stages = useMemo(() => {
@@ -856,6 +858,8 @@ export default function Workspace() {
       setGenericError(
         activeStage.quality_gate.kind === "incomplete_output"
           ? "Regenerate a complete version before finalising."
+          : activeStage.quality_gate.kind === "technology_safety"
+            ? "Regenerate with supported technology choices before finalising."
           : "Regenerate or override the quality gate before finalising.",
       )
       return

@@ -5,14 +5,28 @@ export type QualityGateStatus = "clear" | "blocked" | "overridden"
 
 export interface QualityGateFinding {
   kind: string
+  code?: string
+  severity?: string
+  technology?: string
+  version?: string | null
+  source?: string
+  evidence?: string
   detail: string
   reference: string | null
+  remediation?: string
 }
 
 export interface QualityGateReason {
   code: string
+  kind?: string
+  severity?: string
+  technology?: string
+  version?: string | null
+  source?: string
+  evidence?: string
   detail: string
   reference: string | null
+  remediation?: string
 }
 
 export interface QualityGateInfo {
@@ -23,6 +37,9 @@ export interface QualityGateInfo {
   reasons?: QualityGateReason[]
   override_allowed?: boolean
   repair_attempted?: boolean
+  policy_version?: string | null
+  verified_at?: string | null
+  sources?: string[]
   status?: QualityGateStatus
   version?: number | null
   failed_at?: string | null

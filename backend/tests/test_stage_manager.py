@@ -14,6 +14,7 @@ from services.llm.completion import LLMCompletionInfo
 from services.pipeline.artifact_validator import (
     SECTION_CONTRACTS,
     chunk_completion_sentinel,
+    final_completion_sentinel,
 )
 from services.pipeline.stage_manager import StageDependencyError, StageManager
 
@@ -27,6 +28,44 @@ _VALID_SPEC = "\n\n".join(
 _VALID_SPEC_STREAM = (
     f"{_VALID_SPEC}\n{chunk_completion_sentinel('spec', 'product-scope')}"
 )
+
+
+def _complete_plan(technology_stack: str) -> str:
+    sections: list[str] = []
+    for heading in SECTION_CONTRACTS["plan"]:
+        if heading == "## Technology Stack and Rationale":
+            sections.append(f"{heading}\n{technology_stack}")
+            continue
+        sections.append(
+            f"{heading}\nDetailed plan content referencing FR-001, NFR-001, "
+            "and SEC-001 with implementation-specific depth for validation."
+        )
+    return "\n\n".join(sections)
+
+
+_SAFE_TECH_STACK = (
+    "| Layer | Choice | Version (latest stable as of YYYY-MM) | Support status | "
+    "EOL date | Why not the next-best alternative |\n"
+    "|---|---|---|---|---|---|\n"
+    "| language | Python | 3.12 latest stable as of 2026-06 | Active | "
+    "2028-10-31 | Strong backend ecosystem. |\n"
+    "| framework | FastAPI | latest stable as of 2026-06 | Active | n/a | "
+    "Better async API ergonomics than Flask. |"
+)
+_UNSAFE_TECH_STACK = (
+    "| Layer | Choice | Version (latest stable as of YYYY-MM) | Support status | "
+    "EOL date | Why not the next-best alternative |\n"
+    "|---|---|---|---|---|---|\n"
+    "| language | Python 3.10 | 3.10 | Active | 2026-10-04 | Familiar runtime. |\n"
+    "| LLM provider | gpt-3.5-turbo | 2026-06 | Active | n/a | Cheap model. |"
+)
+_SAFE_PLAN = _complete_plan(_SAFE_TECH_STACK)
+_UNSAFE_PLAN = _complete_plan(_UNSAFE_TECH_STACK)
+_UNSAFE_PLAN_STREAM = (
+    f"{_UNSAFE_PLAN}\n{chunk_completion_sentinel('plan', 'architecture-foundation')}"
+)
+_SAFE_PLAN_FINAL_STREAM = f"{_SAFE_PLAN}\n{final_completion_sentinel('plan')}"
+_UNSAFE_PLAN_FINAL_STREAM = f"{_UNSAFE_PLAN}\n{final_completion_sentinel('plan')}"
 
 
 def _make_stage(
@@ -175,6 +214,7 @@ class _CompletionAwareAdapter:
     def __init__(self, attempts: list[tuple[str, bool]]) -> None:
         self.attempts = attempts
         self.stream_calls: list[tuple[str, str, int]] = []
+        self.complete_calls: list[tuple[str, str, int]] = []
         self.last_completion: LLMCompletionInfo | None = None
 
     async def stream(self, system: str, user: str, max_tokens: int):
@@ -191,6 +231,21 @@ class _CompletionAwareAdapter:
         if stopped_by_limit:
             self.last_completion.apply_finish_reason("max_tokens")
         yield content
+
+    async def complete(self, system: str, user: str, max_tokens: int) -> str:
+        self.complete_calls.append((system, user, max_tokens))
+        try:
+            content, stopped_by_limit = self.attempts.pop(0)
+        except IndexError:
+            content, stopped_by_limit = (_SAFE_PLAN_FINAL_STREAM, False)
+        self.last_completion = LLMCompletionInfo.started(
+            provider="anthropic",
+            model="claude-opus-4-7",
+            max_tokens=max_tokens,
+        )
+        if stopped_by_limit:
+            self.last_completion.apply_finish_reason("max_tokens")
+        return content
 
 
 @pytest.mark.asyncio
@@ -586,6 +641,119 @@ async def test_generate_provider_limit_stop_failed_repair_blocks_and_refunds() -
     assert spec_stage.quality_gate_payload["reasons"][0]["code"] == (
         "provider_stopped_by_limit"
     )
+    assert any("quality_gate_failed" in token for token in tokens)
+
+
+@pytest.mark.asyncio
+async def test_generate_unsafe_plan_repairs_without_double_charging() -> None:
+    workspace_id = uuid4()
+    spec_stage = _make_stage(
+        workspace_id,
+        "spec",
+        status="finalised",
+        content=_VALID_SPEC,
+        version=1,
+    )
+    plan_stage = _make_stage(workspace_id, "plan", status="draft")
+    workspace = _make_workspace([spec_stage, plan_stage])
+    user = _make_user()
+    deduction = CreditLedger(id=uuid4(), user_id=user.id, amount=-10, reason="generate")
+    db = _MultiQueryDB([plan_stage, workspace, [spec_stage], deduction])
+    adapter = _CompletionAwareAdapter(
+        [
+            (_UNSAFE_PLAN_STREAM, False),
+            (_SAFE_PLAN_FINAL_STREAM, False),
+        ]
+    )
+    svc = StageManager(redis_client=_FakeRedis())
+
+    with (
+        patch(
+            "services.pipeline.stage_manager.credit_service.deduct",
+            new_callable=AsyncMock,
+            return_value=deduction,
+        ) as mock_deduct,
+        patch(
+            "services.pipeline.stage_manager.credit_service.refund",
+            new_callable=AsyncMock,
+        ) as mock_refund,
+        patch(
+            "services.pipeline.stage_manager.build_prompt",
+            new_callable=AsyncMock,
+            return_value=("sys", "user"),
+        ),
+        patch("services.pipeline.stage_manager.get_llm", return_value=adapter),
+    ):
+        tokens = [token async for token in svc.generate(plan_stage.id, user, db)]
+
+    mock_deduct.assert_awaited_once_with(db, user.id, 10, "generate")
+    mock_refund.assert_not_awaited()
+    assert len(adapter.stream_calls) == 1
+    assert len(adapter.complete_calls) == 1
+    assert plan_stage.content == _SAFE_PLAN
+    assert plan_stage.quality_gate_status == "clear"
+    assert _SAFE_PLAN in tokens
+
+
+@pytest.mark.asyncio
+async def test_generate_unsafe_plan_failed_repair_blocks_refunds_and_skips_cache() -> (
+    None
+):
+    workspace_id = uuid4()
+    spec_stage = _make_stage(
+        workspace_id,
+        "spec",
+        status="finalised",
+        content=_VALID_SPEC,
+        version=1,
+    )
+    plan_stage = _make_stage(workspace_id, "plan", status="draft")
+    workspace = _make_workspace([spec_stage, plan_stage])
+    user = _make_user()
+    deduction = CreditLedger(id=uuid4(), user_id=user.id, amount=-10, reason="generate")
+    db = _MultiQueryDB([plan_stage, workspace, [spec_stage], deduction])
+    adapter = _CompletionAwareAdapter(
+        [
+            (_UNSAFE_PLAN_STREAM, False),
+            (_UNSAFE_PLAN_FINAL_STREAM, False),
+        ]
+    )
+    svc = StageManager(redis_client=_FakeRedis())
+
+    with (
+        patch(
+            "services.pipeline.stage_manager.credit_service.deduct",
+            new_callable=AsyncMock,
+            return_value=deduction,
+        ),
+        patch(
+            "services.pipeline.stage_manager.credit_service.refund",
+            new_callable=AsyncMock,
+        ) as mock_refund,
+        patch(
+            "services.pipeline.stage_manager.build_prompt",
+            new_callable=AsyncMock,
+            return_value=("sys", "user"),
+        ),
+        patch(
+            "services.pipeline.stage_manager.set_cached_generation",
+            new_callable=AsyncMock,
+        ) as mock_set_cache,
+        patch("services.pipeline.stage_manager.get_llm", return_value=adapter),
+    ):
+        tokens = [token async for token in svc.generate(plan_stage.id, user, db)]
+
+    mock_refund.assert_awaited_once_with(db, deduction.id)
+    mock_set_cache.assert_not_awaited()
+    assert plan_stage.status == "draft"
+    assert plan_stage.quality_gate_status == "blocked"
+    assert plan_stage.quality_gate_kind == "technology_safety"
+    assert plan_stage.quality_gate_payload["override_allowed"] is False
+    assert plan_stage.quality_gate_payload["repair_attempted"] is True
+    assert plan_stage.quality_gate_payload["reasons"][0]["code"] in {
+        "runtime_eol",
+        "deprecated_model_family",
+    }
     assert any("quality_gate_failed" in token for token in tokens)
 
 
@@ -1143,6 +1311,27 @@ async def test_finalise_rejects_legacy_overridden_incomplete_output() -> None:
 
 
 @pytest.mark.asyncio
+async def test_finalise_rejects_manual_unsafe_technology_choices() -> None:
+    plan_stage = _make_stage(
+        stage_type="plan",
+        status="draft",
+        content=_UNSAFE_PLAN,
+        version=3,
+    )
+
+    svc = StageManager(redis_client=_FakeRedis())
+    db = _MultiQueryDB([plan_stage])
+    user = _make_user()
+
+    with pytest.raises(ValueError, match="unsafe technology choices"):
+        await svc.finalise(plan_stage.id, user, db)
+
+    assert plan_stage.quality_gate_status == "blocked"
+    assert plan_stage.quality_gate_kind == "technology_safety"
+    assert plan_stage.quality_gate_payload["override_allowed"] is False
+
+
+@pytest.mark.asyncio
 async def test_override_quality_gate_accepts_current_blocked_draft() -> None:
     workspace_id = uuid4()
     spec_stage = _make_stage(
@@ -1188,6 +1377,29 @@ async def test_override_quality_gate_rejects_incomplete_output() -> None:
 
     with pytest.raises(ValueError, match="cannot be overridden"):
         await svc.override_quality_gate(spec_stage.id, user, db)
+
+
+@pytest.mark.asyncio
+async def test_override_quality_gate_rejects_technology_safety() -> None:
+    plan_stage = _make_stage(
+        stage_type="plan", status="draft", content=_UNSAFE_PLAN, version=3
+    )
+    plan_stage.quality_gate_status = "blocked"
+    plan_stage.quality_gate_kind = "technology_safety"
+    plan_stage.quality_gate_payload = {
+        "stage": "plan",
+        "kind": "technology_safety",
+        "override_allowed": False,
+    }
+    plan_stage.quality_gate_version = 3
+    plan_stage.quality_gate_failed_at = datetime.now(UTC)
+
+    svc = StageManager(redis_client=_FakeRedis())
+    db = _MultiQueryDB([plan_stage])
+    user = _make_user()
+
+    with pytest.raises(ValueError, match="cannot be overridden"):
+        await svc.override_quality_gate(plan_stage.id, user, db)
 
 
 @pytest.mark.asyncio

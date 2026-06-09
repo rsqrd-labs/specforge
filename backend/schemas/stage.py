@@ -58,6 +58,9 @@ class StageQualityGate(BaseModel):
     reasons: list[dict[str, Any]] | None = None
     override_allowed: bool | None = None
     repair_attempted: bool | None = None
+    policy_version: str | None = None
+    verified_at: datetime | None = None
+    sources: list[str] | None = None
     version: int | None = None
     failed_at: datetime | None = None
 
