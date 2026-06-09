@@ -1,6 +1,7 @@
 import { act, fireEvent, render, screen, within } from "@testing-library/react"
 import { afterEach, describe, expect, it, vi } from "vitest"
 
+import { AI_DISCLAIMER_COPY } from "../shared/AiDisclaimer"
 import { StoryboardDeck, STORYBOARD_ACTS } from "./StoryboardDeck"
 import type {
   StoryboardDiagramLayer,
@@ -118,6 +119,7 @@ describe("StoryboardDeck", () => {
       STORYBOARD_ACTS,
     )
     expect(screen.getByText("Opening Thesis headline")).toBeInTheDocument()
+    expect(screen.getByText(AI_DISCLAIMER_COPY)).toBeInTheDocument()
   })
 
   it("supports keyboard navigation and fullscreen shortcut", async () => {

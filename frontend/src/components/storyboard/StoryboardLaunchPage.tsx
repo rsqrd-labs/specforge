@@ -1,4 +1,5 @@
 import { useMemo } from "react"
+import { AiDisclaimer } from "../shared/AiDisclaimer"
 import { ArchitectureReveal } from "./ArchitectureReveal"
 import type {
   StoryboardPayload,
@@ -90,6 +91,7 @@ export function StoryboardLaunchPage({
             </div>
           )}
         </dl>
+        <AiDisclaimer variant="inline" className="storyboard-launch__disclaimer" />
       </div>
 
       <div className="storyboard-launch__architecture">

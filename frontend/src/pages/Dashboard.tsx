@@ -1,6 +1,7 @@
 import { Fragment, useEffect, useRef, useState } from "react"
 import { Link, useNavigate } from "react-router-dom"
 import { ErrorBoundary } from "../components/ErrorBoundary"
+import { AiDisclaimer } from "../components/shared/AiDisclaimer"
 import { GitHubStatusPill } from "../components/shared/GitHubStatusPill"
 import { CreditMeter } from "../components/shared/CreditMeter"
 import { CreateWorkspaceModal } from "../components/dashboard/CreateWorkspaceModal"
@@ -656,6 +657,8 @@ export default function Dashboard() {
           </>
         )}
       </div>
+
+      <AiDisclaimer variant="footer" className="dashboard-ai-disclaimer" />
 
       {showCreate && (
         <CreateWorkspaceModal

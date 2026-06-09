@@ -8,6 +8,7 @@ saffron tick-up when new credits land.
 import { useCallback, useEffect, useMemo, useState } from "react"
 import { Link, useSearchParams } from "react-router-dom"
 
+import { AiDisclaimer } from "../components/shared/AiDisclaimer"
 import {
   createCheckoutSession,
   fetchBillingHistory,
@@ -407,6 +408,7 @@ export default function Billing() {
             </section>
           </>
         ) : null}
+        <AiDisclaimer variant="footer" className="billing-ai-disclaimer" />
       </main>
     </div>
   )

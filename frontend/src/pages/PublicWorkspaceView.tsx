@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react"
 import { Link, useParams } from "react-router-dom"
+import { AiDisclaimer } from "../components/shared/AiDisclaimer"
 import { HarnessCoverageChip } from "../components/workspace/HarnessCoverageChip"
 import { MarkdownRenderer } from "../components/workspace/MarkdownRenderer"
 import { getPublicWorkspace } from "../services/api"
@@ -79,6 +80,7 @@ function Footer() {
         {" "}— turn your idea into a spec, plan, harness, and ready-to-ship
         tasks in 10 minutes →
       </p>
+      <AiDisclaimer variant="footer" className="public-view-ai-disclaimer" />
     </footer>
   )
 }

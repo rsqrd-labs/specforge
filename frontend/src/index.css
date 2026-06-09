@@ -84,6 +84,42 @@ button:disabled {
   min-height: 100vh;
 }
 
+/* ─── Shared AI Disclosure ──────────────────────────────────────────────── */
+
+.ai-disclaimer {
+  margin: 0;
+  color: color-mix(in srgb, var(--color-on-surface-variant) 76%, transparent);
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 1.45;
+  letter-spacing: 0;
+}
+
+.ai-disclaimer--footer {
+  width: min(100%, 1180px);
+  margin: 22px auto 0;
+  padding-top: 12px;
+  border-top: 1px solid rgba(86, 94, 116, 0.12);
+  text-align: center;
+}
+
+.ai-disclaimer--sidebar {
+  margin: 0 10px 12px;
+  padding: 10px 12px;
+  border: 1px solid rgba(86, 94, 116, 0.12);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.44);
+}
+
+.ai-disclaimer--inline {
+  display: inline-block;
+  max-width: min(100%, 48ch);
+  padding: 8px 10px;
+  border-left: 2px solid rgba(143, 78, 0, 0.24);
+  border-radius: 0 8px 8px 0;
+  background: rgba(255, 255, 255, 0.46);
+}
+
 .landing-shell {
   position: relative;
   isolation: isolate;
@@ -7181,6 +7217,15 @@ button:disabled {
   border-top: 1px solid rgba(86, 94, 116, 0.08);
 }
 
+.public-view-footer p {
+  margin: 0;
+}
+
+.public-view-footer .ai-disclaimer {
+  margin-top: 12px;
+  padding-top: 10px;
+}
+
 .public-view-footer-link {
   color: var(--color-primary);
   font-weight: 700;
@@ -11078,7 +11123,7 @@ button:disabled {
 
 .storyboard-deck-footer {
   display: grid;
-  grid-template-columns: auto minmax(120px, 1fr) auto;
+  grid-template-columns: auto minmax(120px, 1fr) auto minmax(190px, 260px);
   gap: 12px;
   align-items: center;
   margin-top: 12px;
@@ -11091,6 +11136,13 @@ button:disabled {
   width: 100%;
   height: 8px;
   accent-color: var(--sb-act-accent, var(--color-secondary));
+}
+
+.storyboard-deck-footer .ai-disclaimer {
+  justify-self: end;
+  padding-block: 6px;
+  background: rgba(255, 255, 255, 0.34);
+  color: color-mix(in srgb, var(--color-on-surface-variant) 72%, transparent);
 }
 
 .storyboard-stale-banner {
@@ -11219,6 +11271,10 @@ button:disabled {
   color: var(--color-on-surface);
   font-size: 18px;
   font-weight: 900;
+}
+
+.storyboard-launch__disclaimer {
+  margin-top: 18px;
 }
 
 .storyboard-launch__architecture {
@@ -12388,6 +12444,10 @@ button:disabled {
 
   .storyboard-deck-footer {
     grid-template-columns: 1fr;
+  }
+
+  .storyboard-deck-footer .ai-disclaimer {
+    justify-self: start;
   }
 
   .storyboard-launch {

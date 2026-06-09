@@ -31,6 +31,7 @@ import { HarnessCoverageChip } from "../components/workspace/HarnessCoverageChip
 import { SharePublicLinkModal } from "../components/workspace/SharePublicLinkModal"
 import { SpecClarificationModal } from "../components/workspace/SpecClarificationModal"
 import { StoryboardToolbar } from "../components/workspace/StoryboardToolbar"
+import { AiDisclaimer } from "../components/shared/AiDisclaimer"
 import { DownloadIcon, GitHubIcon, PDFIcon, ShareIcon } from "../components/shared/icons"
 import { useCredits } from "../hooks/useCredits"
 import {
@@ -1474,6 +1475,7 @@ export default function Workspace() {
             ))}
           </div>
         </div>
+        <AiDisclaimer variant="sidebar" className="workspace-sidebar-disclaimer" />
       </aside>
 
       {/* Main */}

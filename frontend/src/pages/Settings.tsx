@@ -11,6 +11,7 @@
 import { useEffect, useState } from "react"
 import { useLocation, useNavigate } from "react-router-dom"
 
+import { AiDisclaimer } from "../components/shared/AiDisclaimer"
 import GitHubConnection from "../components/settings/GitHubConnection"
 import { getGitHubIntegration } from "../services/api"
 
@@ -96,6 +97,7 @@ export default function Settings() {
             <GitHubConnection />
           </div>
         </section>
+        <AiDisclaimer variant="footer" className="settings-ai-disclaimer" />
       </main>
     </div>
   )

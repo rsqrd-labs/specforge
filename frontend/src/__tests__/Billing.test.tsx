@@ -3,6 +3,7 @@ import { MemoryRouter } from "react-router-dom"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import Billing from "../pages/Billing"
+import { AI_DISCLAIMER_COPY } from "../components/shared/AiDisclaimer"
 import {
   createCheckoutSession,
   fetchBillingHistory,
@@ -89,6 +90,7 @@ describe("Billing — history rendering", () => {
     const refundedChip = container.querySelector(".billing-status-chip.refunded")
     expect(refundedChip).not.toBeNull()
     expect(container.textContent).not.toMatch(/Stripe/)
+    expect(screen.getByText(AI_DISCLAIMER_COPY)).toBeInTheDocument()
   })
 })
 

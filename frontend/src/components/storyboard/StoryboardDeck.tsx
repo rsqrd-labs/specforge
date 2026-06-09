@@ -6,6 +6,7 @@ import {
   useRef,
   useState,
 } from "react"
+import { AiDisclaimer } from "../shared/AiDisclaimer"
 import { MarkdownRenderer } from "../workspace/MarkdownRenderer"
 import {
   ARCHITECTURE_LAYER_SEQUENCE,
@@ -608,6 +609,7 @@ export function StoryboardDeck({
         </span>
         <progress value={activeSlideIndex + 1} max={slides.length} />
         <span>ArrowRight / Space next, ArrowLeft previous, F fullscreen</span>
+        <AiDisclaimer variant="inline" className="storyboard-deck__disclaimer" />
       </footer>
 
       {isPresenterVisible && presenterAllowed && (

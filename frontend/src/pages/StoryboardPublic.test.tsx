@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { MemoryRouter, Route, Routes } from "react-router-dom"
 
 import StoryboardPublic from "./StoryboardPublic"
+import { AI_DISCLAIMER_COPY } from "../components/shared/AiDisclaimer"
 import {
   downloadPublicStoryboard,
   getPublicStoryboard,
@@ -50,6 +51,7 @@ describe("StoryboardPublic", () => {
       document.head.querySelector('meta[name="robots"]')?.getAttribute("content"),
     ).toBe("noindex, nofollow")
     expect(screen.getByRole("button", { name: /present/i })).toBeEnabled()
+    expect(screen.getByText(AI_DISCLAIMER_COPY)).toBeInTheDocument()
   })
 
   it("keeps public notes and source layer hidden by default", async () => {
