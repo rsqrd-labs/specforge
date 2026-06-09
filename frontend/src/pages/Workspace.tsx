@@ -32,6 +32,7 @@ import { SharePublicLinkModal } from "../components/workspace/SharePublicLinkMod
 import { SpecClarificationModal } from "../components/workspace/SpecClarificationModal"
 import { StoryboardToolbar } from "../components/workspace/StoryboardToolbar"
 import { AiDisclaimer } from "../components/shared/AiDisclaimer"
+import { BrandLockup } from "../components/shared/BrandLogo"
 import { DownloadIcon, GitHubIcon, PDFIcon, ShareIcon } from "../components/shared/icons"
 import { useCredits } from "../hooks/useCredits"
 import {
@@ -1399,10 +1400,7 @@ export default function Workspace() {
       {/* Sidebar */}
       <aside className="workspace-sidebar">
         <div className="workspace-sidebar-header">
-          <div className="workspace-brand-lockup">
-            <span className="brand-mark brand-mark-sm"><span>SF</span></span>
-            <span className="brand-wordmark brand-wordmark-sm">SpecForge</span>
-          </div>
+          <BrandLockup variant="small" className="workspace-brand-lockup" />
         </div>
         <StageNavigator
           stages={stagesWithEval}

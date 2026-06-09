@@ -1,14 +1,15 @@
 /*
 Visual hierarchy: current balance first (with any payment-reversal debt shown as a
 quiet, distinct slate note beside it — never folded into the usable figure), the
-single credit pack offer second, and purchase history third. Tiny delight: the SF
-mark pulses while we settle the checkout, and the balance figure gives a gentle
+single credit pack offer second, and purchase history third. Tiny delight: the
+brand mark pulses while we settle the checkout, and the balance figure gives a gentle
 saffron tick-up when new credits land.
 */
 import { useCallback, useEffect, useMemo, useState } from "react"
 import { Link, useSearchParams } from "react-router-dom"
 
 import { AiDisclaimer } from "../components/shared/AiDisclaimer"
+import { BrandLogo } from "../components/shared/BrandLogo"
 import {
   createCheckoutSession,
   fetchBillingHistory,
@@ -80,9 +81,7 @@ function BillingNav() {
           Dashboard
         </Link>
         <div className="billing-nav-brand">
-          <span className="brand-mark brand-mark-sm">
-            <span>SF</span>
-          </span>
+          <BrandLogo size="small" decorative />
           <span className="settings-nav-divider">/</span>
           <span className="settings-nav-section">Billing</span>
         </div>
@@ -108,7 +107,7 @@ function PaymentStatusPanel({
   return (
     <section className={`billing-payment-status ${status}`} aria-live="polite">
       <div className="billing-payment-mark" aria-hidden="true">
-        <span>SF</span>
+        <BrandLogo size="small" decorative />
       </div>
       {status === "processing" && (
         <>

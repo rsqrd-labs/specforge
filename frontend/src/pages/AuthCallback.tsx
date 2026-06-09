@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react"
 import { useNavigate, useSearchParams } from "react-router-dom"
 
+import { BrandLockup } from "../components/shared/BrandLogo"
 import { completeGoogleCallback, setAccessToken } from "../services/api"
 import { useUserStore } from "../store/userStore"
 
@@ -55,10 +56,7 @@ export default function AuthCallback() {
 
       <section className="auth-callback-panel" aria-live="polite">
         <div className="auth-callback-brand">
-          <span className="brand-mark" aria-hidden="true">
-            <span>SF</span>
-          </span>
-          <span className="brand-wordmark">SpecForge</span>
+          <BrandLockup />
         </div>
 
         <div className="auth-callback-orbit" aria-hidden="true">

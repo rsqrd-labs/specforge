@@ -2,6 +2,7 @@ import { Fragment, useEffect, useRef, useState } from "react"
 import { Link, useNavigate } from "react-router-dom"
 import { ErrorBoundary } from "../components/ErrorBoundary"
 import { AiDisclaimer } from "../components/shared/AiDisclaimer"
+import { BrandLockup } from "../components/shared/BrandLogo"
 import { GitHubStatusPill } from "../components/shared/GitHubStatusPill"
 import { CreditMeter } from "../components/shared/CreditMeter"
 import { CreateWorkspaceModal } from "../components/dashboard/CreateWorkspaceModal"
@@ -356,10 +357,7 @@ export default function Dashboard() {
       <nav className="dashboard-nav">
         <div className="dashboard-nav-inner">
           <div className="flex items-center gap-3">
-            <span className="brand-mark brand-mark-sm">
-              <span>SF</span>
-            </span>
-            <span className="brand-wordmark brand-wordmark-sm">SpecForge</span>
+            <BrandLockup variant="small" />
           </div>
           {user && (
             <div className="dashboard-user-actions">

@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react"
 import { Link, useParams } from "react-router-dom"
 import { AiDisclaimer } from "../components/shared/AiDisclaimer"
+import { BrandLockup } from "../components/shared/BrandLogo"
 import { HarnessCoverageChip } from "../components/workspace/HarnessCoverageChip"
 import { MarkdownRenderer } from "../components/workspace/MarkdownRenderer"
 import { getPublicWorkspace } from "../services/api"
@@ -158,7 +159,7 @@ export default function PublicWorkspaceView() {
   return (
     <div className="public-view-shell">
       <header className="public-view-cover">
-        <div className="public-view-brand">SpecForge</div>
+        <BrandLockup variant="compact" className="public-view-brand" />
         <h1 className="public-view-title">{data.name}</h1>
         <p className="public-view-attribution">
           Generated with SpecForge · {data.provider_label}

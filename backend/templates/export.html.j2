@@ -95,11 +95,22 @@
         text-align: center;
         padding-top: 60mm;
       }
-      .cover .brand {
-        font-size: 10pt;
-        letter-spacing: 0.25em;
+      .cover .squirrel-brand-lockup {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 8px;
         color: #8f4e00;
+        font-size: 10pt;
+        font-weight: 800;
+        letter-spacing: 0.16em;
         text-transform: uppercase;
+      }
+      .cover .squirrel-brand-mark {
+        width: 18mm;
+        height: 18mm;
+        display: inline-block;
+        vertical-align: middle;
       }
       .cover h1.workspace-name {
         font-size: 30pt;
@@ -153,7 +164,10 @@
   </head>
   <body>
     <section class="cover">
-      <div class="brand">SpecForge</div>
+      <div class="squirrel-brand-lockup">
+        {% include "_brand_squirrel.svg.j2" %}
+        <span>SpecForge</span>
+      </div>
       <h1 class="workspace-name">{{ workspace_name | e }}</h1>
       <div class="meta">
         <div>Provider: {{ provider_label | e }}</div>

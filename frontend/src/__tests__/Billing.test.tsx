@@ -89,7 +89,9 @@ describe("Billing — history rendering", () => {
     // The refunded chip is the calm slate variant, never the red error chip.
     const refundedChip = container.querySelector(".billing-status-chip.refunded")
     expect(refundedChip).not.toBeNull()
+    expect(container.querySelector(".billing-nav-brand .brand-logo-image")).not.toBeNull()
     expect(container.textContent).not.toMatch(/Stripe/)
+    expect(container.textContent).not.toMatch(/\bSF\b/)
     expect(screen.getByText(AI_DISCLAIMER_COPY)).toBeInTheDocument()
   })
 })

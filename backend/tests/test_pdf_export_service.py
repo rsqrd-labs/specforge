@@ -25,6 +25,9 @@ except OSError as exc:  # pragma: no cover — environment dependent
 
 from services.pipeline.pdf_export_service import (  # noqa: E402
     _NoNetworkFetch,
+    _TEMPLATE_NAME,
+    _build_sections,
+    _jinja_env,
     no_network_url_fetcher,
     render_pdf,
 )
@@ -77,6 +80,21 @@ def test_render_pdf_excludes_harness_directory_marker() -> None:
     # We rely on the absence of any harness-only content in the input plus the
     # contract test (read_backend_file scan) to enforce non-inclusion.
     assert pdf.startswith(b"%PDF-")
+
+
+def test_export_template_inlines_squirrel_brand_without_remote_assets() -> None:
+    template = _jinja_env.get_template(_TEMPLATE_NAME)
+    html = template.render(
+        workspace_name="My Workspace",
+        provider_label="anthropic",
+        generated_at="2026-06-09 00:00 UTC",
+        coverage_label="Harness coverage: 92%",
+        sections=_build_sections(_sample_stages()),
+    )
+
+    assert "squirrel-brand-mark" in html
+    assert "http://" not in html
+    assert "https://" not in html
 
 
 def test_no_network_url_fetcher_blocks_https_urls() -> None:

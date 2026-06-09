@@ -5,6 +5,13 @@ import { describe, expect, it, vi } from "vitest"
 import Landing from "../pages/Landing"
 
 describe("Landing", () => {
+  it("renders the squirrel brand lockup instead of the old SF mark", () => {
+    render(<Landing />)
+
+    expect(screen.getByRole("img", { name: "SpecForge" })).toBeInTheDocument()
+    expect(screen.queryByText("SF")).toBeNull()
+  })
+
   it("navigates to the backend Google auth endpoint on button click", async () => {
     const assignLocation = vi.fn()
 

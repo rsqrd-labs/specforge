@@ -12,6 +12,7 @@ import { useEffect, useState } from "react"
 import { useLocation, useNavigate } from "react-router-dom"
 
 import { AiDisclaimer } from "../components/shared/AiDisclaimer"
+import { BrandLogo } from "../components/shared/BrandLogo"
 import GitHubConnection from "../components/settings/GitHubConnection"
 import { getGitHubIntegration } from "../services/api"
 
@@ -71,9 +72,7 @@ export default function Settings() {
             {backLabel}
           </button>
           <div className="settings-nav-brand">
-            <span className="brand-mark brand-mark-sm">
-              <span>SF</span>
-            </span>
+            <BrandLogo size="small" decorative />
             <span className="settings-nav-divider">/</span>
             <span className="settings-nav-section">Settings</span>
           </div>

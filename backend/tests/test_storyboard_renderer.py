@@ -137,6 +137,7 @@ def test_filename_unknown_kind_raises() -> None:
 def test_render_deck_html_includes_content_and_csp() -> None:
     html = renderer.render_deck_html(_payload(), "Acme")
     assert "SpecForge Launch Keynote" in html
+    assert "squirrel-brand-mark" in html
     assert "Opening Thesis" in html
     assert "From idea to engineered spec" in html
     # The visual is drawn from the slide's own visual.kind (a hero -> "Vision"
@@ -282,6 +283,7 @@ def test_notes_html_strips_script_handlers_remote_images_and_js_links() -> None:
 def test_notes_html_empty_body() -> None:
     html = renderer.render_notes_html("", "Acme")
     assert "Speaker Notes" in html
+    assert "squirrel-brand-mark" in html
 
 
 # ---------------------------------------------------------------------------

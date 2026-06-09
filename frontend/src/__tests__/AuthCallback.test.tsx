@@ -46,4 +46,18 @@ describe("AuthCallback", () => {
     expect(setAccessToken).toHaveBeenCalledWith("access-token")
     expect(await screen.findByText("Dashboard loaded")).toBeInTheDocument()
   })
+
+  it("shows the squirrel brand lockup on callback errors", async () => {
+    render(
+      <MemoryRouter initialEntries={["/auth/callback"]}>
+        <Routes>
+          <Route path="/auth/callback" element={<AuthCallback />} />
+        </Routes>
+      </MemoryRouter>,
+    )
+
+    expect(screen.getByRole("img", { name: "SpecForge" })).toBeInTheDocument()
+    expect(screen.queryByText("SF")).toBeNull()
+    expect(await screen.findByText(/google did not return/i)).toBeInTheDocument()
+  })
 })

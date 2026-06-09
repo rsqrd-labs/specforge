@@ -1,3 +1,5 @@
+import { BrandLockup } from "../components/shared/BrandLogo"
+
 interface LandingProps {
   assignLocation?: (url: string) => void
 }
@@ -19,12 +21,7 @@ export default function Landing({
       </div>
       <section className="landing-hero" aria-labelledby="landing-title">
         <header className="landing-nav">
-          <div className="brand-lockup">
-            <span className="brand-mark" aria-hidden="true">
-              <span>SF</span>
-            </span>
-            <span className="brand-wordmark">SpecForge</span>
-          </div>
+          <BrandLockup />
           <span className="landing-status">AI spec-to-build workspace</span>
         </header>
 
