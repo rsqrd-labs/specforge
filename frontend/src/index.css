@@ -10396,10 +10396,17 @@ button:disabled {
   gap: 16px;
 }
 
-.storyboard-page__header a {
+.storyboard-page__header a,
+.storyboard-page__back-link {
+  appearance: none;
+  border: 0;
+  padding: 0;
+  background: transparent;
   color: var(--color-primary);
+  cursor: pointer;
   font-size: 13px;
   font-weight: 900;
+  font-family: inherit;
   text-decoration: none;
 }
 

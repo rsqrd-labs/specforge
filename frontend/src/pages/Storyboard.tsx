@@ -1,6 +1,6 @@
 import axios from "axios"
-import { useEffect, useState } from "react"
-import { Link, useLocation, useParams } from "react-router-dom"
+import { useCallback, useEffect, useState } from "react"
+import { useLocation, useNavigate, useParams } from "react-router-dom"
 import { PresenterMode } from "../components/storyboard/PresenterMode"
 import { StoryboardDeck } from "../components/storyboard/StoryboardDeck"
 import { StoryboardDownloadMenu } from "../components/storyboard/StoryboardDownloadMenu"
@@ -27,6 +27,7 @@ type LoadState =
 export default function Storyboard() {
   const { id } = useParams<{ id: string }>()
   const location = useLocation()
+  const navigate = useNavigate()
   // The workspace this Storyboard was opened from, passed in navigation state by
   // the workspace page. It lets the not-found / error states (where the fetch
   // failed, so we have no loaded workspace_id) return the user to their workspace
@@ -36,6 +37,7 @@ export default function Storyboard() {
   const workspaceBackTarget = originWorkspaceId
     ? `/workspace/${originWorkspaceId}`
     : "/dashboard"
+  const shouldUseHistoryBack = Boolean(originWorkspaceId && location.key !== "default")
   const [state, setState] = useState<LoadState>({ kind: "loading" })
   const [view, setView] = useState<"launch" | "deck">("launch")
   const [showDownloads, setShowDownloads] = useState(false)
@@ -92,6 +94,18 @@ export default function Storyboard() {
     })
   }
 
+  const goBackToOrigin = useCallback(
+    (fallbackTarget: string) => {
+      if (shouldUseHistoryBack) {
+        navigate(-1)
+        return
+      }
+
+      navigate(fallbackTarget, { replace: true })
+    },
+    [navigate, shouldUseHistoryBack],
+  )
+
   // Generation now runs server-side in the background, so a freshly created or
   // directly-opened Storyboard can legitimately be `generating`. Poll until it
   // settles so the page resolves to the deck (or a failed state) on its own
@@ -140,9 +154,13 @@ export default function Storyboard() {
     return (
       <main className="storyboard-page storyboard-page--deck">
         <StoryboardDeck isNotFound title="Storyboard" />
-        <Link to={workspaceBackTarget}>
+        <button
+          type="button"
+          className="storyboard-page__back-link"
+          onClick={() => goBackToOrigin(workspaceBackTarget)}
+        >
           {originWorkspaceId ? "Back to workspace" : "Back to dashboard"}
-        </Link>
+        </button>
       </main>
     )
   }
@@ -151,9 +169,13 @@ export default function Storyboard() {
     return (
       <main className="storyboard-page storyboard-page--deck" role="alert">
         <StoryboardDeck title="Storyboard" errorMessage={state.message} />
-        <Link to={workspaceBackTarget}>
+        <button
+          type="button"
+          className="storyboard-page__back-link"
+          onClick={() => goBackToOrigin(workspaceBackTarget)}
+        >
           {originWorkspaceId ? "Back to workspace" : "Back to dashboard"}
-        </Link>
+        </button>
       </main>
     )
   }
@@ -166,7 +188,13 @@ export default function Storyboard() {
         <p className="storyboard-page__meta">
           Version {storyboard.version} · <span>{storyboard.status}</span>
         </p>
-        <Link to={`/workspace/${storyboard.workspace_id}`}>Back to workspace</Link>
+        <button
+          type="button"
+          className="storyboard-page__back-link"
+          onClick={() => goBackToOrigin(`/workspace/${storyboard.workspace_id}`)}
+        >
+          Back to workspace
+        </button>
       </header>
       {view === "deck" ? (
         <StoryboardDeck
