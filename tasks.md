@@ -16313,7 +16313,7 @@ The moment-of-use feeling: looking at a clean product changelog you're proud of 
 
 > Implements `V1 spec.md` v2.1.0 (§4.12, §9, §10, §11, §12, §13) and `Plan v1.md` §25, verified by `harness/tests/backend/test_phase25_lemonsqueezy_billing_contract.py` (83 contracts) + `harness/tests/frontend/phase25-lemonsqueezy-billing.contract.test.ts` (7 contracts). (As with prior phases, the tasks.md phase number — 22 — runs ahead of the plan's §25 / the `phase25`-named harness; both naming systems are intentional and consistent with Phase 21 ↔ Plan §24 ↔ `phase24` harness.) Replaces Stripe Hosted Checkout with **Lemon Squeezy** at runtime; the Phase 18 Stripe tasks (T-226–T-238) are superseded at runtime, not deleted. **The A→C dependency order is strict and load-bearing:** Group A (foundation: migration → models → config → queue → CreditService) must fully land and be green before Group C (the money paths) — building a money path on a half-migrated CreditService is the worst failure mode for this phase. Stripe SDK/import removal is **not** in this phase (gated ≥7 days post-cutover; see Plan §25.9 step 8) — it is tracked as **T-308** (the gated decommission task at the end of this phase), so the removal is an explicit status-tracked obligation rather than prose.
 
----
+---   
 
 ### T-290 — Migration 0018: Provider-Neutral Billing Tables + Idempotent Stripe Backfill
 
