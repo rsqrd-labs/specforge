@@ -84,6 +84,25 @@ Depth mandate — before writing, think through:
 - High-level system expectations and integrations, without prescribing internal
   implementation mechanics
 
+Gold-standard output contract:
+- Use stable IDs for every auditable statement: FR-001..., NFR-001..., SEC-001...,
+  AC-001..., RISK-001..., and OQ-001... .
+- Every FR, NFR, SEC, and AC entry must include concrete Evidence: the observable
+  proof, QA check, stakeholder review, metric, audit event, or generated artifact
+  that verifies the statement.
+- Every FR entry must also include actor, trigger, preconditions, expected outcome,
+  postconditions, and source context (explicit user statement, clarified answer,
+  or safe assumption).
+- Every NFR entry must include a measurable threshold or a marked assumption with
+  a recommended default and decision owner.
+- Every SEC entry must include the user/business outcome, abuse case prevented,
+  data involved, and evidence required. Keep controls product-level; PLAN.md will
+  choose the implementation mechanism.
+- Every AC entry must reference at least one FR/NFR/SEC ID and define pass/fail
+  evidence. No AC may be a generic restatement like "feature works".
+- Risks must name impact, likelihood, mitigation/validation, and the requirement
+  or open question that reduces the risk.
+
 Required SPEC.md structure (every section is mandatory):
 - ## Overview
   One-paragraph product summary plus a bullet list of the top user-facing
@@ -115,14 +134,15 @@ Required SPEC.md structure (every section is mandatory):
   - Atomic: tests one observable behavior
   Use sub-requirements (FR-001.1, FR-001.2) only when they clarify related
   behaviour. For each requirement state: actor, trigger, preconditions, expected
-  outcome, and postconditions. Requirements must describe externally visible
-  behaviour, not internal modules or code.
+  outcome, postconditions, source, and evidence. Requirements must describe
+  externally visible behaviour, not internal modules or code.
 - ## Non-Functional Requirements
   Number as NFR-001, NFR-002, … . Cover performance (latency, throughput),
   availability (uptime SLA, recovery time), scalability (user count, data volume),
   accessibility (WCAG level), internationalisation, browser/platform support, and
-  compliance as applicable. Include measurable thresholds when they are known;
-  otherwise state a reasonable target and mark it as an assumption.
+  compliance as applicable. For each NFR include: threshold, measurement method,
+  evidence, owner, and assumption status. Include measurable thresholds when they
+  are known; otherwise state a reasonable target and mark it as an assumption.
 - ## Conceptual Domain Model
   Define the core business entities, their purpose, lifecycle, ownership, and
   high-level relationships. Include a conceptual Mermaid or ASCII diagram. Do not
@@ -141,8 +161,9 @@ Required SPEC.md structure (every section is mandatory):
 - ## Security, Privacy, and Abuse Expectations
   Number as SEC-001, SEC-002, … . Cover authentication expectations, session
   expectations, abuse prevention, PII handling, consent, deletion/export rights,
-  auditability, and domain-specific misuse cases. State the user/business outcome
-  required. Leave concrete mitigations and implementation controls to PLAN.md.
+  auditability, and domain-specific misuse cases. For each SEC include: outcome,
+  protected data/resource, abuse case, evidence, and related FR/NFR IDs. Leave
+  concrete mitigations and implementation controls to PLAN.md.
 - ## Error Handling and Recovery
   For each error category (validation, auth, not found, server error, third-party
   failure): describe the user-visible state, product behaviour, and recovery path.
@@ -156,8 +177,9 @@ Required SPEC.md structure (every section is mandatory):
   Explain how major features interact from the user's perspective. Identify
   dependencies between features without specifying internal service boundaries.
 - ## Acceptance Criteria
-  Product-level acceptance criteria grouped by feature or user flow. Each criterion
-  should be objectively verifiable by QA or a stakeholder.
+  Number as AC-001, AC-002, … . Product-level acceptance criteria grouped by
+  feature or user flow. Each criterion must reference source FR/NFR/SEC IDs and
+  include objective evidence that QA or a stakeholder can verify.
 - ## Success Metrics
   Activation, engagement, conversion, retention, operational, quality, and support
   metrics that indicate whether the product is working. Include measurement intent
@@ -169,8 +191,8 @@ Required SPEC.md structure (every section is mandatory):
   Business, legal, operational, UX, platform, timeline, data, compliance, and
   integration constraints. Distinguish hard constraints from assumptions.
 - ## Risks
-  Product and delivery risks, their impact, and the decision or validation needed
-  to reduce uncertainty.
+  Product and delivery risks. Use RISK-001... and include description, impacted
+  IDs, likelihood, impact, mitigation or validation, owner, and residual risk.
 - ## Assumptions and Open Questions
   For each open question: what decision is needed, what the options are, what the
   recommended default is, and who must decide.
@@ -180,6 +202,9 @@ Required SPEC.md structure (every section is mandatory):
 Specification rules:
 - Every requirement must be testable, unambiguous, and free of implementation
   details.
+- Every FR/NFR/SEC/AC must include evidence. If evidence is unknown, state the
+  safest measurable evidence as an assumption and list it in Assumptions and Open
+  Questions.
 - Do not include exact API endpoints, request/response schemas, database tables,
   column definitions, indexes, file paths, class names, framework names, CI/CD
   commands, deployment topology, infrastructure-as-code, queue/cache choices, or
@@ -268,6 +293,8 @@ in your output):
   Acceptance Criterion [user_flow_coverage].
 - Every NFR states a measurable threshold or is explicitly marked as an assumption
   with a recommended default [non_functional_coverage].
+- Every FR/NFR/SEC/AC entry includes Evidence and all AC IDs reference at least
+  one FR/NFR/SEC ID [specificity_testability, traceability].
 - Product Goals connect directly to named user problems [goal_alignment].
 - The Edge Cases section has at least 15 concrete entries in condition → behaviour
   format.

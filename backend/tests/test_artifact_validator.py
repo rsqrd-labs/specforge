@@ -124,6 +124,148 @@ def test_validate_artifact_completeness_rejects_incomplete_task_block() -> None:
     assert any(issue.code == "incomplete_task_block" for issue in excinfo.value.issues)
 
 
+def test_validate_artifact_completeness_rejects_spec_without_evidence() -> None:
+    artifact = "\n\n".join(
+        (
+            f"{heading}\nDetailed section content with enough product detail for "
+            "the validator to treat it as substantive."
+        )
+        for heading in SECTION_CONTRACTS["spec"]
+    )
+    artifact = artifact.replace(
+        "## Functional Requirements\nDetailed section content with enough product "
+        "detail for the validator to treat it as substantive.",
+        (
+            "## Functional Requirements\n"
+            "| ID | Requirement |\n"
+            "|---|---|\n"
+            "| FR-001 | User can create a project. |"
+        ),
+    )
+
+    with pytest.raises(IncompleteArtifactError) as excinfo:
+        validate_artifact_completeness("spec", artifact)
+
+    assert any(
+        issue.code == "missing_evidence_contract"
+        for issue in excinfo.value.issues
+    )
+
+
+def test_validate_artifact_completeness_rejects_plan_missing_rtm_id() -> None:
+    artifact = _complete_plan_artifact().replace(
+        "## Requirement Traceability Matrix\nbody text",
+        (
+            "## Requirement Traceability Matrix\n"
+            "| Source ID | Requirement summary | Design response | Verification method "
+            "| Residual risk |\n"
+            "|---|---|---|---|---|\n"
+            "| FR-001 | Create project. | POST /projects. | contract test | Low |"
+        ),
+    ).replace(
+        "## Security Architecture\nbody text",
+        "## Security Architecture\nSEC-001 authentication is enforced by middleware.",
+    )
+
+    with pytest.raises(IncompleteArtifactError) as excinfo:
+        validate_artifact_completeness(
+            "plan",
+            artifact,
+            {"spec": "FR-001 creates projects. SEC-001 requires authentication."},
+        )
+
+    assert any(
+        issue.code == "rtm_missing_upstream_id"
+        for issue in excinfo.value.issues
+    )
+
+
+def test_validate_artifact_completeness_rejects_missing_harness_tree_block() -> None:
+    artifact = "\n\n".join(
+        [
+            "## Harness Overview\nDetailed harness strategy and local commands.",
+            (
+                "## Requirement-to-Test Matrix\n"
+                "| Source ID | Test file | Test name |\n"
+                "|---|---|---|\n"
+                "| FR-001 | tests/test_projects.py | test_create_project |"
+            ),
+            (
+                "## Coverage Plan\nDetailed integration, security, contract, "
+                "and migration_safety coverage."
+            ),
+            (
+                "## File Tree\n```text\n"
+                "harness/tests/test_projects.py\n"
+                "harness/tests/test_missing.py\n"
+                "```"
+            ),
+            (
+                "## Files\n"
+                "### File: harness/tests/test_projects.py\n"
+                "```python\n"
+                "# Tests: FR-001\n"
+                "def test_create_project():\n"
+                "    assert False, 'not implemented: FR-001'\n"
+                "```"
+            ),
+        ]
+    )
+
+    with pytest.raises(IncompleteArtifactError) as excinfo:
+        validate_artifact_completeness("harness", artifact)
+
+    assert any(
+        issue.code == "harness_file_tree_missing_block"
+        for issue in excinfo.value.issues
+    )
+
+
+def test_validate_artifact_completeness_rejects_missing_task_harness_ref() -> None:
+    artifact = _complete_tasks_artifact(
+        harness_ref="`tests/test_projects.py::test_missing_project`"
+    )
+    harness = _harness_with_test("tests/test_projects.py", "test_create_project")
+
+    with pytest.raises(IncompleteArtifactError) as excinfo:
+        validate_artifact_completeness(
+            "tasks",
+            artifact,
+            {"spec": "FR-001 creates projects.", "harness": harness},
+        )
+
+    assert any(
+        issue.code == "task_harness_ref_not_found"
+        for issue in excinfo.value.issues
+    )
+
+
+def test_validate_artifact_completeness_rejects_effort_summary_mismatch() -> None:
+    artifact = _complete_tasks_artifact(
+        task_count_line="Tasks: 2 total - 2 MUST - 0 SHOULD - 0 COULD"
+    )
+
+    with pytest.raises(IncompleteArtifactError) as excinfo:
+        validate_artifact_completeness("tasks", artifact, {"spec": "FR-001"})
+
+    assert any(
+        issue.code == "effort_summary_task_count_mismatch"
+        for issue in excinfo.value.issues
+    )
+
+
+def test_validate_artifact_completeness_rejects_future_task_dependency() -> None:
+    artifact = _complete_tasks_artifact(dependencies="T-002")
+
+    with pytest.raises(IncompleteArtifactError) as excinfo:
+        validate_artifact_completeness("tasks", artifact, {"spec": "FR-001"})
+
+    assert any(
+        issue.code == "invalid_task_dependency_order"
+        for issue in excinfo.value.issues
+    )
+
+
 def test_validate_sections_runs_in_under_5ms_on_200k_artifact() -> None:
     # ~210K-char artifact containing every plan heading + the conditional one.
     artifact = (
@@ -145,3 +287,79 @@ def _time_one(fn) -> float:
     start = time.perf_counter()
     fn()
     return time.perf_counter() - start
+
+
+def _harness_with_test(path: str, test_name: str) -> str:
+    return (
+        "## Harness Overview\nDetailed harness strategy.\n\n"
+        "## Requirement-to-Test Matrix\n"
+        f"| FR-001 | {path} | {test_name} |\n\n"
+        "## Coverage Plan\nDetailed coverage.\n\n"
+        f"## File Tree\n```text\nharness/{path}\n```\n\n"
+        f"## Files\n### File: harness/{path}\n"
+        "```python\n"
+        "# Tests: FR-001\n"
+        f"def {test_name}():\n"
+        "    assert False, 'not implemented: FR-001'\n"
+        "```"
+    )
+
+
+def _complete_tasks_artifact(
+    *,
+    harness_ref: str = "`tests/test_projects.py::test_create_project`",
+    task_count_line: str = "Tasks: 1 total - 1 MUST - 0 SHOULD - 0 COULD",
+    dependencies: str = "None",
+) -> str:
+    overview = "\n\n".join(
+        [
+            (
+                "## Effort Summary\n"
+                "- Estimate range: ~1 week\n"
+                f"- {task_count_line}\n"
+                "- Sizes: 1xM\n"
+                "- Minimum cut: Ship MUST-only -> ~2d"
+            ),
+            (
+                "## Execution Overview\n"
+                "Detailed implementation order with safe sequencing."
+            ),
+            (
+                "## Traceability Overview\n"
+                "| Source ID | Plan section | Harness tests | Task IDs | "
+                "Completion evidence |\n"
+                "|---|---|---|---|---|\n"
+                "| FR-001 | API Design | test_create_project | T-001 | pytest passes |"
+            ),
+            "## Dependency Graph\n```mermaid\ngraph TD\n  T001\n```",
+            "## Task Sizing Legend\nM means one to three days with focused tests.",
+        ]
+    )
+    return (
+        f"{overview}\n\n"
+        "## Phase 1: API Layer\n\n"
+        "### T-001: Implement Project Creation\n\n"
+        "**Phase:** API Layer\n"
+        "**Spec refs:** FR-001\n"
+        "**Plan refs:** API Design, Data Model and Persistence\n"
+        f"**Harness refs:** {harness_ref}\n"
+        "**Priority:** MUST\n"
+        "**Estimate:** M\n"
+        "**Estimated size:** M\n"
+        "**Risk:** Medium - project creation is a core workflow\n"
+        "**Owner:** Backend\n\n"
+        "**Description**\n"
+        "Implement the project creation workflow with validation and persistence.\n\n"
+        "**Inputs**\n"
+        "- Plan API contract and harness test.\n\n"
+        "**Outputs**\n"
+        "- Project creation endpoint and passing harness test.\n\n"
+        "**Steps**\n"
+        "1. Create the project service and route from the plan contract.\n\n"
+        "**Acceptance Criteria**\n"
+        "1. `pytest tests/test_projects.py::test_create_project -q` passes.\n\n"
+        "**Rollback / Recovery**\n"
+        "Pure code change; revert the route and service if needed.\n\n"
+        "**Dependencies:** "
+        f"{dependencies}\n"
+    )

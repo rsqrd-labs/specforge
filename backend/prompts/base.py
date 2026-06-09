@@ -9,12 +9,12 @@ from services import langfuse_service
 
 logger = structlog.get_logger(__name__)
 
-ASDD_PROMPT_VERSION = "asdd-v1.8.0"
+ASDD_PROMPT_VERSION = "asdd-v1.9.0"
 STAGE_PROMPT_VERSIONS: dict[str, str] = {
-    "spec": f"{ASDD_PROMPT_VERSION}:spec-v1",
-    "plan": f"{ASDD_PROMPT_VERSION}:plan-v1",
-    "harness": f"{ASDD_PROMPT_VERSION}:harness-v1",
-    "tasks": f"{ASDD_PROMPT_VERSION}:tasks-v1",
+    "spec": f"{ASDD_PROMPT_VERSION}:spec-v2",
+    "plan": f"{ASDD_PROMPT_VERSION}:plan-v2",
+    "harness": f"{ASDD_PROMPT_VERSION}:harness-v2",
+    "tasks": f"{ASDD_PROMPT_VERSION}:tasks-v2",
 }
 
 ASDD_METHODOLOGY_OVERVIEW = """

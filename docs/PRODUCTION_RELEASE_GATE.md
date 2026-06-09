@@ -58,7 +58,7 @@ Prompt quality gate:
 cd harness
 uv run python -m prompt_eval.run \
   --version "$(grep -oE 'asdd-v[0-9.]+' ../backend/prompts/base.py)" \
-  --baseline asdd-v1.7.1 \
+  --baseline asdd-v1.8.0 \
   --report ../prompt_eval_report.md
 ```
 

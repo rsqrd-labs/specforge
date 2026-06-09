@@ -25,6 +25,7 @@ flowchart LR
 | FR-003 | Adjust credits. | Idempotent ledger command. | concurrency test | Medium |
 | FR-004 | Export records. | Export worker redacts secret fields. | export redaction test | Low |
 | NFR-001 | p95 450 ms. | Indexed tenant queries and bounded joins. | load test | Medium |
+| NFR-002 | Audit retention 365 days. | Audit retention job preserves rows for the required window. | retention test | Low |
 | SEC-001 | Auth and authz. | JWT middleware plus tenant policy. | 401 and 403 tests | Low |
 | SEC-002 | Input validation. | Pydantic schemas at API boundary. | validation test | Low |
 | SEC-003 | Rate limit. | Redis sliding window per actor. | 429 test | Low |

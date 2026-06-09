@@ -500,7 +500,7 @@ prompt section contracts:
 cd harness
 uv run python -m prompt_eval.run \
   --version "$(grep -oE 'asdd-v[0-9.]+' ../backend/prompts/base.py)" \
-  --baseline asdd-v1.7.1 \
+  --baseline asdd-v1.8.0 \
   --report /tmp/prompt_eval_report.md
 ```
 
@@ -684,7 +684,7 @@ Environment variable changes require a restart.
 | Run backend tests | `cd backend && uv run pytest tests/ -q` |
 | Run frontend tests | `cd frontend && pnpm test` |
 | Run harness tests | `cd backend && uv run pytest ../harness/tests/backend/ -q` |
-| Run prompt eval | `cd harness && uv run python -m prompt_eval.run --version "$(grep -oE 'asdd-v[0-9.]+' ../backend/prompts/base.py)" --baseline asdd-v1.7.1 --report /tmp/prompt_eval_report.md` |
+| Run prompt eval | `cd harness && uv run python -m prompt_eval.run --version "$(grep -oE 'asdd-v[0-9.]+' ../backend/prompts/base.py)" --baseline asdd-v1.8.0 --report /tmp/prompt_eval_report.md` |
 | Check backend health | `curl http://localhost:8000/health` |
 | Open API explorer | http://localhost:8000/docs |
 

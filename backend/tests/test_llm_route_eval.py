@@ -33,6 +33,7 @@ def test_golden_dataset_covers_major_asdd_prompt_shapes() -> None:
         "regulated_security_sensitive",
         "vague_prompt_rejection",
         "prompt_injection_rejection",
+        "adversarial_prompt_safety_chain",
         "large_context_chain",
     } <= categories
 

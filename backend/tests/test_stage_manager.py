@@ -16,13 +16,60 @@ from services.pipeline.artifact_validator import (
     chunk_completion_sentinel,
     final_completion_sentinel,
 )
-from services.pipeline.stage_manager import StageDependencyError, StageManager
+from services.pipeline.stage_manager import (
+    StageDependencyError,
+    StageManager,
+    _chunk_specs_for_stage,
+    _chunk_user_prompt,
+)
 
+_SPEC_DEFAULT_BODY = (
+    "This section captures the team task-management product contract while "
+    "preserving traceability to FR-001, NFR-001, SEC-001, and AC-001 without "
+    "choosing implementation internals."
+)
+_SPEC_SECTION_BODIES = {
+    "## Functional Requirements": (
+        "| ID | Actor/Trigger | Requirement | Measurable outcome | Edge cases | "
+        "Evidence |\n"
+        "|---|---|---|---|---|---|\n"
+        "| FR-001 | Team member creates or updates a task | Users can create, "
+        "assign, and track task status across a team workspace. | Task state "
+        "is visible to permitted collaborators after save. | Missing owner, "
+        "duplicate title, and reopened task flows are handled. | Problem "
+        "statement asks for teams to create tasks, assign owners, and track "
+        "project status. |"
+    ),
+    "## Non-Functional Requirements": (
+        "| ID | Quality | Requirement | Measurable outcome | Edge cases | Evidence |\n"
+        "|---|---|---|---|---|---|\n"
+        "| NFR-001 | Reliability | Core task operations remain available and "
+        "recoverable during normal tenant usage. | Successful task writes are "
+        "durable and observable. | Retry, transient outage, and partial save "
+        "conditions are covered. | Paying users depend on task tracking as "
+        "the product workflow. |"
+    ),
+    "## Security, Privacy, and Abuse Expectations": (
+        "| ID | Actor/Trigger | Control | Measurable outcome | Edge cases | "
+        "Evidence |\n"
+        "|---|---|---|---|---|---|\n"
+        "| SEC-001 | Authenticated user accesses workspace data | Enforce "
+        "workspace-scoped authorization for reads and writes. | A user cannot "
+        "view or mutate another tenant's tasks. | Revoked members, stale "
+        "sessions, and privilege changes are denied. | Problem statement "
+        "requires authenticated team task management. |"
+    ),
+    "## Acceptance Criteria": (
+        "| ID | Scenario | Expected outcome | Verification | Evidence |\n"
+        "|---|---|---|---|---|\n"
+        "| AC-001 | A permitted team member creates and assigns a task | The task "
+        "appears with owner and status for authorized collaborators only. | "
+        "Executable acceptance test covers create, assign, view, and denied "
+        "cross-workspace access. | Derived from FR-001, NFR-001, and SEC-001. |"
+    ),
+}
 _VALID_SPEC = "\n\n".join(
-    (
-        f"{heading}\nDetailed content for {heading} covering FR-001, NFR-001, "
-        "and SEC-001 with enough implementation-neutral depth."
-    )
+    f"{heading}\n{_SPEC_SECTION_BODIES.get(heading, _SPEC_DEFAULT_BODY)}"
     for heading in SECTION_CONTRACTS["spec"]
 )
 _VALID_SPEC_STREAM = (
@@ -33,6 +80,26 @@ _VALID_SPEC_STREAM = (
 def _complete_plan(technology_stack: str) -> str:
     sections: list[str] = []
     for heading in SECTION_CONTRACTS["plan"]:
+        if heading == "## Requirement Traceability Matrix":
+            sections.append(
+                f"{heading}\n"
+                "| Upstream ID | Plan coverage | Interface or control | Test intent |\n"
+                "|---|---|---|---|\n"
+                "| FR-001 | Task creation, assignment, and status tracking design. | "
+                "Task API and workspace service boundary. | Covered by "
+                "acceptance and integration tests. |\n"
+                "| NFR-001 | Reliable writes, recovery, and observability controls. | "
+                "Persistence, retry, and audit paths. | Covered by reliability "
+                "and failure-mode tests. |\n"
+                "| SEC-001 | Workspace-scoped authorization for task data. | "
+                "Auth policy "
+                "and tenant boundary checks. | Covered by security tests. |\n"
+                "| AC-001 | End-to-end create, assign, view, and denied access "
+                "scenario. | "
+                "Acceptance workflow and API contract. | Covered by executable "
+                "acceptance test. |"
+            )
+            continue
         if heading == "## Technology Stack and Rationale":
             sections.append(f"{heading}\n{technology_stack}")
             continue
@@ -66,6 +133,34 @@ _UNSAFE_PLAN_STREAM = (
 )
 _SAFE_PLAN_FINAL_STREAM = f"{_SAFE_PLAN}\n{final_completion_sentinel('plan')}"
 _UNSAFE_PLAN_FINAL_STREAM = f"{_UNSAFE_PLAN}\n{final_completion_sentinel('plan')}"
+
+
+def test_tasks_generation_uses_phase_group_chunks() -> None:
+    chunk_keys = [chunk.key for chunk in _chunk_specs_for_stage("tasks")]
+
+    assert chunk_keys == [
+        "task-overview",
+        "task-foundation-blocks",
+        "task-interface-blocks",
+        "task-hardening-blocks",
+    ]
+
+
+def test_chunk_user_prompt_wraps_prior_chunks_as_untrusted_context() -> None:
+    chunk = _chunk_specs_for_stage("harness")[1]
+    prompt = _chunk_user_prompt(
+        "BASE PROMPT",
+        stage_type="harness",
+        chunk=chunk,
+        prior_chunks=[
+            "## File Tree\nharness/tests/test_auth.py",
+        ],
+    )
+
+    assert '<untrusted_content source="harness_prior_chunks">' in prompt
+    assert "BEGIN_UNTRUSTED_CONTENT:harness_prior_chunks" in prompt
+    assert "harness/tests/test_auth.py" in prompt
+    assert "Continue from them without duplicating" in prompt
 
 
 def _make_stage(

@@ -20,6 +20,8 @@ content handling for LLM-facing inputs.
 | FR-002 | Prompt and AI Safety Controls | test_answer_requires_citations | T-003 | answer test passes |
 | FR-003 | Data Model and Persistence | test_flag_answer_creates_review_row | T-004 | review test passes |
 | FR-004 | API Design | test_delete_document_removes_embeddings | T-005 | delete test passes |
+| NFR-001 | Capacity Model | test_answer_latency_budget | T-003 | latency evidence |
+| NFR-002 | Error Handling and Recovery | test_indexing_retries_after_worker_restart | T-005 | recovery evidence |
 | SEC-001 | Security Architecture | test_document_cross_tenant_forbidden | T-002 | isolation test passes |
 | SEC-002 | Security Architecture | test_upload_rejects_unsafe_file | T-001 | validation test passes |
 | SEC-003 | Prompt and AI Safety Controls | test_untrusted_content_cannot_override_instructions | T-003 | safety test passes |
@@ -68,7 +70,7 @@ test_document_cross_tenant_forbidden passes.
 
 ### T-003: Implement Cited Answer Service And Safety Gate
 
-**Spec refs:** FR-002, SEC-003, SEC-004, SEC-005
+**Spec refs:** FR-002, NFR-001, SEC-003, SEC-004, SEC-005
 **Plan refs:** Prompt and AI Safety Controls
 **Harness refs:** tests/contract/test_answers.py::test_answer_requires_citations
 **Priority:** MUST
@@ -91,7 +93,7 @@ test_flag_answer_creates_review_row passes.
 
 ### T-005: Delete Documents And Embeddings
 
-**Spec refs:** FR-004
+**Spec refs:** FR-004, NFR-002
 **Plan refs:** API Design
 **Harness refs:** tests/integration/test_documents.py::test_delete_document_removes_embeddings
 **Priority:** MUST

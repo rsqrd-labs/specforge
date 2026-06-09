@@ -1,7 +1,7 @@
 """Phase 19 offline prompt eval runner.
 
 Usage:
-    uv run python -m prompt_eval.run --version asdd-v1.8.0 --baseline asdd-v1.7.1
+    uv run python -m prompt_eval.run --version asdd-v1.9.0 --baseline asdd-v1.8.0
 
 Produces a markdown delta report with per-grader pass-rate delta, per-stage
 cost, and per-stage grading latency. Exit code 1 means at least one grader

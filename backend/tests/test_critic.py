@@ -42,12 +42,57 @@ from services.pipeline.stage_manager import StageManager
 
 _REGEN_METRIC = "specforge_billing_credits_critic_regen_total"
 
-# A spec artifact containing every required section heading so the zero-LLM
-# section validator (which runs BEFORE the critic in generate()) passes and the
-# stubbed critic_review is actually reached.  Also well past the critic's
-# 500-char gradable floor so the direct critic_review unit tests do real work.
+# A spec artifact containing every required section heading and the v1.9
+# evidence fields so the deterministic validator passes before the critic is
+# reached.  Also well past the critic's 500-char gradable floor so the direct
+# critic_review unit tests do real work.
+_SPEC_DEFAULT_BODY = (
+    "This section captures the team task-management product contract while "
+    "preserving traceability to FR-001, NFR-001, SEC-001, and AC-001 without "
+    "choosing implementation internals."
+)
+_SPEC_SECTION_BODIES = {
+    "## Functional Requirements": (
+        "| ID | Actor/Trigger | Requirement | Measurable outcome | Edge cases | "
+        "Evidence |\n"
+        "|---|---|---|---|---|---|\n"
+        "| FR-001 | Team member creates or updates a task | Users can create, "
+        "assign, and track task status across a team workspace. | Task state "
+        "is visible to permitted collaborators after save. | Missing owner, "
+        "duplicate title, and reopened task flows are handled. | Problem "
+        "statement asks for teams to create tasks, assign owners, and track "
+        "project status. |"
+    ),
+    "## Non-Functional Requirements": (
+        "| ID | Quality | Requirement | Measurable outcome | Edge cases | Evidence |\n"
+        "|---|---|---|---|---|---|\n"
+        "| NFR-001 | Reliability | Core task operations remain available and "
+        "recoverable during normal tenant usage. | Successful task writes are "
+        "durable and observable. | Retry, transient outage, and partial save "
+        "conditions are covered. | Paying users depend on task tracking as "
+        "the product workflow. |"
+    ),
+    "## Security, Privacy, and Abuse Expectations": (
+        "| ID | Actor/Trigger | Control | Measurable outcome | Edge cases | "
+        "Evidence |\n"
+        "|---|---|---|---|---|---|\n"
+        "| SEC-001 | Authenticated user accesses workspace data | Enforce "
+        "workspace-scoped authorization for reads and writes. | A user cannot "
+        "view or mutate another tenant's tasks. | Revoked members, stale "
+        "sessions, and privilege changes are denied. | Problem statement "
+        "requires authenticated team task management. |"
+    ),
+    "## Acceptance Criteria": (
+        "| ID | Scenario | Expected outcome | Verification | Evidence |\n"
+        "|---|---|---|---|---|\n"
+        "| AC-001 | A permitted team member creates and assigns a task | The task "
+        "appears with owner and status for authorized collaborators only. | "
+        "Executable acceptance test covers create, assign, view, and denied "
+        "cross-workspace access. | Derived from FR-001, NFR-001, and SEC-001. |"
+    ),
+}
 _LONG_ARTIFACT = "\n\n".join(
-    f"{heading}\nDetailed content for this section covering the requirement.\n"
+    f"{heading}\n{_SPEC_SECTION_BODIES.get(heading, _SPEC_DEFAULT_BODY)}"
     for heading in SECTION_CONTRACTS["spec"]
 )
 _LONG_ARTIFACT_STREAM = (

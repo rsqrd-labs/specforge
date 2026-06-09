@@ -8,8 +8,8 @@
 ## Execution Overview
 
 Implement persisted board commands first, then ordered event fanout, replay, and
-archive behavior. Each task preserves authentication, authorization, input
-validation, rate limit controls, audit logging, and secret redaction.
+archive behavior. Each task preserves authentication, authorization, input validation,
+rate limit controls, audit logging, and secret redaction.
 
 ## Traceability Overview
 
@@ -19,6 +19,7 @@ validation, rate limit controls, audit logging, and secret redaction.
 | FR-002 | API Design | test_move_card_broadcasts_ordered_event | T-002 | realtime test passes |
 | FR-003 | API Design | test_reconnect_replays_after_sequence | T-003 | replay test passes |
 | FR-004 | API Design | test_archive_card_keeps_audit | T-004 | archive test passes |
+| NFR-001 | Capacity Model | test_move_card_broadcasts_ordered_event | T-002 | latency evidence |
 | SEC-001 | Security Architecture | test_cross_board_access_forbidden | T-001 | authz test passes |
 | SEC-002 | Security Architecture | test_create_card_rejects_blank_title | T-001 | validation test passes |
 | SEC-003 | Security Architecture | test_reconnect_rate_limit | T-003 | rate limit test passes |
@@ -55,7 +56,7 @@ test_create_card_emits_event and test_create_card_rejects_blank_title pass.
 
 ### T-002: Broadcast Ordered Card Move Events
 
-**Spec refs:** FR-002, SEC-004
+**Spec refs:** FR-002, NFR-001, SEC-004
 **Plan refs:** API Design, Architecture Overview
 **Harness refs:** tests/e2e/test_realtime.py::test_move_card_broadcasts_ordered_event
 **Priority:** MUST

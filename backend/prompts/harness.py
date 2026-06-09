@@ -21,7 +21,7 @@ product behaviours promised by the spec and the implementation contracts defined
 by the plan, without inventing new product scope or weakening requirements.
 
 Depth mandate:
-- Every FR, NFR, SEC requirement, acceptance criterion, API contract, data
+- Every FR, NFR, SEC requirement, AC acceptance criterion, API contract, data
   invariant, permission rule, and important risk from the spec/plan must be covered
   by at least one named test.
 - Tests must be traceable. Include requirement IDs in comments or markers and
@@ -36,6 +36,23 @@ Depth mandate:
   behaviour where the plan defines module boundaries. Do not invent private
   functions, classes, endpoints, tables, or directories that are not present in the
   plan.
+
+Gold-standard output contract:
+- The Requirement-to-Test Matrix must include every upstream FR-NNN, NFR-NNN,
+  SEC-NNN, and AC-NNN. Missing one ID is a failed HARNESS.
+- Every matrix row must name the exact test file and test function that enforces
+  the behavior. Every named test in the matrix must exist in the Files section.
+- Every file listed in File Tree must appear exactly once in the Files section as
+  `### File: path` followed by one complete fenced code block.
+- Every test function must have an immediate `Tests:` traceability comment naming
+  the covered IDs, followed by a docstring or leading comment that states setup,
+  action, and expected outcome.
+- Integration, security, contract, and migration_safety are non-droppable coverage
+  categories. If a product has no migrations, include a migration_safety file with
+  a concrete "no migrations defined" guard test rather than dropping the category.
+- Tests must be executable and adversarial. If implementation does not exist yet,
+  the test must fail with a precise not-implemented assertion tied to the ID; it
+  must not use pass, skip, TODO, xfail, or empty assertions.
 
 Required HARNESS structure:
 - ## Harness Overview
@@ -193,13 +210,13 @@ def build_user_prompt(dependencies: dict[str, str]) -> str:
     return f"""Produce a complete, executable HARNESS from the spec and plan below.
 
 Instructions:
-0. Before writing any test file, enumerate: every FR/NFR/SEC ID that needs at
+0. Before writing any test file, enumerate: every FR/NFR/SEC/AC ID that needs at
    least one test; every API endpoint from the plan that needs an integration test;
    every security requirement that needs a concrete attack test; every schema that
    needs a contract test. This enumeration becomes the Requirement-to-Test Matrix
    seed and the Coverage Plan. Write both sections before writing any test file.
-1. List every FR, NFR, and SEC requirement from the spec. Every one must have at
-   least one test. Produce the requirement-to-test mapping before writing files.
+1. List every FR, NFR, SEC, and AC ID from the spec. Every one must have at least
+   one test. Produce the requirement-to-test mapping before writing files.
 2. Follow the plan's chosen stack and interfaces exactly. Use the endpoint paths,
    module names, class names, and file paths defined in the plan — do not invent
    alternatives. The task stage will reference these names verbatim.
@@ -276,10 +293,14 @@ Before returning, verify (these checks are internal — do not include a checkli
 in your output):
 - Every FR/NFR/SEC from the spec has at least one named test in the
   Requirement-to-Test Matrix [requirements_coverage].
+- Every AC-NNN from the spec has at least one named test in the
+  Requirement-to-Test Matrix [traceability].
 - Every test has a traceability comment (`# Tests: <ID>` or `// Tests: <ID>` per
   the plan's language) and a complete docstring or leading comment block [traceability].
 - Every file listed in the file tree is provided with its full, runnable content —
   no stubs, no partial bodies, no omitted methods [specificity_testability].
+- Every named test in the Requirement-to-Test Matrix exists in the Files section
+  and every File Tree path has a matching File block [traceability].
 - The shared setup file and all factory files are complete: fixtures cover database
   setup, auth helpers, time mocking, and external service mocks [specificity_testability].
 - The coverage_percent in the Coverage Plan is computed as covered requirements /

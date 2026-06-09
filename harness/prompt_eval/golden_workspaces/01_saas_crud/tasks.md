@@ -19,6 +19,8 @@ rate limit controls, audit logging, and secret redaction.
 | FR-002 | API Design | test_update_plan_requires_authorization | T-002 | security test passes |
 | FR-003 | Data Model and Persistence | test_credit_adjustment_idempotent | T-003 | concurrency test passes |
 | FR-004 | API Design | test_export_redacts_secret_fields | T-004 | redaction test passes |
+| NFR-001 | Capacity Model | load test | T-001 | latency evidence |
+| NFR-002 | Data Model and Persistence | test_audit_retention_preserves_active_rows | T-002 | retention evidence |
 | SEC-001 | Security Architecture | test_update_plan_requires_authorization | T-002 | authz evidence |
 | SEC-002 | Security Architecture | test_create_tenant_rejects_bad_name | T-001 | validation evidence |
 | SEC-003 | Security Architecture | test_export_rate_limit | T-004 | rate limit evidence |
@@ -41,7 +43,7 @@ S means one focused day or less. M means one to three focused days with tests.
 
 ### T-001: Create Tenant Model And Create Endpoint
 
-**Spec refs:** FR-001, SEC-002
+**Spec refs:** FR-001, NFR-001, SEC-002
 **Plan refs:** Data Model and Persistence, API Design
 **Harness refs:** tests/contract/test_tenants.py::test_create_tenant
 **Priority:** MUST
@@ -55,7 +57,7 @@ test_create_tenant_rejects_bad_name pass.
 
 ### T-002: Add Plan Update Authorization And Audit Event
 
-**Spec refs:** FR-002, SEC-001, SEC-004
+**Spec refs:** FR-002, NFR-002, SEC-001, SEC-004
 **Plan refs:** Security Architecture, API Design
 **Harness refs:** tests/contract/test_tenants.py::test_update_plan_requires_authorization
 **Priority:** MUST

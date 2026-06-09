@@ -12,6 +12,8 @@ logging, secret redaction, and untrusted content handling.
 | FR-002 | cited answer | tests/contract/test_answers.py | test_answer_requires_citations | contract | positive |
 | FR-003 | flag answer | tests/integration/test_review.py | test_flag_answer_creates_review_row | integration | positive |
 | FR-004 | delete document | tests/integration/test_documents.py | test_delete_document_removes_embeddings | integration | positive |
+| NFR-001 | answer latency | tests/performance/test_answer_latency.py | test_answer_latency_budget | performance | positive |
+| NFR-002 | indexing recovery | tests/integration/test_documents.py | test_indexing_retries_after_worker_restart | integration | positive |
 | SEC-001 | tenant isolation | tests/security/test_isolation.py | test_document_cross_tenant_forbidden | security | negative |
 | SEC-002 | upload validation | tests/contract/test_documents.py | test_upload_rejects_unsafe_file | contract | negative |
 | SEC-003 | prompt injection | tests/security/test_prompt_safety.py | test_untrusted_content_cannot_override_instructions | security | negative |
@@ -35,6 +37,7 @@ harness/
   tests/security/test_isolation.py
   tests/security/test_prompt_safety.py
   tests/security/test_rate_limits.py
+  tests/performance/test_answer_latency.py
 ```
 
 ## Files
@@ -81,6 +84,20 @@ def test_flag_answer_creates_review_row(api_client, analyst_token, answer):
 def test_delete_document_removes_embeddings(api_client, admin_token, document):
     response = api_client.delete(f"/documents/{document.id}", headers=admin_token)
     assert response.status_code == 204
+
+
+# Tests: NFR-002
+def test_indexing_retries_after_worker_restart(index_worker, document):
+    index_worker.restart()
+    assert document.index_status == "indexed"
+```
+
+### File: tests/performance/test_answer_latency.py
+
+```python
+# Tests: NFR-001
+def test_answer_latency_budget(answer_latency_probe):
+    assert answer_latency_probe.p95_ms <= 2000
 ```
 
 ### File: tests/security/test_isolation.py

@@ -42,6 +42,25 @@ Depth mandate — for every design decision, specify:
   be enforced and verified
 - The observability signal that proves the decision is working in production
 
+Gold-standard output contract:
+- Preserve every upstream FR-NNN, NFR-NNN, SEC-NNN, and AC-NNN exactly. Do not
+  renumber, rename, merge, or drop IDs.
+- The Architecture Overview must start from the top three driving requirements:
+  name the IDs, explain why each drives the architecture, and show where each is
+  satisfied in the system diagram.
+- The Requirement Traceability Matrix must include one row for every upstream
+  FR/NFR/SEC/AC ID. Each row must include a concrete design response, verification
+  method, and residual risk. A missing ID is a failed PLAN.
+- Every API, schema, event, job, module boundary, security control, observability
+  signal, and operational choice must reference the source IDs or explicit
+  assumption that justifies it.
+- When the spec is silent, choose the smallest safe production-grade default,
+  mark it as an assumption, and add an Assumptions and Open Questions entry with
+  decision owner and recommended default.
+- Keep the architecture boring, cohesive, and scalable: add queues, caches,
+  workers, third-party services, or distributed boundaries only when a requirement,
+  capacity model, security need, or failure mode justifies them.
+
 Required PLAN.md structure (every section is mandatory):
 
 - ## Planning Summary
@@ -50,16 +69,17 @@ Required PLAN.md structure (every section is mandatory):
   sequence. Do not restate the full spec.
 
 - ## Architecture Overview
-  Describe the system topology: every service, database, cache, queue, and external
-  dependency. Include an ASCII or Mermaid architecture diagram showing all
-  components and their communication paths. Label arrows with protocol/data format
-  where known, and mark inferred choices as assumptions.
+  Begin with the three driving requirements and why they force the architecture.
+  Describe the system topology: every service, database, cache, queue, and
+  external dependency. Include an ASCII or Mermaid architecture diagram showing
+  all components and their communication paths. Label arrows with protocol/data
+  format where known, and mark inferred choices as assumptions.
 
 - ## Requirement Traceability Matrix
-  A table mapping every FR-NNN, NFR-NNN, SEC-NNN, acceptance criterion, and major
-  constraint from the spec to the plan section that satisfies it. Include columns:
-  source ID, requirement summary, design response, verification method, and residual
-  risk. No requirement may be absent.
+  A table mapping every FR-NNN, NFR-NNN, SEC-NNN, AC-NNN, and major constraint
+  from the spec to the plan section that satisfies it. Include columns: source ID,
+  requirement summary, design response, verification method, and residual risk.
+  No upstream ID may be absent.
 
 - ## Technology Stack and Rationale
   Produce a table with EXACTLY these columns:
@@ -378,15 +398,15 @@ def build_user_prompt(dependencies: dict[str, str]) -> str:
 below.
 
 Instructions:
-0. Before writing any section content, enumerate every FR, NFR, and SEC ID in the
-   spec. This list is your RTM seed — every ID must appear in the Requirement
+0. Before writing any section content, enumerate every FR, NFR, SEC, and AC ID in
+   the spec. This list is your RTM seed — every ID must appear in the Requirement
    Traceability Matrix with no exceptions. Do not begin writing until this list is
    complete in your working memory. Do not include this enumeration in your output.
-1. Read every requirement in the spec (FR, NFR, SEC). Every single one must appear
-   in the Requirement Traceability Matrix and be addressed by a concrete design
-   decision. Preserve all FR/NFR/SEC IDs exactly as they appear in the spec — do
-   not renumber, rename, or rephrase them. The harness and tasks stages depend on
-   these IDs being stable.
+1. Read every requirement and acceptance criterion in the spec (FR, NFR, SEC, AC).
+   Every single one must appear in the Requirement Traceability Matrix and be
+   addressed by a concrete design decision or verification path. Preserve all IDs
+   exactly as they appear in the spec — do not renumber, rename, or rephrase them.
+   The harness and tasks stages depend on these IDs being stable.
 2. Preserve the spec's product intent. Do not add new user-facing scope unless it
    is a necessary technical support capability, and label that clearly.
 3. For every conceptual entity in the spec, produce the implementation data model:
@@ -420,6 +440,10 @@ Before returning, verify (these checks are internal — do not include a checkli
 in your output):
 - Every FR/NFR/SEC ID from the spec appears in the RTM with no exceptions
   [requirements_coverage, traceability].
+- Every AC-NNN from the spec appears in the RTM with a verification method and no
+  acceptance criterion is orphaned from design [traceability].
+- The Architecture Overview names exactly three driving requirements and ties
+  each to concrete components in the diagram [goal_alignment, feasibility].
 - No section contains "TBD", "as needed", or "to be determined" without a
   corresponding entry in Assumptions and Open Questions [specificity_testability].
 - Every API endpoint specifies method, path, auth requirement, full request schema,

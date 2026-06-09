@@ -12,6 +12,7 @@ events, and secret redaction for every tenant workflow.
 | FR-002 | update plan | tests/contract/test_tenants.py | test_update_plan_requires_authorization | security | negative |
 | FR-003 | credit idempotency | tests/integration/test_credits.py | test_credit_adjustment_idempotent | concurrency | positive |
 | FR-004 | export redaction | tests/security/test_exports.py | test_export_redacts_secret_fields | security | negative |
+| NFR-002 | audit retention | tests/integration/test_audit.py | test_audit_retention_preserves_active_rows | integration | positive |
 | SEC-001 | auth and authz | tests/contract/test_tenants.py | test_update_plan_requires_authorization | security | negative |
 | SEC-002 | input validation | tests/contract/test_tenants.py | test_create_tenant_rejects_bad_name | contract | negative |
 | SEC-003 | rate limit | tests/security/test_rate_limits.py | test_export_rate_limit | security | negative |
@@ -76,6 +77,12 @@ def test_plan_change_writes_audit_event(api_client, owner_token):
     response = api_client.patch("/tenants/tnt_001/plan", json={"plan": "team"}, headers=owner_token)
     assert response.status_code == 200
     assert response.json()["audit_event"]["action"] == "tenant.plan_changed"
+
+
+# Tests: NFR-002, SEC-004
+def test_audit_retention_preserves_active_rows(retention_job, audit_event):
+    retention_job.run()
+    assert audit_event.is_retained is True
 ```
 
 ### File: tests/security/test_exports.py

@@ -1,7 +1,7 @@
 {
-  "version": "asdd-v1.7.1",
+  "version": "asdd-v1.8.0",
   "scores": {
-    "rtm_coverage_pct": 0.909,
+    "rtm_coverage_pct": 1.0,
     "fr_to_test_coverage_pct": 1.0,
     "fr_to_task_coverage_pct": 1.0,
     "plan_section_presence_pct": 1.0,

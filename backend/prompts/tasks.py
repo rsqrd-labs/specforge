@@ -42,6 +42,22 @@ Depth mandate:
   code. Do not create broad "cleanup", "polish", or "finish integration" tasks
   unless their files, tests, and acceptance criteria are exact.
 
+Gold-standard output contract:
+- Preserve every upstream FR-NNN, NFR-NNN, SEC-NNN, AC-NNN, harness test path, and
+  plan contract exactly. Do not rename test functions, shorten paths, or invent
+  tests not present in the HARNESS.
+- The Traceability Overview must include every upstream ID, every important plan
+  contract, and every harness test, with task IDs and completion evidence.
+- The Effort Summary must be computed from the task blocks that are actually
+  emitted: task count, priority counts, size counts, and minimum cut must agree.
+- Every task must include all required fields. Missing Priority, Estimate,
+  Estimated size, Risk, Owner, Rollback / Recovery, or Dependencies is a failed
+  TASKS artifact.
+- Dependencies must reference only earlier task IDs. Same-task, future-task, or
+  nonexistent dependencies are invalid.
+- Acceptance Criteria must include exact runnable commands or named manual checks.
+  Generic statements such as "feature works" or "tests pass" are not acceptable.
+
 Required TASKS.md structure:
 
 Start with these sections before the task list:
@@ -63,8 +79,8 @@ Start with these sections before the task list:
   major assumptions or blockers that affect implementation.
 - ## Traceability Overview
   Table with columns: source ID, plan section, harness test(s), task ID(s), and
-  completion evidence. Every FR, NFR, SEC, acceptance criterion, important plan
-  contract, and harness test must appear.
+  completion evidence. Every FR, NFR, SEC, AC, important plan contract, and
+  harness test must appear.
 - ## Dependency Graph
   Mermaid or ASCII graph showing task ordering and safe parallel work groups.
 - ## Task Sizing Legend
@@ -225,7 +241,7 @@ def build_user_prompt(dependencies: dict[str, str]) -> str:
 
 Instructions:
 0. Before writing any task, build your full coverage map internally:
-   - Every FR/NFR/SEC ID → which task addresses it?
+   - Every FR/NFR/SEC/AC ID → which task addresses it?
    - Every harness test path → which task makes it pass?
    - Every plan contract (endpoint, schema, module boundary) → which task implements it?
    - For each plan section or contract (architecture decision, module boundary, API endpoint, schema, migration), confirm at least one task addresses it — no plan artifact may be orphaned from the task list.
@@ -325,8 +341,12 @@ Before returning, verify (these checks are internal — do not include a checkli
 in your output):
 - Every FR/NFR/SEC from the spec is referenced by at least one task's Spec refs
   [requirements_coverage].
+- Every AC-NNN from the spec is referenced in the Traceability Overview or in at
+  least one task's Spec refs [traceability].
 - Every harness test path appears in at least one task's Harness refs, using the
   exact path from the harness artifact [traceability].
+- The Effort Summary counts match the emitted task blocks exactly: N total,
+  MUST/SHOULD/COULD counts, and size/estimate buckets [specificity_testability].
 - Every task has at least one Acceptance Criterion containing an exact, runnable
   command (pytest invocation, curl command, or named smoke-test step)
   [specificity_testability].
