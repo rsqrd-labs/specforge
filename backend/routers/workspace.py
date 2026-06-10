@@ -243,15 +243,16 @@ async def persist_spec_clarification(
     db: AsyncSession = Depends(get_db),
     redis: Redis = Depends(get_redis),
 ) -> Response:
-    """Persist the user's answers to the most recent clarification round.
+    """Persist the user's clarification answers.
 
-    Returns 400 if any submitted question is not in the cached round
-    (the user must answer the questions they were shown, not arbitrary
-    text). Each answer is sanitised and prompt-injection-scanned before
-    persistence.
+    ``mode="round"`` validates against the most recent Redis-backed
+    clarification round. ``mode="existing"`` validates against already-saved
+    workspace questions so a SPEC retry can edit prior answers without calling
+    the clarification judge model again. Each answer is sanitised and
+    prompt-injection-scanned before persistence.
     """
     # Authorise — calling .get() raises 404 if the workspace isn't the user's.
-    await workspace_service.get(id, user.id, db)
+    workspace = await workspace_service.get(id, user.id, db)
     # Shared pool — no manual close needed.  H-1 — T-177.
     try:
         await spec_clarifier.persist_answers(
@@ -259,6 +260,8 @@ async def persist_spec_clarification(
             answers=[a.model_dump() for a in payload.answers],
             db=db,
             redis=redis,
+            mode=payload.mode,
+            workspace=workspace,
         )
     except ClarificationValidationError as exc:
         raise HTTPException(

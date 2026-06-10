@@ -29,11 +29,13 @@ from services.pipeline.spec_clarifier import (
 
 def _workspace(
     problem_statement: str = "Build a thing for a person.",
+    clarification_qa: list[dict[str, str]] | None = None,
 ) -> SimpleNamespace:
     return SimpleNamespace(
         id=uuid4(),
         provider="anthropic",
         problem_statement=problem_statement,
+        clarification_qa=clarification_qa,
     )
 
 
@@ -220,6 +222,133 @@ async def test_persist_answers_sanitises_html_in_answers() -> None:
 
 
 @pytest.mark.asyncio
+async def test_persist_existing_answers_uses_saved_questions_without_redis(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_id = uuid4()
+    question = "Who is the primary user?"
+    workspace = SimpleNamespace(
+        id=workspace_id,
+        clarification_qa=[{"question": question, "answer": "Managers."}],
+    )
+    redis = _FakeRedis()
+    captured: dict = {}
+
+    async def fail_get_llm(*args, **kwargs):
+        raise AssertionError("existing-mode persistence must not call the LLM")
+
+    monkeypatch.setattr(spec_clarifier, "get_llm", fail_get_llm)
+
+    class _CapturingDB:
+        async def execute(self, statement):
+            captured["statement"] = statement
+
+        async def commit(self):
+            captured["committed"] = True
+
+    await persist_answers(
+        workspace_id,
+        [{"question": question, "answer": "Ops managers reviewing incidents."}],
+        _CapturingDB(),
+        redis,
+        mode="existing",
+        workspace=workspace,
+    )
+
+    params = captured["statement"].compile().params
+    assert params["clarification_qa"] == [
+        {
+            "question": question,
+            "answer": "Ops managers reviewing incidents.",
+        }
+    ]
+    assert captured["committed"] is True
+    assert redis.store == {}
+
+
+@pytest.mark.asyncio
+async def test_persist_existing_answers_rejects_unknown_question() -> None:
+    workspace_id = uuid4()
+    workspace = SimpleNamespace(
+        id=workspace_id,
+        clarification_qa=[{"question": "Known question?", "answer": "Known answer."}],
+    )
+    redis = _FakeRedis()
+    db = MagicMock()
+
+    with pytest.raises(ClarificationValidationError) as exc:
+        await persist_answers(
+            workspace_id,
+            [{"question": "Smuggled question?", "answer": "payload"}],
+            db,
+            redis,
+            mode="existing",
+            workspace=workspace,
+        )
+
+    assert str(exc.value) == "question_not_in_existing_answers"
+    db.execute.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_persist_existing_answers_requires_saved_answers() -> None:
+    workspace_id = uuid4()
+    workspace = SimpleNamespace(id=workspace_id, clarification_qa=[])
+    redis = _FakeRedis()
+    db = MagicMock()
+
+    with pytest.raises(ClarificationValidationError) as exc:
+        await persist_answers(
+            workspace_id,
+            [{"question": "Known question?", "answer": "Known answer."}],
+            db,
+            redis,
+            mode="existing",
+            workspace=workspace,
+        )
+
+    assert str(exc.value) == "clarification_answers_missing"
+    db.execute.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_persist_existing_answers_sanitises_html_in_answers() -> None:
+    workspace_id = uuid4()
+    question = "What is the constraint?"
+    workspace = SimpleNamespace(
+        id=workspace_id,
+        clarification_qa=[{"question": question, "answer": "Old answer."}],
+    )
+    redis = _FakeRedis()
+    captured: dict = {}
+
+    class _CapturingDB:
+        async def execute(self, statement):
+            captured["statement"] = statement
+
+        async def commit(self):
+            captured["committed"] = True
+
+    await persist_answers(
+        workspace_id,
+        [
+            {
+                "question": question,
+                "answer": "Keep latency under <script>alert(1)</script> 200ms.",
+            }
+        ],
+        _CapturingDB(),
+        redis,
+        mode="existing",
+        workspace=workspace,
+    )
+
+    stored = captured["statement"].compile().params["clarification_qa"]
+    assert "<script>" not in stored[0]["answer"]
+    assert "Keep latency under" in stored[0]["answer"]
+
+
+@pytest.mark.asyncio
 async def test_persist_answers_raises_when_round_expired() -> None:
     workspace_id = uuid4()
     redis = _FakeRedis()  # Empty — no round cached.
@@ -231,6 +360,63 @@ async def test_persist_answers_raises_when_round_expired() -> None:
             db,
             redis,
         )
+
+
+@pytest.mark.asyncio
+async def test_persist_spec_clarification_passes_existing_mode_to_service() -> None:
+    from fastapi import Response
+
+    from routers.workspace import persist_spec_clarification
+    from schemas.workspace import ClarifySubmitRequest
+
+    workspace_id = uuid4()
+    user = SimpleNamespace(id=uuid4())
+    workspace = SimpleNamespace(
+        id=workspace_id,
+        user_id=user.id,
+        clarification_qa=[{"question": "Known question?", "answer": "Old answer."}],
+    )
+    db = MagicMock()
+    redis = _FakeRedis()
+
+    with (
+        pytest.MonkeyPatch.context() as monkeypatch,
+    ):
+        get_mock = AsyncMock(return_value=workspace)
+        persist_mock = AsyncMock()
+        monkeypatch.setattr(
+            "routers.workspace.workspace_service.get",
+            get_mock,
+        )
+        monkeypatch.setattr(
+            "routers.workspace.spec_clarifier.persist_answers",
+            persist_mock,
+        )
+
+        response = await persist_spec_clarification(
+            workspace_id,
+            ClarifySubmitRequest(
+                answers=[
+                    {"question": "Known question?", "answer": "Updated answer."}
+                ],
+                mode="existing",
+            ),
+            user=user,
+            db=db,
+            redis=redis,
+        )
+
+    assert isinstance(response, Response)
+    assert response.status_code == 204
+    get_mock.assert_awaited_once_with(workspace_id, user.id, db)
+    persist_mock.assert_awaited_once_with(
+        workspace_id=workspace_id,
+        answers=[{"question": "Known question?", "answer": "Updated answer."}],
+        db=db,
+        redis=redis,
+        mode="existing",
+        workspace=workspace,
+    )
 
 
 def test_spec_clarifier_module_has_no_credit_charges() -> None:

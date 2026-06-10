@@ -12,9 +12,12 @@ Two entry points:
     timeout plus broad exception swallowing keeps the standard
     /generate path open if the judge model is unreachable.
 
-  persist_answers(workspace_id, answers, db, redis) -> None
-    Validates each answer's ``question`` is in the cached round, then
-    sanitises the answer text (sanitize_text + PromptGuard) before
+  persist_answers(
+      workspace_id, answers, db, redis, mode="round", workspace=None
+  ) -> None
+    Validates each answer's ``question`` against either the cached Redis
+    round (first-time flow) or already-saved workspace Q&A (retry/edit flow),
+    then sanitises the answer text (sanitize_text + PromptGuard) before
     writing the Q&A pairs to ``Workspace.clarification_qa`` as JSONB.
 
 Design invariants enforced by the harness:
@@ -38,7 +41,7 @@ import asyncio
 import json
 import logging
 import re
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID
 
 from redis.asyncio import Redis
@@ -185,17 +188,64 @@ class ClarificationValidationError(Exception):
     """Raised when a submitted answer's question is not in the cached round."""
 
 
+ClarificationSubmitMode = Literal["round", "existing"]
+
+
+def _question_from_qa(item: Any) -> str | None:
+    if isinstance(item, dict):
+        value = item.get("question")
+    else:
+        value = getattr(item, "question", None)
+    return value if isinstance(value, str) and value.strip() else None
+
+
+async def _allowed_questions_for_mode(
+    workspace_id: UUID,
+    redis: Redis,
+    mode: ClarificationSubmitMode,
+    workspace: Workspace | None,
+) -> set[str]:
+    if mode == "round":
+        raw_round = await redis.get(_round_key(workspace_id))
+        if not raw_round:
+            raise ClarificationValidationError("clarification_round_expired")
+        try:
+            loaded = json.loads(raw_round)
+        except json.JSONDecodeError:
+            raise ClarificationValidationError("clarification_round_corrupt") from None
+        if not isinstance(loaded, list):
+            raise ClarificationValidationError("clarification_round_corrupt")
+        return {q for q in loaded if isinstance(q, str)}
+
+    existing = getattr(workspace, "clarification_qa", None) if workspace else None
+    if not existing:
+        raise ClarificationValidationError("clarification_answers_missing")
+
+    allowed = {
+        question
+        for item in existing
+        if (question := _question_from_qa(item)) is not None
+    }
+    if not allowed:
+        raise ClarificationValidationError("clarification_answers_missing")
+    return allowed
+
+
 async def persist_answers(
     workspace_id: UUID,
     answers: list[dict[str, str]],
     db: AsyncSession,
     redis: Redis,
+    *,
+    mode: ClarificationSubmitMode = "round",
+    workspace: Workspace | None = None,
 ) -> None:
     """Sanitise and persist user-supplied clarification answers.
 
     Raises ``ClarificationValidationError`` if any submitted ``question`` is
-    not in the cached round held in Redis. The cache is loaded once at the
-    start of the call and the check is O(1) per answer.
+    not in the current validation source: Redis for ``mode="round"`` or the
+    saved workspace Q&A for ``mode="existing"``. The source is loaded once at
+    the start of the call and the check is O(1) per answer.
 
     Each answer's ``answer`` text is sanitised (HTML stripped) and scanned
     by ``PromptGuard``; if the guard rejects the answer it is dropped from
@@ -204,20 +254,24 @@ async def persist_answers(
     aggressive — but answers that pass through are guaranteed safe to
     inject into the spec prompt.
     """
-    raw_round = await redis.get(_round_key(workspace_id))
-    if not raw_round:
-        raise ClarificationValidationError("clarification_round_expired")
-    try:
-        allowed_questions = set(json.loads(raw_round))
-    except json.JSONDecodeError:
-        raise ClarificationValidationError("clarification_round_corrupt") from None
+    allowed_questions = await _allowed_questions_for_mode(
+        workspace_id,
+        redis,
+        mode,
+        workspace,
+    )
+    unknown_question_error = (
+        "question_not_in_existing_answers"
+        if mode == "existing"
+        else "question_not_in_round"
+    )
 
     cleaned: list[dict[str, str]] = []
     for entry in answers:
         question = entry.get("question", "")
         answer = entry.get("answer", "")
         if question not in allowed_questions:
-            raise ClarificationValidationError("question_not_in_round")
+            raise ClarificationValidationError(unknown_question_error)
         if not answer.strip():
             continue
         sanitised = sanitize_text(answer)
@@ -234,6 +288,8 @@ async def persist_answers(
         cleaned.append({"question": question[:1000], "answer": sanitised[:1000]})
 
     if not cleaned:
+        if mode == "existing":
+            raise ClarificationValidationError("clarification_answers_empty")
         # Caller treats this as a no-op success — same as Skip.
         return
 
@@ -243,6 +299,6 @@ async def persist_answers(
         .values(clarification_qa=cleaned)
     )
     await db.commit()
-    # The round key has done its job; drop it so future POST /clarify
-    # calls start fresh.
+    # The round key has done its job, and existing-mode saves should also clear
+    # any stale round so the next new clarification starts from a clean state.
     await redis.delete(_round_key(workspace_id))

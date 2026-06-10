@@ -560,6 +560,8 @@ export interface ClarifyAnswer {
   answer: string
 }
 
+export type ClarifySubmitMode = "round" | "existing"
+
 export interface ClarifyResponse {
   questions: ClarifyQuestion[]
 }
@@ -591,8 +593,9 @@ export async function requestClarification(
 export async function persistClarification(
   workspaceId: string,
   answers: ClarifyAnswer[],
+  mode: ClarifySubmitMode = "round",
 ): Promise<void> {
-  await api.patch(`/workspaces/${workspaceId}/clarify`, { answers })
+  await api.patch(`/workspaces/${workspaceId}/clarify`, { answers, mode })
 }
 
 export async function getCredits(): Promise<CreditBalance> {

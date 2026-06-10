@@ -24,7 +24,10 @@ import { TaskValidationPanel } from "../components/workspace/TaskValidationPanel
 import { TaskCompletionPanel } from "../components/workspace/TaskCompletionPanel"
 import { IncrementTimeline } from "../components/workspace/IncrementTimeline"
 import { ExportGitHubModal } from "../components/workspace/ExportGitHubModal"
-import { useActionAlert } from "../components/shared/ActionAlert"
+import {
+  useActionAlert,
+  type ActionAlertAction,
+} from "../components/shared/ActionAlert"
 import { useGitHubSync } from "../hooks/useGitHubSync"
 // ExportPDFButton — T-USE-08 contract; PDF export logic is inlined in handlePdfExport
 import type { } from "../components/workspace/ExportPDFButton"
@@ -66,6 +69,7 @@ import {
   updateWorkspace,
   updateStageContent,
   downloadStoryboard,
+  type ClarifyAnswer,
 } from "../services/api"
 import { useStageStore } from "../store/stageStore"
 import { useWorkspaceStore } from "../store/workspaceStore"
@@ -128,6 +132,10 @@ interface StoryboardFlowMessage {
 interface PendingCreditAction {
   action: CreditAction
   stageId: string
+}
+
+interface PendingClarifyAction extends PendingCreditAction {
+  mode: "new" | "existing"
 }
 
 function getGenerationActionLabel(operation: GenerationActivityOperation) {
@@ -373,7 +381,7 @@ export default function Workspace() {
     useState<StoryboardFlowMessage | null>(null)
   const [storyboardGenerationFailure, setStoryboardGenerationFailure] =
     useState<string | null>(null)
-  const [pendingClarify, setPendingClarify] = useState<PendingCreditAction | null>(
+  const [pendingClarify, setPendingClarify] = useState<PendingClarifyAction | null>(
     null,
   )
   const [generationActivity, setGenerationActivity] =
@@ -529,6 +537,8 @@ export default function Workspace() {
   const hasStaleStoryboardPrerequisite = stages.some(
     (stage) => stage.status === "stale",
   )
+  const savedClarificationAnswers = currentWorkspace?.clarification_qa ?? []
+  const hasSavedClarificationAnswers = savedClarificationAnswers.length > 0
   const shouldShowCreateStoryboardCta =
     canCreateStoryboard && latestStoryboard === null && !isStoryboardLoading
 
@@ -806,6 +816,20 @@ export default function Workspace() {
     setStages,
   ])
 
+  const updateClarificationAnswersLocally = useCallback(
+    (answers: ClarifyAnswer[]) => {
+      if (!currentWorkspace || answers.length === 0) return
+      setCurrentWorkspace({
+        ...currentWorkspace,
+        clarification_qa: answers.map((entry) => ({
+          question: entry.question,
+          answer: entry.answer,
+        })),
+      })
+    },
+    [currentWorkspace, setCurrentWorkspace],
+  )
+
   // Declared before confirmCredits/proceedThroughReviewGate which call it
   const runGeneration = useCallback(
     async (
@@ -907,22 +931,31 @@ export default function Workspace() {
         action === "generate" &&
         activeStage.type === "spec" &&
         activeStage.current_version === 0 &&
-        !(currentWorkspace?.clarification_qa && currentWorkspace.clarification_qa.length > 0)
+        !hasSavedClarificationAnswers
       if (needsClarification) {
-        setPendingClarify({ action, stageId: activeStage.id })
+        setPendingClarify({ action, stageId: activeStage.id, mode: "new" })
         return
       }
       setPendingCredit({ action, stageId: activeStage.id })
     },
-    [activeStage, currentWorkspace?.clarification_qa, guardWorkspaceMutation, saveProblemStatement],
+    [
+      activeStage,
+      guardWorkspaceMutation,
+      hasSavedClarificationAnswers,
+      saveProblemStatement,
+    ],
   )
 
-  const handleClarifyProceed = useCallback(() => {
-    if (!pendingClarify) return
-    const next = pendingClarify
-    setPendingClarify(null)
-    setPendingCredit(next)
-  }, [pendingClarify])
+  const handleClarifyProceed = useCallback(
+    (answers: ClarifyAnswer[]) => {
+      if (!pendingClarify) return
+      updateClarificationAnswersLocally(answers)
+      const next = pendingClarify
+      setPendingClarify(null)
+      setPendingCredit(next)
+    },
+    [pendingClarify, updateClarificationAnswersLocally],
+  )
 
   const handleClarifyCancel = useCallback(() => {
     setPendingClarify(null)
@@ -953,30 +986,69 @@ export default function Workspace() {
       "internal_error",
       "generic",
     ])
-    const primaryAction =
-      streamError.code === "insufficient_credits"
-        ? {
-            label: "View billing",
-            onSelect: () => navigate("/billing"),
-          }
-        : streamError.code === "stage_not_generatable" && activeStage
-          ? {
-              label: "Unlock stage",
-              onSelect: () => {
-                void performRollback(activeStage.current_version)
-              },
-            }
-          : retryable.has(streamError.code)
-            ? {
-                label: "Try again",
-                onSelect: () => {
-                  void runGeneration(lastGenerationActionRef.current)
-                },
-              }
-            : undefined
+    const canRetrySpecWithAnswers =
+      retryable.has(streamError.code) &&
+      activeStage !== null &&
+      activeStage.type === "spec" &&
+      activeStage.current_version === 0 &&
+      lastGenerationActionRef.current === "generate" &&
+      hasSavedClarificationAnswers
 
-    showAlert(actionAlertFromStreamError(streamError, { primaryAction }))
-  }, [activeStage, navigate, performRollback, runGeneration, showAlert, streamError])
+    let primaryAction: ActionAlertAction | undefined
+    if (streamError.code === "insufficient_credits") {
+      primaryAction = {
+        label: "View billing",
+        onSelect: () => navigate("/billing"),
+      }
+    } else if (streamError.code === "stage_not_generatable" && activeStage) {
+      primaryAction = {
+        label: "Unlock stage",
+        onSelect: () => {
+          void performRollback(activeStage.current_version)
+        },
+      }
+    } else if (canRetrySpecWithAnswers && activeStage) {
+      primaryAction = {
+        label: "Retry with answers",
+        onSelect: () => {
+          setPendingCredit({ action: "generate", stageId: activeStage.id })
+        },
+      }
+    } else if (retryable.has(streamError.code)) {
+      primaryAction = {
+        label: "Try again",
+        onSelect: () => {
+          void runGeneration(lastGenerationActionRef.current)
+        },
+      }
+    }
+
+    let secondaryAction: ActionAlertAction | undefined
+    if (canRetrySpecWithAnswers && activeStage) {
+      secondaryAction = {
+        label: "Edit answers",
+        onSelect: () => {
+          setPendingClarify({
+            action: "generate",
+            stageId: activeStage.id,
+            mode: "existing",
+          })
+        },
+      }
+    }
+
+    showAlert(
+      actionAlertFromStreamError(streamError, { primaryAction, secondaryAction }),
+    )
+  }, [
+    activeStage,
+    hasSavedClarificationAnswers,
+    navigate,
+    performRollback,
+    runGeneration,
+    showAlert,
+    streamError,
+  ])
 
   const requestRefine = useCallback(() => {
     if (guardWorkspaceMutation()) return
@@ -2285,6 +2357,10 @@ export default function Workspace() {
       {pendingClarify && id && (
         <SpecClarificationModal
           workspaceId={id}
+          mode={pendingClarify.mode}
+          existingAnswers={
+            pendingClarify.mode === "existing" ? savedClarificationAnswers : undefined
+          }
           onProceed={handleClarifyProceed}
           onCancel={handleClarifyCancel}
         />

@@ -122,14 +122,19 @@ class ClarifyingAnswer(BaseModel):
 class ClarifySubmitRequest(BaseModel):
     """Payload for PATCH /workspaces/{id}/clarify.
 
-    Every ``question`` must match (string-equal) a question from the
-    workspace's most recent ``POST /clarify`` round held in Redis;
-    answers whose question is not in the cached round are rejected with
-    400 so a user cannot smuggle arbitrary text past the validator by
-    fabricating a question. Each answer is sanitised before persistence.
+    ``mode="round"`` is the original first-time flow: every ``question`` must
+    match (string-equal) a question from the workspace's most recent
+    ``POST /clarify`` round held in Redis.
+
+    ``mode="existing"`` is the retry/edit flow after answers already exist on
+    the workspace: every ``question`` must match a saved clarification question
+    on that owned workspace. This avoids another judge-model clarification call
+    while still rejecting fabricated questions. Each answer is sanitised before
+    persistence in both modes.
     """
 
     answers: list[ClarifyingAnswer] = Field(min_length=1)
+    mode: Literal["round", "existing"] = "round"
 
 
 class WorkspaceResponse(BaseModel):
