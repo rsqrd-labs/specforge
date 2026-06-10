@@ -10,6 +10,7 @@ interface StoryboardToolbarProps {
   storyboard: StoryboardToolbarItem
   isBusy?: boolean
   openLabel?: string
+  openAriaLabel?: string
   onOpen: () => void
   onPresent: () => void
   onShare: () => void
@@ -25,7 +26,8 @@ function formatStatus(status: StoryboardStatus): string {
 export function StoryboardToolbar({
   storyboard,
   isBusy = false,
-  openLabel = "Open Storyboard",
+  openLabel = "Open",
+  openAriaLabel = "Open Storyboard",
   onOpen,
   onPresent,
   onShare,
@@ -91,6 +93,7 @@ export function StoryboardToolbar({
           className="storyboard-open-button"
           onClick={onOpen}
           disabled={!isPresentable || isBusy}
+          aria-label={openAriaLabel}
         >
           {openLabel}
         </button>

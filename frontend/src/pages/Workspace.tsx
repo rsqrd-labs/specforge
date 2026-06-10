@@ -99,17 +99,20 @@ const STORYBOARD_POLL_DELAY_MS = 2500
 const REFINE_MODE_OPTIONS = [
   {
     mode: "focused",
-    label: "Focused patch",
+    label: "Focused",
+    submitLabel: "Refine",
     detail: "Smallest safe edit",
   },
   {
     mode: "section",
-    label: "Section rewrite",
+    label: "Section",
+    submitLabel: "Rewrite",
     detail: "Broader local pass",
   },
   {
     mode: "full",
-    label: "Full stage regenerate",
+    label: "Full",
+    submitLabel: "Regenerate",
     detail: "Deliberate replacement",
   },
 ] as const
@@ -130,7 +133,7 @@ interface PendingCreditAction {
 function getGenerationActionLabel(operation: GenerationActivityOperation) {
   switch (operation) {
     case "focused-patch":
-      return "Preparing focused patch"
+      return "Preparing refinement"
     case "quality-gate-regenerate":
       return "Regenerating with gate feedback"
     case "regenerate-gaps":
@@ -1632,9 +1635,10 @@ export default function Workspace() {
                     className="ws-export-item"
                     disabled={!canExport || isExporting}
                     onClick={() => { void handleExport(); setShowExportMenu(false) }}
+                    aria-label="Download ZIP"
                   >
                     <DownloadIcon />
-                    <span>{isExporting ? "Exporting…" : "Download ZIP"}</span>
+                    <span>{isExporting ? "Exporting…" : "ZIP"}</span>
                   </button>
                   <button
                     type="button"
@@ -1643,9 +1647,10 @@ export default function Workspace() {
                     disabled={!allFinalised || isPdfExporting}
                     data-tooltip={!allFinalised ? pdfDisabledReason : undefined}
                     onClick={() => void handlePdfExport()}
+                    aria-label="Export PDF"
                   >
                     <PDFIcon />
-                    <span>{isPdfExporting ? "Generating PDF…" : "Export PDF"}</span>
+                    <span>{isPdfExporting ? "Generating PDF…" : "PDF"}</span>
                   </button>
                   <div
                     className="ws-export-item-wrap"
@@ -1658,9 +1663,10 @@ export default function Workspace() {
                       className={`ws-export-item ${allFinalised && isGitHubConnected ? "ready" : ""}`}
                       disabled={!canExport || !isGitHubConnected}
                       onClick={() => { setShowGitHubExport(true); setShowExportMenu(false) }}
+                      aria-label="Export to GitHub"
                     >
                       <GitHubIcon />
-                      <span>Push to GitHub</span>
+                      <span>GitHub</span>
                     </button>
                   </div>
                 </div>
@@ -1737,7 +1743,8 @@ export default function Workspace() {
           <StoryboardToolbar
             storyboard={latestStoryboard}
             isBusy={isStoryboardBusy}
-            openLabel="Open Storyboard"
+            openLabel="Open"
+            openAriaLabel="Open Storyboard"
             onOpen={handleOpenStoryboard}
             onPresent={handlePresentStoryboard}
             onShare={handleShareStoryboard}
@@ -1758,13 +1765,14 @@ export default function Workspace() {
             <button
               type="button"
               className="gen-btn-primary"
+              aria-label="Create Storyboard"
               onClick={() => {
                 setStoryboardGenerationFailure(null)
                 setShowCreateStoryboard(true)
               }}
-            >
-              Create Storyboard
-            </button>
+	            >
+	              Create
+	            </button>
           </section>
         ) : !isStoryboardLoading ? (
           <section className="storyboard-entry-card muted" aria-label="Storyboard locked">
@@ -1828,7 +1836,7 @@ export default function Workspace() {
             {isLargeRefineSelection && refineMode !== "full" && (
               <div className="refine-selection-advice" role="status">
                 <strong>Large selection</strong>
-                <span>Full stage regenerate may produce a cleaner result.</span>
+                <span>Regenerate may produce a cleaner result.</span>
               </div>
             )}
             <input
@@ -1851,7 +1859,7 @@ export default function Workspace() {
             <button type="submit" className="gen-btn-primary" disabled={isGenerationBusy}>
               {activeBusyOperation === "focused-patch"
                 ? "Preparing patch..."
-                : activeRefineMode.label}
+                : activeRefineMode.submitLabel}
             </button>
           </form>
         )}

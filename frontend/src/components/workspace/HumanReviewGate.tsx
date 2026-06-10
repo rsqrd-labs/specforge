@@ -45,10 +45,10 @@ export function HumanReviewGate({
 
           <div className="modal-footer">
             <button type="button" onClick={onClose} className="modal-cancel">
-              Go back
+              Back
             </button>
             <button type="button" onClick={onProceed} className="modal-submit">
-              Proceed
+              Generate
             </button>
           </div>
         </div>

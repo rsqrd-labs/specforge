@@ -11,6 +11,7 @@ export function CoveragePanel({ stage, evalResult, freeRegenUsed, onRegenerate }
   if (stage.type !== "harness") return null
 
   const uncoveredReqs = evalResult?.uncovered_reqs ?? []
+  const regenerateHelpId = `${stage.id}-coverage-regenerate-help`
 
   if (!evalResult || uncoveredReqs.length === 0) return null
 
@@ -34,14 +35,19 @@ export function CoveragePanel({ stage, evalResult, freeRegenUsed, onRegenerate }
         ))}
       </ul>
 
-      <button className="ws-action-btn" onClick={onRegenerate}>
-        {freeRegenUsed ? "Regenerate harness — 10 credits" : "Regenerate harness — free"}
+      <button
+        className="ws-action-btn"
+        onClick={onRegenerate}
+        aria-label="Regenerate HARNESS"
+        aria-describedby={regenerateHelpId}
+      >
+        Regenerate
       </button>
 
-      <p className="ws-panel-muted">
+      <p id={regenerateHelpId} className="ws-panel-muted">
         {freeRegenUsed
-          ? "These gaps are genuine — the harness cannot infer them from the current Plan. Refine the Plan to add the missing context, then regenerate."
-          : "These gaps are on us, so this regeneration costs no credits. If gaps remain afterwards, your Plan needs more detail — use Refine on the Plan to add the missing context, then regenerate."}
+          ? "This regeneration costs 10 credits. These gaps are genuine — the harness cannot infer them from the current Plan. Refine the Plan to add the missing context, then regenerate."
+          : "This regeneration is free. These gaps are on us. If gaps remain afterwards, your Plan needs more detail — use Refine on the Plan to add the missing context, then regenerate."}
       </p>
     </div>
   )

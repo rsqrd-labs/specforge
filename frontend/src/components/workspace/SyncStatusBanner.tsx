@@ -6,8 +6,8 @@ import { DriftIcon, GitHubIcon } from "../shared/icons"
  * Two calm, informational GitHub-sync banners that share one restrained shell:
  *
  *  - "drift": when the workspace's Tasks changed since the last push
- *    (`out_of_sync`). Slate, not alarm-red — it informs and offers a quiet
- *    saffron "Re-sync changed tasks" action. It does not shout.
+   *    (`out_of_sync`). Slate, not alarm-red — it informs and offers a quiet
+   *    saffron Sync action. It does not shout.
  *  - "disconnected": when the install is suspended/removed. The panel folds to a
  *    single slate line — "Sync paused — reconnect GitHub" — linking to Settings.
  *    No broken-looking empty panel, no raw error.
@@ -30,8 +30,12 @@ export function SyncStatusBanner({
           <GitHubIcon />
         </span>
         <span className="ws-sync-banner-text">Sync paused</span>
-        <Link to="/settings" className="ws-sync-banner-action">
-          Reconnect GitHub →
+        <Link
+          to="/settings"
+          className="ws-sync-banner-action"
+          aria-label="Reconnect GitHub"
+        >
+          Reconnect
         </Link>
       </div>
     )
@@ -51,8 +55,9 @@ export function SyncStatusBanner({
         className="ws-sync-banner-action"
         onClick={onResync}
         disabled={resyncing}
+        aria-label="Sync changed tasks"
       >
-        {resyncing ? "Re-syncing…" : "Re-sync changed tasks"}
+        {resyncing ? "Syncing..." : "Sync"}
       </button>
     </div>
   )

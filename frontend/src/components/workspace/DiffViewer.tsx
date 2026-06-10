@@ -52,8 +52,12 @@ export function DiffViewer({ diff, proposed, onAccept, onReject }: DiffViewerPro
         <button onClick={onReject} className="gen-btn-secondary">
           Reject
         </button>
-        <button onClick={() => onAccept(proposed)} className="gen-btn-primary">
-          Accept changes
+        <button
+          onClick={() => onAccept(proposed)}
+          className="gen-btn-primary"
+          aria-label="Accept changes"
+        >
+          Accept
         </button>
       </div>
     </div>

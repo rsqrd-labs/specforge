@@ -104,7 +104,7 @@ describe("GenerateBar", () => {
     expect(screen.getByRole("status")).toHaveTextContent("Generating stage...")
   })
 
-  it("labels focused patch busy work distinctly", () => {
+  it("labels refinement busy work distinctly", () => {
     const stage = makeStage({ status: "draft", content: "Existing spec" })
     render(
       <GenerateBar
@@ -118,28 +118,38 @@ describe("GenerateBar", () => {
         busyOperation="focused-patch"
       />,
     )
-    expect(screen.getByRole("status")).toHaveTextContent("Preparing focused patch...")
+    expect(screen.getByRole("status")).toHaveTextContent("Preparing refinement...")
     expect(
-      screen.queryByRole("button", { name: /focused patch refine/i }),
+      screen.queryByRole("button", { name: /refine spec/i }),
     ).not.toBeInTheDocument()
   })
 
-  it("shows Generate button when stage is draft with no content", () => {
-    const stage = makeStage({ status: "draft", content: null })
-    render(
-      <GenerateBar
-        stage={stage}
-        onGenerate={noop}
-        onRegenerate={noop}
-        onRefine={noop}
-        onFinalise={noop}
-        onUnlock={noop}
-      />,
-    )
-    expect(screen.getByRole("button", { name: /generate/i })).toBeInTheDocument()
-  })
+  it.each([
+    ["spec", "SPEC"],
+    ["plan", "PLAN"],
+    ["harness", "HARNESS"],
+    ["tasks", "TASKS"],
+  ] as const)(
+    "shows a concise Generate button with %s context",
+    (type, label) => {
+      const stage = makeStage({ type, status: "draft", content: null })
+      render(
+        <GenerateBar
+          stage={stage}
+          onGenerate={noop}
+          onRegenerate={noop}
+          onRefine={noop}
+          onFinalise={noop}
+          onUnlock={noop}
+        />,
+      )
 
-  it("labels regenerate as a deliberate full-stage action", () => {
+      const button = screen.getByRole("button", { name: `Generate ${label}` })
+      expect(button).toHaveTextContent(/^Generate$/)
+    },
+  )
+
+  it("labels available stage actions with concise visible copy", () => {
     const stage = makeStage({ status: "draft", content: "Existing spec" })
     render(
       <GenerateBar
@@ -151,15 +161,48 @@ describe("GenerateBar", () => {
         onUnlock={noop}
       />,
     )
-    expect(
-      screen.getByRole("button", { name: /full stage regenerate/i }),
-    ).toHaveClass("gen-btn-deliberate")
-    expect(
-      screen.getByRole("button", { name: /focused patch refine/i }),
-    ).toBeInTheDocument()
-    expect(
-      screen.getByRole("button", { name: /final quality pass/i }),
-    ).toBeInTheDocument()
+    const regenerate = screen.getByRole("button", { name: /regenerate spec/i })
+    expect(regenerate).toHaveTextContent(/^Regenerate$/)
+    expect(regenerate).toHaveClass("gen-btn-deliberate")
+    expect(screen.getByRole("button", { name: /refine spec/i })).toHaveTextContent(/^Refine$/)
+    expect(screen.getByRole("button", { name: /finalise spec/i })).toHaveTextContent(/^Finalise$/)
+  })
+
+  it("does not render obsolete internal action labels", () => {
+    const commonProps = {
+      onGenerate: noop,
+      onRegenerate: noop,
+      onRefine: noop,
+      onFinalise: noop,
+      onUnlock: noop,
+    }
+    render(
+      <>
+        {(["spec", "plan", "harness", "tasks"] as const).map((type) => (
+          <GenerateBar
+            key={type}
+            stage={makeStage({ id: `stage-${type}`, type, status: "draft", content: null })}
+            {...commonProps}
+          />
+        ))}
+        <GenerateBar
+          stage={makeStage({ id: "stage-with-content", status: "draft", content: "Existing spec" })}
+          {...commonProps}
+        />
+      </>,
+    )
+
+    for (const oldLabel of [
+      "Generate " + "requirements pass",
+      "Generate " + "architecture pass",
+      "Generate " + "validation harness",
+      "Generate " + "implementation plan",
+      "Full stage " + "regenerate",
+      "Focused " + "patch",
+      "Final quality " + "pass",
+    ]) {
+      expect(screen.queryByText(oldLabel)).not.toBeInTheDocument()
+    }
   })
 
   it("disables finalise while quality gate is blocked", () => {
@@ -175,7 +218,7 @@ describe("GenerateBar", () => {
         qualityGateBlocked
       />,
     )
-    expect(screen.getByRole("button", { name: /final quality pass/i })).toBeDisabled()
+    expect(screen.getByRole("button", { name: /finalise spec/i })).toBeDisabled()
   })
 
   it("returns null when stage is locked", () => {
@@ -206,7 +249,7 @@ describe("StalenessWarning", () => {
       />,
     )
     expect(screen.getByRole("button", { name: /regenerate/i })).toBeInTheDocument()
-    expect(screen.getByRole("button", { name: /keep as-is/i })).toBeInTheDocument()
+    expect(screen.getByRole("button", { name: /^keep$/i })).toBeInTheDocument()
     expect(screen.getByText(/SPEC\.md/)).toBeInTheDocument()
   })
 
@@ -254,7 +297,7 @@ describe("HumanReviewGate", () => {
     expect(screen.getByText(/SPEC\.md/)).toBeInTheDocument()
   })
 
-  it("calls onProceed when Proceed is clicked", async () => {
+  it("calls onProceed when Generate is clicked", async () => {
     const user = userEvent.setup()
     const onProceed = vi.fn()
     render(
@@ -265,11 +308,11 @@ describe("HumanReviewGate", () => {
         onClose={vi.fn()}
       />,
     )
-    await user.click(screen.getByRole("button", { name: /proceed/i }))
+    await user.click(screen.getByRole("button", { name: /^generate$/i }))
     expect(onProceed).toHaveBeenCalledOnce()
   })
 
-  it("calls onClose when Cancel is clicked", async () => {
+  it("calls onClose when Back is clicked", async () => {
     const user = userEvent.setup()
     const onClose = vi.fn()
     render(
@@ -280,7 +323,7 @@ describe("HumanReviewGate", () => {
         onClose={onClose}
       />,
     )
-    await user.click(screen.getByRole("button", { name: /go back/i }))
+    await user.click(screen.getByRole("button", { name: /^back$/i }))
     expect(onClose).toHaveBeenCalledOnce()
   })
 })

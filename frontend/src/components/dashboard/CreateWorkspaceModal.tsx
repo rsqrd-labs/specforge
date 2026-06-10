@@ -342,8 +342,9 @@ export function CreateWorkspaceModal({
                 type="submit"
                 disabled={isSubmitting || selectableProviders.length === 0}
                 className="modal-submit"
+                aria-label="Generate workspace spec"
               >
-                {isSubmitting ? "Generating spec…" : "Start shaping it"}
+                {isSubmitting ? "Generating spec…" : "Generate"}
               </button>
             </div>
           </div>

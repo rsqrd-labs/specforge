@@ -185,8 +185,9 @@ export function SharePublicLinkModal({
                 type="button"
                 className="modal-submit"
                 onClick={() => void handleEnable()}
+                aria-label="Enable public sharing"
               >
-                Enable public sharing
+                Enable
               </button>
             </div>
           )}
@@ -206,7 +207,7 @@ export function SharePublicLinkModal({
                   className={`share-modal-copy ${copiedAt ? "copied" : ""}`}
                   onClick={() => void handleCopy()}
                 >
-                  {copiedAt ? "Copied ✓" : "Copy"}
+                  {copiedAt ? "Copied" : "Copy"}
                 </button>
               </div>
 
@@ -245,8 +246,9 @@ export function SharePublicLinkModal({
                     type="button"
                     className="share-modal-rotate-btn"
                     onClick={() => void handleRotate()}
+                    aria-label="Rotate public link"
                   >
-                    Rotate link
+                    Rotate
                   </button>
                 </div>
               </details>

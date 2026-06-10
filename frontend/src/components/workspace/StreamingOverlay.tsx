@@ -268,7 +268,7 @@ function getActivityCopy(activity: GenerationActivityInfo) {
   if (activity.operation === "focused-patch") {
     return {
       stageLabel,
-      title: "Preparing focused patch",
+      title: "Preparing refinement",
       detail: "Reviewing the selected text and shaping a precise edit.",
     }
   }

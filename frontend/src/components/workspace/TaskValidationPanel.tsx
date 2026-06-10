@@ -69,12 +69,13 @@ export function TaskValidationPanel({
 
             {onNavigateToHarness && (
               <button
-                type="button"
-                className="ws-issue-action"
-                onClick={onNavigateToHarness}
-              >
-                Open Harness →
-              </button>
+                  type="button"
+                  className="ws-issue-action"
+                  onClick={onNavigateToHarness}
+                  aria-label="Open HARNESS"
+                >
+                  Open
+                </button>
             )}
           </li>
         ))}

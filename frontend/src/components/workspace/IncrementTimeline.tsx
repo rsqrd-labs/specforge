@@ -10,14 +10,14 @@
  * Layout sketch (a Tasks-stage side panel, sibling of TaskCompletionPanel):
  *   ┌ ws-panel-section ───────────────────────────────────┐
  *   │ INCREMENTS                                           │
- *   │ [ What do you want to add?                    Add → ]│  ← compose
- *   │ ● Increment 2 · Ready            Push to GitHub →    │  ← newest on top
+ *   │ [ What do you want to add?                       Add ]│  ← compose
+ *   │ ● Increment 2 · Ready                       Push     │  ← newest on top
  *   │ │                                                    │
  *   │ ✓ Increment 1 · Pushed                               │  ← node + rail
  *   │ │                                                    │
  *   │ ● v1 · Baseline                                      │  ← anchors bottom
  *   │ ── Ideas ─────────────────────────────────────────  │
- *   │ ✦ Dark mode          Promote →                       │
+ *   │ ✦ Dark mode          Promote                         │
  *   └──────────────────────────────────────────────────────┘
  *
  * Visual hierarchy: the saffron rail + nodes are the spine; titles lead, a quiet
@@ -298,8 +298,9 @@ export function IncrementTimeline({
             className="ws-timeline-add"
             disabled={!canSubmit}
             onClick={() => void handleCreate()}
+            aria-label="Add increment"
           >
-            Add increment →
+            Add
           </button>
         </div>
       </div>
@@ -360,8 +361,9 @@ export function IncrementTimeline({
                   className="ws-timeline-push"
                   disabled={pushingId === inc.id}
                   onClick={() => void handlePush(inc)}
+                  aria-label={`Push increment ${inc.sequence} to GitHub`}
                 >
-                  {pushingId === inc.id ? "Pushing…" : "Push to GitHub →"}
+                  {pushingId === inc.id ? "Pushing…" : "Push"}
                 </button>
               )}
             </li>

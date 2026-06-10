@@ -236,8 +236,9 @@ export function CreateStoryboardModal({
               onClick={() => void handleConfirm()}
               disabled={blocked}
               className="modal-submit"
+              aria-label="Create Storyboard"
             >
-              {isPending || isSubmitting ? "Starting..." : "Create Storyboard"}
+              {isPending || isSubmitting ? "Starting..." : "Create"}
             </button>
           </div>
         </div>

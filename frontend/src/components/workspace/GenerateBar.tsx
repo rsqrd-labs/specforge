@@ -28,7 +28,7 @@ export function GenerateBar({
 }: GenerateBarProps) {
   if (stage.status === "locked") return null
 
-  const generateLabel = getGenerateLabel(stage.type)
+  const stageLabel = getStageLabel(stage.type)
 
   if (isBusy || stage.status === "in_progress") {
     return (
@@ -47,8 +47,9 @@ export function GenerateBar({
           onClick={onGenerate}
           className="gen-btn-primary"
           disabled={isBusy}
+          aria-label={`Generate ${stageLabel}`}
         >
-          {generateLabel}
+          Generate
         </button>
       )}
 
@@ -58,8 +59,9 @@ export function GenerateBar({
           onClick={onUnlock}
           className="gen-btn-secondary"
           disabled={isBusy}
+          aria-label={`Unlock ${stageLabel}`}
         >
-          Unlock stage
+          Unlock
         </button>
       ) : (stage.status === "stale" ||
         (stage.status === "draft" && stage.content)) ? (
@@ -68,8 +70,9 @@ export function GenerateBar({
           onClick={onRegenerate}
           className="gen-btn-secondary gen-btn-deliberate"
           disabled={isBusy}
+          aria-label={`Regenerate ${stageLabel}`}
         >
-          Full stage regenerate
+          Regenerate
         </button>
       ) : null}
 
@@ -78,10 +81,10 @@ export function GenerateBar({
           type="button"
           onClick={onRefine}
           className="gen-btn-secondary"
-          aria-label="Focused patch refine"
+          aria-label={`Refine ${stageLabel}`}
           disabled={isBusy}
         >
-          Focused patch
+          Refine
         </button>
       )}
 
@@ -92,8 +95,9 @@ export function GenerateBar({
           className="gen-btn-primary"
           disabled={qualityGateBlocked || isBusy}
           title={qualityGateBlocked ? qualityGateBlockedMessage : undefined}
+          aria-label={`Finalise ${stageLabel}`}
         >
-          Final quality pass
+          Finalise
         </button>
       )}
     </div>
@@ -103,7 +107,7 @@ export function GenerateBar({
 function getBusyLabel(operation: GenerationActivityOperation | null) {
   switch (operation) {
     case "focused-patch":
-      return "Preparing focused patch..."
+      return "Preparing refinement..."
     case "quality-gate-regenerate":
       return "Regenerating with gate feedback..."
     case "regenerate-gaps":
@@ -116,15 +120,15 @@ function getBusyLabel(operation: GenerationActivityOperation | null) {
   }
 }
 
-function getGenerateLabel(stageType: Stage["type"]) {
+function getStageLabel(stageType: Stage["type"]) {
   switch (stageType) {
     case "spec":
-      return "Generate requirements pass"
+      return "SPEC"
     case "plan":
-      return "Generate architecture pass"
+      return "PLAN"
     case "harness":
-      return "Generate validation harness"
+      return "HARNESS"
     case "tasks":
-      return "Generate implementation plan"
+      return "TASKS"
   }
 }

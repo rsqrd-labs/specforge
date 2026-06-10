@@ -21,7 +21,7 @@
  *     │       CI — the repo goes green as work lands.    │
  *     └───────────────────────────────────────────────┘
  *        (PR selected ⇒ slides in)  ⌥ Branch: specforge/inc-1
- *   N issues will be created                  [Cancel] [Export →]
+ *   N issues will be created                  [Cancel] [Export]
  *
  * Visual hierarchy: the segmented mode choice is the focal decision (each option
  * carries a one-line plain-language consequence, the recommended *Files* mode
@@ -380,8 +380,9 @@ export function ExportGitHubModal({
                 type="button"
                 className="modal-submit"
                 onClick={handleGoToSettings}
+                aria-label="Open Settings"
               >
-                Open Settings →
+                Settings
               </button>
             </div>
           ) : phase === "configure" ? (
@@ -480,7 +481,7 @@ export function ExportGitHubModal({
                   onClick={() => void handleSubmit()}
                   disabled={submitDisabled}
                 >
-                  Export →
+                  Export
                 </button>
               </div>
             </>
@@ -498,12 +499,13 @@ export function ExportGitHubModal({
                     type="button"
                     className="modal-cancel"
                     onClick={handleOpenRepo}
+                    aria-label="Open on GitHub"
                   >
-                    Open on GitHub ↗
+                    Open
                   </button>
                 )}
                 <button type="button" className="modal-submit" onClick={onClose}>
-                  Got it
+                  Done
                 </button>
               </div>
             </div>
@@ -539,8 +541,9 @@ export function ExportGitHubModal({
                   className="modal-submit"
                   onClick={handleOpenRepo}
                   disabled={!repoUrl}
+                  aria-label="Open on GitHub"
                 >
-                  Open on GitHub ↗
+                  Open
                 </button>
               </div>
             </div>

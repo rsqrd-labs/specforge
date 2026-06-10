@@ -94,7 +94,7 @@ describe("StoryboardShareModal", () => {
     await user.click(screen.getByRole("button", { name: /copy link/i }))
     expect(await screen.findByText(/link copied/i)).toBeInTheDocument()
 
-    await user.click(screen.getByRole("button", { name: /generate new link/i }))
+    await user.click(screen.getByRole("button", { name: /rotate link/i }))
     await waitFor(() =>
       expect(screen.getByDisplayValue(/\/sb\/new789/)).toBeInTheDocument(),
     )

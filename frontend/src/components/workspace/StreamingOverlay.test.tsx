@@ -76,7 +76,7 @@ describe("StreamingOverlay generation activity", () => {
     ["generate", "plan", "Designing architecture"],
     ["generate", "harness", "Building validation harness"],
     ["generate", "tasks", "Drafting implementation plan"],
-    ["focused-patch", "plan", "Preparing focused patch"],
+    ["focused-patch", "plan", "Preparing refinement"],
     ["quality-gate-regenerate", "tasks", "Regenerating with gate feedback"],
     ["regenerate-gaps", "tasks", "Regenerating coverage gaps"],
   ] as const)(

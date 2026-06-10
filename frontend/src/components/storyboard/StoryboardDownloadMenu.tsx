@@ -32,7 +32,7 @@ interface StoryboardDownloadMenuProps {
 const OWNER_DOWNLOADS: DownloadItem[] = [
   {
     kind: "html",
-    label: "HTML package",
+    label: "HTML",
     description: "Offline browser keynote package.",
   },
   {
@@ -42,7 +42,7 @@ const OWNER_DOWNLOADS: DownloadItem[] = [
   },
   {
     kind: "notes",
-    label: "Speaker notes",
+    label: "Notes",
     description: "Presenter notes as Markdown.",
   },
 ]
@@ -173,9 +173,10 @@ export function StoryboardDownloadMenu({
                 className="storyboard-download-menu__primary"
                 onClick={() => void handleDownload("pdf")}
                 disabled={pendingKind !== null}
+                aria-label="Download PDF"
               >
                 <span className="storyboard-download-menu__primary-label">
-                  {pendingKind === "pdf" ? "Preparing PDF…" : "Download PDF"}
+                  {pendingKind === "pdf" ? "Preparing PDF…" : "PDF"}
                 </span>
                 <small>{pdfItem.description}</small>
               </button>
@@ -191,6 +192,7 @@ export function StoryboardDownloadMenu({
                       type="button"
                       onClick={() => void handleDownload(item.kind)}
                       disabled={pendingKind !== null}
+                      aria-label={`Download ${item.label}`}
                     >
                       <span>{item.label}</span>
                       <small>{item.description}</small>

@@ -9,8 +9,8 @@
  * Layout sketch (a child block beneath the timeline, same panel rhythm):
  *   IDEAS
  *   [ Jot an idea…                                   ＋ ]
- *   ✦ Dark mode toggle                        Promote →
- *   ⌗ Webhook retries  (from GitHub)          Promote →
+ *   ✦ Dark mode toggle                        Promote
+ *   ⌗ Webhook retries  (from GitHub)          Promote
  *
  * Visual hierarchy: the capture input invites first; ideas are soft slate
  * chips, provenance legible by a small bespoke mark (GitHub vs. spark). The one
@@ -123,8 +123,9 @@ export function IdeaBacklog({
                     type="button"
                     className="ws-idea-promote"
                     onClick={() => onPromote(idea)}
+                    aria-label="Promote idea to increment"
                   >
-                    Promote →
+                    Promote
                   </button>
                 )}
               </li>

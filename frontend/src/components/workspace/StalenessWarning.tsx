@@ -42,14 +42,14 @@ export function StalenessWarning({
 
       <div className="staleness-actions">
         <button type="button" onClick={onDismiss} className="staleness-dismiss">
-          Keep as-is
+          Keep
         </button>
         <button
           type="button"
           onClick={onRegenerate}
           className="gen-btn-primary gen-btn-compact"
         >
-          Regenerate →
+          Regenerate
         </button>
       </div>
     </div>

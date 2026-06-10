@@ -80,24 +80,24 @@ describe("CreditConfirmModal", () => {
   it("shows the action name capitalised in the heading", () => {
     render(<CreditConfirmModal {...defaults} action="regenerate" />)
     expect(
-      screen.getByRole("heading", { name: /full stage regenerate/i }),
+      screen.getByRole("heading", { name: /^regenerate$/i }),
     ).toBeInTheDocument()
   })
 
   it("describes the selected action as value instead of token details", () => {
     render(<CreditConfirmModal {...defaults} action="refine" creditCost={3} />)
     expect(
-      screen.getByRole("heading", { name: /focused patch/i }),
+      screen.getByRole("heading", { name: /^refine$/i }),
     ).toBeInTheDocument()
-    expect(screen.getByText(/preview a focused patch/i)).toBeInTheDocument()
+    expect(screen.getByText(/preview a precise edit/i)).toBeInTheDocument()
     expect(screen.queryByText(/token/i)).not.toBeInTheDocument()
   })
 
-  it("calls onConfirm when Confirm button is clicked", async () => {
+  it("calls onConfirm when the action button is clicked", async () => {
     const user = userEvent.setup()
     const onConfirm = vi.fn()
     render(<CreditConfirmModal {...defaults} onConfirm={onConfirm} />)
-    await user.click(screen.getByRole("button", { name: /confirm/i }))
+    await user.click(screen.getByRole("button", { name: /^generate$/i }))
     expect(onConfirm).toHaveBeenCalledOnce()
   })
 

@@ -5,7 +5,7 @@
  *   Hierarchy → the question is the hero (Plus Jakarta Sans, saffron-anchored).
  *               `why_it_matters` is a slate whisper under it. Textarea sits on
  *               a glass surface. Skip is a quiet text-link at far left; the
- *               saffron "Generate with answers" CTA lives at far right.
+ *               saffron Generate CTA lives at far right.
  *   Delight   → when the user begins typing in a textarea, that question's
  *               `why_it_matters` whisper fades to 60% opacity — a small
  *               acknowledgement that the user has engaged with this one.
@@ -239,16 +239,18 @@ export function SpecClarificationModal({
               onClick={handleSkip}
               className="clarify-modal-skip"
               disabled={phase === "submitting"}
+              aria-label="Skip clarification and go straight to drafting"
             >
-              Skip — go straight to drafting
+              Skip
             </button>
             <button
               type="button"
               onClick={() => void handleSubmit()}
               disabled={!canSubmit}
               className="modal-submit"
+              aria-label="Generate from clarification answers"
             >
-              {phase === "submitting" ? "Saving…" : "Generate with answers"}
+              {phase === "submitting" ? "Saving…" : "Generate"}
             </button>
           </div>
         </div>

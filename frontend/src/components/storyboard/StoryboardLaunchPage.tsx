@@ -62,11 +62,21 @@ export function StoryboardLaunchPage({
           <button type="button" onClick={onPresent}>
             Present
           </button>
-          <button type="button" onClick={onDownload} disabled={!canDownloadPdf}>
-            Download PDF
+          <button
+            type="button"
+            onClick={onDownload}
+            disabled={!canDownloadPdf}
+            aria-label="Download PDF"
+          >
+            PDF
           </button>
-          <button type="button" onClick={onNotes} disabled={!canUseNotes}>
-            Speaker Notes
+          <button
+            type="button"
+            onClick={onNotes}
+            disabled={!canUseNotes}
+            aria-label="Speaker Notes"
+          >
+            Notes
           </button>
           {onShare && (
             <button type="button" onClick={onShare}>

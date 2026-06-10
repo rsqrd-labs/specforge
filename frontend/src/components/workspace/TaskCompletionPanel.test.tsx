@@ -88,7 +88,7 @@ describe("TaskCompletionPanel", () => {
     const { onResync } = renderPanel({ data: syncState({ out_of_sync: true }) })
 
     expect(screen.getByText(/tasks changed since the last push/i)).toBeInTheDocument()
-    await user.click(screen.getByRole("button", { name: /re-sync changed tasks/i }))
+    await user.click(screen.getByRole("button", { name: /sync changed tasks/i }))
     expect(onResync).toHaveBeenCalledOnce()
   })
 

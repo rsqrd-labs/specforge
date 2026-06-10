@@ -259,8 +259,9 @@ export function StoryboardShareModal({
                   type="button"
                   className="sb-share__copy"
                   onClick={() => void copyShareLink()}
+                  aria-label="Copy link"
                 >
-                  {copyState === "copied" ? "Copied" : "Copy link"}
+                  {copyState === "copied" ? "Copied" : "Copy"}
                 </button>
               </div>
               <button
@@ -268,8 +269,9 @@ export function StoryboardShareModal({
                 className="sb-share__rotate"
                 onClick={() => void rotateShare()}
                 disabled={isBusy}
+                aria-label="Rotate link"
               >
-                Generate new link
+                Rotate
               </button>
               <span className="sb-share__rotate-hint">
                 Replaces the current link — the old one stops working immediately.
@@ -329,7 +331,7 @@ export function StoryboardShareModal({
               onClick={() => void saveShare()}
               disabled={isBusy || !enabled || !isDirty}
             >
-              Save changes
+              Save
             </button>
           </div>
         </footer>

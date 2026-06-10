@@ -19,9 +19,9 @@ const CREDIT_COSTS = {
 }
 
 const ACTION_LABELS: Record<string, string> = {
-  generate: "Fast draft",
-  regenerate: "Full stage regenerate",
-  refine: "Focused patch",
+  generate: "Generate",
+  regenerate: "Regenerate",
+  refine: "Refine",
 }
 
 const ACTION_COPY: Record<string, string> = {
@@ -30,7 +30,7 @@ const ACTION_COPY: Record<string, string> = {
   regenerate:
     "Replace this full stage with a fresh pass. Best for stale or oversized changes.",
   refine:
-    "Preview a focused patch for the selected text before accepting changes.",
+    "Preview a precise edit for the selected text before accepting changes.",
 }
 
 export function CreditConfirmModal({
@@ -113,7 +113,7 @@ export function CreditConfirmModal({
               disabled={isInsufficient}
               className="modal-submit"
             >
-              Confirm
+              {ACTION_LABELS[action] ?? "Confirm"}
             </button>
           </div>
         </div>

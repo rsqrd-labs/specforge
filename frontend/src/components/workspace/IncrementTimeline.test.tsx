@@ -146,7 +146,7 @@ describe("IncrementTimeline", () => {
 
     renderTimeline({ hasBaselinePush: true })
 
-    fireEvent.click(await screen.findByRole("button", { name: /push to github/i }))
+    fireEvent.click(await screen.findByRole("button", { name: /push increment 1 to github/i }))
 
     await waitFor(() =>
       expect(mockPush).toHaveBeenCalledWith("ws-1", "inc-1"),
@@ -161,7 +161,7 @@ describe("IncrementTimeline", () => {
 
     await screen.findByText("Add billing")
     expect(
-      screen.queryByRole("button", { name: /push to github/i }),
+      screen.queryByRole("button", { name: /push increment 1 to github/i }),
     ).not.toBeInTheDocument()
   })
 
