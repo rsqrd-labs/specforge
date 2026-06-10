@@ -10,6 +10,7 @@ interface GenerateBarProps {
   onUnlock: () => void
   isBusy?: boolean
   busyOperation?: GenerationActivityOperation | null
+  busyLabel?: string
   qualityGateBlocked?: boolean
   qualityGateBlockedMessage?: string
 }
@@ -23,6 +24,7 @@ export function GenerateBar({
   onUnlock,
   isBusy = false,
   busyOperation = null,
+  busyLabel,
   qualityGateBlocked = false,
   qualityGateBlockedMessage = "Regenerate or override the quality gate before finalising",
 }: GenerateBarProps) {
@@ -34,7 +36,7 @@ export function GenerateBar({
     return (
       <div className="gen-btn-streaming" role="status" aria-live="polite">
         <div className="loading-ring" />
-        <span>{getBusyLabel(busyOperation)}</span>
+        <span>{busyLabel ?? getBusyLabel(busyOperation)}</span>
       </div>
     )
   }

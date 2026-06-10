@@ -5,6 +5,8 @@ interface StalenessWarningProps {
   upstreamStageType: string
   onRegenerate: () => void
   onDismiss: () => void
+  disabled?: boolean
+  disabledReason?: string
 }
 
 export function StalenessWarning({
@@ -12,8 +14,11 @@ export function StalenessWarning({
   upstreamStageType,
   onRegenerate,
   onDismiss,
+  disabled = false,
+  disabledReason,
 }: StalenessWarningProps) {
   if (stage.status !== "stale") return null
+  const disabledReasonId = `${stage.id}-staleness-disabled-reason`
 
   return (
     <div className="staleness-strip">
@@ -41,13 +46,28 @@ export function StalenessWarning({
       </div>
 
       <div className="staleness-actions">
-        <button type="button" onClick={onDismiss} className="staleness-dismiss">
+        {disabled && disabledReason ? (
+          <span id={disabledReasonId} className="workspace-lock-inline-note">
+            {disabledReason}
+          </span>
+        ) : null}
+        <button
+          type="button"
+          onClick={onDismiss}
+          className="staleness-dismiss"
+          disabled={disabled}
+          title={disabled ? disabledReason : undefined}
+          aria-describedby={disabled ? disabledReasonId : undefined}
+        >
           Keep
         </button>
         <button
           type="button"
           onClick={onRegenerate}
           className="gen-btn-primary gen-btn-compact"
+          disabled={disabled}
+          title={disabled ? disabledReason : undefined}
+          aria-describedby={disabled ? disabledReasonId : undefined}
         >
           Regenerate
         </button>

@@ -30,6 +30,8 @@ interface StreamingOverlayProps {
   onOverride?: () => void
   /** Dismiss the findings panel without acting. */
   onDismiss?: () => void
+  actionsDisabled?: boolean
+  disabledReason?: string
 }
 
 export function StreamingOverlay({
@@ -39,6 +41,8 @@ export function StreamingOverlay({
   onRegenerate,
   onOverride,
   onDismiss,
+  actionsDisabled = false,
+  disabledReason,
 }: StreamingOverlayProps) {
   const [renderedActivity, setRenderedActivity] =
     useState<GenerationActivityInfo | null>(activity ?? null)
@@ -78,6 +82,7 @@ export function StreamingOverlay({
         ? missing.length
         : findings.length
     const canOverride = gate.override_allowed !== false && !isIncomplete && !isTechnologySafety
+    const disabledReasonId = disabledReason ? "quality-gate-disabled-reason" : undefined
     return (
       <div
         className="quality-gate-inline"
@@ -148,11 +153,19 @@ export function StreamingOverlay({
             </ul>
           )}
           <div className="quality-gate-actions">
+            {actionsDisabled && disabledReason ? (
+              <p id={disabledReasonId} className="workspace-lock-inline-note">
+                {disabledReason}
+              </p>
+            ) : null}
             {onRegenerate ? (
               <button
                 type="button"
                 className="btn btn-primary"
                 onClick={onRegenerate}
+                disabled={actionsDisabled}
+                title={actionsDisabled ? disabledReason : undefined}
+                aria-describedby={actionsDisabled ? disabledReasonId : undefined}
               >
                 Regenerate
               </button>
@@ -162,12 +175,22 @@ export function StreamingOverlay({
                 type="button"
                 className="btn btn-secondary"
                 onClick={onOverride}
+                disabled={actionsDisabled}
+                title={actionsDisabled ? disabledReason : undefined}
+                aria-describedby={actionsDisabled ? disabledReasonId : undefined}
               >
                 Override and continue
               </button>
             ) : null}
             {onDismiss ? (
-              <button type="button" className="btn btn-ghost" onClick={onDismiss}>
+              <button
+                type="button"
+                className="btn btn-ghost"
+                onClick={onDismiss}
+                disabled={actionsDisabled}
+                title={actionsDisabled ? disabledReason : undefined}
+                aria-describedby={actionsDisabled ? disabledReasonId : undefined}
+              >
                 Dismiss
               </button>
             ) : null}

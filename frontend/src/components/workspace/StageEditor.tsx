@@ -17,18 +17,32 @@ interface StageEditorProps {
   stageId: string
   initialContent: string
   readOnly?: boolean
+  readOnlyReason?: string
   onContentChange?: (content: string) => void
 }
 
 export const StageEditor = forwardRef<StageEditorHandle, StageEditorProps>(
   function StageEditor(
-    { stageId, initialContent, readOnly = false, onContentChange },
+    { stageId, initialContent, readOnly = false, readOnlyReason, onContentChange },
     ref,
   ) {
     const containerRef = useRef<HTMLDivElement>(null)
     const viewRef = useRef<EditorView | null>(null)
     const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
     const lastStreamedRef = useRef<string>("")
+    const readOnlyRef = useRef(readOnly)
+    const onContentChangeRef = useRef(onContentChange)
+    const contentRef = useRef(initialContent)
+    const mountedStageIdRef = useRef<string | null>(null)
+    const readOnlyReasonId = `${stageId}-editor-readonly-reason`
+
+    useEffect(() => {
+      readOnlyRef.current = readOnly
+    }, [readOnly])
+
+    useEffect(() => {
+      onContentChangeRef.current = onContentChange
+    }, [onContentChange])
 
     useImperativeHandle(ref, () => ({
       getSelection() {
@@ -46,17 +60,24 @@ export const StageEditor = forwardRef<StageEditorHandle, StageEditorProps>(
 
     useEffect(() => {
       if (!containerRef.current) return
+      if (mountedStageIdRef.current !== stageId) {
+        mountedStageIdRef.current = stageId
+        contentRef.current = initialContent
+        lastStreamedRef.current = ""
+      }
 
       const view = new EditorView({
-        doc: initialContent,
+        doc: contentRef.current,
         extensions: [
           markdown(),
           EditorView.editable.of(!readOnly),
           EditorView.updateListener.of((update) => {
-            if (!update.docChanged || readOnly) return
+            if (!update.docChanged) return
+            contentRef.current = update.state.doc.toString()
+            if (readOnlyRef.current) return
             if (debounceRef.current) clearTimeout(debounceRef.current)
             debounceRef.current = setTimeout(() => {
-              onContentChange?.(update.state.doc.toString())
+              onContentChangeRef.current?.(update.state.doc.toString())
             }, 500)
           }),
           EditorView.theme({
@@ -69,14 +90,20 @@ export const StageEditor = forwardRef<StageEditorHandle, StageEditorProps>(
       })
 
       viewRef.current = view
-      lastStreamedRef.current = ""
 
       return () => {
+        contentRef.current = view.state.doc.toString()
         view.destroy()
         viewRef.current = null
-        if (debounceRef.current) clearTimeout(debounceRef.current)
+        if (debounceRef.current) {
+          clearTimeout(debounceRef.current)
+          debounceRef.current = null
+          if (!readOnly) {
+            onContentChangeRef.current?.(contentRef.current)
+          }
+        }
       }
-    }, [stageId])
+    }, [readOnly, stageId])
 
     useEffect(() => {
       const unsubscribe = useStageStore.subscribe(
@@ -105,9 +132,16 @@ export const StageEditor = forwardRef<StageEditorHandle, StageEditorProps>(
 
     return (
       <div
-        ref={containerRef}
-        className="stage-editor-shell"
-      />
+        className={`stage-editor-shell${readOnly ? " is-readonly" : ""}`}
+        aria-describedby={readOnly && readOnlyReason ? readOnlyReasonId : undefined}
+      >
+        {readOnly && readOnlyReason ? (
+          <div id={readOnlyReasonId} className="stage-editor-readonly-note">
+            {readOnlyReason}
+          </div>
+        ) : null}
+        <div ref={containerRef} className="stage-editor-mount" />
+      </div>
     )
   },
 )

@@ -76,6 +76,8 @@ interface IncrementTimelineProps {
   /** A live baseline push must exist for an increment push to be accepted —
    *  the backend 409s otherwise, so the action is hidden until then. */
   hasBaselinePush: boolean
+  disabled?: boolean
+  disabledReason?: string
 }
 
 function pushedSet(increments: Increment[]): Set<string> {
@@ -88,6 +90,8 @@ export function IncrementTimeline({
   workspaceId,
   enabled,
   hasBaselinePush,
+  disabled = false,
+  disabledReason,
 }: IncrementTimelineProps) {
   const [increments, setIncrements] = useState<Increment[]>([])
   const [ideas, setIdeas] = useState<IncrementIdea[]>([])
@@ -162,6 +166,7 @@ export function IncrementTimeline({
   }, [creating])
 
   async function handleCreate() {
+    if (disabled) return
     const text = feature.trim()
     if (text.length < FEATURE_MIN) {
       setFeatureError(
@@ -201,6 +206,7 @@ export function IncrementTimeline({
   }
 
   async function handleCapture(text: string) {
+    if (disabled) return
     setCapturing(true)
     setActionError(null)
     try {
@@ -215,6 +221,7 @@ export function IncrementTimeline({
   }
 
   function handlePromote(idea: IncrementIdea) {
+    if (disabled) return
     // Compose, don't mutate: prefill the increment input so the user confirms /
     // expands the idea into a ≥ 8-char feature request and submits it.
     setFeature(idea.text)
@@ -223,6 +230,7 @@ export function IncrementTimeline({
   }
 
   async function handlePush(increment: Increment) {
+    if (disabled) return
     setPushingId(increment.id)
     setActionError(null)
     try {
@@ -261,7 +269,8 @@ export function IncrementTimeline({
 
   // Enabled on any text; the ≥ 8-char rule surfaces as a calm hint on submit
   // rather than a silently disabled button with no explanation.
-  const canSubmit = feature.trim().length > 0 && !creating
+  const canSubmit = feature.trim().length > 0 && !creating && !disabled
+  const disabledReasonId = disabledReason ? "increment-timeline-disabled-reason" : undefined
 
   return (
     <div className="ws-panel-section ws-timeline-panel">
@@ -281,7 +290,9 @@ export function IncrementTimeline({
           rows={2}
           placeholder="What do you want to add?"
           aria-label="Describe the next increment"
-          disabled={creating}
+          aria-describedby={disabled ? disabledReasonId : undefined}
+          disabled={creating || disabled}
+          title={disabled ? disabledReason : undefined}
           onChange={(e) => {
             setFeature(e.target.value)
             if (featureError) setFeatureError(null)
@@ -297,6 +308,8 @@ export function IncrementTimeline({
             type="button"
             className="ws-timeline-add"
             disabled={!canSubmit}
+            title={disabled ? disabledReason : undefined}
+            aria-describedby={disabled ? disabledReasonId : undefined}
             onClick={() => void handleCreate()}
             aria-label="Add increment"
           >
@@ -304,6 +317,11 @@ export function IncrementTimeline({
           </button>
         </div>
       </div>
+      {disabled && disabledReason ? (
+        <p id={disabledReasonId} className="workspace-lock-inline-note">
+          {disabledReason}
+        </p>
+      ) : null}
 
       {creating && (
         <div className="ws-timeline-creating">
@@ -359,7 +377,9 @@ export function IncrementTimeline({
                 <button
                   type="button"
                   className="ws-timeline-push"
-                  disabled={pushingId === inc.id}
+                  disabled={pushingId === inc.id || disabled}
+                  title={disabled ? disabledReason : undefined}
+                  aria-describedby={disabled ? disabledReasonId : undefined}
                   onClick={() => void handlePush(inc)}
                   aria-label={`Push increment ${inc.sequence} to GitHub`}
                 >
@@ -399,6 +419,8 @@ export function IncrementTimeline({
         capturing={capturing}
         onCapture={(text) => void handleCapture(text)}
         onPromote={handlePromote}
+        disabled={disabled}
+        disabledReason={disabledReason}
       />
     </div>
   )

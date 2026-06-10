@@ -31,6 +31,8 @@ interface IdeaBacklogProps {
   capturing: boolean
   onCapture: (text: string) => void
   onPromote: (idea: IncrementIdea) => void
+  disabled?: boolean
+  disabledReason?: string
 }
 
 const STATUS_NOTE: Record<IncrementIdea["status"], string | null> = {
@@ -45,12 +47,15 @@ export function IdeaBacklog({
   capturing,
   onCapture,
   onPromote,
+  disabled = false,
+  disabledReason,
 }: IdeaBacklogProps) {
   const [draft, setDraft] = useState("")
+  const disabledReasonId = disabledReason ? "idea-backlog-disabled-reason" : undefined
 
   function submit() {
     const text = draft.trim()
-    if (!text || capturing) return
+    if (!text || capturing || disabled) return
     onCapture(text)
     setDraft("")
   }
@@ -72,6 +77,9 @@ export function IdeaBacklog({
           maxLength={IDEA_MAX}
           placeholder="Jot an idea…"
           aria-label="Capture an idea"
+          aria-describedby={disabled ? disabledReasonId : undefined}
+          disabled={disabled}
+          title={disabled ? disabledReason : undefined}
           spellCheck
           onChange={(e) => setDraft(e.target.value)}
           onKeyDown={(e) => {
@@ -85,12 +93,19 @@ export function IdeaBacklog({
           type="button"
           className="ws-ideas-add"
           aria-label="Add idea"
-          disabled={!draft.trim() || capturing}
+          disabled={!draft.trim() || capturing || disabled}
+          title={disabled ? disabledReason : undefined}
+          aria-describedby={disabled ? disabledReasonId : undefined}
           onClick={submit}
         >
           {capturing ? "…" : "＋"}
         </button>
       </div>
+      {disabled && disabledReason ? (
+        <p id={disabledReasonId} className="workspace-lock-inline-note">
+          {disabledReason}
+        </p>
+      ) : null}
 
       {ideas.length === 0 ? (
         <p className="ws-ideas-empty">
@@ -122,7 +137,12 @@ export function IdeaBacklog({
                   <button
                     type="button"
                     className="ws-idea-promote"
-                    onClick={() => onPromote(idea)}
+                    onClick={() => {
+                      if (!disabled) onPromote(idea)
+                    }}
+                    disabled={disabled}
+                    title={disabled ? disabledReason : undefined}
+                    aria-describedby={disabled ? disabledReasonId : undefined}
                     aria-label="Promote idea to increment"
                   >
                     Promote

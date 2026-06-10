@@ -4,6 +4,8 @@ interface TaskValidationPanelProps {
   stage: Stage
   evalResult: EvalResult | null | undefined
   onNavigateToHarness?: () => void
+  disabled?: boolean
+  disabledReason?: string
 }
 
 function isGenuineGap(issue: TaskReferenceIssue): boolean {
@@ -14,11 +16,14 @@ export function TaskValidationPanel({
   stage,
   evalResult,
   onNavigateToHarness,
+  disabled = false,
+  disabledReason,
 }: TaskValidationPanelProps) {
   if (stage.type !== "tasks") return null
 
   const allIssues = evalResult?.tasks_without_ref ?? []
   const genuineGaps = allIssues.filter(isGenuineGap)
+  const disabledReasonId = `${stage.id}-task-validation-disabled-reason`
 
   if (!evalResult) {
     return (
@@ -72,6 +77,9 @@ export function TaskValidationPanel({
                   type="button"
                   className="ws-issue-action"
                   onClick={onNavigateToHarness}
+                  disabled={disabled}
+                  title={disabled ? disabledReason : undefined}
+                  aria-describedby={disabled && disabledReason ? disabledReasonId : undefined}
                   aria-label="Open HARNESS"
                 >
                   Open
@@ -80,6 +88,11 @@ export function TaskValidationPanel({
           </li>
         ))}
       </ul>
+      {disabled && disabledReason ? (
+        <p id={disabledReasonId} className="workspace-lock-inline-note">
+          {disabledReason}
+        </p>
+      ) : null}
     </div>
   )
 }

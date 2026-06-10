@@ -5,13 +5,23 @@ interface CoveragePanelProps {
   evalResult: EvalResult | null | undefined
   freeRegenUsed: boolean
   onRegenerate: () => void
+  disabled?: boolean
+  disabledReason?: string
 }
 
-export function CoveragePanel({ stage, evalResult, freeRegenUsed, onRegenerate }: CoveragePanelProps) {
+export function CoveragePanel({
+  stage,
+  evalResult,
+  freeRegenUsed,
+  onRegenerate,
+  disabled = false,
+  disabledReason,
+}: CoveragePanelProps) {
   if (stage.type !== "harness") return null
 
   const uncoveredReqs = evalResult?.uncovered_reqs ?? []
   const regenerateHelpId = `${stage.id}-coverage-regenerate-help`
+  const disabledReasonId = `${stage.id}-coverage-disabled-reason`
 
   if (!evalResult || uncoveredReqs.length === 0) return null
 
@@ -38,8 +48,10 @@ export function CoveragePanel({ stage, evalResult, freeRegenUsed, onRegenerate }
       <button
         className="ws-action-btn"
         onClick={onRegenerate}
+        disabled={disabled}
+        title={disabled ? disabledReason : undefined}
         aria-label="Regenerate HARNESS"
-        aria-describedby={regenerateHelpId}
+        aria-describedby={`${regenerateHelpId}${disabled && disabledReason ? ` ${disabledReasonId}` : ""}`}
       >
         Regenerate
       </button>
@@ -49,6 +61,11 @@ export function CoveragePanel({ stage, evalResult, freeRegenUsed, onRegenerate }
           ? "This regeneration costs 10 credits. These gaps are genuine — the harness cannot infer them from the current Plan. Refine the Plan to add the missing context, then regenerate."
           : "This regeneration is free. These gaps are on us. If gaps remain afterwards, your Plan needs more detail — use Refine on the Plan to add the missing context, then regenerate."}
       </p>
+      {disabled && disabledReason ? (
+        <p id={disabledReasonId} className="workspace-lock-inline-note">
+          {disabledReason}
+        </p>
+      ) : null}
     </div>
   )
 }

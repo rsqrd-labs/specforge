@@ -6,6 +6,8 @@ interface HumanReviewGateProps {
   toStageType: string
   onProceed: () => void
   onClose: () => void
+  disabled?: boolean
+  disabledReason?: string
 }
 
 export function HumanReviewGate({
@@ -13,9 +15,12 @@ export function HumanReviewGate({
   toStageType,
   onProceed,
   onClose,
+  disabled = false,
+  disabledReason,
 }: HumanReviewGateProps) {
   const dialogRef = useRef<HTMLDivElement>(null)
   useFocusTrap(dialogRef, onClose)
+  const disabledReasonId = disabledReason ? "review-gate-disabled-reason" : undefined
 
   return (
     <div
@@ -42,12 +47,24 @@ export function HumanReviewGate({
             <em>{fromStageType}</em>. Take a moment to review the
             source stage before continuing — this will consume credits.
           </div>
+          {disabled && disabledReason ? (
+            <p id={disabledReasonId} className="workspace-lock-inline-note">
+              {disabledReason}
+            </p>
+          ) : null}
 
           <div className="modal-footer">
             <button type="button" onClick={onClose} className="modal-cancel">
               Back
             </button>
-            <button type="button" onClick={onProceed} className="modal-submit">
+            <button
+              type="button"
+              onClick={onProceed}
+              className="modal-submit"
+              disabled={disabled}
+              title={disabled ? disabledReason : undefined}
+              aria-describedby={disabled ? disabledReasonId : undefined}
+            >
               Generate
             </button>
           </div>

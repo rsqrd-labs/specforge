@@ -92,6 +92,24 @@ describe("TaskCompletionPanel", () => {
     expect(onResync).toHaveBeenCalledOnce()
   })
 
+  it("disables drift resync with a clear lock reason", async () => {
+    const user = userEvent.setup()
+    const { onResync } = renderPanel({
+      data: syncState({ out_of_sync: true }),
+      disabled: true,
+      disabledReason: "Editing resumes when generation finishes.",
+    })
+
+    const sync = screen.getByRole("button", { name: /sync changed tasks/i })
+    expect(sync).toBeDisabled()
+    expect(sync).toHaveAccessibleDescription(
+      /editing resumes when generation finishes/i,
+    )
+
+    await user.click(sync)
+    expect(onResync).not.toHaveBeenCalled()
+  })
+
   it("folds to a sync-paused line when the install is suspended", () => {
     renderPanel({ connection: "suspended" })
 

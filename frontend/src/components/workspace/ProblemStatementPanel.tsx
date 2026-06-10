@@ -5,6 +5,7 @@ interface ProblemStatementPanelProps {
   problemStatement: string
   isDirty?: boolean
   readOnly?: boolean
+  readOnlyReason?: string
   onChange?: (value: string) => void
   onBlur?: () => void
 }
@@ -14,6 +15,7 @@ export function ProblemStatementPanel({
   problemStatement,
   isDirty = false,
   readOnly = false,
+  readOnlyReason,
   onChange,
   onBlur,
 }: ProblemStatementPanelProps) {
@@ -24,6 +26,7 @@ export function ProblemStatementPanel({
     : 0
   const characters = problemStatement.length
   const status = stage.status.replace("_", " ")
+  const readOnlyReasonId = `${stage.id}-problem-readonly-reason`
 
   return (
     <div className="workspace-document-card problem-editor-pane">
@@ -37,12 +40,20 @@ export function ProblemStatementPanel({
         </span>
       </div>
       <div className="problem-editor-body">
+        {readOnly && readOnlyReason ? (
+          <div id={readOnlyReasonId} className="problem-editor-readonly-note">
+            {readOnlyReason}
+          </div>
+        ) : null}
         <textarea
           value={problemStatement}
           readOnly={readOnly}
           maxLength={10000}
-          onChange={(event) => onChange?.(event.target.value)}
+          onChange={(event) => {
+            if (!readOnly) onChange?.(event.target.value)
+          }}
           onBlur={onBlur}
+          aria-describedby={readOnly && readOnlyReason ? readOnlyReasonId : undefined}
           className="problem-editor-textarea"
         />
       </div>

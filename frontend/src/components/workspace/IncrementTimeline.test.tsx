@@ -153,6 +153,38 @@ describe("IncrementTimeline", () => {
     )
   })
 
+  it("pauses increment create, push, capture, and promote actions while locked", async () => {
+    mockListIncrements.mockResolvedValue([inc({ status: "ready" })])
+    mockListIdeas.mockResolvedValue([idea({ text: "Webhook retries" })])
+
+    renderTimeline({
+      hasBaselinePush: true,
+      disabled: true,
+      disabledReason: "Editing resumes when generation finishes.",
+    })
+
+    const incrementInput = await screen.findByLabelText(/describe the next increment/i)
+    expect(incrementInput).toBeDisabled()
+    expect(screen.getByRole("button", { name: /add increment/i })).toBeDisabled()
+
+    const push = await screen.findByRole("button", { name: /push increment 1 to github/i })
+    expect(push).toBeDisabled()
+    expect(push).toHaveAccessibleDescription(
+      /editing resumes when generation finishes/i,
+    )
+
+    const ideaInput = screen.getByLabelText(/capture an idea/i)
+    expect(ideaInput).toBeDisabled()
+    expect(screen.getByRole("button", { name: /add idea/i })).toBeDisabled()
+    expect(screen.getByRole("button", { name: /promote idea to increment/i })).toBeDisabled()
+
+    fireEvent.click(push)
+    fireEvent.click(screen.getByRole("button", { name: /promote idea to increment/i }))
+    expect(mockPush).not.toHaveBeenCalled()
+    expect(mockCreate).not.toHaveBeenCalled()
+    expect(mockCreateIdea).not.toHaveBeenCalled()
+  })
+
   it("hides the push action when there is no baseline push yet", async () => {
     mockListIncrements.mockResolvedValue([inc({ status: "ready" })])
     mockListIdeas.mockResolvedValue([])

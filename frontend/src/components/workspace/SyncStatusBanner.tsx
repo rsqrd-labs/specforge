@@ -16,13 +16,19 @@ interface SyncStatusBannerProps {
   variant: "drift" | "disconnected"
   resyncing?: boolean
   onResync?: () => void
+  disabled?: boolean
+  disabledReason?: string
 }
 
 export function SyncStatusBanner({
   variant,
   resyncing = false,
   onResync,
+  disabled = false,
+  disabledReason,
 }: SyncStatusBannerProps) {
+  const disabledReasonId = disabledReason ? "sync-status-disabled-reason" : undefined
+
   if (variant === "disconnected") {
     return (
       <div className="ws-sync-banner disconnected" role="status">
@@ -50,11 +56,18 @@ export function SyncStatusBanner({
       <span className="ws-sync-banner-text">
         Tasks changed since the last push
       </span>
+      {disabled && disabledReason ? (
+        <span id={disabledReasonId} className="ws-sync-banner-reason">
+          {disabledReason}
+        </span>
+      ) : null}
       <button
         type="button"
         className="ws-sync-banner-action"
         onClick={onResync}
-        disabled={resyncing}
+        disabled={resyncing || disabled}
+        title={disabled ? disabledReason : undefined}
+        aria-describedby={disabled ? disabledReasonId : undefined}
         aria-label="Sync changed tasks"
       >
         {resyncing ? "Syncing..." : "Sync"}

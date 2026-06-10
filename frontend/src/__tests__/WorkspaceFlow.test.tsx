@@ -124,6 +124,26 @@ describe("GenerateBar", () => {
     ).not.toBeInTheDocument()
   })
 
+  it("uses explicit workspace-lock busy copy when another stage is generating", () => {
+    const stage = makeStage({ type: "spec", status: "draft", content: "Existing spec" })
+    render(
+      <GenerateBar
+        stage={stage}
+        onGenerate={noop}
+        onRegenerate={noop}
+        onRefine={noop}
+        onFinalise={noop}
+        onUnlock={noop}
+        isBusy
+        busyLabel="Generating PLAN. Editing paused."
+      />,
+    )
+
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "Generating PLAN. Editing paused.",
+    )
+  })
+
   it.each([
     ["spec", "SPEC"],
     ["plan", "PLAN"],

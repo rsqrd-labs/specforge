@@ -129,6 +129,39 @@ describe("StreamingOverlay quality gate", () => {
     expect(onDismiss).toHaveBeenCalledOnce()
   })
 
+  it("disables quality-gate actions with a lock reason", async () => {
+    const user = userEvent.setup()
+    const onRegenerate = vi.fn()
+    const onOverride = vi.fn()
+    const onDismiss = vi.fn()
+
+    render(
+      <StreamingOverlay
+        isVisible={false}
+        gate={criticGate}
+        onRegenerate={onRegenerate}
+        onOverride={onOverride}
+        onDismiss={onDismiss}
+        actionsDisabled
+        disabledReason="Editing resumes when generation finishes."
+      />,
+    )
+
+    const regenerate = screen.getByRole("button", { name: "Regenerate" })
+    expect(regenerate).toBeDisabled()
+    expect(regenerate).toHaveAccessibleDescription(
+      /editing resumes when generation finishes/i,
+    )
+
+    await user.click(regenerate)
+    await user.click(screen.getByRole("button", { name: "Override and continue" }))
+    await user.click(screen.getByRole("button", { name: "Dismiss" }))
+
+    expect(onRegenerate).not.toHaveBeenCalled()
+    expect(onOverride).not.toHaveBeenCalled()
+    expect(onDismiss).not.toHaveBeenCalled()
+  })
+
   it("keeps the gate overlay clickable in CSS", () => {
     render(<StreamingOverlay isVisible={false} gate={criticGate} />)
 

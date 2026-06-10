@@ -205,6 +205,54 @@ function formatStageStatus(status: Stage["status"]): string {
   return status.replace("_", " ")
 }
 
+interface WorkspaceGenerationLock {
+  locked: boolean
+  message: string
+  reason: string
+  busyLabel: string
+  stageLabel: string | null
+}
+
+function getWorkspaceGenerationVerb(
+  operation: GenerationActivityOperation | null,
+): string {
+  if (operation === "focused-patch") return "Refining"
+  if (
+    operation === "regenerate" ||
+    operation === "regenerate-gaps" ||
+    operation === "quality-gate-regenerate"
+  ) {
+    return "Regenerating"
+  }
+  return "Generating"
+}
+
+function getWorkspaceGenerationLock(
+  locked: boolean,
+  stage: Stage | null,
+  operation: GenerationActivityOperation | null,
+): WorkspaceGenerationLock {
+  const reason = "Editing resumes when generation finishes."
+  if (!locked) {
+    return {
+      locked: false,
+      message: "",
+      reason,
+      busyLabel: "",
+      stageLabel: null,
+    }
+  }
+
+  const stageLabel = stage ? STAGE_LABELS[stage.type] : "workspace"
+  const verb = getWorkspaceGenerationVerb(operation)
+  return {
+    locked: true,
+    message: `${verb} ${stageLabel}. Editing is paused to keep outputs consistent. You can keep reading.`,
+    reason,
+    busyLabel: `${verb} ${stageLabel}. Editing paused.`,
+    stageLabel,
+  }
+}
 
 function useAnimatedNumber(value: number | null, duration = 750) {
   const [displayValue, setDisplayValue] = useState(value ?? 0)
@@ -369,9 +417,6 @@ export default function Workspace() {
       ? generationActivity
       : null
   const activeBusyOperation = activeGenerationActivity?.operation ?? null
-  const isGenerationBusy = Boolean(generationActivity) || isStreaming || isRefining
-  const isActiveStageBusy =
-    Boolean(activeGenerationActivity) || (isStreaming && !generationActivity)
 
   const startGenerationActivity = useCallback(
     (
@@ -428,6 +473,46 @@ export default function Workspace() {
       Object.values(stageMap).filter((stage) => workspaceStageIds.has(stage.id)),
     )
   }, [currentWorkspace?.stages, stageMap])
+  const inProgressStage = stages.find((stage) => stage.status === "in_progress") ?? null
+  const workspaceLockStage =
+    (generationActivity ? stageMap[generationActivity.stageId] : null) ??
+    inProgressStage ??
+    (isStreaming || isRefining ? activeStage : null)
+  const workspaceLockOperation =
+    generationActivity?.operation ??
+    (isRefining ? "focused-patch" : null) ??
+    (inProgressStage || isStreaming ? "generate" : null)
+  const workspaceGenerationLock = getWorkspaceGenerationLock(
+    Boolean(generationActivity) || isStreaming || isRefining || Boolean(inProgressStage),
+    workspaceLockStage,
+    workspaceLockOperation,
+  )
+  const isGenerationBusy = workspaceGenerationLock.locked
+  const isActiveStageBusy =
+    Boolean(activeGenerationActivity) ||
+    (isStreaming && !generationActivity) ||
+    activeStage?.status === "in_progress"
+  const workspaceLockReason = workspaceGenerationLock.reason
+  const workspaceLockInlineReason = workspaceGenerationLock.locked
+    ? `Editing paused. ${workspaceLockReason}`
+    : undefined
+  const guardWorkspaceMutation = useCallback(() => {
+    if (!workspaceGenerationLock.locked) return false
+    showAlert(
+      actionAlertFromMessage({
+        title: "Editing is paused",
+        message: workspaceGenerationLock.message,
+        recovery: workspaceLockReason,
+        source: "Workspace",
+      }),
+    )
+    return true
+  }, [
+    showAlert,
+    workspaceGenerationLock.locked,
+    workspaceGenerationLock.message,
+    workspaceLockReason,
+  ])
   const stagesWithEval = useMemo(
     () =>
       stages.map((stage) => ({
@@ -689,6 +774,7 @@ export default function Workspace() {
 
   const saveProblemStatement = useCallback(async () => {
     if (!id || !currentWorkspace || !problemDirty) return true
+    if (guardWorkspaceMutation()) return false
 
     const trimmed = problemDraft.trim()
     if (trimmed.length < 50) {
@@ -715,6 +801,7 @@ export default function Workspace() {
     currentWorkspace,
     problemDirty,
     problemDraft,
+    guardWorkspaceMutation,
     setCurrentWorkspace,
     setStages,
   ])
@@ -770,14 +857,15 @@ export default function Workspace() {
 
   const handleGateRegenerate = useCallback(async () => {
     if (!activeStage) return
-    if (generationActivityRef.current) return
+    if (generationActivityRef.current || guardWorkspaceMutation()) return
     startGenerationActivity(activeStage, "quality-gate-regenerate", true)
     clearQualityGate(activeStage.id)
     await runGeneration("regenerate", "quality-gate-regenerate", true)
-  }, [activeStage, clearQualityGate, runGeneration, startGenerationActivity])
+  }, [activeStage, clearQualityGate, guardWorkspaceMutation, runGeneration, startGenerationActivity])
 
   const handleGateOverride = useCallback(async () => {
     if (!activeStage) return
+    if (guardWorkspaceMutation()) return
     try {
       const updatedStage = await overrideQualityGate(activeStage.id)
       setStage(updatedStage)
@@ -791,19 +879,22 @@ export default function Workspace() {
   }, [
     activeStage,
     clearQualityGate,
+    guardWorkspaceMutation,
     refreshWorkspace,
     setStage,
   ])
 
   const handleGateDismiss = useCallback(() => {
     if (!activeStage) return
+    if (guardWorkspaceMutation()) return
     clearQualityGate(activeStage.id)
-  }, [activeStage, clearQualityGate])
+  }, [activeStage, clearQualityGate, guardWorkspaceMutation])
 
   const requestGeneration = useCallback(
     async (action: "generate" | "regenerate") => {
       if (generationActivityRef.current) return
       if (!activeStage) return
+      if (guardWorkspaceMutation()) return
       if (activeStage.type === "spec") {
         const saved = await saveProblemStatement()
         if (!saved) return
@@ -823,7 +914,7 @@ export default function Workspace() {
       }
       setPendingCredit({ action, stageId: activeStage.id })
     },
-    [activeStage, currentWorkspace?.clarification_qa, saveProblemStatement],
+    [activeStage, currentWorkspace?.clarification_qa, guardWorkspaceMutation, saveProblemStatement],
   )
 
   const handleClarifyProceed = useCallback(() => {
@@ -839,17 +930,18 @@ export default function Workspace() {
 
   const requestFreeRegeneration = useCallback(async () => {
     if (!activeStage) return
-    if (generationActivityRef.current) return
+    if (generationActivityRef.current || guardWorkspaceMutation()) return
     await runGeneration("regenerate-gaps")
-  }, [activeStage, runGeneration])
+  }, [activeStage, guardWorkspaceMutation, runGeneration])
 
   const performRollback = useCallback(async (version: number) => {
     if (!activeStage) return
+    if (guardWorkspaceMutation()) return
     const updated = await rollbackStage(activeStage.id, version)
     setStage(updated)
     setEvalResults((existing) => ({ ...existing, [activeStage.id]: null }))
     await refreshWorkspace()
-  }, [activeStage, setStage, refreshWorkspace])
+  }, [activeStage, guardWorkspaceMutation, setStage, refreshWorkspace])
 
   useEffect(() => {
     if (!streamError || streamError.code === "quality_gate_failed") return
@@ -887,6 +979,7 @@ export default function Workspace() {
   }, [activeStage, navigate, performRollback, runGeneration, showAlert, streamError])
 
   const requestRefine = useCallback(() => {
+    if (guardWorkspaceMutation()) return
     const currentSelection = editorRef.current?.getSelection()
     if (!activeStage || !currentSelection) {
       if (activeStage?.type === "spec") {
@@ -903,10 +996,11 @@ export default function Workspace() {
     setRefineMode("focused")
     setShowRefineInput(true)
     dismissAlert()
-  }, [activeStage, dismissAlert])
+  }, [activeStage, dismissAlert, guardWorkspaceMutation])
 
   const confirmCredits = useCallback(async () => {
     if (!pendingCredit) return
+    if (guardWorkspaceMutation()) return
 
     const stage = stageMap[pendingCredit.stageId]
     if (!stage) return
@@ -921,10 +1015,11 @@ export default function Workspace() {
     setPendingCredit(null)
 
     await runGeneration(nextAction)
-  }, [pendingCredit, stageMap, runGeneration])
+  }, [guardWorkspaceMutation, pendingCredit, stageMap, runGeneration])
 
   const proceedThroughReviewGate = useCallback(async () => {
     if (!pendingReview) return
+    if (guardWorkspaceMutation()) return
 
     const stage = stageMap[pendingReview.stageId]
     if (!stage) return
@@ -939,9 +1034,10 @@ export default function Workspace() {
     } catch {
       setGenericError("Could not acknowledge the review gate.")
     }
-  }, [pendingReview, stageMap, setStage, runGeneration])
+  }, [guardWorkspaceMutation, pendingReview, stageMap, setStage, runGeneration])
 
   const runRefine = useCallback(async () => {
+    if (guardWorkspaceMutation()) return
     if (refineInFlightRef.current || generationActivityRef.current) {
       return
     }
@@ -982,6 +1078,7 @@ export default function Workspace() {
     clearGenerationActivity,
     refineInstruction,
     refineMode,
+    guardWorkspaceMutation,
     selection,
     setStage,
     startGenerationActivity,
@@ -990,13 +1087,14 @@ export default function Workspace() {
   const acceptDiff = useCallback(
     async (proposed: string) => {
       if (!activeStage) return
+      if (guardWorkspaceMutation()) return
       const updatedStage = await acceptStageDiff(activeStage.id, proposed)
       setStage(updatedStage)
       setEvalResults((existing) => ({ ...existing, [updatedStage.id]: null }))
       setDiffResult(null)
       setLargeSelectionWarning(false)
     },
-    [activeStage, setStage],
+    [activeStage, guardWorkspaceMutation, setStage],
   )
 
   const rejectDiff = useCallback(async () => {
@@ -1004,14 +1102,16 @@ export default function Workspace() {
       setDiffResult(null)
       return
     }
+    if (guardWorkspaceMutation()) return
 
     await rejectStageDiff(activeStage.id)
     setDiffResult(null)
     setLargeSelectionWarning(false)
-  }, [activeStage])
+  }, [activeStage, guardWorkspaceMutation])
 
   const handleFinalise = useCallback(async () => {
     if (!activeStage || !id) return
+    if (guardWorkspaceMutation()) return
     if (activeStage.quality_gate?.status === "blocked") {
       setGenericError(
         activeStage.quality_gate.kind === "incomplete_output"
@@ -1043,11 +1143,11 @@ export default function Workspace() {
     } catch {
       setGenericError("Only draft stages can be finalised.")
     }
-  }, [activeStage, id, setStage, setCurrentWorkspace, setStages, refreshLatestStoryboard])
+  }, [activeStage, guardWorkspaceMutation, id, setStage, setCurrentWorkspace, setStages, refreshLatestStoryboard])
 
   const handleContentChange = useCallback(
     async (content: string) => {
-      if (!activeStage || isActiveStageBusy) return
+      if (!activeStage || workspaceGenerationLock.locked) return
       setStage({ ...activeStage, content })
       setEvalResults((existing) => ({ ...existing, [activeStage.id]: null }))
       try {
@@ -1057,18 +1157,19 @@ export default function Workspace() {
         setGenericError("Could not save the latest edit.")
       }
     },
-    [activeStage, isActiveStageBusy, setStage],
+    [activeStage, setStage, workspaceGenerationLock.locked],
   )
 
   const handleRevalidateTasks = useCallback(async () => {
     if (!activeStage || activeStage.type !== "tasks") return
+    if (guardWorkspaceMutation()) return
     try {
       const fresh = await revalidateTasks(activeStage.id)
       setEvalResults((existing) => ({ ...existing, [activeStage.id]: fresh }))
     } catch {
       setGenericError("Could not re-validate tasks.")
     }
-  }, [activeStage])
+  }, [activeStage, guardWorkspaceMutation])
 
   const handleExport = useCallback(async () => {
     if (!id || !canExport || isExporting) return
@@ -1692,10 +1793,22 @@ export default function Workspace() {
             stage={activeStage}
             upstreamStageType={STAGE_LABELS[upstreamType]}
             onRegenerate={() => void requestGeneration("regenerate")}
-            onDismiss={() =>
+            onDismiss={() => {
+              if (guardWorkspaceMutation()) return
               setDismissedStale((existing) => ({ ...existing, [activeStage.id]: true }))
-            }
+            }}
+            disabled={workspaceGenerationLock.locked}
+            disabledReason={workspaceLockReason}
           />
+        )}
+
+        {workspaceGenerationLock.locked && (
+          <div className="ws-banner ws-lock" role="status" aria-live="polite">
+            <span>{workspaceGenerationLock.message}</span>
+            <span id="workspace-lock-action-reason" className="workspace-lock-reason">
+              {workspaceLockReason}
+            </span>
+          </div>
         )}
 
         {largeSelectionWarning && (
@@ -1705,6 +1818,9 @@ export default function Workspace() {
               <button
                 type="button"
                 onClick={() => setLargeSelectionWarning(false)}
+                disabled={workspaceGenerationLock.locked}
+                title={workspaceGenerationLock.locked ? workspaceLockReason : undefined}
+                aria-describedby={workspaceGenerationLock.locked ? "workspace-lock-action-reason" : undefined}
                 className="text-xs underline opacity-75 hover:opacity-100"
               >
                 Proceed
@@ -1713,6 +1829,9 @@ export default function Workspace() {
                 type="button"
                 onClick={() => { void rejectDiff(); void requestGeneration("regenerate") }}
                 className="gen-btn-primary gen-btn-compact"
+                disabled={workspaceGenerationLock.locked}
+                title={workspaceGenerationLock.locked ? workspaceLockReason : undefined}
+                aria-describedby={workspaceGenerationLock.locked ? "workspace-lock-action-reason" : undefined}
               >
                 Regenerate
               </button>
@@ -1794,6 +1913,8 @@ export default function Workspace() {
             onRegenerate={handleGateRegenerate}
             onOverride={handleGateOverride}
             onDismiss={handleGateDismiss}
+            actionsDisabled={workspaceGenerationLock.locked}
+            disabledReason={workspaceLockReason}
           />
         )}
 
@@ -1808,6 +1929,7 @@ export default function Workspace() {
             onUnlock={() => void performRollback(activeStage.current_version)}
             isBusy={isGenerationBusy}
             busyOperation={activeBusyOperation}
+            busyLabel={workspaceGenerationLock.busyLabel || undefined}
             qualityGateBlocked={qualityGateBlocked}
             qualityGateBlockedMessage={qualityGateBlockedMessage}
           />
@@ -1827,6 +1949,8 @@ export default function Workspace() {
                   className={refineMode === option.mode ? "active" : ""}
                   onClick={() => setRefineMode(option.mode)}
                   disabled={isGenerationBusy}
+                  title={isGenerationBusy ? workspaceLockReason : undefined}
+                  aria-describedby={isGenerationBusy ? "workspace-lock-action-reason" : undefined}
                 >
                   <strong>{option.label}</strong>
                   <span>{option.detail}</span>
@@ -1846,6 +1970,8 @@ export default function Workspace() {
               placeholder="Describe how to refine the selected text…"
               className="refine-input"
               disabled={isGenerationBusy}
+              title={isGenerationBusy ? workspaceLockReason : undefined}
+              aria-describedby={isGenerationBusy ? "workspace-lock-action-reason" : undefined}
               autoFocus
             />
             <button
@@ -1853,10 +1979,18 @@ export default function Workspace() {
               onClick={() => setShowRefineInput(false)}
               className="gen-btn-secondary refine-cancel-btn"
               disabled={isGenerationBusy}
+              title={isGenerationBusy ? workspaceLockReason : undefined}
+              aria-describedby={isGenerationBusy ? "workspace-lock-action-reason" : undefined}
             >
               Cancel
             </button>
-            <button type="submit" className="gen-btn-primary" disabled={isGenerationBusy}>
+            <button
+              type="submit"
+              className="gen-btn-primary"
+              disabled={isGenerationBusy}
+              title={isGenerationBusy ? workspaceLockReason : undefined}
+              aria-describedby={isGenerationBusy ? "workspace-lock-action-reason" : undefined}
+            >
               {activeBusyOperation === "focused-patch"
                 ? "Preparing patch..."
                 : activeRefineMode.submitLabel}
@@ -1889,8 +2023,10 @@ export default function Workspace() {
               stage={activeStage}
               problemStatement={problemDraft}
               isDirty={problemDirty}
-              readOnly={isActiveStageBusy}
+              readOnly={workspaceGenerationLock.locked}
+              readOnlyReason={workspaceLockInlineReason}
               onChange={(value) => {
+                if (workspaceGenerationLock.locked) return
                 setProblemDraft(value)
                 setProblemDirty(true)
               }}
@@ -1905,16 +2041,22 @@ export default function Workspace() {
                     <span className={`workspace-status-chip ${activeStage.status}`}>
                       {formatStageStatus(activeStage.status)}
                     </span>
+                    {workspaceGenerationLock.locked && (
+                      <span className="workspace-lock-chip">Editing paused</span>
+                    )}
                   </div>
                 </div>
                 <div className="workspace-pane-actions">
                   <QualityBadge evalResult={evalResult} error={isEvalError} />
-                  {!isActiveStageBusy && !diffResult && (
+                  {!diffResult && (
                     <div className="document-mode-toggle" aria-label="Spec view mode">
                       <button
                         type="button"
                         className={specViewMode === "preview" ? "active" : ""}
                         onClick={() => setSpecViewMode("preview")}
+                        disabled={workspaceGenerationLock.locked}
+                        title={workspaceGenerationLock.locked ? workspaceLockReason : undefined}
+                        aria-describedby={workspaceGenerationLock.locked ? "workspace-lock-action-reason" : undefined}
                       >
                         Preview
                       </button>
@@ -1922,6 +2064,9 @@ export default function Workspace() {
                         type="button"
                         className={specViewMode === "edit" ? "active" : ""}
                         onClick={() => setSpecViewMode("edit")}
+                        disabled={workspaceGenerationLock.locked}
+                        title={workspaceGenerationLock.locked ? workspaceLockReason : undefined}
+                        aria-describedby={workspaceGenerationLock.locked ? "workspace-lock-action-reason" : undefined}
                       >
                         Edit
                       </button>
@@ -1937,6 +2082,8 @@ export default function Workspace() {
                     proposed={diffResult.proposed}
                     onAccept={acceptDiff}
                     onReject={rejectDiff}
+                    disabled={workspaceGenerationLock.locked}
+                    disabledReason={workspaceLockReason}
                   />
                 ) : isActiveStageBusy || specViewMode === "edit" ? (
                   <StageEditor
@@ -1944,7 +2091,8 @@ export default function Workspace() {
                     ref={editorRef}
                     stageId={activeStage.id}
                     initialContent={activeStage.content ?? ""}
-                    readOnly={isActiveStageBusy}
+                    readOnly={workspaceGenerationLock.locked}
+                    readOnlyReason={workspaceLockInlineReason}
                     onContentChange={handleContentChange}
                   />
                 ) : (
@@ -1972,6 +2120,9 @@ export default function Workspace() {
                     <span className={`workspace-status-chip ${activeStage.status}`}>
                       {formatStageStatus(activeStage.status)}
                     </span>
+                    {workspaceGenerationLock.locked && (
+                      <span className="workspace-lock-chip">Editing paused</span>
+                    )}
                     {activeStage.type === "harness" && (
                       <HarnessCoverageChip
                         coverage_summary={currentWorkspace.coverage_summary ?? null}
@@ -1999,20 +2150,26 @@ export default function Workspace() {
                   {activeStage.type === "tasks" && evalResult !== null && genuineGapIssues.length === 0 && (
                     <span className="ws-validation-ok-chip">✓ All tasks valid</span>
                   )}
-                  {activeStage.type === "tasks" && !isActiveStageBusy && (
+                  {activeStage.type === "tasks" && evalResult !== null && (
                     <button
                       type="button"
                       className="ws-view-toggle"
                       onClick={handleRevalidateTasks}
+                      disabled={workspaceGenerationLock.locked}
+                      title={workspaceGenerationLock.locked ? workspaceLockReason : undefined}
+                      aria-describedby={workspaceGenerationLock.locked ? "workspace-lock-action-reason" : undefined}
                     >
                       Re-validate
                     </button>
                   )}
-                  {activeStage.status !== "locked" && !isActiveStageBusy && (
+                  {activeStage.status !== "locked" && (
                     <button
                       type="button"
                       onClick={() => setIsEditMode((m) => !m)}
                       className="ws-view-toggle"
+                      disabled={workspaceGenerationLock.locked}
+                      title={workspaceGenerationLock.locked ? workspaceLockReason : undefined}
+                      aria-describedby={workspaceGenerationLock.locked ? "workspace-lock-action-reason" : undefined}
                     >
                       {isEditMode ? "Preview" : "Edit"}
                     </button>
@@ -2026,7 +2183,8 @@ export default function Workspace() {
                     ref={editorRef}
                     stageId={activeStage.id}
                     initialContent={activeStage.content ?? ""}
-                    readOnly={isActiveStageBusy}
+                    readOnly={workspaceGenerationLock.locked}
+                    readOnlyReason={workspaceLockInlineReason}
                     onContentChange={handleContentChange}
                   />
                 ) : (
@@ -2054,6 +2212,8 @@ export default function Workspace() {
                       proposed={diffResult.proposed}
                       onAccept={acceptDiff}
                       onReject={rejectDiff}
+                      disabled={workspaceGenerationLock.locked}
+                      disabledReason={workspaceLockReason}
                     />
                   </div>
                 ) : (
@@ -2062,6 +2222,8 @@ export default function Workspace() {
                       stage={activeStage}
                       evalResult={evalResult}
                       freeRegenUsed={activeStage.gap_patch_used}
+                      disabled={workspaceGenerationLock.locked}
+                      disabledReason={workspaceLockReason}
                       onRegenerate={
                         activeStage.gap_patch_used
                           ? () => void requestGeneration("regenerate")
@@ -2071,6 +2233,8 @@ export default function Workspace() {
                     <TaskValidationPanel
                       stage={activeStage}
                       evalResult={evalResult}
+                      disabled={workspaceGenerationLock.locked}
+                      disabledReason={workspaceLockReason}
                       onNavigateToHarness={(() => {
                         const h = stages.find((s) => s.type === "harness")
                         return h ? () => setActiveStageId(h.id) : undefined
@@ -2087,7 +2251,12 @@ export default function Workspace() {
                         connection={githubSync.connection}
                         loading={githubSync.loading}
                         resyncing={githubSync.resyncing}
-                        onResync={() => void githubSync.resync()}
+                        onResync={() => {
+                          if (guardWorkspaceMutation()) return
+                          void githubSync.resync()
+                        }}
+                        disabled={workspaceGenerationLock.locked}
+                        disabledReason={workspaceLockReason}
                       />
                     )}
                     {/* The living-workspace timeline: only once the baseline is
@@ -2101,6 +2270,8 @@ export default function Workspace() {
                           workspaceId={id}
                           enabled
                           hasBaselinePush={githubSync.data !== null}
+                          disabled={workspaceGenerationLock.locked}
+                          disabledReason={workspaceLockReason}
                         />
                       )}
                   </>
@@ -2137,6 +2308,8 @@ export default function Workspace() {
           }
           onProceed={proceedThroughReviewGate}
           onClose={() => setPendingReview(null)}
+          disabled={workspaceGenerationLock.locked}
+          disabledReason={workspaceLockReason}
         />
       )}
 

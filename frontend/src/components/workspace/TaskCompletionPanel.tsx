@@ -38,6 +38,8 @@ interface TaskCompletionPanelProps {
   loading: boolean
   resyncing: boolean
   onResync: () => void
+  disabled?: boolean
+  disabledReason?: string
 }
 
 function issueHref(
@@ -63,6 +65,8 @@ export function TaskCompletionPanel({
   loading,
   resyncing,
   onResync,
+  disabled = false,
+  disabledReason,
 }: TaskCompletionPanelProps) {
   // One-time highlight of rows that flip open→done between refetches. The ref is
   // seeded from the FIRST fetch so already-shipped rows never flash on mount —
@@ -150,6 +154,8 @@ export function TaskCompletionPanel({
           variant="drift"
           resyncing={resyncing}
           onResync={onResync}
+          disabled={disabled}
+          disabledReason={disabledReason}
         />
       )}
 

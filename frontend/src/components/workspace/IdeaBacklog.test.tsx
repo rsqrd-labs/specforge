@@ -69,4 +69,24 @@ describe("IdeaBacklog", () => {
     expect(onCapture).toHaveBeenCalledWith("Webhook retries")
     expect(input).toHaveValue("")
   })
+
+  it("disables idea capture and promote with a lock reason", () => {
+    const { onCapture, onPromote } = renderBacklog({
+      ideas: [idea({ text: "SSO" })],
+      disabled: true,
+      disabledReason: "Editing resumes when generation finishes.",
+    })
+
+    const input = screen.getByLabelText(/capture an idea/i)
+    expect(input).toBeDisabled()
+    expect(input).toHaveAccessibleDescription(
+      /editing resumes when generation finishes/i,
+    )
+    expect(screen.getByRole("button", { name: /add idea/i })).toBeDisabled()
+    expect(screen.getByRole("button", { name: /promote idea to increment/i })).toBeDisabled()
+
+    fireEvent.click(screen.getByRole("button", { name: /promote idea to increment/i }))
+    expect(onCapture).not.toHaveBeenCalled()
+    expect(onPromote).not.toHaveBeenCalled()
+  })
 })

@@ -4726,6 +4726,20 @@ button:disabled {
   color: var(--color-secondary);
 }
 
+.workspace-lock-chip {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  min-height: 25px;
+  padding: 0 11px;
+  border-radius: 999px;
+  border: 1px solid rgba(86, 94, 116, 0.20);
+  background: rgba(86, 94, 116, 0.08);
+  color: var(--color-tertiary);
+  font-size: 11px;
+  font-weight: 800;
+}
+
 .workspace-model-chip {
   min-width: 0;
   max-width: clamp(140px, 20vw, 300px);
@@ -7617,6 +7631,13 @@ button:disabled {
   transform: translateY(0);
 }
 
+.ws-view-toggle:disabled {
+  cursor: not-allowed;
+  opacity: 0.58;
+  transform: none;
+  box-shadow: none;
+}
+
 @media (max-width: 1180px) {
   .workspace-header {
     column-gap: 14px;
@@ -7882,6 +7903,31 @@ button:disabled {
   color: var(--color-secondary);
 }
 
+.ws-banner.ws-lock {
+  align-items: flex-start;
+  border-color: rgba(86, 94, 116, 0.20);
+  background:
+    linear-gradient(135deg, rgba(86, 94, 116, 0.08), rgba(143, 78, 0, 0.05)),
+    rgba(255, 255, 255, 0.70);
+  color: var(--color-on-surface);
+}
+
+.workspace-lock-reason {
+  flex: 0 0 auto;
+  color: var(--color-on-surface-variant);
+  font-size: 12px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.workspace-lock-inline-note {
+  margin: 0;
+  color: var(--color-on-surface-variant);
+  font-size: 12px;
+  font-weight: 800;
+  line-height: 1.4;
+}
+
 /* Staleness warning strip */
 .staleness-strip {
   position: relative;
@@ -7985,6 +8031,11 @@ button:disabled {
 .staleness-dismiss:hover {
   opacity: 1;
   background: rgba(143, 78, 0, 0.07);
+}
+
+.staleness-dismiss:disabled {
+  cursor: not-allowed;
+  opacity: 0.46;
 }
 
 /* Refine hint popup */
@@ -8474,6 +8525,8 @@ button:disabled {
   flex: 1;
   min-height: 0;
   position: relative;
+  display: flex;
+  flex-direction: column;
   background:
     linear-gradient(180deg, rgba(255, 255, 255, 0.30), transparent),
     var(--color-surface);
@@ -8538,6 +8591,20 @@ button:disabled {
 
 .problem-editor-textarea:read-only {
   color: var(--color-on-surface-variant);
+}
+
+.problem-editor-readonly-note,
+.stage-editor-readonly-note {
+  flex: 0 0 auto;
+  margin: 12px 14px 0;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid rgba(86, 94, 116, 0.18);
+  background: rgba(86, 94, 116, 0.07);
+  color: var(--color-on-surface-variant);
+  font-size: 12px;
+  font-weight: 800;
+  line-height: 1.4;
 }
 
 .document-mode-toggle {
@@ -8610,12 +8677,27 @@ button:disabled {
 }
 
 .stage-editor-shell {
+  display: flex;
+  flex-direction: column;
   height: 100%;
   width: 100%;
-  overflow: auto;
+  min-height: 0;
+  overflow: hidden;
   background:
     linear-gradient(180deg, rgba(255, 247, 238, 0.60) 0%, rgba(249, 249, 249, 0.18)),
     var(--color-surface);
+}
+
+.stage-editor-shell.is-readonly {
+  background:
+    linear-gradient(180deg, rgba(86, 94, 116, 0.06), rgba(249, 249, 249, 0.18)),
+    var(--color-surface);
+}
+
+.stage-editor-mount {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
 }
 
 .document-markdown-scroll {
@@ -8757,6 +8839,11 @@ button:disabled {
   border-color: rgba(143, 78, 0, 0.45);
 }
 
+.ws-action-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
 .ws-action-btn + .ws-panel-muted {
   margin-top: 10px;
 }
@@ -8842,6 +8929,13 @@ button:disabled {
 .ws-sync-banner-text {
   flex: 1 1 auto;
   color: var(--color-on-surface-variant);
+}
+
+.ws-sync-banner-reason {
+  flex: 1 1 100%;
+  color: var(--color-on-surface-variant);
+  font-size: 11.5px;
+  font-weight: 800;
 }
 
 .ws-sync-banner-action {
@@ -9342,6 +9436,11 @@ button:disabled {
   box-shadow: 0 0 0 3px rgba(86, 94, 116, 0.1);
 }
 
+.ws-ideas-input:disabled {
+  cursor: not-allowed;
+  opacity: 0.62;
+}
+
 .ws-ideas-add {
   flex: none;
   width: 34px;
@@ -9434,6 +9533,15 @@ button:disabled {
 
 .ws-idea-promote:hover {
   background: rgba(143, 78, 0, 0.08);
+}
+
+.ws-idea-promote:disabled {
+  cursor: not-allowed;
+  opacity: 0.52;
+}
+
+.ws-idea-promote:disabled:hover {
+  background: none;
 }
 
 .ws-validation-ok-chip {
@@ -10115,6 +10223,16 @@ button:disabled {
 .ws-issue-action:hover {
   background: var(--color-primary);
   color: #fff;
+}
+
+.ws-issue-action:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.ws-issue-action:disabled:hover {
+  background: transparent;
+  color: var(--color-primary);
 }
 
 .ws-panel-ok {

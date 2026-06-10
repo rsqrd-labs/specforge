@@ -4,6 +4,8 @@ interface DiffViewerProps {
   proposed: string
   onAccept: (proposed: string) => void
   onReject: () => void
+  disabled?: boolean
+  disabledReason?: string
 }
 
 interface DiffLine {
@@ -22,8 +24,16 @@ function parseDiff(diff: string): DiffLine[] {
   })
 }
 
-export function DiffViewer({ diff, proposed, onAccept, onReject }: DiffViewerProps) {
+export function DiffViewer({
+  diff,
+  proposed,
+  onAccept,
+  onReject,
+  disabled = false,
+  disabledReason,
+}: DiffViewerProps) {
   const lines = parseDiff(diff)
+  const disabledReasonId = disabledReason ? "diff-actions-disabled-reason" : undefined
 
   return (
     <div className="diff-viewer">
@@ -49,13 +59,27 @@ export function DiffViewer({ diff, proposed, onAccept, onReject }: DiffViewerPro
       </div>
 
       <div className="diff-actions">
-        <button onClick={onReject} className="gen-btn-secondary">
+        {disabled && disabledReason ? (
+          <p id={disabledReasonId} className="workspace-lock-inline-note">
+            {disabledReason}
+          </p>
+        ) : null}
+        <button
+          onClick={onReject}
+          className="gen-btn-secondary"
+          disabled={disabled}
+          title={disabled ? disabledReason : undefined}
+          aria-describedby={disabled ? disabledReasonId : undefined}
+        >
           Reject
         </button>
         <button
           onClick={() => onAccept(proposed)}
           className="gen-btn-primary"
           aria-label="Accept changes"
+          disabled={disabled}
+          title={disabled ? disabledReason : undefined}
+          aria-describedby={disabled ? disabledReasonId : undefined}
         >
           Accept
         </button>
