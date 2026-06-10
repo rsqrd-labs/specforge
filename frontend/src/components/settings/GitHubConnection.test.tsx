@@ -173,7 +173,7 @@ describe("GitHubConnection", () => {
       await screen.findByRole("button", { name: /install github app/i }),
     )
 
-    expect(await screen.findByRole("alert")).toHaveTextContent(/isn't configured/i)
+    expect(await screen.findByRole("alert")).toHaveTextContent(/not configured/i)
     expect(window.location.href).toBe("") // never navigated
   })
 

@@ -110,7 +110,7 @@ describe("CreateStoryboardModal", () => {
   it("surfaces refund-aware failure language", () => {
     renderModal({ failureMessage: "Generation failed." })
 
-    expect(screen.getByText(/generation failed/i)).toBeInTheDocument()
+    expect(screen.getByRole("alert")).toHaveTextContent(/generation failed/i)
     expect(screen.getByText(/refund-aware/i)).toBeInTheDocument()
     expect(screen.getByText(/credits are returned/i)).toBeInTheDocument()
   })

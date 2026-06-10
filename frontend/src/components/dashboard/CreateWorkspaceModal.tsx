@@ -8,6 +8,7 @@ import { useWorkspaceStore } from "../../store/workspaceStore"
 import type { Template } from "../../types/template"
 import type { AIProvider } from "../../types/workspace"
 import type { Provider } from "../../services/api"
+import { ActionAlertPanel } from "../shared/ActionAlert"
 
 interface CreateWorkspaceModalProps {
   onClose: () => void
@@ -311,7 +312,16 @@ export function CreateWorkspaceModal({
             ))}
           </div>
 
-          {errors.submit && <p className="modal-error">{errors.submit}</p>}
+          {errors.submit && (
+            <ActionAlertPanel
+              severity="error"
+              title="Workspace could not be created"
+              message={errors.submit}
+              recovery="Your draft is still in this form. Try again after checking the provider and statement."
+              source="Dashboard"
+              onDismiss={() => setErrors((prev) => ({ ...prev, submit: "" }))}
+            />
+          )}
 
           <div className="modal-footer">
             <div className="modal-credit-hint" aria-live="polite">

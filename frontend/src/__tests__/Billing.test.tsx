@@ -131,7 +131,7 @@ describe("Billing — checkout_ref polling", () => {
     renderBilling("/billing?checkout_ref=ref-err")
 
     await waitFor(() =>
-      expect(screen.getByText(/unable to verify payment status/i)).toBeInTheDocument(),
+      expect(screen.getByText(/payment status could not be verified/i)).toBeInTheDocument(),
     )
   })
 })

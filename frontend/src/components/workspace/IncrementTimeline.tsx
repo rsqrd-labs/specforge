@@ -43,6 +43,7 @@ import {
   pushIncrement,
 } from "../../services/api"
 import type { Increment, IncrementIdea } from "../../types/github"
+import { ActionAlertPanel } from "../shared/ActionAlert"
 import { DriftIcon, ShippedCheckIcon } from "../shared/icons"
 import { IdeaBacklog } from "./IdeaBacklog"
 import { StagedProgress } from "./StagedProgress"
@@ -310,9 +311,15 @@ export function IncrementTimeline({
       )}
 
       {createError && (
-        <p className="ws-timeline-error" role="alert">
-          {createError}
-        </p>
+        <ActionAlertPanel
+          severity="error"
+          title="Increment could not be created"
+          message={createError}
+          recovery="Your baseline is unchanged. Try again when you are ready."
+          source="Increments"
+          onDismiss={() => setCreateError(null)}
+          className="ws-timeline-error"
+        />
       )}
 
       <ol className="ws-timeline">
@@ -374,9 +381,15 @@ export function IncrementTimeline({
       </ol>
 
       {actionError && (
-        <p className="ws-timeline-error" role="alert">
-          {actionError}
-        </p>
+        <ActionAlertPanel
+          severity="error"
+          title="Increment action failed"
+          message={actionError}
+          recovery="Your timeline is unchanged. Try the action again."
+          source="Increments"
+          onDismiss={() => setActionError(null)}
+          className="ws-timeline-error"
+        />
       )}
 
       <IdeaBacklog

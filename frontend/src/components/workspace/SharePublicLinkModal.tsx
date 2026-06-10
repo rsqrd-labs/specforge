@@ -7,6 +7,7 @@ import {
 } from "../../services/api"
 import { useFocusTrap } from "../../hooks/useFocusTrap"
 import type { ShareLinkResponse } from "../../types/publicShare"
+import { ActionAlertPanel } from "../shared/ActionAlert"
 
 interface SharePublicLinkModalProps {
   workspaceId: string
@@ -253,24 +254,24 @@ export function SharePublicLinkModal({
           )}
 
           {state.kind === "error" && (
-            <div className="share-modal-error" role="alert">
-              <span>{state.message}</span>
-              <button
-                type="button"
-                className="share-modal-error-retry"
-                onClick={() =>
-                  initialEnabled && initialSlug
-                    ? applyLink({
-                        slug: initialSlug,
-                        url: composeUrl(initialSlug, origin),
-                        enabled: true,
-                      })
-                    : setState({ kind: "disabled" })
-                }
-              >
-                Dismiss
-              </button>
-            </div>
+            <ActionAlertPanel
+              severity="error"
+              title="Sharing could not be updated"
+              message={state.message}
+              recovery="Your current sharing state is unchanged."
+              source="Sharing"
+              dismissLabel="Dismiss"
+              onDismiss={() =>
+                initialEnabled && initialSlug
+                  ? applyLink({
+                      slug: initialSlug,
+                      url: composeUrl(initialSlug, origin),
+                      enabled: true,
+                    })
+                  : setState({ kind: "disabled" })
+              }
+              className="share-modal-error"
+            />
           )}
         </div>
 

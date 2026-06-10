@@ -9,6 +9,7 @@ import { useCallback, useEffect, useMemo, useState } from "react"
 import { Link, useSearchParams } from "react-router-dom"
 
 import { AiDisclaimer } from "../components/shared/AiDisclaimer"
+import { ActionAlertPanel } from "../components/shared/ActionAlert"
 import { BrandLogo } from "../components/shared/BrandLogo"
 import {
   createCheckoutSession,
@@ -19,6 +20,7 @@ import {
   getCredits,
 } from "../services/api"
 import type { BillingCreditPack, BillingPackage } from "../types/billing"
+import { billingAlert } from "../utils/errorPresentation"
 
 type LoadState = "loading" | "ready" | "error"
 type PollingStatus = "idle" | "processing" | "completed" | "timeout" | "error"
@@ -95,12 +97,14 @@ interface PaymentStatusPanelProps {
   status: PollingStatus
   creditsAdded: number | null
   expiresAt: string | null
+  onRefresh: () => void
 }
 
 function PaymentStatusPanel({
   status,
   creditsAdded,
   expiresAt,
+  onRefresh,
 }: PaymentStatusPanelProps) {
   if (status === "idle") return null
 
@@ -127,16 +131,26 @@ function PaymentStatusPanel({
         </>
       )}
       {status === "timeout" && (
-        <>
-          <h1>Payment received</h1>
-          <p>Credits may take a moment to appear. Refresh the page in 30 seconds.</p>
-        </>
+        <ActionAlertPanel
+          {...billingAlert("payment-timeout", {
+            primaryAction: {
+              label: "Refresh billing",
+              onSelect: onRefresh,
+              autoDismiss: false,
+            },
+          })}
+        />
       )}
       {status === "error" && (
-        <>
-          <h1>Unable to verify payment status.</h1>
-          <p>Please refresh or contact support.</p>
-        </>
+        <ActionAlertPanel
+          {...billingAlert("payment-error", {
+            primaryAction: {
+              label: "Refresh billing",
+              onSelect: onRefresh,
+              autoDismiss: false,
+            },
+          })}
+        />
       )}
     </section>
   )
@@ -293,6 +307,7 @@ export default function Billing() {
           status={pollingStatus}
           creditsAdded={creditsAdded}
           expiresAt={completedExpiresAt}
+          onRefresh={() => void loadBillingData(false)}
         />
 
         {loadState === "loading" && !billingPackage ? (
@@ -302,13 +317,18 @@ export default function Billing() {
             <p>We are fetching your balance and the current package.</p>
           </section>
         ) : loadState === "error" && !billingPackage ? (
-          <section className="billing-state-panel error" role="alert">
-            <span className="billing-state-kicker">Billing</span>
-            <h1>Could not load billing.</h1>
-            <p>Please refresh and try again.</p>
-            <button type="button" className="billing-secondary-btn" onClick={() => void loadBillingData()}>
-              Try again
-            </button>
+          <section className="billing-state-panel error">
+            <ActionAlertPanel
+              {...billingAlert("load", {
+                primaryAction: {
+                  label: "Try again",
+                  onSelect: () => {
+                    void loadBillingData()
+                  },
+                  autoDismiss: false,
+                },
+              })}
+            />
           </section>
         ) : billingPackage ? (
           <>
@@ -354,9 +374,22 @@ export default function Billing() {
                   {isStartingCheckout ? "Opening checkout…" : "Buy Credits →"}
                 </button>
                 {checkoutError && (
-                  <p className="billing-checkout-error" role="alert">
-                    {checkoutError}
-                  </p>
+                  <ActionAlertPanel
+                    severity="error"
+                    title="Checkout could not open"
+                    message={checkoutError}
+                    recovery="Your credits were not charged. Try again from Billing."
+                    source="Billing"
+                    primaryAction={{
+                      label: "Try again",
+                      onSelect: () => {
+                        void handleBuyCredits()
+                      },
+                      autoDismiss: false,
+                    }}
+                    onDismiss={() => setCheckoutError(null)}
+                    className="billing-checkout-error"
+                  />
                 )}
               </article>
             </section>

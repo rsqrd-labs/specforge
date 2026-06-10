@@ -28,6 +28,7 @@ import {
   type ClarifyQuestion,
 } from "../../services/api"
 import { useFocusTrap } from "../../hooks/useFocusTrap"
+import { ActionAlertPanel } from "../shared/ActionAlert"
 
 const ANSWER_MAX = 500
 
@@ -222,9 +223,14 @@ export function SpecClarificationModal({
           })}
 
           {error && (
-            <p className="modal-error" role="alert">
-              {error}
-            </p>
+            <ActionAlertPanel
+              severity="error"
+              title="Answers could not be saved"
+              message={error}
+              recovery="Your typed answers are still here. Try again or skip to keep moving."
+              source="Clarification"
+              onDismiss={() => setError(null)}
+            />
           )}
 
           <div className="modal-footer clarify-modal-footer">

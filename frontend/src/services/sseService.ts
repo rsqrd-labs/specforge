@@ -81,8 +81,8 @@ function streamErrorMessage(event: ErrorEvent): string {
       return "The selected model provider failed to respond. Please try again."
     case "provider_timeout":
       return (
-        "Generation took longer than expected. Please try again; longer stages " +
-        "may need another attempt."
+        "Generation timed out. The model did not finish this stage in time. " +
+        "Your workspace is safe. Try again; long stages may need another run."
       )
     case "insufficient_credits":
       return "You need more credits before generating this stage."

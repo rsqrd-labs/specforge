@@ -2,12 +2,14 @@ import axios from "axios"
 import { useCallback, useEffect, useState } from "react"
 import { useLocation, useNavigate, useParams } from "react-router-dom"
 import { PresenterMode } from "../components/storyboard/PresenterMode"
+import { ActionAlertPanel } from "../components/shared/ActionAlert"
 import { StoryboardDeck } from "../components/storyboard/StoryboardDeck"
 import { StoryboardDownloadMenu } from "../components/storyboard/StoryboardDownloadMenu"
 import { StoryboardLaunchPage } from "../components/storyboard/StoryboardLaunchPage"
 import { StoryboardShareModal } from "../components/storyboard/StoryboardShareModal"
 import { getApiErrorMessage, getStoryboard } from "../services/api"
 import type { StoryboardDetail, StoryboardSharePermissions } from "../types/storyboard"
+import { storyboardLoadAlert } from "../utils/errorPresentation"
 
 // Authenticated owner Storyboard page (Phase 20 — T-257).
 //
@@ -167,8 +169,21 @@ export default function Storyboard() {
 
   if (state.kind === "error") {
     return (
-      <main className="storyboard-page storyboard-page--deck" role="alert">
-        <StoryboardDeck title="Storyboard" errorMessage={state.message} />
+      <main className="storyboard-page storyboard-page--deck">
+        <StoryboardDeck title="Storyboard" />
+        <ActionAlertPanel
+          {...storyboardLoadAlert(state.message, {
+            primaryAction: {
+              label: "Try again",
+              onSelect: () => window.location.reload(),
+            },
+            secondaryAction: {
+              label: originWorkspaceId ? "Back to workspace" : "Back to dashboard",
+              onSelect: () => goBackToOrigin(workspaceBackTarget),
+            },
+          })}
+          className="storyboard-page-alert"
+        />
         <button
           type="button"
           className="storyboard-page__back-link"

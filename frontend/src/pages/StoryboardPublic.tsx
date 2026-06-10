@@ -100,7 +100,10 @@ export default function StoryboardPublic() {
     return (
       <main className="storyboard-public storyboard-public--empty">
         <h1>This Storyboard link is no longer available</h1>
-        <p>The link may have been disabled or replaced by its owner.</p>
+        <p>
+          This link may have been disabled, rotated, or mistyped. Ask the owner
+          for a fresh Storyboard link.
+        </p>
       </main>
     )
   }

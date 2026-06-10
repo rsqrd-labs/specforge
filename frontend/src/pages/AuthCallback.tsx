@@ -1,9 +1,13 @@
 import { useEffect, useRef, useState } from "react"
 import { useNavigate, useSearchParams } from "react-router-dom"
 
+import { ActionAlertPanel } from "../components/shared/ActionAlert"
 import { BrandLockup } from "../components/shared/BrandLogo"
 import { completeGoogleCallback, setAccessToken } from "../services/api"
 import { useUserStore } from "../store/userStore"
+import { authCallbackAlert } from "../utils/errorPresentation"
+
+type AuthErrorReason = "cancelled" | "missing-code" | "exchange-failed"
 
 export default function AuthCallback() {
   const [searchParams] = useSearchParams()
@@ -11,6 +15,7 @@ export default function AuthCallback() {
   const fetchMe = useUserStore((state) => state.fetchMe)
   const [message, setMessage] = useState("Completing Google sign-in...")
   const [status, setStatus] = useState<"loading" | "error">("loading")
+  const [errorReason, setErrorReason] = useState<AuthErrorReason | null>(null)
   const didRun = useRef(false)
 
   useEffect(() => {
@@ -22,14 +27,18 @@ export default function AuthCallback() {
     const state = searchParams.get("state")
 
     if (error) {
+      const alert = authCallbackAlert("cancelled")
       setStatus("error")
-      setMessage("Google sign-in was cancelled or rejected.")
+      setErrorReason("cancelled")
+      setMessage(alert.message)
       return
     }
 
     if (!code || !state) {
+      const alert = authCallbackAlert("missing-code")
       setStatus("error")
-      setMessage("Google did not return a sign-in code.")
+      setErrorReason("missing-code")
+      setMessage(alert.message)
       return
     }
 
@@ -40,8 +49,10 @@ export default function AuthCallback() {
         navigate("/dashboard", { replace: true })
       })
       .catch(() => {
+        const alert = authCallbackAlert("exchange-failed")
         setStatus("error")
-        setMessage("Google sign-in failed. Check the OAuth configuration.")
+        setErrorReason("exchange-failed")
+        setMessage(alert.message)
       })
   }, [fetchMe, navigate, searchParams])
 
@@ -82,6 +93,13 @@ export default function AuthCallback() {
           <span />
           <span />
         </div>
+
+        {status === "error" && errorReason && (
+          <ActionAlertPanel
+            {...authCallbackAlert(errorReason)}
+            className="auth-callback-alert"
+          />
+        )}
 
         {status === "error" && (
           <div className="auth-callback-actions">

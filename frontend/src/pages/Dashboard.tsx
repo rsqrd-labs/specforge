@@ -1,7 +1,8 @@
-import { Fragment, useEffect, useRef, useState } from "react"
+import { Fragment, useCallback, useEffect, useRef, useState } from "react"
 import { Link, useNavigate } from "react-router-dom"
 import { ErrorBoundary } from "../components/ErrorBoundary"
 import { AiDisclaimer } from "../components/shared/AiDisclaimer"
+import { ActionAlertPanel } from "../components/shared/ActionAlert"
 import { BrandLockup } from "../components/shared/BrandLogo"
 import { GitHubStatusPill } from "../components/shared/GitHubStatusPill"
 import { CreditMeter } from "../components/shared/CreditMeter"
@@ -217,18 +218,18 @@ function UserAvatar({
  */
 function TemplatesErrorFallback() {
   return (
-    <div className="templates-error-fallback" role="alert" aria-live="polite">
-      <span className="templates-error-message">
-        Templates unavailable — reload to retry.
-      </span>
-      <button
-        type="button"
-        className="templates-error-reload"
-        onClick={() => window.location.reload()}
-      >
-        Reload
-      </button>
-    </div>
+    <ActionAlertPanel
+      severity="warning"
+      title="Templates unavailable"
+      message="Starter templates could not render."
+      recovery="Reload the dashboard to fetch them again."
+      source="Dashboard"
+      primaryAction={{
+        label: "Reload",
+        onSelect: () => window.location.reload(),
+      }}
+      className="templates-error-fallback"
+    />
   )
 }
 
@@ -249,20 +250,36 @@ export default function Dashboard() {
   const [workspaceToDelete, setWorkspaceToDelete] = useState<Workspace | null>(null)
   const [deletingWorkspaceId, setDeletingWorkspaceId] = useState<string | null>(null)
   const [deleteError, setDeleteError] = useState<string | null>(null)
+  const [dashboardNotice, setDashboardNotice] = useState<string | null>(null)
   const [activePipelineInfo, setActivePipelineInfo] = useState<PipelineStageId | null>(null)
+
+  const loadCreditSummary = useCallback(async () => {
+    setDashboardNotice(null)
+
+    try {
+      const d = await getCredits()
+      setBalance(d.balance)
+      setGenerationCost(d.generation_cost)
+    } catch {
+      setBalance(null)
+      setDashboardNotice("Could not load your latest credit balance.")
+    }
+
+    try {
+      const packs = await fetchBillingHistory()
+      setBillingPacks(packs)
+    } catch {
+      setBillingPacks([])
+      setDashboardNotice((existing) =>
+        existing ?? "Could not load your latest credit history.",
+      )
+    }
+  }, [])
 
   useEffect(() => {
     void fetchWorkspaces()
-    getCredits()
-      .then((d) => {
-        setBalance(d.balance)
-        setGenerationCost(d.generation_cost)
-      })
-      .catch(() => setBalance(null))
-    fetchBillingHistory()
-      .then(setBillingPacks)
-      .catch(() => setBillingPacks([]))
-  }, [fetchWorkspaces])
+    void loadCreditSummary()
+  }, [fetchWorkspaces, loadCreditSummary])
 
   useEffect(() => {
     if (!activePipelineInfo) return
@@ -482,6 +499,24 @@ export default function Dashboard() {
             </button>
           </div>
         </section>
+      )}
+
+      {dashboardNotice && (
+        <ActionAlertPanel
+          severity="info"
+          title="Dashboard data is partially unavailable"
+          message={dashboardNotice}
+          recovery="Your workspaces remain available. Try again to refresh the summary."
+          source="Dashboard"
+          primaryAction={{
+            label: "Try again",
+            onSelect: () => {
+              void loadCreditSummary()
+            },
+          }}
+          onDismiss={() => setDashboardNotice(null)}
+          className="dashboard-inline-alert"
+        />
       )}
 
       {/* Stats */}

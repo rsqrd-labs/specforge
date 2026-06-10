@@ -8,6 +8,7 @@ import type {
   StoryboardPublicDownloadKind,
   StoryboardSharePermissions,
 } from "../../types/storyboard"
+import { ActionAlertPanel } from "../shared/ActionAlert"
 
 type DownloadMode = "owner" | "public"
 
@@ -203,7 +204,16 @@ export function StoryboardDownloadMenu({
           <p>No public downloads are enabled for this Storyboard.</p>
         )}
 
-        {errorMessage && <p role="alert">{errorMessage}</p>}
+        {errorMessage && (
+          <ActionAlertPanel
+            severity="error"
+            title="Download is not available"
+            message={errorMessage}
+            recovery="Try again, or ask the owner to check the enabled downloads."
+            source="Storyboard"
+            onDismiss={() => setErrorMessage(null)}
+          />
+        )}
       </section>
     </div>
   )

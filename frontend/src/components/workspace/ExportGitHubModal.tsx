@@ -47,6 +47,7 @@ import {
   getGitHubPush,
 } from "../../services/api"
 import type { GitHubExportMode } from "../../types/github"
+import { ActionAlertPanel } from "../shared/ActionAlert"
 import { BranchIcon, PullRequestIcon, ShippedCheckIcon } from "../shared/icons"
 import { StagedProgress } from "./StagedProgress"
 
@@ -546,9 +547,13 @@ export function ExportGitHubModal({
           ) : (
             // phase === "error"
             <>
-              <p className="modal-error">
-                {error ?? "Export failed. Please try again."}
-              </p>
+              <ActionAlertPanel
+                severity="error"
+                title="GitHub export failed"
+                message={error ?? "Export failed. Please try again."}
+                recovery="Your workspace is still saved. Try again or reconnect GitHub in Settings."
+                source="GitHub"
+              />
               <div className="modal-footer">
                 <button type="button" className="modal-cancel" onClick={onClose}>
                   Close

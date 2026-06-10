@@ -152,8 +152,8 @@ describe("createSSEConnection retry behaviour", () => {
 
     expect(onError).toHaveBeenCalledTimes(1)
     expect(onError.mock.calls[0][0].message).toBe(
-      "Generation took longer than expected. Please try again; longer stages " +
-        "may need another attempt.",
+      "Generation timed out. The model did not finish this stage in time. " +
+        "Your workspace is safe. Try again; long stages may need another run.",
     )
   })
 

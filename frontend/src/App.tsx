@@ -1,5 +1,6 @@
 import { lazy, Suspense } from "react"
 import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom"
+import { ActionAlertProvider } from "./components/shared/ActionAlert"
 import { ProtectedRoute } from "./components/shared/ProtectedRoute"
 import AuthCallback from "./pages/AuthCallback"
 import Billing from "./pages/Billing"
@@ -25,71 +26,73 @@ const StoryboardPublic = lazy(() => import("./pages/StoryboardPublic"))
 export default function App() {
   return (
     <BrowserRouter>
-      <Routes>
-        <Route path="/" element={<Landing />} />
-        <Route path="/auth/callback" element={<AuthCallback />} />
-        <Route
-          path="/p/:slug"
-          element={
-            <Suspense fallback={null}>
-              <PublicWorkspaceView />
-            </Suspense>
-          }
-        />
-        <Route
-          path="/sb/:slug"
-          element={
-            <Suspense fallback={null}>
-              <StoryboardPublic />
-            </Suspense>
-          }
-        />
-        <Route
-          path="/dashboard"
-          element={
-            <ProtectedRoute>
-              <Dashboard />
-            </ProtectedRoute>
-          }
-        />
-        <Route
-          path="/workspace/:id"
-          element={
-            <ProtectedRoute>
+      <ActionAlertProvider>
+        <Routes>
+          <Route path="/" element={<Landing />} />
+          <Route path="/auth/callback" element={<AuthCallback />} />
+          <Route
+            path="/p/:slug"
+            element={
               <Suspense fallback={null}>
-                <Workspace />
+                <PublicWorkspaceView />
               </Suspense>
-            </ProtectedRoute>
-          }
-        />
-        <Route
-          path="/storyboards/:id"
-          element={
-            <ProtectedRoute>
+            }
+          />
+          <Route
+            path="/sb/:slug"
+            element={
               <Suspense fallback={null}>
-                <Storyboard />
+                <StoryboardPublic />
               </Suspense>
-            </ProtectedRoute>
-          }
-        />
-        <Route
-          path="/settings"
-          element={
-            <ProtectedRoute>
-              <Settings />
-            </ProtectedRoute>
-          }
-        />
-        <Route
-          path="/billing"
-          element={
-            <ProtectedRoute>
-              <Billing />
-            </ProtectedRoute>
-          }
-        />
-        <Route path="*" element={<Navigate to="/" replace />} />
-      </Routes>
+            }
+          />
+          <Route
+            path="/dashboard"
+            element={
+              <ProtectedRoute>
+                <Dashboard />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/workspace/:id"
+            element={
+              <ProtectedRoute>
+                <Suspense fallback={null}>
+                  <Workspace />
+                </Suspense>
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/storyboards/:id"
+            element={
+              <ProtectedRoute>
+                <Suspense fallback={null}>
+                  <Storyboard />
+                </Suspense>
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/settings"
+            element={
+              <ProtectedRoute>
+                <Settings />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/billing"
+            element={
+              <ProtectedRoute>
+                <Billing />
+              </ProtectedRoute>
+            }
+          />
+          <Route path="*" element={<Navigate to="/" replace />} />
+        </Routes>
+      </ActionAlertProvider>
     </BrowserRouter>
   )
 }

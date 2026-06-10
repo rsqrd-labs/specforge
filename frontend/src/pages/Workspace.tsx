@@ -24,6 +24,7 @@ import { TaskValidationPanel } from "../components/workspace/TaskValidationPanel
 import { TaskCompletionPanel } from "../components/workspace/TaskCompletionPanel"
 import { IncrementTimeline } from "../components/workspace/IncrementTimeline"
 import { ExportGitHubModal } from "../components/workspace/ExportGitHubModal"
+import { useActionAlert } from "../components/shared/ActionAlert"
 import { useGitHubSync } from "../hooks/useGitHubSync"
 // ExportPDFButton — T-USE-08 contract; PDF export logic is inlined in handlePdfExport
 import type { } from "../components/workspace/ExportPDFButton"
@@ -39,7 +40,7 @@ import {
   formatEffortSummaryChip,
   parseEffortSummary,
 } from "../utils/tasksParser"
-import { type StreamErrorState, useStream } from "../hooks/useStream"
+import { useStream } from "../hooks/useStream"
 import {
   acceptStageDiff,
   acknowledgeReviewGate,
@@ -70,6 +71,10 @@ import { useStageStore } from "../store/stageStore"
 import { useWorkspaceStore } from "../store/workspaceStore"
 import type { EvalResult, RefineResponse, Stage, StageType } from "../types/stage"
 import type { StoryboardDetail, StoryboardDownloadKind } from "../types/storyboard"
+import {
+  actionAlertFromMessage,
+  actionAlertFromStreamError,
+} from "../utils/errorPresentation"
 
 const STAGE_ORDER: StageType[] = ["spec", "plan", "harness", "tasks"]
 
@@ -238,6 +243,10 @@ export default function Workspace() {
   const storyboardActionInFlightRef = useRef(false)
   const storyboardLoadRequestRef = useRef(0)
   const storyboardLoadingRequestRef = useRef(0)
+  const lastGenerationActionRef = useRef<"generate" | "regenerate" | "regenerate-gaps">(
+    "generate",
+  )
+  const { showAlert, dismissAlert } = useActionAlert()
   const { currentWorkspace, isLoading, fetchWorkspace, setCurrentWorkspace } =
     useWorkspaceStore()
   const { stages: stageMap, setStage, setStages } = useStageStore()
@@ -278,8 +287,20 @@ export default function Workspace() {
   const [dismissedStale, setDismissedStale] = useState<Record<string, boolean>>(
     {},
   )
-  const [error, setError] = useState<StreamErrorState | null>(null)
-  const setGenericError = (message: string) => setError({ code: "generic", message })
+  const setGenericError = useCallback(
+    (message: string, title = "Action could not finish") => {
+      showAlert(
+        actionAlertFromMessage({
+          title,
+          message,
+          recovery:
+            "Your workspace is safe. Try the action again, or refresh if the problem continues.",
+          source: "Workspace",
+        }),
+      )
+    },
+    [showAlert],
+  )
   const [showRefineHint, setShowRefineHint] = useState(false)
   const [isExporting, setIsExporting] = useState(false)
   const [isEditMode, setIsEditMode] = useState(false)
@@ -291,7 +312,6 @@ export default function Workspace() {
   const [showShareModal, setShowShareModal] = useState(false)
   const [showExportMenu, setShowExportMenu] = useState(false)
   const [isPdfExporting, setIsPdfExporting] = useState(false)
-  const [pdfError, setPdfError] = useState<string | null>(null)
   const [latestStoryboard, setLatestStoryboard] =
     useState<StoryboardDetail | null>(null)
   const [isStoryboardLoading, setIsStoryboardLoading] = useState(false)
@@ -571,10 +591,6 @@ export default function Workspace() {
   ])
 
   useEffect(() => {
-    if (streamError) setError(streamError)
-  }, [streamError])
-
-  useEffect(() => {
     if (!latestStoryboard || latestStoryboard.status !== "generating") return
 
     let cancelled = false
@@ -716,7 +732,8 @@ export default function Workspace() {
         startGenerationActivity(activeStage, operation, true)
       }
 
-      setError(null)
+      lastGenerationActionRef.current = action
+      dismissAlert()
       setEvalResults((existing) => ({ ...existing, [stageId]: null }))
       try {
         const result = await startStream(action)
@@ -740,6 +757,7 @@ export default function Workspace() {
     [
       activeStage,
       clearGenerationActivity,
+      dismissAlert,
       refreshWorkspace,
       setStage,
       startGenerationActivity,
@@ -830,6 +848,41 @@ export default function Workspace() {
     await refreshWorkspace()
   }, [activeStage, setStage, refreshWorkspace])
 
+  useEffect(() => {
+    if (!streamError || streamError.code === "quality_gate_failed") return
+
+    const retryable = new Set([
+      "provider_timeout",
+      "provider_error",
+      "rate_limit_exceeded",
+      "internal_error",
+      "generic",
+    ])
+    const primaryAction =
+      streamError.code === "insufficient_credits"
+        ? {
+            label: "View billing",
+            onSelect: () => navigate("/billing"),
+          }
+        : streamError.code === "stage_not_generatable" && activeStage
+          ? {
+              label: "Unlock stage",
+              onSelect: () => {
+                void performRollback(activeStage.current_version)
+              },
+            }
+          : retryable.has(streamError.code)
+            ? {
+                label: "Try again",
+                onSelect: () => {
+                  void runGeneration(lastGenerationActionRef.current)
+                },
+              }
+            : undefined
+
+    showAlert(actionAlertFromStreamError(streamError, { primaryAction }))
+  }, [activeStage, navigate, performRollback, runGeneration, showAlert, streamError])
+
   const requestRefine = useCallback(() => {
     const currentSelection = editorRef.current?.getSelection()
     if (!activeStage || !currentSelection) {
@@ -846,8 +899,8 @@ export default function Workspace() {
     setRefineInstruction("")
     setRefineMode("focused")
     setShowRefineInput(true)
-    setError(null)
-  }, [activeStage])
+    dismissAlert()
+  }, [activeStage, dismissAlert])
 
   const confirmCredits = useCallback(async () => {
     if (!pendingCredit) return
@@ -1060,7 +1113,6 @@ export default function Workspace() {
   const handlePdfExport = useCallback(async () => {
     if (!id || isPdfExporting || !allFinalised) return
     setIsPdfExporting(true)
-    setPdfError(null)
     setShowExportMenu(false)
     try {
       const blob = await exportWorkspacePdf(id)
@@ -1071,12 +1123,22 @@ export default function Workspace() {
       a.click()
       window.setTimeout(() => URL.revokeObjectURL(url), 1_500)
     } catch (exc) {
-      setPdfError(getApiErrorMessage(exc, "Couldn't generate PDF. Try again?"))
-      setShowExportMenu(true)
+      showAlert(
+        actionAlertFromMessage({
+          title: "PDF export failed",
+          message: getApiErrorMessage(exc, "Could not generate the PDF."),
+          recovery: "Your workspace is saved. Open the export menu and try again.",
+          source: "Export",
+          primaryAction: {
+            label: "Open export menu",
+            onSelect: () => setShowExportMenu(true),
+          },
+        }),
+      )
     } finally {
       setIsPdfExporting(false)
     }
-  }, [id, isPdfExporting, allFinalised, currentWorkspace?.name])
+  }, [id, isPdfExporting, allFinalised, currentWorkspace?.name, showAlert])
 
   const handleCreateStoryboard = useCallback(async () => {
     if (!id || storyboardActionInFlightRef.current) return
@@ -1106,11 +1168,18 @@ export default function Workspace() {
         navigate(`/storyboards/${created.id}`, { state: { workspaceId: id } })
       } else if (created.status === "failed") {
         setStoryboardGenerationFailure("Storyboard generation failed.")
-        setStoryboardMessage({
-          kind: "error",
-          text:
-            "Storyboard generation failed. Credits were refunded and you can try again.",
-        })
+        showAlert(
+          actionAlertFromMessage({
+            title: "Storyboard generation failed",
+            message: "Credits were refunded and you can try again.",
+            recovery: "Your finalised workspace stages are still available.",
+            source: "Storyboard",
+            primaryAction: {
+              label: "Try again",
+              onSelect: () => setShowCreateStoryboard(true),
+            },
+          }),
+        )
       } else {
         storyboardAutoOpenRef.current = created.id
         setStoryboardMessage({
@@ -1124,7 +1193,19 @@ export default function Workspace() {
         "Storyboard generation failed. If credits were deducted, the backend refund path restores them.",
       )
       setStoryboardGenerationFailure(message)
-      setStoryboardMessage({ kind: "error", text: message })
+      showAlert(
+        actionAlertFromMessage({
+          title: "Storyboard generation failed",
+          message,
+          recovery:
+            "If credits were deducted, the backend refund path restores them.",
+          source: "Storyboard",
+          primaryAction: {
+            label: "Try again",
+            onSelect: () => setShowCreateStoryboard(true),
+          },
+        }),
+      )
     } finally {
       storyboardActionInFlightRef.current = false
       setStoryboardAction(null)
@@ -1134,6 +1215,7 @@ export default function Workspace() {
     canCreateStoryboard,
     hasStaleStoryboardPrerequisite,
     navigate,
+    showAlert,
   ])
 
   const handleOpenStoryboard = useCallback(() => {
@@ -1173,11 +1255,21 @@ export default function Workspace() {
         navigate(`/storyboards/${regenerating.id}`, { state: { workspaceId: id } })
       } else if (regenerating.status === "failed") {
         setStoryboardGenerationFailure("Storyboard regeneration failed.")
-        setStoryboardMessage({
-          kind: "error",
-          text:
-            "Storyboard regeneration failed. Credits were refunded and the previous ready deck remains available.",
-        })
+        showAlert(
+          actionAlertFromMessage({
+            title: "Storyboard regeneration failed",
+            message:
+              "Credits were refunded and the previous ready deck remains available.",
+            recovery: "Try regeneration again when you are ready.",
+            source: "Storyboard",
+            primaryAction: {
+              label: "Try again",
+              onSelect: () => {
+                void handleRegenerateStoryboard()
+              },
+            },
+          }),
+        )
         await refreshLatestStoryboard(true)
       } else {
         storyboardAutoOpenRef.current = regenerating.id
@@ -1187,18 +1279,28 @@ export default function Workspace() {
         })
       }
     } catch (error) {
-      setStoryboardMessage({
-        kind: "error",
-        text: getApiErrorMessage(
-          error,
-          "Storyboard regeneration failed. Credits are refunded if the backend cannot complete the paid run.",
-        ),
-      })
+      showAlert(
+        actionAlertFromMessage({
+          title: "Storyboard regeneration failed",
+          message: getApiErrorMessage(
+            error,
+            "Storyboard regeneration failed. Credits are refunded if the backend cannot complete the paid run.",
+          ),
+          recovery: "The previous ready deck remains available.",
+          source: "Storyboard",
+          primaryAction: {
+            label: "Try again",
+            onSelect: () => {
+              void handleRegenerateStoryboard()
+            },
+          },
+        }),
+      )
     } finally {
       storyboardActionInFlightRef.current = false
       setStoryboardAction(null)
     }
-  }, [latestStoryboard, navigate, refreshLatestStoryboard, id])
+  }, [latestStoryboard, navigate, refreshLatestStoryboard, id, showAlert])
 
   const handleShareStoryboard = useCallback(async () => {
     if (
@@ -1239,15 +1341,25 @@ export default function Workspace() {
         })
       }
     } catch (error) {
-      setStoryboardMessage({
-        kind: "error",
-        text: getApiErrorMessage(error, "Could not enable the Storyboard share link."),
-      })
+      showAlert(
+        actionAlertFromMessage({
+          title: "Share link could not be enabled",
+          message: getApiErrorMessage(error, "Could not enable the Storyboard share link."),
+          recovery: "The current Storyboard remains private until sharing succeeds.",
+          source: "Storyboard",
+          primaryAction: {
+            label: "Try again",
+            onSelect: () => {
+              void handleShareStoryboard()
+            },
+          },
+        }),
+      )
     } finally {
       storyboardActionInFlightRef.current = false
       setStoryboardAction(null)
     }
-  }, [latestStoryboard])
+  }, [latestStoryboard, showAlert])
 
   const handleDownloadStoryboard = useCallback(
     async (kind: StoryboardDownloadKind) => {
@@ -1271,16 +1383,26 @@ export default function Workspace() {
         )
         saveBlob(blob, storyboardFilename(latestStoryboard, kind))
       } catch (error) {
-        setStoryboardMessage({
-          kind: "error",
-          text: getApiErrorMessage(error, "Storyboard download failed."),
-        })
+        showAlert(
+          actionAlertFromMessage({
+            title: "Storyboard download failed",
+            message: getApiErrorMessage(error, "Storyboard download failed."),
+            recovery: "Try again from the Storyboard toolbar.",
+            source: "Storyboard",
+            primaryAction: {
+              label: "Try again",
+              onSelect: () => {
+                void handleDownloadStoryboard(kind)
+              },
+            },
+          }),
+        )
       } finally {
         storyboardActionInFlightRef.current = false
         setStoryboardAction(null)
       }
     },
-    [latestStoryboard],
+    [latestStoryboard, showAlert],
   )
 
   useEffect(() => {
@@ -1541,17 +1663,6 @@ export default function Workspace() {
                       <span>Push to GitHub</span>
                     </button>
                   </div>
-                  {pdfError && (
-                    <div className="ws-export-error" role="alert">
-                      <span>{pdfError}</span>
-                      <button
-                        type="button"
-                        onClick={() => { setPdfError(null); void handlePdfExport() }}
-                      >
-                        Retry
-                      </button>
-                    </div>
-                  )}
                 </div>
               )}
             </div>
@@ -1580,30 +1691,6 @@ export default function Workspace() {
             }
           />
         )}
-
-        {error && error.code === "stage_not_generatable" ? (
-          <div className="ws-banner ws-warning">
-            <span>This stage is finalised — unlock it with Rollback before regenerating.</span>
-            <button
-              type="button"
-              onClick={() => setError(null)}
-              className="ws-banner-link"
-            >
-              Dismiss
-            </button>
-          </div>
-        ) : error ? (
-          <div className="ws-banner ws-error">
-            <span>{error.message}</span>
-            <button
-              type="button"
-              onClick={() => setError(null)}
-              className="ws-banner-link"
-            >
-              ✕
-            </button>
-          </div>
-        ) : null}
 
         {largeSelectionWarning && (
           <div className="ws-banner ws-warning">

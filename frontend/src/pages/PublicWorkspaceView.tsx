@@ -99,10 +99,10 @@ function LoadingSkeleton() {
 function NotFound() {
   return (
     <div className="public-view-empty">
-      <h1>Link not available</h1>
+      <h1>This shared workspace link is no longer available</h1>
       <p>
-        This shared spec may have been disabled by its author or the link
-        may be incorrect.
+        This link may have been disabled, rotated, or mistyped. Ask the owner
+        for a fresh workspace share link.
       </p>
       <p>
         <Link to="/" className="public-view-footer-link">

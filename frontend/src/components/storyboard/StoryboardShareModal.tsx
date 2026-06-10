@@ -8,6 +8,7 @@ import type {
   StoryboardSharePermissions,
   StoryboardShareResponse,
 } from "../../types/storyboard"
+import { ActionAlertPanel } from "../shared/ActionAlert"
 
 export const DEFAULT_SHARE_PERMISSIONS: StoryboardSharePermissions = {
   allow_pdf_download: true,
@@ -180,9 +181,7 @@ export function StoryboardShareModal({
     }
   }
 
-  const statusText = errorMessage
-    ? errorMessage
-    : copyState === "copied"
+  const statusText = copyState === "copied"
       ? "Link copied"
       : copyState === "failed"
         ? "Copy failed — select the link and copy it manually."
@@ -191,7 +190,7 @@ export function StoryboardShareModal({
           : isDirty && enabled
             ? "You have unsaved permission changes."
             : ""
-  const statusRole = errorMessage || copyState === "failed" ? "alert" : "status"
+  const statusRole = copyState === "failed" ? "alert" : "status"
 
   return (
     <div
@@ -304,6 +303,17 @@ export function StoryboardShareModal({
             </label>
           ))}
         </div>
+
+        {errorMessage && (
+          <ActionAlertPanel
+            severity="error"
+            title="Sharing settings could not be updated"
+            message={errorMessage}
+            recovery="The previous sharing settings remain in place."
+            source="Storyboard"
+            onDismiss={() => setErrorMessage(null)}
+          />
+        )}
 
         <footer className="sb-share__foot">
           <p className={`sb-share__status sb-share__status--${statusRole}`} role={statusRole}>

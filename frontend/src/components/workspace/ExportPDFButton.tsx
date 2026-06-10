@@ -1,5 +1,6 @@
 import { useCallback, useRef, useState } from "react"
 import { exportWorkspacePdf, getApiErrorMessage } from "../../services/api"
+import { ActionAlertPanel } from "../shared/ActionAlert"
 import { PDFIcon } from "../shared/icons"
 
 interface ExportPDFButtonProps {
@@ -78,16 +79,22 @@ export function ExportPDFButton({
       </button>
       <a ref={anchorRef} hidden aria-hidden="true" />
       {error && (
-        <div className="workspace-pdf-btn-error" role="alert">
-          <span>{error}</span>
-          <button
-            type="button"
-            className="workspace-pdf-btn-retry"
-            onClick={() => void handleClick()}
-          >
-            Retry
-          </button>
-        </div>
+        <ActionAlertPanel
+          severity="error"
+          title="PDF export failed"
+          message={error}
+          recovery="Your workspace is saved. Try exporting again."
+          source="Export"
+          primaryAction={{
+            label: "Retry",
+            onSelect: () => {
+              void handleClick()
+            },
+            autoDismiss: false,
+          }}
+          onDismiss={() => setError(null)}
+          className="workspace-pdf-btn-error"
+        />
       )}
     </div>
   )

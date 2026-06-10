@@ -37,6 +37,8 @@ import {
   revokeGitHubInstallation,
 } from "../../services/api"
 import type { InstallationOption } from "../../types/github"
+import { githubConnectionAlert } from "../../utils/errorPresentation"
+import { ActionAlertPanel, type ActionAlertContent } from "../shared/ActionAlert"
 import { GitHubIcon, InstalledShieldIcon } from "../shared/icons"
 
 type PanelState = "loading" | "not_installed" | "installed" | "suspended"
@@ -58,7 +60,7 @@ export default function GitHubConnection() {
   const [installations, setInstallations] = useState<InstallationOption[]>([])
   const [onLegacyOAuth, setOnLegacyOAuth] = useState(false)
   const [state, setState] = useState<PanelState>("loading")
-  const [error, setError] = useState<string | null>(null)
+  const [errorAlert, setErrorAlert] = useState<ActionAlertContent | null>(null)
   const [opening, setOpening] = useState(false)
   const [confirmId, setConfirmId] = useState<string | null>(null)
   const [revokingId, setRevokingId] = useState<string | null>(null)
@@ -85,10 +87,20 @@ export default function GitHubConnection() {
             ? "suspended"
             : "not_installed",
       )
-      setError(null)
+      setErrorAlert(null)
     } catch {
       if (!mounted.current) return
-      setError("Couldn't load your GitHub connection. Please try again.")
+      setErrorAlert(
+        githubConnectionAlert("load", {
+          primaryAction: {
+            label: "Try again",
+            onSelect: () => {
+              void refresh()
+            },
+            autoDismiss: false,
+          },
+        }),
+      )
       setState("not_installed")
     }
   }, [])
@@ -108,7 +120,7 @@ export default function GitHubConnection() {
   async function handleInstall() {
     if (opening) return
     setOpening(true)
-    setError(null)
+    setErrorAlert(null)
     try {
       const url = await getGitHubInstallUrl()
       if (url) {
@@ -118,11 +130,29 @@ export default function GitHubConnection() {
         return
       }
       // 503 → the App isn't configured for this environment.
-      setError(
-        "GitHub isn't configured for this environment. Ask your admin to enable the SpecForge GitHub App.",
+      setErrorAlert(
+        githubConnectionAlert("not-configured", {
+          primaryAction: {
+            label: "Try again",
+            onSelect: () => {
+              void handleInstall()
+            },
+            autoDismiss: false,
+          },
+        }),
       )
     } catch {
-      setError("Couldn't open GitHub. Please try again.")
+      setErrorAlert(
+        githubConnectionAlert("install", {
+          primaryAction: {
+            label: "Try again",
+            onSelect: () => {
+              void handleInstall()
+            },
+            autoDismiss: false,
+          },
+        }),
+      )
     } finally {
       if (mounted.current) setOpening(false)
     }
@@ -130,14 +160,24 @@ export default function GitHubConnection() {
 
   async function handleDisconnect(id: string) {
     setRevokingId(id)
-    setError(null)
+    setErrorAlert(null)
     try {
       await revokeGitHubInstallation(id)
       await refresh()
       if (mounted.current) setConfirmId(null)
     } catch {
       if (mounted.current) {
-        setError("Disconnect failed. Please try again.")
+        setErrorAlert(
+          githubConnectionAlert("disconnect", {
+            primaryAction: {
+              label: "Try again",
+              onSelect: () => {
+                void handleDisconnect(id)
+              },
+              autoDismiss: false,
+            },
+          }),
+        )
       }
     } finally {
       if (mounted.current) setRevokingId(null)
@@ -175,7 +215,7 @@ export default function GitHubConnection() {
           revokingId={revokingId}
           onAskDisconnect={(id) => {
             setConfirmId(id)
-            setError(null)
+            setErrorAlert(null)
           }}
           onCancelDisconnect={() => setConfirmId(null)}
           onConfirmDisconnect={(id) => void handleDisconnect(id)}
@@ -188,10 +228,12 @@ export default function GitHubConnection() {
         />
       )}
 
-      {error && (
-        <p className="settings-error" role="alert">
-          {error}
-        </p>
+      {errorAlert && (
+        <ActionAlertPanel
+          {...errorAlert}
+          onDismiss={() => setErrorAlert(null)}
+          className="settings-action-alert"
+        />
       )}
     </>
   )

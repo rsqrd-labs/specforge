@@ -1,6 +1,7 @@
 import { useRef } from "react"
 import { useFocusTrap } from "../../hooks/useFocusTrap"
 import type { Workspace } from "../../types/workspace"
+import { ActionAlertPanel } from "../shared/ActionAlert"
 
 interface DeleteWorkspaceModalProps {
   workspace: Workspace
@@ -52,7 +53,15 @@ export function DeleteWorkspaceModal({
             Delete <strong>{workspace.name}</strong> from your dashboard? This removes
             it from active workspaces.
           </p>
-          {error && <p className="modal-error">{error}</p>}
+          {error && (
+            <ActionAlertPanel
+              severity="error"
+              title="Workspace could not be deleted"
+              message={error}
+              recovery="The workspace is still available. Try deleting it again."
+              source="Dashboard"
+            />
+          )}
           <div className="modal-footer">
             <button
               type="button"

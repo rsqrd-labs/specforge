@@ -2,6 +2,7 @@ import { useMemo, useRef, useState } from "react"
 import { Link } from "react-router-dom"
 import { useFocusTrap } from "../../hooks/useFocusTrap"
 import type { Stage, StageType } from "../../types/stage"
+import { ActionAlertPanel } from "../shared/ActionAlert"
 
 export const STORYBOARD_GENERATION_COST = 25
 
@@ -198,10 +199,13 @@ export function CreateStoryboardModal({
           {(failureMessage || insufficientBalance || balanceUnavailable) && (
             <div className="storyboard-modal-notice" role="status">
               {failureMessage && (
-                <p>
-                  {failureMessage} Any failed generation is refund-aware: credits
-                  are returned when the backend cannot complete the Storyboard.
-                </p>
+                <ActionAlertPanel
+                  severity="error"
+                  title="Storyboard generation failed"
+                  message={failureMessage}
+                  recovery="Any failed generation is refund-aware: credits are returned when the backend cannot complete the Storyboard."
+                  source="Storyboard"
+                />
               )}
               {balanceUnavailable && (
                 <p>Refresh credits before creating the paid Storyboard.</p>
