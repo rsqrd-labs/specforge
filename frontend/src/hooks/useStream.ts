@@ -56,31 +56,38 @@ export function useStream(stageId: string | null) {
               ? await regenerateStageForGaps(stageId)
               : await generateStage(stageId)
 
-        let onEval!: (result: EvalResult | null) => void
-        const evalPromise = new Promise<EvalResult | null>((resolve) => {
-          onEval = resolve
-        })
-
         const doneStageId = await new Promise<string>((resolve, reject) => {
           streamRef.current = createSSEConnection(
             response.stream_url,
-             (token) => useStageStore.getState().appendToken(stageId, token),
-             resolve,
-             reject,
-             onEval,
-             (info) => useStageStore.getState().setQualityGate(stageId, info),
-             (progress) =>
-               useStageStore.getState().setStreamProgress(stageId, progress),
-             () => useStageStore.getState().clearStreamContent(stageId),
-           )
+            (token) => useStageStore.getState().appendToken(stageId, token),
+            resolve,
+            reject,
+            // Eval is not consumed from the stream: the independent stage-eval
+            // poller in Workspace fetches it once the stage reaches draft. See
+            // the done-handling note below.
+            () => {},
+            (info) => useStageStore.getState().setQualityGate(stageId, info),
+            (progress) =>
+              useStageStore.getState().setStreamProgress(stageId, progress),
+            () => useStageStore.getState().clearStreamContent(stageId),
+          )
         })
 
+        // `done` is terminal for the loading UI — the backend persists the stage
+        // (status=draft, version bumped, committed) *before* it emits `done`.
+        // Tear the stream down now instead of holding it open for the eval tail:
+        // after `done` the backend blocks up to 30s awaiting the background eval
+        // and emits progress heartbeats the whole time, which kept the overlay,
+        // the elapsed clock, and the "Editing paused" lock alive long after the
+        // finished artifact was already on screen. The eval badge is filled in
+        // asynchronously by the stage-eval poller (run_eval_background commits on
+        // its own session, so closing the stream never drops it).
+        closeStreamRef(streamRef)
         useStageStore.getState().finaliseStream(stageId)
         const updatedStage = await getStage(doneStageId)
         useStageStore.getState().setStage(updatedStage)
-        const evalResult = await evalPromise
 
-        return { stage: updatedStage, evalResult }
+        return { stage: updatedStage, evalResult: null }
       } catch (streamError) {
         useStageStore.getState().finaliseStream(stageId)
         const message =
