@@ -35,7 +35,7 @@ def test_model_cost_lookup_returns_copy() -> None:
     assert model_cost["tier"] == "strong"
     assert (
         PROVIDER_CAPABILITY_REGISTRY["google"]["models"]["gemini-3.5-flash"]["tier"]
-        == "strong"
+        == "mid"
     )
 
 
@@ -48,7 +48,7 @@ def test_google_registry_excludes_shutdown_gemini_flash_model() -> None:
 
 
 def test_registry_exposes_model_policy_fields() -> None:
-    model_config = get_model_cost("openai", "gpt-5.5")
+    model_config = get_model_cost("openai", "gpt-5.4")
 
     assert model_config["status"] == "active"
     assert model_config["adapter_api"] == "responses"
@@ -59,6 +59,7 @@ def test_registry_exposes_model_policy_fields() -> None:
         "harness.generate",
         "tasks.generate",
         "regenerate.full",
+        "refine.section",
     ]
 
 

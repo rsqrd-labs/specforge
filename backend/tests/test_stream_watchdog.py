@@ -130,29 +130,29 @@ async def test_watchdog_enforces_hard_cap_on_runaway_stream() -> None:
     assert exc_info.value.kind == "hard_cap"
 
 
-def test_runtime_fallback_route_resolves_same_provider_mid_tier() -> None:
+def test_runtime_fallback_route_resolves_same_provider_strong_tier() -> None:
     primary = MagicMock()
     primary.provider = "anthropic"
-    primary.model = "claude-opus-4-8"
-    primary.model_tier = "strong"
+    primary.model = "claude-sonnet-4-6"
+    primary.model_tier = "mid"
     primary.operation = "spec.generate"
 
     fallback = _runtime_fallback_route(primary)
 
     assert fallback is not None
     assert fallback.provider == "anthropic"
-    assert fallback.model_tier == "mid"
+    assert fallback.model_tier == "strong"
     assert fallback.model != primary.model
 
 
 def test_runtime_fallback_route_is_none_when_already_on_fallback_tier() -> None:
-    mid = MagicMock()
-    mid.provider = "anthropic"
-    mid.model = "claude-sonnet-4-6"
-    mid.model_tier = "mid"
-    mid.operation = "spec.generate"
+    strong = MagicMock()
+    strong.provider = "anthropic"
+    strong.model = "claude-opus-4-8"
+    strong.model_tier = "strong"
+    strong.operation = "spec.generate"
 
-    assert _runtime_fallback_route(mid) is None
+    assert _runtime_fallback_route(strong) is None
 
 
 def test_output_budgets_carry_reasoning_headroom() -> None:

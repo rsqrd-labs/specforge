@@ -112,16 +112,20 @@ _POLL_INTERVAL_SECONDS = 60
 _RECOVERY_LOCK_TTL = 180  # 3 × _POLL_INTERVAL_SECONDS  H-3 — T-179
 
 STAGE_ORDER = ["spec", "plan", "harness", "tasks"]
+# Core generation routes to the mid tier — the fast/cheap current-generation
+# model per provider (Sonnet 4.6 / GPT-5.4 / Gemini 3.5 Flash) — keeping
+# per-generation cost and latency down; the frontier strong tier is reserved
+# for the runtime escalation retry below.
 STAGE_GENERATION_TIERS = {
-    "spec": ("strong", "mid"),
-    "plan": ("strong", "mid"),
-    "harness": ("strong", "mid"),
-    "tasks": ("strong", "mid"),
+    "spec": ("mid", "strong"),
+    "plan": ("mid", "strong"),
+    "harness": ("mid", "strong"),
+    "tasks": ("mid", "strong"),
 }
-# Runtime degradation tier: when a strong-tier generation fails with a timeout
-# or provider error, the stage is retried exactly once on this tier before the
+# Runtime escalation tier: when a mid-tier generation fails with a timeout or
+# provider error, the stage is retried exactly once on this tier before the
 # failure is surfaced to the user.
-_RUNTIME_FALLBACK_TIER = "mid"
+_RUNTIME_FALLBACK_TIER = "strong"
 # Seconds of pipeline silence between SSE progress heartbeats.  Heartbeats are
 # emitted whenever the generation pipeline (artifact streaming, quality gates,
 # critic review/regenerate, persistence) has not produced a client-visible
@@ -380,7 +384,7 @@ def _repair_budget(
 
 
 def _runtime_fallback_route(failed_route: LLMRoute) -> LLMRoute | None:
-    """Resolve the one-shot mid-tier retry route after a strong-tier failure.
+    """Resolve the one-shot strong-tier retry route after a mid-tier failure.
 
     Stays on the same provider (switching providers mid-generation would
     silently change the user's billing/key expectations).  Returns None when
@@ -413,12 +417,12 @@ def _route_for_refine(workspace: Workspace, mode: str) -> LLMRoute:
     requested_tier = {
         "focused": "mini",
         "section": "mid",
-        "full": "strong",
+        "full": "mid",
     }[mode]
     fallback_tier = {
         "focused": "small",
         "section": "strong",
-        "full": "mid",
+        "full": "strong",
     }[mode]
     return resolve_llm_route(
         operation=operation,

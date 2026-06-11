@@ -27,14 +27,14 @@ def test_routes_to_active_operation_default_for_tier_and_operation() -> None:
     route = resolve_llm_route(
         operation="tasks.generate",
         preferred_provider="google",
-        requested_tier="strong",
+        requested_tier="mid",
         fallback_tier="small",
         latency_class="interactive",
     )
 
     assert route.provider == "google"
     assert route.model == "gemini-3.5-flash"
-    assert route.model_tier == "strong"
+    assert route.model_tier == "mid"
     assert route.cross_provider_fallback is False
     assert route.selection_reason == "active_default"
 
@@ -119,12 +119,12 @@ def test_preferred_model_must_support_operation() -> None:
 @pytest.mark.parametrize(
     ("provider", "expected"),
     [
-        ("anthropic", "claude-opus-4-8"),
-        ("openai", "gpt-5.5"),
+        ("anthropic", "claude-sonnet-4-6"),
+        ("openai", "gpt-5.4"),
         ("google", "gemini-3.5-flash"),
     ],
 )
-def test_core_generation_routes_use_frontier_defaults(
+def test_core_generation_routes_use_fast_cheap_defaults(
     provider: str,
     expected: str,
 ) -> None:
@@ -137,9 +137,42 @@ def test_core_generation_routes_use_frontier_defaults(
         route = resolve_llm_route(
             operation=operation,
             preferred_provider=provider,
-            requested_tier="strong",
+            requested_tier="mid",
             latency_class="interactive",
         )
 
         assert route.model == expected
         assert route.selection_reason == "active_default"
+
+
+@pytest.mark.parametrize(
+    ("provider", "expected"),
+    [
+        ("anthropic", "claude-opus-4-8"),
+        ("openai", "gpt-5.5"),
+    ],
+)
+def test_strong_tier_escalation_stays_eligible_for_core_generation(
+    provider: str,
+    expected: str,
+) -> None:
+    route = resolve_llm_route(
+        operation="spec.generate",
+        preferred_provider=provider,
+        requested_tier="strong",
+        latency_class="interactive",
+    )
+
+    assert route.model == expected
+    assert route.model_tier == "strong"
+    assert route.selection_reason == "active_same_tier"
+
+
+def test_google_has_no_strong_tier_escalation_model() -> None:
+    with pytest.raises(LLMRoutingError):
+        resolve_llm_route(
+            operation="spec.generate",
+            preferred_provider="google",
+            requested_tier="strong",
+            latency_class="interactive",
+        )

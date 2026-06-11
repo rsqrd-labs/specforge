@@ -118,12 +118,16 @@ MODEL_CATALOG: tuple[ModelCatalogEntry, ...] = (
         output_cost_per_million=25.0,
         max_context_tokens=1_000_000,
         default_max_output_tokens=32768,
+        # Core generation ops are RECOMMENDED (not default) so the frontier
+        # tier is never the primary route but stays eligible as the runtime
+        # escalation when a mid-tier generation times out or errors.
         recommended_operations=CORE_GENERATION_OPERATIONS,
-        default_operations=CORE_GENERATION_OPERATIONS,
+        default_operations=(),
         supports_reasoning=True,
         reasoning_effort="high",
         rollout_notes=(
-            "Primary Anthropic frontier default for paid ASDD artifact generation."
+            "Anthropic frontier escalation tier for core ASDD generation "
+            "(one-shot runtime retry after a mid-tier failure)."
         ),
         routing_priority=1,
     ),
@@ -139,16 +143,13 @@ MODEL_CATALOG: tuple[ModelCatalogEntry, ...] = (
         output_cost_per_million=15.0,
         max_context_tokens=1_000_000,
         default_max_output_tokens=32768,
-        # Core generation ops are RECOMMENDED (not default) so the mid tier is
-        # never the primary route but stays eligible as the runtime fallback
-        # when a strong-tier generation times out or errors.
         recommended_operations=(*CORE_GENERATION_OPERATIONS, "refine.section"),
-        default_operations=("refine.section",),
+        default_operations=(*CORE_GENERATION_OPERATIONS, "refine.section"),
         supports_reasoning=True,
         reasoning_effort="medium",
         rollout_notes=(
-            "Anthropic non-core section refinement default and core-generation "
-            "fallback tier."
+            "Primary Anthropic core ASDD generation default — fast/cheap "
+            "current-generation model — and section refinement default."
         ),
         routing_priority=20,
     ),
@@ -200,11 +201,17 @@ MODEL_CATALOG: tuple[ModelCatalogEntry, ...] = (
         output_cost_per_million=30.0,
         max_context_tokens=1_000_000,
         default_max_output_tokens=32768,
+        # Core generation ops are RECOMMENDED (not default) so the frontier
+        # tier is never the primary route but stays eligible as the runtime
+        # escalation when a mid-tier generation times out or errors.
         recommended_operations=CORE_GENERATION_OPERATIONS,
-        default_operations=CORE_GENERATION_OPERATIONS,
+        default_operations=(),
         supports_reasoning=True,
         reasoning_effort="high",
-        rollout_notes="Primary OpenAI frontier default for core ASDD generation.",
+        rollout_notes=(
+            "OpenAI frontier escalation tier for core ASDD generation "
+            "(one-shot runtime retry after a mid-tier failure)."
+        ),
         routing_priority=1,
     ),
     ModelCatalogEntry(
@@ -219,15 +226,13 @@ MODEL_CATALOG: tuple[ModelCatalogEntry, ...] = (
         output_cost_per_million=15.0,
         max_context_tokens=1_000_000,
         default_max_output_tokens=32768,
-        # Eligible (recommended-only) for core generation as the runtime
-        # fallback tier; the strong tier remains the sole active default.
         recommended_operations=(*CORE_GENERATION_OPERATIONS, "refine.section"),
-        default_operations=("refine.section",),
+        default_operations=(*CORE_GENERATION_OPERATIONS, "refine.section"),
         supports_reasoning=True,
         reasoning_effort="medium",
         rollout_notes=(
-            "OpenAI high-quality non-core section refinement default and "
-            "core-generation fallback tier."
+            "Primary OpenAI core ASDD generation default — fast/cheap "
+            "current-generation model — and section refinement default."
         ),
         routing_priority=20,
     ),
@@ -310,7 +315,11 @@ MODEL_CATALOG: tuple[ModelCatalogEntry, ...] = (
         provider="google",
         model_id="gemini-3.5-flash",
         display_name="Gemini 3.5 Flash",
-        tier="strong",
+        # Flash is Google's fast/cheap core-generation model, so it sits on
+        # the mid tier — the primary core-generation route. Google has no
+        # active strong-tier escalation model; a runtime failure surfaces
+        # directly instead of retrying on a second model.
+        tier="mid",
         status="active",
         adapter_api="generate_content",
         input_cost_per_million=1.5,

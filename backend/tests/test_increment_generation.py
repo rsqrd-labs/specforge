@@ -208,7 +208,7 @@ def test_grow_tasks_markdown_appends_and_pins_baseline() -> None:
     assert grown.index("Set up project structure") < grown.index("Add billing")
 
 
-def test_increment_generation_uses_frontier_tasks_route() -> None:
+def test_increment_generation_uses_fast_cheap_tasks_route() -> None:
     workspace = MagicMock()
     workspace.provider = "anthropic"
 
@@ -216,8 +216,8 @@ def test_increment_generation_uses_frontier_tasks_route() -> None:
 
     assert route.operation == "tasks.generate"
     assert route.provider == "anthropic"
-    assert route.model == "claude-opus-4-8"
-    assert route.model_tier == "strong"
+    assert route.model == "claude-sonnet-4-6"
+    assert route.model_tier == "mid"
     assert route.selection_reason == "active_default"
 
 

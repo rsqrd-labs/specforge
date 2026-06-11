@@ -355,7 +355,7 @@ async def test_generate_invalid_route_skips_credit_and_provider_call() -> None:
     mock_get_llm.assert_not_called()
 
 
-def test_harness_generation_uses_stronger_route_with_mid_fallback() -> None:
+def test_harness_generation_uses_mid_route_with_strong_fallback() -> None:
     from services.pipeline import stage_manager as stage_manager_module
 
     workspace = _make_workspace()
@@ -364,20 +364,20 @@ def test_harness_generation_uses_stronger_route_with_mid_fallback() -> None:
     route = stage_manager_module._route_for_stage_generation("harness", workspace)
 
     assert route.provider == "openai"
-    assert route.model == "gpt-5.5"
-    assert route.model_tier == "strong"
+    assert route.model == "gpt-5.4"
+    assert route.model_tier == "mid"
     assert route.reason == "requested_tier"
     assert route.selection_reason == "active_default"
-    # Every stage declares a mid-tier resolve-time fallback, and a distinct
-    # same-provider mid-tier model exists for the runtime fallback retry.
+    # Every stage declares a strong-tier resolve-time fallback, and a distinct
+    # same-provider strong-tier model exists for the runtime escalation retry.
     assert stage_manager_module.STAGE_GENERATION_TIERS["harness"] == (
-        "strong",
         "mid",
+        "strong",
     )
     fallback = stage_manager_module._runtime_fallback_route(route)
     assert fallback is not None
     assert fallback.provider == "openai"
-    assert fallback.model_tier == "mid"
+    assert fallback.model_tier == "strong"
     assert fallback.model != route.model
 
 
@@ -2529,8 +2529,8 @@ async def test_generate_eval_task_cancelled_on_timeout(
 
 
 @pytest.mark.asyncio
-async def test_generate_falls_back_to_mid_tier_after_primary_failure() -> None:
-    """A strong-tier provider failure retries once on the mid tier and the
+async def test_generate_falls_back_to_strong_tier_after_primary_failure() -> None:
+    """A mid-tier provider failure retries once on the strong tier and the
     fallback generation is persisted normally with no refund."""
     from services.llm.base import ProviderError
 

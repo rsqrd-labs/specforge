@@ -154,7 +154,7 @@ class WorkspaceService:
             route = resolve_llm_route(
                 operation="spec.generate",
                 preferred_provider=provider,
-                requested_tier="strong",
+                requested_tier="mid",
                 fallback_tier=None,
                 latency_class="interactive",
             )
