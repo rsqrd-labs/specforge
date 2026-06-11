@@ -20,6 +20,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
+import artifact_fixtures
 import pytest
 from prometheus_client import REGISTRY
 from pydantic import ValidationError
@@ -27,9 +28,7 @@ from pydantic import ValidationError
 from models import CreditLedger, Stage, StageVersion, Workspace
 from services.pipeline import critic as critic_module
 from services.pipeline.artifact_validator import (
-    SECTION_CONTRACTS,
     MissingSectionError,
-    chunk_completion_sentinel,
     final_completion_sentinel,
 )
 from services.pipeline.critic import (
@@ -46,58 +45,7 @@ _REGEN_METRIC = "specforge_billing_credits_critic_regen_total"
 # evidence fields so the deterministic validator passes before the critic is
 # reached.  Also well past the critic's 500-char gradable floor so the direct
 # critic_review unit tests do real work.
-_SPEC_DEFAULT_BODY = (
-    "This section captures the team task-management product contract while "
-    "preserving traceability to FR-001, NFR-001, SEC-001, and AC-001 without "
-    "choosing implementation internals."
-)
-_SPEC_SECTION_BODIES = {
-    "## Functional Requirements": (
-        "| ID | Actor/Trigger | Requirement | Measurable outcome | Edge cases | "
-        "Evidence |\n"
-        "|---|---|---|---|---|---|\n"
-        "| FR-001 | Team member creates or updates a task | Users can create, "
-        "assign, and track task status across a team workspace. | Task state "
-        "is visible to permitted collaborators after save. | Missing owner, "
-        "duplicate title, and reopened task flows are handled. | Problem "
-        "statement asks for teams to create tasks, assign owners, and track "
-        "project status. |"
-    ),
-    "## Non-Functional Requirements": (
-        "| ID | Quality | Requirement | Measurable outcome | Edge cases | Evidence |\n"
-        "|---|---|---|---|---|---|\n"
-        "| NFR-001 | Reliability | Core task operations remain available and "
-        "recoverable during normal tenant usage. | Successful task writes are "
-        "durable and observable. | Retry, transient outage, and partial save "
-        "conditions are covered. | Paying users depend on task tracking as "
-        "the product workflow. |"
-    ),
-    "## Security, Privacy, and Abuse Expectations": (
-        "| ID | Actor/Trigger | Control | Measurable outcome | Edge cases | "
-        "Evidence |\n"
-        "|---|---|---|---|---|---|\n"
-        "| SEC-001 | Authenticated user accesses workspace data | Enforce "
-        "workspace-scoped authorization for reads and writes. | A user cannot "
-        "view or mutate another tenant's tasks. | Revoked members, stale "
-        "sessions, and privilege changes are denied. | Problem statement "
-        "requires authenticated team task management. |"
-    ),
-    "## Acceptance Criteria": (
-        "| ID | Scenario | Expected outcome | Verification | Evidence |\n"
-        "|---|---|---|---|---|\n"
-        "| AC-001 | A permitted team member creates and assigns a task | The task "
-        "appears with owner and status for authorized collaborators only. | "
-        "Executable acceptance test covers create, assign, view, and denied "
-        "cross-workspace access. | Derived from FR-001, NFR-001, and SEC-001. |"
-    ),
-}
-_LONG_ARTIFACT = "\n\n".join(
-    f"{heading}\n{_SPEC_SECTION_BODIES.get(heading, _SPEC_DEFAULT_BODY)}"
-    for heading in SECTION_CONTRACTS["spec"]
-)
-_LONG_ARTIFACT_STREAM = (
-    f"{_LONG_ARTIFACT}\n{chunk_completion_sentinel('spec', 'product-scope')}"
-)
+_LONG_ARTIFACT = artifact_fixtures.VALID_SPEC
 
 
 def _with_final_sentinel(content: str, stage: str = "spec") -> str:
@@ -233,11 +181,15 @@ def _make_user():
     return user
 
 
-async def _fake_stream(*args, **kwargs) -> AsyncGenerator[str, None]:
-    # Emit the long artifact in two chunks so it streams like a real generation.
-    half = len(_LONG_ARTIFACT_STREAM) // 2
-    yield _LONG_ARTIFACT_STREAM[:half]
-    yield _LONG_ARTIFACT_STREAM[half:]
+async def _fake_stream(
+    system, user, max_tokens=0, **kwargs
+) -> AsyncGenerator[str, None]:
+    # Answer each chunk prompt with its own section group and sentinel,
+    # split in two so it streams like a real generation.
+    payload = artifact_fixtures.spec_stream_payload(user)
+    half = len(payload) // 2
+    yield payload[:half]
+    yield payload[half:]
 
 
 def _build_generate_env(*, disable_critic: bool = False):

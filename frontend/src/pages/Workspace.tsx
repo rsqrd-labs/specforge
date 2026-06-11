@@ -311,6 +311,7 @@ export default function Workspace() {
   const { stages: stageMap, setStage, setStages } = useStageStore()
   const qualityGateMap = useStageStore((s) => s.qualityGate)
   const clearQualityGate = useStageStore((s) => s.clearQualityGate)
+  const streamProgressMap = useStageStore((s) => s.streamProgress)
   const { balance } = useCredits()
   const animatedBalance = useAnimatedNumber(balance)
 
@@ -425,6 +426,18 @@ export default function Workspace() {
       ? generationActivity
       : null
   const activeBusyOperation = activeGenerationActivity?.operation ?? null
+  // Backend liveness heartbeat for the in-flight generation (issue #19):
+  // surfaces "still working" in the overlay while the model reasons silently.
+  const activeStreamProgress =
+    activeStage && activeGenerationActivity
+      ? streamProgressMap[activeStage.id] ?? null
+      : null
+  // Progressive streaming: once live draft tokens are arriving, the overlay
+  // collapses to a slim pill so the user watches the document grow in the
+  // editor instead of staring at a full-card loading screen.
+  const hasLiveDraft = useStageStore((s) =>
+    Boolean(activeStageId && s.streamingContent[activeStageId]),
+  )
 
   const startGenerationActivity = useCallback(
     (
@@ -2175,6 +2188,8 @@ export default function Workspace() {
                 <StreamingOverlay
                   isVisible={Boolean(activeGenerationActivity)}
                   activity={activeGenerationActivity}
+                  progress={activeStreamProgress}
+                  compact={hasLiveDraft}
                 />
               </div>
             </section>
@@ -2270,6 +2285,8 @@ export default function Workspace() {
                 <StreamingOverlay
                   isVisible={Boolean(activeGenerationActivity)}
                   activity={activeGenerationActivity}
+                  progress={activeStreamProgress}
+                  compact={hasLiveDraft}
                 />
               </div>
             </section>

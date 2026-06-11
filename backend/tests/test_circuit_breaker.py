@@ -463,17 +463,26 @@ async def test_generate_stream_timeout_records_provider_failure() -> None:
         exc, ProviderTimeoutError
     ), f"Expected ProviderTimeoutError from generate() on timeout path, got {exc!r}"
 
-    # The critical assertion: record_provider_failure must be called exactly once.
-    mock_rpf.assert_called_once()
-    call_args = mock_rpf.call_args[0]
-    assert call_args[0] == provider, (
-        f"record_provider_failure must be called with provider={provider!r}, "
-        f"got {call_args[0]!r}.  C-1 — T-217."
+    # The critical assertion: every failed stream attempt is recorded exactly
+    # once.  The runtime tier fallback retries a timed-out generation once on
+    # the fallback tier; both the primary and the fallback attempt time out
+    # here, so the circuit breaker must observe exactly two distinct failures
+    # (never zero — the original C-1/T-217 regression — and no double-count of
+    # a single attempt).
+    assert mock_rpf.call_count == 2, (
+        "record_provider_failure must be called once per failed stream attempt "
+        f"(primary + fallback = 2), got {mock_rpf.call_count}.  C-1 — T-217."
     )
-    assert isinstance(call_args[1], TimeoutError), (
-        f"record_provider_failure must receive the TimeoutError exc, "
-        f"got {type(call_args[1])!r}.  C-1 — T-217."
-    )
+    for recorded_call in mock_rpf.call_args_list:
+        call_args = recorded_call[0]
+        assert call_args[0] == provider, (
+            f"record_provider_failure must be called with provider={provider!r}, "
+            f"got {call_args[0]!r}.  C-1 — T-217."
+        )
+        assert isinstance(call_args[1], TimeoutError), (
+            f"record_provider_failure must receive the TimeoutError exc, "
+            f"got {type(call_args[1])!r}.  C-1 — T-217."
+        )
 
 
 @pytest.mark.asyncio

@@ -54,7 +54,12 @@ services:
         condition: service_healthy
     volumes:
       - ./backend:/app
-    entrypoint: ["/bin/sh", "-c", "uv sync --frozen --no-dev && uv run --no-sync alembic upgrade head && uv run --no-sync uvicorn main:app --reload --reload-dir /app/routers --reload-dir /app/services --reload-dir /app/models --reload-dir /app/middleware --reload-dir /app/prompts --reload-dir /app/schemas --reload-dir /app/config --reload-exclude '.venv/*' --reload-exclude 'tests/*' --reload-exclude '.pytest_cache/*' --reload-exclude '.ruff_cache/*' --host 0.0.0.0 --port 8000"]
+    # --timeout-graceful-shutdown caps how long a code-reload waits for
+    # in-flight SSE generation streams before force-closing them. Without it a
+    # reload during a long generation wedges uvicorn in "Waiting for
+    # connections to close" indefinitely — the server accepts no new
+    # connections (login breaks) until the generation finishes.
+    entrypoint: ["/bin/sh", "-c", "uv sync --frozen --no-dev && uv run --no-sync alembic upgrade head && uv run --no-sync uvicorn main:app --reload --timeout-graceful-shutdown 15 --reload-dir /app/routers --reload-dir /app/services --reload-dir /app/models --reload-dir /app/middleware --reload-dir /app/prompts --reload-dir /app/schemas --reload-dir /app/config --reload-exclude '.venv/*' --reload-exclude 'tests/*' --reload-exclude '.pytest_cache/*' --reload-exclude '.ruff_cache/*' --host 0.0.0.0 --port 8000"]
 
   worker:
     # Durable background worker (Phase 21 — T-269). Shares the backend image and

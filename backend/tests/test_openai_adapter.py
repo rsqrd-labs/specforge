@@ -3,13 +3,18 @@
 Tests verify that the three defensive guards added to OpenAIAdapter.stream()
 correctly handle the edge-case chunks that the OpenAI API sends:
 
-  OA-1  Usage-only chunks (choices=[]) are silently skipped.
-  OA-2  Chunks with delta=None are silently skipped.
-  OA-3  Chunks with delta.content=None are silently skipped.
+  OA-1  Usage-only chunks (choices=[]) yield an empty liveness sentinel.
+  OA-2  Chunks with delta=None yield an empty liveness sentinel.
+  OA-3  Chunks with delta.content=None yield an empty liveness sentinel.
   OA-4  Normal content chunks are yielded correctly.
-  OA-5  A mixed stream (usage chunk + real content) yields only real content.
+  OA-5  A mixed stream (usage chunk + real content) concatenates to only the
+        real content (sentinels are empty strings, invisible in the artifact).
   OA-6  An entirely empty stream yields nothing and does not raise.
   OA-7  OpenAIError is re-raised as ProviderError.
+
+The empty-string sentinels exist for the stream watchdog (issue #19): every
+provider event — visible text or not — resets the watchdog's idle timer, and
+the watchdog forwards only non-empty tokens to consumers.
 """
 
 from __future__ import annotations
@@ -127,16 +132,18 @@ def _make_responses_adapter(events: list[Any]) -> Any:
 
 
 @pytest.mark.asyncio
-async def test_empty_choices_chunk_is_skipped() -> None:
-    """OA-1 — choices=[] chunks must be silently skipped, not raise IndexError."""
+async def test_empty_choices_chunk_yields_liveness_sentinel() -> None:
+    """OA-1 — choices=[] chunks must not raise IndexError and must yield an
+    empty liveness sentinel so the stream watchdog sees a healthy stream."""
     adapter = _make_adapter([_chunk_empty_choices(), _chunk("hello")])
 
     tokens: list[str] = []
     async for token in adapter.stream("sys", "user", 100):
         tokens.append(token)
 
-    assert tokens == ["hello"], (
-        "Usage-only chunk (choices=[]) must be skipped. " f"Got tokens: {tokens!r}"
+    assert tokens == ["", "hello"], (
+        "Usage-only chunk (choices=[]) must yield a liveness sentinel. "
+        f"Got tokens: {tokens!r}"
     )
 
 
@@ -146,16 +153,17 @@ async def test_empty_choices_chunk_is_skipped() -> None:
 
 
 @pytest.mark.asyncio
-async def test_delta_none_chunk_is_skipped() -> None:
-    """OA-2 — chunks where choices[0].delta is None must be silently skipped."""
+async def test_delta_none_chunk_yields_liveness_sentinel() -> None:
+    """OA-2 — chunks where choices[0].delta is None must yield an empty
+    liveness sentinel without raising."""
     adapter = _make_adapter([_chunk_delta_none(), _chunk("world")])
 
     tokens: list[str] = []
     async for token in adapter.stream("sys", "user", 100):
         tokens.append(token)
 
-    assert tokens == ["world"], (
-        "Chunk with delta=None must be skipped without raising. "
+    assert tokens == ["", "world"], (
+        "Chunk with delta=None must yield a liveness sentinel without raising. "
         f"Got tokens: {tokens!r}"
     )
 
@@ -166,17 +174,18 @@ async def test_delta_none_chunk_is_skipped() -> None:
 
 
 @pytest.mark.asyncio
-async def test_delta_content_none_chunk_is_skipped() -> None:
-    """OA-3 — chunks where delta.content is None must be silently skipped."""
+async def test_delta_content_none_chunk_yields_liveness_sentinel() -> None:
+    """OA-3 — chunks where delta.content is None must yield an empty
+    liveness sentinel without raising."""
     adapter = _make_adapter([_chunk(content=None), _chunk("end")])
 
     tokens: list[str] = []
     async for token in adapter.stream("sys", "user", 100):
         tokens.append(token)
 
-    assert tokens == ["end"], (
-        "Chunk with delta.content=None must be skipped without raising. "
-        f"Got tokens: {tokens!r}"
+    assert tokens == ["", "end"], (
+        "Chunk with delta.content=None must yield a liveness sentinel "
+        f"without raising. Got tokens: {tokens!r}"
     )
 
 
@@ -286,7 +295,9 @@ async def test_gpt5_stream_uses_responses_api_with_reasoning_effort() -> None:
     assert kwargs["model"] == "gpt-5.5"
     assert kwargs["max_output_tokens"] == 8192
     assert kwargs["stream"] is True
-    assert kwargs["reasoning"] == {"effort": "high"}
+    # summary="auto" keeps reasoning-phase stream events flowing (liveness
+    # for the watchdog and the HTTP read timeout) — issue #19.
+    assert kwargs["reasoning"] == {"effort": "high", "summary": "auto"}
     assert kwargs["instructions"] == "sys"
     assert kwargs["input"] == "user"
 

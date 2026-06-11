@@ -69,6 +69,9 @@ export function useStream(stageId: string | null) {
              reject,
              onEval,
              (info) => useStageStore.getState().setQualityGate(stageId, info),
+             (progress) =>
+               useStageStore.getState().setStreamProgress(stageId, progress),
+             () => useStageStore.getState().clearStreamContent(stageId),
            )
         })
 

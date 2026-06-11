@@ -124,6 +124,17 @@ export const StageEditor = forwardRef<StageEditorHandle, StageEditorProps>(
               })
               lastStreamedRef.current = content
             }
+          } else {
+            // stream_reset / canonical replay: the buffer was rewritten
+            // rather than appended — replace the whole document.
+            view.dispatch({
+              changes: {
+                from: 0,
+                to: view.state.doc.length,
+                insert: content,
+              },
+            })
+            lastStreamedRef.current = content
           }
         },
       )

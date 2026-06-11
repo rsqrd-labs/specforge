@@ -295,3 +295,99 @@ describe("createSSEConnection retry behaviour", () => {
     expect(console.warn).toHaveBeenCalledTimes(1)
   })
 })
+
+describe("createSSEConnection progress heartbeats", () => {
+  it("routes progress events to onProgress and never to onToken", async () => {
+    const body =
+      'data: {"progress":{"stage":"spec","state":"generating","elapsed_seconds":20}}\n\n' +
+      'data: {"token":"## Overview"}\n\n' +
+      'data: {"done":true,"stage_id":"s1"}\n\n'
+
+    vi.spyOn(globalThis, "fetch").mockImplementation(() => mockFetchOk(body))
+
+    const onToken = vi.fn()
+    const onDone = vi.fn()
+    const onError = vi.fn()
+    const onEval = vi.fn()
+    const onQualityGate = vi.fn()
+    const onProgress = vi.fn()
+
+    createSSEConnection(
+      "/stream",
+      onToken,
+      onDone,
+      onError,
+      onEval,
+      onQualityGate,
+      onProgress,
+    )
+
+    await vi.runAllTimersAsync()
+
+    expect(onProgress).toHaveBeenCalledWith({
+      stage: "spec",
+      state: "generating",
+      elapsed_seconds: 20,
+    })
+    expect(onToken).toHaveBeenCalledTimes(1)
+    expect(onToken).toHaveBeenCalledWith("## Overview")
+    expect(onDone).toHaveBeenCalledWith("s1")
+    expect(onError).not.toHaveBeenCalled()
+  })
+
+  it("routes stream_reset to onReset so the live draft buffer is cleared", async () => {
+    const body =
+      'data: {"token":"draft text that will be replaced"}\n\n' +
+      'data: {"stream_reset":true}\n\n' +
+      'data: {"token":"## Canonical artifact"}\n\n' +
+      'data: {"done":true,"stage_id":"s3"}\n\n'
+
+    vi.spyOn(globalThis, "fetch").mockImplementation(() => mockFetchOk(body))
+
+    const onToken = vi.fn()
+    const onDone = vi.fn()
+    const onError = vi.fn()
+    const onReset = vi.fn()
+
+    createSSEConnection(
+      "/stream",
+      onToken,
+      onDone,
+      onError,
+      vi.fn(),
+      vi.fn(),
+      vi.fn(),
+      onReset,
+    )
+
+    await vi.runAllTimersAsync()
+
+    expect(onReset).toHaveBeenCalledTimes(1)
+    // Reset is a control event: never appended as content.
+    expect(onToken).toHaveBeenCalledTimes(2)
+    expect(onToken).toHaveBeenNthCalledWith(1, "draft text that will be replaced")
+    expect(onToken).toHaveBeenNthCalledWith(2, "## Canonical artifact")
+    expect(onDone).toHaveBeenCalledWith("s3")
+    expect(onError).not.toHaveBeenCalled()
+  })
+
+  it("ignores progress events when no onProgress handler is provided", async () => {
+    const body =
+      'data: {"progress":{"stage":"plan","state":"generating","elapsed_seconds":5}}\n\n' +
+      'data: {"done":true,"stage_id":"s2"}\n\n'
+
+    vi.spyOn(globalThis, "fetch").mockImplementation(() => mockFetchOk(body))
+
+    const onToken = vi.fn()
+    const onDone = vi.fn()
+    const onError = vi.fn()
+
+    createSSEConnection("/stream", onToken, onDone, onError)
+
+    await vi.runAllTimersAsync()
+
+    expect(onToken).not.toHaveBeenCalled()
+    expect(onDone).toHaveBeenCalledWith("s2")
+    expect(onError).not.toHaveBeenCalled()
+  })
+})

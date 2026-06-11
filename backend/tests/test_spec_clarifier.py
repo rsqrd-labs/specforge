@@ -379,9 +379,7 @@ async def test_persist_spec_clarification_passes_existing_mode_to_service() -> N
     db = MagicMock()
     redis = _FakeRedis()
 
-    with (
-        pytest.MonkeyPatch.context() as monkeypatch,
-    ):
+    with (pytest.MonkeyPatch.context() as monkeypatch,):
         get_mock = AsyncMock(return_value=workspace)
         persist_mock = AsyncMock()
         monkeypatch.setattr(
@@ -396,9 +394,7 @@ async def test_persist_spec_clarification_passes_existing_mode_to_service() -> N
         response = await persist_spec_clarification(
             workspace_id,
             ClarifySubmitRequest(
-                answers=[
-                    {"question": "Known question?", "answer": "Updated answer."}
-                ],
+                answers=[{"question": "Known question?", "answer": "Updated answer."}],
                 mode="existing",
             ),
             user=user,

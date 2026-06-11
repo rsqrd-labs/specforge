@@ -43,6 +43,7 @@ AUDIT_EVENT_CRITIC_DISABLED = "critic_disabled"
 CriticFindingKind = Literal[
     "CoverageGap",
     "MissingSection",
+    "ShallowSection",
     "BannedPhrase",
     "DeprecatedAPI",
     "ADRIncomplete",
@@ -107,6 +108,11 @@ Each finding's "kind" MUST be one of:
   artifact fails to address. Put the requirement ID in "reference".
 - "MissingSection": a mandatory section heading absent from the artifact. Put the
   section name in "reference".
+- "ShallowSection": a required section whose body is superficial — a one-line
+  restatement of its heading, a generic filler sentence that ignores the problem
+  statement, or coverage far below what the upstream inputs demand (for example a
+  three-page problem statement answered by a two-bullet section). Put the section
+  name in "reference".
 - "BannedPhrase": a placeholder or hand-wave that signals an incomplete artifact
   (for example "TBD", "as needed", "etc.", "to be determined", "coming soon",
   "TODO"). Put the offending phrase in "reference".
@@ -119,6 +125,11 @@ Each finding's "kind" MUST be one of:
 Grading rules:
 - Set passed=true with an empty findings array ONLY when the artifact has no
   defects of the kinds above.
+- Depth is graded relative to the inputs: the artifact must engage with the
+  specifics of the problem statement and upstream artifacts, not restate generic
+  best practices. Judge proportionality, not raw length — a rich input answered
+  by uniformly thin sections is a ShallowSection defect even when every heading
+  is present.
 - Set passed=false when there is at least one finding. Report every distinct
   defect; do not stop at the first.
 - Keep each "detail" under 500 characters and specific enough to act on.

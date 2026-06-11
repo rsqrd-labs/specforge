@@ -117,7 +117,7 @@ MODEL_CATALOG: tuple[ModelCatalogEntry, ...] = (
         cached_input_cost_per_million=0.5,
         output_cost_per_million=25.0,
         max_context_tokens=1_000_000,
-        default_max_output_tokens=8192,
+        default_max_output_tokens=32768,
         recommended_operations=CORE_GENERATION_OPERATIONS,
         default_operations=CORE_GENERATION_OPERATIONS,
         supports_reasoning=True,
@@ -138,12 +138,18 @@ MODEL_CATALOG: tuple[ModelCatalogEntry, ...] = (
         cached_input_cost_per_million=0.3,
         output_cost_per_million=15.0,
         max_context_tokens=1_000_000,
-        default_max_output_tokens=8192,
-        recommended_operations=("refine.section",),
+        default_max_output_tokens=32768,
+        # Core generation ops are RECOMMENDED (not default) so the mid tier is
+        # never the primary route but stays eligible as the runtime fallback
+        # when a strong-tier generation times out or errors.
+        recommended_operations=(*CORE_GENERATION_OPERATIONS, "refine.section"),
         default_operations=("refine.section",),
         supports_reasoning=True,
         reasoning_effort="medium",
-        rollout_notes="Anthropic non-core section refinement default.",
+        rollout_notes=(
+            "Anthropic non-core section refinement default and core-generation "
+            "fallback tier."
+        ),
         routing_priority=20,
     ),
     ModelCatalogEntry(
@@ -193,7 +199,7 @@ MODEL_CATALOG: tuple[ModelCatalogEntry, ...] = (
         cached_input_cost_per_million=0.5,
         output_cost_per_million=30.0,
         max_context_tokens=1_000_000,
-        default_max_output_tokens=8192,
+        default_max_output_tokens=32768,
         recommended_operations=CORE_GENERATION_OPERATIONS,
         default_operations=CORE_GENERATION_OPERATIONS,
         supports_reasoning=True,
@@ -212,12 +218,17 @@ MODEL_CATALOG: tuple[ModelCatalogEntry, ...] = (
         cached_input_cost_per_million=0.25,
         output_cost_per_million=15.0,
         max_context_tokens=1_000_000,
-        default_max_output_tokens=8192,
-        recommended_operations=("refine.section",),
+        default_max_output_tokens=32768,
+        # Eligible (recommended-only) for core generation as the runtime
+        # fallback tier; the strong tier remains the sole active default.
+        recommended_operations=(*CORE_GENERATION_OPERATIONS, "refine.section"),
         default_operations=("refine.section",),
         supports_reasoning=True,
         reasoning_effort="medium",
-        rollout_notes="OpenAI high-quality non-core section refinement default.",
+        rollout_notes=(
+            "OpenAI high-quality non-core section refinement default and "
+            "core-generation fallback tier."
+        ),
         routing_priority=20,
     ),
     ModelCatalogEntry(
@@ -306,7 +317,7 @@ MODEL_CATALOG: tuple[ModelCatalogEntry, ...] = (
         cached_input_cost_per_million=0.15,
         output_cost_per_million=9.0,
         max_context_tokens=1_048_576,
-        default_max_output_tokens=8192,
+        default_max_output_tokens=32768,
         recommended_operations=(*CORE_GENERATION_OPERATIONS, "refine.section"),
         default_operations=(*CORE_GENERATION_OPERATIONS, "refine.section"),
         supports_thinking=True,
@@ -456,6 +467,16 @@ def build_provider_capability_registry() -> dict[str, dict[str, Any]]:
     for entry in MODEL_CATALOG:
         registry[entry.provider]["models"][entry.model_id] = entry.to_registry_config()
     return registry
+
+
+def model_max_output_tokens(provider: str, model_id: str) -> int:
+    """The hard per-call output-token ceiling for a catalog model.
+
+    Used to clamp per-operation output budgets: reasoning tokens share this
+    budget with visible artifact tokens on frontier models, so the ceiling
+    must be generous enough that thinking never starves the artifact.
+    """
+    return model_entry(provider, model_id).default_max_output_tokens
 
 
 def model_request_policy(provider: str, model_id: str) -> dict[str, str | None | bool]:

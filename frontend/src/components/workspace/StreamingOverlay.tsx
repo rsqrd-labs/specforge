@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react"
+import type { GenerationProgress } from "../../services/sseService"
 import type { QualityGateInfo, StageType } from "../../types/stage"
 
 export type GenerationActivityOperation =
@@ -20,6 +21,15 @@ export interface GenerationActivityInfo {
 interface StreamingOverlayProps {
   isVisible: boolean
   activity?: GenerationActivityInfo | null
+  /** Latest backend liveness heartbeat, emitted every ~10s while the
+   *  generation pipeline works without visible tokens (frontier-model
+   *  reasoning, quality gates).  Confirms the connection is alive so a long
+   *  generation never looks like a frozen loading screen — issue #19. */
+  progress?: GenerationProgress | null
+  /** Progressive streaming: live draft tokens are rendering in the editor
+   *  behind this overlay — collapse to a slim status pill so the user can
+   *  watch the document grow. */
+  compact?: boolean
   /** Critic quality-gate findings, present when a generation was held back
    *  by the gate (T-247).  Rendered as an interactive panel with regenerate
    *  and owner-only override actions. */
@@ -37,6 +47,8 @@ interface StreamingOverlayProps {
 export function StreamingOverlay({
   isVisible,
   activity,
+  progress,
+  compact = false,
   gate,
   onRegenerate,
   onOverride,
@@ -47,6 +59,21 @@ export function StreamingOverlay({
   const [renderedActivity, setRenderedActivity] =
     useState<GenerationActivityInfo | null>(activity ?? null)
   const [isExiting, setIsExiting] = useState(false)
+  const [elapsedSeconds, setElapsedSeconds] = useState(0)
+
+  // Local elapsed ticker from the activity start, so the overlay visibly
+  // progresses every second even between backend heartbeats.
+  useEffect(() => {
+    if (!activity || !isVisible) {
+      setElapsedSeconds(0)
+      return undefined
+    }
+    const tick = () =>
+      setElapsedSeconds(Math.floor((Date.now() - activity.startedAt) / 1000))
+    tick()
+    const intervalId = window.setInterval(tick, 1000)
+    return () => window.clearInterval(intervalId)
+  }, [activity, isVisible])
 
   useEffect(() => {
     if (activity && isVisible) {
@@ -202,6 +229,25 @@ export function StreamingOverlay({
 
   if (!renderedActivity) return null
 
+  if (compact && isVisible) {
+    const compactCopy = getActivityCopy(renderedActivity)
+    return (
+      <div
+        className="generation-streaming-pill"
+        role="status"
+        aria-live="polite"
+        aria-busy="true"
+        aria-label={`${compactCopy.title} for ${compactCopy.stageLabel}`}
+      >
+        <span className="generation-pill-dot" aria-hidden="true" />
+        <span>
+          {compactCopy.stageLabel}: {compactCopy.title} —{" "}
+          {formatElapsed(elapsedSeconds)}
+        </span>
+      </div>
+    )
+  }
+
   const copy = getActivityCopy(renderedActivity)
   const activeStageIndex = STAGE_FLOW.findIndex(
     (stage) => stage.type === renderedActivity.stageType,
@@ -264,10 +310,24 @@ export function StreamingOverlay({
           <span className="generation-loading-kicker">{copy.stageLabel}</span>
           <strong>{copy.title}</strong>
           <p>{copy.detail}</p>
+          <p className="generation-loading-liveness">
+            {formatElapsed(elapsedSeconds)} elapsed
+            {progress
+              ? " — the model is working; this can take several minutes."
+              : elapsedSeconds >= 15
+                ? " — frontier models can reason for a while before text appears."
+                : ""}
+          </p>
         </div>
       </div>
     </div>
   )
+}
+
+function formatElapsed(totalSeconds: number): string {
+  const minutes = Math.floor(totalSeconds / 60)
+  const seconds = totalSeconds % 60
+  return minutes > 0 ? `${minutes}m ${seconds}s` : `${seconds}s`
 }
 
 const STAGE_FLOW: Array<{ type: StageType; label: string }> = [

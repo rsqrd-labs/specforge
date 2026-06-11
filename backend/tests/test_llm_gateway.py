@@ -86,24 +86,40 @@ def test_get_llm_rebuilds_adapter_after_ttl_expires(
 
 @pytest.mark.asyncio
 async def test_anthropic_adapter_stream_yields_tokens() -> None:
+    """Text events are yielded as tokens; non-text events (thinking deltas,
+    lifecycle events) yield an empty liveness sentinel for the stream
+    watchdog — issue #19."""
 
-    async def fake_text_stream() -> AsyncGenerator[str, None]:
+    def _event(type_: str, text: str | None = None) -> SimpleNamespace:
+        return SimpleNamespace(type=type_, text=text)
+
+    async def fake_events() -> AsyncGenerator[SimpleNamespace, None]:
+        yield _event("message_start")
+        yield _event("thinking")
         for token in ["Hello", " ", "world"]:
-            yield token
+            yield _event("text", token)
+        yield _event("message_stop")
+
+    class _FakeMessageStream:
+        def __aiter__(self):
+            return fake_events()
+
+        get_final_message = AsyncMock(
+            return_value=MagicMock(
+                stop_reason="end_turn", usage=MagicMock(input_tokens=3)
+            )
+        )
 
     mock_stream_ctx = MagicMock()
-    mock_response = MagicMock(text_stream=fake_text_stream())
-    mock_response.get_final_message = AsyncMock(
-        return_value=MagicMock(stop_reason="end_turn", usage=MagicMock(input_tokens=3))
-    )
-    mock_stream_ctx.__aenter__ = AsyncMock(return_value=mock_response)
+    mock_stream_ctx.__aenter__ = AsyncMock(return_value=_FakeMessageStream())
     mock_stream_ctx.__aexit__ = AsyncMock(return_value=False)
 
     adapter = get_llm("anthropic", "claude-sonnet-4-6")
     with patch.object(adapter._client.messages, "stream", return_value=mock_stream_ctx):
         tokens = [t async for t in adapter.stream("sys", "user", 100)]
 
-    assert tokens == ["Hello", " ", "world"]
+    assert tokens == ["", "", "Hello", " ", "world", ""]
+    assert "".join(tokens) == "Hello world"
     assert adapter.last_completion is not None
     assert adapter.last_completion.finish_reason == "end_turn"
     assert adapter.last_completion.stopped_by_limit is False

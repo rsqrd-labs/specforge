@@ -59,6 +59,8 @@ async def _stream_stage(
                 token.startswith('{"done"')
                 or token.startswith('{"eval"')
                 or token.startswith('{"quality_gate_failed"')
+                or token.startswith('{"progress"')
+                or token.startswith('{"stream_reset"')
             ):
                 yield f"data: {token}\n\n"
             else:

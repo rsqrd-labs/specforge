@@ -340,12 +340,21 @@ def _normalise_body_for_depth(body: str) -> str:
 
 
 def _min_body_chars(stage_type: str) -> int:
+    """Minimum normalised body characters for a required section to count as
+    substantive.
+
+    These floors are deliberately well above "a heading restated as one short
+    clause" — the depth failure mode where a token-squeezed model emits every
+    required heading with a single throwaway sentence under each.  They stay
+    below the size of a genuinely minimal-but-real section so terse legitimate
+    artifacts (e.g. a focused Out of Scope list) still pass.
+    """
     return {
-        "spec": 35,
-        "plan": 45,
-        "harness": 30,
-        "tasks": 25,
-    }.get(stage_type, 25)
+        "spec": 120,
+        "plan": 150,
+        "harness": 60,
+        "tasks": 50,
+    }.get(stage_type, 50)
 
 
 def _markdown_shape_issues(artifact_md: str) -> list[CompletenessIssue]:
@@ -373,6 +382,18 @@ def _markdown_shape_issues(artifact_md: str) -> list[CompletenessIssue]:
     return issues
 
 
+# Minimum distinct requirement/acceptance IDs a spec must carry.  Degenerate
+# floors only: any real product spec clears these easily, but a token-starved
+# generation that compresses requirements into prose (no stable IDs, or two
+# token FRs) is caught and routed into the repair pass instead of flowing
+# downstream where plan/harness/tasks traceability would silently degrade.
+_SPEC_MIN_ID_FLOORS: tuple[tuple[str, int], ...] = (
+    ("FR", 5),
+    ("NFR", 3),
+    ("AC", 3),
+)
+
+
 def _spec_issues(artifact_md: str) -> list[CompletenessIssue]:
     issues: list[CompletenessIssue] = []
     for heading in [
@@ -392,6 +413,21 @@ def _spec_issues(artifact_md: str) -> list[CompletenessIssue]:
                         "verifiable."
                     ),
                     reference=heading,
+                )
+            )
+    for prefix, minimum in _SPEC_MIN_ID_FLOORS:
+        distinct = set(re.findall(rf"\b{prefix}-\d{{3}}\b", artifact_md))
+        if len(distinct) < minimum:
+            issues.append(
+                CompletenessIssue(
+                    code="insufficient_requirement_ids",
+                    detail=(
+                        f"SPEC must define at least {minimum} distinct "
+                        f"{prefix}-NNN identifiers; found {len(distinct)}. "
+                        "Shallow or compressed requirement coverage breaks "
+                        "downstream traceability."
+                    ),
+                    reference=prefix,
                 )
             )
     return issues
@@ -534,6 +570,12 @@ def _file_tree_paths(body: str) -> set[str]:
     return paths
 
 
+# Degenerate floor for the task inventory: even a trivial product decomposes
+# into more than a handful of implementation tasks, so fewer than this many
+# blocks signals a compressed, shallow generation rather than a small project.
+_MIN_TASK_BLOCKS = 6
+
+
 def _task_issues(artifact_md: str, deps: dict[str, str]) -> list[CompletenessIssue]:
     task_headers = list(_TASK_HEADER_RE.finditer(artifact_md))
     if not task_headers:
@@ -544,6 +586,19 @@ def _task_issues(artifact_md: str, deps: dict[str, str]) -> list[CompletenessIss
                 reference="tasks",
             )
         ]
+    issues_floor: list[CompletenessIssue] = []
+    if len(task_headers) < _MIN_TASK_BLOCKS:
+        issues_floor.append(
+            CompletenessIssue(
+                code="insufficient_task_count",
+                detail=(
+                    f"TASKS.md contains only {len(task_headers)} task blocks; "
+                    f"at least {_MIN_TASK_BLOCKS} are required for a "
+                    "non-degenerate implementation breakdown."
+                ),
+                reference="tasks",
+            )
+        )
     required_fields = [
         "**Phase:**",
         "**Spec refs:**",
@@ -562,7 +617,7 @@ def _task_issues(artifact_md: str, deps: dict[str, str]) -> list[CompletenessIss
         "**Rollback / Recovery**",
         "**Dependencies**",
     ]
-    issues: list[CompletenessIssue] = []
+    issues: list[CompletenessIssue] = issues_floor
     tasks: list[tuple[int, str]] = []
     for index, match in enumerate(task_headers):
         end = (

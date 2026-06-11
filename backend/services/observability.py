@@ -122,6 +122,31 @@ PIPELINE_INTERRUPTED_STREAMS = Counter(
     ["stage_type"],
 )
 
+# Stream-watchdog kills: kind is "idle" (token gap exceeded the idle timeout —
+# a stalled provider stream) or "hard_cap" (the absolute per-stream bound hit —
+# a runaway generation). Alert on idle-rate: it is the provider-health signal.
+PIPELINE_STREAM_WATCHDOG_TIMEOUTS = Counter(
+    "specforge_pipeline_stream_watchdog_timeouts_total",
+    "Stage generation streams killed by the idle/hard-cap stream watchdog",
+    ["stage_type", "provider", "kind"],
+)
+
+# Runtime tier fallbacks: the primary (strong-tier) generation failed with a
+# timeout or provider error and the stage was retried once on the fallback
+# tier. A rising rate means the frontier route is degraded.
+PIPELINE_GENERATION_FALLBACKS = Counter(
+    "specforge_pipeline_generation_fallbacks_total",
+    "Stage generations retried on the fallback model tier after a primary failure",
+    ["stage_type", "provider", "outcome"],
+)
+
+PIPELINE_GENERATION_DURATION = Histogram(
+    "specforge_pipeline_generation_duration_seconds",
+    "Wall-clock duration of a full stage artifact generation (all chunks)",
+    ["stage_type", "provider"],
+    buckets=(15, 30, 60, 120, 180, 300, 450, 600, 900, float("inf")),
+)
+
 PIPELINE_TECH_SAFETY_FAILURES = Counter(
     "specforge_pipeline_technology_safety_failures_total",
     "Stage artifacts blocked by the deterministic technology safety gate",

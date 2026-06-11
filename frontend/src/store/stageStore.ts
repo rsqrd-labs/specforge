@@ -1,5 +1,6 @@
 import { create } from "zustand"
 import { subscribeWithSelector } from "zustand/middleware"
+import type { GenerationProgress } from "../services/sseService"
 import type { QualityGateInfo, Stage, StageType } from "../types/stage"
 
 interface StageState {
@@ -13,6 +14,11 @@ interface StageState {
   /** Critic quality-gate findings per stage ID, set when a generation is held
    *  back by the gate (T-247).  Cleared when a new stream starts for the stage. */
   qualityGate: Record<string, QualityGateInfo>
+  /** Latest backend liveness heartbeat per stage ID, emitted every ~10s while
+   *  the generation pipeline works without producing visible tokens (frontier
+   *  models reasoning, quality gates running).  Lets the UI show "still
+   *  working" instead of a frozen loading screen — issue #19. */
+  streamProgress: Record<string, GenerationProgress>
   setStage: (stage: Stage) => void
   setStages: (stages: Stage[]) => void
   appendToken: (stageId: string, token: string) => void
@@ -21,6 +27,10 @@ interface StageState {
   finaliseStream: (stageId: string) => void
   setQualityGate: (stageId: string, info: QualityGateInfo) => void
   clearQualityGate: (stageId: string) => void
+  setStreamProgress: (stageId: string, progress: GenerationProgress) => void
+  /** stream_reset: the live-streamed draft is being replaced (repair or
+   *  canonical replay) — empty the buffer without ending the stream. */
+  clearStreamContent: (stageId: string) => void
   markStale: (stageType: StageType) => void
 }
 
@@ -36,6 +46,7 @@ export const useStageStore = create<StageState>()(
     streamingContent: {},
     activeStream: null,
     qualityGate: {},
+    streamProgress: {},
 
     setStage: (stage) =>
       set((state) => {
@@ -97,12 +108,25 @@ export const useStageStore = create<StageState>()(
         // Clear any prior gate findings for this stage on a fresh attempt.
         const qualityGate = { ...state.qualityGate }
         delete qualityGate[stageId]
+        const streamProgress = { ...state.streamProgress }
+        delete streamProgress[stageId]
         return {
           activeStream: stageId,
           streamingContent: { ...state.streamingContent, [stageId]: "" },
           qualityGate,
+          streamProgress,
         }
       }),
+
+    setStreamProgress: (stageId, progress) =>
+      set((state) => ({
+        streamProgress: { ...state.streamProgress, [stageId]: progress },
+      })),
+
+    clearStreamContent: (stageId) =>
+      set((state) => ({
+        streamingContent: { ...state.streamingContent, [stageId]: "" },
+      })),
 
     setQualityGate: (stageId, info) =>
       set((state) => ({
@@ -125,10 +149,13 @@ export const useStageStore = create<StageState>()(
         const existing = state.stages[stageId]
         const updatedStreamingContent = { ...state.streamingContent }
         delete updatedStreamingContent[stageId]
+        const streamProgress = { ...state.streamProgress }
+        delete streamProgress[stageId]
 
         return {
           activeStream: null,
           streamingContent: updatedStreamingContent,
+          streamProgress,
           stages: existing
             ? {
                 ...state.stages,

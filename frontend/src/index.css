@@ -9952,6 +9952,56 @@ button:disabled {
   line-height: 1.45;
 }
 
+.generation-loading-copy p.generation-loading-liveness {
+  color: var(--color-primary);
+  font-size: 12px;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Progressive streaming: slim status pill shown while live draft tokens
+   render in the editor behind it (issue #19 UX). */
+.generation-streaming-pill {
+  position: absolute;
+  top: 14px;
+  right: 18px;
+  z-index: 5;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  border-radius: 999px;
+  border: 1px solid var(--color-outline-variant);
+  background: var(--color-surface-glass, rgba(20, 18, 28, 0.82));
+  backdrop-filter: blur(10px);
+  color: var(--color-on-surface);
+  font-size: 12px;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+  box-shadow: 0 6px 22px rgba(0, 0, 0, 0.25);
+  pointer-events: none;
+}
+
+.generation-pill-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: var(--color-primary);
+  animation: generation-pill-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes generation-pill-pulse {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.35;
+    transform: scale(0.78);
+  }
+}
+
 @keyframes generation-overlay-in {
   from {
     opacity: 0;

@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import json
 import logging
 import re
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import UUID
@@ -40,15 +41,19 @@ from services.llm.cost_cache import (
     set_cached_generation,
 )
 from services.llm.gateway import get_llm
-from services.llm.output_budget import output_budget_for_operation
+from services.llm.model_catalog import model_max_output_tokens
+from services.llm.output_budget import resolve_output_budget
 from services.llm.provider_config import JUDGE_MODELS
 from services.llm.routing import LLMRoute, LLMRoutingError, resolve_llm_route
 from services.observability import (
     BILLING_CREDITS_CRITIC_REGEN,
     PIPELINE_COMPLETION_REPAIRS,
+    PIPELINE_GENERATION_DURATION,
+    PIPELINE_GENERATION_FALLBACKS,
     PIPELINE_INCOMPLETE_OUTPUTS,
     PIPELINE_INTERRUPTED_STREAMS,
     PIPELINE_PROVIDER_LIMIT_STOPS,
+    PIPELINE_STREAM_WATCHDOG_TIMEOUTS,
     PIPELINE_TECH_SAFETY_FAILURES,
     PIPELINE_TECH_SAFETY_FINALISE_BLOCKS,
     PIPELINE_TECH_SAFETY_REPAIRS,
@@ -108,12 +113,30 @@ _RECOVERY_LOCK_TTL = 180  # 3 × _POLL_INTERVAL_SECONDS  H-3 — T-179
 
 STAGE_ORDER = ["spec", "plan", "harness", "tasks"]
 STAGE_GENERATION_TIERS = {
-    "spec": ("strong", None),
-    "plan": ("strong", None),
-    "harness": ("strong", None),
-    "tasks": ("strong", None),
+    "spec": ("strong", "mid"),
+    "plan": ("strong", "mid"),
+    "harness": ("strong", "mid"),
+    "tasks": ("strong", "mid"),
 }
-LONG_GENERATION_STAGES = frozenset({"harness", "tasks"})
+# Runtime degradation tier: when a strong-tier generation fails with a timeout
+# or provider error, the stage is retried exactly once on this tier before the
+# failure is surfaced to the user.
+_RUNTIME_FALLBACK_TIER = "mid"
+# Seconds of pipeline silence between SSE progress heartbeats.  Heartbeats are
+# emitted whenever the generation pipeline (artifact streaming, quality gates,
+# critic review/regenerate, persistence) has not produced a client-visible
+# event — keeping proxies/load balancers from severing the idle connection
+# during long frontier-model reasoning and silent gate phases, and giving the
+# UI a liveness signal.
+_GENERATION_HEARTBEAT_SECONDS = 10.0
+# Queue sentinel marking the end of the generation pipeline's event stream.
+_PIPELINE_END = object()
+# How often a live generation refreshes its stage row's updated_at.  Must stay
+# comfortably under the recovery sweep's 3-minute stuck threshold
+# (recovery_service._STUCK_THRESHOLD_MINUTES): the sweep may only recover
+# stages whose process died (heartbeats stopped), never a healthy long-running
+# frontier generation.
+_STAGE_HEARTBEAT_DB_SECONDS = 30.0
 
 _REFINE_STAGE_RULES: dict[str, str] = {
     "spec": (
@@ -225,13 +248,160 @@ def _route_for_stage_generation(stage_type: str, workspace: Workspace) -> LLMRou
     )
 
 
-def _stream_timeout_for_stage(stage_type: str) -> float:
-    if stage_type in LONG_GENERATION_STAGES:
-        return max(
-            settings.llm_stream_timeout_seconds,
-            settings.llm_long_stream_timeout_seconds,
+class StreamWatchdogTimeout(TimeoutError):
+    """Raised when the stream watchdog kills an unhealthy generation stream.
+
+    kind is "idle" (token gap exceeded the idle timeout — a stalled provider
+    stream) or "hard_cap" (the absolute per-stream bound was hit — a runaway
+    generation).  A steadily streaming generation is never killed, no matter
+    how long the artifact is — that was the flat-timeout failure mode behind
+    issue #19.
+    """
+
+    def __init__(self, *, kind: str, timeout_seconds: float) -> None:
+        self.kind = kind
+        self.timeout_seconds = timeout_seconds
+        super().__init__(
+            f"LLM stream killed by watchdog: no healthy progress within the "
+            f"{kind} bound of {timeout_seconds:.0f}s"
         )
-    return settings.llm_stream_timeout_seconds
+
+
+async def _watchdog_stream(
+    stream: AsyncGenerator[str, None],
+    *,
+    stage_type: str,
+    provider: str,
+) -> AsyncGenerator[str, None]:
+    """Supervise an adapter token stream with an idle timeout and a hard cap.
+
+    Replaces the flat per-stream asyncio.timeout(): frontier reasoning models
+    legitimately take minutes on long inputs, so health is defined as "the
+    provider keeps sending stream events", not "the whole stream finishes
+    within N seconds".  Adapters yield an empty-string liveness sentinel for
+    events that carry no visible text (reasoning/thinking deltas, pings,
+    usage chunks); any yielded item — empty or not — resets the idle timer,
+    but only non-empty tokens are forwarded to the consumer.  A model that
+    reasons silently for minutes therefore never trips the idle bound while
+    its provider connection is demonstrably alive (issue #19).  The hard cap
+    bounds runaway provider cost.
+    """
+    idle_timeout = float(settings.llm_stream_idle_timeout_seconds)
+    hard_cap = float(settings.llm_stream_hard_cap_seconds)
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    iterator = stream.__aiter__()
+    while True:
+        remaining = hard_cap - (loop.time() - started)
+        if remaining <= 0:
+            kind, bound = "hard_cap", hard_cap
+        else:
+            try:
+                token = await asyncio.wait_for(
+                    anext(iterator), timeout=min(idle_timeout, remaining)
+                )
+            except StopAsyncIteration:
+                return
+            except asyncio.TimeoutError:
+                if remaining > idle_timeout:
+                    kind, bound = "idle", idle_timeout
+                else:
+                    kind, bound = "hard_cap", hard_cap
+            else:
+                if token:
+                    yield token
+                continue
+        PIPELINE_STREAM_WATCHDOG_TIMEOUTS.labels(
+            stage_type=stage_type, provider=provider, kind=kind
+        ).inc()
+        with contextlib.suppress(Exception):
+            await iterator.aclose()
+        raise StreamWatchdogTimeout(kind=kind, timeout_seconds=bound)
+
+
+async def _stage_db_heartbeat(stage_id: UUID) -> None:
+    """Refresh a generating stage's updated_at so recovery never kills it.
+
+    The stuck-stage recovery sweep resets any stage left in_progress for more
+    than 3 minutes — its liveness signal is updated_at.  A frontier generation
+    legitimately runs much longer than that, so while generate() is in flight
+    this task bumps updated_at every _STAGE_HEARTBEAT_DB_SECONDS on its own
+    short-lived session (never the request session, which the generation flow
+    is using concurrently).  The status guard ensures a stage the sweep or
+    cleanup already reset is never touched.  If this process dies, heartbeats
+    stop and the sweep correctly recovers the stage.
+    """
+    from sqlalchemy import update  # noqa: PLC0415
+
+    from database import AsyncSessionLocal  # noqa: PLC0415
+
+    try:
+        while True:
+            await asyncio.sleep(_STAGE_HEARTBEAT_DB_SECONDS)
+            try:
+                async with AsyncSessionLocal() as heartbeat_db:
+                    await heartbeat_db.execute(
+                        update(Stage)
+                        .where(
+                            Stage.id == stage_id,
+                            Stage.status == "in_progress",
+                        )
+                        .values(updated_at=datetime.now(UTC))
+                    )
+                    await heartbeat_db.commit()
+            except Exception:
+                logger.exception(
+                    "stage.db_heartbeat.error stage_id=%s",
+                    stage_id,
+                )
+    except asyncio.CancelledError:
+        pass
+
+
+def _repair_budget(
+    route: LLMRoute,
+    current_max_tokens: int,
+    issues: list["CompletenessIssue"],
+) -> int:
+    """The output budget for a repair attempt.
+
+    A repair after a provider limit-stop retries with a doubled budget
+    (clamped to the model ceiling) — retrying with the budget that just
+    proved too small predictably fails the same way.  Other completeness
+    failures keep the original budget.
+    """
+    if not any(issue.code == "provider_stopped_by_limit" for issue in issues):
+        return current_max_tokens
+    try:
+        ceiling = model_max_output_tokens(route.provider, route.model)
+    except ValueError:
+        return current_max_tokens
+    return max(current_max_tokens, min(current_max_tokens * 2, ceiling))
+
+
+def _runtime_fallback_route(failed_route: LLMRoute) -> LLMRoute | None:
+    """Resolve the one-shot mid-tier retry route after a strong-tier failure.
+
+    Stays on the same provider (switching providers mid-generation would
+    silently change the user's billing/key expectations).  Returns None when
+    the failed route already ran on the fallback tier or the provider has no
+    distinct active fallback model — the original failure then surfaces.
+    """
+    if failed_route.model_tier == _RUNTIME_FALLBACK_TIER:
+        return None
+    try:
+        route = resolve_llm_route(
+            operation=failed_route.operation,
+            preferred_provider=failed_route.provider,
+            requested_tier=_RUNTIME_FALLBACK_TIER,
+            fallback_tier=None,
+            latency_class="interactive",
+        )
+    except LLMRoutingError:
+        return None
+    if route.model == failed_route.model:
+        return None
+    return route
 
 
 def _route_for_refine(workspace: Workspace, mode: str) -> LLMRoute:
@@ -248,7 +418,7 @@ def _route_for_refine(workspace: Workspace, mode: str) -> LLMRoute:
     fallback_tier = {
         "focused": "small",
         "section": "strong",
-        "full": None,
+        "full": "mid",
     }[mode]
     return resolve_llm_route(
         operation=operation,
@@ -276,7 +446,11 @@ def _log_generation_route(
             "stage_type": stage_type,
             "action": action,
             "prompt_version": prompt_version,
-            "output_token_budget": output_budget_for_operation(route.operation),
+            "output_token_budget": resolve_output_budget(
+                route.operation,
+                provider=route.provider,
+                model=route.model,
+            ),
             "route_reason": route.reason,
             "selection_reason": route.selection_reason,
             "requested_tier": route.requested_tier,
@@ -807,14 +981,40 @@ class StageManager:
         user_prompt: str,
         stage_type: str,
         deps: dict[str, str],
+        emit: Callable[[str], None] | None = None,
     ) -> GeneratedArtifact:
         chunks: list[str] = []
         repair_attempted = False
-        max_tokens = output_budget_for_operation(route.operation)
-        stream_timeout = _stream_timeout_for_stage(stage_type)
+        max_tokens = resolve_output_budget(
+            route.operation,
+            provider=route.provider,
+            model=route.model,
+        )
+        generation_started = asyncio.get_running_loop().time()
+
+        # Live streaming runs on the happy path only.  The moment any repair
+        # begins, the client's draft contains content that is about to be
+        # replaced — emit one stream_reset (the client clears its buffer) and
+        # stop live-streaming; the canonical end-of-stream replay repaints the
+        # final artifact.
+        live_emit = emit
+
+        def _stop_live_streaming() -> None:
+            nonlocal live_emit
+            if live_emit is not None:
+                live_emit(json.dumps({"stream_reset": True}))
+                live_emit = None
 
         chunk_specs = _chunk_specs_for_stage(stage_type)
-        for index, chunk in enumerate(chunk_specs):
+        # Every chunk is always generated.  There is deliberately NO early
+        # return when an intermediate chunk happens to pass the completeness
+        # check on its own: chunked generation exists to force depth, and a
+        # token-squeezed model that emits a compact "complete-looking" document
+        # in chunk one must not skip the remaining deep-dive chunks (the
+        # shallow-artifact failure mode behind issue #19's follow-up).
+        for chunk in chunk_specs:
+            if live_emit is not None and chunks:
+                live_emit("\n\n")
             try:
                 chunk_text = await self._generate_chunk_once(
                     adapter=adapter,
@@ -825,9 +1025,10 @@ class StageManager:
                     chunk=chunk,
                     prior_chunks=chunks,
                     max_tokens=max_tokens,
-                    stream_timeout=stream_timeout,
+                    emit=live_emit,
                 )
             except IncompleteArtifactError as exc:
+                _stop_live_streaming()
                 if repair_attempted:
                     raise IncompleteArtifactError(
                         stage_type,
@@ -850,8 +1051,7 @@ class StageManager:
                         stage_type=stage_type,
                         chunk=chunk,
                         prior_chunks=chunks,
-                        max_tokens=max_tokens,
-                        stream_timeout=stream_timeout,
+                        max_tokens=_repair_budget(route, max_tokens, exc.issues),
                         repair_issues=exc.issues,
                     )
                 except IncompleteArtifactError as repair_exc:
@@ -874,27 +1074,12 @@ class StageManager:
                     outcome="succeeded",
                 ).inc()
             chunks.append(chunk_text)
-            if index < len(chunk_specs) - 1:
-                try:
-                    validate_artifact_completeness(stage_type, chunk_text, deps)
-                except IncompleteArtifactError:
-                    pass
-                else:
-                    return GeneratedArtifact(
-                        content=chunk_text,
-                        chunks=[chunk_text],
-                        repair_attempted=repair_attempted,
-                        content_generation_id=getattr(
-                            adapter,
-                            "last_generation_id",
-                            None,
-                        ),
-                    )
 
         artifact = "\n\n".join(chunk for chunk in chunks if chunk.strip()).strip()
         try:
             validate_artifact_completeness(stage_type, artifact, deps)
         except IncompleteArtifactError as exc:
+            _stop_live_streaming()
             if repair_attempted:
                 raise IncompleteArtifactError(
                     stage_type,
@@ -909,6 +1094,7 @@ class StageManager:
                 outcome="attempted",
             ).inc()
             repaired_chunks: list[str] = []
+            repair_max_tokens = _repair_budget(route, max_tokens, exc.issues)
             try:
                 for chunk in chunk_specs:
                     repaired_chunks.append(
@@ -920,8 +1106,7 @@ class StageManager:
                             stage_type=stage_type,
                             chunk=chunk,
                             prior_chunks=repaired_chunks,
-                            max_tokens=max_tokens,
-                            stream_timeout=stream_timeout,
+                            max_tokens=repair_max_tokens,
                             repair_issues=exc.issues,
                         )
                     )
@@ -952,6 +1137,9 @@ class StageManager:
                 outcome="succeeded",
             ).inc()
 
+        PIPELINE_GENERATION_DURATION.labels(
+            stage_type=stage_type, provider=route.provider
+        ).observe(asyncio.get_running_loop().time() - generation_started)
         return GeneratedArtifact(
             content=artifact,
             chunks=chunks,
@@ -970,8 +1158,8 @@ class StageManager:
         chunk: ArtifactChunkSpec,
         prior_chunks: list[str],
         max_tokens: int,
-        stream_timeout: float,
         repair_issues: list[CompletenessIssue] | None = None,
+        emit: Callable[[str], None] | None = None,
     ) -> str:
         accumulated = ""
         chunk_prompt = _chunk_user_prompt(
@@ -981,13 +1169,32 @@ class StageManager:
             prior_chunks=prior_chunks,
             repair_issues=repair_issues,
         )
-        async with asyncio.timeout(stream_timeout):
-            async for token in adapter.stream(
+        # Live progressive streaming (issue #19 UX): tokens are forwarded to
+        # the SSE client as they arrive, batched ~5×/s so the browser is not
+        # flooded with per-token events.  The canonical end-of-stream replay
+        # (after a stream_reset) remains the source of truth.
+        loop = asyncio.get_running_loop()
+        pending = ""
+        last_flush = loop.time()
+        async for token in _watchdog_stream(
+            adapter.stream(
                 system_prompt,
                 chunk_prompt,
                 max_tokens=max_tokens,
-            ):
-                accumulated += token
+            ),
+            stage_type=stage_type,
+            provider=route.provider,
+        ):
+            accumulated += token
+            if emit is not None:
+                pending += token
+                now = loop.time()
+                if len(pending) >= 512 or now - last_flush >= 0.2:
+                    emit(pending)
+                    pending = ""
+                    last_flush = now
+        if emit is not None and pending:
+            emit(pending)
         accumulated = _strip_code_fence(accumulated)
         if _completion_stopped_by_limit(adapter):
             PIPELINE_PROVIDER_LIMIT_STOPS.labels(
@@ -1161,13 +1368,110 @@ class StageManager:
             # Post-commit cache eviction — H-2 — T-219.
             await credit_service.invalidate(user.id)
 
-        # _cleanup_done starts False immediately after the commit so that any
-        # exception enters the finally cleanup path and refunds credits + resets
-        # the stage to draft.
+        # The pipeline runs as a background task; this generator only pumps its
+        # SSE events to the client, interleaving {"progress": ...} heartbeats
+        # whenever the pipeline has been silent for a heartbeat interval.
+        # Heartbeats therefore cover the ENTIRE generation — artifact
+        # streaming, quality gates, critic review/regenerate, persistence —
+        # so proxies never see an idle connection and the UI always has a
+        # liveness signal, even while a frontier model reasons silently or a
+        # silent gate phase (critic complete() call) runs for minutes.
+        events: asyncio.Queue = asyncio.Queue()
+        pipeline = asyncio.create_task(
+            self._execute_generation_pipeline(
+                emit=events.put_nowait,
+                stage=stage,
+                stage_id=stage_id,
+                workspace=workspace,
+                user=user,
+                db=db,
+                redis=redis,
+                route=route,
+                deduction=deduction,
+                action=action,
+                trace_id=trace_id,
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                cache_key=cache_key,
+            )
+        )
+        # The sentinel is enqueued from the done-callback (not the pipeline
+        # body) so it is guaranteed to arrive after every event the pipeline
+        # emitted, on success, failure, and cancellation alike.
+        pipeline.add_done_callback(lambda _task: events.put_nowait(_PIPELINE_END))
+        heartbeat_loop = asyncio.get_running_loop()
+        pipeline_started = heartbeat_loop.time()
+        try:
+            while True:
+                try:
+                    event = await asyncio.wait_for(
+                        events.get(), timeout=_GENERATION_HEARTBEAT_SECONDS
+                    )
+                except asyncio.TimeoutError:
+                    yield json.dumps(
+                        {
+                            "progress": {
+                                "stage": stage.type,
+                                "state": "generating",
+                                "elapsed_seconds": int(
+                                    heartbeat_loop.time() - pipeline_started
+                                ),
+                            }
+                        }
+                    )
+                    continue
+                if event is _PIPELINE_END:
+                    break
+                yield event
+            # Re-raise the pipeline's failure (if any) for the router's error
+            # mapping, after every queued event has been flushed to the client.
+            await pipeline
+        finally:
+            # Client disconnect (GeneratorExit/CancelledError) cancels the
+            # pipeline so the LLM call never keeps billing tokens with no
+            # consumer; the pipeline's own finally block performs the refund
+            # and stage-reset cleanup.
+            if not pipeline.done():
+                pipeline.cancel()
+                await asyncio.gather(pipeline, return_exceptions=True)
+
+    async def _execute_generation_pipeline(
+        self,
+        *,
+        emit,
+        stage: Stage,
+        stage_id: UUID,
+        workspace: Workspace,
+        user,
+        db: AsyncSession,
+        redis,
+        route: LLMRoute,
+        deduction,
+        action: str,
+        trace_id: str | None,
+        system_prompt: str,
+        user_prompt: str,
+        cache_key: str,
+    ) -> None:
+        """Run the full post-preflight generation pipeline for generate().
+
+        Every client-visible SSE event goes through emit() (the supervising
+        generator's queue); generate() interleaves progress heartbeats while
+        this pipeline is silent.  Cancellation (client disconnect) lands on
+        whatever this task is awaiting and triggers the finally-block cleanup,
+        exactly as generator teardown did when this body lived inline.
+        """
+        # _cleanup_done starts False immediately after the in_progress commit
+        # so that any exception enters the finally cleanup path and refunds
+        # credits + resets the stage to draft.
         _cleanup_done = False
         span_id: str | None = None
         span_finished = False
         accumulated = ""
+        # Liveness heartbeat for the recovery sweep: runs for the entire
+        # generation (streaming, gates, critic regenerate) and is cancelled in
+        # the finally below before the stage leaves in_progress.
+        db_heartbeat = asyncio.create_task(_stage_db_heartbeat(stage.id))
         try:
             if trace_id:
                 span_id = await self._start_langfuse_span(
@@ -1182,34 +1486,105 @@ class StageManager:
             stream_chunks: list[str] = []
             deps = _workspace_stage_deps(workspace, stage.type)
             technology_repair_used = False
-            try:
-                adapter = get_llm(route.provider, route.model)
-                if trace_id:
-                    from services.llm.instrumented_adapter import InstrumentedAdapter
 
-                    adapter = InstrumentedAdapter(
-                        adapter,
+            def _build_stage_adapter(attempt_route: LLMRoute):
+                built = get_llm(attempt_route.provider, attempt_route.model)
+                if trace_id:
+                    from services.llm.instrumented_adapter import (  # noqa: PLC0415
+                        InstrumentedAdapter,
+                    )
+
+                    built = InstrumentedAdapter(
+                        built,
                         span_id=span_id,
                         trace_id=trace_id,
-                        provider=route.provider,
-                        model=route.model,
+                        provider=attempt_route.provider,
+                        model=attempt_route.model,
                         stage_type=stage.type,
                         action=action,
-                        model_tier=route.model_tier,
+                        model_tier=attempt_route.model_tier,
                         prompt_version=STAGE_PROMPT_VERSIONS[stage.type],
-                        operation=route.operation,
+                        operation=attempt_route.operation,
                         cache_hit=False,
                         batch=False,
-                        cross_provider_fallback=route.cross_provider_fallback,
+                        cross_provider_fallback=attempt_route.cross_provider_fallback,
                     )
-                generated = await self._generate_complete_artifact(
-                    adapter=adapter,
-                    route=route,
-                    system_prompt=system_prompt,
-                    user_prompt=user_prompt,
-                    stage_type=stage.type,
-                    deps=deps,
-                )
+                return built
+
+            try:
+                # Attempt loop: the primary (strong-tier) generation plus at
+                # most one same-provider fallback-tier retry on timeout or
+                # provider failure.  SSE progress heartbeats are interleaved by
+                # the supervising generate() pump while this await is pending.
+                is_fallback_attempt = False
+                while True:
+                    try:
+                        generated = await self._generate_complete_artifact(
+                            adapter=_build_stage_adapter(route),
+                            route=route,
+                            system_prompt=system_prompt,
+                            user_prompt=user_prompt,
+                            stage_type=stage.type,
+                            deps=deps,
+                            emit=emit,
+                        )
+                    except (ProviderError, TimeoutError) as attempt_exc:
+                        # Any live-streamed draft from the failed attempt is
+                        # stale; clear the client buffer before the fallback
+                        # attempt (or the error) replaces it.
+                        emit(json.dumps({"stream_reset": True}))
+                        if is_fallback_attempt:
+                            PIPELINE_GENERATION_FALLBACKS.labels(
+                                stage_type=stage.type,
+                                provider=route.provider,
+                                outcome="failed",
+                            ).inc()
+                            raise
+                        fallback_route = _runtime_fallback_route(route)
+                        if fallback_route is None:
+                            raise
+                        if isinstance(attempt_exc, TimeoutError):
+                            # The fallback may succeed, in which case the
+                            # outer timeout handler never runs — record the
+                            # primary stream failure here so the circuit
+                            # breaker still observes it (C-1 contract).
+                            from services.llm.provider_status import (  # noqa: PLC0415
+                                record_provider_failure,
+                            )
+
+                            record_provider_failure(route.provider, attempt_exc)
+                        logger.warning(
+                            "stage.generation_fallback",
+                            extra={
+                                "stage_id": str(stage_id),
+                                "stage": stage.type,
+                                "failed_provider": route.provider,
+                                "failed_model": route.model,
+                                "fallback_model": fallback_route.model,
+                                "cause": type(attempt_exc).__name__,
+                            },
+                        )
+                        PIPELINE_GENERATION_FALLBACKS.labels(
+                            stage_type=stage.type,
+                            provider=route.provider,
+                            outcome="attempted",
+                        ).inc()
+                        route = fallback_route
+                        is_fallback_attempt = True
+                        _log_generation_route(
+                            route=route,
+                            stage_type=stage.type,
+                            action=action,
+                            prompt_version=STAGE_PROMPT_VERSIONS[stage.type],
+                        )
+                        continue
+                    if is_fallback_attempt:
+                        PIPELINE_GENERATION_FALLBACKS.labels(
+                            stage_type=stage.type,
+                            provider=route.provider,
+                            outcome="succeeded",
+                        ).inc()
+                    break
                 accumulated = generated.content
                 stream_chunks = generated.chunks
                 content_generation_id = generated.content_generation_id
@@ -1221,11 +1596,11 @@ class StageManager:
                 # Calling it again here (unconditionally) would double-count those
                 # errors and trip the circuit after 2 failures instead of the
                 # documented 3.
-                # The timeout path is the only gap: asyncio.timeout() fires via
-                # CancelledError (a BaseException), which bypasses
-                # InstrumentedAdapter.stream()'s `except Exception` guard entirely.
-                # Only TimeoutError reaches here without having already triggered
-                # record_provider_failure().  C-1 — T-217.
+                # The timeout path is the only gap: the stream watchdog cancels
+                # the adapter stream (CancelledError, a BaseException), which
+                # bypasses InstrumentedAdapter.stream()'s `except Exception`
+                # guard entirely.  Only TimeoutError reaches here without having
+                # already triggered record_provider_failure().  C-1 — T-217.
                 if isinstance(exc, TimeoutError):
                     from services.llm.provider_status import (  # noqa: PLC0415
                         record_provider_failure,
@@ -1251,7 +1626,11 @@ class StageManager:
                 if isinstance(exc, TimeoutError):
                     raise ProviderTimeoutError(
                         route.provider,
-                        _stream_timeout_for_stage(stage.type),
+                        getattr(
+                            exc,
+                            "timeout_seconds",
+                            settings.llm_stream_hard_cap_seconds,
+                        ),
                     ) from exc
                 raise exc
             except IncompleteArtifactError as exc:
@@ -1268,7 +1647,7 @@ class StageManager:
                 if span_id:
                     await self._mark_langfuse_span_failed(span_id, exc)
                     span_finished = True
-                yield json.dumps({"quality_gate_failed": gate_payload})
+                emit(json.dumps({"quality_gate_failed": gate_payload}))
                 return
 
             accumulated = _strip_code_fence(accumulated)
@@ -1317,7 +1696,7 @@ class StageManager:
                 if span_id:
                     await self._mark_langfuse_span_failed(span_id, exc)
                     span_finished = True
-                yield json.dumps({"quality_gate_failed": gate_payload})
+                emit(json.dumps({"quality_gate_failed": gate_payload}))
                 return
             except IncompleteArtifactError as exc:
                 gate_payload = await self._block_incomplete_output(
@@ -1333,7 +1712,7 @@ class StageManager:
                 if span_id:
                     await self._mark_langfuse_span_failed(span_id, exc)
                     span_finished = True
-                yield json.dumps({"quality_gate_failed": gate_payload})
+                emit(json.dumps({"quality_gate_failed": gate_payload}))
                 return
 
             # T-247: critic quality gate.  Runs AFTER output validation and
@@ -1370,7 +1749,7 @@ class StageManager:
                     if span_id:
                         await self._mark_langfuse_span_failed(span_id, exc)
                         span_finished = True
-                    yield json.dumps({"quality_gate_failed": gate_payload})
+                    emit(json.dumps({"quality_gate_failed": gate_payload}))
                     return
                 regenerate_count = 0
                 while True:
@@ -1406,7 +1785,7 @@ class StageManager:
                         if span_id:
                             await self._mark_langfuse_span_failed(span_id, gate_error)
                             span_finished = True
-                        yield json.dumps({"quality_gate_failed": gate_payload})
+                        emit(json.dumps({"quality_gate_failed": gate_payload}))
                         return
                     # One platform-funded regenerate with the findings injected.
                     try:
@@ -1433,7 +1812,7 @@ class StageManager:
                         if span_id:
                             await self._mark_langfuse_span_failed(span_id, exc)
                             span_finished = True
-                        yield json.dumps({"quality_gate_failed": gate_payload})
+                        emit(json.dumps({"quality_gate_failed": gate_payload}))
                         return
                     BILLING_CREDITS_CRITIC_REGEN.labels(stage=stage.type).inc()
                     regenerate_count += 1
@@ -1479,7 +1858,7 @@ class StageManager:
                 if span_id:
                     await self._mark_langfuse_span_failed(span_id, exc)
                     span_finished = True
-                yield json.dumps({"quality_gate_failed": gate_payload})
+                emit(json.dumps({"quality_gate_failed": gate_payload}))
                 return
             except IncompleteArtifactError as exc:
                 gate_payload = await self._block_incomplete_output(
@@ -1495,7 +1874,7 @@ class StageManager:
                 if span_id:
                     await self._mark_langfuse_span_failed(span_id, exc)
                     span_finished = True
-                yield json.dumps({"quality_gate_failed": gate_payload})
+                emit(json.dumps({"quality_gate_failed": gate_payload}))
                 return
 
             stage.content = accumulated
@@ -1535,18 +1914,23 @@ class StageManager:
                 content_generation_id=content_generation_id,
                 harness_content=harness_content_for_eval,
             )
+            # Canonical repaint: the live-streamed draft may differ from the
+            # final artifact (code-fence strip, tech-safety repair, critic
+            # regenerate) — reset the client buffer and replay the artifact
+            # that was actually persisted.
+            emit(json.dumps({"stream_reset": True}))
             for index, chunk in enumerate(stream_chunks):
                 if index:
-                    yield "\n\n"
-                yield chunk
-            yield f'{{"done": true, "stage_id": "{stage_id}"}}'
+                    emit("\n\n")
+                emit(chunk)
+            emit(f'{{"done": true, "stage_id": "{stage_id}"}}')
 
             try:
                 eval_result = await asyncio.wait_for(
                     asyncio.shield(eval_task), timeout=30.0
                 )
                 if eval_result is not None:
-                    yield json.dumps({"eval": _eval_to_dict(eval_result)})
+                    emit(json.dumps({"eval": _eval_to_dict(eval_result)}))
             except asyncio.TimeoutError:
                 # asyncio.shield() protects eval_task from the wait_for
                 # cancellation signal, so the task continues running after
@@ -1567,6 +1951,10 @@ class StageManager:
                 await self._mark_langfuse_span_failed(span_id, exc)
             raise
         finally:
+            # Stop the liveness heartbeat before the stage leaves in_progress
+            # (or before the disconnect cleanup below resets it).
+            db_heartbeat.cancel()
+            await asyncio.gather(db_heartbeat, return_exceptions=True)
             if not _cleanup_done:
                 if span_id and not span_finished:
                     await self._mark_langfuse_span_failed(
@@ -1786,7 +2174,11 @@ class StageManager:
                 adapter.complete(
                     system_prompt,
                     user_prompt,
-                    max_tokens=output_budget_for_operation(route.operation),
+                    max_tokens=resolve_output_budget(
+                        route.operation,
+                        provider=route.provider,
+                        model=route.model,
+                    ),
                 ),
                 timeout=settings.llm_complete_timeout_seconds,
             )
@@ -2534,9 +2926,13 @@ class StageManager:
             adapter.complete(
                 system_prompt,
                 augmented_user_prompt,
-                max_tokens=output_budget_for_operation(route.operation),
+                max_tokens=resolve_output_budget(
+                    route.operation,
+                    provider=route.provider,
+                    model=route.model,
+                ),
             ),
-            timeout=_stream_timeout_for_stage(stage_type),
+            timeout=settings.llm_stream_hard_cap_seconds,
         )
         raw = _strip_code_fence(raw)
         if _completion_stopped_by_limit(adapter):
@@ -2625,15 +3021,15 @@ class StageManager:
         # the stage in its original status (no partial writes are ever committed),
         # making recovery-service involvement unnecessary.  C-2 — T-174.
         accumulated = ""
-        stream_timeout = _stream_timeout_for_stage("harness")
         try:
             adapter = get_llm(route.provider, route.model)
-            async with asyncio.timeout(stream_timeout):
-                async for token in adapter.stream(
-                    system_prompt, user_prompt, max_tokens=2048
-                ):
-                    accumulated += token
-                    yield token
+            async for token in _watchdog_stream(
+                adapter.stream(system_prompt, user_prompt, max_tokens=2048),
+                stage_type="harness",
+                provider=route.provider,
+            ):
+                accumulated += token
+                yield token
 
             merged = _merge_harness_patch(existing_content, accumulated)
             try:
@@ -2712,7 +3108,14 @@ class StageManager:
 
             record_provider_failure(route.provider, exc)
             if isinstance(exc, TimeoutError):
-                raise ProviderTimeoutError(route.provider, stream_timeout) from exc
+                raise ProviderTimeoutError(
+                    route.provider,
+                    getattr(
+                        exc,
+                        "timeout_seconds",
+                        settings.llm_stream_hard_cap_seconds,
+                    ),
+                ) from exc
             raise
 
 

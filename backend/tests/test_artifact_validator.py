@@ -366,3 +366,49 @@ def _complete_tasks_artifact(
         "**Dependencies:** "
         f"{dependencies}\n"
     )
+
+
+def test_validate_artifact_completeness_enforces_spec_id_floors() -> None:
+    """A spec whose requirement coverage collapses to a couple of IDs is a
+    depth failure even when every heading and evidence contract is present."""
+    import re as _re
+
+    import artifact_fixtures
+
+    degraded = _re.sub(r"\bFR-00[2-9]\b", "FR-001", artifact_fixtures.VALID_SPEC)
+    degraded = _re.sub(r"\bNFR-00[2-9]\b", "NFR-001", degraded)
+    degraded = _re.sub(r"\bAC-00[2-9]\b", "AC-001", degraded)
+
+    with pytest.raises(IncompleteArtifactError) as excinfo:
+        validate_artifact_completeness("spec", degraded)
+
+    insufficient = [
+        issue
+        for issue in excinfo.value.issues
+        if issue.code == "insufficient_requirement_ids"
+    ]
+    assert {issue.reference for issue in insufficient} == {"FR", "NFR", "AC"}
+
+    # The full fixture clears the floors.
+    validate_artifact_completeness("spec", artifact_fixtures.VALID_SPEC)
+
+
+def test_validate_artifact_completeness_enforces_minimum_task_count() -> None:
+    artifact = _complete_tasks_artifact()
+
+    with pytest.raises(IncompleteArtifactError) as excinfo:
+        validate_artifact_completeness("tasks", artifact, {"spec": "FR-001"})
+
+    assert any(
+        issue.code == "insufficient_task_count" for issue in excinfo.value.issues
+    )
+
+
+def test_min_body_chars_floors_catch_heading_restatements() -> None:
+    """A one-clause body under a required heading is shallow at every stage."""
+    from services.pipeline.artifact_validator import _min_body_chars
+
+    assert _min_body_chars("spec") >= 120
+    assert _min_body_chars("plan") >= 150
+    assert _min_body_chars("harness") >= 60
+    assert _min_body_chars("tasks") >= 50

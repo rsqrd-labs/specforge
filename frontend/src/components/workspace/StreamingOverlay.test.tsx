@@ -101,6 +101,47 @@ describe("StreamingOverlay generation activity", () => {
 
     expect(getComputedStyle(screen.getByRole("status")).pointerEvents).toBe("auto")
   })
+
+  it("shows an elapsed-time liveness line so a long generation never looks frozen", () => {
+    render(
+      <StreamingOverlay
+        isVisible
+        activity={{ ...activity("generate", "spec"), startedAt: Date.now() }}
+      />,
+    )
+
+    expect(screen.getByRole("status")).toHaveTextContent(/elapsed/)
+  })
+
+  it("collapses to a slim pill while live draft tokens render in the editor", () => {
+    render(
+      <StreamingOverlay
+        isVisible
+        compact
+        activity={{ ...activity("generate", "spec"), startedAt: Date.now() }}
+      />,
+    )
+
+    const pill = screen.getByRole("status")
+    expect(pill).toHaveClass("generation-streaming-pill")
+    expect(pill).toHaveTextContent("Structuring requirements")
+    // The full-card loading overlay must not cover the document.
+    expect(document.querySelector(".generation-loading-overlay")).toBeNull()
+  })
+
+  it("confirms backend liveness when a progress heartbeat has arrived", () => {
+    render(
+      <StreamingOverlay
+        isVisible
+        activity={{ ...activity("generate", "spec"), startedAt: Date.now() }}
+        progress={{ stage: "spec", state: "generating", elapsed_seconds: 42 }}
+      />,
+    )
+
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "the model is working; this can take several minutes.",
+    )
+  })
 })
 
 describe("StreamingOverlay quality gate", () => {

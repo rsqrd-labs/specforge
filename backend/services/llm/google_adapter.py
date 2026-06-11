@@ -54,8 +54,12 @@ class GoogleAdapter(BaseLLMAdapter):
             )
             async for chunk in response:
                 _capture_google_completion(self.last_completion, chunk)
-                if chunk.text:
-                    yield chunk.text
+                # Chunks without visible text (thinking phases, metadata-only
+                # chunks) yield an empty liveness sentinel: the stream watchdog
+                # resets its idle timer on every yielded item and forwards only
+                # non-empty tokens, so silent thinking is never killed as
+                # "stalled" (issue #19).
+                yield chunk.text or ""
         except genai_errors.APIError as exc:
             raise ProviderError("google", exc) from exc
 

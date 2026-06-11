@@ -27,12 +27,28 @@ interface QualityGateFailedEvent {
   quality_gate_failed: QualityGateInfo
 }
 
+export interface GenerationProgress {
+  stage: string
+  state: string
+  elapsed_seconds: number
+}
+
+interface ProgressEvent {
+  progress: GenerationProgress
+}
+
+interface StreamResetEvent {
+  stream_reset: true
+}
+
 type SSEPayload =
   | DoneEvent
   | TokenEvent
   | ErrorEvent
   | EvalEvent
   | QualityGateFailedEvent
+  | ProgressEvent
+  | StreamResetEvent
 
 /**
  * Safely close and nullify an SSE stream reference.
@@ -142,6 +158,8 @@ export function createSSEConnection(
   onError: (error: Error) => void,
   onEval: (result: EvalResult | null) => void = () => {},
   onQualityGateFailed: (info: QualityGateInfo) => void = () => {},
+  onProgress: (progress: GenerationProgress) => void = () => {},
+  onReset: () => void = () => {},
 ): SSEControl {
   let closed = false
   let currentController = new AbortController()
@@ -206,6 +224,21 @@ export function createSSEConnection(
           try {
             data = JSON.parse(payload) as SSEPayload
           } catch {
+            continue
+          }
+
+          if ("progress" in data) {
+            // Liveness heartbeat emitted while the model reasons before any
+            // artifact bytes exist. Not a token: never append it to content.
+            onProgress((data as ProgressEvent).progress)
+            continue
+          }
+
+          if ("stream_reset" in data) {
+            // The live-streamed draft is about to be replaced (repair,
+            // regenerate, or the canonical end-of-stream replay): clear the
+            // accumulated buffer before the replacement content arrives.
+            onReset()
             continue
           }
 

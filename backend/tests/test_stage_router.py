@@ -899,3 +899,57 @@ async def test_refine_requires_credits_returns_402_when_balance_zero(app) -> Non
     assert response.status_code == 402
     body = response.json()
     assert body["detail"]["code"] == "insufficient_credits"
+
+
+@pytest.mark.asyncio
+async def test_generate_passes_progress_heartbeats_through_unwrapped(app) -> None:
+    """Progress heartbeats must be forwarded as raw SSE control events, never
+    wrapped as artifact tokens — a wrapped heartbeat would be appended to the
+    user's document by the frontend."""
+    import json as _json
+
+    stage = _make_stage(status="draft")
+
+    async def _fake_db():
+        yield _FakeDB(stage)
+
+    app.dependency_overrides[get_db] = _fake_db
+
+    async def heartbeat_then_content(*args, **kwargs) -> AsyncGenerator[str, None]:
+        yield (
+            '{"progress": {"stage": "spec", "state": "generating", '
+            '"elapsed_seconds": 10}}'
+        )
+        yield "## Overview\nartifact text"
+        yield f'{{"done": true, "stage_id": "{stage.id}"}}'
+
+    with (
+        patch(
+            "routers.stage.stage_manager.generate",
+            side_effect=heartbeat_then_content,
+        ),
+        patch(
+            "services.credit_service.credit_service.get_balance",
+            new_callable=AsyncMock,
+            return_value=100,
+        ),
+    ):
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            response = await client.post(f"/stages/{stage.id}/generate")
+
+    assert response.status_code == 200
+    events = [
+        _json.loads(line[5:].strip())
+        for line in response.text.splitlines()
+        if line.startswith("data:")
+    ]
+    progress = [event for event in events if "progress" in event]
+    assert progress == [
+        {"progress": {"stage": "spec", "state": "generating", "elapsed_seconds": 10}}
+    ]
+    # The artifact text still arrives as a wrapped token event.
+    assert any(event.get("token", "").startswith("## Overview") for event in events)
+    # No token event carries the heartbeat payload.
+    assert not any("progress" in event.get("token", "") for event in events)

@@ -11,6 +11,12 @@ _LIMIT_FINISH_REASONS = {
     "max_tokens_reached",
     "token_limit",
     "MAX_TOKENS",
+    # OpenAI Responses API: a response cut off by max_output_tokens finishes
+    # with status "incomplete".  Missing it misdiagnoses budget truncation as
+    # a sentinel miss, so the repair retries with the SAME too-small budget
+    # (only provider_stopped_by_limit doubles it) and fails identically —
+    # the issue-#19 quality-gate dead end.
+    "incomplete",
 }
 
 

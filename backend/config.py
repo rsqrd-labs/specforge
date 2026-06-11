@@ -52,9 +52,19 @@ class Settings(BaseSettings):
     db_pool_size: int = 20
     db_max_overflow: int = 10
     # LLM circuit-breaker rejections emit specforge_llm_circuit_rejections_total.
-    llm_stream_timeout_seconds: int = 120
-    llm_long_stream_timeout_seconds: int = 300
-    llm_complete_timeout_seconds: int = 45
+    #
+    # Stream-watchdog policy: a generation stream is killed only when it is
+    # actually unhealthy, never merely because the artifact is long.
+    # - idle timeout: maximum gap between two provider stream EVENTS, not
+    #   visible tokens — adapters yield empty liveness sentinels for
+    #   reasoning/thinking deltas, pings, and usage chunks, so a frontier
+    #   model reasoning silently for minutes never trips this bound while its
+    #   connection is demonstrably alive.
+    # - hard cap: absolute upper bound for a single stream call, bounding
+    #   runaway provider cost.
+    llm_stream_idle_timeout_seconds: int = 180
+    llm_stream_hard_cap_seconds: int = 900
+    llm_complete_timeout_seconds: int = 120
     max_request_body_bytes: int = 1_000_000
     tech_safety_policy_max_age_days: int = 30
     tech_safety_osv_cache_ttl_seconds: int = 86_400
@@ -288,6 +298,19 @@ def validate_production_settings() -> None:
                 "LEMONSQUEEZY_TEST_MODE must be False in production "
                 "(live mode required); a test-mode store charges nothing."
             )
+
+    # Stream-watchdog guard: an idle timeout below 30s kills healthy frontier
+    # reasoning streams (they can think for tens of seconds between tokens);
+    # a hard cap below the idle timeout makes every generation time out.
+    if settings.llm_stream_idle_timeout_seconds < 30:
+        errors.append(
+            "LLM_STREAM_IDLE_TIMEOUT_SECONDS must be at least 30 in production; "
+            "lower values kill healthy reasoning-model streams."
+        )
+    if settings.llm_stream_hard_cap_seconds < settings.llm_stream_idle_timeout_seconds:
+        errors.append(
+            "LLM_STREAM_HARD_CAP_SECONDS must be >= LLM_STREAM_IDLE_TIMEOUT_SECONDS."
+        )
 
     # GitHub App guard (Phase 21 — T-283). When the App is enabled (id + slug
     # set), production must also have the signing key and webhook secret, or the

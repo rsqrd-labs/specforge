@@ -59,8 +59,12 @@ class OpenAIAdapter(BaseLLMAdapter):
             async for event in response:
                 _capture_openai_response_completion(self.last_completion, event)
                 delta = _responses_event_text_delta(event)
-                if delta:
-                    yield delta
+                # Non-text events (reasoning deltas, lifecycle events) yield an
+                # empty liveness sentinel: the stream watchdog resets its idle
+                # timer on every yielded item and forwards only non-empty
+                # tokens, so silent reasoning phases are never killed as
+                # "stalled" (issue #19).
+                yield delta if delta else ""
         except openai.OpenAIError as exc:
             raise ProviderError("openai", exc) from exc
         except RuntimeError as exc:
@@ -90,6 +94,7 @@ class OpenAIAdapter(BaseLLMAdapter):
                     usage = getattr(chunk, "usage", None)
                     if usage is not None and self.last_completion is not None:
                         self.last_completion.usage = _object_to_dict(usage)
+                    yield ""
                     continue
                 choice = chunk.choices[0]
                 if self.last_completion is not None:
@@ -98,10 +103,14 @@ class OpenAIAdapter(BaseLLMAdapter):
                     )
                 # Guard 2: The final chunk may have delta=None (no content).
                 if choice.delta is None:
+                    yield ""
                     continue
                 # Guard 3: Tool-use and stop chunks send delta.content=None.
+                # All three guard paths yield an empty liveness sentinel (see
+                # the responses-API stream above) instead of skipping silently.
                 content = choice.delta.content
                 if content is None:
+                    yield ""
                     continue
                 yield content
         except openai.OpenAIError as exc:
@@ -194,7 +203,14 @@ class OpenAIAdapter(BaseLLMAdapter):
         }
         effort = self._request_policy["reasoning_effort"]
         if effort:
-            request["reasoning"] = {"effort": effort}
+            # summary="auto" makes the API stream reasoning-summary deltas
+            # during the otherwise fully-silent reasoning phase.  Without
+            # them a high-effort model can produce zero stream events for
+            # minutes, which trips the stream watchdog's idle bound and the
+            # HTTP client's read timeout even though the generation is
+            # healthy (issue #19).  The deltas carry no output text — the
+            # stream path yields them as empty liveness sentinels.
+            request["reasoning"] = {"effort": effort, "summary": "auto"}
         return request
 
     def _chat_request(self, *, system: str, user: str, max_tokens: int) -> dict:

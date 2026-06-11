@@ -42,8 +42,18 @@ class AnthropicAdapter(BaseLLMAdapter):
                     max_tokens=max_tokens,
                 ),
             ) as stream:
-                async for text in stream.text_stream:
-                    yield text
+                async for event in stream:
+                    if event.type == "text":
+                        yield event.text
+                    else:
+                        # Liveness sentinel: reasoning/thinking deltas, pings,
+                        # and block boundaries carry no visible text but prove
+                        # the provider stream is healthy.  The stream watchdog
+                        # resets its idle timer on every yielded item and
+                        # forwards only non-empty tokens, so a frontier model
+                        # reasoning silently for minutes is never killed as
+                        # "stalled" (issue #19).
+                        yield ""
                 final_message = await stream.get_final_message()
                 if self.last_completion is not None:
                     self.last_completion.apply_finish_reason(

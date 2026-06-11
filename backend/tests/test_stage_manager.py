@@ -7,15 +7,12 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
+import artifact_fixtures
 import pytest
 
 from models import CreditLedger, Stage, StageVersion, Workspace
 from services.llm.completion import LLMCompletionInfo
-from services.pipeline.artifact_validator import (
-    SECTION_CONTRACTS,
-    chunk_completion_sentinel,
-    final_completion_sentinel,
-)
+from services.pipeline.artifact_validator import final_completion_sentinel
 from services.pipeline.stage_manager import (
     StageDependencyError,
     StageManager,
@@ -23,91 +20,14 @@ from services.pipeline.stage_manager import (
     _chunk_user_prompt,
 )
 
-_SPEC_DEFAULT_BODY = (
-    "This section captures the team task-management product contract while "
-    "preserving traceability to FR-001, NFR-001, SEC-001, and AC-001 without "
-    "choosing implementation internals."
-)
-_SPEC_SECTION_BODIES = {
-    "## Functional Requirements": (
-        "| ID | Actor/Trigger | Requirement | Measurable outcome | Edge cases | "
-        "Evidence |\n"
-        "|---|---|---|---|---|---|\n"
-        "| FR-001 | Team member creates or updates a task | Users can create, "
-        "assign, and track task status across a team workspace. | Task state "
-        "is visible to permitted collaborators after save. | Missing owner, "
-        "duplicate title, and reopened task flows are handled. | Problem "
-        "statement asks for teams to create tasks, assign owners, and track "
-        "project status. |"
-    ),
-    "## Non-Functional Requirements": (
-        "| ID | Quality | Requirement | Measurable outcome | Edge cases | Evidence |\n"
-        "|---|---|---|---|---|---|\n"
-        "| NFR-001 | Reliability | Core task operations remain available and "
-        "recoverable during normal tenant usage. | Successful task writes are "
-        "durable and observable. | Retry, transient outage, and partial save "
-        "conditions are covered. | Paying users depend on task tracking as "
-        "the product workflow. |"
-    ),
-    "## Security, Privacy, and Abuse Expectations": (
-        "| ID | Actor/Trigger | Control | Measurable outcome | Edge cases | "
-        "Evidence |\n"
-        "|---|---|---|---|---|---|\n"
-        "| SEC-001 | Authenticated user accesses workspace data | Enforce "
-        "workspace-scoped authorization for reads and writes. | A user cannot "
-        "view or mutate another tenant's tasks. | Revoked members, stale "
-        "sessions, and privilege changes are denied. | Problem statement "
-        "requires authenticated team task management. |"
-    ),
-    "## Acceptance Criteria": (
-        "| ID | Scenario | Expected outcome | Verification | Evidence |\n"
-        "|---|---|---|---|---|\n"
-        "| AC-001 | A permitted team member creates and assigns a task | The task "
-        "appears with owner and status for authorized collaborators only. | "
-        "Executable acceptance test covers create, assign, view, and denied "
-        "cross-workspace access. | Derived from FR-001, NFR-001, and SEC-001. |"
-    ),
-}
-_VALID_SPEC = "\n\n".join(
-    f"{heading}\n{_SPEC_SECTION_BODIES.get(heading, _SPEC_DEFAULT_BODY)}"
-    for heading in SECTION_CONTRACTS["spec"]
-)
-_VALID_SPEC_STREAM = (
-    f"{_VALID_SPEC}\n{chunk_completion_sentinel('spec', 'product-scope')}"
-)
+_VALID_SPEC = artifact_fixtures.VALID_SPEC
 
 
-def _complete_plan(technology_stack: str) -> str:
-    sections: list[str] = []
-    for heading in SECTION_CONTRACTS["plan"]:
-        if heading == "## Requirement Traceability Matrix":
-            sections.append(
-                f"{heading}\n"
-                "| Upstream ID | Plan coverage | Interface or control | Test intent |\n"
-                "|---|---|---|---|\n"
-                "| FR-001 | Task creation, assignment, and status tracking design. | "
-                "Task API and workspace service boundary. | Covered by "
-                "acceptance and integration tests. |\n"
-                "| NFR-001 | Reliable writes, recovery, and observability controls. | "
-                "Persistence, retry, and audit paths. | Covered by reliability "
-                "and failure-mode tests. |\n"
-                "| SEC-001 | Workspace-scoped authorization for task data. | "
-                "Auth policy "
-                "and tenant boundary checks. | Covered by security tests. |\n"
-                "| AC-001 | End-to-end create, assign, view, and denied access "
-                "scenario. | "
-                "Acceptance workflow and API contract. | Covered by executable "
-                "acceptance test. |"
-            )
-            continue
-        if heading == "## Technology Stack and Rationale":
-            sections.append(f"{heading}\n{technology_stack}")
-            continue
-        sections.append(
-            f"{heading}\nDetailed plan content referencing FR-001, NFR-001, "
-            "and SEC-001 with implementation-specific depth for validation."
-        )
-    return "\n\n".join(sections)
+def _spec_stream_payload(user_prompt: str) -> str:
+    return artifact_fixtures.spec_stream_payload(user_prompt)
+
+
+_complete_plan = artifact_fixtures.complete_plan
 
 
 _SAFE_TECH_STACK = (
@@ -128,9 +48,12 @@ _UNSAFE_TECH_STACK = (
 )
 _SAFE_PLAN = _complete_plan(_SAFE_TECH_STACK)
 _UNSAFE_PLAN = _complete_plan(_UNSAFE_TECH_STACK)
-_UNSAFE_PLAN_STREAM = (
-    f"{_UNSAFE_PLAN}\n{chunk_completion_sentinel('plan', 'architecture-foundation')}"
-)
+
+
+def _unsafe_plan_stream_payload(user_prompt: str) -> str:
+    return artifact_fixtures.plan_stream_payload(user_prompt, _UNSAFE_TECH_STACK)
+
+
 _SAFE_PLAN_FINAL_STREAM = f"{_SAFE_PLAN}\n{final_completion_sentinel('plan')}"
 _UNSAFE_PLAN_FINAL_STREAM = f"{_UNSAFE_PLAN}\n{final_completion_sentinel('plan')}"
 
@@ -161,6 +84,27 @@ def test_chunk_user_prompt_wraps_prior_chunks_as_untrusted_context() -> None:
     assert "BEGIN_UNTRUSTED_CONTENT:harness_prior_chunks" in prompt
     assert "harness/tests/test_auth.py" in prompt
     assert "Continue from them without duplicating" in prompt
+
+
+def _streamed_artifact(tokens: list[str]) -> str:
+    """Reassemble the artifact exactly as the SSE client does.
+
+    generate() live-streams tokens while each chunk generates, then emits a
+    {"stream_reset": true} control event followed by the canonical artifact
+    (each chunk as its own token with a literal "\\n\\n" separator token),
+    then JSON control events (done/eval/progress).  Mirroring the client
+    contract: a stream_reset clears the buffer, JSON control events are
+    never content, and everything else accumulates.
+    """
+    parts: list[str] = []
+    for token in tokens:
+        if token.startswith('{"stream_reset"'):
+            parts.clear()
+            continue
+        if token.startswith("{"):
+            continue
+        parts.append(token)
+    return "".join(parts)
 
 
 def _make_stage(
@@ -306,18 +250,37 @@ class _MultiQueryDB:
 
 
 class _CompletionAwareAdapter:
-    def __init__(self, attempts: list[tuple[str, bool]]) -> None:
+    """Chunk-aware fake adapter.
+
+    `attempts` entries are (content_or_None, stopped_by_limit) consumed once
+    per stream/complete call.  A None content resolves to the correct chunk
+    payload for the prompt via `stream_payload_fn`, so every chunk of a
+    chunked generation receives its own sections and sentinel.
+    """
+
+    def __init__(
+        self,
+        attempts: list[tuple[str | None, bool]],
+        *,
+        stream_payload_fn=None,
+    ) -> None:
         self.attempts = attempts
+        self.stream_payload_fn = stream_payload_fn or _spec_stream_payload
         self.stream_calls: list[tuple[str, str, int]] = []
         self.complete_calls: list[tuple[str, str, int]] = []
         self.last_completion: LLMCompletionInfo | None = None
 
+    def _next_attempt(self, default: str | None) -> tuple[str | None, bool]:
+        try:
+            return self.attempts.pop(0)
+        except IndexError:
+            return (default, False)
+
     async def stream(self, system: str, user: str, max_tokens: int):
         self.stream_calls.append((system, user, max_tokens))
-        try:
-            content, stopped_by_limit = self.attempts.pop(0)
-        except IndexError:
-            content, stopped_by_limit = (_VALID_SPEC_STREAM, False)
+        content, stopped_by_limit = self._next_attempt(None)
+        if content is None:
+            content = self.stream_payload_fn(user)
         self.last_completion = LLMCompletionInfo.started(
             provider="anthropic",
             model="claude-opus-4-8",
@@ -329,10 +292,9 @@ class _CompletionAwareAdapter:
 
     async def complete(self, system: str, user: str, max_tokens: int) -> str:
         self.complete_calls.append((system, user, max_tokens))
-        try:
-            content, stopped_by_limit = self.attempts.pop(0)
-        except IndexError:
-            content, stopped_by_limit = (_SAFE_PLAN_FINAL_STREAM, False)
+        content, stopped_by_limit = self._next_attempt(_SAFE_PLAN_FINAL_STREAM)
+        if content is None:
+            content = _SAFE_PLAN_FINAL_STREAM
         self.last_completion = LLMCompletionInfo.started(
             provider="anthropic",
             model="claude-opus-4-8",
@@ -393,7 +355,7 @@ async def test_generate_invalid_route_skips_credit_and_provider_call() -> None:
     mock_get_llm.assert_not_called()
 
 
-def test_harness_generation_uses_stronger_route_and_long_timeout() -> None:
+def test_harness_generation_uses_stronger_route_with_mid_fallback() -> None:
     from services.pipeline import stage_manager as stage_manager_module
 
     workspace = _make_workspace()
@@ -406,10 +368,17 @@ def test_harness_generation_uses_stronger_route_and_long_timeout() -> None:
     assert route.model_tier == "strong"
     assert route.reason == "requested_tier"
     assert route.selection_reason == "active_default"
-    assert (
-        stage_manager_module._stream_timeout_for_stage("harness")
-        >= stage_manager_module.settings.llm_long_stream_timeout_seconds
+    # Every stage declares a mid-tier resolve-time fallback, and a distinct
+    # same-provider mid-tier model exists for the runtime fallback retry.
+    assert stage_manager_module.STAGE_GENERATION_TIERS["harness"] == (
+        "strong",
+        "mid",
     )
+    fallback = stage_manager_module._runtime_fallback_route(route)
+    assert fallback is not None
+    assert fallback.provider == "openai"
+    assert fallback.model_tier == "mid"
+    assert fallback.model != route.model
 
 
 @pytest.mark.asyncio
@@ -455,9 +424,12 @@ async def test_generate_success_deducts_credits_and_saves_version() -> None:
 
     db = _MultiQueryDB([spec_stage, workspace, [], deduction])
 
-    async def fake_stream(*args, **kwargs) -> AsyncGenerator[str, None]:
-        half = len(_VALID_SPEC_STREAM) // 2
-        for token in [_VALID_SPEC_STREAM[:half], _VALID_SPEC_STREAM[half:]]:
+    async def fake_stream(
+        system, user, max_tokens=0, **kwargs
+    ) -> AsyncGenerator[str, None]:
+        payload = _spec_stream_payload(user)
+        half = len(payload) // 2
+        for token in [payload[:half], payload[half:]]:
             yield token
 
     svc = StageManager(redis_client=_FakeRedis())
@@ -483,7 +455,7 @@ async def test_generate_success_deducts_credits_and_saves_version() -> None:
         async for t in svc.generate(spec_stage.id, user, db):
             tokens.append(t)
 
-    assert _VALID_SPEC in tokens
+    assert _streamed_artifact(tokens) == _VALID_SPEC
     assert any("done" in t for t in tokens)
     assert db._committed
 
@@ -557,8 +529,10 @@ async def test_regenerate_bypasses_cache_and_uses_regenerate_credit_reason() -> 
     db = _MultiQueryDB([spec_stage, workspace, [], deduction])
     svc = StageManager(redis_client=redis)
 
-    async def fake_stream(*args, **kwargs) -> AsyncGenerator[str, None]:
-        yield _VALID_SPEC_STREAM
+    async def fake_stream(
+        system, user, max_tokens=0, **kwargs
+    ) -> AsyncGenerator[str, None]:
+        yield _spec_stream_payload(user)
 
     with (
         patch(
@@ -594,7 +568,7 @@ async def test_regenerate_bypasses_cache_and_uses_regenerate_credit_reason() -> 
         ):
             tokens.append(token)
 
-    assert _VALID_SPEC in tokens
+    assert _streamed_artifact(tokens) == _VALID_SPEC
     assert spec_stage.content == _VALID_SPEC
     assert spec_stage.current_version == 3
     mock_get_llm.assert_called_once()
@@ -613,8 +587,10 @@ async def test_generate_cache_miss_writes_completed_output() -> None:
     db = _MultiQueryDB([spec_stage, workspace, [], deduction])
     svc = StageManager(redis_client=redis)
 
-    async def fake_stream(*args, **kwargs) -> AsyncGenerator[str, None]:
-        yield _VALID_SPEC_STREAM
+    async def fake_stream(
+        system, user, max_tokens=0, **kwargs
+    ) -> AsyncGenerator[str, None]:
+        yield _spec_stream_payload(user)
 
     with (
         patch(
@@ -653,8 +629,8 @@ async def test_generate_provider_limit_stop_repairs_without_double_charging() ->
     db = _MultiQueryDB([spec_stage, workspace, [], deduction])
     adapter = _CompletionAwareAdapter(
         [
-            (_VALID_SPEC_STREAM, True),
-            (_VALID_SPEC_STREAM, False),
+            (None, True),
+            (None, False),
         ]
     )
     svc = StageManager(redis_client=_FakeRedis())
@@ -680,10 +656,13 @@ async def test_generate_provider_limit_stop_repairs_without_double_charging() ->
 
     mock_deduct.assert_awaited_once_with(db, user.id, 10, "generate")
     mock_refund.assert_not_awaited()
-    assert len(adapter.stream_calls) == 2
+    # chunk 1 limit-stop, chunk 1 repair, then chunks 2 and 3.
+    assert len(adapter.stream_calls) == 4
+    # The limit-stop repair retries with an escalated output budget.
+    assert adapter.stream_calls[1][2] > adapter.stream_calls[0][2]
     assert spec_stage.content == _VALID_SPEC
     assert spec_stage.quality_gate_status == "clear"
-    assert _VALID_SPEC in tokens
+    assert _streamed_artifact(tokens) == _VALID_SPEC
     assert any("done" in token for token in tokens)
 
 
@@ -697,8 +676,8 @@ async def test_generate_provider_limit_stop_failed_repair_blocks_and_refunds() -
     db = _MultiQueryDB([spec_stage, workspace, [], deduction])
     adapter = _CompletionAwareAdapter(
         [
-            (_VALID_SPEC_STREAM, True),
-            (_VALID_SPEC_STREAM, True),
+            (None, True),
+            (None, True),
         ]
     )
     svc = StageManager(redis_client=_FakeRedis())
@@ -756,10 +735,8 @@ async def test_generate_unsafe_plan_repairs_without_double_charging() -> None:
     deduction = CreditLedger(id=uuid4(), user_id=user.id, amount=-10, reason="generate")
     db = _MultiQueryDB([plan_stage, workspace, [spec_stage], deduction])
     adapter = _CompletionAwareAdapter(
-        [
-            (_UNSAFE_PLAN_STREAM, False),
-            (_SAFE_PLAN_FINAL_STREAM, False),
-        ]
+        [],
+        stream_payload_fn=_unsafe_plan_stream_payload,
     )
     svc = StageManager(redis_client=_FakeRedis())
 
@@ -784,7 +761,7 @@ async def test_generate_unsafe_plan_repairs_without_double_charging() -> None:
 
     mock_deduct.assert_awaited_once_with(db, user.id, 10, "generate")
     mock_refund.assert_not_awaited()
-    assert len(adapter.stream_calls) == 1
+    assert len(adapter.stream_calls) == 4
     assert len(adapter.complete_calls) == 1
     assert plan_stage.content == _SAFE_PLAN
     assert plan_stage.quality_gate_status == "clear"
@@ -810,9 +787,13 @@ async def test_generate_unsafe_plan_failed_repair_blocks_refunds_and_skips_cache
     db = _MultiQueryDB([plan_stage, workspace, [spec_stage], deduction])
     adapter = _CompletionAwareAdapter(
         [
-            (_UNSAFE_PLAN_STREAM, False),
+            (None, False),
+            (None, False),
+            (None, False),
+            (None, False),
             (_UNSAFE_PLAN_FINAL_STREAM, False),
-        ]
+        ],
+        stream_payload_fn=_unsafe_plan_stream_payload,
     )
     svc = StageManager(redis_client=_FakeRedis())
 
@@ -862,8 +843,10 @@ async def test_generate_with_trace_id_creates_langfuse_trace_and_span() -> None:
     deduction = CreditLedger(id=uuid4(), user_id=user.id, amount=-10, reason="generate")
     db = _MultiQueryDB([spec_stage, workspace, [], deduction])
 
-    async def fake_stream(*args, **kwargs) -> AsyncGenerator[str, None]:
-        yield _VALID_SPEC_STREAM
+    async def fake_stream(
+        system, user, max_tokens=0, **kwargs
+    ) -> AsyncGenerator[str, None]:
+        yield _spec_stream_payload(user)
 
     langfuse_client = MagicMock()
     langfuse_client.create_trace = AsyncMock(return_value="trace-1")
@@ -904,7 +887,7 @@ async def test_generate_with_trace_id_creates_langfuse_trace_and_span() -> None:
         async for token in svc.generate(spec_stage.id, user, db, trace_id="trace-1"):
             tokens.append(token)
 
-    assert _VALID_SPEC in tokens
+    assert _streamed_artifact(tokens) == _VALID_SPEC
     langfuse_client.create_trace.assert_awaited_once()
     trace_kwargs = langfuse_client.create_trace.await_args.kwargs
     assert trace_kwargs["trace_id"] == "trace-1"
@@ -936,8 +919,10 @@ async def test_generate_continues_when_langfuse_trace_creation_fails() -> None:
     deduction = CreditLedger(id=uuid4(), user_id=user.id, amount=-10, reason="generate")
     db = _MultiQueryDB([spec_stage, workspace, [], deduction])
 
-    async def fake_stream(*args, **kwargs) -> AsyncGenerator[str, None]:
-        yield _VALID_SPEC_STREAM
+    async def fake_stream(
+        system, user, max_tokens=0, **kwargs
+    ) -> AsyncGenerator[str, None]:
+        yield _spec_stream_payload(user)
 
     langfuse_client = MagicMock()
     langfuse_client.create_trace = AsyncMock(side_effect=RuntimeError("langfuse down"))
@@ -973,7 +958,7 @@ async def test_generate_continues_when_langfuse_trace_creation_fails() -> None:
         async for token in svc.generate(spec_stage.id, user, db, trace_id="trace-1"):
             tokens.append(token)
 
-    assert _VALID_SPEC in tokens
+    assert _streamed_artifact(tokens) == _VALID_SPEC
     assert spec_stage.content == _VALID_SPEC
     assert db._committed
 
@@ -2144,7 +2129,7 @@ async def test_generate_stream_timeout_refunds_credits() -> None:
     with (
         patch.object(
             stage_manager_module.settings,
-            "llm_stream_timeout_seconds",
+            "llm_stream_idle_timeout_seconds",
             0.001,
         ),
         patch(
@@ -2258,8 +2243,10 @@ async def test_generate_uses_select_for_update_on_stage_row() -> None:
         patch("services.pipeline.stage_manager.get_llm") as mock_get_llm,
     ):
 
-        async def fake_stream(*a, **kw) -> AsyncGenerator[str, None]:
-            yield _VALID_SPEC_STREAM
+        async def fake_stream(
+            system, user, max_tokens=0, **kw
+        ) -> AsyncGenerator[str, None]:
+            yield _spec_stream_payload(user)
 
         mock_adapter = MagicMock()
         mock_adapter.stream = fake_stream
@@ -2475,8 +2462,8 @@ async def test_generate_eval_task_cancelled_on_timeout(
             raise
         return None
 
-    async def fake_stream(*args, **kwargs):
-        yield _VALID_SPEC_STREAM
+    async def fake_stream(system, user, max_tokens=0, **kwargs):
+        yield _spec_stream_payload(user)
 
     # Preserve the real wait_for so other callers are unaffected.
     _real_wait_for = asyncio.wait_for
@@ -2539,3 +2526,274 @@ async def test_generate_eval_task_cancelled_on_timeout(
         "Expected logger.warning('eval_task.timeout_cancelled stage_id=...') "
         f"but got: {[r.message for r in caplog.records]}. T-205."
     )
+
+
+@pytest.mark.asyncio
+async def test_generate_falls_back_to_mid_tier_after_primary_failure() -> None:
+    """A strong-tier provider failure retries once on the mid tier and the
+    fallback generation is persisted normally with no refund."""
+    from services.llm.base import ProviderError
+
+    workspace_id = uuid4()
+    spec_stage = _make_stage(workspace_id, "spec", status="draft")
+    workspace = _make_workspace([spec_stage])
+    user = _make_user()
+    deduction = CreditLedger(id=uuid4(), user_id=user.id, amount=-10, reason="generate")
+    db = _MultiQueryDB([spec_stage, workspace, [], deduction])
+    svc = StageManager(redis_client=_FakeRedis())
+
+    async def failing_stream(*args, **kwargs) -> AsyncGenerator[str, None]:
+        raise ProviderError("anthropic", RuntimeError("upstream 5xx"))
+        yield  # pragma: no cover — makes this an AsyncGenerator
+
+    async def fallback_stream(
+        system, user_prompt, max_tokens=0, **kwargs
+    ) -> AsyncGenerator[str, None]:
+        yield _spec_stream_payload(user_prompt)
+
+    primary_adapter = MagicMock()
+    primary_adapter.stream = failing_stream
+    fallback_adapter = MagicMock()
+    fallback_adapter.stream = fallback_stream
+
+    requested_models: list[str] = []
+
+    def fake_get_llm(provider: str, model: str):
+        requested_models.append(model)
+        return primary_adapter if len(requested_models) == 1 else fallback_adapter
+
+    with (
+        patch(
+            "services.pipeline.stage_manager.credit_service.deduct",
+            new_callable=AsyncMock,
+            return_value=deduction,
+        ),
+        patch(
+            "services.pipeline.stage_manager.credit_service.refund",
+            new_callable=AsyncMock,
+        ) as mock_refund,
+        patch(
+            "services.pipeline.stage_manager.build_prompt",
+            new_callable=AsyncMock,
+            return_value=("sys", "user"),
+        ),
+        patch("services.pipeline.stage_manager.get_llm", side_effect=fake_get_llm),
+    ):
+        tokens = [token async for token in svc.generate(spec_stage.id, user, db)]
+
+    assert len(requested_models) == 2
+    assert requested_models[0] != requested_models[1]
+    mock_refund.assert_not_awaited()
+    assert spec_stage.content == _VALID_SPEC
+    assert _streamed_artifact(tokens) == _VALID_SPEC
+    assert any("done" in token for token in tokens)
+
+
+@pytest.mark.asyncio
+async def test_generate_emits_progress_heartbeats_while_model_reasons() -> None:
+    """While the artifact task is pending, generate() yields SSE progress
+    heartbeats so proxies and the UI see a live connection during the silent
+    reasoning phase."""
+    import json as _json
+
+    from services.pipeline import stage_manager as stage_manager_module
+
+    workspace_id = uuid4()
+    spec_stage = _make_stage(workspace_id, "spec", status="draft")
+    workspace = _make_workspace([spec_stage])
+    user = _make_user()
+    deduction = CreditLedger(id=uuid4(), user_id=user.id, amount=-10, reason="generate")
+    db = _MultiQueryDB([spec_stage, workspace, [], deduction])
+    svc = StageManager(redis_client=_FakeRedis())
+
+    async def slow_stream(
+        system, user_prompt, max_tokens=0, **kwargs
+    ) -> AsyncGenerator[str, None]:
+        await asyncio.sleep(0.05)
+        yield _spec_stream_payload(user_prompt)
+
+    with (
+        patch.object(stage_manager_module, "_GENERATION_HEARTBEAT_SECONDS", 0.01),
+        patch(
+            "services.pipeline.stage_manager.credit_service.deduct",
+            new_callable=AsyncMock,
+            return_value=deduction,
+        ),
+        patch(
+            "services.pipeline.stage_manager.build_prompt",
+            new_callable=AsyncMock,
+            return_value=("sys", "user"),
+        ),
+        patch("services.pipeline.stage_manager.get_llm") as mock_get_llm,
+    ):
+        mock_adapter = MagicMock()
+        mock_adapter.stream = slow_stream
+        mock_get_llm.return_value = mock_adapter
+
+        tokens = [token async for token in svc.generate(spec_stage.id, user, db)]
+
+    progress_events = [
+        _json.loads(token) for token in tokens if token.startswith('{"progress"')
+    ]
+    assert progress_events, "expected at least one progress heartbeat"
+    assert progress_events[0]["progress"]["stage"] == "spec"
+    assert progress_events[0]["progress"]["state"] == "generating"
+    # Heartbeats never corrupt the artifact stream.
+    assert _streamed_artifact(tokens) == _VALID_SPEC
+
+
+@pytest.mark.asyncio
+async def test_generate_streams_tokens_live_before_canonical_replay() -> None:
+    """Progressive streaming (issue #19 UX): generation tokens reach the SSE
+    client while chunks generate — the user watches the document grow instead
+    of staring at a blank screen for the whole run.  The stream then emits a
+    stream_reset followed by the canonical artifact replay, so the final
+    buffer always equals what was persisted."""
+    import json as _json
+
+    workspace_id = uuid4()
+    spec_stage = _make_stage(workspace_id, "spec", status="draft")
+    workspace = _make_workspace([spec_stage])
+    user = _make_user()
+    deduction = CreditLedger(id=uuid4(), user_id=user.id, amount=-10, reason="generate")
+    db = _MultiQueryDB([spec_stage, workspace, [], deduction])
+    svc = StageManager(redis_client=_FakeRedis())
+
+    async def fake_stream(
+        system, user_prompt, max_tokens=0, **kwargs
+    ) -> AsyncGenerator[str, None]:
+        yield _spec_stream_payload(user_prompt)
+
+    with (
+        patch(
+            "services.pipeline.stage_manager.credit_service.deduct",
+            new_callable=AsyncMock,
+            return_value=deduction,
+        ),
+        patch(
+            "services.pipeline.stage_manager.build_prompt",
+            new_callable=AsyncMock,
+            return_value=("sys", "user"),
+        ),
+        patch("services.pipeline.stage_manager.get_llm") as mock_get_llm,
+    ):
+        mock_adapter = MagicMock()
+        mock_adapter.stream = fake_stream
+        mock_get_llm.return_value = mock_adapter
+
+        tokens = [token async for token in svc.generate(spec_stage.id, user, db)]
+
+    reset_indexes = [
+        index
+        for index, token in enumerate(tokens)
+        if token.startswith('{"stream_reset"')
+    ]
+    assert len(reset_indexes) == 1, (
+        "happy path must emit exactly one stream_reset (before the canonical "
+        f"replay), got {len(reset_indexes)}"
+    )
+    live_tokens = [
+        token for token in tokens[: reset_indexes[0]] if not token.startswith("{")
+    ]
+    assert live_tokens, "expected live-streamed tokens before the stream_reset"
+    done_events = [
+        _json.loads(token) for token in tokens if token.startswith('{"done"')
+    ]
+    assert done_events, "stream must still end with the done event"
+    # The client contract (reset clears the buffer) reassembles the exact
+    # persisted artifact.
+    assert _streamed_artifact(tokens) == _VALID_SPEC
+
+
+@pytest.mark.asyncio
+async def test_stage_db_heartbeat_refreshes_in_progress_stage() -> None:
+    """The liveness heartbeat must bump updated_at for in_progress stages so
+    the 3-minute recovery sweep never resets a healthy long generation."""
+    from services.pipeline import stage_manager as stage_manager_module
+    from services.pipeline.stage_manager import _stage_db_heartbeat
+
+    executed = []
+
+    class _FakeHeartbeatSession:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def execute(self, statement):
+            executed.append(statement)
+
+        async def commit(self):
+            pass
+
+    stage_id = uuid4()
+    with (
+        patch.object(stage_manager_module, "_STAGE_HEARTBEAT_DB_SECONDS", 0.01),
+        patch("database.AsyncSessionLocal", _FakeHeartbeatSession),
+    ):
+        task = asyncio.create_task(_stage_db_heartbeat(stage_id))
+        await asyncio.sleep(0.08)
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    assert executed, "heartbeat must issue at least one UPDATE"
+    statement = str(executed[0]).lower()
+    assert "update" in statement and "stages" in statement
+    # The status guard prevents resurrecting a stage that recovery or cleanup
+    # already reset.
+    assert "status" in statement
+
+
+@pytest.mark.asyncio
+async def test_generate_runs_db_heartbeat_for_lifetime_of_generation() -> None:
+    """generate() must start the liveness heartbeat after the stage enters
+    in_progress and cancel it before returning."""
+    from services.pipeline import stage_manager as stage_manager_module
+
+    workspace_id = uuid4()
+    spec_stage = _make_stage(workspace_id, "spec", status="draft")
+    workspace = _make_workspace([spec_stage])
+    user = _make_user()
+    deduction = CreditLedger(id=uuid4(), user_id=user.id, amount=-10, reason="generate")
+    db = _MultiQueryDB([spec_stage, workspace, [], deduction])
+    svc = StageManager(redis_client=_FakeRedis())
+
+    heartbeat_state = {"started": 0, "cancelled": 0}
+
+    async def fake_heartbeat(stage_id):
+        heartbeat_state["started"] += 1
+        try:
+            while True:
+                await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            heartbeat_state["cancelled"] += 1
+            raise
+
+    async def fake_stream(
+        system, user_prompt, max_tokens=0, **kwargs
+    ) -> AsyncGenerator[str, None]:
+        yield _spec_stream_payload(user_prompt)
+
+    with (
+        patch.object(stage_manager_module, "_stage_db_heartbeat", fake_heartbeat),
+        patch(
+            "services.pipeline.stage_manager.credit_service.deduct",
+            new_callable=AsyncMock,
+            return_value=deduction,
+        ),
+        patch(
+            "services.pipeline.stage_manager.build_prompt",
+            new_callable=AsyncMock,
+            return_value=("sys", "user"),
+        ),
+        patch("services.pipeline.stage_manager.get_llm") as mock_get_llm,
+    ):
+        mock_adapter = MagicMock()
+        mock_adapter.stream = fake_stream
+        mock_get_llm.return_value = mock_adapter
+
+        tokens = [token async for token in svc.generate(spec_stage.id, user, db)]
+
+    assert heartbeat_state == {"started": 1, "cancelled": 1}
+    assert _streamed_artifact(tokens) == _VALID_SPEC
