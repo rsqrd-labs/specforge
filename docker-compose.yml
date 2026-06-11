@@ -54,6 +54,10 @@ services:
         condition: service_healthy
     volumes:
       - ./backend:/app
+      # Mask the host's .venv (macOS interpreter) so the container keeps its
+      # own Linux venv — running uv/pytest on the host otherwise breaks the
+      # container's `uv sync` on the next start.
+      - api_venv:/app/.venv
     # --timeout-graceful-shutdown caps how long a code-reload waits for
     # in-flight SSE generation streams before force-closing them. Without it a
     # reload during a long generation wedges uvicorn in "Waiting for
@@ -79,6 +83,8 @@ services:
         condition: service_healthy
     volumes:
       - ./backend:/app
+      # Same .venv mask as `api` — see comment there.
+      - worker_venv:/app/.venv
     entrypoint: ["/bin/sh", "-c", "uv sync --frozen --no-dev && uv run --no-sync arq worker.WorkerSettings"]
 
   frontend:
@@ -140,3 +146,5 @@ volumes:
   redis_data:
   frontend_node_modules:
   langfuse_data:
+  api_venv:
+  worker_venv:
