@@ -596,7 +596,24 @@ STORYBOARD_SOURCE_MISSING = Counter(
     labelnames=["source", "section"],
 )
 
+STORYBOARD_STRONG_ESCALATIONS = Counter(
+    "specforge_storyboard_strong_escalations_total",
+    "Storyboard generations where a quality-gate failure on the mid tier "
+    "(schema/parse/grounding error) triggered a one-shot escalation to the "
+    "strong tier.  ``outcome`` is one of: attempted (escalation started), "
+    "succeeded (strong passed validation), failed (strong also failed), or "
+    "no_route (no active strong model for provider — expected for Google/Flash). "
+    "A steady no_route rate indicates Google Flash quality is fine; a rising "
+    "succeeded rate means mid quality is borderline and strong regularly saves "
+    "the generation.  Phase 1 (issue #26).",
+    labelnames=["action", "provider", "outcome"],
+)
+
 _STORYBOARD_ACTION_LABELS = frozenset({"generate", "regenerate", "regenerate_section"})
+_STORYBOARD_PROVIDER_LABELS = frozenset({"anthropic", "openai", "google"})
+_STORYBOARD_STRONG_ESCALATION_OUTCOME_LABELS = frozenset(
+    {"attempted", "succeeded", "failed", "no_route"}
+)
 _STORYBOARD_ERROR_TYPE_LABELS = frozenset(
     {
         "payload_parse",
@@ -995,6 +1012,24 @@ def record_storyboard_source_missing(source: str, section: str) -> None:
     ).inc()
 
 
+def record_storyboard_strong_escalation(
+    action: str, provider: str, outcome: str
+) -> None:
+    """Increment the storyboard strong-tier escalation counter (Phase 1).
+
+    Call once per state transition:
+    - "attempted" when starting a strong-tier retry after a mid-tier quality failure
+    - "succeeded" when the strong attempt passes validation
+    - "failed" when the strong attempt also fails validation
+    - "no_route" when no active strong model is available (expected for Google)
+    """
+    STORYBOARD_STRONG_ESCALATIONS.labels(
+        action=_storyboard_action(action),
+        provider=_storyboard_provider(provider),
+        outcome=_storyboard_escalation_outcome(outcome),
+    ).inc()
+
+
 def _storyboard_action(action: str) -> str:
     value = str(action or "unknown")
     return value if value in _STORYBOARD_ACTION_LABELS else "unknown"
@@ -1025,6 +1060,18 @@ def _storyboard_source(source: str) -> str:
 def _storyboard_section(section: str) -> str:
     value = str(section or "").split(":", 1)[-1].lower().replace("_", "-")
     return value if value in _STORYBOARD_SECTION_LABELS else "unknown"
+
+
+def _storyboard_provider(provider: str) -> str:
+    value = str(provider or "unknown")
+    return value if value in _STORYBOARD_PROVIDER_LABELS else "unknown"
+
+
+def _storyboard_escalation_outcome(outcome: str) -> str:
+    value = str(outcome or "unknown")
+    return (
+        value if value in _STORYBOARD_STRONG_ESCALATION_OUTCOME_LABELS else "unknown"
+    )
 
 
 def _inc_counter(counter, value: Any) -> None:

@@ -62,6 +62,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from config import settings
 from models import CreditLedger, Storyboard, Workspace
 from prompts.storyboard import (
     GRANDFATHER_NOTE_DEPTH,
@@ -76,6 +77,7 @@ from services.credit_service import InsufficientCreditsError, credit_service
 from services.llm.base import ProviderError
 from services.llm.cost_ledger import LLMCostContext
 from services.llm.gateway import complete_with_timeout
+from services.llm.routing import LLMRoute, LLMRoutingError, resolve_llm_route
 from services.observability import (
     get_structured_logger,
     record_storyboard_credits_deducted,
@@ -85,6 +87,7 @@ from services.observability import (
     record_storyboard_generation_failed,
     record_storyboard_generation_started,
     record_storyboard_section_regenerated,
+    record_storyboard_strong_escalation,
 )
 from services.pipeline.storyboard_source import (
     StoryboardSourcePackage,
@@ -627,6 +630,115 @@ async def _reserve(
     return sb, True
 
 
+def _resolve_storyboard_mid_route(source: StoryboardSourcePackage) -> LLMRoute:
+    """Resolve the mid-tier route for storyboard generation (Phase 1).
+
+    This is the primary route when ``storyboard_mid_first`` is enabled.
+    ``fallback_tier="strong"`` is included for completeness but is inert in
+    practice — every provider has an active mid model for this operation, so
+    the fallback is never triggered by model-unavailability.  Quality-gate
+    escalation to strong is handled explicitly in ``_run_storyboard_completion``,
+    not here.
+    """
+    return resolve_llm_route(
+        operation="storyboard.generate",
+        preferred_provider=source.provider,
+        requested_tier="mid",
+        fallback_tier="strong",
+        latency_class="background",
+    )
+
+
+async def _run_storyboard_completion(
+    source: StoryboardSourcePackage,
+    action: str,
+    *,
+    primary_route: LLMRoute,
+    postprocess: Callable[[StoryboardPayload], StoryboardPayload] | None = None,
+) -> StoryboardPayload:
+    """Run the primary (mid-tier) attempt and escalate to strong on quality failure.
+
+    Transport failures (timeout, provider error) are re-raised immediately
+    without escalation — strong is slower and pricier; a timed-out mid attempt
+    is unlikely to recover on strong.  Quality failures (schema/parse/grounding
+    errors) trigger a one-shot strong-tier retry with a fresh repair budget.
+
+    For Google, the only strong candidate (Pro Preview) is preview-only and
+    therefore skipped by the routing layer, causing ``LLMRoutingError``.  That
+    case is caught and treated as ``no_route``: the original quality failure is
+    re-raised without an escalation attempt.
+
+    ``postprocess``, when provided, is called on the validated ``StoryboardPayload``
+    before returning (e.g. splice+re-validate for section regeneration).  A
+    ``StoryboardPayloadError`` raised inside it is treated as a quality failure
+    and triggers escalation the same way — the strong model may produce a section
+    that splices cleanly where the mid model did not.
+    """
+    try:
+        payload = await _complete_and_validate(
+            source,
+            provider=primary_route.provider,
+            model=primary_route.model,
+            model_tier=primary_route.model_tier,
+        )
+        if postprocess is not None:
+            payload = postprocess(payload)
+        return payload
+    except StoryboardPayloadError as mid_exc:
+        error_type = _payload_error_type(mid_exc)
+        if error_type in ("timeout", "provider"):
+            raise  # transport failure — escalation would not help
+
+        # Quality failure: attempt a one-shot escalation to the strong tier.
+        try:
+            strong_route = resolve_llm_route(
+                operation="storyboard.generate",
+                preferred_provider=primary_route.provider,
+                requested_tier="strong",
+                fallback_tier=None,
+                latency_class="background",
+            )
+        except LLMRoutingError:
+            # No active strong model available for this provider (Google/Flash).
+            record_storyboard_strong_escalation(
+                action, primary_route.provider, "no_route"
+            )
+            logger.info(
+                "storyboard.strong_escalation_no_route",
+                action=action,
+                provider=primary_route.provider,
+                mid_model=primary_route.model,
+            )
+            raise mid_exc  # surface the original quality failure
+
+        record_storyboard_strong_escalation(action, primary_route.provider, "attempted")
+        logger.info(
+            "storyboard.strong_escalation",
+            action=action,
+            provider=primary_route.provider,
+            mid_model=primary_route.model,
+            strong_model=strong_route.model,
+        )
+        try:
+            payload = await _complete_and_validate(
+                source,
+                provider=strong_route.provider,
+                model=strong_route.model,
+                model_tier=strong_route.model_tier,
+            )
+            if postprocess is not None:
+                payload = postprocess(payload)
+            record_storyboard_strong_escalation(
+                action, primary_route.provider, "succeeded"
+            )
+            return payload
+        except StoryboardPayloadError:
+            record_storyboard_strong_escalation(
+                action, primary_route.provider, "failed"
+            )
+            raise  # surface the strong attempt's failure
+
+
 async def _run_full_generation(
     db: AsyncSession,
     storyboard_id: UUID,
@@ -636,7 +748,13 @@ async def _run_full_generation(
 ) -> Storyboard:
     start = time.monotonic()
     try:
-        payload = await _complete_and_validate(source)
+        if settings.storyboard_mid_first:
+            primary_route = _resolve_storyboard_mid_route(source)
+            payload = await _run_storyboard_completion(
+                source, action, primary_route=primary_route
+            )
+        else:
+            payload = await _complete_and_validate(source)
     except StoryboardPayloadError as exc:
         record_storyboard_generation_duration(action, time.monotonic() - start)
         # Failure after the debit: mark failed + refund exactly once, then
@@ -667,8 +785,8 @@ async def _run_section_generation(
 ) -> Storyboard:
     action = ACTION_REGENERATE_SECTION
     start = time.monotonic()
-    try:
-        new_payload = await _complete_and_validate(source)
+
+    def _postprocess_section(new_payload: StoryboardPayload) -> StoryboardPayload:
         # The section was proven present before the debit, so the splice cannot
         # raise not-found here; the spliced result must still satisfy the whole
         # six-act contract, so re-validate it and treat any miss as a schema
@@ -679,14 +797,27 @@ async def _run_section_generation(
             # in ``new_payload``; the carried-over acts may predate it, so the
             # whole-payload structural re-validation grandfathers note depth. The
             # floor still gates fresh generations, just not stored legacy notes.
-            payload = StoryboardPayload.model_validate(
+            return StoryboardPayload.model_validate(
                 spliced,
                 context={GRANDFATHER_NOTE_DEPTH: True},
             )
-        except Exception as exc:  # noqa: BLE001 — converted to typed failure below
+        except Exception as e:  # noqa: BLE001 — converted to typed failure below
             raise StoryboardPayloadError(
                 "schema", "spliced section payload failed validation"
-            ) from exc
+            ) from e
+
+    try:
+        if settings.storyboard_mid_first:
+            primary_route = _resolve_storyboard_mid_route(source)
+            payload = await _run_storyboard_completion(
+                source,
+                action,
+                primary_route=primary_route,
+                postprocess=_postprocess_section,
+            )
+        else:
+            new_payload = await _complete_and_validate(source)
+            payload = _postprocess_section(new_payload)
     except StoryboardPayloadError as exc:
         record_storyboard_generation_duration(action, time.monotonic() - start)
         error_type = _payload_error_type(exc)
@@ -718,6 +849,10 @@ async def _run_section_generation(
 
 async def _complete_and_validate(
     source: StoryboardSourcePackage,
+    *,
+    provider: str | None = None,
+    model: str | None = None,
+    model_tier: str = "unknown",
 ) -> StoryboardPayload:
     """Run the LLM completion + strict validation (with bounded repair rounds).
 
@@ -726,8 +861,15 @@ async def _complete_and_validate(
     converted into the same typed error family so the caller has a single
     fail-closed contract. Validation allows up to ``_MAX_REPAIR_ROUNDS`` repair
     re-prompts before the failure becomes terminal.
+
+    ``provider``, ``model``, and ``model_tier`` override ``source`` when set so
+    the Phase 1 routing layer can substitute the routed mid or strong model
+    while keeping the source-grounding context from the original package.
+    ``model_tier`` is threaded to the cost ledger for accurate attribution.
     """
 
+    _provider = provider if provider is not None else source.provider
+    _model = model if model is not None else source.model
     user_prompt = build_user_prompt(source)
     cost_context = LLMCostContext(
         workspace_id=source.workspace_id,
@@ -737,13 +879,14 @@ async def _complete_and_validate(
     async def _repair(repair_prompt: str) -> str:
         try:
             return await complete_with_timeout(
-                source.provider,
-                source.model,
+                _provider,
+                _model,
                 SYSTEM_PROMPT,
                 repair_prompt,
                 _OUTPUT_TOKEN_BUDGET,
                 operation="storyboard.generate",
                 stage_type="storyboard",
+                model_tier=model_tier,
                 cost_context=cost_context,
             )
         except TimeoutError as exc:
@@ -753,13 +896,14 @@ async def _complete_and_validate(
 
     try:
         raw = await complete_with_timeout(
-            source.provider,
-            source.model,
+            _provider,
+            _model,
             SYSTEM_PROMPT,
             user_prompt,
             _OUTPUT_TOKEN_BUDGET,
             operation="storyboard.generate",
             stage_type="storyboard",
+            model_tier=model_tier,
             cost_context=cost_context,
         )
     except TimeoutError as exc:

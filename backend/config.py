@@ -131,6 +131,14 @@ class Settings(BaseSettings):
             if s
         ]
 
+    # Phase 1 (issue #26): route storyboard generation through the mid tier
+    # (Sonnet 4.6 / GPT-5.4 / Gemini 3.5 Flash) first and escalate to the
+    # strong tier on a quality-gate failure (schema/parse/grounding error).
+    # Default False until golden-corpus old-vs-new comparison validates the
+    # routing — Phase 5.3 owns that gate.  Never flip to True in production
+    # before the evaluation passes.
+    storyboard_mid_first: bool = False
+
     # Increment generation (Phase 21 — T-279). The MVP ships the *additive* path
     # only: an increment appends new tasks with their existing content pinned by
     # stable, content-derived task_refs. Behaviour-changing increments (compute

@@ -29,6 +29,9 @@ GENERATION_OPERATIONS = frozenset(
         "regenerate.full",
         "summary.create",
         "eval.score",
+        # Phase 1 (issue #26): storyboard mid-first routing. Registered here so
+        # resolve_llm_route can validate the operation and route mid→strong.
+        "storyboard.generate",
     }
 )
 CORE_GENERATION_OPERATIONS = (
@@ -121,13 +124,16 @@ MODEL_CATALOG: tuple[ModelCatalogEntry, ...] = (
         # Core generation ops are RECOMMENDED (not default) so the frontier
         # tier is never the primary route but stays eligible as the runtime
         # escalation when a mid-tier generation times out or errors.
-        recommended_operations=CORE_GENERATION_OPERATIONS,
+        # storyboard.generate is included so Phase 1 quality-gate escalation
+        # can reach this model (resolve_llm_route requested_tier="strong").
+        recommended_operations=(*CORE_GENERATION_OPERATIONS, "storyboard.generate"),
         default_operations=(),
         supports_reasoning=True,
         reasoning_effort="high",
         rollout_notes=(
             "Anthropic frontier escalation tier for core ASDD generation "
-            "(one-shot runtime retry after a mid-tier failure)."
+            "(one-shot runtime retry after a mid-tier failure) and storyboard "
+            "quality-gate escalation (Phase 1)."
         ),
         routing_priority=1,
     ),
@@ -143,13 +149,20 @@ MODEL_CATALOG: tuple[ModelCatalogEntry, ...] = (
         output_cost_per_million=15.0,
         max_context_tokens=1_000_000,
         default_max_output_tokens=32768,
-        recommended_operations=(*CORE_GENERATION_OPERATIONS, "refine.section"),
-        default_operations=("refine.section",),
+        # storyboard.generate added to both recommended and default so this model
+        # is the mid-tier primary for Phase 1 storyboard routing on Anthropic.
+        recommended_operations=(
+            *CORE_GENERATION_OPERATIONS,
+            "refine.section",
+            "storyboard.generate",
+        ),
+        default_operations=("refine.section", "storyboard.generate"),
         supports_reasoning=True,
         reasoning_effort="medium",
         rollout_notes=(
             "Anthropic mid-tier core ASDD generation escalation (one-shot retry "
-            "after a Haiku 4.5 failure) and section refinement default."
+            "after a Haiku 4.5 failure), section refinement default, and "
+            "storyboard mid-first primary (Phase 1)."
         ),
         routing_priority=20,
     ),
@@ -222,13 +235,15 @@ MODEL_CATALOG: tuple[ModelCatalogEntry, ...] = (
         # Core generation ops are RECOMMENDED (not default) so the frontier
         # tier is never the primary route but stays eligible as the runtime
         # escalation when a mid-tier generation times out or errors.
-        recommended_operations=CORE_GENERATION_OPERATIONS,
+        # storyboard.generate included for Phase 1 quality-gate escalation.
+        recommended_operations=(*CORE_GENERATION_OPERATIONS, "storyboard.generate"),
         default_operations=(),
         supports_reasoning=True,
         reasoning_effort="high",
         rollout_notes=(
             "OpenAI frontier escalation tier for core ASDD generation "
-            "(one-shot runtime retry after a mid-tier failure)."
+            "(one-shot runtime retry after a mid-tier failure) and storyboard "
+            "quality-gate escalation (Phase 1)."
         ),
         routing_priority=1,
     ),
@@ -244,13 +259,20 @@ MODEL_CATALOG: tuple[ModelCatalogEntry, ...] = (
         output_cost_per_million=15.0,
         max_context_tokens=1_000_000,
         default_max_output_tokens=32768,
-        recommended_operations=(*CORE_GENERATION_OPERATIONS, "refine.section"),
-        default_operations=("refine.section",),
+        # storyboard.generate added to both recommended and default so this model
+        # is the mid-tier primary for Phase 1 storyboard routing on OpenAI.
+        recommended_operations=(
+            *CORE_GENERATION_OPERATIONS,
+            "refine.section",
+            "storyboard.generate",
+        ),
+        default_operations=("refine.section", "storyboard.generate"),
         supports_reasoning=True,
         reasoning_effort="medium",
         rollout_notes=(
             "OpenAI mid-tier core ASDD generation escalation (one-shot retry "
-            "after a GPT-5.4 Mini failure) and section refinement default."
+            "after a GPT-5.4 Mini failure), section refinement default, and "
+            "storyboard mid-first primary (Phase 1)."
         ),
         routing_priority=20,
     ),
@@ -351,6 +373,9 @@ MODEL_CATALOG: tuple[ModelCatalogEntry, ...] = (
         # the mid tier — the primary core-generation route. Google has no
         # active strong-tier escalation model; a runtime failure surfaces
         # directly instead of retrying on a second model.
+        # storyboard.generate added so Flash is the mid-first primary for
+        # Phase 1 storyboard routing on Google. No strong escalation exists
+        # (Pro Preview is preview-only), so quality failures surface directly.
         tier="mid",
         status="active",
         adapter_api="generate_content",
@@ -359,11 +384,22 @@ MODEL_CATALOG: tuple[ModelCatalogEntry, ...] = (
         output_cost_per_million=9.0,
         max_context_tokens=1_048_576,
         default_max_output_tokens=32768,
-        recommended_operations=(*CORE_GENERATION_OPERATIONS, "refine.section"),
-        default_operations=(*CORE_GENERATION_OPERATIONS, "refine.section"),
+        recommended_operations=(
+            *CORE_GENERATION_OPERATIONS,
+            "refine.section",
+            "storyboard.generate",
+        ),
+        default_operations=(
+            *CORE_GENERATION_OPERATIONS,
+            "refine.section",
+            "storyboard.generate",
+        ),
         supports_thinking=True,
         thinking_level="high",
-        rollout_notes="Stable Gemini 3-family core ASDD generation default.",
+        rollout_notes=(
+            "Stable Gemini 3-family core ASDD generation default and "
+            "storyboard mid-first primary (Phase 1)."
+        ),
         routing_priority=1,
     ),
     ModelCatalogEntry(
@@ -397,7 +433,11 @@ MODEL_CATALOG: tuple[ModelCatalogEntry, ...] = (
         output_cost_per_million=None,
         max_context_tokens=1_048_576,
         default_max_output_tokens=8192,
-        recommended_operations=CORE_GENERATION_OPERATIONS,
+        # storyboard.generate included so this model appears as a candidate for
+        # Phase 1 strong-tier escalation once it reaches active status. In
+        # preview, _model_for_operation skips it (status != "active"), so
+        # resolve_llm_route raises LLMRoutingError and Google surfaces directly.
+        recommended_operations=(*CORE_GENERATION_OPERATIONS, "storyboard.generate"),
         default_operations=(),
         supports_thinking=True,
         thinking_level="high",
