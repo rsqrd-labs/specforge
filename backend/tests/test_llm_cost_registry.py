@@ -53,14 +53,9 @@ def test_registry_exposes_model_policy_fields() -> None:
     assert model_config["status"] == "active"
     assert model_config["adapter_api"] == "responses"
     assert model_config["supports_reasoning"] is True
-    assert model_config["default_operations"] == [
-        "spec.generate",
-        "plan.generate",
-        "harness.generate",
-        "tasks.generate",
-        "regenerate.full",
-        "refine.section",
-    ]
+    # gpt-5.4 is the mid-tier escalation for core gen, no longer the primary
+    # default; it stays the section-refinement default.
+    assert model_config["default_operations"] == ["refine.section"]
 
 
 def test_required_tiers_are_present() -> None:

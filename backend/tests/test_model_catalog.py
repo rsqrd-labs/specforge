@@ -19,12 +19,12 @@ def test_catalog_validates_at_startup() -> None:
 @pytest.mark.parametrize(
     ("provider", "expected_model"),
     [
-        ("anthropic", "claude-sonnet-4-6"),
-        ("openai", "gpt-5.4"),
+        ("anthropic", "claude-haiku-4-5-20251001"),
+        ("openai", "gpt-5.4-mini"),
         ("google", "gemini-3.5-flash"),
     ],
 )
-def test_core_generation_defaults_are_fast_cheap_models(
+def test_core_generation_defaults_are_cheap_primary_models(
     provider: str,
     expected_model: str,
 ) -> None:

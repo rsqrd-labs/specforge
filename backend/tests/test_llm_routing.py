@@ -110,22 +110,25 @@ def test_preferred_model_must_support_operation() -> None:
         resolve_llm_route(
             operation="spec.generate",
             preferred_provider="openai",
-            preferred_model="gpt-5.4-mini",
+            # gpt-4o only recommends summary.create, so it cannot serve a
+            # core-generation operation even when named explicitly.
+            preferred_model="gpt-4o",
             requested_tier="strong",
             latency_class="interactive",
         )
 
 
 @pytest.mark.parametrize(
-    ("provider", "expected"),
+    ("provider", "requested_tier", "expected"),
     [
-        ("anthropic", "claude-sonnet-4-6"),
-        ("openai", "gpt-5.4"),
-        ("google", "gemini-3.5-flash"),
+        ("anthropic", "small", "claude-haiku-4-5-20251001"),
+        ("openai", "mini", "gpt-5.4-mini"),
+        ("google", "mid", "gemini-3.5-flash"),
     ],
 )
-def test_core_generation_routes_use_fast_cheap_defaults(
+def test_core_generation_routes_use_cheap_primary_defaults(
     provider: str,
+    requested_tier: str,
     expected: str,
 ) -> None:
     for operation in (
@@ -137,12 +140,37 @@ def test_core_generation_routes_use_fast_cheap_defaults(
         route = resolve_llm_route(
             operation=operation,
             preferred_provider=provider,
-            requested_tier="mid",
+            requested_tier=requested_tier,
             latency_class="interactive",
         )
 
         assert route.model == expected
         assert route.selection_reason == "active_default"
+
+
+@pytest.mark.parametrize(
+    ("provider", "expected"),
+    [
+        ("anthropic", "claude-sonnet-4-6"),
+        ("openai", "gpt-5.4"),
+    ],
+)
+def test_mid_tier_escalation_stays_eligible_for_core_generation(
+    provider: str,
+    expected: str,
+) -> None:
+    route = resolve_llm_route(
+        operation="spec.generate",
+        preferred_provider=provider,
+        requested_tier="mid",
+        latency_class="interactive",
+    )
+
+    # The mid model recommends core ops for the runtime escalation retry but is
+    # no longer the primary default for them.
+    assert route.model == expected
+    assert route.model_tier == "mid"
+    assert route.selection_reason == "active_same_tier"
 
 
 @pytest.mark.parametrize(

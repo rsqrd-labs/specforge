@@ -218,7 +218,11 @@ def test_increment_generation_uses_fast_cheap_tasks_route() -> None:
     assert route.provider == "anthropic"
     assert route.model == "claude-sonnet-4-6"
     assert route.model_tier == "mid"
-    assert route.selection_reason == "active_default"
+    # Increment generation deliberately stays on the mid tier (out of scope of
+    # the cheap-primary core-gen swap); the mid model still recommends
+    # tasks.generate but is no longer its primary default, so it resolves as
+    # active_same_tier rather than active_default.
+    assert route.selection_reason == "active_same_tier"
 
 
 # ---------------------------------------------------------------------------

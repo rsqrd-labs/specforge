@@ -355,7 +355,7 @@ async def test_generate_invalid_route_skips_credit_and_provider_call() -> None:
     mock_get_llm.assert_not_called()
 
 
-def test_harness_generation_uses_mid_route_with_strong_fallback() -> None:
+def test_harness_generation_uses_cheap_primary_with_mid_escalation() -> None:
     from services.pipeline import stage_manager as stage_manager_module
 
     workspace = _make_workspace()
@@ -364,20 +364,21 @@ def test_harness_generation_uses_mid_route_with_strong_fallback() -> None:
     route = stage_manager_module._route_for_stage_generation("harness", workspace)
 
     assert route.provider == "openai"
-    assert route.model == "gpt-5.4"
-    assert route.model_tier == "mid"
+    assert route.model == "gpt-5.4-mini"
+    assert route.model_tier == "mini"
     assert route.reason == "requested_tier"
     assert route.selection_reason == "active_default"
-    # Every stage declares a strong-tier resolve-time fallback, and a distinct
-    # same-provider strong-tier model exists for the runtime escalation retry.
-    assert stage_manager_module.STAGE_GENERATION_TIERS["harness"] == (
+    # OpenAI core gen runs the cheap primary first and escalates one-shot to the
+    # mid tier (the previous fast/cheap default) on a runtime failure.
+    assert stage_manager_module.CORE_GENERATION_TIER_POLICY["openai"] == (
+        "mini",
         "mid",
-        "strong",
     )
     fallback = stage_manager_module._runtime_fallback_route(route)
     assert fallback is not None
     assert fallback.provider == "openai"
-    assert fallback.model_tier == "strong"
+    assert fallback.model == "gpt-5.4"
+    assert fallback.model_tier == "mid"
     assert fallback.model != route.model
 
 
@@ -2696,6 +2697,7 @@ async def test_generate_streams_tokens_live_before_canonical_replay() -> None:
         token for token in tokens[: reset_indexes[0]] if not token.startswith("{")
     ]
     assert live_tokens, "expected live-streamed tokens before the stream_reset"
+    assert "SPECFORGE_CHUNK_COMPLETE" not in "".join(live_tokens)
     done_events = [
         _json.loads(token) for token in tokens if token.startswith('{"done"')
     ]

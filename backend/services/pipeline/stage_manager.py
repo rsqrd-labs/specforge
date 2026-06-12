@@ -112,20 +112,23 @@ _POLL_INTERVAL_SECONDS = 60
 _RECOVERY_LOCK_TTL = 180  # 3 × _POLL_INTERVAL_SECONDS  H-3 — T-179
 
 STAGE_ORDER = ["spec", "plan", "harness", "tasks"]
-# Core generation routes to the mid tier — the fast/cheap current-generation
-# model per provider (Sonnet 4.6 / GPT-5.4 / Gemini 3.5 Flash) — keeping
-# per-generation cost and latency down; the frontier strong tier is reserved
-# for the runtime escalation retry below.
-STAGE_GENERATION_TIERS = {
-    "spec": ("mid", "strong"),
-    "plan": ("mid", "strong"),
-    "harness": ("mid", "strong"),
-    "tasks": ("mid", "strong"),
+# Core generation routes to each provider's cheapest viable current-generation
+# model to keep per-generation cost and latency down; on a runtime timeout or
+# provider failure the stage is retried exactly once on the provider's mid tier
+# (the previous fast/cheap default) before the failure is surfaced.  Google has
+# no cheaper viable core-gen model than Flash and no active strong model, so it
+# stays mid-first and surfaces failures directly.
+#
+# (requested_tier, runtime_escalation_tier) per provider:
+#   anthropic: Haiku 4.5 (small)     -> escalate to Sonnet 4.6 (mid)
+#   openai:    GPT-5.4 Mini (mini)   -> escalate to GPT-5.4 (mid)
+#   google:    Gemini 3.5 Flash (mid)-> no active strong model; surfaces
+CORE_GENERATION_TIER_POLICY = {
+    "anthropic": ("small", "mid"),
+    "openai": ("mini", "mid"),
+    "google": ("mid", "strong"),
 }
-# Runtime escalation tier: when a mid-tier generation fails with a timeout or
-# provider error, the stage is retried exactly once on this tier before the
-# failure is surfaced to the user.
-_RUNTIME_FALLBACK_TIER = "strong"
+_DEFAULT_CORE_TIER_POLICY = ("mid", "strong")
 # Seconds of pipeline silence between SSE progress heartbeats.  Heartbeats are
 # emitted whenever the generation pipeline (artifact streaming, quality gates,
 # critic review/regenerate, persistence) has not produced a client-visible
@@ -241,8 +244,13 @@ def _schedule_stage_eval(
     return eval_task
 
 
+def _core_generation_tier_policy(provider: str) -> tuple[str, str]:
+    """(requested_tier, runtime_escalation_tier) for a provider's core gen."""
+    return CORE_GENERATION_TIER_POLICY.get(provider, _DEFAULT_CORE_TIER_POLICY)
+
+
 def _route_for_stage_generation(stage_type: str, workspace: Workspace) -> LLMRoute:
-    requested_tier, fallback_tier = STAGE_GENERATION_TIERS[stage_type]
+    requested_tier, fallback_tier = _core_generation_tier_policy(workspace.provider)
     return resolve_llm_route(
         operation=f"{stage_type}.generate",
         preferred_provider=workspace.provider,
@@ -384,20 +392,23 @@ def _repair_budget(
 
 
 def _runtime_fallback_route(failed_route: LLMRoute) -> LLMRoute | None:
-    """Resolve the one-shot strong-tier retry route after a mid-tier failure.
+    """Resolve the one-shot escalation retry route after a core-gen failure.
 
     Stays on the same provider (switching providers mid-generation would
-    silently change the user's billing/key expectations).  Returns None when
-    the failed route already ran on the fallback tier or the provider has no
-    distinct active fallback model — the original failure then surfaces.
+    silently change the user's billing/key expectations) and escalates to the
+    provider's mid tier — the previous fast/cheap default.  Returns None when
+    the failed route already ran on the escalation tier or the provider has no
+    distinct active escalation model (e.g. Google, whose only strong model is
+    preview) — the original failure then surfaces.
     """
-    if failed_route.model_tier == _RUNTIME_FALLBACK_TIER:
+    _, escalation_tier = _core_generation_tier_policy(failed_route.provider)
+    if failed_route.model_tier == escalation_tier:
         return None
     try:
         route = resolve_llm_route(
             operation=failed_route.operation,
             preferred_provider=failed_route.provider,
-            requested_tier=_RUNTIME_FALLBACK_TIER,
+            requested_tier=escalation_tier,
             fallback_tier=None,
             latency_class="interactive",
         )
@@ -414,16 +425,13 @@ def _route_for_refine(workspace: Workspace, mode: str) -> LLMRoute:
         "section": "refine.section",
         "full": "regenerate.full",
     }[mode]
-    requested_tier = {
-        "focused": "mini",
-        "section": "mid",
-        "full": "mid",
-    }[mode]
-    fallback_tier = {
-        "focused": "small",
-        "section": "strong",
-        "full": "strong",
-    }[mode]
+    if mode == "full":
+        # Full regenerate follows the same cheap-primary core-gen policy (and
+        # mid-tier runtime escalation) as a fresh stage generation.
+        requested_tier, fallback_tier = _core_generation_tier_policy(workspace.provider)
+    else:
+        requested_tier = {"focused": "mini", "section": "mid"}[mode]
+        fallback_tier = {"focused": "small", "section": "strong"}[mode]
     return resolve_llm_route(
         operation=operation,
         preferred_provider=workspace.provider,
@@ -560,6 +568,9 @@ AUDIT_EVENT_QUALITY_GATE_OVERRIDDEN = "quality_gate_overridden"
 INCOMPLETE_OUTPUT_GATE_KIND = "incomplete_output"
 TECH_SAFETY_OUTPUT_CONTRACT_VERSION = "v3-tech-safety"
 MAX_COMPLETENESS_REPAIRS = 1
+# Keep enough unflushed live text to cover the internal completion sentinel,
+# even when it arrives split across provider tokens.
+_LIVE_STREAM_SENTINEL_HOLDBACK_CHARS = 160
 
 
 @dataclass(frozen=True)
@@ -1178,8 +1189,27 @@ class StageManager:
         # flooded with per-token events.  The canonical end-of-stream replay
         # (after a stream_reset) remains the source of truth.
         loop = asyncio.get_running_loop()
-        pending = ""
         last_flush = loop.time()
+        live_emitted_chars = 0
+
+        def _flush_live_safe() -> None:
+            nonlocal last_flush, live_emitted_chars
+            if emit is None:
+                return
+            safe_length = max(
+                0,
+                len(accumulated) - _LIVE_STREAM_SENTINEL_HOLDBACK_CHARS,
+            )
+            if safe_length <= live_emitted_chars:
+                return
+            now = loop.time()
+            segment = accumulated[live_emitted_chars:safe_length]
+            if len(segment) < 512 and now - last_flush < 0.2:
+                return
+            emit(segment)
+            live_emitted_chars = safe_length
+            last_flush = now
+
         async for token in _watchdog_stream(
             adapter.stream(
                 system_prompt,
@@ -1190,15 +1220,8 @@ class StageManager:
             provider=route.provider,
         ):
             accumulated += token
-            if emit is not None:
-                pending += token
-                now = loop.time()
-                if len(pending) >= 512 or now - last_flush >= 0.2:
-                    emit(pending)
-                    pending = ""
-                    last_flush = now
-        if emit is not None and pending:
-            emit(pending)
+            _flush_live_safe()
+        live_prefix = accumulated[:live_emitted_chars]
         accumulated = _strip_code_fence(accumulated)
         if _completion_stopped_by_limit(adapter):
             PIPELINE_PROVIDER_LIMIT_STOPS.labels(
@@ -1226,11 +1249,20 @@ class StageManager:
             stage_type,
             accumulated,
             chunk_key=chunk.key,
-        )
+        ).strip()
         validation = validate(cleaned)
         if not validation.is_safe:
             raise SecurityError(f"Output failed validation: {validation.reason}")
-        return cleaned.strip()
+        if emit is not None:
+            if cleaned.startswith(live_prefix):
+                final_segment = cleaned[len(live_prefix) :]
+                if final_segment:
+                    emit(final_segment)
+            else:
+                emit(json.dumps({"stream_reset": True}))
+                if cleaned:
+                    emit(cleaned)
+        return cleaned
 
     async def generate(
         self,

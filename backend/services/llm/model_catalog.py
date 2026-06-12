@@ -144,12 +144,12 @@ MODEL_CATALOG: tuple[ModelCatalogEntry, ...] = (
         max_context_tokens=1_000_000,
         default_max_output_tokens=32768,
         recommended_operations=(*CORE_GENERATION_OPERATIONS, "refine.section"),
-        default_operations=(*CORE_GENERATION_OPERATIONS, "refine.section"),
+        default_operations=("refine.section",),
         supports_reasoning=True,
         reasoning_effort="medium",
         rollout_notes=(
-            "Primary Anthropic core ASDD generation default — fast/cheap "
-            "current-generation model — and section refinement default."
+            "Anthropic mid-tier core ASDD generation escalation (one-shot retry "
+            "after a Haiku 4.5 failure) and section refinement default."
         ),
         routing_priority=20,
     ),
@@ -164,12 +164,30 @@ MODEL_CATALOG: tuple[ModelCatalogEntry, ...] = (
         cached_input_cost_per_million=0.1,
         output_cost_per_million=5.0,
         max_context_tokens=200_000,
-        default_max_output_tokens=4096,
-        recommended_operations=("refine.focused", "summary.create", "eval.score"),
-        default_operations=("refine.focused", "summary.create", "eval.score"),
+        # Raised from 4096 so the cheap primary can carry the full core-gen
+        # output budget (24576) without the model ceiling truncating artifacts.
+        default_max_output_tokens=32768,
+        recommended_operations=(
+            *CORE_GENERATION_OPERATIONS,
+            "refine.focused",
+            "summary.create",
+            "eval.score",
+        ),
+        default_operations=(
+            *CORE_GENERATION_OPERATIONS,
+            "refine.focused",
+            "summary.create",
+            "eval.score",
+        ),
         supports_reasoning=True,
-        reasoning_effort="low",
-        rollout_notes="Anthropic current lightweight judge and focused-refine model.",
+        # Medium (not low) effort: as the core-gen primary, Haiku must reason
+        # hard enough to clear the completeness/critic gates.  Per-model field,
+        # so this also lifts its judge/eval/focused-refine uses to medium.
+        reasoning_effort="medium",
+        rollout_notes=(
+            "Primary Anthropic core ASDD generation default — cheapest viable "
+            "current-generation model — plus lightweight judge and focused refine."
+        ),
         routing_priority=30,
     ),
     ModelCatalogEntry(
@@ -227,12 +245,12 @@ MODEL_CATALOG: tuple[ModelCatalogEntry, ...] = (
         max_context_tokens=1_000_000,
         default_max_output_tokens=32768,
         recommended_operations=(*CORE_GENERATION_OPERATIONS, "refine.section"),
-        default_operations=(*CORE_GENERATION_OPERATIONS, "refine.section"),
+        default_operations=("refine.section",),
         supports_reasoning=True,
         reasoning_effort="medium",
         rollout_notes=(
-            "Primary OpenAI core ASDD generation default — fast/cheap "
-            "current-generation model — and section refinement default."
+            "OpenAI mid-tier core ASDD generation escalation (one-shot retry "
+            "after a GPT-5.4 Mini failure) and section refinement default."
         ),
         routing_priority=20,
     ),
@@ -247,17 +265,31 @@ MODEL_CATALOG: tuple[ModelCatalogEntry, ...] = (
         cached_input_cost_per_million=0.075,
         output_cost_per_million=4.5,
         max_context_tokens=400_000,
-        default_max_output_tokens=4096,
+        # Raised from 4096 so the cheap primary can carry the full core-gen
+        # output budget (24576) without the model ceiling truncating artifacts.
+        default_max_output_tokens=32768,
         recommended_operations=(
+            *CORE_GENERATION_OPERATIONS,
             "refine.focused",
             "refine.section",
             "summary.create",
             "eval.score",
         ),
-        default_operations=("refine.focused", "summary.create", "eval.score"),
+        default_operations=(
+            *CORE_GENERATION_OPERATIONS,
+            "refine.focused",
+            "summary.create",
+            "eval.score",
+        ),
         supports_reasoning=True,
-        reasoning_effort="low",
-        rollout_notes="OpenAI lightweight current model for non-core operations.",
+        # Medium (not low) effort: as the core-gen primary, Mini must reason
+        # hard enough to clear the completeness/critic gates.  Per-model field,
+        # so this also lifts its judge/eval/non-core uses to medium.
+        reasoning_effort="medium",
+        rollout_notes=(
+            "Primary OpenAI core ASDD generation default — cheapest viable "
+            "current-generation model — plus lightweight non-core operations."
+        ),
         routing_priority=30,
     ),
     ModelCatalogEntry(
