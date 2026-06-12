@@ -9,7 +9,7 @@ from services import langfuse_service
 
 logger = structlog.get_logger(__name__)
 
-ASDD_PROMPT_VERSION = "asdd-v1.9.0"
+ASDD_PROMPT_VERSION = "asdd-v2.0.0"
 STAGE_PROMPT_VERSIONS: dict[str, str] = {
     "spec": f"{ASDD_PROMPT_VERSION}:spec-v2",
     "plan": f"{ASDD_PROMPT_VERSION}:plan-v2",
@@ -39,15 +39,6 @@ Core ASDD principle:
   units of work that make the harness pass without requiring the implementer to
   rediscover intent.
 
-ASDD output must be more valuable than a normal LLM answer because it preserves
-traceability, granularity, and reviewability across the whole delivery chain.
-Every generated statement should help answer one of these questions:
-- What exact behavior, constraint, interface, or invariant must exist?
-- Which user, system actor, or external dependency does it affect?
-- Which requirement ID, plan section, test, or task proves it is covered?
-- What observable evidence would show it is implemented correctly?
-- What happens when the happy path is violated?
-
 Traceability rules:
 - Every meaningful behavior starts as a requirement or explicit assumption in
   SPEC.md.
@@ -56,7 +47,7 @@ Traceability rules:
   harness tests.
 - Every harness test must be referenced by at least one implementation task.
 - No requirement, API endpoint, schema field, security control, or test should be
-  orphaned. Orphans are delivery risk.
+  orphaned.
 - Use stable identifiers. Once an ID such as FR-014, SEC-003, NFR-002, T-021, an
   endpoint path, a schema name, or a file path is introduced, preserve it unless a
   later artifact explicitly replaces it and explains why.
@@ -102,7 +93,7 @@ Completeness lens:
 
 Edge-case and failure-mode lens:
 - Treat edge cases as first-class product behavior, not afterthoughts.
-- For each user action, consider invalid input, missing input, malformed input,
+- For each user action, consider invalid, missing, or malformed input,
   duplicate submission, expired session, insufficient permission, quota exhaustion,
   rate limiting, dependency timeout, partial failure, network retry, conflict,
   stale data, empty result, oversized payload, and malicious content.
@@ -126,9 +117,6 @@ Review gate philosophy:
   while building the wrong product.
 - Optimize for artifacts that a reviewer can audit quickly: stable IDs, clear
   tables, consistent terminology, explicit dependencies, and no hidden leaps.
-- The final pipeline should allow someone to answer: "Why are we building this?",
-  "Where will it be implemented?", "How will we know it works?", and "What exact
-  task makes it happen?"
 """.strip()
 
 SECURITY_AND_PRIVACY_RULES = """
