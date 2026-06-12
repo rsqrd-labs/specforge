@@ -509,6 +509,15 @@ PIPELINE_VALIDATOR_FAILURES = Counter(
     labelnames=["stage"],
 )
 
+PIPELINE_QUALITY_ESCALATIONS = Counter(
+    "specforge_pipeline_quality_escalations_total",
+    "Stage generations where a quality-gate failure (critic findings) on the "
+    "cheap primary tier triggered an escalation to the mid tier for the "
+    "platform-funded regenerate.  A rising rate indicates the cheap primary "
+    "regularly falls short of the critic's standards.  Phase 5.1.",
+    ["stage_type", "provider"],
+)
+
 # ---------------------------------------------------------------------------
 # Storyboard (Phase 20).  Counters and histograms are intentionally labelled
 # only with bounded enums so a malicious title/slug/error cannot create

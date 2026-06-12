@@ -58,6 +58,7 @@ from services.observability import (
     PIPELINE_INCOMPLETE_OUTPUTS,
     PIPELINE_INTERRUPTED_STREAMS,
     PIPELINE_PROVIDER_LIMIT_STOPS,
+    PIPELINE_QUALITY_ESCALATIONS,
     PIPELINE_STREAM_WATCHDOG_TIMEOUTS,
     PIPELINE_TECH_SAFETY_FAILURES,
     PIPELINE_TECH_SAFETY_FINALISE_BLOCKS,
@@ -1838,6 +1839,25 @@ class StageManager:
                         emit(json.dumps({"quality_gate_failed": gate_payload}))
                         return
                     # One platform-funded regenerate with the findings injected.
+                    # Phase 5.1: if we're on the cheap primary, escalate to the
+                    # mid tier for this regenerate instead of repeating on the
+                    # same model that just failed the critic.  _runtime_fallback_route
+                    # returns None when already at/above the escalation tier, so
+                    # Google/Flash, mid-first ops, and increment generation are
+                    # automatically unaffected.
+                    _quality_escalated = _runtime_fallback_route(route)
+                    if _quality_escalated is not None:
+                        PIPELINE_QUALITY_ESCALATIONS.labels(
+                            stage_type=stage.type,
+                            provider=route.provider,
+                        ).inc()
+                        route = _quality_escalated
+                        _log_generation_route(
+                            route=route,
+                            stage_type=stage.type,
+                            action="critic_regen_escalated",
+                            prompt_version=STAGE_PROMPT_VERSIONS[stage.type],
+                        )
                     try:
                         accumulated = await self._regenerate_with_findings(
                             route=route,

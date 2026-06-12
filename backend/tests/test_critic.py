@@ -486,6 +486,132 @@ async def test_critic_fail_then_pass_regenerates_once() -> None:
     mr.assert_not_awaited()  # success after regenerate — no refund
 
 
+_ESCALATION_METRIC = "specforge_pipeline_quality_escalations_total"
+
+
+@pytest.mark.asyncio
+async def test_critic_failure_escalates_regen_to_mid_tier() -> None:
+    """Phase 5.1: a critic failure on the cheap primary escalates the funded
+    regenerate to the mid tier instead of repeating on the same cheap model."""
+    from services.pipeline import stage_manager as sm_module
+
+    svc, stage, workspace, user, deduction, db = _build_generate_env()
+    regenerated = "## Corrected\n" + _LONG_ARTIFACT
+    deduct, refund, invalidate, build, validate, set_cache, get_llm = _generate_patches(
+        svc, complete_return=_with_final_sentinel(regenerated)
+    )
+    fail_then_pass = [
+        StageCriticResult(
+            passed=False,
+            findings=[CriticFinding(kind="MissingSection", detail="FR-001 gap")],
+        ),
+        StageCriticResult(passed=True),
+    ]
+    before = REGISTRY.get_sample_value(
+        _ESCALATION_METRIC, {"stage_type": "spec", "provider": "anthropic"}
+    ) or 0.0
+
+    captured_routes: list = []
+
+    original_regen = svc._regenerate_with_findings
+
+    async def spy_regen(**kwargs):
+        captured_routes.append(kwargs["route"])
+        return await original_regen(**kwargs)
+
+    with (
+        deduct as md,
+        refund as mr,
+        invalidate,
+        build,
+        validate,
+        set_cache,
+        get_llm,
+        patch(
+            "services.pipeline.stage_manager.critic_review",
+            new_callable=AsyncMock,
+            side_effect=fail_then_pass,
+        ),
+        patch.object(svc, "_regenerate_with_findings", side_effect=spy_regen),
+    ):
+        md.return_value = deduction
+        tokens = [t async for t in svc.generate(stage.id, user, db)]
+
+    after = REGISTRY.get_sample_value(
+        _ESCALATION_METRIC, {"stage_type": "spec", "provider": "anthropic"}
+    ) or 0.0
+    assert after - before == 1.0, "escalation counter must increment exactly once"
+    assert len(captured_routes) == 1
+    _, escalation_tier = sm_module._core_generation_tier_policy("anthropic")
+    assert captured_routes[0].model_tier == escalation_tier, (
+        "regenerate must use the escalation (mid) tier, not the cheap primary"
+    )
+    assert any("done" in t for t in tokens)
+    mr.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_critic_failure_no_escalation_when_already_mid() -> None:
+    """Phase 5.1: if the route is already at/above the escalation tier (e.g.
+    Google Flash which has no cheaper distinct tier), no escalation happens and
+    the counter stays flat."""
+    from services.pipeline import stage_manager as sm_module
+
+    svc, stage, workspace, user, deduction, db = _build_generate_env()
+    # Switch workspace to google so the cheap primary IS the mid (no cheaper tier).
+    workspace.provider = "google"
+    workspace.model = "gemini-3.5-flash"
+
+    regenerated = "## Corrected\n" + _LONG_ARTIFACT
+    deduct, refund, invalidate, build, validate, set_cache, get_llm = _generate_patches(
+        svc, complete_return=_with_final_sentinel(regenerated)
+    )
+    fail_then_pass = [
+        StageCriticResult(
+            passed=False,
+            findings=[CriticFinding(kind="ShallowSection", detail="thin plan")],
+        ),
+        StageCriticResult(passed=True),
+    ]
+    before = REGISTRY.get_sample_value(
+        _ESCALATION_METRIC, {"stage_type": "spec", "provider": "google"}
+    ) or 0.0
+
+    captured_routes: list = []
+    original_regen = svc._regenerate_with_findings
+
+    async def spy_regen(**kwargs):
+        captured_routes.append(kwargs["route"])
+        return await original_regen(**kwargs)
+
+    with (
+        deduct as md,
+        refund as mr,
+        invalidate,
+        build,
+        validate,
+        set_cache,
+        get_llm,
+        patch(
+            "services.pipeline.stage_manager.critic_review",
+            new_callable=AsyncMock,
+            side_effect=fail_then_pass,
+        ),
+        patch.object(svc, "_regenerate_with_findings", side_effect=spy_regen),
+    ):
+        md.return_value = deduction
+        tokens = [t async for t in svc.generate(stage.id, user, db)]
+
+    after = REGISTRY.get_sample_value(
+        _ESCALATION_METRIC, {"stage_type": "spec", "provider": "google"}
+    ) or 0.0
+    assert after - before == 0.0, "no escalation when already at/above escalation tier"
+    assert len(captured_routes) == 1
+    assert captured_routes[0].provider == "google"
+    assert any("done" in t for t in tokens)
+    mr.assert_not_awaited()
+
+
 @pytest.mark.asyncio
 async def test_disable_critic_skips_gate() -> None:
     """disable_critic=True bypasses the critic entirely."""
