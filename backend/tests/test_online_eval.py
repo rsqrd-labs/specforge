@@ -35,7 +35,9 @@ class _FakeJudge:
         self.response = response
         self.calls: list[dict[str, Any]] = []
 
-    async def complete(self, system: str, user: str, max_tokens: int) -> str:
+    async def complete(
+        self, system: str, user: str, max_tokens: int, *, cache_system: bool = False
+    ) -> str:
         self.calls.append({"system": system, "user": user, "max_tokens": max_tokens})
         if isinstance(self.response, Exception):
             raise self.response

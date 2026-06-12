@@ -25,10 +25,22 @@ class ProviderTimeoutError(ProviderError):
 class BaseLLMAdapter(ABC):
     @abstractmethod
     async def stream(
-        self, system: str, user: str, max_tokens: int
+        self,
+        system: str,
+        user: str,
+        max_tokens: int,
+        *,
+        cache_system: bool = False,
     ) -> AsyncGenerator[str, None]:
         pass
 
     @abstractmethod
-    async def complete(self, system: str, user: str, max_tokens: int) -> str:
+    async def complete(
+        self,
+        system: str,
+        user: str,
+        max_tokens: int,
+        *,
+        cache_system: bool = False,
+    ) -> str:
         pass

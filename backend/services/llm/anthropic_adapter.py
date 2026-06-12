@@ -27,7 +27,12 @@ class AnthropicAdapter(BaseLLMAdapter):
         )
 
     async def stream(
-        self, system: str, user: str, max_tokens: int
+        self,
+        system: str,
+        user: str,
+        max_tokens: int,
+        *,
+        cache_system: bool = False,
     ) -> AsyncGenerator[str, None]:
         self.last_completion = LLMCompletionInfo.started(
             provider="anthropic",
@@ -40,6 +45,7 @@ class AnthropicAdapter(BaseLLMAdapter):
                     system=system,
                     user=user,
                     max_tokens=max_tokens,
+                    cache_system=cache_system,
                 ),
             ) as stream:
                 async for event in stream:
@@ -65,7 +71,14 @@ class AnthropicAdapter(BaseLLMAdapter):
         except anthropic.APIError as exc:
             raise ProviderError("anthropic", exc) from exc
 
-    async def complete(self, system: str, user: str, max_tokens: int) -> str:
+    async def complete(
+        self,
+        system: str,
+        user: str,
+        max_tokens: int,
+        *,
+        cache_system: bool = False,
+    ) -> str:
         self.last_completion = LLMCompletionInfo.started(
             provider="anthropic",
             model=self.model,
@@ -77,6 +90,7 @@ class AnthropicAdapter(BaseLLMAdapter):
                     system=system,
                     user=user,
                     max_tokens=max_tokens,
+                    cache_system=cache_system,
                 ),
             )
             if self.last_completion is not None:
@@ -90,10 +104,34 @@ class AnthropicAdapter(BaseLLMAdapter):
         except anthropic.APIError as exc:
             raise ProviderError("anthropic", exc) from exc
 
-    def _messages_request(self, *, system: str, user: str, max_tokens: int) -> dict:
-        request = {
+    def _messages_request(
+        self,
+        *,
+        system: str,
+        user: str,
+        max_tokens: int,
+        cache_system: bool = False,
+    ) -> dict:
+        # When caching is enabled and requested, wrap the system string as a
+        # content block with cache_control so the provider can store and reuse
+        # the token representation across calls that share this stable prefix.
+        # Anthropic requires ≥1024 tokens (Sonnet/Opus) or ≥2048 (Haiku 4.5)
+        # to create a cache entry; the ASDD base prompt (~4 K tokens) easily
+        # clears both thresholds.  No beta header needed for Claude 4 models.
+        if cache_system and settings.llm_prompt_cache_enabled:
+            system_value: object = [
+                {
+                    "type": "text",
+                    "text": system,
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ]
+        else:
+            system_value = system
+
+        request: dict = {
             "model": self.model,
-            "system": system,
+            "system": system_value,
             "messages": [{"role": "user", "content": user}],
             "max_tokens": max_tokens,
         }

@@ -1221,6 +1221,11 @@ class StageManager:
                 system_prompt,
                 chunk_prompt,
                 max_tokens=max_tokens,
+                # The system prompt is identical across all chunks of a single
+                # stage generation (including repair retries), so marking it
+                # cacheable lets Anthropic reuse the cached token representation
+                # for chunks 2+ and repair calls (Phase 2 — issue #26).
+                cache_system=True,
             ),
             stage_type=stage_type,
             provider=route.provider,
@@ -3026,6 +3031,11 @@ class StageManager:
                     provider=route.provider,
                     model=route.model,
                 ),
+                # The critic regenerate uses the same stage system prompt as
+                # the original generation, so marking it cacheable hits the
+                # same cache entry if the regenerate fires within the TTL
+                # (Phase 2 — issue #26).
+                cache_system=True,
             ),
             timeout=settings.llm_stream_hard_cap_seconds,
         )

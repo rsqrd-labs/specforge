@@ -888,6 +888,10 @@ async def _complete_and_validate(
                 stage_type="storyboard",
                 model_tier=model_tier,
                 cost_context=cost_context,
+                # SYSTEM_PROMPT is identical across all repair rounds, so all
+                # three calls (initial + up to 2 repairs) share one cache entry
+                # on providers that support it (Phase 2 — issue #26).
+                cache_system=True,
             )
         except TimeoutError as exc:
             raise StoryboardPayloadError("parse", "llm repair timed out") from exc
@@ -905,6 +909,7 @@ async def _complete_and_validate(
             stage_type="storyboard",
             model_tier=model_tier,
             cost_context=cost_context,
+            cache_system=True,
         )
     except TimeoutError as exc:
         raise StoryboardPayloadError("parse", "llm completion timed out") from exc

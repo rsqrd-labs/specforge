@@ -276,7 +276,9 @@ class _CompletionAwareAdapter:
         except IndexError:
             return (default, False)
 
-    async def stream(self, system: str, user: str, max_tokens: int):
+    async def stream(
+        self, system: str, user: str, max_tokens: int, *, cache_system: bool = False
+    ):
         self.stream_calls.append((system, user, max_tokens))
         content, stopped_by_limit = self._next_attempt(None)
         if content is None:
@@ -290,7 +292,9 @@ class _CompletionAwareAdapter:
             self.last_completion.apply_finish_reason("max_tokens")
         yield content
 
-    async def complete(self, system: str, user: str, max_tokens: int) -> str:
+    async def complete(
+        self, system: str, user: str, max_tokens: int, *, cache_system: bool = False
+    ) -> str:
         self.complete_calls.append((system, user, max_tokens))
         content, stopped_by_limit = self._next_attempt(_SAFE_PLAN_FINAL_STREAM)
         if content is None:

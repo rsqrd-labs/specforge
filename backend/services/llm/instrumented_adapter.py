@@ -94,12 +94,19 @@ class InstrumentedAdapter(BaseLLMAdapter):
         self.last_completion: LLMCompletionInfo | None = None
 
     async def stream(
-        self, system: str, user: str, max_tokens: int
+        self,
+        system: str,
+        user: str,
+        max_tokens: int,
+        *,
+        cache_system: bool = False,
     ) -> AsyncGenerator[str, None]:
         accumulated: list[str] = []
         start = time.perf_counter()
         try:
-            async for token in self._wrapped.stream(system, user, max_tokens):
+            async for token in self._wrapped.stream(
+                system, user, max_tokens, cache_system=cache_system
+            ):
                 accumulated.append(token)
                 yield token
         except Exception as exc:
@@ -116,13 +123,22 @@ class InstrumentedAdapter(BaseLLMAdapter):
                 start=start,
             )
 
-    async def complete(self, system: str, user: str, max_tokens: int) -> str:
+    async def complete(
+        self,
+        system: str,
+        user: str,
+        max_tokens: int,
+        *,
+        cache_system: bool = False,
+    ) -> str:
         start = time.perf_counter()
         response: str = ""
         try:
             # Forward max_tokens as a keyword so the wrapper is transparent to
             # callers/tests that pass (and assert) it by name.
-            response = await self._wrapped.complete(system, user, max_tokens=max_tokens)
+            response = await self._wrapped.complete(
+                system, user, max_tokens=max_tokens, cache_system=cache_system
+            )
             record_provider_success(self._provider)
             return response
         except Exception as exc:

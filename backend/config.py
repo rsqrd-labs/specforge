@@ -70,6 +70,12 @@ class Settings(BaseSettings):
     # behind a flag so a test/CI environment without a DB never even attempts
     # the write.
     llm_cost_ledger_enabled: bool = True
+    # Phase 2 (issue #26): add cache_control hints to the system-prompt block for
+    # providers that support explicit prompt caching (Anthropic cache_control).
+    # Default True — quality-neutral (same content, same model; only billing and
+    # latency change) and the break-even is low for chunked/multi-round paths.
+    # Flip False to disable the structured block without a redeploy.
+    llm_prompt_cache_enabled: bool = True
     max_request_body_bytes: int = 1_000_000
     tech_safety_policy_max_age_days: int = 30
     tech_safety_osv_cache_ttl_seconds: int = 86_400

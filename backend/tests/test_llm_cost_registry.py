@@ -53,9 +53,12 @@ def test_registry_exposes_model_policy_fields() -> None:
     assert model_config["status"] == "active"
     assert model_config["adapter_api"] == "responses"
     assert model_config["supports_reasoning"] is True
-    # gpt-5.4 is the mid-tier escalation for core gen, no longer the primary
-    # default; it stays the section-refinement default.
-    assert model_config["default_operations"] == ["refine.section"]
+    # gpt-5.4 is the mid-tier for core gen (Phase 1, issue #26) and section
+    # refinement; both appear in default_operations.
+    assert set(model_config["default_operations"]) >= {
+        "refine.section",
+        "storyboard.generate",
+    }
 
 
 def test_required_tiers_are_present() -> None:

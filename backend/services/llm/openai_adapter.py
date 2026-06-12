@@ -27,7 +27,12 @@ class OpenAIAdapter(BaseLLMAdapter):
         )
 
     async def stream(
-        self, system: str, user: str, max_tokens: int
+        self,
+        system: str,
+        user: str,
+        max_tokens: int,
+        *,
+        cache_system: bool = False,  # automatic prefix caching; no explicit opt-in
     ) -> AsyncGenerator[str, None]:
         self.last_completion = LLMCompletionInfo.started(
             provider="openai",
@@ -116,7 +121,14 @@ class OpenAIAdapter(BaseLLMAdapter):
         except openai.OpenAIError as exc:
             raise ProviderError("openai", exc) from exc
 
-    async def complete(self, system: str, user: str, max_tokens: int) -> str:
+    async def complete(
+        self,
+        system: str,
+        user: str,
+        max_tokens: int,
+        *,
+        cache_system: bool = False,  # automatic prefix caching; no explicit opt-in
+    ) -> str:
         self.last_completion = LLMCompletionInfo.started(
             provider="openai",
             model=self.model,

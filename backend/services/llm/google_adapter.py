@@ -39,7 +39,12 @@ class GoogleAdapter(BaseLLMAdapter):
         )
 
     async def stream(
-        self, system: str, user: str, max_tokens: int
+        self,
+        system: str,
+        user: str,
+        max_tokens: int,
+        *,
+        cache_system: bool = False,  # explicit caching deferred; implicit applies
     ) -> AsyncGenerator[str, None]:
         self.last_completion = LLMCompletionInfo.started(
             provider="google",
@@ -63,7 +68,14 @@ class GoogleAdapter(BaseLLMAdapter):
         except genai_errors.APIError as exc:
             raise ProviderError("google", exc) from exc
 
-    async def complete(self, system: str, user: str, max_tokens: int) -> str:
+    async def complete(
+        self,
+        system: str,
+        user: str,
+        max_tokens: int,
+        *,
+        cache_system: bool = False,  # explicit caching deferred; implicit applies
+    ) -> str:
         self.last_completion = LLMCompletionInfo.started(
             provider="google",
             model=self.model,

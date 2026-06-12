@@ -164,6 +164,7 @@ async def complete_with_timeout(
     stage_type: str = "-",
     model_tier: str = "unknown",
     cost_context: "LLMCostContext | None" = None,
+    cache_system: bool = False,
 ) -> str:
     """Run adapter.complete() under a hard wall-clock timeout via asyncio.wait_for.
 
@@ -174,6 +175,10 @@ async def complete_with_timeout(
     When *operation* is supplied the call is wrapped in InstrumentedAdapter so
     it is recorded in the cost ledger; omitting it preserves the original raw
     behaviour for callers that record elsewhere.
+
+    *cache_system* is forwarded to the adapter so callers in multi-round
+    completion paths (chunked generation, storyboard repair) can hint that the
+    system prompt is stable and should be cached by the provider.
     """
     if operation is not None:
         adapter: BaseLLMAdapter = get_instrumented_llm(
@@ -187,7 +192,7 @@ async def complete_with_timeout(
     else:
         adapter = get_llm(provider, model)
     return await asyncio.wait_for(
-        adapter.complete(system, user, max_tokens),
+        adapter.complete(system, user, max_tokens, cache_system=cache_system),
         timeout=timeout,
     )
 
