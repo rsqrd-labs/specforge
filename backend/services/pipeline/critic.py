@@ -19,12 +19,15 @@ Security contract (Phase 19 Prompt Pipeline Quality Directive):
 from __future__ import annotations
 
 import logging
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from prompts.base import wrap_untrusted_content
 from services.llm.gateway import call_judge_model
+
+if TYPE_CHECKING:
+    from services.llm.cost_ledger import LLMCostContext
 
 logger = logging.getLogger(__name__)
 
@@ -226,6 +229,7 @@ async def critic_review(
     deps: dict[str, str],
     *,
     provider: str | None = None,
+    cost_context: "LLMCostContext | None" = None,
 ) -> StageCriticResult:
     """Run the critic over a generated artifact.
 
@@ -246,6 +250,9 @@ async def critic_review(
             system_prompt=_CRITIC_SYSTEM_PROMPT,
             user_prompt=_build_critic_user_prompt(stage_type, artifact_text, deps),
             provider=provider,
+            operation="critic.review",
+            stage_type=stage_type,
+            cost_context=cost_context,
         )
     except Exception:
         logger.warning(

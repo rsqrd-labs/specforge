@@ -63,6 +63,7 @@ from models import (
 from prompts.base import wrap_untrusted_content
 from services.integrations.github_api_client import GitHubChecksPermissionError
 from services.integrations.task_parser import parse_tasks
+from services.llm.cost_ledger import LLMCostContext
 from services.llm.gateway import call_judge_model
 from services.observability import (
     GITHUB_AUDIT_CHECK_POSTED,
@@ -415,6 +416,11 @@ async def _judge(
                 system_prompt=_PR_EVALUATOR_SYSTEM_PROMPT,
                 user_prompt=user_prompt,
                 provider=provider,
+                operation="pr_check.evaluate",
+                cost_context=LLMCostContext(
+                    workspace_id=push.workspace_id,
+                    product_surface="pr_check",
+                ),
             )
     except Exception:
         logger.warning("github.pr_check.judge_failed", push_id=str(push.id))

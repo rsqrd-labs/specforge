@@ -40,7 +40,12 @@ from services.llm.cost_cache import (
     get_cached_generation,
     set_cached_generation,
 )
+from services.llm.cost_ledger import (
+    LLMCostContext,
+    update_cost_event_quality_outcome,
+)
 from services.llm.gateway import get_llm
+from services.llm.instrumented_adapter import InstrumentedAdapter
 from services.llm.model_catalog import model_max_output_tokens
 from services.llm.output_budget import resolve_output_budget
 from services.llm.provider_config import JUDGE_MODELS
@@ -1523,29 +1528,32 @@ class StageManager:
             deps = _workspace_stage_deps(workspace, stage.type)
             technology_repair_used = False
 
-            def _build_stage_adapter(attempt_route: LLMRoute):
-                built = get_llm(attempt_route.provider, attempt_route.model)
-                if trace_id:
-                    from services.llm.instrumented_adapter import (  # noqa: PLC0415
-                        InstrumentedAdapter,
-                    )
+            stage_cost_context = LLMCostContext(
+                workspace_id=workspace.id,
+                stage_id=stage.id,
+                credit_reason=("regenerate" if action == "regenerate" else "generate"),
+                product_surface="stage_generation",
+            )
 
-                    built = InstrumentedAdapter(
-                        built,
-                        span_id=span_id,
-                        trace_id=trace_id,
-                        provider=attempt_route.provider,
-                        model=attempt_route.model,
-                        stage_type=stage.type,
-                        action=action,
-                        model_tier=attempt_route.model_tier,
-                        prompt_version=STAGE_PROMPT_VERSIONS[stage.type],
-                        operation=attempt_route.operation,
-                        cache_hit=False,
-                        batch=False,
-                        cross_provider_fallback=attempt_route.cross_provider_fallback,
-                    )
-                return built
+            def _build_stage_adapter(attempt_route: LLMRoute):
+                # Always wrap for cost capture (span_id/trace_id may be None when
+                # Langfuse is off — the wrapper's Langfuse calls are no-op there).
+                return InstrumentedAdapter(
+                    get_llm(attempt_route.provider, attempt_route.model),
+                    span_id=span_id,
+                    trace_id=trace_id,
+                    provider=attempt_route.provider,
+                    model=attempt_route.model,
+                    stage_type=stage.type,
+                    action=action,
+                    model_tier=attempt_route.model_tier,
+                    prompt_version=STAGE_PROMPT_VERSIONS[stage.type],
+                    operation=attempt_route.operation,
+                    cache_hit=False,
+                    batch=False,
+                    cross_provider_fallback=attempt_route.cross_provider_fallback,
+                    cost_context=stage_cost_context,
+                )
 
             try:
                 # Attempt loop: the primary (strong-tier) generation plus at
@@ -1782,6 +1790,9 @@ class StageManager:
                         payload=gate_payload,
                     )
                     _cleanup_done = True
+                    await update_cost_event_quality_outcome(
+                        content_generation_id, "validator_failed"
+                    )
                     if span_id:
                         await self._mark_langfuse_span_failed(span_id, exc)
                         span_finished = True
@@ -1818,6 +1829,9 @@ class StageManager:
                             payload=gate_payload,
                         )
                         _cleanup_done = True
+                        await update_cost_event_quality_outcome(
+                            content_generation_id, "critic_failed"
+                        )
                         if span_id:
                             await self._mark_langfuse_span_failed(span_id, gate_error)
                             span_finished = True
@@ -1832,6 +1846,12 @@ class StageManager:
                             findings=critic_result.findings,
                             stage_type=stage.type,
                             deps=critic_deps,
+                            cost_context=LLMCostContext(
+                                workspace_id=workspace.id,
+                                stage_id=stage.id,
+                                credit_reason="critic_regen",
+                                product_surface="stage_generation",
+                            ),
                         )
                         stream_chunks = [accumulated]
                     except IncompleteArtifactError as exc:
@@ -1935,6 +1955,8 @@ class StageManager:
                 )
             await db.commit()
             _cleanup_done = True
+            # Cost-ledger: the generation cleared every gate and is persisted.
+            await update_cost_event_quality_outcome(content_generation_id, "passed")
             if action == "generate":
                 await set_cached_generation(redis, cache_key, accumulated)
             if span_id:
@@ -2187,25 +2209,27 @@ class StageManager:
                     stage=stage,
                     action="refine",
                 )
-            adapter = get_llm(route.provider, route.model)
-            if trace_id:
-                from services.llm.instrumented_adapter import InstrumentedAdapter
-
-                adapter = InstrumentedAdapter(
-                    adapter,
-                    span_id=span_id,
-                    trace_id=trace_id,
-                    provider=route.provider,
-                    model=route.model,
-                    stage_type=stage.type,
-                    action="refine",
-                    model_tier=route.model_tier,
-                    prompt_version=STAGE_PROMPT_VERSIONS[stage.type],
-                    operation=route.operation,
-                    cache_hit=False,
-                    batch=False,
-                    cross_provider_fallback=route.cross_provider_fallback,
-                )
+            adapter = InstrumentedAdapter(
+                get_llm(route.provider, route.model),
+                span_id=span_id,
+                trace_id=trace_id,
+                provider=route.provider,
+                model=route.model,
+                stage_type=stage.type,
+                action="refine",
+                model_tier=route.model_tier,
+                prompt_version=STAGE_PROMPT_VERSIONS[stage.type],
+                operation=route.operation,
+                cache_hit=False,
+                batch=False,
+                cross_provider_fallback=route.cross_provider_fallback,
+                cost_context=LLMCostContext(
+                    workspace_id=workspace.id,
+                    stage_id=stage.id,
+                    credit_reason="refine",
+                    product_surface="refine",
+                ),
+            )
             replacement = await asyncio.wait_for(
                 adapter.complete(
                     system_prompt,
@@ -2928,6 +2952,7 @@ class StageManager:
         findings,
         stage_type: str,
         deps: dict[str, str],
+        cost_context: LLMCostContext | None = None,
     ) -> str:
         """One platform-funded, non-streaming regenerate with findings injected.
 
@@ -2957,7 +2982,21 @@ class StageManager:
             f"{findings_block}"
             f"{completion_instruction(stage_type)}"
         )
-        adapter = get_llm(route.provider, route.model)
+        adapter = InstrumentedAdapter(
+            get_llm(route.provider, route.model),
+            provider=route.provider,
+            model=route.model,
+            stage_type=stage_type,
+            action="regenerate",
+            model_tier=route.model_tier,
+            prompt_version=STAGE_PROMPT_VERSIONS.get(stage_type, "local"),
+            operation=route.operation,
+            cost_context=(
+                cost_context
+                if cost_context is not None
+                else LLMCostContext(product_surface="critic_regen")
+            ),
+        )
         raw = await asyncio.wait_for(
             adapter.complete(
                 system_prompt,
@@ -3058,7 +3097,20 @@ class StageManager:
         # making recovery-service involvement unnecessary.  C-2 — T-174.
         accumulated = ""
         try:
-            adapter = get_llm(route.provider, route.model)
+            adapter = InstrumentedAdapter(
+                get_llm(route.provider, route.model),
+                provider=route.provider,
+                model=route.model,
+                stage_type="harness",
+                action="harness_patch",
+                model_tier=route.model_tier,
+                operation=route.operation,
+                cost_context=LLMCostContext(
+                    workspace_id=workspace.id,
+                    stage_id=stage.id,
+                    product_surface="harness_patch",
+                ),
+            )
             async for token in _watchdog_stream(
                 adapter.stream(system_prompt, user_prompt, max_tokens=2048),
                 stage_type="harness",

@@ -14,6 +14,7 @@ from database import AsyncSessionLocal
 from models import EvalResult
 from services import langfuse_service
 from services.llm.batch_executor import complete_background_llm
+from services.llm.cost_ledger import LLMCostContext
 from services.llm.gateway import get_llm
 from services.llm.output_budget import output_budget_for_operation
 from services.llm.provider_config import JUDGE_MODELS
@@ -709,6 +710,7 @@ async def _call_eval_judge(
             stage_type="eval",
             prompt_version="eval-v2",
             adapter_factory=get_llm,
+            cost_context=LLMCostContext(product_surface="eval"),
         ),
         timeout=max(settings.llm_complete_timeout_seconds, _EVAL_TIMEOUT_SECONDS),
     )

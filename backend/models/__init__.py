@@ -20,6 +20,7 @@ from models.github_webhook_event import GitHubWebhookEvent  # noqa: E402
 from models.increment import Increment, IncrementIdea  # noqa: E402
 from models.integration_push import IntegrationPush  # noqa: E402
 from models.integration_push_task import IntegrationPushTask  # noqa: E402
+from models.llm_cost_event import LLMCostEvent  # noqa: E402
 from models.stage import Stage  # noqa: E402
 from models.stage_version import StageVersion  # noqa: E402
 from models.storyboard import Storyboard  # noqa: E402
@@ -46,6 +47,7 @@ __all__ = [
     "IncrementIdea",
     "IntegrationPush",
     "IntegrationPushTask",
+    "LLMCostEvent",
     "Stage",
     "StageVersion",
     "Storyboard",

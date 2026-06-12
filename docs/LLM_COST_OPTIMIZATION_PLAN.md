@@ -8,15 +8,27 @@ stated cost drivers are already mitigated; others are genuinely unbuilt. The pha
 below removes waste and instruments first, then introduces cheaper routing only behind
 validators and telemetry.
 
+> **Current baseline (updated after commit `1ccd4ab`).** Core generation (the four
+> streamed stages + full regenerate) now routes **cheapest-tier-first** per provider —
+> Claude Haiku 4.5 / GPT-5.4 Mini / Gemini 3.5 Flash — via `CORE_GENERATION_TIER_POLICY`
+> in `stage_manager.py`, escalating to the mid tier (Sonnet 4.6 / GPT-5.4) **only on a
+> runtime/provider failure**. This shipped the *aggressive* form of the cost saving
+> **ahead of its safety rails**: there is (a) **no complexity-aware starting tier** — every
+> request starts cheapest regardless of difficulty; (b) **no quality-gate-triggered
+> escalation** — a critic/validator failure regenerates on the *same* cheap model
+> (`route=route`) and then refunds+fails rather than escalating to a stronger tier; and
+> (c) **no golden-corpus validation** that the cheap primary holds artifact quality.
+> **Closing (a)–(c) is now the most important near-term work and is folded into Phase 5.**
+
 ---
 
 ## 1. Current state vs. issue assumptions
 
 | # | Issue proposal / premise | Reality in code | Classification |
 |---|--------------------------|-----------------|----------------|
-| premise | Core SPEC/PLAN/HARNESS/TASKS route **strong-first** | `STAGE_GENERATION_TIERS` = `("mid","strong")` for all four stages; mid-first with single strong retry already shipped (commit `8746db7`, `stage_manager.py:119-128`) | **Already done** |
-| extra | Use the **cheap/fast latest-gen model** per provider | Core gen already defaults to the mid tier = the fast/cheap current-gen model: Sonnet 4.6 / GPT-5.4 / Gemini 3.5 Flash (`model_catalog.py`). The genuinely cheaper latest-gen tier (GPT-5.4 Mini, Flash-Lite) is **locked out of core ops**; tier ladder is asymmetric across providers | **Mostly done — cheap-tier floor is the delta** |
-| premise | Full **regenerate** routes strong-first; refine.section/full strong | `regenerate.full`, `refine.section`, `refine.full` still resolve `strong` (`stage_manager.py:417-431`) | **Valid — still strong** |
+| premise | Core SPEC/PLAN/HARNESS/TASKS route **strong-first** | **No longer true.** Core gen routes **cheapest-tier-first** (Haiku 4.5 / GPT-5.4 Mini / Flash) via `CORE_GENERATION_TIER_POLICY`, escalating to mid (Sonnet 4.6 / GPT-5.4) only on a runtime/provider failure (commit `1ccd4ab`) | **Shipped aggressively — safety rails missing (Phase 5)** |
+| extra | Use the **cheap/fast latest-gen model** per provider | Done *deterministically*: Haiku 4.5 / GPT-5.4 Mini are the core-gen defaults (output ceilings raised 4096→32768, `reasoning_effort` bumped low→medium); Sonnet/GPT-5.4 demoted to escalation; Google stays on Flash (`model_catalog.py`) | **Shipped — adaptive/complexity-aware version is Phase 5** |
+| premise | Full **regenerate** routes strong-first; refine.section/full strong | `regenerate.full` now follows the same cheap-primary policy as a fresh stage. `refine.section` still mid→strong; `refine.focused` still mini→small (`_route_for_refine`) | **regenerate shipped cheap; refine unchanged** |
 | 1 | Add an LLM **cost ledger** (per-call, rolled up per workspace/stage/storyboard) | Only Prometheus counters + a `structlog` line + Langfuse generation (`observability.py:873`, `instrumented_adapter.py`). No DB table; no per-workspace/stage rollup | **Partially done (telemetry only) — needs DB ledger** |
 | 1 | Capture real input/cached/output/reasoning tokens | Adapters **do** capture `last_completion.usage` from terminal usage chunks (all 3 providers), but `InstrumentedAdapter._cost_metadata` ignores it and calls `estimated_usage_from_text` → `cached_input_tokens` is always `None`, costs are tokenizer estimates | **Bug/gap — wiring fix, not adapter surgery** |
 | 2 | Provider prompt/context **caching** (cache_control / prompt_cache_key / cached content) | None. Adapter interface is plain `(system, user, max_tokens)` — no way to express cache breakpoints. `model_catalog` already prices `cached_input_cost_per_million` + flags `supports_prompt_cache_accounting`, so accounting is ready, wiring is absent | **Greenfield (needs adapter interface change)** |
@@ -29,7 +41,7 @@ validators and telemetry.
 | 7b | Slim the **static prompt templates** in `backend/prompts/` | Templates are large and verbose: spec ~3.9K, plan ~6.9K, harness ~4.5K, tasks ~5.0K, storyboard ~8.2K est. tokens. Every core-gen/refine call re-sends a **~3.3K-token shared prefix** (`ASDD_METHODOLOGY_OVERVIEW` + `SECURITY_AND_PRIVACY_RULES` + `PROFESSIONAL_OUTPUT_RULES`) byte-identical across all four stages (`base.py:20-247`). Real redundancy/belt-and-braces phrasing exists | **Valid — must be caching-safe (new)** |
 | 8 | Surface cheaper **narrow workflows** (focused refine, section rewrite, coverage-gap) | Narrow ops exist and are cheap (`refine.focused` 768 budget); discoverability/defaulting is a product surface, not a backend gap | **Mostly product/UX** |
 
-**Net:** the safe, high-value path is **phase 0 (real accounting) → storyboard mid-first → provider caching → real batch → budget right-sizing → adaptive routing**. Core-gen downgrade — the scary part — is already shipped; what remains is regenerate/refine and the measurement+caching that lets us go further safely.
+**Net:** the safe, high-value path is **phase 0 (real accounting) → storyboard mid-first → provider caching → real batch → budget right-sizing → adaptive routing**. The core-gen downgrade — the scary part — has *already shipped in its aggressive form* (always-cheapest, escalate only on infra failure, unvalidated). So the priorities flip slightly: Phase 0 (measurement) and Phase 5 (the complexity classifier + quality-gate escalation + golden-corpus validation that retrofit the safety rails onto what's already live) are the two highest-value items; caching, batch, and budget work are pure additive savings on top.
 
 ---
 
@@ -141,31 +153,34 @@ Using ≥2–4 weeks of phase-0 ledger data:
 
 ---
 
-### Phase 5 — Adaptive routing for core generation *(riskiest; last; golden-corpus gated)*
+### Phase 5 — Retrofit safety rails onto the shipped cheap-primary routing *(riskiest; highest near-term priority)*
 
-Do **not** globally downgrade. Add a **deterministic** complexity classifier (no LLM call):
-- problem length, ambiguity markers, security/regulatory keywords, number of source artifacts/upstream refs, prior failed generations, quality-gate history, template type.
+The aggressive cost saving is **already live** (always-cheapest core gen, escalate only on infra failure, unvalidated). Phase 5 is no longer "go cheaper" — it is **making what already shipped safe**. Three workstreams, each independently shippable:
 
-Policy:
-- **High complexity →** strong first.
-- **Normal/low →** mid first with automatic strong escalation on validator failure, incomplete output, quality-gate failure, or low eval score (the escalation machinery already exists for the current mid→strong retry).
-- **HARNESS/TASKS:** conservative rollout only after golden-corpus validation.
-- **Increment generation:** keep strong until tests prove mid preserves task refs + traceability.
+**5.1 — Quality-gate-triggered tier escalation *(do this first — closes the biggest live risk).***
+Today `_runtime_fallback_route` escalates to mid only on a runtime/provider *failure*; a critic/validator *quality* failure regenerates on the **same** cheap model (`route=route`) then refunds+fails. Add: when the artifact-completeness validator or critic fails on the cheap primary, **escalate the (one funded) regenerate to the mid tier** instead of repeating on the cheap model. This is the single change that turns the live "always cheapest, hope it passes" into "cheapest, but a quality miss is caught by a stronger model." Count it (`pipeline_quality_escalations_total`).
 
-**Gating:** expand `asdd_route_golden.json` from 8 cases to a corpus covering simple/medium/complex across all stages + storyboard; run `scripts/run_llm_route_eval.py` old-vs-new through the existing `ROUTE_PROMOTION.md` process. Ship behind an `adaptive_routing` flag; default-on only after the promotion gate passes (no validator regression, quality ≥ threshold, cost reduction met, no security regression).
+**5.2 — Deterministic complexity classifier for the *starting* tier (no LLM call).**
+Signals: problem length, ambiguity markers, security/regulatory keywords, number of source artifacts/upstream refs, prior failed generations, quality-gate history, template type. Policy (note the baseline inverted — we now start cheap and decide when to start *higher*):
+- **High complexity →** start at mid (or strong for the hardest), skipping the cheap primary that would predictably fail its gates and waste a regenerate.
+- **Normal/low →** keep the current cheap-first behavior.
+- **HARNESS/TASKS:** most likely to need a higher floor; tune from Phase-0 quality-outcome data per stage.
+- **Increment generation:** unchanged — stays on mid (`_INCREMENT_TIERS = ("mid", None)`) until tests prove a cheaper tier preserves task refs + traceability.
 
-**Acceptance:** adaptive routing behind a flag with golden-corpus comparison before default (Issue AC 6). **Risk:** high. **Effort:** L.
+**5.3 — Golden-corpus validation (the gate that should have preceded the swap).**
+Expand `asdd_route_golden.json` from 8 cases to simple/medium/complex across all stages + storyboard; run `scripts/run_llm_route_eval.py` old-vs-new through `ROUTE_PROMOTION.md`. Produce the cheap-primary-vs-mid comparison (completeness, critic pass rate, traceability, cost per *successful* artifact). Put the whole cheap-primary policy behind a flag (e.g. `core_cheap_primary`) so that if the corpus shows a regression, reverting to mid-first is one toggle, not a rollback.
 
-#### 5b — Cheap-tier floor & latest-gen catalog hygiene
+**Acceptance:** quality failures escalate tier (not just infra failures); a deterministic classifier sets the starting tier; the cheap-primary policy is flag-guarded and validated old-vs-new on the expanded golden corpus with no validator/quality/security/traceability regression (Issue AC 6). **Risk:** high. **Effort:** L (5.1 is S–M and should ship soon).
 
-Core gen *already* uses the cheap/fast latest-gen model (the mid tier: Sonnet 4.6 / GPT-5.4 / Gemini 3.5 Flash). The remaining levers:
+#### 5b — Latest-gen catalog hygiene & cross-provider cost (what's *left* after the swap)
 
-1. **Let the genuinely cheapest latest-gen tier serve the low-complexity branch.** Today `mini`/`small` models (GPT-5.4 Mini at $0.75/$4.5 — ~3.3× cheaper than GPT-5.4; Gemini Flash-Lite) are not in `CORE_GENERATION_OPERATIONS`' recommended set, so routing can't pick them for a stage even when the work is trivial. Add them as **recommended (not default)** for core ops and let the Phase-5 complexity classifier route low-complexity stages there, with automatic mid→strong escalation on any validator/quality failure. This is the safe way to go *below* mid without globally downgrading.
-2. **Normalize the per-provider cheap-tier floor.** The ladder is asymmetric: Anthropic jumps mid→small (Sonnet→Haiku, no mini), OpenAI has mini but no small, Google has small (Flash-Lite). Decide each provider's cheap floor for core gen's low-complexity branch (e.g. is Haiku 4.5 acceptable for a trivial spec, or is Sonnet the Anthropic floor?) and encode it consistently.
-3. **"Latest-generation only" catalog hygiene.** The catalog is already the single source of truth with deprecated models flagged. Add a written periodic-review step (e.g. quarterly + on any provider release) so the next cheaper fast model (next Flash/Haiku/mini) is eval'd on the golden corpus and swapped in one place — keeping the cheap tier on the current generation without ad-hoc edits.
-4. **(Optional, sensitive) cheapest-provider-first for platform-key generations.** Gemini 3.5 Flash is the cheapest mid by output ($9/M vs $15/M). `allow_cross_provider` exists today only as a fallback; using it as a *primary* cost-optimizing choice for platform-key (non-BYO) generations is a real lever — but it changes which provider a user's output comes from, so it ships only behind golden-corpus quality parity and a product decision. BYO-key users always stay on their chosen provider.
+The deterministic cheap-tier floor is now shipped (Haiku 4.5 / GPT-5.4 Mini are core-gen defaults). Remaining levers:
 
-**Acceptance:** cheap-tier eligibility + catalog-hygiene policy land with the same golden-corpus gating as Phase 5; no quality/security/traceability regression. **Risk:** med-high (folds into Phase 5's gating). **Effort:** S-M on top of Phase 5.
+1. **Normalize the per-provider cheap-tier floor.** The tier ladder is still asymmetric: Anthropic mid→small (Sonnet→Haiku, no mini), OpenAI mid→mini (GPT-5.4→Mini, no small), Google mid→small (Flash→Flash-Lite). The classifier (5.2) should reason about "how far below mid is safe per provider" consistently rather than per-provider accident.
+2. **"Latest-generation only" catalog hygiene.** The catalog is the single source of truth with deprecated models flagged. Add a written periodic-review step (quarterly + on any provider release) so the next cheaper fast model (next Flash/Haiku/mini) is eval'd on the golden corpus and swapped in one place.
+3. **(Optional, sensitive) cheapest-provider-first for platform-key generations.** Gemini 3.5 Flash is the cheapest mid by output ($9/M vs $15/M). `allow_cross_provider` exists today only as a fallback; using it as a *primary* cost choice for platform-key (non-BYO) generations is a real lever — but it changes which provider a user's output comes from, so it ships only behind golden-corpus quality parity and a product decision. BYO-key users always stay on their chosen provider.
+
+**Acceptance:** catalog-hygiene policy documented; any further tier/provider change rides the same golden-corpus gating as Phase 5. **Risk:** med. **Effort:** S–M.
 
 ---
 
@@ -188,14 +203,16 @@ A change promotes only if cost drops **and** no quality/security/traceability me
 ## 5. Rollout order (dependency + risk ordered)
 
 ```
-Phase 0  Real usage accounting + DB cost ledger      (foundation, low risk)
-Phase 1  Storyboard mid-first + strong escalation     (high ROI, low-med risk)
-Phase 2  Provider prompt caching (+ extraction #7)    (med risk, adapter change)
-Phase 2b Slim static prompt templates (caching-safe)   (med risk, co-designed w/ Phase 2)
-Phase 3  Real batch for eval/PR-check/summaries       (med risk, worker)
-Phase 4  Budget right-sizing from ledger percentiles  (med risk, repair-guarded)
-Phase 5  Adaptive routing for core gen                (high risk, flag + corpus gated)
+Phase 0  Real usage accounting + DB cost ledger        (foundation, low risk)
+Phase 5.1 Quality-gate-triggered tier escalation        (HIGH PRIORITY — closes a live risk; S–M)
+Phase 1  Storyboard mid-first + strong escalation       (high ROI, low-med risk)
+Phase 2  Provider prompt caching (+ extraction #7)      (med risk, adapter change)
+Phase 2b Slim static prompt templates (caching-safe)    (med risk, co-designed w/ Phase 2)
+Phase 3  Real batch for eval/PR-check/summaries         (med risk, worker)
+Phase 4  Budget right-sizing from ledger percentiles    (med risk, repair-guarded)
+Phase 5.2/5.3 Complexity classifier + golden-corpus gate (high risk, flag-guarded)
+Phase 5b Catalog hygiene / cross-provider cost          (med risk, corpus-gated)
    ↳ cheaper-workflow UX (#8) ships opportunistically alongside any phase
 ```
 
-This matches the issue's own "safest initial savings path = caching + batch + storyboard," but front-loads the measurement foundation the issue lists as AC #1 — because every later phase's safety case depends on real numbers we don't capture today.
+Note the reordering vs. the original plan: because the cheap-primary swap already shipped *without* its safety rails, **Phase 5.1 (escalate to a stronger tier on a quality-gate failure) jumps near the front** — it's small and it closes the biggest live risk. Phase 0 still leads because every later phase's safety case (including 5.2/5.3's golden-corpus comparison) depends on the real per-call cost/quality numbers we don't capture today.

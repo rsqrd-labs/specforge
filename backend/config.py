@@ -65,6 +65,11 @@ class Settings(BaseSettings):
     llm_stream_idle_timeout_seconds: int = 180
     llm_stream_hard_cap_seconds: int = 900
     llm_complete_timeout_seconds: int = 120
+    # Phase 0 (issue #26) LLM cost ledger: persist one llm_cost_events row per
+    # provider call. Fire-and-forget and fully exception-swallowed, but kept
+    # behind a flag so a test/CI environment without a DB never even attempts
+    # the write.
+    llm_cost_ledger_enabled: bool = True
     max_request_body_bytes: int = 1_000_000
     tech_safety_policy_max_age_days: int = 30
     tech_safety_osv_cache_ttl_seconds: int = 86_400

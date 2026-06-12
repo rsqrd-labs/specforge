@@ -50,7 +50,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 import prompts.spec_clarification as clarification_prompt
 from models.workspace import Workspace
+from services.llm.cost_ledger import LLMCostContext
 from services.llm.gateway import get_llm
+from services.llm.instrumented_adapter import InstrumentedAdapter
 from services.llm.provider_config import JUDGE_MODELS
 from services.security.prompt_guard import PromptGuard
 from services.security.sanitizer import sanitize_text
@@ -145,7 +147,19 @@ async def request_clarifying_questions(
     user_prompt = clarification_prompt.build_user_prompt(workspace.problem_statement)
 
     try:
-        adapter = get_llm(provider, judge_model)
+        adapter = InstrumentedAdapter(
+            get_llm(provider, judge_model),
+            provider=provider,
+            model=judge_model,
+            stage_type="spec",
+            action="clarify",
+            model_tier="small",
+            operation="clarify.questions",
+            cost_context=LLMCostContext(
+                workspace_id=workspace.id,
+                product_surface="clarifier",
+            ),
+        )
         async with asyncio.timeout(_JUDGE_TIMEOUT_SECONDS):
             raw = await adapter.complete(system_prompt, user_prompt, max_tokens=600)
     except asyncio.TimeoutError:

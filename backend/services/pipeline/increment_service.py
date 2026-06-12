@@ -76,7 +76,9 @@ from services.integrations.task_parser import (
     parse_tasks,
 )
 from services.llm.base import ProviderError, ProviderTimeoutError
+from services.llm.cost_ledger import LLMCostContext
 from services.llm.gateway import get_llm
+from services.llm.instrumented_adapter import InstrumentedAdapter
 from services.llm.output_budget import output_budget_for_operation
 from services.llm.routing import LLMRoutingError, resolve_llm_route
 from services.observability import (
@@ -242,7 +244,21 @@ class IncrementService:
         user_prompt = _user_prompt(stages, feature_request, baseline_max)
 
         try:
-            adapter = get_llm(route.provider, route.model)
+            adapter = InstrumentedAdapter(
+                get_llm(route.provider, route.model),
+                provider=route.provider,
+                model=route.model,
+                stage_type="tasks",
+                action="increment",
+                model_tier=route.model_tier,
+                operation=route.operation,
+                cost_context=LLMCostContext(
+                    workspace_id=workspace_id,
+                    increment_id=increment_id,
+                    credit_reason="increment",
+                    product_surface="increment",
+                ),
+            )
             completion = await asyncio.wait_for(
                 adapter.complete(
                     system_prompt,

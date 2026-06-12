@@ -40,11 +40,16 @@ import structlog
 from services import langfuse_service
 from services.llm.base import BaseLLMAdapter
 from services.llm.completion import LLMCompletionInfo
+from services.llm.cost_ledger import LLMCostContext, persist_cost_event
 from services.llm.provider_status import (
     record_provider_failure,
     record_provider_success,
 )
-from services.llm.usage import estimate_cost_usd, estimated_usage_from_text
+from services.llm.usage import (
+    estimate_cost_usd,
+    estimated_usage_from_text,
+    normalize_provider_usage,
+)
 from services.observability import record_llm_cost_event, redact_sensitive_data
 
 logger = structlog.get_logger(__name__)
@@ -67,6 +72,7 @@ class InstrumentedAdapter(BaseLLMAdapter):
         cache_hit: bool = False,
         batch: bool = False,
         cross_provider_fallback: bool = False,
+        cost_context: LLMCostContext | None = None,
     ) -> None:
         self._wrapped = wrapped
         self._span_id = span_id
@@ -81,6 +87,7 @@ class InstrumentedAdapter(BaseLLMAdapter):
         self._cache_hit = cache_hit
         self._batch = batch
         self._cross_provider_fallback = cross_provider_fallback
+        self._cost_context = cost_context
         # Set after each recorded generation so downstream code (T-127 eval
         # score linking) can attach scores or dataset items to the same id.
         self.last_generation_id: str | None = None
@@ -113,7 +120,9 @@ class InstrumentedAdapter(BaseLLMAdapter):
         start = time.perf_counter()
         response: str = ""
         try:
-            response = await self._wrapped.complete(system, user, max_tokens)
+            # Forward max_tokens as a keyword so the wrapper is transparent to
+            # callers/tests that pass (and assert) it by name.
+            response = await self._wrapped.complete(system, user, max_tokens=max_tokens)
             record_provider_success(self._provider)
             return response
         except Exception as exc:
@@ -153,23 +162,33 @@ class InstrumentedAdapter(BaseLLMAdapter):
             )
             record_llm_cost_event(cost_metadata)
             logger.info("llm.cost_recorded", **cost_metadata)
-            client = langfuse_service.get_langfuse_client()
-            generation_id = await client.create_generation(
-                span_id=self._span_id,
-                trace_id=self._trace_id,
-                name=f"{self._provider}.{self._action}",
-                provider=self._provider,
-                model=self._model,
-                input=redacted_input,
-                output=redacted_output,
-                metadata={
-                    "stage_type": self._stage_type,
-                    "action": self._action,
-                    "latency_ms": latency_ms,
-                    **cost_metadata,
-                },
-            )
+            # Create the Langfuse generation first so its id can be persisted on
+            # the cost-ledger row — the stage manager later sets quality_outcome
+            # on that row by the same generation_id.  Langfuse failures must not
+            # block the ledger write, so this is its own guarded step.
+            generation_id: str | None = None
+            try:
+                client = langfuse_service.get_langfuse_client()
+                generation_id = await client.create_generation(
+                    span_id=self._span_id,
+                    trace_id=self._trace_id,
+                    name=f"{self._provider}.{self._action}",
+                    provider=self._provider,
+                    model=self._model,
+                    input=redacted_input,
+                    output=redacted_output,
+                    metadata={
+                        "stage_type": self._stage_type,
+                        "action": self._action,
+                        "latency_ms": latency_ms,
+                        **cost_metadata,
+                    },
+                )
+            except Exception:
+                logger.error("instrumented_adapter.langfuse.failed", exc_info=True)
             self.last_generation_id = generation_id
+            cost_metadata["generation_id"] = generation_id
+            await persist_cost_event(cost_metadata)
         except Exception:
             # Defensive: a bug in the wrapper itself must never break the
             # caller. LangfuseClient already swallows but the recorder mock
@@ -185,19 +204,29 @@ class InstrumentedAdapter(BaseLLMAdapter):
         output: str,
         latency_ms: int,
     ) -> dict[str, Any]:
-        usage = estimated_usage_from_text(
-            provider=self._provider,
-            model=self._model,
-            system=system,
-            user=user,
-            output=output,
-        )
+        # Prefer the provider-reported usage captured by the wrapped adapter
+        # (real input/cached/output/reasoning tokens); fall back to the
+        # tokenizer estimate only when no usage chunk arrived.
+        completion = self.last_completion
+        usage = None
+        if completion is not None and completion.usage is not None:
+            usage = normalize_provider_usage(self._provider, completion.usage)
+        if usage is None or (
+            usage.input_tokens is None and usage.output_tokens is None
+        ):
+            usage = estimated_usage_from_text(
+                provider=self._provider,
+                model=self._model,
+                system=system,
+                user=user,
+                output=output,
+            )
         try:
             estimated_cost = estimate_cost_usd(self._provider, self._model, usage)
         except Exception:
             estimated_cost = None
 
-        return {
+        metadata = {
             "provider": self._provider,
             "model": self._model,
             "model_tier": self._model_tier,
@@ -207,13 +236,21 @@ class InstrumentedAdapter(BaseLLMAdapter):
             "input_tokens": usage.input_tokens,
             "cached_input_tokens": usage.cached_input_tokens,
             "output_tokens": usage.output_tokens,
+            "reasoning_tokens": usage.reasoning_tokens,
             "provider_usage_raw": usage.provider_usage_raw,
             "usage_estimation_method": usage.usage_estimation_method,
             "estimated_cost_usd": (
                 float(estimated_cost) if estimated_cost is not None else None
             ),
             "latency_ms": latency_ms,
+            "finish_reason": completion.finish_reason if completion else None,
+            "stopped_by_limit": (
+                bool(completion.stopped_by_limit) if completion else False
+            ),
             "cache_hit": self._cache_hit,
             "batch": self._batch,
             "cross_provider_fallback": self._cross_provider_fallback,
         }
+        if self._cost_context is not None:
+            metadata.update(self._cost_context.as_metadata())
+        return metadata

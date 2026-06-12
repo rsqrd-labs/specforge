@@ -15,6 +15,7 @@ from services.llm.provider_status import CIRCUIT_REJECTIONS, can_route
 
 if TYPE_CHECKING:
     from services.llm.base import BaseLLMAdapter
+    from services.llm.cost_ledger import LLMCostContext
 
 logger = logging.getLogger(__name__)
 
@@ -108,6 +109,49 @@ def get_llm(
     return new_adapter
 
 
+def get_instrumented_llm(
+    provider: str,
+    model: str,
+    *,
+    operation: str,
+    stage_type: str = "-",
+    action: str | None = None,
+    model_tier: str = "unknown",
+    prompt_version: str = "local",
+    cache_hit: bool = False,
+    batch: bool = False,
+    cross_provider_fallback: bool = False,
+    cost_context: "LLMCostContext | None" = None,
+    span_id: str | None = None,
+    trace_id: str | None = None,
+) -> "BaseLLMAdapter":
+    """A circuit-aware adapter wrapped in InstrumentedAdapter for cost capture.
+
+    The single front door for call sites that previously used the raw adapter
+    (storyboard, increment, clarifier, judge calls) so every LLM call lands in
+    the Phase-0 cost ledger. ``cost_context`` carries the product-surface FK
+    attribution without growing this signature per domain field.
+    """
+    from services.llm.instrumented_adapter import InstrumentedAdapter  # noqa: PLC0415
+
+    return InstrumentedAdapter(
+        get_llm(provider, model),
+        span_id=span_id,
+        trace_id=trace_id,
+        provider=provider,
+        model=model,
+        stage_type=stage_type,
+        action=action or operation,
+        model_tier=model_tier,
+        prompt_version=prompt_version,
+        operation=operation,
+        cache_hit=cache_hit,
+        batch=batch,
+        cross_provider_fallback=cross_provider_fallback,
+        cost_context=cost_context,
+    )
+
+
 async def complete_with_timeout(
     provider: str,
     model: str,
@@ -116,14 +160,32 @@ async def complete_with_timeout(
     max_tokens: int,
     *,
     timeout: float = _WALL_CLOCK_TIMEOUT,
+    operation: str | None = None,
+    stage_type: str = "-",
+    model_tier: str = "unknown",
+    cost_context: "LLMCostContext | None" = None,
 ) -> str:
     """Run adapter.complete() under a hard wall-clock timeout via asyncio.wait_for.
 
     Callers that need streaming should apply asyncio.timeout() around the
     stream loop directly; this helper targets one-shot completion calls where
     the entire coroutine must finish within *timeout* seconds.  H-6 — T-182.
+
+    When *operation* is supplied the call is wrapped in InstrumentedAdapter so
+    it is recorded in the cost ledger; omitting it preserves the original raw
+    behaviour for callers that record elsewhere.
     """
-    adapter = get_llm(provider, model)
+    if operation is not None:
+        adapter: BaseLLMAdapter = get_instrumented_llm(
+            provider,
+            model,
+            operation=operation,
+            stage_type=stage_type,
+            model_tier=model_tier,
+            cost_context=cost_context,
+        )
+    else:
+        adapter = get_llm(provider, model)
     return await asyncio.wait_for(
         adapter.complete(system, user, max_tokens),
         timeout=timeout,
@@ -143,6 +205,9 @@ async def call_judge_model(
     provider: str | None = None,
     max_tokens: int = 2048,
     timeout: float | None = None,
+    operation: str = "judge.call",
+    stage_type: str = "-",
+    cost_context: "LLMCostContext | None" = None,
 ) -> str:
     """Run a one-shot completion against the cheap judge model for *provider*.
 
@@ -166,6 +231,10 @@ async def call_judge_model(
         user_prompt,
         max_tokens,
         timeout=effective_timeout,
+        operation=operation,
+        stage_type=stage_type,
+        model_tier="small",
+        cost_context=cost_context,
     )
 
 

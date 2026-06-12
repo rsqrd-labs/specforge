@@ -130,29 +130,33 @@ async def test_watchdog_enforces_hard_cap_on_runaway_stream() -> None:
     assert exc_info.value.kind == "hard_cap"
 
 
-def test_runtime_fallback_route_resolves_same_provider_strong_tier() -> None:
+def test_runtime_fallback_route_escalates_cheap_primary_to_mid_tier() -> None:
+    # Core gen now starts on the cheap primary (Haiku, small); a runtime failure
+    # escalates to the provider's mid tier (Sonnet).
     primary = MagicMock()
     primary.provider = "anthropic"
-    primary.model = "claude-sonnet-4-6"
-    primary.model_tier = "mid"
+    primary.model = "claude-haiku-4-5-20251001"
+    primary.model_tier = "small"
     primary.operation = "spec.generate"
 
     fallback = _runtime_fallback_route(primary)
 
     assert fallback is not None
     assert fallback.provider == "anthropic"
-    assert fallback.model_tier == "strong"
+    assert fallback.model_tier == "mid"
+    assert fallback.model == "claude-sonnet-4-6"
     assert fallback.model != primary.model
 
 
-def test_runtime_fallback_route_is_none_when_already_on_fallback_tier() -> None:
-    strong = MagicMock()
-    strong.provider = "anthropic"
-    strong.model = "claude-opus-4-8"
-    strong.model_tier = "strong"
-    strong.operation = "spec.generate"
+def test_runtime_fallback_route_is_none_when_already_on_escalation_tier() -> None:
+    # A mid-tier failure has nowhere left to escalate (mid IS the escalation tier).
+    mid = MagicMock()
+    mid.provider = "anthropic"
+    mid.model = "claude-sonnet-4-6"
+    mid.model_tier = "mid"
+    mid.operation = "spec.generate"
 
-    assert _runtime_fallback_route(strong) is None
+    assert _runtime_fallback_route(mid) is None
 
 
 def test_output_budgets_carry_reasoning_headroom() -> None:
@@ -168,12 +172,15 @@ def test_output_budgets_carry_reasoning_headroom() -> None:
 
 
 def test_resolve_output_budget_clamps_to_model_ceiling() -> None:
-    # Haiku's catalog ceiling (4096) is below the spec budget — clamped.
+    # Gemini Flash-Lite's catalog ceiling (4096) is below the spec budget — the
+    # budget is clamped down to the model's hard ceiling. (Haiku 4.5 / GPT-5.4
+    # Mini ceilings were raised to 32768 so the cheap core-gen primaries are not
+    # clamped.)
     assert (
         resolve_output_budget(
             "spec.generate",
-            provider="anthropic",
-            model="claude-haiku-4-5-20251001",
+            provider="google",
+            model="gemini-3.1-flash-lite",
         )
         == 4096
     )

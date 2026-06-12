@@ -74,6 +74,7 @@ from prompts.storyboard import (
 )
 from services.credit_service import InsufficientCreditsError, credit_service
 from services.llm.base import ProviderError
+from services.llm.cost_ledger import LLMCostContext
 from services.llm.gateway import complete_with_timeout
 from services.observability import (
     get_structured_logger,
@@ -728,6 +729,10 @@ async def _complete_and_validate(
     """
 
     user_prompt = build_user_prompt(source)
+    cost_context = LLMCostContext(
+        workspace_id=source.workspace_id,
+        product_surface="storyboard",
+    )
 
     async def _repair(repair_prompt: str) -> str:
         try:
@@ -737,6 +742,9 @@ async def _complete_and_validate(
                 SYSTEM_PROMPT,
                 repair_prompt,
                 _OUTPUT_TOKEN_BUDGET,
+                operation="storyboard.generate",
+                stage_type="storyboard",
+                cost_context=cost_context,
             )
         except TimeoutError as exc:
             raise StoryboardPayloadError("parse", "llm repair timed out") from exc
@@ -750,6 +758,9 @@ async def _complete_and_validate(
             SYSTEM_PROMPT,
             user_prompt,
             _OUTPUT_TOKEN_BUDGET,
+            operation="storyboard.generate",
+            stage_type="storyboard",
+            cost_context=cost_context,
         )
     except TimeoutError as exc:
         raise StoryboardPayloadError("parse", "llm completion timed out") from exc

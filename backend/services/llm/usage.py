@@ -22,6 +22,10 @@ class NormalizedUsage:
     output_tokens: int | None
     provider_usage_raw: dict | None
     usage_estimation_method: UsageEstimationMethod
+    # Observability breakout only: reasoning/thinking tokens are ALREADY
+    # included in output_tokens and billed at the output rate, so this value is
+    # never added to estimate_cost_usd (that would double-count).
+    reasoning_tokens: int | None = None
 
 
 def normalize_provider_usage(provider: str, raw_usage: Any) -> NormalizedUsage:
@@ -48,6 +52,7 @@ def normalize_provider_usage(provider: str, raw_usage: Any) -> NormalizedUsage:
         output_tokens=_int_or_none(usage.get("output_tokens")),
         provider_usage_raw=usage,
         usage_estimation_method="provider_reported",
+        reasoning_tokens=_int_or_none(usage.get("reasoning_tokens")),
     )
 
 
@@ -117,6 +122,12 @@ def estimated_usage_from_text(
 
 def _normalize_openai_usage(usage: dict) -> NormalizedUsage:
     details = _to_dict(usage.get("prompt_tokens_details"))
+    # Reasoning tokens live under completion_tokens_details (Chat Completions)
+    # or output_tokens_details (Responses API); both are already counted inside
+    # completion/output_tokens.
+    output_details = _to_dict(
+        usage.get("completion_tokens_details") or usage.get("output_tokens_details")
+    )
     return NormalizedUsage(
         input_tokens=_first_int(usage, "prompt_tokens", "input_tokens"),
         cached_input_tokens=_first_int(details, "cached_tokens", "cached_input_tokens"),
@@ -127,6 +138,7 @@ def _normalize_openai_usage(usage: dict) -> NormalizedUsage:
         ),
         provider_usage_raw=usage,
         usage_estimation_method="provider_reported",
+        reasoning_tokens=_first_int(output_details, "reasoning_tokens"),
     )
 
 
@@ -160,6 +172,8 @@ def _normalize_google_usage(usage: dict) -> NormalizedUsage:
         output_tokens=(candidates + thoughts) if candidates is not None else thoughts,
         provider_usage_raw=usage,
         usage_estimation_method="provider_reported",
+        # thoughtsTokenCount is already folded into output_tokens above.
+        reasoning_tokens=(thoughts or None),
     )
 
 

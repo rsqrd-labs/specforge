@@ -43,6 +43,20 @@ class FakeRedis:
 
 
 @pytest.fixture(autouse=True)
+def _disable_llm_cost_ledger(monkeypatch):
+    """Disable the Phase-0 cost-ledger DB write in unit tests.
+
+    The write is fire-and-forget and fully exception-swallowed, but with no
+    Postgres in the unit-test environment it would still attempt (and slowly
+    time out) a real connection on every instrumented LLM call. Off by default
+    here; ``test_llm_cost_ledger.py`` re-enables it against a stubbed session.
+    """
+    from config import settings
+
+    monkeypatch.setattr(settings, "llm_cost_ledger_enabled", False, raising=False)
+
+
+@pytest.fixture(autouse=True)
 def _reset_shared_redis():
     """Reset the module-level + singleton-cached Redis clients between tests.
 

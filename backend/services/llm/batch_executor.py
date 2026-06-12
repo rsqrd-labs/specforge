@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from services.llm.base import BaseLLMAdapter
+from services.llm.cost_ledger import LLMCostContext
 from services.llm.cost_registry import get_provider_capabilities, model_tier
 from services.llm.gateway import get_llm
 from services.llm.instrumented_adapter import InstrumentedAdapter
@@ -66,6 +67,7 @@ async def complete_background_llm(
     prompt_version: str = "local",
     allow_batch: bool = True,
     adapter_factory: Callable[[str, str], BaseLLMAdapter] = get_llm,
+    cost_context: LLMCostContext | None = None,
 ) -> BackgroundLLMResult:
     if operation in INTERACTIVE_OPERATIONS:
         raise BatchEligibilityError(
@@ -89,6 +91,7 @@ async def complete_background_llm(
             cache_hit=False,
             batch=batch,
             cross_provider_fallback=False,
+            cost_context=cost_context,
         )
         output = await instrumented.complete(system, user, max_tokens=max_tokens)
         return BackgroundLLMResult(
