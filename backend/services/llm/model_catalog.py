@@ -42,6 +42,46 @@ CORE_GENERATION_OPERATIONS = (
     "regenerate.full",
 )
 
+# --- Core-generation tier ladder (issue #26 Phase 5b) -------------------------
+# The single, declarative source of truth for *how far below mid* each provider's
+# core generation is allowed to start, and where it escalates. Phase 5 shipped a
+# cheap-primary policy as an ad-hoc per-provider dict in ``stage_manager``; Phase
+# 5b normalizes that into one validated ladder here so the per-provider floor is a
+# deliberate, documented decision rather than a per-provider accident.
+#
+# Each tuple is ordered **cheapest viable core-gen tier → escalation tiers** and
+# is read as a capability ladder, not a cost ladder. The runtime cheap-primary
+# policy derives ``(primary, fallback) = (ladder[0], ladder[1])`` from it (see
+# ``stage_manager.CORE_GENERATION_TIER_POLICY``); the deterministic complexity
+# classifier (Phase 5.2) may raise the *start* to any later tier in the ladder.
+#
+# Per-provider viability rationale (the normalization itself — "how far below mid
+# is safe here"):
+#   * anthropic: ``small`` (Haiku 4.5) is a viable core-gen default → start one
+#     tier below mid; escalate Sonnet 4.6 (mid) → Opus 4.8 (strong).
+#   * openai: ``mini`` (GPT-5.4 Mini) is a viable core-gen default → start one
+#     tier below mid; escalate GPT-5.4 (mid) → GPT-5.5 (strong).
+#   * google: ``small`` (Flash-Lite) is **deliberately excluded** — it is not a
+#     core-gen default (lightweight routing/judge only), so Google's floor is
+#     ``mid`` (Flash). Its ``strong`` escalation has no *active* model today
+#     (Pro Preview is preview-only), so a failure surfaces directly; the ladder
+#     still declares ``strong`` as the escalation slot for when one ships.
+#
+# Lowering any provider's floor (e.g. Google → ``small``) changes which model
+# actually runs and therefore requires the Phase-5 golden-corpus live gate
+# (``docs/evals/ROUTE_PROMOTION.md``) before it is edited here.
+CORE_GENERATION_TIER_LADDER: dict[str, tuple[str, ...]] = {
+    "anthropic": ("small", "mid", "strong"),
+    "openai": ("mini", "mid", "strong"),
+    "google": ("mid", "strong"),
+}
+
+# Capability ordering used only to assert each ladder is monotonically
+# increasing. ``small``/``mini`` are cross-provider peers (a provider never lists
+# both), so they share rank 0; ``mid`` < ``strong``. This is the catalog's own
+# ordering for ladder hygiene and is independent of the classifier's floor rank.
+_CORE_TIER_RANK: dict[str, int] = {"small": 0, "mini": 0, "mid": 1, "strong": 2}
+
 PROVIDER_CAPABILITIES: dict[str, dict[str, bool]] = {
     "anthropic": {
         "supports_streaming": True,
@@ -600,6 +640,89 @@ def validate_model_catalog() -> None:
                     f"default: provider={provider!r}, operation={operation!r}, "
                     f"defaults={defaults!r}"
                 )
+
+    validate_core_generation_ladder()
+
+
+def core_generation_ladder(provider: str) -> tuple[str, ...]:
+    """The declared cheapest-first core-generation tier ladder for a provider."""
+    _require_provider(provider)
+    ladder = CORE_GENERATION_TIER_LADDER.get(provider)
+    if not ladder:
+        raise RuntimeError(f"No core-generation tier ladder declared for {provider!r}")
+    return ladder
+
+
+def core_generation_tier_policy(provider: str) -> tuple[str, str]:
+    """Derive the live ``(primary, fallback)`` cheap-primary policy from the ladder.
+
+    The runtime policy is exactly ``(ladder[0], ladder[1])`` — the cheapest viable
+    starting tier and its one-shot escalation. Deriving it here (rather than
+    hand-maintaining a parallel dict) keeps the per-provider floor a single,
+    catalog-validated decision (issue #26 Phase 5b).
+    """
+    ladder = core_generation_ladder(provider)
+    return ladder[0], ladder[1]
+
+
+def validate_core_generation_ladder() -> None:
+    """Assert every provider's core-gen tier ladder is well-formed (Phase 5b).
+
+    Hygiene invariants (CI-enforced via ``validate_model_catalog``):
+
+    * Every required provider declares a ladder of at least ``(primary, fallback)``.
+    * Each tier is a valid model tier and the ladder is strictly increasing in
+      capability rank (cheapest first), so an escalation never *lowers* capability.
+    * The **primary** tier resolves to exactly one active core-generation default
+      model — the model that actually runs by default. Escalation tiers may have
+      no active model today (e.g. Google ``strong``: a failure surfaces directly),
+      so they are not required to resolve; ``_validate_entry`` independently bars
+      any deprecated/preview model from being a default.
+    """
+    active_core_default_tiers: dict[tuple[str, str], set[str]] = {}
+    for entry in MODEL_CATALOG:
+        if entry.status != "active":
+            continue
+        defaults_core = any(
+            op in entry.default_operations for op in CORE_GENERATION_OPERATIONS
+        )
+        if defaults_core:
+            active_core_default_tiers.setdefault(
+                (entry.provider, entry.tier), set()
+            ).add(entry.model_id)
+
+    for provider in REQUIRED_PROVIDERS:
+        ladder = CORE_GENERATION_TIER_LADDER.get(provider)
+        if not ladder or len(ladder) < 2:
+            raise RuntimeError(
+                f"Provider {provider!r} must declare a core-generation ladder of "
+                f"at least (primary, fallback); got {ladder!r}"
+            )
+        previous_rank = -1
+        for tier in ladder:
+            if tier not in _CORE_TIER_RANK:
+                raise RuntimeError(
+                    f"{provider!r} core-generation ladder references non-core tier "
+                    f"{tier!r}"
+                )
+            rank = _CORE_TIER_RANK[tier]
+            if rank <= previous_rank:
+                raise RuntimeError(
+                    f"{provider!r} core-generation ladder is not strictly "
+                    f"increasing in capability: {ladder!r}"
+                )
+            previous_rank = rank
+
+        primary_tier = ladder[0]
+        primary_defaults = active_core_default_tiers.get(
+            (provider, primary_tier), set()
+        )
+        if len(primary_defaults) != 1:
+            raise RuntimeError(
+                f"{provider!r} core-generation primary tier {primary_tier!r} must "
+                f"resolve to exactly one active default model; got "
+                f"{sorted(primary_defaults)!r}"
+            )
 
 
 def _validate_entry(entry: ModelCatalogEntry) -> None:

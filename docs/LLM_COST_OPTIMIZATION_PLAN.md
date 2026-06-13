@@ -171,15 +171,15 @@ Signals: problem length, ambiguity markers, security/regulatory keywords, number
 
 **Acceptance:** quality failures escalate tier (not just infra failures); a deterministic classifier sets the starting tier; the cheap-primary policy is flag-guarded and validated old-vs-new on the expanded golden corpus with no validator/quality/security/traceability regression (Issue AC 6). **Risk:** high. **Effort:** L (5.1 is S–M and should ship soon).
 
-#### 5b — Latest-gen catalog hygiene & cross-provider cost (what's *left* after the swap)
+#### 5b — Latest-gen catalog hygiene & cross-provider cost (what's *left* after the swap) *(Shipped — levers 1+2; lever 3 deferred.)*
 
-The deterministic cheap-tier floor is now shipped (Haiku 4.5 / GPT-5.4 Mini are core-gen defaults). Remaining levers:
+The deterministic cheap-tier floor is now shipped (Haiku 4.5 / GPT-5.4 Mini are core-gen defaults). Levers:
 
-1. **Normalize the per-provider cheap-tier floor.** The tier ladder is still asymmetric: Anthropic mid→small (Sonnet→Haiku, no mini), OpenAI mid→mini (GPT-5.4→Mini, no small), Google mid→small (Flash→Flash-Lite). The classifier (5.2) should reason about "how far below mid is safe per provider" consistently rather than per-provider accident.
-2. **"Latest-generation only" catalog hygiene.** The catalog is the single source of truth with deprecated models flagged. Add a written periodic-review step (quarterly + on any provider release) so the next cheaper fast model (next Flash/Haiku/mini) is eval'd on the golden corpus and swapped in one place.
-3. **(Optional, sensitive) cheapest-provider-first for platform-key generations.** Gemini 3.5 Flash is the cheapest mid by output ($9/M vs $15/M). `allow_cross_provider` exists today only as a fallback; using it as a *primary* cost choice for platform-key (non-BYO) generations is a real lever — but it changes which provider a user's output comes from, so it ships only behind golden-corpus quality parity and a product decision. BYO-key users always stay on their chosen provider.
+1. **Normalize the per-provider cheap-tier floor.** *(Done.)* The asymmetric ladder (Anthropic mid→small, OpenAI mid→mini, Google mid-floor) is now a single declarative `CORE_GENERATION_TIER_LADDER` in `model_catalog.py` — the source of truth. `stage_manager.CORE_GENERATION_TIER_POLICY` is **derived** from it (`core_generation_tier_policy()` → `(ladder[0], ladder[1])`), not hand-maintained. The per-provider viability decision ("how far below mid is safe") is documented in the ladder itself: Google floors at `mid` because Flash-Lite is not a core-gen default. **Behavior-preserving:** a pinned test asserts the derived policy is byte-identical to what Phase 5 shipped — no route changed.
+2. **"Latest-generation only" catalog hygiene.** *(Done.)* `validate_core_generation_ladder()` (run inside `validate_model_catalog()`, CI-enforced) asserts each ladder is strictly capability-increasing and each primary tier resolves to exactly one active, non-deprecated core-gen default. The written quarterly/on-release periodic-review process — deprecate-don't-delete, eval-before-promote, one-place swap — lives in [`docs/evals/CATALOG_HYGIENE.md`](evals/CATALOG_HYGIENE.md).
+3. **(Optional, sensitive) cheapest-provider-first for platform-key generations.** *(Deferred — intentionally not built.)* Routing platform-key (non-BYO) gen to the cheapest-mid provider (Gemini 3.5 Flash) changes *which provider* a user's output comes from, so it ships only behind golden-corpus quality parity **and** a product decision. No flag is added (dead config that gates nothing is worse than a deferral note). `allow_cross_provider` stays fallback-only; BYO-key users always stay on their provider. See `CATALOG_HYGIENE.md` §4.
 
-**Acceptance:** catalog-hygiene policy documented; any further tier/provider change rides the same golden-corpus gating as Phase 5. **Risk:** med. **Effort:** S–M.
+**Acceptance:** *(Met for 1+2.)* catalog-hygiene policy documented (`CATALOG_HYGIENE.md`); the per-provider floor is one validated ladder; any further tier/provider change rides the same golden-corpus gating as Phase 5 (`ROUTE_PROMOTION.md`). **Risk:** med. **Effort:** S–M.
 
 ---
 
@@ -210,7 +210,7 @@ Phase 2b Slim static prompt templates (caching-safe)    (med risk, co-designed w
 Phase 3  Real batch for eval/PR-check/summaries         (med risk, worker)
 Phase 4  Budget right-sizing from ledger percentiles    (med risk, repair-guarded)
 Phase 5.2/5.3 Complexity classifier + golden-corpus gate (high risk, flag-guarded)
-Phase 5b Catalog hygiene / cross-provider cost          (med risk, corpus-gated)
+Phase 5b Catalog hygiene / normalized tier ladder       (DONE — levers 1+2; lever 3 deferred)
    ↳ cheaper-workflow UX (#8) ships opportunistically alongside any phase
 ```
 

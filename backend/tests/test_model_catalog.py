@@ -2,12 +2,18 @@ from __future__ import annotations
 
 import pytest
 
+from services.llm import model_catalog as catalog_module
 from services.llm.model_catalog import (
     CORE_GENERATION_OPERATIONS,
+    CORE_GENERATION_TIER_LADDER,
     MODEL_CATALOG,
+    REQUIRED_PROVIDERS,
+    core_generation_ladder,
+    core_generation_tier_policy,
     default_model_for_operation,
     model_entry,
     model_request_policy,
+    validate_core_generation_ladder,
     validate_model_catalog,
 )
 
@@ -54,6 +60,84 @@ def test_preview_gemini_models_are_cataloged_but_not_production_defaults() -> No
 
         assert entry.status == "preview"
         assert entry.default_operations == ()
+
+
+# --- Phase 5b: core-generation tier ladder -----------------------------------
+
+
+def test_every_required_provider_declares_a_ladder() -> None:
+    assert set(CORE_GENERATION_TIER_LADDER) == set(REQUIRED_PROVIDERS)
+
+
+def test_derived_policy_is_byte_identical_to_shipped_cheap_primary() -> None:
+    # Phase 5b is a *behavior-preserving* normalization: deriving the live
+    # cheap-primary policy from the catalog ladder must reproduce exactly what
+    # Phase 5 shipped as a hand-maintained dict. If this changes, a model
+    # actually runs differently and the Phase-5 golden-corpus gate is required.
+    assert core_generation_tier_policy("anthropic") == ("small", "mid")
+    assert core_generation_tier_policy("openai") == ("mini", "mid")
+    assert core_generation_tier_policy("google") == ("mid", "strong")
+
+
+def test_stage_manager_policy_derives_from_catalog_ladder() -> None:
+    from services.pipeline import stage_manager
+
+    for provider in REQUIRED_PROVIDERS:
+        assert stage_manager.CORE_GENERATION_TIER_POLICY[provider] == (
+            core_generation_tier_policy(provider)
+        )
+
+
+def test_google_floor_stays_mid_flash_lite_is_not_a_core_gen_default() -> None:
+    # Flash-Lite (small) exists and is active, but is deliberately NOT a core-gen
+    # default — Google's documented floor is mid (Flash). Lowering it is a routing
+    # change gated by the Phase-5 live eval, not a Phase-5b edit.
+    assert core_generation_ladder("google")[0] == "mid"
+    flash_lite = model_entry("google", "gemini-3.1-flash-lite")
+    assert flash_lite.tier == "small"
+    assert not any(
+        op in flash_lite.default_operations for op in CORE_GENERATION_OPERATIONS
+    )
+
+
+def test_ladders_are_strictly_increasing_in_capability() -> None:
+    rank = catalog_module._CORE_TIER_RANK
+    for provider, ladder in CORE_GENERATION_TIER_LADDER.items():
+        ranks = [rank[tier] for tier in ladder]
+        assert ranks == sorted(ranks)
+        assert len(set(ranks)) == len(ranks), f"{provider} ladder not strict: {ladder}"
+
+
+def test_each_primary_tier_resolves_to_exactly_one_active_default() -> None:
+    for provider in REQUIRED_PROVIDERS:
+        primary_tier = core_generation_ladder(provider)[0]
+        actives = [
+            entry
+            for entry in MODEL_CATALOG
+            if entry.provider == provider
+            and entry.tier == primary_tier
+            and entry.status == "active"
+            and any(op in entry.default_operations for op in CORE_GENERATION_OPERATIONS)
+        ]
+        assert len(actives) == 1, (provider, primary_tier, actives)
+
+
+def test_ladder_validator_rejects_non_increasing_ladder(monkeypatch) -> None:
+    monkeypatch.setitem(CORE_GENERATION_TIER_LADDER, "anthropic", ("mid", "small"))
+    with pytest.raises(RuntimeError, match="strictly"):
+        validate_core_generation_ladder()
+
+
+def test_ladder_validator_rejects_unknown_tier(monkeypatch) -> None:
+    monkeypatch.setitem(CORE_GENERATION_TIER_LADDER, "openai", ("judge", "mid"))
+    with pytest.raises(RuntimeError, match="non-core tier"):
+        validate_core_generation_ladder()
+
+
+def test_ladder_validator_rejects_too_short_ladder(monkeypatch) -> None:
+    monkeypatch.setitem(CORE_GENERATION_TIER_LADDER, "google", ("mid",))
+    with pytest.raises(RuntimeError, match="primary, fallback"):
+        validate_core_generation_ladder()
 
 
 def test_frontier_adapter_policy_is_explicit() -> None:

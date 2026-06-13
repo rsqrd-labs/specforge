@@ -52,7 +52,11 @@ from services.llm.cost_ledger import (
 )
 from services.llm.gateway import get_llm
 from services.llm.instrumented_adapter import InstrumentedAdapter
-from services.llm.model_catalog import model_max_output_tokens
+from services.llm.model_catalog import (
+    CORE_GENERATION_TIER_LADDER,
+    core_generation_tier_policy,
+    model_max_output_tokens,
+)
 from services.llm.output_budget import resolve_output_budget
 from services.llm.provider_config import JUDGE_MODELS
 from services.llm.routing import LLMRoute, LLMRoutingError, resolve_llm_route
@@ -136,10 +140,14 @@ STAGE_ORDER = ["spec", "plan", "harness", "tasks"]
 #   anthropic: Haiku 4.5 (small)     -> escalate to Sonnet 4.6 (mid)
 #   openai:    GPT-5.4 Mini (mini)   -> escalate to GPT-5.4 (mid)
 #   google:    Gemini 3.5 Flash (mid)-> no active strong model; surfaces
-CORE_GENERATION_TIER_POLICY = {
-    "anthropic": ("small", "mid"),
-    "openai": ("mini", "mid"),
-    "google": ("mid", "strong"),
+# Derived from the catalog's declarative core-generation tier ladder (issue #26
+# Phase 5b) — the single source of truth for the per-provider cheap-tier floor.
+# Kept as a module-level symbol here because callers (and tests) read the live
+# cheap-primary policy from ``stage_manager``; the ladder is validated against the
+# catalog so this mapping can never drift from the models that actually exist.
+CORE_GENERATION_TIER_POLICY: dict[str, tuple[str, str]] = {
+    provider: core_generation_tier_policy(provider)
+    for provider in CORE_GENERATION_TIER_LADDER
 }
 _DEFAULT_CORE_TIER_POLICY = ("mid", "strong")
 # Seconds of pipeline silence between SSE progress heartbeats.  Heartbeats are

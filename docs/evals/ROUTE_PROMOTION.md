@@ -74,3 +74,14 @@ Promotion requires:
 
 Live provider evals must be run from an operator-approved branch with explicit
 API keys and a saved JSON/Markdown report attached to the promotion review.
+
+## Tier ladder & catalog hygiene (Phase 5b)
+
+The per-provider cheap-tier floor is a single declarative ladder
+(`CORE_GENERATION_TIER_LADDER` in `model_catalog.py`) from which the live
+cheap-primary policy is derived and CI-validated. Any change to *which model
+actually runs* — lowering a provider's floor, promoting a new cheap/fast model to
+a core-gen default, or taking up the deferred cheapest-provider-first lever —
+rides this same golden-corpus gate. The ladder, the CI-enforced hygiene
+invariants, and the quarterly/on-release review process are documented in
+[`CATALOG_HYGIENE.md`](CATALOG_HYGIENE.md).
