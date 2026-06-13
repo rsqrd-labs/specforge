@@ -32,6 +32,10 @@ _DRY_RUN_ENV_DEFAULTS = {
 for key, value in _DRY_RUN_ENV_DEFAULTS.items():
     os.environ.setdefault(key, value)
 
+from services.llm.complexity_classifier import (  # noqa: E402
+    ComplexitySignals,
+    classify_complexity,
+)
 from services.llm.quality_gates import (  # noqa: E402
     gate_for_operation,
     validate_quality_gate_config,
@@ -112,6 +116,7 @@ def _validate_case(case: dict[str, Any]) -> None:
         "operations",
         "problem_statement",
         "upstream_artifacts",
+        "complexity",
         "expected_traits",
     }
     missing = sorted(required - set(case))
@@ -129,6 +134,12 @@ def _validate_case(case: dict[str, Any]) -> None:
     ):
         if field not in traits:
             raise ValueError(f"Golden case {case['id']} missing trait {field!r}")
+    complexity = case["complexity"]
+    for field in ("expected_level", "expected_tier_floor"):
+        if field not in complexity:
+            raise ValueError(
+                f"Golden case {case['id']} missing complexity field {field!r}"
+            )
 
 
 def _select_cases(
@@ -163,7 +174,18 @@ def _build_report(
             )
             results.append(result)
 
-    deterministic_pass = all(result["deterministic_pass"] for result in results)
+    # Phase 5.2/5.3: the deterministic complexity classifier check.  Evaluated at
+    # the problem-statement level (stage=spec, no upstream) so the expectation is a
+    # stable function of the prompt itself; later stages can only raise the floor,
+    # never lower it.  This is the genuinely tier-sensitive assertion in the
+    # otherwise tier-agnostic dry run — the cheap-vs-mid *quality* comparison
+    # remains the manual live gate (see docs/evals/ROUTE_PROMOTION.md).
+    classifier_results = [_evaluate_case_complexity(case) for case in cases]
+    classifier_pass = all(item["classification_matches"] for item in classifier_results)
+
+    deterministic_pass = (
+        all(result["deterministic_pass"] for result in results) and classifier_pass
+    )
     average_quality = (
         sum(result["quality_score"] for result in results) / len(results)
         if results
@@ -177,9 +199,37 @@ def _build_report(
         "result_count": len(results),
         "average_quality_score": round(average_quality, 4),
         "deterministic_pass": deterministic_pass,
+        "classifier_pass": classifier_pass,
         "manual_operator_approval_required": True,
         "elapsed_ms": round((time.perf_counter() - started) * 1000, 2),
         "results": results,
+        "classifier_results": classifier_results,
+    }
+
+
+def _evaluate_case_complexity(case: dict[str, Any]) -> dict[str, Any]:
+    expected = case["complexity"]
+    signals = ComplexitySignals(
+        stage_type="spec",
+        problem_statement=case["problem_statement"],
+        upstream_artifact_count=0,
+        upstream_artifacts_text="",
+    )
+    assessment = classify_complexity(signals)
+    matches = (
+        assessment.level == expected["expected_level"]
+        and assessment.tier_floor == expected["expected_tier_floor"]
+    )
+    return {
+        "case_id": case["id"],
+        "category": case["category"],
+        "expected_level": expected["expected_level"],
+        "actual_level": assessment.level,
+        "expected_tier_floor": expected["expected_tier_floor"],
+        "actual_tier_floor": assessment.tier_floor,
+        "score": assessment.score,
+        "reasons": list(assessment.reasons),
+        "classification_matches": matches,
     }
 
 
@@ -268,7 +318,7 @@ def _simulated_output(case: dict[str, Any]) -> str:
         sections.append(f"## Security Coverage\n\n{coverage}.")
     if traits["api_schema_specificity"]:
         fields = ", ".join(traits["api_schema_specificity"])
-        sections.append(f"```json\n{{\"entities\": \"{fields}\"}}\n```")
+        sections.append(f'```json\n{{"entities": "{fields}"}}\n```')
     return "\n\n".join(sections)
 
 
@@ -320,6 +370,7 @@ def _render_markdown(report: dict[str, Any]) -> str:
         f"- Results: `{report['result_count']}`",
         f"- Average quality: `{report['average_quality_score']}`",
         f"- Deterministic pass: `{report['deterministic_pass']}`",
+        f"- Complexity classifier pass: `{report.get('classifier_pass')}`",
         "- Live promotion: manual operator approval required",
         "",
         "| Case | Operation | Route | Quality | Pass |",
@@ -332,6 +383,23 @@ def _render_markdown(report: dict[str, Any]) -> str:
             f"{route['model']} | {result['quality_score']} | "
             f"{result['deterministic_pass']} |"
         )
+    classifier_results = report.get("classifier_results")
+    if classifier_results:
+        lines.extend(
+            [
+                "",
+                "## Complexity classifier (starting-tier floor)",
+                "",
+                "| Case | Expected | Actual | Floor | Score | Match |",
+                "| --- | --- | --- | --- | ---: | --- |",
+            ]
+        )
+        for item in classifier_results:
+            lines.append(
+                f"| {item['case_id']} | {item['expected_level']} | "
+                f"{item['actual_level']} | {item['actual_tier_floor']} | "
+                f"{item['score']} | {item['classification_matches']} |"
+            )
     return "\n".join(lines)
 
 

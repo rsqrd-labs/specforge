@@ -548,6 +548,16 @@ PIPELINE_QUALITY_ESCALATIONS = Counter(
     ["stage_type", "provider"],
 )
 
+PIPELINE_COMPLEXITY_TIER_FLOORS = Counter(
+    "specforge_pipeline_complexity_tier_floors_total",
+    "Core generations where the deterministic complexity classifier raised the "
+    "starting tier above the cheap primary (e.g. regulated domain, large upstream "
+    "chain, prior quality-gate failure), labelled by the assessed complexity "
+    "level.  Lets operators see how often — and for which stages/providers — the "
+    "classifier chooses to skip the cheap attempt.  Phase 5.2.",
+    ["stage_type", "provider", "level"],
+)
+
 # ---------------------------------------------------------------------------
 # Storyboard (Phase 20).  Counters and histograms are intentionally labelled
 # only with bounded enums so a malicious title/slug/error cannot create

@@ -36,6 +36,11 @@ from services.credit_service import (
 from services.evals import eval_batch
 from services.evals.online_eval import run_eval_background
 from services.llm.base import ProviderError, ProviderTimeoutError
+from services.llm.complexity_classifier import (
+    ComplexitySignals,
+    classify_complexity,
+    raise_tier_to_floor,
+)
 from services.llm.cost_cache import (
     build_generation_cache_key,
     get_cached_generation,
@@ -54,6 +59,7 @@ from services.llm.routing import LLMRoute, LLMRoutingError, resolve_llm_route
 from services.observability import (
     BILLING_CREDITS_CRITIC_REGEN,
     PIPELINE_COMPLETION_REPAIRS,
+    PIPELINE_COMPLEXITY_TIER_FLOORS,
     PIPELINE_GENERATION_DURATION,
     PIPELINE_GENERATION_FALLBACKS,
     PIPELINE_INCOMPLETE_OUTPUTS,
@@ -301,12 +307,84 @@ def _schedule_stage_eval(
 
 
 def _core_generation_tier_policy(provider: str) -> tuple[str, str]:
-    """(requested_tier, runtime_escalation_tier) for a provider's core gen."""
+    """(requested_tier, runtime_escalation_tier) for a provider's core gen.
+
+    When the cheap-primary policy is toggled off (``core_cheap_primary`` —
+    Phase 5.3's one-toggle revert), every provider falls back to the pre-cheap-swap
+    *mid-first* default (requested ``mid``, escalate to ``strong``).  This drives
+    both the starting tier and the runtime escalation (``_runtime_fallback_route``
+    and the Phase 5.1 quality escalation read the same helper), so a single flag
+    cleanly reverts fresh stages, full regenerate, and the harness gap-patch to
+    mid-first without a redeploy.
+    """
+    if not settings.core_cheap_primary:
+        return _DEFAULT_CORE_TIER_POLICY
     return CORE_GENERATION_TIER_POLICY.get(provider, _DEFAULT_CORE_TIER_POLICY)
 
 
-def _route_for_stage_generation(stage_type: str, workspace: Workspace) -> LLMRoute:
+def _apply_complexity_floor(
+    requested_tier: str,
+    fallback_tier: str | None,
+    *,
+    stage_type: str,
+    provider: str,
+    signals: ComplexitySignals | None,
+) -> tuple[str, str | None]:
+    """Raise the core-gen starting tier when the deterministic complexity
+    classifier (Phase 5.2) judges the request predictably hard.
+
+    A no-op unless ``core_complexity_routing`` is on *and* the cheap primary is in
+    effect (when reverted to mid-first there is no cheap tier to raise above).
+    When it raises, the route fallback is pinned to ``mid`` — the universal floor
+    that resolves for every provider — so a ``strong`` floor degrades to mid for a
+    provider without a core-gen strong model (e.g. Google) instead of erroring.
+    The runtime/quality escalation policy is unchanged (it reads
+    ``_core_generation_tier_policy`` independently).
+    """
+    if (
+        signals is None
+        or not settings.core_complexity_routing
+        or not settings.core_cheap_primary
+    ):
+        return requested_tier, fallback_tier
+    assessment = classify_complexity(signals)
+    raised = raise_tier_to_floor(requested_tier, assessment.tier_floor)
+    if raised == requested_tier:
+        return requested_tier, fallback_tier
+    PIPELINE_COMPLEXITY_TIER_FLOORS.labels(
+        stage_type=stage_type,
+        provider=provider,
+        level=assessment.level,
+    ).inc()
+    logger.info(
+        "llm.complexity_tier_floor",
+        extra={
+            "stage_type": stage_type,
+            "provider": provider,
+            "complexity_level": assessment.level,
+            "complexity_score": assessment.score,
+            "complexity_reasons": list(assessment.reasons),
+            "cheap_primary_tier": requested_tier,
+            "raised_to_tier": raised,
+        },
+    )
+    return raised, "mid"
+
+
+def _route_for_stage_generation(
+    stage_type: str,
+    workspace: Workspace,
+    *,
+    signals: ComplexitySignals | None = None,
+) -> LLMRoute:
     requested_tier, fallback_tier = _core_generation_tier_policy(workspace.provider)
+    requested_tier, fallback_tier = _apply_complexity_floor(
+        requested_tier,
+        fallback_tier,
+        stage_type=stage_type,
+        provider=workspace.provider,
+        signals=signals,
+    )
     return resolve_llm_route(
         operation=f"{stage_type}.generate",
         preferred_provider=workspace.provider,
@@ -475,7 +553,13 @@ def _runtime_fallback_route(failed_route: LLMRoute) -> LLMRoute | None:
     return route
 
 
-def _route_for_refine(workspace: Workspace, mode: str) -> LLMRoute:
+def _route_for_refine(
+    workspace: Workspace,
+    mode: str,
+    *,
+    stage_type: str | None = None,
+    signals: ComplexitySignals | None = None,
+) -> LLMRoute:
     operation = {
         "focused": "refine.focused",
         "section": "refine.section",
@@ -483,8 +567,16 @@ def _route_for_refine(workspace: Workspace, mode: str) -> LLMRoute:
     }[mode]
     if mode == "full":
         # Full regenerate follows the same cheap-primary core-gen policy (and
-        # mid-tier runtime escalation) as a fresh stage generation.
+        # mid-tier runtime escalation) as a fresh stage generation, including the
+        # Phase 5.2 complexity floor.
         requested_tier, fallback_tier = _core_generation_tier_policy(workspace.provider)
+        requested_tier, fallback_tier = _apply_complexity_floor(
+            requested_tier,
+            fallback_tier,
+            stage_type=stage_type or "tasks",
+            provider=workspace.provider,
+            signals=signals,
+        )
     else:
         requested_tier = {"focused": "mini", "section": "mid"}[mode]
         fallback_tier = {"focused": "small", "section": "strong"}[mode]
@@ -494,6 +586,25 @@ def _route_for_refine(workspace: Workspace, mode: str) -> LLMRoute:
         requested_tier=requested_tier,
         fallback_tier=fallback_tier,
         latency_class="interactive",
+    )
+
+
+def _build_complexity_signals(stage, workspace: Workspace) -> ComplexitySignals:
+    """Gather the no-LLM complexity signals from rows already loaded at preflight.
+
+    Must be called *before* the cached-output path clears the quality gate so the
+    ``prior_quality_gate_blocked`` signal (a retry of a stage the cheap model
+    already failed) is observed pre-reset.
+    """
+    deps = _workspace_stage_deps(workspace, stage.type)
+    return ComplexitySignals(
+        stage_type=stage.type,
+        problem_statement=workspace.problem_statement or "",
+        upstream_artifact_count=len(deps),
+        upstream_artifacts_text="\n".join(deps.values()),
+        template_slug=workspace.template_slug,
+        prior_quality_gate_blocked=(stage.quality_gate_status == "blocked"),
+        clarification_count=len(workspace.clarification_qa or []),
     )
 
 
@@ -1385,11 +1496,21 @@ class StageManager:
 
         if not free:
             _assert_visible_credit_balance(user, credit_cost)
+        # Phase 5.2: gather complexity signals before the cached path clears the
+        # quality gate, so a retry of a previously-blocked stage is observed.
+        complexity_signals = _build_complexity_signals(stage, workspace)
         route = _resolve_preflight_route(
             lambda: (
-                _route_for_refine(workspace, "full")
+                _route_for_refine(
+                    workspace,
+                    "full",
+                    stage_type=stage.type,
+                    signals=complexity_signals,
+                )
                 if action == "regenerate"
-                else _route_for_stage_generation(stage.type, workspace)
+                else _route_for_stage_generation(
+                    stage.type, workspace, signals=complexity_signals
+                )
             )
         )
         _log_generation_route(

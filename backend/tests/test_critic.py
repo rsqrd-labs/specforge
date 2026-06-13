@@ -555,7 +555,6 @@ async def test_critic_failure_no_escalation_when_already_mid() -> None:
     """Phase 5.1: if the route is already at/above the escalation tier (e.g.
     Google Flash which has no cheaper distinct tier), no escalation happens and
     the counter stays flat."""
-    from services.pipeline import stage_manager as sm_module
 
     svc, stage, workspace, user, deduction, db = _build_generate_env()
     # Switch workspace to google so the cheap primary IS the mid (no cheaper tier).

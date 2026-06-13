@@ -153,6 +153,28 @@ class Settings(BaseSettings):
     # before the evaluation passes.
     storyboard_mid_first: bool = False
 
+    # Phase 5.3 (issue #26): master switch for the shipped cheap-primary core
+    # generation policy (Haiku 4.5 / GPT-5.4 Mini start, mid-tier escalation on a
+    # runtime/quality-gate failure).  Default True — it wraps the *live* behavior
+    # so it can be reverted with one toggle: set False and every core generation
+    # (fresh stages, full regenerate, harness gap-patch) falls back to the
+    # pre-cheap-swap *mid-first* default (Sonnet 4.6 / GPT-5.4 first, strong
+    # escalation).  Increment generation is independent (`_INCREMENT_TIERS`) and
+    # is unaffected by this flag.  Flip False if the golden-corpus comparison ever
+    # shows the cheap primary regressing artifact quality.
+    core_cheap_primary: bool = True
+
+    # Phase 5.2 (issue #26): deterministic, no-LLM complexity classifier that
+    # raises the *starting* tier for predictably hard core generations (regulated
+    # domains, large upstream chains, prior quality-gate failures) above the cheap
+    # primary — so a request that would burn the cheap attempt + funded regenerate
+    # starts on a capable model instead.  It is a floor, never a ceiling (it can
+    # only raise a tier, never lower it) and only applies while `core_cheap_primary`
+    # is on.  Default False — per issue AC, adaptive routing ships behind a flag
+    # and is enabled only after the golden-corpus live gate validates it
+    # (`docs/evals/ROUTE_PROMOTION.md`).
+    core_complexity_routing: bool = False
+
     # Increment generation (Phase 21 — T-279). The MVP ships the *additive* path
     # only: an increment appends new tasks with their existing content pinned by
     # stable, content-derived task_refs. Behaviour-changing increments (compute

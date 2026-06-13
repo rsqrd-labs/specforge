@@ -13,8 +13,56 @@ uv run python ../scripts/run_llm_route_eval.py --operation all --provider openai
 ```
 
 The dry-run never calls provider APIs. It validates dataset shape, route
-resolution, deterministic validators, estimated usage/cost plumbing, and the
-promotion gate configuration.
+resolution, deterministic validators, estimated usage/cost plumbing, the
+promotion gate configuration, and the **deterministic complexity classifier**
+(Phase 5.2): every golden case must classify to its declared
+`complexity.expected_level` / `expected_tier_floor`. The classifier check is
+evaluated at the problem-statement level (stage `spec`, no upstream) so the
+expectation is a stable function of the prompt itself — later stages can only
+raise the floor, never lower it.
+
+## Adaptive routing (Phase 5.2 / 5.3) — what the dry run can and cannot prove
+
+Core generation ships a **cheap-primary** policy (Haiku 4.5 / GPT-5.4 Mini start,
+mid escalation on a runtime or quality-gate failure). Two flags gate the
+adaptive layer:
+
+- `core_cheap_primary` (default **true**) — wraps the live behavior. Set it
+  **false** to revert every core generation (fresh stages, full regenerate,
+  harness gap-patch) to the pre-cheap-swap **mid-first** default in one toggle.
+- `core_complexity_routing` (default **false**) — the deterministic complexity
+  classifier that raises the *starting* tier for predictably hard requests
+  (regulated domains, large upstream chains, prior quality-gate failures). It is
+  a floor, never a ceiling, and only applies while `core_cheap_primary` is on.
+  Per the issue's acceptance criteria, it ships **off** and is enabled only after
+  the manual live gate below validates it.
+
+**The dry run cannot produce the cheap-vs-mid *quality* comparison.** Its
+simulated output is fabricated from `expected_traits` and is identical regardless
+of tier, so running it at the cheap tier vs the mid tier yields identical
+deterministic-validator and quality scores — only the resolved route and
+estimated cost differ. The genuine quality comparison (artifact completeness,
+critic pass rate, traceability, Storyboard schema/grounding, **cost per
+successful artifact**) is therefore the **manual live gate**: run the expanded
+golden corpus through real provider calls from an operator-approved branch with
+`core_complexity_routing` toggled on vs. off, and attach the saved report to the
+promotion review. Only promote (flip `core_complexity_routing` to true by
+default) if cost drops and no quality / security / traceability metric regresses.
+
+Storyboard generation is validated through its own `StoryboardPayload` schema +
+grounding path (Phase 1, `storyboard_mid_first`), not the deterministic
+route-eval simulated output; it carries a route gate entry only so the gate
+config is complete and its route resolves.
+
+**Classifier watch list (check before defaulting `core_complexity_routing` on):**
+the regulated-keyword set is deliberately broad on a few high-frequency terms —
+notably `payment` (and `financial`, `audit trail`) — which alone cross the high
+threshold and raise the start to mid. Many ordinary apps mention payments without
+being PCI-scoped, so the live comparison should report the **false-positive
+raise rate** (cheap-viable prompts pushed to mid) alongside the quality numbers.
+This is a floor (cost-up, never quality-down), so it is safe to ship off; the
+live gate exists precisely to confirm the over-routing rate is acceptable before
+the default flips.
 
 Promotion requires:
 

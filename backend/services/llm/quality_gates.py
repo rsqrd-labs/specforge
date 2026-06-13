@@ -83,6 +83,21 @@ ROUTE_QUALITY_GATES: dict[str, dict[str, Any]] = {
         "min_cost_reduction_ratio": 0.00,
         "requires_security_regression_review": True,
     },
+    # Storyboard generation (Phase 1, issue #26) moves off the persisted strong
+    # workspace model to a mid-first route with strong escalation on a
+    # schema/parse/grounding failure.  The candidate is therefore the mid tier;
+    # the baseline is the previous strong default.  Storyboard quality is gated by
+    # its own StoryboardPayload schema + grounding checks, not the deterministic
+    # route-eval simulated output, so it carries a route gate (so the config is
+    # complete and the eval harness can resolve its route) but its quality is
+    # validated through the storyboard-specific path.
+    "storyboard.generate": {
+        "baseline_tier": "strong",
+        "candidate_tiers": ["mid"],
+        "min_average_quality_score": 0.90,
+        "min_cost_reduction_ratio": 0.30,
+        "requires_security_regression_review": True,
+    },
 }
 
 PROVIDER_GATE_OVERRIDES: dict[str, dict[str, dict[str, Any]]] = {

@@ -386,6 +386,113 @@ def test_harness_generation_uses_cheap_primary_with_mid_escalation() -> None:
     assert fallback.model != route.model
 
 
+_REGULATED_PROBLEM = (
+    "Design a clinic portal that stores PHI and integrates with an EHR under HIPAA."
+)
+_SIMPLE_PROBLEM = "Build a personal recipe book for one user to save recipes."
+
+
+def test_complexity_classifier_off_by_default_keeps_cheap_primary() -> None:
+    # Phase 5.2: even a regulated prompt starts on the cheap primary while the
+    # classifier flag is off (its default) — the live behavior is unchanged.
+    from services.pipeline import stage_manager as sm
+
+    workspace = _make_workspace()
+    workspace.provider = "anthropic"
+    workspace.problem_statement = _REGULATED_PROBLEM
+    stage = _make_stage(workspace_id=workspace.id, stage_type="spec")
+
+    signals = sm._build_complexity_signals(stage, workspace)
+    route = sm._route_for_stage_generation("spec", workspace, signals=signals)
+
+    assert route.model_tier == "small"
+    assert route.model == "claude-haiku-4-5-20251001"
+
+
+def test_complexity_classifier_raises_regulated_prompt_to_mid(monkeypatch) -> None:
+    from services.pipeline import stage_manager as sm
+
+    monkeypatch.setattr(sm.settings, "core_complexity_routing", True)
+
+    workspace = _make_workspace()
+    workspace.provider = "anthropic"
+    workspace.problem_statement = _REGULATED_PROBLEM
+    stage = _make_stage(workspace_id=workspace.id, stage_type="spec")
+
+    signals = sm._build_complexity_signals(stage, workspace)
+    route = sm._route_for_stage_generation("spec", workspace, signals=signals)
+    assert route.model_tier == "mid"
+    assert route.model == "claude-sonnet-4-6"
+
+    # A simple prompt still starts cheap even with the classifier on.
+    workspace.problem_statement = _SIMPLE_PROBLEM
+    simple_stage = _make_stage(workspace_id=workspace.id, stage_type="spec")
+    simple_signals = sm._build_complexity_signals(simple_stage, workspace)
+    simple_route = sm._route_for_stage_generation(
+        "spec", workspace, signals=simple_signals
+    )
+    assert simple_route.model_tier == "small"
+    assert simple_route.model == "claude-haiku-4-5-20251001"
+
+
+def test_complexity_classifier_does_not_raise_for_google(monkeypatch) -> None:
+    # Google's cheap primary is already mid (Flash); a mid floor is a no-op.
+    from services.pipeline import stage_manager as sm
+
+    monkeypatch.setattr(sm.settings, "core_complexity_routing", True)
+
+    workspace = _make_workspace()
+    workspace.provider = "google"
+    workspace.problem_statement = _REGULATED_PROBLEM
+    stage = _make_stage(workspace_id=workspace.id, stage_type="spec")
+
+    signals = sm._build_complexity_signals(stage, workspace)
+    route = sm._route_for_stage_generation("spec", workspace, signals=signals)
+    assert route.model_tier == "mid"
+    assert route.model == "gemini-3.5-flash"
+
+
+def test_prior_quality_gate_block_escalates_starting_tier(monkeypatch) -> None:
+    # A retry of a stage the cheap model already failed starts on the mid tier.
+    from services.pipeline import stage_manager as sm
+
+    monkeypatch.setattr(sm.settings, "core_complexity_routing", True)
+
+    workspace = _make_workspace()
+    workspace.provider = "openai"
+    workspace.problem_statement = "Build a simple notes app."
+    stage = _make_stage(workspace_id=workspace.id, stage_type="spec")
+    stage.quality_gate_status = "blocked"
+
+    signals = sm._build_complexity_signals(stage, workspace)
+    assert signals.prior_quality_gate_blocked is True
+    route = sm._route_for_stage_generation("spec", workspace, signals=signals)
+    assert route.model_tier == "mid"
+    assert route.model == "gpt-5.4"
+
+
+def test_core_cheap_primary_revert_uses_mid_first(monkeypatch) -> None:
+    # Phase 5.3 one-toggle revert: cheap_primary off => mid-first everywhere,
+    # with strong runtime escalation, regardless of complexity.
+    from services.pipeline import stage_manager as sm
+
+    monkeypatch.setattr(sm.settings, "core_cheap_primary", False)
+
+    workspace = _make_workspace()
+    workspace.provider = "anthropic"
+    stage = _make_stage(workspace_id=workspace.id, stage_type="spec")
+
+    signals = sm._build_complexity_signals(stage, workspace)
+    route = sm._route_for_stage_generation("spec", workspace, signals=signals)
+    assert route.model_tier == "mid"
+    assert route.model == "claude-sonnet-4-6"
+
+    fallback = sm._runtime_fallback_route(route)
+    assert fallback is not None
+    assert fallback.model_tier == "strong"
+    assert fallback.model == "claude-opus-4-8"
+
+
 @pytest.mark.asyncio
 async def test_generate_zero_visible_credits_skips_credit_and_provider_call() -> None:
     from services.credit_service import InsufficientCreditsError
