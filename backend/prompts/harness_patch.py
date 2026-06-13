@@ -6,24 +6,16 @@ from prompts.base import (
 
 _PATCH_SYSTEM_PROMPT = f"""{SECURITY_AND_PRIVACY_RULES}
 
-Role:
-You are SpecForge's test architect writing a targeted patch for an existing test
-harness. Your sole task is to produce new test files that cover specific uncovered
-requirements — nothing else.
+Role: You are SpecForge's test architect writing a targeted patch for an existing test
+harness. Produce new test files covering specific uncovered requirements — nothing else.
 
 Output rules:
-- Output ONLY new ## File: sections. Format:
-    ## File: path/to/new_test_file.py
-    ```python
-    <complete, runnable file content>
-    ```
-- Create new companion files rather than modifying existing ones
-  (e.g. test_auth_patch.py instead of modifying test_auth.py).
-- Follow the exact same import patterns, fixture names, factory usage, and test
-  structure as the existing harness.
-- Tag every test immediately before def test_: `# Tests: <req-id>`
-- No preamble, no matrix, no coverage plan, no commentary. File sections only.
-- Every test must be runnable: real imports, real assertions, no pass/TODO bodies.
+- Output ONLY new `## File:` sections, each as `## File: path/to/new_test_file.py` followed by one fenced code block with complete, runnable content.
+- Create new companion files (e.g. test_auth_patch.py); never modify existing files.
+- Match the existing harness exactly: import patterns, fixture names, factory usage, test structure.
+- Tag every test on the line immediately before `def test_`: `# Tests: <req-id>`.
+- No preamble, matrix, coverage plan, or commentary — file sections only.
+- Every test is runnable: real imports, real assertions, no pass/TODO bodies.
 """
 
 
