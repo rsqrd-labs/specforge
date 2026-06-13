@@ -706,7 +706,7 @@ async def _call_eval_judge(
             model=model,
             system=_JUDGE_SYSTEM,
             user=user_prompt,
-            max_tokens=output_budget_for_operation("eval.score"),
+            max_tokens=output_budget_for_operation("eval.score", provider),
             stage_type="eval",
             prompt_version="eval-v2",
             adapter_factory=get_llm,
@@ -837,15 +837,22 @@ def build_eval_request(
     stage_type: str,
     content: str,
     spec_content: str,
+    provider: str | None = None,
 ) -> tuple[str, str, int]:
     """Build the (system, user, max_tokens) for one eval-judge call.
 
     The submit side of the deferred-batch path (Phase 3): a batch request reuses
     exactly the prompt the synchronous path's first (non-compact) attempt would
-    send, so a batched eval scores the same artifact identically.
+    send, so a batched eval scores the same artifact identically. ``provider``
+    is threaded so a per-(operation, provider) budget override (Phase 4) applies
+    to batched evals identically to synchronous ones.
     """
     user_prompt = _build_eval_prompt(stage_type, content, spec_content, compact=False)
-    return _JUDGE_SYSTEM, user_prompt, output_budget_for_operation("eval.score")
+    return (
+        _JUDGE_SYSTEM,
+        user_prompt,
+        output_budget_for_operation("eval.score", provider),
+    )
 
 
 async def persist_eval_from_raw(

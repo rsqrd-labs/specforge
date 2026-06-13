@@ -241,6 +241,85 @@ async def cost_rollup(
     ]
 
 
+async def output_token_percentiles(
+    db: Any,
+    *,
+    since: Any | None = None,
+    operations: list[str] | None = None,
+) -> list[dict[str, Any]]:
+    """Output-token distribution per (operation, provider) — the Phase-4
+    evidence source for right-sizing budgets (issue #26).
+
+    Returns one row per (operation, provider) with the sample count, the
+    p50/p90/p95/max of ``output_tokens``, the p50/p95 of ``reasoning_tokens``
+    (observability only — reasoning is already inside output_tokens and is
+    never re-added to a budget), and the ``truncation_rate`` (fraction of calls
+    that hit ``stopped_by_limit``). Read-only; the caller supplies the session.
+
+    Only rows with a non-null ``output_tokens`` and a non-null ``operation``
+    contribute, so estimate-only or unattributed calls do not pollute the
+    distribution. ``truncation_rate`` is computed over those same rows.
+    """
+    from sqlalchemy import Float, cast, func, select  # noqa: PLC0415
+
+    from models import LLMCostEvent  # noqa: PLC0415
+
+    def _pct(level: float, column: Any) -> Any:
+        # percentile_cont(level) WITHIN GROUP (ORDER BY column) — interpolated
+        # percentile, the right tool for a continuous token count.
+        return func.percentile_cont(level).within_group(column.asc())
+
+    output_col = LLMCostEvent.output_tokens
+    reasoning_col = LLMCostEvent.reasoning_tokens
+    stmt = (
+        select(
+            LLMCostEvent.operation.label("operation"),
+            LLMCostEvent.provider.label("provider"),
+            func.count().label("samples"),
+            _pct(0.50, output_col).label("p50_output_tokens"),
+            _pct(0.90, output_col).label("p90_output_tokens"),
+            _pct(0.95, output_col).label("p95_output_tokens"),
+            func.max(output_col).label("max_output_tokens"),
+            _pct(0.50, reasoning_col).label("p50_reasoning_tokens"),
+            _pct(0.95, reasoning_col).label("p95_reasoning_tokens"),
+            func.avg(cast(LLMCostEvent.stopped_by_limit, Float)).label(
+                "truncation_rate"
+            ),
+        )
+        .where(output_col.isnot(None))
+        .where(LLMCostEvent.operation.isnot(None))
+        .group_by(LLMCostEvent.operation, LLMCostEvent.provider)
+        .order_by(LLMCostEvent.operation, LLMCostEvent.provider)
+    )
+    if since is not None:
+        stmt = stmt.where(LLMCostEvent.created_at >= since)
+    if operations:
+        stmt = stmt.where(LLMCostEvent.operation.in_(operations))
+
+    result = await db.execute(stmt)
+
+    def _int(value: Any) -> int | None:
+        return int(value) if value is not None else None
+
+    return [
+        {
+            "operation": row.operation,
+            "provider": row.provider,
+            "samples": int(row.samples),
+            "p50_output_tokens": _int(row.p50_output_tokens),
+            "p90_output_tokens": _int(row.p90_output_tokens),
+            "p95_output_tokens": _int(row.p95_output_tokens),
+            "max_output_tokens": _int(row.max_output_tokens),
+            "p50_reasoning_tokens": _int(row.p50_reasoning_tokens),
+            "p95_reasoning_tokens": _int(row.p95_reasoning_tokens),
+            "truncation_rate": (
+                float(row.truncation_rate) if row.truncation_rate is not None else None
+            ),
+        }
+        for row in result
+    ]
+
+
 def _row_kwargs_from_metadata(metadata: Mapping[str, Any]) -> dict[str, Any]:
     row: dict[str, Any] = {}
     for field in _EVENT_FIELDS:

@@ -97,7 +97,7 @@ async def enqueue_eval_batch(
     re-enqueues pending rows, so we never double-score by also falling back.
     """
     system, user_prompt, max_tokens = build_eval_request(
-        stage_type, content, spec_content
+        stage_type, content, spec_content, provider
     )
     context = {
         "stage_version_id": str(stage_version_id),

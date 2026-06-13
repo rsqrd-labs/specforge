@@ -263,7 +263,9 @@ class IncrementService:
                 adapter.complete(
                     system_prompt,
                     user_prompt,
-                    max_tokens=output_budget_for_operation(route.operation),
+                    max_tokens=output_budget_for_operation(
+                        route.operation, route.provider
+                    ),
                 ),
                 timeout=settings.llm_complete_timeout_seconds,
             )
