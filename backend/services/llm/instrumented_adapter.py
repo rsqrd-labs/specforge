@@ -238,7 +238,9 @@ class InstrumentedAdapter(BaseLLMAdapter):
                 output=output,
             )
         try:
-            estimated_cost = estimate_cost_usd(self._provider, self._model, usage)
+            estimated_cost = estimate_cost_usd(
+                self._provider, self._model, usage, batch=self._batch
+            )
         except Exception:
             estimated_cost = None
 

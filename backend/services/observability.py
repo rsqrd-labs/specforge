@@ -357,6 +357,36 @@ GITHUB_QUEUE_DEPTH = Gauge(
     "specforge_github_queue_depth",
     "Approximate number of GitHub worker jobs currently queued/in-flight.",
 )
+
+# LLM batch job metrics (Phase 3 — issue #26). The deferred-batch eval lane has
+# its own ``llm:batch:deadletter`` Redis list so a stuck batch is never confused
+# with a GitHub export or billing grant. ``submitted`` counts batches created at
+# the provider; ``collected`` counts batches whose results were persisted; the
+# retry/dead-letter pair is the reliability signal for the lane.
+LLM_BATCH_SUBMITTED_TOTAL = Counter(
+    "specforge_llm_batch_submitted_total",
+    "Provider Message Batches created for non-interactive judge/eval work, "
+    "labelled by operation and provider.",
+    labelnames=["operation", "provider"],
+)
+LLM_BATCH_COLLECTED_TOTAL = Counter(
+    "specforge_llm_batch_collected_total",
+    "Deferred batches whose results were collected and persisted, labelled by "
+    "operation, provider, and outcome (succeeded / fallback / failed).",
+    labelnames=["operation", "provider", "outcome"],
+)
+LLM_BATCH_JOB_RETRIES_TOTAL = Counter(
+    "specforge_llm_batch_job_retries_total",
+    "LLM batch worker job attempts that failed transiently and were retried "
+    "(exponential backoff + jitter), labelled by job name.",
+    labelnames=["job"],
+)
+LLM_BATCH_JOB_DEADLETTERED_TOTAL = Counter(
+    "specforge_llm_batch_job_deadlettered_total",
+    "LLM batch worker jobs that exhausted max_tries and were moved to the "
+    "'llm:batch:deadletter' record for manual replay, labelled by job name.",
+    labelnames=["job"],
+)
 # Per-installation rate governor (Phase 21 — T-274). A throttle is healthy
 # backpressure (GitHub 403/429 or local token-bucket exhaustion), distinct from a
 # job failure: the job is requeued off the dead-letter try budget. The rate of
@@ -1069,9 +1099,7 @@ def _storyboard_provider(provider: str) -> str:
 
 def _storyboard_escalation_outcome(outcome: str) -> str:
     value = str(outcome or "unknown")
-    return (
-        value if value in _STORYBOARD_STRONG_ESCALATION_OUTCOME_LABELS else "unknown"
-    )
+    return value if value in _STORYBOARD_STRONG_ESCALATION_OUTCOME_LABELS else "unknown"
 
 
 def _inc_counter(counter, value: Any) -> None:

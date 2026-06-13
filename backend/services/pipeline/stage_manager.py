@@ -33,6 +33,7 @@ from services.credit_service import (
     InsufficientCreditsError,
     credit_service,
 )
+from services.evals import eval_batch
 from services.evals.online_eval import run_eval_background
 from services.llm.base import ProviderError, ProviderTimeoutError
 from services.llm.cost_cache import (
@@ -224,6 +225,54 @@ def _eval_to_dict(result: EvalResult) -> dict:
     }
 
 
+async def _dispatch_stage_eval(
+    *,
+    version_id: UUID,
+    stage_type: str,
+    content: str,
+    eval_context: str,
+    provider: str,
+    content_generation_id: str | None,
+    harness_content: str | None,
+    workspace_id: UUID | None,
+) -> EvalResult | None:
+    """Score the stage, deferring to a provider batch when enabled.
+
+    With ``llm_batch_enabled`` and a provider that has a real Message Batches
+    adapter, the eval is enqueued for the worker batch path (50% discount) and
+    returns ``None`` here — its result is delivered asynchronously later, not
+    inline in this stream (eval display is already non-blocking). Any dispatch
+    failure (e.g. DB unavailable creating the checkpoint row) falls back to a
+    synchronous in-process score so eval still happens.
+    """
+    if settings.llm_batch_enabled and eval_batch.provider_supports_real_batch(provider):
+        try:
+            await eval_batch.enqueue_eval_batch(
+                stage_version_id=version_id,
+                stage_type=stage_type,
+                content=content,
+                spec_content=eval_context,
+                provider=provider,
+                judge_model=JUDGE_MODELS[provider],
+                content_generation_id=content_generation_id,
+                harness_content=harness_content,
+                workspace_id=workspace_id,
+            )
+            return None
+        except Exception:
+            logger.warning("eval_batch.dispatch_failed_scoring_inline", exc_info=True)
+    return await run_eval_background(
+        version_id,
+        stage_type,
+        content,
+        eval_context,
+        provider,
+        JUDGE_MODELS[provider],
+        content_generation_id=content_generation_id,
+        harness_content=harness_content,
+    )
+
+
 def _schedule_stage_eval(
     *,
     version_id: UUID,
@@ -231,19 +280,20 @@ def _schedule_stage_eval(
     content: str,
     eval_context: str,
     provider: str,
+    workspace_id: UUID | None = None,
     content_generation_id: str | None = None,
     harness_content: str | None = None,
 ) -> asyncio.Task[EvalResult | None]:
     eval_task = asyncio.create_task(
-        run_eval_background(
-            version_id,
-            stage_type,
-            content,
-            eval_context,
-            provider,
-            JUDGE_MODELS[provider],
+        _dispatch_stage_eval(
+            version_id=version_id,
+            stage_type=stage_type,
+            content=content,
+            eval_context=eval_context,
+            provider=provider,
             content_generation_id=content_generation_id,
             harness_content=harness_content,
+            workspace_id=workspace_id,
         )
     )
     eval_task.add_done_callback(_log_eval_error)
@@ -1994,6 +2044,7 @@ class StageManager:
                 content=accumulated,
                 eval_context=eval_context,
                 provider=workspace.provider,
+                workspace_id=workspace.id,
                 content_generation_id=content_generation_id,
                 harness_content=harness_content_for_eval,
             )
@@ -2508,6 +2559,7 @@ class StageManager:
                 content=new_content,
                 eval_context=eval_context,
                 provider=workspace.provider,
+                workspace_id=workspace.id,
                 harness_content=harness_content_for_eval,
             )
         return stage
@@ -3189,6 +3241,7 @@ class StageManager:
                 content=merged,
                 eval_context=eval_context,
                 provider=workspace.provider,
+                workspace_id=workspace.id,
                 content_generation_id=None,
             )
             yield f'{{"done": true, "stage_id": "{stage_id}"}}'

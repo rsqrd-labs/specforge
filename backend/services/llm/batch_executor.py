@@ -1,4 +1,15 @@
-"""Background LLM batch executor for non-interactive operations.
+"""Synchronous fallback executor for non-interactive judge/eval operations.
+
+This is the *real-time* path for background LLM work: it calls the adapter's
+``complete()`` immediately, at full price. The real provider Message Batches path
+(the 50% discount) lives in ``services/evals/eval_batch.py`` and runs on the arq
+worker; this module is what eval falls back to when batching is off, the provider
+has no batch adapter, or the durable queue is unavailable.
+
+Because this path is **not** a provider batch, it records ``batch=False`` on the
+cost event — claiming the batch flag here while paying the full real-time price
+would halve the recorded cost (``estimate_cost_usd(batch=...)``) and corrupt the
+ledger. Only ``eval_batch`` records ``batch=True``.
 
 HTTP timeout policy (H-6 — T-182): timeout= enforcement is delegated to the
 underlying adapter's httpx.Timeout configuration.  This module does not make
@@ -14,7 +25,7 @@ from typing import Any
 
 from services.llm.base import BaseLLMAdapter
 from services.llm.cost_ledger import LLMCostContext
-from services.llm.cost_registry import get_provider_capabilities, model_tier
+from services.llm.cost_registry import model_tier
 from services.llm.gateway import get_llm
 from services.llm.instrumented_adapter import InstrumentedAdapter
 
@@ -76,7 +87,12 @@ async def complete_background_llm(
     if operation not in ELIGIBLE_BATCH_OPERATIONS:
         raise BatchEligibilityError(f"Operation {operation!r} is not batch-eligible.")
 
-    batch = allow_batch and _provider_supports_batch(provider)
+    # This is the synchronous real-time path — it never claims the batch
+    # discount (the real provider-batch path is services/evals/eval_batch.py).
+    # ``allow_batch`` is retained for call-site/back-compat but no longer drives
+    # a cost-affecting flag here.
+    del allow_batch
+    batch = False
     try:
         adapter = adapter_factory(provider, model)
         instrumented = InstrumentedAdapter(
@@ -118,13 +134,6 @@ def dead_letter_jobs() -> list[dict[str, Any]]:
 
 def clear_dead_letter_jobs() -> None:
     _DEAD_LETTER_JOBS.clear()
-
-
-def _provider_supports_batch(provider: str) -> bool:
-    try:
-        return bool(get_provider_capabilities(provider)["supports_batch"])
-    except Exception:
-        return False
 
 
 def _model_tier_or_unknown(provider: str, model: str) -> str:

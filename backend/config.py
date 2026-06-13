@@ -76,6 +76,14 @@ class Settings(BaseSettings):
     # latency change) and the break-even is low for chunked/multi-round paths.
     # Flip False to disable the structured block without a redeploy.
     llm_prompt_cache_enabled: bool = True
+    # Phase 3 (issue #26): submit non-interactive judge/eval calls (eval.score)
+    # through the provider Message Batches API for the 50% batch discount,
+    # driven on the arq worker (submit → checkpoint batch id → cron poll →
+    # collect). Default False — the feature ships behind a flag with automatic
+    # fallback to the synchronous in-process path when off, when the provider
+    # has no real batch API (only Anthropic today), or when the durable queue is
+    # unavailable. Never batches interactive generation or the critic.
+    llm_batch_enabled: bool = False
     max_request_body_bytes: int = 1_000_000
     tech_safety_policy_max_age_days: int = 30
     tech_safety_osv_cache_ttl_seconds: int = 86_400

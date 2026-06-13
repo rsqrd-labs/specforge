@@ -32,7 +32,10 @@ async def test_interactive_operations_reject_batch_path() -> None:
 
 
 @pytest.mark.asyncio
-async def test_eligible_operation_marks_batch_when_provider_supports_it() -> None:
+async def test_synchronous_fallback_never_claims_batch_discount() -> None:
+    # The synchronous executor runs at full real-time price, so it must record
+    # batch=False — the 50% discount belongs only to the real worker batch path
+    # (services/evals/eval_batch.py). Claiming it here would halve recorded cost.
     adapter = MagicMock()
     adapter_factory = MagicMock(return_value=adapter)
     instrumented = MagicMock()
@@ -54,28 +57,22 @@ async def test_eligible_operation_marks_batch_when_provider_supports_it() -> Non
         )
 
     assert result.output == '{"overall_score": 90}'
-    assert result.batch is True
+    assert result.batch is False
     adapter_factory.assert_called_once_with("openai", "gpt-5.4-mini")
-    assert instrumented_cls.call_args.kwargs["batch"] is True
+    assert instrumented_cls.call_args.kwargs["batch"] is False
     assert instrumented_cls.call_args.kwargs["operation"] == "eval.score"
 
 
 @pytest.mark.asyncio
-async def test_eligible_operation_falls_back_when_provider_lacks_batch() -> None:
+async def test_allow_batch_flag_does_not_change_cost_flag() -> None:
     adapter_factory = MagicMock(return_value=MagicMock())
     instrumented = MagicMock()
     instrumented.complete = AsyncMock(return_value="ok")
 
-    with (
-        patch(
-            "services.llm.batch_executor.get_provider_capabilities",
-            return_value={"supports_batch": False},
-        ),
-        patch(
-            "services.llm.batch_executor.InstrumentedAdapter",
-            return_value=instrumented,
-        ) as instrumented_cls,
-    ):
+    with patch(
+        "services.llm.batch_executor.InstrumentedAdapter",
+        return_value=instrumented,
+    ) as instrumented_cls:
         result = await complete_background_llm(
             operation="summary.create",
             provider="anthropic",
@@ -84,6 +81,7 @@ async def test_eligible_operation_falls_back_when_provider_lacks_batch() -> None
             user="user",
             max_tokens=100,
             stage_type="summary",
+            allow_batch=True,
             adapter_factory=adapter_factory,
         )
 
@@ -118,5 +116,5 @@ async def test_failed_background_job_is_dead_lettered() -> None:
     jobs = dead_letter_jobs()
     assert jobs[-1]["operation"] == "eval.score"
     assert jobs[-1]["provider"] == "google"
-    assert jobs[-1]["batch"] is True
+    assert jobs[-1]["batch"] is False
     assert "provider down" in jobs[-1]["error"]

@@ -1,12 +1,17 @@
 from __future__ import annotations
 
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Sequence
 
 import anthropic
 import httpx
 
 from config import settings
-from services.llm.base import BaseLLMAdapter, ProviderError
+from services.llm.base import (
+    BaseLLMAdapter,
+    BatchRequest,
+    BatchResultItem,
+    ProviderError,
+)
 from services.llm.completion import LLMCompletionInfo
 from services.llm.model_catalog import model_request_policy
 
@@ -104,6 +109,66 @@ class AnthropicAdapter(BaseLLMAdapter):
         except anthropic.APIError as exc:
             raise ProviderError("anthropic", exc) from exc
 
+    async def submit_batch(self, requests: Sequence[BatchRequest]) -> str:
+        """Create a Message Batch (50% discount) and return its id.
+
+        Each request reuses ``_messages_request`` for body parity with the live
+        path, minus ``extra_body`` (a client-level kwarg the per-request batch
+        params do not carry — the judge's reasoning effort is non-critical and
+        omitting it never changes correctness). A batch-of-one still earns the
+        full batch discount, so the caller need not aggregate.
+        """
+        try:
+            batch_requests = [
+                {
+                    "custom_id": req.custom_id,
+                    "params": self._batch_params(
+                        system=req.system,
+                        user=req.user,
+                        max_tokens=req.max_tokens,
+                    ),
+                }
+                for req in requests
+            ]
+            batch = await self._client.beta.messages.batches.create(
+                requests=batch_requests
+            )
+            return batch.id
+        except anthropic.APIError as exc:
+            raise ProviderError("anthropic", exc) from exc
+
+    async def poll_batch(self, provider_batch_id: str) -> str:
+        try:
+            batch = await self._client.beta.messages.batches.retrieve(provider_batch_id)
+            return str(getattr(batch, "processing_status", "") or "")
+        except anthropic.APIError as exc:
+            raise ProviderError("anthropic", exc) from exc
+
+    async def fetch_batch_results(
+        self, provider_batch_id: str
+    ) -> dict[str, BatchResultItem]:
+        results: dict[str, BatchResultItem] = {}
+        try:
+            # The async SDK's results() is itself a coroutine that fetches the
+            # results file; it must be awaited before async-iterating the
+            # per-request entries (it returns an AsyncJSONLDecoder).
+            stream = await self._client.beta.messages.batches.results(provider_batch_id)
+            async for entry in stream:
+                results[entry.custom_id] = _normalize_batch_result(entry)
+        except anthropic.APIError as exc:
+            raise ProviderError("anthropic", exc) from exc
+        return results
+
+    def _batch_params(self, *, system: str, user: str, max_tokens: int) -> dict:
+        params = self._messages_request(
+            system=system,
+            user=user,
+            max_tokens=max_tokens,
+            cache_system=False,
+        )
+        params.pop("extra_body", None)
+        return params
+
     def _messages_request(
         self,
         *,
@@ -139,6 +204,43 @@ class AnthropicAdapter(BaseLLMAdapter):
         if effort:
             request["extra_body"] = {"effort": effort}
         return request
+
+
+def _normalize_batch_result(entry) -> BatchResultItem:
+    """Map one Anthropic batch result entry to a provider-neutral item.
+
+    Succeeded entries carry a full Message (``result.message``); errored/expired/
+    canceled entries carry no usable text. Tolerant of SDK shape via getattr so a
+    minor SDK bump cannot break collection.
+    """
+    custom_id = entry.custom_id
+    result = getattr(entry, "result", None)
+    status = str(getattr(result, "type", "") or "errored")
+    if status == "succeeded":
+        message = getattr(result, "message", None)
+        content = getattr(message, "content", None) or []
+        text = next(
+            (
+                getattr(block, "text", None)
+                for block in content
+                if getattr(block, "type", None) == "text"
+            ),
+            None,
+        )
+        usage = getattr(message, "usage", None)
+        return BatchResultItem(
+            custom_id=custom_id,
+            status="succeeded",
+            text=text,
+            usage=_object_to_dict(usage) if usage is not None else None,
+            finish_reason=getattr(message, "stop_reason", None),
+        )
+    error = getattr(result, "error", None)
+    return BatchResultItem(
+        custom_id=custom_id,
+        status=status,
+        error=str(getattr(error, "type", None) or error or status),
+    )
 
 
 def _object_to_dict(value) -> dict:

@@ -41,6 +41,8 @@ from services.observability import (
     GITHUB_JOB_DEADLETTERED_TOTAL,
     GITHUB_JOB_RETRIES_TOTAL,
     GITHUB_THROTTLED_TOTAL,
+    LLM_BATCH_JOB_DEADLETTERED_TOTAL,
+    LLM_BATCH_JOB_RETRIES_TOTAL,
 )
 
 logger = structlog.get_logger(__name__)
@@ -57,6 +59,7 @@ _RETRY_BACKOFF_CAP_SECONDS = 600.0
 # or confused with, the GitHub export dead-letter stream (Plan §25.6 T-293).
 GH_DEAD_LETTER_KEY = "gh:deadletter"
 BILLING_DEAD_LETTER_KEY = "billing:deadletter"
+LLM_BATCH_DEAD_LETTER_KEY = "llm:batch:deadletter"
 # Back-compat alias: the GitHub key kept its original name for any external
 # replay tooling that referenced it.
 DEAD_LETTER_KEY = GH_DEAD_LETTER_KEY
@@ -335,4 +338,15 @@ billing_job = make_job_wrapper(
     dead_letter_key=BILLING_DEAD_LETTER_KEY,
     special_handlers=None,
     log_event_prefix="billing.job",
+)
+
+# LLM batch job lane (Phase 3 — issue #26) — deferred batch submit/collect.
+# Same retry/dead-letter contract; its own ``llm:batch:deadletter`` list so a
+# stuck eval batch is never confused with a GitHub export or billing grant.
+llm_batch_job = make_job_wrapper(
+    retries_metric=LLM_BATCH_JOB_RETRIES_TOTAL,
+    deadletter_metric=LLM_BATCH_JOB_DEADLETTERED_TOTAL,
+    dead_letter_key=LLM_BATCH_DEAD_LETTER_KEY,
+    special_handlers=None,
+    log_event_prefix="llm_batch.job",
 )

@@ -40,6 +40,7 @@ from services.queue import (
     billing_job,
     close_arq_pool,
     github_job,
+    llm_batch_job,
 )
 
 logger = structlog.get_logger(__name__)
@@ -71,6 +72,12 @@ _BILLING_SWEEP_CRON_SECOND = {0}
 _BILLING_RECONCILE_CRON_MINUTE = {7, 22, 37, 52}
 _BILLING_PURGE_CRON_HOUR = {3}
 _BILLING_PURGE_CRON_MINUTE = {42}
+
+# LLM batch eval sweep (Phase 3 — issue #26). Runs every minute, staggered off
+# the billing 60s sweep ({0}) so the two don't fire on the same second. Batches
+# take minutes to ~24h; a per-minute poll is ample and the provider retrieve is
+# cheap.
+_LLM_BATCH_SWEEP_CRON_SECOND = {30}
 
 
 @github_job("export_push")
@@ -174,6 +181,42 @@ async def billing_process_webhook(ctx: dict[str, Any], webhook_event_id: str) ->
     await billing_worker.billing_process_webhook(ctx, webhook_event_id)
 
 
+@llm_batch_job("llm_batch_submit")
+async def llm_batch_submit(ctx: dict[str, Any], batch_job_id: str) -> None:
+    """Create the provider batch for a pending eval row (Phase 3 — issue #26).
+
+    Wrapped in the ``llm_batch_job`` contract: a transient provider error retries
+    with backoff, then dead-letters to ``llm:batch:deadletter`` after
+    ``JOB_MAX_TRIES``. Idempotent — a no-op once the row is submitted or gone.
+    """
+    from services.evals import eval_batch
+
+    await eval_batch.run_submit(ctx, batch_job_id)
+
+
+@llm_batch_job("llm_batch_collect")
+async def llm_batch_collect(ctx: dict[str, Any], batch_job_id: str) -> None:
+    """Poll a submitted eval batch and persist its result once ended (Phase 3).
+
+    Returns cleanly while the batch is still processing (the sweep cron re-enqueues
+    it next tick); a transient poll/fetch error retries then dead-letters.
+    """
+    from services.evals import eval_batch
+
+    await eval_batch.run_collect(ctx, batch_job_id)
+
+
+async def llm_batch_sweep(ctx: dict[str, Any]) -> None:
+    """Cron: recover stuck pending eval batches and advance submitted ones (T-3).
+
+    Plain cron — the body catches and logs; a transient blip is recovered by the
+    next tick, so a failure must never surface as a worker error.
+    """
+    from services.evals import eval_batch
+
+    await eval_batch.sweep(ctx)
+
+
 async def billing_process_pending_webhooks(ctx: dict[str, Any]) -> None:
     """Cron (60s): recover queue-outage + crashed-worker inbox rows (T-298).
 
@@ -251,6 +294,8 @@ class WorkerSettings:
         projects_sync,
         pr_check,
         billing_process_webhook,
+        llm_batch_submit,
+        llm_batch_collect,
     ]
     cron_jobs = [
         cron(
@@ -278,6 +323,11 @@ class WorkerSettings:
             purge_billing_events,
             hour=_BILLING_PURGE_CRON_HOUR,
             minute=_BILLING_PURGE_CRON_MINUTE,
+            run_at_startup=False,
+        ),
+        cron(
+            llm_batch_sweep,
+            second=_LLM_BATCH_SWEEP_CRON_SECOND,
             run_at_startup=False,
         ),
     ]

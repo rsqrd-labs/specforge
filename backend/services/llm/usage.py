@@ -69,7 +69,17 @@ def estimate_cost_usd(
     provider: str,
     model: str,
     usage: NormalizedUsage,
+    *,
+    batch: bool = False,
 ) -> Decimal | None:
+    """Estimate USD cost for a call's token usage.
+
+    ``batch=True`` applies the provider Message Batches 50% discount (Anthropic
+    and OpenAI both halve input *and* output token rates for batched requests),
+    so a genuinely batched call records ~half the cost of the same real-time
+    call. Only the deferred-batch collect path sets this — the synchronous
+    fallback runs at full price and must leave it False (no double-discount).
+    """
     cost = get_model_cost(provider, model)
     input_tokens = usage.input_tokens
     cached_input_tokens = usage.cached_input_tokens or 0
@@ -99,6 +109,9 @@ def estimate_cost_usd(
         output_tokens or 0,
         cost["output_cost_per_million"],
     )
+    if batch:
+        # Provider Message Batches discount: 50% off all token usage.
+        total *= Decimal("0.5")
     return total
 
 

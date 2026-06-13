@@ -822,6 +822,78 @@ async def run_eval(
             EVAL_POLL_FAILURES.labels(stage_type=stage_type).inc()
             return None
 
+    return await _persist_eval_data(
+        db,
+        data,
+        stage_version_id=stage_version_id,
+        stage_type=stage_type,
+        content=content,
+        harness_content=harness_content,
+        content_generation_id=content_generation_id,
+    )
+
+
+def build_eval_request(
+    stage_type: str,
+    content: str,
+    spec_content: str,
+) -> tuple[str, str, int]:
+    """Build the (system, user, max_tokens) for one eval-judge call.
+
+    The submit side of the deferred-batch path (Phase 3): a batch request reuses
+    exactly the prompt the synchronous path's first (non-compact) attempt would
+    send, so a batched eval scores the same artifact identically.
+    """
+    user_prompt = _build_eval_prompt(stage_type, content, spec_content, compact=False)
+    return _JUDGE_SYSTEM, user_prompt, output_budget_for_operation("eval.score")
+
+
+async def persist_eval_from_raw(
+    db: AsyncSession,
+    raw: str,
+    *,
+    stage_version_id: UUID,
+    stage_type: str,
+    content: str,
+    harness_content: str | None = None,
+    content_generation_id: str | None = None,
+) -> EvalResult | None:
+    """Parse a judge response and persist the EvalResult, or return None.
+
+    The completion side of the deferred-batch path: one parse attempt, no
+    re-scoring (a batch round trip can take hours — re-batching on a parse miss
+    is the wrong call). Returns None when the judge output is not parseable JSON;
+    the caller decides whether to fall back to a single synchronous score.
+    """
+    data = _parse_eval_json(raw)
+    if data is None:
+        logger.error(
+            "batch eval judge returned non-JSON for stage_version_id=%s: %r",
+            stage_version_id,
+            raw[:200],
+        )
+        return None
+    return await _persist_eval_data(
+        db,
+        data,
+        stage_version_id=stage_version_id,
+        stage_type=stage_type,
+        content=content,
+        harness_content=harness_content,
+        content_generation_id=content_generation_id,
+    )
+
+
+async def _persist_eval_data(
+    db: AsyncSession,
+    data: dict[str, Any],
+    *,
+    stage_version_id: UUID,
+    stage_type: str,
+    content: str,
+    harness_content: str | None,
+    content_generation_id: str | None,
+) -> EvalResult:
     normalised = _normalise_eval_payload(stage_type, data)
     coverage_percent: int | None = normalised["coverage_percent"]
     uncovered_reqs: list[str] | None = normalised["uncovered_reqs"]
