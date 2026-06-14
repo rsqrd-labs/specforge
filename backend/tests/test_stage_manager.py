@@ -1226,13 +1226,20 @@ async def test_generate_unsafe_plan_failed_repair_blocks_refunds_and_skips_cache
 
 
 @pytest.mark.asyncio
-async def test_generate_with_trace_id_creates_langfuse_trace_and_span() -> None:
+async def test_generate_with_trace_id_creates_langfuse_trace_and_span(
+    monkeypatch,
+) -> None:
     workspace_id = uuid4()
     spec_stage = _make_stage(workspace_id, "spec", status="draft")
     workspace = _make_workspace([spec_stage])
     user = _make_user()
     deduction = CreditLedger(id=uuid4(), user_id=user.id, amount=-10, reason="generate")
     db = _MultiQueryDB([spec_stage, workspace, [], deduction])
+    # Force the (default-0.0) score sample so the background score path runs and
+    # this test can assert it was scheduled (issue #27 Phase 2).
+    from services.pipeline import stage_manager as sm
+
+    monkeypatch.setattr(sm.settings, "eval_score_sample_rate", 1.0)
 
     async def fake_stream(
         system, user, max_tokens=0, **kwargs
@@ -2910,7 +2917,9 @@ async def test_refine_unbalanced_markdown_fence_refunds_credits() -> None:
 
 
 @pytest.mark.asyncio
-async def test_generate_emits_structural_eval_without_blocking_on_score() -> None:
+async def test_generate_emits_structural_eval_without_blocking_on_score(
+    monkeypatch,
+) -> None:
     """generate() emits the inline structural eval and never awaits the score.
 
     Phase 1 decouples deterministic findings from the LLM judge: the stream
@@ -2928,6 +2937,11 @@ async def test_generate_emits_structural_eval_without_blocking_on_score() -> Non
     user = _make_user()
     deduction = CreditLedger(id=uuid4(), user_id=user.id, amount=-10, reason="generate")
     db = _MultiQueryDB([spec_stage, workspace, [], deduction])
+    # Opt this spec stage into the (default-0.0) score sample so the fire-and-
+    # forget judge path is exercised (issue #27 Phase 2).
+    from services.pipeline import stage_manager as sm
+
+    monkeypatch.setattr(sm.settings, "eval_score_sample_rate", 1.0)
 
     score_started = asyncio.Event()
 
@@ -3030,6 +3044,174 @@ async def test_generate_emits_done_when_structural_eval_persist_fails() -> None:
         t.startswith('{"eval"') for t in tokens
     ), "the eval event is skipped when the inline persist fails"
     assert _streamed_artifact(tokens) == _VALID_SPEC
+
+
+# ---------------------------------------------------------------------------
+# issue #27 Phase 2: the best-effort LLM quality *score* is sampled at
+# ``eval_score_sample_rate`` (default 0.0 ⇒ never), gated at the single
+# chokepoint ``_dispatch_stage_eval``.  HARNESS is exempt — its LLM-derived
+# coverage finding has no deterministic equivalent and must always be scored
+# (Decision A).  Deterministic structural findings are unaffected (persisted
+# inline by the caller, no judge call).
+# ---------------------------------------------------------------------------
+
+
+def _counter_value(counter, **labels) -> float:
+    """Read a labelled prometheus_client Counter's current value (0 if unset)."""
+    return counter.labels(**labels)._value.get()
+
+
+@pytest.mark.asyncio
+async def test_dispatch_stage_eval_samples_out_nonharness_at_zero_rate(
+    monkeypatch,
+) -> None:
+    """spec/plan/tasks at the default 0.0 rate issue NO judge call.
+
+    The deterministic structural row was already persisted inline by the caller,
+    so the dispatch returns ``None`` (matching the batch no-op contract) and
+    increments ``judge_calls_skipped_total{reason="sampled_out"}``.
+    """
+    from services.observability import JUDGE_CALLS_SKIPPED_TOTAL
+    from services.pipeline import stage_manager as sm
+
+    monkeypatch.setattr(sm.settings, "eval_score_sample_rate", 0.0)
+    run_eval_background = AsyncMock()
+    monkeypatch.setattr(sm, "run_eval_background", run_eval_background)
+
+    before = _counter_value(
+        JUDGE_CALLS_SKIPPED_TOTAL, purpose="eval.score", reason="sampled_out"
+    )
+    for stage_type in ("spec", "plan", "tasks"):
+        result = await sm._dispatch_stage_eval(
+            version_id=uuid4(),
+            stage_type=stage_type,
+            content="body",
+            eval_context="spec",
+            provider="anthropic",
+            content_generation_id=None,
+            harness_content=None,
+            workspace_id=None,
+        )
+        assert result is None
+    run_eval_background.assert_not_called()
+    after = _counter_value(
+        JUDGE_CALLS_SKIPPED_TOTAL, purpose="eval.score", reason="sampled_out"
+    )
+    assert after - before == 3
+
+
+@pytest.mark.asyncio
+async def test_dispatch_stage_eval_scores_nonharness_at_full_rate(
+    monkeypatch,
+) -> None:
+    """At rate 1.0 a spec stage runs the background score path."""
+    from services.pipeline import stage_manager as sm
+
+    monkeypatch.setattr(sm.settings, "eval_score_sample_rate", 1.0)
+    monkeypatch.setattr(sm.settings, "llm_batch_enabled", False)
+    run_eval_background = AsyncMock(return_value=None)
+    monkeypatch.setattr(sm, "run_eval_background", run_eval_background)
+
+    await sm._dispatch_stage_eval(
+        version_id=uuid4(),
+        stage_type="spec",
+        content="body",
+        eval_context="spec",
+        provider="anthropic",
+        content_generation_id=None,
+        harness_content=None,
+        workspace_id=None,
+    )
+    run_eval_background.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_dispatch_stage_eval_always_scores_harness_at_zero_rate(
+    monkeypatch,
+) -> None:
+    """Decision A: harness coverage survives sampling-out.
+
+    Even with the score rate pinned to 0.0 a HARNESS stage still dispatches the
+    judge so its LLM-derived ``coverage_percent``/``uncovered_reqs`` finding stays
+    visible — the one carve-out that, if wrong, fails the issue's own ACs.
+    """
+    from services.pipeline import stage_manager as sm
+
+    monkeypatch.setattr(sm.settings, "eval_score_sample_rate", 0.0)
+    monkeypatch.setattr(sm.settings, "llm_batch_enabled", False)
+    run_eval_background = AsyncMock(return_value=None)
+    monkeypatch.setattr(sm, "run_eval_background", run_eval_background)
+
+    await sm._dispatch_stage_eval(
+        version_id=uuid4(),
+        stage_type="harness",
+        content="harness body",
+        eval_context="spec",
+        provider="anthropic",
+        content_generation_id=None,
+        harness_content="harness body",
+        workspace_id=None,
+    )
+    run_eval_background.assert_awaited_once()
+
+
+def test_should_score_stage_is_deterministic_at_bounds(monkeypatch) -> None:
+    """Harness short-circuits before ``random``; 0.0/1.0 are deterministic."""
+    from services.pipeline import stage_manager as sm
+
+    monkeypatch.setattr(sm.settings, "eval_score_sample_rate", 0.0)
+    assert sm._should_score_stage("harness") is True  # carve-out, never random
+    assert sm._should_score_stage("spec") is False
+    assert sm._should_score_stage("tasks") is False
+
+    monkeypatch.setattr(sm.settings, "eval_score_sample_rate", 1.0)
+    assert sm._should_score_stage("spec") is True
+    assert sm._should_score_stage("harness") is True
+
+
+@pytest.mark.asyncio
+async def test_generate_spec_skips_score_judge_by_default(monkeypatch) -> None:
+    """End-to-end: a default-config spec generation emits structural findings
+    but never schedules the score-only judge (the Phase 2 cost win)."""
+    from services.pipeline import stage_manager as sm
+
+    monkeypatch.setattr(sm.settings, "eval_score_sample_rate", 0.0)
+    run_eval_background = AsyncMock(return_value=None)
+    monkeypatch.setattr(sm, "run_eval_background", run_eval_background)
+
+    workspace_id = uuid4()
+    spec_stage = _make_stage(workspace_id, "spec", status="draft")
+    workspace = _make_workspace([spec_stage])
+    user = _make_user()
+    deduction = CreditLedger(id=uuid4(), user_id=user.id, amount=-10, reason="generate")
+    db = _MultiQueryDB([spec_stage, workspace, [], deduction])
+
+    async def fake_stream(system, user, max_tokens=0, **kwargs):
+        await asyncio.sleep(0)
+        yield _spec_stream_payload(user)
+
+    svc = StageManager(redis_client=_FakeRedis())
+    with (
+        patch(
+            "services.pipeline.stage_manager.credit_service.deduct",
+            new_callable=AsyncMock,
+            return_value=deduction,
+        ),
+        patch(
+            "services.pipeline.stage_manager.build_prompt",
+            new_callable=AsyncMock,
+            return_value=("sys", "user"),
+        ),
+        patch("services.pipeline.stage_manager.get_llm") as mock_get_llm,
+    ):
+        mock_adapter = MagicMock()
+        mock_adapter.stream = fake_stream
+        mock_get_llm.return_value = mock_adapter
+        tokens = [token async for token in svc.generate(spec_stage.id, user, db)]
+        await asyncio.sleep(0)
+
+    assert any(t.startswith('{"eval"') for t in tokens), "structural eval still emits"
+    run_eval_background.assert_not_called()
 
 
 @pytest.mark.asyncio

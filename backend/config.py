@@ -1,3 +1,4 @@
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -84,6 +85,19 @@ class Settings(BaseSettings):
     # has no real batch API (only Anthropic today), or when the durable queue is
     # unavailable. Never batches interactive generation or the critic.
     llm_batch_enabled: bool = False
+    # Issue #27 Phase 2: fraction of non-harness generations (spec/plan/tasks)
+    # whose best-effort LLM *quality score* is computed. The score is no longer a
+    # user-facing signal (Phase 1 cut it from the UI in favour of deterministic
+    # findings), so it is sampled purely for internal telemetry. Default 0.0 ⇒ the
+    # score-only judge call is never issued for those stages, which is the cost
+    # win — deterministic findings (task traceability, completeness) still run
+    # inline on every generation regardless. HARNESS stages are exempt from this
+    # gate: their LLM-derived coverage finding (`coverage_percent`/`uncovered_reqs`)
+    # has no deterministic equivalent and must stay visible (Decision A), so the
+    # judge always runs there. The single gate lives in `_dispatch_stage_eval`.
+    # Raise toward 1.0 only to gather model/provider quality telemetry. Must be in
+    # [0.0, 1.0]; an out-of-range value fails startup in every environment.
+    eval_score_sample_rate: float = 0.0
     max_request_body_bytes: int = 1_000_000
     tech_safety_policy_max_age_days: int = 30
     tech_safety_osv_cache_ttl_seconds: int = 86_400
@@ -236,6 +250,21 @@ class Settings(BaseSettings):
     admin_user_emails: str = ""
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+
+    @field_validator("eval_score_sample_rate")
+    @classmethod
+    def _validate_eval_score_sample_rate(cls, value: float) -> float:
+        """Reject a sample rate outside [0.0, 1.0] (issue #27 Phase 2).
+
+        This is a probability, not a count — a value below 0 or above 1 is a
+        misconfiguration in any environment, so it fails fast at startup rather
+        than silently clamping and quietly under/over-sampling the judge.
+        """
+        if not 0.0 <= value <= 1.0:
+            raise ValueError(
+                "eval_score_sample_rate must be between 0.0 and 1.0 " f"(got {value})"
+            )
+        return value
 
     @property
     def lemonsqueezy_enabled(self) -> bool:

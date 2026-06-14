@@ -5,6 +5,7 @@ import contextlib
 import hashlib
 import json
 import logging
+import random
 import re
 from collections.abc import AsyncGenerator, Callable
 from dataclasses import dataclass
@@ -77,6 +78,7 @@ from services.observability import (
     PIPELINE_TECH_SAFETY_REPAIRS,
     PIPELINE_VALIDATOR_FAILURES,
     SSE_STREAM_FAILURES,
+    record_judge_call_skipped,
 )
 from services.pipeline.artifact_validator import (
     CompletenessIssue,
@@ -246,6 +248,21 @@ def _eval_to_dict(result: EvalResult) -> dict:
     }
 
 
+def _should_score_stage(stage_type: str) -> bool:
+    """Decide whether to issue the best-effort LLM quality score (issue #27 P2).
+
+    HARNESS is always scored: its coverage finding (``coverage_percent`` /
+    ``uncovered_reqs``) is LLM-derived with no deterministic equivalent and must
+    stay visible (Decision A). Every other stage is sampled at
+    ``settings.eval_score_sample_rate`` — default 0.0, so the score-only judge
+    call is normally skipped (the cost win). Harness short-circuits *before*
+    ``random`` so a rate of 0.0/1.0 is deterministic.
+    """
+    if stage_type == "harness":
+        return True
+    return random.random() < settings.eval_score_sample_rate
+
+
 async def _dispatch_stage_eval(
     *,
     version_id: UUID,
@@ -259,6 +276,14 @@ async def _dispatch_stage_eval(
 ) -> EvalResult | None:
     """Score the stage, deferring to a provider batch when enabled.
 
+    The best-effort LLM score is gated here — the single chokepoint covering all
+    ``_schedule_stage_eval`` sites *and* the batch path — by
+    ``_should_score_stage`` (issue #27 Phase 2). When sampled out, no judge call
+    is issued (the deterministic structural ``EvalResult`` was already persisted
+    inline by the caller) and ``None`` is returned, matching the existing
+    batch/no-op contract; ``_schedule_stage_eval`` is fire-and-forget and never
+    treats ``None`` as a failure.
+
     With ``llm_batch_enabled`` and a provider that has a real Message Batches
     adapter, the eval is enqueued for the worker batch path (50% discount) and
     returns ``None`` here — its result is delivered asynchronously later, not
@@ -266,6 +291,9 @@ async def _dispatch_stage_eval(
     failure (e.g. DB unavailable creating the checkpoint row) falls back to a
     synchronous in-process score so eval still happens.
     """
+    if not _should_score_stage(stage_type):
+        record_judge_call_skipped("eval.score", "sampled_out")
+        return None
     if settings.llm_batch_enabled and eval_batch.provider_supports_real_batch(provider):
         try:
             await eval_batch.enqueue_eval_batch(
