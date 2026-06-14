@@ -29,6 +29,18 @@ export interface QualityGateReason {
   remediation?: string
 }
 
+/** Derived, billing-honest recovery contract attached to a blocked stage's
+ *  `quality_gate` by the backend (`models.stage.derive_quality_gate_recovery`).
+ *  The single authoritative source for the recovery action, override
+ *  availability, retry cost, refund truth, and the user-facing message. */
+export interface QualityGateRecovery {
+  action: string
+  overridable: boolean
+  credit_required: number
+  refunded_prior_attempt: boolean
+  message: string
+}
+
 export interface QualityGateInfo {
   stage: StageType
   kind: string | null
@@ -43,6 +55,7 @@ export interface QualityGateInfo {
   status?: QualityGateStatus
   version?: number | null
   failed_at?: string | null
+  recovery?: QualityGateRecovery | null
 }
 
 export interface Stage {

@@ -79,6 +79,7 @@ import {
   actionAlertFromMessage,
   actionAlertFromStreamError,
 } from "../utils/errorPresentation"
+import { deriveFinaliseGateBlock } from "../utils/qualityGate"
 
 const STAGE_ORDER: StageType[] = ["spec", "plan", "harness", "tasks"]
 
@@ -477,14 +478,16 @@ export default function Workspace() {
   const githubSync = useGitHubSync(id, activeStage?.type === "tasks")
 
   // T-247 critic quality gate: findings surfaced when a generation is held back.
+  // The transient, SSE-driven map still feeds the findings panel below, but it is
+  // dismissable — so it must NOT decide whether finalise is blocked.
   const activeGate = activeStage ? qualityGateMap[activeStage.id] : undefined
-  const qualityGateBlocked = Boolean(activeGate)
-  const qualityGateBlockedMessage =
-    activeGate?.kind === "incomplete_output"
-      ? "Regenerate a complete version before finalising"
-      : activeGate?.kind === "technology_safety"
-        ? "Regenerate with supported technology choices before finalising"
-      : "Regenerate or override the quality gate before finalising"
+  // Finalise-blocking reads ONE authoritative source: the persisted stage object
+  // (issue #28, Phase 1). It is populated the moment the gate fires (the
+  // `quality_gate_failed` stream rejection refetches the stage — useStream.ts:100)
+  // and after every refresh, and unlike the SSE map it cannot be dismissed away.
+  const finaliseGateBlock = deriveFinaliseGateBlock(activeStage)
+  const qualityGateBlocked = finaliseGateBlock.blocked
+  const qualityGateBlockedMessage = finaliseGateBlock.message
 
   const stages = useMemo(() => {
     const workspaceStageIds = new Set(
@@ -1197,14 +1200,9 @@ export default function Workspace() {
   const handleFinalise = useCallback(async () => {
     if (!activeStage || !id) return
     if (guardWorkspaceMutation()) return
-    if (activeStage.quality_gate?.status === "blocked") {
-      setGenericError(
-        activeStage.quality_gate.kind === "incomplete_output"
-          ? "Regenerate a complete version before finalising."
-          : activeStage.quality_gate.kind === "technology_safety"
-            ? "Regenerate with supported technology choices before finalising."
-          : "Regenerate or override the quality gate before finalising.",
-      )
+    const gateBlock = deriveFinaliseGateBlock(activeStage)
+    if (gateBlock.blocked) {
+      setGenericError(gateBlock.message)
       return
     }
     const finalisedType = activeStage.type
@@ -1225,8 +1223,13 @@ export default function Workspace() {
           setActiveStageId(nextStage.id)
         }
       }
-    } catch {
-      setGenericError("Only draft stages can be finalised.")
+    } catch (err) {
+      // Surface the backend's structured gate 409 (`detail.message` /
+      // `detail.recovery.message`) verbatim instead of the old blanket
+      // draft-only copy. The status-branch ValueError ("…cannot be finalised")
+      // is a plain-string detail and is surfaced as-is; the generic fallback
+      // only applies when no structured detail is present (issue #28, Phase 1).
+      setGenericError(getApiErrorMessage(err, "Only draft stages can be finalised."))
     }
   }, [activeStage, guardWorkspaceMutation, id, setStage, setCurrentWorkspace, setStages, refreshLatestStoryboard])
 
