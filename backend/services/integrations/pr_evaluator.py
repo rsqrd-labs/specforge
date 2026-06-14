@@ -69,6 +69,7 @@ from services.observability import (
     GITHUB_AUDIT_CHECK_POSTED,
     GITHUB_CHECK_TOTAL,
     github_audit,
+    record_judge_call,
 )
 
 logger = structlog.get_logger(__name__)
@@ -410,6 +411,7 @@ async def _judge(
         return None
     provider = await _workspace_provider(db, push.workspace_id)
     user_prompt = _build_user_prompt(criteria, diff)
+    record_judge_call("pr_check")
     try:
         async with _JUDGE_SEMAPHORE:
             raw = await call_judge_model(

@@ -54,6 +54,7 @@ from services.llm.cost_ledger import LLMCostContext
 from services.llm.gateway import get_llm
 from services.llm.instrumented_adapter import InstrumentedAdapter
 from services.llm.provider_config import JUDGE_MODELS
+from services.observability import record_judge_call
 from services.security.prompt_guard import PromptGuard
 from services.security.sanitizer import sanitize_text
 
@@ -160,6 +161,7 @@ async def request_clarifying_questions(
                 product_surface="clarifier",
             ),
         )
+        record_judge_call("clarify")
         async with asyncio.timeout(_JUDGE_TIMEOUT_SECONDS):
             raw = await adapter.complete(system_prompt, user_prompt, max_tokens=600)
     except asyncio.TimeoutError:

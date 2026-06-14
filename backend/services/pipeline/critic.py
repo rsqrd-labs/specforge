@@ -25,6 +25,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from prompts.base import wrap_untrusted_content
 from services.llm.gateway import call_judge_model
+from services.observability import record_judge_call
 
 if TYPE_CHECKING:
     from services.llm.cost_ledger import LLMCostContext
@@ -245,6 +246,7 @@ async def critic_review(
         # Too short to grade meaningfully — pass through.
         return StageCriticResult(passed=True)
 
+    record_judge_call("critic")
     try:
         result_json = await call_judge_model(
             system_prompt=_CRITIC_SYSTEM_PROMPT,

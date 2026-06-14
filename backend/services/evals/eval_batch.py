@@ -48,6 +48,7 @@ from services.llm.usage import estimate_cost_usd, normalize_provider_usage
 from services.observability import (
     LLM_BATCH_COLLECTED_TOTAL,
     LLM_BATCH_SUBMITTED_TOTAL,
+    record_judge_call,
     record_llm_cost_event,
 )
 from services.queue import enqueue
@@ -159,6 +160,10 @@ async def run_submit(ctx: dict[str, Any], batch_job_id: str) -> None:
         row.provider_batch_id = provider_batch_id
         row.status = "submitted"
         await db.commit()
+    # The provider batch is the billed eval.score judge call on the deferred lane;
+    # count it as spend alongside the batch-submitted gauge so the judge-call
+    # instrument stays correct when llm_batch_enabled is on (issue #27, Phase 0).
+    record_judge_call(_OPERATION)
     LLM_BATCH_SUBMITTED_TOTAL.labels(operation=_OPERATION, provider=row.provider).inc()
     logger.info(
         "llm_batch.submitted",

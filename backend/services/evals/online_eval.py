@@ -18,7 +18,7 @@ from services.llm.cost_ledger import LLMCostContext
 from services.llm.gateway import get_llm
 from services.llm.output_budget import output_budget_for_operation
 from services.llm.provider_config import JUDGE_MODELS
-from services.observability import EVAL_POLL_FAILURES
+from services.observability import EVAL_POLL_FAILURES, record_judge_call
 
 logger = logging.getLogger(__name__)
 _EVAL_TIMEOUT_SECONDS = 90.0
@@ -699,6 +699,10 @@ async def _call_eval_judge(
     model: str,
     user_prompt: str,
 ) -> str:
+    # Count the spend at the point the provider request is issued — once per real
+    # attempt, so the compact-prompt re-try counts as the separate call it is
+    # (issue #27, Phase 0).
+    record_judge_call("eval.score")
     result = await asyncio.wait_for(
         complete_background_llm(
             operation="eval.score",

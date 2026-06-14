@@ -8,7 +8,11 @@ from fastapi.testclient import TestClient
 from main import create_app
 from services import observability
 from services.observability import (
+    JUDGE_CALLS_SKIPPED_TOTAL,
+    JUDGE_CALLS_TOTAL,
     SensitiveDataFilter,
+    record_judge_call,
+    record_judge_call_skipped,
     redact_sensitive_data,
     redact_structlog_event,
 )
@@ -471,3 +475,66 @@ def test_lifespan_flushes_langfuse_on_shutdown() -> None:
             pass
 
     flushed.assert_awaited_once()
+
+
+# ---------------------------------------------------------------------------
+# Judge-call spend instrument (issue #27 — Phase 0)
+# ---------------------------------------------------------------------------
+
+
+def _judge_total(purpose: str) -> float:
+    return JUDGE_CALLS_TOTAL.labels(purpose=purpose)._value.get()
+
+
+def _judge_skipped(purpose: str, reason: str) -> float:
+    return JUDGE_CALLS_SKIPPED_TOTAL.labels(purpose=purpose, reason=reason)._value.get()
+
+
+def test_judge_call_metrics_are_registered() -> None:
+    for metric in ["JUDGE_CALLS_TOTAL", "JUDGE_CALLS_SKIPPED_TOTAL"]:
+        assert hasattr(observability, metric)
+
+
+def test_record_judge_call_increments_purpose_label() -> None:
+    before = _judge_total("critic")
+    record_judge_call("critic")
+    assert _judge_total("critic") == before + 1
+
+
+def test_record_judge_call_counts_every_attempt() -> None:
+    before = _judge_total("eval.score")
+    record_judge_call("eval.score")
+    record_judge_call("eval.score")
+    # Each real attempt (e.g. a compact-prompt re-try) is its own unit of spend.
+    assert _judge_total("eval.score") == before + 2
+
+
+def test_record_judge_call_normalises_unknown_purpose() -> None:
+    before = _judge_total("unknown")
+    record_judge_call("not-a-real-purpose")
+    # An out-of-vocabulary purpose collapses to the single "unknown" bucket
+    # rather than creating an unbounded Prometheus series.
+    assert _judge_total("unknown") == before + 1
+
+
+def test_record_judge_call_skipped_increments_purpose_and_reason() -> None:
+    before = _judge_skipped("pr_check", "budget")
+    record_judge_call_skipped("pr_check", "budget")
+    assert _judge_skipped("pr_check", "budget") == before + 1
+
+
+def test_record_judge_call_skipped_normalises_unknown_labels() -> None:
+    before = _judge_skipped("unknown", "unknown")
+    record_judge_call_skipped("bogus-purpose", "bogus-reason")
+    assert _judge_skipped("unknown", "unknown") == before + 1
+
+
+def test_judge_call_metrics_exposed_on_endpoint() -> None:
+    record_judge_call("clarify")
+    with patch.object(observability.settings, "metrics_token", "test-metrics-token"):
+        client = TestClient(create_app(redis_client=_NoopRedis()))
+        response = client.get(
+            "/metrics", headers={"Authorization": "Bearer test-metrics-token"}
+        )
+    assert response.status_code == 200
+    assert "specforge_judge_calls_total" in response.text

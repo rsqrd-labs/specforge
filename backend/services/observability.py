@@ -686,6 +686,88 @@ _STORYBOARD_SECTION_LABELS = frozenset(
     }
 )
 
+# ---------------------------------------------------------------------------
+# Judge-model spend instrument (issue #27 — Phase 0)
+# ---------------------------------------------------------------------------
+#
+# Every judge-model call in the product has exactly one of four *purposes*:
+#   - ``eval.score``  — the post-generation quality score (online_eval / eval_batch)
+#   - ``critic``      — the Phase-19 safety/quality gate second pass
+#   - ``pr_check``    — the GitHub PR-diff acceptance-criteria judge
+#   - ``clarify``     — the pre-generation clarifying-questions judge
+#
+# ``judge_calls_total`` counts a judge call *actually issued to a provider* (the
+# real, billed spend), incremented at each call site — including every retry/
+# compact attempt and the deferred-batch submit, so the figure tracks money, not
+# logical operations.  ``judge_calls_skipped_total`` counts a judge call that was
+# deliberately *not* issued, by reason.  Together they are the before/after
+# instrument for the issue #27 rework: as the score is sampled out and the PR
+# judge is gated, ``skipped`` rises and ``total`` falls, and the ratio of the two
+# proves the cost reduction rather than asserting it.
+#
+# Phase 0 ships the counters + helpers and wires ``judge_calls_total`` at every
+# call site.  Each skip reason is wired by the phase that owns its site
+# (``sampled_out`` → Phase 1/2, ``disabled``/``cached``/``deterministic_gate`` →
+# Phase 3, ``budget``/``debounce`` → Phase 4); a Counter that has not yet been
+# ``.inc()``-ed simply does not export a series, which is expected, not missing.
+# Both label vocabularies are bounded enums normalised through the helpers below,
+# so an unexpected value collapses to ``unknown`` and can never explode Prometheus
+# cardinality.
+JUDGE_CALLS_TOTAL = Counter(
+    "specforge_judge_calls_total",
+    "LLM judge-model calls actually issued to a provider (billed spend), by "
+    "purpose: eval.score / critic / pr_check / clarify. Counts every real "
+    "attempt, including compact retries and deferred-batch submits.",
+    labelnames=["purpose"],
+)
+JUDGE_CALLS_SKIPPED_TOTAL = Counter(
+    "specforge_judge_calls_skipped_total",
+    "LLM judge-model calls deliberately not issued, by purpose and reason: "
+    "sampled_out (below the eval-score sample rate), deterministic_gate (a "
+    "deterministic check already decided), disabled (owner/setting opt-out), "
+    "budget (daily cap reached), debounce (a recent verdict stands), cached "
+    "(an identical artifact verdict was reused).",
+    labelnames=["purpose", "reason"],
+)
+
+_JUDGE_PURPOSE_LABELS = frozenset({"eval.score", "critic", "pr_check", "clarify"})
+_JUDGE_SKIP_REASON_LABELS = frozenset(
+    {"sampled_out", "deterministic_gate", "disabled", "budget", "debounce", "cached"}
+)
+
+
+def record_judge_call(purpose: str) -> None:
+    """Count one judge-model call actually issued to a provider (issue #27).
+
+    Call at the site where the provider request is made — once per real attempt,
+    so retries and compact-prompt re-tries each count as the separate spend they
+    are.  ``purpose`` outside the bounded vocabulary collapses to ``unknown``.
+    """
+    JUDGE_CALLS_TOTAL.labels(purpose=_judge_purpose(purpose)).inc()
+
+
+def record_judge_call_skipped(purpose: str, reason: str) -> None:
+    """Count one judge-model call deliberately not issued (issue #27).
+
+    ``purpose`` and ``reason`` outside their bounded vocabularies collapse to
+    ``unknown`` so a stray caller can never explode Prometheus cardinality.
+    """
+    JUDGE_CALLS_SKIPPED_TOTAL.labels(
+        purpose=_judge_purpose(purpose),
+        reason=_judge_skip_reason(reason),
+    ).inc()
+
+
+def _judge_purpose(purpose: str) -> str:
+    value = str(purpose or "unknown")
+    return value if value in _JUDGE_PURPOSE_LABELS else "unknown"
+
+
+def _judge_skip_reason(reason: str) -> str:
+    value = str(reason or "unknown")
+    return value if value in _JUDGE_SKIP_REASON_LABELS else "unknown"
+
+
 _sentry_configured = False
 _otel_configured = False
 _REDACTED = "[REDACTED]"
