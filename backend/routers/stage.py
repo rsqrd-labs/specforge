@@ -31,6 +31,7 @@ from services.pipeline.artifact_validator import MissingSectionError
 from services.pipeline.critic import StageQualityGateError
 from services.pipeline.stage_manager import (
     PreflightError,
+    QualityGateBlockedError,
     RateLimitError,
     RefineSelectionError,
     SecurityError,
@@ -345,7 +346,21 @@ async def finalise_stage(
     await _load_stage(id, db, user.id)
     try:
         stage = await stage_manager.finalise(id, user, db)
+    except QualityGateBlockedError as exc:
+        # Structured 409 the frontend renders directly: the gate kind plus a
+        # derived recovery contract. Must precede the bare-ValueError catch
+        # below, since QualityGateBlockedError subclasses ValueError.
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "error": "quality_gate_blocked",
+                "kind": exc.kind,
+                "message": exc.message,
+                "recovery": exc.recovery,
+            },
+        ) from exc
     except ValueError as exc:
+        # Non-gate finalise rejections (e.g. status != 'draft') stay 409-string.
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT, detail=str(exc)
         ) from exc

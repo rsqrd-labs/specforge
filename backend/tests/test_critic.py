@@ -439,6 +439,9 @@ async def test_missing_section_gate_persists_blocked_draft() -> None:
     assert stage.quality_gate_status == "blocked"
     assert stage.quality_gate_kind == "missing_sections"
     assert stage.quality_gate_payload["missing"] == missing
+    # This gate path does not refund; the contract must report that honestly.
+    assert stage.quality_gate_payload["refunded_prior_attempt"] is False
+    assert stage.quality_gate["recovery"]["refunded_prior_attempt"] is False
     assert any(isinstance(a, StageVersion) for a in db.added)
     assert any("quality_gate_failed" in t for t in tokens)
 
@@ -507,9 +510,12 @@ async def test_critic_failure_escalates_regen_to_mid_tier() -> None:
         ),
         StageCriticResult(passed=True),
     ]
-    before = REGISTRY.get_sample_value(
-        _ESCALATION_METRIC, {"stage_type": "spec", "provider": "anthropic"}
-    ) or 0.0
+    before = (
+        REGISTRY.get_sample_value(
+            _ESCALATION_METRIC, {"stage_type": "spec", "provider": "anthropic"}
+        )
+        or 0.0
+    )
 
     captured_routes: list = []
 
@@ -537,15 +543,18 @@ async def test_critic_failure_escalates_regen_to_mid_tier() -> None:
         md.return_value = deduction
         tokens = [t async for t in svc.generate(stage.id, user, db)]
 
-    after = REGISTRY.get_sample_value(
-        _ESCALATION_METRIC, {"stage_type": "spec", "provider": "anthropic"}
-    ) or 0.0
+    after = (
+        REGISTRY.get_sample_value(
+            _ESCALATION_METRIC, {"stage_type": "spec", "provider": "anthropic"}
+        )
+        or 0.0
+    )
     assert after - before == 1.0, "escalation counter must increment exactly once"
     assert len(captured_routes) == 1
     _, escalation_tier = sm_module._core_generation_tier_policy("anthropic")
-    assert captured_routes[0].model_tier == escalation_tier, (
-        "regenerate must use the escalation (mid) tier, not the cheap primary"
-    )
+    assert (
+        captured_routes[0].model_tier == escalation_tier
+    ), "regenerate must use the escalation (mid) tier, not the cheap primary"
     assert any("done" in t for t in tokens)
     mr.assert_not_awaited()
 
@@ -572,9 +581,12 @@ async def test_critic_failure_no_escalation_when_already_mid() -> None:
         ),
         StageCriticResult(passed=True),
     ]
-    before = REGISTRY.get_sample_value(
-        _ESCALATION_METRIC, {"stage_type": "spec", "provider": "google"}
-    ) or 0.0
+    before = (
+        REGISTRY.get_sample_value(
+            _ESCALATION_METRIC, {"stage_type": "spec", "provider": "google"}
+        )
+        or 0.0
+    )
 
     captured_routes: list = []
     original_regen = svc._regenerate_with_findings
@@ -601,9 +613,12 @@ async def test_critic_failure_no_escalation_when_already_mid() -> None:
         md.return_value = deduction
         tokens = [t async for t in svc.generate(stage.id, user, db)]
 
-    after = REGISTRY.get_sample_value(
-        _ESCALATION_METRIC, {"stage_type": "spec", "provider": "google"}
-    ) or 0.0
+    after = (
+        REGISTRY.get_sample_value(
+            _ESCALATION_METRIC, {"stage_type": "spec", "provider": "google"}
+        )
+        or 0.0
+    )
     assert after - before == 0.0, "no escalation when already at/above escalation tier"
     assert len(captured_routes) == 1
     assert captured_routes[0].provider == "google"

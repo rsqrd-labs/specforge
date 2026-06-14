@@ -21,6 +21,7 @@ from config import settings
 from database import get_shared_redis
 from middleware.rate_limit import sliding_window_check
 from models import EvalResult, Stage, StageVersion, Workspace
+from models.stage import derive_quality_gate_recovery
 from prompts.base import (
     SECURITY_AND_PRIVACY_RULES,
     STAGE_PROMPT_VERSIONS,
@@ -741,6 +742,45 @@ _FILE_HEADING_RE = re.compile(r"^(#{2,3})\s+File:\s+(.+?)$", re.MULTILINE)
 _RECOVERY_LOCK_KEY = "recovery:leader_lock"
 AUDIT_EVENT_QUALITY_GATE_OVERRIDDEN = "quality_gate_overridden"
 INCOMPLETE_OUTPUT_GATE_KIND = "incomplete_output"
+
+
+class QualityGateBlockedError(ValueError):
+    """Finalise refused because the current version is blocked by a quality gate.
+
+    Subclasses ``ValueError`` deliberately: existing ``except ValueError``
+    callers and the pinned ``pytest.raises(ValueError, match=...)`` assertions
+    keep working unchanged, while ``finalise_stage`` catches this subclass
+    *first* to emit a structured 409 carrying the gate ``kind`` and a derived
+    ``recovery`` contract for the frontend. ``str(exc)`` stays the human reason
+    (so the legacy ``match=`` patterns still hit); ``message`` is the
+    user-facing recovery copy.
+    """
+
+    def __init__(self, *, kind: str | None, reason: str, recovery: dict) -> None:
+        super().__init__(reason)
+        self.kind = kind
+        self.message = recovery["message"]
+        self.recovery = recovery
+
+
+def _quality_gate_blocked_error(stage: Stage, reason: str) -> "QualityGateBlockedError":
+    """Build a QualityGateBlockedError from a stage's persisted gate state.
+
+    The recovery contract (overridable flag, refund truth, message) is derived
+    from the same persisted ``quality_gate_kind`` / ``quality_gate_payload`` the
+    block site wrote, so the finalise 409 and the ``Stage.quality_gate.recovery``
+    property always agree.
+    """
+    payload = stage.quality_gate_payload or {}
+    recovery = derive_quality_gate_recovery(
+        stage.quality_gate_kind,
+        refunded_prior_attempt=bool(payload.get("refunded_prior_attempt", False)),
+    )
+    return QualityGateBlockedError(
+        kind=stage.quality_gate_kind, reason=reason, recovery=recovery
+    )
+
+
 TECH_SAFETY_OUTPUT_CONTRACT_VERSION = "v3-tech-safety"
 MAX_COMPLETENESS_REPAIRS = 1
 # Keep enough unflushed live text to cover the internal completion sentinel,
@@ -1965,6 +2005,10 @@ class StageManager:
                         "stage": stage.type,
                         "kind": "missing_sections",
                         "missing": exc.missing,
+                        # This terminal path does not refund the deduction; the
+                        # recovery contract must not claim a refund that did not
+                        # happen.
+                        "refunded_prior_attempt": False,
                     }
                     await self._persist_quality_gate_blocked(
                         db,
@@ -2001,6 +2045,9 @@ class StageManager:
                             "findings": [
                                 f.model_dump() for f in critic_result.findings
                             ],
+                            # This terminal path does not refund the deduction;
+                            # report the refund truth honestly.
+                            "refunded_prior_attempt": False,
                         }
                         gate_error = StageQualityGateError(
                             stage.type, critic_result.findings
@@ -2508,24 +2555,27 @@ class StageManager:
             stage.quality_gate_kind == INCOMPLETE_OUTPUT_GATE_KIND
             and stage.quality_gate_version == stage.current_version
         ):
-            raise ValueError(
-                "Current stage version is incomplete. Regenerate before finalising."
+            raise _quality_gate_blocked_error(
+                stage,
+                "Current stage version is incomplete. " "Regenerate before finalising.",
             )
         if (
             stage.quality_gate_kind == TECH_SAFETY_GATE_KIND
             and stage.quality_gate_version == stage.current_version
         ):
-            raise ValueError(
+            raise _quality_gate_blocked_error(
+                stage,
                 "Current stage version has unsafe technology choices. "
-                "Regenerate before finalising."
+                "Regenerate before finalising.",
             )
         if (
             stage.quality_gate_status == "blocked"
             and stage.quality_gate_version == stage.current_version
         ):
-            raise ValueError(
+            raise _quality_gate_blocked_error(
+                stage,
                 "Current stage version is blocked by the quality gate. "
-                "Regenerate or override before finalising."
+                "Regenerate or override before finalising.",
             )
 
         redis = await self._redis_client()
@@ -2544,9 +2594,10 @@ class StageManager:
                     code=finding.code,
                 ).inc()
             await db.commit()
-            raise ValueError(
+            raise _quality_gate_blocked_error(
+                stage,
                 "Current stage version has unsafe technology choices. "
-                "Regenerate before finalising."
+                "Regenerate before finalising.",
             ) from exc
 
         stage.status = "finalised"
@@ -2968,9 +3019,11 @@ class StageManager:
         route: LLMRoute,
         exc: TechSafetyError,
     ) -> dict:
-        if deduction is not None:
+        refunded = deduction is not None
+        if refunded:
             await credit_service.refund(db, deduction.id)
         gate_payload = self._technology_safety_gate_payload(stage.type, exc)
+        gate_payload["refunded_prior_attempt"] = refunded
         await self._persist_quality_gate_blocked(
             db,
             redis,
@@ -3005,10 +3058,11 @@ class StageManager:
         stage.status = "draft" if stage.status == "finalised" else stage.status
         stage.quality_gate_status = "blocked"
         stage.quality_gate_kind = TECH_SAFETY_GATE_KIND
-        stage.quality_gate_payload = self._technology_safety_gate_payload(
-            stage.type,
-            exc,
-        )
+        gate_payload = self._technology_safety_gate_payload(stage.type, exc)
+        # Finalise never charges a credit (no require_credits on the route), so
+        # there is nothing to refund here — say so honestly in the contract.
+        gate_payload["refunded_prior_attempt"] = False
+        stage.quality_gate_payload = gate_payload
         stage.quality_gate_version = stage.current_version
         stage.quality_gate_failed_at = now
         stage.updated_at = now
@@ -3030,9 +3084,13 @@ class StageManager:
             provider=route.provider,
             reason=first_reason,
         ).inc()
-        if deduction is not None:
+        refunded = deduction is not None
+        if refunded:
             await credit_service.refund(db, deduction.id)
         gate_payload = self._incomplete_gate_payload(stage.type, exc)
+        # Record the actual refund truth so the recovery contract can be honest:
+        # a generation-time block refunds; the finalise-time re-check does not.
+        gate_payload["refunded_prior_attempt"] = refunded
         await self._persist_quality_gate_blocked(
             db,
             redis,

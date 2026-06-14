@@ -13,7 +13,10 @@ from database import get_db
 from main import create_app
 from middleware.auth import get_current_user
 from models import EvalResult, Stage, User
-from services.pipeline.stage_manager import StageDependencyError
+from services.pipeline.stage_manager import (
+    QualityGateBlockedError,
+    StageDependencyError,
+)
 
 _USER_ID = uuid4()
 _USER = User(
@@ -132,6 +135,39 @@ async def test_get_stage_returns_stage_response(app) -> None:
     data = response.json()
     assert data["id"] == str(stage.id)
     assert data["status"] == "draft"
+
+
+@pytest.mark.asyncio
+async def test_get_blocked_stage_serializes_recovery_contract(app) -> None:
+    """The derived recovery contract survives StageResponse pydantic
+    serialization end-to-end (the schema field is the silent-drop guard)."""
+    stage = _make_stage(status="draft")
+    stage.quality_gate_status = "blocked"
+    stage.quality_gate_kind = "incomplete_output"
+    stage.quality_gate_payload = {
+        "stage": "spec",
+        "kind": "incomplete_output",
+        "refunded_prior_attempt": True,
+    }
+    stage.quality_gate_version = 1
+
+    async def _fake_db():
+        yield _FakeDB(stage)
+
+    app.dependency_overrides[get_db] = _fake_db
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        response = await client.get(f"/stages/{stage.id}")
+
+    assert response.status_code == 200
+    recovery = response.json()["quality_gate"]["recovery"]
+    assert recovery["overridable"] is False
+    assert recovery["refunded_prior_attempt"] is True
+    assert recovery["credit_required"] == 10
+    assert recovery["action"] == "regenerate"
+    assert recovery["message"]
 
 
 @pytest.mark.asyncio
@@ -494,6 +530,71 @@ async def test_finalise_returns_updated_stage(app) -> None:
 
     assert response.status_code == 200
     assert response.json()["id"] == str(stage.id)
+
+
+@pytest.mark.asyncio
+async def test_finalise_quality_gate_block_returns_structured_409(app) -> None:
+    """A gate block serializes as a structured 409 the frontend can render."""
+    stage = _make_stage(status="draft")
+
+    async def _fake_db():
+        yield _FakeDB(stage)
+
+    app.dependency_overrides[get_db] = _fake_db
+
+    recovery = {
+        "action": "regenerate",
+        "overridable": False,
+        "credit_required": 10,
+        "refunded_prior_attempt": True,
+        "message": "This version stopped before it was complete.",
+    }
+    error = QualityGateBlockedError(
+        kind="incomplete_output",
+        reason="Current stage version is incomplete. Regenerate before finalising.",
+        recovery=recovery,
+    )
+
+    with patch(
+        "routers.stage.stage_manager.finalise",
+        new_callable=AsyncMock,
+        side_effect=error,
+    ):
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            response = await client.post(f"/stages/{stage.id}/finalise")
+
+    assert response.status_code == 409
+    detail = response.json()["detail"]
+    assert detail["error"] == "quality_gate_blocked"
+    assert detail["kind"] == "incomplete_output"
+    assert detail["message"] == recovery["message"]
+    assert detail["recovery"] == recovery
+
+
+@pytest.mark.asyncio
+async def test_finalise_non_gate_value_error_stays_string_409(app) -> None:
+    """A non-gate finalise rejection keeps the legacy 409-string shape."""
+    stage = _make_stage(status="finalised")
+
+    async def _fake_db():
+        yield _FakeDB(stage)
+
+    app.dependency_overrides[get_db] = _fake_db
+
+    with patch(
+        "routers.stage.stage_manager.finalise",
+        new_callable=AsyncMock,
+        side_effect=ValueError("Stage status 'finalised' cannot be finalised"),
+    ):
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            response = await client.post(f"/stages/{stage.id}/finalise")
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == ("Stage status 'finalised' cannot be finalised")
 
 
 @pytest.mark.asyncio

@@ -14,6 +14,7 @@ from models import CreditLedger, Stage, StageVersion, Workspace
 from services.llm.completion import LLMCompletionInfo
 from services.pipeline.artifact_validator import final_completion_sentinel
 from services.pipeline.stage_manager import (
+    QualityGateBlockedError,
     StageDependencyError,
     StageManager,
     _chunk_specs_for_stage,
@@ -824,6 +825,9 @@ async def test_generate_provider_limit_stop_failed_repair_blocks_and_refunds() -
     assert spec_stage.quality_gate_status == "blocked"
     assert spec_stage.quality_gate_kind == "incomplete_output"
     assert spec_stage.quality_gate_payload["override_allowed"] is False
+    # The generation-time block refunds, so the recovery contract must record it.
+    assert spec_stage.quality_gate_payload["refunded_prior_attempt"] is True
+    assert spec_stage.quality_gate["recovery"]["refunded_prior_attempt"] is True
     assert spec_stage.quality_gate_payload["repair_attempted"] is True
     assert spec_stage.quality_gate_payload["reasons"][0]["code"] == (
         "provider_stopped_by_limit"
@@ -938,6 +942,8 @@ async def test_generate_unsafe_plan_failed_repair_blocks_refunds_and_skips_cache
     assert plan_stage.quality_gate_status == "blocked"
     assert plan_stage.quality_gate_kind == "technology_safety"
     assert plan_stage.quality_gate_payload["override_allowed"] is False
+    # Generation-time tech-safety block refunds; record it for the contract.
+    assert plan_stage.quality_gate_payload["refunded_prior_attempt"] is True
     assert plan_stage.quality_gate_payload["repair_attempted"] is True
     assert plan_stage.quality_gate_payload["reasons"][0]["code"] in {
         "runtime_eol",
@@ -1472,9 +1478,17 @@ async def test_finalise_rejects_blocked_quality_gate_version() -> None:
     db = _MultiQueryDB([spec_stage])
     user = _make_user()
 
-    with pytest.raises(ValueError, match="blocked by the quality gate"):
+    with pytest.raises(QualityGateBlockedError) as excinfo:
         await svc.finalise(spec_stage.id, user, db)
 
+    exc = excinfo.value
+    assert "blocked by the quality gate" in str(exc)
+    assert exc.kind == "critic_findings"
+    # critic_findings is an overridable gate; recovery contract must say so.
+    assert exc.recovery["overridable"] is True
+    assert exc.recovery["action"] == "regenerate"
+    assert exc.recovery["credit_required"] == 10
+    assert exc.message == exc.recovery["message"]
     assert spec_stage.status == "draft"
 
 
@@ -1516,12 +1530,21 @@ async def test_finalise_rejects_manual_unsafe_technology_choices() -> None:
     db = _MultiQueryDB([plan_stage])
     user = _make_user()
 
-    with pytest.raises(ValueError, match="unsafe technology choices"):
+    with pytest.raises(QualityGateBlockedError) as excinfo:
         await svc.finalise(plan_stage.id, user, db)
 
+    exc = excinfo.value
+    assert "unsafe technology choices" in str(exc)
+    assert exc.kind == "technology_safety"
+    # technology_safety is non-overridable; finalise charges nothing, so the
+    # contract must not claim a refund.
+    assert exc.recovery["overridable"] is False
+    assert exc.recovery["refunded_prior_attempt"] is False
+    assert exc.message == exc.recovery["message"]
     assert plan_stage.quality_gate_status == "blocked"
     assert plan_stage.quality_gate_kind == "technology_safety"
     assert plan_stage.quality_gate_payload["override_allowed"] is False
+    assert plan_stage.quality_gate_payload["refunded_prior_attempt"] is False
 
 
 @pytest.mark.asyncio
@@ -1606,6 +1629,84 @@ async def test_override_quality_gate_rejects_clear_stage() -> None:
 
     with pytest.raises(ValueError, match="not blocked"):
         await svc.override_quality_gate(spec_stage.id, user, db)
+
+
+def _blocked_stage(kind: str, *, refunded: bool, version: int = 3) -> Stage:
+    """A draft stage whose current version is blocked by quality gate ``kind``."""
+    stage = _make_stage(status="draft", content="blocked content", version=version)
+    stage.quality_gate_status = "blocked"
+    stage.quality_gate_kind = kind
+    stage.quality_gate_payload = {
+        "stage": stage.type,
+        "kind": kind,
+        "refunded_prior_attempt": refunded,
+    }
+    stage.quality_gate_version = version
+    stage.quality_gate_failed_at = datetime.now(UTC)
+    return stage
+
+
+@pytest.mark.asyncio
+async def test_finalise_incomplete_output_returns_structured_recovery() -> None:
+    """incomplete_output block: non-overridable, refund honestly reported."""
+    stage = _blocked_stage("incomplete_output", refunded=True)
+    svc = StageManager(redis_client=_FakeRedis())
+    db = _MultiQueryDB([stage])
+
+    with pytest.raises(QualityGateBlockedError) as excinfo:
+        await svc.finalise(stage.id, _make_user(), db)
+
+    exc = excinfo.value
+    assert exc.kind == "incomplete_output"
+    assert exc.recovery["overridable"] is False
+    assert exc.recovery["refunded_prior_attempt"] is True
+    assert exc.recovery["action"] == "regenerate"
+    assert "refunded" in exc.recovery["message"].lower()
+    # The persisted stage object exposes the same derived contract (survives
+    # refresh: it is a pure property of the existing columns).
+    assert stage.quality_gate["recovery"] == exc.recovery
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["missing_sections", "critic_findings"])
+async def test_finalise_overridable_gates_return_structured_recovery(kind) -> None:
+    """missing_sections / critic_findings blocks are overridable in the contract."""
+    stage = _blocked_stage(kind, refunded=False)
+    svc = StageManager(redis_client=_FakeRedis())
+    db = _MultiQueryDB([stage])
+
+    with pytest.raises(QualityGateBlockedError) as excinfo:
+        await svc.finalise(stage.id, _make_user(), db)
+
+    exc = excinfo.value
+    assert exc.kind == kind
+    assert exc.recovery["overridable"] is True
+    assert exc.recovery["refunded_prior_attempt"] is False
+    assert "refunded" not in exc.recovery["message"].lower()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "kind",
+    ["incomplete_output", "technology_safety", "missing_sections", "critic_findings"],
+)
+async def test_recovery_overridable_matches_override_quality_gate(kind) -> None:
+    """Guard: the derived ``overridable`` flag never drifts from the actual
+    override_quality_gate policy. If they disagree the contract would lie to the
+    frontend about whether an override is possible."""
+    stage = _blocked_stage(kind, refunded=False)
+    stage.current_version = stage.quality_gate_version
+    svc = StageManager(redis_client=_FakeRedis())
+
+    contract_overridable = stage.quality_gate["recovery"]["overridable"]
+
+    override_permitted = True
+    try:
+        await svc.override_quality_gate(stage.id, _make_user(), _MultiQueryDB([stage]))
+    except ValueError:
+        override_permitted = False
+
+    assert contract_overridable == override_permitted
 
 
 @pytest.mark.asyncio

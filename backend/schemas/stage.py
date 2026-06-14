@@ -49,6 +49,24 @@ class EvalResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+class StageQualityGateRecovery(BaseModel):
+    """Derived, billing-honest recovery contract for a blocked quality gate.
+
+    Built by ``models.stage.derive_quality_gate_recovery`` and attached to a
+    blocked stage's ``quality_gate`` so the frontend has one authoritative source
+    for the recovery action, override availability, retry cost, refund truth, and
+    the user-facing message.
+    """
+
+    action: str
+    overridable: bool
+    credit_required: int
+    refunded_prior_attempt: bool
+    message: str
+
+    model_config = ConfigDict(from_attributes=True)
+
+
 class StageQualityGate(BaseModel):
     status: QualityGateStatus
     stage: StageType
@@ -63,6 +81,7 @@ class StageQualityGate(BaseModel):
     sources: list[str] | None = None
     version: int | None = None
     failed_at: datetime | None = None
+    recovery: StageQualityGateRecovery | None = None
 
     model_config = ConfigDict(from_attributes=True)
 
