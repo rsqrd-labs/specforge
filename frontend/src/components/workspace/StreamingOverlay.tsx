@@ -109,6 +109,16 @@ export function StreamingOverlay({
         ? missing.length
         : findings.length
     const canOverride = gate.override_allowed !== false && !isIncomplete && !isTechnologySafety
+    // Recovery CTA (issue #28, Phase 3): for the non-overridable kinds, retry IS
+    // the recovery, so the primary action reads as an explicit, non-punitive
+    // "Retry generation" rather than the neutral "Regenerate". Overridable kinds
+    // keep "Regenerate" alongside "Override and continue".
+    const isNonOverridable = isIncomplete || isTechnologySafety
+    const regenerateLabel = isNonOverridable ? "Retry generation" : "Regenerate"
+    // Billing-honest sub-copy, driven solely by the backend's refund truth — the
+    // generation-time block refunds the failed attempt; the finalise-time
+    // re-check reports `false`. Single source of truth, no per-kind guessing.
+    const showRefundNote = Boolean(gate.recovery?.refunded_prior_attempt)
     const disabledReasonId = disabledReason ? "quality-gate-disabled-reason" : undefined
     return (
       <div
@@ -185,6 +195,11 @@ export function StreamingOverlay({
                 {disabledReason}
               </p>
             ) : null}
+            {showRefundNote ? (
+              <p className="quality-gate-refund-note" role="note">
+                Your previous attempt was refunded.
+              </p>
+            ) : null}
             {onRegenerate ? (
               <button
                 type="button"
@@ -194,7 +209,7 @@ export function StreamingOverlay({
                 title={actionsDisabled ? disabledReason : undefined}
                 aria-describedby={actionsDisabled ? disabledReasonId : undefined}
               >
-                Regenerate
+                {regenerateLabel}
               </button>
             ) : null}
             {onOverride && canOverride ? (

@@ -34,6 +34,15 @@ const incompleteGate: QualityGateInfo = {
       reference: "max_tokens",
     },
   ],
+  recovery: {
+    action: "regenerate",
+    overridable: false,
+    credit_required: 10,
+    refunded_prior_attempt: true,
+    message:
+      "This version stopped before it was complete and can't be finalised. " +
+      "Regenerate to produce a full version. Your previous attempt was refunded.",
+  },
 }
 
 const technologySafetyGate: QualityGateInfo = {
@@ -54,6 +63,15 @@ const technologySafetyGate: QualityGateInfo = {
       remediation: "Choose Node.js 22 LTS or newer.",
     },
   ],
+  recovery: {
+    action: "regenerate",
+    overridable: false,
+    credit_required: 10,
+    refunded_prior_attempt: true,
+    message:
+      "This version proposes unsafe technology choices and can't be finalised. " +
+      "Regenerate to continue. Your previous attempt was refunded.",
+  },
 }
 
 function activity(
@@ -212,7 +230,10 @@ describe("StreamingOverlay quality gate", () => {
     ).toBe("auto")
   })
 
-  it("hides override for incomplete output gates", () => {
+  it("offers a 'Retry generation' CTA + refund sub-copy for incomplete output gates", () => {
+    // Phase 3 (issue #28): for a non-overridable block the retry IS the recovery,
+    // so the primary action is the explicit, non-punitive "Retry generation" and
+    // the refund is stated plainly so the gate never feels like a paywall.
     render(
       <StreamingOverlay
         isVisible={false}
@@ -222,14 +243,22 @@ describe("StreamingOverlay quality gate", () => {
       />,
     )
 
-    expect(screen.getByRole("button", { name: "Regenerate" })).toBeInTheDocument()
+    expect(
+      screen.getByRole("button", { name: "Retry generation" }),
+    ).toBeInTheDocument()
+    expect(
+      screen.queryByRole("button", { name: "Regenerate" }),
+    ).not.toBeInTheDocument()
     expect(
       screen.queryByRole("button", { name: "Override and continue" }),
     ).not.toBeInTheDocument()
     expect(screen.getByText(/stopped before completion/i)).toBeInTheDocument()
+    expect(screen.getByRole("note")).toHaveTextContent(
+      "Your previous attempt was refunded.",
+    )
   })
 
-  it("hides override and renders remediation for technology safety gates", () => {
+  it("renames the CTA and renders remediation for technology safety gates", () => {
     render(
       <StreamingOverlay
         isVisible={false}
@@ -239,11 +268,61 @@ describe("StreamingOverlay quality gate", () => {
       />,
     )
 
-    expect(screen.getByRole("button", { name: "Regenerate" })).toBeInTheDocument()
+    expect(
+      screen.getByRole("button", { name: "Retry generation" }),
+    ).toBeInTheDocument()
     expect(
       screen.queryByRole("button", { name: "Override and continue" }),
     ).not.toBeInTheDocument()
     expect(screen.getByText(/unsafe or unsupported technology/i)).toBeInTheDocument()
     expect(screen.getAllByText(/Node\.js 22 LTS/i).length).toBeGreaterThan(0)
+    expect(screen.getByRole("note")).toHaveTextContent(
+      "Your previous attempt was refunded.",
+    )
+  })
+
+  it("omits the refund sub-copy when no refund actually happened", () => {
+    // The note is driven solely by the backend refund truth: a finalise-time
+    // re-check sets refunded_prior_attempt false and we must not imply a refund.
+    render(
+      <StreamingOverlay
+        isVisible={false}
+        gate={{
+          ...incompleteGate,
+          recovery: {
+            ...incompleteGate.recovery!,
+            refunded_prior_attempt: false,
+          },
+        }}
+        onRegenerate={vi.fn()}
+      />,
+    )
+
+    expect(
+      screen.getByRole("button", { name: "Retry generation" }),
+    ).toBeInTheDocument()
+    expect(screen.queryByRole("note")).not.toBeInTheDocument()
+  })
+
+  it("keeps 'Regenerate' (not 'Retry generation') and no refund note for overridable kinds", () => {
+    // critic_findings is overridable and carries no refund contract in this
+    // fixture — the recovery CTA rename is scoped to non-overridable blocks only.
+    render(
+      <StreamingOverlay
+        isVisible={false}
+        gate={criticGate}
+        onRegenerate={vi.fn()}
+        onOverride={vi.fn()}
+      />,
+    )
+
+    expect(screen.getByRole("button", { name: "Regenerate" })).toBeInTheDocument()
+    expect(
+      screen.queryByRole("button", { name: "Retry generation" }),
+    ).not.toBeInTheDocument()
+    expect(
+      screen.getByRole("button", { name: "Override and continue" }),
+    ).toBeInTheDocument()
+    expect(screen.queryByRole("note")).not.toBeInTheDocument()
   })
 })
