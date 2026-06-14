@@ -13,11 +13,24 @@ export function gateFallbackMessage(kind: string | null | undefined): string {
   return "Regenerate or override the quality gate before finalising"
 }
 
+/** Short header-badge label marking a blocked stage so it never reads as an
+ *  ordinary, finalisable draft (issue #28, Phase 2). Kind-aware: only an
+ *  `incomplete_output` block is literally a *partial* document; the other kinds
+ *  produced a complete draft that the gate flagged, so they read "Blocked
+ *  draft". The actionable, kind-specific copy is the recovery message below. */
+export function blockedDraftLabel(kind: string | null | undefined): string {
+  return kind === "incomplete_output" ? "Blocked partial draft" : "Blocked draft"
+}
+
 export interface FinaliseGateBlock {
   /** Whether finalise must be blocked for this stage. */
   blocked: boolean
   /** The single authoritative reason to show, backend-derived where available. */
   message: string
+  /** The persisted gate kind when blocked, else null. */
+  kind: string | null
+  /** Short header-badge label for the blocked state (kind-aware). */
+  label: string
 }
 
 /** Derive the finalise-block decision from the ONE authoritative source: the
@@ -34,5 +47,7 @@ export function deriveFinaliseGateBlock(
   return {
     blocked: Boolean(gate),
     message: gate?.recovery?.message ?? gateFallbackMessage(gate?.kind),
+    kind: gate?.kind ?? null,
+    label: blockedDraftLabel(gate?.kind),
   }
 }

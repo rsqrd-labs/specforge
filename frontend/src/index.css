@@ -4750,6 +4750,22 @@ button:disabled {
   font-weight: 800;
 }
 
+/* Blocked-partial-draft badge (issue #28, Phase 2) — marks a stage whose
+   persisted quality gate is blocked so it never reads as a finalisable draft. */
+.workspace-blocked-chip {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  min-height: 25px;
+  padding: 0 11px;
+  border-radius: 999px;
+  border: 1px solid rgba(220, 38, 38, 0.28);
+  background: rgba(220, 38, 38, 0.08);
+  color: #b91c1c;
+  font-size: 11px;
+  font-weight: 800;
+}
+
 .workspace-model-chip {
   min-width: 0;
   max-width: clamp(140px, 20vw, 300px);
@@ -7732,6 +7748,18 @@ button:disabled {
   width: 100%;
 }
 
+/* Visible reason the Finalise button is disabled by a blocked quality gate
+   (issue #28, Phase 2). Full-width so it wraps onto its own line under the
+   action buttons rather than crowding the row. */
+.finalise-gate-reason {
+  flex: 1 0 100%;
+  margin: 0;
+  color: #b91c1c;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.4;
+}
+
 .gen-btn-primary {
   position: relative;
   display: inline-flex;
@@ -9611,6 +9639,37 @@ button:disabled {
 .quality-gate-inline {
   pointer-events: auto;
   margin: 0 0 16px;
+}
+
+/* Collapsed blocked-state notice shown after "Hide details" (issue #28,
+   Phase 2). Keeps the block legible and re-expandable without a refresh. */
+.quality-gate-collapsed {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  flex-wrap: wrap;
+  margin: 0 0 16px;
+  padding: 12px 16px;
+  border-radius: 8px;
+  border: 1px solid rgba(220, 38, 38, 0.22);
+  background: rgba(220, 38, 38, 0.05);
+}
+
+.quality-gate-collapsed-text {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.quality-gate-collapsed-reason {
+  margin: 0;
+  color: var(--color-on-surface-variant);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.45;
 }
 
 .quality-gate-panel {

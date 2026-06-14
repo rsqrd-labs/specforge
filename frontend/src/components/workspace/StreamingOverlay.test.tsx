@@ -163,7 +163,7 @@ describe("StreamingOverlay quality gate", () => {
 
     await user.click(screen.getByRole("button", { name: "Regenerate" }))
     await user.click(screen.getByRole("button", { name: "Override and continue" }))
-    await user.click(screen.getByRole("button", { name: "Dismiss" }))
+    await user.click(screen.getByRole("button", { name: "Hide details" }))
 
     expect(onRegenerate).toHaveBeenCalledOnce()
     expect(onOverride).toHaveBeenCalledOnce()
@@ -196,7 +196,7 @@ describe("StreamingOverlay quality gate", () => {
 
     await user.click(regenerate)
     await user.click(screen.getByRole("button", { name: "Override and continue" }))
-    await user.click(screen.getByRole("button", { name: "Dismiss" }))
+    await user.click(screen.getByRole("button", { name: "Hide details" }))
 
     expect(onRegenerate).not.toHaveBeenCalled()
     expect(onOverride).not.toHaveBeenCalled()

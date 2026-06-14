@@ -218,7 +218,7 @@ export function StreamingOverlay({
                 title={actionsDisabled ? disabledReason : undefined}
                 aria-describedby={actionsDisabled ? disabledReasonId : undefined}
               >
-                Dismiss
+                Hide details
               </button>
             ) : null}
           </div>

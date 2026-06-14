@@ -1,7 +1,11 @@
 import { describe, expect, it } from "vitest"
 
 import type { QualityGateInfo, Stage, StageType } from "../types/stage"
-import { deriveFinaliseGateBlock, gateFallbackMessage } from "./qualityGate"
+import {
+  blockedDraftLabel,
+  deriveFinaliseGateBlock,
+  gateFallbackMessage,
+} from "./qualityGate"
 
 function makeStage(quality_gate?: QualityGateInfo | null): Stage {
   return {
@@ -46,6 +50,8 @@ describe("deriveFinaliseGateBlock", () => {
     expect(deriveFinaliseGateBlock(makeStage(null))).toEqual({
       blocked: false,
       message: "Regenerate or override the quality gate before finalising",
+      kind: null,
+      label: "Blocked draft",
     })
   })
 
@@ -68,25 +74,56 @@ describe("deriveFinaliseGateBlock", () => {
     const result = deriveFinaliseGateBlock(
       makeStage(blockedGate("incomplete_output", message)),
     )
-    expect(result).toEqual({ blocked: true, message })
+    expect(result).toEqual({
+      blocked: true,
+      message,
+      kind: "incomplete_output",
+      label: "Blocked partial draft",
+    })
   })
 
   // The guardrail: regression coverage across ALL gate kinds, not just the repro.
   it.each([
-    ["incomplete_output", "Regenerate a complete version before finalising"],
+    [
+      "incomplete_output",
+      "Regenerate a complete version before finalising",
+      "Blocked partial draft",
+    ],
     [
       "technology_safety",
       "Regenerate with supported technology choices before finalising",
+      "Blocked draft",
     ],
-    ["missing_sections", "Regenerate or override the quality gate before finalising"],
-    ["critic_findings", "Regenerate or override the quality gate before finalising"],
+    [
+      "missing_sections",
+      "Regenerate or override the quality gate before finalising",
+      "Blocked draft",
+    ],
+    [
+      "critic_findings",
+      "Regenerate or override the quality gate before finalising",
+      "Blocked draft",
+    ],
   ])(
     "falls back to kind-specific copy for %s when recovery is absent",
-    (kind, expected) => {
+    (kind, expected, label) => {
       const result = deriveFinaliseGateBlock(makeStage(blockedGate(kind)))
-      expect(result).toEqual({ blocked: true, message: expected })
+      expect(result).toEqual({ blocked: true, message: expected, kind, label })
     },
   )
+})
+
+describe("blockedDraftLabel", () => {
+  it("only calls an incomplete_output block a 'partial' draft", () => {
+    // incomplete_output is the one kind that truly produced a partial document;
+    // the others produced a complete draft the gate flagged.
+    expect(blockedDraftLabel("incomplete_output")).toBe("Blocked partial draft")
+    expect(blockedDraftLabel("technology_safety")).toBe("Blocked draft")
+    expect(blockedDraftLabel("critic_findings")).toBe("Blocked draft")
+    expect(blockedDraftLabel("missing_sections")).toBe("Blocked draft")
+    expect(blockedDraftLabel(null)).toBe("Blocked draft")
+    expect(blockedDraftLabel(undefined)).toBe("Blocked draft")
+  })
 })
 
 describe("gateFallbackMessage", () => {

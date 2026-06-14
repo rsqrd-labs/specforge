@@ -6,6 +6,10 @@ import {
   canCreateStoryboardFromStages,
 } from "../components/workspace/CreateStoryboardModal"
 import { CreditConfirmModal, CREDIT_COSTS } from "../components/workspace/CreditConfirmModal"
+import {
+  BlockedPartialBadge,
+  BlockedPartialNotice,
+} from "../components/workspace/BlockedPartialBanner"
 import { DiffViewer } from "../components/workspace/DiffViewer"
 import { GenerateBar } from "../components/workspace/GenerateBar"
 import { HumanReviewGate } from "../components/workspace/HumanReviewGate"
@@ -311,6 +315,7 @@ export default function Workspace() {
     useWorkspaceStore()
   const { stages: stageMap, setStage, setStages } = useStageStore()
   const qualityGateMap = useStageStore((s) => s.qualityGate)
+  const setQualityGate = useStageStore((s) => s.setQualityGate)
   const clearQualityGate = useStageStore((s) => s.clearQualityGate)
   const streamProgressMap = useStageStore((s) => s.streamProgress)
   const { balance } = useCredits()
@@ -924,11 +929,23 @@ export default function Workspace() {
     setStage,
   ])
 
+  // "Hide details" (issue #28, Phase 2): collapse the findings panel only. This
+  // clears the transient SSE map entry, but the blocked state stays legible —
+  // the header badge and the collapsed notice both derive from the persisted
+  // `activeStage.quality_gate`, so nothing about the block is lost.
   const handleGateDismiss = useCallback(() => {
     if (!activeStage) return
     if (guardWorkspaceMutation()) return
     clearQualityGate(activeStage.id)
   }, [activeStage, clearQualityGate, guardWorkspaceMutation])
+
+  // "Show details": re-expand the findings panel from the authoritative stage
+  // object (symmetric with the badge's source), so dismissal is non-destructive
+  // and reversible without a refresh.
+  const handleGateShowDetails = useCallback(() => {
+    if (!activeStage?.quality_gate) return
+    setQualityGate(activeStage.id, activeStage.quality_gate)
+  }, [activeStage, setQualityGate])
 
   const requestGeneration = useCallback(
     async (action: "generate" | "regenerate") => {
@@ -1994,7 +2011,7 @@ export default function Workspace() {
           </section>
         ) : null}
 
-        {activeGate && (
+        {activeGate ? (
           <StreamingOverlay
             isVisible={false}
             gate={activeGate}
@@ -2004,7 +2021,18 @@ export default function Workspace() {
             actionsDisabled={workspaceGenerationLock.locked}
             disabledReason={workspaceLockReason}
           />
-        )}
+        ) : qualityGateBlocked ? (
+          // Findings panel collapsed via "Hide details" — the blocked state
+          // persists as a slim, re-expandable notice off the stage object
+          // (issue #28, Phase 2).
+          <BlockedPartialNotice
+            message={qualityGateBlockedMessage}
+            label={finaliseGateBlock.label}
+            onShowDetails={
+              activeStage?.quality_gate ? handleGateShowDetails : undefined
+            }
+          />
+        ) : null}
 
         {/* Generate bar */}
         <div className="generate-bar">
@@ -2129,6 +2157,7 @@ export default function Workspace() {
                     <span className={`workspace-status-chip ${activeStage.status}`}>
                       {formatStageStatus(activeStage.status)}
                     </span>
+                    <BlockedPartialBadge stage={activeStage} />
                     {workspaceGenerationLock.locked && (
                       <span className="workspace-lock-chip">Editing paused</span>
                     )}
@@ -2210,6 +2239,7 @@ export default function Workspace() {
                     <span className={`workspace-status-chip ${activeStage.status}`}>
                       {formatStageStatus(activeStage.status)}
                     </span>
+                    <BlockedPartialBadge stage={activeStage} />
                     {workspaceGenerationLock.locked && (
                       <span className="workspace-lock-chip">Editing paused</span>
                     )}

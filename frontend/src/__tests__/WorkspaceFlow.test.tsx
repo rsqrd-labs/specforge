@@ -241,6 +241,49 @@ describe("GenerateBar", () => {
     expect(screen.getByRole("button", { name: /finalise spec/i })).toBeDisabled()
   })
 
+  it("shows a visible, accessible reason when finalise is gate-blocked", () => {
+    // A disabled button is unreliably announced by assistive tech, so the
+    // reason must be a genuinely visible note (issue #28, Phase 2), with
+    // aria-describedby as reinforcement.
+    const stage = makeStage({ status: "draft", content: "Blocked spec" })
+    const message =
+      "This version stopped before it was complete and can't be finalised."
+    render(
+      <GenerateBar
+        stage={stage}
+        onGenerate={noop}
+        onRegenerate={noop}
+        onRefine={noop}
+        onFinalise={noop}
+        onUnlock={noop}
+        qualityGateBlocked
+        qualityGateBlockedMessage={message}
+      />,
+    )
+
+    const note = screen.getByRole("note")
+    expect(note).toHaveTextContent(message)
+    expect(screen.getByRole("button", { name: /finalise spec/i })).toHaveAccessibleDescription(
+      message,
+    )
+  })
+
+  it("omits the gate reason note when finalise is not blocked", () => {
+    const stage = makeStage({ status: "draft", content: "Clean spec" })
+    render(
+      <GenerateBar
+        stage={stage}
+        onGenerate={noop}
+        onRegenerate={noop}
+        onRefine={noop}
+        onFinalise={noop}
+        onUnlock={noop}
+      />,
+    )
+    expect(screen.queryByRole("note")).not.toBeInTheDocument()
+    expect(screen.getByRole("button", { name: /finalise spec/i })).toBeEnabled()
+  })
+
   it("returns null when stage is locked", () => {
     const stage = makeStage({ status: "locked" })
     const { container } = render(

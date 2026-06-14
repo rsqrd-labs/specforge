@@ -31,6 +31,9 @@ export function GenerateBar({
   if (stage.status === "locked") return null
 
   const stageLabel = getStageLabel(stage.type)
+  const canFinalise =
+    (stage.status === "draft" || stage.status === "stale") && Boolean(stage.content)
+  const showGateReason = canFinalise && qualityGateBlocked
 
   if (isBusy || stage.status === "in_progress") {
     return (
@@ -90,21 +93,38 @@ export function GenerateBar({
         </button>
       )}
 
-      {(stage.status === "draft" || stage.status === "stale") && stage.content && (
+      {canFinalise && (
         <button
           type="button"
           onClick={onFinalise}
           className="gen-btn-primary"
           disabled={qualityGateBlocked || isBusy}
           title={qualityGateBlocked ? qualityGateBlockedMessage : undefined}
+          aria-describedby={showGateReason ? FINALISE_GATE_REASON_ID : undefined}
           aria-label={`Finalise ${stageLabel}`}
         >
           Finalise
         </button>
       )}
+
+      {/* Visible, accessible reason the finalise button is disabled — a disabled
+          button is unreliably announced by assistive tech, so the visible note
+          is the load-bearing part, with aria-describedby as reinforcement
+          (issue #28, Phase 2). Full-width so it wraps onto its own line. */}
+      {showGateReason && (
+        <p
+          id={FINALISE_GATE_REASON_ID}
+          className="finalise-gate-reason"
+          role="note"
+        >
+          {qualityGateBlockedMessage}
+        </p>
+      )}
     </div>
   )
 }
+
+const FINALISE_GATE_REASON_ID = "finalise-gate-block-reason"
 
 function getBusyLabel(operation: GenerationActivityOperation | null) {
   switch (operation) {
