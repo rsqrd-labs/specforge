@@ -3489,3 +3489,166 @@ async def test_generate_runs_db_heartbeat_for_lifetime_of_generation() -> None:
 
     assert heartbeat_state == {"started": 1, "cancelled": 1}
     assert _streamed_artifact(tokens) == _VALID_SPEC
+
+
+# ---------------------------------------------------------------------------
+# Issue #27 Phase 3 — critic: confirm ordering + instrument the skips.
+#
+# Phase 3 is a *confirm, don't rebuild* phase: the deterministic gates already
+# run before the critic judge call (validate_artifact_completeness inside the
+# generation loop; validate_sections immediately before critic_review).  These
+# regression tests pin that ordering by asserting the critic judge call is never
+# issued when a deterministic gate decides, and that the skip is attributed to
+# the right reason on the before/after spend instrument.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_generate_disable_critic_records_disabled_skip(monkeypatch) -> None:
+    """The owner escape hatch skips the whole gate and is attributed to ``disabled``.
+
+    When ``disable_critic`` is set neither the zero-LLM section gate nor the
+    critic judge call runs; the skip must show up as
+    ``judge_calls_skipped_total{purpose="critic",reason="disabled"}`` so the gate
+    reads as *deliberately off*, not silently absent.
+    """
+    from services.observability import JUDGE_CALLS_SKIPPED_TOTAL
+    from services.pipeline import stage_manager as sm
+
+    monkeypatch.setattr(sm.settings, "eval_score_sample_rate", 0.0)
+    monkeypatch.setattr(sm, "run_eval_background", AsyncMock(return_value=None))
+
+    workspace_id = uuid4()
+    spec_stage = _make_stage(workspace_id, "spec", status="draft")
+    workspace = _make_workspace([spec_stage])  # disable_critic=True by default
+    assert workspace.disable_critic is True
+    user = _make_user()
+    deduction = CreditLedger(id=uuid4(), user_id=user.id, amount=-10, reason="generate")
+    db = _MultiQueryDB([spec_stage, workspace, [], deduction])
+
+    async def fake_stream(system, user, max_tokens=0, **kwargs):
+        await asyncio.sleep(0)
+        yield _spec_stream_payload(user)
+
+    before = _counter_value(
+        JUDGE_CALLS_SKIPPED_TOTAL, purpose="critic", reason="disabled"
+    )
+    svc = StageManager(redis_client=_FakeRedis())
+    with (
+        patch(
+            "services.pipeline.stage_manager.credit_service.deduct",
+            new_callable=AsyncMock,
+            return_value=deduction,
+        ),
+        patch(
+            "services.pipeline.stage_manager.build_prompt",
+            new_callable=AsyncMock,
+            return_value=("sys", "user"),
+        ),
+        patch(
+            "services.pipeline.stage_manager.critic_review",
+            new_callable=AsyncMock,
+        ) as mock_critic,
+        patch("services.pipeline.stage_manager.get_llm") as mock_get_llm,
+    ):
+        mock_adapter = MagicMock()
+        mock_adapter.stream = fake_stream
+        mock_get_llm.return_value = mock_adapter
+        [token async for token in svc.generate(spec_stage.id, user, db)]
+        await asyncio.sleep(0)
+
+    mock_critic.assert_not_called()
+    after = _counter_value(
+        JUDGE_CALLS_SKIPPED_TOTAL, purpose="critic", reason="disabled"
+    )
+    assert after - before == 1
+
+
+@pytest.mark.asyncio
+async def test_generate_section_gate_skips_critic_before_judge(monkeypatch) -> None:
+    """A terminal ``MissingSectionError`` blocks *before* any critic judge call.
+
+    This pins the Phase 3 ordering guarantee: the zero-LLM section gate decides
+    first, so ``critic_review`` is never invoked (mocked here so a real verdict
+    cannot mask the assertion) and the skip is attributed to ``deterministic_gate``
+    exactly once.
+    """
+    import json as _json
+
+    from services.observability import JUDGE_CALLS_SKIPPED_TOTAL
+    from services.pipeline import stage_manager as sm
+    from services.pipeline.artifact_validator import MissingSectionError
+
+    monkeypatch.setattr(sm.settings, "eval_score_sample_rate", 0.0)
+
+    workspace_id = uuid4()
+    spec_stage = _make_stage(workspace_id, "spec", status="draft")
+    workspace = _make_workspace([spec_stage])
+    workspace.disable_critic = False  # exercise the real gate ordering
+    user = _make_user()
+    deduction = CreditLedger(id=uuid4(), user_id=user.id, amount=-10, reason="generate")
+    db = _MultiQueryDB([spec_stage, workspace, [], deduction])
+
+    async def fake_stream(system, user, max_tokens=0, **kwargs):
+        await asyncio.sleep(0)
+        yield _spec_stream_payload(user)
+
+    def raise_missing(*args, **kwargs):
+        raise MissingSectionError("spec", ["Acceptance Criteria"])
+
+    before = _counter_value(
+        JUDGE_CALLS_SKIPPED_TOTAL, purpose="critic", reason="deterministic_gate"
+    )
+    svc = StageManager(redis_client=_FakeRedis())
+    with (
+        patch(
+            "services.pipeline.stage_manager.credit_service.deduct",
+            new_callable=AsyncMock,
+            return_value=deduction,
+        ),
+        patch(
+            "services.pipeline.stage_manager.credit_service.refund",
+            new_callable=AsyncMock,
+        ),
+        patch(
+            "services.pipeline.stage_manager.build_prompt",
+            new_callable=AsyncMock,
+            return_value=("sys", "user"),
+        ),
+        patch(
+            "services.pipeline.stage_manager.validate_sections",
+            side_effect=raise_missing,
+        ),
+        patch(
+            "services.pipeline.stage_manager.critic_review",
+            new_callable=AsyncMock,
+        ) as mock_critic,
+        patch.object(
+            StageManager, "_persist_quality_gate_blocked", new_callable=AsyncMock
+        ),
+        patch(
+            "services.pipeline.stage_manager.update_cost_event_quality_outcome",
+            new_callable=AsyncMock,
+        ),
+        patch("services.pipeline.stage_manager.get_llm") as mock_get_llm,
+    ):
+        mock_adapter = MagicMock()
+        mock_adapter.stream = fake_stream
+        mock_get_llm.return_value = mock_adapter
+        tokens = [token async for token in svc.generate(spec_stage.id, user, db)]
+        await asyncio.sleep(0)
+
+    # The deterministic gate decided: the critic judge call is never issued.
+    mock_critic.assert_not_called()
+    after = _counter_value(
+        JUDGE_CALLS_SKIPPED_TOTAL, purpose="critic", reason="deterministic_gate"
+    )
+    assert after - before == 1
+
+    gate_events = [
+        _json.loads(t)
+        for t in tokens
+        if t.startswith("{") and "quality_gate_failed" in t
+    ]
+    assert gate_events, "a quality_gate_failed SSE is emitted on the terminal block"
+    assert gate_events[0]["quality_gate_failed"]["kind"] == "missing_sections"

@@ -2100,6 +2100,12 @@ class StageManager:
                     validate_sections(stage.type, accumulated, critic_deps)
                 except MissingSectionError as exc:
                     PIPELINE_VALIDATOR_FAILURES.labels(stage=stage.type).inc()
+                    # Issue #27 Phase 3: the zero-LLM section gate decided this
+                    # generation is terminal, so the critic judge call is never
+                    # issued.  Record the skip so the before/after spend
+                    # instrument attributes it to the deterministic gate rather
+                    # than under-counting a judge call that genuinely did not run.
+                    record_judge_call_skipped("critic", "deterministic_gate")
                     gate_payload = {
                         "stage": stage.type,
                         "kind": "missing_sections",
@@ -2235,6 +2241,13 @@ class StageManager:
                             await self._mark_langfuse_span_failed(span_id, sec_error)
                             span_finished = True
                         raise sec_error
+            else:
+                # Issue #27 Phase 3: the owner toggled the audited disable_critic
+                # escape hatch, so neither the zero-LLM section gate nor the
+                # critic judge call runs.  Record the deliberate opt-out so the
+                # spend instrument shows the critic was skipped by setting, not
+                # silently absent.
+                record_judge_call_skipped("critic", "disabled")
 
             try:
                 accumulated, tech_repaired = await self._ensure_technology_safe(
