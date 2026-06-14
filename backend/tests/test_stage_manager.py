@@ -10,7 +10,7 @@ from uuid import uuid4
 import artifact_fixtures
 import pytest
 
-from models import CreditLedger, Stage, StageVersion, Workspace
+from models import CreditLedger, EvalResult, Stage, StageVersion, Workspace
 from services.llm.completion import LLMCompletionInfo
 from services.pipeline.artifact_validator import final_completion_sentinel
 from services.pipeline.stage_manager import (
@@ -216,6 +216,16 @@ class _FakeResult:
         yield from self._many
 
 
+def _is_eval_result_select(statement: Any) -> bool:
+    """True when a SQLAlchemy statement is a SELECT against EvalResult."""
+    try:
+        return any(
+            cd.get("entity") is EvalResult for cd in statement.column_descriptions
+        )
+    except Exception:
+        return False
+
+
 class _MultiQueryDB:
     def __init__(self, responses: list[Any]) -> None:
         self._responses = iter(responses)
@@ -223,6 +233,12 @@ class _MultiQueryDB:
         self._committed = False
 
     async def execute(self, statement: Any) -> _FakeResult:
+        # The inline structural eval (issue #27 Phase 1) looks up the version's
+        # existing EvalResult.  Model an empty eval_results table and, crucially,
+        # do NOT consume a seeded response — the generate-flow tests order their
+        # responses precisely and this lookup must not shift them.
+        if _is_eval_result_select(statement):
+            return _FakeResult(None)
         try:
             val = next(self._responses)
         except StopIteration:
@@ -247,7 +263,15 @@ class _MultiQueryDB:
         self._committed = True
 
     async def refresh(self, instance: Any) -> None:
-        pass
+        # Mirror the DB server defaults the real refresh would populate, so a
+        # freshly inserted EvalResult is serialisable by _eval_to_dict.
+        if isinstance(instance, EvalResult):
+            if getattr(instance, "id", None) is None:
+                instance.id = uuid4()
+            if getattr(instance, "created_at", None) is None:
+                instance.created_at = datetime.now(UTC)
+            if getattr(instance, "flagged", None) is None:
+                instance.flagged = False
 
 
 class _CompletionAwareAdapter:
@@ -2879,70 +2903,42 @@ async def test_refine_unbalanced_markdown_fence_refunds_credits() -> None:
 
 
 # ---------------------------------------------------------------------------
-# T-205: eval_task cancel on asyncio.shield() timeout
+# issue #27 Phase 1: the LLM score is fire-and-forget — the stream never blocks
+# on it.  The old 30s asyncio.shield/wait_for block (and its T-205 cancel-on-
+# timeout path) is deleted; deterministic findings are emitted inline instead.
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_generate_eval_task_cancelled_on_timeout(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """T-205 — asyncio.shield() eval_task must be explicitly cancelled on TimeoutError.
+async def test_generate_emits_structural_eval_without_blocking_on_score() -> None:
+    """generate() emits the inline structural eval and never awaits the score.
 
-    When asyncio.wait_for(asyncio.shield(eval_task), timeout=30.0) fires,
-    asyncio.shield() keeps the inner task alive.  The fix must call
-    eval_task.cancel() followed by asyncio.gather(eval_task,
-    return_exceptions=True) so the task receives CancelledError and is
-    fully cleaned up.
-
-    The test injects a slow run_eval_background coroutine that sets an
-    asyncio.Event on CancelledError.  The patched asyncio.wait_for raises
-    TimeoutError immediately for timeout==30.0 to avoid sleeping 30 s.
+    Phase 1 decouples deterministic findings from the LLM judge: the stream
+    persists structural findings, emits the ``{"eval": ...}`` event immediately
+    with the score fields null, and schedules the LLM score strictly
+    fire-and-forget.  A judge that blocks forever must not delay the stream —
+    the previous 30s shield/wait_for block is gone, so there is no timeout to
+    cancel.
     """
-    import logging
+    import json as _json
 
     workspace_id = uuid4()
     spec_stage = _make_stage(workspace_id, "spec", status="draft")
     workspace = _make_workspace([spec_stage])
     user = _make_user()
     deduction = CreditLedger(id=uuid4(), user_id=user.id, amount=-10, reason="generate")
-    # DB: _load_stage → spec_stage, _load_workspace → workspace
-    # Spec stage has no dependencies so _assert_dependencies_finalised is a no-op.
-    db = _MultiQueryDB([spec_stage, workspace])
+    db = _MultiQueryDB([spec_stage, workspace, [], deduction])
 
-    # Event set when slow_eval receives CancelledError — proves that
-    # the fix called eval_task.cancel() and awaited gather() so the task
-    # actually processed the cancellation.
-    cancelled_event = asyncio.Event()
+    score_started = asyncio.Event()
 
-    async def slow_eval(*args, **kwargs):
-        """Blocks indefinitely; records cancellation via cancelled_event."""
-        try:
-            await asyncio.sleep(9999)
-        except asyncio.CancelledError:
-            cancelled_event.set()
-            raise
-        return None
+    async def blocking_score(*args, **kwargs):
+        """A judge score that never returns — proves the stream does not wait."""
+        score_started.set()
+        await asyncio.sleep(9999)
 
     async def fake_stream(system, user, max_tokens=0, **kwargs):
+        await asyncio.sleep(0)
         yield _spec_stream_payload(user)
-
-    # Preserve the real wait_for so other callers are unaffected.
-    _real_wait_for = asyncio.wait_for
-
-    async def patched_wait_for(coro_or_future, timeout):
-        if timeout == 30.0:
-            # Yield to the event loop so slow_eval starts and reaches its
-            # first `await asyncio.sleep(9999)`.  Without this, the task is
-            # cancelled before it runs, so slow_eval's except block never
-            # fires and cancelled_event is never set.
-            await asyncio.sleep(0)
-            # Simulate the eval taking longer than the 30-second budget.
-            # Raising here mimics what asyncio.wait_for does when the shield
-            # expires; the inner task is NOT cancelled at this point — that
-            # is exactly the bug our fix addresses.
-            raise asyncio.TimeoutError
-        return await _real_wait_for(coro_or_future, timeout)
 
     svc = StageManager(redis_client=_FakeRedis())
 
@@ -2958,36 +2954,82 @@ async def test_generate_eval_task_cancelled_on_timeout(
             return_value=("sys", "user"),
         ),
         patch("services.pipeline.stage_manager.get_llm") as mock_get_llm,
-        patch("services.pipeline.stage_manager.run_eval_background", slow_eval),
-        patch("asyncio.wait_for", patched_wait_for),
+        patch("services.pipeline.stage_manager.run_eval_background", blocking_score),
     ):
         mock_adapter = MagicMock()
         mock_adapter.stream = fake_stream
         mock_get_llm.return_value = mock_adapter
 
-        with caplog.at_level(logging.WARNING, logger="services.pipeline.stage_manager"):
-            tokens = []
-            async for token in svc.generate(spec_stage.id, user, db):
-                tokens.append(token)
+        async def _drain():
+            return [token async for token in svc.generate(spec_stage.id, user, db)]
 
-    # The eval_task must have been cancelled (slow_eval set the event).
-    assert cancelled_event.is_set(), (
-        "eval_task must be explicitly cancelled after asyncio.wait_for timeout. "
-        "asyncio.shield() does NOT cancel the inner task — the fix must call "
-        "eval_task.cancel() + asyncio.gather(eval_task, return_exceptions=True). "
-        "T-205."
-    )
+        # Must complete promptly even though the background score blocks forever.
+        tokens = await asyncio.wait_for(_drain(), timeout=5.0)
 
-    # A WARNING must be emitted so the timeout is visible in production logs.
-    stage_id_str = str(spec_stage.id)
-    assert any(
-        "eval_task.timeout_cancelled" in record.message
-        and stage_id_str in record.message
-        for record in caplog.records
-    ), (
-        "Expected logger.warning('eval_task.timeout_cancelled stage_id=...') "
-        f"but got: {[r.message for r in caplog.records]}. T-205."
+    eval_events = [_json.loads(t) for t in tokens if t.startswith('{"eval"')]
+    assert eval_events, "stream must emit an inline structural eval event"
+    payload = eval_events[0]["eval"]
+    assert payload["overall_score"] is None, (
+        "the inline eval is structural-only; the LLM score is fire-and-forget "
+        "and must not populate the streamed event's score (issue #27 Phase 1)"
     )
+    # The fire-and-forget score was scheduled (and left running), never awaited.
+    assert score_started.is_set()
+
+
+@pytest.mark.asyncio
+async def test_generate_emits_done_when_structural_eval_persist_fails() -> None:
+    """A DB error persisting the inline structural eval must not break the stream.
+
+    Structural findings are best-effort telemetry, not a gate (issue #27
+    Phase 1): ``done`` must still emit so an already-charged, successful
+    generation never surfaces as a stream error.  The eval event is skipped.
+    """
+    workspace_id = uuid4()
+    spec_stage = _make_stage(workspace_id, "spec", status="draft")
+    workspace = _make_workspace([spec_stage])
+    user = _make_user()
+    deduction = CreditLedger(id=uuid4(), user_id=user.id, amount=-10, reason="generate")
+    db = _MultiQueryDB([spec_stage, workspace, [], deduction])
+
+    async def boom(*args, **kwargs):
+        raise RuntimeError("transient DB error")
+
+    async def fake_stream(system, user, max_tokens=0, **kwargs):
+        await asyncio.sleep(0)
+        yield _spec_stream_payload(user)
+
+    svc = StageManager(redis_client=_FakeRedis())
+
+    with (
+        patch(
+            "services.pipeline.stage_manager.credit_service.deduct",
+            new_callable=AsyncMock,
+            return_value=deduction,
+        ),
+        patch(
+            "services.pipeline.stage_manager.build_prompt",
+            new_callable=AsyncMock,
+            return_value=("sys", "user"),
+        ),
+        patch("services.pipeline.stage_manager.get_llm") as mock_get_llm,
+        patch("services.pipeline.stage_manager.persist_structural_eval", boom),
+        patch(
+            "services.pipeline.stage_manager.run_eval_background",
+            new_callable=AsyncMock,
+        ),
+    ):
+        mock_adapter = MagicMock()
+        mock_adapter.stream = fake_stream
+        mock_get_llm.return_value = mock_adapter
+
+        tokens = [token async for token in svc.generate(spec_stage.id, user, db)]
+
+    assert any(t.startswith('{"done"') for t in tokens), "done must still emit"
+    assert not any(
+        t.startswith('{"eval"') for t in tokens
+    ), "the eval event is skipped when the inline persist fails"
+    assert _streamed_artifact(tokens) == _VALID_SPEC
 
 
 @pytest.mark.asyncio
@@ -3236,6 +3278,11 @@ async def test_generate_runs_db_heartbeat_for_lifetime_of_generation() -> None:
     async def fake_stream(
         system, user_prompt, max_tokens=0, **kwargs
     ) -> AsyncGenerator[str, None]:
+        # Yield control once so the liveness heartbeat task is scheduled before
+        # the (instantaneous) mock stream completes — a real provider stream
+        # always awaits network I/O.  Previously the inline 30s eval await gave
+        # the loop this turn; issue #27 Phase 1 removed it, so model it here.
+        await asyncio.sleep(0)
         yield _spec_stream_payload(user_prompt)
 
     with (

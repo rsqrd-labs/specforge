@@ -25,7 +25,7 @@ import pytest
 from prometheus_client import REGISTRY
 from pydantic import ValidationError
 
-from models import CreditLedger, Stage, StageVersion, Workspace
+from models import CreditLedger, EvalResult, Stage, StageVersion, Workspace
 from services.pipeline import critic as critic_module
 from services.pipeline.artifact_validator import (
     MissingSectionError,
@@ -108,6 +108,16 @@ class _FakeResult:
         yield from self._many
 
 
+def _is_eval_result_select(statement: Any) -> bool:
+    """True when a SQLAlchemy statement is a SELECT against EvalResult."""
+    try:
+        return any(
+            cd.get("entity") is EvalResult for cd in statement.column_descriptions
+        )
+    except Exception:
+        return False
+
+
 class _MultiQueryDB:
     def __init__(self, responses: list[Any]) -> None:
         self._responses = iter(responses)
@@ -115,6 +125,12 @@ class _MultiQueryDB:
         self._committed = False
 
     async def execute(self, statement: Any) -> _FakeResult:
+        # The inline structural eval (issue #27 Phase 1) looks up the version's
+        # existing EvalResult.  Model an empty eval_results table without
+        # consuming a seeded response, so the ordered generate-flow responses
+        # below are unaffected.
+        if _is_eval_result_select(statement):
+            return _FakeResult(None)
         try:
             val = next(self._responses)
         except StopIteration:
@@ -137,7 +153,15 @@ class _MultiQueryDB:
         self._committed = True
 
     async def refresh(self, instance: Any) -> None:
-        pass
+        # Mirror the DB server defaults a real refresh populates so a freshly
+        # inserted EvalResult is serialisable by _eval_to_dict.
+        if isinstance(instance, EvalResult):
+            if getattr(instance, "id", None) is None:
+                instance.id = uuid4()
+            if getattr(instance, "created_at", None) is None:
+                instance.created_at = datetime.now(UTC)
+            if getattr(instance, "flagged", None) is None:
+                instance.flagged = False
 
 
 def _make_stage(workspace_id, stage_type="spec", status="draft") -> Stage:

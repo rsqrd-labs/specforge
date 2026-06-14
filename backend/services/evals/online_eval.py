@@ -7,6 +7,7 @@ import re
 from typing import Any
 from uuid import UUID
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config import settings
@@ -508,6 +509,93 @@ def _validate_task_references(
     return issues
 
 
+def validate_stage_findings(
+    stage_type: str,
+    content: str,
+    harness_content: str | None,
+) -> tuple[list[dict[str, Any]] | None, bool]:
+    """Deterministic structural findings for a stage — no judge call.
+
+    Extracted from ``_persist_eval_data`` (issue #27 Phase 1) so both the
+    post-generation flow and ``POST /stages/{id}/revalidate-tasks`` derive task
+    traceability from one place.  Pure regex parsing, microsecond-cheap, and
+    fully independent of any LLM score.
+
+    Returns ``(tasks_without_ref, flagged)``:
+      * ``tasks_without_ref`` — the structural task→harness traceability and
+        per-task field issues for a TASKS stage validated against its harness.
+        ``None`` for any other stage type or when there is no harness content to
+        validate against (the judge's fallback list, if any, is layered on by
+        ``_persist_eval_data`` only in that case).
+      * ``flagged`` — ``True`` only when at least one *genuine* gap is present.
+        A ``GENERATION_FAILURE`` is a prompt-quality issue, not a user-facing
+        flag.  Harness ``coverage_percent`` flagging is LLM-derived and stays in
+        ``_persist_eval_data`` — it is deliberately not produced here.
+    """
+    if stage_type != "tasks" or not harness_content:
+        return None, False
+    tasks_without_ref = _validate_task_references(content, harness_content)
+    flagged = any(
+        issue.get("gap_type") != "GENERATION_FAILURE" for issue in tasks_without_ref
+    )
+    return tasks_without_ref, flagged
+
+
+async def _get_or_create_eval(
+    db: AsyncSession, stage_version_id: UUID, stage_type: str
+) -> EvalResult:
+    """Return the latest EvalResult for a version, or a fresh unpersisted one.
+
+    One eval row per stage version: the inline structural persist
+    (``persist_structural_eval``) creates the row with score fields null, and a
+    later sampled or batched judge score updates *that* row instead of racing a
+    second copy.  Mirrors the find-or-update pattern in
+    ``POST /stages/{id}/revalidate-tasks`` (issue #27 Phase 1).  A stage version
+    is immutable, so there is exactly one logical eval per version.
+    """
+    result = await db.execute(
+        select(EvalResult)
+        .where(EvalResult.stage_version_id == stage_version_id)
+        .order_by(EvalResult.created_at.desc())
+        .limit(1)
+    )
+    existing = result.scalar_one_or_none()
+    if existing is not None:
+        return existing
+    return EvalResult(stage_version_id=stage_version_id, stage_type=stage_type)
+
+
+async def persist_structural_eval(
+    db: AsyncSession,
+    *,
+    stage_version_id: UUID,
+    stage_type: str,
+    content: str,
+    harness_content: str | None,
+) -> EvalResult:
+    """Persist deterministic structural findings inline — no judge call.
+
+    Runs after a stage clears its quality gate and *before* (and independent of)
+    any LLM score (issue #27 Phase 1).  Score fields stay null; only the
+    deterministic traceability findings are populated, so the workspace gets
+    actionable task gaps immediately without waiting on — or paying for — a
+    judge round trip.  Find-or-update by version so a later sampled judge score
+    updates this same row.  Score fields already present on the row (e.g. a
+    re-persist) are preserved, never nulled.
+    """
+    tasks_without_ref, flagged = validate_stage_findings(
+        stage_type, content, harness_content
+    )
+    eval_result = await _get_or_create_eval(db, stage_version_id, stage_type)
+    eval_result.stage_type = stage_type
+    eval_result.tasks_without_ref = tasks_without_ref
+    eval_result.flagged = flagged
+    db.add(eval_result)
+    await db.commit()
+    await db.refresh(eval_result)
+    return eval_result
+
+
 def _log_dataset_error(task: asyncio.Task) -> None:
     if not task.cancelled() and (exc := task.exception()):
         logger.error("langfuse_dataset_background_failed", extra={"error": str(exc)})
@@ -910,34 +998,45 @@ async def _persist_eval_data(
     uncovered_reqs: list[str] | None = normalised["uncovered_reqs"]
     tasks_without_ref: list[dict[str, Any]] | None = normalised["tasks_without_ref"]
 
-    if stage_type == "tasks" and harness_content:
-        tasks_without_ref = _validate_task_references(content, harness_content)
-
-    flagged = False
+    # Deterministic task traceability takes precedence over the judge's fallback
+    # list whenever harness content is available to validate against.  This is
+    # the same helper the inline structural persist and revalidate-tasks use, so
+    # all three paths agree (issue #27 Phase 1).
+    det_tasks, det_flagged = validate_stage_findings(
+        stage_type, content, harness_content
+    )
+    if det_tasks is not None:
+        tasks_without_ref = det_tasks
+        flagged = det_flagged
+    elif stage_type == "tasks" and tasks_without_ref:
+        # No harness to validate against — fall back to the judge's list.
+        # GENERATION_FAILURE is a prompt quality issue — only GENUINE_GAP flags.
+        flagged = any(
+            i.get("gap_type") != "GENERATION_FAILURE" for i in tasks_without_ref
+        )
+    else:
+        flagged = False
     if (
         stage_type == "harness"
         and coverage_percent is not None
         and coverage_percent < 80
     ):
+        # Harness coverage flagging is the one LLM-derived signal — it stays here
+        # rather than in the deterministic helper (Decision A / Guardrails).
         flagged = True
-    if stage_type == "tasks" and tasks_without_ref:
-        # GENERATION_FAILURE is a prompt quality issue — only GENUINE_GAP
-        # flags the result
-        flagged = any(
-            i.get("gap_type") != "GENERATION_FAILURE" for i in tasks_without_ref
-        )
 
-    eval_result = EvalResult(
-        stage_version_id=stage_version_id,
-        stage_type=stage_type,
-        overall_score=normalised["overall_score"],
-        completeness=normalised["completeness"],
-        clarity=normalised["clarity"],
-        coverage_percent=coverage_percent,
-        uncovered_reqs=uncovered_reqs,
-        tasks_without_ref=tasks_without_ref,
-        flagged=flagged,
-    )
+    # Find-or-update the version's eval row: a sampled judge score updates the
+    # row the inline structural persist already created, rather than inserting a
+    # racing duplicate (issue #27 Phase 1).
+    eval_result = await _get_or_create_eval(db, stage_version_id, stage_type)
+    eval_result.stage_type = stage_type
+    eval_result.overall_score = normalised["overall_score"]
+    eval_result.completeness = normalised["completeness"]
+    eval_result.clarity = normalised["clarity"]
+    eval_result.coverage_percent = coverage_percent
+    eval_result.uncovered_reqs = uncovered_reqs
+    eval_result.tasks_without_ref = tasks_without_ref
+    eval_result.flagged = flagged
     db.add(eval_result)
     await db.commit()
     await db.refresh(eval_result)

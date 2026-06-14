@@ -74,14 +74,13 @@ export function useStream(stageId: string | null) {
         })
 
         // `done` is terminal for the loading UI — the backend persists the stage
-        // (status=draft, version bumped, committed) *before* it emits `done`.
-        // Tear the stream down now instead of holding it open for the eval tail:
-        // after `done` the backend blocks up to 30s awaiting the background eval
-        // and emits progress heartbeats the whole time, which kept the overlay,
-        // the elapsed clock, and the "Editing paused" lock alive long after the
-        // finished artifact was already on screen. The eval badge is filled in
-        // asynchronously by the stage-eval poller (run_eval_background commits on
-        // its own session, so closing the stream never drops it).
+        // (status=draft, version bumped, committed) *before* it emits `done`, and
+        // commits the deterministic structural eval row before `done` too (issue
+        // #27 Phase 1). Tear the stream down now instead of holding it open for
+        // the eval tail: the stage-eval poller fetches the eval once the stage
+        // reaches draft (structural findings are already there; the best-effort
+        // LLM score updates the same row in the background), so closing the
+        // stream never drops it.
         closeStreamRef(streamRef)
         useStageStore.getState().finaliseStream(stageId)
         const updatedStage = await getStage(doneStageId)

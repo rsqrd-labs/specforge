@@ -29,6 +29,13 @@ class _FakeDB:
         if not hasattr(instance, "id") or instance.id is None:
             instance.id = uuid4()
 
+    async def execute(self, statement: Any) -> Any:
+        # Models an empty eval_results table: _get_or_create_eval finds no prior
+        # row and creates a fresh EvalResult, preserving one row per run_eval.
+        result = MagicMock()
+        result.scalar_one_or_none.return_value = None
+        return result
+
 
 class _FakeJudge:
     def __init__(self, response: str | Exception) -> None:

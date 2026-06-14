@@ -10,7 +10,9 @@ from services.evals.online_eval import (
     _parse_task_blocks,
     _ref_matches_harness,
     _validate_task_references,
+    persist_structural_eval,
     run_eval,
+    validate_stage_findings,
 )
 
 _HARNESS = """\
@@ -320,3 +322,89 @@ async def test_run_eval_tasks_generation_failure_does_not_flag() -> None:
     assert result.flagged is False  # GENERATION_FAILURE doesn't surface to user
     assert result.tasks_without_ref is not None
     assert result.tasks_without_ref[0]["gap_type"] == "GENERATION_FAILURE"
+
+
+# ---------------------------------------------------------------------------
+# issue #27 Phase 1: validate_stage_findings — the deterministic, no-LLM helper
+# shared by the generation flow and POST /stages/{id}/revalidate-tasks.
+# ---------------------------------------------------------------------------
+
+
+class TestValidateStageFindings:
+    def test_tasks_with_harness_finds_genuine_gap_and_flags(self) -> None:
+        tasks_without_ref, flagged = validate_stage_findings(
+            "tasks", _TASKS_GENUINE_GAP, _HARNESS
+        )
+        assert tasks_without_ref is not None
+        assert any(i["gap_type"] == "GENUINE_GAP" for i in tasks_without_ref)
+        assert flagged is True
+
+    def test_clean_tasks_against_harness_not_flagged(self) -> None:
+        tasks_without_ref, flagged = validate_stage_findings("tasks", _TASKS, _HARNESS)
+        assert tasks_without_ref == []
+        assert flagged is False
+
+    def test_generation_failure_does_not_flag(self) -> None:
+        tasks_without_ref, flagged = validate_stage_findings(
+            "tasks", _TASKS_MISSING_FIELD, _HARNESS
+        )
+        assert tasks_without_ref is not None
+        assert any(i["gap_type"] == "GENERATION_FAILURE" for i in tasks_without_ref)
+        # A GENERATION_FAILURE is a prompt-quality issue, never a user-facing flag.
+        assert all(
+            i["gap_type"] != "GENERATION_FAILURE"
+            for i in tasks_without_ref
+            if i["gap_type"] == "GENUINE_GAP"
+        )
+
+    def test_non_tasks_stage_returns_none(self) -> None:
+        # Harness coverage flagging is LLM-derived and stays in _persist_eval_data.
+        assert validate_stage_findings("harness", "content", "harness") == (None, False)
+        assert validate_stage_findings("spec", "content", None) == (None, False)
+        assert validate_stage_findings("plan", "content", "spec") == (None, False)
+
+    def test_tasks_without_harness_returns_none(self) -> None:
+        assert validate_stage_findings("tasks", _TASKS, None) == (None, False)
+        assert validate_stage_findings("tasks", _TASKS, "") == (None, False)
+
+
+@pytest.mark.asyncio
+async def test_persist_structural_eval_persists_findings_with_null_score() -> None:
+    """The inline persist writes deterministic findings and no score — no judge."""
+    from tests.test_online_eval import _FakeDB
+
+    db = _FakeDB()
+    result = await persist_structural_eval(
+        db,
+        stage_version_id=uuid4(),
+        stage_type="tasks",
+        content=_TASKS_GENUINE_GAP,
+        harness_content=_HARNESS,
+    )
+
+    assert result.overall_score is None
+    assert result.completeness is None
+    assert result.clarity is None
+    assert result.coverage_percent is None
+    assert result.flagged is True
+    assert result.tasks_without_ref is not None
+    assert any(i["gap_type"] == "GENUINE_GAP" for i in result.tasks_without_ref)
+    assert db._committed
+
+
+@pytest.mark.asyncio
+async def test_persist_structural_eval_non_tasks_has_no_findings() -> None:
+    from tests.test_online_eval import _FakeDB
+
+    db = _FakeDB()
+    result = await persist_structural_eval(
+        db,
+        stage_version_id=uuid4(),
+        stage_type="spec",
+        content="a spec body",
+        harness_content=None,
+    )
+
+    assert result.overall_score is None
+    assert result.tasks_without_ref is None
+    assert result.flagged is False

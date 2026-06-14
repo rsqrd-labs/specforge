@@ -13,7 +13,11 @@ import {
 import { DiffViewer } from "../components/workspace/DiffViewer"
 import { GenerateBar } from "../components/workspace/GenerateBar"
 import { HumanReviewGate } from "../components/workspace/HumanReviewGate"
-import { QualityBadge } from "../components/workspace/QualityBadge"
+import {
+  QualityBadge,
+  QUALITY_STATUS_LABEL,
+  deriveQualityStatus,
+} from "../components/workspace/QualityBadge"
 import { StageEditor, type StageEditorHandle } from "../components/workspace/StageEditor"
 import { StageNavigator } from "../components/workspace/StageNavigator"
 import { StalenessWarning } from "../components/workspace/StalenessWarning"
@@ -345,9 +349,9 @@ export default function Workspace() {
   const [evalResults, setEvalResults] = useState<Record<string, EvalResult | null>>(
     {},
   )
-  /** Stages whose eval polling exhausted all retries without a successful result.
-   *  When true, QualityBadge renders "Score unavailable" instead of the shimmer.
-   *  M-5 — T-187.
+  /** Stages whose eval validation could not complete. When true, QualityBadge
+   *  renders the quiet, non-blocking "Unavailable" status (issue #27 Phase 1;
+   *  originally M-5 — T-187).
    */
   const [evalError, setEvalError] = useState<Record<string, boolean>>({})
   const [dismissedStale, setDismissedStale] = useState<Record<string, boolean>>(
@@ -1692,13 +1696,14 @@ export default function Workspace() {
   const activeRefineMode =
     REFINE_MODE_OPTIONS.find((option) => option.mode === refineMode) ??
     REFINE_MODE_OPTIONS[0]
+  // Findings-derived status instead of the old `N/100` number (issue #27
+  // Phase 1, Decision C). The numeric score is no longer a user-facing signal.
+  const qualityStatus = deriveQualityStatus(evalResult, {
+    error: isEvalError,
+    checking: activeStage.status === "in_progress",
+  })
   const sidebarSignals = [
-    [
-      "Quality",
-      evalResult?.overall_score === null || evalResult?.overall_score === undefined
-        ? "Awaiting eval"
-        : `${evalResult.overall_score}/100`,
-    ],
+    ["Quality", qualityStatus ? QUALITY_STATUS_LABEL[qualityStatus] : "Not run"],
     ["Output", activeWordCount === 0 ? "No draft yet" : `${activeWordCount.toLocaleString()} words`],
   ]
   const isStoryboardBusy = storyboardAction !== null
@@ -2164,7 +2169,11 @@ export default function Workspace() {
                   </div>
                 </div>
                 <div className="workspace-pane-actions">
-                  <QualityBadge evalResult={evalResult} error={isEvalError} />
+                  <QualityBadge
+                    evalResult={evalResult}
+                    error={isEvalError}
+                    checking={activeStage.status === "in_progress"}
+                  />
                   {!diffResult && (
                     <div className="document-mode-toggle" aria-label="Spec view mode">
                       <button
@@ -2266,7 +2275,11 @@ export default function Workspace() {
                   </div>
                 </div>
                 <div className="workspace-pane-actions">
-                  <QualityBadge evalResult={evalResult} error={isEvalError} />
+                  <QualityBadge
+                    evalResult={evalResult}
+                    error={isEvalError}
+                    checking={activeStage.status === "in_progress"}
+                  />
                   {activeStage.type === "tasks" && evalResult !== null && genuineGapIssues.length === 0 && (
                     <span className="ws-validation-ok-chip">✓ All tasks valid</span>
                   )}

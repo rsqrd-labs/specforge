@@ -25,7 +25,7 @@ from schemas.stage import (
     StageVersionResponse,
 )
 from services.credit_service import InsufficientCreditsError
-from services.evals.online_eval import _validate_task_references
+from services.evals.online_eval import validate_stage_findings
 from services.llm.base import ProviderError, ProviderTimeoutError
 from services.pipeline.artifact_validator import MissingSectionError
 from services.pipeline.critic import StageQualityGateError
@@ -487,8 +487,11 @@ async def revalidate_tasks(
     harness_stage = harness_result.scalar_one_or_none()
     harness_content = harness_stage.content if harness_stage else ""
 
-    tasks_without_ref = _validate_task_references(stage.content, harness_content or "")
-    flagged = any(i.get("gap_type") != "GENERATION_FAILURE" for i in tasks_without_ref)
+    # Same deterministic helper the generation flow uses inline — one source of
+    # truth for task traceability, no LLM call (issue #27 Phase 1).
+    tasks_without_ref, flagged = validate_stage_findings(
+        "tasks", stage.content, harness_content or ""
+    )
 
     # Fetch the existing eval for the current version to preserve quality scores
     eval_result_row = await db.execute(

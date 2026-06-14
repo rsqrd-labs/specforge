@@ -35,7 +35,7 @@ from services.credit_service import (
     credit_service,
 )
 from services.evals import eval_batch
-from services.evals.online_eval import run_eval_background
+from services.evals.online_eval import persist_structural_eval, run_eval_background
 from services.llm.base import ProviderError, ProviderTimeoutError
 from services.llm.complexity_classifier import (
     ComplexitySignals,
@@ -219,6 +219,12 @@ def _strip_code_fence(text: str) -> str:
     return stripped
 
 
+# Strong references to in-flight fire-and-forget background eval tasks, so the
+# event loop's weak reference does not let them be garbage-collected before they
+# finish (issue #27 Phase 1).  Tasks remove themselves on completion.
+_BACKGROUND_EVAL_TASKS: set[asyncio.Task] = set()
+
+
 def _log_eval_error(task: asyncio.Task) -> None:
     if not task.cancelled() and (exc := task.exception()):
         logger.error("eval_background_failed", extra={"error": str(exc)})
@@ -311,6 +317,12 @@ def _schedule_stage_eval(
             workspace_id=workspace_id,
         )
     )
+    # The LLM score is now strictly fire-and-forget (issue #27 Phase 1 removed
+    # the inline await), so retain a strong reference until completion — the
+    # event loop only holds a weak reference to a bare task, which can otherwise
+    # be garbage-collected mid-flight and silently drop the score.
+    _BACKGROUND_EVAL_TASKS.add(eval_task)
+    eval_task.add_done_callback(_BACKGROUND_EVAL_TASKS.discard)
     eval_task.add_done_callback(_log_eval_error)
     return eval_task
 
@@ -2273,7 +2285,39 @@ class StageManager:
                 await self._end_langfuse_span(span_id)
                 span_finished = True
             await self._invalidate_stage_cache(workspace.id, stage.type, redis)
-            eval_task = _schedule_stage_eval(
+
+            # Deterministic structural findings run inline and always — no judge
+            # call, no stream block.  Persist them on the request session so the
+            # workspace surfaces actionable task gaps the moment generation
+            # completes (issue #27 Phase 1).  Best-effort: findings are telemetry,
+            # never a gate, so a transient DB error here must NOT turn a
+            # successful, already-charged generation into a stream error.  `done`
+            # always emits; the scheduled background eval's find-or-create
+            # rebuilds the row so the poller still recovers the findings.
+            try:
+                structural_eval = await persist_structural_eval(
+                    db,
+                    stage_version_id=version_id,
+                    stage_type=stage.type,
+                    content=accumulated,
+                    harness_content=harness_content_for_eval,
+                )
+                eval_event = json.dumps({"eval": _eval_to_dict(structural_eval)})
+            except Exception:
+                logger.warning(
+                    "structural_eval_persist_failed stage_id=%s",
+                    stage_id,
+                    exc_info=True,
+                )
+                with contextlib.suppress(Exception):
+                    await db.rollback()
+                eval_event = None
+            # The LLM quality score is best-effort and strictly non-blocking: it
+            # updates this same eval row in the background (find-or-update by
+            # version) and is never awaited.  A judge outage can no longer delay
+            # the stream — the 30s shield/wait_for block is gone (issue #27
+            # Phase 1).
+            _schedule_stage_eval(
                 version_id=version_id,
                 stage_type=stage.type,
                 content=accumulated,
@@ -2293,28 +2337,8 @@ class StageManager:
                     emit("\n\n")
                 emit(chunk)
             emit(f'{{"done": true, "stage_id": "{stage_id}"}}')
-
-            try:
-                eval_result = await asyncio.wait_for(
-                    asyncio.shield(eval_task), timeout=30.0
-                )
-                if eval_result is not None:
-                    emit(json.dumps({"eval": _eval_to_dict(eval_result)}))
-            except asyncio.TimeoutError:
-                # asyncio.shield() protects eval_task from the wait_for
-                # cancellation signal, so the task continues running after
-                # the timeout fires.  Cancel it explicitly to release the
-                # thread-pool slot and prevent resource leaks.  T-205.
-                eval_task.cancel()
-                await asyncio.gather(eval_task, return_exceptions=True)
-                logger.warning(
-                    "eval_task.timeout_cancelled stage_id=%s",
-                    stage_id,
-                )
-            except Exception:  # pragma: no cover - best-effort eval collection
-                logger.warning(
-                    "eval_collection_failed stage_id=%s", stage_id, exc_info=True
-                )
+            if eval_event:
+                emit(eval_event)
         except Exception as exc:
             if span_id and not span_finished:
                 await self._mark_langfuse_span_failed(span_id, exc)
@@ -2792,6 +2816,27 @@ class StageManager:
         await db.commit()
         await db.refresh(stage)
         if stage.quality_gate_status != "blocked":
+            # Persist deterministic findings inline so a refetch surfaces task
+            # gaps immediately, then score in the background (issue #27 Phase 1).
+            # Best-effort: the content is already saved and charged, so a persist
+            # failure must not fail the refine — the poller recovers via the
+            # background eval's find-or-create.
+            try:
+                await persist_structural_eval(
+                    db,
+                    stage_version_id=version_id,
+                    stage_type=stage.type,
+                    content=new_content,
+                    harness_content=harness_content_for_eval,
+                )
+            except Exception:
+                logger.warning(
+                    "structural_eval_persist_failed stage_id=%s",
+                    stage.id,
+                    exc_info=True,
+                )
+                with contextlib.suppress(Exception):
+                    await db.rollback()
             _schedule_stage_eval(
                 version_id=version_id,
                 stage_type=stage.type,
@@ -3481,7 +3526,30 @@ class StageManager:
             await db.commit()
             await self._invalidate_stage_cache(workspace.id, "harness", redis)
 
-            eval_task = _schedule_stage_eval(
+            # Inline deterministic findings, then a non-blocking background score
+            # — same decoupling as the main generate path (issue #27 Phase 1).
+            # Harness has no deterministic task findings; this persists the eval
+            # row (scores/coverage null) so the LLM score can later update it.
+            # Best-effort: a persist failure must not break the patched stream.
+            try:
+                structural_eval = await persist_structural_eval(
+                    db,
+                    stage_version_id=version_id,
+                    stage_type="harness",
+                    content=merged,
+                    harness_content=None,
+                )
+                eval_event = json.dumps({"eval": _eval_to_dict(structural_eval)})
+            except Exception:
+                logger.warning(
+                    "structural_eval_persist_failed stage_id=%s",
+                    stage_id,
+                    exc_info=True,
+                )
+                with contextlib.suppress(Exception):
+                    await db.rollback()
+                eval_event = None
+            _schedule_stage_eval(
                 version_id=version_id,
                 stage_type="harness",
                 content=merged,
@@ -3491,28 +3559,8 @@ class StageManager:
                 content_generation_id=None,
             )
             yield f'{{"done": true, "stage_id": "{stage_id}"}}'
-
-            try:
-                eval_result = await asyncio.wait_for(
-                    asyncio.shield(eval_task), timeout=30.0
-                )
-                if eval_result is not None:
-                    yield json.dumps({"eval": _eval_to_dict(eval_result)})
-            except asyncio.TimeoutError:
-                # asyncio.shield() protects eval_task from the wait_for
-                # cancellation signal, so the task continues running after
-                # the timeout fires.  Cancel it explicitly to release the
-                # thread-pool slot and prevent resource leaks.  T-205.
-                eval_task.cancel()
-                await asyncio.gather(eval_task, return_exceptions=True)
-                logger.warning(
-                    "eval_task.timeout_cancelled stage_id=%s",
-                    stage_id,
-                )
-            except Exception:  # pragma: no cover - best-effort eval collection
-                logger.warning(
-                    "eval_collection_failed stage_id=%s", stage_id, exc_info=True
-                )
+            if eval_event:
+                yield eval_event
 
         except (ProviderError, TimeoutError) as exc:
             # On provider failure the stage remains in its pre-patch status
