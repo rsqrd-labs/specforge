@@ -425,7 +425,8 @@ async def test_dispatcher_routes_pr_open_and_check_suite_to_pr_check(
             db=session,
             enqueue_fn=fake_enqueue,
         )
-        assert ("pr_check", str(task.push_id), 9) in enqueued
+        # An automatic push is tagged ``auto`` (issue #27 Phase 4).
+        assert ("pr_check", str(task.push_id), 9, "auto") in enqueued
 
         check = json.dumps(
             {
@@ -438,10 +439,46 @@ async def test_dispatcher_routes_pr_open_and_check_suite_to_pr_check(
         await github_reconcile.reconcile_event(
             {}, "d-check", "check_suite", check, db=session, enqueue_fn=fake_enqueue
         )
-        assert enqueued.count(("pr_check", str(task.push_id), 9)) == 2
+        assert enqueued.count(("pr_check", str(task.push_id), 9, "auto")) == 2
         # An opened PR is not a completion.
         await session.refresh(task)
         assert task.state == "open"
+    finally:
+        await _cleanup(session, inst)
+
+
+async def test_dispatcher_tags_check_suite_rerequested_as_manual(
+    session: AsyncSession, user: User, workspace: Workspace
+) -> None:
+    """A ``check_suite:rerequested`` event is an explicit re-run → ``manual``
+    trigger, the signal the pr_check worker uses to honour ``manual`` mode."""
+    inst = await _make_install(session, user)
+    task = await _make_push_with_task(
+        session, workspace=workspace, user=user, installation=inst
+    )
+    enqueued: list[tuple[Any, ...]] = []
+
+    async def fake_enqueue(job: str, *args: Any) -> None:
+        enqueued.append((job, *args))
+
+    try:
+        rerequested = json.dumps(
+            {
+                "action": "rerequested",
+                "repository": {"id": _REPO_ID, "full_name": "octo/app"},
+                "installation": {"id": inst.installation_id},
+                "check_suite": {"pull_requests": [{"number": 9}]},
+            }
+        ).encode()
+        await github_reconcile.reconcile_event(
+            {},
+            "d-rerun",
+            "check_suite",
+            rerequested,
+            db=session,
+            enqueue_fn=fake_enqueue,
+        )
+        assert ("pr_check", str(task.push_id), 9, "manual") in enqueued
     finally:
         await _cleanup(session, inst)
 

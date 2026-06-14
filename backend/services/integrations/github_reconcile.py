@@ -332,16 +332,22 @@ async def _route_pr_check(
     db: AsyncSession, payload: dict[str, Any], enqueue_fn: Any
 ) -> None:
     """pull_request(opened|synchronize|reopened) and check_suite → ``pr_check``
-    (T-282), one job per matched push."""
+    (T-282), one job per matched push.
+
+    A ``check_suite:rerequested`` event is an explicit user re-run, so it is
+    tagged ``manual``; every other routed event is an automatic push tagged
+    ``auto``. The pr_check worker uses that to honour the installation's
+    ``manual`` pr_check_mode (issue #27 Phase 4)."""
     repo_id, installation_id = _identity(payload)
     if repo_id is None or installation_id is None:
         return
     pr_number = _pr_number(payload)
     if pr_number is None:
         return
+    trigger = "manual" if payload.get("action") == "rerequested" else "auto"
     pushes = await find_live_pushes_for_event(db, repo_id, installation_id)
     for push in pushes:
-        await _enqueue(enqueue_fn, "pr_check", str(push.id), pr_number)
+        await _enqueue(enqueue_fn, "pr_check", str(push.id), pr_number, trigger)
 
 
 async def _route_projects_sync(

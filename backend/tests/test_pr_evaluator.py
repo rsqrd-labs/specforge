@@ -219,9 +219,12 @@ class _FakeRedis:
         return None
 
 
+# The fakes accept **kwargs so they tolerate call_judge_model's full keyword
+# surface (operation / cost_context were added in issue #26 Phase 0); a stricter
+# signature silently turned every judge call into a TypeError → fail-open neutral.
 def _judge(verdict_json: str, calls: list[int]):
     async def _fake(
-        *, system_prompt: str, user_prompt: str, provider: Any = None
+        *, system_prompt: str, user_prompt: str, provider: Any = None, **_: Any
     ) -> str:
         calls.append(1)
         return verdict_json
@@ -231,7 +234,7 @@ def _judge(verdict_json: str, calls: list[int]):
 
 def _judge_raises(calls: list[int]):
     async def _fake(
-        *, system_prompt: str, user_prompt: str, provider: Any = None
+        *, system_prompt: str, user_prompt: str, provider: Any = None, **_: Any
     ) -> str:
         calls.append(1)
         raise RuntimeError("judge unavailable")
@@ -248,7 +251,7 @@ async def session() -> AsyncSession:
     await engine.dispose()
 
 
-async def _seed(db: AsyncSession) -> dict[str, Any]:
+async def _seed(db: AsyncSession, *, pr_check_mode: str = "auto") -> dict[str, Any]:
     user = User(
         email=f"pr-{uuid4()}@example.com",
         google_id=f"g-{uuid4()}",
@@ -285,12 +288,16 @@ async def _seed(db: AsyncSession) -> dict[str, Any]:
     db.add(StageVersion(stage_id=stage.id, version=1, content=_TASKS, created_by="ai"))
     await db.commit()
 
+    # Existing cost-control / judge tests predate the Phase-4 mode gate and
+    # assume the judge runs on every push, so they seed ``auto``. The mode-gate
+    # tests below pass ``off`` / ``manual`` explicitly (move-with-contract).
     inst = GitHubInstallation(
         installation_id=uuid4().int % 1_000_000_000,
         account_login="octo",
         account_type="Organization",
         repository_selection="all",
         user_id=user.id,
+        pr_check_mode=pr_check_mode,
     )
     db.add(inst)
     await db.commit()
@@ -329,7 +336,15 @@ async def _teardown(db: AsyncSession, seeded: dict[str, Any]) -> None:
 
 
 async def _run(
-    session, seeded, stub, redis, monkeypatch, verdict_json=None, *, raises=False
+    session,
+    seeded,
+    stub,
+    redis,
+    monkeypatch,
+    verdict_json=None,
+    *,
+    raises=False,
+    trigger="auto",
 ):
     calls: list[int] = []
     if raises:
@@ -339,7 +354,7 @@ async def _run(
             pr_evaluator, "call_judge_model", _judge(verdict_json, calls)
         )
     await pr_evaluator.run_pr_check(
-        {}, str(seeded["push"].id), 7, db=session, client=stub, redis=redis
+        {}, str(seeded["push"].id), 7, trigger, db=session, client=stub, redis=redis
     )
     return calls
 
@@ -498,5 +513,128 @@ async def test_checks_permission_falls_back_to_commit_status(
         states = [s["state"] for s in stub.statuses]
         assert "pending" in states  # the up-front pending status
         assert states[-1] == "success"  # neutral collapsed to non-blocking success
+    finally:
+        await _teardown(session, seeded)
+
+
+# ===========================================================================
+# pr_check_mode gate (issue #27 Phase 4)
+# ===========================================================================
+
+
+def _skipped_disabled() -> float:
+    """Current value of the pr_check ``disabled`` skip counter."""
+    from services.observability import JUDGE_CALLS_SKIPPED_TOTAL
+
+    return JUDGE_CALLS_SKIPPED_TOTAL.labels(
+        purpose="pr_check", reason="disabled"
+    )._value.get()
+
+
+async def test_mode_off_skips_judge_and_posts_disabled_neutral(
+    session, monkeypatch
+) -> None:
+    """``off`` never judges: a neutral 'disabled' check posts, no judge call."""
+    seeded = await _seed(session, pr_check_mode="off")
+    stub, redis = _StubClient(), _FakeRedis()
+    before = _skipped_disabled()
+    try:
+        calls = await _run(
+            session,
+            seeded,
+            stub,
+            redis,
+            monkeypatch,
+            '{"passed": true, "findings": []}',
+        )
+        assert not calls  # judge never issued
+        assert stub.final_conclusion == "neutral"
+        assert _skipped_disabled() == before + 1
+        # done_key armed so the check_suite:completed echo is deduped.
+        assert redis.store[f"gh:prcheck:done:{seeded['push'].id}:7"] == "sha-1"
+    finally:
+        await _teardown(session, seeded)
+
+
+async def test_mode_manual_auto_push_skips_and_posts_manual_neutral(
+    session, monkeypatch
+) -> None:
+    """``manual`` + an automatic push: neutral 'manual mode' check, no judge."""
+    seeded = await _seed(session, pr_check_mode="manual")
+    stub, redis = _StubClient(), _FakeRedis()
+    before = _skipped_disabled()
+    try:
+        calls = await _run(
+            session,
+            seeded,
+            stub,
+            redis,
+            monkeypatch,
+            '{"passed": true, "findings": []}',
+            trigger="auto",
+        )
+        assert not calls
+        assert stub.final_conclusion == "neutral"
+        assert _skipped_disabled() == before + 1
+    finally:
+        await _teardown(session, seeded)
+
+
+async def test_mode_manual_with_manual_trigger_runs_judge(session, monkeypatch) -> None:
+    """``manual`` + an explicit re-run: the judge runs and the check reflects it."""
+    seeded = await _seed(session, pr_check_mode="manual")
+    stub, redis = _StubClient(), _FakeRedis()
+    before = _skipped_disabled()
+    try:
+        calls = await _run(
+            session,
+            seeded,
+            stub,
+            redis,
+            monkeypatch,
+            '{"passed": true, "findings": []}',
+            trigger="manual",
+        )
+        assert len(calls) == 1  # judge ran
+        assert stub.final_conclusion == "success"
+        assert _skipped_disabled() == before  # not a skip
+    finally:
+        await _teardown(session, seeded)
+
+
+async def test_manual_rerun_bypasses_head_sha_dedup(session, monkeypatch) -> None:
+    """A manual re-run judges the SAME head SHA even after an auto skip armed the
+    dedup key; the subsequent completion echo (auto) is still deduped."""
+    seeded = await _seed(session, pr_check_mode="manual")
+    stub, redis = _StubClient(), _FakeRedis()
+    calls: list[int] = []
+    monkeypatch.setattr(
+        pr_evaluator,
+        "call_judge_model",
+        _judge('{"passed": true, "findings": []}', calls),
+    )
+    try:
+        # 1. Automatic push → manual-mode neutral, no judge, done_key armed.
+        await pr_evaluator.run_pr_check(
+            {}, str(seeded["push"].id), 7, "auto", db=session, client=stub, redis=redis
+        )
+        assert not calls
+        # 2. User clicks Re-run on the same SHA → judge runs despite done_key.
+        await pr_evaluator.run_pr_check(
+            {},
+            str(seeded["push"].id),
+            7,
+            "manual",
+            db=session,
+            client=stub,
+            redis=redis,
+        )
+        assert len(calls) == 1
+        assert stub.final_conclusion == "success"
+        # 3. Our verdict's check_suite:completed echo (auto, same SHA) is deduped.
+        await pr_evaluator.run_pr_check(
+            {}, str(seeded["push"].id), 7, "auto", db=session, client=stub, redis=redis
+        )
+        assert len(calls) == 1  # no second judge
     finally:
         await _teardown(session, seeded)

@@ -560,6 +560,9 @@ async def _seed_pr(db: AsyncSession) -> dict[str, Any]:
         account_type="Organization",
         repository_selection="all",
         user_id=user.id,
+        # The pr_evaluator behavioral test drives the judge path, which the
+        # Phase-4 mode gate now runs only in "auto" (default is "manual").
+        pr_check_mode="auto",
     )
     db.add(inst)
     await db.commit()
@@ -615,7 +618,7 @@ async def test_pr_evaluator_is_not_the_critic_and_fails_open(
     calls: list[int] = []
 
     async def boom(
-        *, system_prompt: str, user_prompt: str, provider: Any = None
+        *, system_prompt: str, user_prompt: str, provider: Any = None, **_: Any
     ) -> str:
         calls.append(1)
         raise RuntimeError("judge unavailable")

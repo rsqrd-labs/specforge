@@ -260,7 +260,8 @@ def _should_score_stage(stage_type: str) -> bool:
     """
     if stage_type == "harness":
         return True
-    return random.random() < settings.eval_score_sample_rate
+    # nosec B311 — sampling probability, not a security/crypto draw.
+    return random.random() < settings.eval_score_sample_rate  # nosec B311
 
 
 async def _dispatch_stage_eval(

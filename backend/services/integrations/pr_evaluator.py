@@ -70,9 +70,17 @@ from services.observability import (
     GITHUB_CHECK_TOTAL,
     github_audit,
     record_judge_call,
+    record_judge_call_skipped,
 )
 
 logger = structlog.get_logger(__name__)
+
+# How a pr_check job was triggered (issue #27 Phase 4). ``auto`` is an automatic
+# routed push (pull_request / check_suite:requested); ``manual`` is an explicit
+# GitHub re-run (check_suite:rerequested). The default is ``auto`` so an older
+# in-flight job enqueued before this phase (3 positional args) keeps its
+# pre-Phase-4 meaning.
+PRCheckTrigger = Literal["auto", "manual"]
 
 # The check shown on the PR.
 CHECK_NAME = "SpecForge / acceptance"
@@ -176,6 +184,7 @@ async def run_pr_check(
     ctx: dict[str, Any],
     push_id: str,
     pr_number: int,
+    trigger: PRCheckTrigger = "auto",
     *,
     db: AsyncSession | None = None,
     client: Any = None,
@@ -183,12 +192,20 @@ async def run_pr_check(
 ) -> None:
     """Worker entrypoint for the ``pr_check`` job (T-282).
 
-    ``db``/``client``/``redis`` are injectable for tests; production opens a
-    session and builds an App-mode client bound to the push's installation.
+    ``trigger`` distinguishes an automatic routed push (``auto``) from an
+    explicit GitHub re-run (``manual``); it gates the ``manual`` pr_check_mode
+    (issue #27 Phase 4). ``db``/``client``/``redis`` are injectable for tests;
+    production opens a session and builds an App-mode client bound to the push's
+    installation.
     """
     if db is not None:
         await _run_pr_check(
-            db, push_id, pr_number, client=client, redis=redis or get_shared_redis()
+            db,
+            push_id,
+            pr_number,
+            trigger,
+            client=client,
+            redis=redis or get_shared_redis(),
         )
         return
     from database import AsyncSessionLocal
@@ -198,6 +215,7 @@ async def run_pr_check(
             session,
             push_id,
             pr_number,
+            trigger,
             client=client,
             redis=redis,
         )
@@ -207,6 +225,7 @@ async def _run_pr_check(
     db: AsyncSession,
     push_id: str,
     pr_number: int,
+    trigger: PRCheckTrigger = "auto",
     *,
     client: Any = None,
     redis: Any = None,
@@ -221,14 +240,14 @@ async def _run_pr_check(
         return
 
     if client is not None:
-        await _drive_pr_check(db, push, pr_number, client, redis)
+        await _drive_pr_check(db, push, pr_number, client, redis, trigger)
         return
 
-    await _drive_pr_check_in_production(db, push, pr_number)
+    await _drive_pr_check_in_production(db, push, pr_number, trigger)
 
 
 async def _drive_pr_check_in_production(  # pragma: no cover - worker-only wiring
-    db: AsyncSession, push: IntegrationPush, pr_number: int
+    db: AsyncSession, push: IntegrationPush, pr_number: int, trigger: PRCheckTrigger
 ) -> None:
     """Build the App-mode client + governor and run the check (production path).
 
@@ -260,7 +279,7 @@ async def _drive_pr_check_in_production(  # pragma: no cover - worker-only wirin
         built = make_app_github_client(
             token_provider, installation.installation_id, http, governor=governor
         )
-        await _drive_pr_check(db, push, pr_number, built, redis)
+        await _drive_pr_check(db, push, pr_number, built, redis, trigger)
 
 
 async def _drive_pr_check(
@@ -269,6 +288,7 @@ async def _drive_pr_check(
     pr_number: int,
     client: Any,
     redis: Any,
+    trigger: PRCheckTrigger = "auto",
 ) -> None:
     repo = push.repo_full_name
     assert repo is not None  # nosec B101 — guaranteed by the caller
@@ -282,11 +302,26 @@ async def _drive_pr_check(
         return
 
     # 1. head-SHA dedup FIRST — idempotent + breaks the check_suite re-entry loop.
+    #    A ``manual`` re-run deliberately bypasses it: the user clicked "Re-run"
+    #    on the same SHA and means it. This MUST stay before the mode gate so our
+    #    own posted verdict's check_suite:completed echo (which arrives as
+    #    ``auto``) short-circuits here instead of falling through to the
+    #    manual-mode neutral poster and overwriting the verdict (issue #27 P4).
     done_key = f"gh:prcheck:done:{push.id}:{pr_number}"
-    if await _redis_get(redis, done_key) == head_sha:
+    if trigger != "manual" and await _redis_get(redis, done_key) == head_sha:
         return
 
-    # 2. Resolve PR → SpecForge task(s) via Closes #N. No task ⇒ neutral + stop.
+    # 2. Per-installation mode gate (issue #27 Phase 4). ``off`` never judges;
+    #    ``manual`` judges only on an explicit re-run; ``auto`` always judges.
+    mode = await _pr_check_mode(db, push.installation_id)
+    skip = _mode_skip_verdict(mode, trigger)
+    if skip is not None:
+        await _post_verdict(client, repo, head_sha, skip, push)
+        record_judge_call_skipped("pr_check", "disabled")
+        await _redis_set(redis, done_key, head_sha, _DAY_SECONDS)
+        return
+
+    # 4. Resolve PR → SpecForge task(s) via Closes #N. No task ⇒ neutral + stop.
     criteria = await _resolve_acceptance_criteria(db, push, pr)
     if not criteria:
         await _post_verdict(
@@ -304,16 +339,18 @@ async def _drive_pr_check(
         await _redis_set(redis, done_key, head_sha, _DAY_SECONDS)
         return
 
-    # 3. Debounce rapid pushes: a recent judge for this PR stands; skip this one.
+    # 5. Debounce rapid pushes: a recent judge for this PR stands; skip this one.
     debounce_key = f"gh:prcheck:debounce:{push.id}:{pr_number}"
     if await _redis_get(redis, debounce_key) is not None:
         logger.info(
             "github.pr_check.debounced", push_id=str(push.id), pr_number=pr_number
         )
+        record_judge_call_skipped("pr_check", "debounce")
         return
 
-    # 4. Per-installation daily budget: over it ⇒ neutral, no judge call.
+    # 6. Per-installation daily budget: over it ⇒ neutral, no judge call.
     if not await _within_budget(redis, push.installation_id):
+        record_judge_call_skipped("pr_check", "budget")
         await _post_verdict(
             client,
             repo,
@@ -329,13 +366,13 @@ async def _drive_pr_check(
         await _redis_set(redis, done_key, head_sha, _DAY_SECONDS)
         return
 
-    # 5. Post pending, judge the diff, then update to the verdict.
+    # 7. Post pending, judge the diff, then update to the verdict.
     pending = await _post_pending(client, repo, head_sha)
     diff = await client.get_pull_request_diff(repo, pr_number)
     verdict = _verdict_for(await _judge(db, push, criteria, diff))
     await _post_verdict(client, repo, head_sha, verdict, push, check_run_id=pending)
 
-    # 6. Record: dedup this SHA + arm the debounce window.
+    # 8. Record: dedup this SHA + arm the debounce window.
     await _redis_set(redis, done_key, head_sha, _DAY_SECONDS)
     await _redis_set(redis, debounce_key, head_sha, PR_CHECK_DEBOUNCE_SECONDS)
     logger.info(
@@ -623,6 +660,52 @@ async def _workspace_provider(db: AsyncSession, workspace_id: Any) -> str | None
         await db.execute(select(Workspace).where(Workspace.id == workspace_id))
     ).scalar_one_or_none()
     return workspace.provider if workspace is not None else None
+
+
+async def _pr_check_mode(db: AsyncSession, installation_pk: Any) -> str:
+    """Read the installation's ``pr_check_mode`` (issue #27 Phase 4).
+
+    ``installation_pk`` is the :class:`IntegrationPush.installation_id` FK, i.e.
+    the installation row's UUID PK (not GitHub's numeric ``installation_id``).
+    A missing row defaults to ``manual`` — the safe, lower-spend default that
+    matches the column's server default; the production driver already returns
+    early when the installation is gone, so this is a defensive fallback.
+    """
+    mode = (
+        await db.execute(
+            select(GitHubInstallation.pr_check_mode).where(
+                GitHubInstallation.id == installation_pk
+            )
+        )
+    ).scalar_one_or_none()
+    return mode or "manual"
+
+
+def _mode_skip_verdict(mode: str, trigger: PRCheckTrigger) -> _Verdict | None:
+    """The neutral check to post when the mode setting skips the judge, or None.
+
+    ``off`` always skips; ``manual`` skips an automatic push but runs on an
+    explicit re-run; ``auto`` (and any unknown value, fail-open) never skips. The
+    posted copy is explicit about *why* the check did not judge so the setting is
+    discoverable on the PR (plan Phase 4).
+    """
+    if mode == "off":
+        return _Verdict(
+            "neutral",
+            "SpecForge PR review disabled",
+            "SpecForge acceptance-criteria review is turned off for this "
+            "installation, so this PR was not judged. This check does not block "
+            "the PR.",
+        )
+    if mode == "manual" and trigger != "manual":
+        return _Verdict(
+            "neutral",
+            "SpecForge PR review is manual",
+            "SpecForge acceptance-criteria review is in manual mode for this "
+            "installation. Re-run this check to judge the PR against its linked "
+            "task's acceptance criteria. This check does not block the PR.",
+        )
+    return None
 
 
 def _extract_json_object(raw: str) -> str:

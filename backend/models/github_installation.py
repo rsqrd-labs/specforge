@@ -17,7 +17,15 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Literal
 from uuid import UUID as PythonUUID
 
-from sqlalchemy import BigInteger, ForeignKey, Text, UniqueConstraint, func, text
+from sqlalchemy import (
+    BigInteger,
+    CheckConstraint,
+    ForeignKey,
+    Text,
+    UniqueConstraint,
+    func,
+    text,
+)
 from sqlalchemy.dialects.postgresql import TIMESTAMP, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -33,6 +41,10 @@ class GitHubInstallation(Base):
         UniqueConstraint(
             "installation_id",
             name="uq_github_installation_installation_id",
+        ),
+        CheckConstraint(
+            "pr_check_mode IN ('off', 'manual', 'auto')",
+            name="ck_github_installation_pr_check_mode",
         ),
     )
 
@@ -51,6 +63,18 @@ class GitHubInstallation(Base):
     repository_selection: Mapped[Literal["all", "selected"]] = mapped_column(
         Text,
         nullable=False,
+    )
+    # Issue #27 Phase 4 — per-installation control over the PR-diff judge:
+    #   off    → never judge; post a neutral "disabled by setting" check.
+    #   manual → judge only on an explicit GitHub re-run (check_suite
+    #            rerequested); an automatic push posts a neutral "re-run to
+    #            evaluate" check and spends no judge call.
+    #   auto   → judge on every routed push (the pre-Phase-4 behaviour).
+    # Defaults to "manual" so the judge is opt-in (the issue #27 cost cut).
+    pr_check_mode: Mapped[Literal["off", "manual", "auto"]] = mapped_column(
+        Text,
+        nullable=False,
+        server_default=text("'manual'"),
     )
     # The SpecForge user who installed, if known. SET NULL on user delete: the
     # installation outlives the linking account.

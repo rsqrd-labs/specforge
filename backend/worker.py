@@ -135,11 +135,18 @@ async def projects_sync(ctx: dict[str, Any], push_id: str) -> None:
 
 
 @github_job("pr_check")
-async def pr_check(ctx: dict[str, Any], push_id: str, pr_number: int) -> None:
-    """Post the SpecForge PR status check (implemented in T-282)."""
+async def pr_check(
+    ctx: dict[str, Any], push_id: str, pr_number: int, trigger: str = "auto"
+) -> None:
+    """Post the SpecForge PR status check (implemented in T-282).
+
+    ``trigger`` (``auto``/``manual``, default ``auto``) is supplied by the
+    reconcile router (issue #27 Phase 4); the default keeps an older in-flight
+    job enqueued with 3 positional args on its pre-Phase-4 ``auto`` meaning.
+    """
     from services.integrations import pr_evaluator
 
-    await pr_evaluator.run_pr_check(ctx, push_id, pr_number)
+    await pr_evaluator.run_pr_check(ctx, push_id, pr_number, trigger)
 
 
 @github_job("reconcile_drift")
