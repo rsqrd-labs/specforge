@@ -534,6 +534,41 @@ def _repair_budget(
     return max(current_max_tokens, min(current_max_tokens * 2, ceiling))
 
 
+def _limit_stop_repair_is_doomed(
+    route: LLMRoute,
+    current_max_tokens: int,
+    issues: list["CompletenessIssue"],
+) -> bool:
+    """True when a chunk limit-stop repair would run at the model's last budget.
+
+    Phase 4 (issue #28).  A chunk that stopped because the provider hit its
+    output-token budget is repaired with a *doubled* budget (`_repair_budget`).
+    Once that doubled budget is already clamped to the model's output ceiling,
+    the repair is the *final* escalation — there is no larger budget left to try.
+    A generation that over-produced at the prior budget (the d3 case: 89 FRs,
+    truncated mid-table) is unlikely to suddenly fit at the ceiling, so spending
+    that ceiling-capped repair is a multi-minute call before the same terminal
+    `incomplete_output` block.  Skipping it surfaces the block immediately.
+
+    NOT outcome-preserving: a generation that only *just* overran the prior
+    budget could still fit at the ceiling, so this trades that recovery for the
+    saved call.  That trade is exactly why the caller gates it behind a
+    default-off flag, promoted only after the issue-#26 live corpus gate
+    (`docs/evals/ROUTE_PROMOTION.md`).  It fires only for
+    `provider_stopped_by_limit`; a sub-ceiling limit-stop (the doubling can still
+    hand the repair a strictly larger, below-ceiling budget) and every non-limit
+    completeness failure (where a same-budget repair genuinely helps) are left
+    untouched, and an uncatalogued model (unknown ceiling) never bails.
+    """
+    if not any(issue.code == "provider_stopped_by_limit" for issue in issues):
+        return False
+    try:
+        ceiling = model_max_output_tokens(route.provider, route.model)
+    except ValueError:
+        return False
+    return _repair_budget(route, current_max_tokens, issues) >= ceiling
+
+
 def _runtime_fallback_route(failed_route: LLMRoute) -> LLMRoute | None:
     """Resolve the one-shot escalation retry route after a core-gen failure.
 
@@ -1265,6 +1300,30 @@ class StageManager:
                         exc.issues,
                         partial_content="\n\n".join([*chunks, exc.partial_content]),
                         repair_attempted=True,
+                    ) from exc
+                # Phase 4 (issue #28): when the chunk stopped on its token budget
+                # and the repair's doubled budget would already be clamped to the
+                # model's output ceiling (its final escalation, no headroom left),
+                # an over-producing chunk is unlikely to fit at the ceiling — so
+                # the ceiling-capped repair is a multi-minute call before the same
+                # terminal block.  Skip it and surface the block now.  Behind a
+                # default-off flag (corpus-gated, NOT outcome-preserving): OFF ⇒
+                # this branch is inert and the loop is byte-identical.
+                if settings.pipeline_early_bail_unrecoverable_chunk and (
+                    _limit_stop_repair_is_doomed(route, max_tokens, exc.issues)
+                ):
+                    PIPELINE_COMPLETION_REPAIRS.labels(
+                        stage_type=stage_type,
+                        provider=route.provider,
+                        outcome="skipped_at_ceiling",
+                    ).inc()
+                    # No funded repair was attempted (we skipped the doomed one),
+                    # so the gate payload honestly reports repair_attempted=False.
+                    raise IncompleteArtifactError(
+                        stage_type,
+                        exc.issues,
+                        partial_content="\n\n".join([*chunks, exc.partial_content]),
+                        repair_attempted=False,
                     ) from exc
                 repair_attempted = True
                 PIPELINE_COMPLETION_REPAIRS.labels(

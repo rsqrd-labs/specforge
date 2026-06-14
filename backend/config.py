@@ -175,6 +175,23 @@ class Settings(BaseSettings):
     # (`docs/evals/ROUTE_PROMOTION.md`).
     core_complexity_routing: bool = False
 
+    # Phase 4 (issue #28): early-bail on an unrecoverable chunk limit-stop. A chunk
+    # that stops on its output-token budget is repaired with a *doubled* budget
+    # (`_repair_budget`). Once that doubled budget is already clamped to the model
+    # output ceiling, the repair is the final escalation — there is no larger budget
+    # left to try — and a generation that over-produced at the prior budget (the d3
+    # case: 89 FRs, truncated) is unlikely to fit at the ceiling. With this flag on,
+    # that ceiling-capped repair is skipped and the `incomplete_output` block
+    # surfaces immediately instead of after another multi-minute call. Under the live
+    # catalog this DOES fire for core generation (budget 24576 doubles into the 32768
+    # ceiling), so it actively cuts a call — it is NOT outcome-preserving: a
+    # generation that only just overran could still fit at the ceiling, so the flag
+    # trades that recovery for the saved call. That is exactly why it ships Default
+    # False — a chunk-loop change that changes which artifacts recover rides the
+    # issue-#26 golden-corpus gate and is promoted only after the manual live review
+    # (`docs/evals/ROUTE_PROMOTION.md`). Flag OFF ⇒ the loop is byte-identical.
+    pipeline_early_bail_unrecoverable_chunk: bool = False
+
     # Increment generation (Phase 21 — T-279). The MVP ships the *additive* path
     # only: an increment appends new tasks with their existing content pinned by
     # stable, content-derived task_refs. Behaviour-changing increments (compute

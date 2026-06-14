@@ -75,6 +75,40 @@ Promotion requires:
 Live provider evals must be run from an operator-approved branch with explicit
 API keys and a saved JSON/Markdown report attached to the promotion review.
 
+## Early-bail on an unrecoverable chunk (issue #28, Phase 4)
+
+`pipeline_early_bail_unrecoverable_chunk` (default **false**) is a chunk-loop
+change and therefore rides this same gate. A chunk that stops on its output-token
+budget is repaired with a *doubled* budget (`_repair_budget`). Once that doubled
+budget is already clamped to the model **ceiling**, the repair is the final
+escalation — there is no larger budget left to try — and a generation that
+over-produced at the prior budget (the d3 case: 89 FRs, truncated) is unlikely to
+fit at the ceiling. With the flag on, that ceiling-capped repair is skipped
+(counter `specforge_pipeline_completion_repairs_total{outcome="skipped_at_ceiling"}`)
+and the `incomplete_output` block surfaces immediately; the refund and recovery
+contract are unchanged.
+
+**Under the live catalog this DOES fire for core generation.** Core-gen budgets
+are 24576 and the Haiku 4.5 / GPT-5.4 Mini ceilings are 32768, so an initial
+limit-stop's doubled budget (49152) clamps to 32768 = the ceiling → the bail
+triggers and actively cuts the repair call. It is therefore **not
+outcome-preserving**: a generation that only *just* overran 24576 could still fit
+at 32768, so the flag trades that recovery for the saved call. That is precisely
+why it ships **off**.
+
+The deterministic dry run cannot measure the trade (its simulated output never
+limit-stops), so promotion is a **manual live step**: on the golden corpus, with
+the flag on, confirm the count of artifacts that recover *only* via the
+ceiling-budget repair is negligible, and that latency/cost on the limit-stop path
+drops. Only then flip the default to true.
+
+Scope notes: the bail is confined to the per-chunk limit-stop repair. A
+sub-ceiling limit-stop (the doubling can still hand the repair a strictly larger,
+below-ceiling budget) and the full-artifact repair pass — which carries
+**structural** completeness issues, never `provider_stopped_by_limit` — are both
+left untouched. An uncatalogued model (unknown ceiling) never bails. With the
+flag off, the chunk loop is byte-identical to today.
+
 ## Tier ladder & catalog hygiene (Phase 5b)
 
 The per-provider cheap-tier floor is a single declarative ladder

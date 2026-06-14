@@ -108,6 +108,9 @@ PIPELINE_INCOMPLETE_OUTPUTS = Counter(
 )
 PIPELINE_COMPLETION_REPAIRS = Counter(
     "specforge_pipeline_completion_repairs_total",
+    # outcome: attempted / succeeded / failed for a funded repair, plus
+    # skipped_at_ceiling (Phase 4, issue #28) when a chunk limit-stop repair is
+    # skipped because the budget is already maxed and the retry is provably doomed.
     "Platform-funded repair attempts for incomplete stage generation chunks",
     ["stage_type", "provider", "outcome"],
 )

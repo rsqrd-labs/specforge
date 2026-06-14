@@ -835,6 +835,255 @@ async def test_generate_provider_limit_stop_failed_repair_blocks_and_refunds() -
     assert any("quality_gate_failed" in token for token in tokens)
 
 
+def _route_for_doom_test(model: str = "claude-haiku-4-5-20251001"):
+    from services.llm.routing import LLMRoute
+
+    return LLMRoute(
+        provider="anthropic",
+        model=model,
+        model_tier="small",
+        operation="generate_spec",
+        latency_class="interactive",
+        cross_provider_fallback=False,
+        reason="test",
+        requested_tier="small",
+        fallback_tier=None,
+        selection_reason="test",
+    )
+
+
+def _limit_stop_issue():
+    from services.pipeline.artifact_validator import CompletenessIssue
+
+    return CompletenessIssue(
+        code="provider_stopped_by_limit",
+        detail="The provider stopped because the output token limit was reached.",
+        reference="max_tokens",
+    )
+
+
+def _non_limit_issue():
+    from services.pipeline.artifact_validator import CompletenessIssue
+
+    return CompletenessIssue(
+        code="missing_completion_sentinel",
+        detail="The completion sentinel was absent.",
+    )
+
+
+@pytest.mark.parametrize(
+    ("budget", "ceiling", "issues_fn", "expected"),
+    [
+        # Phase 4 fires when the repair's DOUBLED budget would already be clamped
+        # to the model ceiling (its final escalation, no headroom left).
+        # Real core-gen: 24576 doubles to 49152 → clamps to 32768 = ceiling.
+        (24576, 32768, _limit_stop_issue, True),
+        # Already at the ceiling.
+        (32768, 32768, _limit_stop_issue, True),
+        # Boundary: 2 × 16384 == 32768 == ceiling.
+        (16384, 32768, _limit_stop_issue, True),
+        # Sub-ceiling: the doubling lands strictly below the ceiling (2×16000 =
+        # 32000 < 32768), so the repair still gets a strictly larger budget.
+        (16000, 32768, _limit_stop_issue, False),
+        (8000, 32768, _limit_stop_issue, False),
+        # Non-limit completeness failures: a same-budget repair genuinely helps.
+        (24576, 32768, _non_limit_issue, False),
+    ],
+)
+def test_limit_stop_repair_is_doomed_matrix(
+    monkeypatch, budget, ceiling, issues_fn, expected
+) -> None:
+    from services.pipeline import stage_manager as sm
+
+    monkeypatch.setattr(sm, "model_max_output_tokens", lambda provider, model: ceiling)
+    assert (
+        sm._limit_stop_repair_is_doomed(_route_for_doom_test(), budget, [issues_fn()])
+        is expected
+    )
+
+
+def test_limit_stop_repair_is_not_doomed_when_ceiling_unknown(monkeypatch) -> None:
+    # An uncatalogued model gives no ceiling — we cannot prove the budget is
+    # maxed, so we must NOT bail: the repair and its doubling get to try.
+    from services.pipeline import stage_manager as sm
+
+    def _raise(provider, model):
+        raise ValueError("unknown model")
+
+    monkeypatch.setattr(sm, "model_max_output_tokens", _raise)
+    assert (
+        sm._limit_stop_repair_is_doomed(
+            _route_for_doom_test("mystery-model"), 999999, [_limit_stop_issue()]
+        )
+        is False
+    )
+
+
+@pytest.mark.asyncio
+async def test_doomed_limit_stop_still_repairs_when_flag_off(monkeypatch) -> None:
+    # The guardrail proof: with the Phase 4 flag OFF the chunk loop is
+    # byte-identical to today — even a doomed (ceiling-capped) limit-stop STILL
+    # spends a funded repair (which re-stops and blocks), exactly as before. No
+    # ceiling patch: the real core-gen budget (24576) doubles into the 32768
+    # ceiling, so the doomed condition holds under the live catalog.
+    from services.pipeline import stage_manager as sm
+
+    monkeypatch.setattr(sm.settings, "pipeline_early_bail_unrecoverable_chunk", False)
+
+    workspace_id = uuid4()
+    spec_stage = _make_stage(workspace_id, "spec", status="draft")
+    workspace = _make_workspace([spec_stage])
+    user = _make_user()
+    deduction = CreditLedger(id=uuid4(), user_id=user.id, amount=-10, reason="generate")
+    db = _MultiQueryDB([spec_stage, workspace, [], deduction])
+    adapter = _CompletionAwareAdapter([(None, True), (None, True)])
+    svc = StageManager(redis_client=_FakeRedis())
+
+    with (
+        patch(
+            "services.pipeline.stage_manager.credit_service.deduct",
+            new_callable=AsyncMock,
+            return_value=deduction,
+        ),
+        patch(
+            "services.pipeline.stage_manager.credit_service.refund",
+            new_callable=AsyncMock,
+        ),
+        patch(
+            "services.pipeline.stage_manager.build_prompt",
+            new_callable=AsyncMock,
+            return_value=("sys", "user"),
+        ),
+        patch("services.pipeline.stage_manager.get_llm", return_value=adapter),
+    ):
+        async for _ in svc.generate(spec_stage.id, user, db):
+            pass
+
+    # original chunk + funded repair = 2 calls; the repair was attempted.
+    assert len(adapter.stream_calls) == 2
+    assert spec_stage.quality_gate_status == "blocked"
+    assert spec_stage.quality_gate_payload["repair_attempted"] is True
+
+
+@pytest.mark.asyncio
+async def test_doomed_limit_stop_skips_repair_when_flag_on(
+    monkeypatch,
+) -> None:
+    # Production-reachability proof: NO ceiling patch. The real core-gen budget
+    # (24576) doubles into the 32768 ceiling, so a chunk limit-stop is doomed and
+    # the flag-on bail skips the repair under the live catalog.
+    from services.observability import PIPELINE_COMPLETION_REPAIRS
+    from services.pipeline import stage_manager as sm
+
+    monkeypatch.setattr(sm.settings, "pipeline_early_bail_unrecoverable_chunk", True)
+
+    before = PIPELINE_COMPLETION_REPAIRS.labels(
+        stage_type="spec", provider="anthropic", outcome="skipped_at_ceiling"
+    )._value.get()
+
+    workspace_id = uuid4()
+    spec_stage = _make_stage(workspace_id, "spec", status="draft")
+    workspace = _make_workspace([spec_stage])
+    user = _make_user()
+    deduction = CreditLedger(id=uuid4(), user_id=user.id, amount=-10, reason="generate")
+    db = _MultiQueryDB([spec_stage, workspace, [], deduction])
+    # A single limit-stop is enough: the repair is never spent.
+    adapter = _CompletionAwareAdapter([(None, True)])
+    svc = StageManager(redis_client=_FakeRedis())
+
+    with (
+        patch(
+            "services.pipeline.stage_manager.credit_service.deduct",
+            new_callable=AsyncMock,
+            return_value=deduction,
+        ),
+        patch(
+            "services.pipeline.stage_manager.credit_service.refund",
+            new_callable=AsyncMock,
+        ) as mock_refund,
+        patch(
+            "services.pipeline.stage_manager.set_cached_generation",
+            new_callable=AsyncMock,
+        ) as mock_set_cache,
+        patch(
+            "services.pipeline.stage_manager.build_prompt",
+            new_callable=AsyncMock,
+            return_value=("sys", "user"),
+        ),
+        patch("services.pipeline.stage_manager.get_llm", return_value=adapter),
+    ):
+        tokens = [token async for token in svc.generate(spec_stage.id, user, db)]
+
+    # The doomed repair is skipped: exactly one provider call, no second stream.
+    assert len(adapter.stream_calls) == 1
+    # Still blocked + refunded — recovery contract identical to the repair path.
+    mock_refund.assert_awaited_once_with(db, deduction.id)
+    mock_set_cache.assert_not_awaited()
+    assert spec_stage.quality_gate_status == "blocked"
+    assert spec_stage.quality_gate_kind == "incomplete_output"
+    assert spec_stage.quality_gate_payload["override_allowed"] is False
+    assert spec_stage.quality_gate_payload["refunded_prior_attempt"] is True
+    # No funded repair was spent, and the payload says so honestly.
+    assert spec_stage.quality_gate_payload["repair_attempted"] is False
+    assert spec_stage.quality_gate_payload["reasons"][0]["code"] == (
+        "provider_stopped_by_limit"
+    )
+    assert any("quality_gate_failed" in token for token in tokens)
+
+    after = PIPELINE_COMPLETION_REPAIRS.labels(
+        stage_type="spec", provider="anthropic", outcome="skipped_at_ceiling"
+    )._value.get()
+    assert after == before + 1
+
+
+@pytest.mark.asyncio
+async def test_sub_ceiling_limit_stop_still_repairs_when_flag_on(monkeypatch) -> None:
+    # Flag ON but the budget is below the ceiling: the repair's doubling CAN grow
+    # the budget, so the bail must NOT fire — the funded repair runs and recovers.
+    from services.pipeline import stage_manager as sm
+
+    monkeypatch.setattr(sm.settings, "pipeline_early_bail_unrecoverable_chunk", True)
+    monkeypatch.setattr(
+        sm, "model_max_output_tokens", lambda provider, model: 10_000_000
+    )
+
+    workspace_id = uuid4()
+    spec_stage = _make_stage(workspace_id, "spec", status="draft")
+    workspace = _make_workspace([spec_stage])
+    user = _make_user()
+    deduction = CreditLedger(id=uuid4(), user_id=user.id, amount=-10, reason="generate")
+    db = _MultiQueryDB([spec_stage, workspace, [], deduction])
+    adapter = _CompletionAwareAdapter([(None, True), (None, False)])
+    svc = StageManager(redis_client=_FakeRedis())
+
+    with (
+        patch(
+            "services.pipeline.stage_manager.credit_service.deduct",
+            new_callable=AsyncMock,
+            return_value=deduction,
+        ),
+        patch(
+            "services.pipeline.stage_manager.credit_service.refund",
+            new_callable=AsyncMock,
+        ) as mock_refund,
+        patch(
+            "services.pipeline.stage_manager.build_prompt",
+            new_callable=AsyncMock,
+            return_value=("sys", "user"),
+        ),
+        patch("services.pipeline.stage_manager.get_llm", return_value=adapter),
+    ):
+        tokens = [token async for token in svc.generate(spec_stage.id, user, db)]
+
+    mock_refund.assert_not_awaited()
+    # chunk 1 limit-stop, chunk 1 repair (doubled budget), then chunks 2 and 3.
+    assert len(adapter.stream_calls) == 4
+    assert adapter.stream_calls[1][2] > adapter.stream_calls[0][2]
+    assert spec_stage.content == _VALID_SPEC
+    assert spec_stage.quality_gate_status == "clear"
+    assert _streamed_artifact(tokens) == _VALID_SPEC
+
+
 @pytest.mark.asyncio
 async def test_generate_unsafe_plan_repairs_without_double_charging() -> None:
     workspace_id = uuid4()
