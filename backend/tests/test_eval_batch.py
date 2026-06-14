@@ -348,6 +348,36 @@ async def test_enqueue_eval_batch_commits_row_and_enqueues() -> None:
 
 
 @pytest.mark.asyncio
+async def test_enqueue_eval_batch_persists_generation_route_metadata() -> None:
+    # issue #27 Phase 5: the deferred-batch checkpoint must carry the generation
+    # route's provider/model so a batched score reaches Langfuse with the same
+    # comparison metadata the synchronous path attaches.
+    session = _FakeSession(None)
+
+    with (
+        patch.object(eval_batch, "AsyncSessionLocal", _session_local(session)),
+        patch.object(eval_batch, "enqueue", AsyncMock()),
+    ):
+        await eval_batch.enqueue_eval_batch(
+            stage_version_id=uuid4(),
+            stage_type="spec",
+            content="artifact",
+            spec_content="",
+            provider="anthropic",
+            judge_model="claude-haiku-4-5-20251001",
+            content_generation_id="g-1",
+            harness_content=None,
+            workspace_id=None,
+            generation_provider="anthropic",
+            generation_model="claude-haiku-4-5",
+        )
+
+    row = session.added[0]
+    assert row.context["generation_provider"] == "anthropic"
+    assert row.context["generation_model"] == "claude-haiku-4-5"
+
+
+@pytest.mark.asyncio
 async def test_enqueue_eval_batch_swallows_enqueue_failure() -> None:
     # Row is committed before enqueue; a queue blip must not raise (the sweep
     # cron recovers), or the caller would double-score via its sync fallback.

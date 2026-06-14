@@ -274,6 +274,8 @@ async def _dispatch_stage_eval(
     content_generation_id: str | None,
     harness_content: str | None,
     workspace_id: UUID | None,
+    generation_provider: str | None = None,
+    generation_model: str | None = None,
 ) -> EvalResult | None:
     """Score the stage, deferring to a provider batch when enabled.
 
@@ -307,6 +309,8 @@ async def _dispatch_stage_eval(
                 content_generation_id=content_generation_id,
                 harness_content=harness_content,
                 workspace_id=workspace_id,
+                generation_provider=generation_provider,
+                generation_model=generation_model,
             )
             return None
         except Exception:
@@ -320,6 +324,8 @@ async def _dispatch_stage_eval(
         JUDGE_MODELS[provider],
         content_generation_id=content_generation_id,
         harness_content=harness_content,
+        generation_provider=generation_provider,
+        generation_model=generation_model,
     )
 
 
@@ -333,6 +339,8 @@ def _schedule_stage_eval(
     workspace_id: UUID | None = None,
     content_generation_id: str | None = None,
     harness_content: str | None = None,
+    generation_provider: str | None = None,
+    generation_model: str | None = None,
 ) -> asyncio.Task[EvalResult | None]:
     eval_task = asyncio.create_task(
         _dispatch_stage_eval(
@@ -344,6 +352,8 @@ def _schedule_stage_eval(
             content_generation_id=content_generation_id,
             harness_content=harness_content,
             workspace_id=workspace_id,
+            generation_provider=generation_provider,
+            generation_model=generation_model,
         )
     )
     # The LLM score is now strictly fire-and-forget (issue #27 Phase 1 removed
@@ -2368,6 +2378,12 @@ class StageManager:
                 workspace_id=workspace.id,
                 content_generation_id=content_generation_id,
                 harness_content=harness_content_for_eval,
+                # Telemetry: the *final* generation route (post-fallback /
+                # quality-escalation), not the judge model — so sampled Langfuse
+                # scores/datasets are attributable to the model that actually
+                # produced the artifact (issue #27 Phase 5).
+                generation_provider=route.provider,
+                generation_model=route.model,
             )
             # Canonical repaint: the live-streamed draft may differ from the
             # final artifact (code-fence strip, tech-safety repair, critic

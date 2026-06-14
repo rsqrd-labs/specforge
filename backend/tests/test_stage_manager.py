@@ -3126,6 +3126,40 @@ async def test_dispatch_stage_eval_scores_nonharness_at_full_rate(
 
 
 @pytest.mark.asyncio
+async def test_dispatch_stage_eval_forwards_generation_route_metadata(
+    monkeypatch,
+) -> None:
+    """issue #27 Phase 5: the generation route's provider/model thread through.
+
+    The eval dispatch must forward the *generation* provider/model (not the judge
+    model) so the sampled Langfuse score/dataset is attributable to the model that
+    produced the artifact.
+    """
+    from services.pipeline import stage_manager as sm
+
+    monkeypatch.setattr(sm.settings, "eval_score_sample_rate", 1.0)
+    monkeypatch.setattr(sm.settings, "llm_batch_enabled", False)
+    run_eval_background = AsyncMock(return_value=None)
+    monkeypatch.setattr(sm, "run_eval_background", run_eval_background)
+
+    await sm._dispatch_stage_eval(
+        version_id=uuid4(),
+        stage_type="spec",
+        content="body",
+        eval_context="spec",
+        provider="anthropic",
+        content_generation_id="g-1",
+        harness_content=None,
+        workspace_id=None,
+        generation_provider="anthropic",
+        generation_model="claude-haiku-4-5",
+    )
+    kwargs = run_eval_background.await_args.kwargs
+    assert kwargs["generation_provider"] == "anthropic"
+    assert kwargs["generation_model"] == "claude-haiku-4-5"
+
+
+@pytest.mark.asyncio
 async def test_dispatch_stage_eval_always_scores_harness_at_zero_rate(
     monkeypatch,
 ) -> None:

@@ -601,6 +601,25 @@ def _log_dataset_error(task: asyncio.Task) -> None:
         logger.error("langfuse_dataset_background_failed", extra={"error": str(exc)})
 
 
+def _score_comment(
+    stage_type: str,
+    generation_provider: str | None,
+    generation_model: str | None,
+) -> str | None:
+    """Compact provider/model tag for the Langfuse score row (issue #27 Phase 5).
+
+    The score already links to its generation observation (which carries the
+    true route provider/model), so this is human-readable redundancy in the
+    score view itself — enough to compare model/provider quality at a glance
+    without joining to the observation.  Returns ``None`` (no comment) when the
+    generation route is unknown.
+    """
+    if generation_provider is None and generation_model is None:
+        return None
+    route = "/".join(part for part in (generation_provider, generation_model) if part)
+    return f"{stage_type} · {route}"
+
+
 def _dataset_for_score(score: int | float | None) -> str | None:
     if score is None:
         return None
@@ -846,16 +865,29 @@ async def _add_generation_to_dataset(
     content_generation_id: str,
     eval_result: EvalResult,
     content: str,
+    generation_provider: str | None,
+    generation_model: str | None,
 ) -> None:
+    # Denormalize the generation provider/model straight into the dataset item
+    # (issue #27 Phase 5) so the high/low_quality datasets are self-contained for
+    # model/provider quality comparison — independent of whatever cross-entity
+    # querying Langfuse resolves through ``source_observation_id``.  These are the
+    # *generation* route's provider/model (the artifact under evaluation), not the
+    # judge model.  Omitted when unknown rather than written as null noise.
+    item: dict[str, Any] = {
+        "stage_type": eval_result.stage_type,
+        "overall_score": eval_result.overall_score,
+        "completeness": eval_result.completeness,
+        "clarity": eval_result.clarity,
+        "content": content,
+    }
+    if generation_provider is not None:
+        item["generation_provider"] = generation_provider
+    if generation_model is not None:
+        item["generation_model"] = generation_model
     await langfuse_service.get_langfuse_client().add_to_dataset(
         dataset_name=dataset_name,
-        item={
-            "stage_type": eval_result.stage_type,
-            "overall_score": eval_result.overall_score,
-            "completeness": eval_result.completeness,
-            "clarity": eval_result.clarity,
-            "content": content,
-        },
+        item=item,
         source_observation_id=content_generation_id,
     )
 
@@ -870,6 +902,8 @@ async def run_eval(
     judge_model: str | None = None,
     content_generation_id: str | None = None,
     harness_content: str | None = None,
+    generation_provider: str | None = None,
+    generation_model: str | None = None,
 ) -> EvalResult | None:
     resolved_judge_model = judge_model or JUDGE_MODELS[provider]
     raw = await _score_with_retry(
@@ -922,6 +956,8 @@ async def run_eval(
         content=content,
         harness_content=harness_content,
         content_generation_id=content_generation_id,
+        generation_provider=generation_provider,
+        generation_model=generation_model,
     )
 
 
@@ -956,6 +992,8 @@ async def persist_eval_from_raw(
     content: str,
     harness_content: str | None = None,
     content_generation_id: str | None = None,
+    generation_provider: str | None = None,
+    generation_model: str | None = None,
 ) -> EvalResult | None:
     """Parse a judge response and persist the EvalResult, or return None.
 
@@ -980,6 +1018,8 @@ async def persist_eval_from_raw(
         content=content,
         harness_content=harness_content,
         content_generation_id=content_generation_id,
+        generation_provider=generation_provider,
+        generation_model=generation_model,
     )
 
 
@@ -992,6 +1032,8 @@ async def _persist_eval_data(
     content: str,
     harness_content: str | None,
     content_generation_id: str | None,
+    generation_provider: str | None = None,
+    generation_model: str | None = None,
 ) -> EvalResult:
     normalised = _normalise_eval_payload(stage_type, data)
     coverage_percent: int | None = normalised["coverage_percent"]
@@ -1046,6 +1088,9 @@ async def _persist_eval_data(
                 generation_id=content_generation_id,
                 name="overall",
                 value=float(eval_result.overall_score),
+                comment=_score_comment(
+                    stage_type, generation_provider, generation_model
+                ),
             )
         except Exception:
             logger.exception(
@@ -1060,6 +1105,8 @@ async def _persist_eval_data(
                     content_generation_id=content_generation_id,
                     eval_result=eval_result,
                     content=content,
+                    generation_provider=generation_provider,
+                    generation_model=generation_model,
                 )
             )
             dataset_task.add_done_callback(_log_dataset_error)
@@ -1075,6 +1122,8 @@ async def run_eval_background(
     judge_model: str,
     content_generation_id: str | None = None,
     harness_content: str | None = None,
+    generation_provider: str | None = None,
+    generation_model: str | None = None,
 ) -> EvalResult | None:
     async with AsyncSessionLocal() as db:
         return await run_eval(
@@ -1087,4 +1136,6 @@ async def run_eval_background(
             judge_model,
             content_generation_id,
             harness_content=harness_content,
+            generation_provider=generation_provider,
+            generation_model=generation_model,
         )

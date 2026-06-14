@@ -9,7 +9,22 @@ from uuid import uuid4
 import pytest
 
 from models import EvalResult
-from services.evals.online_eval import run_eval, run_eval_background
+from services.evals.online_eval import (
+    _score_comment,
+    run_eval,
+    run_eval_background,
+)
+
+
+def test_score_comment_omits_unknown_route() -> None:
+    # issue #27 Phase 5: no provider/model ⇒ no comment (don't write null noise).
+    assert _score_comment("spec", None, None) is None
+    assert _score_comment("plan", "anthropic", None) == "plan · anthropic"
+    assert _score_comment("tasks", None, "gpt-5.4-mini") == "tasks · gpt-5.4-mini"
+    assert (
+        _score_comment("harness", "google", "gemini-3.5-flash")
+        == "harness · google/gemini-3.5-flash"
+    )
 
 
 class _FakeDB:
@@ -143,7 +158,7 @@ async def test_run_eval_scores_langfuse_generation_when_id_present() -> None:
 
     assert result is not None
     langfuse_client.score_generation.assert_awaited_once_with(
-        generation_id="g-123", name="overall", value=85.0
+        generation_id="g-123", name="overall", value=85.0, comment=None
     )
     langfuse_client.add_to_dataset.assert_awaited_once()
 
@@ -255,6 +270,91 @@ async def test_run_eval_collects_datasets_at_score_thresholds(
         kwargs = langfuse_client.add_to_dataset.await_args.kwargs
         assert kwargs["dataset_name"] == expected_dataset
         assert kwargs["source_observation_id"] == "g-123"
+
+
+@pytest.mark.asyncio
+async def test_run_eval_attaches_generation_metadata_to_score_and_dataset() -> None:
+    # issue #27 Phase 5: a sampled score must carry the *generation* route's
+    # provider/model (not the judge model) so model/provider quality is
+    # comparable.  A high score routes to a dataset whose item is denormalized
+    # with provider+model; the score row's comment tags them too.
+    db = _FakeDB()
+    judge_response = '{"overall_score": 90, "completeness": 90, "clarity": 80}'
+    langfuse_client = MagicMock()
+    langfuse_client.score_generation = AsyncMock()
+    langfuse_client.add_to_dataset = AsyncMock()
+
+    with (
+        patch(
+            "services.evals.online_eval.get_llm",
+            return_value=_FakeJudge(judge_response),
+        ),
+        patch(
+            "services.evals.online_eval.langfuse_service.get_langfuse_client",
+            return_value=langfuse_client,
+        ),
+    ):
+        result = await run_eval(
+            uuid4(),
+            "spec",
+            "spec content",
+            "",
+            db,
+            content_generation_id="g-123",
+            generation_provider="anthropic",
+            generation_model="claude-haiku-4-5",
+        )
+        await asyncio.sleep(0)
+
+    assert result is not None
+    score_kwargs = langfuse_client.score_generation.await_args.kwargs
+    assert score_kwargs["comment"] == "spec · anthropic/claude-haiku-4-5"
+
+    item = langfuse_client.add_to_dataset.await_args.kwargs["item"]
+    assert item["generation_provider"] == "anthropic"
+    assert item["generation_model"] == "claude-haiku-4-5"
+    assert item["stage_type"] == "spec"
+    assert item["overall_score"] == 90
+
+
+@pytest.mark.asyncio
+async def test_run_eval_mid_range_score_still_carries_provider_model() -> None:
+    # The comprehensive comparison surface is the per-generation score, not the
+    # high/low datasets (which only collect score extremes).  A mid-range score
+    # (no dataset) must still tag provider/model on the score row so typical
+    # generations remain comparable (issue #27 Phase 5).
+    db = _FakeDB()
+    judge_response = '{"overall_score": 72, "completeness": 70, "clarity": 75}'
+    langfuse_client = MagicMock()
+    langfuse_client.score_generation = AsyncMock()
+    langfuse_client.add_to_dataset = AsyncMock()
+
+    with (
+        patch(
+            "services.evals.online_eval.get_llm",
+            return_value=_FakeJudge(judge_response),
+        ),
+        patch(
+            "services.evals.online_eval.langfuse_service.get_langfuse_client",
+            return_value=langfuse_client,
+        ),
+    ):
+        result = await run_eval(
+            uuid4(),
+            "plan",
+            "plan content",
+            "spec content",
+            db,
+            content_generation_id="g-456",
+            generation_provider="openai",
+            generation_model="gpt-5.4-mini",
+        )
+        await asyncio.sleep(0)
+
+    assert result is not None
+    langfuse_client.add_to_dataset.assert_not_awaited()
+    score_kwargs = langfuse_client.score_generation.await_args.kwargs
+    assert score_kwargs["comment"] == "plan · openai/gpt-5.4-mini"
 
 
 @pytest.mark.asyncio
@@ -466,4 +566,6 @@ async def test_run_eval_background_opens_its_own_session() -> None:
         "gpt-5.4-mini",
         None,
         harness_content=None,
+        generation_provider=None,
+        generation_model=None,
     )

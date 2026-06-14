@@ -89,6 +89,8 @@ async def enqueue_eval_batch(
     content_generation_id: str | None,
     harness_content: str | None,
     workspace_id: UUID | None,
+    generation_provider: str | None = None,
+    generation_model: str | None = None,
 ) -> UUID:
     """Checkpoint a pending eval batch row and enqueue its submit job.
 
@@ -109,6 +111,10 @@ async def enqueue_eval_batch(
         "content_generation_id": content_generation_id,
         "provider": provider,
         "judge_model": judge_model,
+        # The generation route's provider/model (issue #27 Phase 5) — telemetry
+        # metadata for the Langfuse score/dataset, distinct from the judge model.
+        "generation_provider": generation_provider,
+        "generation_model": generation_model,
     }
     async with AsyncSessionLocal() as db:
         row = LLMBatchJob(
@@ -255,6 +261,8 @@ async def _finish_from_item(db: Any, row: LLMBatchJob, item: Any) -> str:
             content=row.context["content"],
             harness_content=row.context.get("harness_content"),
             content_generation_id=row.context.get("content_generation_id"),
+            generation_provider=row.context.get("generation_provider"),
+            generation_model=row.context.get("generation_model"),
         )
         if result is not None:
             return "succeeded"
@@ -276,6 +284,8 @@ async def _fallback_score(db: Any, row: LLMBatchJob) -> None:
             row.context["judge_model"],
             content_generation_id=row.context.get("content_generation_id"),
             harness_content=row.context.get("harness_content"),
+            generation_provider=row.context.get("generation_provider"),
+            generation_model=row.context.get("generation_model"),
         )
     except Exception:  # pragma: no cover — eval is best-effort, never fatal
         logger.exception("llm_batch.fallback_score_failed", batch_job_id=str(row.id))
