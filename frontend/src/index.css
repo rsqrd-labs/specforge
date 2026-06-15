@@ -11455,28 +11455,31 @@ button:disabled {
 }
 
 /* Slide-entry motion. The active slide remounts (keyed on its index), replaying
-   one of three vetted transitions selected from the deck's transition mood. */
+   one of three vetted transitions selected from the deck's transition mood. The
+   three moods read as deliberately different cross-slide moves — a settling rise,
+   a slow cinematic dissolve with a faint zoom, and a wider lateral glide — so the
+   chosen transition_style is felt rather than uniform. */
 @keyframes storyboard-rise {
-  from { opacity: 0; transform: translateY(26px) scale(0.985); }
+  from { opacity: 0; transform: translateY(34px) scale(0.978); }
   to { opacity: 1; transform: translateY(0) scale(1); }
 }
 @keyframes storyboard-fade {
-  from { opacity: 0; }
-  to { opacity: 1; }
+  from { opacity: 0; transform: scale(1.035); }
+  to { opacity: 1; transform: scale(1); }
 }
 @keyframes storyboard-glide {
-  from { opacity: 0; transform: translateX(46px); }
+  from { opacity: 0; transform: translateX(64px); }
   to { opacity: 1; transform: translateX(0); }
 }
 
 .storyboard-theme-rise .storyboard-slide {
-  animation: storyboard-rise 0.52s cubic-bezier(0.22, 1, 0.36, 1) both;
+  animation: storyboard-rise 0.62s cubic-bezier(0.16, 1, 0.3, 1) both;
 }
 .storyboard-theme-fade .storyboard-slide {
-  animation: storyboard-fade 0.5s ease both;
+  animation: storyboard-fade 0.7s cubic-bezier(0.33, 0, 0.2, 1) both;
 }
 .storyboard-theme-glide .storyboard-slide {
-  animation: storyboard-glide 0.5s cubic-bezier(0.22, 1, 0.36, 1) both;
+  animation: storyboard-glide 0.6s cubic-bezier(0.16, 1, 0.3, 1) both;
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -11488,9 +11491,17 @@ button:disabled {
   .storyboard-deck-shell .storyboard-visual-card,
   .storyboard-deck-shell .storyboard-visual-points li,
   .storyboard-deck-shell .storyboard-visual-metric,
-  .architecture-layer-card,
+  .arch-node,
+  .arch-edge-group,
+  .arch-region,
   .storyboard-decor-orb {
     animation: none;
+  }
+
+  /* Under reduced motion the static-complete topology is the deliverable: the
+     flowing data-flow dash is removed entirely, leaving solid connectors. */
+  .arch-edge-flow {
+    display: none;
   }
 }
 
@@ -11508,11 +11519,133 @@ button:disabled {
   border-radius: 14px;
 }
 
-/* Architecture slide: the diagram is the star, so it takes the full slide width
-   (headline stacked compactly above) and the eight layer cards flow into as many
-   columns as fit — keeping the reveal short enough to read in one glance. The
-   slide scrolls internally as a safety net so no layer is ever clipped at the
-   bottom of the stage. */
+/* ── Per-slide-type layouts (Phase B) ────────────────────────────────────────
+   The base .storyboard-slide grid is the text + structured-visual SPLIT, which
+   is exactly what product / walkthrough / trust / appendix slides want, so
+   .storyboard-slide--layout-split needs no override. The other three variants
+   re-shape the stage so a keynote does not read as one repeated template. */
+
+/* FEATURE — the bookends. A single centred column with an oversized title, the
+   copy and badges centred beneath it, and the structured visual demoted to a
+   centred supporting band below (it still renders, so the deterministic visual
+   and its source grounding are never dropped). */
+.storyboard-slide--layout-feature {
+  grid-template-columns: minmax(0, 1fr);
+  place-content: center;
+  justify-items: center;
+  text-align: center;
+  gap: 22px;
+}
+
+.storyboard-slide--layout-feature .storyboard-slide-content {
+  display: grid;
+  justify-items: center;
+  align-self: center;
+  gap: 14px;
+  max-width: 28ch;
+}
+
+.storyboard-slide--layout-feature .storyboard-slide-kicker {
+  align-items: center;
+  justify-content: center;
+}
+
+.storyboard-slide--layout-feature h2 {
+  /* Oversized cover/closing headline — the single biggest type in the deck. */
+  font-size: clamp(44px, 6.6vw, 104px);
+}
+
+.storyboard-slide--layout-feature h2::after {
+  margin-inline: auto;
+}
+
+.storyboard-slide--layout-feature .storyboard-slide-text {
+  margin-inline: auto;
+}
+
+.storyboard-slide--layout-feature .storyboard-slide-source-badges {
+  justify-content: center;
+}
+
+.storyboard-slide--layout-feature .storyboard-slide-visual {
+  align-self: center;
+  width: min(420px, 100%);
+}
+
+/* METRIC — one giant figure. The metric visual dominates a wide right column and
+   its value scales up to headline size; the supporting copy stays in a narrower
+   left column. */
+.storyboard-slide--layout-metric {
+  grid-template-columns: minmax(0, 0.82fr) minmax(280px, 1.18fr);
+  align-items: center;
+}
+
+.storyboard-slide--layout-metric .storyboard-visual-card {
+  width: 100%;
+  min-height: 320px;
+  align-content: center;
+  justify-items: center;
+  text-align: center;
+}
+
+.storyboard-slide--layout-metric .storyboard-visual-metric {
+  justify-items: center;
+}
+
+.storyboard-slide--layout-metric .storyboard-visual-metric strong {
+  font-size: clamp(64px, 11vw, 168px);
+}
+
+/* ── Cover + act-intro framing (Phase B) ────────────────────────────────────
+   The first slide of the deck is the cover; the first slide of any act gets a
+   brief intro treatment. Both use the per-act accent rotation already in play. */
+.storyboard-slide-kicker {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+
+/* The product/deck name set above the cover title as a quiet brand overline. */
+.storyboard-slide-cover-mark {
+  flex-basis: 100%;
+  color: color-mix(in srgb, var(--sb-act-accent, #6d28d9) 70%, #160f2e);
+  font-size: clamp(12px, 1.2vw, 15px);
+  font-weight: 900;
+  letter-spacing: 0.24em;
+  text-transform: uppercase;
+}
+
+/* "Act N of 6" — only on the first slide of each act, framing the section. */
+.storyboard-slide-act-progress {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--sb-act-accent, #6d28d9) 32%, transparent);
+  color: color-mix(in srgb, var(--sb-act-accent, #6d28d9) 76%, #1f1233);
+  padding: 0 11px;
+  font-size: 10px;
+  font-weight: 900;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+/* Entering a new act reads as a bigger beat: a touch more breathing room above
+   the headline so the section change is felt. */
+.storyboard-slide--act-open:not(.storyboard-slide--arch) h2 {
+  margin-top: 22px;
+}
+
+/* The cover headline runs even larger than the other feature slides. */
+.storyboard-slide--cover h2 {
+  font-size: clamp(48px, 7.4vw, 120px);
+}
+
+/* Architecture slide: the topology graph is the star, so it takes the full slide
+   width (headline stacked compactly above) and the node/edge diagram fills the
+   region below. The slide scrolls internally as a safety net so the diagram is
+   never clipped at the bottom of the stage. */
 .storyboard-slide--arch {
   grid-template-columns: minmax(0, 1fr);
   align-content: start;
@@ -11537,8 +11670,8 @@ button:disabled {
   place-items: stretch;
 }
 
-.storyboard-slide--arch .architecture-reveal-stage {
-  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+.storyboard-slide--arch .architecture-topology {
+  max-height: none;
   min-height: 0;
 }
 
@@ -13013,126 +13146,184 @@ button:disabled {
   border: 0;
 }
 
-/* The eight layers are glass tiles floating over the stage aurora — no heavy
-   container box. They flow into as many columns as fit and reveal one after
-   another, so the diagram reads as a layered system stack being built up. */
-.architecture-reveal-stage {
+/* Architecture topology graph — a real node + edge system diagram drawn in
+   trusted code. The SVG scales to its viewBox; the eight planes render as
+   connected nodes with data-flow animation along the edges. The static
+   (non-animated) state is the complete diagram, with motion layered on top so
+   reduced-motion and PDF degrade to a fully-drawn topology. */
+.architecture-topology {
   width: 100%;
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(216px, 1fr));
-  gap: 12px;
-  margin: 0 0 12px;
-  padding: 0;
-  list-style: none;
+  height: auto;
+  max-height: 56vh;
+  display: block;
+  overflow: visible;
 }
 
-.architecture-layer-card {
-  position: relative;
-  min-width: 0;
-  display: grid;
-  grid-template-columns: 42px minmax(0, 1fr);
-  gap: 13px;
-  align-items: start;
-  border: 1px solid color-mix(in srgb, var(--layer-accent, #6d28d9) 26%, rgba(255, 255, 255, 0.5));
+/* ---- Box nodes (HTML inside foreignObject) -------------------------------- */
+.arch-node-fo {
+  overflow: visible;
+}
+
+.arch-node {
+  box-sizing: border-box;
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 2px;
+  padding: 10px 14px;
+  border: 1px solid color-mix(in srgb, var(--node-accent, #6d28d9) 30%, rgba(255, 255, 255, 0.5));
   border-radius: 16px;
   background: linear-gradient(
     158deg,
-    rgba(255, 255, 255, 0.72),
-    rgba(255, 255, 255, 0.34)
+    rgba(255, 255, 255, 0.82),
+    rgba(255, 255, 255, 0.46)
   );
   -webkit-backdrop-filter: blur(13px) saturate(1.2);
   backdrop-filter: blur(13px) saturate(1.2);
   box-shadow:
-    0 16px 38px -22px color-mix(in srgb, var(--layer-accent, #6d28d9) 58%, transparent),
-    inset 0 1px 0 rgba(255, 255, 255, 0.62);
-  padding: 14px 16px;
+    0 16px 38px -22px color-mix(in srgb, var(--node-accent, #6d28d9) 60%, transparent),
+    inset 0 1px 0 rgba(255, 255, 255, 0.7);
   overflow: hidden;
+  /* Accent rail down the leading edge — the "plane" signature. */
+  border-left: 4px solid var(--node-accent, #6d28d9);
   animation: storyboard-build 0.5s cubic-bezier(0.22, 1, 0.36, 1) both;
-  animation-delay: calc(var(--layer-index, 0) * 0.07s + 0.1s);
-  transition: transform 0.26s cubic-bezier(0.22, 1, 0.36, 1), box-shadow 0.26s ease;
+  animation-delay: calc(var(--reveal-index, 0) * 0.08s + 0.1s);
 }
 
-/* Gradient accent rail down the leading edge — the "plane" signature, a
-   different hue per layer. */
-.architecture-layer-card::before {
-  content: "";
-  position: absolute;
-  inset: 0 auto 0 0;
-  width: 4px;
-  background: linear-gradient(
-    180deg,
-    var(--layer-accent, #6d28d9),
-    var(--layer-accent-2, #0ea5e9)
-  );
+.arch-node--extra {
+  justify-content: center;
+  border-style: dashed;
 }
 
-.architecture-layer-card:hover {
-  transform: translateY(-5px);
-  box-shadow:
-    0 28px 54px -20px color-mix(in srgb, var(--layer-accent, #6d28d9) 66%, transparent),
-    inset 0 1px 0 rgba(255, 255, 255, 0.72);
+.arch-node-fo.pending .arch-node {
+  opacity: 0.34;
 }
 
-.architecture-layer-card.pending {
-  opacity: 0.42;
-}
-
-.architecture-layer-card__index {
-  display: grid;
-  place-items: center;
-  width: 42px;
-  height: 42px;
-  border-radius: 13px;
-  /* Darkened toward ink so the white number stays legible even on a pale accent. */
-  background: linear-gradient(
-    140deg,
-    color-mix(in srgb, var(--layer-accent, #6d28d9) 62%, #160f2e),
-    color-mix(in srgb, var(--layer-accent-2, #0ea5e9) 62%, #160f2e)
-  );
-  color: #fff;
-  font-size: 17px;
-  font-weight: 900;
-  box-shadow: 0 8px 18px -6px color-mix(in srgb, var(--layer-accent, #6d28d9) 70%, transparent);
-}
-
-.architecture-layer-card__body {
-  min-width: 0;
-}
-
-.architecture-layer-card__kind {
-  display: block;
-  margin-bottom: 4px;
-  color: color-mix(in srgb, var(--layer-accent, #6d28d9) 60%, #160f2e);
+.arch-node__kind {
+  color: color-mix(in srgb, var(--node-accent, #6d28d9) 60%, #160f2e);
   font-size: 9.5px;
   font-weight: 900;
   letter-spacing: 0.08em;
   text-transform: uppercase;
 }
 
-.architecture-layer-card strong {
-  display: block;
+.arch-node__label {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
   color: var(--color-on-surface);
   font-size: 15px;
   font-weight: 800;
-  line-height: 1.2;
+  line-height: 1.18;
 }
 
-.architecture-layer-card p {
-  margin: 5px 0 0;
-  color: var(--color-on-surface-variant);
-  font-size: 12px;
-  line-height: 1.4;
-}
-
-.architecture-layer-card small {
-  display: inline-flex;
-  margin-top: 9px;
+.arch-node__source {
+  align-self: flex-start;
+  margin-top: 3px;
   border-radius: 999px;
-  background: color-mix(in srgb, var(--layer-accent, #6d28d9) 12%, transparent);
-  color: color-mix(in srgb, var(--layer-accent, #6d28d9) 72%, #1f1233);
-  padding: 3px 9px;
+  background: color-mix(in srgb, var(--node-accent, #6d28d9) 12%, transparent);
+  color: color-mix(in srgb, var(--node-accent, #6d28d9) 72%, #1f1233);
+  padding: 1px 8px;
   font-size: 9px;
   font-weight: 900;
+}
+
+/* ---- Edges ----------------------------------------------------------------- */
+.arch-edge-group {
+  animation: storyboard-fade-in 0.5s ease both;
+  animation-delay: calc(var(--reveal-index, 0) * 0.08s);
+}
+
+.arch-edge-group.pending {
+  opacity: 0.16;
+}
+
+.arch-edge-group.pending .arch-edge-flow {
+  display: none;
+}
+
+.arch-edge {
+  fill: none;
+  stroke: color-mix(in srgb, var(--edge-accent, #6d28d9) 52%, rgba(120, 120, 150, 0.5));
+  stroke-width: 2.5;
+  stroke-linecap: round;
+}
+
+.arch-arrow-head {
+  fill: color-mix(in srgb, var(--edge-accent, #6d28d9) 64%, #160f2e);
+}
+
+/* The data-flow signature: a short, bright dash sliding along the connector. It
+   is purely decorative motion on top of the solid edge, so disabling it (reduced
+   motion / PDF) leaves the complete static topology intact. */
+.arch-edge-flow {
+  fill: none;
+  stroke: var(--edge-accent, #6d28d9);
+  stroke-width: 3.5;
+  stroke-linecap: round;
+  stroke-dasharray: 16 220;
+  filter: drop-shadow(0 0 4px color-mix(in srgb, var(--edge-accent, #6d28d9) 70%, transparent));
+  animation: arch-flow 2.6s linear infinite;
+  animation-delay: calc(var(--reveal-index, 0) * 0.22s);
+}
+
+@keyframes arch-flow {
+  to {
+    stroke-dashoffset: -236;
+  }
+}
+
+/* ---- Trust / recovery regions --------------------------------------------- */
+.arch-region {
+  animation: storyboard-fade-in 0.6s ease both;
+  animation-delay: calc(var(--reveal-index, 0) * 0.08s);
+}
+
+.arch-region.pending {
+  opacity: 0.2;
+}
+
+.arch-region__rect {
+  fill: none;
+}
+
+.arch-region__rect--trust {
+  stroke: color-mix(in srgb, var(--storyboard-arch-secondary, #a1385f) 60%, transparent);
+  stroke-width: 1.75;
+  stroke-dasharray: 8 7;
+}
+
+.arch-region__rect--recovery {
+  fill: color-mix(in srgb, var(--storyboard-arch-accent, #565e74) 9%, transparent);
+  stroke: color-mix(in srgb, var(--storyboard-arch-accent, #565e74) 32%, transparent);
+  stroke-width: 1.25;
+}
+
+.arch-region__label {
+  font-size: 12px;
+  font-weight: 900;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.arch-region__label--trust {
+  fill: color-mix(in srgb, var(--storyboard-arch-secondary, #a1385f) 78%, #160f2e);
+}
+
+.arch-region__label--recovery {
+  fill: color-mix(in srgb, var(--storyboard-arch-accent, #565e74) 80%, #160f2e);
+}
+
+@keyframes storyboard-fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
 }
 
 .architecture-reveal-caption {
@@ -13173,7 +13364,8 @@ button:disabled {
     min-height: 0;
   }
 
-  .storyboard-slide {
+  .storyboard-slide,
+  .storyboard-slide--layout-metric {
     grid-template-columns: 1fr;
     padding: 24px;
   }
@@ -13208,8 +13400,8 @@ button:disabled {
     grid-template-columns: 1fr;
   }
 
-  .architecture-reveal-stage {
-    grid-template-columns: 1fr;
+  .architecture-topology {
+    max-height: none;
   }
 
   .storyboard-share-modal__url {
@@ -13251,12 +13443,14 @@ button:disabled {
     padding: 0;
   }
 
-  .architecture-reveal-stage {
-    grid-template-columns: 1fr;
-    min-height: 0;
-    padding: 0;
-    border: 0;
-    background: transparent;
+  .architecture-topology {
+    max-height: none;
+    overflow: visible;
+  }
+
+  /* The flowing dash never prints; the solid topology is the printed artifact. */
+  .arch-edge-flow {
+    display: none;
   }
 }
 

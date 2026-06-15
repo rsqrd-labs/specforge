@@ -132,6 +132,25 @@ function transitionClass(style: string | undefined): "fade" | "glide" | "rise" {
   return "rise"
 }
 
+// Per-slide-type stage layout. A keynote does not use one split layout for every
+// slide: the bookends (hero / thesis / closing) are centred, oversized title
+// moments; a slide whose visual is a single metric becomes one giant figure; the
+// architecture slide is full-bleed; everything else keeps the text + structured
+// visual split. The return value is only ever used as a fixed class suffix, so
+// no free text ever reaches CSS — it stays an allow-list.
+type SlideLayout = "feature" | "metric" | "arch" | "split"
+
+function slideLayout(
+  slide: StoryboardSlide | null,
+  isArchitecture: boolean,
+): SlideLayout {
+  if (isArchitecture) return "arch"
+  const type = slide?.type
+  if (type === "hero" || type === "thesis" || type === "closing") return "feature"
+  if (visualMetric(slide?.visual)) return "metric"
+  return "split"
+}
+
 // Descriptor keys are pure data: read them defensively (any may be absent) and
 // render only strings. React escapes every value, so nothing is ever executed.
 function asStringList(value: unknown): string[] {
@@ -491,6 +510,13 @@ export function StoryboardDeck({
   const isArchitectureSlide =
     slide?.type === "architecture" || section.title === "Technical Architecture"
   const architectureStep = ARCHITECTURE_LAYER_SEQUENCE.length
+  // Per-slide-type layout (centred feature / giant metric / full-bleed arch /
+  // split) plus the two framing moments: the very first slide of the deck is the
+  // cover, and the first slide of any act gets the act-intro treatment.
+  const layout = slideLayout(slide, isArchitectureSlide)
+  const isActOpening = (activeSlide?.slideIndex ?? 0) === 0
+  const isDeckCover = activeSlideIndex === 0
+  const actNumber = activeSectionIndex + 1
 
   return (
     <section
@@ -568,13 +594,27 @@ export function StoryboardDeck({
         </div>
         <article
           key={activeSlideIndex}
-          className={`storyboard-slide storyboard-slide--${slide?.type ?? "thesis"}${
+          className={`storyboard-slide storyboard-slide--${slide?.type ?? "thesis"} storyboard-slide--layout-${layout}${
             isArchitectureSlide ? " storyboard-slide--arch" : ""
+          }${isActOpening ? " storyboard-slide--act-open" : ""}${
+            isDeckCover ? " storyboard-slide--cover" : ""
           }`}
           aria-live="polite"
         >
           <div className="storyboard-slide-content">
-            <span className="storyboard-slide-act">{section.title}</span>
+            <div className="storyboard-slide-kicker">
+              {isDeckCover && (
+                <span className="storyboard-slide-cover-mark">
+                  {payload?.title ?? title ?? "Storyboard"}
+                </span>
+              )}
+              <span className="storyboard-slide-act">{section.title}</span>
+              {isActOpening && (
+                <span className="storyboard-slide-act-progress">
+                  Act {actNumber} of {STORYBOARD_ACTS.length}
+                </span>
+              )}
+            </div>
             <h2>{slide?.headline}</h2>
             <div className="storyboard-slide-text">
               <MarkdownRenderer content={slide?.visible_text ?? ""} />

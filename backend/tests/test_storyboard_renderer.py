@@ -180,6 +180,84 @@ def test_visual_descriptors_drive_the_slide_panel() -> None:
     assert "Human review gate" in html
 
 
+def test_arch_slide_renders_full_svg_topology() -> None:
+    html = renderer.render_deck_html(_payload(), "Acme")
+    # The architecture slide draws an inline SVG topology graph, not a card grid.
+    assert '<svg class="arch-topology"' in html
+    assert 'viewBox="0 0 960 600"' in html
+    # All six connectable planes are drawn as box nodes (kind labels, uppercased).
+    for kind in renderer._ARCH_BOX_KINDS:
+        assert f">{kind.upper()}<" in html
+    # The emitted client layer keeps its model label; omitted planes fall back to
+    # their canonical copy so the system diagram is complete (eight planes total).
+    assert "Browser SPA" in html
+    assert "Trust boundaries" in html  # trust region (not emitted -> canonical)
+    assert "Failure and recovery paths" in html  # recovery region (canonical)
+    # Five directed edges, each with an arrowhead polygon.
+    assert html.count("<polygon points=") == len(renderer._ARCH_EDGES) == 5
+    # Static topology: no animation, no remote/script refs.
+    assert "http://" not in html
+    assert "https://" not in html
+
+
+def test_arch_topology_mirrors_the_frontend_constants() -> None:
+    # Parity guard: the offline topology must match the live deck's node/edge set
+    # (ArchitectureReveal.tsx). These are the closed enum and canonical edges.
+    assert renderer._ARCH_BOX_KINDS == (
+        "client",
+        "frontend",
+        "api",
+        "data",
+        "llm",
+        "integrations",
+    )
+    assert renderer._ARCH_EDGES == (
+        ("client", "frontend"),
+        ("frontend", "api"),
+        ("api", "data"),
+        ("api", "llm"),
+        ("api", "integrations"),
+    )
+
+
+def test_arch_topology_tolerates_unknown_group_kind() -> None:
+    payload = _payload()
+    payload["diagrams"][0]["layers"].append(
+        {
+            "id": "l-group",
+            "kind": "group",
+            "label": "Billing subsystem",
+            "summary": "Lemon Squeezy worker.",
+            "source_refs": [],
+        }
+    )
+    html = renderer.render_deck_html(payload, "Acme")
+    # The unknown kind renders as an unconnected annotation, never crashing, and
+    # never adds a sixth box-node kind or an extra edge.
+    assert "Billing subsystem" in html
+    assert html.count("<polygon points=") == 5
+
+
+def test_arch_topology_absent_without_architecture_diagram() -> None:
+    payload = _payload()
+    payload["diagrams"] = []
+    html = renderer.render_deck_html(payload, "Acme")
+    # With no architecture_reveal diagram the arch slide falls back to the normal
+    # visual panel — no topology SVG is emitted.
+    assert '<svg class="arch-topology"' not in html
+
+
+def test_wrap_label_caps_lines_and_truncates_overflow() -> None:
+    assert renderer._wrap_label("Browser SPA") == ["Browser SPA"]
+    assert renderer._wrap_label("") == []
+    wrapped = renderer._wrap_label(
+        "API gateway and backend services orchestration layer everywhere"
+    )
+    assert len(wrapped) <= 2
+    assert wrapped[-1].endswith("…")
+    assert all(len(line) <= 20 for line in wrapped)
+
+
 def test_each_act_inlines_a_distinct_palette_accent() -> None:
     payload = _payload()
     palette = ["#112233", "#445566", "#778899"]

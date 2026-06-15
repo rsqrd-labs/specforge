@@ -313,70 +313,240 @@ def _visual_metric(visual: Any) -> dict[str, str] | None:
     }
 
 
-def _order_arch_layers(layers: list[Any]) -> list[dict[str, Any]]:
-    """Order the *emitted* architecture layers by the canonical plane sequence.
+# Canonical human copy per plane, mirroring the frontend LAYER_COPY. A plane the
+# model omitted is still drawn with a real architectural label (never apologetic
+# filler): the topology graph must show all eight planes to read as a system.
+_ARCH_LAYER_COPY: dict[str, str] = {
+    "client": "User and client entry points",
+    "frontend": "Frontend experience",
+    "api": "API and backend services",
+    "data": "Data stores and state",
+    "llm": "LLM and provider layer",
+    "integrations": "External integrations",
+    "trust": "Trust boundaries",
+    "recovery": "Failure and recovery paths",
+}
 
-    Only layers the model actually produced are kept (no placeholder padding) and,
-    like the live deck, at most one card per canonical kind — so a duplicated kind
-    can never push the grid past the two rows the slide is sized for. Known kinds
-    sort into ``_ARCH_LAYER_SEQUENCE`` order; any unknown kind keeps its original
-    relative position at the end.
+# --- Topology geometry (mirrors ArchitectureReveal.tsx; trusted code only) ----
+# The offline renderer draws the *same* node/edge topology as the live deck's
+# static-complete SVG base state. WeasyPrint cannot animate, so it consumes the
+# static diagram: solid connectors with arrowheads, a dashed trust boundary, and
+# a recovery backplane band. Geometry is integer-only so every path/coordinate is
+# an exact value (no float formatting) and is built entirely from trusted code —
+# only node labels (escaped text) come from the model.
+_ARCH_VIEW_W = 960
+_ARCH_VIEW_H = 600
+_ARCH_NODE_W = 168
+_ARCH_NODE_H = 88
+_ARCH_BOX_KINDS = ("client", "frontend", "api", "data", "llm", "integrations")
+_ARCH_NODE_CENTERS: dict[str, tuple[int, int]] = {
+    "client": (104, 300),
+    "frontend": (330, 300),
+    "api": (556, 300),
+    "data": (834, 118),
+    "llm": (834, 300),
+    "integrations": (834, 482),
+}
+_ARCH_EDGES = (
+    ("client", "frontend"),
+    ("frontend", "api"),
+    ("api", "data"),
+    ("api", "llm"),
+    ("api", "integrations"),
+)
+_ARCH_TRUST_MEMBERS = ("frontend", "api", "data", "llm")
+_ARCH_RECOVERY_MEMBERS = ("api", "data", "llm", "integrations")
+
+
+def _arch_node_box(kind: str) -> tuple[int, int, int, int]:
+    cx, cy = _ARCH_NODE_CENTERS[kind]
+    return cx - _ARCH_NODE_W // 2, cy - _ARCH_NODE_H // 2, _ARCH_NODE_W, _ARCH_NODE_H
+
+
+def _arch_edge_path(frm: str, to: str) -> tuple[str, tuple[int, int]]:
+    """Smooth left-to-right connector; returns the path ``d`` and the end point.
+
+    The end tangent is always horizontal (control point shares the end's y), so
+    the arrowhead at the target can be a fixed right-pointing triangle.
     """
 
-    order = {kind: i for i, kind in enumerate(_ARCH_LAYER_SEQUENCE)}
-    seen: set[str] = set()
-    deduped: list[dict[str, Any]] = []
-    for layer in layers:
+    ax, ay = _ARCH_NODE_CENTERS[frm]
+    bx, by = _ARCH_NODE_CENTERS[to]
+    sx, sy = ax + _ARCH_NODE_W // 2, ay
+    ex, ey = bx - _ARCH_NODE_W // 2, by
+    dx = max((ex - sx) // 2, 36)
+    return f"M {sx} {sy} C {sx + dx} {sy}, {ex - dx} {ey}, {ex} {ey}", (ex, ey)
+
+
+def _arch_region(members: tuple[str, ...], pad: int) -> tuple[int, int, int, int]:
+    boxes = [_arch_node_box(kind) for kind in members]
+    min_x = min(b[0] for b in boxes) - pad
+    min_y = min(b[1] for b in boxes) - pad
+    max_x = max(b[0] + b[2] for b in boxes) + pad
+    max_y = max(b[1] + b[3] for b in boxes) + pad
+    return min_x, min_y, max_x - min_x, max_y - min_y
+
+
+def _wrap_label(text: str, width: int = 20, max_lines: int = 2) -> list[str]:
+    """Word-wrap a node label to at most ``max_lines`` of ~``width`` chars.
+
+    SVG ``<text>`` does not wrap; we wrap in code and hard-cap each line (with an
+    ellipsis when content is dropped) so a long label can never overflow a node.
+    """
+
+    text = text.strip()
+    if not text:
+        return []
+    words = text.split()
+    lines: list[str] = []
+    current = ""
+    consumed = 0
+    for word in words:
+        candidate = (current + " " + word).strip()
+        if not current or len(candidate) <= width:
+            current = candidate
+            consumed += 1
+        elif len(lines) < max_lines - 1:
+            lines.append(current)
+            current = word
+            consumed += 1
+        else:
+            break
+    if current:
+        lines.append(current)
+    capped: list[str] = []
+    for index, line in enumerate(lines):
+        dropped = index == len(lines) - 1 and consumed < len(words)
+        if len(line) > width or dropped:
+            line = line[: width - 1].rstrip() + "…"
+        capped.append(line)
+    return capped
+
+
+def _build_arch_topology(
+    content: dict[str, Any], palette: list[str]
+) -> dict[str, Any] | None:
+    """Build the static architecture topology, or ``None`` when none was emitted.
+
+    Mirrors the live ``ArchitectureReveal`` SVG: six connected box nodes (the
+    canonical planes), five directed edges, a dashed trust boundary, and a
+    recovery backplane. All eight planes are always drawn — a plane the model
+    omitted falls back to its canonical label so the system diagram stays whole.
+    Node/region labels are the only model-derived strings; they are sanitised here
+    and HTML-escaped by the template's autoescape.
+    """
+
+    diagram: dict[str, Any] | None = None
+    for candidate in content.get("diagrams") or []:
+        if isinstance(candidate, dict) and candidate.get("type") == _ARCH_REVEAL_TYPE:
+            diagram = candidate
+            break
+    if diagram is None:
+        return None
+
+    by_kind: dict[str, dict[str, Any]] = {}
+    extras_raw: list[dict[str, Any]] = []
+    for layer in diagram.get("layers") or []:
         if not isinstance(layer, dict):
             continue
         kind = _clean(layer.get("kind"))
-        if kind and kind in order:
-            if kind in seen:
-                continue
-            seen.add(kind)
-        deduped.append(layer)
-    return sorted(
-        deduped, key=lambda layer: order.get(_clean(layer.get("kind")), len(order))
-    )
+        if kind in _ARCH_LAYER_COPY:
+            by_kind.setdefault(kind, layer)
+        elif kind:
+            extras_raw.append(layer)
 
-
-def _build_arch_layers(
-    content: dict[str, Any], palette: list[str]
-) -> list[dict[str, Any]]:
-    """Themed, structured architecture layers, or ``[]`` when none were emitted.
-
-    Each layer takes the next palette colour so the planes read as a colourful
-    stack, exactly like the live ``ArchitectureReveal``.
-    """
-
-    for diagram in content.get("diagrams") or []:
-        if diagram.get("type") != _ARCH_REVEAL_TYPE:
-            continue
-        ordered = _order_arch_layers(diagram.get("layers") or [])
-        layers: list[dict[str, Any]] = []
-        for index, layer in enumerate(ordered):
+    def label_for(kind: str) -> str:
+        layer = by_kind.get(kind)
+        if layer:
             label = _clean(layer.get("label"))
-            kind = _clean(layer.get("kind"))
-            if not label and not kind:
-                continue
-            layer_accent = palette[index % len(palette)]
-            layer_accent_2 = palette[(index + 1) % len(palette)]
-            layers.append(
-                {
-                    "number": len(layers) + 1,
-                    "kind": kind,
-                    "label": label,
-                    "summary": _clean(layer.get("summary")),
-                    "accent": layer_accent,
-                    "accent_2": layer_accent_2,
-                    "ink": _readable_ink(layer_accent),
-                    # White number sits on the badge fill, so the fill itself must
-                    # be dark enough — use the ink gradient, not the raw accents.
-                    "ink_2": _readable_ink(layer_accent_2),
-                }
-            )
-        return layers
-    return []
+            if label:
+                return label
+        return _ARCH_LAYER_COPY[kind]
+
+    def accent_for(kind: str) -> str:
+        return palette[_ARCH_LAYER_SEQUENCE.index(kind) % len(palette)]
+
+    nodes: list[dict[str, Any]] = []
+    for kind in _ARCH_BOX_KINDS:
+        x, y, w, h = _arch_node_box(kind)
+        accent = accent_for(kind)
+        nodes.append(
+            {
+                "kind": kind,
+                "x": x,
+                "y": y,
+                "w": w,
+                "h": h,
+                "accent": accent,
+                "ink": _readable_ink(accent),
+                "text_x": x + 14,
+                "kind_y": y + 24,
+                "label_y0": y + 46,
+                "label_lines": _wrap_label(label_for(kind)),
+            }
+        )
+
+    edges: list[dict[str, Any]] = []
+    for frm, to in _ARCH_EDGES:
+        d, (ex, ey) = _arch_edge_path(frm, to)
+        accent = accent_for(to)
+        edges.append(
+            {
+                "d": d,
+                "stroke": accent,
+                "arrow_fill": _readable_ink(accent),
+                "arrow": f"{ex},{ey} {ex - 10},{ey - 6} {ex - 10},{ey + 6}",
+            }
+        )
+
+    trust_accent = palette[1 % len(palette)]
+    recovery_accent = palette[2 % len(palette)]
+    tx, ty, tw, th = _arch_region(_ARCH_TRUST_MEMBERS, 24)
+    rx, ry, rw, rh = _arch_region(_ARCH_RECOVERY_MEMBERS, 38)
+
+    extras: list[dict[str, Any]] = []
+    for index, layer in enumerate(extras_raw):
+        label = _clean(layer.get("label")) or _clean(layer.get("kind")) or "annotation"
+        extras.append(
+            {
+                "x": 24,
+                "y": 444 + index * 52,
+                "w": 184,
+                "h": 44,
+                "label": label[:40],
+            }
+        )
+
+    return {
+        "view_w": _ARCH_VIEW_W,
+        "view_h": _ARCH_VIEW_H,
+        "nodes": nodes,
+        "edges": edges,
+        "trust": {
+            "x": tx,
+            "y": ty,
+            "w": tw,
+            "h": th,
+            "stroke": trust_accent,
+            "label": label_for("trust"),
+            "label_x": tx + 16,
+            "label_y": ty + 22,
+            "label_fill": _readable_ink(trust_accent),
+        },
+        "recovery": {
+            "x": rx,
+            "y": ry,
+            "w": rw,
+            "h": rh,
+            "fill": recovery_accent,
+            "stroke": recovery_accent,
+            "label": label_for("recovery"),
+            "label_x": rx + 16,
+            "label_y": ry + rh - 14,
+            "label_fill": _readable_ink(recovery_accent),
+        },
+        "extras": extras,
+    }
 
 
 def _build_deck_context(content: dict[str, Any], workspace_name: str) -> dict[str, Any]:
@@ -386,9 +556,9 @@ def _build_deck_context(content: dict[str, Any], workspace_name: str) -> dict[st
     accent_2 = palette[1] if len(palette) > 1 else palette[0]
 
     # The architecture reveal is rendered as the Technical Architecture slide's own
-    # visual (mirroring the live deck), so build its themed layers once and attach
-    # them to the matching slide(s) below — there is no standalone architecture page.
-    arch_layers = _build_arch_layers(content, palette)
+    # visual (mirroring the live deck), so build the topology graph once and attach
+    # it to the matching slide(s) below — there is no standalone architecture page.
+    arch_topology = _build_arch_topology(content, palette)
 
     # One flat list of slide "pages" (each renders to its own A4 page). Every
     # slide carries its act's rotating accent so the printed deck shifts colour
@@ -403,8 +573,8 @@ def _build_deck_context(content: dict[str, Any], workspace_name: str) -> dict[st
             visual = slide.get("visual") or {}
             kind = _clean(visual.get("kind")) if isinstance(visual, dict) else ""
             slide_no += 1
-            # An architecture slide shows the reveal grid as its visual; fall back
-            # to the normal visual when no architecture layers were emitted.
+            # An architecture slide shows the topology graph as its visual; fall
+            # back to the normal visual when no architecture diagram was emitted.
             is_arch_slide = (
                 _clean(slide.get("type")) == _ARCH_SLIDE_TYPE
                 or section_title == _ARCH_ACT_TITLE
@@ -423,7 +593,7 @@ def _build_deck_context(content: dict[str, Any], workspace_name: str) -> dict[st
                     "visual_points": _visual_points(visual),
                     "visual_metric": _visual_metric(visual),
                     "architecture": (
-                        arch_layers if is_arch_slide and arch_layers else None
+                        arch_topology if is_arch_slide and arch_topology else None
                     ),
                     "sources": [
                         s for s in (slide.get("sources") or []) if s in _VALID_SOURCES

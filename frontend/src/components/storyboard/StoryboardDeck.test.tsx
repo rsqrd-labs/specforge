@@ -222,6 +222,72 @@ describe("StoryboardDeck", () => {
     expect(screen.getByText(/stale storyboard/i)).toBeInTheDocument()
   })
 
+  it("frames the first slide as the deck cover with a centred feature layout", () => {
+    const { container } = render(
+      <StoryboardDeck payload={makePayload()} status="ready" isOwner />,
+    )
+    const slide = container.querySelector(".storyboard-slide")
+    expect(slide?.className).toContain("storyboard-slide--cover")
+    expect(slide?.className).toContain("storyboard-slide--layout-feature")
+    expect(container.querySelector(".storyboard-slide-cover-mark")?.textContent).toBe(
+      "SpecForge Launch",
+    )
+  })
+
+  it("gives the first slide of each act the act-intro label", () => {
+    render(<StoryboardDeck payload={makePayload()} status="ready" isOwner />)
+    expect(screen.getByText(/act 1 of 6/i)).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole("tab", { name: /technical architecture/i }))
+    expect(screen.getByText(/act 4 of 6/i)).toBeInTheDocument()
+  })
+
+  it("makes the architecture slide full-bleed, not the split visual panel", () => {
+    const { container } = render(
+      <StoryboardDeck payload={makePayload()} status="ready" isOwner />,
+    )
+    fireEvent.click(screen.getByRole("tab", { name: /technical architecture/i }))
+    const slide = container.querySelector(".storyboard-slide")
+    expect(slide?.className).toContain("storyboard-slide--layout-arch")
+    expect(slide?.className).toContain("storyboard-slide--arch")
+  })
+
+  it("uses the split layout for interior product slides and a giant figure for metric visuals", () => {
+    const payload = makePayload()
+    const visionIndex = payload.sections.findIndex(
+      (section) => section.title === "Product Vision",
+    )
+    const base = payload.sections[visionIndex].slides[0]
+    payload.sections[visionIndex].slides = [
+      {
+        ...base,
+        id: "pv-split",
+        type: "product",
+        visual: { kind: "bullets", points: ["Alpha", "Beta"] },
+      },
+      {
+        ...base,
+        id: "pv-metric",
+        type: "product",
+        visual: { kind: "metric", value: "99.9%", label: "uptime" },
+      },
+    ]
+
+    const { container } = render(
+      <StoryboardDeck payload={payload} status="ready" isOwner />,
+    )
+    fireEvent.click(screen.getByRole("tab", { name: /product vision/i }))
+    let slide = container.querySelector(".storyboard-slide")
+    expect(slide?.className).toContain("storyboard-slide--layout-split")
+    expect(slide?.className).toContain("storyboard-slide--act-open")
+
+    // The second slide of the act is a metric figure and no longer act-opening.
+    fireEvent.keyDown(window, { key: "ArrowRight" })
+    slide = container.querySelector(".storyboard-slide")
+    expect(slide?.className).toContain("storyboard-slide--layout-metric")
+    expect(slide?.className).not.toContain("storyboard-slide--act-open")
+  })
+
   it("keeps generated deck details in memory while shortcuts are used", () => {
     const localSpy = vi.spyOn(Storage.prototype, "setItem")
     render(<StoryboardDeck payload={makePayload()} status="ready" isOwner />)

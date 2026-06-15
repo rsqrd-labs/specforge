@@ -279,79 +279,28 @@
 
       /* ---- Architecture slide -------------------------------------------- */
       /* The Technical Architecture slide drops the two-column body: copy sits in a
-         fixed-height band on top, the reveal grid spans the full width below — the
-         print analogue of the live deck's single-column arch layout. The fixed
-         copy band guarantees the grid can never be pushed into an overlap. */
+         fixed-height band on top, the topology graph fills the full width below —
+         the static (print) analogue of the live deck's animated SVG topology. The
+         fixed copy band guarantees the diagram can never be pushed into overlap. */
       .page--arch-slide .headline { font-size: 22pt; }
       .arch-slide-copy {
         position: absolute;
-        top: 30mm;
+        top: 28mm;
         left: 24mm;
         right: 24mm;
-        height: 50mm;
+        height: 46mm;
         overflow: hidden;
       }
-      .arch-grid {
+      /* The topology SVG is sized to the band so WeasyPrint lays it out reliably;
+         preserveAspectRatio centres the diagram within it. Every shape colour is a
+         validated #RRGGBB hex inlined as an SVG presentation attribute — no
+         gradients (unreliable in WeasyPrint), no url()/filters, no remote refs. */
+      .arch-topology {
         position: absolute;
-        top: 86mm;
+        top: 78mm;
         left: 24mm;
-        right: 24mm;
-        bottom: 11mm;
-        display: grid;
-        grid-template-columns: repeat(4, 1fr);
-        grid-auto-rows: min-content;
-        gap: 5mm;
-        align-content: center;
-      }
-      .arch-card {
-        position: relative;
-        border: 1px solid var(--a);
-        border-radius: 4.5mm;
-        background: rgba(255, 255, 255, 0.72);
-        padding: 5mm 5mm 5mm 7mm;
-        overflow: hidden;
-      }
-      .arch-card::before {
-        content: "";
-        position: absolute;
-        left: 0;
-        top: 0;
-        bottom: 0;
-        width: 2.5mm;
-        background: linear-gradient(180deg, var(--a), var(--a2));
-      }
-      .arch-card__num {
-        display: inline-flex;
-        align-items: center;
-        justify-content: center;
-        width: 8mm;
-        height: 8mm;
-        border-radius: 2.4mm;
-        background: linear-gradient(140deg, var(--ink), var(--ink2));
-        color: #fff;
-        font-size: 11pt;
-        font-weight: 800;
-        margin-bottom: 2.5mm;
-      }
-      .arch-card__kind {
-        font-size: 7pt;
-        font-weight: 800;
-        letter-spacing: 0.1em;
-        text-transform: uppercase;
-        color: var(--ink);
-      }
-      .arch-card__label {
-        margin: 1mm 0 0;
-        font-size: 11pt;
-        font-weight: 800;
-        line-height: 1.12;
-        color: #11152b;
-      }
-      .arch-card__summary {
-        margin: 1.5mm 0 0;
-        font-size: 8.5pt;
-        line-height: 1.28;
-        color: #64748b;
+        width: 249mm;
+        height: 119mm;
       }
     </style>
   </head>
@@ -380,9 +329,10 @@
     {# ---- One designed slide per page ---- #}
     {% for page in pages %}
     {% if page.architecture %}
-    {# Architecture slide: the reveal grid *is* this slide's visual (mirrors the
-       live deck), so copy sits on top and the layers span the full width below —
-       no separate architecture page. #}
+    {# Architecture slide: the topology graph *is* this slide's visual (mirrors the
+       live deck's static-complete SVG), so copy sits on top and the node/edge
+       diagram spans the full width below — no separate architecture page. #}
+    {% set a = page.architecture %}
     <section class="page page--slide page--arch-slide" style="--a: {{ page.accent }}; --a2: {{ page.accent_2 }}; --ink: {{ page.ink }};">
       <div class="kicker">
         <span class="kicker__act">Act {{ page.act_no }}</span> · {{ page.act_title }}
@@ -397,16 +347,35 @@
         </div>
         {% endif %}
       </div>
-      <div class="arch-grid">
-        {% for layer in page.architecture %}
-        <div class="arch-card" style="--a: {{ layer.accent }}; --a2: {{ layer.accent_2 }}; --ink: {{ layer.ink }}; --ink2: {{ layer.ink_2 }};">
-          <span class="arch-card__num">{{ layer.number }}</span>
-          <span class="arch-card__kind">{{ layer.kind }}</span>
-          <div class="arch-card__label">{{ layer.label }}</div>
-          {% if layer.summary %}<p class="arch-card__summary">{{ layer.summary }}</p>{% endif %}
-        </div>
+      {# font-family is set as an inherited SVG attribute (not a CSS rule) so it
+         applies even where WeasyPrint does not cascade HTML CSS into inline SVG. #}
+      <svg class="arch-topology" viewBox="0 0 {{ a.view_w }} {{ a.view_h }}" preserveAspectRatio="xMidYMid meet" font-family="Helvetica, Arial, sans-serif">
+        {# Recovery backplane (lowest layer). #}
+        <rect x="{{ a.recovery.x }}" y="{{ a.recovery.y }}" width="{{ a.recovery.w }}" height="{{ a.recovery.h }}" rx="22" fill="{{ a.recovery.fill }}" fill-opacity="0.09" stroke="{{ a.recovery.stroke }}" stroke-opacity="0.34" stroke-width="1.25" />
+        <text x="{{ a.recovery.label_x }}" y="{{ a.recovery.label_y }}" fill="{{ a.recovery.label_fill }}" font-size="13" font-weight="700">{{ a.recovery.label }}</text>
+        {# Trust boundary (dashed outline). #}
+        <rect x="{{ a.trust.x }}" y="{{ a.trust.y }}" width="{{ a.trust.w }}" height="{{ a.trust.h }}" rx="20" fill="none" stroke="{{ a.trust.stroke }}" stroke-opacity="0.6" stroke-width="1.75" stroke-dasharray="8 7" />
+        <text x="{{ a.trust.label_x }}" y="{{ a.trust.label_y }}" fill="{{ a.trust.label_fill }}" font-size="13" font-weight="700">{{ a.trust.label }}</text>
+        {# Directed edges with arrowheads. #}
+        {% for edge in a.edges %}
+        <path d="{{ edge.d }}" fill="none" stroke="{{ edge.stroke }}" stroke-opacity="0.7" stroke-width="2.5" stroke-linecap="round" />
+        <polygon points="{{ edge.arrow }}" fill="{{ edge.arrow_fill }}" />
         {% endfor %}
-      </div>
+        {# Box nodes. #}
+        {% for node in a.nodes %}
+        <rect x="{{ node.x }}" y="{{ node.y }}" width="{{ node.w }}" height="{{ node.h }}" rx="14" fill="#ffffff" fill-opacity="0.82" stroke="{{ node.accent }}" stroke-width="1.25" />
+        <rect x="{{ node.x }}" y="{{ node.y }}" width="4" height="{{ node.h }}" fill="{{ node.accent }}" />
+        <text x="{{ node.text_x }}" y="{{ node.kind_y }}" fill="{{ node.ink }}" font-size="9.5" font-weight="700">{{ node.kind|upper }}</text>
+        {% for line in node.label_lines %}
+        <text x="{{ node.text_x }}" y="{{ node.label_y0 + loop.index0 * 16 }}" fill="#11152b" font-size="13" font-weight="700">{{ line }}</text>
+        {% endfor %}
+        {% endfor %}
+        {# Unknown / group kinds: unconnected annotations. #}
+        {% for extra in a.extras %}
+        <rect x="{{ extra.x }}" y="{{ extra.y }}" width="{{ extra.w }}" height="{{ extra.h }}" rx="10" fill="#ffffff" fill-opacity="0.7" stroke="#94a3b8" stroke-width="1" stroke-dasharray="5 4" />
+        <text x="{{ extra.x + 12 }}" y="{{ extra.y + 27 }}" fill="#475569" font-size="11" font-weight="700">{{ extra.label }}</text>
+        {% endfor %}
+      </svg>
       <div class="page__foot">
         <span>{{ title }}</span>
         <span>{{ page.slide_no }} / {{ total_slides }}</span>
