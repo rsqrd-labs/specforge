@@ -203,28 +203,62 @@ def test_langfuse_client_swallows_all_exceptions(
 
 
 def test_base_llm_adapter_signature_unchanged() -> None:
-    """T-123: BaseLLMAdapter.stream() and .complete() signatures must remain
-    exactly (system, user, max_tokens). Phase 11 must not modify the abstract
-    interface."""
+    """T-123: BaseLLMAdapter.stream() and .complete() must keep the positional
+    interface (self, system, user, max_tokens). Phase 11 must not modify the
+    abstract interface to instrument it.
+
+    Issue #26 (prompt caching) later added a keyword-only ``cache_system: bool =
+    False`` to both methods. That is a deliberate, backward-compatible interface
+    evolution unrelated to Langfuse — it does not disturb the positional
+    interface and every existing call site keeps working. So the contract here
+    asserts the positional interface is frozen AND that the only addition is the
+    optional keyword-only ``cache_system`` flag (no surprise required params)."""
     base = import_backend("services.llm.base")
     BaseLLMAdapter = base.BaseLLMAdapter
 
-    stream_params = list(
-        inspect.signature(BaseLLMAdapter.stream).parameters.keys()
-    )
-    complete_params = list(
-        inspect.signature(BaseLLMAdapter.complete).parameters.keys()
+    _POSITIONAL = (
+        inspect.Parameter.POSITIONAL_ONLY,
+        inspect.Parameter.POSITIONAL_OR_KEYWORD,
     )
 
-    assert stream_params == ["self", "system", "user", "max_tokens"], (
-        f"BaseLLMAdapter.stream signature changed to {stream_params}. "
-        "Phase 11 must instrument via composition, not by modifying the adapter "
-        "interface. See T-123."
-    )
-    assert complete_params == ["self", "system", "user", "max_tokens"], (
-        f"BaseLLMAdapter.complete signature changed to {complete_params}. "
-        "Phase 11 must instrument via composition. See T-123."
-    )
+    def _positional(method: object) -> list[str]:
+        return [
+            p.name
+            for p in inspect.signature(method).parameters.values()
+            if p.kind in _POSITIONAL
+        ]
+
+    def _keyword_only(method: object) -> dict[str, inspect.Parameter]:
+        return {
+            p.name: p
+            for p in inspect.signature(method).parameters.values()
+            if p.kind == inspect.Parameter.KEYWORD_ONLY
+        }
+
+    for name, method in (
+        ("stream", BaseLLMAdapter.stream),
+        ("complete", BaseLLMAdapter.complete),
+    ):
+        positional = _positional(method)
+        assert positional == ["self", "system", "user", "max_tokens"], (
+            f"BaseLLMAdapter.{name} positional interface changed to {positional}. "
+            "Phase 11 must instrument via composition, not by modifying the "
+            "positional adapter interface. See T-123."
+        )
+
+        kwonly = _keyword_only(method)
+        # The only permitted keyword-only addition is issue #26's cache_system.
+        assert set(kwonly) <= {"cache_system"}, (
+            f"BaseLLMAdapter.{name} grew unexpected keyword-only params "
+            f"{sorted(set(kwonly) - {'cache_system'})}. Only the issue-#26 "
+            "cache_system flag is sanctioned. See T-123."
+        )
+        if "cache_system" in kwonly:
+            cs = kwonly["cache_system"]
+            assert cs.default is False, (
+                f"BaseLLMAdapter.{name} cache_system must default to False so "
+                "every existing call site is unaffected. See T-123."
+            )
 
 
 def test_provider_adapters_do_not_import_langfuse() -> None:
@@ -269,11 +303,25 @@ def test_instrumented_adapter_passes_through_to_wrapped_adapter() -> None:
         def __init__(self) -> None:
             self.complete_calls: list[tuple[str, str, int]] = []
 
-        async def stream(self, system: str, user: str, max_tokens: int):
+        async def stream(
+            self,
+            system: str,
+            user: str,
+            max_tokens: int,
+            *,
+            cache_system: bool = False,
+        ):
             for token in ["hello", " ", "world"]:
                 yield token
 
-        async def complete(self, system: str, user: str, max_tokens: int) -> str:
+        async def complete(
+            self,
+            system: str,
+            user: str,
+            max_tokens: int,
+            *,
+            cache_system: bool = False,
+        ) -> str:
             self.complete_calls.append((system, user, max_tokens))
             return "complete-response"
 
@@ -323,10 +371,24 @@ def test_instrumented_adapter_records_provider_and_model_metadata(
     base_module = import_backend("services.llm.base")
 
     class FakeAdapter(base_module.BaseLLMAdapter):
-        async def stream(self, system: str, user: str, max_tokens: int):
+        async def stream(
+            self,
+            system: str,
+            user: str,
+            max_tokens: int,
+            *,
+            cache_system: bool = False,
+        ):
             yield "ok"
 
-        async def complete(self, system: str, user: str, max_tokens: int) -> str:
+        async def complete(
+            self,
+            system: str,
+            user: str,
+            max_tokens: int,
+            *,
+            cache_system: bool = False,
+        ) -> str:
             return "done"
 
     captured: dict[str, Any] = {}
@@ -385,11 +447,25 @@ def test_instrumented_adapter_records_full_accumulated_stream(
     base_module = import_backend("services.llm.base")
 
     class FakeAdapter(base_module.BaseLLMAdapter):
-        async def stream(self, system: str, user: str, max_tokens: int):
+        async def stream(
+            self,
+            system: str,
+            user: str,
+            max_tokens: int,
+            *,
+            cache_system: bool = False,
+        ):
             for token in ["foo", "bar", "baz"]:
                 yield token
 
-        async def complete(self, system: str, user: str, max_tokens: int) -> str:
+        async def complete(
+            self,
+            system: str,
+            user: str,
+            max_tokens: int,
+            *,
+            cache_system: bool = False,
+        ) -> str:
             return ""
 
     create_calls: list[dict[str, Any]] = []
