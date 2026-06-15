@@ -1,7 +1,9 @@
-import { lazy, Suspense } from "react"
+import { lazy, Suspense, type ReactNode } from "react"
 import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom"
 import { ActionAlertProvider } from "./components/shared/ActionAlert"
+import { BrandLoader } from "./components/shared/BrandLoader"
 import { ProtectedRoute } from "./components/shared/ProtectedRoute"
+import { featureFlags } from "./config/featureFlags"
 import AuthCallback from "./pages/AuthCallback"
 import Billing from "./pages/Billing"
 import Dashboard from "./pages/Dashboard"
@@ -23,6 +25,13 @@ const PublicWorkspaceView = lazy(() => import("./pages/PublicWorkspaceView"))
 const Storyboard = lazy(() => import("./pages/Storyboard"))
 const StoryboardPublic = lazy(() => import("./pages/StoryboardPublic"))
 
+// Dark-launched behind `branded_loaders`: until the flag flips, lazy chunks
+// keep the prior blank fallback; with it on, every route shows the branded
+// loader instead of a flash of nothing.
+const routeFallback: ReactNode = featureFlags.brandedLoaders ? (
+  <BrandLoader variant="block" label="Loading SpecForge…" />
+) : null
+
 export default function App() {
   return (
     <BrowserRouter>
@@ -33,7 +42,7 @@ export default function App() {
           <Route
             path="/p/:slug"
             element={
-              <Suspense fallback={null}>
+              <Suspense fallback={routeFallback}>
                 <PublicWorkspaceView />
               </Suspense>
             }
@@ -41,7 +50,7 @@ export default function App() {
           <Route
             path="/sb/:slug"
             element={
-              <Suspense fallback={null}>
+              <Suspense fallback={routeFallback}>
                 <StoryboardPublic />
               </Suspense>
             }
@@ -58,7 +67,7 @@ export default function App() {
             path="/workspace/:id"
             element={
               <ProtectedRoute>
-                <Suspense fallback={null}>
+                <Suspense fallback={routeFallback}>
                   <Workspace />
                 </Suspense>
               </ProtectedRoute>
@@ -68,7 +77,7 @@ export default function App() {
             path="/storyboards/:id"
             element={
               <ProtectedRoute>
-                <Suspense fallback={null}>
+                <Suspense fallback={routeFallback}>
                   <Storyboard />
                 </Suspense>
               </ProtectedRoute>

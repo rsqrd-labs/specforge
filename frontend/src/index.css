@@ -301,6 +301,129 @@ button:disabled {
   letter-spacing: 0.02em;
 }
 
+/* ---------------------------------------------------------------------------
+   BrandLoader (issue #21, Phase 1) — the single branded loading primitive.
+   Animation is compositor-only (transform/opacity) so hundreds of concurrent
+   loaders cost ~nothing and there is no layout/paint thrash.
+   --------------------------------------------------------------------------- */
+.brand-loader {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--color-on-surface-variant);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.brand-loader--block {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  justify-content: center;
+  align-items: center;
+  width: 100%;
+  padding: 24px 0;
+}
+
+.brand-loader--overlay {
+  flex-direction: column;
+  gap: 14px;
+}
+
+.brand-loader-mark {
+  display: inline-grid;
+  place-items: center;
+  flex: 0 0 auto;
+  width: 28px;
+  height: 28px;
+}
+
+.brand-loader--md .brand-loader-mark {
+  width: 40px;
+  height: 40px;
+}
+
+.brand-loader--lg .brand-loader-mark {
+  width: 56px;
+  height: 56px;
+}
+
+.brand-loader-mark svg {
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+
+.brand-loader-track {
+  fill: none;
+  stroke: rgba(136, 115, 100, 0.22);
+  stroke-width: 4;
+}
+
+.brand-loader-arc {
+  fill: none;
+  stroke-width: 4;
+  stroke-linecap: round;
+  transform-origin: 24px 24px;
+  animation: brand-loader-spin 1s linear infinite;
+}
+
+.brand-loader-core {
+  fill: var(--color-primary);
+  transform-origin: 24px 24px;
+  animation: brand-loader-pulse 1.6s ease-in-out infinite;
+}
+
+.brand-loader-mark.is-paused .brand-loader-arc,
+.brand-loader-mark.is-paused .brand-loader-core {
+  animation-play-state: paused;
+}
+
+.brand-loader-label {
+  line-height: 1.3;
+}
+
+/* Self-contained visually-hidden announcement, matching the codebase
+   convention of not depending on a shared utility class. */
+.brand-loader-sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+@keyframes brand-loader-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes brand-loader-pulse {
+  0%,
+  100% {
+    transform: scale(1);
+    opacity: 0.85;
+  }
+  50% {
+    transform: scale(0.7);
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  /* The component already swaps to the static mark; this is the belt-and-braces
+     CSS guarantee that nothing animates if a player ever mounts. */
+  .brand-loader-arc,
+  .brand-loader-core {
+    animation: none;
+  }
+}
+
 .landing-status {
   border: 1px solid rgba(136, 115, 100, 0.34);
   border-radius: 999px;

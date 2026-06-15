@@ -3,6 +3,7 @@ import { Link, useNavigate } from "react-router-dom"
 import { ErrorBoundary } from "../components/ErrorBoundary"
 import { AiDisclaimer } from "../components/shared/AiDisclaimer"
 import { ActionAlertPanel } from "../components/shared/ActionAlert"
+import { BrandLoader } from "../components/shared/BrandLoader"
 import { BrandLockup } from "../components/shared/BrandLogo"
 import { GitHubStatusPill } from "../components/shared/GitHubStatusPill"
 import { CreditMeter } from "../components/shared/CreditMeter"
@@ -10,6 +11,7 @@ import { CreateWorkspaceModal } from "../components/dashboard/CreateWorkspaceMod
 import { DeleteWorkspaceModal } from "../components/dashboard/DeleteWorkspaceModal"
 import { WorkspaceCard } from "../components/dashboard/WorkspaceCard"
 import { TemplatesStrip } from "../components/templates/TemplatesStrip"
+import { featureFlags } from "../config/featureFlags"
 import { STARTER_WORKSPACES } from "../config/starterWorkspaces"
 import {
   fetchBillingHistory,
@@ -634,7 +636,11 @@ export default function Dashboard() {
 
         {isLoading ? (
           <div className="dashboard-loading">
-            <div className="loading-ring" />
+            {featureFlags.brandedLoaders ? (
+              <BrandLoader variant="block" size="lg" label="Loading your workspaces…" />
+            ) : (
+              <div className="loading-ring" />
+            )}
           </div>
         ) : workspaces.length === 0 ? (
           <div className="workspace-empty">

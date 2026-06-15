@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react"
+import { featureFlags } from "../../config/featureFlags"
 import type { GenerationProgress } from "../../services/sseService"
 import type { QualityGateInfo, StageType } from "../../types/stage"
+import { BrandLoader } from "../shared/BrandLoader"
 
 export type GenerationActivityOperation =
   | "generate"
@@ -301,25 +303,32 @@ export function StreamingOverlay({
           </div>
         </div>
 
-        <div className="generation-activity-visual" aria-hidden="true">
-          {variant === "patch" ? (
-            <div className="generation-patch-flow">
-              <span className="patch-source-line wide" />
-              <span className="patch-source-line" />
-              <span className="patch-connector" />
-              <span className="patch-result-line wide" />
-              <span className="patch-result-line" />
-            </div>
-          ) : (
-            <div className="generation-document-shimmer">
-              <span className="doc-line wide" />
-              <span className="doc-line" />
-              <span className="doc-line short" />
-              <span className="doc-line wide" />
-            </div>
-          )}
-          {variant === "gate" ? <span className="generation-gate-check" /> : null}
-        </div>
+        {featureFlags.brandedLoaders ? (
+          // The overlay already owns the live region (role="status" above), so
+          // the branded mark is embedded with the decorative `overlay` variant.
+          // The stage rail and copy are preserved.
+          <BrandLoader variant="overlay" size="lg" />
+        ) : (
+          <div className="generation-activity-visual" aria-hidden="true">
+            {variant === "patch" ? (
+              <div className="generation-patch-flow">
+                <span className="patch-source-line wide" />
+                <span className="patch-source-line" />
+                <span className="patch-connector" />
+                <span className="patch-result-line wide" />
+                <span className="patch-result-line" />
+              </div>
+            ) : (
+              <div className="generation-document-shimmer">
+                <span className="doc-line wide" />
+                <span className="doc-line" />
+                <span className="doc-line short" />
+                <span className="doc-line wide" />
+              </div>
+            )}
+            {variant === "gate" ? <span className="generation-gate-check" /> : null}
+          </div>
+        )}
 
         <div className="generation-loading-copy">
           <span className="generation-loading-kicker">{copy.stageLabel}</span>

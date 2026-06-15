@@ -2,7 +2,9 @@ import { useEffect, useRef, useState } from "react"
 import { useNavigate, useSearchParams } from "react-router-dom"
 
 import { ActionAlertPanel } from "../components/shared/ActionAlert"
+import { BrandLoader } from "../components/shared/BrandLoader"
 import { BrandLockup } from "../components/shared/BrandLogo"
+import { featureFlags } from "../config/featureFlags"
 import { completeGoogleCallback, setAccessToken } from "../services/api"
 import { useUserStore } from "../store/userStore"
 import { authCallbackAlert } from "../utils/errorPresentation"
@@ -70,13 +72,22 @@ export default function AuthCallback() {
           <BrandLockup />
         </div>
 
-        <div className="auth-callback-orbit" aria-hidden="true">
-          <span className="auth-orbit-ring" />
-          <span className="auth-orbit-ring auth-orbit-ring-secondary" />
-          <div className={status === "error" ? "auth-google-mark error" : "auth-google-mark"}>
-            <GoogleIcon />
+        {featureFlags.brandedLoaders && status === "loading" ? (
+          // The panel <section> already owns the aria-live region, so the
+          // branded mark is rendered with the decorative `overlay` variant to
+          // avoid nesting live regions.
+          <div className="auth-callback-orbit">
+            <BrandLoader variant="overlay" size="lg" />
           </div>
-        </div>
+        ) : (
+          <div className="auth-callback-orbit" aria-hidden="true">
+            <span className="auth-orbit-ring" />
+            <span className="auth-orbit-ring auth-orbit-ring-secondary" />
+            <div className={status === "error" ? "auth-google-mark error" : "auth-google-mark"}>
+              <GoogleIcon />
+            </div>
+          </div>
+        )}
 
         <div className="auth-callback-copy">
           <span className={status === "error" ? "auth-callback-kicker error" : "auth-callback-kicker"}>
