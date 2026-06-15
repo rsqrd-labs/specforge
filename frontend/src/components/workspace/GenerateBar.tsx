@@ -1,3 +1,5 @@
+import { BrandLoader } from "../shared/BrandLoader"
+import { featureFlags } from "../../config/featureFlags"
 import type { Stage } from "../../types/stage"
 import type { GenerationActivityOperation } from "./StreamingOverlay"
 
@@ -38,7 +40,14 @@ export function GenerateBar({
   if (isBusy || stage.status === "in_progress") {
     return (
       <div className="gen-btn-streaming" role="status" aria-live="polite">
-        <div className="loading-ring" />
+        {/* This row already owns the live region, so the branded mark embeds
+            decoratively (overlay variant) to avoid nesting a second
+            role="status"; the label span carries the announcement. */}
+        {featureFlags.brandedLoaders ? (
+          <BrandLoader variant="overlay" size="sm" />
+        ) : (
+          <div className="loading-ring" />
+        )}
         <span>{busyLabel ?? getBusyLabel(busyOperation)}</span>
       </div>
     )

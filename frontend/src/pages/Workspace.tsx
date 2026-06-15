@@ -44,6 +44,7 @@ import { SharePublicLinkModal } from "../components/workspace/SharePublicLinkMod
 import { SpecClarificationModal } from "../components/workspace/SpecClarificationModal"
 import { StoryboardToolbar } from "../components/workspace/StoryboardToolbar"
 import { AiDisclaimer } from "../components/shared/AiDisclaimer"
+import { BrandLoader } from "../components/shared/BrandLoader"
 import { BrandLockup } from "../components/shared/BrandLogo"
 import { DownloadIcon, GitHubIcon, PDFIcon, ShareIcon } from "../components/shared/icons"
 import { useCredits } from "../hooks/useCredits"
@@ -88,6 +89,7 @@ import {
   actionAlertFromStreamError,
 } from "../utils/errorPresentation"
 import { deriveFinaliseGateBlock } from "../utils/qualityGate"
+import { featureFlags } from "../config/featureFlags"
 
 const STAGE_ORDER: StageType[] = ["spec", "plan", "harness", "tasks"]
 
@@ -462,12 +464,15 @@ export default function Workspace() {
         actionLabel: getGenerationActionLabel(operation),
         startedAt: Date.now(),
         streamed,
+        // Drives the live, data-backed ETA band for this provider (issue #21
+        // Phase 2b); falls back to the heuristic table when absent.
+        provider: currentWorkspace?.provider,
       }
       generationActivityRef.current = nextActivity
       setGenerationActivity(nextActivity)
       return nextActivity
     },
-    [],
+    [currentWorkspace?.provider],
   )
 
   const clearGenerationActivity = useCallback((stageId?: string) => {
@@ -1632,7 +1637,11 @@ export default function Workspace() {
   if (isLoading) {
     return (
       <div className="workspace-center">
-        <div className="loading-ring" />
+        {featureFlags.brandedLoaders ? (
+          <BrandLoader variant="block" size="lg" label="Loading workspace…" />
+        ) : (
+          <div className="loading-ring" />
+        )}
       </div>
     )
   }

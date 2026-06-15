@@ -165,6 +165,38 @@ _DEFAULT_CORE_TIER_POLICY = ("mid", "strong")
 _GENERATION_HEARTBEAT_SECONDS = 10.0
 # Queue sentinel marking the end of the generation pipeline's event stream.
 _PIPELINE_END = object()
+
+# Pipeline phases surfaced on the progress heartbeat so the loading UI can show
+# what the silent pipeline is actually doing instead of inferring from elapsed
+# time alone (issue #21 Phase 2c).  Ordered by pipeline progression.  The field
+# is strictly ADDITIVE: it never replaces `state`/`elapsed_seconds`, and a client
+# that does not know it simply ignores it.  In practice only the `critic` phase
+# (a silent judge call + optional regenerate) runs long enough to emit a
+# heartbeat; the deterministic gate and persistence phases are sub-second.
+PIPELINE_PHASE_STREAMING = "streaming"
+PIPELINE_PHASE_QUALITY_GATE = "quality_gate"
+PIPELINE_PHASE_CRITIC = "critic"
+PIPELINE_PHASE_PERSISTING = "persisting"
+
+
+class _PhaseTracker:
+    """Single-writer / single-reader holder for the current pipeline phase.
+
+    The pipeline task advances it as it moves through generation; the supervising
+    ``generate()`` loop reads it when stamping a progress heartbeat.  Both run on
+    the same event loop and a plain attribute assignment is atomic under the
+    asyncio single-thread model, so no lock is required.
+    """
+
+    __slots__ = ("phase",)
+
+    def __init__(self) -> None:
+        self.phase = PIPELINE_PHASE_STREAMING
+
+    def set(self, phase: str) -> None:
+        self.phase = phase
+
+
 # How often a live generation refreshes its stage row's updated_at.  Must stay
 # comfortably under the recovery sweep's 3-minute stuck threshold
 # (recovery_service._STUCK_THRESHOLD_MINUTES): the sweep may only recover
@@ -1756,6 +1788,9 @@ class StageManager:
         # liveness signal, even while a frontier model reasons silently or a
         # silent gate phase (critic complete() call) runs for minutes.
         events: asyncio.Queue = asyncio.Queue()
+        # Shared phase state: the pipeline advances it; the heartbeat below reads
+        # it so each liveness ping reports the real phase (issue #21 Phase 2c).
+        phase_tracker = _PhaseTracker()
         pipeline = asyncio.create_task(
             self._execute_generation_pipeline(
                 emit=events.put_nowait,
@@ -1772,6 +1807,7 @@ class StageManager:
                 system_prompt=system_prompt,
                 user_prompt=user_prompt,
                 cache_key=cache_key,
+                phase=phase_tracker,
             )
         )
         # The sentinel is enqueued from the done-callback (not the pipeline
@@ -1792,6 +1828,7 @@ class StageManager:
                             "progress": {
                                 "stage": stage.type,
                                 "state": "generating",
+                                "phase": phase_tracker.phase,
                                 "elapsed_seconds": int(
                                     heartbeat_loop.time() - pipeline_started
                                 ),
@@ -1831,6 +1868,7 @@ class StageManager:
         system_prompt: str,
         user_prompt: str,
         cache_key: str,
+        phase: _PhaseTracker,
     ) -> None:
         """Run the full post-preflight generation pipeline for generate().
 
@@ -2034,6 +2072,10 @@ class StageManager:
 
             accumulated = _strip_code_fence(accumulated)
 
+            # Streaming is done; the deterministic gates (security validation,
+            # technology safety, section presence) run next (issue #21 Phase 2c).
+            phase.set(PIPELINE_PHASE_QUALITY_GATE)
+
             validation = validate(accumulated)
             if not validation.is_safe:
                 await credit_service.refund(db, deduction.id)
@@ -2146,6 +2188,10 @@ class StageManager:
                         span_finished = True
                     emit(json.dumps({"quality_gate_failed": gate_payload}))
                     return
+                # The deterministic section gate passed; the (silent) judge call
+                # and any platform-funded regenerate run next.  This is the one
+                # phase long enough to actually emit heartbeats (issue #21 2c).
+                phase.set(PIPELINE_PHASE_CRITIC)
                 regenerate_count = 0
                 while True:
                     critic_result = await critic_review(
@@ -2310,6 +2356,8 @@ class StageManager:
                 emit(json.dumps({"quality_gate_failed": gate_payload}))
                 return
 
+            # Every gate cleared; persist the version, cache, and schedule evals.
+            phase.set(PIPELINE_PHASE_PERSISTING)
             stage.content = accumulated
             stage.current_version += 1
             stage.status = "draft"

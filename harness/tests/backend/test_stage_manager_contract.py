@@ -29,3 +29,22 @@ def test_stage_manager_prevents_duplicate_generation_streams() -> None:
 
     assert "in_progress" in source
     assert "already" in source or "conflict" in source or "409" in source
+
+
+def test_progress_heartbeat_exposes_additive_phase_field() -> None:
+    """Issue #21 Phase 2c: the SSE progress heartbeat carries an additive
+    ``phase`` field alongside the existing ``state``/``elapsed_seconds`` so the
+    loading UI reflects the real pipeline phase.  The field must be additive (the
+    legacy keys stay) and cover the four declared phases."""
+    module = import_backend("services.pipeline.stage_manager")
+
+    assert module.PIPELINE_PHASE_STREAMING == "streaming"
+    assert module.PIPELINE_PHASE_QUALITY_GATE == "quality_gate"
+    assert module.PIPELINE_PHASE_CRITIC == "critic"
+    assert module.PIPELINE_PHASE_PERSISTING == "persisting"
+
+    source = read_backend_file("services", "pipeline", "stage_manager.py")
+    # The heartbeat payload keeps the legacy contract and adds `phase`.
+    assert '"state": "generating"' in source
+    assert '"elapsed_seconds"' in source
+    assert '"phase": phase_tracker.phase' in source

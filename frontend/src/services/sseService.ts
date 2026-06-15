@@ -31,6 +31,11 @@ export interface GenerationProgress {
   stage: string
   state: string
   elapsed_seconds: number
+  /** The real pipeline phase the heartbeat was emitted in (issue #21 Phase 2c).
+   *  Additive and backward-compatible: older backends omit it. Typed loosely as
+   *  `string` because the wire is the source of truth and an unknown value must
+   *  degrade to the generic liveness copy, never throw. */
+  phase?: string
 }
 
 interface ProgressEvent {

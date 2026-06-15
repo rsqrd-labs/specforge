@@ -79,6 +79,13 @@ _BILLING_PURGE_CRON_MINUTE = {42}
 # cheap.
 _LLM_BATCH_SWEEP_CRON_SECOND = {30}
 
+# Generation-ETA rollup (issue #21 Phase 2b). Every 10 minutes on a minute set
+# that collides with no other tick (drift {0,15,30,45}, billing reconcile
+# {7,22,37,52}, purges at the top-of-hour offsets). 10-minute cadence under the
+# 15-minute cache TTL guarantees the cached estimates never expire while the
+# worker is healthy; the startup run warms the cache right after a deploy.
+_GENERATION_ESTIMATES_CRON_MINUTE = {3, 13, 23, 33, 43, 53}
+
 
 @github_job("export_push")
 async def export_push(
@@ -224,6 +231,18 @@ async def llm_batch_sweep(ctx: dict[str, Any]) -> None:
     await eval_batch.sweep(ctx)
 
 
+async def refresh_generation_estimates(ctx: dict[str, Any]) -> None:
+    """Cron (10m): roll the latency ledger up into the cached generation-ETA
+    estimates served by GET /stages/generation-estimates (issue #21 Phase 2b).
+
+    Plain cron — the body catches and logs; a transient blip is recovered by the
+    next tick, so a failure must never surface as a worker error.
+    """
+    from services.llm import generation_estimates
+
+    await generation_estimates.refresh_generation_estimates(ctx)
+
+
 async def billing_process_pending_webhooks(ctx: dict[str, Any]) -> None:
     """Cron (60s): recover queue-outage + crashed-worker inbox rows (T-298).
 
@@ -336,6 +355,11 @@ class WorkerSettings:
             llm_batch_sweep,
             second=_LLM_BATCH_SWEEP_CRON_SECOND,
             run_at_startup=False,
+        ),
+        cron(
+            refresh_generation_estimates,
+            minute=_GENERATION_ESTIMATES_CRON_MINUTE,
+            run_at_startup=True,
         ),
     ]
     redis_settings = _redis_settings()

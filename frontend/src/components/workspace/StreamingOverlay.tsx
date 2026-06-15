@@ -2,7 +2,14 @@ import { useEffect, useState } from "react"
 import { featureFlags } from "../../config/featureFlags"
 import type { GenerationProgress } from "../../services/sseService"
 import type { QualityGateInfo, StageType } from "../../types/stage"
+import type { AIProvider } from "../../types/workspace"
 import { BrandLoader } from "../shared/BrandLoader"
+import {
+  type EtaEstimate,
+  etaBand,
+  etaProgressFraction,
+  useEtaEstimate,
+} from "./useEtaEstimate"
 
 export type GenerationActivityOperation =
   | "generate"
@@ -18,6 +25,10 @@ export interface GenerationActivityInfo {
   actionLabel: string
   startedAt: number
   streamed: boolean
+  /** Workspace LLM provider, used to pick the live, data-backed ETA band for
+   *  this provider (issue #21 Phase 2b). Optional — without it the ETA falls
+   *  back to the provider-agnostic heuristic table. */
+  provider?: AIProvider
 }
 
 interface StreamingOverlayProps {
@@ -96,6 +107,15 @@ export function StreamingOverlay({
 
     return () => window.clearTimeout(timeoutId)
   }, [activity, isVisible, renderedActivity])
+
+  // Phase 2a heuristic ETA (issue #21). Called unconditionally (hooks rule) and
+  // before any early return; the value is only consumed in the full-overlay path
+  // below. Pure constant-table lookup — no backend dependency.
+  const eta = useEtaEstimate(
+    renderedActivity?.stageType,
+    renderedActivity?.operation,
+    renderedActivity?.provider,
+  )
 
   if (gate) {
     const missing = gate.missing ?? []
@@ -266,6 +286,15 @@ export function StreamingOverlay({
   }
 
   const copy = getActivityCopy(renderedActivity)
+  // Issue #21 Phase 2c: when the backend heartbeat reports a real pipeline phase
+  // and the branded-loaders rollout is on, the liveness line names that phase
+  // instead of the generic "still working" copy. Gated on the flag so a
+  // flag-off session is byte-identical, and any unknown/missing phase falls back
+  // to the generic copy — the field is additive and must never break the line.
+  const phaseLiveness =
+    featureFlags.brandedLoaders && progress?.phase
+      ? phaseLivenessCopy(progress.phase)
+      : null
   const activeStageIndex = STAGE_FLOW.findIndex(
     (stage) => stage.type === renderedActivity.stageType,
   )
@@ -337,13 +366,59 @@ export function StreamingOverlay({
           <p className="generation-loading-liveness">
             {formatElapsed(elapsedSeconds)} elapsed
             {progress
-              ? " — the model is working; this can take several minutes."
+              ? ` — ${phaseLiveness ?? "the model is working; this can take several minutes."}`
               : elapsedSeconds >= 15
                 ? " — frontier models can reason for a while before text appears."
                 : ""}
           </p>
+          {/* Not during the exit fade: the elapsed ticker resets to 0 the moment
+              the activity clears, so rendering the bar here would animate the
+              fill backward toward empty as the card fades (a "progress goes
+              backward" smell). The bar simply leaves with the card instead. */}
+          {featureFlags.brandedLoaders && !isExiting ? (
+            <EtaProgress elapsedSeconds={elapsedSeconds} eta={eta} />
+          ) : null}
         </div>
       </div>
+    </div>
+  )
+}
+
+/**
+ * Phase 2a honest ETA (issue #21). A decelerating bar that asymptotes near 90%
+ * (`ETA_PROGRESS_CAP`) and a banded caption — never a countdown that hits zero
+ * and keeps spinning. The bar is purely decorative (`aria-hidden`): it is a
+ * heuristic, so the honest, screen-reader-announced signal is the caption text
+ * (static app copy) sitting inside the overlay's existing live region. The fill
+ * animates with `transform: scaleX` (compositor-only — no layout) so hundreds of
+ * concurrent loaders cost nothing.
+ */
+function EtaProgress({
+  elapsedSeconds,
+  eta,
+}: {
+  elapsedSeconds: number
+  eta: EtaEstimate
+}) {
+  const fraction = etaProgressFraction(elapsedSeconds, eta)
+  const band = etaBand(elapsedSeconds, eta)
+  const caption =
+    band === "overdue"
+      ? `usually ~${eta.p50}s · still working`
+      : `usually ~${eta.p50}s`
+
+  return (
+    <div className="generation-eta">
+      <span
+        className={`generation-eta-bar generation-eta-bar--${band}`}
+        aria-hidden="true"
+      >
+        <span
+          className="generation-eta-fill"
+          style={{ transform: `scaleX(${fraction})` }}
+        />
+      </span>
+      <span className="generation-eta-caption">{caption}</span>
     </div>
   )
 }
@@ -366,6 +441,28 @@ const STAGE_ACTIVITY_COPY: Record<StageType, string> = {
   plan: "Designing architecture",
   harness: "Building validation harness",
   tasks: "Drafting implementation plan",
+}
+
+/**
+ * Map a backend pipeline phase (issue #21 Phase 2c) to a short, honest liveness
+ * sentence. Pure and total: an unknown or future phase returns `null` so the
+ * caller falls back to the generic "still working" copy — the wire field is
+ * additive and must never be the thing that breaks the loading screen. The
+ * strings are static app copy and never echo model/user content.
+ */
+export function phaseLivenessCopy(phase: string): string | null {
+  switch (phase) {
+    case "streaming":
+      return "the model is drafting; this can take several minutes."
+    case "quality_gate":
+      return "checking the draft against the quality gates."
+    case "critic":
+      return "a reviewer model is checking the draft for quality."
+    case "persisting":
+      return "finalising and saving the result."
+    default:
+      return null
+  }
 }
 
 function getActivityCopy(activity: GenerationActivityInfo) {

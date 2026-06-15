@@ -3358,6 +3358,17 @@ async def test_generate_emits_progress_heartbeats_while_model_reasons() -> None:
     assert progress_events, "expected at least one progress heartbeat"
     assert progress_events[0]["progress"]["stage"] == "spec"
     assert progress_events[0]["progress"]["state"] == "generating"
+    # Issue #21 Phase 2c: the heartbeat carries the real pipeline phase (additive
+    # field — `state`/`elapsed_seconds` are unchanged) so the loading UI can show
+    # what the silent pipeline is doing.  Every emitted phase is one of the four.
+    valid_phases = {
+        stage_manager_module.PIPELINE_PHASE_STREAMING,
+        stage_manager_module.PIPELINE_PHASE_QUALITY_GATE,
+        stage_manager_module.PIPELINE_PHASE_CRITIC,
+        stage_manager_module.PIPELINE_PHASE_PERSISTING,
+    }
+    for event in progress_events:
+        assert event["progress"]["phase"] in valid_phases
     # Heartbeats never corrupt the artifact stream.
     assert _streamed_artifact(tokens) == _VALID_SPEC
 

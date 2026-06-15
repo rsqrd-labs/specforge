@@ -547,6 +547,48 @@ export async function getTemplates(force = false): Promise<Template[]> {
 }
 
 // ---------------------------------------------------------------------------
+// Generation ETA — live percentiles (issue #21 Phase 2b)
+// ---------------------------------------------------------------------------
+
+import type { AIProvider } from "../types/workspace"
+import type { StageType } from "../types/stage"
+
+/** Canonical lookup operations the backend serves estimates for — the same
+ *  three groupings the heuristic table collapses its activity operations into. */
+export type EstimateLookupOperation = "generate" | "focused-patch" | "regenerate-gaps"
+
+/** One aggregate latency band for a (provider, stage, operation), in seconds.
+ *  `n` is the sample count behind it. Aggregate-only — no per-user data. */
+export interface GenerationEstimate {
+  provider: AIProvider
+  stage: StageType
+  operation: EstimateLookupOperation
+  p50: number
+  p90: number
+  n: number
+}
+
+export interface GenerationEstimatesResponse {
+  estimates: GenerationEstimate[]
+  generated_at: string | null
+}
+
+/** Fetch the live, data-backed generation-ETA bands. Returns `[]` on any
+ *  error/empty response so the caller falls back to the heuristic table — this
+ *  call must never throw or degrade the loading UX. Authenticated (uses the
+ *  `api` instance), so it carries the session like other read endpoints. */
+export async function fetchGenerationEstimates(): Promise<GenerationEstimate[]> {
+  try {
+    const response = await api.get<GenerationEstimatesResponse>(
+      "/stages/generation-estimates",
+    )
+    return Array.isArray(response.data?.estimates) ? response.data.estimates : []
+  } catch {
+    return []
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Spec Clarification (Phase 14, T-USE-03 / T-USE-04)
 // ---------------------------------------------------------------------------
 

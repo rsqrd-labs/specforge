@@ -4,7 +4,9 @@ import { describe, expect, it, vi } from "vitest"
 
 import type { QualityGateInfo } from "../../types/stage"
 import "../../index.css"
+import { useGenerationEstimatesStore } from "../../store/generationEstimatesStore"
 import {
+  phaseLivenessCopy,
   StreamingOverlay,
   type GenerationActivityInfo,
   type GenerationActivityOperation,
@@ -159,6 +161,46 @@ describe("StreamingOverlay generation activity", () => {
     expect(screen.getByRole("status")).toHaveTextContent(
       "the model is working; this can take several minutes.",
     )
+  })
+
+  it("keeps the generic liveness copy (ignores progress.phase) while the flag is off", () => {
+    // Phase 2c phase-specific copy is gated on branded_loaders (off in this
+    // file). Even with a phase on the heartbeat, the flag-off path must stay
+    // byte-identical to the pre-2c generic copy.
+    render(
+      <StreamingOverlay
+        isVisible
+        activity={{ ...activity("generate", "spec"), startedAt: Date.now() }}
+        progress={{
+          stage: "spec",
+          state: "generating",
+          elapsed_seconds: 42,
+          phase: "critic",
+        }}
+      />,
+    )
+
+    const status = screen.getByRole("status")
+    expect(status).toHaveTextContent(
+      "the model is working; this can take several minutes.",
+    )
+    expect(status).not.toHaveTextContent(/reviewer model/i)
+  })
+})
+
+describe("phaseLivenessCopy (Phase 2c)", () => {
+  it.each([
+    ["streaming", /drafting/i],
+    ["quality_gate", /quality gates/i],
+    ["critic", /reviewer model/i],
+    ["persisting", /finalising and saving/i],
+  ] as const)("maps the %s phase to honest copy", (phase, pattern) => {
+    expect(phaseLivenessCopy(phase)).toMatch(pattern)
+  })
+
+  it("returns null for an unknown phase so the caller uses the generic copy", () => {
+    expect(phaseLivenessCopy("future_phase")).toBeNull()
+    expect(phaseLivenessCopy("")).toBeNull()
   })
 })
 
@@ -324,5 +366,31 @@ describe("StreamingOverlay quality gate", () => {
       screen.getByRole("button", { name: "Override and continue" }),
     ).toBeInTheDocument()
     expect(screen.queryByRole("note")).not.toBeInTheDocument()
+  })
+
+  it("does not fetch live estimates while the branded-loaders flag is off", () => {
+    // Flag is off in this file (the branded path is covered separately). Even
+    // with a provider on the activity, the loading screen must make zero new
+    // network calls — the live fetch is gated on the same flag that renders the
+    // ETA bar, preserving the flag-off path byte-for-byte (Phase 2b).
+    const ensureLoaded = vi.fn(async () => {})
+    useGenerationEstimatesStore.setState({ ensureLoaded })
+
+    render(
+      <StreamingOverlay
+        isVisible
+        activity={{
+          stageId: "stage-spec",
+          stageType: "spec",
+          operation: "generate",
+          actionLabel: "generate",
+          startedAt: Date.now(),
+          streamed: true,
+          provider: "anthropic",
+        }}
+      />,
+    )
+
+    expect(ensureLoaded).not.toHaveBeenCalled()
   })
 })

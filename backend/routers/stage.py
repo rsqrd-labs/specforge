@@ -8,10 +8,11 @@ from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import StreamingResponse
+from redis.asyncio import Redis
 from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from database import get_db
+from database import get_db, get_redis
 from middleware.auth import get_current_user
 from middleware.credit_check import require_credits
 from models import EvalResult, Stage, StageVersion, User, Workspace
@@ -19,6 +20,7 @@ from schemas.stage import (
     AcceptDiffRequest,
     ContentEditRequest,
     DiffResponse,
+    GenerationEstimatesResponse,
     RefineRequest,
     RollbackRequest,
     StageResponse,
@@ -27,6 +29,7 @@ from schemas.stage import (
 from services.credit_service import InsufficientCreditsError
 from services.evals.online_eval import validate_stage_findings
 from services.llm.base import ProviderError, ProviderTimeoutError
+from services.llm.generation_estimates import read_generation_estimates
 from services.pipeline.artifact_validator import MissingSectionError
 from services.pipeline.critic import StageQualityGateError
 from services.pipeline.stage_manager import (
@@ -141,6 +144,23 @@ async def _load_stage(stage_id: UUID, db: AsyncSession, user_id: UUID) -> Stage:
     if stage is None:
         raise HTTPException(status_code=404, detail="Stage not found")
     return stage
+
+
+@router.get("/generation-estimates", response_model=GenerationEstimatesResponse)
+async def get_generation_estimates(
+    redis: Redis = Depends(get_redis),
+    _: User = Depends(get_current_user),
+) -> GenerationEstimatesResponse:
+    """Aggregate, data-backed generation-ETA bands (issue #21 Phase 2b).
+
+    A pure Redis read of the rollup the worker cron precomputes — the heavy
+    ledger query never runs on the request path. Authenticated and covered by the
+    default per-user/IP read limits. Aggregate-only (durations + counts, no PII);
+    a cache miss returns an empty list and the client falls back to its heuristic
+    table. Declared before ``/{id}`` so the static path is not parsed as a UUID.
+    """
+    payload = await read_generation_estimates(redis)
+    return GenerationEstimatesResponse.model_validate(payload)
 
 
 @router.get("/{id}", response_model=StageResponse)

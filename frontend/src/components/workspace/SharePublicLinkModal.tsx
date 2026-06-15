@@ -8,6 +8,8 @@ import {
 import { useFocusTrap } from "../../hooks/useFocusTrap"
 import type { ShareLinkResponse } from "../../types/publicShare"
 import { ActionAlertPanel } from "../shared/ActionAlert"
+import { BrandLoader } from "../shared/BrandLoader"
+import { featureFlags } from "../../config/featureFlags"
 
 interface SharePublicLinkModalProps {
   workspaceId: string
@@ -172,9 +174,12 @@ export function SharePublicLinkModal({
         </header>
 
         <div className="create-modal-body share-modal-body">
-          {state.kind === "loading" && (
-            <p className="share-modal-loading">Working…</p>
-          )}
+          {state.kind === "loading" &&
+            (featureFlags.brandedLoaders ? (
+              <BrandLoader variant="inline" size="sm" label="Working…" />
+            ) : (
+              <p className="share-modal-loading">Working…</p>
+            ))}
 
           {state.kind === "disabled" && (
             <div className="share-modal-disabled">

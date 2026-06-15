@@ -98,6 +98,32 @@ class Settings(BaseSettings):
     # Raise toward 1.0 only to gather model/provider quality telemetry. Must be in
     # [0.0, 1.0]; an out-of-range value fails startup in every environment.
     eval_score_sample_rate: float = 0.0
+    # Issue #21 Phase 2b — honest, data-backed generation ETA. A cheap periodic
+    # worker cron rolls llm_cost_events latency_ms up into aggregate p50/p90 per
+    # (provider, stage, operation), caches the result in Redis, and the read-only
+    # GET /stages/generation-estimates endpoint serves it from cache (the heavy
+    # query never runs per request). The frontend prefers these live percentiles
+    # and falls back to its constant heuristic table on any miss/empty/low-sample
+    # response, so the feature can never degrade the UX below the 2a baseline.
+    # Flip enabled False to stop refreshing (the endpoint then serves empty and
+    # every client falls back to the heuristic).
+    generation_estimates_enabled: bool = True
+    # Trailing window the rollup samples. Shorter tracks the current cheap-tier
+    # models' latency; long enough to accumulate volume per (provider, stage).
+    generation_estimates_window_days: int = 14
+    # A (provider, stage, operation) key is only served once it has at least this
+    # many samples — below it the client keeps the heuristic baseline.
+    generation_estimates_min_samples: int = 50
+    # Redis TTL for the cached rollup. The cron recomputes more often than this
+    # (see worker.py) so the key never expires while the worker is healthy; if the
+    # worker is down past the TTL the key lapses and clients fall back cleanly.
+    generation_estimates_cache_ttl_seconds: int = 900
+    # latency_ms measures the provider stream only; the post-stream pipeline tail
+    # (artifact validator → critic judge → persistence) adds a few seconds of
+    # perceived time the stream timer never sees. Added to the served p50/p90 so
+    # the band reflects perceived wall-clock, not stream duration (keeps the
+    # "still working" flip from firing early on the slow end of normal runs).
+    generation_estimates_pipeline_tail_seconds: int = 4
     max_request_body_bytes: int = 1_000_000
     tech_safety_policy_max_age_days: int = 30
     tech_safety_osv_cache_ttl_seconds: int = 86_400

@@ -1,4 +1,6 @@
 import type { StoryboardStatus, StoryboardSummary } from "../../types/storyboard"
+import { BrandLoader } from "../shared/BrandLoader"
+import { featureFlags } from "../../config/featureFlags"
 import { DownloadIcon, ShareIcon } from "../shared/icons"
 
 type StoryboardToolbarItem = Pick<
@@ -76,7 +78,13 @@ export function StoryboardToolbar({
           role="status"
           aria-live="polite"
         >
-          <span className="storyboard-generating-spinner" aria-hidden="true" />
+          {/* The host owns the live region above, so the branded mark embeds
+              decoratively (overlay variant) — no nested role="status". */}
+          {featureFlags.brandedLoaders ? (
+            <BrandLoader variant="overlay" size="sm" />
+          ) : (
+            <span className="storyboard-generating-spinner" aria-hidden="true" />
+          )}
           <div className="storyboard-generating-track" aria-hidden="true">
             <span className="storyboard-generating-bar" />
           </div>

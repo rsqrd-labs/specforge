@@ -33,6 +33,34 @@ class RefineRequest(BaseModel):
         return self
 
 
+class GenerationEstimate(BaseModel):
+    """One aggregate latency band for a (provider, stage, operation) — issue #21
+    Phase 2b. Durations in seconds; ``n`` is the sample count behind them.
+
+    Aggregate-only: no user, workspace, or content field ever appears here.
+    """
+
+    provider: Literal["anthropic", "openai", "google"]
+    stage: StageType
+    operation: Literal["generate", "focused-patch", "regenerate-gaps"]
+    p50: int = Field(ge=0)
+    p90: int = Field(ge=0)
+    n: int = Field(ge=0)
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class GenerationEstimatesResponse(BaseModel):
+    """Cached generation-ETA rollup. Empty ``estimates`` (cache miss / disabled /
+    low sample volume) is a valid response — the client falls back to its
+    constant heuristic table."""
+
+    estimates: list[GenerationEstimate] = Field(default_factory=list)
+    generated_at: datetime | None = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
 class EvalResponse(BaseModel):
     id: UUID
     stage_version_id: UUID

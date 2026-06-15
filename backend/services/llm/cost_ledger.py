@@ -320,6 +320,90 @@ async def output_token_percentiles(
     ]
 
 
+async def generation_latency_percentiles(
+    db: Any,
+    *,
+    since: Any | None = None,
+    operations: list[str] | None = None,
+) -> list[dict[str, Any]]:
+    """End-to-end latency distribution per (operation, provider, stage_type) — the
+    data source for the issue-#21 honest-ETA endpoint (Phase 2b).
+
+    Returns one row per (operation, provider, stage_type) with the sample count
+    and the p50/p90 of ``latency_ms``. ``latency_ms`` on a streamed generation
+    row is the **full provider stream duration** (the instrumented adapter starts
+    its timer before the stream and records in the ``finally`` after the last
+    token), so it is the dominant term of user-perceived generation time.
+
+    Aggregate-only — durations and counts, no per-user data and no PII. Read-only;
+    the caller supplies the session. Only rows that represent a *live, interactive*
+    provider call contribute:
+
+    * ``latency_ms`` non-null and strictly positive (drops estimate-only rows),
+    * ``cache_hit`` false (a cache replay is near-instant and unrepresentative),
+    * ``batch`` false (batch jobs run for minutes-to-hours, off the request path),
+    * ``operation``/``stage_type`` non-null (need both to key the estimate).
+
+    p50/p90 are percentile-robust, so the rare watchdog-timeout tail (a hung
+    stream recorded at ~the hard cap) does not distort them.
+    """
+    from sqlalchemy import func, select  # noqa: PLC0415
+
+    from models import LLMCostEvent  # noqa: PLC0415
+
+    def _pct(level: float, column: Any) -> Any:
+        return func.percentile_cont(level).within_group(column.asc())
+
+    latency_col = LLMCostEvent.latency_ms
+    stmt = (
+        select(
+            LLMCostEvent.operation.label("operation"),
+            LLMCostEvent.provider.label("provider"),
+            LLMCostEvent.stage_type.label("stage_type"),
+            func.count().label("samples"),
+            _pct(0.50, latency_col).label("p50_latency_ms"),
+            _pct(0.90, latency_col).label("p90_latency_ms"),
+        )
+        .where(latency_col.isnot(None))
+        .where(latency_col > 0)
+        .where(LLMCostEvent.cache_hit.is_(False))
+        .where(LLMCostEvent.batch.is_(False))
+        .where(LLMCostEvent.operation.isnot(None))
+        .where(LLMCostEvent.stage_type.isnot(None))
+        .group_by(
+            LLMCostEvent.operation,
+            LLMCostEvent.provider,
+            LLMCostEvent.stage_type,
+        )
+        .order_by(
+            LLMCostEvent.operation,
+            LLMCostEvent.provider,
+            LLMCostEvent.stage_type,
+        )
+    )
+    if since is not None:
+        stmt = stmt.where(LLMCostEvent.created_at >= since)
+    if operations:
+        stmt = stmt.where(LLMCostEvent.operation.in_(operations))
+
+    result = await db.execute(stmt)
+
+    def _int(value: Any) -> int | None:
+        return int(value) if value is not None else None
+
+    return [
+        {
+            "operation": row.operation,
+            "provider": row.provider,
+            "stage_type": row.stage_type,
+            "samples": int(row.samples),
+            "p50_latency_ms": _int(row.p50_latency_ms),
+            "p90_latency_ms": _int(row.p90_latency_ms),
+        }
+        for row in result
+    ]
+
+
 def _row_kwargs_from_metadata(metadata: Mapping[str, Any]) -> dict[str, Any]:
     row: dict[str, Any] = {}
     for field in _EVENT_FIELDS:
