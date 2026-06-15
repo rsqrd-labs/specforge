@@ -696,27 +696,36 @@ def test_phase16_ci_has_redis_service() -> None:
 
 
 def test_phase16_eval_orphan_tasks_are_cancelled() -> None:
-    """MF-1 — asyncio.shield() orphan tasks must be explicitly cancelled on timeout.
+    """MF-1 — background eval tasks must never be orphaned/leaked.
 
-    stage_manager.py wraps eval tasks in asyncio.shield() with a 30-second timeout.
-    When the timeout fires, the shielded task continues running indefinitely —
-    it is detached from the parent coroutine with no reference to cancel it.
-    Under load, many orphaned eval tasks accumulate, consuming threads and
-    open HTTP connections to the eval backend.
+    Original failure mode (T-205): stage_manager.py wrapped eval tasks in
+    asyncio.shield() with a 30-second timeout; when the timeout fired the
+    shielded task detached and ran indefinitely with no reference held, so under
+    load orphaned eval tasks accumulated open connections and thread-pool slots.
 
-    The task reference must be retained and explicitly cancelled in the except
-    TimeoutError branch.
+    Issue #27 Phase 1 made LLM scoring strictly fire-and-forget and *removed* the
+    shield()+timeout-that-abandons pattern entirely. The leak is now prevented by
+    the canonical asyncio idiom instead: each eval task is created, a strong
+    reference is retained in a module-level set (so it cannot be garbage-collected
+    mid-flight), and a done-callback discards it on completion. Bounded runtime is
+    enforced at the source by run_eval_background's own asyncio.wait_for timeout,
+    which cancels the inner work on expiry. This is strictly safer than the old
+    approach.
+
+    The invariant this guards is unchanged — *no orphaned eval tasks* — so the
+    contract accepts either the legacy shield()+explicit-cancel pattern OR the
+    issue-#27 retained-reference + done-callback-discard pattern. It still fails
+    on a bare, untracked ``asyncio.create_task`` with no leak protection.
     """
     source = read_backend_file("services", "pipeline", "stage_manager.py")
 
-    # The timeout/cancel pattern should be present near asyncio.shield usage
+    # Legacy pattern: explicit cancel in the shield() timeout handler.
     shield_region = ""
     shield_match = re.search(r"asyncio\.shield\s*\(", source)
     if shield_match:
         start = max(0, shield_match.start() - 500)
         end = min(len(source), shield_match.start() + 2000)
         shield_region = source[start:end]
-
     has_cancel_on_timeout = bool(
         re.search(r"TimeoutError.*\.cancel\(\)", shield_region, re.DOTALL)
         or re.search(r"\.cancel\(\).*TimeoutError", shield_region, re.DOTALL)
@@ -726,12 +735,26 @@ def test_phase16_eval_orphan_tasks_are_cancelled() -> None:
             and re.search(r"eval_task\.cancel\(\)", source)
         )
     )
-    assert has_cancel_on_timeout, (
-        "stage_manager.py must explicitly call eval_task.cancel() in the "
-        "TimeoutError handler when asyncio.shield() times out. The shielded task "
-        "continues running in the background with no reference held — under load, "
-        "these orphaned tasks accumulate open connections and consume thread pool "
-        "slots indefinitely. MF-1 — T-205."
+
+    # Issue-#27 pattern: the created task is retained in a module-level set and
+    # discarded via a done-callback — the documented way to keep a fire-and-forget
+    # task from being GC'd mid-flight (no orphan, no unbounded set growth).
+    eval_task_created = re.search(r"eval_task\s*=\s*asyncio\.create_task", source)
+    retained_in_set = re.search(r"_BACKGROUND_EVAL_TASKS\.add\(\s*eval_task\s*\)", source)
+    discarded_on_done = re.search(
+        r"add_done_callback\(\s*_BACKGROUND_EVAL_TASKS\.discard\s*\)", source
+    )
+    has_tracked_fire_and_forget = bool(
+        eval_task_created and retained_in_set and discarded_on_done
+    )
+
+    assert has_cancel_on_timeout or has_tracked_fire_and_forget, (
+        "stage_manager.py must protect background eval tasks from orphaning — "
+        "either by cancelling the shielded task in the TimeoutError handler "
+        "(legacy) or by retaining the created task in _BACKGROUND_EVAL_TASKS and "
+        "discarding it via add_done_callback (issue #27 fire-and-forget). Without "
+        "one of these, an untracked task can be GC'd mid-flight or leak open "
+        "connections and thread-pool slots under load. MF-1 — T-205."
     )
 
 

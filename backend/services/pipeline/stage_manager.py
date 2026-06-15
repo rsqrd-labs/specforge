@@ -139,10 +139,13 @@ STAGE_ORDER = ["spec", "plan", "harness", "tasks"]
 # no cheaper viable core-gen model than Flash and no active strong model, so it
 # stays mid-first and surfaces failures directly.
 #
-# (requested_tier, runtime_escalation_tier) per provider:
-#   anthropic: Haiku 4.5 (small)     -> escalate to Sonnet 4.6 (mid)
-#   openai:    GPT-5.4 Mini (mini)   -> escalate to GPT-5.4 (mid)
-#   google:    Gemini 3.5 Flash (mid)-> no active strong model; surfaces
+# (requested_tier, runtime_escalation_tier) per provider, in provider-neutral
+# tier terms (the concrete models for each tier live only in the catalog — see
+# CORE_GENERATION_TIER_LADDER in model_catalog.py — so this comment never names a
+# model and can never drift from it):
+#   anthropic: cheap small tier      -> escalate to the mid tier
+#   openai:    cheap mini tier       -> escalate to the mid tier
+#   google:    mid tier              -> no active strong tier; surfaces directly
 # Derived from the catalog's declarative core-generation tier ladder (issue #26
 # Phase 5b) — the single source of truth for the per-provider cheap-tier floor.
 # Kept as a module-level symbol here because callers (and tests) read the live

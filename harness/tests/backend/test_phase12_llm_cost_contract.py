@@ -242,14 +242,42 @@ def test_instrumented_adapter_records_provider_normalized_cost_metadata() -> Non
 
 def test_adapters_expose_or_normalize_usage_without_changing_base_interface() -> None:
     """Plan §16.13: provider usage accounting must be normalized without
-    changing BaseLLMAdapter.stream(system, user, max_tokens) or complete(...)."""
+    changing the positional BaseLLMAdapter.stream(system, user, max_tokens) /
+    complete(...) interface.
+
+    Issue #26 (prompt caching) added a keyword-only ``cache_system: bool = False``
+    to both methods — a deliberate, backward-compatible addition that leaves the
+    positional interface (and every existing call site) untouched. The contract
+    freezes the positional interface and permits only that sanctioned kw-only
+    flag, defaulting to False."""
     base = import_backend("services.llm.base")
     BaseLLMAdapter = base.BaseLLMAdapter
 
-    stream_params = list(inspect.signature(BaseLLMAdapter.stream).parameters)
-    complete_params = list(inspect.signature(BaseLLMAdapter.complete).parameters)
-    assert stream_params == ["self", "system", "user", "max_tokens"]
-    assert complete_params == ["self", "system", "user", "max_tokens"]
+    _POSITIONAL = (
+        inspect.Parameter.POSITIONAL_ONLY,
+        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+    )
+
+    for name, method in (
+        ("stream", BaseLLMAdapter.stream),
+        ("complete", BaseLLMAdapter.complete),
+    ):
+        params = inspect.signature(method).parameters
+        positional = [p.name for p in params.values() if p.kind in _POSITIONAL]
+        assert positional == ["self", "system", "user", "max_tokens"], (
+            f"BaseLLMAdapter.{name} positional interface changed to {positional}."
+        )
+        kwonly = {
+            p.name: p
+            for p in params.values()
+            if p.kind == inspect.Parameter.KEYWORD_ONLY
+        }
+        assert set(kwonly) <= {"cache_system"}, (
+            f"BaseLLMAdapter.{name} grew unsanctioned keyword-only params "
+            f"{sorted(set(kwonly) - {'cache_system'})}."
+        )
+        if "cache_system" in kwonly:
+            assert kwonly["cache_system"].default is False
 
     usage_module = import_backend("services.llm.usage")
     for expected in [
