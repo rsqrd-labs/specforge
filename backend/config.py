@@ -185,23 +185,16 @@ class Settings(BaseSettings):
             if s
         ]
 
-    # Phase 1 (issue #26): route storyboard generation through the mid tier
-    # (Sonnet 4.6 / GPT-5.4 / Gemini 3.5 Flash) first and escalate to the
-    # strong tier on a quality-gate failure (schema/parse/grounding error).
-    # Default False until golden-corpus old-vs-new comparison validates the
-    # routing — Phase 5.3 owns that gate.  Never flip to True in production
-    # before the evaluation passes.
-    storyboard_mid_first: bool = False
-
-    # Phase 5.3 (issue #26): master switch for the shipped cheap-primary core
-    # generation policy (Haiku 4.5 / GPT-5.4 Mini start, mid-tier escalation on a
-    # runtime/quality-gate failure).  Default True — it wraps the *live* behavior
-    # so it can be reverted with one toggle: set False and every core generation
-    # (fresh stages, full regenerate, harness gap-patch) falls back to the
-    # pre-cheap-swap *mid-first* default (Sonnet 4.6 / GPT-5.4 first, strong
-    # escalation).  Increment generation is independent (`_INCREMENT_TIERS`) and
-    # is unaffected by this flag.  Flip False if the golden-corpus comparison ever
-    # shows the cheap primary regressing artifact quality.
+    # Phase 5.3 (issue #26) + issue #17 follow-up: master switch for the
+    # product-wide cheap-primary generation policy (Haiku 4.5 / GPT-5.4 Mini
+    # start, mid-tier escalation on a runtime/quality-gate failure).  Default
+    # True — it wraps the *live* behavior so it can be reverted with one toggle:
+    # set False and **every** artifact-generation feature — the four core stages,
+    # full regenerate, the harness gap-patch, the storyboard keynote, and
+    # increment generation — falls back to the pre-cheap-swap *mid-first* default
+    # (Sonnet 4.6 / GPT-5.4 first, strong escalation) via the shared
+    # ``services.llm.tier_policy.generation_tier_policy``.  Flip False if the
+    # golden-corpus comparison ever shows the cheap primary regressing quality.
     core_cheap_primary: bool = True
 
     # Phase 5.2 (issue #26): deterministic, no-LLM complexity classifier that

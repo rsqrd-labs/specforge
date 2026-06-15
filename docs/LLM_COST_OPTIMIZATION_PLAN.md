@@ -78,7 +78,9 @@ validators and telemetry.
 1. Route storyboard through `resolve_llm_route(operation="storyboard.generate", requested_tier="mid", fallback_tier="strong")` instead of `source.model`. Register the operation in `cost_registry`/`model_catalog` `recommended_operations` and a `ROUTE_QUALITY_GATES` entry.
 2. **Preserve** strict `StoryboardPayload` schema validation, grounding checks, and the 2-round repair loop verbatim.
 3. **Escalate to strong** on: schema validation failure, grounding failure, payload validation failure, or low quality signal — *before* surfacing an error to the user. Count escalations (`storyboard_strong_escalations_total`).
-4. Validate on the golden corpus (schema + grounding pass rate) old-vs-new before flipping the default; ship behind `storyboard_mid_first` flag.
+4. Validate on the golden corpus (schema + grounding pass rate) old-vs-new before flipping the default; ship behind a flag.
+
+> **Update (issue #17 follow-up):** storyboard generation was unified with the product-wide cheap-primary policy. It now always routes through the shared `services/llm/tier_policy.generation_tier_policy` (cheap primary → **mid** escalation on a quality-gate failure), keyed off the single `core_cheap_primary` flag — the separate `storyboard_mid_first` flag and its escalation counter (`storyboard_strong_escalations_total` → `storyboard_escalations_total`) were retired.
 
 **Acceptance:** storyboard no longer defaults to persisted strong model without an escalation reason (Issue AC 5). **Risk:** low-med (validator-backed). **Effort:** M.
 
@@ -165,7 +167,7 @@ Signals: problem length, ambiguity markers, security/regulatory keywords, number
 - **High complexity →** start at mid (or strong for the hardest), skipping the cheap primary that would predictably fail its gates and waste a regenerate.
 - **Normal/low →** keep the current cheap-first behavior.
 - **HARNESS/TASKS:** most likely to need a higher floor; tune from Phase-0 quality-outcome data per stage.
-- **Increment generation:** unchanged — stays on mid (`_INCREMENT_TIERS = ("mid", None)`) until tests prove a cheaper tier preserves task refs + traceability.
+- **Increment generation:** *(updated, issue #17 follow-up)* now follows the same product-wide cheap-primary→mid policy via `generation_tier_policy` (it no longer pins a private `_INCREMENT_TIERS` mid-only constant); the shared `tasks.generate` operation/budget and stable task refs are preserved.
 
 **5.3 — Golden-corpus validation (the gate that should have preceded the swap).** *(Shipped — corpus expanded, classifier gated in the eval, flag in place.)* `asdd_route_golden.json` now spans simple/high/critical bands (each case declares `complexity.expected_*`); `scripts/run_llm_route_eval.py` asserts the classifier deterministically and reports per-case tier floors. The whole cheap-primary policy is behind `core_cheap_primary` (default on) — flip it false to revert to mid-first in one toggle. **Note (honest scope):** the dry run's simulated output is tier-identical, so it *cannot* produce the cheap-vs-mid **quality** comparison — that stays the manual live gate over the expanded corpus (`ROUTE_PROMOTION.md`), which must pass before `core_complexity_routing` is defaulted on. Storyboard keeps its own schema/grounding gate (Phase 1) rather than a fabricated route-eval case.
 

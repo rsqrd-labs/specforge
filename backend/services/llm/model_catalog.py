@@ -29,8 +29,9 @@ GENERATION_OPERATIONS = frozenset(
         "regenerate.full",
         "summary.create",
         "eval.score",
-        # Phase 1 (issue #26): storyboard mid-first routing. Registered here so
-        # resolve_llm_route can validate the operation and route mid→strong.
+        # Storyboard keynote generation. Follows the same product-wide
+        # cheap-primary→mid policy as core generation (issue #17 follow-up):
+        # the cheap tier is the primary and mid is the quality-failure escalation.
         "storyboard.generate",
     }
 )
@@ -164,16 +165,17 @@ MODEL_CATALOG: tuple[ModelCatalogEntry, ...] = (
         # Core generation ops are RECOMMENDED (not default) so the frontier
         # tier is never the primary route but stays eligible as the runtime
         # escalation when a mid-tier generation times out or errors.
-        # storyboard.generate is included so Phase 1 quality-gate escalation
-        # can reach this model (resolve_llm_route requested_tier="strong").
+        # storyboard.generate stays eligible so that when the cheap-primary flag
+        # is reverted (storyboard policy becomes mid→strong), the strong tier is
+        # still reachable as the storyboard escalation target.
         recommended_operations=(*CORE_GENERATION_OPERATIONS, "storyboard.generate"),
         default_operations=(),
         supports_reasoning=True,
         reasoning_effort="high",
         rollout_notes=(
             "Anthropic frontier escalation tier for core ASDD generation "
-            "(one-shot runtime retry after a mid-tier failure) and storyboard "
-            "quality-gate escalation (Phase 1)."
+            "(one-shot runtime retry after a mid-tier failure) and the storyboard "
+            "escalation target when reverted to mid-first."
         ),
         routing_priority=1,
     ),
@@ -189,8 +191,8 @@ MODEL_CATALOG: tuple[ModelCatalogEntry, ...] = (
         output_cost_per_million=15.0,
         max_context_tokens=1_000_000,
         default_max_output_tokens=32768,
-        # storyboard.generate added to both recommended and default so this model
-        # is the mid-tier primary for Phase 1 storyboard routing on Anthropic.
+        # storyboard.generate kept here so Sonnet is the mid-tier escalation
+        # target when the cheap storyboard primary (Haiku) fails a quality gate.
         recommended_operations=(
             *CORE_GENERATION_OPERATIONS,
             "refine.section",
@@ -202,7 +204,7 @@ MODEL_CATALOG: tuple[ModelCatalogEntry, ...] = (
         rollout_notes=(
             "Anthropic mid-tier core ASDD generation escalation (one-shot retry "
             "after a Haiku 4.5 failure), section refinement default, and "
-            "storyboard mid-first primary (Phase 1)."
+            "storyboard quality-failure escalation target (issue #17 follow-up)."
         ),
         routing_priority=20,
     ),
@@ -220,17 +222,22 @@ MODEL_CATALOG: tuple[ModelCatalogEntry, ...] = (
         # Raised from 4096 so the cheap primary can carry the full core-gen
         # output budget (24576) without the model ceiling truncating artifacts.
         default_max_output_tokens=32768,
+        # storyboard.generate added (recommended + default) so the cheap primary
+        # carries the keynote too — storyboard now follows the same
+        # cheap-primary→mid policy as core generation (issue #17 follow-up).
         recommended_operations=(
             *CORE_GENERATION_OPERATIONS,
             "refine.focused",
             "summary.create",
             "eval.score",
+            "storyboard.generate",
         ),
         default_operations=(
             *CORE_GENERATION_OPERATIONS,
             "refine.focused",
             "summary.create",
             "eval.score",
+            "storyboard.generate",
         ),
         supports_reasoning=True,
         # Medium (not low) effort: as the core-gen primary, Haiku must reason
@@ -275,15 +282,17 @@ MODEL_CATALOG: tuple[ModelCatalogEntry, ...] = (
         # Core generation ops are RECOMMENDED (not default) so the frontier
         # tier is never the primary route but stays eligible as the runtime
         # escalation when a mid-tier generation times out or errors.
-        # storyboard.generate included for Phase 1 quality-gate escalation.
+        # storyboard.generate stays eligible so the strong tier is reachable as
+        # the storyboard escalation target when the cheap-primary flag is
+        # reverted (storyboard policy becomes mid→strong).
         recommended_operations=(*CORE_GENERATION_OPERATIONS, "storyboard.generate"),
         default_operations=(),
         supports_reasoning=True,
         reasoning_effort="high",
         rollout_notes=(
             "OpenAI frontier escalation tier for core ASDD generation "
-            "(one-shot runtime retry after a mid-tier failure) and storyboard "
-            "quality-gate escalation (Phase 1)."
+            "(one-shot runtime retry after a mid-tier failure) and the storyboard "
+            "escalation target when reverted to mid-first."
         ),
         routing_priority=1,
     ),
@@ -299,8 +308,8 @@ MODEL_CATALOG: tuple[ModelCatalogEntry, ...] = (
         output_cost_per_million=15.0,
         max_context_tokens=1_000_000,
         default_max_output_tokens=32768,
-        # storyboard.generate added to both recommended and default so this model
-        # is the mid-tier primary for Phase 1 storyboard routing on OpenAI.
+        # storyboard.generate kept here so GPT-5.4 is the mid-tier escalation
+        # target when the cheap storyboard primary (GPT-5.4 Mini) fails a gate.
         recommended_operations=(
             *CORE_GENERATION_OPERATIONS,
             "refine.section",
@@ -312,7 +321,7 @@ MODEL_CATALOG: tuple[ModelCatalogEntry, ...] = (
         rollout_notes=(
             "OpenAI mid-tier core ASDD generation escalation (one-shot retry "
             "after a GPT-5.4 Mini failure), section refinement default, and "
-            "storyboard mid-first primary (Phase 1)."
+            "storyboard quality-failure escalation target (issue #17 follow-up)."
         ),
         routing_priority=20,
     ),
@@ -330,18 +339,23 @@ MODEL_CATALOG: tuple[ModelCatalogEntry, ...] = (
         # Raised from 4096 so the cheap primary can carry the full core-gen
         # output budget (24576) without the model ceiling truncating artifacts.
         default_max_output_tokens=32768,
+        # storyboard.generate added (recommended + default) so the cheap primary
+        # carries the keynote too — storyboard now follows the same
+        # cheap-primary→mid policy as core generation (issue #17 follow-up).
         recommended_operations=(
             *CORE_GENERATION_OPERATIONS,
             "refine.focused",
             "refine.section",
             "summary.create",
             "eval.score",
+            "storyboard.generate",
         ),
         default_operations=(
             *CORE_GENERATION_OPERATIONS,
             "refine.focused",
             "summary.create",
             "eval.score",
+            "storyboard.generate",
         ),
         supports_reasoning=True,
         # Medium (not low) effort: as the core-gen primary, Mini must reason
@@ -413,9 +427,11 @@ MODEL_CATALOG: tuple[ModelCatalogEntry, ...] = (
         # the mid tier — the primary core-generation route. Google has no
         # active strong-tier escalation model; a runtime failure surfaces
         # directly instead of retrying on a second model.
-        # storyboard.generate added so Flash is the mid-first primary for
-        # Phase 1 storyboard routing on Google. No strong escalation exists
-        # (Pro Preview is preview-only), so quality failures surface directly.
+        # storyboard.generate: Google has no sub-Flash core-gen model, so its
+        # cheap-primary policy floors at mid — Flash is the storyboard primary
+        # for Google, exactly as it is for core generation. No active strong
+        # escalation exists (Pro Preview is preview-only), so a storyboard
+        # quality failure surfaces directly — consistent with core gen.
         tier="mid",
         status="active",
         adapter_api="generate_content",
@@ -438,7 +454,7 @@ MODEL_CATALOG: tuple[ModelCatalogEntry, ...] = (
         thinking_level="high",
         rollout_notes=(
             "Stable Gemini 3-family core ASDD generation default and "
-            "storyboard mid-first primary (Phase 1)."
+            "storyboard primary on Google (no sub-Flash core-gen model)."
         ),
         routing_priority=1,
     ),

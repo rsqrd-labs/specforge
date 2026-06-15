@@ -208,7 +208,7 @@ def test_grow_tasks_markdown_appends_and_pins_baseline() -> None:
     assert grown.index("Set up project structure") < grown.index("Add billing")
 
 
-def test_increment_generation_uses_fast_cheap_tasks_route() -> None:
+def test_increment_generation_uses_cheap_primary_tasks_route() -> None:
     workspace = MagicMock()
     workspace.provider = "anthropic"
 
@@ -216,13 +216,13 @@ def test_increment_generation_uses_fast_cheap_tasks_route() -> None:
 
     assert route.operation == "tasks.generate"
     assert route.provider == "anthropic"
-    assert route.model == "claude-sonnet-4-6"
-    assert route.model_tier == "mid"
-    # Increment generation deliberately stays on the mid tier (out of scope of
-    # the cheap-primary core-gen swap); the mid model still recommends
-    # tasks.generate but is no longer its primary default, so it resolves as
-    # active_same_tier rather than active_default.
-    assert route.selection_reason == "active_same_tier"
+    # Increment now follows the product-wide cheap-primary→mid policy, like core
+    # TASKS generation: the cheap tier (Haiku 4.5) is the primary and mid
+    # (Sonnet 4.6) is the one-shot escalation (issue #17 follow-up).
+    assert route.model == "claude-haiku-4-5-20251001"
+    assert route.model_tier == "small"
+    assert route.fallback_tier == "mid"
+    assert route.selection_reason == "active_default"
 
 
 # ---------------------------------------------------------------------------

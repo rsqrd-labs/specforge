@@ -54,14 +54,15 @@ from services.llm.cost_ledger import (
 )
 from services.llm.gateway import get_llm
 from services.llm.instrumented_adapter import InstrumentedAdapter
-from services.llm.model_catalog import (
-    CORE_GENERATION_TIER_LADDER,
-    core_generation_tier_policy,
-    model_max_output_tokens,
-)
+from services.llm.model_catalog import model_max_output_tokens
 from services.llm.output_budget import resolve_output_budget
 from services.llm.provider_config import JUDGE_MODELS
 from services.llm.routing import LLMRoute, LLMRoutingError, resolve_llm_route
+from services.llm.tier_policy import (
+    CHEAP_PRIMARY_TIER_POLICY,
+    DEFAULT_TIER_POLICY,
+    generation_tier_policy,
+)
 from services.observability import (
     BILLING_CREDITS_CRITIC_REGEN,
     PIPELINE_COMPLETION_REPAIRS,
@@ -148,14 +149,12 @@ STAGE_ORDER = ["spec", "plan", "harness", "tasks"]
 #   google:    mid tier              -> no active strong tier; surfaces directly
 # Derived from the catalog's declarative core-generation tier ladder (issue #26
 # Phase 5b) — the single source of truth for the per-provider cheap-tier floor.
-# Kept as a module-level symbol here because callers (and tests) read the live
-# cheap-primary policy from ``stage_manager``; the ladder is validated against the
-# catalog so this mapping can never drift from the models that actually exist.
-CORE_GENERATION_TIER_POLICY: dict[str, tuple[str, str]] = {
-    provider: core_generation_tier_policy(provider)
-    for provider in CORE_GENERATION_TIER_LADDER
-}
-_DEFAULT_CORE_TIER_POLICY = ("mid", "strong")
+# The live cheap-primary policy now lives in the product-wide ``tier_policy``
+# module so the core stages, the storyboard keynote, and increment generation all
+# read one definition (issue #17 follow-up); these aliases preserve the public
+# ``stage_manager`` symbols that callers and tests read for the core-gen view.
+CORE_GENERATION_TIER_POLICY = CHEAP_PRIMARY_TIER_POLICY
+_DEFAULT_CORE_TIER_POLICY = DEFAULT_TIER_POLICY
 # Seconds of pipeline silence between SSE progress heartbeats.  Heartbeats are
 # emitted whenever the generation pipeline (artifact streaming, quality gates,
 # critic review/regenerate, persistence) has not produced a client-visible
@@ -411,10 +410,12 @@ def _core_generation_tier_policy(provider: str) -> tuple[str, str]:
     and the Phase 5.1 quality escalation read the same helper), so a single flag
     cleanly reverts fresh stages, full regenerate, and the harness gap-patch to
     mid-first without a redeploy.
+
+    Delegates to the product-wide ``generation_tier_policy`` so core generation,
+    the storyboard keynote, and increment generation share one flag-gated
+    definition (issue #17 follow-up).
     """
-    if not settings.core_cheap_primary:
-        return _DEFAULT_CORE_TIER_POLICY
-    return CORE_GENERATION_TIER_POLICY.get(provider, _DEFAULT_CORE_TIER_POLICY)
+    return generation_tier_policy(provider)
 
 
 def _apply_complexity_floor(

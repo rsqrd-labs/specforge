@@ -62,7 +62,6 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from config import settings
 from models import CreditLedger, Storyboard, Workspace
 from prompts.storyboard import (
     GRANDFATHER_NOTE_DEPTH,
@@ -78,16 +77,17 @@ from services.llm.base import ProviderError
 from services.llm.cost_ledger import LLMCostContext
 from services.llm.gateway import complete_with_timeout
 from services.llm.routing import LLMRoute, LLMRoutingError, resolve_llm_route
+from services.llm.tier_policy import generation_tier_policy
 from services.observability import (
     get_structured_logger,
     record_storyboard_credits_deducted,
     record_storyboard_credits_refunded,
+    record_storyboard_escalation,
     record_storyboard_generation_completed,
     record_storyboard_generation_duration,
     record_storyboard_generation_failed,
     record_storyboard_generation_started,
     record_storyboard_section_regenerated,
-    record_storyboard_strong_escalation,
 )
 from services.pipeline.storyboard_source import (
     StoryboardSourcePackage,
@@ -630,21 +630,27 @@ async def _reserve(
     return sb, True
 
 
-def _resolve_storyboard_mid_route(source: StoryboardSourcePackage) -> LLMRoute:
-    """Resolve the mid-tier route for storyboard generation (Phase 1).
+def _resolve_storyboard_primary_route(source: StoryboardSourcePackage) -> LLMRoute:
+    """Resolve the primary route for storyboard generation.
 
-    This is the primary route when ``storyboard_mid_first`` is enabled.
-    ``fallback_tier="strong"`` is included for completeness but is inert in
-    practice — every provider has an active mid model for this operation, so
-    the fallback is never triggered by model-unavailability.  Quality-gate
-    escalation to strong is handled explicitly in ``_run_storyboard_completion``,
-    not here.
+    Storyboard follows the same product-wide cheap-primary policy as core
+    generation (issue #17 follow-up): ``generation_tier_policy`` returns the
+    provider's cheap floor escalating to ``mid`` (Haiku 4.5 / GPT-5.4 Mini →
+    Sonnet 4.6 / GPT-5.4), or — when ``core_cheap_primary`` is flipped off —
+    the pre-cheap-swap ``mid`` → ``strong`` default. Google has no sub-Flash
+    core-gen model, so it floors at mid (Flash), exactly as core gen does.
+
+    The returned route carries ``fallback_tier`` as the escalation target;
+    ``_run_storyboard_completion`` performs the one-shot escalation explicitly on
+    a quality-gate failure (a richer trigger than the route's model-unavailability
+    fallback), so the two never double-escalate.
     """
+    requested_tier, fallback_tier = generation_tier_policy(source.provider)
     return resolve_llm_route(
         operation="storyboard.generate",
         preferred_provider=source.provider,
-        requested_tier="mid",
-        fallback_tier="strong",
+        requested_tier=requested_tier,
+        fallback_tier=fallback_tier,
         latency_class="background",
     )
 
@@ -656,23 +662,29 @@ async def _run_storyboard_completion(
     primary_route: LLMRoute,
     postprocess: Callable[[StoryboardPayload], StoryboardPayload] | None = None,
 ) -> StoryboardPayload:
-    """Run the primary (mid-tier) attempt and escalate to strong on quality failure.
+    """Run the primary (cheap) attempt and escalate one tier on quality failure.
+
+    Storyboard uses the product-wide cheap-primary policy: the primary route is
+    the provider's cheap tier and ``primary_route.fallback_tier`` is the
+    escalation target (``mid`` while ``core_cheap_primary`` is live; ``strong``
+    when reverted to mid-first).
 
     Transport failures (timeout, provider error) are re-raised immediately
-    without escalation — strong is slower and pricier; a timed-out mid attempt
-    is unlikely to recover on strong.  Quality failures (schema/parse/grounding
-    errors) trigger a one-shot strong-tier retry with a fresh repair budget.
+    without escalation — the escalation tier is slower and pricier, and a
+    timed-out primary attempt is unlikely to recover on it.  Quality failures
+    (schema/parse/grounding errors, which a truncated payload also surfaces)
+    trigger a one-shot escalation with a fresh repair budget.
 
-    For Google, the only strong candidate (Pro Preview) is preview-only and
-    therefore skipped by the routing layer, causing ``LLMRoutingError``.  That
-    case is caught and treated as ``no_route``: the original quality failure is
-    re-raised without an escalation attempt.
+    When the provider has no active model at the escalation tier (e.g. Google,
+    whose only strong candidate is preview-only and floors at mid with no further
+    tier), routing raises ``LLMRoutingError``; that is caught and treated as
+    ``no_route`` — the original quality failure is re-raised without an attempt.
 
     ``postprocess``, when provided, is called on the validated ``StoryboardPayload``
     before returning (e.g. splice+re-validate for section regeneration).  A
     ``StoryboardPayloadError`` raised inside it is treated as a quality failure
-    and triggers escalation the same way — the strong model may produce a section
-    that splices cleanly where the mid model did not.
+    and triggers escalation the same way — the escalation model may produce a
+    section that splices cleanly where the primary model did not.
     """
     try:
         payload = await _complete_and_validate(
@@ -684,59 +696,57 @@ async def _run_storyboard_completion(
         if postprocess is not None:
             payload = postprocess(payload)
         return payload
-    except StoryboardPayloadError as mid_exc:
-        error_type = _payload_error_type(mid_exc)
+    except StoryboardPayloadError as primary_exc:
+        error_type = _payload_error_type(primary_exc)
         if error_type in ("timeout", "provider"):
             raise  # transport failure — escalation would not help
 
-        # Quality failure: attempt a one-shot escalation to the strong tier.
+        escalation_tier = primary_route.fallback_tier
+        # Quality failure: attempt a one-shot escalation to the next tier.
         try:
-            strong_route = resolve_llm_route(
+            if escalation_tier is None:
+                raise LLMRoutingError("no escalation tier for storyboard route")
+            escalation_route = resolve_llm_route(
                 operation="storyboard.generate",
                 preferred_provider=primary_route.provider,
-                requested_tier="strong",
+                requested_tier=escalation_tier,
                 fallback_tier=None,
                 latency_class="background",
             )
         except LLMRoutingError:
-            # No active strong model available for this provider (Google/Flash).
-            record_storyboard_strong_escalation(
-                action, primary_route.provider, "no_route"
-            )
+            # No active model at the escalation tier for this provider (Google).
+            record_storyboard_escalation(action, primary_route.provider, "no_route")
             logger.info(
-                "storyboard.strong_escalation_no_route",
+                "storyboard.escalation_no_route",
                 action=action,
                 provider=primary_route.provider,
-                mid_model=primary_route.model,
+                primary_model=primary_route.model,
+                escalation_tier=escalation_tier,
             )
-            raise mid_exc  # surface the original quality failure
+            raise primary_exc  # surface the original quality failure
 
-        record_storyboard_strong_escalation(action, primary_route.provider, "attempted")
+        record_storyboard_escalation(action, primary_route.provider, "attempted")
         logger.info(
-            "storyboard.strong_escalation",
+            "storyboard.escalation",
             action=action,
             provider=primary_route.provider,
-            mid_model=primary_route.model,
-            strong_model=strong_route.model,
+            primary_model=primary_route.model,
+            escalation_model=escalation_route.model,
         )
         try:
             payload = await _complete_and_validate(
                 source,
-                provider=strong_route.provider,
-                model=strong_route.model,
-                model_tier=strong_route.model_tier,
+                provider=escalation_route.provider,
+                model=escalation_route.model,
+                model_tier=escalation_route.model_tier,
             )
             if postprocess is not None:
                 payload = postprocess(payload)
-            record_storyboard_strong_escalation(
-                action, primary_route.provider, "succeeded"
-            )
+            record_storyboard_escalation(action, primary_route.provider, "succeeded")
             return payload
         except StoryboardPayloadError:
-            record_storyboard_strong_escalation(
-                action, primary_route.provider, "failed"
-            )
-            raise  # surface the strong attempt's failure
+            record_storyboard_escalation(action, primary_route.provider, "failed")
+            raise  # surface the escalation attempt's failure
 
 
 async def _run_full_generation(
@@ -748,13 +758,10 @@ async def _run_full_generation(
 ) -> Storyboard:
     start = time.monotonic()
     try:
-        if settings.storyboard_mid_first:
-            primary_route = _resolve_storyboard_mid_route(source)
-            payload = await _run_storyboard_completion(
-                source, action, primary_route=primary_route
-            )
-        else:
-            payload = await _complete_and_validate(source)
+        primary_route = _resolve_storyboard_primary_route(source)
+        payload = await _run_storyboard_completion(
+            source, action, primary_route=primary_route
+        )
     except StoryboardPayloadError as exc:
         record_storyboard_generation_duration(action, time.monotonic() - start)
         # Failure after the debit: mark failed + refund exactly once, then
@@ -807,17 +814,13 @@ async def _run_section_generation(
             ) from e
 
     try:
-        if settings.storyboard_mid_first:
-            primary_route = _resolve_storyboard_mid_route(source)
-            payload = await _run_storyboard_completion(
-                source,
-                action,
-                primary_route=primary_route,
-                postprocess=_postprocess_section,
-            )
-        else:
-            new_payload = await _complete_and_validate(source)
-            payload = _postprocess_section(new_payload)
+        primary_route = _resolve_storyboard_primary_route(source)
+        payload = await _run_storyboard_completion(
+            source,
+            action,
+            primary_route=primary_route,
+            postprocess=_postprocess_section,
+        )
     except StoryboardPayloadError as exc:
         record_storyboard_generation_duration(action, time.monotonic() - start)
         error_type = _payload_error_type(exc)

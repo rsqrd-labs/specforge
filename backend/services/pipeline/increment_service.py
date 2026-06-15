@@ -81,6 +81,7 @@ from services.llm.gateway import get_llm
 from services.llm.instrumented_adapter import InstrumentedAdapter
 from services.llm.output_budget import output_budget_for_operation
 from services.llm.routing import LLMRoutingError, resolve_llm_route
+from services.llm.tier_policy import generation_tier_policy
 from services.observability import (
     GITHUB_AUDIT_INCREMENT_PUSHED,
     GITHUB_AUDIT_PR_OPENED,
@@ -101,11 +102,12 @@ logger = logging.getLogger(__name__)
 INCREMENT_CREDIT_COST = 5
 
 # Increment generation produces TASKS-shaped output and shares the
-# ``tasks.generate`` operation/budget. Keep it on the same mid (fast/cheap)
-# route as TASKS generation; scoped deltas still need reliable traceability
-# and stable task refs.
+# ``tasks.generate`` operation/budget. It follows the same product-wide
+# cheap-primary→mid policy as TASKS generation (issue #17 follow-up): the cheap
+# tier is the primary and mid is the one-shot escalation. Scoped deltas still
+# need reliable traceability and stable task refs, which the cheap primary
+# carries via the same operation contract.
 _INCREMENT_OPERATION = "tasks.generate"
-_INCREMENT_TIERS = ("mid", None)
 
 # Cap the persisted increment title so an oversized feature request cannot bloat
 # the row; the full request still drives generation.
@@ -328,7 +330,7 @@ class IncrementService:
     # ------------------------------------------------------------------ helpers
 
     def _resolve_route(self, workspace: Workspace):
-        requested_tier, fallback_tier = _INCREMENT_TIERS
+        requested_tier, fallback_tier = generation_tier_policy(workspace.provider)
         try:
             return resolve_llm_route(
                 operation=_INCREMENT_OPERATION,

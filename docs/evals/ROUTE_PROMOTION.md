@@ -50,9 +50,12 @@ promotion review. Only promote (flip `core_complexity_routing` to true by
 default) if cost drops and no quality / security / traceability metric regresses.
 
 Storyboard generation is validated through its own `StoryboardPayload` schema +
-grounding path (Phase 1, `storyboard_mid_first`), not the deterministic
-route-eval simulated output; it carries a route gate entry only so the gate
-config is complete and its route resolves.
+grounding path, not the deterministic route-eval simulated output; it carries a
+route gate entry only so the gate config is complete and its route resolves.
+Since the issue #17 follow-up it shares the product-wide cheap-primary→mid
+policy (`generation_tier_policy`, gated by `core_cheap_primary`); the quality of
+the cheap storyboard primary vs. mid is a live manual check, since the dry run is
+tier-identical.
 
 **Classifier watch list (check before defaulting `core_complexity_routing` on):**
 the regulated-keyword set is deliberately broad on a few high-frequency terms —
