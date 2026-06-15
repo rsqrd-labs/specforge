@@ -122,7 +122,7 @@ required; consider pinning to `22.12` for determinism (optional).
 - [x] `pnpm tsc`, `pnpm test`, `pnpm build` all green. *(Phase 3: tsc clean; 266/266 tests; build 228ms.)*
 - [x] All three `vitest.harness.config.ts` CI contracts green. *(Phase 3: phase13/14/24 → 63/63.)*
 - [x] `dist/` has the three manual chunks and minified CSS. *(Phase 3: codemirror/react/vendor + 216.79 kB CSS.)*
-- [ ] Dependabot alert #5 closed as fixed (not dismissed). *(Phase 4 verified alert #5 = esbuild / GHSA-gv7w-rqvm-qjhr / manifest `frontend/pnpm-lock.yaml`, currently `open`; auto-closes as **fixed** when the lockfile merges to `main` — deliberately NOT manually dismissed. Closes in Phase 5.)*
+- [x] Dependabot alert #5 closed as fixed (not dismissed). *(Phase 5: PR #32 merged to `main` (`72670c6`); Dependabot auto-resolved alert #5 — `state: fixed`, GHSA-gv7w-rqvm-qjhr, esbuild — never manually dismissed.)*
 - [x] Build target decision documented in `vite.config.ts`. *(Phase 2: pinned `baseline-widely-available`.)*
 
 ## Rollback
@@ -175,6 +175,29 @@ currently `open`. It is **not** manually dismissed: Dependabot auto-resolves it
 to **fixed** once the vulnerable version leaves the `main`-branch lockfile
 (Phase 5, post-merge), satisfying the "closed as fixed (not dismissed)"
 criterion.
+
+## Phase 5 result — shipped to main, CVE auto-closed
+
+- Branch `chore/vite8-upgrade` pushed; **PR #32** opened against `main`.
+- Frontend CI job **passed** (`pnpm install --frozen-lockfile` → `pnpm audit
+  --audit-level moderate` → `pnpm tsc` → `pnpm test` 266/266 → phase13/14/24
+  harness contracts 63/63 → `pnpm build`). Secret Scan, both CodeQL Analyze
+  jobs, and the Worker Image Build also passed.
+- Merged to `main` as `72670c6` (fast-forward of the single commit
+  `7316be0`); branch deleted.
+- Dependabot alert #5 auto-transitioned to **`state: fixed`** once the
+  de-esbuilded lockfile landed on `main` — satisfying "closed as fixed (not
+  dismissed)".
+
+**Pre-existing, unrelated CI note (not introduced here):** the `Backend`
+job is red on `main` *independently of this change* —
+`harness/tests/backend/test_langfuse_contract.py` asserts
+`BaseLLMAdapter.stream` has signature `[self, system, user, max_tokens]`, but
+the live adapter (`backend/services/llm/base.py`) now carries a
+`cache_system` kwarg from the issue-#27 work. That same failure is present on
+the base commit `dd5fcd7` (CI run on the pre-merge `main` also concluded
+`failure`), so this frontend-only PR neither caused nor worsened it. It is a
+separate harness-contract drift to address under issue #27, not this CVE work.
 
 ## Out of scope / notes
 
