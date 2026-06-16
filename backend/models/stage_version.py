@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING
 from uuid import UUID as PythonUUID
 
 from sqlalchemy import CheckConstraint, ForeignKey, Integer, Text, func, text
-from sqlalchemy.dialects.postgresql import TIMESTAMP, UUID
+from sqlalchemy.dialects.postgresql import JSONB, TIMESTAMP, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from models import Base
@@ -37,6 +37,15 @@ class StageVersion(Base):
     version: Mapped[int] = mapped_column(Integer, nullable=False)
     content: Mapped[str] = mapped_column(Text, nullable=False)
     created_by: Mapped[str] = mapped_column(Text, nullable=False)
+    # Brave web-research provenance (issue #12, Phase 4). Both NULL unless this
+    # version was generated with grounding actually injected — so a populated
+    # research_context is the authoritative "this generation used web research"
+    # signal (more accurate than the workspace opt-in flag, which only says it
+    # *may*). research_context is the exact, sanitised block fed to the model
+    # (reproducible/diffable); research_sources is its provenance list of
+    # ``{"url": ..., "title": ...}`` (http/https only, sanitised upstream).
+    research_context: Mapped[str | None] = mapped_column(Text, nullable=True)
+    research_sources: Mapped[list | None] = mapped_column(JSONB, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True),
         nullable=False,

@@ -74,6 +74,11 @@ export interface Stage {
   updated_at: string
 }
 
+export interface ResearchSource {
+  url: string
+  title: string
+}
+
 export interface StageVersion {
   id: string
   stage_id: string
@@ -81,6 +86,14 @@ export interface StageVersion {
   content: string
   created_by: "user" | "ai"
   created_at: string
+  /**
+   * Brave web-research provenance (issue #12, Phase 4). Present only when this
+   * version was generated with grounding injected; research_context being set is
+   * the authoritative "this version used web research" signal. Source URLs are
+   * http/https-allowlisted server-side.
+   */
+  research_context?: string | null
+  research_sources?: ResearchSource[] | null
 }
 
 export interface EvalResult {

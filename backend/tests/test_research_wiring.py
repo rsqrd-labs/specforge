@@ -26,11 +26,12 @@ from fastapi import HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config import settings
-from models import Workspace
+from models import StageVersion, Workspace
 from routers.workspace import set_workspace_research
 from schemas.workspace import WorkspaceResearchToggle
 from services.pipeline.critic import StageCriticResult
 from services.pipeline.stage_manager import StageManager
+from services.research.research_service import ResearchContext, ResearchSource
 
 _FETCH = "services.pipeline.stage_manager.research_service.fetch_context"
 
@@ -85,7 +86,7 @@ async def test_free_run_skips_research_entirely() -> None:
             credit_cost=10,
             free=True,
         )
-    assert out == ""
+    assert out.is_empty
     fetch.assert_not_awaited()
 
 
@@ -105,7 +106,7 @@ async def test_insufficient_surplus_skips_research() -> None:
             credit_cost=10,
             free=False,
         )
-    assert out == ""
+    assert out.is_empty
     fetch.assert_not_awaited()
 
 
@@ -116,7 +117,10 @@ async def test_sufficient_surplus_delegates_and_returns_block() -> None:
     user = _user(balance=100)
     ws = _workspace()
     redis = MagicMock()
-    with patch(_FETCH, new_callable=AsyncMock, return_value="BLOCK") as fetch:
+    block = ResearchContext(
+        block="BLOCK", sources=(ResearchSource("https://a.com", "A"),)
+    )
+    with patch(_FETCH, new_callable=AsyncMock, return_value=block) as fetch:
         out = await svc._fetch_research_context(
             ws,
             "spec",
@@ -125,7 +129,7 @@ async def test_sufficient_surplus_delegates_and_returns_block() -> None:
             credit_cost=10,
             free=False,
         )
-    assert out == "BLOCK"
+    assert out is block
     # fetch_context receives a DEDICATED session (not the preflight's db) so the
     # brave charge commit can't release the stage's FOR UPDATE lock early.
     fetch.assert_awaited_once()
@@ -142,7 +146,8 @@ async def test_unknown_balance_is_permissive() -> None:
     """A non-int balance (unknown) defers to fetch_context's own pre-check
     rather than blocking enrichment outright."""
     svc = StageManager(redis_client=MagicMock())
-    with patch(_FETCH, new_callable=AsyncMock, return_value="BLOCK") as fetch:
+    block = ResearchContext(block="BLOCK")
+    with patch(_FETCH, new_callable=AsyncMock, return_value=block) as fetch:
         out = await svc._fetch_research_context(
             _workspace(),
             "spec",
@@ -151,7 +156,7 @@ async def test_unknown_balance_is_permissive() -> None:
             credit_cost=10,
             free=False,
         )
-    assert out == "BLOCK"
+    assert out is block
     fetch.assert_awaited_once()
 
 
@@ -265,7 +270,10 @@ async def test_generate_injects_block_for_opted_in_workspace(
         patch(
             "services.pipeline.stage_manager.research_service.fetch_context",
             new_callable=AsyncMock,
-            return_value="## External Research Context\nSENTINEL",
+            return_value=ResearchContext(
+                block="## External Research Context\nSENTINEL",
+                sources=(ResearchSource("https://src.example/a", "Source A"),),
+            ),
         ) as mock_fetch,
         patch(
             "services.pipeline.stage_manager.critic_review",
@@ -281,6 +289,15 @@ async def test_generate_injects_block_for_opted_in_workspace(
         mock_build.await_args.kwargs["research_context"]
         == "## External Research Context\nSENTINEL"
     )
+    # Phase 4: the grounding is persisted on the new StageVersion (block +
+    # sources) so the generation is reproducible and can show its provenance.
+    versions = [a for a in db.added if isinstance(a, StageVersion)]
+    assert versions, "a StageVersion must be persisted"
+    persisted = versions[-1]
+    assert persisted.research_context == "## External Research Context\nSENTINEL"
+    assert persisted.research_sources == [
+        {"url": "https://src.example/a", "title": "Source A"}
+    ]
 
 
 @pytest.mark.asyncio
@@ -313,3 +330,8 @@ async def test_generate_passes_empty_context_when_not_opted_in(
         [t async for t in svc.generate(stage.id, user, db)]
 
     assert mock_build.await_args.kwargs["research_context"] == ""
+    # A non-grounded version leaves the research columns NULL (not "").
+    versions = [a for a in db.added if isinstance(a, StageVersion)]
+    assert versions, "a StageVersion must be persisted"
+    assert versions[-1].research_context is None
+    assert versions[-1].research_sources is None

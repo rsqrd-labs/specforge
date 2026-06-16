@@ -111,6 +111,8 @@ from services.pipeline.tech_safety import (
     validate_technology_safety,
 )
 from services.research import research_service
+from services.research.research_service import _EMPTY as _EMPTY_RESEARCH
+from services.research.research_service import ResearchContext
 from services.security.output_validator import validate
 from services.security.problem_statement_gate import (
     ProblemStatementValidationError,
@@ -1640,8 +1642,8 @@ class StageManager:
         *,
         credit_cost: int,
         free: bool,
-    ) -> str:
-        """Resolve the optional Brave web-research block, or ``""`` (issue #12).
+    ) -> ResearchContext:
+        """Resolve the optional Brave web-research context, or ``_EMPTY`` (issue #12).
 
         Gated so research can NEVER block or starve a generation:
 
@@ -1658,8 +1660,12 @@ class StageManager:
         * **``research_service.fetch_context`` is itself fully fail-open** — every
           miss (feature off, not opted in, out-of-scope stage, quota spent,
           insufficient credits, Redis/HTTP failure, empty or all-unsafe grounding)
-          returns ``""``, which ``build_prompt`` treats as a no-op yielding a
-          byte-identical prompt. It never raises.
+          returns ``_EMPTY`` (``block == ""``), whose ``.block`` ``build_prompt``
+          treats as a no-op yielding a byte-identical prompt. It never raises.
+
+        Returns a ``ResearchContext``: ``.block`` feeds the prompt and ``.sources``
+        is persisted on the StageVersion (Phase 4). On a skip we return the shared
+        ``_EMPTY`` sentinel — no block, no sources.
 
         fetch_context commits its own credit charge, so it is handed a **dedicated
         DB session** rather than the preflight's ``db``: committing on ``db`` would
@@ -1672,13 +1678,13 @@ class StageManager:
         generation deduct on the main session consistent.
         """
         if free:
-            return ""
+            return _EMPTY_RESEARCH
         research_charge = settings.billing_credits_brave_research
         visible_balance = getattr(user, "credit_balance", None)
         if isinstance(visible_balance, int) and visible_balance < (
             credit_cost + research_charge
         ):
-            return ""
+            return _EMPTY_RESEARCH
         from database import AsyncSessionLocal  # noqa: PLC0415
 
         async with AsyncSessionLocal() as research_db:
@@ -1824,7 +1830,9 @@ class StageManager:
         # Brave call — and baked into user_prompt once. The mid-tier escalation
         # retry reuses this same user_prompt, so a retry never re-fetches or
         # re-charges. See _fetch_research_context for the fail-open gating.
-        research_context = await self._fetch_research_context(
+        # (Phase 4): the block feeds the prompt and the full context (block +
+        # sources) is threaded to the pipeline to persist on the StageVersion.
+        research = await self._fetch_research_context(
             workspace,
             stage.type,
             user,
@@ -1833,7 +1841,7 @@ class StageManager:
             free=free,
         )
         system_prompt, user_prompt = await build_prompt(
-            stage.type, workspace, db, redis, research_context=research_context
+            stage.type, workspace, db, redis, research_context=research.block
         )
 
         deduction = (
@@ -1879,6 +1887,7 @@ class StageManager:
                 user_prompt=user_prompt,
                 cache_key=cache_key,
                 phase=phase_tracker,
+                research=research,
             )
         )
         # The sentinel is enqueued from the done-callback (not the pipeline
@@ -1940,6 +1949,7 @@ class StageManager:
         user_prompt: str,
         cache_key: str,
         phase: _PhaseTracker,
+        research: ResearchContext = _EMPTY_RESEARCH,
     ) -> None:
         """Run the full post-preflight generation pipeline for generate().
 
@@ -2439,6 +2449,14 @@ class StageManager:
                 version=stage.current_version,
                 content=accumulated,
                 created_by="ai",
+                # Issue #12 (Phase 4): persist the grounding actually injected into
+                # this generation so it is reproducible/diffable and can show its
+                # provenance. NULL unless research was non-empty — a populated
+                # research_context is the authoritative "this version used web
+                # research" signal (cache-restored grounding included; that path
+                # carries no charge, so version↔COGS is intentionally not 1:1).
+                research_context=research.block or None,
+                research_sources=research.sources_as_dicts() or None,
             )
             db.add(version)
             await db.flush()

@@ -430,6 +430,44 @@ Conventions: every phase is mergeable on its own with the feature **dark**
 - **Acceptance:** a grounded generation shows its research block + sources on the version;
   COGS and user-credit debits reconcile 1:1.
 
+**Implementation notes / decisions made while building Phase 4 (2026-06-17):**
+- **`fetch_context` now returns a `ResearchContext{block, sources}`** (was a bare
+  `str`), so the block (prompt) and its provenance (persistence) flow out together
+  from the one place that has the parsed Brave result. Every fail-open miss returns
+  the single canonical `_EMPTY` sentinel (`block == ""`, no sources), so the
+  fail-open spine is unchanged and `build_prompt(research_context=ctx.block)` stays
+  byte-identical on a miss. `sources` is `[{url, title}]` for *only the items
+  actually injected* into the block (mirrors the block, not the full result).
+- **Persistence:** two nullable columns on `StageVersion` — `research_context`
+  (Text, the exact injected block) and `research_sources` (JSONB). A populated
+  `research_context` is the authoritative "this version used web research" signal
+  (more accurate than the workspace opt-in flag), which is why the frontend badge
+  reads off the version, not the toggle. Both NULL on a non-grounded version
+  (Alembic 0024). The persist happens in `_execute_generation_pipeline` (the sole
+  success-persist on the research path; the cache-hit early-return never fetches).
+- **Source-URL XSS guard:** every source URL is scheme-allowlisted to http/https at
+  the single backend chokepoint (`_safe_http_url` in `_assemble_block`) before it is
+  ever persisted, and re-validated on cache deserialize and again client-side —
+  defense in depth so a `javascript:`/`data:` URL can never reach an `<a href>`.
+- **Cache is now a JSON envelope** `{block, sources}` (was a bare string) so a
+  *generation-cache miss + research-cache hit* still restores sources onto the
+  version. Deserialize is defensive: legacy bare strings, corrupt JSON, and tampered
+  values all degrade to `_EMPTY` or a source-less block.
+- **COGS:** one `llm_cost_events` row (`provider="brave"`, `model="llm-context"`,
+  `operation="brave_research"`, `estimated_cost_usd=brave_cost_usd_per_call`) is
+  written at the same call site and under the same success condition as the credit
+  debit, so **charge↔COGS is 1:1** — *best-effort, not transactional*:
+  `persist_cost_event` is own-session/error-swallowing and gated by
+  `llm_cost_ledger_enabled`, so a disabled/failed ledger yields a debit with no COGS
+  row (correct: the ledger must never unwind a charge). **version↔COGS is
+  deliberately NOT 1:1** — a research-cache-hit version is grounded yet free (no
+  paid call, no charge, no COGS row). Brave rows carry no `output_tokens`, so they
+  never pollute the token-percentile / latency rollups.
+- **Dashboards:** no Grafana JSON is tracked in this repo (observability is the
+  Prometheus `/metrics` endpoint + the cost ledger). The Phase-1/2 `brave_*` metrics
+  and the new `provider="brave"` COGS rows are the data source; building the actual
+  Grafana panel is an ops task, not a code change here.
+
 ### Phase 5 — Pre-launch validation → flag flip
 - `backend/scripts/compare_brave_grounding.py`: run a fixed corpus of problem statements
   through generation **with Brave on vs off**, dump the deterministic critic/eval findings

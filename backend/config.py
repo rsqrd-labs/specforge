@@ -304,6 +304,12 @@ class Settings(BaseSettings):
     # Provisional placeholder — final price (§13 open question) is set from the
     # $5/1k Brave cost plus margin and confirmed with billing before launch.
     billing_credits_brave_research: int = 1
+    # COGS (Phase 4): platform USD cost of one paid Brave call, recorded on an
+    # ``llm_cost_events`` row (provider="brave") per paid fetch so platform spend
+    # and the user-facing credit debit reconcile. Default = Brave Search plan
+    # $5 / 1000 requests = $0.005 / request; revisit if we move to the
+    # token-metered AI-grounding plan (§13 open question).
+    brave_cost_usd_per_call: float = 0.005
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

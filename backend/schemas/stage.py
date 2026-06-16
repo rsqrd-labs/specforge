@@ -132,6 +132,19 @@ class StageResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+class ResearchSourceResponse(BaseModel):
+    """One provenance entry for a grounded version (issue #12, Phase 4).
+
+    URL is allowlisted to http/https at assembly time on the backend, so the
+    frontend can render it as a link without re-validating; title is already
+    sanitised."""
+
+    url: str
+    title: str = ""
+
+    model_config = ConfigDict(from_attributes=True)
+
+
 class StageVersionResponse(BaseModel):
     id: UUID
     stage_id: UUID
@@ -139,6 +152,11 @@ class StageVersionResponse(BaseModel):
     content: str
     created_by: Literal["user", "ai"]
     created_at: datetime
+    # Brave web-research provenance (issue #12, Phase 4). Both None unless this
+    # version was generated with grounding injected; research_context present is
+    # the authoritative "used web research" signal for the version view.
+    research_context: str | None = None
+    research_sources: list[ResearchSourceResponse] | None = None
 
     model_config = ConfigDict(from_attributes=True)
 

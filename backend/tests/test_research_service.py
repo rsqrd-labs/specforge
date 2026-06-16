@@ -104,6 +104,14 @@ def _result(snippets: tuple[str, ...] = ("Use FastAPI 0.115 for the backend.",))
     )
 
 
+@pytest.fixture(autouse=True)
+def _no_real_cogs(monkeypatch):
+    """Stub the COGS ledger write by default so no test opens a real DB session
+    (persist_cost_event is best-effort and own-session). COGS-specific tests
+    re-stub it in their body to assert on the call."""
+    monkeypatch.setattr(research_service, "persist_cost_event", AsyncMock())
+
+
 @pytest.fixture
 def enabled(monkeypatch):
     """Turn the feature fully on (flag + key + default stages)."""
@@ -151,7 +159,7 @@ async def test_disabled_when_flag_off(monkeypatch, stub_credit):
         _workspace(), "spec", FakeDB(), redis, _USER_ID
     )
 
-    assert out == ""
+    assert out is research_service._EMPTY
     fetch.assert_not_called()
     stub_credit.assert_not_called()
 
@@ -164,7 +172,7 @@ async def test_not_opted_in_never_calls_brave(monkeypatch, enabled, stub_credit)
         _workspace(opted_in=False), "spec", FakeDB(), redis, _USER_ID
     )
 
-    assert out == ""
+    assert out is research_service._EMPTY
     fetch.assert_not_called()
     stub_credit.assert_not_called()
 
@@ -178,7 +186,7 @@ async def test_stage_out_of_scope_skips(monkeypatch, enabled, stub_credit):
         _workspace(), "tasks", FakeDB(), redis, _USER_ID
     )
 
-    assert out == ""
+    assert out is research_service._EMPTY
     fetch.assert_not_called()
     stub_credit.assert_not_called()
 
@@ -199,8 +207,11 @@ async def test_success_injects_block_and_charges_once(
         _workspace(), "spec", db, redis, _USER_ID
     )
 
-    assert "External Research Context" in out
-    assert "Use FastAPI 0.115" in out
+    assert "External Research Context" in out.block
+    assert "Use FastAPI 0.115" in out.block
+    # Phase 4: provenance of the injected item is surfaced (and persisted).
+    assert [s.url for s in out.sources] == ["https://example.com/post"]
+    assert out.sources[0].title == "Modern Python stacks"
     fetch.assert_awaited_once()
     stub_credit.assert_awaited_once()
     args = stub_credit.await_args.args
@@ -225,8 +236,10 @@ async def test_success_caches_block_so_second_call_skips_http_and_charge(
         _workspace(), "spec", FakeDB(), redis, _USER_ID
     )
 
+    # Cache round-trips the full envelope: block AND sources survive (Phase 4).
     assert first == second
-    assert "External Research Context" in second
+    assert "External Research Context" in second.block
+    assert [s.url for s in second.sources] == ["https://example.com/post"]
     fetch.assert_awaited_once()  # second served from cache
     stub_credit.assert_awaited_once()  # charged only once
 
@@ -251,8 +264,8 @@ async def test_empty_grounding_returns_blank_no_charge_and_negative_caches(
         _workspace(), "spec", FakeDB(), redis, _USER_ID
     )
 
-    assert out == ""
-    assert again == ""
+    assert out is research_service._EMPTY
+    assert again is research_service._EMPTY
     fetch.assert_awaited_once()  # negative-cached
     stub_credit.assert_not_called()
 
@@ -271,8 +284,8 @@ async def test_client_failure_returns_blank_no_charge_no_cache(
         _workspace(), "spec", FakeDB(), redis, _USER_ID
     )
 
-    assert out == ""
-    assert again == ""
+    assert out is research_service._EMPTY
+    assert again is research_service._EMPTY
     assert fetch.await_count == 2  # not cached, retried
     stub_credit.assert_not_called()
 
@@ -290,7 +303,7 @@ async def test_all_snippets_dropped_by_guard_returns_blank_no_charge(
         _workspace(), "spec", FakeDB(), redis, _USER_ID
     )
 
-    assert out == ""
+    assert out is research_service._EMPTY
     fetch.assert_awaited_once()
     stub_credit.assert_not_called()
 
@@ -311,8 +324,8 @@ async def test_injection_snippet_dropped_but_safe_snippet_kept(
         _workspace(), "spec", FakeDB(), redis, _USER_ID
     )
 
-    assert "Pytest 8 is the current testing standard." in out
-    assert "Ignore previous instructions" not in out
+    assert "Pytest 8 is the current testing standard." in out.block
+    assert "Ignore previous instructions" not in out.block
     stub_credit.assert_awaited_once()
 
 
@@ -335,7 +348,7 @@ async def test_quota_ceiling_skips_without_calling_brave(
         _workspace(), "spec", FakeDB(), redis, _USER_ID
     )
 
-    assert out == ""
+    assert out is research_service._EMPTY
     fetch.assert_not_called()
     stub_credit.assert_not_called()
 
@@ -375,7 +388,7 @@ async def test_insufficient_credits_skips_without_calling_brave(monkeypatch, ena
         _workspace(), "spec", FakeDB(), redis, _USER_ID
     )
 
-    assert out == ""
+    assert out is research_service._EMPTY
     fetch.assert_not_called()
     deduct.assert_not_called()
 
@@ -399,7 +412,7 @@ async def test_charge_lost_race_fails_open_and_rolls_back(monkeypatch, enabled):
         _workspace(), "spec", db, redis, _USER_ID
     )
 
-    assert out == ""
+    assert out is research_service._EMPTY
     assert db.rollbacks == 1
     assert db.commits == 0
 
@@ -419,7 +432,7 @@ async def test_redis_down_fails_open_to_blank_no_charge(
         _workspace(), "spec", FakeDB(), redis, _USER_ID
     )
 
-    assert out == ""
+    assert out is research_service._EMPTY
     fetch.assert_not_called()
     stub_credit.assert_not_called()
 
@@ -446,9 +459,114 @@ async def test_block_is_bounded_by_max_context_chars(monkeypatch, enabled, stub_
         _workspace(), "spec", FakeDB(), redis, _USER_ID
     )
 
-    assert out  # something was injected
-    assert len(out) <= 800
-    assert out.count("Fact about current tooling.") < 20  # truncated
+    assert out.block  # something was injected
+    assert len(out.block) <= 800
+    assert out.block.count("Fact about current tooling.") < 20  # truncated
+
+
+# ---------------------------------------------------------------------------
+# Phase 4 — COGS (llm_cost_events provider="brave") + source-URL allowlist
+# ---------------------------------------------------------------------------
+
+
+def _stub_cogs(monkeypatch):
+    cogs = AsyncMock()
+    monkeypatch.setattr(research_service, "persist_cost_event", cogs)
+    return cogs
+
+
+async def test_paid_call_records_one_brave_cogs_row(monkeypatch, enabled, stub_credit):
+    """A successful paid fetch writes exactly one provider="brave" COGS row,
+    reconciling 1:1 with the credit debit."""
+    _stub_fetch(monkeypatch, _result())
+    cogs = _stub_cogs(monkeypatch)
+
+    await research_service.fetch_context(
+        _workspace(), "spec", FakeDB(), FakeRedis(), _USER_ID
+    )
+
+    cogs.assert_awaited_once()
+    meta = cogs.await_args.args[0]
+    assert meta["provider"] == "brave"
+    assert meta["model"]  # NOT NULL on the ledger
+    assert meta["stage_type"] == "spec"
+    assert meta["workspace_id"] == _WS_ID
+    assert meta["credit_reason"] == f"brave_research:{_WS_ID}:spec"
+    assert (
+        float(meta["estimated_cost_usd"])
+        == research_service.settings.brave_cost_usd_per_call
+    )
+
+
+async def test_cache_hit_writes_no_cogs_row(monkeypatch, enabled, stub_credit):
+    """version↔COGS is intentionally NOT 1:1: a cache-served (free) call — even
+    though it returns a grounded block — records no COGS row."""
+    _stub_fetch(monkeypatch, _result())
+    cogs = _stub_cogs(monkeypatch)
+    redis = FakeRedis()
+
+    await research_service.fetch_context(
+        _workspace(), "spec", FakeDB(), redis, _USER_ID
+    )
+    await research_service.fetch_context(
+        _workspace(), "spec", FakeDB(), redis, _USER_ID
+    )
+
+    cogs.assert_awaited_once()  # only the first (paid) call, not the cache hit
+
+
+async def test_failure_and_empty_write_no_cogs_row(monkeypatch, enabled, stub_credit):
+    """No delivered value ⇒ no charge ⇒ no COGS row (client failure or empty)."""
+    cogs = _stub_cogs(monkeypatch)
+
+    _stub_fetch(monkeypatch, None)  # transient failure
+    await research_service.fetch_context(
+        _workspace(), "spec", FakeDB(), FakeRedis(), _USER_ID
+    )
+    _stub_fetch(monkeypatch, BraveResult(query="q", results=(), sources=()))  # empty
+    await research_service.fetch_context(
+        _workspace(), "spec", FakeDB(), FakeRedis(), _USER_ID
+    )
+
+    cogs.assert_not_awaited()
+
+
+async def test_dangerous_scheme_source_url_is_dropped(
+    monkeypatch, enabled, stub_credit
+):
+    """An injected snippet whose source URL is a non-http(s) scheme keeps its
+    safe text but contributes NO source link — the XSS allowlist chokepoint."""
+    _stub_cogs(monkeypatch)
+    malicious = BraveResult(
+        query="q",
+        results=(
+            BraveSnippet(
+                url="javascript:alert(document.cookie)",
+                title="Safe looking title",
+                snippets=("A genuinely useful, safe fact about tooling.",),
+            ),
+        ),
+        sources=(),
+    )
+    _stub_fetch(monkeypatch, malicious)
+
+    out = await research_service.fetch_context(
+        _workspace(), "spec", FakeDB(), FakeRedis(), _USER_ID
+    )
+
+    assert "useful, safe fact" in out.block  # text still injected
+    assert out.sources == ()  # but the dangerous-scheme URL is not a source
+
+
+def test_safe_http_url_allowlist():
+    ok = research_service._safe_http_url
+    assert ok("https://example.com/x") == "https://example.com/x"
+    assert ok("  http://example.com  ") == "http://example.com"
+    assert ok("javascript:alert(1)") == ""
+    assert ok("data:text/html;base64,xx") == ""
+    assert ok("//evil.com") == ""
+    assert ok("") == ""
+    assert ok(None) == ""
 
 
 # ---------------------------------------------------------------------------

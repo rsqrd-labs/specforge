@@ -129,6 +129,53 @@ def test_generate_preflight_wires_research_service() -> None:
     src = read_backend_file("services", "pipeline", "stage_manager.py")
     assert "research_service" in src
     assert "_fetch_research_context" in src
-    assert "research_context=research_context" in src, (
+    assert "research_context=research.block" in src, (
         "generate() must pass the fetched block into build_prompt."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Phase 4 — StageVersion persistence + COGS visibility.
+# ---------------------------------------------------------------------------
+
+
+def test_stage_version_has_research_persistence_columns() -> None:
+    src = read_backend_file("models", "stage_version.py")
+    assert "research_context" in src and "research_sources" in src, (
+        "StageVersion must persist the injected research block + its sources."
+    )
+
+
+def test_migration_adds_stage_version_research_columns() -> None:
+    path = BACKEND_ROOT / "migrations" / "versions"
+    matches = [
+        p
+        for p in path.glob("*.py")
+        if "research_context" in p.read_text() and "stage_versions" in p.read_text()
+    ]
+    assert matches, "An Alembic migration must add the StageVersion research columns."
+    body = matches[0].read_text()
+    assert "add_column" in body and "drop_column" in body
+
+
+def test_research_service_records_brave_cogs_row() -> None:
+    src = read_backend_file("services", "research", "research_service.py")
+    # Spend is recorded on llm_cost_events with provider="brave", per paid call.
+    assert "persist_cost_event" in src
+    assert '"provider": "brave"' in src, (
+        "Each paid Brave call must write a provider='brave' COGS row."
+    )
+
+
+def test_source_urls_are_http_allowlisted() -> None:
+    """Untrusted web source URLs are an XSS vector; they must be scheme-allowlisted
+    at the backend chokepoint before persistence/rendering."""
+    src = read_backend_file("services", "research", "research_service.py")
+    assert "_safe_http_url" in src
+
+
+def test_stage_version_response_exposes_research() -> None:
+    src = read_backend_file("schemas", "stage.py")
+    assert "research_context" in src and "research_sources" in src, (
+        "StageVersionResponse must expose the research block + sources."
     )
