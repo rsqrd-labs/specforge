@@ -52,7 +52,6 @@ scripts = ["psycopg2-binary>=2.9"]
 dev = [
     "bandit==1.*",
     "pip-audit==2.*",
-    "safety==3.*",
     "pytest==9.*",
     "pytest-asyncio==1.*",
     "pytest-cov==6.*",
