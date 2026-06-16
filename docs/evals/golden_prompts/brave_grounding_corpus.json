@@ -1,0 +1,50 @@
+[
+  {
+    "id": "billing-migration-mor",
+    "name": "Merchant-of-record billing migration",
+    "category": "pricing_and_apis",
+    "problem_statement": "Migrate a SaaS app's payments from a payment-processor integration to a merchant-of-record provider so the platform no longer handles sales tax, VAT, or chargebacks directly. Cover the webhook signature verification, idempotent credit grants, refund reversals, and a reconciliation job.",
+    "recency_rationale": "Merchant-of-record providers, their webhook signing schemes, and tax-handling guarantees change frequently; current docs and SDK names are recency-sensitive and benefit from live grounding.",
+    "stages": ["spec", "plan"]
+  },
+  {
+    "id": "fastapi-async-streaming",
+    "name": "FastAPI server-sent-events streaming service",
+    "category": "framework_versions",
+    "problem_statement": "Build a FastAPI service that streams long-running LLM generations to a browser over Server-Sent Events, with a watchdog that keeps the connection alive during silent reasoning, idempotent resume, and graceful client-disconnect handling under async SQLAlchemy.",
+    "recency_rationale": "FastAPI, Starlette, and async SQLAlchemy streaming idioms shift across releases; grounding can surface the current recommended patterns and deprecations.",
+    "stages": ["spec", "plan"]
+  },
+  {
+    "id": "llm-provider-gateway",
+    "name": "Multi-provider LLM gateway",
+    "category": "pricing_and_apis",
+    "problem_statement": "Design a unified gateway that routes generation requests across multiple frontier LLM providers, normalizing streaming token deltas, reasoning/thinking deltas, tool-use, and usage accounting behind one interface, with per-provider model catalogs and cost estimation.",
+    "recency_rationale": "Frontier model identifiers, context windows, pricing, and streaming event shapes change on a monthly cadence; this is the strongest case for live grounding to help.",
+    "stages": ["spec", "plan"]
+  },
+  {
+    "id": "oauth-pkce-spa",
+    "name": "OAuth 2.1 PKCE flow for a SPA",
+    "category": "security_best_practice",
+    "problem_statement": "Implement a secure Google sign-in flow for a single-page app using the current OAuth 2.1 best practices: PKCE, short-lived access tokens held in memory, refresh tokens in HTTP-only cookies, and CSRF protection on all mutating requests.",
+    "recency_rationale": "OAuth best-current-practice guidance (token storage, implicit-flow deprecation, PKCE) has evolved; grounding can confirm the current recommendations.",
+    "stages": ["spec", "plan"]
+  },
+  {
+    "id": "vector-search-rag",
+    "name": "Retrieval-augmented search backend",
+    "category": "framework_versions",
+    "problem_statement": "Build a retrieval-augmented search backend over a Postgres database using pgvector for embeddings, hybrid lexical-plus-semantic ranking, chunking with overlap, and a re-ranking pass, exposed as an async API with caching.",
+    "recency_rationale": "pgvector capabilities, index types, and hybrid-search recommendations change across versions; current guidance is recency-sensitive.",
+    "stages": ["spec", "plan"]
+  },
+  {
+    "id": "evergreen-todo-crud",
+    "name": "Team task tracker (recency-neutral control)",
+    "category": "control",
+    "problem_statement": "Build a collaborative task tracker where teams create projects, add tasks with assignees and due dates, comment, and see an activity feed. Standard CRUD over a relational database with role-based access control.",
+    "recency_rationale": "Deliberate control case: a well-trodden CRUD problem where current web context should add little. Grounding is expected to be neutral here, which validates that the off/on comparison does not spuriously favor grounding.",
+    "stages": ["spec", "plan"]
+  }
+]

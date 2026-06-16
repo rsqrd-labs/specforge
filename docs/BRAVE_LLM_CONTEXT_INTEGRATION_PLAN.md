@@ -479,6 +479,45 @@ Conventions: every phase is mergeable on its own with the feature **dark**
 - **Acceptance:** corpus comparison shows grounding helps (or is neutral) with no
   fail-open regressions; documented decision to enable.
 
+**Implementation notes / decisions made while building Phase 5 (2026-06-17):**
+- **Two-mode harness, mirroring `scripts/run_llm_route_eval.py`.**
+  `backend/scripts/compare_brave_grounding.py` defaults to a deterministic,
+  network-free **dry run** (CI-safe) and exposes the real comparison behind an
+  operator-gated `--live`. "(offline; no live traffic)" is read as
+  *operator-initiated, off the production serving path* — not "no API calls"; the
+  whole point of Phase 5 is a real grounding measurement, which a pure dry run
+  cannot produce.
+- **Dry run proves exactly two things** (the only things provable without
+  artifacts): corpus shape, and the **fail-open identity** — for every in-scope
+  stage, `build_user_prompt(research_context="")` is byte-identical to rendering
+  with no research key at all, and a non-empty block is injected. That empty-block
+  no-op *is* the structural "no fail-open regressions" guarantee, asserted
+  deterministically. The deterministic gates (`validate_sections`,
+  `validate_artifact_completeness`) need real artifacts, so they run only in
+  `--live`.
+- **Block built from the production seams, never `fetch_context`.** `fetch_context`
+  charges credits, consumes the daily quota, and writes the DB/COGS — wrong for a
+  comparison tool. The harness reuses `brave_client.fetch` +
+  `research_service._assemble_block` (identical header framing, sanitisation,
+  prompt-injection guard, char bound, http(s) URL allowlist) with none of the
+  billing machinery. A live run spends real Brave budget but touches **no**
+  SpecForge billing state, persists no StageVersion, and writes no COGS row.
+- **Comparison is on the deterministic gates only**, not the LLM critic (which is
+  non-deterministic). Per-stage verdict is *helps / neutral / regressed* on the
+  finding count; the run passes iff no stage regressed and no case errored. Spec
+  and plan are both covered (plan threaded off the just-generated spec via the
+  prompt module directly — no DB seeding).
+- **Honest boundary surfaced in the docs:** the live comparison is single-sample
+  and confounded by LLM sampling noise — a sound *directional* gate (a *neutral*
+  result passes by design), not a rigorous A/B. The corpus is weighted toward
+  recency-sensitive prompts plus one recency-neutral **control** so the gate
+  can't spuriously conclude grounding helps everywhere. Promotion runbook +
+  decision log: `docs/evals/BRAVE_GROUNDING_PROMOTION.md`.
+- **The flag flip stays an ops action.** `brave_search_flag` remains `false` in
+  code; flipping it is the documented launch step (instantly revertible,
+  per-workspace opt-in still gates every call). No Grafana JSON is tracked in this
+  repo (consistent with Phase 4).
+
 ---
 
 ## 13. Decisions & remaining open questions

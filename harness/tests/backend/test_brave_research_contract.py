@@ -21,9 +21,10 @@ test_prompt_builder).
 
 from __future__ import annotations
 
+import json
 import re
 
-from conftest import BACKEND_ROOT, read_backend_file
+from conftest import BACKEND_ROOT, REPO_ROOT, read_backend_file
 
 # ---------------------------------------------------------------------------
 # Phase 1 — config surface + adapter.
@@ -179,3 +180,42 @@ def test_stage_version_response_exposes_research() -> None:
     assert "research_context" in src and "research_sources" in src, (
         "StageVersionResponse must expose the research block + sources."
     )
+
+
+# ---------------------------------------------------------------------------
+# Phase 5 — offline comparison gate + flag-flip stays an ops action.
+# ---------------------------------------------------------------------------
+
+
+def test_phase5_comparison_script_exists_and_is_gated() -> None:
+    """The pre-launch comparison ships dry-run-by-default with a --live gate."""
+    src = read_backend_file("scripts", "compare_brave_grounding.py")
+    assert "--live" in src, "live mode must be an explicit, opt-in flag"
+    assert "_run_dry_run" in src and "_run_live" in src
+
+
+def test_phase5_comparison_never_bills() -> None:
+    """The comparison must reuse the assembly seams, NOT fetch_context — it must
+    never charge a credit, consume the quota, or write a COGS row."""
+    src = read_backend_file("scripts", "compare_brave_grounding.py")
+    assert "_assemble_block" in src, "block must come from the production assembler"
+    assert "fetch_context(" not in src, (
+        "the comparison must bypass fetch_context (no credit/quota/DB/COGS)."
+    )
+
+
+def test_phase5_corpus_exists_with_a_control_case() -> None:
+    """A recency-neutral control guards against spuriously favoring grounding."""
+    path = (
+        REPO_ROOT / "docs" / "evals" / "golden_prompts" / "brave_grounding_corpus.json"
+    )
+    assert path.exists(), f"Missing corpus: {path.relative_to(REPO_ROOT)}"
+    corpus = json.loads(path.read_text(encoding="utf-8"))
+    assert isinstance(corpus, list) and corpus
+    assert any(case.get("category") == "control" for case in corpus)
+
+
+def test_phase5_flag_still_ships_dark() -> None:
+    """Phase 5 delivers the *gate*, not the flip: the flag stays False in code."""
+    src = read_backend_file("config.py")
+    assert re.search(r"brave_search_flag\s*:\s*bool\s*=\s*False", src)
