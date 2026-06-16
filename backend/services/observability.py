@@ -174,6 +174,44 @@ PIPELINE_TECH_SAFETY_FINALISE_BLOCKS = Counter(
     ["stage_type", "code"],
 )
 
+# Brave LLM Context API research enrichment (issue #12). The integration is a
+# purely additive, fail-open grounding layer: every failure path returns an
+# empty research block and generation proceeds unchanged. These metrics make the
+# fail-open behaviour observable without ever recording the API key or raw
+# third-party snippets.
+#
+# Outcome ownership (avoids double-counting across phases):
+#   - the Brave HTTP client (Phase 1) emits the low-level call outcomes
+#     hit|empty|timeout|error|rate_limited and the latency histogram;
+#   - the research service (Phase 2) emits the cache-level outcomes
+#     (disabled|cache hit/miss|quota|insufficient_credits) and the injected
+#     context-size histogram.
+BRAVE_REQUESTS_TOTAL = Counter(
+    "specforge_brave_requests_total",
+    "Brave LLM Context research fetch outcomes",
+    # hit|empty|timeout|error|rate_limited (HTTP client) +
+    # disabled|quota|insufficient_credits (research service, Phase 2)
+    ["outcome"],
+)
+
+BRAVE_REQUEST_LATENCY = Histogram(
+    "specforge_brave_request_latency_seconds",
+    "Wall-clock latency of a Brave LLM Context API fetch (incl. one retry)",
+    buckets=(0.1, 0.25, 0.5, 1.0, 2.0, 4.0, 8.0, float("inf")),
+)
+
+BRAVE_CACHE_TOTAL = Counter(
+    "specforge_brave_cache_total",
+    "Brave research Redis cache lookups (emitted by the research service)",
+    ["result"],  # hit|miss
+)
+
+BRAVE_CONTEXT_CHARS = Histogram(
+    "specforge_brave_context_chars",
+    "Size in characters of the research context block injected into a prompt",
+    buckets=(0, 500, 1000, 2000, 4000, 6000, 8000, 12000, float("inf")),
+)
+
 # PDF export duration histogram — WeasyPrint is CPU-bound and blocks the
 # thread-pool executor thread for 0.5–3 s per render. Observing duration
 # makes event-loop-blocking outliers (C-4) visible.

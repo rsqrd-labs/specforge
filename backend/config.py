@@ -268,6 +268,43 @@ class Settings(BaseSettings):
     # and the correction endpoint 403s for everyone (closed by default).
     admin_user_emails: str = ""
 
+    # Brave LLM Context API research enrichment (issue #12) — mirrors the
+    # langfuse/lemonsqueezy optional-integration shape. The feature is a purely
+    # *additive*, fail-open web-grounding layer: when it is off, unconfigured, or
+    # failing at runtime, generation proceeds identically to today on an empty
+    # research block. Leaving brave_search_api_key empty disables the feature with
+    # zero network traffic; brave_search_flag is a second, explicit kill-switch so
+    # the integration can be flipped on/off without rotating the key. Both must be
+    # set for ``brave_search_enabled`` to be true (and even then every actual call
+    # is further gated per-workspace + per-stage + per-credit; see the plan §3).
+    brave_search_api_key: str = ""
+    brave_search_flag: bool = False
+    # Stages that benefit from grounding (spec/plan); 'tasks' is pure decomposition
+    # of upstream artifacts and is intentionally excluded by default.
+    brave_research_stages: str = "spec,plan"
+    # Hard per-fetch latency budget — far tighter than Brave's 30s suggestion so a
+    # slow third party can add at most this many seconds to a generation (and 0s
+    # when cached or disabled).
+    brave_timeout_seconds: float = 4.0
+    # Redis cache TTL for a fetched research block; keeps regenerate loops and
+    # bursty traffic off the per-query meter. 6h is a freshness-vs-cost tradeoff.
+    brave_cache_ttl_seconds: int = 21600
+    # Brave context size control (contract range 1024–32768).
+    brave_max_tokens: int = 8192
+    # Upper bound on the injected research block so it cannot crowd out upstream
+    # deps or blow the context window.
+    brave_max_context_chars: int = 12000
+    # Per-workspace daily call ceiling enforced in Redis; protects the monthly
+    # free/paid quota from runaway loops. Over-ceiling fails open to no research.
+    brave_max_calls_per_workspace_per_day: int = 20
+    # Freshness bias toward recent best-practices (pd|pw|pm|py or a date range).
+    brave_freshness: str = "py"
+    # Credits charged per *successful paid* Brave fetch (cache hits, failures,
+    # timeouts, empty results, and the disabled/not-opted-in paths cost nothing).
+    # Provisional placeholder — final price (§13 open question) is set from the
+    # $5/1k Brave cost plus margin and confirmed with billing before launch.
+    billing_credits_brave_research: int = 1
+
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     @field_validator("eval_score_sample_rate")
@@ -329,6 +366,33 @@ class Settings(BaseSettings):
             for email in self.admin_user_emails.split(",")
             if email.strip()
         }
+
+    @property
+    def brave_search_enabled(self) -> bool:
+        """True only when Brave research is fully configured AND switched on.
+
+        The single source of truth for "is Brave on": the integration needs a
+        non-empty subscription key *and* the explicit ``brave_search_flag``
+        kill-switch flipped on. An empty key alone keeps it off (no traffic);
+        the flag lets ops disable it without rotating the key. Note this property
+        already folds in the key, so the production guard keys on
+        ``brave_search_flag`` (the flag-on/key-missing misconfiguration) rather
+        than on this property, which can never be true with an empty key.
+        """
+        return bool(self.brave_search_api_key) and self.brave_search_flag
+
+    @property
+    def brave_research_stage_set(self) -> frozenset[str]:
+        """The parsed set of stage types eligible for Brave enrichment.
+
+        Empty when ``brave_research_stages`` is blank, which disables enrichment
+        for every stage even with the flag and key set.
+        """
+        return frozenset(
+            stage.strip().lower()
+            for stage in self.brave_research_stages.split(",")
+            if stage.strip()
+        )
 
 
 settings = Settings()
@@ -444,6 +508,19 @@ def validate_production_settings() -> None:
                 "GITHUB_APP_WEBHOOK_SECRET must be set when the GitHub App is "
                 "enabled, or inbound webhooks cannot be signature-verified."
             )
+
+    # Brave research guard (issue #12). The feature is allowed *off* in prod (no
+    # hard requirement), but turning the flag on without a key is a silent
+    # misconfiguration: every fetch would 401 and fail open to no research, so
+    # the flag would look enabled while doing nothing. We key on the flag (not
+    # ``brave_search_enabled``, which already folds in the key and so can never be
+    # true here with an empty key) to catch exactly that flag-on/key-missing case.
+    if settings.brave_search_flag and not settings.brave_search_api_key.strip():
+        errors.append(
+            "BRAVE_SEARCH_API_KEY must be set when BRAVE_SEARCH_FLAG is true; "
+            "otherwise every Brave fetch 401s and silently disables research "
+            "while the flag reads as enabled."
+        )
 
     if errors:
         raise RuntimeError("; ".join(errors))
