@@ -1,3 +1,4 @@
+import type { ReactNode } from "react"
 import type { Stage } from "../../types/stage"
 
 interface ProblemStatementPanelProps {
@@ -8,6 +9,8 @@ interface ProblemStatementPanelProps {
   readOnlyReason?: string
   onChange?: (value: string) => void
   onBlur?: () => void
+  /** Optional controls rendered in the panel footer (e.g. web-research opt-in). */
+  footer?: ReactNode
 }
 
 export function ProblemStatementPanel({
@@ -18,6 +21,7 @@ export function ProblemStatementPanel({
   readOnlyReason,
   onChange,
   onBlur,
+  footer,
 }: ProblemStatementPanelProps) {
   if (stage.type !== "spec") return null
 
@@ -71,6 +75,7 @@ export function ProblemStatementPanel({
           <strong>{status}</strong>
         </div>
       </div>
+      {footer ? <div className="source-brief-footer">{footer}</div> : null}
     </div>
   )
 }

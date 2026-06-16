@@ -30,6 +30,13 @@ export interface Workspace {
   public_share_slug?: string | null
   public_share_enabled?: boolean
   disable_critic?: boolean
+  /**
+   * Per-workspace opt-in for Brave web-research enrichment (issue #12).
+   * Off by default; enabling it permits generation to send this workspace's
+   * idea text to Brave (a third party) for up-to-date web grounding, at a
+   * per-generation credit cost. Generation always works without it.
+   */
+  brave_research_enabled?: boolean
   coverage_summary?: CoverageSummary | null
 }
 

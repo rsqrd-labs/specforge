@@ -121,11 +121,21 @@ async def build_prompt(
     workspace: Workspace,
     db: AsyncSession,
     redis_client: Redis | None = None,
+    *,
+    research_context: str = "",
 ) -> tuple[str, str]:
     module = _PROMPT_MODULES[stage_type]
     dep_keys = _DEPENDENCIES[stage_type]
 
     deps: dict[str, str] = {"problem_statement": workspace.problem_statement}
+
+    # Issue #12 (Phase 3): optional Brave web-research grounding. The block is
+    # assembled+sanitised upstream (research_service) and threaded through deps
+    # for the module to position. Empty string (the fail-open default and the
+    # value for stages/workspaces without research) yields a byte-identical
+    # prompt — the regression pin. build_prompt stays a pure assembler; the only
+    # new I/O (the Brave fetch) lives in the generate() preflight.
+    deps["research_context"] = research_context
 
     # Phase 14: thread persisted Spec Clarification Q&A into the spec
     # prompt so regenerates honour the user's earlier answers without a

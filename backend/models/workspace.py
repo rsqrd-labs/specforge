@@ -69,6 +69,18 @@ class Workspace(Base):
         default=False,
         server_default=text("false"),
     )
+    # Per-workspace opt-in for Brave web-research enrichment (issue #12, Phase 3).
+    # Default OFF — sending the idea text to Brave is a third-party data egress and
+    # a credit charge, so it is strictly opt-in and never inferred. Toggling it
+    # writes a structured `brave_research_toggled` audit log row. Even when on,
+    # generation degrades to no-research on any failure/insufficient-credit path,
+    # so this flag controls *whether we may*, never *whether generation can run*.
+    brave_research_enabled: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default=text("false"),
+    )
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True),
         nullable=False,

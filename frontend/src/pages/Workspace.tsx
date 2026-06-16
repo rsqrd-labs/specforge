@@ -28,6 +28,7 @@ import {
 } from "../components/workspace/StreamingOverlay"
 import { MarkdownRenderer } from "../components/workspace/MarkdownRenderer"
 import { ProblemStatementPanel } from "../components/workspace/ProblemStatementPanel"
+import { ResearchConsentToggle } from "../components/workspace/ResearchConsentToggle"
 import { TaskValidationPanel } from "../components/workspace/TaskValidationPanel"
 import { TaskCompletionPanel } from "../components/workspace/TaskCompletionPanel"
 import { IncrementTimeline } from "../components/workspace/IncrementTimeline"
@@ -2161,6 +2162,21 @@ export default function Workspace() {
                 setProblemDirty(true)
               }}
               onBlur={() => void saveProblemStatement()}
+              footer={
+                currentWorkspace ? (
+                  <ResearchConsentToggle
+                    workspaceId={currentWorkspace.id}
+                    enabled={currentWorkspace.brave_research_enabled ?? false}
+                    disabled={workspaceGenerationLock.locked}
+                    onChanged={(enabled) =>
+                      setCurrentWorkspace({
+                        ...currentWorkspace,
+                        brave_research_enabled: enabled,
+                      })
+                    }
+                  />
+                ) : null
+              }
             />
 
             <section className="workspace-document-card spec-document-card">

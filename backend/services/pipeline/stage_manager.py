@@ -110,6 +110,7 @@ from services.pipeline.tech_safety import (
     policy_version,
     validate_technology_safety,
 )
+from services.research import research_service
 from services.security.output_validator import validate
 from services.security.problem_statement_gate import (
     ProblemStatementValidationError,
@@ -1630,6 +1631,61 @@ class StageManager:
                     emit(cleaned)
         return cleaned
 
+    async def _fetch_research_context(
+        self,
+        workspace: Workspace,
+        stage_type: str,
+        user,
+        redis,
+        *,
+        credit_cost: int,
+        free: bool,
+    ) -> str:
+        """Resolve the optional Brave web-research block, or ``""`` (issue #12).
+
+        Gated so research can NEVER block or starve a generation:
+
+        * **Free / platform-funded runs are skipped** — there is no user to meter,
+          so a free regenerate (e.g. a critic-funded retry) never spends a Brave
+          credit.
+        * **Surplus guard.** Research is attempted only when the visible balance
+          covers BOTH the generation charge that follows AND the research charge,
+          so spending a research credit can never drop the user below the
+          generation cost and fail the very generation it was meant to enrich.
+          Mirrors ``_assert_visible_credit_balance``: only enforced when the
+          balance is a known int (defensively permissive otherwise, since
+          ``fetch_context`` does its own authoritative pre-check + atomic debit).
+        * **``research_service.fetch_context`` is itself fully fail-open** — every
+          miss (feature off, not opted in, out-of-scope stage, quota spent,
+          insufficient credits, Redis/HTTP failure, empty or all-unsafe grounding)
+          returns ``""``, which ``build_prompt`` treats as a no-op yielding a
+          byte-identical prompt. It never raises.
+
+        fetch_context commits its own credit charge, so it is handed a **dedicated
+        DB session** rather than the preflight's ``db``: committing on ``db`` would
+        release the ``FOR UPDATE`` lock the preflight holds on the stage row before
+        its status flips to ``in_progress``, opening a double-generation race. A
+        dedicated session keeps the brave charge atomic and independent while the
+        main transaction (and its stage lock) stays intact. ``workspace`` is read
+        only for already-loaded scalar attributes, so it is safe across the session
+        boundary; the cache invalidation in ``deduct`` keeps the subsequent
+        generation deduct on the main session consistent.
+        """
+        if free:
+            return ""
+        research_charge = settings.billing_credits_brave_research
+        visible_balance = getattr(user, "credit_balance", None)
+        if isinstance(visible_balance, int) and visible_balance < (
+            credit_cost + research_charge
+        ):
+            return ""
+        from database import AsyncSessionLocal  # noqa: PLC0415
+
+        async with AsyncSessionLocal() as research_db:
+            return await research_service.fetch_context(
+                workspace, stage_type, research_db, redis, user.id
+            )
+
     async def generate(
         self,
         stage_id: UUID,
@@ -1713,9 +1769,6 @@ class StageManager:
             action=action,
             prompt_version=STAGE_PROMPT_VERSIONS[stage.type],
         )
-        system_prompt, user_prompt = await build_prompt(
-            stage.type, workspace, db, redis
-        )
         cache_key = build_generation_cache_key(
             prompt_version=STAGE_PROMPT_VERSIONS[stage.type],
             stage_type=stage.type,
@@ -1765,6 +1818,23 @@ class StageManager:
             yield cached_output
             yield f'{{"done": true, "stage_id": "{stage_id}"}}'
             return
+
+        # Issue #12 (Phase 3): optional Brave web-research grounding, fetched here
+        # — after the generation-cache miss so a cache hit never triggers a paid
+        # Brave call — and baked into user_prompt once. The mid-tier escalation
+        # retry reuses this same user_prompt, so a retry never re-fetches or
+        # re-charges. See _fetch_research_context for the fail-open gating.
+        research_context = await self._fetch_research_context(
+            workspace,
+            stage.type,
+            user,
+            redis,
+            credit_cost=credit_cost,
+            free=free,
+        )
+        system_prompt, user_prompt = await build_prompt(
+            stage.type, workspace, db, redis, research_context=research_context
+        )
 
         deduction = (
             None

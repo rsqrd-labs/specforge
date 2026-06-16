@@ -391,6 +391,36 @@ Conventions: every phase is mergeable on its own with the feature **dark**
   include grounding and debit one Brave charge; every other state generates unchanged and
   free.
 
+**Implementation notes / decisions made while building Phase 3 (2026-06-16):**
+- **Fetch is sequential, not `asyncio.gather`.** `research_service.fetch_context`
+  commits its own credit charge, and a single `AsyncSession` cannot be used
+  concurrently — running it on `generate()`'s `db` would also release the stage's
+  `FOR UPDATE` lock early (double-generation race). It therefore runs on a
+  **dedicated `AsyncSessionLocal()` session** (`StageManager._fetch_research_context`)
+  *after* the generation-cache miss and is awaited sequentially. The remaining
+  preflight work (`build_prompt`) is local/fast (cache+DB reads), so overlap would
+  save little; the worst case is +`brave_timeout_seconds` only on a true cache-miss
+  for an opted-in spec/plan generation (+0s when cached, disabled, or not opted in).
+- **Research runs only on a generation-cache miss**, so a cached generation never
+  triggers a paid Brave call or charge (a correctness win over a naive preflight
+  fetch). **Known consequence (accepted):** `build_generation_cache_key` does *not*
+  include the research block, so two workspaces with byte-identical problem
+  statements + upstream share a cache entry — a later opted-in request that hits the
+  cache gets the cached output (grounded or not) free, with no fetch. This is benign:
+  the deterministic research query is identical for identical inputs (no privacy leak,
+  no stale grounding), regenerate bypasses the cache, and "cache hit ⇒ free" matches
+  the design. Opt-in is thus **best-effort on cross-workspace cache hits**.
+- **Surplus guard:** research is attempted only when the visible balance covers
+  *both* the generation charge and the research charge, so a research debit can never
+  starve the generation it enriches (`free`/platform-funded runs skip research
+  entirely).
+- **"Researched with web context" indicator deferred to Phase 4.** An *accurate*
+  "this generation used research" badge needs the per-`StageVersion` persistence that
+  lands in Phase 4; an opt-in-state indicator would only reflect the toggle, not
+  whether a given generation was actually grounded. The opt-in toggle + consent dialog
+  shipped; the per-generation indicator rides Phase 4. (Not in Phase 3's acceptance
+  criteria.)
+
 ### Phase 4 — Persistence + cost visibility
 - Persist the research block + source URLs on the `StageVersion` (new nullable column or
   the existing version metadata) so generations are reproducible/diffable.

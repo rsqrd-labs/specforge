@@ -71,6 +71,21 @@ class WorkspaceCriticToggle(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+class WorkspaceResearchToggle(BaseModel):
+    """Owner-only opt-in toggle for Brave web-research enrichment (issue #12).
+
+    Setting brave_research_enabled=True permits generation for this workspace to
+    send the idea text to Brave (a third party) for up-to-date web grounding,
+    at a per-generation credit cost. Off by default; the router writes a
+    `brave_research_toggled` audit log row. Enrichment always degrades to
+    no-research on failure, so this flag never affects whether generation runs.
+    """
+
+    brave_research_enabled: bool
+
+    model_config = ConfigDict(from_attributes=True)
+
+
 class CoverageSummary(BaseModel):
     """Harness coverage figure surfaced from the latest EvalResult.
 
@@ -150,6 +165,7 @@ class WorkspaceResponse(BaseModel):
     public_share_slug: str | None = None
     public_share_enabled: bool = False
     disable_critic: bool = False
+    brave_research_enabled: bool = False
     coverage_summary: CoverageSummary | None = None
     stages: list[StageResponse] = Field(default_factory=list)
     created_at: datetime

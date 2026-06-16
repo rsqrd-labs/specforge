@@ -356,6 +356,21 @@ export async function setWorkspaceCritic(
   return response.data
 }
 
+/**
+ * Toggle the per-workspace Brave web-research opt-in (issue #12).
+ * Owner-only on the backend; enabling permits generation to send the idea text
+ * to Brave (a third party) at a per-generation credit cost. Off by default.
+ */
+export async function setWorkspaceResearch(
+  id: string,
+  enabled: boolean,
+): Promise<WorkspaceWithStages> {
+  const response = await api.patch<WorkspaceWithStages>(`/workspaces/${id}/research`, {
+    brave_research_enabled: enabled,
+  })
+  return response.data
+}
+
 export async function getStage(id: string): Promise<Stage> {
   const response = await api.get<Stage>(`/stages/${id}`)
   return response.data

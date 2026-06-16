@@ -177,3 +177,24 @@ BEGIN_UNTRUSTED_CONTENT:{label}
 </{label}>
 END_UNTRUSTED_CONTENT:{label}
 </untrusted_content>"""
+
+
+def render_research_block(research_context: str) -> str:
+    """Render the optional Brave research block for insertion into a user prompt.
+
+    Issue #12 (Phase 3). ``research_context`` is the already-assembled, already-
+    sanitised/guarded/framed block produced by ``research_service.fetch_context``
+    (or ``""`` on any miss). This helper only positions it.
+
+    CONTRACT — the empty case must contribute **zero characters** so that
+    ``research_context == ""`` yields a byte-identical prompt to today (the
+    regression pin in §12). Callers therefore place ``{render_research_block(...)}``
+    immediately adjacent to surrounding text with no literal whitespace of their
+    own. When non-empty, the block is set off by surrounding blank lines and sits
+    between the upstream deps and the closing "Before returning, verify"
+    instruction, so the model reads it as advisory reference material, never as
+    the authoritative artifact or the final directive.
+    """
+    if not research_context:
+        return ""
+    return f"\n\n{research_context.strip()}\n"

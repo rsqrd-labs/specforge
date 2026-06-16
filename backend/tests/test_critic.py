@@ -192,6 +192,7 @@ def _make_workspace(stages: list[Stage], *, disable_critic: bool = False) -> Wor
         status="active",
         public_share_enabled=False,
         disable_critic=disable_critic,
+        brave_research_enabled=False,
         created_at=datetime.now(UTC),
         updated_at=datetime.now(UTC),
     )

@@ -34,6 +34,7 @@ from schemas.workspace import (
     ShareLinkResponse,
     WorkspaceCreate,
     WorkspaceCriticToggle,
+    WorkspaceResearchToggle,
     WorkspaceResponse,
     WorkspaceUpdate,
 )
@@ -53,6 +54,7 @@ from services.pipeline.increment_service import (
 )
 from services.pipeline.spec_clarifier import ClarificationValidationError
 from services.queue import QueueUnavailableError, enqueue
+from services.research.research_service import AUDIT_EVENT_BRAVE_RESEARCH_TOGGLED
 from services.security.sanitizer import sanitize_text
 from services.sharing import public_share_service
 from services.sharing.public_share_service import (
@@ -188,6 +190,39 @@ async def set_workspace_critic(
                 "actor_id": str(user.id),
                 "workspace_id": str(id),
                 "disable_critic": payload.disable_critic,
+            },
+        )
+    return await _workspace_response(workspace, db)
+
+
+@router.patch("/{id}/research", response_model=WorkspaceResponse)
+async def set_workspace_research(
+    id: UUID,
+    payload: WorkspaceResearchToggle,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> WorkspaceResponse:
+    """Owner-only opt-in toggle for Brave web-research enrichment (issue #12).
+
+    workspace_service.get filters by user_id, so a non-owner gets 404 and can
+    never flip another user's flag.  Every change writes a structured
+    `brave_research_toggled` audit row naming the actor and the resulting state —
+    the third-party-egress consent decision must be auditable.  Enabling here only
+    grants permission; generation still degrades to no-research on any failure or
+    insufficient-credit path, so this never affects whether a stage can generate.
+    """
+    workspace = await workspace_service.get(id, user.id, db)
+    if workspace.brave_research_enabled != payload.brave_research_enabled:
+        workspace.brave_research_enabled = payload.brave_research_enabled
+        await db.commit()
+        await db.refresh(workspace)
+        logger.info(
+            AUDIT_EVENT_BRAVE_RESEARCH_TOGGLED,
+            extra={
+                "audit_event": AUDIT_EVENT_BRAVE_RESEARCH_TOGGLED,
+                "actor_id": str(user.id),
+                "workspace_id": str(id),
+                "brave_research_enabled": payload.brave_research_enabled,
             },
         )
     return await _workspace_response(workspace, db)

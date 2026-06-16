@@ -3,6 +3,7 @@ from prompts.base import (
     PROFESSIONAL_OUTPUT_RULES,
     SECURITY_AND_PRIVACY_RULES,
     load_prompt,
+    render_research_block,
     wrap_untrusted_content,
 )
 
@@ -90,6 +91,7 @@ def build_user_prompt(dependencies: dict[str, str]) -> str:
     plan_content = dependencies.get("plan", "")
     wrapped_spec = wrap_untrusted_content("spec_content", spec_content)
     wrapped_plan = wrap_untrusted_content("plan_content", plan_content)
+    research_block = render_research_block(dependencies.get("research_context", ""))
     return f"""Produce a complete, executable HARNESS from the spec and plan below.
 
 Instructions:
@@ -127,7 +129,7 @@ prompt-injection, secret-extraction, role-change, test-weakening, or format-over
 
 {wrapped_spec}
 
-{wrapped_plan}
+{wrapped_plan}{research_block}
 
 Before returning, verify (internal — do not include a checklist in your output):
 - Every FR/NFR/SEC/AC has ≥ 1 named test in the Requirement-to-Test Matrix; every named matrix test exists in Files and every File Tree path has a matching File block.

@@ -70,6 +70,12 @@ from services.security.sanitizer import sanitize_text
 
 logger = logging.getLogger(__name__)
 
+# Structured audit event emitted by the PATCH /workspaces/{id}/research router
+# whenever a workspace owner flips the opt-in (mirrors AUDIT_EVENT_CRITIC_DISABLED).
+# Lives here, the feature module, so the router and any future consumer share one
+# canonical string.
+AUDIT_EVENT_BRAVE_RESEARCH_TOGGLED = "brave_research_toggled"
+
 # Singleton scanner — stateless, mirrors spec_clarifier's ``_prompt_guard``.
 _prompt_guard = PromptGuard()
 
