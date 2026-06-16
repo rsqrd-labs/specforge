@@ -47,9 +47,9 @@ uv run pytest \
   ../harness/tests/backend/test_phase25_lemonsqueezy_billing_contract.py \
   -q
 uv run bandit -r config.py database.py main.py middleware models prompts routers schemas services
-# PYSEC-2026-161 (starlette) is a tracked, currently-unfixable advisory — see the
-# note under "Tracked security exceptions" below. All other advisories fail the gate.
-uv run pip-audit --strict --ignore-vuln PYSEC-2026-161
+# No advisories are suppressed: every pip-audit finding fails the gate. Fix by
+# bumping the affected dependency.
+uv run pip-audit --strict
 ```
 
 Prompt quality gate:
@@ -92,17 +92,15 @@ Pass criteria:
 - Prompt eval report shows no unapproved per-grader regression against the
   selected baseline.
 - Bandit reports no unresolved issues.
-- `pip-audit --strict` reports no known vulnerabilities except the tracked
-  exceptions below.
+- `pip-audit --strict` reports no known vulnerabilities.
 - Production smoke passes against staging with live LLM smoke enabled.
 
 ### Tracked security exceptions
 
-| Advisory | Package | Status | Justification / exit plan |
-|---|---|---|---|
-| PYSEC-2026-161 | `starlette` (0.50.0) | Acknowledged, suppressed via `--ignore-vuln` | Fix is `starlette>=1.0.1`, but `fastapi==0.124.*` hard-caps `starlette<0.51` and no **stable** FastAPI release yet supports starlette 1.0 (only pre-releases). We stay on the latest fastapi-compatible starlette (0.50.0). **Exit plan:** drop the ignore and bump `fastapi`+`starlette` together once a stable FastAPI supports starlette ≥1.0. Re-check each release. |
-
-All other `pip-audit` advisories must fail the gate (no blanket suppression).
+None. `pip-audit --strict` runs with no `--ignore-vuln` suppression — every
+advisory fails the gate and is fixed by bumping the affected dependency. (The
+former PYSEC-2026-161 starlette exception was retired once starlette moved to
+1.3.x, well past the affected `< 1.0.1`.)
 
 ## Environment Gate
 

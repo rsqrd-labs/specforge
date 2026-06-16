@@ -156,13 +156,10 @@ jobs:
         run: uv run bandit -r config.py database.py main.py middleware models prompts routers schemas services
 
       - name: Python dependency audit
-        # PYSEC-2026-161 (starlette < 1.0.1) is acknowledged and tracked: the fix
-        # is starlette 1.0.1, but FastAPI 0.124.* hard-caps starlette < 0.51 and no
-        # STABLE FastAPI release yet supports starlette 1.0 (only pre-releases), so
-        # there is no safe version-bump fix. We stay on the latest fastapi-compatible
-        # starlette (0.50.0) and re-evaluate when a stable FastAPI supports 1.0.
-        # See docs/PRODUCTION_RELEASE_GATE.md. All other advisories must fail CI.
-        run: uv run pip-audit --strict --ignore-vuln PYSEC-2026-161
+        # No advisories are suppressed: the previously-acknowledged PYSEC-2026-161
+        # (starlette < 1.0.1) no longer applies now that starlette is on 1.3.x.
+        # Any advisory must fail CI; fix by bumping the affected dependency.
+        run: uv run pip-audit --strict
 
       - name: Pytest
         # These schema-owning integration modules call Alembic reset helpers or
