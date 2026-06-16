@@ -572,6 +572,17 @@ BILLING_CREDITS_CRITIC_REGEN = Counter(
     labelnames=["stage"],
 )
 
+BILLING_CREDITS_BRAVE_RESEARCH = Counter(
+    "specforge_billing_credits_brave_research_total",
+    "User-metered Brave web-research charges — incremented once per successful, "
+    "content-bearing (post-sanitisation) paid Brave fetch that debited the user's "
+    "credit ledger. Cache hits, empty/all-dropped results, failures, quota skips, "
+    "and the disabled/not-opted-in paths charge nothing and never increment here. "
+    "Labelled by stage so spend can be attributed to spec vs plan. Issue #12 "
+    "(Phase 2).",
+    labelnames=["stage"],
+)
+
 PIPELINE_VALIDATOR_FAILURES = Counter(
     "pipeline_validator_failures_total",
     "Count of stage generations rejected by the zero-LLM section-presence "
