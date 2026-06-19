@@ -1,8 +1,12 @@
 # Payment System Audit — Plan of Action (Issue #35)
 
-**Status:** plan / scoping. This document maps the generic enterprise audit checklist
-in issue #35 to *this* codebase's reality and defines how each item gets discharged.
-It is the plan, not the executed audit — execution rows are marked ☐.
+**Status:** ✅ executed (all 7 steps complete, 2026-06-19). This document maps the
+generic enterprise audit checklist in issue #35 to *this* codebase's reality and
+defines how each item gets discharged. The executed-audit deliverable is
+[docs/PAYMENT_AUDIT_REPORT.md](PAYMENT_AUDIT_REPORT.md) (with
+[PAYMENT_THREAT_MODEL.md](PAYMENT_THREAT_MODEL.md) +
+[PAYMENT_COMPLIANCE.md](PAYMENT_COMPLIANCE.md)); the §2 rows below are resolved with
+evidence and the report's §4 carries the sign-off block awaiting the named approvers.
 
 ## 0. Grounding facts (read these first; they decide what applies)
 
@@ -51,7 +55,7 @@ Legend: **✅ Verified** (evidence in code, cite on execution) · **☐ To verif
 
 | # | Checklist item | Status | Evidence / Note |
 |---|---|---|---|
-| Inventory | all services/endpoints/components | ☐ | §1 above; finalize via `rg` sweep |
+| Inventory | all services/endpoints/components | ✅ | Resolved 2026-06-19 ([PAYMENT_AUDIT_REPORT.md](PAYMENT_AUDIT_REPORT.md) §2 row 1). `rg` sweep ran; core grant surfaces in §1 confirmed. Sweep also surfaced `services/queue.py` (`BILLING_DEAD_LETTER_KEY`), `middleware/rate_limit.py` (webhook exemption), `worker.py` (job registration), `main.py`, `migrations/0018`, frontend `api.ts`/`types/billing.ts` — **wiring/registration, not additional grant paths.** |
 | Webhook: signature verify | ✅ | `_verify_lemon_signature` — HMAC-SHA256 over **raw bytes read before parse**, constant-time `compare_digest`, two-secret rotation list, **fail-closed** on empty header/secret (billing.py:587–750) |
 | Webhook: replay / idempotency | ✅ | 4-part unique inbox identity `(provider, event_name, object_id, payload_hash)` → `IntegrityError`→`already_processed` (billing.py:683–707); grant idempotent on `(provider, provider_order_id)` + `billing_purchase:lemonsqueezy:{order}` ledger reason |
 | Webhook: verify-before-work | ✅ | no DB/queue mutation before signature check; parse only after verify (billing.py:585–600) |
@@ -61,7 +65,7 @@ Legend: **✅ Verified** (evidence in code, cite on execution) · **☐ To verif
 | `/status`: IDOR safety | ✅ | single query scoped by `checkout_ref` AND `user_id`; 404 (not 403) on any mismatch; 200 only when granted (billing.py:284–337) |
 | Idempotency: refund/reversal | ✅ | `apply_refund_reversal` idempotent on `refund:billing:{pack}:{cents}`; over-spend → recoverable debt (worker.py:516–560; credit_service) |
 | Reconciliation & monitoring | ✅ | 3-lane `billing_reconcile` (inbox replay / bounded `get_order` re-read / attempt hygiene), **never auto-grants**; 60s pending sweep; pending-age gauge (worker.py:283–609) |
-| Dead-letter / retry | ☐ | confirm `billing:deadletter` separation from `gh:deadletter`, bounded retries, and replay runbook (RUNBOOK §9) |
+| Dead-letter / retry | ✅ | Verified 2026-06-19. `billing:deadletter` is **separate** from `gh:deadletter` (worker.py:191; key `BILLING_DEAD_LETTER_KEY` in `services/queue.py`); bounded by `JOB_MAX_TRIES` (worker.py:367) with backoff via the `billing_job` wrapper; replay procedure RUNBOOK §9.3. |
 | Admin manual grant controls | ✅ | `require_admin` allowlist, CSRF+auth+rate-limit, triple idempotency barrier, immutable audit row (billing.py:105–540) |
 | Secrets in vault, not repo | ✅ | Verified 2026-06-19. `.env`/`.envrc` gitignored (.gitignore:152–153); the only tracked env file `backend/.env.example` ships the five secret-bearing keys (`API_KEY`, `WEBHOOK_SECRET`, `_PREV`, `STORE_ID`, `VARIANT_ID`) **empty** — only non-secret config populated (.env.example:89–102). `git log -p --all -S` pickaxe over full history surfaced **zero** real secret values (only doc placeholders `<new_secret>`/`<new>`, runbook rotation text, and the dummy test fixture `"lsq-whsec"`). CI TruffleHog job runs on every push, SHA-pinned v3.95.2, `fetch-depth:0`, base→head diff (ci.yml:13–29). Caveat: TruffleHog `--only-verified` would catch a leaked Lemon **API key** but not the user-defined HMAC **webhook secret** (unverifiable string); the `.gitignore` is the primary control there. |
 | Encryption in transit | ✅ | Verified 2026-06-19. `validate_production_settings()` rejects a non-`https://` `lemonsqueezy_success_url` (config.py:466–467) and a non-HTTPS `FRONTEND_URL` (config.py:417). Railway (backend/worker) + Vercel (frontend) terminate TLS at the platform edge (§0.2). Outbound `lemonsqueezy_api_base` defaults to `https://api.lemonsqueezy.com` (config.py:261). |
@@ -72,12 +76,12 @@ Legend: **✅ Verified** (evidence in code, cite on execution) · **☐ To verif
 | Integration tests (success/fail/retry/idempotency) | ✅ | Gap-check done 2026-06-19 against migrated Postgres+Redis (CI parity): **184 passed**, branch coverage of the four payment modules `routers/billing.py` 91% · `billing_worker.py` 90% · `credit_service.py` 86% · `lemonsqueezy_service.py` 91%. Confirmed the named branches are already covered — refund→debt (`test_phase25_money_math::test_spend_then_reversal_creates_debt_then_repurchase_recovers_first`), orphaned checkout (`test_billing_router::test_checkout_orphaned_commit_failure_502_no_url`, `…_lemon_failure_marks_attempt_failed_502`), reconcile lanes 1/2/3 (12 tests in `test_billing_reconcile`), admin-correction races (11 tests in `test_billing_admin_correction`). **One real gap closed:** the two *concurrent* double-grant race branches in `handle_order_created` (the sequential duplicate tests only reach the `_find_existing_pack` pre-check) — added `test_concurrent_pack_flush_conflict_grants_nothing` (pack-flush `IntegrityError`, worker.py:1045–1055) and `test_concurrent_ledger_reason_conflict_grants_nothing` (grant `granted is None` ledger-reason rejection, worker.py:1061–1068) in `test_billing_order_created.py`; both verified to drop those line ranges out of the coverage Missing list. Run `TEST_DATABASE_URL=… uv run pytest tests/test_billing*.py tests/test_lemon*.py tests/test_phase25*.py tests/test_credit_service.py -q`. Residual ~10% misses are defensive error/edge paths outside the audit's named branch set. |
 | Threat model review | ✅ | Authored 2026-06-19: [docs/PAYMENT_THREAT_MODEL.md](PAYMENT_THREAT_MODEL.md). All 7 surfaces (forged webhook, replay, nonce theft, test/live confusion, IDOR on /status, double-grant race, refund evasion, admin-correction abuse) documented as vector → mitigation (file:line) → **residual risk**. Honest residuals named: HMAC secret is a user-defined string `--only-verified` can't catch (`.gitignore`/rotation is the control); admin-correction audit row is detective-not-preventive; reconcile/orphaned-commit recovery is eventual-not-preventive. |
 | Compliance checklist (PCI/GDPR) | ✅ | Authored 2026-06-19: [docs/PAYMENT_COMPLIANCE.md](PAYMENT_COMPLIANCE.md). **PCI SAQ-A** justified (MoR + redirect-only, no PAN; SAQ-A obligations SpecForge still owns tabulated). **GDPR data-flow** stated precisely — direct identifiers (email/name/receipt URL/raw nonce) excluded by the allow-list, but `customer_id` + `user_id`→`User.email` retained as **pseudonymous** personal data (not overclaimed as "PII-free"). **Retention** grounded in code: inbox + terminal attempts purged at 30 days (`purge_billing_events`, `_RETENTION_DAYS`); financial audit tables retained indefinitely behind `RESTRICT` FKs; erasure is the manual RUNBOOK §9.7 procedure. |
-| Recovery & rollback playbook | ✅(partial)→☐ | RUNBOOK §9 + §3 already cover dead-letter replay, reconcile, admin-correction, manual refund. Gap-check for an explicit "payment incident" rollback section |
+| Recovery & rollback playbook | ✅ | Gap-check done 2026-06-19 ([PAYMENT_AUDIT_REPORT.md](PAYMENT_AUDIT_REPORT.md) §3): **no new RUNBOOK section needed** — every payment failure mode already maps to an existing procedure (RUNBOOK §9.2–9.8 + §3 + §2). Symptom→procedure table in the report. The step-6 *action* (adding a section) was correctly skipped because the gap-check found no gap. |
 | k8s / load balancer / networking | N/A | no k8s/LB in repo; Railway+Vercel platform-owned (§0.2) |
 | Tokenization / PAN handling | N/A | MoR + redirect-only checkout; no card data touches SpecForge (§0.1) |
 | Load & chaos / failure-injection testing | N/A (defer) | premature for current stage; worker idempotency + reconcile/dead-letter are the resilience design. Revisit pre-scale; capture as a deferred item, not a release blocker |
 | Third-party SLA / vendor contract review | N/A (org) | Lemon Squeezy ToS/MoR coverage is a business/legal artifact, not code; note owner |
-| Sign-off criteria | ☐ | define approvers (security review pass + infra/secrets confirmation + payments owner) and required evidence below |
+| Sign-off criteria | ✅ | Recorded 2026-06-19 ([PAYMENT_AUDIT_REPORT.md](PAYMENT_AUDIT_REPORT.md) §4): all five §4 acceptance criteria shown satisfied with evidence; human approval block (security reviewer + infra/secrets owner + payments owner) presented **awaiting** the named approvers. The report cannot itself sign off — approval is a human act. |
 
 ## 3. Execution order (when this plan is approved to run)
 
