@@ -553,3 +553,124 @@ async def test_reprocessing_same_row_is_idempotent(session, db_maker, cleanup) -
     assert await _balance(db_maker, user_id) == credits
     assert await _pack_count(db_maker, user_id) == 1
     assert await _purchase_ledger_count(db_maker, order_id) == 1
+
+
+# ---------------------------------------------------------------------------
+# Concurrent double-grant races (the two redelivery branches that the sequential
+# duplicate tests above CANNOT reach: those resolve at the `_find_existing_pack`
+# pre-check, but a truly concurrent delivery slips past that SELECT and is caught
+# later — once by the pack-flush unique index, once by the ledger-reason index).
+# These guard the payment audit's "double-grant race" surface (issue #35, step 2).
+# ---------------------------------------------------------------------------
+
+
+async def test_concurrent_pack_flush_conflict_grants_nothing(
+    session, db_maker, cleanup, monkeypatch
+) -> None:
+    """A racing delivery commits the pack between our pre-check and our flush.
+
+    Simulates the TOCTOU window: ``_find_existing_pack`` ran and saw nothing, then
+    the winning delivery's ``(provider, provider_order_id)`` row committed, so our
+    ``db.flush()`` raises ``IntegrityError`` on the partial-unique index *before*
+    the grant. The handler must roll back, ack the redelivery as processed, and
+    grant nothing — no second pack, no second ledger row. (Patching
+    ``_find_existing_pack``→None is the only deterministic way to open the window,
+    since every unique key is also a pre-check predicate; the pre-check is NOT
+    broken.)  Covers handle_order_created's pack-flush IntegrityError branch.
+    """
+    nonce_hash = hashlib.sha256(b"nonce-race-pack").hexdigest()
+    user = await _make_user(session, cleanup)
+    user_id = user.id
+    attempt = await _make_attempt(session, user, nonce_hash)
+    credits = attempt.credits
+    order_id = f"ord_{uuid4().hex[:10]}"
+
+    # The "winner" delivery already committed its pack + purchase ledger row.
+    now = datetime.now(UTC)
+    winner_pack = BillingCreditPack(
+        user_id=user_id,
+        provider="lemonsqueezy",
+        provider_checkout_id=None,
+        provider_order_id=order_id,
+        credits_purchased=credits,
+        credits_remaining=credits,
+        price_cents=attempt.price_cents,
+        currency=attempt.currency,
+        paid_item_amount_cents=attempt.price_cents,
+        status="active",
+        purchased_at=now,
+        expires_at=now + timedelta(days=attempt.validity_days),
+    )
+    session.add(winner_pack)
+    session.add(
+        CreditLedger(
+            user_id=user_id,
+            amount=credits,
+            reason=f"billing_purchase:lemonsqueezy:{order_id}",
+        )
+    )
+    await session.commit()
+
+    webhook = await _make_webhook(
+        session, cleanup, _payload(attempt, nonce_hash, order_id=order_id)
+    )
+    wid = webhook.id
+
+    # Force the pre-check to miss, reproducing the race window.
+    async def _miss(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(billing_worker, "_find_existing_pack", _miss)
+
+    await billing_worker.handle_order_created({}, str(wid))
+
+    # No double grant: only the winner's pack/ledger survive, balance untouched.
+    assert await _pack_count(db_maker, user_id) == 1
+    assert await _purchase_ledger_count(db_maker, order_id) == 1
+    assert await _balance(db_maker, user_id) == 0
+    # The redelivery is durably acked so the sweep stops re-driving it.
+    assert await _wh_status(db_maker, wid) == "processed"
+
+
+async def test_concurrent_ledger_reason_conflict_grants_nothing(
+    session, db_maker, cleanup
+) -> None:
+    """A racing delivery commits the purchase ledger row before our grant flushes.
+
+    Here the pack flush succeeds (no committed pack yet) but the grant's nested
+    SAVEPOINT hits the ``billing_purchase:`` ledger-reason unique index and returns
+    ``None``. We seed only the ledger row (the race state where the winner's pack
+    is not yet visible to our SELECT). The handler must roll back the speculative
+    pack, ack the redelivery, and add nothing. Covers handle_order_created's
+    ``granted is None`` branch.
+    """
+    nonce_hash = hashlib.sha256(b"nonce-race-ledger").hexdigest()
+    user = await _make_user(session, cleanup, balance=0)
+    user_id = user.id
+    attempt = await _make_attempt(session, user, nonce_hash)
+    credits = attempt.credits
+    order_id = f"ord_{uuid4().hex[:10]}"
+
+    # The winner's purchase ledger row is already committed (its pack row is not
+    # yet visible to our pre-check — the race window).
+    session.add(
+        CreditLedger(
+            user_id=user_id,
+            amount=credits,
+            reason=f"billing_purchase:lemonsqueezy:{order_id}",
+        )
+    )
+    await session.commit()
+
+    webhook = await _make_webhook(
+        session, cleanup, _payload(attempt, nonce_hash, order_id=order_id)
+    )
+    wid = webhook.id
+
+    await billing_worker.handle_order_created({}, str(wid))
+
+    # The grant returned None: speculative pack rolled back, nothing granted.
+    assert await _pack_count(db_maker, user_id) == 0
+    assert await _purchase_ledger_count(db_maker, order_id) == 1
+    assert await _balance(db_maker, user_id) == 0
+    assert await _wh_status(db_maker, wid) == "processed"
