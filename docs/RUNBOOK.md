@@ -704,6 +704,7 @@ audit data after the T-308 decommission).
 | BillingWebhookErrorRate | `rate(specforge_billing_webhook_error_total[5m]) > 0` | Warning | Check logs for `billing.webhook.*` / `billing.job.*`; inspect Lemon dashboard delivery logs. Webhook retries are safe — the inbox dedupes on the event id. Delete a `billing_webhook_events` row only with incident-lead approval and only after confirming credits were not granted |
 | BillingWebhookPendingAge | `specforge_billing_webhook_pending_age_seconds > 300` | Warning | The inbox is not draining (queue outage or crashed worker). Confirm the worker process is up and Redis is reachable; the 60s sweep re-enqueues stale rows. A sustained breach is the trigger to scale the billing worker out (§9.6) |
 | BillingCheckoutDropped | `rate(specforge_billing_checkout_completed_total[30m]) == 0` while `checkout_created` rising; **or** zero `checkout_completed` over 72h | Warning | Verify `/billing/webhook` is reachable and returning 200; check Lemon webhook delivery logs and the inbox; inspect CSRF/rate-limit exemptions |
+| BillingCheckoutApiError | `rate(specforge_billing_checkout_api_error_total[15m]) > 0` | Warning | A `POST /billing/checkout` failed. `error_type="provider_error"` → Lemon's checkout API failed (users get a 502 and **cannot pay**); check Lemon status and the `_API_KEY`/`_STORE_ID`/`_VARIANT_ID` config. `error_type="orphaned_commit"` → the post-Lemon local commit failed so the URL was never exposed; the attempt is recovered by reconcile (lane 3 hygiene + lane 1), but a sustained rate signals a DB/commit fault — inspect `billing.checkout.*` logs |
 | BillingReversalSpike | `rate(specforge_billing_credits_revoked_total[1h])` above baseline | Warning | A burst of `order_refunded`/fraud revocations. Review the Lemon dashboard; confirm reversals are legitimate and debt was created where expected |
 | BillingUnprovablePaidCheckout | `increase(specforge_billing_unrecoverable_checkout_total[1h]) > 0` | Warning | An `order_created` was rejected while the provider reports the order **paid**. Reconcile cannot auto-grant this — settle via the admin-correction path (§9.5) with evidence |
 | BillingDebtCreated | `increase(specforge_billing_credit_debt_created_total[1h]) > 0` | Info | A reversal exceeded remaining balance and created recoverable debt. Expected after refunds on spent credits; investigate if the rate is abnormal |
@@ -711,6 +712,24 @@ audit data after the T-308 decommission).
 | BillingExpirySpike | `rate(specforge_billing_credits_expired_total[1h])` above baseline | Info | Unusual volume of credits lazily expiring; correlate with a past purchase cohort, not a fault |
 | BillingJobDeadlettered | `increase(specforge_billing_job_deadlettered_total[15m]) > 0` | Critical | A billing job exhausted retries and landed in `billing:deadletter`. Inspect and replay (§9.3) |
 | BillingWebhookDuplicate | `rate(specforge_billing_webhook_duplicate_total[1h]) > 100` | Info | Normal if Lemon is retrying; investigate above 100/hour — the endpoint may be failing silently after the `already_processed` return |
+| BillingAdminCorrection | `increase(specforge_billing_admin_correction_total[1h]) > 0` | Info | **Control-visibility, not a failure.** A privileged manual credit grant landed via `POST /billing/admin/correction` (§9.5). Expected only to settle a `BillingUnprovablePaidCheckout`. Confirm the caller is an authorised `ADMIN_USER_EMAILS` operator and that the `billing_admin_corrections` audit row carries an `evidence_url`; investigate any correction with no corresponding unrecoverable-checkout signal |
+
+**Counters with deliberately no standalone alert** (so the "every failure mode has
+an alert" sign-off is met without padding the runbook). These are
+dashboard/business/context metrics, not failure modes:
+`specforge_billing_credits_granted_total`,
+`specforge_billing_purchase_revenue_cents_total`,
+`specforge_billing_credits_consumed_total`,
+`specforge_billing_credit_debt_recovered_total`,
+`specforge_billing_webhook_received_total`,
+`specforge_billing_checkout_created_total` (consumed inside `BillingCheckoutDropped`),
+`specforge_billing_checkout_expired_total` (lane-3 hygiene churn), and
+`specforge_billing_checkout_rate_limited_total`. `specforge_billing_job_retries_total`
+is intentionally **not** alerted on its own — retries are transient by design and
+the dead-letter is the actionable signal (`BillingJobDeadlettered`, Critical),
+matching the GitHub queue pattern in §12. `specforge_billing_credits_critic_regen_total`
+and `specforge_billing_credits_brave_research_total` are platform-funded
+quality/research credits, not payment-flow metrics, and are out of scope here.
 
 ### 9.2 Billing Endpoint Recovery
 
