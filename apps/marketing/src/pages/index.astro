@@ -1,0 +1,296 @@
+---
+// Homepage — the indexable "/" for the marketing zone. Ported from the SPA
+// Landing surface (frontend/src/pages/Landing.tsx) to static HTML so crawlers
+// and answer engines get real content, not an empty root div (issue #18,
+// Phase 1). The SPA Landing stays as the in-app fallback.
+import BaseLayout from "../layouts/BaseLayout.astro"
+import { SIGN_IN_URL, SITE_NAME, ENTITY_DESCRIPTION, absoluteUrl } from "../consts"
+
+const title =
+  "SpecForge — AI Spec-to-Build Workspace for Specs, Plans & Tasks"
+const description =
+  "SpecForge turns rough product ideas into build-ready SPEC, PLAN, HARNESS, and TASKS artifacts — structured requirements, validation, and traceable tasks for clean engineer and AI-agent handoffs."
+
+// Site-wide structured data. Phase 2 expands per-type JSON-LD across routes;
+// the homepage carries the org + product entities answer engines key on.
+const jsonLd = [
+  {
+    "@context": "https://schema.org",
+    "@type": "Organization",
+    name: SITE_NAME,
+    url: absoluteUrl("/"),
+    logo: absoluteUrl("/brand/squirrel-mark.png"),
+    description: ENTITY_DESCRIPTION,
+  },
+  {
+    "@context": "https://schema.org",
+    "@type": "SoftwareApplication",
+    name: SITE_NAME,
+    applicationCategory: "DeveloperApplication",
+    operatingSystem: "Web",
+    url: absoluteUrl("/"),
+    description: ENTITY_DESCRIPTION,
+  },
+]
+
+const workflow = [
+  ["01", "Spec", "Requirements, users, and acceptance criteria.", "Output: SPEC.md"],
+  ["02", "Plan", "Architecture, risks, and implementation path.", "Output: PLAN.md"],
+  ["03", "Harness", "Validation assets before execution begins.", "Output: tests"],
+  ["04", "Tasks", "Traceable work items ready for delivery.", "Output: tasks.md"],
+]
+
+const problems = [
+  ["Requirements stay vague", "Everyone agrees on the idea, then discovers different assumptions during implementation."],
+  ["Tests arrive too late", "Validation often starts after decisions are already embedded in code."],
+  ["AI agents need better context", "Coding agents move faster when the brief, constraints, and acceptance checks are explicit."],
+]
+
+const proof = [
+  ["01", "Quality gates", "Every stage includes review checkpoints before the build moves forward."],
+  ["02", "Harness-first coverage", "Validation assets are generated alongside the plan, not after delivery."],
+  ["03", "Traceable execution", "Tasks stay connected to requirements, risks, and acceptance criteria."],
+  ["04", "Clean handoff", "Export a structured package that another engineer or agent can continue from."],
+]
+
+const audiences = [
+  ["Founders", "Turn a promising product idea into a brief engineers can challenge and build."],
+  ["Product teams", "Convert intent, edge cases, and user journeys into requirements and review gates."],
+  ["Engineers", "Start with architecture, risks, tests, and traceable tasks instead of a vague ticket."],
+  ["AI agent teams", "Give coding agents cleaner instructions, stronger constraints, and validation targets."],
+]
+---
+
+<BaseLayout
+  title={title}
+  description={description}
+  path="/"
+  ogType="website"
+  jsonLd={jsonLd}
+>
+  <main class="landing-shell">
+    <div class="ambient-field" aria-hidden="true">
+      <span class="ambient-band band-saffron"></span>
+      <span class="ambient-band band-lotus"></span>
+      <span class="ambient-band band-slate"></span>
+      <span class="ambient-grid"></span>
+    </div>
+    <section class="landing-hero" aria-labelledby="landing-title">
+      <header class="landing-nav">
+        <span class="brand-lockup" role="img" aria-label="SpecForge">
+          <span class="brand-logo brand-logo--default" aria-hidden="true">
+            <img class="brand-logo-image" src="/brand/squirrel-mark.png" alt="" />
+          </span>
+          <span class="brand-wordmark" aria-hidden="true">SpecForge</span>
+        </span>
+        <span class="landing-status">AI spec-to-build workspace</span>
+      </header>
+
+      <div class="hero-grid">
+        <div class="hero-copy">
+          <h1 id="landing-title">
+            Turn rough product ideas into build-ready specs, tests, and tasks.
+          </h1>
+          <p class="hero-lede">
+            SpecForge is an AI spec-to-build workspace that turns rough product
+            ideas into four structured, build-ready artifacts &mdash; SPEC,
+            PLAN, HARNESS, and TASKS &mdash; so founders, product teams,
+            engineers, and AI coding agents start from explicit requirements,
+            early validation, and traceable work instead of a vague brief.
+          </p>
+
+          <div class="hero-value-row" aria-label="SpecForge outcomes">
+            <span>Less ambiguity</span>
+            <span>Earlier validation</span>
+            <span>Cleaner AI handoffs</span>
+          </div>
+
+          <div class="auth-card">
+            <div class="auth-card-glow" aria-hidden="true"></div>
+            <div class="auth-card-header">
+              <div>
+                <span class="auth-kicker">Start with one idea</span>
+                <strong>Build your first spec</strong>
+              </div>
+              <div class="auth-pulse" aria-hidden="true"><span></span></div>
+            </div>
+
+            <a href={SIGN_IN_URL} class="google-button" aria-label="Sign in with Google">
+              <span class="google-button-icon">
+                <svg aria-hidden="true" class="h-5 w-5" viewBox="0 0 24 24" width="20" height="20">
+                  <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" />
+                  <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" />
+                  <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z" />
+                  <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" />
+                </svg>
+              </span>
+              <span>Start your first workspace</span>
+              <span class="button-arrow" aria-hidden="true">&rarr;</span>
+            </a>
+
+            <div class="auth-meta" aria-label="Authentication safeguards">
+              <span>OAuth secured</span>
+              <span>50 starter credits</span>
+              <span>No setup required</span>
+            </div>
+          </div>
+
+          <div class="workflow-showcase" aria-label="SpecForge workflow">
+            <div class="workflow-heading">
+              <span>Delivery pipeline</span>
+              <strong>Spec - Plan - Harness - Tasks</strong>
+            </div>
+
+            <div class="workflow-board">
+              <span class="pipeline-beam" aria-hidden="true"></span>
+              {workflow.map(([number, label, descriptionText, output]) => (
+                <div class="workflow-card">
+                  <div class="workflow-card-top">
+                    <span class="workflow-number">{number}</span>
+                    <strong>{label}</strong>
+                  </div>
+                  <p>{descriptionText}</p>
+                  <em>{output}</em>
+                </div>
+              ))}
+            </div>
+
+            <div class="workflow-outcomes">
+              <div><span>Validated</span><strong>review gates</strong></div>
+              <div><span>Traceable</span><strong>task coverage</strong></div>
+              <div><span>Exportable</span><strong>build package</strong></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="product-panel" aria-label="SpecForge product preview">
+          <div class="panel-topbar">
+            <span></span><span></span><span></span>
+            <strong>Workspace</strong>
+          </div>
+
+          <div class="stage-rail">
+            {["Spec", "Plan", "Harness", "Tasks"].map((stage, index) => (
+              <div class={index === 0 ? "stage-pill active" : "stage-pill"}>
+                <span>0{index + 1}</span>
+                {stage}
+              </div>
+            ))}
+          </div>
+
+          <div class="before-after-panel" aria-label="Before and after SpecForge">
+            <div>
+              <span>Rough input</span>
+              <p>&ldquo;Build an onboarding assistant for new SaaS users.&rdquo;</p>
+            </div>
+            <div>
+              <span>Build package</span>
+              <p>SPEC.md, PLAN.md, validation harness, and implementation tasks.</p>
+            </div>
+          </div>
+
+          <div class="workspace-status">
+            <div><span>Readiness</span><strong>92%</strong></div>
+            <div><span>Risks closed</span><strong>14</strong></div>
+          </div>
+
+          <div class="document-card">
+            <div class="document-header">
+              <span>SPEC.md</span>
+              <em>Quality 92</em>
+            </div>
+            <h2>Problem framing, user journeys, and acceptance criteria</h2>
+            <div class="doc-line wide"></div>
+            <div class="doc-line"></div>
+            <div class="doc-line short"></div>
+          </div>
+
+          <div class="handoff-card">
+            <div>
+              <span>Next handoff</span>
+              <strong>Harness coverage review</strong>
+            </div>
+            <em>3 checks waiting</em>
+          </div>
+
+          <div class="insight-grid">
+            <div><span>Coverage</span><strong>87%</strong></div>
+            <div><span>Review gate</span><strong>Ready</strong></div>
+            <div><span>Next stage</span><strong>Plan</strong></div>
+          </div>
+
+          <div class="activity-feed" aria-label="Workspace activity">
+            {[
+              ["Spec gate passed", "Acceptance criteria linked"],
+              ["Plan draft ready", "Architecture risks mapped"],
+              ["Harness queued", "Contract checks prepared"],
+            ].map(([itemTitle, detail]) => (
+              <div class="activity-item">
+                <span aria-hidden="true"></span>
+                <div>
+                  <strong>{itemTitle}</strong>
+                  <p>{detail}</p>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      <section class="landing-problem-section" aria-labelledby="problem-title">
+        <div class="section-copy">
+          <span>Why teams lose momentum</span>
+          <h2 id="problem-title">
+            Product ideas usually break between &ldquo;we should build this&rdquo;
+            and &ldquo;here is exactly how.&rdquo;
+          </h2>
+        </div>
+        <div class="problem-grid">
+          {problems.map(([cardTitle, copy]) => (
+            <div class="problem-card">
+              <strong>{cardTitle}</strong>
+              <p>{copy}</p>
+            </div>
+          ))}
+        </div>
+      </section>
+
+      <div class="landing-proof-panel" aria-label="SpecForge platform highlights">
+        {proof.map(([number, tileTitle, copy]) => (
+          <div class="proof-tile">
+            <span>{number}</span>
+            <strong>{tileTitle}</strong>
+            <p>{copy}</p>
+          </div>
+        ))}
+      </div>
+
+      <section class="audience-section" aria-labelledby="audience-title">
+        <div class="section-copy">
+          <span>Built for execution-minded teams</span>
+          <h2 id="audience-title">Use it when the next step needs to be clearer than the idea.</h2>
+        </div>
+        <div class="audience-grid">
+          {audiences.map(([cardTitle, copy]) => (
+            <div class="audience-card">
+              <strong>{cardTitle}</strong>
+              <p>{copy}</p>
+            </div>
+          ))}
+        </div>
+      </section>
+
+      <section class="landing-final-cta" aria-labelledby="final-cta-title">
+        <div>
+          <span>Bring one messy idea</span>
+          <h2 id="final-cta-title">Leave with a build plan your team can act on.</h2>
+          <p>
+            Start with Google, use your starter credits, and turn the first
+            product thought into a structured SpecForge workspace.
+          </p>
+        </div>
+        <a href={SIGN_IN_URL} class="final-cta-button">Start your first workspace</a>
+      </section>
+    </section>
+  </main>
+</BaseLayout>

@@ -1,5 +1,8 @@
 {
   "rewrites": [
-    { "source": "/((?!api/).*)", "destination": "/index.html" }
+    {
+      "source": "/((?!api/|guides/|templates/|use-cases/|compare/|demos/|_astro/|sitemap|robots.txt).*)",
+      "destination": "/index.html"
+    }
   ]
 }

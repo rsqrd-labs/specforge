@@ -1,4 +1,10 @@
+# NOTE: At the apex domain this file is shadowed by the marketing zone's
+# robots.txt (apps/marketing/public/robots.txt is authoritative). This copy is
+# kept consistent for direct hits on the SPA deployment URL.
 User-agent: *
-# T-USE-10: public shared specs at /p/<slug> are intentionally noindex.
-# This is belt-and-suspenders with the backend's X-Robots-Tag header.
+# T-USE-10 / issue #18: public shared specs (/p/) and storyboards (/sb/) are
+# intentionally noindex. This Disallow is the primary document-level guard for
+# compliant crawlers; the _headers X-Robots-Tag and JS-injected meta are the
+# secondary layers.
 Disallow: /p/
+Disallow: /sb/

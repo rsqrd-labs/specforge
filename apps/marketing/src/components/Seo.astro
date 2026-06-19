@@ -1,0 +1,51 @@
+---
+// Reusable head-metadata component: title, description, canonical, Open Graph,
+// Twitter card, and robots directives. Driven entirely by props so every
+// indexable route can declare unique, complete metadata (issue #18, Phase 2
+// hardens uniqueness/QA; the component contract lands here in Phase 1).
+import { SITE_NAME, absoluteUrl } from "../consts"
+
+interface Props {
+  title: string
+  description: string
+  /** Site-relative path (e.g. "/", "/guides/foo"). Resolved to an absolute canonical. */
+  path?: string
+  /** Site-relative or absolute OG/Twitter image. */
+  image?: string
+  /** OpenGraph type — "website" for hubs, "article" for guides. */
+  ogType?: "website" | "article"
+  /** Robots directive. Marketing pages are indexable by default. */
+  robots?: string
+}
+
+const {
+  title,
+  description,
+  path = "/",
+  image = "/brand/squirrel-mark.png",
+  ogType = "website",
+  robots = "index, follow",
+} = Astro.props
+
+const canonical = absoluteUrl(path)
+const imageUrl = absoluteUrl(image)
+---
+
+<title>{title}</title>
+<meta name="description" content={description} />
+<link rel="canonical" href={canonical} />
+<meta name="robots" content={robots} />
+
+<!-- Open Graph -->
+<meta property="og:type" content={ogType} />
+<meta property="og:site_name" content={SITE_NAME} />
+<meta property="og:title" content={title} />
+<meta property="og:description" content={description} />
+<meta property="og:url" content={canonical} />
+<meta property="og:image" content={imageUrl} />
+
+<!-- Twitter -->
+<meta name="twitter:card" content="summary_large_image" />
+<meta name="twitter:title" content={title} />
+<meta name="twitter:description" content={description} />
+<meta name="twitter:image" content={imageUrl} />

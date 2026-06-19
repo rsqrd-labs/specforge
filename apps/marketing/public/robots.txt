@@ -1,0 +1,17 @@
+# SpecForge — authoritative robots policy (served at the apex by the marketing
+# zone). The SPA zone's own robots.txt is shadowed at the apex and kept only for
+# direct hits on the SPA deployment URL.
+#
+# Marketing/content routes are open to crawlers. Public generated artifacts are
+# intentionally noindex; this Disallow is the PRIMARY document-level guard for
+# compliant crawlers (the SPA-zone _headers X-Robots-Tag and JS-injected meta
+# are the secondary layers):
+#   /p/  — public shared specs        /sb/ — public storyboards
+User-agent: *
+Allow: /
+Disallow: /p/
+Disallow: /sb/
+
+# @astrojs/sitemap emits a sitemap index. Phase 2 finalises sitemap routing
+# (and replaces the placeholder apex below with the real PUBLIC_SITE_URL).
+Sitemap: https://specforge.app/sitemap-index.xml

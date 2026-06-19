@@ -1,0 +1,47 @@
+---
+// Single layout for the marketing zone. Wires <Seo> (head metadata) and exposes
+// a `jsonLd` slot via props, imports the shared "Modern Indica" global styles,
+// and renders the page body. Every indexable route renders through this.
+import Seo from "../components/Seo.astro"
+import JsonLd from "../components/JsonLd.astro"
+import "../styles/global.css"
+
+interface Props {
+  title: string
+  description: string
+  path?: string
+  image?: string
+  ogType?: "website" | "article"
+  robots?: string
+  /** Optional structured data rendered into <head>. */
+  jsonLd?: Record<string, unknown> | Record<string, unknown>[]
+}
+
+const { title, description, path, image, ogType, robots, jsonLd } = Astro.props
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link rel="icon" type="image/png" href="/favicon.png" />
+    <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
+    <meta name="theme-color" content="#8f4e00" />
+    <meta name="generator" content={Astro.generator} />
+    <Seo
+      title={title}
+      description={description}
+      path={path}
+      image={image}
+      ogType={ogType}
+      robots={robots}
+    />
+    {jsonLd && <JsonLd schema={jsonLd} />}
+  </head>
+  <body>
+    <slot />
+  </body>
+</html>

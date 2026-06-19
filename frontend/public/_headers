@@ -8,6 +8,17 @@
   X-Content-Type-Options: nosniff
   X-Frame-Options: DENY
 
+# Issue #18: public storyboards at /sb/<slug> are intentionally noindex, to
+# match /p/*. Unlike /p/*, /sb/ is a client-rendered SPA route that needs its
+# own JS, so it gets the noindex header WITHOUT the strict scriptless CSP.
+# Document-level noindex stack: robots.txt Disallow is the primary guard for
+# non-JS crawlers; this X-Robots-Tag is the secondary layer (only if the edge
+# honors _headers); the JS-injected meta covers JS crawlers. (The backend
+# X-Robots-Tag is on the public storyboard API JSON, not this HTML document.)
+/sb/*
+  X-Robots-Tag: noindex, nofollow
+  X-Content-Type-Options: nosniff
+
 /*
   X-Content-Type-Options: nosniff
   Referrer-Policy: strict-origin-when-cross-origin
