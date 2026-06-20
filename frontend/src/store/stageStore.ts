@@ -19,6 +19,14 @@ interface StageState {
    *  models reasoning, quality gates running).  Lets the UI show "still
    *  working" instead of a frozen loading screen — issue #19. */
   streamProgress: Record<string, GenerationProgress>
+  /** stream_reset bookkeeping per stage ID. A reset (completion-repair,
+   *  provider fallback, or the final canonical replay) means the live draft is
+   *  about to be replaced — but the replacement does not stream during a repair,
+   *  so emptying the buffer immediately blanks the editor and regresses the
+   *  overlay from the slim "watch it grow" pill back to the full from-scratch
+   *  loading card for the whole repair. Instead we keep the current draft on
+   *  screen and overwrite it the moment the first replacement token arrives. */
+  pendingReset: Record<string, boolean>
   setStage: (stage: Stage) => void
   setStages: (stages: Stage[]) => void
   appendToken: (stageId: string, token: string) => void
@@ -47,6 +55,7 @@ export const useStageStore = create<StageState>()(
     activeStream: null,
     qualityGate: {},
     streamProgress: {},
+    pendingReset: {},
 
     setStage: (stage) =>
       set((state) => {
@@ -84,22 +93,31 @@ export const useStageStore = create<StageState>()(
       }),
 
     appendToken: (stageId, token) =>
-      set((state) => ({
-        streamingContent: {
-          ...state.streamingContent,
-          [stageId]: (state.streamingContent[stageId] ?? "") + token,
-        },
-      })),
+      set((state) => {
+        // A pending reset means this token is the first of the replacement
+        // draft: overwrite the (now-stale) buffer instead of appending, and
+        // clear the reset flag.
+        const resetting = state.pendingReset[stageId]
+        const base = resetting ? "" : (state.streamingContent[stageId] ?? "")
+        const pendingReset = { ...state.pendingReset }
+        delete pendingReset[stageId]
+        return {
+          streamingContent: { ...state.streamingContent, [stageId]: base + token },
+          pendingReset,
+        }
+      }),
 
     appendStreamToken: (token) =>
       set((state) => {
         const stageId = state.activeStream
         if (!stageId) return state
+        const resetting = state.pendingReset[stageId]
+        const base = resetting ? "" : (state.streamingContent[stageId] ?? "")
+        const pendingReset = { ...state.pendingReset }
+        delete pendingReset[stageId]
         return {
-          streamingContent: {
-            ...state.streamingContent,
-            [stageId]: (state.streamingContent[stageId] ?? "") + token,
-          },
+          streamingContent: { ...state.streamingContent, [stageId]: base + token },
+          pendingReset,
         }
       }),
 
@@ -110,11 +128,14 @@ export const useStageStore = create<StageState>()(
         delete qualityGate[stageId]
         const streamProgress = { ...state.streamProgress }
         delete streamProgress[stageId]
+        const pendingReset = { ...state.pendingReset }
+        delete pendingReset[stageId]
         return {
           activeStream: stageId,
           streamingContent: { ...state.streamingContent, [stageId]: "" },
           qualityGate,
           streamProgress,
+          pendingReset,
         }
       }),
 
@@ -124,8 +145,12 @@ export const useStageStore = create<StageState>()(
       })),
 
     clearStreamContent: (stageId) =>
+      // Deferred reset: keep the current draft visible so the editor never
+      // blanks (and the overlay never regresses to the from-scratch loading
+      // card) during a repair that streams nothing until it completes. The
+      // first replacement token (appendToken) overwrites the stale buffer.
       set((state) => ({
-        streamingContent: { ...state.streamingContent, [stageId]: "" },
+        pendingReset: { ...state.pendingReset, [stageId]: true },
       })),
 
     setQualityGate: (stageId, info) =>
@@ -151,11 +176,14 @@ export const useStageStore = create<StageState>()(
         delete updatedStreamingContent[stageId]
         const streamProgress = { ...state.streamProgress }
         delete streamProgress[stageId]
+        const pendingReset = { ...state.pendingReset }
+        delete pendingReset[stageId]
 
         return {
           activeStream: null,
           streamingContent: updatedStreamingContent,
           streamProgress,
+          pendingReset,
           stages: existing
             ? {
                 ...state.stages,
