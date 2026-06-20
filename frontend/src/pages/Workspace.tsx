@@ -2163,19 +2163,17 @@ export default function Workspace() {
               }}
               onBlur={() => void saveProblemStatement()}
               footer={
-                currentWorkspace ? (
-                  <ResearchConsentToggle
-                    workspaceId={currentWorkspace.id}
-                    enabled={currentWorkspace.brave_research_enabled ?? false}
-                    disabled={workspaceGenerationLock.locked}
-                    onChanged={(enabled) =>
-                      setCurrentWorkspace({
-                        ...currentWorkspace,
-                        brave_research_enabled: enabled,
-                      })
-                    }
-                  />
-                ) : null
+                <ResearchConsentToggle
+                  workspaceId={currentWorkspace.id}
+                  enabled={currentWorkspace.brave_research_enabled ?? false}
+                  disabled={workspaceGenerationLock.locked}
+                  onChanged={(enabled) =>
+                    setCurrentWorkspace({
+                      ...currentWorkspace,
+                      brave_research_enabled: enabled,
+                    })
+                  }
+                />
               }
             />
 
