@@ -6,11 +6,47 @@ on:
     branches:
       - main
 
+# Cancel superseded runs on the same ref so a burst of pushes to a PR branch
+# does not pile up parallel full-CI runs. Never cancel on main: a cancelled
+# deploy could leave a half-shipped release.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
 permissions:
   contents: read
   security-events: write
 
 jobs:
+  # Detect which areas a PR touches so we can skip whole jobs that aren't
+  # affected. On a push to main this job still runs, but every downstream job
+  # gates on `github.event_name == 'push'` too, so main always runs everything.
+  changes:
+    name: Detect changes
+    runs-on: ubuntu-latest
+    outputs:
+      backend: ${{ steps.filter.outputs.backend }}
+      frontend: ${{ steps.filter.outputs.frontend }}
+      marketing: ${{ steps.filter.outputs.marketing }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            backend:
+              - 'backend/**'
+              - 'harness/**'
+              - '.github/workflows/ci.yml'
+            frontend:
+              - 'frontend/**'
+              - 'harness/**'
+              - '.github/workflows/ci.yml'
+            marketing:
+              - 'apps/marketing/**'
+              - '.github/workflows/ci.yml'
+
   secrets:
     name: Secret Scan
     runs-on: ubuntu-latest
@@ -31,6 +67,8 @@ jobs:
   backend:
     name: Backend
     runs-on: ubuntu-latest
+    needs: changes
+    if: ${{ github.event_name == 'push' || needs.changes.outputs.backend == 'true' }}
     services:
       postgres:
         image: postgres:15-alpine
@@ -259,29 +297,11 @@ jobs:
       - name: Phase 12 cost event schema
         run: python3 -m json.tool ../harness/schemas/llm-cost-event.schema.json >/dev/null
 
-      - name: GitHub integration tests
-        run: >-
-          uv run pytest
-          tests/test_github_integration.py
-          tests/test_github_api_client.py
-          tests/test_task_parser.py
-          -q --no-cov
-        env:
-          DATABASE_URL: "postgresql+asyncpg://postgres:postgres@localhost:5432/test"
-          REDIS_URL: "redis://localhost:6379/0"
-          GOOGLE_CLIENT_ID: "ci-test-client-id"
-          GOOGLE_CLIENT_SECRET: "ci-test-client-secret"
-          FRONTEND_URL: "http://localhost:5173"
-          ANTHROPIC_API_KEY: "ci-test-anthropic-key"
-          OPENAI_API_KEY: "ci-test-openai-key"
-          GOOGLE_API_KEY: "ci-test-google-key"
-          ENCRYPTION_MASTER_KEY: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
-          CSRF_SECRET: "ci-test-csrf-secret-value-long-enough"
-          TEST_DATABASE_URL: "postgresql+asyncpg://postgres:postgres@localhost:5432/test"
-          TEST_REDIS_URL: "redis://localhost:6379/0"
-          GITHUB_CLIENT_ID: ""
-          GITHUB_CLIENT_SECRET: ""
-          ENVIRONMENT: "test"
+      # NOTE: tests/test_github_integration.py, test_github_api_client.py and
+      # test_task_parser.py already run inside the main Pytest step above (they
+      # are not in its --ignore list, and the empty GITHUB_CLIENT_* they used
+      # are the config defaults). The dedicated re-run step was dropped to save
+      # CI minutes; re-add a one-module step here only when triaging a failure.
 
       - name: Phase 13 GitHub integration harness contracts
         run: uv run pytest ../harness/tests/backend/test_phase13_github_integration_contract.py -q
@@ -316,30 +336,11 @@ jobs:
           CSRF_SECRET: "ci-test-csrf-secret-value-long-enough"
           ENVIRONMENT: "test"
 
-      - name: Phase 14 V1.3 unit tests
-        # Each test module here owns one V1.3 feature. They are also covered
-        # by the main pytest run above; this step exists so a failure can be
-        # attributed to the right feature without parsing the full log.
-        run: >-
-          uv run pytest
-          tests/test_spec_clarifier.py
-          tests/test_pdf_export_service.py
-          tests/test_public_share_service.py
-          tests/test_online_eval_task_fields.py
-          tests/test_seed_templates.py
-          -q --no-cov
-        env:
-          DATABASE_URL: "postgresql+asyncpg://postgres:postgres@localhost:5432/test"
-          REDIS_URL: "redis://localhost:6379/0"
-          GOOGLE_CLIENT_ID: "ci-test-client-id"
-          GOOGLE_CLIENT_SECRET: "ci-test-client-secret"
-          FRONTEND_URL: "http://localhost:5173"
-          ANTHROPIC_API_KEY: "ci-test-anthropic-key"
-          OPENAI_API_KEY: "ci-test-openai-key"
-          GOOGLE_API_KEY: "ci-test-google-key"
-          ENCRYPTION_MASTER_KEY: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
-          CSRF_SECRET: "ci-test-csrf-secret-value-long-enough"
-          ENVIRONMENT: "test"
+      # NOTE: the per-feature V1.3 unit modules (test_spec_clarifier,
+      # test_pdf_export_service, test_public_share_service,
+      # test_online_eval_task_fields, test_seed_templates) already run inside
+      # the main Pytest step above. The dedicated re-run step (kept only for
+      # per-feature failure attribution) was dropped to save CI minutes.
 
       - name: Phase 14 public-workspace + template schemas
         run: |
@@ -392,6 +393,9 @@ jobs:
   worker-image:
     name: Worker Image Build
     runs-on: ubuntu-latest
+    # The Dockerfile rarely changes and the build is uncached (slow). PRs skip
+    # it; main still builds + validates the image before `deploy` consumes it.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -405,6 +409,8 @@ jobs:
   frontend:
     name: Frontend
     runs-on: ubuntu-latest
+    needs: changes
+    if: ${{ github.event_name == 'push' || needs.changes.outputs.frontend == 'true' }}
     defaults:
       run:
         working-directory: frontend
@@ -454,6 +460,8 @@ jobs:
   marketing:
     name: Marketing
     runs-on: ubuntu-latest
+    needs: changes
+    if: ${{ github.event_name == 'push' || needs.changes.outputs.marketing == 'true' }}
     defaults:
       run:
         working-directory: apps/marketing
