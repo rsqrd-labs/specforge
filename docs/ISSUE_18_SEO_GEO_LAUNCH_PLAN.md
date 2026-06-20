@@ -413,5 +413,51 @@ homepage).
   - Two build-time-only deps unaffected; added `@vercel/analytics` (client island,
     only shipped when enabled). `pnpm check` 0/0/0; disabled + enabled builds both
     verified.
-- [ ] Phase 6 — Validation tests
+- [x] Phase 6 — Validation tests
+  - **Test runner:** added `vitest` (+ `linkedom` for zero-DOM HTML parsing) to
+    `apps/marketing` with `vitest.config.ts` built on Astro's `getViteConfig`,
+    so the suite imports the site's own `.astro` components and TS libs with the
+    **same resolution the build uses** (no forked module graph) and
+    `import.meta.env` is defined. `pnpm test` → `vitest run`. CI wiring is
+    **deliberately left to Phase 7** (which owns the marketing job).
+  - **Always-fresh dist (kills the stale-pass class):** `tests/setup/global-setup.ts`
+    runs `astro build` **unconditionally** before the suite (~1.6s), so the
+    dist-parsing tests can never pass against stale output. A credential-free
+    build emits the homepage + 5 hubs — exactly the "always-indexable" surface
+    the dist assertions gate; Sanity detail routes are covered by
+    component/unit tests instead (they don't build without content in CI).
+  - **8 test files / 137 assertions, mapped 1:1 to the ACs:**
+    `static-html` (every indexable route emits one non-empty `<h1>`, a `<title>`,
+    a `<main>`, and >200 chars of real body — not an empty `#root` div);
+    `metadata` (per-route unique title/description/canonical/OG/Twitter +
+    indexable robots + sign-in CTA + no placeholder copy + the load-bearing
+    "`ENTITY_DESCRIPTION` is never reused as a `<meta description>`" check, plus
+    cross-route title/description/canonical **uniqueness**); `sitemap` (lists
+    only the indexable routes, no orphans, **excludes** `/p`,`/sb`, app routes);
+    `robots` (both zones disallow `/p/`+`/sb/`, never block `/` or the hubs,
+    reference the sitemap); `noindex-regression` (**the critical guard** —
+    `_headers` `X-Robots-Tag` on `/p/*`+`/sb/*`, both robots.txt disallows,
+    `vercel.json` rewrites `/p/`+`/sb/` to the SPA zone but **not** the hubs,
+    and the backend `X-Robots-Tag` + SPA JS-meta source guards still present —
+    backend *behavior* stays owned by `harness/tests/backend` phase14/23, not
+    duplicated); `structured-data` (homepage Organization+SoftwareApplication
+    `@id`-connected graph as actually emitted, plus the FAQPage/BreadcrumbList/
+    Article pure builders); `geo-content` (answer-ready blocks rendered via the
+    **Astro Container API** assert definition→workflow→comparison→examples
+    **order**, FAQ visible Q&A byte-matches the FAQPage JSON-LD, empty FAQ emits
+    nothing, and demo-sanitization exercises `renderMarkdown` dropping
+    `<script>`/inline handlers/`<iframe>`/`<object>`; entity language verbatim
+    on every page); `measurement` (AI-referral channel = the 5 engines with
+    `bing` isolated to `mixed_search_ai`, `classifyReferrer` host-suffix +
+    null-path behavior, analytics opt-in/inert by default, GSC meta gated, and
+    the synthetic-query audit artifacts committed + hub-mapped).
+  - **Container API kept non-load-bearing** (advisor steer): component-level
+    only (`AnswerReady`/`FaqSection` import types, no island → no renderer
+    registration); full-page rendering avoided (the `@vercel/analytics` island
+    would need React wired into the container). Every other AC is covered by
+    dist-parsing or pure-unit tests, so the suite never hinges on the
+    experimental API.
+  - **Verified non-vacuous:** mutation-tested the critical guard — deleting the
+    `/sb/*` `X-Robots-Tag` from `_headers` turns `noindex-regression` RED;
+    reverted, all 137 green. `pnpm check` 0/0/0; `pnpm test` 8 files / 137 pass.
 - [ ] Phase 7 — CI + deploy
