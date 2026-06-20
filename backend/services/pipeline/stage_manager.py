@@ -2402,7 +2402,10 @@ class StageManager:
                     allow_repair=not technology_repair_used,
                 )
                 if tech_repaired:
-                    technology_repair_used = True
+                    # This is the second (post-critic-regenerate) and final
+                    # safety pass, so we don't re-set technology_repair_used —
+                    # nothing reads it again. allow_repair above already used
+                    # the flag to forbid a second repair when pass one repaired.
                     stream_chunks = [accumulated]
             except TechSafetyError as exc:
                 gate_payload = await self._block_technology_safety_output(
