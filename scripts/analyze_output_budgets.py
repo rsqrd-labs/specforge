@@ -122,7 +122,9 @@ def _format_markdown(report: list[dict]) -> str:
             )
         )
     if not report:
-        lines.append("| _(ledger empty for the window)_ ||||||||||| |")
+        column_count = len(lines[2].split("|")) - 2
+        empty_cells = ["_(ledger empty for the window)_"] + [""] * (column_count - 1)
+        lines.append("| " + " | ".join(empty_cells) + " |")
     lines += [
         "",
         (
