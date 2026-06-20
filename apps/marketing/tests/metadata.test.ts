@@ -21,6 +21,11 @@ const PLACEHOLDER_PATTERNS = [
   /\bxxx+\b/i,
 ]
 
+const MIN_TITLE_LENGTH = 15
+const MAX_TITLE_LENGTH = 70
+const MIN_DESCRIPTION_LENGTH = 50
+const MAX_DESCRIPTION_LENGTH = 220
+
 const docs = allIndexableDocs()
 
 describe("metadata completeness (per route)", () => {
@@ -31,16 +36,16 @@ describe("metadata completeness (per route)", () => {
       const canonical = doc.querySelector('link[rel="canonical"]')?.getAttribute("href") ?? ""
 
       it("has a substantive title", () => {
-        expect(title.length).toBeGreaterThanOrEqual(15)
-        expect(title.length).toBeLessThanOrEqual(70)
+        expect(title.length).toBeGreaterThanOrEqual(MIN_TITLE_LENGTH)
+        expect(title.length).toBeLessThanOrEqual(MAX_TITLE_LENGTH)
       })
 
       it("has a substantive meta description", () => {
         // Lower bound guards against thin/empty descriptions; the upper bound
         // is a generous runaway-content guard (Google truncates SERP display
         // near ~160, but over-long authored copy is a soft issue, not a gate).
-        expect(description.length).toBeGreaterThanOrEqual(50)
-        expect(description.length).toBeLessThanOrEqual(220)
+        expect(description.length).toBeGreaterThanOrEqual(MIN_DESCRIPTION_LENGTH)
+        expect(description.length).toBeLessThanOrEqual(MAX_DESCRIPTION_LENGTH)
       })
 
       it("has an absolute canonical on the production origin matching its route", () => {
