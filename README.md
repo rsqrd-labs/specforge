@@ -27,9 +27,12 @@ Core capabilities:
 - Provider-aware LLM routing for Anthropic, OpenAI, and Google.
 - User-supplied provider API keys, encrypted at rest, with platform key fallback.
 - Online evaluation and quality indicators for generated stages.
+- A two-stage quality gate (zero-LLM section/depth validation plus an advisory LLM critic) with regenerate and override actions.
 - Harness full-coverage badge when all spec requirements are mapped to tests.
 - Task priority, time estimates, and effort summary across the task list.
-- Export options: ZIP delivery package, PDF document, GitHub repository push, and public share link.
+- A storyboard keynote and an evolving timeline of increments and ideas on top of the base spec.
+- Export options: ZIP delivery package, PDF document, and public share link.
+- A living, bidirectional GitHub integration (GitHub App): push the package to a repository, then keep tasks and issues/PRs in sync via a durable background worker.
 
 ## Product Flow
 
@@ -46,30 +49,38 @@ Core capabilities:
 
 ## Architecture
 
-SpecForge is a full-stack web application with a React frontend, FastAPI backend, PostgreSQL persistence, Redis-backed session/rate-limit state, and pluggable LLM providers.
+SpecForge is a full-stack web application with a React frontend, FastAPI backend, PostgreSQL persistence, Redis-backed session/rate-limit state, a durable background worker, and pluggable LLM providers.
 
 ```text
 Browser
   |
   | React + Vite frontend
   v
-FastAPI API
-  |
-  |-- PostgreSQL: users, workspaces, stages, credits, evals, templates
-  |-- Redis: refresh sessions, rate limits, transient auth state
+FastAPI API ----------------> Redis queue ----------------> arq worker
+  |                                                            (GitHub I/O,
+  |-- PostgreSQL: users, workspaces, stages, credits,          billing webhooks,
+  |               evals, templates, increments, billing        reconciliation crons)
+  |-- Redis: refresh sessions, rate limits, transient auth state, job queue
   |-- LLM gateway: Anthropic, OpenAI, Google Gemini
   |-- PDF renderer: WeasyPrint with no-network URL fetcher
   |-- Observability: Prometheus metrics, Sentry, optional OTLP
 ```
 
+The API process never blocks on external I/O. GitHub operations and billing-webhook
+processing are enqueued onto Redis and handled by a separate **arq worker** process
+(`worker.WorkerSettings`), which runs the export/sync jobs and periodic reconciliation
+crons. The worker shares the backend image and is its own service in both
+`docker-compose.yml` and the Railway `Procfile`.
+
 Important backend areas:
 
-- `backend/routers`: HTTP API routes for auth, workspaces, stages, credits, providers, integrations, and public share.
-- `backend/services/pipeline`: stage generation, diffing, PDF export, prompt building, and recovery.
-- `backend/services/llm`: provider adapters and routing.
+- `backend/routers`: HTTP API routes for auth, workspaces, stages, credits, providers, billing, storyboards, templates, integrations, and public share.
+- `backend/services/pipeline`: stage generation, diffing, PDF export, prompt building, quality gate (artifact validator + critic), increments, storyboards, and recovery.
+- `backend/services/llm`: provider adapters, the model catalog, routing, and tier/output-budget policy.
 - `backend/services/evals`: online evaluation and quality scoring.
 - `backend/services/security`: CSRF, prompt guard, output validator, sanitizer, and encrypted key handling.
 - `backend/middleware`: rate limiting and CSRF enforcement.
+- `backend/worker.py`: arq worker settings — registers GitHub and billing jobs plus the reconciliation crons.
 - `backend/migrations`: Alembic database migrations.
 - `backend/scripts/seed_templates.py`: idempotent starter-template seed, runs on every container start.
 
@@ -93,6 +104,50 @@ PDF rendering uses WeasyPrint. The backend Dockerfile installs the required nati
 
 The `templates` table is populated automatically on every container start by `backend/scripts/seed_templates.py`, invoked from `backend/entrypoint.sh` after `alembic upgrade head`. The seed is idempotent. To add a new template, edit `STARTER_TEMPLATES` in the seed script — never rename a slug in place; add a new slug and mark the old one inactive.
 
+### Quality Gate
+
+After a stage streams and passes output validation, but before it is persisted, two
+gates run. First a zero-LLM validator checks that every required section is present
+and meets minimum depth (per-stage section contracts, requirement-identifier floors,
+and a task-count floor). Then a cheap LLM critic does a second-pass review and, on a
+failing verdict, triggers one platform-funded regenerate with the findings injected.
+
+The critic is **advisory**: if the artifact still fails after that regenerate, the
+draft is still delivered and finalisable, with the remaining findings attached as
+non-blocking suggestions. The blocking gates are the zero-LLM section/depth checks
+and a technology-safety check; every blocking gate is **overridable** by the
+workspace owner, who can also disable the critic entirely per workspace. A blocking
+gate resets the stage to draft and surfaces Regenerate and Override actions in the UI.
+
+### GitHub Living System of Record
+
+The GitHub integration is a bidirectional, worker-driven sync built on the SpecForge
+**GitHub App** (the earlier OAuth export path is retained behind a flag). All GitHub
+I/O runs on the arq worker, never inline in the API:
+
+- `POST /workspaces/{id}/export/github` enqueues a push and returns `202` immediately.
+- Inbound webhooks arrive at `POST /integrations/github/webhook`, HMAC-verified before
+  any DB or queue work. Closing a task's issue or merging its PR flips that task to
+  done inside SpecForge.
+- Jobs are idempotent and checkpointed, with bounded retries, backoff, and a
+  dead-letter queue. A periodic cron reconciles drift.
+- Sync state is `GET /workspaces/{id}/sync`; recovery is `POST .../sync/resync` and
+  `POST .../sync/backfill`.
+
+See `docs/RUNBOOK.md` §12 for App and webhook-secret rotation, dead-letter replay,
+backfill, and increment-push operations.
+
+### Billing
+
+Paid credit packs use **Lemon Squeezy** hosted checkout (Lemon is the Merchant of
+Record, so it absorbs tax, chargebacks, and disputes). Checkout is attempt-first:
+`POST /billing/checkout` records an attempt before calling Lemon and returns a
+reference the frontend polls. `POST /billing/webhook` verifies the `X-Signature` HMAC
+before any DB work, commits the event to a durable inbox, then enqueues processing on
+the arq worker — the HTTP path never grants credits inline. Grants and refunds are
+idempotent, and reconciliation crons keep the ledger honest without ever auto-granting.
+See `docs/RUNBOOK.md` §9 for billing ops.
+
 ## Tech Stack
 
 Backend:
@@ -103,6 +158,7 @@ Backend:
 - Alembic migrations
 - PostgreSQL 16
 - Redis 7
+- arq for the durable background worker (GitHub/billing jobs, reconciliation crons)
 - Authlib and python-jose for OAuth/JWT flows
 - Anthropic, OpenAI, and Google Generative AI SDKs
 - WeasyPrint for PDF rendering
@@ -194,8 +250,22 @@ See `docs/LOCAL_TESTING_HANDBOOK.md` for a step-by-step guide to generating secr
 | `CSRF_SECRET` | HMAC secret for CSRF token signing. |
 | `METRICS_TOKEN` | Bearer token protecting the `/metrics` endpoint. Leave blank to allow unauthenticated scraping (not recommended in production). |
 | `MAX_ACTIVE_WORKSPACES_PER_USER` | Optional cap on active workspaces per user. Defaults to unlimited when unset. |
-| `GITHUB_CLIENT_ID` | GitHub OAuth App client ID. Leave blank to disable the GitHub export integration. |
+| `GITHUB_CLIENT_ID` | GitHub OAuth App client ID. Leave blank to disable the legacy (Phase 13) OAuth export integration. |
 | `GITHUB_CLIENT_SECRET` | GitHub OAuth App client secret. Required when `GITHUB_CLIENT_ID` is set. |
+| `GITHUB_APP_ID` | Numeric GitHub App id (the living Phase 21 integration). Set together with `GITHUB_APP_SLUG` to enable the App. |
+| `GITHUB_APP_SLUG` | Public GitHub App slug, used to build the install URL. |
+| `GITHUB_APP_PRIVATE_KEY` | RS256 PEM that signs the App JWT. A secret-manager value, never stored in the DB. Required in production when the App is enabled. |
+| `GITHUB_APP_WEBHOOK_SECRET` | HMAC secret for verifying inbound webhooks. Required in production when the App is enabled. `GITHUB_APP_WEBHOOK_SECRET_PREV` is also accepted during a rotation window. |
+| `LEMONSQUEEZY_API_KEY` | Lemon Squeezy API key. Set with `LEMONSQUEEZY_STORE_ID` and `LEMONSQUEEZY_VARIANT_ID` to enable checkout; leave any blank to disable it (`POST /billing/checkout` returns 503). |
+| `LEMONSQUEEZY_WEBHOOK_SECRET` | HMAC secret for verifying `X-Signature` on billing webhooks. `LEMONSQUEEZY_WEBHOOK_SECRET_PREV` is accepted during rotation. |
+| `LEMONSQUEEZY_PRICE_CENTS` / `_CURRENCY` / `_CREDITS_PER_PURCHASE` / `_CREDIT_VALIDITY_DAYS` | Credit-pack pricing and validity. |
+| `LEMONSQUEEZY_SUCCESS_URL` | Post-checkout redirect (HTTPS in production). |
+| `LEMONSQUEEZY_TEST_MODE` | Must be `false` in production. |
+| `ADMIN_USER_EMAILS` | Comma-separated allowlist for the manual billing-correction endpoint. |
+| `LLM_STREAM_IDLE_TIMEOUT_SECONDS` | Stream watchdog idle bound — a stream is killed only if no provider event arrives within this window. Defaults to 180. |
+| `LLM_STREAM_HARD_CAP_SECONDS` | Absolute upper bound on a single stream. Defaults to 900. |
+| `CORE_CHEAP_PRIMARY` | Optional feature flag. Defaults to off (core generation is mid-tier first with strong-tier escalation); set true to route to the cheapest viable tier first. |
+| `CORE_COMPLEXITY_ROUTING` | Optional feature flag, defaults to off. Enables a deterministic classifier that raises (never lowers) the starting tier for predictably hard requests. |
 | `SENTRY_DSN` | Optional backend Sentry DSN. |
 | `GRAFANA_OTLP_ENDPOINT` | Optional OTLP trace endpoint. |
 | `GRAFANA_OTLP_TOKEN` | Optional OTLP auth token. |
@@ -231,7 +301,12 @@ The compose stack starts:
 - PostgreSQL on `localhost:5432`
 - Redis on `localhost:6379`
 - FastAPI API on `localhost:8000`
+- arq worker (no published port; drains the Redis job queue)
 - Vite frontend on `localhost:5173`
+
+The worker needs public ingress to receive GitHub and billing webhooks in dev —
+forward a tunnel (for example `smee.io` or `gh webhook forward`) to the local
+`POST /integrations/github/webhook` endpoint, and register a separate dev GitHub App.
 
 Open:
 
@@ -280,6 +355,14 @@ cd backend
 uv sync
 uv run alembic upgrade head
 uv run uvicorn main:app --reload --host 127.0.0.1 --port 8000
+```
+
+In a second shell, run the background worker (required for GitHub sync and billing
+webhook processing):
+
+```bash
+cd backend
+uv run arq worker.WorkerSettings
 ```
 
 Frontend:
@@ -352,11 +435,20 @@ docs/SMOKE_TEST_CHECKLIST.md
 
 ## Provider-Agnostic LLM Cost Optimization
 
-SpecForge keeps cost optimization provider-neutral. `services.llm.cost_registry`
-is the static source of truth for OpenAI, Anthropic, and Google model tiers,
-costs, context limits, usage support, prompt-cache accounting, and batch support.
-Stage logic routes by operation and tier (`strong`, `mid`, `mini`, `small`) via
-`resolve_llm_route()` instead of hard-coding provider model names.
+SpecForge keeps cost optimization provider-neutral. `services.llm.model_catalog`
+is the single source of truth for provider model IDs and per-provider tiers; the
+capability/cost registry (`services.llm.cost_registry`) and routing policy derive
+from it, so model swaps happen in one place. Stage logic routes by operation and
+tier (`strong`, `mid`, `mini`, `small`) via `resolve_llm_route()` instead of
+hard-coding provider model names, and output budgets are sized per operation and
+clamped to each model's catalog ceiling (`services.llm.output_budget`).
+
+Core generation defaults to each provider's **mid tier** with strong-tier
+escalation on a quality-gate or runtime failure. An optional `CORE_CHEAP_PRIMARY`
+flag flips every artifact-generation feature to a cheapest-viable-tier-first policy
+(with mid-tier escalation), and `CORE_COMPLEXITY_ROUTING` can raise the starting
+tier for predictably hard requests. Both ship off and are promoted only after the
+golden-corpus route eval (`scripts/run_llm_route_eval.py`) and manual approval.
 
 Key invariants:
 
@@ -408,11 +500,16 @@ SpecForge can be deployed as two application services plus managed PostgreSQL an
 
 ```text
 Frontend static site/CDN
-Backend container service
+Backend API container service
+Worker container service (arq, shares the backend image)
 Managed PostgreSQL
 Managed Redis
 Optional observability: Sentry + OTLP/Grafana
 ```
+
+The worker is a separate long-running process (`arq worker.WorkerSettings`), not just
+a compose convenience. It must run alongside the API in production for GitHub sync and
+billing-webhook processing; the Railway `Procfile` declares it as a `worker` process.
 
 Recommended production shape:
 
@@ -511,16 +608,23 @@ http://localhost:5173/auth/callback
 
 ## GitHub Export Setup
 
-The GitHub export integration lets users push their delivery package to a GitHub repository. It is optional and disabled by default when `GITHUB_CLIENT_ID` is blank.
+The GitHub integration lets users push their delivery package to a repository and
+keep tasks in sync with issues and PRs. There are two paths:
 
-To enable it:
+- **GitHub App (Phase 21, the living integration)** — bidirectional, worker-driven
+  sync. Enable it by setting `GITHUB_APP_ID` and `GITHUB_APP_SLUG`, plus
+  `GITHUB_APP_PRIVATE_KEY` and `GITHUB_APP_WEBHOOK_SECRET` (both required in
+  production). Point the App's webhook at `POST /integrations/github/webhook`. See
+  `docs/INTEGRATION_API_SETUP_HANDBOOK.md` for the full App registration walkthrough
+  and `docs/RUNBOOK.md` §12 for rotation and recovery ops.
+- **OAuth App (Phase 13, legacy one-shot export)** — retained behind a flag. To
+  enable it, create a GitHub OAuth App with callback URL
+  `{FRONTEND_URL}/integrations/github/callback` and set `GITHUB_CLIENT_ID` and
+  `GITHUB_CLIENT_SECRET`.
 
-1. In GitHub → **Settings** → **Developer settings** → **OAuth Apps** → **New OAuth App**.
-2. Set the **Authorization callback URL** to `{FRONTEND_URL}/integrations/github/callback`.
-3. Copy the **Client ID** and generate a **Client Secret**.
-4. Set `GITHUB_CLIENT_ID` and `GITHUB_CLIENT_SECRET` in backend secrets.
-
-When `GITHUB_CLIENT_ID` is blank, the backend returns 503 for all GitHub integration routes and the frontend omits the GitHub export option. No partial configuration is needed to disable the feature.
+When neither path is configured, the backend returns 503 for GitHub integration
+routes and the frontend omits the GitHub export option. No partial configuration is
+needed to disable the feature.
 
 ## Observability
 
@@ -618,8 +722,9 @@ PDF export fails:
 
 GitHub export returns 503:
 
-- Confirm `GITHUB_CLIENT_ID` and `GITHUB_CLIENT_SECRET` are set in the backend environment.
-- Both variables must be non-blank to enable the integration.
+- For the GitHub App path, confirm `GITHUB_APP_ID` and `GITHUB_APP_SLUG` (and, in production, `GITHUB_APP_PRIVATE_KEY` and `GITHUB_APP_WEBHOOK_SECRET`) are set.
+- For the legacy OAuth path, confirm both `GITHUB_CLIENT_ID` and `GITHUB_CLIENT_SECRET` are non-blank.
+- Confirm the arq worker process is running — export pushes are enqueued, not handled inline.
 
 Large frontend build warning:
 
