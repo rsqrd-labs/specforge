@@ -1,0 +1,2 @@
+# Dated synthetic-query audit runs land here (issue #18, Phase 5.3).
+# Generate with: node measurement/audit.mjs > measurement/runs/$(date +%F).md

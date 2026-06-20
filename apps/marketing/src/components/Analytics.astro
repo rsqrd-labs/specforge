@@ -1,0 +1,34 @@
+---
+// Body-side measurement island (issue #18, Phase 5). Rendered just before
+// </body> by BaseLayout, and ONLY when `analyticsEnabled` — so a build with
+// analytics off ships no Vercel script and no classifier (the GSC <meta> lives
+// in <head> and is gated separately). Two parts when on:
+//
+//   1. Vercel Web Analytics (`<Analytics/>`) — injects its first-party script
+//      from /_vercel/insights/* and captures the native referrer breakdown that
+//      is the guaranteed baseline for the AI-engine channel.
+//
+//   2. The AI-referral classifier — a bundled (not inline) module script that
+//      reuses the shared `classifyReferrer` (single source of truth, and an
+//      external /_astro/* asset so it stays CSP `'self'`-clean for Phase 7). It
+//      normalizes a recognized referrer into a `track('AI Referral', …)` custom
+//      event so the channel is named, not just inferred from raw hosts.
+import Analytics from "@vercel/analytics/astro"
+import { analyticsEnabled } from "../lib/analytics"
+---
+
+{analyticsEnabled && (
+  <>
+    <Analytics />
+    <script>
+      import { track } from "@vercel/analytics"
+      import { classifyReferrer, AI_REFERRAL_EVENT } from "../lib/analytics"
+
+      // Best-effort: an empty/origin-only referrer simply doesn't classify.
+      const hit = classifyReferrer(document.referrer)
+      if (hit) {
+        track(AI_REFERRAL_EVENT, { engine: hit.engine, channel: hit.channel })
+      }
+    </script>
+  </>
+)}

@@ -357,6 +357,61 @@ homepage).
     until content is authored. Revisit when detail routes have content (Phase 7
     deploy/webhook), alongside the analytics/GSC/AI-referral measurement that is
     Phase 5's actual new work.
-- [ ] Phase 5 — GEO answer-readiness + measurement
+- [x] Phase 5 — GEO answer-readiness + measurement
+  - **Answer-ready template (5.1) was finalized in Phase 4** and verified again
+    here: the `AnswerReady` set renders, in answer-engine order, direct-answer
+    **definition** → **workflow** → **comparison table** → **examples**, and
+    `FaqSection` renders a no-JS `<details>` FAQ whose visible Q&A byte-matches
+    the `FAQPage` JSON-LD, with consistent `ENTITY_DESCRIPTION` framing. Phase 5
+    adds **measurement**, not new template structure.
+  - **Vendor: Vercel Web Analytics** (user decision). Chosen because the zone
+    deploys on Vercel — its script is served **first-party from
+    `/_vercel/insights/*`** (same-origin → CSP-clean, no third-party host to
+    allowlist later), cookieless/privacy-light (no consent banner), and it
+    captures the referrer breakdown natively. Wired via `@vercel/analytics/astro`
+    (`<Analytics/>` island, default export — API verified empirically against the
+    installed package, not memory).
+  - **Gated + inert by default (the load-bearing posture):** `src/lib/analytics.ts`
+    exposes `analyticsEnabled` (`PUBLIC_ANALYTICS_ENABLED === "true"`, **off by
+    default**). `BaseLayout` renders the analytics island only when enabled — a
+    default/CI/preview build ships **zero executable JS** (verified: no
+    `<script src>`/`type=module`, no `vercel`/`_astro/*.js`, no GSC meta in the
+    built HTML). Enabled build verified to emit the Vercel island + the bundled
+    classifier + the GSC meta. Real creds switch on in Phase 7.
+  - **AI-referral channel (5.2):** `AI_ENGINE_REFERRERS` in `analytics.ts` is the
+    single source of truth (consumed by both the client classifier and the
+    Phase-6 tests, so it can't drift). A pure, side-effect-free `classifyReferrer()`
+    maps a `document.referrer` to `{engine,label,channel}`; the classifier is a
+    **bundled** module script (`Analytics.astro`, not `define:vars`-inline — keeps
+    it an external `/_astro/*` asset, CSP-clean for Phase 7) that fires
+    `track('AI Referral', { engine, channel })`. **`bing.com` is deliberately a
+    separate `mixed_search_ai` bucket**, not in the core `ai_answer_engine`
+    channel — `bing.com` referrals are mostly classic Bing organic, so folding
+    them in would inflate the exact metric this phase isolates; we keep the host
+    (some Copilot-in-Bing answers refer as `bing.com`) without polluting the AI
+    channel. `copilot.microsoft.com` is the high-confidence Copilot host. Logic
+    smoke-tested against sample referrers (Bing split, www/cn-subdomain suffix
+    match, classic-Google → null, empty/invalid → null — all pass).
+  - **Honest caveats committed this phase (not deferred surprises):** the README
+    states (a) Vercel **custom events need Pro+** — on Hobby they drop, so the
+    **native referrer breakdown is the guaranteed baseline** and the custom event
+    is an enhancement; (b) referrer attribution is **best-effort** (policy
+    stripping / origin-only referrers) — a **sampler, not a census**.
+  - **Search Console (5.2):** gated `<meta name="google-site-verification">` in
+    `<head>` driven by `PUBLIC_GSC_VERIFICATION`, **independent** of analytics
+    (renders even with tracking off; blank ⇒ omitted, e.g. DNS verification).
+  - **Synthetic-query audit (5.3):** `apps/marketing/measurement/` —
+    `synthetic-queries.json` (cluster-keyed target queries: spec-to-build /
+    coding-agent-handoff / templates / comparisons, mapped to hubs + the six
+    engines), a dependency-free `audit.mjs` that renders a dated fill-in results
+    log (16 queries × 6 engines = 96 checks), `SYNTHETIC_QUERY_AUDIT.md`
+    (methodology, cadence, limitations) and `README.md` (the full measurement
+    overview + AI-channel definition). Defined as a **launch-monitoring artifact,
+    not an automated gate** (engine answers are non-deterministic / mostly
+    API-less). `measurement/runs/` holds dated runs.
+  - **`/llms.txt` (5.4): deferred** per the issue (not a launch dependency).
+  - Two build-time-only deps unaffected; added `@vercel/analytics` (client island,
+    only shipped when enabled). `pnpm check` 0/0/0; disabled + enabled builds both
+    verified.
 - [ ] Phase 6 — Validation tests
 - [ ] Phase 7 — CI + deploy

@@ -1,0 +1,64 @@
+{
+  "version": 1,
+  "updated": "2026-06-20",
+  "note": "Issue #18, Phase 5.3 — repeatable synthetic-query audit. A launch-MONITORING artifact, not an automated gate: these queries are run against answer engines (manually, or via API where available) on a cadence to track whether SpecForge is cited/visible over time. Keep clusters aligned with the keyword clusters the content hubs target (spec-to-build, coding-agent handoff, templates, comparisons). Edit the queries; `audit.mjs` turns this file into a dated results log.",
+  "target": {
+    "brand": "SpecForge",
+    "hosts": ["specforge.app"],
+    "what_counts_as_a_hit": "An answer engine names SpecForge and/or links a specforge.app URL in its answer."
+  },
+  "engines": [
+    { "key": "chatgpt", "label": "ChatGPT (search)", "surface": "chatgpt.com", "method": "manual" },
+    { "key": "perplexity", "label": "Perplexity", "surface": "perplexity.ai", "method": "manual_or_api" },
+    { "key": "gemini", "label": "Google Gemini", "surface": "gemini.google.com", "method": "manual" },
+    { "key": "copilot", "label": "Microsoft Copilot", "surface": "copilot.microsoft.com", "method": "manual" },
+    { "key": "claude", "label": "Claude", "surface": "claude.ai", "method": "manual" },
+    { "key": "google_aio", "label": "Google AI Overviews", "surface": "google.com", "method": "manual" }
+  ],
+  "clusters": [
+    {
+      "key": "spec-to-build",
+      "label": "Spec-to-build workflow",
+      "hub": "/use-cases",
+      "queries": [
+        "how do I turn a rough product idea into an engineering spec",
+        "tool that turns a product idea into a spec, plan, and tasks",
+        "what is a spec-to-build workflow",
+        "how to go from idea to a build-ready technical plan"
+      ]
+    },
+    {
+      "key": "coding-agent-handoff",
+      "label": "Coding-agent handoff",
+      "hub": "/guides",
+      "queries": [
+        "how to write a spec a coding agent can build from",
+        "best way to hand off requirements to an AI coding agent",
+        "how to give an AI agent enough context to implement a feature",
+        "structured brief for AI pair programming"
+      ]
+    },
+    {
+      "key": "templates",
+      "label": "PRD / spec / plan templates",
+      "hub": "/templates",
+      "queries": [
+        "PRD template for a SaaS feature",
+        "engineering spec template with acceptance criteria",
+        "implementation plan template for a new product",
+        "test plan / validation harness template"
+      ]
+    },
+    {
+      "key": "comparisons",
+      "label": "Tool comparisons",
+      "hub": "/compare",
+      "queries": [
+        "alternatives to writing specs by hand in a doc",
+        "best AI tools for product specs and planning",
+        "AI tool to generate specs vs a PRD template",
+        "what can turn requirements into traceable engineering tasks"
+      ]
+    }
+  ]
+}

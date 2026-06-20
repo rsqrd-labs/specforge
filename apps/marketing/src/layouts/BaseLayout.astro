@@ -4,6 +4,8 @@
 // and renders the page body. Every indexable route renders through this.
 import Seo from "../components/Seo.astro"
 import JsonLd from "../components/JsonLd.astro"
+import Analytics from "../components/Analytics.astro"
+import { gscVerification } from "../lib/analytics"
 import "../styles/global.css"
 
 interface Props {
@@ -47,6 +49,11 @@ const {
     <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
     <meta name="theme-color" content="#8f4e00" />
     <meta name="generator" content={Astro.generator} />
+    {/* Search Console ownership — independent of analytics; renders whenever
+        the token is set, even with tracking disabled (issue #18, Phase 5). */}
+    {gscVerification && (
+      <meta name="google-site-verification" content={gscVerification} />
+    )}
     <Seo
       title={title}
       description={description}
@@ -63,5 +70,6 @@ const {
   </head>
   <body>
     <slot />
+    <Analytics />
   </body>
 </html>
