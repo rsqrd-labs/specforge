@@ -1,0 +1,33 @@
+---
+// Shared top navigation for content pages + hubs (issue #18, Phase 4). The
+// brand lockup links home; the hub links make every content namespace reachable
+// from every page (Phase-6 "no orphaned routes"). The homepage keeps its own
+// bespoke hero header, so this is used only on the content/hub chrome.
+import { CONTENT_HUBS, SIGN_IN_URL } from "../consts"
+
+interface Props {
+  /** Path of the active hub, to mark the current nav item. */
+  active?: string
+}
+
+const { active } = Astro.props
+---
+
+<header class="site-header">
+  <a href="/" class="site-header-brand" aria-label="SpecForge home">
+    <img src="/brand/squirrel-mark.png" alt="" width="28" height="28" />
+    <span>SpecForge</span>
+  </a>
+  <nav class="site-header-nav" aria-label="Content">
+    {CONTENT_HUBS.map((hub) => (
+      <a
+        href={hub.path}
+        aria-current={active === hub.path ? "page" : undefined}
+        class={active === hub.path ? "is-active" : undefined}
+      >
+        {hub.label}
+      </a>
+    ))}
+  </nav>
+  <a href={SIGN_IN_URL} class="site-header-cta">Start free</a>
+</header>

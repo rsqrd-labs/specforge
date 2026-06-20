@@ -1,0 +1,82 @@
+---
+// Guide detail page (issue #18, Phase 4). Guides target the "how-to" keyword
+// cluster (writing specs, coding-agent handoff, shipping from a plan) and emit
+// Article + BreadcrumbList JSON-LD, plus FAQPage when the guide carries FAQs.
+//
+// Content boundary: the guide *documents* are authored later in the Sanity
+// studio (creds land in Phase 7). With Sanity unconfigured, getGuides() returns
+// [] and this route builds zero pages — the template itself is what ships now.
+import ContentLayout from "../../layouts/ContentLayout.astro"
+import Breadcrumbs from "../../components/content/Breadcrumbs.astro"
+import PortableText from "../../components/content/PortableText.astro"
+import FaqSection from "../../components/content/FaqSection.astro"
+import { getGuides, guideToArticleInput, guidePath } from "../../lib/sanity"
+import type { GuideDoc } from "../../lib/sanity"
+import {
+  articleSchema,
+  breadcrumbListSchema,
+  faqPageSchema,
+  type BreadcrumbItem,
+} from "../../lib/seo"
+
+export async function getStaticPaths() {
+  const guides = await getGuides()
+  return guides.map((guide) => ({ params: { slug: guide.slug }, props: { guide } }))
+}
+
+interface Props {
+  guide: GuideDoc
+}
+
+const { guide } = Astro.props
+const path = guidePath(guide.slug)
+
+const crumbs: BreadcrumbItem[] = [
+  { name: "Home", path: "/" },
+  { name: "Guides", path: "/guides" },
+  { name: guide.heading, path },
+]
+
+// Article + breadcrumb always; FAQPage only when FAQs exist (empty FAQPage is
+// an invalid/penalized shape).
+const jsonLd: Record<string, unknown>[] = [
+  articleSchema(guideToArticleInput(guide)),
+  breadcrumbListSchema(crumbs),
+]
+if (guide.faqs && guide.faqs.length) jsonLd.push(faqPageSchema(guide.faqs))
+---
+
+<ContentLayout
+  title={guide.seo.title}
+  description={guide.seo.description}
+  path={path}
+  image={guide.seo.ogImage ?? guide.heroImage}
+  ogType="article"
+  publishedTime={guide.datePublished}
+  modifiedTime={guide.dateModified}
+  activeHub="/guides"
+  jsonLd={jsonLd}
+>
+  <main class="content-main">
+    <Breadcrumbs items={crumbs} />
+    <article>
+      <header class="content-header">
+        <span class="content-kicker">Guide</span>
+        <h1>{guide.heading}</h1>
+        {guide.excerpt && <p class="content-lede">{guide.excerpt}</p>}
+        <div class="content-byline">
+          {guide.authorName && <span>By {guide.authorName}</span>}
+          <span>
+            Updated <time datetime={guide.dateModified}>{new Date(guide.dateModified).toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric" })}</time>
+          </span>
+        </div>
+        {guide.heroImage && (
+          <img class="content-hero-image" src={guide.heroImage} alt={guide.seo.title} />
+        )}
+      </header>
+
+      <PortableText blocks={guide.body} />
+      <FaqSection faqs={guide.faqs} />
+    </article>
+  </main>
+</ContentLayout>

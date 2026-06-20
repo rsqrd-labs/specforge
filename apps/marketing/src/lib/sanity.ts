@@ -110,8 +110,16 @@ export interface SanityExample {
   output: string
 }
 
-/** Portable Text blocks. Rendered to HTML in Phase 4; kept opaque here. */
-export type PortableTextBlock = Record<string, unknown>
+/**
+ * A Portable Text block. Every block carries a `_type` discriminator (`block`,
+ * `image`, …); the rest stays opaque here and is serialized to HTML in Phase 4
+ * (`components/content/PortableText.astro`). The `_type` field also satisfies
+ * `@portabletext/to-html`'s `TypedObject` input contract.
+ */
+export interface PortableTextBlock {
+  _type: string
+  [key: string]: unknown
+}
 
 interface SanityDocMeta {
   _id: string

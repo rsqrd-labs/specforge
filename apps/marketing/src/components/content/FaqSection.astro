@@ -1,0 +1,29 @@
+---
+// Visible FAQ block (issue #18, Phase 4). Renders the same `faqs` array that
+// feeds the FAQPage JSON-LD, so the on-page answer and the structured-data
+// answer are identical — Google requires the FAQPage markup to match visible
+// content, and answer engines extract from the rendered Q&A. <details>/<summary>
+// keeps it interactive with zero JavaScript.
+import type { SanityFaq } from "../../lib/sanity"
+
+interface Props {
+  faqs?: SanityFaq[]
+}
+
+const { faqs } = Astro.props
+const hasFaqs = faqs && faqs.length > 0
+---
+
+{hasFaqs && (
+  <section class="answer-section faq-section" aria-labelledby="faq-heading">
+    <h2 id="faq-heading">Frequently asked questions</h2>
+    <div class="faq-list">
+      {faqs!.map((faq) => (
+        <details class="faq-item">
+          <summary>{faq.question}</summary>
+          <p>{faq.answer}</p>
+        </details>
+      ))}
+    </div>
+  </section>
+)}

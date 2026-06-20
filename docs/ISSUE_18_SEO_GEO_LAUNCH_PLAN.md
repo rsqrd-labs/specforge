@@ -289,7 +289,74 @@ homepage).
     `isSanityConfigured:false`, every fetch `[]`/`null`, no throw. **Not
     runtime-verified against live Sanity** — that's correct for the phase
     boundary: the page templates that consume these queries are Phase 4.
-- [ ] Phase 4 — Launch content
+- [x] Phase 4 — Launch content
+  - **Content boundary (stated up front):** Phase 4 ships the *templates +
+    hubs + in-repo copy* that consume the Phase-3 fetch layer. The actual
+    guide/use-case/comparison/template/demo *documents* are authored in the
+    Sanity studio later (creds land in Phase 7). With Sanity unconfigured every
+    `getStaticPaths` yields zero detail pages, so a green build alone proves
+    nothing here — each template was verified against **fixture data** instead
+    (see Verified).
+  - Five dynamic detail routes consuming `src/lib/sanity.ts`:
+    `/guides/[slug]` (Article), `/use-cases/[slug]` + `/compare/[slug]` (both
+    `seoPage`, sharing one `SeoPageArticle` body — workflow-led vs table-led),
+    `/templates/[slug]`, `/demos/[slug]`. Each emits `BreadcrumbList` always and
+    `FAQPage` only when FAQs exist (an empty FAQPage is an invalid/penalized
+    shape); guides add `Article` via the Phase-3 `guideToArticleInput` adapter.
+    The top-level `landing`-section `seoPage` route (`/[slug]`) is **deliberately
+    deferred** — a catch-all top-level dynamic route risks shadowing future
+    static pages; the hubs filter to `use-case`/`comparison` so a `landing` doc
+    is never listed pointing at a route that doesn't exist.
+  - Five **hub/index pages** (`/guides`, `/templates`, `/use-cases`, `/compare`,
+    `/demos`) — themselves indexable SEO surfaces carrying the keyword-cluster
+    copy in-repo (spec-to-build, coding-agent handoff, PRD/spec/plan templates,
+    "X vs Y"). Hubs are linked from a shared `SiteHeader`/`SiteFooter` and an
+    on-homepage "explore" grid (single source: `CONTENT_HUBS` in `consts.ts`),
+    so every hub is reachable from every page — the Phase-6 "no orphaned routes"
+    guard. Detail pages link back via visible breadcrumbs that mirror the
+    `BreadcrumbList` JSON-LD.
+  - GEO answer-ready rendering (the structure is inherent to the content types;
+    Phase 5 adds *measurement*, not this): a shared `AnswerReady` block set
+    renders, in answer-engine order, the direct-answer **definition** up top →
+    **workflow** steps → **comparison** table → **examples**; `FaqSection`
+    renders a no-JS `<details>` FAQ whose visible Q&A is byte-identical to the
+    `FAQPage` markup (Google requires the match). Rich `body` is Portable Text
+    via `@portabletext/to-html` (`PortableText.astro`).
+  - **Demos are curated, first-party only** — no import-from-workspace path. The
+    four artifacts (spec/plan/harness/tasks Markdown) render to real crawlable
+    HTML via `marked` (`src/lib/markdown.ts`), which **drops raw/inline HTML**
+    (`renderer.html → ""`) as defense-in-depth beneath the Phase-6 content gate.
+  - **Entity-language discipline (the load-bearing SEO rule):** meta
+    `title`/`description` come **only** from each doc's authored `seo.*` (unique,
+    min/max-validated in the studio); `ENTITY_DESCRIPTION` lives **only** in
+    in-body framing + JSON-LD, **never** as a meta fallback — wiring it as a
+    description default would let un-overridden pages pass the Phase-6
+    duplicate/missing QA with identical copy, defeating the gate. Homepage
+    "refreshed" by standardizing on that snippet in body/footer copy and adding
+    the hub-discovery links; its required title/description stay bespoke.
+  - Two build-time deps added (`marked`, `@portabletext/to-html`); both run only
+    at SSG time, ship zero client JS. `PortableTextBlock` tightened to
+    `{ _type: string; … }` (strictly more correct — every PT block has `_type`;
+    also satisfies `to-html`'s `TypedObject`). One latent note carried in
+    `PortableText.astro`: the bare `body` projection has no asset deref, so
+    in-body `image` blocks need a projection+serializer when that content lands.
+  - **Verified:** `pnpm check` 0/0/0 and `pnpm build` clean (6 pages: `/` +
+    5 hubs; detail routes correctly build 0 pages with no Sanity content). Each
+    template was then exercised through **throwaway fixture pages** fed sample
+    `GuideDoc`/`SeoPageDoc`/`DemoPageDoc` (the Phase-3 scratch-page technique):
+    confirmed real `<h1>`, valid `Article`+`BreadcrumbList`+`FAQPage` JSON-LD,
+    Portable-Text body, all answer-ready blocks (definition/workflow/comparison/
+    examples), and that an embedded `<script>alert('xss')</script>` in demo
+    Markdown was dropped (0 occurrences) — then deleted the fixtures and rebuilt
+    clean. Confirmed the 5 hubs carry unique authored meta descriptions, that
+    `ENTITY_DESCRIPTION` never appears in a `<meta name="description">`, and that
+    the sitemap lists `/` + the 5 hubs only (no app/`/p`/`/sb`/scratch routes).
+  - **Conscious deferral (Phase-2 handoff):** sitemap `lastmod` per detail page
+    from Sanity `_updatedAt` is **not** wired — `@astrojs/sitemap`'s `serialize`
+    runs at config time without per-page Sanity data, and no detail pages exist
+    until content is authored. Revisit when detail routes have content (Phase 7
+    deploy/webhook), alongside the analytics/GSC/AI-referral measurement that is
+    Phase 5's actual new work.
 - [ ] Phase 5 — GEO answer-readiness + measurement
 - [ ] Phase 6 — Validation tests
 - [ ] Phase 7 — CI + deploy

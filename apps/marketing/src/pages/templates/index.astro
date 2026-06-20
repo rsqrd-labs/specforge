@@ -1,0 +1,48 @@
+---
+// Templates hub (issue #18, Phase 4). Indexable surface for the "PRD / spec /
+// plan template" cluster. Lists every template page; cards link the detail
+// routes.
+import ContentLayout from "../../layouts/ContentLayout.astro"
+import { getTemplatePages, templatePath } from "../../lib/sanity"
+import { breadcrumbListSchema, type BreadcrumbItem } from "../../lib/seo"
+
+const docs = await getTemplatePages()
+
+const title = "SpecForge Templates — PRD, Spec & Build-Plan Starters"
+const description =
+  "Starter templates for PRDs, product specs, and engineering plans — generate a structured first draft with SpecForge and adapt it to your idea instead of starting from a blank page."
+
+const crumbs: BreadcrumbItem[] = [
+  { name: "Home", path: "/" },
+  { name: "Templates", path: "/templates" },
+]
+const jsonLd = breadcrumbListSchema(crumbs)
+---
+
+<ContentLayout title={title} description={description} path="/templates" activeHub="/templates" jsonLd={jsonLd}>
+  <main class="content-main is-wide">
+    <header class="content-header hub-intro">
+      <span class="content-kicker">Templates</span>
+      <h1>PRD, spec, and build-plan templates you can generate and adapt</h1>
+      <p class="content-lede">
+        Don't start from a blank page. Each template shows the structure SpecForge
+        generates — requirements, architecture, validation, and tasks — so you can
+        see the shape of a strong brief and produce your own from a rough idea.
+      </p>
+    </header>
+
+    {docs.length > 0 ? (
+      <div class="hub-grid">
+        {docs.map((doc) => (
+          <a class="hub-card" href={templatePath(doc.slug)}>
+            <h2>{doc.heading}</h2>
+            <p>{doc.seo.description}</p>
+            <span class="hub-card-more">View template &rarr;</span>
+          </a>
+        ))}
+      </div>
+    ) : (
+      <p class="hub-empty">New templates are on the way. Check back soon.</p>
+    )}
+  </main>
+</ContentLayout>

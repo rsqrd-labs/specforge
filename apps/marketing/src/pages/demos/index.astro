@@ -1,0 +1,48 @@
+---
+// Demos hub (issue #18, Phase 4). Indexable "show, don't tell" surface — each
+// demo is a curated, first-party example of one rough idea expanded into the
+// four SpecForge artifacts. Lists every demo; cards link the detail routes.
+import ContentLayout from "../../layouts/ContentLayout.astro"
+import { getDemoPages, demoPath } from "../../lib/sanity"
+import { breadcrumbListSchema, type BreadcrumbItem } from "../../lib/seo"
+
+const docs = await getDemoPages()
+
+const title = "SpecForge Demos — One Idea, Four Build-Ready Artifacts"
+const description =
+  "Real, first-party examples of SpecForge in action: watch a rough product idea become a structured SPEC, PLAN, HARNESS, and TASKS package you could hand to a team or coding agent."
+
+const crumbs: BreadcrumbItem[] = [
+  { name: "Home", path: "/" },
+  { name: "Demos", path: "/demos" },
+]
+const jsonLd = breadcrumbListSchema(crumbs)
+---
+
+<ContentLayout title={title} description={description} path="/demos" activeHub="/demos" jsonLd={jsonLd}>
+  <main class="content-main is-wide">
+    <header class="content-header hub-intro">
+      <span class="content-kicker">Demos</span>
+      <h1>See one idea become four build-ready artifacts</h1>
+      <p class="content-lede">
+        Curated, first-party examples — each starts from a single rough product
+        idea and shows the full SpecForge output: SPEC, PLAN, HARNESS, and TASKS.
+        No live user data, just real worked examples.
+      </p>
+    </header>
+
+    {docs.length > 0 ? (
+      <div class="hub-grid">
+        {docs.map((doc) => (
+          <a class="hub-card" href={demoPath(doc.slug)}>
+            <h2>{doc.heading}</h2>
+            <p>{doc.summary ?? doc.seo.description}</p>
+            <span class="hub-card-more">View demo &rarr;</span>
+          </a>
+        ))}
+      </div>
+    ) : (
+      <p class="hub-empty">New demos are on the way. Check back soon.</p>
+    )}
+  </main>
+</ContentLayout>

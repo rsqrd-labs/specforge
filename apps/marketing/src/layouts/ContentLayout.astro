@@ -1,0 +1,61 @@
+---
+// Shared shell for every content/hub page (issue #18, Phase 4). Wraps BaseLayout
+// (which owns <head>/Seo/JsonLd) with the marketing chrome — SiteHeader, an
+// ambient backdrop, a constrained reading column, and SiteFooter — so detail and
+// hub pages share one look without each re-deriving it. The homepage keeps its
+// own bespoke hero and only borrows SiteFooter.
+import BaseLayout from "./BaseLayout.astro"
+import SiteHeader from "../components/SiteHeader.astro"
+import SiteFooter from "../components/SiteFooter.astro"
+import "../styles/content.css"
+
+interface Props {
+  title: string
+  description: string
+  path: string
+  image?: string
+  imageAlt?: string
+  ogType?: "website" | "article"
+  publishedTime?: string
+  modifiedTime?: string
+  /** Path of the active hub for nav highlighting. */
+  activeHub?: string
+  jsonLd?: Record<string, unknown> | Record<string, unknown>[]
+}
+
+const {
+  title,
+  description,
+  path,
+  image,
+  imageAlt,
+  ogType,
+  publishedTime,
+  modifiedTime,
+  activeHub,
+  jsonLd,
+} = Astro.props
+---
+
+<BaseLayout
+  title={title}
+  description={description}
+  path={path}
+  image={image}
+  imageAlt={imageAlt}
+  ogType={ogType}
+  publishedTime={publishedTime}
+  modifiedTime={modifiedTime}
+  jsonLd={jsonLd}
+>
+  <div class="content-zone">
+    <div class="content-ambient" aria-hidden="true">
+      <span class="content-band band-saffron"></span>
+      <span class="content-band band-lotus"></span>
+      <span class="content-grid"></span>
+    </div>
+    <SiteHeader active={activeHub} />
+    <slot />
+    <SiteFooter />
+  </div>
+</BaseLayout>

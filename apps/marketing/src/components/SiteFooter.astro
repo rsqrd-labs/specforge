@@ -1,0 +1,33 @@
+---
+// Shared footer (issue #18, Phase 4). Repeats the content-hub links on every
+// page — including the homepage — so the hubs are reachable site-wide and the
+// internal-link graph is complete (Phase-6 reachability). Carries the
+// standardized entity sentence once, in body copy (not as a meta description).
+import { CONTENT_HUBS, SIGN_IN_URL, ENTITY_DESCRIPTION, SITE_NAME } from "../consts"
+
+const year = new Date().getFullYear()
+---
+
+<footer class="site-footer">
+  <div class="site-footer-top">
+    <div class="site-footer-brand">
+      <a href="/" class="site-footer-logo" aria-label="SpecForge home">
+        <img src="/brand/squirrel-mark.png" alt="" width="32" height="32" />
+        <strong>SpecForge</strong>
+      </a>
+      <p>{ENTITY_DESCRIPTION}</p>
+      <a href={SIGN_IN_URL} class="site-footer-cta">Start your first workspace</a>
+    </div>
+    <nav class="site-footer-nav" aria-label="Explore">
+      <span class="site-footer-nav-title">Explore</span>
+      <ul>
+        {CONTENT_HUBS.map((hub) => (
+          <li><a href={hub.path}>{hub.label}</a></li>
+        ))}
+      </ul>
+    </nav>
+  </div>
+  <div class="site-footer-bottom">
+    <span>&copy; {year} {SITE_NAME}</span>
+  </div>
+</footer>

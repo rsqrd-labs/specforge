@@ -1,0 +1,84 @@
+---
+// Demo detail page (issue #18, Phase 4). Backed by `demoPage` documents —
+// CURATED, FIRST-PARTY ONLY. There is no import-from-workspace path: these are
+// authored examples, so they contain no user data, secrets, or private links
+// (the Phase-6 demo-sanitization gate guards this at the content level; the
+// Markdown renderer drops raw HTML as a second layer). Each demo shows one rough
+// idea expanded into the four SpecForge artifacts — strong "show, don't tell"
+// SEO/GEO surface. BreadcrumbList always; FAQPage when FAQs exist.
+import ContentLayout from "../../layouts/ContentLayout.astro"
+import Breadcrumbs from "../../components/content/Breadcrumbs.astro"
+import FaqSection from "../../components/content/FaqSection.astro"
+import { getDemoPages, demoPath } from "../../lib/sanity"
+import type { DemoPageDoc } from "../../lib/sanity"
+import { renderMarkdown } from "../../lib/markdown"
+import { breadcrumbListSchema, faqPageSchema, type BreadcrumbItem } from "../../lib/seo"
+
+export async function getStaticPaths() {
+  const docs = await getDemoPages()
+  return docs.map((doc) => ({ params: { slug: doc.slug }, props: { doc } }))
+}
+
+interface Props {
+  doc: DemoPageDoc
+}
+
+const { doc } = Astro.props
+const path = demoPath(doc.slug)
+
+const crumbs: BreadcrumbItem[] = [
+  { name: "Home", path: "/" },
+  { name: "Demos", path: "/demos" },
+  { name: doc.heading, path },
+]
+
+const jsonLd: Record<string, unknown>[] = [breadcrumbListSchema(crumbs)]
+if (doc.faqs && doc.faqs.length) jsonLd.push(faqPageSchema(doc.faqs))
+
+// The four artifacts, in pipeline order. Each Markdown body → sanitized HTML.
+const artifacts: Array<{ file: string; label: string; html: string }> = [
+  { file: "SPEC.md", label: "Spec", html: renderMarkdown(doc.specMarkdown) },
+  { file: "PLAN.md", label: "Plan", html: renderMarkdown(doc.planMarkdown) },
+  { file: "HARNESS", label: "Harness", html: renderMarkdown(doc.harnessMarkdown) },
+  { file: "tasks.md", label: "Tasks", html: renderMarkdown(doc.tasksMarkdown) },
+]
+---
+
+<ContentLayout
+  title={doc.seo.title}
+  description={doc.seo.description}
+  path={path}
+  image={doc.seo.ogImage}
+  activeHub="/demos"
+  jsonLd={jsonLd}
+>
+  <main class="content-main">
+    <Breadcrumbs items={crumbs} />
+    <article>
+      <header class="content-header">
+        <span class="content-kicker">Demo</span>
+        <h1>{doc.heading}</h1>
+        {doc.summary && <p class="content-lede">{doc.summary}</p>}
+      </header>
+
+      <div class="demo-idea">
+        <span>Starting idea</span>
+        <p>{doc.idea}</p>
+      </div>
+
+      {artifacts.map((artifact) => (
+        artifact.html && (
+          <section class="demo-artifact" aria-label={artifact.label}>
+            <div class="demo-artifact-head">
+              <span>{artifact.label}</span>
+              <span class="demo-artifact-file">{artifact.file}</span>
+            </div>
+            <div class="prose-body" set:html={artifact.html} />
+          </section>
+        )
+      ))}
+
+      <FaqSection faqs={doc.faqs} />
+    </article>
+  </main>
+</ContentLayout>

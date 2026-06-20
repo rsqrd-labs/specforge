@@ -1,0 +1,48 @@
+---
+// Use-cases hub (issue #18, Phase 4). Indexable surface for the workflow/job
+// cluster — "spec-to-build for <X>", "turn an idea into a build plan". Lists
+// every use-case page; cards link the detail routes.
+import ContentLayout from "../../layouts/ContentLayout.astro"
+import { getSeoPages, seoPagePath } from "../../lib/sanity"
+import { breadcrumbListSchema, type BreadcrumbItem } from "../../lib/seo"
+
+const docs = await getSeoPages("use-case")
+
+const title = "SpecForge Use Cases — From Rough Idea to Build-Ready Spec"
+const description =
+  "See how SpecForge turns rough ideas into structured specs, plans, validation harnesses, and traceable tasks — for founders, product teams, engineers, and AI agent workflows."
+
+const crumbs: BreadcrumbItem[] = [
+  { name: "Home", path: "/" },
+  { name: "Use cases", path: "/use-cases" },
+]
+const jsonLd = breadcrumbListSchema(crumbs)
+---
+
+<ContentLayout title={title} description={description} path="/use-cases" activeHub="/use-cases" jsonLd={jsonLd}>
+  <main class="content-main is-wide">
+    <header class="content-header hub-intro">
+      <span class="content-kicker">Use cases</span>
+      <h1>Ways teams turn ideas into build-ready specs with SpecForge</h1>
+      <p class="content-lede">
+        Concrete spec-to-build workflows — from a one-line product idea to SPEC,
+        PLAN, HARNESS, and TASKS — for the jobs founders, product managers,
+        engineers, and AI coding agents actually do.
+      </p>
+    </header>
+
+    {docs.length > 0 ? (
+      <div class="hub-grid">
+        {docs.map((doc) => (
+          <a class="hub-card" href={seoPagePath("use-case", doc.slug)}>
+            <h2>{doc.heading}</h2>
+            <p>{doc.seo.description}</p>
+            <span class="hub-card-more">Explore &rarr;</span>
+          </a>
+        ))}
+      </div>
+    ) : (
+      <p class="hub-empty">New use cases are on the way. Check back soon.</p>
+    )}
+  </main>
+</ContentLayout>

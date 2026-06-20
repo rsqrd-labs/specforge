@@ -4,8 +4,10 @@
 // and answer engines get real content, not an empty root div (issue #18,
 // Phase 1). The SPA Landing stays as the in-app fallback.
 import BaseLayout from "../layouts/BaseLayout.astro"
-import { SIGN_IN_URL } from "../consts"
+import SiteFooter from "../components/SiteFooter.astro"
+import { SIGN_IN_URL, CONTENT_HUBS } from "../consts"
 import { siteJsonLd } from "../lib/seo"
+import "../styles/content.css"
 
 const title =
   "SpecForge — AI Spec-to-Build Workspace for Specs, Plans & Tasks"
@@ -264,6 +266,22 @@ const audiences = [
         </div>
       </section>
 
+      <section class="audience-section" aria-labelledby="explore-title">
+        <div class="section-copy">
+          <span>Go deeper</span>
+          <h2 id="explore-title">Explore guides, templates, comparisons, and demos.</h2>
+        </div>
+        <div class="hub-grid">
+          {CONTENT_HUBS.map((hub) => (
+            <a class="hub-card" href={hub.path}>
+              <h3>{hub.label}</h3>
+              <p>{hub.blurb}</p>
+              <span class="hub-card-more">Explore &rarr;</span>
+            </a>
+          ))}
+        </div>
+      </section>
+
       <section class="landing-final-cta" aria-labelledby="final-cta-title">
         <div>
           <span>Bring one messy idea</span>
@@ -277,4 +295,5 @@ const audiences = [
       </section>
     </section>
   </main>
+  <SiteFooter />
 </BaseLayout>

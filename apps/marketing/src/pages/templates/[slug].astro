@@ -1,0 +1,62 @@
+---
+// Template detail page (issue #18, Phase 4). Backed by `templatePage` documents
+// — these target the "PRD/spec/plan template" keyword cluster and show what the
+// generated starter looks like (definition → workflow → examples → body).
+// BreadcrumbList always; FAQPage when FAQs exist.
+import ContentLayout from "../../layouts/ContentLayout.astro"
+import Breadcrumbs from "../../components/content/Breadcrumbs.astro"
+import AnswerReady from "../../components/content/AnswerReady.astro"
+import PortableText from "../../components/content/PortableText.astro"
+import FaqSection from "../../components/content/FaqSection.astro"
+import { getTemplatePages, templatePath } from "../../lib/sanity"
+import type { TemplatePageDoc } from "../../lib/sanity"
+import { breadcrumbListSchema, faqPageSchema, type BreadcrumbItem } from "../../lib/seo"
+
+export async function getStaticPaths() {
+  const docs = await getTemplatePages()
+  return docs.map((doc) => ({ params: { slug: doc.slug }, props: { doc } }))
+}
+
+interface Props {
+  doc: TemplatePageDoc
+}
+
+const { doc } = Astro.props
+const path = templatePath(doc.slug)
+
+const crumbs: BreadcrumbItem[] = [
+  { name: "Home", path: "/" },
+  { name: "Templates", path: "/templates" },
+  { name: doc.heading, path },
+]
+
+const jsonLd: Record<string, unknown>[] = [breadcrumbListSchema(crumbs)]
+if (doc.faqs && doc.faqs.length) jsonLd.push(faqPageSchema(doc.faqs))
+---
+
+<ContentLayout
+  title={doc.seo.title}
+  description={doc.seo.description}
+  path={path}
+  image={doc.seo.ogImage}
+  activeHub="/templates"
+  jsonLd={jsonLd}
+>
+  <main class="content-main">
+    <Breadcrumbs items={crumbs} />
+    <article>
+      <header class="content-header">
+        <span class="content-kicker">Template &middot; {doc.templateName}</span>
+        <h1>{doc.heading}</h1>
+      </header>
+
+      <AnswerReady
+        definition={doc.definition}
+        workflowSteps={doc.workflowSteps}
+        examples={doc.examples}
+      />
+      <PortableText blocks={doc.body} />
+      <FaqSection faqs={doc.faqs} />
+    </article>
+  </main>
+</ContentLayout>

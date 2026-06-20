@@ -1,0 +1,22 @@
+---
+// Renders a Sanity Portable Text body to HTML at build time (issue #18, Phase 4).
+// Used by guide / use-case / template bodies. The block array is opaque in the
+// fetch layer (`PortableTextBlock[]`); this is the single place it becomes HTML.
+//
+// NOTE (latent, for when content lands): the `body` GROQ projection is bare
+// (`body`, no asset dereference), so embedded `image` blocks have no resolved
+// URL yet and are skipped by the default serializer. When image-in-body content
+// is authored, deref the asset in the projection and add an `image` component
+// serializer here. Text/heading/list/mark content renders fully today.
+import { toHTML } from "@portabletext/to-html"
+import type { PortableTextBlock } from "../../lib/sanity"
+
+interface Props {
+  blocks?: PortableTextBlock[]
+}
+
+const { blocks } = Astro.props
+const html = blocks && blocks.length ? toHTML(blocks) : ""
+---
+
+{html && <div class="prose-body" set:html={html} />}

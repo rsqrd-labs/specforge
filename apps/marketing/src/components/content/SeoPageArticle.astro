@@ -1,0 +1,41 @@
+---
+// Shared <main> body for the two `seoPage`-backed routes — use-cases
+// (workflow-led) and comparisons (table-led). Both consume the same SeoPageDoc,
+// so the rendering lives here once; the routes differ only in kicker copy,
+// breadcrumb hub, and which JSON-LD they assemble in <head>. Order follows the
+// GEO answer-ready pattern: heading → direct definition → workflow → comparison
+// → examples → rich body → FAQ.
+import Breadcrumbs from "./Breadcrumbs.astro"
+import AnswerReady from "./AnswerReady.astro"
+import PortableText from "./PortableText.astro"
+import FaqSection from "./FaqSection.astro"
+import type { SeoPageDoc } from "../../lib/sanity"
+import type { BreadcrumbItem } from "../../lib/seo"
+
+interface Props {
+  doc: SeoPageDoc
+  kicker: string
+  crumbs: BreadcrumbItem[]
+}
+
+const { doc, kicker, crumbs } = Astro.props
+---
+
+<main class="content-main">
+  <Breadcrumbs items={crumbs} />
+  <article>
+    <header class="content-header">
+      <span class="content-kicker">{kicker}</span>
+      <h1>{doc.heading}</h1>
+    </header>
+
+    <AnswerReady
+      definition={doc.definition}
+      workflowSteps={doc.workflowSteps}
+      comparison={doc.comparison}
+      examples={doc.examples}
+    />
+    <PortableText blocks={doc.body} />
+    <FaqSection faqs={doc.faqs} />
+  </article>
+</main>

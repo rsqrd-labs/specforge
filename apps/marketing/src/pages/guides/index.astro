@@ -1,0 +1,50 @@
+---
+// Guides hub (issue #18, Phase 4). Lists every guide and is itself an indexable
+// SEO surface for the "how-to" cluster: writing a spec, handing a brief to a
+// coding agent, going from plan to shipped. Intro copy carries the keyword
+// framing in-repo (detail docs are Sanity-authored later); cards link the
+// detail pages so nothing is orphaned.
+import ContentLayout from "../../layouts/ContentLayout.astro"
+import { getGuides, guidePath } from "../../lib/sanity"
+import { breadcrumbListSchema, type BreadcrumbItem } from "../../lib/seo"
+
+const guides = await getGuides()
+
+const title = "SpecForge Guides — Write Specs & Hand Off to Coding Agents"
+const description =
+  "Practical guides on turning rough product ideas into specs, plans, and tasks — and handing a clean brief to engineers and AI coding agents you can actually build from."
+
+const crumbs: BreadcrumbItem[] = [
+  { name: "Home", path: "/" },
+  { name: "Guides", path: "/guides" },
+]
+const jsonLd = breadcrumbListSchema(crumbs)
+---
+
+<ContentLayout title={title} description={description} path="/guides" activeHub="/guides" jsonLd={jsonLd}>
+  <main class="content-main is-wide">
+    <header class="content-header hub-intro">
+      <span class="content-kicker">Guides</span>
+      <h1>Guides for spec-driven, AI-ready product development</h1>
+      <p class="content-lede">
+        How to turn a rough idea into a build-ready SPEC, PLAN, HARNESS, and TASKS
+        package — and hand it off to engineers or AI coding agents without losing
+        the requirements, constraints, and acceptance criteria along the way.
+      </p>
+    </header>
+
+    {guides.length > 0 ? (
+      <div class="hub-grid">
+        {guides.map((guide) => (
+          <a class="hub-card" href={guidePath(guide.slug)}>
+            <h2>{guide.heading}</h2>
+            <p>{guide.excerpt ?? guide.seo.description}</p>
+            <span class="hub-card-more">Read guide &rarr;</span>
+          </a>
+        ))}
+      </div>
+    ) : (
+      <p class="hub-empty">New guides are on the way. Check back soon.</p>
+    )}
+  </main>
+</ContentLayout>

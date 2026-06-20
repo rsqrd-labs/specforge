@@ -1,0 +1,99 @@
+---
+// The GEO answer-ready block set (issue #18, Phase 4 — answer-readiness is
+// finalized in Phase 5). Renders, in the order answer engines reward:
+//
+//   1. Definition — a direct, self-contained answer in the first paragraph.
+//   2. Workflow steps — an ordered HowTo-style list.
+//   3. Comparison table — feature-by-feature vs. a named alternative.
+//   4. Examples — concrete input → output pairs.
+//
+// Each block renders only when its data is present, so the same component
+// serves use-case pages (workflow-led) and comparison pages (table-led). FAQs
+// render separately (FaqSection) because they also drive FAQPage JSON-LD.
+import type {
+  SanityWorkflowStep,
+  SanityComparison,
+  SanityExample,
+} from "../../lib/sanity"
+
+interface Props {
+  /** The direct-answer definition, rendered first for answer engines. */
+  definition?: string
+  workflowSteps?: SanityWorkflowStep[]
+  comparison?: SanityComparison
+  examples?: SanityExample[]
+}
+
+const { definition, workflowSteps, comparison, examples } = Astro.props
+const hasWorkflow = workflowSteps && workflowSteps.length > 0
+const hasComparison = comparison && comparison.rows && comparison.rows.length > 0
+const hasExamples = examples && examples.length > 0
+---
+
+{definition && (
+  <p class="answer-definition">{definition}</p>
+)}
+
+{hasWorkflow && (
+  <section class="answer-section" aria-labelledby="workflow-heading">
+    <h2 id="workflow-heading">How it works</h2>
+    <ol class="workflow-list">
+      {workflowSteps!.map((step, i) => (
+        <li>
+          <span class="workflow-step-index" aria-hidden="true">{String(i + 1).padStart(2, "0")}</span>
+          <div>
+            <strong>{step.name}</strong>
+            <p>{step.description}</p>
+          </div>
+        </li>
+      ))}
+    </ol>
+  </section>
+)}
+
+{hasComparison && (
+  <section class="answer-section" aria-labelledby="comparison-heading">
+    <h2 id="comparison-heading">SpecForge vs. {comparison!.alternativeName}</h2>
+    <div class="comparison-scroll">
+      <table class="comparison-table">
+        <thead>
+          <tr>
+            <th scope="col">Capability</th>
+            <th scope="col">SpecForge</th>
+            <th scope="col">{comparison!.alternativeName}</th>
+          </tr>
+        </thead>
+        <tbody>
+          {comparison!.rows.map((row) => (
+            <tr>
+              <th scope="row">{row.feature}</th>
+              <td>{row.specforge}</td>
+              <td>{row.alternative}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  </section>
+)}
+
+{hasExamples && (
+  <section class="answer-section" aria-labelledby="examples-heading">
+    <h2 id="examples-heading">Examples</h2>
+    <div class="example-grid">
+      {examples!.map((ex) => (
+        <article class="example-card">
+          <h3>{ex.title}</h3>
+          <div class="example-io">
+            <span class="example-label">Input</span>
+            <p>{ex.input}</p>
+          </div>
+          <div class="example-io">
+            <span class="example-label">Output</span>
+            <p>{ex.output}</p>
+          </div>
+        </article>
+      ))}
+    </div>
+  </section>
+)}

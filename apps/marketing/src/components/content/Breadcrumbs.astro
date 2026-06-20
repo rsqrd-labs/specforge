@@ -1,0 +1,27 @@
+---
+// Visible breadcrumb trail (issue #18, Phase 4). Mirrors the BreadcrumbList
+// JSON-LD emitted on the same page (same items, same order) so the rendered
+// trail and the structured data agree. The last item is the current page and
+// is not a link.
+import type { BreadcrumbItem } from "../../lib/seo"
+
+interface Props {
+  items: BreadcrumbItem[]
+}
+
+const { items } = Astro.props
+---
+
+<nav class="breadcrumbs" aria-label="Breadcrumb">
+  <ol>
+    {items.map((item, i) => (
+      <li>
+        {i < items.length - 1 ? (
+          <a href={item.path}>{item.name}</a>
+        ) : (
+          <span aria-current="page">{item.name}</span>
+        )}
+      </li>
+    ))}
+  </ol>
+</nav>

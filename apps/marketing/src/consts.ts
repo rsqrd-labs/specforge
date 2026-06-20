@@ -32,3 +32,41 @@ export const ENTITY_DESCRIPTION =
 export function absoluteUrl(path = "/"): string {
   return new URL(path, `${SITE_URL}/`).href
 }
+
+/**
+ * The marketing content hubs (issue #18, Phase 4). Single source of truth for
+ * the header/footer navigation, so every hub is reachable from every page —
+ * the Phase-6 "no orphaned routes" guard. Order is intentional (use-cases and
+ * guides lead the keyword clusters: spec-to-build, coding-agent handoff).
+ */
+export const CONTENT_HUBS: ReadonlyArray<{
+  label: string
+  path: string
+  blurb: string
+}> = [
+  {
+    label: "Use cases",
+    path: "/use-cases",
+    blurb: "Turn a rough idea into specs, tests, and tasks for a given workflow.",
+  },
+  {
+    label: "Guides",
+    path: "/guides",
+    blurb: "How to write specs, hand off to coding agents, and ship from a plan.",
+  },
+  {
+    label: "Templates",
+    path: "/templates",
+    blurb: "Starter PRD, spec, and plan templates you can generate and adapt.",
+  },
+  {
+    label: "Comparisons",
+    path: "/compare",
+    blurb: "How SpecForge compares to other spec, PRD, and planning tools.",
+  },
+  {
+    label: "Demos",
+    path: "/demos",
+    blurb: "Real first-party examples: one idea expanded into four build artifacts.",
+  },
+]

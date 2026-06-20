@@ -1,0 +1,43 @@
+---
+// Use-case detail page (issue #18, Phase 4). Backed by `seoPage` documents with
+// section == "use-case" — these target the workflow/job keyword cluster
+// ("spec-to-build for X", "turn an idea into a build plan"). BreadcrumbList
+// always; FAQPage when FAQs exist.
+import ContentLayout from "../../layouts/ContentLayout.astro"
+import SeoPageArticle from "../../components/content/SeoPageArticle.astro"
+import { getSeoPages, seoPagePath } from "../../lib/sanity"
+import type { SeoPageDoc } from "../../lib/sanity"
+import { breadcrumbListSchema, faqPageSchema, type BreadcrumbItem } from "../../lib/seo"
+
+export async function getStaticPaths() {
+  const docs = await getSeoPages("use-case")
+  return docs.map((doc) => ({ params: { slug: doc.slug }, props: { doc } }))
+}
+
+interface Props {
+  doc: SeoPageDoc
+}
+
+const { doc } = Astro.props
+const path = seoPagePath("use-case", doc.slug)
+
+const crumbs: BreadcrumbItem[] = [
+  { name: "Home", path: "/" },
+  { name: "Use cases", path: "/use-cases" },
+  { name: doc.heading, path },
+]
+
+const jsonLd: Record<string, unknown>[] = [breadcrumbListSchema(crumbs)]
+if (doc.faqs && doc.faqs.length) jsonLd.push(faqPageSchema(doc.faqs))
+---
+
+<ContentLayout
+  title={doc.seo.title}
+  description={doc.seo.description}
+  path={path}
+  image={doc.seo.ogImage}
+  activeHub="/use-cases"
+  jsonLd={jsonLd}
+>
+  <SeoPageArticle doc={doc} kicker="Use case" crumbs={crumbs} />
+</ContentLayout>

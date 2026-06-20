@@ -1,0 +1,48 @@
+---
+// Comparisons hub (issue #18, Phase 4). Indexable surface for high-intent "X vs
+// Y" / "best tool for specs/PRDs" queries. Lists every comparison page; cards
+// link the detail routes.
+import ContentLayout from "../../layouts/ContentLayout.astro"
+import { getSeoPages, seoPagePath } from "../../lib/sanity"
+import { breadcrumbListSchema, type BreadcrumbItem } from "../../lib/seo"
+
+const docs = await getSeoPages("comparison")
+
+const title = "SpecForge Comparisons — How It Compares to Spec & PRD Tools"
+const description =
+  "Side-by-side comparisons of SpecForge against other spec, PRD, and planning tools — feature by feature, so you can pick the right way to turn ideas into build-ready artifacts."
+
+const crumbs: BreadcrumbItem[] = [
+  { name: "Home", path: "/" },
+  { name: "Comparisons", path: "/compare" },
+]
+const jsonLd = breadcrumbListSchema(crumbs)
+---
+
+<ContentLayout title={title} description={description} path="/compare" activeHub="/compare" jsonLd={jsonLd}>
+  <main class="content-main is-wide">
+    <header class="content-header hub-intro">
+      <span class="content-kicker">Comparisons</span>
+      <h1>How SpecForge compares to other spec and planning tools</h1>
+      <p class="content-lede">
+        Honest, feature-by-feature comparisons to help you choose the right way to
+        turn rough product ideas into specs, plans, validation, and tasks — whether
+        you're handing off to engineers or AI coding agents.
+      </p>
+    </header>
+
+    {docs.length > 0 ? (
+      <div class="hub-grid">
+        {docs.map((doc) => (
+          <a class="hub-card" href={seoPagePath("comparison", doc.slug)}>
+            <h2>{doc.heading}</h2>
+            <p>{doc.seo.description}</p>
+            <span class="hub-card-more">Compare &rarr;</span>
+          </a>
+        ))}
+      </div>
+    ) : (
+      <p class="hub-empty">New comparisons are on the way. Check back soon.</p>
+    )}
+  </main>
+</ContentLayout>
