@@ -94,8 +94,10 @@ def _format_markdown(report: list[dict]) -> str:
     lines = [
         "# Output Budget Analysis",
         "",
-        "| operation | provider | samples | p50 | p90 | p95 | max | trunc% | "
-        "current | recommend | rationale |",
+        (
+            "| operation | provider | samples | p50 | p90 | p95 | max | trunc% | "
+            "current | recommend | rationale |"
+        ),
         "|---|---|--:|--:|--:|--:|--:|--:|--:|--:|---|",
     ]
     for entry in report:
@@ -123,9 +125,11 @@ def _format_markdown(report: list[dict]) -> str:
         lines.append("| _(ledger empty for the window)_ ||||||||||| |")
     lines += [
         "",
-        "Recommendations are advisory. Promote one only after the gate in "
-        "`docs/evals/OUTPUT_BUDGET_TUNING.md`, then add it to "
-        "`OUTPUT_TOKEN_BUDGET_OVERRIDES`.",
+        (
+            "Recommendations are advisory. Promote one only after the gate in "
+            "`docs/evals/OUTPUT_BUDGET_TUNING.md`, then add it to "
+            "`OUTPUT_TOKEN_BUDGET_OVERRIDES`."
+        ),
     ]
     return "\n".join(lines)
 

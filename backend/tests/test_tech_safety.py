@@ -31,8 +31,10 @@ def _plan_table(*rows: str) -> str:
         [
             "## Technology Stack and Rationale",
             "",
-            "| Layer | Choice | Version (latest stable as of YYYY-MM) | "
-            "Support status | EOL date | Why not the next-best alternative |",
+            (
+                "| Layer | Choice | Version (latest stable as of YYYY-MM) | "
+                "Support status | EOL date | Why not the next-best alternative |"
+            ),
             "|---|---|---|---|---|---|",
             *rows,
         ]
