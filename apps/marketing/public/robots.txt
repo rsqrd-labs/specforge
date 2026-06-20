@@ -12,6 +12,8 @@ Allow: /
 Disallow: /p/
 Disallow: /sb/
 
-# @astrojs/sitemap emits a sitemap index. Phase 2 finalises sitemap routing
-# (and replaces the placeholder apex below with the real PUBLIC_SITE_URL).
+# @astrojs/sitemap emits a sitemap index (sitemap-index.xml → sitemap-0.xml),
+# filtered to indexable routes only (the /p/* and /sb/* artifact routes and the
+# SPA app routes are excluded in astro.config.mjs). The apex below is the
+# production PUBLIC_SITE_URL; keep it in sync if the marketing origin changes.
 Sitemap: https://specforge.app/sitemap-index.xml

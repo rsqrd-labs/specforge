@@ -4,34 +4,18 @@
 // and answer engines get real content, not an empty root div (issue #18,
 // Phase 1). The SPA Landing stays as the in-app fallback.
 import BaseLayout from "../layouts/BaseLayout.astro"
-import { SIGN_IN_URL, SITE_NAME, ENTITY_DESCRIPTION, absoluteUrl } from "../consts"
+import { SIGN_IN_URL } from "../consts"
+import { siteJsonLd } from "../lib/seo"
 
 const title =
   "SpecForge — AI Spec-to-Build Workspace for Specs, Plans & Tasks"
 const description =
   "SpecForge turns rough product ideas into build-ready SPEC, PLAN, HARNESS, and TASKS artifacts — structured requirements, validation, and traceable tasks for clean engineer and AI-agent handoffs."
 
-// Site-wide structured data. Phase 2 expands per-type JSON-LD across routes;
-// the homepage carries the org + product entities answer engines key on.
-const jsonLd = [
-  {
-    "@context": "https://schema.org",
-    "@type": "Organization",
-    name: SITE_NAME,
-    url: absoluteUrl("/"),
-    logo: absoluteUrl("/brand/squirrel-mark.png"),
-    description: ENTITY_DESCRIPTION,
-  },
-  {
-    "@context": "https://schema.org",
-    "@type": "SoftwareApplication",
-    name: SITE_NAME,
-    applicationCategory: "DeveloperApplication",
-    operatingSystem: "Web",
-    url: absoluteUrl("/"),
-    description: ENTITY_DESCRIPTION,
-  },
-]
+// Site-wide structured data: the Organization + SoftwareApplication entities,
+// `@id`-anchored so answer engines resolve a single, consistent SpecForge
+// entity across every page (issue #18, Phase 2 — see src/lib/seo.ts).
+const jsonLd = siteJsonLd
 
 const workflow = [
   ["01", "Spec", "Requirements, users, and acceptance criteria.", "Output: SPEC.md"],

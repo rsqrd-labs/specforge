@@ -220,6 +220,11 @@ node_modules/
 harness/node_modules
 .pnpm-store/
 
+# The generic Python `lib/` ignore above also matches the marketing app's
+# TypeScript source dir (apps/marketing/src/lib). Re-include it explicitly.
+!apps/marketing/src/lib/
+!apps/marketing/src/lib/**
+
 # Secrets
 *.pem
 

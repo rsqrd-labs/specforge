@@ -219,7 +219,37 @@ homepage).
   - Verified: `pnpm build` + `astro check` clean; `dist/index.html` emits real
     `<h1>`/body/title/description/canonical/robots/OG/Twitter/JSON-LD + bundled
     CSS, no external script tags.
-- [ ] Phase 2 — Metadata, sitemap, structured data
+- [x] Phase 2 — Metadata, sitemap, structured data
+  - Per-route metadata: `<Seo>` is driven entirely by page data with
+    defaults only on the *safe* fields (OG image, `og:locale`, Twitter card,
+    robots). `title` and `description` stay **required with no fallback** —
+    a silent description default would let every un-overridden page pass the
+    Phase 6 duplicate/missing QA with identical copy, defeating the gate.
+    Added `og:locale`, `og:image:alt`/`twitter:image:alt`, optional
+    `article:published_time`/`modified_time` (for guide pages), and an optional
+    `twitter:site`/`creator` handle. `BaseLayout` forwards all of them.
+  - Centralised SEO + structured-data library `src/lib/seo.ts`: site-wide
+    defaults plus pure, typed JSON-LD builders for the five plan types —
+    `organizationSchema`, `softwareApplicationSchema`, `faqPageSchema`,
+    `breadcrumbListSchema`, `articleSchema`. Entities share stable `@id`
+    anchors (`/#organization`, `/#software`) so they resolve to one connected
+    graph; SoftwareApplication carries the free-tier `Offer` and references the
+    Organization as publisher. `siteJsonLd` is the site-wide bundle; `index.astro`
+    now consumes it instead of inlining the schema.
+  - Sitemap (`astro.config.mjs`): explicit `filter` excludes `/p`, `/sb`, and
+    the SPA app routes (`/dashboard`, `/workspace`, `/settings`, `/billing`,
+    `/auth`, `/assets`) — a defence-in-depth boundary (those aren't Astro pages,
+    so they can't appear anyway) that's now testable. `serialize` sets `lastmod`
+    (passthrough-first → Phase 3/4 supplies Sanity `_updatedAt`) and a homepage
+    `priority`; `changefreq`/`priority` are deliberately minimal since Google
+    ignores them as ranking signals. Robots `Sitemap:` stays `sitemap-index.xml`
+    (matches the `@astrojs/sitemap` output and Phase 1); comment finalised.
+  - Verified: `pnpm check` + `pnpm build` clean. `dist/index.html` emits unique
+    title/description/canonical/robots + full OG (incl. locale + image:alt) +
+    Twitter, and the `@id`-anchored Organization + SoftwareApplication JSON-LD;
+    homepage still ships zero executable JS (only the ld+json block).
+    `dist/sitemap-0.xml` carries `<lastmod>` + homepage `<priority>1.0</priority>`;
+    `dist/robots.txt` allows `/`, disallows `/p/` + `/sb/`, points at the sitemap.
 - [ ] Phase 3 — Sanity content models
 - [ ] Phase 4 — Launch content
 - [ ] Phase 5 — GEO answer-readiness + measurement

@@ -11,13 +11,29 @@ interface Props {
   description: string
   path?: string
   image?: string
+  imageAlt?: string
   ogType?: "website" | "article"
   robots?: string
+  publishedTime?: string
+  modifiedTime?: string
+  twitterSite?: string
   /** Optional structured data rendered into <head>. */
   jsonLd?: Record<string, unknown> | Record<string, unknown>[]
 }
 
-const { title, description, path, image, ogType, robots, jsonLd } = Astro.props
+const {
+  title,
+  description,
+  path,
+  image,
+  imageAlt,
+  ogType,
+  robots,
+  publishedTime,
+  modifiedTime,
+  twitterSite,
+  jsonLd,
+} = Astro.props
 ---
 
 <!doctype html>
@@ -36,8 +52,12 @@ const { title, description, path, image, ogType, robots, jsonLd } = Astro.props
       description={description}
       path={path}
       image={image}
+      imageAlt={imageAlt}
       ogType={ogType}
       robots={robots}
+      publishedTime={publishedTime}
+      modifiedTime={modifiedTime}
+      twitterSite={twitterSite}
     />
     {jsonLd && <JsonLd schema={jsonLd} />}
   </head>
