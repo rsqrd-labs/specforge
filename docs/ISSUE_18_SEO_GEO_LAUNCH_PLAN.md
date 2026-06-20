@@ -250,7 +250,45 @@ homepage).
     homepage still ships zero executable JS (only the ld+json block).
     `dist/sitemap-0.xml` carries `<lastmod>` + homepage `<priority>1.0</priority>`;
     `dist/robots.txt` allows `/`, disallows `/p/` + `/sb/`, points at the sitemap.
-- [ ] Phase 3 — Sanity content models
+- [x] Phase 3 — Sanity content models
+  - Standalone Sanity studio in `apps/marketing/sanity/` (own package +
+    `sanity.config.ts`/`sanity.cli.ts`/`tsconfig.json`), **deliberately not
+    embedded** via `@sanity/astro`: an embedded `/studio` would put an editor
+    surface on the public marketing origin to noindex + sitemap-exclude, which
+    fights the issue's noindex-integrity requirement. Deploys separately
+    (`sanity deploy`); the Astro site only *reads* it at build time. Excluded
+    from the Astro `tsconfig.json` so `astro check` never types studio files
+    against deps the marketing app doesn't install.
+  - Five document types — `seoPage` (one type powering `/use-cases/*`,
+    `/compare/*`, and top-level landings via a `section` field), `guide`
+    (→ Article), `templatePage`, `demoPage` (**curated, first-party only** — no
+    import-from-workspace path; the Phase-6 demo-sanitization gate's data model),
+    and `redirect` — over shared objects (`seo` + the GEO answer-readiness blocks
+    `faqItem`/`workflowStep`/`comparison`/`example`/`blockContent`). Every doc
+    carries an explicit `seo` block (title/description/canonical override/OG
+    image) and the GEO fields (direct definition, workflow steps, comparison
+    table, FAQ list, examples).
+  - Typed GROQ fetch layer `src/lib/sanity.ts` with **explicit named projections**
+    (never `*[_type==…]` splats — the type↔query alignment is the only thing
+    Phase 3 can verify, since no routes exercise it yet) and result types shaped
+    **backward from the Phase-2 consumers**: `SanityFaq` is a literal alias of
+    `seo.ts`'s `FaqItem`, and `guideToArticleInput()` composes a `guide` straight
+    into `articleSchema`'s `ArticleSchemaInput` — so the projection drifting from
+    what the builders need stops the build. `_updatedAt` → sitemap `lastmod` /
+    Article `dateModified`; `coalesce(publishedAt, _createdAt)` → `datePublished`.
+  - **Graceful degradation** (the load-bearing contract): the client is created
+    *lazily* and only when `isSanityConfigured` (a top-level
+    `createClient({projectId:""})` throws at construction); every fetch
+    short-circuits to `[]`/`null` when unconfigured, so CI builds with no creds
+    stay green and the first Phase-4 route can't brick. `projectId`/`dataset` are
+    `PUBLIC_`-exposed (public values); a read token is neither used nor
+    `PUBLIC_`-prefixed. `useCdn:false` + pinned `apiVersion`.
+  - Verified: `pnpm check` + `pnpm build` clean (0 errors). Runtime degradation
+    confirmed by *executing* the layer through a throwaway scratch page during a
+    real build (not just type-checking): unconfigured ⇒
+    `isSanityConfigured:false`, every fetch `[]`/`null`, no throw. **Not
+    runtime-verified against live Sanity** — that's correct for the phase
+    boundary: the page templates that consume these queries are Phase 4.
 - [ ] Phase 4 — Launch content
 - [ ] Phase 5 — GEO answer-readiness + measurement
 - [ ] Phase 6 — Validation tests
