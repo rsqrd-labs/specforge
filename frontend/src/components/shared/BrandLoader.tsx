@@ -95,20 +95,22 @@ function useDocumentHidden(): boolean {
 }
 
 /**
- * The animated brand mark. A self-hosted, CSS-only placeholder today: the
- * animation runs entirely on the compositor (transform/opacity only) and ships
- * no extra runtime dependency.
+ * The animated brand mark: a self-hosted, CSS-only SVG squirrel. The animation
+ * runs entirely on the compositor (transform/opacity only — bushy-tail flick,
+ * gentle body bob, occasional blink) and ships no extra runtime dependency, so
+ * it preserves the codebase's no-network-fetch ethos.
  *
- * This is a deliberate swap seam — the designer-authored Lottie squirrel drops
- * in here later (lazy-loaded player, falling back to {@link BrandLogo} on
- * load/asset failure) without changing {@link BrandLoader}'s public API.
+ * This stays a swap seam — a richer designer-authored asset can drop in here
+ * later (falling back to {@link BrandLogo} on load failure) without changing
+ * {@link BrandLoader}'s public API. The {@link BrandLogo} static squirrel
+ * remains the reduced-motion / fallback target.
  */
 function BrandLoaderMark({ paused }: { paused: boolean }) {
-  // `useId` keeps the gradient id unique per instance so multiple loaders on one
-  // page never collide on the same DOM id (which would make every arc resolve
-  // `url(#…)` to the first match). Colons from `useId` are stripped because
-  // `url(#:r0:)` is an unreliable reference target across browsers.
-  const gradientId = `brand-loader-arc-${useId().replace(/:/g, "")}`
+  // `useId` keeps the fur gradient id unique per instance so multiple loaders on
+  // one page never collide on the same DOM id (which would make every squirrel
+  // resolve `url(#…)` to the first match). Colons from `useId` are stripped
+  // because `url(#:r0:)` is an unreliable reference target across browsers.
+  const gradientId = `brand-loader-fur-${useId().replace(/:/g, "")}`
   return (
     <span
       className={classNames("brand-loader-mark", paused && "is-paused")}
@@ -121,13 +123,26 @@ function BrandLoaderMark({ paused }: { paused: boolean }) {
             <stop offset="100%" stopColor="#fd80a9" />
           </linearGradient>
         </defs>
-        <circle className="brand-loader-track" cx="24" cy="24" r="18" />
-        <path
-          className="brand-loader-arc"
-          d="M24 6 a18 18 0 0 1 18 18"
-          stroke={`url(#${gradientId})`}
-        />
-        <circle className="brand-loader-core" cx="24" cy="24" r="6" />
+        <g className="squirrel">
+          <g className="squirrel-fur" fill={`url(#${gradientId})`}>
+            {/* Bushy tail, taller than the body — the defining squirrel cue. */}
+            <path
+              className="squirrel-tail"
+              d="M29 41 C42 42 46 28 41 17 C38 10 32 8 30 13 C35 15 37 22 36 28 C35 34 32 38 29 41 Z"
+            />
+            <ellipse className="squirrel-foot" cx="16" cy="41" rx="4.2" ry="2" />
+            {/* Sitting torso. */}
+            <path
+              className="squirrel-torso"
+              d="M22 20 C29 20 31 31 30 37 C29 42 14 42 13 37 C12 31 15 20 22 20 Z"
+            />
+            <circle className="squirrel-head" cx="17" cy="15" r="8" />
+            <path className="squirrel-ear" d="M12 8 C10 3 16 3 16 10 Z" />
+            <path className="squirrel-ear" d="M19 9 C20 3 25 4 23 10 Z" />
+          </g>
+          <circle className="squirrel-eye" cx="13.4" cy="14.4" r="1.7" />
+          <circle className="squirrel-nose" cx="9.6" cy="16.8" r="1.3" />
+        </g>
       </svg>
     </span>
   )

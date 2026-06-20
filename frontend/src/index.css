@@ -372,28 +372,40 @@ button:disabled {
   overflow: visible;
 }
 
-.brand-loader-track {
-  fill: none;
-  stroke: rgba(136, 115, 100, 0.22);
-  stroke-width: 4;
+/* Animated CSS squirrel (issue #21). Everything is transform/opacity only so it
+   runs on the compositor; `transform-box: view-box` resolves each
+   `transform-origin` against the 48×48 viewBox so rotations pivot on the right
+   anatomical point. */
+.squirrel {
+  transform-box: view-box;
+  transform-origin: 24px 40px;
+  animation: squirrel-bob 1.8s ease-in-out infinite;
 }
 
-.brand-loader-arc {
-  fill: none;
-  stroke-width: 4;
-  stroke-linecap: round;
-  transform-origin: 24px 24px;
-  animation: brand-loader-spin 1s linear infinite;
+.squirrel-tail {
+  transform-box: view-box;
+  transform-origin: 30px 40px;
+  animation: squirrel-tail 1.4s ease-in-out infinite;
 }
 
-.brand-loader-core {
-  fill: var(--color-primary);
-  transform-origin: 24px 24px;
-  animation: brand-loader-pulse 1.6s ease-in-out infinite;
+.squirrel-foot {
+  opacity: 0.85;
 }
 
-.brand-loader-mark.is-paused .brand-loader-arc,
-.brand-loader-mark.is-paused .brand-loader-core {
+.squirrel-eye,
+.squirrel-nose {
+  fill: #3b2a20;
+}
+
+.squirrel-eye {
+  transform-box: view-box;
+  transform-origin: 13.4px 14.4px;
+  animation: squirrel-blink 3.4s ease-in-out infinite;
+}
+
+.brand-loader-mark.is-paused .squirrel,
+.brand-loader-mark.is-paused .squirrel-tail,
+.brand-loader-mark.is-paused .squirrel-eye {
   animation-play-state: paused;
 }
 
@@ -415,29 +427,43 @@ button:disabled {
   border: 0;
 }
 
-@keyframes brand-loader-spin {
-  to {
-    transform: rotate(360deg);
+@keyframes squirrel-bob {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-2px);
   }
 }
 
-@keyframes brand-loader-pulse {
+@keyframes squirrel-tail {
   0%,
   100% {
-    transform: scale(1);
-    opacity: 0.85;
+    transform: rotate(0deg);
   }
   50% {
-    transform: scale(0.7);
-    opacity: 1;
+    transform: rotate(-13deg);
+  }
+}
+
+@keyframes squirrel-blink {
+  0%,
+  90%,
+  100% {
+    transform: scaleY(1);
+  }
+  95% {
+    transform: scaleY(0.1);
   }
 }
 
 @media (prefers-reduced-motion: reduce) {
   /* The component already swaps to the static mark; this is the belt-and-braces
-     CSS guarantee that nothing animates if a player ever mounts. */
-  .brand-loader-arc,
-  .brand-loader-core {
+     CSS guarantee that nothing animates if the animated mark ever mounts. */
+  .squirrel,
+  .squirrel-tail,
+  .squirrel-eye {
     animation: none;
   }
 }

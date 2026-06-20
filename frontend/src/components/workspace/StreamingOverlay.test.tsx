@@ -2,6 +2,13 @@ import { render, screen } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { describe, expect, it, vi } from "vitest"
 
+// `branded_loaders` now ships ON by default, so this file pins it OFF to keep
+// exercising the legacy per-surface loader / default-off path. The flag-ON
+// (animated squirrel) behavior is covered in StreamingOverlay.branded.test.tsx.
+vi.mock("../../config/featureFlags", () => ({
+  featureFlags: { brandedLoaders: false },
+}))
+
 import type { QualityGateInfo } from "../../types/stage"
 import "../../index.css"
 import { useGenerationEstimatesStore } from "../../store/generationEstimatesStore"
