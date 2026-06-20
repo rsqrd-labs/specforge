@@ -37,6 +37,14 @@ export default defineConfig({
   // Static output: every indexable route ships real, crawlable HTML — the whole
   // point of the marketing zone (issue #18, Phase 1).
   output: "static",
+  // Both URL forms resolve; the canonical signal is what aligns surfaces. Every
+  // `<link rel="canonical">`/`og:url`/internal link derives from
+  // `absoluteUrl(path)`: no trailing slash on content routes, a single "/" on the
+  // root. The sitemap must agree (a canonical-vs-sitemap slash mismatch is a
+  // self-inflicted duplicate signal), so the serializer below normalizes <loc>
+  // to exactly that shape. We DON'T use `trailingSlash: "never"` because the
+  // sitemap integration re-applies it *after* serialize, stripping even the
+  // root's slash and breaking the home canonical match (issue #18, Phase 4).
   trailingSlash: "ignore",
   integrations: [
     // Reuses the frontend Tailwind config (Modern Indica tokens) — see
@@ -54,8 +62,16 @@ export default defineConfig({
       filter: (page) => !isSitemapExcluded(new URL(page).pathname),
       serialize: (item) => {
         const isHome = new URL(item.url).pathname === "/"
+        // Match <loc> to the canonical exactly: the site root keeps its single
+        // trailing slash (canonical is `absoluteUrl("/")` → ".../"), every other
+        // route has none. `trailingSlash: "never"` strips even the root, so add
+        // it back for home; strip any trailing slash elsewhere.
+        const url = isHome
+          ? item.url.replace(/\/?$/, "/")
+          : item.url.replace(/\/$/, "")
         return {
           ...item,
+          url,
           priority: isHome ? 1.0 : 0.7,
           lastmod: item.lastmod ?? new Date().toISOString(),
         }
