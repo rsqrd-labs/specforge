@@ -132,13 +132,18 @@ def _read_escalation_counter(action: str, provider: str, outcome: str) -> float:
 # ---------------------------------------------------------------------------
 
 
-def test_resolve_primary_route_picks_cheap_tier():
+def test_resolve_primary_route_picks_cheap_tier(monkeypatch):
     """Storyboard's primary route is the provider's cheap-tier model.
 
     Verified against the real catalog/routing layer (no mocks): the cheap
     storyboard primary must actually resolve now that Haiku/Mini list
-    ``storyboard.generate``, escalating to mid.
+    ``storyboard.generate``, escalating to mid.  Pin the cheap-primary policy on
+    (the product default is now mid-first) to exercise that path.
     """
+    from services.llm import tier_policy
+
+    monkeypatch.setattr(tier_policy.settings, "core_cheap_primary", True)
+
     route = _resolve_storyboard_primary_route(_make_source("anthropic"))
     assert route.model == "claude-haiku-4-5-20251001"
     assert route.model_tier == "small"

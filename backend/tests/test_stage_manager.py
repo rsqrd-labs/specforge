@@ -384,8 +384,14 @@ async def test_generate_invalid_route_skips_credit_and_provider_call() -> None:
     mock_get_llm.assert_not_called()
 
 
-def test_harness_generation_uses_cheap_primary_with_mid_escalation() -> None:
+def test_harness_generation_uses_cheap_primary_with_mid_escalation(
+    monkeypatch,
+) -> None:
     from services.pipeline import stage_manager as stage_manager_module
+
+    # Pin the cheap-primary path on (the product default is now mid-first); this
+    # test exercises the still-supported cheap-primary policy specifically.
+    monkeypatch.setattr(stage_manager_module.settings, "core_cheap_primary", True)
 
     workspace = _make_workspace()
     workspace.provider = "openai"
@@ -417,10 +423,12 @@ _REGULATED_PROBLEM = (
 _SIMPLE_PROBLEM = "Build a personal recipe book for one user to save recipes."
 
 
-def test_complexity_classifier_off_by_default_keeps_cheap_primary() -> None:
-    # Phase 5.2: even a regulated prompt starts on the cheap primary while the
-    # classifier flag is off (its default) — the live behavior is unchanged.
+def test_complexity_classifier_off_by_default_keeps_cheap_primary(monkeypatch) -> None:
+    # Phase 5.2: with the cheap-primary policy on, even a regulated prompt starts
+    # on the cheap primary while the classifier flag is off (its default).
     from services.pipeline import stage_manager as sm
+
+    monkeypatch.setattr(sm.settings, "core_cheap_primary", True)
 
     workspace = _make_workspace()
     workspace.provider = "anthropic"
@@ -437,6 +445,8 @@ def test_complexity_classifier_off_by_default_keeps_cheap_primary() -> None:
 def test_complexity_classifier_raises_regulated_prompt_to_mid(monkeypatch) -> None:
     from services.pipeline import stage_manager as sm
 
+    # The complexity floor only applies while the cheap-primary policy is on.
+    monkeypatch.setattr(sm.settings, "core_cheap_primary", True)
     monkeypatch.setattr(sm.settings, "core_complexity_routing", True)
 
     workspace = _make_workspace()

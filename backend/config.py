@@ -196,15 +196,16 @@ class Settings(BaseSettings):
 
     # Phase 5.3 (issue #26) + issue #17 follow-up: master switch for the
     # product-wide cheap-primary generation policy (Haiku 4.5 / GPT-5.4 Mini
-    # start, mid-tier escalation on a runtime/quality-gate failure).  Default
-    # True — it wraps the *live* behavior so it can be reverted with one toggle:
-    # set False and **every** artifact-generation feature — the four core stages,
-    # full regenerate, the harness gap-patch, the storyboard keynote, and
-    # increment generation — falls back to the pre-cheap-swap *mid-first* default
+    # start, mid-tier escalation on a runtime/quality-gate failure).  Now defaults
+    # **False** (mid-first): the cheap primary (GPT-5.4 Mini) was too slow and
+    # produced shallow/truncated heavy stages (e.g. the 4-chunk plan stage burned
+    # ~10 min and failed the depth gate), so **every** artifact-generation feature
+    # — the four core stages, full regenerate, the harness gap-patch, the
+    # storyboard keynote, and increment generation — starts on the mid tier
     # (Sonnet 4.6 / GPT-5.4 first, strong escalation) via the shared
-    # ``services.llm.tier_policy.generation_tier_policy``.  Flip False if the
-    # golden-corpus comparison ever shows the cheap primary regressing quality.
-    core_cheap_primary: bool = True
+    # ``services.llm.tier_policy.generation_tier_policy``.  Set True to re-enable
+    # the cheap-primary policy if a golden-corpus comparison shows it competitive.
+    core_cheap_primary: bool = False
 
     # Phase 5.2 (issue #26): deterministic, no-LLM complexity classifier that
     # raises the *starting* tier for predictably hard core generations (regulated

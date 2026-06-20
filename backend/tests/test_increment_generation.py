@@ -208,7 +208,13 @@ def test_grow_tasks_markdown_appends_and_pins_baseline() -> None:
     assert grown.index("Set up project structure") < grown.index("Add billing")
 
 
-def test_increment_generation_uses_cheap_primary_tasks_route() -> None:
+def test_increment_generation_uses_cheap_primary_tasks_route(monkeypatch) -> None:
+    # Pin the cheap-primary path on (the product default is now mid-first); this
+    # test exercises the still-supported cheap-primary policy specifically.
+    from services.llm import tier_policy
+
+    monkeypatch.setattr(tier_policy.settings, "core_cheap_primary", True)
+
     workspace = MagicMock()
     workspace.provider = "anthropic"
 
