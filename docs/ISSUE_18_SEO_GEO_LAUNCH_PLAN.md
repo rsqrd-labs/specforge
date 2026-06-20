@@ -460,4 +460,52 @@ homepage).
   - **Verified non-vacuous:** mutation-tested the critical guard — deleting the
     `/sb/*` `X-Robots-Tag` from `_headers` turns `noindex-regression` RED;
     reverted, all 137 green. `pnpm check` 0/0/0; `pnpm test` 8 files / 137 pass.
-- [ ] Phase 7 — CI + deploy
+- [x] Phase 7 — CI + deploy
+  - **Marketing CI job** added to `.github/workflows/ci.yml` (`marketing`,
+    mirroring the `frontend` job): pnpm 9.15.9 + Node 22 (pnpm cache),
+    `pnpm install --frozen-lockfile`, `pnpm check` (astro check / type gate),
+    `pnpm build` (compile smoke), then `pnpm test` — the Phase-6 vitest suite
+    whose `globalSetup` re-builds a fresh credential-free dist and asserts the
+    SEO/GEO contracts. The explicit build step is kept *in addition to* the
+    test's own build so a compile break is attributed without parsing the
+    vitest log. `deploy` now `needs: [secrets, backend, worker-image, frontend,
+    marketing]`, so a red marketing gate blocks the production deploy.
+  - **No `pnpm audit` gate in the marketing job, by design.** The frontend job
+    audits because it ships a JS bundle to browsers; the marketing zone is
+    `output: "static"` (crawlable HTML, **zero runtime JS**), so its dependency
+    tree is build-time tooling (Astro, the Sanity CLI) — not a deployed attack
+    surface. The remaining advisories are all transitive Sanity-CLI deps with
+    no actionable bump, and TruffleHog (the `secrets` job) already scans
+    `apps/marketing` repo-wide, so the zone is not unguarded. Revisit if the
+    zone ever ships client JS beyond the opt-in Vercel analytics island.
+  - **Marketing Vercel deploy step** added to the `deploy` job (apex/primary
+    zone, a **separate** Vercel project from the SPA → its own
+    `VERCEL_MARKETING_PROJECT_ID`). The secret is mapped to a job-level `env`
+    so the step can `if`-gate on it (the `secrets` context is unavailable in
+    step `if`); until the project is provisioned the step is **skipped, not
+    failed**, so flipping `PRODUCTION_DEPLOY_ENABLED=true` for the existing
+    backend/SPA deploy never breaks on a missing marketing project.
+  - **Backend `SITE_URL` prod guard** (`config.py`): added optional
+    `site_url: str = ""` (the backend mirror of the marketing canonical origin;
+    no backend consumer reads it yet) and an **HTTPS-when-set** check in
+    `validate_production_settings()` — an `http://` value fails startup
+    (insecure canonical/OG/sitemap), empty is allowed. Deliberately *not*
+    hard-required: that would fail-boot every existing prod deploy that hasn't
+    set it; mirrors the `langfuse_host` optional-but-HTTPS pattern. Covered by
+    `tests/test_marketing_site_url_config.py` (5 tests; the 42-test prod-config
+    suite stays green).
+  - **External infra — operator setup steps (carried forward; not codeable here):**
+    1. Create the marketing Vercel project rooted at `apps/marketing` (apex
+       domain → marketing zone; the SPA stays on its own project/subdomain).
+       Set repo secret `VERCEL_MARKETING_PROJECT_ID`.
+    2. Set `PUBLIC_SITE_URL` (Astro) on the marketing project and `SITE_URL`
+       (backend) to the **HTTPS** apex origin — both drive canonical/OG/sitemap.
+    3. **Replace the SPA-host placeholder** in `apps/marketing/vercel.json`
+       (`https://specforge-app.vercel.app`) with the real SPA-zone host once
+       the project domains are assigned (Phase-1 left this as a placeholder).
+    4. Wire the **Sanity webhook → Vercel deploy hook** on the marketing
+       project only, so content edits trigger a rebuild (build-time content;
+       see Verification #6).
+  - **Verified:** `pnpm check` 0/0/0, `pnpm build` clean, `pnpm test` 8 files /
+    143 pass; backend prod-config suite (incl. the new SITE_URL tests) green;
+    `ci.yml` parses and the job graph wires `marketing` into `deploy`.

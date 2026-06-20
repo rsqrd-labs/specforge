@@ -12,6 +12,15 @@ class Settings(BaseSettings):
     google_client_secret: str
     frontend_url: str
 
+    # Marketing-zone canonical origin (issue #18, Phase 7). The Astro marketing
+    # zone owns its own ``PUBLIC_SITE_URL``; this is the backend-side mirror for
+    # any server-emitted canonical/sitemap concern. Optional (empty = unset, no
+    # backend consumer reads it yet) but HTTPS-enforced in prod when set — see
+    # ``validate_production_settings``. Hard-requiring it would fail-boot every
+    # existing prod deploy that has not configured it, so the guard is
+    # HTTPS-when-set (mirroring ``langfuse_host``), not unconditional.
+    site_url: str = ""
+
     anthropic_api_key: str
     openai_api_key: str
     google_api_key: str
@@ -416,6 +425,12 @@ def validate_production_settings() -> None:
         errors.append("METRICS_TOKEN must be set in production")
     if not settings.frontend_url.startswith("https://"):
         errors.append("FRONTEND_URL must use HTTPS in production")
+    # Marketing zone canonical origin (issue #18, Phase 7). HTTPS-when-set: an
+    # http:// SITE_URL would emit insecure canonical/OG/sitemap URLs and leak the
+    # marketing origin over plaintext. Empty is allowed (the backend has no
+    # consumer yet); only a configured-but-insecure value is a misconfiguration.
+    if settings.site_url and not settings.site_url.startswith("https://"):
+        errors.append("SITE_URL must use HTTPS in production when set")
     if not settings.jwt_private_key.strip().startswith("-----BEGIN"):
         errors.append(
             "JWT_PRIVATE_KEY must be a PEM-encoded RSA or EC private key "

@@ -451,14 +451,68 @@ jobs:
       - name: Build
         run: pnpm build
 
+  marketing:
+    name: Marketing
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/marketing
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.9
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+          cache-dependency-path: "**/pnpm-lock.yaml"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # No `pnpm audit` gate here, by design (issue #18, Phase 7). The marketing
+      # zone is `output: "static"` — it ships crawlable HTML and zero runtime JS,
+      # so its dependency tree is build-time tooling (Astro, the Sanity CLI),
+      # not a deployed browser attack surface like the SPA bundle the `frontend`
+      # job audits. The remaining advisories are all transitive Sanity-CLI deps
+      # with no actionable bump. TruffleHog (the `secrets` job) already scans
+      # apps/marketing repo-wide, so the zone is not unguarded.
+
+      - name: Astro check
+        run: pnpm check
+
+      - name: Build
+        # Smoke that the credential-free build (no Sanity creds in CI ⇒ homepage
+        # + 5 hubs) compiles; the test suite re-builds fresh in its globalSetup,
+        # but a clean build step attributes a compile break vs a test-assertion
+        # failure without parsing the vitest log.
+        run: pnpm build
+
+      - name: Test (metadata / sitemap / robots / noindex / structured-data / GEO QA)
+        # vitest globalSetup runs a fresh `astro build` (Sanity creds stripped),
+        # then asserts the SEO/GEO contracts against the emitted dist — the
+        # Phase-6 validation suite mapped 1:1 to the Phase-2..5 ACs.
+        run: pnpm test
+
   deploy:
     name: Deploy
-    needs: [secrets, backend, worker-image, frontend]
+    needs: [secrets, backend, worker-image, frontend, marketing]
     runs-on: ubuntu-latest
     # Keep production deploys opt-in while the project is still in testing.
     # Set the repository variable PRODUCTION_DEPLOY_ENABLED=true after Railway
     # and Vercel projects/secrets are ready.
     if: github.ref == 'refs/heads/main' && github.event_name == 'push' && vars.PRODUCTION_DEPLOY_ENABLED == 'true'
+    # Map the optional marketing project id to a job-level env var so the
+    # marketing deploy step can gate on it: the `secrets` context is NOT
+    # available in step `if` conditions, but `env` is.
+    env:
+      VERCEL_MARKETING_PROJECT_ID: ${{ secrets.VERCEL_MARKETING_PROJECT_ID }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -483,3 +537,23 @@ jobs:
           VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
           VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
           VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+
+      # Marketing zone — the primary (apex) Vercel project (issue #18, Phase 7).
+      # Separate Vercel project from the SPA, so it uses its own project id
+      # (VERCEL_MARKETING_PROJECT_ID). PUBLIC_SITE_URL must be set as a project
+      # env var in Vercel (canonical/OG/sitemap base). The step is skipped (not
+      # failed) until that secret exists, so enabling production deploys before
+      # the marketing project is provisioned does not break the deploy job.
+      - name: Deploy marketing to Vercel
+        if: ${{ env.VERCEL_MARKETING_PROJECT_ID != '' }}
+        working-directory: apps/marketing
+        run: |
+          npm install -g vercel
+          vercel --prod --token ${{ secrets.VERCEL_TOKEN }} \
+            --yes \
+            --scope ${{ secrets.VERCEL_ORG_ID }} \
+            --project-id ${{ secrets.VERCEL_MARKETING_PROJECT_ID }}
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_MARKETING_PROJECT_ID }}
