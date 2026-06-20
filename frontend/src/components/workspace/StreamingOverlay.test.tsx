@@ -27,7 +27,8 @@ const criticGate: QualityGateInfo = {
 const incompleteGate: QualityGateInfo = {
   stage: "tasks",
   kind: "incomplete_output",
-  override_allowed: false,
+  // Issue #34: overridable now; incomplete_output still refunds.
+  override_allowed: true,
   repair_attempted: true,
   reasons: [
     {
@@ -38,19 +39,21 @@ const incompleteGate: QualityGateInfo = {
   ],
   recovery: {
     action: "regenerate",
-    overridable: false,
+    overridable: true,
     credit_required: 10,
     refunded_prior_attempt: true,
     message:
-      "This version stopped before it was complete and can't be finalised. " +
-      "Regenerate to produce a full version. Your previous attempt was refunded.",
+      "This draft looks cut off before it finished. Regenerate for a complete " +
+      "version, or finalise this one as-is if it already covers what you need. " +
+      "Your credit for this attempt was refunded.",
   },
 }
 
 const technologySafetyGate: QualityGateInfo = {
   stage: "plan",
   kind: "technology_safety",
-  override_allowed: false,
+  // Issue #34: overridable now; technology_safety no longer refunds.
+  override_allowed: true,
   repair_attempted: true,
   policy_version: "tech-safety-v1",
   reasons: [
@@ -67,12 +70,13 @@ const technologySafetyGate: QualityGateInfo = {
   ],
   recovery: {
     action: "regenerate",
-    overridable: false,
+    overridable: true,
     credit_required: 10,
-    refunded_prior_attempt: true,
+    refunded_prior_attempt: false,
     message:
-      "This version proposes unsafe technology choices and can't be finalised. " +
-      "Regenerate to continue. Your previous attempt was refunded.",
+      "This draft suggests a technology that's out of date or unsupported. " +
+      "Regenerate to get an up-to-date version, or finalise this one as-is if " +
+      "the choice is intentional.",
   },
 }
 
@@ -272,10 +276,9 @@ describe("StreamingOverlay quality gate", () => {
     ).toBe("auto")
   })
 
-  it("offers a 'Retry generation' CTA + refund sub-copy for incomplete output gates", () => {
-    // Phase 3 (issue #28): for a non-overridable block the retry IS the recovery,
-    // so the primary action is the explicit, non-punitive "Retry generation" and
-    // the refund is stated plainly so the gate never feels like a paywall.
+  it("offers Regenerate + Override + refund sub-copy for incomplete output gates", () => {
+    // Issue #34: incomplete_output is overridable now — the user can regenerate
+    // OR finalise as-is. incomplete_output still refunds, so the note shows.
     render(
       <StreamingOverlay
         isVisible={false}
@@ -286,21 +289,19 @@ describe("StreamingOverlay quality gate", () => {
     )
 
     expect(
-      screen.getByRole("button", { name: "Retry generation" }),
+      screen.getByRole("button", { name: "Regenerate" }),
     ).toBeInTheDocument()
     expect(
-      screen.queryByRole("button", { name: "Regenerate" }),
-    ).not.toBeInTheDocument()
-    expect(
-      screen.queryByRole("button", { name: "Override and continue" }),
-    ).not.toBeInTheDocument()
+      screen.getByRole("button", { name: "Override and continue" }),
+    ).toBeInTheDocument()
     expect(screen.getByText(/stopped before completion/i)).toBeInTheDocument()
     expect(screen.getByRole("note")).toHaveTextContent(
       "Your previous attempt was refunded.",
     )
   })
 
-  it("renames the CTA and renders remediation for technology safety gates", () => {
+  it("offers Regenerate + Override + no refund note for technology safety gates", () => {
+    // Issue #34: technology_safety is overridable now and no longer refunds.
     render(
       <StreamingOverlay
         isVisible={false}
@@ -311,16 +312,16 @@ describe("StreamingOverlay quality gate", () => {
     )
 
     expect(
-      screen.getByRole("button", { name: "Retry generation" }),
+      screen.getByRole("button", { name: "Regenerate" }),
     ).toBeInTheDocument()
     expect(
-      screen.queryByRole("button", { name: "Override and continue" }),
-    ).not.toBeInTheDocument()
-    expect(screen.getByText(/unsafe or unsupported technology/i)).toBeInTheDocument()
+      screen.getByRole("button", { name: "Override and continue" }),
+    ).toBeInTheDocument()
+    expect(
+      screen.getByText(/outdated or unsupported technology/i),
+    ).toBeInTheDocument()
     expect(screen.getAllByText(/Node\.js 22 LTS/i).length).toBeGreaterThan(0)
-    expect(screen.getByRole("note")).toHaveTextContent(
-      "Your previous attempt was refunded.",
-    )
+    expect(screen.queryByRole("note")).not.toBeInTheDocument()
   })
 
   it("omits the refund sub-copy when no refund actually happened", () => {
@@ -341,7 +342,7 @@ describe("StreamingOverlay quality gate", () => {
     )
 
     expect(
-      screen.getByRole("button", { name: "Retry generation" }),
+      screen.getByRole("button", { name: "Regenerate" }),
     ).toBeInTheDocument()
     expect(screen.queryByRole("note")).not.toBeInTheDocument()
   })

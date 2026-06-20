@@ -25,15 +25,13 @@ if TYPE_CHECKING:
 
 
 # Quality-gate kinds whose block can only be cleared by regenerating — an
-# override is refused for them. This mirrors StageManager.override_quality_gate,
-# which rejects override for exactly these two kinds; missing_sections and
-# critic_findings stay overridable. Kept as literals here (not imported from
-# services) so the models layer never depends upward on services; a guard test
-# (test_stage_manager.py) asserts this set stays in lockstep with
-# override_quality_gate so the two can never silently drift.
-NON_OVERRIDABLE_GATE_KINDS: frozenset[str] = frozenset(
-    {"incomplete_output", "technology_safety"}
-)
+# override is refused for them. Empty since issue #34: every blocking gate is now
+# overridable (the user owns the artifact), and the LLM critic no longer blocks
+# at all — it is advisory. Kept as a (now empty) set so the lockstep guard test
+# and StageManager.override_quality_gate keep one source of truth; if a future
+# kind must be non-overridable again, add it here. Literals (not imported from
+# services) so the models layer never depends upward on services.
+NON_OVERRIDABLE_GATE_KINDS: frozenset[str] = frozenset()
 
 # Credits charged for a (re)generation. Mirrors require_credits(10) on the
 # generate/regenerate routes; surfaced in the recovery contract so the UI can
@@ -42,35 +40,45 @@ GENERATION_CREDIT_COST = 10
 
 
 def _recovery_message(kind: str | None, *, overridable: bool, refunded: bool) -> str:
-    """Build the kind-specific, billing-honest recovery sentence shown to users."""
-    refund_clause = " Your previous attempt was refunded." if refunded else ""
+    """Build the kind-specific, billing-honest recovery sentence shown to users.
+
+    Every blocking kind is overridable since issue #34, so each message offers
+    the same two clear choices — regenerate for a fresh version, or finalise this
+    one as-is — phrased so a non-technical user knows exactly what each does.
+    """
+    refund_clause = " Your credit for this attempt was refunded." if refunded else ""
     if kind == "incomplete_output":
         return (
-            "This version stopped before it was complete and can't be finalised. "
-            "Regenerate to produce a full version." + refund_clause
+            "This draft looks cut off before it finished. Regenerate for a "
+            "complete version, or finalise this one as-is if it already covers "
+            "what you need." + refund_clause
         )
     if kind == "technology_safety":
         return (
-            "This version proposes unsafe technology choices and can't be "
-            "finalised. Regenerate to continue." + refund_clause
+            "This draft suggests a technology that's out of date or unsupported. "
+            "Regenerate to get an up-to-date version, or finalise this one as-is "
+            "if the choice is intentional." + refund_clause
         )
     if kind == "missing_sections":
         return (
-            "This version is missing required sections. Regenerate, or override "
-            "to finalise it as-is." + refund_clause
+            "This draft is missing a few expected sections. Regenerate to fill "
+            "them in, or finalise this one as-is if you don't need them."
+            + refund_clause
         )
     if kind == "critic_findings":
+        # Advisory now (issue #34): findings are suggestions on a finalisable
+        # draft, never a block. Kept for forward-compat / legacy blocked rows.
         return (
-            "This version didn't pass the quality review. Regenerate, or override "
-            "to finalise it as-is." + refund_clause
+            "The quality review left some suggestions on this draft. Regenerate "
+            "to address them, or finalise this one as-is." + refund_clause
         )
     # Unknown / forward-compatible kind: stay honest about override availability.
     action = (
-        "Regenerate, or override to finalise it as-is."
+        "Regenerate for a fresh version, or finalise this one as-is."
         if overridable
         else "Regenerate to continue."
     )
-    return "This version is blocked by the quality gate. " + action + refund_clause
+    return "The quality review flagged this draft. " + action + refund_clause
 
 
 def derive_quality_gate_recovery(
@@ -108,7 +116,7 @@ class Stage(Base):
             name="ck_stages_status",
         ),
         CheckConstraint(
-            "quality_gate_status IN ('clear', 'blocked', 'overridden')",
+            "quality_gate_status IN ('clear', 'blocked', 'overridden', 'advisory')",
             name="ck_stages_quality_gate_status",
         ),
     )

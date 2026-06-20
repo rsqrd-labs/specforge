@@ -163,7 +163,8 @@ async def test_get_blocked_stage_serializes_recovery_contract(app) -> None:
 
     assert response.status_code == 200
     recovery = response.json()["quality_gate"]["recovery"]
-    assert recovery["overridable"] is False
+    # Issue #34: incomplete_output is overridable now (every blocking kind is).
+    assert recovery["overridable"] is True
     assert recovery["refunded_prior_attempt"] is True
     assert recovery["credit_required"] == 10
     assert recovery["action"] == "regenerate"

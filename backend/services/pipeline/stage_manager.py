@@ -22,7 +22,7 @@ from config import settings
 from database import get_shared_redis
 from middleware.rate_limit import sliding_window_check
 from models import EvalResult, Stage, StageVersion, Workspace
-from models.stage import derive_quality_gate_recovery
+from models.stage import NON_OVERRIDABLE_GATE_KINDS, derive_quality_gate_recovery
 from prompts.base import (
     SECURITY_AND_PRIVACY_RULES,
     STAGE_PROMPT_VERSIONS,
@@ -93,7 +93,7 @@ from services.pipeline.artifact_validator import (
 )
 from services.pipeline.critic import (
     MAX_REGENERATES,
-    StageQualityGateError,
+    CriticFinding,
     critic_review,
 )
 from services.pipeline.diff_engine import (
@@ -2221,11 +2221,14 @@ class StageManager:
                 return
 
             # T-247: critic quality gate.  Runs AFTER output validation and
-            # BEFORE persistence + caching, so only a critic-passed artifact is
-            # ever cached, persisted, or eval'd (the cache-hit early return is
-            # therefore legitimately pre-vetted).  The validator pre-gate (T-248)
-            # slots in immediately before this block.  Skipped when the
-            # workspace owner has toggled the audited disable_critic escape hatch.
+            # BEFORE persistence + caching.  Issue #34: the critic is ADVISORY,
+            # not blocking — the deterministic section gate below is still
+            # terminal, but the LLM judge never blocks finalisation.  After its
+            # one platform-funded regenerate, any remaining findings are captured
+            # here and attached to the delivered draft as non-blocking
+            # suggestions (status="advisory").  Skipped when the workspace owner
+            # has toggled the audited disable_critic escape hatch.
+            advisory_findings: list[CriticFinding] = []
             if not workspace.disable_critic:
                 critic_deps = await self._critic_deps(workspace.id, stage.type)
                 # T-248: zero-LLM section-presence gate runs FIRST — it is the
@@ -2284,37 +2287,15 @@ class StageManager:
                     if critic_result.passed:
                         break
                     if regenerate_count >= MAX_REGENERATES:
-                        # Terminal gate failure after the one regenerate pass.
-                        gate_payload = {
-                            "stage": stage.type,
-                            "kind": "critic_findings",
-                            "findings": [
-                                f.model_dump() for f in critic_result.findings
-                            ],
-                            # This terminal path does not refund the deduction;
-                            # report the refund truth honestly.
-                            "refunded_prior_attempt": False,
-                        }
-                        gate_error = StageQualityGateError(
-                            stage.type, critic_result.findings
-                        )
-                        await self._persist_quality_gate_blocked(
-                            db,
-                            redis,
-                            stage,
-                            accumulated,
-                            kind="critic_findings",
-                            payload=gate_payload,
-                        )
-                        _cleanup_done = True
-                        await update_cost_event_quality_outcome(
-                            content_generation_id, "critic_failed"
-                        )
-                        if span_id:
-                            await self._mark_langfuse_span_failed(span_id, gate_error)
-                            span_finished = True
-                        emit(json.dumps({"quality_gate_failed": gate_payload}))
-                        return
+                        # Issue #34: the critic is advisory.  The one
+                        # platform-funded regenerate already ran and the artifact
+                        # still has findings — surface them as non-blocking
+                        # suggestions on the delivered draft instead of blocking
+                        # finalisation.  The generation proceeds down the normal
+                        # success path (persist, cache, eval); the findings are
+                        # attached at persist via _mark_quality_gate_advisory.
+                        advisory_findings = list(critic_result.findings)
+                        break
                     # One platform-funded regenerate with the findings injected.
                     # Phase 5.1: if we're on the cheap primary, escalate to the
                     # mid tier for this regenerate instead of repeating on the
@@ -2445,7 +2426,13 @@ class StageManager:
             stage.content = accumulated
             stage.current_version += 1
             stage.status = "draft"
-            self._clear_quality_gate(stage)
+            # Issue #34: a draft that cleared every terminal gate but still has
+            # advisory critic findings is delivered as a finalisable draft with
+            # the findings attached as non-blocking suggestions.
+            if advisory_findings:
+                self._mark_quality_gate_advisory(stage, advisory_findings)
+            else:
+                self._clear_quality_gate(stage)
             stage.updated_at = datetime.now(UTC)
             version = StageVersion(
                 stage_id=stage.id,
@@ -2472,8 +2459,13 @@ class StageManager:
                 )
             await db.commit()
             _cleanup_done = True
-            # Cost-ledger: the generation cleared every gate and is persisted.
-            await update_cost_event_quality_outcome(content_generation_id, "passed")
+            # Cost-ledger: the generation cleared every terminal gate and is
+            # persisted.  "critic_advisory" distinguishes a delivered draft that
+            # carries non-blocking critic suggestions from a clean "passed".
+            await update_cost_event_quality_outcome(
+                content_generation_id,
+                "critic_advisory" if advisory_findings else "passed",
+            )
             if action == "generate":
                 await set_cached_generation(redis, cache_key, accumulated)
             if span_id:
@@ -2835,23 +2827,16 @@ class StageManager:
         stage = await self._load_stage(stage_id, db, lock=True)
         if stage.status != "draft":
             raise ValueError(f"Stage status {stage.status!r} cannot be finalised")
-        if (
-            stage.quality_gate_kind == INCOMPLETE_OUTPUT_GATE_KIND
+        # Issue #34: a blocked gate of ANY kind is finalisable only after the user
+        # overrides it (status flips to "overridden").  A still-"blocked" current
+        # version is the single block condition — the previous per-kind blocks for
+        # incomplete_output/technology_safety are gone so those kinds can now be
+        # overridden.  An "advisory" status carries non-blocking suggestions and
+        # never blocks finalise.
+        overridden_current = (
+            stage.quality_gate_status == "overridden"
             and stage.quality_gate_version == stage.current_version
-        ):
-            raise _quality_gate_blocked_error(
-                stage,
-                "Current stage version is incomplete. " "Regenerate before finalising.",
-            )
-        if (
-            stage.quality_gate_kind == TECH_SAFETY_GATE_KIND
-            and stage.quality_gate_version == stage.current_version
-        ):
-            raise _quality_gate_blocked_error(
-                stage,
-                "Current stage version has unsafe technology choices. "
-                "Regenerate before finalising.",
-            )
+        )
         if (
             stage.quality_gate_status == "blocked"
             and stage.quality_gate_version == stage.current_version
@@ -2863,26 +2848,33 @@ class StageManager:
             )
 
         redis = await self._redis_client()
-        try:
-            await self._assert_technology_safe(
-                stage.type,
-                stage.content or "",
-                await self._critic_deps(stage.workspace_id, stage.type),
-                redis,
-            )
-        except TechSafetyError as exc:
-            self._mark_current_version_technology_blocked(stage, exc)
-            for finding in exc.findings:
-                PIPELINE_TECH_SAFETY_FINALISE_BLOCKS.labels(
-                    stage_type=stage.type,
-                    code=finding.code,
-                ).inc()
-            await db.commit()
-            raise _quality_gate_blocked_error(
-                stage,
-                "Current stage version has unsafe technology choices. "
-                "Regenerate before finalising.",
-            ) from exc
+        # The finalise-time technology re-check is a belt-and-suspenders gate for
+        # content that reached finalise without passing the generation-time gate
+        # (e.g. an edited draft).  When the user has explicitly overridden the
+        # quality gate for this version, honour that decision and skip the
+        # re-block — otherwise an overridden technology_safety draft could never
+        # be finalised (issue #34).
+        if not overridden_current:
+            try:
+                await self._assert_technology_safe(
+                    stage.type,
+                    stage.content or "",
+                    await self._critic_deps(stage.workspace_id, stage.type),
+                    redis,
+                )
+            except TechSafetyError as exc:
+                self._mark_current_version_technology_blocked(stage, exc)
+                for finding in exc.findings:
+                    PIPELINE_TECH_SAFETY_FINALISE_BLOCKS.labels(
+                        stage_type=stage.type,
+                        code=finding.code,
+                    ).inc()
+                await db.commit()
+                raise _quality_gate_blocked_error(
+                    stage,
+                    "Current stage version has unsafe technology choices. "
+                    "Regenerate before finalising.",
+                ) from exc
 
         stage.status = "finalised"
         stage.finalised_at = datetime.now(UTC)
@@ -3178,6 +3170,30 @@ class StageManager:
         stage.quality_gate_version = None
         stage.quality_gate_failed_at = None
 
+    def _mark_quality_gate_advisory(
+        self,
+        stage: Stage,
+        findings: list[CriticFinding],
+    ) -> None:
+        """Attach non-blocking critic findings to a delivered draft (issue #34).
+
+        Unlike _persist_quality_gate_blocked this never sets status="blocked" and
+        never resets/refunds: the artifact is finalisable as-is.  The findings
+        ride on Stage.quality_gate (status="advisory") so the frontend renders
+        them as suggestions after generation completes.  Pinned to the just-bumped
+        current_version so a later edit/regenerate supersedes them.
+        """
+        now = datetime.now(UTC)
+        stage.quality_gate_status = "advisory"
+        stage.quality_gate_kind = "critic_findings"
+        stage.quality_gate_payload = {
+            "stage": stage.type,
+            "kind": "critic_findings",
+            "findings": [finding.model_dump() for finding in findings],
+        }
+        stage.quality_gate_version = stage.current_version
+        stage.quality_gate_failed_at = now
+
     def _incomplete_gate_payload(
         self,
         stage_type: str,
@@ -3186,7 +3202,8 @@ class StageManager:
         return {
             "stage": stage_type,
             "kind": INCOMPLETE_OUTPUT_GATE_KIND,
-            "override_allowed": False,
+            # Overridable since issue #34 — the user may finalise as-is.
+            "override_allowed": True,
             "repair_attempted": exc.repair_attempted,
             "reasons": [
                 {
@@ -3216,7 +3233,8 @@ class StageManager:
         return {
             "stage": stage_type,
             "kind": TECH_SAFETY_GATE_KIND,
-            "override_allowed": False,
+            # Overridable since issue #34 — the user may finalise as-is.
+            "override_allowed": True,
             "repair_attempted": exc.repair_attempted,
             "policy_version": policy_version(),
             "verified_at": now.isoformat(),
@@ -3324,11 +3342,12 @@ class StageManager:
         route: LLMRoute,
         exc: TechSafetyError,
     ) -> dict:
-        refunded = deduction is not None
-        if refunded:
-            await credit_service.refund(db, deduction.id)
+        # Issue #34: a technology-safety block is now overridable — the artifact
+        # is delivered and the user can finalise it as-is — so the credit stands
+        # (no refund), matching critic/missing_sections.  Only genuinely broken
+        # output (incomplete_output) and hard failures still refund.
         gate_payload = self._technology_safety_gate_payload(stage.type, exc)
-        gate_payload["refunded_prior_attempt"] = refunded
+        gate_payload["refunded_prior_attempt"] = False
         await self._persist_quality_gate_blocked(
             db,
             redis,
@@ -3337,8 +3356,6 @@ class StageManager:
             kind=TECH_SAFETY_GATE_KIND,
             payload=gate_payload,
         )
-        if deduction is not None:
-            await credit_service.invalidate(user.id)
         logger.warning(
             "stage.technology_safety_blocked",
             extra={
@@ -3468,13 +3485,13 @@ class StageManager:
             raise ValueError(
                 "Current stage version is not blocked by the quality gate."
             )
-        if stage.quality_gate_kind == INCOMPLETE_OUTPUT_GATE_KIND:
+        # Issue #34: every blocking gate kind is overridable — the user owns the
+        # artifact and may finalise it as-is.  NON_OVERRIDABLE_GATE_KINDS is now
+        # empty; the lockstep guard test asserts this stays in sync.
+        if stage.quality_gate_kind in NON_OVERRIDABLE_GATE_KINDS:
             raise ValueError(
-                "Incomplete stage output cannot be overridden. Regenerate instead."
-            )
-        if stage.quality_gate_kind == TECH_SAFETY_GATE_KIND:
-            raise ValueError(
-                "Unsafe technology choices cannot be overridden. Regenerate instead."
+                f"Gate kind {stage.quality_gate_kind!r} cannot be overridden. "
+                "Regenerate instead."
             )
 
         stage.quality_gate_status = "overridden"

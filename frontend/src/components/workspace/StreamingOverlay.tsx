@@ -130,13 +130,11 @@ export function StreamingOverlay({
       : isMissingSections
         ? missing.length
         : findings.length
-    const canOverride = gate.override_allowed !== false && !isIncomplete && !isTechnologySafety
-    // Recovery CTA (issue #28, Phase 3): for the non-overridable kinds, retry IS
-    // the recovery, so the primary action reads as an explicit, non-punitive
-    // "Retry generation" rather than the neutral "Regenerate". Overridable kinds
-    // keep "Regenerate" alongside "Override and continue".
-    const isNonOverridable = isIncomplete || isTechnologySafety
-    const regenerateLabel = isNonOverridable ? "Retry generation" : "Regenerate"
+    // Issue #34: every blocking kind is overridable now — the user owns the
+    // artifact and may finalise it as-is — so override is offered for all kinds
+    // (the backend's override_quality_gate accepts them all).
+    const canOverride = gate.override_allowed !== false
+    const regenerateLabel = "Regenerate"
     // Billing-honest sub-copy, driven solely by the backend's refund truth — the
     // generation-time block refunds the failed attempt; the finalise-time
     // re-check reports `false`. Single source of truth, no per-kind guessing.
@@ -154,13 +152,13 @@ export function StreamingOverlay({
             {isIncomplete
               ? `The generated ${gate.stage} stopped before completion${
                   gate.repair_attempted ? " after a repair attempt" : ""
-                }. Regenerate to produce a complete version.`
+                }. Regenerate for a complete version, or override to finalise this one as-is.`
               : isTechnologySafety
-              ? `The generated ${gate.stage} selected unsafe or unsupported technology${
+              ? `The generated ${gate.stage} selected outdated or unsupported technology${
                   issueCount === 1 ? "" : " choices"
                 }${
                   gate.repair_attempted ? " after a repair attempt" : ""
-                }. Regenerate with supported choices.`
+                }. Regenerate for an up-to-date version, or override to finalise this one as-is.`
               : isMissingSections
               ? `The generated ${gate.stage} is missing ${issueCount} required ${
                   issueCount === 1 ? "section" : "sections"

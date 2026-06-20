@@ -1,7 +1,7 @@
 export type StageType = "spec" | "plan" | "harness" | "tasks"
 
 export type StageStatus = "locked" | "draft" | "in_progress" | "finalised" | "stale"
-export type QualityGateStatus = "clear" | "blocked" | "overridden"
+export type QualityGateStatus = "clear" | "blocked" | "overridden" | "advisory"
 
 export interface QualityGateFinding {
   kind: string

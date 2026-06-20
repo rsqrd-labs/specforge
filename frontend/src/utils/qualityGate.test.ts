@@ -3,7 +3,9 @@ import { describe, expect, it } from "vitest"
 import type { QualityGateInfo, Stage, StageType } from "../types/stage"
 import {
   blockedDraftLabel,
+  deriveAdvisoryFindings,
   deriveFinaliseGateBlock,
+  findingKindLabel,
   gateFallbackMessage,
 } from "./qualityGate"
 
@@ -49,7 +51,7 @@ describe("deriveFinaliseGateBlock", () => {
   it("is not blocked when there is no quality gate", () => {
     expect(deriveFinaliseGateBlock(makeStage(null))).toEqual({
       blocked: false,
-      message: "Regenerate or override the quality gate before finalising",
+      message: "Regenerate, or override to finalise this version as-is",
       kind: null,
       label: "Blocked draft",
     })
@@ -86,22 +88,22 @@ describe("deriveFinaliseGateBlock", () => {
   it.each([
     [
       "incomplete_output",
-      "Regenerate a complete version before finalising",
+      "Regenerate for a complete version, or finalise this one as-is",
       "Blocked partial draft",
     ],
     [
       "technology_safety",
-      "Regenerate with supported technology choices before finalising",
+      "Regenerate for an up-to-date version, or finalise this one as-is",
       "Blocked draft",
     ],
     [
       "missing_sections",
-      "Regenerate or override the quality gate before finalising",
+      "Regenerate, or override to finalise this version as-is",
       "Blocked draft",
     ],
     [
       "critic_findings",
-      "Regenerate or override the quality gate before finalising",
+      "Regenerate, or override to finalise this version as-is",
       "Blocked draft",
     ],
   ])(
@@ -129,8 +131,46 @@ describe("blockedDraftLabel", () => {
 describe("gateFallbackMessage", () => {
   it("covers known kinds and an unknown/forward-compatible default", () => {
     expect(gateFallbackMessage("incomplete_output")).toMatch(/complete version/)
-    expect(gateFallbackMessage("technology_safety")).toMatch(/supported technology/)
+    expect(gateFallbackMessage("technology_safety")).toMatch(/up-to-date/)
     expect(gateFallbackMessage("missing_sections")).toMatch(/override/)
     expect(gateFallbackMessage(undefined)).toMatch(/override/)
+  })
+})
+
+describe("findingKindLabel", () => {
+  it("maps known critic kinds to plain language", () => {
+    expect(findingKindLabel("CoverageGap")).toBe("Uncovered requirement")
+    expect(findingKindLabel("ShallowSection")).toBe("Needs more detail")
+    expect(findingKindLabel("DeprecatedAPI")).toBe("Outdated technology")
+  })
+
+  it("falls back to a generic label for unknown/empty kinds", () => {
+    expect(findingKindLabel("SomethingNew")).toBe("Suggestion")
+    expect(findingKindLabel(null)).toBe("Suggestion")
+    expect(findingKindLabel(undefined)).toBe("Suggestion")
+  })
+})
+
+describe("deriveAdvisoryFindings", () => {
+  it("returns findings only for an advisory gate (issue #34)", () => {
+    const advisory = makeStage({
+      stage: "spec",
+      kind: "critic_findings",
+      status: "advisory",
+      findings: [{ kind: "ShallowSection", detail: "thin", reference: null }],
+    })
+    expect(deriveAdvisoryFindings(advisory)).toHaveLength(1)
+  })
+
+  it("returns nothing for blocked/clear stages or a missing stage", () => {
+    const blocked = makeStage({
+      stage: "spec",
+      kind: "critic_findings",
+      status: "blocked",
+      findings: [{ kind: "ShallowSection", detail: "thin", reference: null }],
+    })
+    expect(deriveAdvisoryFindings(blocked)).toEqual([])
+    expect(deriveAdvisoryFindings(makeStage(null))).toEqual([])
+    expect(deriveAdvisoryFindings(null)).toEqual([])
   })
 })

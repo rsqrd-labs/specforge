@@ -1,16 +1,46 @@
-import type { Stage } from "../types/stage"
+import type { QualityGateFinding, Stage } from "../types/stage"
+
+/** Plain-language labels for critic finding kinds. The raw kinds (e.g.
+ *  "CoverageGap", "ADRIncomplete") read like internal jargon; users see a short
+ *  human label instead. Unknown kinds fall back to a generic "Suggestion".
+ *  (issue #34 — "recommendations are not intuitive".) */
+const FINDING_KIND_LABELS: Record<string, string> = {
+  CoverageGap: "Uncovered requirement",
+  MissingSection: "Missing section",
+  ShallowSection: "Needs more detail",
+  BannedPhrase: "Placeholder text",
+  DeprecatedAPI: "Outdated technology",
+  ADRIncomplete: "Incomplete decision record",
+}
+
+export function findingKindLabel(kind: string | null | undefined): string {
+  if (!kind) return "Suggestion"
+  return FINDING_KIND_LABELS[kind] ?? "Suggestion"
+}
+
+/** The non-blocking critic suggestions attached to a delivered draft. Present
+ *  only when the persisted gate is `advisory` (issue #34); the draft is fully
+ *  finalisable, these are improvement hints, never a block. */
+export function deriveAdvisoryFindings(
+  stage: Stage | null | undefined,
+): QualityGateFinding[] {
+  if (stage?.quality_gate?.status !== "advisory") return []
+  return stage.quality_gate.findings ?? []
+}
 
 /** Last-resort finalise-block copy when the backend recovery contract is absent
  *  (e.g. a stage persisted before issue #28 shipped). The backend's
  *  `recovery.message` is preferred wherever it exists. */
 export function gateFallbackMessage(kind: string | null | undefined): string {
+  // Every blocking kind is overridable since issue #34: the user can regenerate
+  // for a fresh version or finalise this one as-is.
   if (kind === "incomplete_output") {
-    return "Regenerate a complete version before finalising"
+    return "Regenerate for a complete version, or finalise this one as-is"
   }
   if (kind === "technology_safety") {
-    return "Regenerate with supported technology choices before finalising"
+    return "Regenerate for an up-to-date version, or finalise this one as-is"
   }
-  return "Regenerate or override the quality gate before finalising"
+  return "Regenerate, or override to finalise this version as-is"
 }
 
 /** Short header-badge label marking a blocked stage so it never reads as an

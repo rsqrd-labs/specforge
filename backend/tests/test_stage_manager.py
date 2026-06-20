@@ -848,7 +848,9 @@ async def test_generate_provider_limit_stop_failed_repair_blocks_and_refunds() -
     assert spec_stage.status == "draft"
     assert spec_stage.quality_gate_status == "blocked"
     assert spec_stage.quality_gate_kind == "incomplete_output"
-    assert spec_stage.quality_gate_payload["override_allowed"] is False
+    assert (
+        spec_stage.quality_gate_payload["override_allowed"] is True
+    )  # issue #34: overridable
     # The generation-time block refunds, so the recovery contract must record it.
     assert spec_stage.quality_gate_payload["refunded_prior_attempt"] is True
     assert spec_stage.quality_gate["recovery"]["refunded_prior_attempt"] is True
@@ -1045,7 +1047,9 @@ async def test_doomed_limit_stop_skips_repair_when_flag_on(
     mock_set_cache.assert_not_awaited()
     assert spec_stage.quality_gate_status == "blocked"
     assert spec_stage.quality_gate_kind == "incomplete_output"
-    assert spec_stage.quality_gate_payload["override_allowed"] is False
+    assert (
+        spec_stage.quality_gate_payload["override_allowed"] is True
+    )  # issue #34: overridable
     assert spec_stage.quality_gate_payload["refunded_prior_attempt"] is True
     # No funded repair was spent, and the payload says so honestly.
     assert spec_stage.quality_gate_payload["repair_attempted"] is False
@@ -1158,9 +1162,7 @@ async def test_generate_unsafe_plan_repairs_without_double_charging() -> None:
 
 
 @pytest.mark.asyncio
-async def test_generate_unsafe_plan_failed_repair_blocks_refunds_and_skips_cache() -> (
-    None
-):
+async def test_generate_unsafe_plan_failed_repair_blocks_no_refund() -> None:
     workspace_id = uuid4()
     spec_stage = _make_stage(
         workspace_id,
@@ -1209,14 +1211,15 @@ async def test_generate_unsafe_plan_failed_repair_blocks_refunds_and_skips_cache
     ):
         tokens = [token async for token in svc.generate(plan_stage.id, user, db)]
 
-    mock_refund.assert_awaited_once_with(db, deduction.id)
+    # Issue #34: a tech-safety block is overridable (artifact delivered), so the
+    # credit stands — no refund, unlike incomplete_output.
+    mock_refund.assert_not_awaited()
     mock_set_cache.assert_not_awaited()
     assert plan_stage.status == "draft"
     assert plan_stage.quality_gate_status == "blocked"
     assert plan_stage.quality_gate_kind == "technology_safety"
-    assert plan_stage.quality_gate_payload["override_allowed"] is False
-    # Generation-time tech-safety block refunds; record it for the contract.
-    assert plan_stage.quality_gate_payload["refunded_prior_attempt"] is True
+    assert plan_stage.quality_gate_payload["override_allowed"] is True
+    assert plan_stage.quality_gate_payload["refunded_prior_attempt"] is False
     assert plan_stage.quality_gate_payload["repair_attempted"] is True
     assert plan_stage.quality_gate_payload["reasons"][0]["code"] in {
         "runtime_eol",
@@ -1773,7 +1776,9 @@ async def test_finalise_rejects_blocked_quality_gate_version() -> None:
 
 
 @pytest.mark.asyncio
-async def test_finalise_rejects_legacy_overridden_incomplete_output() -> None:
+async def test_finalise_accepts_overridden_incomplete_output() -> None:
+    # Issue #34: incomplete_output is overridable now — an overridden draft
+    # finalises as-is (the previous contract rejected it).
     spec_stage = _make_stage(
         status="draft",
         content="incomplete content",
@@ -1784,7 +1789,7 @@ async def test_finalise_rejects_legacy_overridden_incomplete_output() -> None:
     spec_stage.quality_gate_payload = {
         "stage": "spec",
         "kind": "incomplete_output",
-        "override_allowed": False,
+        "override_allowed": True,
     }
     spec_stage.quality_gate_version = 3
     spec_stage.quality_gate_failed_at = datetime.now(UTC)
@@ -1793,8 +1798,9 @@ async def test_finalise_rejects_legacy_overridden_incomplete_output() -> None:
     db = _MultiQueryDB([spec_stage])
     user = _make_user()
 
-    with pytest.raises(ValueError, match="incomplete"):
-        await svc.finalise(spec_stage.id, user, db)
+    await svc.finalise(spec_stage.id, user, db)
+
+    assert spec_stage.status == "finalised"
 
 
 @pytest.mark.asyncio
@@ -1816,14 +1822,14 @@ async def test_finalise_rejects_manual_unsafe_technology_choices() -> None:
     exc = excinfo.value
     assert "unsafe technology choices" in str(exc)
     assert exc.kind == "technology_safety"
-    # technology_safety is non-overridable; finalise charges nothing, so the
-    # contract must not claim a refund.
-    assert exc.recovery["overridable"] is False
+    # Issue #34: technology_safety is overridable now; finalise charges nothing,
+    # so the contract still must not claim a refund.
+    assert exc.recovery["overridable"] is True
     assert exc.recovery["refunded_prior_attempt"] is False
     assert exc.message == exc.recovery["message"]
     assert plan_stage.quality_gate_status == "blocked"
     assert plan_stage.quality_gate_kind == "technology_safety"
-    assert plan_stage.quality_gate_payload["override_allowed"] is False
+    assert plan_stage.quality_gate_payload["override_allowed"] is True
     assert plan_stage.quality_gate_payload["refunded_prior_attempt"] is False
 
 
@@ -1855,14 +1861,15 @@ async def test_override_quality_gate_accepts_current_blocked_draft() -> None:
 
 
 @pytest.mark.asyncio
-async def test_override_quality_gate_rejects_incomplete_output() -> None:
+async def test_override_quality_gate_accepts_incomplete_output() -> None:
+    # Issue #34: incomplete_output is overridable now.
     spec_stage = _make_stage(status="draft", content="blocked content", version=3)
     spec_stage.quality_gate_status = "blocked"
     spec_stage.quality_gate_kind = "incomplete_output"
     spec_stage.quality_gate_payload = {
         "stage": "spec",
         "kind": "incomplete_output",
-        "override_allowed": False,
+        "override_allowed": True,
     }
     spec_stage.quality_gate_version = 3
     spec_stage.quality_gate_failed_at = datetime.now(UTC)
@@ -1871,12 +1878,14 @@ async def test_override_quality_gate_rejects_incomplete_output() -> None:
     db = _MultiQueryDB([spec_stage])
     user = _make_user()
 
-    with pytest.raises(ValueError, match="cannot be overridden"):
-        await svc.override_quality_gate(spec_stage.id, user, db)
+    updated = await svc.override_quality_gate(spec_stage.id, user, db)
+
+    assert updated.quality_gate_status == "overridden"
 
 
 @pytest.mark.asyncio
-async def test_override_quality_gate_rejects_technology_safety() -> None:
+async def test_override_quality_gate_accepts_technology_safety() -> None:
+    # Issue #34: technology_safety is overridable now.
     plan_stage = _make_stage(
         stage_type="plan", status="draft", content=_UNSAFE_PLAN, version=3
     )
@@ -1885,7 +1894,7 @@ async def test_override_quality_gate_rejects_technology_safety() -> None:
     plan_stage.quality_gate_payload = {
         "stage": "plan",
         "kind": "technology_safety",
-        "override_allowed": False,
+        "override_allowed": True,
     }
     plan_stage.quality_gate_version = 3
     plan_stage.quality_gate_failed_at = datetime.now(UTC)
@@ -1894,8 +1903,9 @@ async def test_override_quality_gate_rejects_technology_safety() -> None:
     db = _MultiQueryDB([plan_stage])
     user = _make_user()
 
-    with pytest.raises(ValueError, match="cannot be overridden"):
-        await svc.override_quality_gate(plan_stage.id, user, db)
+    updated = await svc.override_quality_gate(plan_stage.id, user, db)
+
+    assert updated.quality_gate_status == "overridden"
 
 
 @pytest.mark.asyncio
@@ -1928,7 +1938,7 @@ def _blocked_stage(kind: str, *, refunded: bool, version: int = 3) -> Stage:
 
 @pytest.mark.asyncio
 async def test_finalise_incomplete_output_returns_structured_recovery() -> None:
-    """incomplete_output block: non-overridable, refund honestly reported."""
+    """incomplete_output block: overridable (issue #34), refund honestly reported."""
     stage = _blocked_stage("incomplete_output", refunded=True)
     svc = StageManager(redis_client=_FakeRedis())
     db = _MultiQueryDB([stage])
@@ -1938,7 +1948,7 @@ async def test_finalise_incomplete_output_returns_structured_recovery() -> None:
 
     exc = excinfo.value
     assert exc.kind == "incomplete_output"
-    assert exc.recovery["overridable"] is False
+    assert exc.recovery["overridable"] is True
     assert exc.recovery["refunded_prior_attempt"] is True
     assert exc.recovery["action"] == "regenerate"
     assert "refunded" in exc.recovery["message"].lower()

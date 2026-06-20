@@ -89,7 +89,8 @@ import {
   actionAlertFromMessage,
   actionAlertFromStreamError,
 } from "../utils/errorPresentation"
-import { deriveFinaliseGateBlock } from "../utils/qualityGate"
+import { deriveAdvisoryFindings, deriveFinaliseGateBlock } from "../utils/qualityGate"
+import { AdvisoryFindingsPanel } from "../components/workspace/AdvisoryFindingsPanel"
 import { featureFlags } from "../config/featureFlags"
 
 const STAGE_ORDER: StageType[] = ["spec", "plan", "harness", "tasks"]
@@ -503,6 +504,8 @@ export default function Workspace() {
   const finaliseGateBlock = deriveFinaliseGateBlock(activeStage)
   const qualityGateBlocked = finaliseGateBlock.blocked
   const qualityGateBlockedMessage = finaliseGateBlock.message
+  // Non-blocking critic suggestions on a finalisable draft (issue #34).
+  const advisoryFindings = deriveAdvisoryFindings(activeStage)
 
   const stages = useMemo(() => {
     const workspaceStageIds = new Set(
@@ -2046,6 +2049,16 @@ export default function Workspace() {
             onShowDetails={
               activeStage?.quality_gate ? handleGateShowDetails : undefined
             }
+          />
+        ) : advisoryFindings.length ? (
+          // Delivered, finalisable draft with non-blocking critic suggestions
+          // (issue #34). Never blocks finalisation.
+          <AdvisoryFindingsPanel
+            findings={advisoryFindings}
+            stageType={activeStage.type}
+            onRegenerate={handleGateRegenerate}
+            actionsDisabled={workspaceGenerationLock.locked}
+            disabledReason={workspaceLockReason}
           />
         ) : null}
 

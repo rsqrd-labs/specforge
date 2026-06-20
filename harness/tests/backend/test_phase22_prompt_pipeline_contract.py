@@ -1068,14 +1068,18 @@ def test_t247_critic_enforces_one_regenerate_cap() -> None:
     ), "Critic loop must cap regenerates at exactly one per stage.  T-247."
 
 
-def test_t247_critic_persists_blocked_draft_on_second_failure() -> None:
-    """T-247 — second consecutive critic failure must persist a blocked draft."""
-    src = read_backend_file("services", "pipeline", "critic.py") + read_backend_file(
-        "services", "pipeline", "stage_manager.py"
-    )
-    assert "quality_gate_status" in src and "blocked" in src, (
-        "Critic loop must persist a blocked draft after the second consecutive "
-        "failure so the user can inspect, regenerate, or override.  T-247."
+def test_t247_critic_persists_advisory_draft_on_second_failure() -> None:
+    """T-247 (+issue #34) — after the one regenerate the critic is advisory.
+
+    The second consecutive critic failure no longer blocks; it delivers a
+    finalisable draft with the findings attached as non-blocking suggestions
+    (quality_gate_status="advisory") so the user can inspect, finalise, or
+    regenerate.
+    """
+    src = read_backend_file("services", "pipeline", "stage_manager.py")
+    assert "_mark_quality_gate_advisory" in src and '"advisory"' in src, (
+        "Critic loop must attach advisory findings (status='advisory') after the "
+        "second consecutive failure instead of blocking the draft.  Issue #34."
     )
 
 
@@ -1496,7 +1500,13 @@ def test_issue9_technology_safety_policy_and_validator_are_wired() -> None:
 
 
 def test_issue9_stage_manager_blocks_before_cache_and_finalise() -> None:
-    """Issue #9 — unsafe technology cannot be cached, finalised, or overridden."""
+    """Issue #9 — unsafe technology is gated before cache + revalidated at finalise.
+
+    Issue #34 update: a technology_safety block is now OVERRIDABLE (the user owns
+    the artifact and may finalise it as-is), so the previous "cannot be
+    overridden" guard is gone.  The gate still runs before cache writes and
+    finalise still revalidates an un-overridden draft.
+    """
     src = read_backend_file("services", "pipeline", "stage_manager.py")
     validation_pos = src.find("await self._ensure_technology_safe")
     cache_pos = src.rfind("set_cached_generation(redis, cache_key")
@@ -1507,9 +1517,6 @@ def test_issue9_stage_manager_blocks_before_cache_and_finalise() -> None:
     assert (
         validation_pos >= 0 and cache_pos >= 0 and validation_pos < cache_pos
     ), "Technology safety validation must run before cache writes. Issue #9."
-    assert (
-        "Unsafe technology choices cannot be overridden" in src
-    ), "The stage override endpoint must reject technology_safety gates. Issue #9."
     assert (
         "Current stage version has unsafe technology choices" in src
     ), "Finalise must revalidate and reject unsafe technology choices. Issue #9."
