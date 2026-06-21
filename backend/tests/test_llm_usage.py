@@ -27,6 +27,26 @@ def test_normalizes_openai_usage_with_cached_tokens() -> None:
     assert usage.usage_estimation_method == "provider_reported"
 
 
+def test_normalizes_openai_usage_responses_api() -> None:
+    # The Responses API (gpt-5.4-mini, the OpenAI core-gen primary) reports
+    # cached tokens under input_tokens_details, not prompt_tokens_details.
+    usage = normalize_provider_usage(
+        "openai",
+        {
+            "input_tokens": 1000,
+            "output_tokens": 250,
+            "input_tokens_details": {"cached_tokens": 600},
+            "output_tokens_details": {"reasoning_tokens": 40},
+        },
+    )
+
+    assert usage.input_tokens == 1000
+    assert usage.cached_input_tokens == 600
+    assert usage.output_tokens == 250
+    assert usage.reasoning_tokens == 40
+    assert usage.usage_estimation_method == "provider_reported"
+
+
 def test_normalizes_anthropic_usage_with_cache_tokens() -> None:
     usage = normalize_provider_usage(
         "anthropic",

@@ -134,7 +134,15 @@ def estimated_usage_from_text(
 
 
 def _normalize_openai_usage(usage: dict) -> NormalizedUsage:
-    details = _to_dict(usage.get("prompt_tokens_details"))
+    # Chat Completions nests cached tokens under ``prompt_tokens_details``; the
+    # Responses API (used by gpt-5.4-mini, the OpenAI core-gen primary) nests
+    # them under ``input_tokens_details``. Read either so automatic prefix-cache
+    # hits are captured for both APIs — without the fallback, Responses-API
+    # models report ``cached_input_tokens == 0`` even on perfect hits and the
+    # cost ledger prices cached input at the full uncached rate.
+    details = _to_dict(
+        usage.get("prompt_tokens_details") or usage.get("input_tokens_details")
+    )
     # Reasoning tokens live under completion_tokens_details (Chat Completions)
     # or output_tokens_details (Responses API); both are already counted inside
     # completion/output_tokens.
