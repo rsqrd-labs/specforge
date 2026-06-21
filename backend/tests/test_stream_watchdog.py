@@ -133,9 +133,9 @@ async def test_watchdog_enforces_hard_cap_on_runaway_stream() -> None:
 def test_runtime_fallback_route_escalates_cheap_primary_to_mid_tier(
     monkeypatch,
 ) -> None:
-    # Pin the cheap-primary path on (the product default is now mid-first): on it,
-    # core gen starts on the cheap primary (Haiku, small) and a runtime failure
-    # escalates to the provider's mid tier (Sonnet).
+    # Pin the cheap-primary policy on explicitly (independent of the product
+    # default): on it, core gen starts on the cheap primary (Haiku, small) and a
+    # runtime failure escalates to the provider's mid tier (Sonnet).
     from services.llm import tier_policy
 
     monkeypatch.setattr(tier_policy.settings, "core_cheap_primary", True)
@@ -159,7 +159,7 @@ def test_runtime_fallback_route_is_none_when_already_on_escalation_tier(
     monkeypatch,
 ) -> None:
     # Under the cheap-primary policy a mid-tier failure has nowhere left to
-    # escalate (mid IS the escalation tier).  Pin it on (default is now mid-first).
+    # escalate (mid IS the escalation tier).  Pin it on explicitly.
     from services.llm import tier_policy
 
     monkeypatch.setattr(tier_policy.settings, "core_cheap_primary", True)

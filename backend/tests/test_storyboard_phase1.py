@@ -138,7 +138,7 @@ def test_resolve_primary_route_picks_cheap_tier(monkeypatch):
     Verified against the real catalog/routing layer (no mocks): the cheap
     storyboard primary must actually resolve now that Haiku/Mini list
     ``storyboard.generate``, escalating to mid.  Pin the cheap-primary policy on
-    (the product default is now mid-first) to exercise that path.
+    explicitly to exercise that path independent of the product default.
     """
     from services.llm import tier_policy
 

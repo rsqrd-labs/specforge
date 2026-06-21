@@ -389,8 +389,8 @@ def test_harness_generation_uses_cheap_primary_with_mid_escalation(
 ) -> None:
     from services.pipeline import stage_manager as stage_manager_module
 
-    # Pin the cheap-primary path on (the product default is now mid-first); this
-    # test exercises the still-supported cheap-primary policy specifically.
+    # Pin the cheap-primary policy on so this test exercises that path
+    # explicitly, independent of the product default.
     monkeypatch.setattr(stage_manager_module.settings, "core_cheap_primary", True)
 
     workspace = _make_workspace()
