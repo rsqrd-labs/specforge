@@ -57,6 +57,35 @@ def _disable_llm_cost_ledger(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _reset_prompt_cache():
+    """Isolate the Langfuse prompt machinery between tests.
+
+    Two process-globals leak a remote prompt body from one test into the next,
+    making ``test_stage_system_prompt_has_stable_static_prefix`` pass alone but
+    fail when ordered after a Langfuse-using test:
+
+    1. ``prompts.base._PROMPT_CACHE`` — the app-level per-name TTL cache. A test
+       that fetches a remote body seeds it, and the entry outlives the test.
+    2. ``langfuse_service._INSTANCE`` — the process-wide client singleton. A
+       test that configures Langfuse (e.g. ``test_langfuse_service``) builds a
+       client whose own SDK TTL cache then serves bodies to later tests; it is
+       only reset on the *next* such test's setup, not on teardown.
+
+    Clearing the cache and dropping the singleton before and after each test
+    means every test rebuilds the client from its own settings and falls back
+    to the local prompt unless it explicitly stubs Langfuse.
+    """
+    from prompts import base as prompt_base
+    from services import langfuse_service
+
+    prompt_base._PROMPT_CACHE.clear()
+    langfuse_service.reset_langfuse_client()
+    yield
+    prompt_base._PROMPT_CACHE.clear()
+    langfuse_service.reset_langfuse_client()
+
+
+@pytest.fixture(autouse=True)
 def _reset_shared_redis():
     """Reset the module-level + singleton-cached Redis clients between tests.
 

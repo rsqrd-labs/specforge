@@ -20,14 +20,14 @@ ordered execution work; do not invent product scope, weaken tests, or hide archi
 
 Granular and traceable: split large concerns ("implement authentication" → user model + migration, password
 hashing, JWT issue/verify, login endpoint, …). Every task references the exact requirement IDs, plan sections,
-harness tests, files, and predecessor tasks it depends on. Tasks are topologically ordered: dependencies point
-only to earlier task IDs, and each task leaves the repository coherent and reviewable. Steps are concrete
-file-level actions ("Create `src/models/user.py` with a `User` SQLAlchemy model (columns id, email,
-password_hash, created_at)" — not "implement the user model"); each Acceptance Criterion is verifiable by a
-specific command (a named pytest, a curl with expected response, or a manual smoke step with exact expected UI).
-Target one focused session (~1–4h); split if larger. Preserve every upstream FR-NNN/NFR-NNN/SEC-NNN/AC-NNN,
-harness test path, and plan contract verbatim — never rename tests, shorten paths, or invent tests absent from
-the HARNESS. Every task includes all required fields; a missing field is a failed TASKS artifact.
+harness tests, files, and predecessor tasks. Tasks are topologically ordered: dependencies point only to earlier
+task IDs, and each task leaves the repository coherent and reviewable. Steps are concrete file-level actions
+("Create `src/models/user.py` with a `User` SQLAlchemy model (columns id, email, password_hash, created_at)" —
+not "implement the user model"); each Acceptance Criterion is verifiable by a specific command (named pytest,
+curl with expected response, or a manual smoke step with exact expected UI). Target one focused session (~1–4h);
+split if larger. Preserve every upstream FR-NNN/NFR-NNN/SEC-NNN/AC-NNN, harness test path, and plan contract
+verbatim — never rename tests, shorten paths, or invent tests absent from the HARNESS. Every task includes all
+required fields; a missing field is a failed TASKS artifact.
 
 Required TASKS.md structure — these sections before the task list:
 - ## Effort Summary — render at the very top, four lines, exact label format, derived after the full task list:
@@ -74,13 +74,13 @@ changes, tests that should move from failing to passing.
 **Steps**
 Numbered single-action steps, each referencing the exact file path, class, function, or SQL — e.g. "Create
 `src/models/user.py`"; "Add column `email_verified BOOLEAN NOT NULL DEFAULT FALSE` to the users table". Include
-any required code-generation, migration, formatting, or doc update as its own step.
+any code-generation, migration, formatting, or doc update as its own step.
 
 **Acceptance Criteria**
 Numbered verifiable outcomes — exact commands or named manual checks, e.g. "`pytest harness/tests/unit/
 test_user_model.py -v` passes"; "navigating to /login shows the login form". No "it works correctly". Include
-≥ 1 harness test command per task unless it is explicitly setup-only; setup-only tasks use a different concrete
-command (lint, migration, typecheck, or CI config validation).
+≥ 1 harness test command per task unless explicitly setup-only; setup-only tasks use another concrete command
+(lint, migration, typecheck, or CI config validation).
 
 **Rollback / Recovery**
 Concrete rollback/recovery for migrations, config, feature flags, external services, or operational changes.
@@ -91,31 +91,30 @@ Comma-separated earlier task IDs that must complete first. The first Phase-1 tas
 
 Task design rules:
 - Every spec requirement (FR, NFR, SEC) is addressed by ≥ 1 task. Every harness test must be referenced by at
-  least one task, and every task should reference ≥ 1 harness test unless it is a setup-only enabler. A test with
-  no task means a feature will never be built. Setup-only tasks MUST use the `_(none — <reason>)_` form in Harness
-  refs so validators can distinguish them from tasks missing a reference by mistake.
-- Tasks are strictly ordered: a task may only depend on earlier-numbered tasks. Security control tasks come
-  before the API tasks they protect; data model and migration tasks come before the services and APIs that depend
-  on those tables. Prefer vertical slices after foundations (model/service/API/test for one small behavior).
+  least one task, and every task should reference ≥ 1 harness test unless it is a setup-only enabler (a test with
+  no task means a feature is never built). Setup-only tasks MUST use the `_(none — <reason>)_` form in Harness
+  refs so validators can distinguish them from accidental omissions.
+- Tasks are strictly ordered: a task may only depend on earlier-numbered tasks. Security control tasks precede the
+  API tasks they protect; data model and migration tasks precede the services/APIs that depend on them. Prefer
+  vertical slices after foundations (model/service/API/test for one small behavior).
 - Include explicit tasks for migration creation, env var documentation, secret rotation, CI pipeline steps, load
-  test runs, rollout/rollback steps, data backfills, and any manual operational procedure the plan describes.
-  Tie observability/audit tasks to the behavior they monitor; avoid one broad "add observability" task.
+  test runs, rollout/rollback steps, data backfills, and any manual operational procedure the plan describes. Tie
+  observability/audit tasks to the behavior they monitor; avoid one broad "add observability" task.
 - Do not combine backend and frontend in one task unless a single harness E2E test requires both. Do not create
   tasks that weaken tests, bypass auth, expose secrets, disable validators, skip migrations, or remove security
   controls. Do not invent files, modules, endpoints, schemas, or technologies absent from the plan; if a missing
-  detail blocks task creation, create a task that resolves the plan gap and list the decision owner.
+  detail blocks a task, create a task that resolves the plan gap and name the decision owner.
 - Every dependency-introducing task MUST include three Acceptance Criteria beyond its harness criteria:
   a. SCA tool exit-0: `pip-audit` (Python) / `pnpm audit` (Node) / equivalent exits 0 with no critical or high CVEs.
-  b. Pinned version matches the version recorded in PLAN.md Technology Stack for the relevant Layer. If the task
-     introduces a layer the PLAN does not name, first update the PLAN (separate task) — never silently pin a version.
+  b. Pinned version matches PLAN.md Technology Stack for the relevant Layer. If the task introduces a layer the
+     PLAN does not name, first update the PLAN (separate task) — never silently pin a version.
   c. The chosen package is NOT on the Support status `Deprecated` or `EOL` line in PLAN.md Technology Stack.
-- For Frontend/Full-stack tasks, the Steps MUST implement the loading state, error state, and empty state (not just
-  the happy path) and the focus/keyboard interaction (where focus lands on mount, what keys do what — Tab order,
-  Escape, arrow keys for lists — and where focus returns on close/dismiss). The Acceptance Criteria MUST include at
-  least one accessibility assertion (an axe-core scan with zero-violations expectation, or an RTL role-based query
-  that fails when the semantic role is missing). For Frontend/Full-stack tasks that add a runtime dependency, the
-  Acceptance Criteria MUST include the bundle-size delta in KB gzipped (target ceiling +15 KB/task; if exceeded,
-  reference the PLAN.md Frontend Architecture bundle-budget entry that justifies it).
+- Frontend/Full-stack tasks: Steps MUST implement loading, error, and empty states (not just the happy path) and
+  the focus/keyboard interaction (where focus lands on mount; Tab order, Escape, arrow keys for lists; where focus
+  returns on close/dismiss). Acceptance Criteria MUST include ≥ 1 accessibility assertion (axe-core zero-violations
+  or an RTL role-based query that fails when the semantic role is missing). If the task adds a runtime dependency,
+  Acceptance Criteria MUST include the bundle-size delta in KB gzipped (ceiling +15 KB/task; if exceeded, reference
+  the PLAN.md Frontend Architecture bundle-budget entry that justifies it).
 """  # nosec B608
 
 
@@ -137,20 +136,20 @@ Instructions:
 0. First build your full coverage map internally: every FR/NFR/SEC/AC ID → which task addresses it; every harness
    test path → which task makes it pass; every plan contract (endpoint, schema, module boundary, architecture
    decision, migration) → which task implements it. For each plan section or contract, confirm ≥ 1 task addresses
-   it — no plan artifact may be orphaned. Verify nothing is orphaned before writing T-001. Do not include this map
-   in output; it becomes the Traceability Overview, using the exact spec IDs and exact harness test paths.
-1. Use the exact harness test paths as Harness refs (`path/to/test_file.py::ClassName::test_method_name`) — do not
+   it — no plan artifact is orphaned. Verify before writing T-001. Do not include this map in output; it becomes
+   the Traceability Overview, using exact spec IDs and exact harness test paths.
+1. Use exact harness test paths as Harness refs (`path/to/test_file.py::ClassName::test_method_name`) — do not
    paraphrase, abbreviate, or invent paths; TASKS fails if references do not match the harness exactly.
-2. Break every large concern into small tasks; if a task would take more than half a day, split it. Aim for 20–50
-   tasks for a non-trivial product.
+2. Break large concerns into small tasks; if a task exceeds half a day, split it. Aim for 20–50 tasks for a
+   non-trivial product.
 3. Write Steps as concrete file-level actions (exact paths, function names, SQL — "create `services/auth_service.py`
    with `hash_password(plain: str) -> str` using bcrypt cost factor 12") and Acceptance Criteria as exact commands
    or test names, verifiable without reading the code.
 4. Sequence so each task is executable and reviewable independently: infrastructure before logic, logic before API,
    API before frontend, everything before observability cleanup. Keep tasks aligned to the plan's architecture and
-   the harness file/test names — do not invent architecture or remove tests to make the list easier.
+   the harness file/test names — do not invent architecture or remove tests to ease the list.
 5. Include rollback/recovery notes for tasks touching persistence, configuration, deployment, secrets, external
-   integrations, or operations. Mark setup-only tasks clearly and give them concrete non-harness verification commands.
+   integrations, or operations. Mark setup-only tasks clearly with concrete non-harness verification commands.
 
 Example — a well-formed task (different product; do not copy into your output):
 
@@ -215,7 +214,7 @@ Before returning, verify (internal — do not include a checklist in your output
 - Every harness test path appears in ≥ 1 task's Harness refs, using the exact path from the harness artifact.
 - The Effort Summary counts match the emitted task blocks exactly (N total, MUST/SHOULD/COULD, size/estimate buckets).
 - Every task has ≥ 1 Acceptance Criterion with an exact runnable command (pytest, curl, or named smoke step).
-- No task's Dependencies lists a higher T-NNN — the dependency graph is acyclic; security control and data/migration tasks precede what depends on them.
+- No task's Dependencies lists a higher T-NNN — the graph is acyclic; security control and data/migration tasks precede what depends on them.
 - Every dependency-adding task carries the three Acceptance Criteria (SCA exit-0 with no critical/high CVEs, version-pin matching PLAN.md Technology Stack, non-Deprecated/non-EOL Support status).
 - Every Frontend/Full-stack task has Steps for loading + error + empty states and ≥ 1 accessibility assertion in Acceptance Criteria.
 
