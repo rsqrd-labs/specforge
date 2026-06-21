@@ -6,6 +6,10 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from schemas.stage import StageResponse
 from services.llm.provider_config import VALID_MODELS
+from services.security.problem_statement_gate import (
+    PROBLEM_STATEMENT_MAX_CHARS,
+    PROBLEM_STATEMENT_MIN_CHARS,
+)
 
 Provider = Literal["anthropic", "openai", "google"]
 WorkspaceStatus = Literal["active", "archived"]
@@ -13,7 +17,10 @@ WorkspaceStatus = Literal["active", "archived"]
 
 class WorkspaceCreate(BaseModel):
     name: str = Field(min_length=1, max_length=200)
-    problem_statement: str = Field(min_length=50, max_length=10_000)
+    problem_statement: str = Field(
+        min_length=PROBLEM_STATEMENT_MIN_CHARS,
+        max_length=PROBLEM_STATEMENT_MAX_CHARS,
+    )
     provider: Provider
     # Deprecated public input. Concrete model routing is server-owned; this
     # optional field remains only to reject invalid legacy clients cleanly.
@@ -46,8 +53,8 @@ class WorkspaceUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=200)
     problem_statement: str | None = Field(
         default=None,
-        min_length=50,
-        max_length=10_000,
+        min_length=PROBLEM_STATEMENT_MIN_CHARS,
+        max_length=PROBLEM_STATEMENT_MAX_CHARS,
     )
 
     model_config = ConfigDict(from_attributes=True)

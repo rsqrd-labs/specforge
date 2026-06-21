@@ -320,6 +320,76 @@ async def output_token_percentiles(
     ]
 
 
+async def input_token_percentiles(
+    db: Any,
+    *,
+    since: Any | None = None,
+    operations: list[str] | None = None,
+) -> list[dict[str, Any]]:
+    """Input-token (assembled-prompt) distribution per (operation, provider) —
+    the Phase-A evidence source for the problem-statement compression plan
+    (docs/PROBLEM_STATEMENT_COMPRESSION_PLAN.md §8).
+
+    ``input_tokens`` on a generation row is the *whole* assembled prompt the
+    model actually saw (system + user, incl. problem statement, research, and
+    upstream artifacts), so this is the distribution the window-fit reliability
+    ceiling (§5) is measured against. It is **not** the problem-statement size on
+    its own — that is not a ledger column; the analysis script reads it directly
+    from the ``workspaces`` table.
+
+    Returns one row per (operation, provider) with the sample count and the
+    p50/p90/p95/max of ``input_tokens``. Only rows with a non-null
+    ``input_tokens`` and a non-null ``operation`` contribute, so estimate-only or
+    unattributed calls do not pollute the distribution. Read-only; the caller
+    supplies the session.
+    """
+    from sqlalchemy import func, select  # noqa: PLC0415
+
+    from models import LLMCostEvent  # noqa: PLC0415
+
+    def _pct(level: float, column: Any) -> Any:
+        return func.percentile_cont(level).within_group(column.asc())
+
+    input_col = LLMCostEvent.input_tokens
+    stmt = (
+        select(
+            LLMCostEvent.operation.label("operation"),
+            LLMCostEvent.provider.label("provider"),
+            func.count().label("samples"),
+            _pct(0.50, input_col).label("p50_input_tokens"),
+            _pct(0.90, input_col).label("p90_input_tokens"),
+            _pct(0.95, input_col).label("p95_input_tokens"),
+            func.max(input_col).label("max_input_tokens"),
+        )
+        .where(input_col.isnot(None))
+        .where(LLMCostEvent.operation.isnot(None))
+        .group_by(LLMCostEvent.operation, LLMCostEvent.provider)
+        .order_by(LLMCostEvent.operation, LLMCostEvent.provider)
+    )
+    if since is not None:
+        stmt = stmt.where(LLMCostEvent.created_at >= since)
+    if operations:
+        stmt = stmt.where(LLMCostEvent.operation.in_(operations))
+
+    result = await db.execute(stmt)
+
+    def _int(value: Any) -> int | None:
+        return int(value) if value is not None else None
+
+    return [
+        {
+            "operation": row.operation,
+            "provider": row.provider,
+            "samples": int(row.samples),
+            "p50_input_tokens": _int(row.p50_input_tokens),
+            "p90_input_tokens": _int(row.p90_input_tokens),
+            "p95_input_tokens": _int(row.p95_input_tokens),
+            "max_input_tokens": _int(row.max_input_tokens),
+        }
+        for row in result
+    ]
+
+
 async def generation_latency_percentiles(
     db: Any,
     *,

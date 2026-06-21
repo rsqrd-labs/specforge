@@ -286,6 +286,33 @@ the `llm_cost_events` ledger (same evidence-gated method as
 `scripts/analyze_output_budgets.py`). *Exit: large inputs are accepted; data shows what
 fraction of real inputs exceed `THRESHOLD` — i.e. how often compression will even run.*
 
+> **Phase A — shipped (2026-06-22).** `INPUT_HARD_CAP = 50_000` chars
+> (`PROBLEM_STATEMENT_MAX_CHARS` in `services/security/problem_statement_gate.py`, the
+> single semantic authority; mirrored by the Pydantic create/update schemas and DB CHECK
+> via migration `0026`). Templates deliberately stay tight at 10K (`schemas/template.py`).
+> The gate now rejects only above the ceiling (`problem_statement_too_long`), on raw
+> length, before the content checks. **Instruments are Histograms, not gauges** — a gauge
+> holds only the last value and cannot express a distribution; precedent is
+> `BRAVE_CONTEXT_CHARS`. Two were added (`services/observability.py`):
+> `specforge_problem_statement_tokens{provider}` (emitted in the spec branch *before* the
+> generation-cache check, so cache hits count) and
+> `specforge_assembled_prompt_tokens{provider,stage_type}` (emitted on cache-miss after
+> `build_prompt`); both reuse `estimate_tokens` (no new tokenizer). The analysis script is
+> `scripts/analyze_problem_statement_sizes.py`: problem-statement sizes come from
+> `workspaces` (the ledger lacks the statement-only size; `octet_length` matches
+> `estimate_tokens`' utf-8 basis), assembled-prompt sizes from the ledger
+> (`input_token_percentiles`); `--threshold-tokens` is a CLI knob (default 8000) since
+> `C_MAX` is still §10-open. Day-one reading will be ~0% over threshold — correct, not
+> broken: every stored statement is ≤10K chars today.
+>
+> **Blast-radius audit (§2) — audited, deliberately *not fixed* in Phase A.** The
+> PDF/public-share export, full-statement frontend rendering, `_scrub` in
+> `storyboard_source.py`, and the logging/Sentry paths now all *may* see up to 50K chars.
+> None hard-fails at 50K (≪ the 1MB request-body limit), and the right fix is to feed them
+> the *compressed* value, which does not exist until Phase B/C. They are left as-is; the
+> frontend `maxLength={10000}` is also left for the Phase-D UI work. Tracked here so the
+> deferral is explicit, not an oversight.
+
 **Phase B — Rungs 0/1/3 + the deterministic floor (delivers never-fail + bounded-cost).**
 Pure-Python, zero LLM cost, lazy in `build_prompt` behind a default-off flag
 (`problem_statement_compression`). Unit-tested + an offline golden corpus alongside

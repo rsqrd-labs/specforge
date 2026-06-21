@@ -6,6 +6,27 @@ from dataclasses import dataclass, field
 
 from services.security.prompt_guard import scan
 
+# Problem-statement size bounds — the single semantic authority for the floor
+# and ceiling (docs/PROBLEM_STATEMENT_COMPRESSION_PLAN.md §2). The Pydantic
+# request schemas (`schemas/workspace.py`) and the DB CHECK constraint
+# (`models/workspace.py` + migration 0026) mirror these exact *raw-length*
+# numbers, so the bound is consistent across all three layers. (One pre-existing
+# edge this does not erase: the gate validates the raw input, while
+# `workspace_service.create` stores the `sanitize_text` result, and bleach
+# entity-escaping can expand length — `<` -> `&lt;` — so an input sitting on the
+# ceiling with many such chars could still trip the DB CHECK. That predates this
+# change; it is not introduced by raising the cap.)
+#
+# PROBLEM_STATEMENT_MAX_CHARS is the outer DoS/storage ceiling — the largest
+# blob we will *store* at all (a long pasted PRD / requirements doc). It is
+# deliberately far above the per-call model budget (`C_MAX`, a later phase):
+# everything between that budget and this ceiling is handled by compression,
+# not rejection. A "too large" rejection happens *only* above this ceiling, far
+# above any realistic paste. These are character counts (matching the DB
+# `char_length` constraint and Pydantic `max_length`), not token counts.
+PROBLEM_STATEMENT_MIN_CHARS = 50
+PROBLEM_STATEMENT_MAX_CHARS = 50_000
+
 _PRODUCT_INTENT_RE = re.compile(
     r"\b("
     r"app|application|platform|product|software|system|service|tool|website|"
@@ -76,14 +97,35 @@ def _normalize(text: str) -> str:
 
 
 def validate_problem_statement(text: str) -> ProblemStatementValidation:
+    # Ceiling check on the *raw* length first, so it matches the DB
+    # `char_length` constraint and the Pydantic `max_length` exactly (whitespace
+    # normalisation only ever shrinks the value, so checking the raw length is
+    # the conservative, storage-faithful bound). This is the single rejection
+    # point for a genuinely oversized blob; everything below it is accepted and,
+    # in a later phase, compressed rather than refused.
+    if len(text) > PROBLEM_STATEMENT_MAX_CHARS:
+        return ProblemStatementValidation(
+            is_valid=False,
+            code="problem_statement_too_long",
+            message=(
+                "Keep the problem statement under "
+                f"{PROBLEM_STATEMENT_MAX_CHARS:,} characters."
+            ),
+            hints=[
+                "Paste only the requirements and context the product needs.",
+                "Trim background, transcripts, or unrelated appendices.",
+            ],
+        )
+
     value = _normalize(text)
 
-    if len(value) < 50:
+    if len(value) < PROBLEM_STATEMENT_MIN_CHARS:
         return ProblemStatementValidation(
             is_valid=False,
             code="problem_statement_too_short",
             message=(
-                "Describe the product or software problem in at least " "50 characters."
+                "Describe the product or software problem in at least "
+                f"{PROBLEM_STATEMENT_MIN_CHARS} characters."
             ),
             hints=[
                 "Name the product or tool you want to build.",

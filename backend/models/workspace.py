@@ -9,6 +9,10 @@ from sqlalchemy.dialects.postgresql import JSONB, TIMESTAMP, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from models import Base
+from services.security.problem_statement_gate import (
+    PROBLEM_STATEMENT_MAX_CHARS,
+    PROBLEM_STATEMENT_MIN_CHARS,
+)
 
 if TYPE_CHECKING:
     from models.stage import Stage
@@ -23,8 +27,11 @@ class Workspace(Base):
             name="ck_workspaces_status",
         ),
         CheckConstraint("char_length(name) <= 200", name="ck_workspaces_name_len"),
+        # Floor + ceiling mirror problem_statement_gate (the semantic authority);
+        # migration 0026 carries the same literals as the live DB constraint.
         CheckConstraint(
-            "char_length(problem_statement) BETWEEN 50 AND 10000",
+            "char_length(problem_statement) BETWEEN "
+            f"{PROBLEM_STATEMENT_MIN_CHARS} AND {PROBLEM_STATEMENT_MAX_CHARS}",
             name="ck_workspaces_problem_statement_len",
         ),
     )

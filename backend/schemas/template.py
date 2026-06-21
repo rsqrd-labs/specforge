@@ -30,6 +30,10 @@ class TemplateRead(BaseModel):
     name: str = Field(min_length=1, max_length=200)
     description: str = Field(min_length=1, max_length=400)
     category: TemplateCategory
+    # Starter templates intentionally stay at the original 10K ceiling, NOT the
+    # raised workspace cap (PROBLEM_STATEMENT_MAX_CHARS). Templates are authored,
+    # curated seed content — not user pastes — so they have no need for the large
+    # input that the compression plan (§2/§10) raises the *workspace* cap for.
     problem_statement: str = Field(min_length=50, max_length=10_000)
     suggested_provider: TemplateProvider | None = None
     suggested_model: str | None = None

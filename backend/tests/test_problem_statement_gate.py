@@ -1,4 +1,13 @@
-from services.security.problem_statement_gate import validate_problem_statement
+from services.security.problem_statement_gate import (
+    PROBLEM_STATEMENT_MAX_CHARS,
+    PROBLEM_STATEMENT_MIN_CHARS,
+    validate_problem_statement,
+)
+
+_VALID_BASE = (
+    "I want to build a project management web app for teams to create projects, "
+    "assign tasks, track status, and notify users. "
+)
 
 
 def test_accepts_rough_product_problem_statement() -> None:
@@ -59,3 +68,42 @@ def test_rejects_nonsensical_physical_action_prompt() -> None:
 
     assert result.is_valid is False
     assert result.code == "problem_statement_not_product_relevant"
+
+
+def test_accepts_large_valid_statement_up_to_the_raised_cap() -> None:
+    # A long-but-legal pasted PRD: well above the old 10K ceiling, at the new cap.
+    reps = PROBLEM_STATEMENT_MAX_CHARS // len(_VALID_BASE)
+    statement = (_VALID_BASE * reps).strip()
+
+    assert len(statement) > 10_000
+    assert len(statement) <= PROBLEM_STATEMENT_MAX_CHARS
+    result = validate_problem_statement(statement)
+
+    assert result.is_valid is True
+
+
+def test_rejects_statement_above_the_storage_ceiling() -> None:
+    statement = _VALID_BASE * (PROBLEM_STATEMENT_MAX_CHARS // len(_VALID_BASE) + 5)
+
+    assert len(statement) > PROBLEM_STATEMENT_MAX_CHARS
+    result = validate_problem_statement(statement)
+
+    assert result.is_valid is False
+    assert result.code == "problem_statement_too_long"
+
+
+def test_ceiling_check_precedes_content_checks() -> None:
+    # An oversized blob is rejected as too_long even if its content would
+    # otherwise fail a different (e.g. non-product) check — the ceiling is the
+    # first, cheapest guard.
+    result = validate_problem_statement("a" * (PROBLEM_STATEMENT_MAX_CHARS + 1))
+
+    assert result.is_valid is False
+    assert result.code == "problem_statement_too_long"
+
+
+def test_floor_still_enforced_with_constant() -> None:
+    result = validate_problem_statement("a" * (PROBLEM_STATEMENT_MIN_CHARS - 1))
+
+    assert result.is_valid is False
+    assert result.code == "problem_statement_too_short"

@@ -406,3 +406,44 @@ async def test_archive_workspace_route_wrong_owner_returns_404(app) -> None:
 
     assert response.status_code == 404
     assert response.json()["detail"] == "Workspace not found"
+
+
+# ---------------------------------------------------------------------------
+# Problem-statement cap (compression plan Phase A §2). The request schemas must
+# mirror the gate's bounds exactly, so a value the gate accepts is storable.
+# ---------------------------------------------------------------------------
+
+
+def test_create_schema_bounds_match_the_gate_constants() -> None:
+    from pydantic import ValidationError
+
+    from schemas.workspace import WorkspaceUpdate
+    from services.security.problem_statement_gate import (
+        PROBLEM_STATEMENT_MAX_CHARS,
+        PROBLEM_STATEMENT_MIN_CHARS,
+    )
+
+    base = "I want to build a project tracker for teams to manage tasks. "
+    at_cap = (base * (PROBLEM_STATEMENT_MAX_CHARS // len(base))).strip()
+    assert len(at_cap) <= PROBLEM_STATEMENT_MAX_CHARS
+    assert len(at_cap) > 10_000  # above the old ceiling
+
+    # Accepted at the raised cap on both create and update.
+    WorkspaceCreate(
+        name="Big", problem_statement=at_cap, provider="anthropic", model=None
+    )
+    WorkspaceUpdate(problem_statement=at_cap)
+
+    too_long = "a" * (PROBLEM_STATEMENT_MAX_CHARS + 1)
+    with pytest.raises(ValidationError):
+        WorkspaceCreate(
+            name="Big", problem_statement=too_long, provider="anthropic", model=None
+        )
+    with pytest.raises(ValidationError):
+        WorkspaceUpdate(problem_statement=too_long)
+
+    too_short = "a" * (PROBLEM_STATEMENT_MIN_CHARS - 1)
+    with pytest.raises(ValidationError):
+        WorkspaceCreate(
+            name="Small", problem_statement=too_short, provider="anthropic", model=None
+        )

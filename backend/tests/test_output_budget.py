@@ -224,3 +224,64 @@ async def test_output_token_percentiles_empty_ledger() -> None:
             return []
 
     assert await output_token_percentiles(_DB()) == []
+
+
+# --------------------------------------------------------------------------- #
+# input_token_percentiles — assembled-prompt distribution (compression Phase A)
+# --------------------------------------------------------------------------- #
+@pytest.mark.asyncio
+async def test_input_token_percentiles_shape() -> None:
+    from services.llm.cost_ledger import input_token_percentiles
+
+    class _Row:
+        operation = "spec.generate"
+        provider = "anthropic"
+        samples = 300
+        p50_input_tokens = 6000.0
+        p90_input_tokens = 9000.0
+        p95_input_tokens = 10000.0
+        max_input_tokens = 42000
+
+    class _DB:
+        async def execute(self, stmt):
+            return [_Row()]
+
+    rows = await input_token_percentiles(_DB())
+    assert rows == [
+        {
+            "operation": "spec.generate",
+            "provider": "anthropic",
+            "samples": 300,
+            "p50_input_tokens": 6000,
+            "p90_input_tokens": 9000,
+            "p95_input_tokens": 10000,
+            "max_input_tokens": 42000,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_input_token_percentiles_handles_nulls_and_empty() -> None:
+    from services.llm.cost_ledger import input_token_percentiles
+
+    class _Row:
+        operation = "plan.generate"
+        provider = "google"
+        samples = 0
+        p50_input_tokens = None
+        p90_input_tokens = None
+        p95_input_tokens = None
+        max_input_tokens = None
+
+    class _DBWithNulls:
+        async def execute(self, stmt):
+            return [_Row()]
+
+    class _EmptyDB:
+        async def execute(self, stmt):
+            return []
+
+    rows = await input_token_percentiles(_DBWithNulls())
+    assert rows[0]["p95_input_tokens"] is None
+    assert rows[0]["samples"] == 0
+    assert await input_token_percentiles(_EmptyDB()) == []

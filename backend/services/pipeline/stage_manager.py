@@ -63,6 +63,7 @@ from services.llm.tier_policy import (
     DEFAULT_TIER_POLICY,
     generation_tier_policy,
 )
+from services.llm.usage import estimate_tokens
 from services.observability import (
     BILLING_CREDITS_CRITIC_REGEN,
     PIPELINE_COMPLETION_REPAIRS,
@@ -79,7 +80,9 @@ from services.observability import (
     PIPELINE_TECH_SAFETY_REPAIRS,
     PIPELINE_VALIDATOR_FAILURES,
     SSE_STREAM_FAILURES,
+    record_assembled_prompt_tokens,
     record_judge_call_skipped,
+    record_problem_statement_tokens,
 )
 from services.pipeline.artifact_validator import (
     CompletenessIssue,
@@ -1721,6 +1724,20 @@ class StageManager:
                 assert_valid_problem_statement(workspace.problem_statement)
             except ProblemStatementValidationError as exc:
                 raise SecurityError(exc.result.message or str(exc)) from exc
+            # Phase A instrumentation (compression plan §8): observe the token
+            # size of the problem statement entering generation. Emitted here —
+            # in the spec branch, before the generation-cache check — so cache
+            # hits are counted too: this is the honest "how often a large input
+            # enters generation" frequency, and the spec is the single entry
+            # point where the raw statement is the primary input.
+            record_problem_statement_tokens(
+                workspace.provider,
+                estimate_tokens(
+                    workspace.provider,
+                    workspace.model,
+                    workspace.problem_statement,
+                ),
+            )
 
         scan_result = scan(workspace.problem_statement)
         if not scan_result.is_safe:
@@ -1842,6 +1859,20 @@ class StageManager:
         )
         system_prompt, user_prompt = await build_prompt(
             stage.type, workspace, db, redis, research_context=research.block
+        )
+        # Phase A instrumentation (compression plan §8): observe the size of the
+        # fully assembled prompt actually sent to the model. Reached only on a
+        # generation-cache miss (a hit returns above without assembling a
+        # prompt), which is correct — this is the figure the window-fit
+        # reliability ceiling (§5) is measured against.
+        record_assembled_prompt_tokens(
+            route.provider,
+            stage.type,
+            estimate_tokens(
+                route.provider,
+                route.model,
+                f"{system_prompt}\n{user_prompt}",
+            ),
         )
 
         deduction = (

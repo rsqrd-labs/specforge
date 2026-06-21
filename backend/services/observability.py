@@ -212,6 +212,89 @@ BRAVE_CONTEXT_CHARS = Histogram(
     buckets=(0, 500, 1000, 2000, 4000, 6000, 8000, 12000, float("inf")),
 )
 
+# ---------------------------------------------------------------------------
+# Problem-statement compression — Phase A instrumentation
+# (docs/PROBLEM_STATEMENT_COMPRESSION_PLAN.md §8).
+# ---------------------------------------------------------------------------
+#
+# Two distributions, captured at generation time, that tell us *whether and how
+# often* compression would ever fire once the input cap is raised. A histogram
+# (not a gauge) is the right instrument: we need the live distribution across
+# generations, not the last value. ``estimate_tokens`` (utf-8-byte basis) is
+# reused for both — no new tokenizer. Buckets bracket the future compression
+# THRESHOLD (~8K tokens) and the raised 50K-char storage cap (~12.5K tokens).
+#
+# Labels are bounded enums (provider / stage_type) normalised through the helpers
+# below so a stray value can never explode Prometheus cardinality.
+PROBLEM_STATEMENT_TOKENS = Histogram(
+    "specforge_problem_statement_tokens",
+    "Estimated token size of a workspace problem statement entering generation "
+    "(emitted once per spec generation, including generation-cache hits).",
+    labelnames=["provider"],
+    buckets=(250, 500, 1000, 2000, 4000, 8000, 12000, 16000, 24000, float("inf")),
+)
+
+ASSEMBLED_PROMPT_TOKENS = Histogram(
+    "specforge_assembled_prompt_tokens",
+    "Estimated token size of the fully assembled stage prompt (system + user, "
+    "incl. problem statement, research, and upstream artifacts) actually sent to "
+    "the model. Emitted once per cache-miss generation.",
+    labelnames=["provider", "stage_type"],
+    buckets=(
+        1000,
+        2000,
+        4000,
+        8000,
+        16000,
+        32000,
+        64000,
+        128000,
+        float("inf"),
+    ),
+)
+
+_PROVIDER_LABELS = frozenset({"anthropic", "openai", "google"})
+_STAGE_TYPE_LABELS = frozenset({"spec", "plan", "harness", "tasks"})
+
+
+def _provider_label(provider: str) -> str:
+    value = str(provider or "unknown")
+    return value if value in _PROVIDER_LABELS else "unknown"
+
+
+def _stage_type_label(stage_type: str) -> str:
+    value = str(stage_type or "unknown")
+    return value if value in _STAGE_TYPE_LABELS else "unknown"
+
+
+def record_problem_statement_tokens(provider: str, tokens: int | None) -> None:
+    """Observe the token size of a problem statement entering generation.
+
+    No-op for ``None``/negative (an unestimable input is not a data point). The
+    common under-cap input lands in the low buckets; the new large pastes are
+    what light up the high ones — that ratio is the Phase-A exit signal.
+    """
+    if tokens is not None and tokens >= 0:
+        PROBLEM_STATEMENT_TOKENS.labels(provider=_provider_label(provider)).observe(
+            tokens
+        )
+
+
+def record_assembled_prompt_tokens(
+    provider: str, stage_type: str, tokens: int | None
+) -> None:
+    """Observe the token size of a fully assembled stage prompt sent to a model.
+
+    No-op for ``None``/negative. This is the *whole* prompt (system + user), so
+    it is the figure the window-fit reliability ceiling (§5) is computed against.
+    """
+    if tokens is not None and tokens >= 0:
+        ASSEMBLED_PROMPT_TOKENS.labels(
+            provider=_provider_label(provider),
+            stage_type=_stage_type_label(stage_type),
+        ).observe(tokens)
+
+
 # PDF export duration histogram — WeasyPrint is CPU-bound and blocks the
 # thread-pool executor thread for 0.5–3 s per render. Observing duration
 # makes event-loop-blocking outliers (C-4) visible.
