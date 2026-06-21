@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react"
+import { createPortal } from "react-dom"
 import { featureFlags } from "../../config/featureFlags"
 import type { GenerationProgress } from "../../services/sseService"
 import type { QualityGateInfo, StageType } from "../../types/stage"
@@ -117,6 +118,18 @@ export function StreamingOverlay({
     renderedActivity?.provider,
   )
 
+  // The findings popup is a non-blocking floating card — Esc dismisses it like
+  // any lightweight overlay, but we deliberately do NOT focus-trap, so the user
+  // keeps reading and scrolling the generated document behind it.
+  useEffect(() => {
+    if (!gate || !onDismiss || actionsDisabled) return undefined
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onDismiss()
+    }
+    window.addEventListener("keydown", onKey)
+    return () => window.removeEventListener("keydown", onKey)
+  }, [gate, onDismiss, actionsDisabled])
+
   if (gate) {
     const missing = gate.missing ?? []
     const findings = gate.findings ?? []
@@ -140,13 +153,28 @@ export function StreamingOverlay({
     // re-check reports `false`. Single source of truth, no per-kind guessing.
     const showRefundNote = Boolean(gate.recovery?.refunded_prior_attempt)
     const disabledReasonId = disabledReason ? "quality-gate-disabled-reason" : undefined
-    return (
+    // Floating, body-portaled popup (not an inline block): fixed to the viewport
+    // so it never reflows the workspace column or hides the generated document
+    // behind it. The user can dismiss (✕ / Esc), regenerate, or override in place.
+    return createPortal(
       <div
-        className="quality-gate-inline"
+        className="quality-gate-popup"
         role="alertdialog"
         aria-label="Quality gate findings"
       >
         <div className="quality-gate-panel">
+          {onDismiss ? (
+            <button
+              type="button"
+              className="quality-gate-close"
+              onClick={onDismiss}
+              disabled={actionsDisabled}
+              title={actionsDisabled ? disabledReason : undefined}
+              aria-label="Dismiss findings"
+            >
+              ✕
+            </button>
+          ) : null}
           <h3 className="quality-gate-title">Quality gate held this generation back</h3>
           <p className="quality-gate-subtitle">
             {isIncomplete
@@ -258,7 +286,8 @@ export function StreamingOverlay({
             ) : null}
           </div>
         </div>
-      </div>
+      </div>,
+      document.body,
     )
   }
 

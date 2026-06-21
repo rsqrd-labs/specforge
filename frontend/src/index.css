@@ -9912,6 +9912,92 @@ button:disabled {
   margin: 0 0 16px;
 }
 
+/* Blocking quality-gate findings render as a floating, dismissible popup rather
+   than an inline block. It is portaled to <body> and fixed to the viewport, so
+   it never reflows the workspace column or squeezes the generated document out
+   of view — the user keeps reading behind it and can dismiss (✕ / Esc) or act
+   in place. Anchored bottom-right; on narrow viewports it spans the bottom. */
+.quality-gate-popup {
+  pointer-events: auto;
+  position: fixed;
+  right: 24px;
+  bottom: 24px;
+  z-index: 70;
+  display: flex;
+  flex-direction: column;
+  width: min(420px, calc(100vw - 48px));
+  max-height: min(70vh, 640px);
+  animation: quality-gate-popup-in 0.22s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.quality-gate-popup .quality-gate-panel {
+  position: relative;
+  width: 100%;
+  max-height: none;
+  flex: 1 1 auto;
+  overflow: auto;
+}
+
+.quality-gate-popup .quality-gate-title {
+  padding-right: 30px;
+}
+
+.quality-gate-close {
+  position: absolute;
+  top: 14px;
+  right: 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--color-on-surface-variant);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.quality-gate-close:hover {
+  background: rgba(143, 78, 0, 0.1);
+  color: var(--color-on-surface);
+}
+
+.quality-gate-close:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+@keyframes quality-gate-popup-in {
+  from {
+    opacity: 0;
+    transform: translateY(14px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@media (max-width: 640px) {
+  .quality-gate-popup {
+    right: 16px;
+    left: 16px;
+    bottom: 16px;
+    width: auto;
+    max-height: min(75vh, 640px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .quality-gate-popup {
+    animation: none;
+  }
+}
+
 /* Advisory variant (issue #34): non-blocking critic suggestions on a delivered,
    finalisable draft. Amber/info tone so it never reads as a hard error. */
 .quality-gate-inline.advisory .quality-gate-panel {
