@@ -10026,17 +10026,57 @@ button:disabled {
 .quality-gate-collapsed-text {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 10px 12px;
   flex-wrap: wrap;
+  flex: 1 1 280px;
   min-width: 0;
 }
 
 .quality-gate-collapsed-reason {
+  flex: 1 1 220px;
   margin: 0;
   color: var(--color-on-surface-variant);
   font-size: 13px;
-  font-weight: 600;
+  font-weight: 500;
   line-height: 1.45;
+}
+
+/* The "Show details" / "Show suggestions" re-expand control. Without this the
+   button falls back to a bare browser default, because the `.btn`/`.btn-ghost`
+   rules are scoped to `.quality-gate-actions` only. Style it as a compact,
+   self-contained pill that reads as an action, not an afterthought. */
+.quality-gate-collapsed .btn {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  min-height: 34px;
+  padding: 0 14px;
+  border-radius: 999px;
+  border: 1px solid rgba(143, 78, 0, 0.26);
+  background: rgba(255, 255, 255, 0.7);
+  color: var(--color-primary);
+  font-size: 12px;
+  font-weight: 800;
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    background 0.15s ease,
+    border-color 0.15s ease,
+    transform 0.05s ease;
+}
+
+.quality-gate-collapsed .btn:hover {
+  background: rgba(143, 78, 0, 0.08);
+  border-color: rgba(143, 78, 0, 0.4);
+}
+
+.quality-gate-collapsed .btn:active {
+  transform: translateY(1px);
+}
+
+.quality-gate-collapsed .btn:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
 }
 
 .quality-gate-panel {
