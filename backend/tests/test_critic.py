@@ -206,6 +206,43 @@ def _make_user():
     return user
 
 
+@pytest.fixture
+def legacy_inline_critic(monkeypatch):
+    """Pin the synchronous inline critic+regenerate path.
+
+    docs/CRITIC_ASYNC_ADVISORY_PLAN.md makes the async-advisory critic the
+    default (the judge runs off the critical path after `done`).  The legacy
+    inline regenerate loop is retained behind ``critic_async_advisory=False`` for
+    one release; the behavioural tests below exercise exactly that loop, so they
+    pin the flag rather than racing the detached background task.
+    """
+    from services.pipeline import stage_manager as stage_manager_module
+
+    monkeypatch.setattr(stage_manager_module.settings, "critic_async_advisory", False)
+
+
+class _FakeAdvisoryResult:
+    def __init__(self, obj) -> None:
+        self._obj = obj
+
+    def scalar_one_or_none(self):
+        return self._obj
+
+
+def _fake_session_local_for(stage):
+    """A patchable ``database.AsyncSessionLocal`` that yields *stage* on lookup.
+
+    Returns (session_local_factory, session) so a test can both inject the
+    factory and assert ``commit`` on the session the detached critic used.
+    """
+    session = MagicMock()
+    session.execute = AsyncMock(return_value=_FakeAdvisoryResult(stage))
+    session.commit = AsyncMock()
+    session.__aenter__ = AsyncMock(return_value=session)
+    session.__aexit__ = AsyncMock(return_value=False)
+    return MagicMock(return_value=session), session
+
+
 async def _fake_stream(
     system, user, max_tokens=0, **kwargs
 ) -> AsyncGenerator[str, None]:
@@ -342,7 +379,7 @@ def _generate_patches(svc: StageManager, *, complete_return: str | None = None):
 
 
 @pytest.mark.asyncio
-async def test_critic_pass_persists_artifact() -> None:
+async def test_critic_pass_persists_artifact(legacy_inline_critic) -> None:
     svc, stage, workspace, user, deduction, db = _build_generate_env()
     deduct, refund, invalidate, build, validate, set_cache, get_llm = _generate_patches(
         svc
@@ -374,7 +411,7 @@ async def test_critic_pass_persists_artifact() -> None:
 
 
 @pytest.mark.asyncio
-async def test_critic_one_regenerate_then_advisory() -> None:
+async def test_critic_one_regenerate_then_advisory(legacy_inline_critic) -> None:
     """Issue #34: after the one regenerate the critic is advisory, not blocking.
 
     A still-failing artifact is DELIVERED (status draft, finalisable) with the
@@ -480,7 +517,7 @@ async def test_missing_section_gate_persists_blocked_draft() -> None:
 
 
 @pytest.mark.asyncio
-async def test_critic_fail_then_pass_regenerates_once() -> None:
+async def test_critic_fail_then_pass_regenerates_once(legacy_inline_critic) -> None:
     """First fail then pass: regenerate once, persist the corrected artifact."""
     svc, stage, workspace, user, deduction, db = _build_generate_env()
     regenerated = "## Corrected\n" + _LONG_ARTIFACT
@@ -526,7 +563,7 @@ _ESCALATION_METRIC = "specforge_pipeline_quality_escalations_total"
 
 
 @pytest.mark.asyncio
-async def test_critic_failure_escalates_regen_to_mid_tier() -> None:
+async def test_critic_failure_escalates_regen_to_mid_tier(legacy_inline_critic) -> None:
     """Phase 5.1: a critic failure on the cheap primary escalates the funded
     regenerate to the mid tier instead of repeating on the same cheap model."""
     from services.pipeline import stage_manager as sm_module
@@ -593,7 +630,9 @@ async def test_critic_failure_escalates_regen_to_mid_tier() -> None:
 
 
 @pytest.mark.asyncio
-async def test_critic_failure_no_escalation_when_already_mid() -> None:
+async def test_critic_failure_no_escalation_when_already_mid(
+    legacy_inline_critic,
+) -> None:
     """Phase 5.1: if the route is already at/above the escalation tier (e.g.
     Google Flash which has no cheaper distinct tier), no escalation happens and
     the counter stays flat."""
@@ -808,7 +847,9 @@ async def test_condensed_problem_statement_surfaces_advisory_notice() -> None:
 
 
 @pytest.mark.asyncio
-async def test_condensed_notice_coexists_with_critic_findings() -> None:
+async def test_condensed_notice_coexists_with_critic_findings(
+    legacy_inline_critic,
+) -> None:
     """Phase D: when the critic is advisory AND the statement was condensed, both
     findings ride the single advisory bucket (notice appended after critic ones)."""
     svc, stage, workspace, user, deduction, db = _build_generate_env()
@@ -868,3 +909,318 @@ async def test_uncondensed_clean_generation_stays_clear() -> None:
         [t async for t in svc.generate(stage.id, user, db)]
 
     assert stage.quality_gate_status == "clear"
+
+
+# ---------------------------------------------------------------------------
+# Async-advisory critic (docs/CRITIC_ASYNC_ADVISORY_PLAN.md) — the default path:
+# the judge runs OFF the critical path after `done`.
+# ---------------------------------------------------------------------------
+_ADVISORY_METRIC = "specforge_pipeline_critic_advisory_findings_total"
+
+
+@pytest.mark.asyncio
+async def test_async_advisory_done_before_judge_and_schedules_critic() -> None:
+    """Default path: `done` is emitted WITHOUT awaiting the judge inline, and the
+    critic is scheduled as a detached background task instead."""
+    svc, stage, workspace, user, deduction, db = _build_generate_env()
+    deduct, refund, invalidate, build, validate, set_cache, get_llm = _generate_patches(
+        svc
+    )
+    with (
+        deduct as md,
+        refund as mr,
+        invalidate,
+        build,
+        validate,
+        set_cache as mc,
+        get_llm,
+        patch(
+            "services.pipeline.stage_manager.critic_review",
+            new_callable=AsyncMock,
+        ) as mock_critic,
+        patch.object(svc, "_schedule_critic_review") as mock_schedule,
+    ):
+        md.return_value = deduction
+        tokens = [t async for t in svc.generate(stage.id, user, db)]
+
+    # The judge never runs on the critical path — only the detached scheduler is
+    # invoked, once, pinned to the just-persisted version.
+    mock_critic.assert_not_awaited()
+    mock_schedule.assert_called_once()
+    kwargs = mock_schedule.call_args.kwargs
+    assert kwargs["stage_id"] == stage.id
+    assert kwargs["version"] == stage.current_version
+    assert kwargs["stage_type"] == "spec"
+    assert kwargs["content"] == _LONG_ARTIFACT.strip()
+    assert kwargs["provider"] == "anthropic"
+    # The usable draft is delivered, persisted clean, cached; nothing refunded.
+    assert any("done" in t for t in tokens)
+    assert not any("quality_gate_failed" in t for t in tokens)
+    assert stage.status == "draft"
+    assert stage.content == _LONG_ARTIFACT.strip()
+    assert stage.quality_gate_status == "clear"
+    mc.assert_awaited_once()
+    mr.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_async_advisory_section_gate_still_blocks_inline() -> None:
+    """The zero-LLM section gate stays terminal on the critical path: a miss
+    blocks the draft and the background critic is never scheduled."""
+    svc, stage, workspace, user, deduction, db = _build_generate_env()
+    deduct, refund, invalidate, build, validate, set_cache, get_llm = _generate_patches(
+        svc
+    )
+    missing = ["## Acceptance Criteria"]
+    with (
+        deduct as md,
+        refund,
+        invalidate,
+        build,
+        validate,
+        set_cache,
+        get_llm,
+        patch(
+            "services.pipeline.stage_manager.validate_sections",
+            side_effect=MissingSectionError("spec", missing),
+        ),
+        patch.object(svc, "_schedule_critic_review") as mock_schedule,
+    ):
+        md.return_value = deduction
+        tokens = [t async for t in svc.generate(stage.id, user, db)]
+
+    mock_schedule.assert_not_called()
+    assert stage.quality_gate_status == "blocked"
+    assert stage.quality_gate_kind == "missing_sections"
+    assert any("quality_gate_failed" in t for t in tokens)
+
+
+@pytest.mark.asyncio
+async def test_async_advisory_disable_critic_skips_schedule() -> None:
+    """disable_critic bypasses the whole gate, including the background critic."""
+    svc, stage, workspace, user, deduction, db = _build_generate_env(
+        disable_critic=True
+    )
+    deduct, refund, invalidate, build, validate, set_cache, get_llm = _generate_patches(
+        svc
+    )
+    with (
+        deduct as md,
+        refund,
+        invalidate,
+        build,
+        validate,
+        set_cache,
+        get_llm,
+        patch.object(svc, "_schedule_critic_review") as mock_schedule,
+    ):
+        md.return_value = deduction
+        tokens = [t async for t in svc.generate(stage.id, user, db)]
+
+    mock_schedule.assert_not_called()
+    assert any("done" in t for t in tokens)
+    assert stage.content == _LONG_ARTIFACT.strip()
+
+
+@pytest.mark.asyncio
+async def test_dispatch_critic_review_failing_marks_advisory() -> None:
+    """A failing background verdict attaches advisory findings, bumps the counter,
+    and records the critic_advisory cost outcome — all off the critical path."""
+    workspace_id = uuid4()
+    stage = _make_stage(workspace_id, "spec")
+    stage.current_version = 3
+    svc = StageManager(redis_client=_FakeRedis())
+    session_local, session = _fake_session_local_for(stage)
+    fail = StageCriticResult(
+        passed=False,
+        findings=[CriticFinding(kind="MissingSection", detail="missing ADR")],
+    )
+    before = REGISTRY.get_sample_value(_ADVISORY_METRIC, {"stage": "spec"}) or 0.0
+
+    with (
+        patch(
+            "services.pipeline.stage_manager.critic_review",
+            new_callable=AsyncMock,
+            return_value=fail,
+        ),
+        patch("database.AsyncSessionLocal", session_local),
+        patch(
+            "services.pipeline.stage_manager.update_cost_event_quality_outcome",
+            new_callable=AsyncMock,
+        ) as mock_cost,
+    ):
+        await svc._dispatch_critic_review(
+            stage_id=stage.id,
+            version=3,
+            stage_type="spec",
+            content=_LONG_ARTIFACT,
+            critic_deps={},
+            provider="anthropic",
+            content_generation_id="gen-1",
+        )
+
+    session.commit.assert_awaited_once()
+    assert stage.quality_gate_status == "advisory"
+    assert stage.quality_gate_kind == "critic_findings"
+    assert stage.quality_gate_version == 3
+    kinds = [f["kind"] for f in stage.quality_gate_payload["findings"]]
+    assert kinds == ["MissingSection"]
+    after = REGISTRY.get_sample_value(_ADVISORY_METRIC, {"stage": "spec"}) or 0.0
+    assert after - before == 1.0
+    mock_cost.assert_awaited_once_with("gen-1", "critic_advisory")
+
+
+@pytest.mark.asyncio
+async def test_dispatch_critic_review_merges_with_condensed_notice() -> None:
+    """The background critic preserves an advisory notice already attached at
+    persist (the Phase-D condensed-statement notice) rather than overwriting."""
+    workspace_id = uuid4()
+    stage = _make_stage(workspace_id, "spec")
+    stage.current_version = 2
+    # Persist already attached the condensed-statement notice.
+    stage.quality_gate_status = "advisory"
+    stage.quality_gate_kind = "critic_findings"
+    stage.quality_gate_payload = {
+        "stage": "spec",
+        "kind": "critic_findings",
+        "findings": [{"kind": "ProblemStatementCondensed", "detail": "x"}],
+    }
+    svc = StageManager(redis_client=_FakeRedis())
+    session_local, _ = _fake_session_local_for(stage)
+    fail = StageCriticResult(
+        passed=False,
+        findings=[CriticFinding(kind="MissingSection", detail="missing ADR")],
+    )
+    with (
+        patch(
+            "services.pipeline.stage_manager.critic_review",
+            new_callable=AsyncMock,
+            return_value=fail,
+        ),
+        patch("database.AsyncSessionLocal", session_local),
+        patch(
+            "services.pipeline.stage_manager.update_cost_event_quality_outcome",
+            new_callable=AsyncMock,
+        ),
+    ):
+        await svc._dispatch_critic_review(
+            stage_id=stage.id,
+            version=2,
+            stage_type="spec",
+            content=_LONG_ARTIFACT,
+            critic_deps={},
+            provider="anthropic",
+            content_generation_id="gen-1",
+        )
+
+    kinds = {f["kind"] for f in stage.quality_gate_payload["findings"]}
+    assert kinds == {"ProblemStatementCondensed", "MissingSection"}
+
+
+@pytest.mark.asyncio
+async def test_dispatch_critic_review_passing_makes_no_change() -> None:
+    """A clean background verdict never opens a session or writes anything."""
+    workspace_id = uuid4()
+    stage = _make_stage(workspace_id, "spec")
+    stage.current_version = 1
+    svc = StageManager(redis_client=_FakeRedis())
+    session_local, session = _fake_session_local_for(stage)
+    with (
+        patch(
+            "services.pipeline.stage_manager.critic_review",
+            new_callable=AsyncMock,
+            return_value=StageCriticResult(passed=True),
+        ),
+        patch("database.AsyncSessionLocal", session_local),
+        patch(
+            "services.pipeline.stage_manager.update_cost_event_quality_outcome",
+            new_callable=AsyncMock,
+        ) as mock_cost,
+    ):
+        await svc._dispatch_critic_review(
+            stage_id=stage.id,
+            version=1,
+            stage_type="spec",
+            content=_LONG_ARTIFACT,
+            critic_deps={},
+            provider="anthropic",
+            content_generation_id="gen-1",
+        )
+
+    session_local.assert_not_called()  # no session opened on a passing verdict
+    session.commit.assert_not_awaited()
+    mock_cost.assert_not_awaited()
+    assert stage.quality_gate_status is None or stage.quality_gate_status != "advisory"
+
+
+@pytest.mark.asyncio
+async def test_dispatch_critic_review_version_mismatch_no_write() -> None:
+    """Staleness guard: a version bump since scheduling means a newer draft
+    superseded the one judged — findings must not be stamped on the wrong one."""
+    workspace_id = uuid4()
+    stage = _make_stage(workspace_id, "spec")
+    stage.current_version = 5  # newer than the scheduled version below
+    svc = StageManager(redis_client=_FakeRedis())
+    session_local, session = _fake_session_local_for(stage)
+    fail = StageCriticResult(
+        passed=False,
+        findings=[CriticFinding(kind="MissingSection", detail="missing ADR")],
+    )
+    with (
+        patch(
+            "services.pipeline.stage_manager.critic_review",
+            new_callable=AsyncMock,
+            return_value=fail,
+        ),
+        patch("database.AsyncSessionLocal", session_local),
+        patch(
+            "services.pipeline.stage_manager.update_cost_event_quality_outcome",
+            new_callable=AsyncMock,
+        ) as mock_cost,
+    ):
+        await svc._dispatch_critic_review(
+            stage_id=stage.id,
+            version=3,
+            stage_type="spec",
+            content=_LONG_ARTIFACT,
+            critic_deps={},
+            provider="anthropic",
+            content_generation_id="gen-1",
+        )
+
+    session.commit.assert_not_awaited()
+    mock_cost.assert_not_awaited()
+    assert stage.quality_gate_status != "advisory"
+
+
+@pytest.mark.asyncio
+async def test_dispatch_critic_review_judge_error_swallowed() -> None:
+    """Fail-open: a judge error never raises out of the detached task and never
+    touches the already-delivered draft."""
+    workspace_id = uuid4()
+    stage = _make_stage(workspace_id, "spec")
+    stage.current_version = 1
+    svc = StageManager(redis_client=_FakeRedis())
+    session_local, session = _fake_session_local_for(stage)
+    with (
+        patch(
+            "services.pipeline.stage_manager.critic_review",
+            new_callable=AsyncMock,
+            side_effect=RuntimeError("judge down"),
+        ),
+        patch("database.AsyncSessionLocal", session_local),
+    ):
+        # Must not raise.
+        await svc._dispatch_critic_review(
+            stage_id=stage.id,
+            version=1,
+            stage_type="spec",
+            content=_LONG_ARTIFACT,
+            critic_deps={},
+            provider="anthropic",
+            content_generation_id="gen-1",
+        )
+
+    session_local.assert_not_called()
+    session.commit.assert_not_awaited()
+    assert stage.quality_gate_status != "advisory"

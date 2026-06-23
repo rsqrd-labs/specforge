@@ -68,6 +68,7 @@ from services.observability import (
     BILLING_CREDITS_CRITIC_REGEN,
     PIPELINE_COMPLETION_REPAIRS,
     PIPELINE_COMPLEXITY_TIER_FLOORS,
+    PIPELINE_CRITIC_ADVISORY_FINDINGS,
     PIPELINE_GENERATION_DURATION,
     PIPELINE_GENERATION_FALLBACKS,
     PIPELINE_INCOMPLETE_OUTPUTS,
@@ -270,6 +271,18 @@ _BACKGROUND_EVAL_TASKS: set[asyncio.Task] = set()
 def _log_eval_error(task: asyncio.Task) -> None:
     if not task.cancelled() and (exc := task.exception()):
         logger.error("eval_background_failed", extra={"error": str(exc)})
+
+
+# Strong references to in-flight fire-and-forget background CRITIC tasks — the
+# off-critical-path judge (docs/CRITIC_ASYNC_ADVISORY_PLAN.md) — so the event
+# loop's weak reference does not let them be garbage-collected before they
+# finish.  Tasks remove themselves on completion.  Mirrors _BACKGROUND_EVAL_TASKS.
+_BACKGROUND_CRITIC_TASKS: set[asyncio.Task] = set()
+
+
+def _log_critic_error(task: asyncio.Task) -> None:
+    if not task.cancelled() and (exc := task.exception()):
+        logger.error("critic_background_failed", extra={"error": str(exc)})
 
 
 def _eval_to_dict(result: EvalResult) -> dict:
@@ -2291,16 +2304,69 @@ class StageManager:
                 emit(json.dumps({"quality_gate_failed": gate_payload}))
                 return
 
-            # T-247: critic quality gate.  Runs AFTER output validation and
-            # BEFORE persistence + caching.  Issue #34: the critic is ADVISORY,
-            # not blocking — the deterministic section gate below is still
-            # terminal, but the LLM judge never blocks finalisation.  After its
-            # one platform-funded regenerate, any remaining findings are captured
-            # here and attached to the delivered draft as non-blocking
-            # suggestions (status="advisory").  Skipped when the workspace owner
-            # has toggled the audited disable_critic escape hatch.
+            # Post-stream quality gates.  docs/CRITIC_ASYNC_ADVISORY_PLAN.md takes
+            # the LLM critic OFF the critical path (settings.critic_async_advisory,
+            # default True): only the zero-LLM section gate runs inline, the usable
+            # draft is delivered the moment the deterministic gates pass, and the
+            # judge runs in a detached background task scheduled after `done`.  The
+            # legacy inline critic+regenerate loop (T-247 / issue #34) is retained
+            # verbatim behind the flag for one release as an instant revert.
             advisory_findings: list[CriticFinding] = []
-            if not workspace.disable_critic:
+            # Upstream deps captured for the post-`done` background critic (async
+            # path); passed by value (plain strings) into the detached task so it
+            # never holds an ORM object or the request session.
+            critic_deps_for_async: dict[str, str] | None = None
+            if settings.critic_async_advisory:
+                # Only the zero-LLM section-presence gate runs inline — it is the
+                # cheapest gate and terminal (a missing mandatory heading is a
+                # prompt defect, not a sampling fluke, so there is nothing to
+                # regenerate).  The judge call and its advisory findings are
+                # deferred to _schedule_critic_review after `done`.  Skipped
+                # wholesale when the owner toggled the audited disable_critic
+                # escape hatch (no section gate, no judge — matching legacy).
+                if not workspace.disable_critic:
+                    critic_deps_for_async = await self._critic_deps(
+                        workspace.id, stage.type
+                    )
+                    try:
+                        validate_sections(
+                            stage.type, accumulated, critic_deps_for_async
+                        )
+                    except MissingSectionError as exc:
+                        PIPELINE_VALIDATOR_FAILURES.labels(stage=stage.type).inc()
+                        # The zero-LLM section gate decided this generation is
+                        # terminal, so no judge call (now or in the background) is
+                        # issued — attribute the skip to the deterministic gate so
+                        # the before/after spend instrument does not under-count.
+                        record_judge_call_skipped("critic", "deterministic_gate")
+                        gate_payload = {
+                            "stage": stage.type,
+                            "kind": "missing_sections",
+                            "missing": exc.missing,
+                            # Terminal path: no refund happened, so the recovery
+                            # contract must not claim one.
+                            "refunded_prior_attempt": False,
+                        }
+                        await self._persist_quality_gate_blocked(
+                            db,
+                            redis,
+                            stage,
+                            accumulated,
+                            kind="missing_sections",
+                            payload=gate_payload,
+                        )
+                        _cleanup_done = True
+                        await update_cost_event_quality_outcome(
+                            content_generation_id, "validator_failed"
+                        )
+                        if span_id:
+                            await self._mark_langfuse_span_failed(span_id, exc)
+                            span_finished = True
+                        emit(json.dumps({"quality_gate_failed": gate_payload}))
+                        return
+                else:
+                    record_judge_call_skipped("critic", "disabled")
+            elif not workspace.disable_critic:
                 critic_deps = await self._critic_deps(workspace.id, stage.type)
                 # T-248: zero-LLM section-presence gate runs FIRST — it is the
                 # cheapest gate (regex/substring, no LLM call) and short-circuits
@@ -2610,6 +2676,25 @@ class StageManager:
             emit(f'{{"done": true, "stage_id": "{stage_id}"}}')
             if eval_event:
                 emit(eval_event)
+            # docs/CRITIC_ASYNC_ADVISORY_PLAN.md: the usable draft is now
+            # delivered (`done` fired and this pipeline is about to return, so the
+            # SSE pump closes cleanly with no trailing heartbeats).  Run the LLM
+            # critic OFF the critical path — a detached background task (its own
+            # short-lived session, never this request session, and NOT the
+            # pipeline task, so a client disconnect's pipeline.cancel() leaves it
+            # untouched) judges the persisted artifact and, on a failing verdict,
+            # attaches non-blocking advisory findings.  No auto-regenerate.
+            # Fail-open: a judge outage never touches the delivered, charged draft.
+            if settings.critic_async_advisory and not workspace.disable_critic:
+                self._schedule_critic_review(
+                    stage_id=stage.id,
+                    version=stage.current_version,
+                    stage_type=stage.type,
+                    content=accumulated,
+                    critic_deps=critic_deps_for_async or {},
+                    provider=workspace.provider,
+                    content_generation_id=content_generation_id,
+                )
         except Exception as exc:
             if span_id and not span_finished:
                 await self._mark_langfuse_span_failed(span_id, exc)
@@ -3275,6 +3360,118 @@ class StageManager:
         }
         stage.quality_gate_version = stage.current_version
         stage.quality_gate_failed_at = now
+
+    def _schedule_critic_review(
+        self,
+        *,
+        stage_id: UUID,
+        version: int,
+        stage_type: str,
+        content: str,
+        critic_deps: dict[str, str],
+        provider: str,
+        content_generation_id: str | None,
+    ) -> asyncio.Task[None]:
+        """Fire-and-forget the off-critical-path critic (async advisory plan).
+
+        Mirrors _schedule_stage_eval: the task is held in a module-level strong-ref
+        set because the event loop keeps only a weak reference to a bare task —
+        without it the detached critic could be garbage-collected mid-flight.  The
+        task removes itself on completion and logs any unexpected error.
+        """
+        task = asyncio.create_task(
+            self._dispatch_critic_review(
+                stage_id=stage_id,
+                version=version,
+                stage_type=stage_type,
+                content=content,
+                critic_deps=critic_deps,
+                provider=provider,
+                content_generation_id=content_generation_id,
+            )
+        )
+        _BACKGROUND_CRITIC_TASKS.add(task)
+        task.add_done_callback(_BACKGROUND_CRITIC_TASKS.discard)
+        task.add_done_callback(_log_critic_error)
+        return task
+
+    async def _dispatch_critic_review(
+        self,
+        *,
+        stage_id: UUID,
+        version: int,
+        stage_type: str,
+        content: str,
+        critic_deps: dict[str, str],
+        provider: str,
+        content_generation_id: str | None,
+    ) -> None:
+        """Judge a delivered draft off the critical path; attach advisory findings.
+
+        docs/CRITIC_ASYNC_ADVISORY_PLAN.md §3.2.  Mirrors _dispatch_stage_eval:
+        opens its OWN short-lived AsyncSessionLocal (never the request session the
+        generation flow closes) and runs as a detached task (never the pipeline
+        task), so it survives client disconnect.  Judge ONLY — there is
+        deliberately no regenerate.  Fully fail-open: the draft is already
+        delivered and charged, so every error is logged and dropped without ever
+        touching the artifact.
+        """
+        try:
+            result = await critic_review(
+                stage_type, content, critic_deps, provider=provider
+            )
+        except Exception:
+            # critic_review is itself fail-open, but guard the call site too: a
+            # judge outage must never surface from a detached background task.
+            logger.warning(
+                "critic.async_review_failed",
+                extra={"stage": stage_type, "stage_id": str(stage_id)},
+                exc_info=True,
+            )
+            return
+        if result.passed:
+            return
+
+        from database import AsyncSessionLocal  # noqa: PLC0415
+
+        try:
+            async with AsyncSessionLocal() as db:
+                stage = (
+                    await db.execute(select(Stage).where(Stage.id == stage_id))
+                ).scalar_one_or_none()
+                if stage is None:
+                    return
+                # Staleness guard (§3.2.2): a version bump since this critic was
+                # scheduled means a newer draft superseded the one we judged —
+                # never stamp findings onto the wrong version.
+                if stage.current_version != version:
+                    return
+                # Merge with advisory findings already attached at persist — the
+                # Phase-D problem-statement-condensed notice rides the SAME
+                # bucket, so preserve it rather than overwrite it.
+                existing: list[dict] = []
+                if stage.quality_gate_status == "advisory" and isinstance(
+                    stage.quality_gate_payload, dict
+                ):
+                    existing = list(stage.quality_gate_payload.get("findings") or [])
+                combined = existing + [
+                    finding.model_dump() for finding in result.findings
+                ]
+                self._mark_quality_gate_advisory(stage, combined)
+                stage.updated_at = datetime.now(UTC)
+                await db.commit()
+            PIPELINE_CRITIC_ADVISORY_FINDINGS.labels(stage=stage_type).inc()
+            # Cost-ledger: a delivered draft that now carries non-blocking critic
+            # suggestions — mirrors the legacy inline path's "critic_advisory".
+            await update_cost_event_quality_outcome(
+                content_generation_id, "critic_advisory"
+            )
+        except Exception:
+            logger.warning(
+                "critic.async_persist_failed",
+                extra={"stage": stage_type, "stage_id": str(stage_id)},
+                exc_info=True,
+            )
 
     def _incomplete_gate_payload(
         self,

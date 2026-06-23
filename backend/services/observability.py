@@ -713,6 +713,16 @@ PIPELINE_QUALITY_ESCALATIONS = Counter(
     ["stage_type", "provider"],
 )
 
+PIPELINE_CRITIC_ADVISORY_FINDINGS = Counter(
+    "specforge_pipeline_critic_advisory_findings_total",
+    "Background (off-critical-path) critic reviews whose verdict FAILED, attaching "
+    "non-blocking advisory findings to an already-delivered draft. With the async "
+    "advisory critic this is exactly the population that previously triggered the "
+    "platform-funded auto-regenerate — so the rate is the signal for the quality "
+    "tradeoff of dropping that regenerate (docs/CRITIC_ASYNC_ADVISORY_PLAN.md §4).",
+    labelnames=["stage"],
+)
+
 PIPELINE_COMPLEXITY_TIER_FLOORS = Counter(
     "specforge_pipeline_complexity_tier_floors_total",
     "Core generations where the deterministic complexity classifier raised the "

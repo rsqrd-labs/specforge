@@ -107,6 +107,17 @@ class Settings(BaseSettings):
     # Raise toward 1.0 only to gather model/provider quality telemetry. Must be in
     # [0.0, 1.0]; an out-of-range value fails startup in every environment.
     eval_score_sample_rate: float = 0.0
+    # Critic async-advisory (docs/CRITIC_ASYNC_ADVISORY_PLAN.md): take the Phase-19
+    # critic judge off the critical path. Default True — the usable draft is
+    # delivered the moment the deterministic gates pass (sections, depth,
+    # tech-safety) and the `done` SSE event fires; the LLM judge then runs in a
+    # detached background task (mirroring the best-effort eval score) and, on a
+    # failing verdict, attaches its findings to the already-delivered draft as
+    # non-blocking advisory suggestions. There is NO auto-regenerate in this path.
+    # Flip False to retain the legacy inline critic+regenerate loop verbatim for
+    # one release (instant revert if quality/UX regresses) — the old branch is
+    # removed in a follow-up once the new path is proven.
+    critic_async_advisory: bool = True
     # Issue #21 Phase 2b — honest, data-backed generation ETA. A cheap periodic
     # worker cron rolls llm_cost_events latency_ms up into aggregate p50/p90 per
     # (provider, stage, operation), caches the result in Redis, and the read-only
