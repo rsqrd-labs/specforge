@@ -142,6 +142,28 @@ frontend poll for the result on reload.
   points `database.AsyncSessionLocal` at the seeded fake, so existing generate
   tests pass unchanged. A spy asserts the pipeline opened its own session.
 
+### Follow-up fix — the reconnect was invisible (2026-06-24)
+
+The first cut delivered the artifact but the **reconnecting page showed nothing**:
+the loading overlay, elapsed time, and any sign of activity vanished on refresh,
+so the generation looked lost (the user's "everything disappeared" report). Two
+gaps, both in `Workspace.tsx`, fixed stage-agnostically (spec/plan/harness/tasks):
+
+1. **Stage selection landed on the wrong stage.** On a fresh mount the page
+   selected `firstUnlockedStage` — the *first* non-locked stage — so a refresh
+   mid-PLAN landed on a finalised SPEC, not the generating PLAN. Extracted
+   `pickActiveStageOnLoad(stages, existing)`: keep a still-valid prior selection,
+   else prefer the `in_progress` stage, else fall back to `firstUnlockedStage`.
+   Unit-tested in `pages/Workspace.reconnect.test.ts`.
+2. **The overlay never rendered during reconnect.** `StreamingOverlay`'s
+   `isVisible` is driven by `activeGenerationActivity`, which only existed for a
+   live local stream — `null` after a refresh. Synthesize a `reconnectActivity`
+   when the active stage is `in_progress` and this client is **not** streaming it;
+   `startedAt` reads the stage's `updated_at` (stamped at the `in_progress`
+   transition in `generate()`; nothing bumps the row mid-stream, so elapsed is
+   accurate). The overlay shows full (no live tokens to collapse into a pill),
+   and clears the instant `useReconnectPoll` settles the stage to `draft`.
+
 ## Out of scope / follow-up
 
 - Live token-streaming resume across refresh (needs Redis pub/sub fan-out). The

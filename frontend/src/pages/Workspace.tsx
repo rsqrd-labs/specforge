@@ -212,6 +212,28 @@ function firstUnlockedStage(stages: Stage[]): Stage | null {
   )
 }
 
+/**
+ * Which stage to select on a (re)load of the workspace.
+ *
+ * Keeps the user's current selection if it still exists. Otherwise — a fresh
+ * mount, e.g. a page refresh while a stage is still generating server-side —
+ * prefers the in-progress stage so its reconnect overlay is visible, instead of
+ * defaulting to the first unlocked stage. Without this, a user who refreshed
+ * mid-PLAN would land on SPEC and see no sign that PLAN is still running
+ * (docs/REFRESH_DURING_GENERATION_PLAN.md). Falls back to the first unlocked
+ * stage when nothing is generating.
+ */
+export function pickActiveStageOnLoad(
+  stages: Stage[],
+  existing: string | null,
+): string | null {
+  if (existing && stages.some((stage) => stage.id === existing)) {
+    return existing
+  }
+  const generating = stages.find((stage) => stage.status === "in_progress")
+  return generating?.id ?? firstUnlockedStage(stages)?.id ?? null
+}
+
 function sortStages(stages: Stage[]): Stage[] {
   return [...stages].sort(
     (a, b) => STAGE_ORDER.indexOf(a.type) - STAGE_ORDER.indexOf(b.type),
@@ -436,10 +458,48 @@ export default function Workspace() {
   const { start: startStream, isStreaming, error: streamError } = useStream(
     activeStage?.id ?? null,
   )
+  // Reconnect overlay: the stage is generating server-side but THIS client is
+  // not the one streaming it (true on a fresh mount after a page refresh —
+  // docs/REFRESH_DURING_GENERATION_PLAN.md). The detached pipeline keeps running
+  // and `useReconnectPoll` delivers the settled artifact, but without a
+  // synthetic activity the StreamingOverlay never shows, so the screen looks
+  // empty and the user thinks the generation was lost. Drive the overlay from
+  // the persisted stage: `updated_at` is stamped at the in_progress transition
+  // (stage_manager.generate) and nothing bumps the row mid-stream, so it is an
+  // accurate elapsed baseline. Stage-agnostic — works for spec/plan/harness/tasks.
+  // Memoised on its stable inputs so the synthesized activity keeps a steady
+  // object identity across the reconnect poll's 3s re-renders — otherwise the
+  // overlay's elapsed-timer effect would re-arm on every render.
+  const reconnectStreaming =
+    Boolean(activeStage) &&
+    activeStage?.status === "in_progress" &&
+    !isStreaming &&
+    generationActivity?.stageId !== activeStage?.id
+  const reconnectActivity: GenerationActivityInfo | null = useMemo(
+    () =>
+      reconnectStreaming && activeStage
+        ? {
+            stageId: activeStage.id,
+            stageType: activeStage.type,
+            operation: "generate",
+            actionLabel: getGenerationActionLabel("generate"),
+            startedAt: Date.parse(activeStage.updated_at) || Date.now(),
+            streamed: false,
+            provider: currentWorkspace?.provider,
+          }
+        : null,
+    [
+      reconnectStreaming,
+      activeStage?.id,
+      activeStage?.type,
+      activeStage?.updated_at,
+      currentWorkspace?.provider,
+    ],
+  )
   const activeGenerationActivity =
     activeStage && generationActivity?.stageId === activeStage.id
       ? generationActivity
-      : null
+      : reconnectActivity
   const activeBusyOperation = activeGenerationActivity?.operation ?? null
   // Backend liveness heartbeat for the in-flight generation (issue #19):
   // surfaces "still working" in the overlay while the model reasons silently.
@@ -646,12 +706,7 @@ export default function Workspace() {
     if (!currentWorkspace) return
 
     setStages(currentWorkspace.stages)
-    setActiveStageId((existing) => {
-      if (existing && currentWorkspace.stages.some((stage) => stage.id === existing)) {
-        return existing
-      }
-      return firstUnlockedStage(currentWorkspace.stages)?.id ?? null
-    })
+    setActiveStageId((existing) => pickActiveStageOnLoad(currentWorkspace.stages, existing))
 
     setEvalResults((existing) => {
       const next = { ...existing }
