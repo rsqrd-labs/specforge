@@ -319,6 +319,7 @@ async def test_instrumented_adapter_forwards_cache_system() -> None:
         def __init__(self) -> None:
             self.last_completion = None
             self.seen_cache_system: list[bool] = []
+            self.seen_cache_user_prefix: list[str | None] = []
 
         async def stream(
             self,
@@ -327,8 +328,10 @@ async def test_instrumented_adapter_forwards_cache_system() -> None:
             max_tokens: int,
             *,
             cache_system: bool = False,
+            cache_user_prefix: str | None = None,
         ) -> AsyncGenerator[str, None]:
             self.seen_cache_system.append(cache_system)
+            self.seen_cache_user_prefix.append(cache_user_prefix)
             yield "tok"
 
         async def complete(
@@ -338,8 +341,10 @@ async def test_instrumented_adapter_forwards_cache_system() -> None:
             max_tokens: int,
             *,
             cache_system: bool = False,
+            cache_user_prefix: str | None = None,
         ) -> str:
             self.seen_cache_system.append(cache_system)
+            self.seen_cache_user_prefix.append(cache_user_prefix)
             return "ok"
 
     inner = _RecordingAdapter()
@@ -360,13 +365,19 @@ async def test_instrumented_adapter_forwards_cache_system() -> None:
 
         await adapter.complete("sys", "user", 100, cache_system=True)
         tokens = [
-            t async for t in adapter.stream("sys", "user", 100, cache_system=True)
+            t
+            async for t in adapter.stream(
+                "sys", "user", 100, cache_system=True, cache_user_prefix="sys-prefix"
+            )
         ]
 
     assert inner.seen_cache_system == [
         True,
         True,
     ], "InstrumentedAdapter must forward cache_system=True to the wrapped adapter"
+    # The stream call passed cache_user_prefix; complete did not (so its forwarded
+    # value is the None default) — both must reach the wrapped adapter unchanged.
+    assert inner.seen_cache_user_prefix == [None, "sys-prefix"]
     assert "tok" in tokens
 
 
@@ -386,10 +397,14 @@ async def test_complete_with_timeout_forwards_cache_system(
         def __init__(self) -> None:
             self.last_completion = None
 
-        async def stream(self, s, u, m, *, cache_system=False):  # pragma: no cover
+        async def stream(
+            self, s, u, m, *, cache_system=False, cache_user_prefix=None
+        ):  # pragma: no cover
             yield ""
 
-        async def complete(self, s, u, m, *, cache_system=False) -> str:
+        async def complete(
+            self, s, u, m, *, cache_system=False, cache_user_prefix=None
+        ) -> str:
             seen_cache_system.append(cache_system)
             return "done"
 
@@ -439,3 +454,177 @@ def test_anthropic_cache_tokens_normalised() -> None:
     }
     usage_write = normalize_provider_usage("anthropic", raw_write)
     assert usage_write.cached_input_tokens == 300
+
+
+# ---------------------------------------------------------------------------
+# PC-10..PC-15: issue #39 (Lever A) — caching the stable user-prompt prefix
+# ---------------------------------------------------------------------------
+
+# Comfortably above _MIN_CACHEABLE_PREFIX_CHARS (8192) — the input-heavy stages
+# whose upstream artifacts Lever A targets always clear it.
+_PREFIX = "BASE PROMPT: " + ("x" * 9000)  # the stable base_user_prompt
+_SUFFIX = "\n\nChunk scope: generate only section A."
+_FULL_USER = _PREFIX + _SUFFIX
+
+
+def _messages_request_user_content(
+    adapter: AnthropicAdapter, *, cache_user_prefix: str | None
+) -> object:
+    return adapter._messages_request(
+        system=_SYSTEM,
+        user=_FULL_USER,
+        max_tokens=_MAX_TOKENS,
+        cache_user_prefix=cache_user_prefix,
+    )["messages"][0]["content"]
+
+
+def test_user_prefix_cached_splits_into_two_blocks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PC-10: a valid prefix splits the user message into a cached prefix block
+    plus a variable suffix block; concatenated they reproduce the input byte
+    for byte (the model sees identical text)."""
+    adapter = _make_anthropic_adapter()
+    monkeypatch.setattr(
+        "services.llm.anthropic_adapter.settings",
+        SimpleNamespace(anthropic_api_key="test", llm_prompt_cache_enabled=True),
+    )
+
+    content = _messages_request_user_content(adapter, cache_user_prefix=_PREFIX)
+
+    assert isinstance(content, list) and len(content) == 2
+    prefix_block, suffix_block = content
+    assert prefix_block["text"] == _PREFIX
+    assert prefix_block["cache_control"] == {"type": "ephemeral"}
+    assert "cache_control" not in suffix_block
+    assert suffix_block["text"] == _SUFFIX
+    assert prefix_block["text"] + suffix_block["text"] == _FULL_USER
+
+
+def test_user_prefix_kill_switch_keeps_plain_string(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PC-11: llm_prompt_cache_enabled=False reverts to the plain-string user
+    message even when a prefix is supplied (the regression pin)."""
+    adapter = _make_anthropic_adapter()
+    monkeypatch.setattr(
+        "services.llm.anthropic_adapter.settings",
+        SimpleNamespace(anthropic_api_key="test", llm_prompt_cache_enabled=False),
+    )
+
+    content = _messages_request_user_content(adapter, cache_user_prefix=_PREFIX)
+
+    assert content == _FULL_USER
+
+
+def test_user_prefix_none_keeps_plain_string(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PC-12: no prefix supplied → plain-string user message (default callers)."""
+    adapter = _make_anthropic_adapter()
+    monkeypatch.setattr(
+        "services.llm.anthropic_adapter.settings",
+        SimpleNamespace(anthropic_api_key="test", llm_prompt_cache_enabled=True),
+    )
+
+    content = _messages_request_user_content(adapter, cache_user_prefix=None)
+
+    assert content == _FULL_USER
+
+
+def test_user_prefix_not_a_prefix_or_empty_suffix_stays_plain(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PC-13: a string that is not a proper prefix of user, or one equal to the
+    whole user (empty suffix), is never split — the API rejects empty text
+    blocks, so we fall back to the plain string."""
+    adapter = _make_anthropic_adapter()
+    monkeypatch.setattr(
+        "services.llm.anthropic_adapter.settings",
+        SimpleNamespace(anthropic_api_key="test", llm_prompt_cache_enabled=True),
+    )
+
+    not_a_prefix = "totally different text"
+    assert (
+        _messages_request_user_content(adapter, cache_user_prefix=not_a_prefix)
+        == _FULL_USER
+    )
+    # prefix == full user ⇒ empty suffix ⇒ stay plain
+    assert (
+        _messages_request_user_content(adapter, cache_user_prefix=_FULL_USER)
+        == _FULL_USER
+    )
+
+
+def test_user_prefix_below_min_cacheable_stays_plain(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PC-15: a prefix below Anthropic's minimum cacheable length is not marked
+    cacheable (Anthropic would ignore the marker anyway) — e.g. the compressed
+    spec problem statement.  Returns the plain string so no breakpoint is wasted
+    and the sub-minimum edge is never exercised."""
+    from services.llm.anthropic_adapter import _MIN_CACHEABLE_PREFIX_CHARS
+
+    adapter = _make_anthropic_adapter()
+    monkeypatch.setattr(
+        "services.llm.anthropic_adapter.settings",
+        SimpleNamespace(anthropic_api_key="test", llm_prompt_cache_enabled=True),
+    )
+
+    small_prefix = "x" * (_MIN_CACHEABLE_PREFIX_CHARS - 1)
+    user = small_prefix + "\n\nChunk scope: section A."
+    content = adapter._messages_request(
+        system=_SYSTEM,
+        user=user,
+        max_tokens=_MAX_TOKENS,
+        cache_user_prefix=small_prefix,
+    )["messages"][0]["content"]
+
+    assert content == user
+
+
+@pytest.mark.asyncio
+async def test_anthropic_stream_forwards_user_prefix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PC-14: stream() forwards cache_user_prefix into _messages_request so the
+    chunked-generation call path actually caches the base prompt."""
+    adapter = _make_anthropic_adapter()
+    monkeypatch.setattr(
+        "services.llm.anthropic_adapter.settings",
+        SimpleNamespace(anthropic_api_key="test", llm_prompt_cache_enabled=True),
+    )
+
+    seen: dict = {}
+    original = adapter._messages_request
+
+    def _spy(**kwargs):
+        seen.update(kwargs)
+        return original(**kwargs)
+
+    adapter._messages_request = _spy  # type: ignore[method-assign]
+
+    async def _fake_events():
+        if False:  # pragma: no cover - empty async generator
+            yield ""
+
+    class _Ctx:
+        async def __aenter__(self):
+            stream = MagicMock()
+            stream.__aiter__ = lambda _self: _fake_events()
+            stream.get_final_message = AsyncMock(
+                return_value=SimpleNamespace(stop_reason="end_turn", usage=None)
+            )
+            return stream
+
+        async def __aexit__(self, *exc):
+            return False
+
+    adapter._client.messages.stream = MagicMock(return_value=_Ctx())
+
+    async for _ in adapter.stream(
+        _SYSTEM, _FULL_USER, _MAX_TOKENS, cache_system=True, cache_user_prefix=_PREFIX
+    ):
+        pass
+
+    assert seen.get("cache_user_prefix") == _PREFIX

@@ -45,6 +45,7 @@ class GoogleAdapter(BaseLLMAdapter):
         max_tokens: int,
         *,
         cache_system: bool = False,  # explicit caching deferred; implicit applies
+        cache_user_prefix: str | None = None,  # explicit caching deferred; no-op
     ) -> AsyncGenerator[str, None]:
         self.last_completion = LLMCompletionInfo.started(
             provider="google",
@@ -75,6 +76,7 @@ class GoogleAdapter(BaseLLMAdapter):
         max_tokens: int,
         *,
         cache_system: bool = False,  # explicit caching deferred; implicit applies
+        cache_user_prefix: str | None = None,  # explicit caching deferred; no-op
     ) -> str:
         self.last_completion = LLMCompletionInfo.started(
             provider="google",

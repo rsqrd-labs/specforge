@@ -38,6 +38,7 @@ class AnthropicAdapter(BaseLLMAdapter):
         max_tokens: int,
         *,
         cache_system: bool = False,
+        cache_user_prefix: str | None = None,
     ) -> AsyncGenerator[str, None]:
         self.last_completion = LLMCompletionInfo.started(
             provider="anthropic",
@@ -51,6 +52,7 @@ class AnthropicAdapter(BaseLLMAdapter):
                     user=user,
                     max_tokens=max_tokens,
                     cache_system=cache_system,
+                    cache_user_prefix=cache_user_prefix,
                 ),
             ) as stream:
                 async for event in stream:
@@ -83,6 +85,7 @@ class AnthropicAdapter(BaseLLMAdapter):
         max_tokens: int,
         *,
         cache_system: bool = False,
+        cache_user_prefix: str | None = None,
     ) -> str:
         self.last_completion = LLMCompletionInfo.started(
             provider="anthropic",
@@ -96,6 +99,7 @@ class AnthropicAdapter(BaseLLMAdapter):
                     user=user,
                     max_tokens=max_tokens,
                     cache_system=cache_system,
+                    cache_user_prefix=cache_user_prefix,
                 ),
             )
             if self.last_completion is not None:
@@ -176,6 +180,7 @@ class AnthropicAdapter(BaseLLMAdapter):
         user: str,
         max_tokens: int,
         cache_system: bool = False,
+        cache_user_prefix: str | None = None,
     ) -> dict:
         # When caching is enabled and requested, wrap the system string as a
         # content block with cache_control so the provider can store and reuse
@@ -197,13 +202,66 @@ class AnthropicAdapter(BaseLLMAdapter):
         request: dict = {
             "model": self.model,
             "system": system_value,
-            "messages": [{"role": "user", "content": user}],
+            "messages": [
+                {
+                    "role": "user",
+                    "content": _user_content(user, cache_user_prefix),
+                }
+            ],
             "max_tokens": max_tokens,
         }
         effort = self._request_policy["reasoning_effort"]
         if effort:
             request["extra_body"] = {"effort": effort}
         return request
+
+
+# Anthropic only creates a cache entry for a block of ≥1024 tokens (Sonnet/Opus)
+# or ≥2048 tokens (Haiku 4.5); below that the cache_control marker is silently
+# ignored.  Marking only prefixes that comfortably clear the largest floor keeps
+# us off that edge entirely (it cannot turn into an API error on a sub-minimum
+# block) and avoids spending a breakpoint on a block that could never cache —
+# notably the *compressed* spec problem statement, which is small and
+# output-bound, so it loses nothing.  ~4 chars/token × 2048 ≈ 8K chars,
+# conservative; the input-heavy stages (plan/harness/tasks embed up to 200K
+# chars of upstream artifacts) clear it by a wide margin.
+_MIN_CACHEABLE_PREFIX_CHARS = 8192
+
+
+def _user_content(user: str, cache_user_prefix: str | None) -> object:
+    """Build the ``user`` message content, caching its stable prefix when asked.
+
+    Issue #39 (Lever A): chunked stage generation re-sends an identical
+    ``base_user_prompt`` (problem statement + up to 200K chars of upstream
+    artifacts) on every chunk and every repair, with only a short per-chunk
+    suffix changing.  Splitting the user message into a stable prefix block
+    (marked ``cache_control: ephemeral``) and a variable suffix block lets
+    Anthropic reuse the cached prefix tokens on chunks 2+/repairs — the dominant
+    per-chunk input cost for plan/harness/tasks.
+
+    The split is purely a transport optimisation: Anthropic concatenates text
+    blocks, so the model sees byte-identical input and the generated artifact is
+    unchanged.  Returns the plain string (the pre-#39 request, the regression
+    pin) whenever caching is off, no prefix was given, the prefix is not a proper
+    prefix of ``user`` with a non-empty suffix (never an empty text block, which
+    the API rejects), or the prefix is too small to be cacheable anyway.
+    """
+    if (
+        not cache_user_prefix
+        or not settings.llm_prompt_cache_enabled
+        or not user.startswith(cache_user_prefix)
+        or len(cache_user_prefix) >= len(user)
+        or len(cache_user_prefix) < _MIN_CACHEABLE_PREFIX_CHARS
+    ):
+        return user
+    return [
+        {
+            "type": "text",
+            "text": cache_user_prefix,
+            "cache_control": {"type": "ephemeral"},
+        },
+        {"type": "text", "text": user[len(cache_user_prefix) :]},
+    ]
 
 
 def _normalize_batch_result(entry) -> BatchResultItem:

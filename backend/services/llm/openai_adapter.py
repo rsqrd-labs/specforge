@@ -33,6 +33,7 @@ class OpenAIAdapter(BaseLLMAdapter):
         max_tokens: int,
         *,
         cache_system: bool = False,  # automatic prefix caching; no explicit opt-in
+        cache_user_prefix: str | None = None,  # OpenAI auto-caches prefixes; no-op
     ) -> AsyncGenerator[str, None]:
         self.last_completion = LLMCompletionInfo.started(
             provider="openai",
@@ -128,6 +129,7 @@ class OpenAIAdapter(BaseLLMAdapter):
         max_tokens: int,
         *,
         cache_system: bool = False,  # automatic prefix caching; no explicit opt-in
+        cache_user_prefix: str | None = None,  # OpenAI auto-caches prefixes; no-op
     ) -> str:
         self.last_completion = LLMCompletionInfo.started(
             provider="openai",

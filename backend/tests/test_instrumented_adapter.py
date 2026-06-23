@@ -46,7 +46,13 @@ class _FakeAdapter(BaseLLMAdapter):
         self.stream_calls: list[tuple[str, str, int]] = []
 
     async def stream(
-        self, system: str, user: str, max_tokens: int, *, cache_system: bool = False
+        self,
+        system: str,
+        user: str,
+        max_tokens: int,
+        *,
+        cache_system: bool = False,
+        cache_user_prefix: str | None = None,
     ):
         self.stream_calls.append((system, user, max_tokens))
         self.last_completion = LLMCompletionInfo.started(
@@ -60,7 +66,13 @@ class _FakeAdapter(BaseLLMAdapter):
             yield token
 
     async def complete(
-        self, system: str, user: str, max_tokens: int, *, cache_system: bool = False
+        self,
+        system: str,
+        user: str,
+        max_tokens: int,
+        *,
+        cache_system: bool = False,
+        cache_user_prefix: str | None = None,
     ) -> str:
         self.complete_calls.append((system, user, max_tokens))
         self.last_completion = LLMCompletionInfo.started(

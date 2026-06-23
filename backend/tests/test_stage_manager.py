@@ -302,7 +302,13 @@ class _CompletionAwareAdapter:
             return (default, False)
 
     async def stream(
-        self, system: str, user: str, max_tokens: int, *, cache_system: bool = False
+        self,
+        system: str,
+        user: str,
+        max_tokens: int,
+        *,
+        cache_system: bool = False,
+        cache_user_prefix: str | None = None,
     ):
         self.stream_calls.append((system, user, max_tokens))
         content, stopped_by_limit = self._next_attempt(None)
@@ -318,7 +324,13 @@ class _CompletionAwareAdapter:
         yield content
 
     async def complete(
-        self, system: str, user: str, max_tokens: int, *, cache_system: bool = False
+        self,
+        system: str,
+        user: str,
+        max_tokens: int,
+        *,
+        cache_system: bool = False,
+        cache_user_prefix: str | None = None,
     ) -> str:
         self.complete_calls.append((system, user, max_tokens))
         content, stopped_by_limit = self._next_attempt(_SAFE_PLAN_FINAL_STREAM)

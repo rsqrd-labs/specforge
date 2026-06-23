@@ -100,12 +100,17 @@ class InstrumentedAdapter(BaseLLMAdapter):
         max_tokens: int,
         *,
         cache_system: bool = False,
+        cache_user_prefix: str | None = None,
     ) -> AsyncGenerator[str, None]:
         accumulated: list[str] = []
         start = time.perf_counter()
         try:
             async for token in self._wrapped.stream(
-                system, user, max_tokens, cache_system=cache_system
+                system,
+                user,
+                max_tokens,
+                cache_system=cache_system,
+                cache_user_prefix=cache_user_prefix,
             ):
                 accumulated.append(token)
                 yield token
@@ -130,6 +135,7 @@ class InstrumentedAdapter(BaseLLMAdapter):
         max_tokens: int,
         *,
         cache_system: bool = False,
+        cache_user_prefix: str | None = None,
     ) -> str:
         start = time.perf_counter()
         response: str = ""
@@ -137,7 +143,11 @@ class InstrumentedAdapter(BaseLLMAdapter):
             # Forward max_tokens as a keyword so the wrapper is transparent to
             # callers/tests that pass (and assert) it by name.
             response = await self._wrapped.complete(
-                system, user, max_tokens=max_tokens, cache_system=cache_system
+                system,
+                user,
+                max_tokens=max_tokens,
+                cache_system=cache_system,
+                cache_user_prefix=cache_user_prefix,
             )
             record_provider_success(self._provider)
             return response

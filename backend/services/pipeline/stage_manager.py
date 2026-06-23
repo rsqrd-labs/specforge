@@ -1638,6 +1638,14 @@ class StageManager:
                 # cacheable lets Anthropic reuse the cached token representation
                 # for chunks 2+ and repair calls (Phase 2 — issue #26).
                 cache_system=True,
+                # Issue #39 (Lever A): the base user prompt — the problem
+                # statement plus up to 200K chars of embedded upstream artifacts
+                # for plan/harness/tasks — is the stable prefix of every chunk's
+                # prompt (`_chunk_user_prompt` appends only the prior chunks and
+                # the per-chunk scope after it).  Caching it as well lets
+                # Anthropic reuse that (often dominant) input on chunks 2+/repairs
+                # instead of re-billing and re-processing it every call.
+                cache_user_prefix=user_prompt,
             ),
             stage_type=stage_type,
             provider=route.provider,

@@ -262,11 +262,25 @@ async def test_instrumented_adapter_records_provider_usage_and_context(
                 },
             )
 
-        async def complete(self, system, user, max_tokens, *, cache_system=False):
+        async def complete(
+            self,
+            system,
+            user,
+            max_tokens,
+            *,
+            cache_system=False,
+            cache_user_prefix=None,
+        ):
             return "ok"
 
         async def stream(  # pragma: no cover
-            self, system, user, max_tokens, *, cache_system=False
+            self,
+            system,
+            user,
+            max_tokens,
+            *,
+            cache_system=False,
+            cache_user_prefix=None,
         ):
             yield "ok"
 
@@ -331,12 +345,26 @@ async def test_instrumented_adapter_stream_records_provider_usage(monkeypatch) -
                 usage={"input_tokens": 1500, "output_tokens": 900},
             )
 
-        async def stream(self, system, user, max_tokens, *, cache_system=False):
+        async def stream(
+            self,
+            system,
+            user,
+            max_tokens,
+            *,
+            cache_system=False,
+            cache_user_prefix=None,
+        ):
             for tok in ("hel", "lo"):
                 yield tok
 
         async def complete(  # pragma: no cover
-            self, system, user, max_tokens, *, cache_system=False
+            self,
+            system,
+            user,
+            max_tokens,
+            *,
+            cache_system=False,
+            cache_user_prefix=None,
         ):
             return "x"
 
