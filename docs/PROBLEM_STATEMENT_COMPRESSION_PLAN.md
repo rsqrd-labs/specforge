@@ -321,6 +321,33 @@ assembled prompt is provably ≤ window; Rung-0 output is byte-identical for und
 input (regression pin).* **This phase already satisfies reliability + cost; it just isn't
 yet "meaning-preserving" for prose.**
 
+> **Phase B — shipped (2026-06-23).** New module
+> `services/pipeline/problem_compressor.py` implements the pure-Python ladder —
+> Rung 0 (no-op, byte-identical), Rung 1 (lossless structural cleanup), Rung 3
+> (deterministic normative-first clamp). Rung 2 is Phase C, so the ladder skips
+> Rung 1 → Rung 3. The public surface is `get_or_compress(raw, budget, redis,
+> provider, model)` (cached, fail-open) over the pure `compress_problem_statement`;
+> `problem_budget(...)` computes `min(C_MAX, WINDOW_FIT_CEILING)`. Wired **lazily
+> behind the default-off `problem_statement_compression` flag** at all three
+> consumers through the one shared helper: `build_prompt` (covering spec **and**
+> plan/harness/tasks, since `problem_statement` is in `deps` for every stage), the
+> clarifier (`spec_clarifier.py` — still runs on short input; only over-budget input
+> condenses), and the storyboard (`storyboard_source.py`, after `_scrub`). `C_MAX`
+> ships as one constant, `problem_statement_budget_tokens = 8000` (config). The
+> cache key is `psc:{COMPRESSION_VERSION}:{budget}:{sha256(raw)}` (7-day TTL; the raw
+> statement is immutable). **Three guarantees are enforced by construction and pinned
+> by tests:** (1) Rung 0 / flag-off output is byte-identical for under-budget input;
+> (2) the ladder always terminates `est_tokens ≤ budget` for any input up to
+> `INPUT_HARD_CAP` (the fail-open path *also* truncates — never raw); (3) Rung 1 never
+> drops a normative line and never touches fenced code/tables. Telemetry:
+> `specforge_problem_compression_rung_total{rung}` (1/3/error; Rung-0 no-ops are not
+> counted). Tests: `tests/test_problem_compressor.py` (unit), the offline golden
+> corpus `docs/evals/golden_prompts/problem_compression_golden.json` consumed by
+> `tests/test_problem_compression_golden.py`, and flag-on/off integration assertions
+> in `tests/test_prompt_builder.py`. The blast-radius surfaces deferred in Phase A
+> (PDF/share export, frontend rendering) are *unchanged* — they still read the raw
+> stored value; feeding them the compressed value is Phase D UI work.
+
 **Phase C — Rung 2 (meaning-preserving abstractive pass).** Reuse `JUDGE_MODELS`, capped
 map-reduce, fail-open to Rung 3, length-gated against the clarifier. Quality gate: a
 **normative-retention eval** — count distinct normative statements (must/shall/numbered
@@ -332,6 +359,16 @@ in `docs/evals/ROUTE_PROMOTION.md`.
 "condensed" notice via `AdvisoryFindingsPanel`. *Exit: large-input workspaces generate
 within the cost ceiling; zero increase in spec quality-gate failures or user-reported
 missing requirements.*
+
+> **Phase-D enable caveat (cache coherence).** The generation cache key in
+> `stage_manager.py` hashes the *raw* `problem_statement`; compression runs *after*
+> that check, inside `build_prompt`. While the flag is stable this is coherent (raw
+> → deterministic compressed → output). But flipping `problem_statement_compression`
+> on/off — or bumping `COMPRESSION_VERSION` — does **not** invalidate
+> previously-cached generations, so a stale (uncompressed-input) output can linger up
+> to the 24h generation-cache TTL. Harmless and self-healing, but the flip should
+> either accept the ≤24h window or be paired with a generation-cache flush. (Phase B
+> deliberately does **not** add the compressed value to the generation cache key.)
 
 ## 9. Success metrics
 

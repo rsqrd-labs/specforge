@@ -343,6 +343,30 @@ async def test_build_scrubs_problem_statement_and_excludes_draft() -> None:
 
 
 @pytest.mark.asyncio
+async def test_build_compresses_long_problem_statement_when_flag_on(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from services.llm.usage import estimate_tokens
+    from services.pipeline import storyboard_source as ss
+
+    db, _stages, _versions = _finalised_fixture()
+    huge = "Background prose with no requirement. " * 5000  # ~25K tokens
+    db._workspace.problem_statement = huge
+    monkeypatch.setattr(ss.settings, "problem_statement_compression", True)
+    monkeypatch.setattr(ss.settings, "problem_statement_budget_tokens", 500)
+    # No live Redis in the unit test — get_or_compress fails open to a fresh,
+    # bounded compute when the cache is unavailable.
+    monkeypatch.setattr(ss, "get_shared_redis", lambda: None)
+
+    pkg = await build_storyboard_source(db, _WORKSPACE_ID, _USER_ID)
+
+    assert huge not in pkg.problem_statement  # condensed, not passed through raw
+    assert (
+        estimate_tokens("anthropic", "claude-sonnet-4-6", pkg.problem_statement) or 0
+    ) <= 500
+
+
+@pytest.mark.asyncio
 async def test_build_is_deterministic() -> None:
     db1, _s1, _v1 = _finalised_fixture()
     pkg1 = await build_storyboard_source(db1, _WORKSPACE_ID, _USER_ID)

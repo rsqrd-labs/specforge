@@ -143,6 +143,45 @@ async def test_request_clarifying_questions_swallows_provider_errors(
 
 
 @pytest.mark.asyncio
+async def test_clarifier_compresses_long_statement_when_flag_on(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from services.llm.usage import estimate_tokens
+
+    huge = "Background prose with no requirement. " * 5000  # ~25K tokens
+    workspace = _workspace(huge)
+
+    captured: dict[str, str] = {}
+
+    async def capturing_complete(system_prompt: str, user_prompt: str, **kwargs):
+        captured["user_prompt"] = user_prompt
+        return json.dumps([{"question": "Who is the primary user?"}])
+
+    fake_adapter = SimpleNamespace(complete=capturing_complete)
+    monkeypatch.setattr(spec_clarifier, "get_llm", lambda *a, **k: fake_adapter)
+    monkeypatch.setattr(spec_clarifier.settings, "problem_statement_compression", True)
+    monkeypatch.setattr(spec_clarifier.settings, "problem_statement_budget_tokens", 500)
+
+    class _Redis:
+        store: dict = {}
+
+        async def get(self, key):
+            return None
+
+        async def set(self, key, value, ex=0):
+            return None
+
+        async def setex(self, key, ttl, value):
+            return None
+
+    await request_clarifying_questions(workspace, _Redis())
+
+    # The judge never sees the raw 25K-token paste; the statement is condensed.
+    assert huge not in captured["user_prompt"]
+    assert (estimate_tokens("anthropic", "x", captured["user_prompt"]) or 0) < 2000
+
+
+@pytest.mark.asyncio
 async def test_request_clarifying_questions_caches_questions(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

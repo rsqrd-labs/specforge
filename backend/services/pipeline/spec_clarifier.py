@@ -49,12 +49,14 @@ from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 import prompts.spec_clarification as clarification_prompt
+from config import settings
 from models.workspace import Workspace
 from services.llm.cost_ledger import LLMCostContext
 from services.llm.gateway import get_llm
 from services.llm.instrumented_adapter import InstrumentedAdapter
 from services.llm.provider_config import JUDGE_MODELS
 from services.observability import record_judge_call
+from services.pipeline.problem_compressor import get_or_compress, problem_budget
 from services.security.prompt_guard import PromptGuard
 from services.security.sanitizer import sanitize_text
 
@@ -145,7 +147,20 @@ async def request_clarifying_questions(
         return []
 
     system_prompt = clarification_prompt.SYSTEM_PROMPT
-    user_prompt = clarification_prompt.build_user_prompt(workspace.problem_statement)
+    # Compression is for *long*, not *vague* (plan §4): the clarifier still runs
+    # on short/rambling input to *add* structure — get_or_compress is a
+    # byte-identical no-op under budget, so only an over-budget statement is
+    # condensed before the judge sees it, keeping this call bounded too.
+    statement = workspace.problem_statement
+    if settings.problem_statement_compression:
+        statement = await get_or_compress(
+            statement,
+            problem_budget(provider, judge_model),
+            redis,
+            provider,
+            judge_model,
+        )
+    user_prompt = clarification_prompt.build_user_prompt(statement)
 
     try:
         adapter = InstrumentedAdapter(

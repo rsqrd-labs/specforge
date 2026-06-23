@@ -237,6 +237,30 @@ class Settings(BaseSettings):
     # (`docs/evals/ROUTE_PROMOTION.md`). Flag OFF ⇒ the loop is byte-identical.
     pipeline_early_bail_unrecoverable_chunk: bool = False
 
+    # Problem-statement compression (docs/PROBLEM_STATEMENT_COMPRESSION_PLAN.md,
+    # Phase B). When True, an over-budget problem statement is reduced to at most
+    # `problem_statement_budget_tokens` (C_MAX) before any model sees it, via the
+    # zero-LLM ladder in `services/pipeline/problem_compressor.py` (Rung 0 no-op →
+    # Rung 1 lossless structural cleanup → Rung 3 deterministic normative-first
+    # clamp). It is the *other half* of the raised input cap (Phase A): input is
+    # accepted big and fed small, so per-call cost/latency stay bounded regardless
+    # of input size, and no call can blow the model window. Default **False** — the
+    # under-threshold common case is a byte-identical no-op, so flipping it changes
+    # nothing for the vast majority of inputs; it ships off so the Rung-0 regression
+    # pin and the golden corpus gate the rollout. The Rung-2 abstractive
+    # (meaning-preserving) pass is Phase C and is not wired here.
+    problem_statement_compression: bool = False
+
+    # C_MAX — the product token budget compression targets and triggers on
+    # (THRESHOLD ≈ C_MAX). A *chosen* small constant set far below the model window
+    # (200K–1M tokens): the win is sending less, not fitting the window. Pre-Phase-A
+    # inputs (≤10K chars ≈ 2.5K tokens) sit below this and never compress; only the
+    # new large pastes (up to the 50K-char `PROBLEM_STATEMENT_MAX_CHARS`) trip it.
+    # One constant across providers keeps the cache key and golden corpus
+    # deterministic (plan §10). The effective budget is `min(this, WINDOW_FIT_CEILING)`
+    # so it can never exceed what the window physically allows.
+    problem_statement_budget_tokens: int = 8000
+
     # Increment generation (Phase 21 — T-279). The MVP ships the *additive* path
     # only: an increment appends new tasks with their existing content pinned by
     # stable, content-derived task_refs. Behaviour-changing increments (compute

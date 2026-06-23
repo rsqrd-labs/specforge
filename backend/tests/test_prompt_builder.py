@@ -83,6 +83,49 @@ async def test_build_prompt_spec_contains_problem_statement() -> None:
 
 
 @pytest.mark.asyncio
+async def test_build_prompt_compression_flag_off_is_byte_identical(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Flag off (the default) and a huge statement: the prompt must embed the raw
+    # statement verbatim — the Rung-0 / flag-off regression pin.
+    huge = "Background prose. " * 5000  # ~25K tokens, far over any budget
+    workspace = _make_workspace(huge)
+    monkeypatch.setattr(prompt_builder.settings, "problem_statement_compression", False)
+    _, off = await build_prompt("spec", workspace, _FakeDB(), _FakeRedis())
+    assert huge in off
+
+
+@pytest.mark.asyncio
+async def test_build_prompt_compression_flag_on_under_budget_is_noop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    small = "Build a todo app for teams. Users must authenticate to save tasks."
+    workspace = _make_workspace(small)
+    monkeypatch.setattr(prompt_builder.settings, "problem_statement_compression", True)
+    _, on = await build_prompt("spec", workspace, _FakeDB(), _FakeRedis())
+    assert small in on  # under budget ⇒ byte-identical even with the flag on
+
+
+@pytest.mark.asyncio
+async def test_build_prompt_compression_flag_on_bounds_large_input(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from services.llm.usage import estimate_tokens
+
+    huge = "Background prose with no requirement. " * 5000
+    workspace = _make_workspace(huge)
+    monkeypatch.setattr(prompt_builder.settings, "problem_statement_compression", True)
+    monkeypatch.setattr(
+        prompt_builder.settings, "problem_statement_budget_tokens", 2000
+    )
+    _, on = await build_prompt("spec", workspace, _FakeDB(), _FakeRedis())
+    assert huge not in on  # the raw statement was condensed
+    # The whole assembled prompt now fits well under the window; the statement
+    # portion is bounded by C_MAX.
+    assert (estimate_tokens("anthropic", "claude-sonnet-4-6", on) or 0) < 8000
+
+
+@pytest.mark.asyncio
 async def test_build_prompt_plan_contains_spec_content() -> None:
     workspace = _make_workspace()
     spec_stage = Stage(

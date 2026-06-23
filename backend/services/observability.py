@@ -295,6 +295,35 @@ def record_assembled_prompt_tokens(
         ).observe(tokens)
 
 
+# Problem-statement compression ladder telemetry (compression plan Phase B).
+# A counter labelled by the rung that actually fired makes the rollout legible:
+# how often the lossless Rung 1 alone returns under budget vs. how often the
+# deterministic Rung 3 floor is reached vs. how often the outer fail-open
+# bounded-truncate backstop catches a compressor error. Rung 0 (the common
+# under-budget no-op) is deliberately *not* counted — it returns before the
+# ladder engages, so counting it would swamp the signal with the common case.
+# `rung` is a bounded enum normalised through the helper below.
+PROBLEM_COMPRESSION_RUNGS = Counter(
+    "specforge_problem_compression_rung_total",
+    "Count of problem-statement compressions by the ladder rung that produced "
+    "the result (1=lossless structural cleanup, 3=deterministic clamp, "
+    "error=fail-open bounded truncate). Rung 0 no-ops are not counted.",
+    labelnames=["rung"],
+)
+
+_COMPRESSION_RUNG_LABELS = frozenset({"1", "3", "error"})
+
+
+def record_problem_compression(rung: str) -> None:
+    """Observe which compression rung produced a result.
+
+    No-op for the Rung-0 fast path (the caller never calls this for it). An
+    unexpected label collapses to ``"error"`` so Prometheus cardinality is fixed.
+    """
+    label = rung if rung in _COMPRESSION_RUNG_LABELS else "error"
+    PROBLEM_COMPRESSION_RUNGS.labels(rung=label).inc()
+
+
 # PDF export duration histogram — WeasyPrint is CPU-bound and blocks the
 # thread-pool executor thread for 0.5–3 s per render. Observing duration
 # makes event-loop-blocking outliers (C-4) visible.

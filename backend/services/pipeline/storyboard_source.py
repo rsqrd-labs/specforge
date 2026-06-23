@@ -37,12 +37,15 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from config import settings
+from database import get_shared_redis
 from models import Stage, StageVersion, Workspace
 from schemas.stage import StageType
 from services.observability import (
     record_storyboard_source_missing,
     redact_sensitive_data,
 )
+from services.pipeline.problem_compressor import get_or_compress, problem_budget
 
 # Hard cap on every excerpt fed to the prompt. Keeps the prompt bounded and
 # prevents a single huge section from dominating the source map.
@@ -420,10 +423,23 @@ async def build_storyboard_source(
     for item in missing:
         record_storyboard_source_missing(item.stage, item.source_id)
 
+    # Compress *after* scrubbing (compression runs after the sanitiser, plan §4),
+    # behind the same default-off flag, so a 50K-char statement does not blow the
+    # storyboard prompt. Under-budget input is a byte-identical no-op.
+    problem_statement = _scrub(workspace.problem_statement or "")
+    if settings.problem_statement_compression:
+        problem_statement = await get_or_compress(
+            problem_statement,
+            problem_budget(workspace.provider, workspace.model),
+            get_shared_redis(),
+            workspace.provider,
+            workspace.model,
+        )
+
     return StoryboardSourcePackage(
         workspace_id=workspace.id,
         workspace_name=workspace.name,
-        problem_statement=_scrub(workspace.problem_statement or ""),
+        problem_statement=problem_statement,
         provider=workspace.provider,
         model=workspace.model,
         stage_versions=stage_versions,

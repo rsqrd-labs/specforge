@@ -12,9 +12,11 @@ import prompts.harness as harness_prompts
 import prompts.plan as plan_prompts
 import prompts.spec as spec_prompts
 import prompts.tasks as tasks_prompts
+from config import settings
 from database import get_shared_redis
 from models import Stage, Workspace
 from services.observability import PIPELINE_UPSTREAM_SECTION_SKIPPED
+from services.pipeline.problem_compressor import get_or_compress, problem_budget
 from services.pipeline.stage_summary_service import summarize_stage_content
 
 logger = logging.getLogger(__name__)
@@ -155,6 +157,31 @@ async def build_prompt(
                 )
                 content = _section_aware_injection(dep_type, content)
             deps[dep_type] = content
+
+    # Problem-statement compression (compression plan Phase B), applied lazily
+    # here — beside _section_aware_injection, the existing upstream reducer — so
+    # the cached compressed value is computed once and reused across stages and
+    # surfaces. Default-off behind `problem_statement_compression`; when off this
+    # is a no-op and the prompt is byte-identical (the Rung-0 regression pin).
+    # Under-budget input is also a byte-identical no-op even when the flag is on,
+    # so the common case never changes. The statement is in `deps` for *every*
+    # stage, so every stage's prompt is bounded by C_MAX, not just spec.
+    if settings.problem_statement_compression:
+        redis = redis_client or get_shared_redis()
+        budget = problem_budget(
+            workspace.provider,
+            workspace.model,
+            research_context=research_context,
+            clarification_qa=deps.get("clarification_qa", ""),
+            stage_type=stage_type,
+        )
+        deps["problem_statement"] = await get_or_compress(
+            workspace.problem_statement,
+            budget,
+            redis,
+            workspace.provider,
+            workspace.model,
+        )
 
     return await module.get_system_prompt(), module.build_user_prompt(deps)
 

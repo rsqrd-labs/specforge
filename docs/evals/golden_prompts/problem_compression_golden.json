@@ -1,0 +1,52 @@
+{
+  "description": "Offline golden corpus for the zero-LLM problem-statement compression ladder (Phase B). Consumed by backend/tests/test_problem_compression_golden.py. Each case fixes the budget and asserts ladder properties: termination (output <= budget tokens), the Rung-0 byte-identical pin, lossless Rung-1 cleanup, and normative-first retention under the Rung-3 clamp. Token sizing reuses services.llm.usage.estimate_tokens (utf-8-byte basis). The builder assembles a statement from optional fields joined by a blank line, in this order: problem_statement_prefix, the fr_unit repeated fr_count times (one normative block), narrative_filler repeated narrative_repeat times (one narrative block), problem_statement_suffix. A literal 'problem_statement' overrides the builder.",
+  "cases": [
+    {
+      "id": "under_budget_noop",
+      "budget_tokens": 8000,
+      "expected_rung": "0",
+      "byte_identical": true,
+      "problem_statement": "Build a team task tracker where users create projects, assign tasks, set due dates, comment, and see project status. FR-001: users must authenticate. FR-002: managers must approve task closure.",
+      "must_retain_ids": ["FR-001", "FR-002"]
+    },
+    {
+      "id": "rung1_whitespace_and_footer_noise",
+      "budget_tokens": 40,
+      "expected_rung": "1",
+      "problem_statement": "Build a CRM.\n\n\n\nThe   sales    team    needs    to    track    leads.\n\nPage 1 of 12\n\nThe   sales    team    needs    to    track    leads.\n\nSent from my iPhone\n\nFR-010: the system must record every lead source.",
+      "must_retain_ids": ["FR-010"],
+      "must_drop_substrings": ["Page 1 of 12", "Sent from my iPhone"],
+      "must_not_contain": ["track    leads"]
+    },
+    {
+      "id": "rung3_normative_heavy_retains_all_fr",
+      "budget_tokens": 400,
+      "expected_rung": "3",
+      "problem_statement_prefix": "Build a regulated healthcare scheduling platform. The following requirements are normative.",
+      "fr_unit": "- FR-{n:03d}: the system must enforce requirement {n} for patient records.\n",
+      "fr_count": 10,
+      "narrative_filler": "This is purely background narrative prose describing the history and motivation of the project, repeated to inflate the input past the budget. ",
+      "narrative_repeat": 300,
+      "retain_all_fr": true
+    },
+    {
+      "id": "rung3_narrative_dropped_normative_first",
+      "budget_tokens": 300,
+      "expected_rung": "3",
+      "problem_statement_prefix": "We have spent years thinking about this product and its market.",
+      "narrative_filler": "Background context and rationale that carries no requirement and may be dropped. ",
+      "narrative_repeat": 400,
+      "problem_statement_suffix": "- FR-900: the export endpoint must stream as NDJSON.\n- FR-901: every mutation must be audit-logged.",
+      "must_retain_ids": ["FR-900", "FR-901"]
+    },
+    {
+      "id": "rung3_oversized_normative_truncates_in_order",
+      "budget_tokens": 200,
+      "expected_rung": "3",
+      "fr_unit": "- SEC-{n:03d}: the platform shall mitigate threat {n} with a documented control and review cadence.\n",
+      "fr_count": 80,
+      "must_retain_ids": ["SEC-001"],
+      "must_not_contain": ["SEC-080"]
+    }
+  ]
+}
