@@ -1,0 +1,29 @@
+{
+  "description": "Offline corpus for the Phase-C abstractive pass (Rung 2). Narrative-dominant problem statements that carry normative requirement IDs, so the abstractive map-reduce is actually exercised (every Phase-B golden case is normative-heavy and never reaches the model). Consumed by scripts/run_problem_compression_eval.py. The dry-run proves the structural promotion invariant with no API calls: Rung 2 keeps normative blocks VERBATIM and FIRST and condenses only narrative, so normative retention is 100% by construction. The --live mode additionally runs the real judge map-reduce and reports the measured normative-retention ratio plus an optional semantic-equivalence judge score on the narrative. Statements are assembled from optional fields joined by blank lines, in order: problem_statement_prefix, fr_unit repeated fr_count times (the normative block), narrative_filler repeated narrative_repeat times (the narrative block to abstract), problem_statement_suffix. A literal 'problem_statement' overrides the builder.",
+  "cases": [
+    {
+      "id": "narrative_dominant_fr_prefix",
+      "budget_tokens": 600,
+      "fr_unit": "- FR-{n:03d}: the system must enforce control {n} on every request.\n",
+      "fr_count": 8,
+      "narrative_filler": "The team has spent considerable effort understanding the market, the competitive landscape, the regulatory backdrop, and the history of prior attempts at this product, all of which inform the rationale here. ",
+      "narrative_repeat": 120
+    },
+    {
+      "id": "narrative_dominant_fr_suffix",
+      "budget_tokens": 500,
+      "problem_statement_prefix": "We are building an internal analytics platform and have thought about it for a long time.",
+      "narrative_filler": "Background and rationale prose that carries no requirement and exists to motivate the work, describing stakeholders, goals, and non-goals at length without ever stating a hard constraint. ",
+      "narrative_repeat": 150,
+      "fr_unit": "- NFR-{n:03d}: p95 latency for surface {n} shall stay under 200ms.\n",
+      "fr_count": 6
+    },
+    {
+      "id": "narrative_dominant_mixed_ids",
+      "budget_tokens": 700,
+      "problem_statement_prefix": "A regulated payments product. The following are normative and must not be paraphrased:\n- FR-001: every transfer must be double-entry booked.\n- SEC-001: all PII must be encrypted at rest.\n- NFR-001: the ledger must reconcile within 60 seconds.",
+      "narrative_filler": "Extensive narrative describing the company history, the founders' motivation, the partnerships pursued, the markets considered, and the long-term vision, none of which is a requirement and all of which may be condensed for the model. ",
+      "narrative_repeat": 140
+    }
+  ]
+}

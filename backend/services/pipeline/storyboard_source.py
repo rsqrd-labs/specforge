@@ -41,6 +41,7 @@ from config import settings
 from database import get_shared_redis
 from models import Stage, StageVersion, Workspace
 from schemas.stage import StageType
+from services.llm.cost_ledger import LLMCostContext
 from services.observability import (
     record_storyboard_source_missing,
     redact_sensitive_data,
@@ -434,6 +435,10 @@ async def build_storyboard_source(
             get_shared_redis(),
             workspace.provider,
             workspace.model,
+            cost_context=LLMCostContext(
+                workspace_id=workspace.id,
+                product_surface="storyboard",
+            ),
         )
 
     return StoryboardSourcePackage(

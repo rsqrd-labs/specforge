@@ -261,6 +261,25 @@ class Settings(BaseSettings):
     # so it can never exceed what the window physically allows.
     problem_statement_budget_tokens: int = 8000
 
+    # Rung 2 — the meaning-preserving *abstractive* pass (Phase C). This is a
+    # **sub-gate** of `problem_statement_compression`: it has no effect unless the
+    # master flag is also on. When both are on, an over-budget statement that the
+    # deterministic ladder would otherwise hand to the Rung-3 clamp is instead
+    # routed through a capped map-reduce over the cheap judge model that keeps
+    # normative content (requirement IDs, must/shall, lists, tables) verbatim and
+    # condenses only the narrative prose, falling open to the Rung-3 floor on any
+    # judge error/timeout or when there is no narrative room. Default **False**:
+    # like `core_complexity_routing`, the paid LLM layer ships off and is promoted
+    # only after the normative-retention + semantic-equivalence gate
+    # (docs/evals/PROBLEM_COMPRESSION_PROMOTION.md). Phase B's zero-cost
+    # reliability never depends on this flag.
+    problem_statement_abstractive: bool = False
+
+    # Overall wall-clock budget for the Rung-2 abstractive pass (all map + reduce
+    # judge calls combined). On expiry the pass fails open to the Rung-3 floor, so
+    # this caps the added latency, not correctness (plan §9 target: < 3s p95).
+    problem_statement_abstractive_timeout_seconds: float = 8.0
+
     # Increment generation (Phase 21 — T-279). The MVP ships the *additive* path
     # only: an increment appends new tasks with their existing content pinned by
     # stable, content-derived task_refs. Behaviour-changing increments (compute

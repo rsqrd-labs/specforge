@@ -355,6 +355,41 @@ items, FR/NFR/SEC IDs) before vs. after, and an LLM-judge semantic-equivalence s
 the narrative — promote only at ~zero loss of normative content, mirroring the live gate
 in `docs/evals/ROUTE_PROMOTION.md`.
 
+> **Phase C — shipped (2026-06-23).** Rung 2 lives in `problem_compressor.py` behind a
+> **second** default-off flag, `problem_statement_abstractive` — a *sub-gate* of the
+> Phase-B master `problem_statement_compression` (no effect unless the master is also on).
+> This deliberately splits the plan's singular "flip the flag" into two: the master
+> delivers Phase-B's zero-cost reliability; the sub-gate enables the *paid, lossy* LLM
+> pass, promoted independently via the gate below — mirroring the
+> `core_cheap_primary`/`core_complexity_routing` two-flag precedent (a paid adaptive layer
+> must not be force-enabled by a reliability toggle). The pure ladder
+> (`compress_problem_statement`) is **unchanged** and stays the deterministic source of
+> truth + Rung-3 floor; the new async `_compress` orchestrator runs the pure ladder first
+> and only attempts Rung 2 when it would otherwise reach Rung 3 *and* the sub-gate is on,
+> falling back to the already-computed floor if it declines. **Design:** partition the
+> cleaned doc into normative vs. narrative blocks (the Phase-B `_split_blocks` /
+> `_is_normative_block`); keep normative **verbatim and first** (so it is never sent to
+> the model and **normative retention is 100% by construction**); condense only narrative
+> via a capped map-reduce over `call_judge_model` (cheap `JUDGE_MODELS[provider]`, prompt
+> held in code like the critic, content wrapped via `wrap_untrusted_content`); assemble
+> `[normative]+[summary]` and hard-truncate (only the narrative tail can be trimmed). The
+> map fans out in parallel (`asyncio.gather`) with a single reduce pass only if needed
+> (≤ `N_CHUNKS+1` calls), all under an overall `asyncio.timeout`
+> (`problem_statement_abstractive_timeout_seconds`, default 8s). **Fail-open** to Rung 3
+> on no narrative, no leftover budget, over-cap narrative, or any judge error/timeout —
+> Rung 2 never raises, and `get_or_compress`'s outer fallback was upgraded from a *prefix*
+> truncate of the raw input to a `_rung3_clamp` so a fail-open path can never drop trailing
+> requirements. Cost is attributed (`product_surface` per consumer) and amortised by the
+> Redis cache, whose key now carries the mode (`a1`/`a0`) so flipping the sub-gate never
+> cross-serves a deterministic vs. abstractive value; a *degraded* result (abstractive
+> requested, fell to the floor) is cached only 5 min so a transient judge outage
+> self-heals. Telemetry: `specforge_problem_compression_rung_total{rung="2"}`. Gate &
+> tests: the deterministic normative-retention invariant is the automated CI gate
+> (`scripts/run_problem_compression_eval.py` dry-run over
+> `golden_prompts/problem_compression_rung2_golden.json`, pinned by
+> `tests/test_problem_compressor.py`); the narrative semantic-equivalence judge score is
+> the manual `--live` step. Full procedure in `docs/evals/PROBLEM_COMPRESSION_PROMOTION.md`.
+
 **Phase D — Enable + UI surfacing.** Flip the flag after the gate; ship the advisory
 "condensed" notice via `AdvisoryFindingsPanel`. *Exit: large-input workspaces generate
 within the cost ceiling; zero increase in spec quality-gate failures or user-reported

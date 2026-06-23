@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from services.llm.usage import estimate_tokens
@@ -11,6 +13,7 @@ from services.pipeline.problem_compressor import (
     _truncate_to_tokens,
     compress_problem_statement,
     get_or_compress,
+    normative_retention,
     problem_budget,
 )
 
@@ -287,3 +290,317 @@ async def test_get_or_compress_fails_open_bounded_on_compressor_error(
 @pytest.mark.asyncio
 async def test_get_or_compress_none_input() -> None:
     assert await get_or_compress("", 100, _FakeRedis(), PROVIDER, MODEL) == ""
+
+
+# --------------------------------------------------------------------------- #
+# Rung 2 — meaning-preserving abstractive pass (Phase C)
+# --------------------------------------------------------------------------- #
+
+
+class _FakeJudge:
+    """Stub for ``pc.call_judge_model`` — records calls, returns a canned summary.
+
+    The whole point of Rung 2's tests: drive the LLM path *deterministically* so
+    we assert the structural contract (normative kept verbatim, budget honoured,
+    fail-open) without a live, flaky judge model.
+    """
+
+    def __init__(
+        self, summary: str = "Condensed narrative.", *, sleep: float = 0.0, error=None
+    ) -> None:
+        self.summary = summary
+        self.sleep = sleep
+        self.error = error
+        self.calls: list[str] = []
+
+    async def __call__(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        provider=None,
+        max_tokens: int = 2048,
+        operation: str = "judge.call",
+        stage_type: str = "-",
+        cost_context=None,
+    ) -> str:
+        self.calls.append(operation)
+        if self.sleep:
+            await asyncio.sleep(self.sleep)
+        if self.error is not None:
+            raise self.error
+        return self.summary
+
+
+def _enable_abstractive(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(pc.settings, "problem_statement_compression", True)
+    monkeypatch.setattr(pc.settings, "problem_statement_abstractive", True)
+
+
+# A small verbatim normative block + a large narrative block. The narrative
+# dominates so Rung 2 is actually exercised (every Phase-B golden case is
+# normative-heavy ⇒ no narrative room ⇒ the floor, never the model).
+_NORMS = "\n".join(f"- FR-{n:03d}: the system must do thing {n}." for n in range(1, 6))
+_NARRATIVE = "Background prose with rationale, history, and market context. " * 200
+_MIXED = f"{_NORMS}\n\n{_NARRATIVE}"
+
+
+@pytest.mark.asyncio
+async def test_rung2_flag_off_never_calls_judge(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(pc.settings, "problem_statement_compression", True)
+    monkeypatch.setattr(pc.settings, "problem_statement_abstractive", False)
+    judge = _FakeJudge(error=AssertionError("judge must not be called when flag off"))
+    monkeypatch.setattr(pc, "call_judge_model", judge)
+    out = await get_or_compress(_MIXED, 400, _FakeRedis(), PROVIDER, MODEL)
+    assert judge.calls == []  # deterministic floor only
+    assert _tok(out) <= 400
+
+
+@pytest.mark.asyncio
+async def test_rung2_compresses_narrative_keeps_normative_verbatim(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _enable_abstractive(monkeypatch)
+    judge = _FakeJudge("CONDENSED SUMMARY OF BACKGROUND.")
+    monkeypatch.setattr(pc, "call_judge_model", judge)
+
+    text, rung = await pc._compress(_MIXED, 400, PROVIDER, MODEL, None)
+
+    assert rung == "2"
+    assert judge.calls == ["problem_compression.map"]  # one chunk ⇒ one call
+    assert _tok(text) <= 400
+    for n in range(1, 6):  # every requirement kept verbatim
+        assert f"FR-{n:03d}" in text
+    assert "CONDENSED SUMMARY OF BACKGROUND." in text
+    assert "Background prose with rationale" not in text  # narrative was condensed
+
+
+@pytest.mark.asyncio
+async def test_rung2_normative_retention_is_total(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _enable_abstractive(monkeypatch)
+    monkeypatch.setattr(pc, "call_judge_model", _FakeJudge())
+    out = await get_or_compress(_MIXED, 400, _FakeRedis(), PROVIDER, MODEL)
+    retained, total = normative_retention(_MIXED, out)
+    assert total == 5
+    assert retained == total  # ~100% — the promotion-gate invariant, by construction
+
+
+@pytest.mark.asyncio
+async def test_rung2_fails_open_to_rung3_on_judge_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _enable_abstractive(monkeypatch)
+    judge = _FakeJudge(error=RuntimeError("provider 500"))
+    monkeypatch.setattr(pc, "call_judge_model", judge)
+
+    text, rung = await pc._compress(_MIXED, 400, PROVIDER, MODEL, None)
+
+    assert rung == "3"  # fell open to the deterministic floor
+    assert _tok(text) <= 400
+    for n in range(1, 6):  # the floor is normative-first ⇒ requirements survive
+        assert f"FR-{n:03d}" in text
+
+
+@pytest.mark.asyncio
+async def test_rung2_fails_open_to_rung3_on_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _enable_abstractive(monkeypatch)
+    monkeypatch.setattr(
+        pc.settings, "problem_statement_abstractive_timeout_seconds", 0.05
+    )
+    monkeypatch.setattr(pc, "call_judge_model", _FakeJudge(sleep=5.0))
+
+    text, rung = await pc._compress(_MIXED, 400, PROVIDER, MODEL, None)
+
+    assert rung == "3"
+    assert _tok(text) <= 400
+
+
+@pytest.mark.asyncio
+async def test_rung2_all_normative_returns_floor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _enable_abstractive(monkeypatch)
+    judge = _FakeJudge(error=AssertionError("no narrative ⇒ judge must not be called"))
+    monkeypatch.setattr(pc, "call_judge_model", judge)
+    norms = "\n".join(
+        f"- SEC-{n:03d}: the platform shall mitigate {n}." for n in range(1, 81)
+    )
+
+    text, rung = await pc._compress(norms, 150, PROVIDER, MODEL, None)
+
+    assert rung == "3"  # no narrative to abstract ⇒ deterministic clamp
+    assert judge.calls == []
+    assert _tok(text) <= 150
+    assert "SEC-001" in text
+
+
+@pytest.mark.asyncio
+async def test_rung2_over_chunk_cap_falls_to_rung3(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _enable_abstractive(monkeypatch)
+    monkeypatch.setattr(pc, "_RUNG2_MAX_CHUNKS", 1)  # narrative needs >1 chunk
+    judge = _FakeJudge(error=AssertionError("over cap ⇒ judge must not be called"))
+    monkeypatch.setattr(pc, "call_judge_model", judge)
+    big_narrative = "word " * 6000  # ~30K chars ⇒ 2 chunks at the 4000-token window
+
+    text, rung = await pc._compress(big_narrative, 1000, PROVIDER, MODEL, None)
+
+    assert rung == "3"  # over the compressor's own input cap ⇒ floor (bounded cost)
+    assert judge.calls == []
+    assert _tok(text) <= 1000
+
+
+@pytest.mark.asyncio
+async def test_rung2_multichunk_runs_reduce_pass(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _enable_abstractive(monkeypatch)
+    monkeypatch.setattr(pc, "_RUNG2_CHUNK_TOKENS", 200)  # ~800-char chunks
+    # Each map summary is large enough that the concatenation overflows the
+    # narrative budget, forcing exactly one reduce pass.
+    monkeypatch.setattr(pc, "call_judge_model", judge := _FakeJudge("filler " * 60))
+    # Newlines so the chunk splitter snaps to a boundary rather than mid-window.
+    narrative = "alpha beta gamma delta epsilon zeta.\n" * 120  # several chunks
+
+    text, rung = await pc._compress(narrative, 300, PROVIDER, MODEL, None)
+
+    assert rung == "2"
+    assert judge.calls.count("problem_compression.map") >= 2  # mapped each chunk
+    assert judge.calls.count("problem_compression.reduce") == 1  # one bounded reduce
+    assert _tok(text) <= 300
+
+
+@pytest.mark.asyncio
+async def test_rung2_multichunk_skips_reduce_when_combined_fits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _enable_abstractive(monkeypatch)
+    monkeypatch.setattr(pc, "_RUNG2_CHUNK_TOKENS", 200)  # force multiple chunks
+    monkeypatch.setattr(pc, "call_judge_model", judge := _FakeJudge("tiny."))
+    narrative = "alpha beta gamma delta epsilon zeta.\n" * 120
+
+    text, rung = await pc._compress(narrative, 600, PROVIDER, MODEL, None)
+
+    assert rung == "2"
+    assert judge.calls.count("problem_compression.map") >= 2
+    assert judge.calls.count("problem_compression.reduce") == 0  # combined already fit
+    assert _tok(text) <= 600
+
+
+@pytest.mark.asyncio
+async def test_rung2_no_narrative_room_falls_to_rung3(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Normative (nearly) fills the whole budget ⇒ no room for a useful summary ⇒
+    # the deterministic floor is the better tool, judge is never called.
+    _enable_abstractive(monkeypatch)
+    judge = _FakeJudge(error=AssertionError("no narrative room ⇒ judge must not run"))
+    monkeypatch.setattr(pc, "call_judge_model", judge)
+    norms = "\n".join(
+        f"- FR-{n:03d}: the system must do thing {n}." for n in range(1, 60)
+    )
+    raw = f"{norms}\n\nSome trailing narrative prose that cannot fit."
+
+    text, rung = await pc._compress(raw, 120, PROVIDER, MODEL, None)
+
+    assert rung == "3"
+    assert judge.calls == []
+    assert _tok(text) <= 120
+
+
+@pytest.mark.asyncio
+async def test_rung2_empty_judge_output_falls_to_rung3(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _enable_abstractive(monkeypatch)
+    monkeypatch.setattr(pc, "call_judge_model", _FakeJudge("   "))  # blank summary
+
+    text, rung = await pc._compress(_MIXED, 400, PROVIDER, MODEL, None)
+
+    assert rung == "3"  # empty/garbled judge output ⇒ floor
+    assert _tok(text) <= 400
+    for n in range(1, 6):
+        assert f"FR-{n:03d}" in text
+
+
+@pytest.mark.asyncio
+async def test_rung2_multichunk_judge_error_falls_open_to_rung3(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A chunk error must fall the whole pass open to the floor, not surface — the
+    # parallel-map branch re-raises so siblings don't run detached.
+    _enable_abstractive(monkeypatch)
+    monkeypatch.setattr(pc, "_RUNG2_CHUNK_TOKENS", 200)  # force multiple chunks
+    monkeypatch.setattr(pc, "call_judge_model", _FakeJudge(error=RuntimeError("503")))
+    narrative = "alpha beta gamma delta epsilon zeta. " * 120
+
+    text, rung = await pc._compress(narrative, 300, PROVIDER, MODEL, None)
+
+    assert rung == "3"
+    assert _tok(text) <= 300
+
+
+@pytest.mark.asyncio
+async def test_cache_key_separates_abstractive_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(pc.settings, "problem_statement_compression", True)
+    redis = _FakeRedis()
+
+    # Flag off: deterministic floor cached under the "a0" mode key.
+    monkeypatch.setattr(pc.settings, "problem_statement_abstractive", False)
+    off = await get_or_compress(_MIXED, 400, redis, PROVIDER, MODEL)
+
+    # Flip on with a working judge: must NOT serve the a0-cached floor; recompute.
+    monkeypatch.setattr(pc.settings, "problem_statement_abstractive", True)
+    monkeypatch.setattr(pc, "call_judge_model", _FakeJudge("ABSTRACTIVE."))
+    on = await get_or_compress(_MIXED, 400, redis, PROVIDER, MODEL)
+
+    assert "ABSTRACTIVE." in on
+    assert on != off  # the two modes are isolated in the cache
+    assert len([k for k in redis.store if ":a0:" in k]) == 1
+    assert len([k for k in redis.store if ":a1:" in k]) == 1
+
+
+@pytest.mark.asyncio
+async def test_rung2_degraded_result_cached_with_short_ttl(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _enable_abstractive(monkeypatch)
+    monkeypatch.setattr(pc, "call_judge_model", _FakeJudge(error=RuntimeError("down")))
+    redis = _CapturingRedis()
+
+    await get_or_compress(_MIXED, 400, redis, PROVIDER, MODEL)
+
+    # Fell open to the floor ⇒ cached briefly so a transient outage self-heals.
+    assert redis.last_ex == pc._CACHE_TTL_DEGRADED_SECONDS
+
+
+@pytest.mark.asyncio
+async def test_non_degraded_result_cached_with_full_ttl(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _enable_abstractive(monkeypatch)
+    monkeypatch.setattr(pc, "call_judge_model", _FakeJudge("OK."))
+    redis = _CapturingRedis()
+
+    await get_or_compress(_MIXED, 400, redis, PROVIDER, MODEL)
+
+    assert redis.last_ex == pc._CACHE_TTL_SECONDS
+
+
+class _CapturingRedis(_FakeRedis):
+    def __init__(self) -> None:
+        super().__init__()
+        self.last_ex: int | None = None
+
+    async def set(self, key: str, value: str, ex: int = 0) -> None:
+        self.last_ex = ex
+        await super().set(key, value, ex=ex)

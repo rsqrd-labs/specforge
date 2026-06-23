@@ -159,6 +159,10 @@ async def request_clarifying_questions(
             redis,
             provider,
             judge_model,
+            cost_context=LLMCostContext(
+                workspace_id=workspace.id,
+                product_surface="clarifier",
+            ),
         )
     user_prompt = clarification_prompt.build_user_prompt(statement)
 

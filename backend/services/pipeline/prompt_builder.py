@@ -15,6 +15,7 @@ import prompts.tasks as tasks_prompts
 from config import settings
 from database import get_shared_redis
 from models import Stage, Workspace
+from services.llm.cost_ledger import LLMCostContext
 from services.observability import PIPELINE_UPSTREAM_SECTION_SKIPPED
 from services.pipeline.problem_compressor import get_or_compress, problem_budget
 from services.pipeline.stage_summary_service import summarize_stage_content
@@ -181,6 +182,10 @@ async def build_prompt(
             redis,
             workspace.provider,
             workspace.model,
+            cost_context=LLMCostContext(
+                workspace_id=workspace.id,
+                product_surface="problem_compression",
+            ),
         )
 
     return await module.get_system_prompt(), module.build_user_prompt(deps)

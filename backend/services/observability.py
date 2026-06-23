@@ -306,12 +306,13 @@ def record_assembled_prompt_tokens(
 PROBLEM_COMPRESSION_RUNGS = Counter(
     "specforge_problem_compression_rung_total",
     "Count of problem-statement compressions by the ladder rung that produced "
-    "the result (1=lossless structural cleanup, 3=deterministic clamp, "
-    "error=fail-open bounded truncate). Rung 0 no-ops are not counted.",
+    "the result (1=lossless structural cleanup, 2=abstractive map-reduce, "
+    "3=deterministic clamp, error=fail-open bounded truncate). Rung 0 no-ops "
+    "are not counted.",
     labelnames=["rung"],
 )
 
-_COMPRESSION_RUNG_LABELS = frozenset({"1", "3", "error"})
+_COMPRESSION_RUNG_LABELS = frozenset({"1", "2", "3", "error"})
 
 
 def record_problem_compression(rung: str) -> None:
