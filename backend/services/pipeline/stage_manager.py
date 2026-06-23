@@ -746,8 +746,14 @@ def _route_for_refine(
             signals=signals,
         )
     else:
-        requested_tier = {"focused": "mini", "section": "mid"}[mode]
-        fallback_tier = {"focused": "small", "section": "strong"}[mode]
+        # Focused and section refine follow the same product-wide cheap-primary
+        # policy as core generation (issue #17 follow-up): start on the provider's
+        # cheapest viable tier, escalate one tier on a runtime failure.  Routing
+        # them through `_core_generation_tier_policy` (not a hardcoded per-mode
+        # tier) means the single `core_cheap_primary` flag governs refine too, so
+        # section refine no longer pins to the mid tier (gpt-5.4 / Sonnet 4.6)
+        # while every other generation path is on the cheap tier.
+        requested_tier, fallback_tier = _core_generation_tier_policy(workspace.provider)
     return resolve_llm_route(
         operation=operation,
         preferred_provider=workspace.provider,

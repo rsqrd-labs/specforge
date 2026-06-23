@@ -228,6 +228,7 @@ MODEL_CATALOG: tuple[ModelCatalogEntry, ...] = (
         recommended_operations=(
             *CORE_GENERATION_OPERATIONS,
             "refine.focused",
+            "refine.section",
             "summary.create",
             "eval.score",
             "storyboard.generate",
@@ -235,6 +236,7 @@ MODEL_CATALOG: tuple[ModelCatalogEntry, ...] = (
         default_operations=(
             *CORE_GENERATION_OPERATIONS,
             "refine.focused",
+            "refine.section",
             "summary.create",
             "eval.score",
             "storyboard.generate",
@@ -353,6 +355,7 @@ MODEL_CATALOG: tuple[ModelCatalogEntry, ...] = (
         default_operations=(
             *CORE_GENERATION_OPERATIONS,
             "refine.focused",
+            "refine.section",
             "summary.create",
             "eval.score",
             "storyboard.generate",
@@ -442,11 +445,13 @@ MODEL_CATALOG: tuple[ModelCatalogEntry, ...] = (
         default_max_output_tokens=32768,
         recommended_operations=(
             *CORE_GENERATION_OPERATIONS,
+            "refine.focused",
             "refine.section",
             "storyboard.generate",
         ),
         default_operations=(
             *CORE_GENERATION_OPERATIONS,
+            "refine.focused",
             "refine.section",
             "storyboard.generate",
         ),
