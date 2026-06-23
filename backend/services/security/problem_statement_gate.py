@@ -56,14 +56,22 @@ _USER_OR_WORKFLOW_RE = re.compile(
     r"notification|notifications|report|reports|approval|approvals|"
     r"booking|bookings|task|tasks|project|projects|order|orders|"
     r"tenant|tenants|role|roles|permission|permissions|"
-    # Software action verbs specific to real products
-    r"track|store|filter|notify|alert|schedule|submit|"
+    # Software action verbs specific to real products (common inflections
+    # included explicitly — `store`/`stored`, `trigger`/`triggered`, etc. —
+    # because a bare stem with a trailing `\b` would otherwise miss the past
+    # tense that real statements use).
+    r"track|store|stored|filter|notify|alert|schedule|submit|"
     r"export|import|sync|authenticate|assign|validate|"
-    r"upload|download|fetch|query|"
+    r"upload|download|fetch|query|ingest|parse|transform|"
+    r"trigger|triggered|generate|generated|process|processed|"
     # Common product data and domain artefacts
     r"record|records|file|files|account|accounts|profile|profiles|"
     r"settings|message|messages|event|events|calendar|"
-    r"form|forms|channel|channels|request|requests|endpoint|endpoints"
+    r"form|forms|channel|channels|request|requests|endpoint|endpoints|"
+    # Cloud / data / automation product nouns
+    r"invoice|invoices|bucket|buckets|output|outputs|"
+    r"recipient|recipients|email|emails|mail|pipeline|pipelines|"
+    r"webhook|webhooks|attachment|attachments|log|logs|metric|metrics"
     r")\b",
     re.I,
 )

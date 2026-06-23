@@ -20,6 +20,21 @@ def test_accepts_rough_product_problem_statement() -> None:
     assert result.is_valid is True
 
 
+def test_accepts_cloud_automation_agent_statement() -> None:
+    # Regression: a real S3/invoice automation agent used cloud/data vocabulary
+    # and past-tense verbs ("stored", "trigger") that the workflow-context check
+    # did not recognise, so a clearly-valid product was rejected as
+    # "not a real software product, system, or workflow".
+    result = validate_problem_statement(
+        "I want to build an AI bot/agent that automatically analysed AWS CUR "
+        "or AWS invoice and generate output. Output has to be stored in an S3 "
+        "bucket and mailed to certain recipients. The input invoice will land "
+        "inside an S3 bucket and it should trigger the bot."
+    )
+
+    assert result.is_valid is True
+
+
 def test_rejects_general_content_request() -> None:
     result = validate_problem_statement(
         "Write me a funny poem about software engineers drinking coffee on a rainy day."
