@@ -238,7 +238,22 @@ async def test_non_owner_gets_404() -> None:
 # generate() end-to-end: the fetched block actually reaches build_prompt.
 # Reuses the test_critic harness rather than re-deriving the generate() env.
 # ---------------------------------------------------------------------------
+import test_critic  # noqa: E402
 from test_critic import _build_generate_env, _generate_patches  # noqa: E402
+
+
+@pytest.fixture
+def pipeline_session(monkeypatch):
+    """generate() runs its pipeline on a session it opens itself and re-loads the
+    stage/workspace on it (docs/REFRESH_DURING_GENERATION_PLAN.md).  The two
+    generate()-driving tests below request this fixture to point
+    ``AsyncSessionLocal`` at test_critic's seeded ``_MultiQueryDB``.  The
+    ``_fetch_research_context`` unit tests deliberately do NOT — they exercise the
+    real (unqueried) research session instead.
+    """
+    test_critic.install_pipeline_session_patch(monkeypatch)
+    yield
+    test_critic._ACTIVE_MULTI_QUERY_DB = None
 
 
 def _enable_brave(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -251,6 +266,7 @@ def _enable_brave(monkeypatch: pytest.MonkeyPatch) -> None:
 @pytest.mark.asyncio
 async def test_generate_injects_block_for_opted_in_workspace(
     monkeypatch: pytest.MonkeyPatch,
+    pipeline_session,
 ) -> None:
     """Opted-in spec generation threads the fetched block into build_prompt."""
     _enable_brave(monkeypatch)
@@ -303,6 +319,7 @@ async def test_generate_injects_block_for_opted_in_workspace(
 @pytest.mark.asyncio
 async def test_generate_passes_empty_context_when_not_opted_in(
     monkeypatch: pytest.MonkeyPatch,
+    pipeline_session,
 ) -> None:
     """A not-opted-in workspace gets research_context='' — fetch_context runs
     (real) but short-circuits on the opt-in gate, never calling Brave."""

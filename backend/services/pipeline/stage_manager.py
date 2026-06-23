@@ -279,10 +279,28 @@ def _log_eval_error(task: asyncio.Task) -> None:
 # finish.  Tasks remove themselves on completion.  Mirrors _BACKGROUND_EVAL_TASKS.
 _BACKGROUND_CRITIC_TASKS: set[asyncio.Task] = set()
 
+# Strong references to the detached generation pipeline tasks.  A page refresh
+# mid-generation closes the SSE connection, which tears down the supervising
+# generate() generator; the pipeline must keep running to completion on its own
+# DB session so the artifact is persisted and the reloaded page can poll for it
+# (docs/REFRESH_DURING_GENERATION_PLAN.md).  The event loop holds only a weak
+# reference to a bare task, so without this set a detached pipeline could be
+# garbage-collected mid-flight.  Tasks remove themselves on completion.
+_BACKGROUND_PIPELINE_TASKS: set[asyncio.Task] = set()
+
 
 def _log_critic_error(task: asyncio.Task) -> None:
     if not task.cancelled() and (exc := task.exception()):
         logger.error("critic_background_failed", extra={"error": str(exc)})
+
+
+def _log_pipeline_error(task: asyncio.Task) -> None:
+    # The supervising generate() generator awaits the pipeline on the connected
+    # path and surfaces its error to the router.  On a client disconnect nobody
+    # awaits it, so a genuine failure would otherwise be swallowed — log it here
+    # so detached-pipeline crashes remain visible.
+    if not task.cancelled() and (exc := task.exception()):
+        logger.error("pipeline_background_failed", extra={"error": str(exc)})
 
 
 def _eval_to_dict(result: EvalResult) -> dict:
@@ -1333,7 +1351,7 @@ class StageManager:
         *,
         trace_id: str,
         workspace: Workspace,
-        user,
+        user_id: UUID,
         stage: Stage,
         action: str,
     ) -> str | None:
@@ -1342,11 +1360,11 @@ class StageManager:
             await client.create_trace(
                 name=f"workspace.{workspace.id}",
                 trace_id=trace_id,
-                user_id=str(user.id),
+                user_id=str(user_id),
                 metadata={
                     "trace_id": trace_id,
                     "workspace_id": str(workspace.id),
-                    "user_id": str(user.id),
+                    "user_id": str(user_id),
                     "stage_type": stage.type,
                     "action": action,
                 },
@@ -1960,17 +1978,20 @@ class StageManager:
         # Shared phase state: the pipeline advances it; the heartbeat below reads
         # it so each liveness ping reports the real phase (issue #21 Phase 2c).
         phase_tracker = _PhaseTracker()
+        # The pipeline owns its own DB session and is identified only by ids /
+        # scalars, never the request-bound ORM objects: the request session is
+        # torn down the instant generate() returns (e.g. on a client
+        # disconnect), so the detached task must not touch `db`, `user`, or
+        # `deduction` (docs/REFRESH_DURING_GENERATION_PLAN.md).
         pipeline = asyncio.create_task(
             self._execute_generation_pipeline(
                 emit=events.put_nowait,
-                stage=stage,
                 stage_id=stage_id,
-                workspace=workspace,
-                user=user,
-                db=db,
+                workspace_id=workspace.id,
+                user_id=user.id,
                 redis=redis,
                 route=route,
-                deduction=deduction,
+                deduction_id=deduction.id if deduction else None,
                 action=action,
                 trace_id=trace_id,
                 system_prompt=system_prompt,
@@ -1981,6 +2002,12 @@ class StageManager:
                 research=research,
             )
         )
+        # Hold a strong reference so a client disconnect (which stops the pump
+        # below from awaiting the task) can never let the detached pipeline be
+        # garbage-collected before it finishes persisting.
+        _BACKGROUND_PIPELINE_TASKS.add(pipeline)
+        pipeline.add_done_callback(_BACKGROUND_PIPELINE_TASKS.discard)
+        pipeline.add_done_callback(_log_pipeline_error)
         # The sentinel is enqueued from the done-callback (not the pipeline
         # body) so it is guaranteed to arrive after every event the pipeline
         # emitted, on success, failure, and cancellation alike.
@@ -2014,26 +2041,29 @@ class StageManager:
             # mapping, after every queued event has been flushed to the client.
             await pipeline
         finally:
-            # Client disconnect (GeneratorExit/CancelledError) cancels the
-            # pipeline so the LLM call never keeps billing tokens with no
-            # consumer; the pipeline's own finally block performs the refund
-            # and stage-reset cleanup.
-            if not pipeline.done():
-                pipeline.cancel()
-                await asyncio.gather(pipeline, return_exceptions=True)
+            # A client disconnect (GeneratorExit/CancelledError) tears down this
+            # supervising generator, but the pipeline is deliberately NOT
+            # cancelled: it keeps running on its own DB session to completion so
+            # the generated artifact is persisted and the reloaded page can poll
+            # for it (docs/REFRESH_DURING_GENERATION_PLAN.md).  Billing is now
+            # charge-on-completion — a finished generation keeps its charge; only
+            # a genuine failure refunds.  The detached task is kept alive by
+            # _BACKGROUND_PIPELINE_TASKS; any post-disconnect emit() calls land
+            # in a queue nobody reads and are GC'd with this closure.  If the
+            # detached task itself dies, its db_heartbeat stops and the
+            # stuck-stage recovery sweep is the safety net.
+            pass
 
     async def _execute_generation_pipeline(
         self,
         *,
         emit,
-        stage: Stage,
         stage_id: UUID,
-        workspace: Workspace,
-        user,
-        db: AsyncSession,
+        workspace_id: UUID,
+        user_id: UUID,
         redis,
         route: LLMRoute,
-        deduction,
+        deduction_id: UUID | None,
         action: str,
         trace_id: str | None,
         system_prompt: str,
@@ -2043,21 +2073,95 @@ class StageManager:
         phase: _PhaseTracker,
         research: ResearchContext = _EMPTY_RESEARCH,
     ) -> None:
-        """Run the full post-preflight generation pipeline for generate().
+        """Run the post-preflight generation pipeline on its OWN DB session.
+
+        This runs as a detached background task (docs/REFRESH_DURING_GENERATION
+        _PLAN.md): a client disconnect tears down the supervising generate()
+        generator and FastAPI closes the request-scoped session, so the pipeline
+        must not borrow that session or any request-bound ORM object.  It opens
+        its own AsyncSessionLocal — the same pattern as _stage_db_heartbeat and
+        _dispatch_critic_review — and re-loads `stage` and `workspace` by id on
+        it.  Callers identify the work only by ids / scalars (workspace_id,
+        user_id, deduction_id).  The body then mutates and commits exactly as it
+        did when it borrowed the request session.
+        """
+        from database import AsyncSessionLocal  # noqa: PLC0415
+
+        async with AsyncSessionLocal() as own_db:
+            stage = await self._load_stage(stage_id, own_db)
+            workspace = await self._load_workspace(workspace_id, own_db)
+            # End the read transaction immediately so the pooled connection is
+            # released back during the (potentially many-minute) LLM stream
+            # instead of sitting idle-in-transaction the whole time — that would
+            # pin a connection per concurrent generation and, under a Postgres
+            # idle_in_transaction_session_timeout, get the session killed before
+            # the final persist.  commit (not rollback) because rollback expires
+            # the instances; with expire_on_commit=False the already-loaded
+            # stage/workspace scalars (and the selectinload'd workspace.stages)
+            # stay populated for the body to read without further IO, and the
+            # next write auto-begins a fresh transaction.
+            await own_db.commit()
+            await self._run_generation_pipeline_body(
+                emit=emit,
+                db=own_db,
+                stage=stage,
+                stage_id=stage_id,
+                workspace=workspace,
+                user_id=user_id,
+                redis=redis,
+                route=route,
+                deduction_id=deduction_id,
+                action=action,
+                trace_id=trace_id,
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                compression_rung=compression_rung,
+                cache_key=cache_key,
+                phase=phase,
+                research=research,
+            )
+
+    async def _run_generation_pipeline_body(
+        self,
+        *,
+        emit,
+        db: AsyncSession,
+        stage: Stage,
+        stage_id: UUID,
+        workspace: Workspace,
+        user_id: UUID,
+        redis,
+        route: LLMRoute,
+        deduction_id: UUID | None,
+        action: str,
+        trace_id: str | None,
+        system_prompt: str,
+        user_prompt: str,
+        compression_rung: str = "0",
+        cache_key: str,
+        phase: _PhaseTracker,
+        research: ResearchContext = _EMPTY_RESEARCH,
+    ) -> None:
+        """The full post-preflight pipeline, operating on the supplied session.
 
         Every client-visible SSE event goes through emit() (the supervising
         generator's queue); generate() interleaves progress heartbeats while
-        this pipeline is silent.  Cancellation (client disconnect) lands on
-        whatever this task is awaiting and triggers the finally-block cleanup,
-        exactly as generator teardown did when this body lived inline.
+        this pipeline is silent.  `db` is the pipeline-owned session opened by
+        _execute_generation_pipeline; `stage`/`workspace` are loaded on it.
         """
         # _cleanup_done starts False immediately after the in_progress commit
         # so that any exception enters the finally cleanup path and refunds
-        # credits + resets the stage to draft.
+        # credits + resets the stage to draft.  On the success path it is set
+        # True (the charge stands); the cleanup path now means "genuine
+        # failure", not "client left".
         _cleanup_done = False
         span_id: str | None = None
         span_finished = False
         accumulated = ""
+        # Captured up-front so the failure-cleanup in the finally never has to
+        # read an ORM attribute through a possibly-aborted transaction.
+        stage_type = stage.type
+        workspace_id = workspace.id
         # Liveness heartbeat for the recovery sweep: runs for the entire
         # generation (streaming, gates, critic regenerate) and is cancelled in
         # the finally below before the stage leaves in_progress.
@@ -2067,7 +2171,7 @@ class StageManager:
                 span_id = await self._start_langfuse_span(
                     trace_id=trace_id,
                     workspace=workspace,
-                    user=user,
+                    user_id=user_id,
                     stage=stage,
                     action=action,
                 )
@@ -2204,14 +2308,14 @@ class StageManager:
                 # visible in dashboards even before the 3-min recovery loop
                 # fires.  T-194.
                 SSE_STREAM_FAILURES.labels(stage_type=stage.type).inc()
-                if deduction is not None:
-                    await credit_service.refund(db, deduction.id)
+                if deduction_id is not None:
+                    await credit_service.refund(db, deduction_id)
                 stage.status = "draft"
                 stage.updated_at = datetime.now(UTC)
                 await db.commit()
-                if deduction is not None:
+                if deduction_id is not None:
                     # Post-commit cache eviction — H-2 — T-219.
-                    await credit_service.invalidate(user.id)
+                    await credit_service.invalidate(user_id)
                 _cleanup_done = True
                 if span_id:
                     await self._mark_langfuse_span_failed(span_id, exc)
@@ -2231,8 +2335,8 @@ class StageManager:
                     db=db,
                     redis=redis,
                     stage=stage,
-                    user=user,
-                    deduction=deduction,
+                    user_id=user_id,
+                    deduction_id=deduction_id,
                     route=route,
                     exc=exc,
                 )
@@ -2251,12 +2355,14 @@ class StageManager:
 
             validation = validate(accumulated)
             if not validation.is_safe:
-                await credit_service.refund(db, deduction.id)
+                if deduction_id is not None:
+                    await credit_service.refund(db, deduction_id)
                 stage.status = "draft"
                 stage.updated_at = datetime.now(UTC)
                 await db.commit()
-                # Post-commit cache eviction — H-2 — T-219.
-                await credit_service.invalidate(user.id)
+                if deduction_id is not None:
+                    # Post-commit cache eviction — H-2 — T-219.
+                    await credit_service.invalidate(user_id)
                 _cleanup_done = True
                 if span_id:
                     await self._mark_langfuse_span_failed(
@@ -2284,8 +2390,8 @@ class StageManager:
                     db=db,
                     redis=redis,
                     stage=stage,
-                    user=user,
-                    deduction=deduction,
+                    user_id=user_id,
+                    deduction_id=deduction_id,
                     route=route,
                     exc=exc,
                 )
@@ -2300,8 +2406,8 @@ class StageManager:
                     db=db,
                     redis=redis,
                     stage=stage,
-                    user=user,
-                    deduction=deduction,
+                    user_id=user_id,
+                    deduction_id=deduction_id,
                     route=route,
                     exc=exc,
                 )
@@ -2482,8 +2588,8 @@ class StageManager:
                             db=db,
                             redis=redis,
                             stage=stage,
-                            user=user,
-                            deduction=deduction,
+                            user_id=user_id,
+                            deduction_id=deduction_id,
                             route=route,
                             exc=exc,
                         )
@@ -2498,7 +2604,7 @@ class StageManager:
                     # The regenerated artifact must clear the same security gate.
                     regen_validation = validate(accumulated)
                     if not regen_validation.is_safe:
-                        await self._refund_and_reset(db, deduction, stage, user)
+                        await self._refund_and_reset(db, deduction_id, stage, user_id)
                         _cleanup_done = True
                         sec_error = SecurityError(
                             f"Regenerated output failed validation: "
@@ -2538,8 +2644,8 @@ class StageManager:
                     db=db,
                     redis=redis,
                     stage=stage,
-                    user=user,
-                    deduction=deduction,
+                    user_id=user_id,
+                    deduction_id=deduction_id,
                     route=route,
                     exc=exc,
                 )
@@ -2554,8 +2660,8 @@ class StageManager:
                     db=db,
                     redis=redis,
                     stage=stage,
-                    user=user,
-                    deduction=deduction,
+                    user_id=user_id,
+                    deduction_id=deduction_id,
                     route=route,
                     exc=exc,
                 )
@@ -2713,14 +2819,22 @@ class StageManager:
             db_heartbeat.cancel()
             await asyncio.gather(db_heartbeat, return_exceptions=True)
             if not _cleanup_done:
+                # Reaching here with _cleanup_done False now means a GENUINE
+                # failure (an unhandled exception), not a client disconnect — the
+                # pipeline is no longer cancelled when the client leaves, so a
+                # disconnect lets generation finish and set _cleanup_done on the
+                # success path (docs/REFRESH_DURING_GENERATION_PLAN.md).  Refund +
+                # reset-to-draft + the interrupted-partial-discarded contract is
+                # therefore the failure cleanup.
                 if span_id and not span_finished:
                     await self._mark_langfuse_span_failed(
                         span_id,
                         RuntimeError("stage generation interrupted before completion"),
                     )
-                # Client disconnected before generation completed. The request-scoped
-                # db session may be torn down, so open a fresh one for cleanup.
-                from database import AsyncSessionLocal
+                # The pipeline-owned `db` may be in an aborted transaction after
+                # the failure, so open a FRESH session for cleanup and address
+                # the work by id/scalars only.
+                from database import AsyncSessionLocal  # noqa: PLC0415
 
                 try:
                     async with AsyncSessionLocal() as cleanup_db:
@@ -2729,26 +2843,26 @@ class StageManager:
                         )
                         stuck = result.scalar_one_or_none()
                         if stuck is not None and stuck.status == "in_progress":
-                            if deduction is not None:
-                                await credit_service.refund(cleanup_db, deduction.id)
+                            if deduction_id is not None:
+                                await credit_service.refund(cleanup_db, deduction_id)
                             PIPELINE_INTERRUPTED_STREAMS.labels(
-                                stage_type=stage.type
+                                stage_type=stage_type
                             ).inc()
                             logger.warning(
                                 "stage.interrupted_partial_discarded",
                                 extra={
                                     "stage_id": str(stage_id),
-                                    "stage": stage.type,
+                                    "stage": stage_type,
                                 },
                             )
                             stuck.status = "draft"
                             stuck.updated_at = datetime.now(UTC)
                             await cleanup_db.commit()
-                            if deduction is not None:
+                            if deduction_id is not None:
                                 # Post-commit cache eviction — H-2 — T-219.
-                                await credit_service.invalidate(user.id)
+                                await credit_service.invalidate(user_id)
                             await redis.delete(
-                                f"{_STAGE_CACHE_PREFIX}{workspace.id}:{stage.type}"
+                                f"{_STAGE_CACHE_PREFIX}{workspace_id}:{stage_type}"
                             )
                 except Exception:
                     logger.exception(
@@ -2904,7 +3018,7 @@ class StageManager:
                 span_id = await self._start_langfuse_span(
                     trace_id=trace_id,
                     workspace=workspace,
-                    user=user,
+                    user_id=user.id,
                     stage=stage,
                     action="refine",
                 )
@@ -3624,11 +3738,14 @@ class StageManager:
         db: AsyncSession,
         redis: "Redis",
         stage: Stage,
-        user,
-        deduction,
+        user_id: UUID,
+        deduction_id: UUID | None,
         route: LLMRoute,
         exc: TechSafetyError,
     ) -> dict:
+        # user_id / deduction_id are accepted for call-site symmetry with the
+        # other gate-block helpers; a technology-safety block never refunds (the
+        # artifact is delivered and overridable), so neither is used here.
         # Issue #34: a technology-safety block is now overridable — the artifact
         # is delivered and the user can finalise it as-is — so the credit stands
         # (no refund), matching critic/missing_sections.  Only genuinely broken
@@ -3682,8 +3799,8 @@ class StageManager:
         db: AsyncSession,
         redis: "Redis",
         stage: Stage,
-        user,
-        deduction,
+        user_id: UUID,
+        deduction_id: UUID | None,
         route: LLMRoute,
         exc: IncompleteArtifactError,
     ) -> dict:
@@ -3693,9 +3810,9 @@ class StageManager:
             provider=route.provider,
             reason=first_reason,
         ).inc()
-        refunded = deduction is not None
+        refunded = deduction_id is not None
         if refunded:
-            await credit_service.refund(db, deduction.id)
+            await credit_service.refund(db, deduction_id)
         gate_payload = self._incomplete_gate_payload(stage.type, exc)
         # Record the actual refund truth so the recovery contract can be honest:
         # a generation-time block refunds; the finalise-time re-check does not.
@@ -3708,8 +3825,8 @@ class StageManager:
             kind=INCOMPLETE_OUTPUT_GATE_KIND,
             payload=gate_payload,
         )
-        if deduction is not None:
-            await credit_service.invalidate(user.id)
+        if deduction_id is not None:
+            await credit_service.invalidate(user_id)
         logger.warning(
             "stage.incomplete_output_blocked",
             extra={
@@ -3799,7 +3916,7 @@ class StageManager:
         return stage
 
     async def _refund_and_reset(
-        self, db: AsyncSession, deduction, stage: Stage, user
+        self, db: AsyncSession, deduction_id: UUID | None, stage: Stage, user_id: UUID
     ) -> None:
         """Refund the generation credit and reset the stage to draft.
 
@@ -3807,14 +3924,14 @@ class StageManager:
         rejection refunds the user exactly once and leaves a regeneratable
         draft.  The caller owns _cleanup_done / span bookkeeping.
         """
-        if deduction is not None:
-            await credit_service.refund(db, deduction.id)
+        if deduction_id is not None:
+            await credit_service.refund(db, deduction_id)
         stage.status = "draft"
         stage.updated_at = datetime.now(UTC)
         await db.commit()
-        if deduction is not None:
+        if deduction_id is not None:
             # Post-commit cache eviction — H-2 — T-219.
-            await credit_service.invalidate(user.id)
+            await credit_service.invalidate(user_id)
 
     async def _regenerate_with_findings(
         self,

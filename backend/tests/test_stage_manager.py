@@ -14,6 +14,7 @@ from models import CreditLedger, EvalResult, Stage, StageVersion, Workspace
 from services.llm.completion import LLMCompletionInfo
 from services.pipeline.artifact_validator import final_completion_sentinel
 from services.pipeline.stage_manager import (
+    _BACKGROUND_PIPELINE_TASKS,
     QualityGateBlockedError,
     StageDependencyError,
     StageManager,
@@ -106,6 +107,11 @@ def _streamed_artifact(tokens: list[str]) -> str:
             continue
         parts.append(token)
     return "".join(parts)
+
+
+async def _drain(stream) -> list[str]:
+    """Consume an SSE generator to exhaustion, returning every event."""
+    return [token async for token in stream]
 
 
 def _make_stage(
@@ -226,11 +232,58 @@ def _is_eval_result_select(statement: Any) -> bool:
         return False
 
 
+def _select_entity(statement: Any) -> Any:
+    """The primary ORM entity of a SELECT, or None for non-ORM statements."""
+    try:
+        for cd in statement.column_descriptions:
+            entity = cd.get("entity")
+            if entity is not None:
+                return entity
+    except Exception:
+        return None
+    return None
+
+
+def _is_by_id_select(statement: Any, table: str) -> bool:
+    """True for a single-row ``WHERE <table>.id = :id`` SELECT.
+
+    Used by the fake DB to model a real database's identity map: a by-id read
+    returns the same row across sessions.  Collection queries (``type IN`` for
+    dependency checks, ``type =`` for next-stage lookups) are deliberately
+    excluded so they keep consuming the test's ordered responses.
+    """
+    return f"{table}.id =" in str(statement)
+
+
+# The fake DB the active stage_manager test is exercising.  generate() now runs
+# its pipeline on a pipeline-OWNED ``AsyncSessionLocal`` session and re-loads the
+# stage/workspace on it (docs/REFRESH_DURING_GENERATION_PLAN.md), so the autouse
+# ``_patch_pipeline_session`` fixture points ``database.AsyncSessionLocal`` at
+# this same instance — the re-load then transparently returns the seeded rows.
+_ACTIVE_MULTI_QUERY_DB: "_MultiQueryDB | None" = None
+
+
 class _MultiQueryDB:
     def __init__(self, responses: list[Any]) -> None:
         self._responses = iter(responses)
         self.added: list[Any] = []
         self._committed = False
+        # First-seen Stage/Workspace rows, replayed for later by-id reads so the
+        # pipeline's re-load on its own session returns the same seeded object a
+        # real DB's identity map would (no response re-seeding needed).
+        self._captured_stage: Stage | None = None
+        self._captured_workspace: Workspace | None = None
+        global _ACTIVE_MULTI_QUERY_DB
+        _ACTIVE_MULTI_QUERY_DB = self
+
+    async def __aenter__(self) -> "_MultiQueryDB":
+        return self
+
+    async def __aexit__(self, *exc: Any) -> bool:
+        return False
+
+    async def close(self) -> None:
+        pass
 
     async def execute(self, statement: Any) -> _FakeResult:
         # The inline structural eval (issue #27 Phase 1) looks up the version's
@@ -239,10 +292,28 @@ class _MultiQueryDB:
         # responses precisely and this lookup must not shift them.
         if _is_eval_result_select(statement):
             return _FakeResult(None)
+        # A by-id re-load of a previously-seen Stage/Workspace replays that row
+        # without consuming a response, mirroring a real DB across sessions.
+        if (
+            self._captured_stage is not None
+            and _select_entity(statement) is Stage
+            and _is_by_id_select(statement, "stages")
+        ):
+            return _FakeResult(self._captured_stage)
+        if (
+            self._captured_workspace is not None
+            and _select_entity(statement) is Workspace
+            and _is_by_id_select(statement, "workspaces")
+        ):
+            return _FakeResult(self._captured_workspace)
         try:
             val = next(self._responses)
         except StopIteration:
             val = None
+        if isinstance(val, Stage) and self._captured_stage is None:
+            self._captured_stage = val
+        elif isinstance(val, Workspace) and self._captured_workspace is None:
+            self._captured_workspace = val
         if isinstance(val, list):
             return _FakeResult(many=val)
         return _FakeResult(val)
@@ -272,6 +343,41 @@ class _MultiQueryDB:
                 instance.created_at = datetime.now(UTC)
             if getattr(instance, "flagged", None) is None:
                 instance.flagged = False
+
+    async def rollback(self) -> None:
+        pass
+
+
+@pytest.fixture(autouse=True)
+def _patch_pipeline_session(monkeypatch):
+    """Point the pipeline-owned ``AsyncSessionLocal`` at the test's fake DB.
+
+    generate() detaches its pipeline onto a session it opens itself so a client
+    disconnect can no longer kill an in-flight generation (docs/REFRESH_DURING
+    _GENERATION_PLAN.md).  In unit tests that session must be the same
+    ``_MultiQueryDB`` the test seeded, so the pipeline's stage/workspace re-load
+    sees the seeded rows.  Reset the active-instance handle before each test so
+    one test's fake DB never leaks into the next, and have the patched factory
+    return whichever ``_MultiQueryDB`` the test most recently built.  Tests that
+    need a different cleanup/heartbeat session install their own narrower
+    ``patch("database.AsyncSessionLocal", ...)``, which wins inside its block.
+    """
+    import database
+
+    global _ACTIVE_MULTI_QUERY_DB
+    _ACTIVE_MULTI_QUERY_DB = None
+
+    def _factory():
+        if _ACTIVE_MULTI_QUERY_DB is None:
+            raise RuntimeError(
+                "AsyncSessionLocal() called with no active _MultiQueryDB; "
+                "patch database.AsyncSessionLocal explicitly in this test."
+            )
+        return _ACTIVE_MULTI_QUERY_DB
+
+    monkeypatch.setattr(database, "AsyncSessionLocal", _factory)
+    yield
+    _ACTIVE_MULTI_QUERY_DB = None
 
 
 class _CompletionAwareAdapter:
@@ -1387,37 +1493,27 @@ async def test_generate_continues_when_langfuse_trace_creation_fails() -> None:
 
 
 @pytest.mark.asyncio
-async def test_generate_marks_langfuse_span_failed_on_client_disconnect() -> None:
+async def test_generate_does_not_cancel_pipeline_on_client_disconnect() -> None:
+    # Contract change (docs/REFRESH_DURING_GENERATION_PLAN.md): a client
+    # disconnect tears down the supervising generate() generator but must NOT
+    # cancel the detached pipeline — it keeps running on its own session so the
+    # artifact is preserved.  No refund fires and the disconnect does not reset
+    # the stage; billing is charge-on-completion.
     workspace_id = uuid4()
     spec_stage = _make_stage(workspace_id, "spec", status="draft")
     workspace = _make_workspace([spec_stage])
     user = _make_user()
     deduction = CreditLedger(id=uuid4(), user_id=user.id, amount=-10, reason="generate")
-    db = _MultiQueryDB([spec_stage, workspace, [], deduction])
+    db = _MultiQueryDB([spec_stage, workspace, []])
     stream_entered = asyncio.Event()
+    never = asyncio.Event()
 
     async def fake_stream(*args, **kwargs) -> AsyncGenerator[str, None]:
-        yield "partial"
         stream_entered.set()
-        await asyncio.sleep(10)
-
-    class _FakeCleanupResult:
-        def scalar_one_or_none(self):
-            return spec_stage
-
-    fake_cleanup_db = MagicMock()
-    fake_cleanup_db.execute = AsyncMock(return_value=_FakeCleanupResult())
-    fake_cleanup_db.commit = AsyncMock()
-    fake_cleanup_db.__aenter__ = AsyncMock(return_value=fake_cleanup_db)
-    fake_cleanup_db.__aexit__ = AsyncMock(return_value=False)
-    fake_session_local = MagicMock(return_value=fake_cleanup_db)
-
-    langfuse_client = MagicMock()
-    langfuse_client.create_trace = AsyncMock(return_value="trace-1")
-    langfuse_client.create_span = AsyncMock(return_value="span-1")
-    langfuse_client.create_generation = AsyncMock(return_value="generation-1")
-    langfuse_client.end_span = AsyncMock()
-    langfuse_client.mark_span_failed = AsyncMock()
+        # Hold the stream open so the pipeline is unambiguously mid-flight when
+        # the client disconnects.
+        await never.wait()
+        yield ""  # pragma: no cover — never reached
 
     svc = StageManager(redis_client=_FakeRedis())
 
@@ -1430,38 +1526,120 @@ async def test_generate_marks_langfuse_span_failed_on_client_disconnect() -> Non
         patch(
             "services.pipeline.stage_manager.credit_service.refund",
             new_callable=AsyncMock,
-        ),
+        ) as mock_refund,
         patch(
             "services.pipeline.stage_manager.build_prompt",
             new_callable=AsyncMock,
             return_value=("sys", "user", "0"),
         ),
         patch("services.pipeline.stage_manager.get_llm") as mock_get_llm,
-        patch(
-            "services.pipeline.stage_manager.langfuse_service.get_langfuse_client",
-            return_value=langfuse_client,
-        ),
-        patch("database.AsyncSessionLocal", fake_session_local),
     ):
         mock_adapter = MagicMock()
         mock_adapter.stream = fake_stream
         mock_get_llm.return_value = mock_adapter
 
         stream = svc.generate(spec_stage.id, user, db, trace_id="trace-1")
-        task = asyncio.create_task(anext(stream))
+        consumer = asyncio.create_task(_drain(stream))
         await asyncio.wait_for(stream_entered.wait(), timeout=1.0)
-        task.cancel()
-        await asyncio.gather(task, return_exceptions=True)
+        pipeline_tasks = list(_BACKGROUND_PIPELINE_TASKS)
+        assert pipeline_tasks, "the detached pipeline task must be retained"
+        pipeline_task = pipeline_tasks[0]
+
+        # Simulate the page refresh: cancel the consumer and close the SSE
+        # generator.
+        consumer.cancel()
+        await asyncio.gather(consumer, return_exceptions=True)
         await stream.aclose()
 
-    langfuse_client.end_span.assert_not_awaited()
-    langfuse_client.mark_span_failed.assert_awaited_once()
-    assert langfuse_client.mark_span_failed.await_args.args[0] == "span-1"
-    assert "interrupted" in str(langfuse_client.mark_span_failed.await_args.args[1])
+        # The pipeline survives the disconnect: still running, never cancelled,
+        # the stage was not reset, and nothing was refunded.
+        assert not pipeline_task.cancelled()
+        assert not pipeline_task.done()
+        assert spec_stage.status == "in_progress"
+        mock_refund.assert_not_awaited()
+
+        # Teardown: release the held stream and let the detached task unwind.
+        pipeline_task.cancel()
+        await asyncio.gather(pipeline_task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_generate_completes_detached_pipeline_after_client_disconnect() -> None:
+    # The other half of the contract: once disconnected, the detached pipeline
+    # runs to completion on its own AsyncSessionLocal session, persists the
+    # artifact as a bumped draft version, and the credit is NOT refunded.
+    workspace_id = uuid4()
+    spec_stage = _make_stage(workspace_id, "spec", status="draft")
+    workspace = _make_workspace([spec_stage])
+    user = _make_user()
+    deduction = CreditLedger(id=uuid4(), user_id=user.id, amount=-10, reason="generate")
+    db = _MultiQueryDB([spec_stage, workspace, []])
+    stream_entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def fake_stream(
+        system: str, user_prompt: str, *args, **kwargs
+    ) -> AsyncGenerator[str, None]:
+        stream_entered.set()
+        # Block until the client has "disconnected", then stream the full,
+        # valid artifact so the detached pipeline completes normally.
+        await release.wait()
+        yield _spec_stream_payload(user_prompt)
+
+    svc = StageManager(redis_client=_FakeRedis())
+
+    with (
+        patch(
+            "services.pipeline.stage_manager.credit_service.deduct",
+            new_callable=AsyncMock,
+            return_value=deduction,
+        ),
+        patch(
+            "services.pipeline.stage_manager.credit_service.refund",
+            new_callable=AsyncMock,
+        ) as mock_refund,
+        patch(
+            "services.pipeline.stage_manager.build_prompt",
+            new_callable=AsyncMock,
+            return_value=("sys", "user", "0"),
+        ),
+        patch("services.pipeline.stage_manager.get_llm") as mock_get_llm,
+        # Spy on the pipeline-owned session factory so a future revert to
+        # borrowing the request session (which a disconnect tears down) fails
+        # here instead of silently passing against the never-closed fake db.
+        patch("database.AsyncSessionLocal", MagicMock(return_value=db)) as session_spy,
+    ):
+        mock_adapter = MagicMock()
+        mock_adapter.stream = fake_stream
+        mock_get_llm.return_value = mock_adapter
+
+        stream = svc.generate(spec_stage.id, user, db)
+        consumer = asyncio.create_task(_drain(stream))
+        await asyncio.wait_for(stream_entered.wait(), timeout=1.0)
+        pipeline_tasks = list(_BACKGROUND_PIPELINE_TASKS)
+        assert pipeline_tasks, "the detached pipeline task must be retained"
+        pipeline_task = pipeline_tasks[0]
+
+        # Client disconnects mid-stream.
+        consumer.cancel()
+        await asyncio.gather(consumer, return_exceptions=True)
+        await stream.aclose()
+
+        # Let the detached pipeline finish and persist.
+        release.set()
+        await asyncio.wait_for(pipeline_task, timeout=2.0)
+
+    # The pipeline ran on its OWN session, not the request `db`.
+    assert session_spy.called
     assert spec_stage.status == "draft"
-    assert spec_stage.content is None
-    assert spec_stage.current_version == 0
-    fake_cleanup_db.add.assert_not_called()
+    assert spec_stage.content == _VALID_SPEC
+    assert spec_stage.current_version == 1
+    assert any(
+        isinstance(item, StageVersion) and item.content == _VALID_SPEC
+        for item in db.added
+    )
+    assert db._committed
+    mock_refund.assert_not_awaited()
 
 
 @pytest.mark.asyncio

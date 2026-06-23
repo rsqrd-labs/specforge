@@ -53,6 +53,7 @@ import {
   formatEffortSummaryChip,
   parseEffortSummary,
 } from "../utils/tasksParser"
+import { useReconnectPoll } from "../hooks/useReconnectPoll"
 import { useStream } from "../hooks/useStream"
 import {
   acceptStageDiff,
@@ -721,6 +722,16 @@ export default function Workspace() {
     activeStage?.content,
     activeStage?.quality_gate?.status,
   ])
+
+  // Reconnect-by-poll (docs/REFRESH_DURING_GENERATION_PLAN.md): when a stage is
+  // `in_progress` but THIS client is not the one streaming it — true on a fresh
+  // mount after a page refresh — the server keeps the detached generation
+  // pipeline running and persists the finished artifact at `done`. The hook
+  // polls until the stage leaves `in_progress` and writes the settled result
+  // into the store, so the completed draft (or a quality-gate block) appears
+  // without a manual re-generate. The active streamer drives the stage via the
+  // SSE hook, so it never polls here.
+  useReconnectPoll(inProgressStage?.id ?? null, isStreaming)
 
   useEffect(() => {
     if (!latestStoryboard || latestStoryboard.status !== "generating") return
