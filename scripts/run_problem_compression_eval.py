@@ -75,7 +75,7 @@ def _build_statement(case: dict[str, Any]) -> str:
             "".join(case["fr_unit"].format(n=n) for n in range(1, case["fr_count"] + 1))
         )
     if "narrative_filler" in case:
-        parts.append(case["narrative_filler"] * case["narrative_repeat"])
+        parts.append(case["narrative_filler"] * case.get("narrative_repeat", 1))
     if "problem_statement_suffix" in case:
         parts.append(case["problem_statement_suffix"])
     return "\n\n".join(parts)
