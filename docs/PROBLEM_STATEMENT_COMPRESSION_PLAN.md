@@ -395,6 +395,39 @@ in `docs/evals/ROUTE_PROMOTION.md`.
 within the cost ceiling; zero increase in spec quality-gate failures or user-reported
 missing requirements.*
 
+> **Phase D — shipped (2026-06-23).** Two halves, gated independently.
+> **(1) Enable.** The Phase-B master `problem_statement_compression` is now **enabled by
+> default** (`config.py`): the deterministic ladder is zero-LLM-cost and bounded, so the
+> common (under-budget) case stays a byte-identical no-op and only genuinely over-budget
+> pastes condense (Rung 1/3). The **paid, lossy** abstractive sub-gate
+> `problem_statement_abstractive` stays **default-off** — its promotion strictly requires
+> the live normative-retention + human semantic-equivalence read in
+> `docs/evals/PROBLEM_COMPRESSION_PROMOTION.md`, which is a manual operational step (real
+> provider calls), not a code change. Per the Phase-D cache caveat below, the master flip
+> does not invalidate previously-cached generations; pair the deploy with a
+> generation-cache flush or accept the ≤24h window.
+> **(2) UI surfacing.** When a stage's problem statement was *lossily* condensed (Rung
+> 2 = abstractive summary, Rung 3 = deterministic clamp), the user is told via a
+> **non-blocking advisory notice** on the generated stage, reusing the issue-#34
+> `AdvisoryFindingsPanel`. `build_prompt` now returns the per-stage compression rung
+> (`prompt_builder.py`), recovered purely and **cache-hit-safe** by
+> `classify_compression_rung` (replays the pure ladder's decision points against the
+> returned text against the exact budget used — never a second compression, correct on
+> the cache hits that 3 of the 4 stages take). `StageManager._execute_generation_pipeline`
+> threads the rung to the success path and, for Rung 2/3, appends a
+> `ProblemStatementCondensed` finding to the **same advisory bucket** as any critic
+> findings (they coexist; `_mark_quality_gate_advisory` now takes serialised dicts).
+> The notice is informational: it states that every requirement ID was kept verbatim,
+> never blocks finalisation, never refunds, and the panel **suppresses the misleading
+> "Regenerate to address" action** when the only findings are informational notices
+> (`isInformationalFinding` in `qualityGate.ts`; copy switches "suggestion" → "note").
+> The rung is genuinely per-stage (`problem_budget` varies by `stage_type`). Tests:
+> `classify_compression_rung` unit + ladder-parity (`test_problem_compressor.py`),
+> `build_prompt` rung reporting (`test_prompt_builder.py`), the advisory merge /
+> coexistence / clear-when-unchanged paths (`test_critic.py`), and the panel
+> informational-only suppression + label (`AdvisoryFindingsPanel.test.tsx`,
+> `qualityGate.test.ts`).
+
 > **Phase-D enable caveat (cache coherence).** The generation cache key in
 > `stage_manager.py` hashes the *raw* `problem_statement`; compression runs *after*
 > that check, inside `build_prompt`. While the flag is stable this is coherent (raw

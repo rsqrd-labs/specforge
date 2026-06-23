@@ -504,6 +504,35 @@ def normative_retention(before: str, after: str) -> tuple[int, int]:
     return retained, len(before_ids)
 
 
+def classify_compression_rung(
+    raw: str, compressed: str, budget: int, provider: str, model: str
+) -> str:
+    """Re-derive which rung produced ``compressed`` from ``raw`` — purely.
+
+    ``get_or_compress`` returns only the text (and its Redis entry stores only the
+    text), so the rung that produced a value is not propagated — least of all on a
+    cache hit, which is how 3 of the 4 stages see it. This recovers the rung
+    deterministically by replaying the pure ladder's decision points against the
+    returned text: no Redis, no LLM, no second compression. ``build_prompt`` uses
+    it to surface the lossy-condensation advisory notice (Phase D) identically on
+    a cache hit and a miss.
+
+    Returns ``"0"`` (byte-identical / under budget), ``"1"`` (lossless structural
+    cleanup), ``"2"`` (abstractive summary), or ``"3"`` (deterministic clamp).
+    Only ``"2"`` and ``"3"`` are lossy and warrant a user-facing notice; ``"0"``
+    is identical and ``"1"`` strips only whitespace/comments. The cheap equality
+    checks short-circuit the common (rung 0/1) path before the pure clamp replay.
+    """
+    if compressed == raw:
+        return "0"
+    cleaned = _rung1_cleanup(raw)
+    if compressed == cleaned:
+        return "1"
+    if compressed == _rung3_clamp(cleaned, budget, provider, model):
+        return "3"
+    return "2"
+
+
 def compress_problem_statement(
     raw: str, budget: int, provider: str, model: str
 ) -> tuple[str, str]:

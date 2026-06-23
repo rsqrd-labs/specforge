@@ -11,11 +11,24 @@ const FINDING_KIND_LABELS: Record<string, string> = {
   BannedPhrase: "Placeholder text",
   DeprecatedAPI: "Outdated technology",
   ADRIncomplete: "Incomplete decision record",
+  ProblemStatementCondensed: "Condensed problem statement",
 }
 
 export function findingKindLabel(kind: string | null | undefined): string {
   if (!kind) return "Suggestion"
   return FINDING_KIND_LABELS[kind] ?? "Suggestion"
+}
+
+/** Finding kinds that are purely informational — a notice about how the input was
+ *  processed, not a defect in the artifact. Regenerating cannot "address" them, so
+ *  the advisory panel suppresses its regenerate action when these are the *only*
+ *  findings (Phase D, problem-statement compression notice). */
+const INFORMATIONAL_FINDING_KINDS = new Set<string>(["ProblemStatementCondensed"])
+
+export function isInformationalFinding(
+  kind: string | null | undefined,
+): boolean {
+  return kind != null && INFORMATIONAL_FINDING_KINDS.has(kind)
 }
 
 /** The non-blocking critic suggestions attached to a delivered draft. Present

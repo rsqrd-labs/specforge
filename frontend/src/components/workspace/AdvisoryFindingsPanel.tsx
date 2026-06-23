@@ -1,6 +1,6 @@
 import { useState } from "react"
 import type { QualityGateFinding, StageType } from "../../types/stage"
-import { findingKindLabel } from "../../utils/qualityGate"
+import { findingKindLabel, isInformationalFinding } from "../../utils/qualityGate"
 
 interface AdvisoryFindingsPanelProps {
   /** The non-blocking critic suggestions for the current draft. */
@@ -32,6 +32,13 @@ export function AdvisoryFindingsPanel({
   if (findings.length === 0) return null
 
   const count = findings.length
+  // Only offer "Regenerate to address" when at least one finding is an actual
+  // artifact defect the critic can fix. A purely informational notice (e.g. the
+  // problem statement was condensed to fit budget) cannot be regenerated away, so
+  // the action would mislead (Phase D). The word used for the findings tracks this
+  // too: "suggestion" implies an action; an info-only panel reads as "note".
+  const actionable = findings.some((f) => !isInformationalFinding(f.kind))
+  const noun = actionable ? "suggestion" : "note"
   const disabledReasonId = disabledReason
     ? "advisory-findings-disabled-reason"
     : undefined
@@ -41,11 +48,13 @@ export function AdvisoryFindingsPanel({
       <div className="quality-gate-collapsed" role="status">
         <div className="quality-gate-collapsed-text">
           <span className="workspace-advisory-chip">
-            {count} suggestion{count === 1 ? "" : "s"}
+            {count} {noun}
+            {count === 1 ? "" : "s"}
           </span>
           <p className="quality-gate-collapsed-reason">
-            This {stageType} is ready to finalise. The quality review left some
-            optional suggestions.
+            This {stageType} is ready to finalise. {actionable
+              ? "The quality review left some optional suggestions."
+              : "There are some notes about how it was generated."}
           </p>
         </div>
         <button
@@ -53,7 +62,7 @@ export function AdvisoryFindingsPanel({
           className="btn btn-ghost"
           onClick={() => setCollapsed(false)}
         >
-          Show suggestions
+          Show {noun}s
         </button>
       </div>
     )
@@ -63,12 +72,14 @@ export function AdvisoryFindingsPanel({
     <div className="quality-gate-inline advisory" role="status" aria-label="Quality review suggestions">
       <div className="quality-gate-panel">
         <h3 className="quality-gate-title">
-          This {stageType} is ready — {count} optional suggestion
+          This {stageType} is ready — {count} {actionable ? "optional " : ""}
+          {noun}
           {count === 1 ? "" : "s"}
         </h3>
         <p className="quality-gate-subtitle">
-          You can finalise this {stageType} now. These are improvements the
-          quality review suggested — address them only if they matter to you.
+          {actionable
+            ? `You can finalise this ${stageType} now. These are improvements the quality review suggested — address them only if they matter to you.`
+            : `You can finalise this ${stageType} now. These notes explain how it was generated — review them if they matter to you.`}
         </p>
         <ul className="quality-gate-findings">
           {findings.map((finding, index) => (
@@ -89,7 +100,7 @@ export function AdvisoryFindingsPanel({
               {disabledReason}
             </p>
           ) : null}
-          {onRegenerate ? (
+          {onRegenerate && actionable ? (
             <button
               type="button"
               className="btn btn-secondary"

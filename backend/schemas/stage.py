@@ -6,7 +6,11 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 StageType = Literal["spec", "plan", "harness", "tasks"]
 StageStatus = Literal["locked", "draft", "in_progress", "finalised", "stale"]
-QualityGateStatus = Literal["clear", "blocked", "overridden"]
+# "advisory" (issue #34) is a delivered, finalisable draft carrying non-blocking
+# findings — the status the post-`done` refetch (GET /stages/{id} → StageResponse)
+# must serialize for AdvisoryFindingsPanel to render. Omitting it 500s the refetch
+# for every advisory stage (critic suggestions and the Phase-D condensed notice).
+QualityGateStatus = Literal["clear", "blocked", "overridden", "advisory"]
 
 
 class GenerateRequest(BaseModel):

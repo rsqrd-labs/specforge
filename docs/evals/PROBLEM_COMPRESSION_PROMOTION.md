@@ -8,11 +8,14 @@ evidence-based, partly-manual gate.
 
 It is gated by a **sub-flag** of the Phase-B master flag:
 
-- `problem_statement_compression` (default **false**) — the Phase-B master. The
-  whole zero-LLM ladder (Rung 0/1/3) and the bounded-cost / never-fail guarantees
-  live here. Flipping this on alone changes nothing for under-budget input and
-  uses only the deterministic ladder for over-budget input.
-- `problem_statement_abstractive` (default **false**) — this gate. Meaningful
+- `problem_statement_compression` (**enabled by default since Phase D**) — the
+  Phase-B master. The whole zero-LLM ladder (Rung 0/1/3) and the bounded-cost /
+  never-fail guarantees live here. It changes nothing for under-budget input and
+  uses only the deterministic ladder for over-budget input, so it shipped on once
+  the Rung-0 regression pin and golden corpus were green. When it condenses
+  (Rung 2/3) the user sees a non-blocking advisory notice on the generated stage
+  (`AdvisoryFindingsPanel`).
+- `problem_statement_abstractive` (default **false** — still pending this gate) — this gate. Meaningful
   **only when the master is also on**. When both are on, an over-budget statement
   that the deterministic ladder would hand to the Rung-3 clamp is instead routed
   through the capped map-reduce. Phase-B reliability never depends on this flag.

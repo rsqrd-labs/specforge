@@ -7,6 +7,7 @@ import {
   deriveFinaliseGateBlock,
   findingKindLabel,
   gateFallbackMessage,
+  isInformationalFinding,
 } from "./qualityGate"
 
 function makeStage(quality_gate?: QualityGateInfo | null): Stage {
@@ -148,6 +149,25 @@ describe("findingKindLabel", () => {
     expect(findingKindLabel("SomethingNew")).toBe("Suggestion")
     expect(findingKindLabel(null)).toBe("Suggestion")
     expect(findingKindLabel(undefined)).toBe("Suggestion")
+  })
+
+  it("maps the Phase-D condensation notice to a friendly label", () => {
+    expect(findingKindLabel("ProblemStatementCondensed")).toBe(
+      "Condensed problem statement",
+    )
+  })
+})
+
+describe("isInformationalFinding", () => {
+  it("flags the condensation notice as informational (no regenerate action)", () => {
+    expect(isInformationalFinding("ProblemStatementCondensed")).toBe(true)
+  })
+
+  it("treats real critic findings and unknown/empty kinds as actionable", () => {
+    expect(isInformationalFinding("CoverageGap")).toBe(false)
+    expect(isInformationalFinding("SomethingNew")).toBe(false)
+    expect(isInformationalFinding(null)).toBe(false)
+    expect(isInformationalFinding(undefined)).toBe(false)
   })
 })
 

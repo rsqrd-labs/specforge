@@ -75,7 +75,7 @@ def _make_workspace(
 async def test_build_prompt_spec_contains_problem_statement() -> None:
     workspace = _make_workspace("Build a todo app with persistence")
     redis = _FakeRedis()
-    _, user_prompt = await build_prompt("spec", workspace, _FakeDB(), redis)
+    _, user_prompt, _ = await build_prompt("spec", workspace, _FakeDB(), redis)
     assert "Build a todo app with persistence" in user_prompt
     assert '<untrusted_content source="problem_statement">' in user_prompt
     assert "BEGIN_UNTRUSTED_CONTENT:problem_statement" in user_prompt
@@ -91,7 +91,7 @@ async def test_build_prompt_compression_flag_off_is_byte_identical(
     huge = "Background prose. " * 5000  # ~25K tokens, far over any budget
     workspace = _make_workspace(huge)
     monkeypatch.setattr(prompt_builder.settings, "problem_statement_compression", False)
-    _, off = await build_prompt("spec", workspace, _FakeDB(), _FakeRedis())
+    _, off, _ = await build_prompt("spec", workspace, _FakeDB(), _FakeRedis())
     assert huge in off
 
 
@@ -102,8 +102,37 @@ async def test_build_prompt_compression_flag_on_under_budget_is_noop(
     small = "Build a todo app for teams. Users must authenticate to save tasks."
     workspace = _make_workspace(small)
     monkeypatch.setattr(prompt_builder.settings, "problem_statement_compression", True)
-    _, on = await build_prompt("spec", workspace, _FakeDB(), _FakeRedis())
+    sys_, on, rung = await build_prompt("spec", workspace, _FakeDB(), _FakeRedis())
     assert small in on  # under budget ⇒ byte-identical even with the flag on
+    assert rung == "0"  # no condensation ⇒ no advisory notice (Phase D)
+
+
+@pytest.mark.asyncio
+async def test_build_prompt_reports_lossy_rung_when_condensed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Flag on + an over-budget statement the deterministic ladder must clamp:
+    # build_prompt reports rung "3" so the caller can surface the Phase-D notice.
+    huge = "Background prose with no requirement. " * 5000
+    workspace = _make_workspace(huge)
+    monkeypatch.setattr(prompt_builder.settings, "problem_statement_compression", True)
+    monkeypatch.setattr(
+        prompt_builder.settings, "problem_statement_budget_tokens", 2000
+    )
+    _, on, rung = await build_prompt("spec", workspace, _FakeDB(), _FakeRedis())
+    assert huge not in on
+    assert rung in ("2", "3")  # condensed ⇒ a lossy rung the caller surfaces
+
+
+@pytest.mark.asyncio
+async def test_build_prompt_flag_off_reports_rung_zero(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    huge = "Background prose. " * 5000
+    workspace = _make_workspace(huge)
+    monkeypatch.setattr(prompt_builder.settings, "problem_statement_compression", False)
+    _, _, rung = await build_prompt("spec", workspace, _FakeDB(), _FakeRedis())
+    assert rung == "0"  # flag off ⇒ never a notice, even for huge input
 
 
 @pytest.mark.asyncio
@@ -118,7 +147,7 @@ async def test_build_prompt_compression_flag_on_bounds_large_input(
     monkeypatch.setattr(
         prompt_builder.settings, "problem_statement_budget_tokens", 2000
     )
-    _, on = await build_prompt("spec", workspace, _FakeDB(), _FakeRedis())
+    _, on, _ = await build_prompt("spec", workspace, _FakeDB(), _FakeRedis())
     assert huge not in on  # the raw statement was condensed
     # The whole assembled prompt now fits well under the window; the statement
     # portion is bounded by C_MAX.
@@ -139,7 +168,7 @@ async def test_build_prompt_plan_contains_spec_content() -> None:
     )
     stages = {"spec": spec_stage}
     redis = _FakeRedis()
-    _, user_prompt = await build_prompt("plan", workspace, _FakeDB(stages), redis)
+    _, user_prompt, _ = await build_prompt("plan", workspace, _FakeDB(stages), redis)
     assert "<spec_content>" in user_prompt
     assert '<untrusted_content source="spec_content">' in user_prompt
     assert "BEGIN_UNTRUSTED_CONTENT:spec_content" in user_prompt
@@ -168,7 +197,7 @@ async def test_build_prompt_truncates_long_upstream_content() -> None:
         review_gate_acknowledged=False,
     )
     redis = _FakeRedis()
-    _, user_prompt = await build_prompt(
+    _, user_prompt, _ = await build_prompt(
         "plan", workspace, _FakeDB({"spec": spec_stage}), redis
     )
     assert "## Downstream Constraints" in user_prompt
@@ -353,10 +382,10 @@ async def test_build_prompt_empty_research_context_is_byte_identical(
     )
     stages = {"spec": spec_stage, "plan": plan_stage, "harness": harness_stage}
 
-    default_sys, default_user = await build_prompt(
+    default_sys, default_user, _ = await build_prompt(
         stage_name, workspace, _FakeDB(stages), _FakeRedis()
     )
-    explicit_sys, explicit_user = await build_prompt(
+    explicit_sys, explicit_user, _ = await build_prompt(
         stage_name, workspace, _FakeDB(stages), _FakeRedis(), research_context=""
     )
 
@@ -400,7 +429,7 @@ async def test_build_prompt_injects_research_block_before_closing_instruction(
         current_version=1,
         review_gate_acknowledged=False,
     )
-    _, user_prompt = await build_prompt(
+    _, user_prompt, _ = await build_prompt(
         stage_name,
         workspace,
         _FakeDB({"spec": spec_stage}),

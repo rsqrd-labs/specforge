@@ -323,7 +323,7 @@ def _generate_patches(svc: StageManager, *, complete_return: str | None = None):
     build = patch(
         "services.pipeline.stage_manager.build_prompt",
         new_callable=AsyncMock,
-        return_value=("sys", "user"),
+        return_value=("sys", "user", "0"),
     )
     validate = patch(
         "services.pipeline.stage_manager.validate",
@@ -769,3 +769,102 @@ async def test_disable_critic_no_change_skips_audit(
     assert not [
         r for r in caplog.records if r.getMessage() == AUDIT_EVENT_CRITIC_DISABLED
     ]
+
+
+@pytest.mark.asyncio
+async def test_condensed_problem_statement_surfaces_advisory_notice() -> None:
+    """Phase D: a lossily-condensed problem statement is surfaced as a non-blocking
+    advisory notice on the delivered draft, even when the critic is clean."""
+    svc, stage, workspace, user, deduction, db = _build_generate_env()
+    deduct, refund, invalidate, build, validate, set_cache, get_llm = _generate_patches(
+        svc
+    )
+    with (
+        deduct as md,
+        refund as mr,
+        invalidate,
+        build as mock_build,
+        validate,
+        set_cache,
+        get_llm,
+        patch(
+            "services.pipeline.stage_manager.critic_review",
+            new_callable=AsyncMock,
+            return_value=StageCriticResult(passed=True),
+        ),
+    ):
+        md.return_value = deduction
+        mock_build.return_value = ("sys", "user", "3")  # deterministic clamp
+        tokens = [t async for t in svc.generate(stage.id, user, db)]
+
+    assert any("done" in t for t in tokens)
+    assert stage.status == "draft"  # finalisable — never blocked
+    assert stage.quality_gate_status == "advisory"
+    kinds = [f["kind"] for f in stage.quality_gate_payload["findings"]]
+    assert kinds == ["ProblemStatementCondensed"]
+    mr.assert_not_awaited()  # informational notice never refunds
+    # The generation completes normally — no blocking event.
+    assert not any("quality_gate_failed" in t for t in tokens)
+
+
+@pytest.mark.asyncio
+async def test_condensed_notice_coexists_with_critic_findings() -> None:
+    """Phase D: when the critic is advisory AND the statement was condensed, both
+    findings ride the single advisory bucket (notice appended after critic ones)."""
+    svc, stage, workspace, user, deduction, db = _build_generate_env()
+    deduct, refund, invalidate, build, validate, set_cache, get_llm = _generate_patches(
+        svc, complete_return=_with_final_sentinel(_LONG_ARTIFACT)
+    )
+    fail = StageCriticResult(
+        passed=False,
+        findings=[CriticFinding(kind="MissingSection", detail="missing ADR")],
+    )
+    with (
+        deduct as md,
+        refund,
+        invalidate,
+        build as mock_build,
+        validate,
+        set_cache,
+        get_llm,
+        patch(
+            "services.pipeline.stage_manager.critic_review",
+            new_callable=AsyncMock,
+            return_value=fail,  # fails twice ⇒ advisory after the one regenerate
+        ),
+    ):
+        md.return_value = deduction
+        mock_build.return_value = ("sys", "user", "2")  # abstractive summary
+        tokens = [t async for t in svc.generate(stage.id, user, db)]
+
+    assert any("done" in t for t in tokens)
+    assert stage.quality_gate_status == "advisory"
+    kinds = [f["kind"] for f in stage.quality_gate_payload["findings"]]
+    assert kinds == ["MissingSection", "ProblemStatementCondensed"]
+
+
+@pytest.mark.asyncio
+async def test_uncondensed_clean_generation_stays_clear() -> None:
+    """Phase D regression: rung "0" (no condensation) + clean critic ⇒ no advisory."""
+    svc, stage, workspace, user, deduction, db = _build_generate_env()
+    deduct, refund, invalidate, build, validate, set_cache, get_llm = _generate_patches(
+        svc
+    )
+    with (
+        deduct as md,
+        refund,
+        invalidate,
+        build,  # _generate_patches default return rung "0"
+        validate,
+        set_cache,
+        get_llm,
+        patch(
+            "services.pipeline.stage_manager.critic_review",
+            new_callable=AsyncMock,
+            return_value=StageCriticResult(passed=True),
+        ),
+    ):
+        md.return_value = deduction
+        [t async for t in svc.generate(stage.id, user, db)]
+
+    assert stage.quality_gate_status == "clear"

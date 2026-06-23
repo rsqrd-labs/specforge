@@ -172,6 +172,48 @@ async def test_get_blocked_stage_serializes_recovery_contract(app) -> None:
 
 
 @pytest.mark.asyncio
+async def test_get_advisory_stage_serializes_condensed_notice(app) -> None:
+    """Phase D: the ProblemStatementCondensed advisory notice survives StageResponse
+    serialization end-to-end. This is the first non-critic finding kind to cross the
+    schema boundary, so the read-schema (`StageQualityGate.findings: list[dict]`,
+    `kind: str`) must keep it — the guard against a silently-dropped UI feature."""
+    stage = _make_stage(status="draft")
+    stage.quality_gate_status = "advisory"
+    stage.quality_gate_kind = "critic_findings"
+    stage.quality_gate_payload = {
+        "stage": "spec",
+        "kind": "critic_findings",
+        "findings": [
+            {"kind": "MissingSection", "detail": "missing ADR", "reference": None},
+            {
+                "kind": "ProblemStatementCondensed",
+                "detail": "Your problem statement was condensed before generating.",
+                "reference": None,
+            },
+        ],
+    }
+    stage.quality_gate_version = 1
+
+    async def _fake_db():
+        yield _FakeDB(stage)
+
+    app.dependency_overrides[get_db] = _fake_db
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        response = await client.get(f"/stages/{stage.id}")
+
+    assert response.status_code == 200
+    gate = response.json()["quality_gate"]
+    assert gate["status"] == "advisory"
+    kinds = [f["kind"] for f in gate["findings"]]
+    assert kinds == ["MissingSection", "ProblemStatementCondensed"]
+    # Advisory carries no blocking recovery contract.
+    assert gate.get("recovery") is None
+
+
+@pytest.mark.asyncio
 async def test_get_stage_returns_404_when_stage_is_not_owned(app) -> None:
     async def _fake_db():
         yield _FakeDB(None)

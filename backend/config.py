@@ -246,10 +246,14 @@ class Settings(BaseSettings):
     # accepted big and fed small, so per-call cost/latency stay bounded regardless
     # of input size, and no call can blow the model window. Default **False** — the
     # under-threshold common case is a byte-identical no-op, so flipping it changes
-    # nothing for the vast majority of inputs; it ships off so the Rung-0 regression
-    # pin and the golden corpus gate the rollout. The Rung-2 abstractive
-    # (meaning-preserving) pass is Phase C and is not wired here.
-    problem_statement_compression: bool = False
+    # nothing for the vast majority of inputs; the Rung-0 regression pin and the
+    # golden corpus gated the rollout. **Enabled by default in Phase D** (the
+    # deterministic ladder is zero-LLM-cost and bounded; only genuinely over-budget
+    # pastes condense). When a paste does condense (Rung 2/3), the user is told via
+    # a non-blocking advisory notice on the generated stage (`AdvisoryFindingsPanel`).
+    # The Rung-2 *abstractive* (paid, meaning-preserving) pass remains a separate,
+    # default-off sub-gate (`problem_statement_abstractive`) below.
+    problem_statement_compression: bool = True
 
     # C_MAX — the product token budget compression targets and triggers on
     # (THRESHOLD ≈ C_MAX). A *chosen* small constant set far below the model window

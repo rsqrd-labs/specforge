@@ -17,7 +17,11 @@ from database import get_shared_redis
 from models import Stage, Workspace
 from services.llm.cost_ledger import LLMCostContext
 from services.observability import PIPELINE_UPSTREAM_SECTION_SKIPPED
-from services.pipeline.problem_compressor import get_or_compress, problem_budget
+from services.pipeline.problem_compressor import (
+    classify_compression_rung,
+    get_or_compress,
+    problem_budget,
+)
 from services.pipeline.stage_summary_service import summarize_stage_content
 
 logger = logging.getLogger(__name__)
@@ -126,7 +130,15 @@ async def build_prompt(
     redis_client: Redis | None = None,
     *,
     research_context: str = "",
-) -> tuple[str, str]:
+) -> tuple[str, str, str]:
+    """Assemble ``(system_prompt, user_prompt, compression_rung)`` for a stage.
+
+    ``compression_rung`` reports how this stage's problem statement was condensed
+    ("0" none / "1" lossless / "2" abstractive / "3" clamp). It is the signal the
+    caller uses to surface the Phase-D advisory notice; it is "0" whenever the
+    compression flag is off or the input was under budget, so the common case is
+    unchanged.
+    """
     module = _PROMPT_MODULES[stage_type]
     dep_keys = _DEPENDENCIES[stage_type]
 
@@ -159,14 +171,16 @@ async def build_prompt(
                 content = _section_aware_injection(dep_type, content)
             deps[dep_type] = content
 
-    # Problem-statement compression (compression plan Phase B), applied lazily
+    # Problem-statement compression (compression plan Phase B/D), applied lazily
     # here — beside _section_aware_injection, the existing upstream reducer — so
     # the cached compressed value is computed once and reused across stages and
-    # surfaces. Default-off behind `problem_statement_compression`; when off this
-    # is a no-op and the prompt is byte-identical (the Rung-0 regression pin).
-    # Under-budget input is also a byte-identical no-op even when the flag is on,
-    # so the common case never changes. The statement is in `deps` for *every*
-    # stage, so every stage's prompt is bounded by C_MAX, not just spec.
+    # surfaces. Gated by `problem_statement_compression` (enabled by default in
+    # Phase D); when off this is a no-op and the prompt is byte-identical (the
+    # Rung-0 regression pin). Under-budget input is also a byte-identical no-op
+    # even when the flag is on, so the common case never changes. The statement is
+    # in `deps` for *every* stage, so every stage's prompt is bounded by C_MAX, not
+    # just spec.
+    compression_rung = "0"
     if settings.problem_statement_compression:
         redis = redis_client or get_shared_redis()
         budget = problem_budget(
@@ -176,7 +190,7 @@ async def build_prompt(
             clarification_qa=deps.get("clarification_qa", ""),
             stage_type=stage_type,
         )
-        deps["problem_statement"] = await get_or_compress(
+        compressed = await get_or_compress(
             workspace.problem_statement,
             budget,
             redis,
@@ -187,8 +201,22 @@ async def build_prompt(
                 product_surface="problem_compression",
             ),
         )
+        deps["problem_statement"] = compressed
+        # Phase D: classify how the statement was condensed so the caller can
+        # surface a non-blocking advisory notice for the lossy rungs (2/3). Pure
+        # and cache-hit-safe — recomputed from the returned text against the exact
+        # budget used, never a second compression. budget can differ per stage_type
+        # (problem_budget), so the rung is genuinely per-stage.
+        compression_rung = classify_compression_rung(
+            workspace.problem_statement,
+            compressed,
+            budget,
+            workspace.provider,
+            workspace.model,
+        )
 
-    return await module.get_system_prompt(), module.build_user_prompt(deps)
+    system_prompt = await module.get_system_prompt()
+    return system_prompt, module.build_user_prompt(deps), compression_rung
 
 
 async def _fetch_stage_content(

@@ -437,7 +437,7 @@ async def test_generate_stream_timeout_records_provider_failure() -> None:
         ),
         patch(
             "services.pipeline.stage_manager.build_prompt",
-            AsyncMock(return_value=("system_prompt", "user_prompt")),
+            AsyncMock(return_value=("system_prompt", "user_prompt", "0")),
         ),
         patch(
             "services.pipeline.stage_manager.build_generation_cache_key",
@@ -552,7 +552,7 @@ async def test_generate_provider_error_does_not_double_count_record_provider_fai
         ),
         patch(
             "services.pipeline.stage_manager.build_prompt",
-            AsyncMock(return_value=("system_prompt", "user_prompt")),
+            AsyncMock(return_value=("system_prompt", "user_prompt", "0")),
         ),
         patch(
             "services.pipeline.stage_manager.build_generation_cache_key",

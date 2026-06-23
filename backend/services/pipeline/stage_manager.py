@@ -871,6 +871,44 @@ _RECOVERY_LOCK_KEY = "recovery:leader_lock"
 AUDIT_EVENT_QUALITY_GATE_OVERRIDDEN = "quality_gate_overridden"
 INCOMPLETE_OUTPUT_GATE_KIND = "incomplete_output"
 
+# Phase D (problem-statement compression): the finding kind for the non-blocking
+# advisory notice shown when an over-budget problem statement was *lossily*
+# condensed (Rung 2 abstractive summary / Rung 3 deterministic clamp) before the
+# model saw it. Purely informational — it never blocks finalisation and carries no
+# regenerate semantics (regenerating cannot un-condense an over-budget input). The
+# frontend maps this kind to a friendly label and suppresses the regenerate action.
+PROBLEM_CONDENSED_FINDING_KIND = "ProblemStatementCondensed"
+
+
+def _problem_statement_condensed_finding(rung: str, stage_type: str) -> dict:
+    """Build the informational advisory finding for a lossily-condensed statement.
+
+    Returned as a plain dict (not a ``CriticFinding`` — this is not a critic verdict
+    and must not widen the strict critic-finding vocabulary) so it merges directly
+    into the advisory ``quality_gate`` findings payload. Requirement IDs are always
+    preserved verbatim by the compressor, which the copy states plainly so the user
+    knows exactly what was and was not at risk.
+    """
+    if rung == "2":
+        detail = (
+            f"Your problem statement exceeded the size budget, so its narrative was "
+            f"summarized (every requirement ID kept verbatim) before generating this "
+            f"{stage_type}. Skim the {stage_type} to confirm the summary preserved "
+            f"your intent."
+        )
+    else:  # rung "3" — deterministic clamp
+        detail = (
+            f"Your problem statement exceeded the size budget and was trimmed "
+            f"(requirements kept first; lower-priority trailing prose dropped) before "
+            f"generating this {stage_type}. Review the {stage_type} to confirm nothing "
+            f"important was lost."
+        )
+    return {
+        "kind": PROBLEM_CONDENSED_FINDING_KIND,
+        "detail": detail,
+        "reference": None,
+    }
+
 
 class QualityGateBlockedError(ValueError):
     """Finalise refused because the current version is blocked by a quality gate.
@@ -1857,7 +1895,7 @@ class StageManager:
             credit_cost=credit_cost,
             free=free,
         )
-        system_prompt, user_prompt = await build_prompt(
+        system_prompt, user_prompt, compression_rung = await build_prompt(
             stage.type, workspace, db, redis, research_context=research.block
         )
         # Phase A instrumentation (compression plan §8): observe the size of the
@@ -1916,6 +1954,7 @@ class StageManager:
                 trace_id=trace_id,
                 system_prompt=system_prompt,
                 user_prompt=user_prompt,
+                compression_rung=compression_rung,
                 cache_key=cache_key,
                 phase=phase_tracker,
                 research=research,
@@ -1978,6 +2017,7 @@ class StageManager:
         trace_id: str | None,
         system_prompt: str,
         user_prompt: str,
+        compression_rung: str = "0",
         cache_key: str,
         phase: _PhaseTracker,
         research: ResearchContext = _EMPTY_RESEARCH,
@@ -2459,9 +2499,16 @@ class StageManager:
             stage.status = "draft"
             # Issue #34: a draft that cleared every terminal gate but still has
             # advisory critic findings is delivered as a finalisable draft with
-            # the findings attached as non-blocking suggestions.
-            if advisory_findings:
-                self._mark_quality_gate_advisory(stage, advisory_findings)
+            # the findings attached as non-blocking suggestions.  Phase D adds the
+            # problem-statement-condensed notice to the *same* advisory bucket so
+            # the two coexist — mark advisory when either is present, else clear.
+            advisory_payload = [finding.model_dump() for finding in advisory_findings]
+            if compression_rung in ("2", "3"):
+                advisory_payload.append(
+                    _problem_statement_condensed_finding(compression_rung, stage.type)
+                )
+            if advisory_payload:
+                self._mark_quality_gate_advisory(stage, advisory_payload)
             else:
                 self._clear_quality_gate(stage)
             stage.updated_at = datetime.now(UTC)
@@ -3204,15 +3251,19 @@ class StageManager:
     def _mark_quality_gate_advisory(
         self,
         stage: Stage,
-        findings: list[CriticFinding],
+        findings: list[dict],
     ) -> None:
-        """Attach non-blocking critic findings to a delivered draft (issue #34).
+        """Attach non-blocking advisory findings to a delivered draft (issue #34).
 
         Unlike _persist_quality_gate_blocked this never sets status="blocked" and
         never resets/refunds: the artifact is finalisable as-is.  The findings
         ride on Stage.quality_gate (status="advisory") so the frontend renders
         them as suggestions after generation completes.  Pinned to the just-bumped
         current_version so a later edit/regenerate supersedes them.
+
+        Takes already-serialised finding dicts so it can carry both critic
+        findings *and* the Phase-D problem-statement-condensed notice in one
+        advisory bucket (the latter is not a CriticFinding).
         """
         now = datetime.now(UTC)
         stage.quality_gate_status = "advisory"
@@ -3220,7 +3271,7 @@ class StageManager:
         stage.quality_gate_payload = {
             "stage": stage.type,
             "kind": "critic_findings",
-            "findings": [finding.model_dump() for finding in findings],
+            "findings": findings,
         }
         stage.quality_gate_version = stage.current_version
         stage.quality_gate_failed_at = now

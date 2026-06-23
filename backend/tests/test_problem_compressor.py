@@ -11,6 +11,7 @@ from services.pipeline.problem_compressor import (
     _rung1_cleanup,
     _rung3_clamp,
     _truncate_to_tokens,
+    classify_compression_rung,
     compress_problem_statement,
     get_or_compress,
     normative_retention,
@@ -604,3 +605,46 @@ class _CapturingRedis(_FakeRedis):
     async def set(self, key: str, value: str, ex: int = 0) -> None:
         self.last_ex = ex
         await super().set(key, value, ex=ex)
+
+
+# --------------------------------------------------------------------------- #
+# classify_compression_rung — pure, cache-hit-safe rung recovery (Phase D)
+# --------------------------------------------------------------------------- #
+
+
+def test_classify_rung0_when_unchanged() -> None:
+    raw = "Build a todo app. FR-001: users must authenticate."
+    assert classify_compression_rung(raw, raw, 8000, PROVIDER, MODEL) == "0"
+
+
+def test_classify_rung1_when_lossless_cleanup() -> None:
+    # A statement that only needs whitespace/comment cleanup to fit budget.
+    raw = "FR-001: must auth.\n\n\n\n   \n\nBackground.   \n\n"
+    cleaned = _rung1_cleanup(raw)
+    assert cleaned != raw  # cleanup changed it
+    assert classify_compression_rung(raw, cleaned, 8000, PROVIDER, MODEL) == "1"
+
+
+def test_classify_rung3_matches_deterministic_clamp() -> None:
+    budget = 200
+    cleaned = _rung1_cleanup(_MIXED)
+    clamped = _rung3_clamp(cleaned, budget, PROVIDER, MODEL)
+    assert classify_compression_rung(_MIXED, clamped, budget, PROVIDER, MODEL) == "3"
+
+
+def test_classify_rung2_for_any_other_over_budget_text() -> None:
+    # An abstractive summary equals neither raw, nor the cleanup, nor the clamp,
+    # so it is classified as the (lossy) abstractive rung.
+    budget = 200
+    summary = f"{_NORMS}\n\nA faithful one-line condensation of the narrative."
+    assert classify_compression_rung(_MIXED, summary, budget, PROVIDER, MODEL) == "2"
+
+
+def test_classify_matches_pure_ladder_rung() -> None:
+    # The classifier re-derives exactly the rung the pure ladder reports.
+    for raw, budget in [
+        ("Small. FR-001 must auth.", 8000),
+        (_MIXED, 200),
+    ]:
+        text, rung = compress_problem_statement(raw, budget, PROVIDER, MODEL)
+        assert classify_compression_rung(raw, text, budget, PROVIDER, MODEL) == rung

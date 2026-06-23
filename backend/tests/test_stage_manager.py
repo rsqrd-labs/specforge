@@ -590,7 +590,7 @@ async def test_generate_success_deducts_credits_and_saves_version() -> None:
         patch(
             "services.pipeline.stage_manager.build_prompt",
             new_callable=AsyncMock,
-            return_value=("sys", "user"),
+            return_value=("sys", "user", "0"),
         ),
         patch("services.pipeline.stage_manager.get_llm") as mock_get_llm,
     ):
@@ -622,7 +622,7 @@ async def test_generate_cache_hit_skips_credit_and_provider_call() -> None:
         patch(
             "services.pipeline.stage_manager.build_prompt",
             new_callable=AsyncMock,
-            return_value=("sys", "user"),
+            return_value=("sys", "user", "0"),
         ),
         patch(
             "services.pipeline.stage_manager.build_generation_cache_key",
@@ -685,7 +685,7 @@ async def test_regenerate_bypasses_cache_and_uses_regenerate_credit_reason() -> 
         patch(
             "services.pipeline.stage_manager.build_prompt",
             new_callable=AsyncMock,
-            return_value=("sys", "user"),
+            return_value=("sys", "user", "0"),
         ),
         patch(
             "services.pipeline.stage_manager.build_generation_cache_key",
@@ -748,7 +748,7 @@ async def test_generate_cache_miss_writes_completed_output() -> None:
         patch(
             "services.pipeline.stage_manager.build_prompt",
             new_callable=AsyncMock,
-            return_value=("sys", "user"),
+            return_value=("sys", "user", "0"),
         ),
         patch(
             "services.pipeline.stage_manager.build_generation_cache_key",
@@ -795,7 +795,7 @@ async def test_generate_provider_limit_stop_repairs_without_double_charging() ->
         patch(
             "services.pipeline.stage_manager.build_prompt",
             new_callable=AsyncMock,
-            return_value=("sys", "user"),
+            return_value=("sys", "user", "0"),
         ),
         patch("services.pipeline.stage_manager.get_llm", return_value=adapter),
     ):
@@ -842,7 +842,7 @@ async def test_generate_provider_limit_stop_failed_repair_blocks_and_refunds() -
         patch(
             "services.pipeline.stage_manager.build_prompt",
             new_callable=AsyncMock,
-            return_value=("sys", "user"),
+            return_value=("sys", "user", "0"),
         ),
         patch(
             "services.pipeline.stage_manager.set_cached_generation",
@@ -988,7 +988,7 @@ async def test_doomed_limit_stop_still_repairs_when_flag_off(monkeypatch) -> Non
         patch(
             "services.pipeline.stage_manager.build_prompt",
             new_callable=AsyncMock,
-            return_value=("sys", "user"),
+            return_value=("sys", "user", "0"),
         ),
         patch("services.pipeline.stage_manager.get_llm", return_value=adapter),
     ):
@@ -1044,7 +1044,7 @@ async def test_doomed_limit_stop_skips_repair_when_flag_on(
         patch(
             "services.pipeline.stage_manager.build_prompt",
             new_callable=AsyncMock,
-            return_value=("sys", "user"),
+            return_value=("sys", "user", "0"),
         ),
         patch("services.pipeline.stage_manager.get_llm", return_value=adapter),
     ):
@@ -1107,7 +1107,7 @@ async def test_sub_ceiling_limit_stop_still_repairs_when_flag_on(monkeypatch) ->
         patch(
             "services.pipeline.stage_manager.build_prompt",
             new_callable=AsyncMock,
-            return_value=("sys", "user"),
+            return_value=("sys", "user", "0"),
         ),
         patch("services.pipeline.stage_manager.get_llm", return_value=adapter),
     ):
@@ -1156,7 +1156,7 @@ async def test_generate_unsafe_plan_repairs_without_double_charging() -> None:
         patch(
             "services.pipeline.stage_manager.build_prompt",
             new_callable=AsyncMock,
-            return_value=("sys", "user"),
+            return_value=("sys", "user", "0"),
         ),
         patch("services.pipeline.stage_manager.get_llm", return_value=adapter),
     ):
@@ -1211,7 +1211,7 @@ async def test_generate_unsafe_plan_failed_repair_blocks_no_refund() -> None:
         patch(
             "services.pipeline.stage_manager.build_prompt",
             new_callable=AsyncMock,
-            return_value=("sys", "user"),
+            return_value=("sys", "user", "0"),
         ),
         patch(
             "services.pipeline.stage_manager.set_cached_generation",
@@ -1277,7 +1277,7 @@ async def test_generate_with_trace_id_creates_langfuse_trace_and_span(
         patch(
             "services.pipeline.stage_manager.build_prompt",
             new_callable=AsyncMock,
-            return_value=("sys", "user"),
+            return_value=("sys", "user", "0"),
         ),
         patch("services.pipeline.stage_manager.get_llm") as mock_get_llm,
         patch(
@@ -1353,7 +1353,7 @@ async def test_generate_continues_when_langfuse_trace_creation_fails() -> None:
         patch(
             "services.pipeline.stage_manager.build_prompt",
             new_callable=AsyncMock,
-            return_value=("sys", "user"),
+            return_value=("sys", "user", "0"),
         ),
         patch("services.pipeline.stage_manager.get_llm") as mock_get_llm,
         patch(
@@ -1422,7 +1422,7 @@ async def test_generate_marks_langfuse_span_failed_on_client_disconnect() -> Non
         patch(
             "services.pipeline.stage_manager.build_prompt",
             new_callable=AsyncMock,
-            return_value=("sys", "user"),
+            return_value=("sys", "user", "0"),
         ),
         patch("services.pipeline.stage_manager.get_llm") as mock_get_llm,
         patch(
@@ -1720,7 +1720,7 @@ async def test_generate_provider_error_refunds_credits() -> None:
         patch(
             "services.pipeline.stage_manager.build_prompt",
             new_callable=AsyncMock,
-            return_value=("sys", "user"),
+            return_value=("sys", "user", "0"),
         ),
         patch("services.pipeline.stage_manager.get_llm") as mock_get_llm,
     ):
@@ -2751,7 +2751,7 @@ async def test_generate_uses_select_for_update_on_stage_row() -> None:
         patch(
             "services.pipeline.stage_manager.build_prompt",
             new_callable=AsyncMock,
-            return_value=("sys", "user"),
+            return_value=("sys", "user", "0"),
         ),
         patch("services.pipeline.stage_manager.get_llm") as mock_get_llm,
     ):
@@ -2985,7 +2985,7 @@ async def test_generate_emits_structural_eval_without_blocking_on_score(
         patch(
             "services.pipeline.stage_manager.build_prompt",
             new_callable=AsyncMock,
-            return_value=("sys", "user"),
+            return_value=("sys", "user", "0"),
         ),
         patch("services.pipeline.stage_manager.get_llm") as mock_get_llm,
         patch("services.pipeline.stage_manager.run_eval_background", blocking_score),
@@ -3044,7 +3044,7 @@ async def test_generate_emits_done_when_structural_eval_persist_fails() -> None:
         patch(
             "services.pipeline.stage_manager.build_prompt",
             new_callable=AsyncMock,
-            return_value=("sys", "user"),
+            return_value=("sys", "user", "0"),
         ),
         patch("services.pipeline.stage_manager.get_llm") as mock_get_llm,
         patch("services.pipeline.stage_manager.persist_structural_eval", boom),
@@ -3254,7 +3254,7 @@ async def test_generate_spec_skips_score_judge_by_default(monkeypatch) -> None:
         patch(
             "services.pipeline.stage_manager.build_prompt",
             new_callable=AsyncMock,
-            return_value=("sys", "user"),
+            return_value=("sys", "user", "0"),
         ),
         patch("services.pipeline.stage_manager.get_llm") as mock_get_llm,
     ):
@@ -3315,7 +3315,7 @@ async def test_generate_falls_back_to_strong_tier_after_primary_failure() -> Non
         patch(
             "services.pipeline.stage_manager.build_prompt",
             new_callable=AsyncMock,
-            return_value=("sys", "user"),
+            return_value=("sys", "user", "0"),
         ),
         patch("services.pipeline.stage_manager.get_llm", side_effect=fake_get_llm),
     ):
@@ -3362,7 +3362,7 @@ async def test_generate_emits_progress_heartbeats_while_model_reasons() -> None:
         patch(
             "services.pipeline.stage_manager.build_prompt",
             new_callable=AsyncMock,
-            return_value=("sys", "user"),
+            return_value=("sys", "user", "0"),
         ),
         patch("services.pipeline.stage_manager.get_llm") as mock_get_llm,
     ):
@@ -3424,7 +3424,7 @@ async def test_generate_streams_tokens_live_before_canonical_replay() -> None:
         patch(
             "services.pipeline.stage_manager.build_prompt",
             new_callable=AsyncMock,
-            return_value=("sys", "user"),
+            return_value=("sys", "user", "0"),
         ),
         patch("services.pipeline.stage_manager.get_llm") as mock_get_llm,
     ):
@@ -3542,7 +3542,7 @@ async def test_generate_runs_db_heartbeat_for_lifetime_of_generation() -> None:
         patch(
             "services.pipeline.stage_manager.build_prompt",
             new_callable=AsyncMock,
-            return_value=("sys", "user"),
+            return_value=("sys", "user", "0"),
         ),
         patch("services.pipeline.stage_manager.get_llm") as mock_get_llm,
     ):
@@ -3608,7 +3608,7 @@ async def test_generate_disable_critic_records_disabled_skip(monkeypatch) -> Non
         patch(
             "services.pipeline.stage_manager.build_prompt",
             new_callable=AsyncMock,
-            return_value=("sys", "user"),
+            return_value=("sys", "user", "0"),
         ),
         patch(
             "services.pipeline.stage_manager.critic_review",
@@ -3678,7 +3678,7 @@ async def test_generate_section_gate_skips_critic_before_judge(monkeypatch) -> N
         patch(
             "services.pipeline.stage_manager.build_prompt",
             new_callable=AsyncMock,
-            return_value=("sys", "user"),
+            return_value=("sys", "user", "0"),
         ),
         patch(
             "services.pipeline.stage_manager.validate_sections",
