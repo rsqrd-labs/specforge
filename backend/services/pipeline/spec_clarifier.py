@@ -8,9 +8,10 @@ Two entry points:
     clarifying questions about the workspace's problem statement. The
     questions are cached in Redis for 900 seconds under a round key so
     ``persist_answers`` can validate that user-submitted answers belong
-    to the most recently shown round. Best-effort: a 5-second asyncio
-    timeout plus broad exception swallowing keeps the standard
-    /generate path open if the judge model is unreachable.
+    to the most recently shown round. Best-effort: a 30-second asyncio
+    timeout (sized for the reasoning judge model) plus broad exception
+    swallowing keeps the standard /generate path open if the judge model
+    is unreachable.
 
   persist_answers(
       workspace_id, answers, db, redis, mode="round", workspace=None
@@ -29,8 +30,9 @@ Design invariants enforced by the harness:
   - Every persisted answer flows through ``sanitize_text`` and the
     ``PromptGuard`` scanner (the same pipeline applied to the original
     problem statement). User-supplied text is never trusted.
-  - An ``asyncio.timeout(5.0)`` wraps the judge-model call so a stuck
-    provider cannot block the modal beyond five seconds.
+  - An ``asyncio.timeout(_JUDGE_TIMEOUT_SECONDS)`` wraps the judge-model
+    call so a stuck provider cannot block the modal indefinitely; the
+    bound is sized for the reasoning judge, well under the frontend cap.
 
 See V1 spec.md §4.4.1, Plan v1.md §18.3, tasks.md T-162.
 """
@@ -68,10 +70,23 @@ logger = logging.getLogger(__name__)
 _ROUND_KEY_PREFIX = "clarify_round:"
 _ROUND_TTL_SECONDS = 900  # 15 minutes — generous slack for slow typists
 
-# Judge-model invocation must never block the modal beyond ~5s. If the
-# provider is unreachable the modal silently bypasses; the user sees the
-# standard generate flow without realising a clarification call was tried.
-_JUDGE_TIMEOUT_SECONDS = 5.0
+# Judge-model invocation must never block the modal indefinitely, but the
+# clarification judge is now a *reasoning* model (e.g. GPT-5.4 Mini at medium
+# effort), whose hidden reasoning routinely runs longer than a non-reasoning
+# judge. The old 5s bound was sized for GPT-4o Mini and silently killed the
+# slower reasoning call, returning [] -> 204 -> the modal bypassed with no
+# questions shown. 30s gives reasoning room while staying well under the
+# frontend's 90s sync timeout. The bound is a ceiling, not added latency: a
+# fast call still returns immediately.
+_JUDGE_TIMEOUT_SECONDS = 30.0
+
+# Output budget for the judge call. Reasoning models bill hidden reasoning
+# tokens against this same budget (see services.llm.output_budget), so 600 —
+# sized for a non-reasoning judge — could be fully consumed by reasoning,
+# leaving the visible JSON empty/truncated -> [] -> 204 -> silent bypass.
+# 2048 leaves comfortable headroom for reasoning plus the short JSON array.
+# This does not raise cost: providers bill actual output tokens, not the cap.
+_JUDGE_MAX_OUTPUT_TOKENS = 2048
 
 # Bounds on the parsed JSON array we accept from the judge model.
 _MIN_QUESTIONS = 1
@@ -182,7 +197,9 @@ async def request_clarifying_questions(
         )
         record_judge_call("clarify")
         async with asyncio.timeout(_JUDGE_TIMEOUT_SECONDS):
-            raw = await adapter.complete(system_prompt, user_prompt, max_tokens=600)
+            raw = await adapter.complete(
+                system_prompt, user_prompt, max_tokens=_JUDGE_MAX_OUTPUT_TOKENS
+            )
     except asyncio.TimeoutError:
         logger.info(
             "clarify_judge_timeout",
