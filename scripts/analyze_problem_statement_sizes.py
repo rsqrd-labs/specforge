@@ -72,7 +72,9 @@ async def _problem_statement_distribution(
     The token estimate mirrors ``estimate_tokens`` exactly: ``(octet_length + 3)
     / 4`` (utf-8 bytes, integer division). Only active workspaces contribute.
     """
-    from sqlalchemy import case, func, select  # noqa: PLC0415
+    from sqlalchemy import case  # noqa: PLC0415
+    from sqlalchemy import func  # noqa: PLC0415
+    from sqlalchemy import select  # noqa: PLC0415
 
     from models import Workspace  # noqa: PLC0415
 
