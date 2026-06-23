@@ -144,15 +144,12 @@ def _format_markdown(report: dict[str, Any]) -> str:
         "",
         "| samples | p50 | p90 | p95 | max | over threshold | % over |",
         "|--:|--:|--:|--:|--:|--:|--:|",
-        "| {n} | {p50} | {p90} | {p95} | {mx} | {oc} | {pct:.2f} |".format(
-            n=ps["samples"],
-            p50=ps["p50_tokens"] if ps["p50_tokens"] is not None else "—",
-            p90=ps["p90_tokens"] if ps["p90_tokens"] is not None else "—",
-            p95=ps["p95_tokens"] if ps["p95_tokens"] is not None else "—",
-            mx=ps["max_tokens"] if ps["max_tokens"] is not None else "—",
-            oc=ps["over_threshold_count"],
-            pct=pct,
-        ),
+        f"| {ps['samples']} | "
+        f"{ps['p50_tokens'] if ps['p50_tokens'] is not None else '—'} | "
+        f"{ps['p90_tokens'] if ps['p90_tokens'] is not None else '—'} | "
+        f"{ps['p95_tokens'] if ps['p95_tokens'] is not None else '—'} | "
+        f"{ps['max_tokens'] if ps['max_tokens'] is not None else '—'} | "
+        f"{ps['over_threshold_count']} | {pct:.2f} |",
         "",
         (
             f"**{ps['over_threshold_count']} of {ps['samples']} "
@@ -169,15 +166,9 @@ def _format_markdown(report: dict[str, Any]) -> str:
     assembled = report["assembled_prompts"]
     for row in assembled:
         lines.append(
-            "| {op} | {prov} | {n} | {p50} | {p90} | {p95} | {mx} |".format(
-                op=row["operation"],
-                prov=row["provider"],
-                n=row["samples"],
-                p50=row["p50_input_tokens"],
-                p90=row["p90_input_tokens"],
-                p95=row["p95_input_tokens"],
-                mx=row["max_input_tokens"],
-            )
+            f"| {row['operation']} | {row['provider']} | {row['samples']} | "
+            f"{row['p50_input_tokens']} | {row['p90_input_tokens']} | "
+            f"{row['p95_input_tokens']} | {row['max_input_tokens']} |"
         )
     if not assembled:
         lines.append("| _(ledger empty for the window)_ |  |  |  |  |  |  |")
