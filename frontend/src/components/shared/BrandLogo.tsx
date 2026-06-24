@@ -1,3 +1,5 @@
+import { SquirrelMark } from "./SquirrelMark"
+
 export type BrandLogoSize = "default" | "small" | "compact"
 export type BrandLockupVariant = "default" | "small" | "compact"
 
@@ -24,13 +26,11 @@ export function BrandLogo({
   return (
     <span
       className={classNames("brand-logo", `brand-logo--${size}`, className)}
+      role={decorative ? undefined : "img"}
+      aria-label={decorative ? undefined : "SpecForge squirrel logo"}
       aria-hidden={decorative ? true : undefined}
     >
-      <img
-        className="brand-logo-image"
-        src="/brand/squirrel-mark.png"
-        alt={decorative ? "" : "SpecForge squirrel logo"}
-      />
+      <SquirrelMark className="brand-logo-image" />
     </span>
   )
 }

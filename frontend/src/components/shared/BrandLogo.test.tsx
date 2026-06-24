@@ -10,10 +10,9 @@ describe("BrandLogo", () => {
     expect(
       screen.getByRole("img", { name: "SpecForge squirrel logo" }),
     ).toBeInTheDocument()
-    expect(
-      screen.getByRole("img", { name: "SpecForge squirrel logo" }),
-    ).toHaveAttribute("src", "/brand/squirrel-mark.png")
-    expect(container.querySelector(".brand-logo-image")).not.toBeNull()
+    const mark = container.querySelector(".brand-logo-image")
+    expect(mark).not.toBeNull()
+    expect(mark?.tagName.toLowerCase()).toBe("svg")
     expect(screen.queryByText("SF")).toBeNull()
   })
 
