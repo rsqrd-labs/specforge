@@ -120,6 +120,23 @@ _FILE_BLOCK_RE = re.compile(
 _INCOMPLETE_TRAILING_RE = re.compile(r"(:|,\s*|\|\s*)$")
 
 
+def _ends_with_complete_table_row(final_line: str) -> bool:
+    """True when the artifact's last line is a complete markdown table row.
+
+    A well-formed table row is pipe-delimited and *legitimately* ends every row
+    with ``|`` (``| a | b |``), so a document that closes on a table — e.g. a
+    plan's "Open Questions" matrix — naturally has a trailing pipe.  The
+    ``_INCOMPLETE_TRAILING_RE`` ``|`` clause exists to catch a row truncated
+    mid-cell, but such a cut ends *inside* the cell text (no trailing ``|``), so
+    a row that ends with ``|`` and carries an interior separator (``count >= 2``)
+    is complete, not dangling.  Genuine mid-table truncation that happens to land
+    on a cell boundary is still caught by the provider ``stopped_by_limit`` and
+    ``missing_completion_sentinel`` checks; this only removes the false positive
+    that flagged every table-closing artifact as truncated.
+    """
+    return final_line.endswith("|") and final_line.count("|") >= 2
+
+
 # Completeness codes that mean the model genuinely stopped early or emitted
 # corrupt markup — the artifact is *unusable*, so the generation is refunded and
 # repaired.  Every OTHER completeness code is a depth/quality opinion (a shallow
@@ -129,13 +146,23 @@ _INCOMPLETE_TRAILING_RE = re.compile(r"(:|,\s*|\|\s*)$")
 # artifact — same stance as the critic / missing_sections, issue #34).  Keeping
 # the discriminator here, exhaustive over the codes the validator emits, is the
 # single source of truth for "does this cost the platform a refund".
+#
+# `dangling_trailing_line` is deliberately NOT refundable.  The check can only
+# run *after* `validate_completion_sentinel` has passed and the provider
+# `stopped_by_limit` guard has cleared (see every `validate_artifact_completeness`
+# call site in stage_manager.py) — i.e. the model itself asserted the artifact is
+# complete by emitting the final sentinel.  A genuinely truncated generation has
+# no sentinel (→ `missing_completion_sentinel`) or a hard provider stop
+# (→ `provider_stopped_by_limit`); those two own real truncation.  So a trailing
+# `:`/`,`/`|` on a model-complete artifact is a heuristic quality opinion, not
+# unusable output — it flows through as a non-blocking advisory finding (no
+# refund, no paid repair, finalisable) instead of refunding a complete artifact.
 REFUNDABLE_INCOMPLETE_CODES: frozenset[str] = frozenset(
     {
         "empty_artifact",
         "missing_completion_sentinel",
         "provider_stopped_by_limit",
         "unbalanced_code_fence",
-        "dangling_trailing_line",
         "incomplete_harness_file_block",
     }
 )
@@ -413,7 +440,11 @@ def _markdown_shape_issues(artifact_md: str) -> list[CompletenessIssue]:
         (line.strip() for line in reversed(artifact_md.splitlines()) if line.strip()),
         "",
     )
-    if final_line and _INCOMPLETE_TRAILING_RE.search(final_line):
+    if (
+        final_line
+        and _INCOMPLETE_TRAILING_RE.search(final_line)
+        and not _ends_with_complete_table_row(final_line)
+    ):
         issues.append(
             CompletenessIssue(
                 code="dangling_trailing_line",

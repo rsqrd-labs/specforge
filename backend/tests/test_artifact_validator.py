@@ -148,6 +148,44 @@ def test_refundable_partition_separates_truncation_from_depth() -> None:
     assert exc.depth_issues == [shallow]
 
 
+def test_artifact_ending_on_complete_table_is_not_dangling() -> None:
+    # A plan that legitimately closes on a markdown table (e.g. an "Open
+    # Questions" matrix) ends every row with '|'. That trailing pipe must NOT be
+    # read as a mid-table truncation — the regression that blocked a complete
+    # 174k-char plan as incomplete_output and refunded it.
+    from services.pipeline.artifact_validator import _markdown_shape_issues
+
+    artifact = (
+        "## Open Questions\n\n"
+        "| ID | Question | Owner |\n"
+        "| --- | --- | --- |\n"
+        "| OQ-001 | Is the control surface admin-only? | Security owner |"
+    )
+    codes = {issue.code for issue in _markdown_shape_issues(artifact)}
+    assert "dangling_trailing_line" not in codes
+
+
+def test_artifact_ending_mid_clause_is_still_flagged_but_not_refundable() -> None:
+    # A mid-clause-looking tail (trailing colon or comma) is still *surfaced* as a
+    # dangling_trailing_line finding — but it is NOT refundable.  The check only
+    # runs after the completion sentinel passed (the model asserted completeness),
+    # so a trailing colon/comma is a heuristic opinion on a complete artifact, not
+    # genuine truncation: it flows through as a non-blocking advisory finding.
+    from services.pipeline.artifact_validator import (
+        CompletenessIssue,
+        _markdown_shape_issues,
+    )
+
+    for tail in ("The remaining risks are:", "first item, second item,"):
+        issues = _markdown_shape_issues(f"## Risks\n\n{tail}")
+        codes = {issue.code for issue in issues}
+        assert "dangling_trailing_line" in codes
+        assert all(not issue.is_refundable for issue in issues)
+
+    # Exhaustive guard: the code itself must never be classed as refundable.
+    assert CompletenessIssue("dangling_trailing_line", "x").is_refundable is False
+
+
 def test_validate_artifact_completeness_rejects_incomplete_harness_file() -> None:
     artifact = "\n\n".join(
         [
