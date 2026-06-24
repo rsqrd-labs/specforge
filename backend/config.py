@@ -239,8 +239,10 @@ class Settings(BaseSettings):
     # case: 89 FRs, truncated) is unlikely to fit at the ceiling. With this flag on,
     # that ceiling-capped repair is skipped and the `incomplete_output` block
     # surfaces immediately instead of after another multi-minute call. Under the live
-    # catalog this DOES fire for core generation (budget 24576 doubles into the 32768
-    # ceiling), so it actively cuts a call — it is NOT outcome-preserving: a
+    # catalog this NO LONGER fires for core generation (the 49152 budget doubles to
+    # 98304, clamped to the true 64K ceiling — a real step above the budget), so the
+    # repair always has headroom; the flag only short-circuits genuinely ceiling-capped
+    # cases. When it does fire it actively cuts a call — it is NOT outcome-preserving: a
     # generation that only just overran could still fit at the ceiling, so the flag
     # trades that recovery for the saved call. That is exactly why it ships Default
     # False — a chunk-loop change that changes which artifacts recover rides the

@@ -187,9 +187,10 @@ def test_output_budgets_carry_reasoning_headroom() -> None:
 
 def test_resolve_output_budget_clamps_to_model_ceiling() -> None:
     # Gemini Flash-Lite's catalog ceiling (4096) is below the spec budget — the
-    # budget is clamped down to the model's hard ceiling. (Haiku 4.5 / GPT-5.4
-    # Mini ceilings were raised to 32768 so the cheap core-gen primaries are not
-    # clamped.)
+    # budget is clamped down to the model's hard ceiling. (The core-gen ceilings
+    # across all three providers were raised to 64K — below every current-gen
+    # model's real output cap — so the cheap primaries are never clamped and the
+    # limit-stop repair has real headroom.)
     assert (
         resolve_output_budget(
             "spec.generate",
@@ -198,7 +199,7 @@ def test_resolve_output_budget_clamps_to_model_ceiling() -> None:
         )
         == 4096
     )
-    # Opus's ceiling (32768) is above the spec budget — budget wins.
+    # Opus's ceiling (64000) is above the spec budget — budget wins.
     assert (
         resolve_output_budget(
             "spec.generate",
@@ -225,8 +226,10 @@ def test_repair_budget_escalates_only_for_limit_stops() -> None:
     ]
 
     assert _repair_budget(route, 16384, limit_issue) == 32768
-    # Clamped at the model ceiling.
-    assert _repair_budget(route, 32768, limit_issue) == 32768
+    # Doubles into the true 64K ceiling rather than being clamped at 32768.
+    assert _repair_budget(route, 32768, limit_issue) == 64000
+    # Clamped at the model ceiling once doubling would exceed it.
+    assert _repair_budget(route, 49152, limit_issue) == 64000
     # Non-limit failures keep the original budget.
     assert _repair_budget(route, 16384, other_issue) == 16384
 

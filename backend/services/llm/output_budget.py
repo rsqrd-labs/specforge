@@ -41,17 +41,22 @@ from dataclasses import dataclass
 from services.llm.model_catalog import model_max_output_tokens
 
 OUTPUT_TOKEN_BUDGETS: dict[str, int] = {
-    # Live GPT-5.5 spec chunks measured ~15-18K estimated output tokens
-    # (reasoning + an 8-section chunk body); 16384 truncated them, so core
-    # generation budgets sit at 24576 with the limit-stop repair doubling
-    # into the 32768 model ceiling.
-    "spec.generate": 24576,
-    "plan.generate": 24576,
-    "harness.generate": 24576,
-    "tasks.generate": 24576,
+    # A core-gen chunk is reasoning + an ~8-section body. With medium-effort
+    # reasoning billed against max_tokens, 24576 truncated nearly every chunk
+    # and the doubling repair clamped to the old 32768 model ceiling (so it
+    # could not recover) — almost every generation failed with
+    # provider_stopped_by_limit. The core-gen ceilings across all three
+    # providers are now 64K (model_catalog.py — below every current-gen model's
+    # real output cap), so the first attempt sits at 49152 (comfortably fits
+    # reasoning + a full dense chunk) and the limit-stop repair still doubles
+    # into the 64K ceiling.
+    "spec.generate": 49152,
+    "plan.generate": 49152,
+    "harness.generate": 49152,
+    "tasks.generate": 49152,
     "refine.focused": 768,
     "refine.section": 4096,
-    "regenerate.full": 24576,
+    "regenerate.full": 49152,
     "summary.create": 2048,
     "eval.score": 1024,
 }

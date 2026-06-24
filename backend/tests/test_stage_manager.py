@@ -1029,9 +1029,13 @@ def _non_limit_issue():
     ("budget", "ceiling", "issues_fn", "expected"),
     [
         # Phase 4 fires when the repair's DOUBLED budget would already be clamped
-        # to the model ceiling (its final escalation, no headroom left).
-        # Real core-gen: 24576 doubles to 49152 → clamps to 32768 = ceiling.
-        (24576, 32768, _limit_stop_issue, True),
+        # to the model ceiling (its final escalation, no headroom left). These
+        # rows patch an explicit ceiling to exercise the pure logic; with the
+        # live 64K core-gen ceilings (all providers) the production budget
+        # (49152) doubles to 98304 → clamps to 64000 > 49152, so production is
+        # no longer doomed on any adapter.
+        # Budget already clamped at the ceiling.
+        (49152, 49152, _limit_stop_issue, True),
         # Already at the ceiling.
         (32768, 32768, _limit_stop_issue, True),
         # Boundary: 2 × 16384 == 32768 == ceiling.
@@ -1041,7 +1045,7 @@ def _non_limit_issue():
         (16000, 32768, _limit_stop_issue, False),
         (8000, 32768, _limit_stop_issue, False),
         # Non-limit completeness failures: a same-budget repair genuinely helps.
-        (24576, 32768, _non_limit_issue, False),
+        (49152, 49152, _non_limit_issue, False),
     ],
 )
 def test_limit_stop_repair_is_doomed_matrix(
@@ -1076,13 +1080,14 @@ def test_limit_stop_repair_is_not_doomed_when_ceiling_unknown(monkeypatch) -> No
 @pytest.mark.asyncio
 async def test_doomed_limit_stop_still_repairs_when_flag_off(monkeypatch) -> None:
     # The guardrail proof: with the Phase 4 flag OFF the chunk loop is
-    # byte-identical to today — even a doomed (ceiling-capped) limit-stop STILL
-    # spends a funded repair (which re-stops and blocks), exactly as before. No
-    # ceiling patch: the real core-gen budget (24576) doubles into the 32768
-    # ceiling, so the doomed condition holds under the live catalog.
+    # byte-identical to today — a limit-stop STILL spends a funded repair (which
+    # re-stops and blocks), exactly as before. The flag-off path never consults
+    # _limit_stop_repair_is_doomed, so it always repairs regardless of the
+    # ceiling — we patch one low enough to force the repair to re-stop.
     from services.pipeline import stage_manager as sm
 
     monkeypatch.setattr(sm.settings, "pipeline_early_bail_unrecoverable_chunk", False)
+    monkeypatch.setattr(sm, "model_max_output_tokens", lambda provider, model: 49152)
 
     workspace_id = uuid4()
     spec_stage = _make_stage(workspace_id, "spec", status="draft")
@@ -1123,13 +1128,15 @@ async def test_doomed_limit_stop_still_repairs_when_flag_off(monkeypatch) -> Non
 async def test_doomed_limit_stop_skips_repair_when_flag_on(
     monkeypatch,
 ) -> None:
-    # Production-reachability proof: NO ceiling patch. The real core-gen budget
-    # (24576) doubles into the 32768 ceiling, so a chunk limit-stop is doomed and
-    # the flag-on bail skips the repair under the live catalog.
+    # The flag-on bail skips the repair when the doubling has no headroom left.
+    # The live 64K core-gen ceilings now give the production budget (49152) a
+    # real doubling step, so we patch the ceiling down to the budget to construct
+    # the doomed (ceiling-capped) case the bail is designed to short-circuit.
     from services.observability import PIPELINE_COMPLETION_REPAIRS
     from services.pipeline import stage_manager as sm
 
     monkeypatch.setattr(sm.settings, "pipeline_early_bail_unrecoverable_chunk", True)
+    monkeypatch.setattr(sm, "model_max_output_tokens", lambda provider, model: 49152)
 
     before = PIPELINE_COMPLETION_REPAIRS.labels(
         stage_type="spec", provider="anthropic", outcome="skipped_at_ceiling"

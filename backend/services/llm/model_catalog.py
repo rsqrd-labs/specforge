@@ -161,7 +161,7 @@ MODEL_CATALOG: tuple[ModelCatalogEntry, ...] = (
         cached_input_cost_per_million=0.5,
         output_cost_per_million=25.0,
         max_context_tokens=1_000_000,
-        default_max_output_tokens=32768,
+        default_max_output_tokens=64000,
         # Core generation ops are RECOMMENDED (not default) so the frontier
         # tier is never the primary route but stays eligible as the runtime
         # escalation when a mid-tier generation times out or errors.
@@ -190,7 +190,7 @@ MODEL_CATALOG: tuple[ModelCatalogEntry, ...] = (
         cached_input_cost_per_million=0.3,
         output_cost_per_million=15.0,
         max_context_tokens=1_000_000,
-        default_max_output_tokens=32768,
+        default_max_output_tokens=64000,
         # storyboard.generate kept here so Sonnet is the mid-tier escalation
         # target when the cheap storyboard primary (Haiku) fails a quality gate.
         recommended_operations=(
@@ -219,9 +219,14 @@ MODEL_CATALOG: tuple[ModelCatalogEntry, ...] = (
         cached_input_cost_per_million=0.1,
         output_cost_per_million=5.0,
         max_context_tokens=200_000,
-        # Raised from 4096 so the cheap primary can carry the full core-gen
-        # output budget (24576) without the model ceiling truncating artifacts.
-        default_max_output_tokens=32768,
+        # This model's true output ceiling is 64K. It was previously capped at
+        # 32768 to "fit" the 24576 budget, but with reasoning billed against
+        # max_tokens a dense chunk (reasoning + ~8 sections) routinely exceeded
+        # 32768 — and the doubling-repair clamped to the same 32768 ceiling, so
+        # the repair was DOOMED and nearly every generation truncated with
+        # provider_stopped_by_limit. Raised to the real 64K so the first attempt
+        # and the doubling repair both have genuine headroom.
+        default_max_output_tokens=64000,
         # storyboard.generate added (recommended + default) so the cheap primary
         # carries the keynote too — storyboard now follows the same
         # cheap-primary→mid policy as core generation (issue #17 follow-up).
@@ -280,7 +285,13 @@ MODEL_CATALOG: tuple[ModelCatalogEntry, ...] = (
         cached_input_cost_per_million=0.5,
         output_cost_per_million=30.0,
         max_context_tokens=1_000_000,
-        default_max_output_tokens=32768,
+        # 64K matches the cross-provider core-gen ceiling. Every current-gen
+        # frontier model caps output well above this (OpenAI GPT-5.x: 128K;
+        # Gemini Flash: 65536; Anthropic Haiku 4.5 / Sonnet 4.6: 64K), so 64000
+        # is safely below the real cap and never produces a >cap max_tokens 400.
+        # The old 32768 clamped the doubling repair to the same value the first
+        # attempt failed at, so the repair was doomed and chunks truncated.
+        default_max_output_tokens=64000,
         # Core generation ops are RECOMMENDED (not default) so the frontier
         # tier is never the primary route but stays eligible as the runtime
         # escalation when a mid-tier generation times out or errors.
@@ -309,7 +320,9 @@ MODEL_CATALOG: tuple[ModelCatalogEntry, ...] = (
         cached_input_cost_per_million=0.25,
         output_cost_per_million=15.0,
         max_context_tokens=1_000_000,
-        default_max_output_tokens=32768,
+        # 64K cross-provider core-gen ceiling (real cap is far higher) — see the
+        # GPT-5.5 entry. Gives the limit-stop repair real headroom.
+        default_max_output_tokens=64000,
         # storyboard.generate kept here so GPT-5.4 is the mid-tier escalation
         # target when the cheap storyboard primary (GPT-5.4 Mini) fails a gate.
         recommended_operations=(
@@ -338,9 +351,11 @@ MODEL_CATALOG: tuple[ModelCatalogEntry, ...] = (
         cached_input_cost_per_million=0.075,
         output_cost_per_million=4.5,
         max_context_tokens=400_000,
-        # Raised from 4096 so the cheap primary can carry the full core-gen
-        # output budget (24576) without the model ceiling truncating artifacts.
-        default_max_output_tokens=32768,
+        # 64K cross-provider core-gen ceiling. GPT-5.x mini-tier models cap
+        # output at 128K, well above 64000, so this never 400s on a >cap
+        # max_tokens. As the cheap OpenAI primary, this carries the full 49152
+        # first-attempt budget with the limit-stop repair doubling into 64000.
+        default_max_output_tokens=64000,
         # storyboard.generate added (recommended + default) so the cheap primary
         # carries the keynote too — storyboard now follows the same
         # cheap-primary→mid policy as core generation (issue #17 follow-up).
@@ -442,7 +457,11 @@ MODEL_CATALOG: tuple[ModelCatalogEntry, ...] = (
         cached_input_cost_per_million=0.15,
         output_cost_per_million=9.0,
         max_context_tokens=1_048_576,
-        default_max_output_tokens=32768,
+        # 64K cross-provider core-gen ceiling. Gemini Flash caps output at
+        # 65536, so 64000 sits just below the real cap (no >cap max_tokens 400)
+        # while giving Google's cheap primary the full 49152 first-attempt
+        # budget and a limit-stop repair that doubles into 64000.
+        default_max_output_tokens=64000,
         recommended_operations=(
             *CORE_GENERATION_OPERATIONS,
             "refine.focused",

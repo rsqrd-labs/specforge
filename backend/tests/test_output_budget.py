@@ -23,8 +23,8 @@ from services.llm.output_budget import (
 # per-(operation, provider) overrides
 # --------------------------------------------------------------------------- #
 def test_default_budget_unchanged_when_no_override() -> None:
-    assert output_budget_for_operation("spec.generate") == 24576
-    assert output_budget_for_operation("spec.generate", "anthropic") == 24576
+    assert output_budget_for_operation("spec.generate") == 49152
+    assert output_budget_for_operation("spec.generate", "anthropic") == 49152
 
 
 def test_override_takes_precedence(monkeypatch) -> None:
@@ -33,8 +33,8 @@ def test_override_takes_precedence(monkeypatch) -> None:
     )
     # Override applies only to the matched (operation, provider) pair.
     assert output_budget_for_operation("spec.generate", "openai") == 16384
-    assert output_budget_for_operation("spec.generate", "anthropic") == 24576
-    assert output_budget_for_operation("spec.generate") == 24576
+    assert output_budget_for_operation("spec.generate", "anthropic") == 49152
+    assert output_budget_for_operation("spec.generate") == 49152
 
 
 def test_resolve_output_budget_honors_override_then_clamps(monkeypatch) -> None:
@@ -130,8 +130,8 @@ def test_reduction_floored_to_completeness_floor() -> None:
 
 
 def test_no_reduction_when_distribution_already_fits() -> None:
-    # p95 near the ceiling: headroom pushes target >= current -> no change.
-    rec = _rec(p95_output_tokens=20000, truncation_rate=0.0)
+    # p95 near the budget: headroom pushes target >= current -> no change.
+    rec = _rec(p95_output_tokens=40000, truncation_rate=0.0)
     assert rec.recommended_budget is None
     assert "no_reduction_available" in rec.rationale
 
