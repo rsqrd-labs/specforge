@@ -174,6 +174,49 @@ describe("StreamingOverlay generation activity", () => {
     )
   })
 
+  it("shows honest, monotonic part progress while the parallel path drafts (issue #39)", () => {
+    // The parallel chunked path streams no visible tokens; the part counter is
+    // the liveness signal that a long generation is actually advancing, so it
+    // renders independent of the branded-loaders flag.
+    render(
+      <StreamingOverlay
+        isVisible
+        activity={{ ...activity("generate", "spec"), startedAt: Date.now() }}
+        progress={{
+          stage: "spec",
+          state: "generating",
+          elapsed_seconds: 42,
+          phase: "streaming",
+          completed_parts: 2,
+          total_parts: 3,
+        }}
+      />,
+    )
+
+    expect(screen.getByRole("status")).toHaveTextContent("2 of 3 parts drafted")
+  })
+
+  it("hides the part counter once generation leaves the drafting phases", () => {
+    // After every part is drafted the pipeline moves to the gate/critic phases,
+    // where a stale "3 of 3 parts" would mislead — so the counter disappears.
+    render(
+      <StreamingOverlay
+        isVisible
+        activity={{ ...activity("generate", "spec"), startedAt: Date.now() }}
+        progress={{
+          stage: "spec",
+          state: "generating",
+          elapsed_seconds: 42,
+          phase: "critic",
+          completed_parts: 3,
+          total_parts: 3,
+        }}
+      />,
+    )
+
+    expect(screen.queryByText(/parts drafted/)).toBeNull()
+  })
+
   it("keeps the generic liveness copy (ignores progress.phase) while the flag is off", () => {
     // Phase 2c phase-specific copy is gated on branded_loaders (off in this
     // file). Even with a phase on the heartbeat, the flag-off path must stay
@@ -202,6 +245,7 @@ describe("StreamingOverlay generation activity", () => {
 describe("phaseLivenessCopy (Phase 2c)", () => {
   it.each([
     ["streaming", /drafting/i],
+    ["refining", /refining the draft/i],
     ["quality_gate", /quality gates/i],
     ["critic", /reviewer model/i],
     ["persisting", /finalising and saving/i],

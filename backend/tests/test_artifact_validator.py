@@ -96,6 +96,58 @@ def test_validate_artifact_completeness_rejects_shallow_required_section() -> No
     assert excinfo.value.issues[0].code == "shallow_required_section"
 
 
+# A Mermaid/ASCII diagram is exactly what the spec prompt asks for in the User
+# Flow Diagrams section.  Regression: the depth normaliser used to strip the
+# entire fenced block, so a diagram-only section read as empty and tripped a
+# spurious shallow finding that refunded nearly every spec.
+_DIAGRAM_BODY = (
+    "The primary flow from sign-in to a generated spec.\n\n"
+    "```mermaid\n"
+    "flowchart TD\n"
+    "  A[Landing] --> B[Sign in with Google]\n"
+    "  B --> C{Has workspace?}\n"
+    "  C -->|yes| D[Dashboard]\n"
+    "  C -->|no| E[Create workspace]\n"
+    "  E --> D\n"
+    "  D --> F[Generate spec]\n"
+    "```\n"
+)
+
+
+def test_diagram_only_section_counts_as_substantive() -> None:
+    detailed = "Detailed content that is specific enough for validation."
+    artifact = "\n\n".join(
+        f"{heading}\n"
+        f"{_DIAGRAM_BODY if heading == '## User Flow Diagrams' else detailed}"
+        for heading in SECTION_CONTRACTS["spec"]
+    )
+    # The diagram body is real substance, so no shallow finding for it.  (Other
+    # spec-specific checks like requirement-ID floors may still fire on this
+    # minimal fixture; we only assert the diagram section itself is not flagged.)
+    try:
+        validate_artifact_completeness("spec", artifact)
+    except IncompleteArtifactError as exc:
+        shallow_refs = {
+            issue.reference
+            for issue in exc.issues
+            if issue.code == "shallow_required_section"
+        }
+        assert "## User Flow Diagrams" not in shallow_refs
+
+
+def test_refundable_partition_separates_truncation_from_depth() -> None:
+    from services.pipeline.artifact_validator import CompletenessIssue
+
+    truncated = CompletenessIssue("provider_stopped_by_limit", "stopped")
+    shallow = CompletenessIssue("shallow_required_section", "thin", "## Risks")
+    assert truncated.is_refundable is True
+    assert shallow.is_refundable is False
+
+    exc = IncompleteArtifactError("spec", [truncated, shallow])
+    assert exc.truncation_issues == [truncated]
+    assert exc.depth_issues == [shallow]
+
+
 def test_validate_artifact_completeness_rejects_incomplete_harness_file() -> None:
     artifact = "\n\n".join(
         [

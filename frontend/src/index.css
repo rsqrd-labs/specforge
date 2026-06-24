@@ -10501,6 +10501,16 @@ button:disabled {
   font-variant-numeric: tabular-nums;
 }
 
+/* Issue #39 UX: honest, monotonic part progress for the parallel chunked path,
+   which streams no visible tokens. Sits just under the liveness line. */
+.generation-loading-copy p.generation-loading-parts {
+  margin-top: 4px;
+  color: var(--color-on-surface-variant);
+  font-size: 12px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
 /* Phase 2a honest ETA (issue #21): a decelerating progress bar + banded caption.
    The bar asymptotes (caps ~90%) and never completes on estimate alone — the
    real `done` removes the overlay. */

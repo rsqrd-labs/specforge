@@ -12,7 +12,10 @@ import pytest
 
 from models import CreditLedger, EvalResult, Stage, StageVersion, Workspace
 from services.llm.completion import LLMCompletionInfo
-from services.pipeline.artifact_validator import final_completion_sentinel
+from services.pipeline.artifact_validator import (
+    chunk_completion_sentinel,
+    final_completion_sentinel,
+)
 from services.pipeline.stage_manager import (
     _BACKGROUND_PIPELINE_TASKS,
     QualityGateBlockedError,
@@ -217,6 +220,87 @@ async def test_parallel_generation_runs_chunks_concurrently_and_completes(
     assert "## Overview" in generated.content
     assert "## Non-Functional Requirements" in generated.content
     assert "## Acceptance Criteria" in generated.content
+    assert generated.content_generation_id == "gen-parallel"
+
+
+def test_progress_payload_includes_parts_only_when_active() -> None:
+    # The part counter is additive: omitted entirely until a counter is active
+    # (total > 0), so older clients and the live-streamed paths are unaffected.
+    from services.pipeline import stage_manager as sm
+
+    phase = sm._PhaseTracker()
+    idle = sm._progress_payload(stage_type="spec", phase=phase, elapsed_seconds=5)
+    assert "completed_parts" not in idle
+    assert "total_parts" not in idle
+    assert idle == {
+        "stage": "spec",
+        "state": "generating",
+        "phase": "streaming",
+        "elapsed_seconds": 5,
+    }
+
+    phase.set_parts(2, 4)
+    active = sm._progress_payload(stage_type="spec", phase=phase, elapsed_seconds=7)
+    assert active["completed_parts"] == 2
+    assert active["total_parts"] == 4
+
+    # `completed` is clamped to `total` so a late tick can never report N+1 of N.
+    phase.set_parts(9, 4)
+    assert (
+        sm._progress_payload(stage_type="spec", phase=phase, elapsed_seconds=9)[
+            "completed_parts"
+        ]
+        == 4
+    )
+
+
+@pytest.mark.asyncio
+async def test_parallel_generation_reports_monotonic_part_progress(
+    monkeypatch,
+) -> None:
+    # Issue #39 UX: the parallel path streams no visible tokens, so it must tick
+    # honest, monotonic part progress on the phase tracker AND emit an immediate
+    # liveness ping per chunk (both carry the counts; the store replaces, so a
+    # heartbeat without them would wipe the counter).
+    import json
+
+    from services.pipeline import stage_manager as sm
+
+    monkeypatch.setattr(sm.settings, "pipeline_parallel_chunks", True)
+
+    tracker = {"active": 0, "max": 0}
+
+    def factory(_route):
+        return _ConcurrencyAdapter(tracker, _spec_stream_payload)
+
+    phase = sm._PhaseTracker()
+    emitted: list[str] = []
+
+    generated = await StageManager()._generate_complete_artifact(
+        adapter=factory(None),
+        route=_spec_generate_route(),
+        system_prompt="SYSTEM",
+        user_prompt="BASE SPEC PROMPT",
+        stage_type="spec",
+        deps={},
+        emit=emitted.append,
+        adapter_factory=factory,
+        phase=phase,
+    )
+
+    # Total is known upfront (sum of all chunks across waves); all parts resolved.
+    assert phase.total == 3
+    assert phase.completed == 3
+
+    progress_events = [
+        json.loads(e)["progress"]
+        for e in emitted
+        if e.startswith("{") and "progress" in e
+    ]
+    # One ping per chunk, counting 1→2→3, each carrying the constant total.
+    assert [p["completed_parts"] for p in progress_events] == [1, 2, 3]
+    assert {p["total_parts"] for p in progress_events} == {3}
+    assert {p["phase"] for p in progress_events} == {"streaming"}
     assert generated.content_generation_id == "gen-parallel"
 
 
@@ -1149,6 +1233,133 @@ async def test_generate_provider_limit_stop_failed_repair_blocks_and_refunds(
         "provider_stopped_by_limit"
     )
     assert any("quality_gate_failed" in token for token in tokens)
+
+
+# --- Quality-gate refund bleed: depth findings are advisory, never refunded ---
+
+_STAGE_DIAGRAM_BODY = (
+    "The primary flow from sign-in to a generated spec.\n\n"
+    "```mermaid\n"
+    "flowchart TD\n"
+    "  A[Landing] --> B[Sign in with Google]\n"
+    "  B --> C{Has workspace?}\n"
+    "  C -->|yes| D[Dashboard]\n"
+    "  C -->|no| E[Create workspace]\n"
+    "  E --> D\n"
+    "  D --> F[Generate spec]\n"
+    "```"
+)
+
+
+def _swap_user_flow_body(user_prompt: str, new_body: str) -> str:
+    """A spec chunk payload with the User Flow Diagrams body swapped out."""
+    key = artifact_fixtures.chunk_key_from_prompt(user_prompt, "product-scope")
+    md = artifact_fixtures.spec_chunk_md(key)
+    if key == "product-scope":
+        md = md.replace(
+            f"## User Flow Diagrams\n{artifact_fixtures.SPEC_DEFAULT_BODY}",
+            f"## User Flow Diagrams\n{new_body}",
+        )
+    return f"{md}\n{chunk_completion_sentinel('spec', key)}"
+
+
+def _diagram_spec_stream_payload(user_prompt: str) -> str:
+    return _swap_user_flow_body(user_prompt, _STAGE_DIAGRAM_BODY)
+
+
+def _shallow_spec_stream_payload(user_prompt: str) -> str:
+    return _swap_user_flow_body(user_prompt, "N/A.")
+
+
+@pytest.mark.asyncio
+async def test_generate_mermaid_user_flow_diagram_is_not_refunded() -> None:
+    # Regression: a Mermaid-only User Flow Diagrams section used to be stripped to
+    # empty by the depth normaliser, flagged shallow, and refunded on every spec.
+    # It is now substantive content — the stage completes clean, no refund.
+    workspace_id = uuid4()
+    spec_stage = _make_stage(workspace_id, "spec", status="draft")
+    workspace = _make_workspace([spec_stage])
+    user = _make_user()
+    deduction = CreditLedger(id=uuid4(), user_id=user.id, amount=-10, reason="generate")
+    db = _MultiQueryDB([spec_stage, workspace, [], deduction])
+    adapter = _CompletionAwareAdapter(
+        [], stream_payload_fn=_diagram_spec_stream_payload
+    )
+    svc = StageManager(redis_client=_FakeRedis())
+
+    with (
+        patch(
+            "services.pipeline.stage_manager.credit_service.deduct",
+            new_callable=AsyncMock,
+            return_value=deduction,
+        ),
+        patch(
+            "services.pipeline.stage_manager.credit_service.refund",
+            new_callable=AsyncMock,
+        ) as mock_refund,
+        patch(
+            "services.pipeline.stage_manager.build_prompt",
+            new_callable=AsyncMock,
+            return_value=("sys", "user", "0"),
+        ),
+        patch("services.pipeline.stage_manager.get_llm", return_value=adapter),
+    ):
+        tokens = [token async for token in svc.generate(spec_stage.id, user, db)]
+
+    mock_refund.assert_not_awaited()
+    # 3 chunks, no repair pass — the diagram never trips a completeness failure.
+    assert len(adapter.stream_calls) == 3
+    assert spec_stage.quality_gate_status == "clear"
+    assert "flowchart TD" in spec_stage.content
+    assert any("done" in token for token in tokens)
+
+
+@pytest.mark.asyncio
+async def test_generate_depth_only_failure_is_advisory_not_refunded() -> None:
+    # A genuinely shallow (but complete) section is a depth/quality opinion: the
+    # draft is delivered with a NON-blocking advisory finding, no repair LLM call
+    # is spent, and the credit is NOT refunded.
+    workspace_id = uuid4()
+    spec_stage = _make_stage(workspace_id, "spec", status="draft")
+    workspace = _make_workspace([spec_stage])
+    user = _make_user()
+    deduction = CreditLedger(id=uuid4(), user_id=user.id, amount=-10, reason="generate")
+    db = _MultiQueryDB([spec_stage, workspace, [], deduction])
+    adapter = _CompletionAwareAdapter(
+        [], stream_payload_fn=_shallow_spec_stream_payload
+    )
+    svc = StageManager(redis_client=_FakeRedis())
+
+    with (
+        patch(
+            "services.pipeline.stage_manager.credit_service.deduct",
+            new_callable=AsyncMock,
+            return_value=deduction,
+        ),
+        patch(
+            "services.pipeline.stage_manager.credit_service.refund",
+            new_callable=AsyncMock,
+        ) as mock_refund,
+        patch(
+            "services.pipeline.stage_manager.build_prompt",
+            new_callable=AsyncMock,
+            return_value=("sys", "user", "0"),
+        ),
+        patch("services.pipeline.stage_manager.get_llm", return_value=adapter),
+    ):
+        tokens = [token async for token in svc.generate(spec_stage.id, user, db)]
+
+    # The headline contract: a depth-only failure never refunds and never repairs.
+    mock_refund.assert_not_awaited()
+    assert len(adapter.stream_calls) == 3  # no repair pass
+    # Delivered, finalisable draft with the depth finding attached as advisory.
+    assert spec_stage.status == "draft"
+    assert spec_stage.quality_gate_status == "advisory"
+    assert spec_stage.quality_gate_kind == "critic_findings"
+    findings = spec_stage.quality_gate_payload["findings"]
+    assert any("User Flow Diagrams" in f["detail"] for f in findings)
+    assert "## User Flow Diagrams" in spec_stage.content
+    assert any("done" in token for token in tokens)
 
 
 class _AlwaysLimitStopAdapter:

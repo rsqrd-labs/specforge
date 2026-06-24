@@ -36,6 +36,13 @@ export interface GenerationProgress {
    *  `string` because the wire is the source of truth and an unknown value must
    *  degrade to the generic liveness copy, never throw. */
   phase?: string
+  /** Parallel chunked generation part progress (issue #39 UX). The parallel
+   *  path streams no visible tokens, so these give the overlay honest, monotonic
+   *  "N of M parts drafted" feedback. Additive and optional: present only while
+   *  a part counter is active (`total_parts > 0`); absent on live-streamed
+   *  stages and older backends. */
+  completed_parts?: number
+  total_parts?: number
 }
 
 interface ProgressEvent {

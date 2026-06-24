@@ -8,7 +8,7 @@ import logging
 import random
 import re
 from collections.abc import AsyncGenerator, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from uuid import UUID
 
@@ -180,6 +180,7 @@ _PIPELINE_END = object()
 # (a silent judge call + optional regenerate) runs long enough to emit a
 # heartbeat; the deterministic gate and persistence phases are sub-second.
 PIPELINE_PHASE_STREAMING = "streaming"
+PIPELINE_PHASE_REFINING = "refining"
 PIPELINE_PHASE_QUALITY_GATE = "quality_gate"
 PIPELINE_PHASE_CRITIC = "critic"
 PIPELINE_PHASE_PERSISTING = "persisting"
@@ -192,15 +193,52 @@ class _PhaseTracker:
     ``generate()`` loop reads it when stamping a progress heartbeat.  Both run on
     the same event loop and a plain attribute assignment is atomic under the
     asyncio single-thread model, so no lock is required.
+
+    It also carries the parallel-generation part counter (issue #39 UX): the
+    parallel chunk path suppresses live token streaming, so the only liveness the
+    UI has is this heartbeat.  Reporting ``completed``/``total`` parts here lets
+    the loading overlay show honest, monotonic "N of M parts drafted" progress
+    instead of a spinner that looks frozen.  ``total == 0`` means "no part
+    counter applies" (sequential / live-streamed paths) and the field is dropped.
     """
 
-    __slots__ = ("phase",)
+    __slots__ = ("phase", "completed", "total")
 
     def __init__(self) -> None:
         self.phase = PIPELINE_PHASE_STREAMING
+        self.completed = 0
+        self.total = 0
 
     def set(self, phase: str) -> None:
         self.phase = phase
+
+    def set_parts(self, completed: int, total: int) -> None:
+        self.completed = completed
+        self.total = total
+
+
+def _progress_payload(
+    *, stage_type: str, phase: _PhaseTracker, elapsed_seconds: int
+) -> dict:
+    """Build the ``progress`` SSE liveness payload.
+
+    Shared by the supervising heartbeat (emitted on pipeline silence) and the
+    parallel generator's per-part emit so both carry identical fields — the
+    frontend store *replaces* the stored progress object on each event, so a
+    heartbeat that omitted the part counts would wipe them every interval.  The
+    part counts are additive and only present while a part counter is active
+    (``total > 0``); older clients ignore them.
+    """
+    payload: dict = {
+        "stage": stage_type,
+        "state": "generating",
+        "phase": phase.phase,
+        "elapsed_seconds": elapsed_seconds,
+    }
+    if phase.total > 0:
+        payload["completed_parts"] = min(phase.completed, phase.total)
+        payload["total_parts"] = phase.total
+    return payload
 
 
 # How often a live generation refreshes its stage row's updated_at.  Must stay
@@ -947,6 +985,47 @@ def _problem_statement_condensed_finding(rung: str, stage_type: str) -> dict:
     }
 
 
+# Map each non-refundable completeness code onto the existing critic finding
+# vocabulary the frontend already labels (AdvisoryFindingsPanel / qualityGate.ts),
+# so deterministic depth findings render with a human label and the "Regenerate
+# to address" action with ZERO frontend change.  Shallow/structural gaps read as
+# "ShallowSection" ("Needs more detail"); coverage/traceability gaps read as
+# "CoverageGap" ("Uncovered requirement").  Unmapped codes fall back to
+# ShallowSection (also the panel's generic "Suggestion" if a kind is unknown).
+_COMPLETENESS_ADVISORY_KIND: dict[str, str] = {
+    "shallow_required_section": "ShallowSection",
+    "missing_evidence_contract": "ShallowSection",
+    "insufficient_task_count": "ShallowSection",
+    "incomplete_task_block": "ShallowSection",
+    "missing_task_blocks": "ShallowSection",
+    "missing_harness_file_blocks": "ShallowSection",
+    "invalid_task_dependency_order": "ShallowSection",
+    "effort_summary_task_count_mismatch": "ShallowSection",
+    "effort_summary_priority_mismatch": "ShallowSection",
+    "effort_summary_estimate_mismatch": "ShallowSection",
+    "insufficient_requirement_ids": "CoverageGap",
+    "insufficient_upstream_traceability": "CoverageGap",
+    "rtm_missing_upstream_id": "CoverageGap",
+    "harness_file_tree_missing_block": "CoverageGap",
+    "harness_matrix_missing_test": "CoverageGap",
+    "missing_test_traceability_comment": "CoverageGap",
+    "task_harness_ref_not_found": "CoverageGap",
+}
+
+
+def _completeness_advisory_finding(issue: "CompletenessIssue") -> dict:
+    """Render a non-refundable depth issue as an advisory finding dict.
+
+    Same {kind, detail, reference} shape as the critic / condensed-statement
+    notices so it merges into the single advisory ``quality_gate`` payload.
+    """
+    return {
+        "kind": _COMPLETENESS_ADVISORY_KIND.get(issue.code, "ShallowSection"),
+        "detail": issue.detail,
+        "reference": issue.reference,
+    }
+
+
 class QualityGateBlockedError(ValueError):
     """Finalise refused because the current version is blocked by a quality gate.
 
@@ -1003,6 +1082,37 @@ class GeneratedArtifact:
     chunks: list[str]
     repair_attempted: bool
     content_generation_id: str | None
+    # Non-refundable depth/quality findings that survived generation (and any
+    # truncation repair).  The artifact is complete and finalisable; these are
+    # attached as non-blocking advisory suggestions at persist time and NEVER
+    # refund (issue: quality-gate refund bleed).
+    depth_findings: list[CompletenessIssue] = field(default_factory=list)
+
+
+def _split_completeness_or_raise(
+    stage_type: str,
+    artifact: str,
+    exc: IncompleteArtifactError,
+    *,
+    repair_attempted: bool,
+) -> list[CompletenessIssue]:
+    """Partition a completeness failure into refund-worthy vs advisory.
+
+    If any *truncation* (refundable) issue is present the output is genuinely
+    unusable: re-raise carrying ONLY those issues so the caller blocks + refunds.
+    Otherwise the artifact is complete but thin/imperfect by our depth
+    heuristics — return the depth issues so the caller attaches them as
+    non-blocking advisory findings (no repair, no refund).
+    """
+    truncation = exc.truncation_issues
+    if truncation:
+        raise IncompleteArtifactError(
+            stage_type,
+            truncation,
+            partial_content=artifact or exc.partial_content,
+            repair_attempted=repair_attempted,
+        ) from exc
+    return exc.depth_issues
 
 
 async def refresh_recovery_lock(redis: "Redis") -> None:
@@ -1517,6 +1627,7 @@ class StageManager:
         deps: dict[str, str],
         emit: Callable[[str], None] | None = None,
         adapter_factory: Callable[[LLMRoute], object] | None = None,
+        phase: "_PhaseTracker | None" = None,
     ) -> GeneratedArtifact:
         # Issue #39: when enabled, generate dependency-independent chunks
         # concurrently in waves (sum of chunk latencies -> ~max per wave). Needs
@@ -1536,6 +1647,7 @@ class StageManager:
                 stage_type=stage_type,
                 deps=deps,
                 emit=emit,
+                phase=phase,
             )
         chunks: list[str] = []
         repair_attempted = False
@@ -1654,66 +1766,90 @@ class StageManager:
             chunks.append(chunk_text)
 
         artifact = "\n\n".join(chunk for chunk in chunks if chunk.strip()).strip()
+        # Depth/quality findings that survive as advisory (no refund, no repair).
+        advisory_issues: list[CompletenessIssue] = []
         try:
             validate_artifact_completeness(stage_type, artifact, deps)
         except IncompleteArtifactError as exc:
-            _stop_live_streaming()
-            if repair_attempted:
-                raise IncompleteArtifactError(
-                    stage_type,
-                    exc.issues,
-                    partial_content=artifact,
-                    repair_attempted=True,
-                ) from exc
-            repair_attempted = True
-            PIPELINE_COMPLETION_REPAIRS.labels(
-                stage_type=stage_type,
-                provider=route.provider,
-                outcome="attempted",
-            ).inc()
-            repaired_chunks: list[str] = []
-            repair_max_tokens = _repair_budget(route, max_tokens, exc.issues)
-            try:
-                for chunk in chunk_specs:
-                    repaired_chunks.append(
-                        await self._generate_chunk_once(
-                            adapter=adapter,
-                            route=route,
-                            system_prompt=system_prompt,
-                            user_prompt=user_prompt,
-                            stage_type=stage_type,
-                            chunk=chunk,
-                            prior_chunks=repaired_chunks,
-                            max_tokens=repair_max_tokens,
-                            repair_issues=exc.issues,
-                        )
-                    )
-                artifact = "\n\n".join(
-                    chunk for chunk in repaired_chunks if chunk.strip()
-                ).strip()
-                validate_artifact_completeness(stage_type, artifact, deps)
-            except IncompleteArtifactError as repair_exc:
+            if exc.truncation_issues:
+                _stop_live_streaming()
+            if repair_attempted or not exc.truncation_issues:
+                # Either we already spent our one repair, OR there is nothing
+                # truncated to repair (depth-only) — surface truncation (refund)
+                # or carry depth issues forward as advisory.  A depth-only draft
+                # is fully streamed and correct, so live streaming is NOT reset.
+                advisory_issues = _split_completeness_or_raise(
+                    stage_type, artifact, exc, repair_attempted=repair_attempted
+                )
+            else:
+                # Genuine truncation, first repair allowed — repair on the
+                # truncation issues only (depth issues never drive a paid repair).
+                repair_attempted = True
                 PIPELINE_COMPLETION_REPAIRS.labels(
                     stage_type=stage_type,
                     provider=route.provider,
-                    outcome="failed",
+                    outcome="attempted",
                 ).inc()
-                raise IncompleteArtifactError(
-                    stage_type,
-                    repair_exc.issues,
-                    partial_content=(
-                        repair_exc.partial_content
-                        or "\n\n".join(repaired_chunks)
-                        or artifact
-                    ),
-                    repair_attempted=True,
-                ) from repair_exc
-            chunks = [artifact]
-            PIPELINE_COMPLETION_REPAIRS.labels(
-                stage_type=stage_type,
-                provider=route.provider,
-                outcome="succeeded",
-            ).inc()
+                repaired_chunks: list[str] = []
+                repair_max_tokens = _repair_budget(
+                    route, max_tokens, exc.truncation_issues
+                )
+                try:
+                    for chunk in chunk_specs:
+                        repaired_chunks.append(
+                            await self._generate_chunk_once(
+                                adapter=adapter,
+                                route=route,
+                                system_prompt=system_prompt,
+                                user_prompt=user_prompt,
+                                stage_type=stage_type,
+                                chunk=chunk,
+                                prior_chunks=repaired_chunks,
+                                max_tokens=repair_max_tokens,
+                                repair_issues=exc.truncation_issues,
+                            )
+                        )
+                except IncompleteArtifactError as repair_exc:
+                    PIPELINE_COMPLETION_REPAIRS.labels(
+                        stage_type=stage_type,
+                        provider=route.provider,
+                        outcome="failed",
+                    ).inc()
+                    raise IncompleteArtifactError(
+                        stage_type,
+                        repair_exc.truncation_issues or repair_exc.issues,
+                        partial_content=(
+                            repair_exc.partial_content
+                            or "\n\n".join(repaired_chunks)
+                            or artifact
+                        ),
+                        repair_attempted=True,
+                    ) from repair_exc
+                artifact = "\n\n".join(
+                    chunk for chunk in repaired_chunks if chunk.strip()
+                ).strip()
+                chunks = [artifact]
+                # Re-validate: truncation still present -> refund; only depth
+                # remaining -> deliver with advisory findings (repair succeeded).
+                try:
+                    validate_artifact_completeness(stage_type, artifact, deps)
+                except IncompleteArtifactError as repair_exc:
+                    try:
+                        advisory_issues = _split_completeness_or_raise(
+                            stage_type, artifact, repair_exc, repair_attempted=True
+                        )
+                    except IncompleteArtifactError:
+                        PIPELINE_COMPLETION_REPAIRS.labels(
+                            stage_type=stage_type,
+                            provider=route.provider,
+                            outcome="failed",
+                        ).inc()
+                        raise
+                PIPELINE_COMPLETION_REPAIRS.labels(
+                    stage_type=stage_type,
+                    provider=route.provider,
+                    outcome="succeeded",
+                ).inc()
 
         PIPELINE_GENERATION_DURATION.labels(
             stage_type=stage_type, provider=route.provider
@@ -1722,6 +1858,7 @@ class StageManager:
             content=artifact,
             chunks=chunks,
             repair_attempted=repair_attempted,
+            depth_findings=advisory_issues,
             content_generation_id=getattr(adapter, "last_generation_id", None),
         )
 
@@ -1735,6 +1872,7 @@ class StageManager:
         stage_type: str,
         deps: dict[str, str],
         emit: Callable[[str], None] | None = None,
+        phase: "_PhaseTracker | None" = None,
     ) -> GeneratedArtifact:
         """Issue #39 parallel happy path: generate chunks in concurrent waves.
 
@@ -1749,16 +1887,50 @@ class StageManager:
         Live token streaming is suppressed (parallel streams cannot be
         interleaved into one document); the supervising progress heartbeats keep
         the connection warm and the caller's canonical end-of-stream replay
-        paints the final artifact.
+        paints the final artifact.  Because the user sees no growing text, each
+        chunk that resolves ticks a part counter on the shared ``phase`` tracker
+        and emits an immediate liveness ping, so the loading overlay shows honest
+        "N of M parts drafted" progress instead of a frozen-looking spinner.
         """
         max_tokens = resolve_output_budget(
             route.operation, provider=route.provider, model=route.model
         )
-        generation_started = asyncio.get_running_loop().time()
+        loop = asyncio.get_running_loop()
+        generation_started = loop.time()
         # Any draft already on the client (e.g. from a failed prior attempt) is
         # stale — clear it once; the canonical replay is the source of truth.
         if emit is not None:
             emit(json.dumps({"stream_reset": True}))
+
+        # Part progress (issue #39 UX): total parts is the sum of every chunk
+        # across every wave, known upfront.  ``completed`` ticks once per chunk
+        # as it RESOLVES (after any per-chunk repair), never per LLM call — a
+        # repaired chunk counts once.  Single-threaded asyncio makes the bare
+        # increment safe without a lock.
+        total_parts = sum(len(wave) for wave in _chunk_waves_for_stage(stage_type))
+        completed_parts = 0
+        if phase is not None:
+            phase.set_parts(0, total_parts)
+
+        def _tick_part() -> None:
+            nonlocal completed_parts
+            completed_parts += 1
+            if phase is not None:
+                phase.set_parts(completed_parts, total_parts)
+                if emit is not None:
+                    emit(
+                        json.dumps(
+                            {
+                                "progress": _progress_payload(
+                                    stage_type=stage_type,
+                                    phase=phase,
+                                    elapsed_seconds=int(
+                                        loop.time() - generation_started
+                                    ),
+                                )
+                            }
+                        )
+                    )
 
         repair_attempted = False
         repair_lock = asyncio.Lock()
@@ -1826,6 +1998,8 @@ class StageManager:
             last_generation_id = (
                 getattr(adapter, "last_generation_id", None) or last_generation_id
             )
+            # The chunk is done (incl. any repair) — tick the part counter once.
+            _tick_part()
             return text
 
         chunks: list[str] = []
@@ -1848,76 +2022,110 @@ class StageManager:
             ) from exc
 
         artifact = "\n\n".join(chunk for chunk in chunks if chunk.strip()).strip()
+        # Depth/quality findings that survive as advisory (no refund, no repair).
+        advisory_issues: list[CompletenessIssue] = []
         try:
             validate_artifact_completeness(stage_type, artifact, deps)
         except IncompleteArtifactError as exc:
-            if repair_attempted:
-                raise IncompleteArtifactError(
-                    stage_type,
-                    exc.issues,
-                    partial_content=artifact,
-                    repair_attempted=True,
-                ) from exc
-            # Full completeness repair runs SEQUENTIALLY so each regenerated chunk
-            # can see the others and reconcile cross-chunk invariants — identical
-            # to the sequential path's full-repair pass.
-            repair_attempted = True
-            PIPELINE_COMPLETION_REPAIRS.labels(
-                stage_type=stage_type,
-                provider=route.provider,
-                outcome="attempted",
-            ).inc()
-            repaired_chunks: list[str] = []
-            repair_max_tokens = _repair_budget(route, max_tokens, exc.issues)
-            repair_specs = [
-                chunk for wave in _chunk_waves_for_stage(stage_type) for chunk in wave
-            ]
-            try:
-                for chunk in repair_specs:
-                    repair_adapter = adapter_factory(route)
-                    repaired_chunks.append(
-                        await self._generate_chunk_once(
-                            adapter=repair_adapter,
-                            route=route,
-                            system_prompt=system_prompt,
-                            user_prompt=user_prompt,
-                            stage_type=stage_type,
-                            chunk=chunk,
-                            prior_chunks=repaired_chunks,
-                            max_tokens=repair_max_tokens,
-                            repair_issues=exc.issues,
-                        )
-                    )
-                    last_generation_id = (
-                        getattr(repair_adapter, "last_generation_id", None)
-                        or last_generation_id
-                    )
-                artifact = "\n\n".join(
-                    chunk for chunk in repaired_chunks if chunk.strip()
-                ).strip()
-                validate_artifact_completeness(stage_type, artifact, deps)
-            except IncompleteArtifactError as repair_exc:
+            if repair_attempted or not exc.truncation_issues:
+                # Already repaired once, OR nothing truncated to repair
+                # (depth-only): surface truncation (refund) or carry depth issues
+                # forward as advisory.  Depth issues never drive a paid repair.
+                advisory_issues = _split_completeness_or_raise(
+                    stage_type, artifact, exc, repair_attempted=repair_attempted
+                )
+            else:
+                # Full completeness repair runs SEQUENTIALLY so each regenerated
+                # chunk can see the others and reconcile cross-chunk invariants —
+                # identical to the sequential path's full-repair pass.  Repair is
+                # driven by the truncation issues only.
+                repair_attempted = True
                 PIPELINE_COMPLETION_REPAIRS.labels(
                     stage_type=stage_type,
                     provider=route.provider,
-                    outcome="failed",
+                    outcome="attempted",
                 ).inc()
-                raise IncompleteArtifactError(
-                    stage_type,
-                    repair_exc.issues,
-                    partial_content=(
-                        repair_exc.partial_content
-                        or "\n\n".join(repaired_chunks)
-                        or artifact
-                    ),
-                    repair_attempted=True,
-                ) from repair_exc
-            chunks = [artifact]
-            PIPELINE_COMPLETION_REPAIRS.labels(
-                stage_type=stage_type,
-                provider=route.provider,
-                outcome="succeeded",
-            ).inc()
+                repaired_chunks: list[str] = []
+                repair_max_tokens = _repair_budget(
+                    route, max_tokens, exc.truncation_issues
+                )
+                repair_specs = [
+                    chunk
+                    for wave in _chunk_waves_for_stage(stage_type)
+                    for chunk in wave
+                ]
+                # This is a fresh, sequential pass over every chunk — not a
+                # regression of the happy-path counter.  Switch the phase so the
+                # overlay reads "refining" (a new pass) and restart the part
+                # counter from 0 rather than freezing pinned at N/N for the
+                # minutes this pass takes.
+                if phase is not None:
+                    phase.set(PIPELINE_PHASE_REFINING)
+                completed_parts = 0
+                if phase is not None:
+                    phase.set_parts(0, len(repair_specs))
+                try:
+                    for chunk in repair_specs:
+                        repair_adapter = adapter_factory(route)
+                        repaired_chunks.append(
+                            await self._generate_chunk_once(
+                                adapter=repair_adapter,
+                                route=route,
+                                system_prompt=system_prompt,
+                                user_prompt=user_prompt,
+                                stage_type=stage_type,
+                                chunk=chunk,
+                                prior_chunks=repaired_chunks,
+                                max_tokens=repair_max_tokens,
+                                repair_issues=exc.truncation_issues,
+                            )
+                        )
+                        last_generation_id = (
+                            getattr(repair_adapter, "last_generation_id", None)
+                            or last_generation_id
+                        )
+                        _tick_part()
+                except IncompleteArtifactError as repair_exc:
+                    PIPELINE_COMPLETION_REPAIRS.labels(
+                        stage_type=stage_type,
+                        provider=route.provider,
+                        outcome="failed",
+                    ).inc()
+                    raise IncompleteArtifactError(
+                        stage_type,
+                        repair_exc.truncation_issues or repair_exc.issues,
+                        partial_content=(
+                            repair_exc.partial_content
+                            or "\n\n".join(repaired_chunks)
+                            or artifact
+                        ),
+                        repair_attempted=True,
+                    ) from repair_exc
+                artifact = "\n\n".join(
+                    chunk for chunk in repaired_chunks if chunk.strip()
+                ).strip()
+                chunks = [artifact]
+                # Re-validate: truncation still present -> refund; only depth
+                # remaining -> deliver with advisory findings (repair succeeded).
+                try:
+                    validate_artifact_completeness(stage_type, artifact, deps)
+                except IncompleteArtifactError as repair_exc:
+                    try:
+                        advisory_issues = _split_completeness_or_raise(
+                            stage_type, artifact, repair_exc, repair_attempted=True
+                        )
+                    except IncompleteArtifactError:
+                        PIPELINE_COMPLETION_REPAIRS.labels(
+                            stage_type=stage_type,
+                            provider=route.provider,
+                            outcome="failed",
+                        ).inc()
+                        raise
+                PIPELINE_COMPLETION_REPAIRS.labels(
+                    stage_type=stage_type,
+                    provider=route.provider,
+                    outcome="succeeded",
+                ).inc()
 
         PIPELINE_GENERATION_DURATION.labels(
             stage_type=stage_type, provider=route.provider
@@ -1926,6 +2134,7 @@ class StageManager:
             content=artifact,
             chunks=chunks,
             repair_attempted=repair_attempted,
+            depth_findings=advisory_issues,
             content_generation_id=last_generation_id,
         )
 
@@ -2354,14 +2563,13 @@ class StageManager:
                 except asyncio.TimeoutError:
                     yield json.dumps(
                         {
-                            "progress": {
-                                "stage": stage.type,
-                                "state": "generating",
-                                "phase": phase_tracker.phase,
-                                "elapsed_seconds": int(
+                            "progress": _progress_payload(
+                                stage_type=stage.type,
+                                phase=phase_tracker,
+                                elapsed_seconds=int(
                                     heartbeat_loop.time() - pipeline_started
                                 ),
-                            }
+                            )
                         }
                     )
                     continue
@@ -2556,6 +2764,7 @@ class StageManager:
                             deps=deps,
                             emit=emit,
                             adapter_factory=_build_stage_adapter,
+                            phase=phase,
                         )
                     except (ProviderError, TimeoutError) as attempt_exc:
                         # Any live-streamed draft from the failed attempt is
@@ -2617,6 +2826,11 @@ class StageManager:
                 accumulated = generated.content
                 stream_chunks = generated.chunks
                 content_generation_id = generated.content_generation_id
+                # Depth/quality findings from the deterministic completeness gate
+                # ride along as NON-blocking advisory suggestions (no refund) —
+                # attached at persist beside any critic / condensed-statement
+                # notice (quality-gate refund bleed fix).
+                completeness_advisory = list(generated.depth_findings)
             except (ProviderError, TimeoutError) as exc:
                 # Record failure for stream timeouts ONLY — not for ProviderError.
                 # CRITICAL: Do NOT call record_provider_failure() unconditionally here.
@@ -3015,6 +3229,12 @@ class StageManager:
             # problem-statement-condensed notice to the *same* advisory bucket so
             # the two coexist — mark advisory when either is present, else clear.
             advisory_payload = [finding.model_dump() for finding in advisory_findings]
+            # Deterministic depth/quality findings (shallow sections, thin
+            # coverage) ride the SAME advisory bucket — delivered, finalisable,
+            # never refunded (quality-gate refund bleed fix).
+            advisory_payload.extend(
+                _completeness_advisory_finding(issue) for issue in completeness_advisory
+            )
             if compression_rung in ("2", "3"):
                 advisory_payload.append(
                     _problem_statement_condensed_finding(compression_rung, stage.type)
@@ -4142,7 +4362,12 @@ class StageManager:
             provider=route.provider,
             reason=first_reason,
         ).inc()
-        refunded = deduction_id is not None
+        # Refund ONLY for genuine truncation/corruption (the unusable output the
+        # platform should not charge for).  Depth/quality opinions never refund —
+        # the main generation path already routes those to advisory, this is the
+        # defensive backstop for any other caller (e.g. the legacy inline critic
+        # regenerate) that surfaces a completeness failure here.
+        refunded = deduction_id is not None and bool(exc.truncation_issues)
         if refunded:
             await credit_service.refund(db, deduction_id)
         gate_payload = self._incomplete_gate_payload(stage.type, exc)
@@ -4157,7 +4382,7 @@ class StageManager:
             kind=INCOMPLETE_OUTPUT_GATE_KIND,
             payload=gate_payload,
         )
-        if deduction_id is not None:
+        if refunded:
             await credit_service.invalidate(user_id)
         logger.warning(
             "stage.incomplete_output_blocked",

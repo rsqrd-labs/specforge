@@ -120,11 +120,37 @@ _FILE_BLOCK_RE = re.compile(
 _INCOMPLETE_TRAILING_RE = re.compile(r"(:|,\s*|\|\s*)$")
 
 
+# Completeness codes that mean the model genuinely stopped early or emitted
+# corrupt markup — the artifact is *unusable*, so the generation is refunded and
+# repaired.  Every OTHER completeness code is a depth/quality opinion (a shallow
+# section, a thin requirement count, a traceability gap): the artifact is
+# complete and finalisable, just imperfect by our heuristics, so it is delivered
+# as a NON-blocking advisory finding and NEVER refunded (the user owns the
+# artifact — same stance as the critic / missing_sections, issue #34).  Keeping
+# the discriminator here, exhaustive over the codes the validator emits, is the
+# single source of truth for "does this cost the platform a refund".
+REFUNDABLE_INCOMPLETE_CODES: frozenset[str] = frozenset(
+    {
+        "empty_artifact",
+        "missing_completion_sentinel",
+        "provider_stopped_by_limit",
+        "unbalanced_code_fence",
+        "dangling_trailing_line",
+        "incomplete_harness_file_block",
+    }
+)
+
+
 @dataclass(frozen=True)
 class CompletenessIssue:
     code: str
     detail: str
     reference: str | None = None
+
+    @property
+    def is_refundable(self) -> bool:
+        """True when this issue means genuinely truncated/corrupt output."""
+        return self.code in REFUNDABLE_INCOMPLETE_CODES
 
 
 class IncompleteArtifactError(RuntimeError):
@@ -144,6 +170,16 @@ class IncompleteArtifactError(RuntimeError):
         self.repair_attempted = repair_attempted
         joined = "; ".join(issue.detail for issue in issues)
         super().__init__(f"Stage {stage_type} artifact is incomplete: {joined}")
+
+    @property
+    def truncation_issues(self) -> list[CompletenessIssue]:
+        """The refundable (truncated/corrupt) subset of issues."""
+        return [issue for issue in self.issues if issue.is_refundable]
+
+    @property
+    def depth_issues(self) -> list[CompletenessIssue]:
+        """The non-refundable depth/quality subset, attached as advisory."""
+        return [issue for issue in self.issues if not issue.is_refundable]
 
 
 class MissingSectionError(RuntimeError):
@@ -332,9 +368,16 @@ def _section_body(artifact_md: str, heading: str) -> str:
 
 
 def _normalise_body_for_depth(body: str) -> str:
-    body = re.sub(r"```.*?```", " ", body, flags=re.DOTALL)
+    # Strip only the fence *markers* (``` and any language tag) and keep the
+    # fenced body — a Mermaid/ASCII diagram or code block is real, measurable
+    # substance.  Sections like "## User Flow Diagrams" are prompted to be a
+    # diagram in a fenced block; discarding the whole block made every such
+    # section read as empty and trip a spurious shallow finding (the refund
+    # bleed this fix targets).
+    body = re.sub(r"(?m)^[ \t]*```[^\n]*$", " ", body)
+    # Drop markdown table rules/pipes but keep cell text.
     body = re.sub(r"\|?-+\|[-|\s]*", " ", body)
-    body = re.sub(r"[*_`>#\[\]()-]+", " ", body)
+    body = re.sub(r"[*_`>#\[\]()|-]+", " ", body)
     body = re.sub(r"\b(?:TODO|TBD|placeholder|lorem ipsum)\b", " ", body, flags=re.I)
     return " ".join(body.split())
 

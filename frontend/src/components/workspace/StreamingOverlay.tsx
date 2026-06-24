@@ -322,6 +322,17 @@ export function StreamingOverlay({
     featureFlags.brandedLoaders && progress?.phase
       ? phaseLivenessCopy(progress.phase)
       : null
+  // Issue #39 UX: the parallel chunked path streams no visible tokens, so the
+  // backend reports honest, monotonic part progress on the heartbeat. Show it
+  // only while parts are actually being generated (the `streaming`/`refining`
+  // phases) — once all parts are drafted the pipeline moves to the gate/critic
+  // phases, where a stale "N of N parts" would mislead. Independent of the
+  // branded-loaders flag: this is the core liveness signal, not decoration.
+  const totalParts = progress?.total_parts ?? 0
+  const showParts =
+    totalParts > 0 &&
+    (progress?.phase === "streaming" || progress?.phase === "refining")
+  const completedParts = Math.min(progress?.completed_parts ?? 0, totalParts)
   const activeStageIndex = STAGE_FLOW.findIndex(
     (stage) => stage.type === renderedActivity.stageType,
   )
@@ -398,6 +409,11 @@ export function StreamingOverlay({
                 ? " — frontier models can reason for a while before text appears."
                 : ""}
           </p>
+          {showParts ? (
+            <p className="generation-loading-parts" aria-live="polite">
+              {completedParts} of {totalParts} parts drafted
+            </p>
+          ) : null}
           {/* Not during the exit fade: the elapsed ticker resets to 0 the moment
               the activity clears, so rendering the bar here would animate the
               fill backward toward empty as the card fades (a "progress goes
@@ -481,6 +497,8 @@ export function phaseLivenessCopy(phase: string): string | null {
   switch (phase) {
     case "streaming":
       return "the model is drafting; this can take several minutes."
+    case "refining":
+      return "refining the draft to fill remaining gaps."
     case "quality_gate":
       return "checking the draft against the quality gates."
     case "critic":
