@@ -2082,17 +2082,6 @@ export default function Workspace() {
 	              Create
 	            </button>
           </section>
-        ) : !isStoryboardLoading ? (
-          <section className="storyboard-entry-card muted" aria-label="Storyboard locked">
-            <div>
-              <span className="storyboard-status-badge locked">Locked</span>
-              <strong>Storyboard unlocks after finalisation</strong>
-              <p>
-                Finalise SPEC, PLAN, HARNESS, and TASKS before starting the
-                paid Storyboard flow.
-              </p>
-            </div>
-          </section>
         ) : null}
 
         {activeGate ? (
