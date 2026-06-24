@@ -7,15 +7,24 @@ locally and live on the internet. No prior deployment experience is assumed.
 
 ## How SpecForge is structured
 
-SpecForge has two application pieces plus two data stores:
+SpecForge has three application pieces plus two data stores. The third piece —
+the **marketing zone** — is the SEO/GEO content site (issue #18); it is optional
+for running the product but required for organic and answer-engine acquisition.
 
 ```text
 User's browser
   |
-  | (opens the app, signs in, generates stages)
+  | (lands on a marketing/content page, or opens the app, signs in, generates stages)
   v
-Frontend — React app, static files
-  Hosted on Vercel  (e.g. https://specforge.vercel.app)
+Marketing zone — Astro static site (SEO + GEO content)   [optional]
+  Hosted on Vercel, on the APEX domain  (e.g. https://specforge.app)
+  Source: apps/marketing/.  Content authored in Sanity (a hosted CMS).
+  |
+  | Vercel multi-zone "rewrites" forward app/artifact paths to the SPA below.
+  | (/dashboard, /workspace/*, /settings, /billing, /auth/*, /p/*, /sb/*, /assets/*)
+  v
+Frontend — React app, static files (the SPA)
+  Hosted on Vercel, on its OWN project/subdomain  (e.g. https://specforge-app.vercel.app)
   |
   | API calls
   v
@@ -26,11 +35,21 @@ Backend — FastAPI Python server
   +-- Redis       cache/sessions, hosted on Railway
 ```
 
-**Locally** everything runs in Docker on your machine at `localhost` URLs.
+**Locally** the frontend, backend, and data stores run in Docker on your machine
+at `localhost` URLs. The marketing zone is a separate Astro project under
+`apps/marketing/` with its own dev/build commands (`pnpm dev` / `pnpm build`); it
+is not part of `docker compose` and is not needed to run the product locally.
 
 **In production** the backend and databases live on Railway (a cloud hosting
-platform), and the frontend lives on Vercel (a static-site hosting platform).
-Both are free to start and require no server management on your part.
+platform), and the SPA frontend lives on Vercel (a static-site hosting platform).
+Both are free to start and require no server management on your part. The
+marketing zone, when you launch it, is a **second, separate Vercel project**
+rooted at `apps/marketing` that owns the apex domain and rewrites the
+app/artifact paths to the SPA project — so the whole product stays on one origin
+(OAuth redirect URIs, the refresh cookie, CSRF, and CORS are all unchanged). See
+[section 7](#7-marketing-zone-seo--geo-content-site) for the full marketing-zone
+setup, and `docs/ISSUE_18_SEO_GEO_LAUNCH_PLAN.md` for its architecture and build
+log.
 
 ---
 
@@ -93,8 +112,10 @@ you merge to `main`.
 | Google OAuth | Yes | User sign-in ("Sign in with Google") |
 | Anthropic / OpenAI / Google Gemini | At least one | LLM generation — you need a key for whichever provider(s) you want to offer |
 | Railway | Production | Hosts the backend server, PostgreSQL, and Redis in the cloud |
-| Vercel | Production | Hosts the frontend website |
+| Vercel | Production | Hosts the frontend website (the SPA) — and, separately, the marketing zone |
 | GitHub Actions secrets | Production | Lets the automated pipeline deploy to Railway and Vercel |
+| Marketing Vercel project | Optional | Second Vercel project rooted at `apps/marketing` — the SEO/GEO content site on the apex domain (issue #18). Skip until you launch organic/answer-engine acquisition. |
+| Sanity | Optional | Hosted CMS that holds the marketing content (guides, use-cases, comparisons, templates, demos). Fetched at build time. Required only if you run the marketing zone with real content. |
 | GitHub OAuth App | Optional | GitHub export integration — lets users push spec/plan/tasks to a GitHub repo as files + issues. Leave blank to disable. |
 | Lemon Squeezy | Optional | Paid credit packs through Lemon Squeezy hosted checkout and signed webhooks (Phase 22). Leave blank to disable billing checkout. |
 | Sentry | Optional | Error reporting if something breaks in production |
@@ -746,7 +767,13 @@ Actions.
    | `RAILWAY_TOKEN` | The Railway token |
    | `VERCEL_TOKEN` | The Vercel token |
    | `VERCEL_ORG_ID` | Your Vercel org/account ID |
-   | `VERCEL_PROJECT_ID` | Your Vercel project ID |
+   | `VERCEL_PROJECT_ID` | Your Vercel project ID (the SPA project) |
+
+   Optional — only if you launch the marketing zone (section 7):
+
+   | Secret name | Value |
+   | --- | --- |
+   | `VERCEL_MARKETING_PROJECT_ID` | The project ID of the **marketing** Vercel project (rooted at `apps/marketing`). Until this is set, the marketing deploy step in CI is **skipped, not failed** — so adding the marketing zone later never breaks the existing backend/SPA deploy. |
 
    Optional but recommended for prompt-eval and provider smoke workflows:
 
@@ -912,6 +939,10 @@ The backend enforces these rules at startup when `ENVIRONMENT=production`:
 - `FRONTEND_URL` must start with `https://`.
 - `JWT_PRIVATE_KEY` must be a real PEM key (not the CI placeholder).
 - `ENCRYPTION_MASTER_KEY` must not be the CI placeholder value.
+- `SITE_URL` is optional, but **if set it must start with `https://`** (it is the
+  backend mirror of the marketing canonical origin used for canonical/OG/sitemap
+  concerns; an `http://` value fails startup). Leave it blank if you are not
+  running the marketing zone — no backend code reads it yet.
 - If Lemon billing is enabled in production (`LEMONSQUEEZY_API_KEY` +
   `LEMONSQUEEZY_STORE_ID` + `LEMONSQUEEZY_VARIANT_ID` all set),
   `LEMONSQUEEZY_WEBHOOK_SECRET` must be set, `LEMONSQUEEZY_SUCCESS_URL` must use
@@ -1087,3 +1118,195 @@ Never commit:
 The CI pipeline runs TruffleHog on every push to detect accidentally committed
 secrets. It is safest to add `*.pem` and `.env` to `.gitignore` immediately
 after creating them.
+
+---
+
+## 7. Marketing Zone (SEO + GEO content site)
+
+This section is **optional**. The product runs fine without it — skip everything
+here until you want organic (search) and answer-engine (GEO — ChatGPT,
+Perplexity, Gemini, Copilot, Claude) acquisition. It was built under issue #18;
+the full architecture and phase-by-phase build log live in
+`docs/ISSUE_18_SEO_GEO_LAUNCH_PLAN.md`.
+
+### What it is and why it is separate
+
+The SPA (`frontend/`) is a client-rendered Vite + React app: the only HTML a
+crawler sees is an empty `<div id="root">` shell, so it is effectively invisible
+to search engines and answer engines. The marketing zone solves that without
+touching the SPA: it is a **separate Astro static site** under `apps/marketing/`
+that emits real, crawlable HTML with complete metadata and validated structured
+data, and pulls its content from **Sanity** at build time.
+
+In production it runs as a **second Vercel project** that owns the apex domain
+and uses Vercel multi-zone **rewrites** (`apps/marketing/vercel.json`) to forward
+all app/artifact paths to the SPA project. Everything stays on one origin, so
+OAuth redirect URIs, the refresh cookie, CSRF, and CORS are unchanged.
+
+What ships where:
+
+- **Marketing zone serves (real static HTML):** `/` (homepage), the five content
+  hubs and their detail pages — `/use-cases/*`, `/guides/*`, `/templates/*`,
+  `/compare/*`, `/demos/*` — plus `/sitemap.xml` and `/robots.txt`.
+- **Rewritten to the SPA project:** `/dashboard`, `/workspace/*`, `/settings`,
+  `/billing`, `/auth/*`, `/p/*`, `/sb/*`, `/assets/*`.
+- **Still `noindex` (must not regress):** the public artifact pages `/p/*` and
+  `/sb/*` stay `noindex, nofollow` via `frontend/public/_headers`, both
+  `robots.txt` files, the backend `X-Robots-Tag`, and JS-injected meta. The
+  marketing zone opens crawling for content **only** — never for user data.
+
+### Important: content lives in Sanity, not in the repo
+
+The repo ships the page **templates, the five hub pages, and the in-repo framing
+copy** — but the actual guide / use-case / comparison / template / demo
+**documents are authored in the Sanity studio** (`apps/marketing/sanity/`) and
+fetched at build time. With Sanity unconfigured, a build produces only the
+homepage and the five hub index pages; every detail route yields zero pages. So
+launching the zone with real content has two parts: **(1)** stand up Sanity and
+author content, **(2)** deploy the marketing Vercel project. You can deploy the
+zone with no Sanity creds first (homepage + hubs only) — the fetch layer degrades
+gracefully to empty content and the build stays green.
+
+### Step A — Set up Sanity (the content CMS)
+
+1. Go to [sanity.io](https://www.sanity.io/) and create an account and a project.
+   Note the **Project ID** (a short string) and the **dataset** name (use
+   `production`). These are **public** values — they appear in every browser
+   request to the Sanity API, so they are fine to expose (`PUBLIC_`-prefixed
+   below). **Do not** create or expose a read token: published content on a
+   public dataset is read tokenlessly at build time, and a token must never be
+   `PUBLIC_`-prefixed.
+2. Deploy the studio. The studio is a **standalone** package in
+   `apps/marketing/sanity/` (deliberately not embedded in the public site, so no
+   editor surface is ever served on the marketing origin):
+
+   ```bash
+   cd apps/marketing/sanity
+   pnpm install
+   npx sanity deploy      # publishes the editing studio (e.g. https://<project>.sanity.studio)
+   ```
+3. In the studio, author content for the document types you want live: `guide`,
+   `seoPage` (powers `/use-cases/*` and `/compare/*`), `templatePage`, and
+   `demoPage`. Demos are **curated, first-party only** — there is no
+   import-from-a-user-workspace path, by design.
+
+### Step B — Create the marketing Vercel project
+
+This is a **second** Vercel project, separate from the SPA project you created in
+[section 3, Step 2](#step-2--set-up-vercel-frontend).
+
+1. In Vercel, **Add New Project** → import this same GitHub repository again.
+2. Set the **Root Directory** to `apps/marketing`. Framework preset: **Astro**.
+3. Add the environment variables below (Vercel → the marketing project →
+   **Settings** → **Environment Variables**). Astro bakes `PUBLIC_*` values in at
+   build time, so a change only takes effect on the next deploy.
+
+   | Variable | Value |
+   | --- | --- |
+   | `PUBLIC_SITE_URL` | The HTTPS **apex** origin this project serves, e.g. `https://specforge.app`. Drives canonical URLs, OG absolute URLs, and the sitemap base. |
+   | `PUBLIC_API_URL` | Your Railway backend URL. The "Sign in with Google" CTA links to `${PUBLIC_API_URL}/auth/google`, mirroring the SPA. |
+   | `PUBLIC_SANITY_PROJECT_ID` | Your Sanity Project ID. Leave blank to build homepage + hubs only (no detail pages). |
+   | `PUBLIC_SANITY_DATASET` | `production` (or your dataset name). |
+   | `PUBLIC_SANITY_API_VERSION` | Pinned API date, e.g. `2024-10-01`. |
+   | `PUBLIC_ANALYTICS_ENABLED` | `false` by default — the zone ships **zero** analytics JS unless this is exactly `true`. Set `true` to enable the first-party Vercel Web Analytics island (also enable the integration on the Vercel project). |
+   | `PUBLIC_GSC_VERIFICATION` | Optional Google Search Console verification token (the `content` of the `<meta name="google-site-verification">` tag). Leave blank if verifying by DNS. |
+
+4. Assign the **apex domain** to this marketing project, and keep the SPA on its
+   own project/subdomain (the one whose URL you set as `VITE_API_URL` / the
+   backend `FRONTEND_URL`).
+
+### Step C — Point the rewrites at the real SPA host
+
+`apps/marketing/vercel.json` ships with a **placeholder** SPA host
+(`https://specforge-app.vercel.app`) in every rewrite `destination`. Once the SPA
+project's production domain is assigned, replace that placeholder with the real
+SPA host so the app/artifact paths resolve. (Until this is correct, `/dashboard`,
+`/p/*`, etc. on the apex domain will 404 or loop.)
+
+### Step D — Set the backend `SITE_URL`
+
+On the Railway backend, set `SITE_URL` to the same HTTPS apex origin as
+`PUBLIC_SITE_URL`. It is the backend mirror of the canonical origin; it is
+optional, but if set it **must be HTTPS** or the backend refuses to start
+(see [Production-only requirements](#production-only-requirements)).
+
+### Step E — Enable automatic deploys (GitHub secret)
+
+Add the `VERCEL_MARKETING_PROJECT_ID` GitHub secret (the marketing project's ID),
+as described in [section 3, Step 3](#step-3--set-up-github-secrets-automated-deployment).
+The CI `marketing` job builds and tests the zone on every push; the deploy step
+is skipped until this secret exists, so adding the zone never breaks the existing
+backend/SPA deploy.
+
+### Step F — Wire content refresh (Sanity → Vercel deploy hook)
+
+Because Sanity content is fetched at **build time**, an editor's change only goes
+live on a rebuild. Connect them:
+
+1. In the marketing Vercel project → **Settings** → **Git** → **Deploy Hooks**,
+   create a hook and copy its URL.
+2. In Sanity → **API** → **Webhooks**, add a webhook that POSTs to that deploy
+   hook URL on document publish.
+
+Now publishing content in Sanity triggers a marketing-zone rebuild automatically.
+(Instant publish without a rebuild — ISR — is a deliberate future upgrade, out of
+scope for launch.)
+
+### Marketing zone `.env` (local builds)
+
+For building the zone locally, copy `apps/marketing/.env.example` to
+`apps/marketing/.env`:
+
+```env
+PUBLIC_SITE_URL=https://specforge.app
+PUBLIC_API_URL=https://api.specforge.app
+
+PUBLIC_SANITY_PROJECT_ID=your_project_id   # blank ⇒ homepage + hubs only
+PUBLIC_SANITY_DATASET=production
+PUBLIC_SANITY_API_VERSION=2024-10-01
+
+PUBLIC_ANALYTICS_ENABLED=false             # exactly "true" to ship analytics JS
+PUBLIC_GSC_VERIFICATION=                   # GSC meta token, or blank for DNS
+```
+
+### Verify the marketing zone
+
+```bash
+cd apps/marketing
+pnpm install
+pnpm check     # astro check / type gate
+pnpm build     # static build → dist/
+pnpm test      # the issue-#18 SEO/GEO contract suite (metadata, sitemap,
+               # robots, noindex regression, structured data, GEO content QA)
+pnpm preview   # serve dist/ locally to view-source the HTML
+```
+
+Then confirm against the built output / preview:
+
+1. `dist/index.html` and each hub emit a real `<h1>`, a unique `<title>` and meta
+   description, canonical, OG, Twitter, and JSON-LD (not an empty root div).
+2. `dist/sitemap-index.xml` lists only indexable routes — **not** `/p/*`, `/sb/*`,
+   or app routes.
+3. `dist/robots.txt` allows `/` and the hubs and disallows `/p/` and `/sb/`.
+4. Validate the JSON-LD in Google's Rich Results test.
+5. **Must-not-regress:** on the live apex domain, `/p/<slug>` and `/sb/<slug>`
+   still return `noindex` (the rewrite resolves to the SPA zone; `_headers` and
+   the backend `X-Robots-Tag` are present).
+
+### Marketing zone troubleshooting
+
+- **App paths 404 on the apex domain** (`/dashboard`, `/p/...`): the placeholder
+  SPA host in `apps/marketing/vercel.json` was not replaced with the real SPA
+  host (Step C).
+- **Detail pages are missing, only homepage + 5 hubs build:** Sanity is
+  unconfigured (`PUBLIC_SANITY_PROJECT_ID` blank) or has no published content.
+  This is the expected graceful-degradation state, not an error.
+- **Backend refuses to start after setting `SITE_URL`:** the value is not HTTPS.
+- **Marketing deploy never runs in CI:** `VERCEL_MARKETING_PROJECT_ID` is not set
+  — the step is intentionally skipped, not failed.
+- **Content edits do not appear:** the Sanity → Vercel deploy hook (Step F) is
+  missing; content is build-time, so a rebuild is required.
+- **Analytics not recording:** `PUBLIC_ANALYTICS_ENABLED` is not exactly `true`,
+  or the `@vercel/analytics` integration is not enabled on the Vercel project.
+  (Note: Vercel custom events need a Pro plan; on Hobby the native referrer
+  breakdown is the guaranteed baseline.)
