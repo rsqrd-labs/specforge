@@ -250,6 +250,32 @@ class Settings(BaseSettings):
     # (`docs/evals/ROUTE_PROMOTION.md`). Flag OFF ⇒ the loop is byte-identical.
     pipeline_early_bail_unrecoverable_chunk: bool = False
 
+    # Parallel chunk generation (issue #39 latency). A stage's wall-clock to
+    # `done` is the SUM of its sequential streaming chunk calls (spec=3, plan=4,
+    # harness=2, tasks=4). When True, the happy path generates a stage's chunks
+    # in dependency-ordered WAVES (`_chunk_waves_for_stage`), running the chunks
+    # within a wave concurrently — turning the sum into ~max(wave) and cutting
+    # wall-clock the most on the worst offenders (plan ~4→1 wave, tasks ~4→2).
+    # Each concurrent chunk uses its OWN adapter instance (no shared completion
+    # state) and live token streaming is suppressed in favour of the supervising
+    # progress heartbeats + the canonical end-of-stream replay (parallel token
+    # streams cannot be interleaved into one coherent document). The sequential
+    # path (`_chunk_specs_for_stage`) is left byte-identical as the OFF fallback,
+    # and any incompleteness still routes through the existing per-chunk repair
+    # plus a full SEQUENTIAL completeness-repair pass, so cross-chunk invariants
+    # (effort-summary counts, numbering, traceability) are reconciled exactly as
+    # today. It is OUTCOME-CHANGING (parallel chunks cannot see each other), so it
+    # rides the issue-#26 golden-corpus gate (`docs/evals/ROUTE_PROMOTION.md`)
+    # before promotion. Flag OFF ⇒ generation is byte-identical to the
+    # pre-#39 sequential loop. Shipped ON (user decision, issue #39) to cut the
+    # ~8-min/stage wall-clock now; instantly reversible by setting this False if
+    # the corpus/live quality of parallel chunks regresses.
+    pipeline_parallel_chunks: bool = True
+    # Max chunks generated concurrently within a single stage generation. Caps
+    # peak provider tokens-per-minute / concurrent streams so a fan-out does not
+    # trip rate limits (which would claw the latency win back via 429 retries).
+    pipeline_parallel_chunk_concurrency: int = 4
+
     # Problem-statement compression (docs/PROBLEM_STATEMENT_COMPRESSION_PLAN.md,
     # Phase B). When True, an over-budget problem statement is reduced to at most
     # `problem_statement_budget_tokens` (C_MAX) before any model sees it, via the

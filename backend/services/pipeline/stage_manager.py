@@ -1236,6 +1236,107 @@ def _chunk_specs_for_stage(stage_type: str) -> list[ArtifactChunkSpec]:
     ]
 
 
+def _task_parallel_waves() -> list[list[ArtifactChunkSpec]]:
+    """TASKS chunk waves for the parallel path (issue #39).
+
+    The sequential block chunks rely on seeing prior chunks to "continue
+    numbering"; parallel siblings cannot.  So the overview chunk is asked to
+    publish an explicit, contiguous, non-overlapping T-NNN range per phase
+    group, and each block chunk authors ONLY its assigned range — making the
+    three block chunks collision-free and independent so they run concurrently.
+    """
+    overview = ArtifactChunkSpec(
+        "task-overview",
+        (
+            "Generate only the TASKS.md Effort Summary, Execution Overview, "
+            "Traceability Overview, Dependency Graph, and Task Sizing Legend. "
+            "Use the full task inventory you intend to emit so counts and "
+            "dependencies are internally consistent. Assign each later phase "
+            "group — (a) foundations, data layer, core logic, and security "
+            "controls; (b) API, integration, frontend, and user-facing "
+            "workflows; (c) observability, testing, hardening, deployment, "
+            "operations, rollout, and recovery — an explicit, contiguous, "
+            "NON-overlapping T-NNN number range, and state those three ranges in "
+            "the Execution Overview so each group can be authored independently "
+            "without colliding."
+        ),
+    )
+    foundation = ArtifactChunkSpec(
+        "task-foundation-blocks",
+        (
+            "Generate only the early implementation phases and their "
+            "`### T-NNN` task blocks: foundations, data layer, core business "
+            "logic, and security controls that protect later API work. Use ONLY "
+            "the T-NNN range the overview assigned to group (a); never reuse a "
+            "number from another group's range. Each task must include every "
+            "required field, concrete steps, exact harness refs, objective "
+            "acceptance criteria, and Dependencies that point only to earlier "
+            "task IDs."
+        ),
+    )
+    interface = ArtifactChunkSpec(
+        "task-interface-blocks",
+        (
+            "Generate only API, integration, frontend, and user-facing workflow "
+            "task blocks, using ONLY the T-NNN range the overview assigned to "
+            "group (b); never reuse a number from another group's range. "
+            "Preserve the task inventory and dependency graph from the overview; "
+            "do not duplicate earlier tasks. Each task must include every "
+            "required field, exact harness refs, concrete steps, "
+            "loading/error/empty/focus handling for frontend work, and objective "
+            "acceptance criteria."
+        ),
+    )
+    hardening = ArtifactChunkSpec(
+        "task-hardening-blocks",
+        (
+            "Generate only observability, testing, hardening, deployment, "
+            "operations, rollout, and recovery task blocks, using ONLY the "
+            "T-NNN range the overview assigned to group (c); never reuse a "
+            "number from another group's range. Preserve the overview counts and "
+            "dependency graph; do not duplicate earlier tasks. Every harness test "
+            "and plan contract not covered by groups (a) or (b) must be covered "
+            "here."
+        ),
+    )
+    return [[overview], [foundation, interface, hardening]]
+
+
+def _chunk_waves_for_stage(stage_type: str) -> list[list[ArtifactChunkSpec]]:
+    """Dependency-ordered wave grouping of a stage's chunks (issue #39).
+
+    Each inner list is a set of chunks with NO cross-references among them, so
+    they may be generated concurrently; waves run in order because a later wave
+    can reference IDs/inventory minted by an earlier one.  Consumed only by the
+    parallel path behind ``pipeline_parallel_chunks``; ``_chunk_specs_for_stage``
+    stays the regression-proof sequential fallback.
+    """
+    if stage_type == "spec":
+        specs = {c.key: c for c in _chunk_specs_for_stage(stage_type)}
+        # product-scope mints FR IDs; system-expectations mints NFR/SEC IDs —
+        # independent.  validation-risk's Acceptance Criteria reference FR IDs,
+        # so it runs in a second wave that can see the first.
+        return [
+            [specs["product-scope"], specs["system-expectations"]],
+            [specs["validation-risk"]],
+        ]
+    if stage_type == "plan":
+        # Every plan chunk references requirement IDs from the upstream SPEC
+        # (present in the shared base prompt), not from sibling chunks, and emits
+        # a disjoint set of sections — so all four run concurrently in one wave.
+        return [list(_chunk_specs_for_stage(stage_type))]
+    if stage_type == "tasks":
+        return _task_parallel_waves()
+    # harness (contract -> files is strictly ordered) and the single-chunk
+    # default stay sequential: one chunk per wave.
+    return [[chunk] for chunk in _chunk_specs_for_stage(stage_type)]
+
+
+def _stage_has_parallel_waves(stage_type: str) -> bool:
+    """True when at least one wave holds >1 chunk (i.e. parallelism exists)."""
+    return any(len(wave) > 1 for wave in _chunk_waves_for_stage(stage_type))
+
+
 def _chunk_user_prompt(
     base_user_prompt: str,
     *,
@@ -1415,7 +1516,27 @@ class StageManager:
         stage_type: str,
         deps: dict[str, str],
         emit: Callable[[str], None] | None = None,
+        adapter_factory: Callable[[LLMRoute], object] | None = None,
     ) -> GeneratedArtifact:
+        # Issue #39: when enabled, generate dependency-independent chunks
+        # concurrently in waves (sum of chunk latencies -> ~max per wave). Needs
+        # a factory so each concurrent chunk gets its own adapter (no shared
+        # completion state). Falls through to the sequential path below when off,
+        # when the stage has no parallelism, or when no factory was supplied.
+        if (
+            settings.pipeline_parallel_chunks
+            and adapter_factory is not None
+            and _stage_has_parallel_waves(stage_type)
+        ):
+            return await self._generate_complete_artifact_parallel(
+                adapter_factory=adapter_factory,
+                route=route,
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                stage_type=stage_type,
+                deps=deps,
+                emit=emit,
+            )
         chunks: list[str] = []
         repair_attempted = False
         max_tokens = resolve_output_budget(
@@ -1602,6 +1723,210 @@ class StageManager:
             chunks=chunks,
             repair_attempted=repair_attempted,
             content_generation_id=getattr(adapter, "last_generation_id", None),
+        )
+
+    async def _generate_complete_artifact_parallel(
+        self,
+        *,
+        adapter_factory: Callable[[LLMRoute], object],
+        route: LLMRoute,
+        system_prompt: str,
+        user_prompt: str,
+        stage_type: str,
+        deps: dict[str, str],
+        emit: Callable[[str], None] | None = None,
+    ) -> GeneratedArtifact:
+        """Issue #39 parallel happy path: generate chunks in concurrent waves.
+
+        Mirrors ``_generate_complete_artifact``'s repair semantics — a per-chunk
+        limit-stop/sentinel failure gets one funded repair retry, and an
+        assembled artifact that fails the full completeness contract gets one
+        SEQUENTIAL full-regeneration pass (so cross-chunk invariants — numbering,
+        effort-summary counts, traceability — are reconciled with each chunk
+        able to see the others) before surfacing a terminal block. Only the
+        happy-path generation is parallelized; correctness is unchanged.
+
+        Live token streaming is suppressed (parallel streams cannot be
+        interleaved into one document); the supervising progress heartbeats keep
+        the connection warm and the caller's canonical end-of-stream replay
+        paints the final artifact.
+        """
+        max_tokens = resolve_output_budget(
+            route.operation, provider=route.provider, model=route.model
+        )
+        generation_started = asyncio.get_running_loop().time()
+        # Any draft already on the client (e.g. from a failed prior attempt) is
+        # stale — clear it once; the canonical replay is the source of truth.
+        if emit is not None:
+            emit(json.dumps({"stream_reset": True}))
+
+        repair_attempted = False
+        repair_lock = asyncio.Lock()
+        semaphore = asyncio.Semaphore(
+            max(1, settings.pipeline_parallel_chunk_concurrency)
+        )
+        last_generation_id: str | None = None
+
+        async def _generate_chunk_with_repair(
+            chunk: ArtifactChunkSpec,
+            prior_chunks: list[str],
+        ) -> str:
+            nonlocal repair_attempted, last_generation_id
+            adapter = adapter_factory(route)
+            async with semaphore:
+                try:
+                    text = await self._generate_chunk_once(
+                        adapter=adapter,
+                        route=route,
+                        system_prompt=system_prompt,
+                        user_prompt=user_prompt,
+                        stage_type=stage_type,
+                        chunk=chunk,
+                        prior_chunks=prior_chunks,
+                        max_tokens=max_tokens,
+                        emit=None,
+                    )
+                except IncompleteArtifactError as exc:
+                    # One funded per-chunk repair, mirroring the sequential loop.
+                    # The lock keeps the "at most one repair in flight" intent and
+                    # serialises the (rare) concurrent-failure case.
+                    async with repair_lock:
+                        repair_attempted = True
+                        PIPELINE_COMPLETION_REPAIRS.labels(
+                            stage_type=stage_type,
+                            provider=route.provider,
+                            outcome="attempted",
+                        ).inc()
+                        try:
+                            text = await self._generate_chunk_once(
+                                adapter=adapter_factory(route),
+                                route=route,
+                                system_prompt=system_prompt,
+                                user_prompt=user_prompt,
+                                stage_type=stage_type,
+                                chunk=chunk,
+                                prior_chunks=prior_chunks,
+                                max_tokens=_repair_budget(
+                                    route, max_tokens, exc.issues
+                                ),
+                                repair_issues=exc.issues,
+                            )
+                        except IncompleteArtifactError:
+                            PIPELINE_COMPLETION_REPAIRS.labels(
+                                stage_type=stage_type,
+                                provider=route.provider,
+                                outcome="failed",
+                            ).inc()
+                            raise
+                        PIPELINE_COMPLETION_REPAIRS.labels(
+                            stage_type=stage_type,
+                            provider=route.provider,
+                            outcome="succeeded",
+                        ).inc()
+            last_generation_id = (
+                getattr(adapter, "last_generation_id", None) or last_generation_id
+            )
+            return text
+
+        chunks: list[str] = []
+        try:
+            for wave in _chunk_waves_for_stage(stage_type):
+                prior_snapshot = list(chunks)
+                wave_results = await asyncio.gather(
+                    *(
+                        _generate_chunk_with_repair(chunk, prior_snapshot)
+                        for chunk in wave
+                    )
+                )
+                chunks.extend(wave_results)
+        except IncompleteArtifactError as exc:
+            raise IncompleteArtifactError(
+                stage_type,
+                exc.issues,
+                partial_content="\n\n".join([*chunks, exc.partial_content]),
+                repair_attempted=repair_attempted,
+            ) from exc
+
+        artifact = "\n\n".join(chunk for chunk in chunks if chunk.strip()).strip()
+        try:
+            validate_artifact_completeness(stage_type, artifact, deps)
+        except IncompleteArtifactError as exc:
+            if repair_attempted:
+                raise IncompleteArtifactError(
+                    stage_type,
+                    exc.issues,
+                    partial_content=artifact,
+                    repair_attempted=True,
+                ) from exc
+            # Full completeness repair runs SEQUENTIALLY so each regenerated chunk
+            # can see the others and reconcile cross-chunk invariants — identical
+            # to the sequential path's full-repair pass.
+            repair_attempted = True
+            PIPELINE_COMPLETION_REPAIRS.labels(
+                stage_type=stage_type,
+                provider=route.provider,
+                outcome="attempted",
+            ).inc()
+            repaired_chunks: list[str] = []
+            repair_max_tokens = _repair_budget(route, max_tokens, exc.issues)
+            repair_specs = [
+                chunk for wave in _chunk_waves_for_stage(stage_type) for chunk in wave
+            ]
+            try:
+                for chunk in repair_specs:
+                    repair_adapter = adapter_factory(route)
+                    repaired_chunks.append(
+                        await self._generate_chunk_once(
+                            adapter=repair_adapter,
+                            route=route,
+                            system_prompt=system_prompt,
+                            user_prompt=user_prompt,
+                            stage_type=stage_type,
+                            chunk=chunk,
+                            prior_chunks=repaired_chunks,
+                            max_tokens=repair_max_tokens,
+                            repair_issues=exc.issues,
+                        )
+                    )
+                    last_generation_id = (
+                        getattr(repair_adapter, "last_generation_id", None)
+                        or last_generation_id
+                    )
+                artifact = "\n\n".join(
+                    chunk for chunk in repaired_chunks if chunk.strip()
+                ).strip()
+                validate_artifact_completeness(stage_type, artifact, deps)
+            except IncompleteArtifactError as repair_exc:
+                PIPELINE_COMPLETION_REPAIRS.labels(
+                    stage_type=stage_type,
+                    provider=route.provider,
+                    outcome="failed",
+                ).inc()
+                raise IncompleteArtifactError(
+                    stage_type,
+                    repair_exc.issues,
+                    partial_content=(
+                        repair_exc.partial_content
+                        or "\n\n".join(repaired_chunks)
+                        or artifact
+                    ),
+                    repair_attempted=True,
+                ) from repair_exc
+            chunks = [artifact]
+            PIPELINE_COMPLETION_REPAIRS.labels(
+                stage_type=stage_type,
+                provider=route.provider,
+                outcome="succeeded",
+            ).inc()
+
+        PIPELINE_GENERATION_DURATION.labels(
+            stage_type=stage_type, provider=route.provider
+        ).observe(asyncio.get_running_loop().time() - generation_started)
+        return GeneratedArtifact(
+            content=artifact,
+            chunks=chunks,
+            repair_attempted=repair_attempted,
+            content_generation_id=last_generation_id,
         )
 
     async def _generate_chunk_once(
@@ -2230,6 +2555,7 @@ class StageManager:
                             stage_type=stage.type,
                             deps=deps,
                             emit=emit,
+                            adapter_factory=_build_stage_adapter,
                         )
                     except (ProviderError, TimeoutError) as attempt_exc:
                         # Any live-streamed draft from the failed attempt is

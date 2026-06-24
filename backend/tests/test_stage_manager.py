@@ -20,6 +20,9 @@ from services.pipeline.stage_manager import (
     StageManager,
     _chunk_specs_for_stage,
     _chunk_user_prompt,
+    _chunk_waves_for_stage,
+    _stage_has_parallel_waves,
+    _task_parallel_waves,
 )
 
 _VALID_SPEC = artifact_fixtures.VALID_SPEC
@@ -69,6 +72,152 @@ def test_tasks_generation_uses_phase_group_chunks() -> None:
         "task-interface-blocks",
         "task-hardening-blocks",
     ]
+
+
+def test_chunk_waves_for_stage_grouping() -> None:
+    # Issue #39: the dependency-ordered wave DAG that the parallel path runs.
+    assert [[c.key for c in wave] for wave in _chunk_waves_for_stage("spec")] == [
+        ["product-scope", "system-expectations"],
+        ["validation-risk"],
+    ]
+    assert [[c.key for c in wave] for wave in _chunk_waves_for_stage("plan")] == [
+        [
+            "architecture-foundation",
+            "quality-and-structure",
+            "data-api-security",
+            "operations-risk",
+        ],
+    ]
+    assert [[c.key for c in wave] for wave in _chunk_waves_for_stage("tasks")] == [
+        ["task-overview"],
+        ["task-foundation-blocks", "task-interface-blocks", "task-hardening-blocks"],
+    ]
+    # harness is strictly sequential (contract -> files): one chunk per wave.
+    assert [[c.key for c in wave] for wave in _chunk_waves_for_stage("harness")] == [
+        ["harness-contract"],
+        ["harness-files"],
+    ]
+    # The flat sequential specs are unchanged regardless of the wave grouping.
+    for stage in ("spec", "plan", "harness", "tasks"):
+        flat_from_waves = [
+            c.key for wave in _chunk_waves_for_stage(stage) for c in wave
+        ]
+        assert flat_from_waves == [c.key for c in _chunk_specs_for_stage(stage)]
+
+
+def test_stage_has_parallel_waves() -> None:
+    assert _stage_has_parallel_waves("spec") is True
+    assert _stage_has_parallel_waves("plan") is True
+    assert _stage_has_parallel_waves("tasks") is True
+    # harness has no wave with >1 chunk, so the parallel path is never taken.
+    assert _stage_has_parallel_waves("harness") is False
+
+
+def test_task_parallel_waves_pre_assign_numbering_ranges() -> None:
+    # Parallel task block chunks cannot "continue numbering" from siblings they
+    # can't see; the overview must publish explicit ranges and each block must be
+    # told to stay inside its assigned range.
+    waves = _task_parallel_waves()
+    overview = waves[0][0]
+    assert "NON-overlapping T-NNN number range" in overview.instruction
+    block_instructions = " ".join(c.instruction for c in waves[1])
+    assert "Continue TASKS.md numbering after the prior task chunks" not in (
+        block_instructions
+    )
+    assert block_instructions.lower().count("only the t-nnn range") == 3
+    assert "group (a)" in block_instructions
+    assert "group (b)" in block_instructions
+    assert "group (c)" in block_instructions
+
+
+class _ConcurrencyAdapter:
+    """Fake adapter recording how many streams are in flight simultaneously."""
+
+    def __init__(self, tracker: dict[str, int], payload_fn) -> None:
+        self._tracker = tracker
+        self._payload_fn = payload_fn
+        self.last_completion: LLMCompletionInfo | None = None
+        self.last_generation_id = "gen-parallel"
+
+    async def stream(
+        self,
+        system: str,
+        user: str,
+        max_tokens: int,
+        *,
+        cache_system: bool = False,
+        cache_user_prefix: str | None = None,
+    ):
+        self._tracker["active"] += 1
+        self._tracker["max"] = max(self._tracker["max"], self._tracker["active"])
+        try:
+            # Yield control so siblings in the same wave can enter before this
+            # one finishes — that overlap is what proves real concurrency.
+            await asyncio.sleep(0.02)
+            self.last_completion = LLMCompletionInfo.started(
+                provider="anthropic",
+                model="claude-haiku-4-5-20251001",
+                max_tokens=max_tokens,
+            )
+            yield self._payload_fn(user)
+        finally:
+            self._tracker["active"] -= 1
+
+
+def _spec_generate_route():
+    from services.llm.routing import LLMRoute
+
+    return LLMRoute(
+        provider="anthropic",
+        model="claude-haiku-4-5-20251001",
+        model_tier="small",
+        operation="spec.generate",
+        latency_class="interactive",
+        cross_provider_fallback=False,
+        reason="test",
+        requested_tier="small",
+        fallback_tier=None,
+        selection_reason="test",
+    )
+
+
+@pytest.mark.asyncio
+async def test_parallel_generation_runs_chunks_concurrently_and_completes(
+    monkeypatch,
+) -> None:
+    from services.pipeline import stage_manager as sm
+
+    monkeypatch.setattr(sm.settings, "pipeline_parallel_chunks", True)
+
+    tracker = {"active": 0, "max": 0}
+    created: list[_ConcurrencyAdapter] = []
+
+    def factory(_route):
+        adapter = _ConcurrencyAdapter(tracker, _spec_stream_payload)
+        created.append(adapter)
+        return adapter
+
+    generated = await StageManager()._generate_complete_artifact(
+        adapter=factory(None),
+        route=_spec_generate_route(),
+        system_prompt="SYSTEM",
+        user_prompt="BASE SPEC PROMPT",
+        stage_type="spec",
+        deps={},
+        emit=None,
+        adapter_factory=factory,
+    )
+
+    # The two wave-1 chunks (product-scope, system-expectations) ran together.
+    assert tracker["max"] == 2
+    # One adapter per chunk (the pre-built `adapter=` is ignored by the parallel
+    # path): 3 spec chunks + the throwaway built for the `adapter=` kwarg.
+    assert len(created) == 4
+    # The assembled artifact spans all three waves' section groups.
+    assert "## Overview" in generated.content
+    assert "## Non-Functional Requirements" in generated.content
+    assert "## Acceptance Criteria" in generated.content
+    assert generated.content_generation_id == "gen-parallel"
 
 
 def test_chunk_user_prompt_wraps_prior_chunks_as_untrusted_context() -> None:
@@ -772,7 +921,13 @@ async def test_generate_cache_hit_skips_credit_and_provider_call() -> None:
 
 
 @pytest.mark.asyncio
-async def test_regenerate_bypasses_cache_and_uses_regenerate_credit_reason() -> None:
+async def test_regenerate_bypasses_cache_and_uses_regenerate_credit_reason(
+    monkeypatch,
+) -> None:
+    # Asserts sequential-path stream-call counts; pin to the sequential path.
+    monkeypatch.setattr(
+        "services.pipeline.stage_manager.settings.pipeline_parallel_chunks", False
+    )
     workspace_id = uuid4()
     spec_stage = _make_stage(
         workspace_id,
@@ -932,7 +1087,14 @@ async def test_generate_provider_limit_stop_repairs_without_double_charging() ->
 
 
 @pytest.mark.asyncio
-async def test_generate_provider_limit_stop_failed_repair_blocks_and_refunds() -> None:
+async def test_generate_provider_limit_stop_failed_repair_blocks_and_refunds(
+    monkeypatch,
+) -> None:
+    # Sequential-path mechanics (exact per-chunk stream-call count); the parallel
+    # path's limit-stop block+refund contract is covered separately.
+    monkeypatch.setattr(
+        "services.pipeline.stage_manager.settings.pipeline_parallel_chunks", False
+    )
     workspace_id = uuid4()
     spec_stage = _make_stage(workspace_id, "spec", status="draft")
     workspace = _make_workspace([spec_stage])
@@ -986,6 +1148,86 @@ async def test_generate_provider_limit_stop_failed_repair_blocks_and_refunds() -
     assert spec_stage.quality_gate_payload["reasons"][0]["code"] == (
         "provider_stopped_by_limit"
     )
+    assert any("quality_gate_failed" in token for token in tokens)
+
+
+class _AlwaysLimitStopAdapter:
+    """Every stream call stops on the output-token limit (parallel-path test).
+
+    A fresh instance per ``get_llm`` call mirrors the parallel path giving each
+    concurrent chunk its own adapter (so there is no shared completion state).
+    """
+
+    def __init__(self) -> None:
+        self.last_completion: LLMCompletionInfo | None = None
+        self.last_generation_id = "gen-limit"
+
+    async def stream(
+        self,
+        system: str,
+        user: str,
+        max_tokens: int,
+        *,
+        cache_system: bool = False,
+        cache_user_prefix: str | None = None,
+    ):
+        self.last_completion = LLMCompletionInfo.started(
+            provider="anthropic",
+            model="claude-haiku-4-5-20251001",
+            max_tokens=max_tokens,
+        )
+        self.last_completion.apply_finish_reason("max_tokens")
+        yield _spec_stream_payload(user)
+
+
+@pytest.mark.asyncio
+async def test_parallel_provider_limit_stop_blocks_and_refunds(monkeypatch) -> None:
+    # The block+refund contract must hold under the now-default parallel path:
+    # every concurrent chunk limit-stops, its one funded repair re-stops, and the
+    # assembled failure refunds the deduction and blocks the stage.
+    monkeypatch.setattr(
+        "services.pipeline.stage_manager.settings.pipeline_parallel_chunks", True
+    )
+    workspace_id = uuid4()
+    spec_stage = _make_stage(workspace_id, "spec", status="draft")
+    workspace = _make_workspace([spec_stage])
+    user = _make_user()
+    deduction = CreditLedger(id=uuid4(), user_id=user.id, amount=-10, reason="generate")
+    db = _MultiQueryDB([spec_stage, workspace, [], deduction])
+    svc = StageManager(redis_client=_FakeRedis())
+
+    with (
+        patch(
+            "services.pipeline.stage_manager.credit_service.deduct",
+            new_callable=AsyncMock,
+            return_value=deduction,
+        ),
+        patch(
+            "services.pipeline.stage_manager.credit_service.refund",
+            new_callable=AsyncMock,
+        ) as mock_refund,
+        patch(
+            "services.pipeline.stage_manager.build_prompt",
+            new_callable=AsyncMock,
+            return_value=("sys", "user", "0"),
+        ),
+        patch(
+            "services.pipeline.stage_manager.set_cached_generation",
+            new_callable=AsyncMock,
+        ) as mock_set_cache,
+        patch(
+            "services.pipeline.stage_manager.get_llm",
+            side_effect=lambda provider, model: _AlwaysLimitStopAdapter(),
+        ),
+    ):
+        tokens = [token async for token in svc.generate(spec_stage.id, user, db)]
+
+    mock_refund.assert_awaited_once_with(db, deduction.id)
+    mock_set_cache.assert_not_awaited()
+    assert spec_stage.status == "draft"
+    assert spec_stage.quality_gate_status == "blocked"
+    assert spec_stage.quality_gate_kind == "incomplete_output"
+    assert spec_stage.quality_gate_payload["repair_attempted"] is True
     assert any("quality_gate_failed" in token for token in tokens)
 
 
@@ -1087,6 +1329,8 @@ async def test_doomed_limit_stop_still_repairs_when_flag_off(monkeypatch) -> Non
     from services.pipeline import stage_manager as sm
 
     monkeypatch.setattr(sm.settings, "pipeline_early_bail_unrecoverable_chunk", False)
+    # Per-chunk early-bail is sequential-path logic; pin to the sequential path.
+    monkeypatch.setattr(sm.settings, "pipeline_parallel_chunks", False)
     monkeypatch.setattr(sm, "model_max_output_tokens", lambda provider, model: 49152)
 
     workspace_id = uuid4()
@@ -1136,6 +1380,8 @@ async def test_doomed_limit_stop_skips_repair_when_flag_on(
     from services.pipeline import stage_manager as sm
 
     monkeypatch.setattr(sm.settings, "pipeline_early_bail_unrecoverable_chunk", True)
+    # Per-chunk early-bail is sequential-path logic; pin to the sequential path.
+    monkeypatch.setattr(sm.settings, "pipeline_parallel_chunks", False)
     monkeypatch.setattr(sm, "model_max_output_tokens", lambda provider, model: 49152)
 
     before = PIPELINE_COMPLETION_REPAIRS.labels(
@@ -3466,11 +3712,18 @@ async def test_generate_spec_skips_score_judge_by_default(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_generate_falls_back_to_strong_tier_after_primary_failure() -> None:
+async def test_generate_falls_back_to_strong_tier_after_primary_failure(
+    monkeypatch,
+) -> None:
     """A mid-tier provider failure retries once on the strong tier and the
     fallback generation is persisted normally with no refund."""
     from services.llm.base import ProviderError
 
+    # Asserts exact get_llm call-counting (2 total), which is sequential-path
+    # specific; the parallel fallback contract is covered by its own test below.
+    monkeypatch.setattr(
+        "services.pipeline.stage_manager.settings.pipeline_parallel_chunks", False
+    )
     workspace_id = uuid4()
     spec_stage = _make_stage(workspace_id, "spec", status="draft")
     workspace = _make_workspace([spec_stage])
@@ -3591,7 +3844,9 @@ async def test_generate_emits_progress_heartbeats_while_model_reasons() -> None:
 
 
 @pytest.mark.asyncio
-async def test_generate_streams_tokens_live_before_canonical_replay() -> None:
+async def test_generate_streams_tokens_live_before_canonical_replay(
+    monkeypatch,
+) -> None:
     """Progressive streaming (issue #19 UX): generation tokens reach the SSE
     client while chunks generate — the user watches the document grow instead
     of staring at a blank screen for the whole run.  The stream then emits a
@@ -3599,6 +3854,11 @@ async def test_generate_streams_tokens_live_before_canonical_replay() -> None:
     buffer always equals what was persisted."""
     import json as _json
 
+    # Live token streaming is a sequential-path feature (the parallel path
+    # suppresses it in favour of progress heartbeats + the canonical replay).
+    monkeypatch.setattr(
+        "services.pipeline.stage_manager.settings.pipeline_parallel_chunks", False
+    )
     workspace_id = uuid4()
     spec_stage = _make_stage(workspace_id, "spec", status="draft")
     workspace = _make_workspace([spec_stage])
