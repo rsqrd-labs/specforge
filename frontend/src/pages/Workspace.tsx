@@ -58,6 +58,7 @@ import { useStream } from "../hooks/useStream"
 import {
   acceptStageDiff,
   acknowledgeReviewGate,
+  acknowledgeStaleStage,
   exportWorkspace,
   exportWorkspacePdf,
   finaliseStage,
@@ -381,9 +382,6 @@ export default function Workspace() {
    *  originally M-5 — T-187).
    */
   const [evalError, setEvalError] = useState<Record<string, boolean>>({})
-  const [dismissedStale, setDismissedStale] = useState<Record<string, boolean>>(
-    {},
-  )
   const setGenericError = useCallback(
     (message: string, title = "Action could not finish") => {
       showAlert(
@@ -1293,9 +1291,36 @@ export default function Workspace() {
     setLargeSelectionWarning(false)
   }, [activeStage, guardWorkspaceMutation])
 
+  // Accept a stale stage's existing content as-is: restores it to finalised
+  // server-side via the credit-free acknowledge path (no regenerate). This is
+  // NOT finaliseStage() — that endpoint rejects non-draft stages (the "Stage
+  // status 'stale' cannot be finalised" 409) and would re-stale a still-
+  // consistent finalised downstream. Reached from both the staleness banner's
+  // "Keep" button and the GenerateBar "Finalise" button when the stage is stale.
+  const handleAcknowledgeStale = useCallback(async () => {
+    if (!activeStage || !id) return
+    if (guardWorkspaceMutation()) return
+    try {
+      const updatedStage = await acknowledgeStaleStage(activeStage.id)
+      setStage(updatedStage)
+      const workspace = await getWorkspace(id)
+      setCurrentWorkspace(workspace)
+      setStages(workspace.stages)
+      void refreshLatestStoryboard(true)
+    } catch (err) {
+      setGenericError(getApiErrorMessage(err, "Could not keep this stage as-is."))
+    }
+  }, [activeStage, guardWorkspaceMutation, id, setStage, setCurrentWorkspace, setStages, refreshLatestStoryboard])
+
   const handleFinalise = useCallback(async () => {
     if (!activeStage || !id) return
     if (guardWorkspaceMutation()) return
+    // A stale stage's "Finalise" means "accept what's already here": there is no
+    // new draft to finalise, so route it to the credit-free acknowledge path.
+    if (activeStage.status === "stale") {
+      void handleAcknowledgeStale()
+      return
+    }
     const gateBlock = deriveFinaliseGateBlock(activeStage)
     if (gateBlock.blocked) {
       setGenericError(gateBlock.message)
@@ -1327,7 +1352,7 @@ export default function Workspace() {
       // only applies when no structured detail is present (issue #28, Phase 1).
       setGenericError(getApiErrorMessage(err, "Only draft stages can be finalised."))
     }
-  }, [activeStage, guardWorkspaceMutation, id, setStage, setCurrentWorkspace, setStages, refreshLatestStoryboard])
+  }, [activeStage, guardWorkspaceMutation, id, handleAcknowledgeStale, setStage, setCurrentWorkspace, setStages, refreshLatestStoryboard])
 
   const handleContentChange = useCallback(
     async (content: string) => {
@@ -1726,8 +1751,7 @@ export default function Workspace() {
 
   const evalResult = evalResults[activeStage.id] ?? activeStage.eval_result ?? null
   const isEvalError = evalError[activeStage.id] ?? false
-  const showStaleWarning =
-    activeStage.status === "stale" && !dismissedStale[activeStage.id]
+  const showStaleWarning = activeStage.status === "stale"
   const upstreamType = previousStageType(activeStage.type)
   const taskIssues = evalResult?.tasks_without_ref ?? []
   const genuineGapIssues = taskIssues.filter(
@@ -1997,10 +2021,7 @@ export default function Workspace() {
             stage={activeStage}
             upstreamStageType={STAGE_LABELS[upstreamType]}
             onRegenerate={() => void requestGeneration("regenerate")}
-            onDismiss={() => {
-              if (guardWorkspaceMutation()) return
-              setDismissedStale((existing) => ({ ...existing, [activeStage.id]: true }))
-            }}
+            onDismiss={() => void handleAcknowledgeStale()}
             disabled={workspaceGenerationLock.locked}
             disabledReason={workspaceLockReason}
           />

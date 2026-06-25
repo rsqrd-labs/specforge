@@ -402,6 +402,27 @@ async def finalise_stage(
     return StageResponse.model_validate(stage)
 
 
+@router.post("/{id}/acknowledge-stale", response_model=StageResponse)
+async def acknowledge_stale_stage(
+    id: UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> StageResponse:
+    """Keep a stale stage's content as-is, restoring it to finalised.
+
+    Backs the "Keep" action on the staleness banner: re-affirms the existing
+    finalised artifact without a regenerate. A non-stale stage is a 409.
+    """
+    await _load_stage(id, db, user.id)
+    try:
+        stage = await stage_manager.acknowledge_stale(id, user, db)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail=str(exc)
+        ) from exc
+    return StageResponse.model_validate(stage)
+
+
 @router.post("/{id}/rollback", response_model=StageResponse)
 async def rollback_stage(
     id: UUID,

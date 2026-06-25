@@ -401,6 +401,11 @@ export async function finaliseStage(id: string): Promise<Stage> {
   return response.data
 }
 
+export async function acknowledgeStaleStage(id: string): Promise<Stage> {
+  const response = await api.post<Stage>(`/stages/${id}/acknowledge-stale`)
+  return response.data
+}
+
 export async function rollbackStage(
   id: string,
   version: number,

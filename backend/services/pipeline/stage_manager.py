@@ -3860,6 +3860,51 @@ class StageManager:
         await db.refresh(stage)
         return stage
 
+    async def acknowledge_stale(self, stage_id: UUID, user, db: AsyncSession) -> Stage:
+        """Accept a stale stage's existing content as-is, restoring it to finalised.
+
+        A stage becomes ``stale`` only when it was already ``finalised`` and an
+        upstream source moved (``_mark_downstream_stale``, the regenerate
+        ``was_finalised`` branch, and the workspace problem-statement edit path
+        all gate on ``status == "finalised"``).  Staleness is an *upstream-drift
+        advisory*, not a content-safety signal: this stage's content is
+        unchanged and already passed every gate at its original finalise.  So
+        "Keep" re-affirms that finalised artifact without regenerating (and
+        without spending a credit) — the gap the prior cosmetic-only Keep left
+        open, which forced users to regenerate to escape ``stale``.
+
+        This is deliberately NOT a thin wrapper over ``finalise()``.  That path's
+        side effects (downstream-stale propagation, storyboard/GitHub-push
+        invalidation, the finalise-time tech-safety re-check) all assume the
+        content *changed*.  Here it has not, so re-running them would be wrong:
+        acknowledging a stale *middle* stage would incorrectly re-stale a
+        finalised downstream that is still consistent with this stage's
+        unchanged content.  Restoring the prior finalised status is the whole
+        operation.
+        """
+        stage = await self._load_stage(stage_id, db, lock=True)
+        if stage.status != "stale":
+            raise ValueError(f"Stage status {stage.status!r} cannot be acknowledged")
+
+        stage.status = "finalised"
+        stage.finalised_at = datetime.now(UTC)
+        stage.updated_at = datetime.now(UTC)
+
+        # Refresh the stage cache so reads see the restored finalised content,
+        # mirroring finalise()'s invalidate+set (content is unchanged, but a
+        # prior cache entry may have expired while the stage sat stale).
+        redis = await self._redis_client()
+        await self._invalidate_stage_cache(stage.workspace_id, stage.type, redis)
+        await redis.set(
+            f"{_STAGE_CACHE_PREFIX}{stage.workspace_id}:{stage.type}",
+            stage.content or "",
+            ex=_STAGE_CACHE_TTL,
+        )
+
+        await db.commit()
+        await db.refresh(stage)
+        return stage
+
     async def rollback(
         self, stage_id: UUID, version_number: int, user, db: AsyncSession
     ) -> Stage:
@@ -3876,6 +3921,18 @@ class StageManager:
             raise HTTPException(status_code=404, detail="Version not found")
 
         stage = await self._load_stage(stage_id, db)
+        # "Unlock in place" — rolling back to the version that is already current
+        # (the Unlock button passes stage.current_version) — does not change the
+        # content, so an advisory gate pinned to that version is still valid.
+        # Preserve it so unlocking a finalised stage restores its non-blocking
+        # suggestions instead of silently dropping them (the user unlocked
+        # precisely to act on them). A genuine rollback to an *older* version
+        # changes the content, so its findings are stale and still get cleared.
+        preserve_advisory = (
+            version_number == stage.current_version
+            and stage.quality_gate_status == "advisory"
+            and stage.quality_gate_version == version_number
+        )
         stage.content = version.content
         stage.current_version = version_number
         stage.status = "draft"
@@ -3894,7 +3951,8 @@ class StageManager:
         except TechSafetyError as exc:
             self._mark_current_version_technology_blocked(stage, exc)
         else:
-            self._clear_quality_gate(stage)
+            if not preserve_advisory:
+                self._clear_quality_gate(stage)
         await self._invalidate_stage_cache(stage.workspace_id, stage.type, redis)
         await db.commit()
         await db.refresh(stage)

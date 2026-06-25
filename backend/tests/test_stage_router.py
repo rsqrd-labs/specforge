@@ -641,6 +641,52 @@ async def test_finalise_non_gate_value_error_stays_string_409(app) -> None:
 
 
 @pytest.mark.asyncio
+async def test_acknowledge_stale_returns_updated_stage(app) -> None:
+    stage = _make_stage(status="finalised")
+
+    async def _fake_db():
+        yield _FakeDB(stage)
+
+    app.dependency_overrides[get_db] = _fake_db
+
+    with patch(
+        "routers.stage.stage_manager.acknowledge_stale",
+        new_callable=AsyncMock,
+        return_value=stage,
+    ):
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            response = await client.post(f"/stages/{stage.id}/acknowledge-stale")
+
+    assert response.status_code == 200
+    assert response.json()["id"] == str(stage.id)
+
+
+@pytest.mark.asyncio
+async def test_acknowledge_stale_non_stale_returns_409(app) -> None:
+    stage = _make_stage(status="draft")
+
+    async def _fake_db():
+        yield _FakeDB(stage)
+
+    app.dependency_overrides[get_db] = _fake_db
+
+    with patch(
+        "routers.stage.stage_manager.acknowledge_stale",
+        new_callable=AsyncMock,
+        side_effect=ValueError("Stage status 'draft' cannot be acknowledged"),
+    ):
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            response = await client.post(f"/stages/{stage.id}/acknowledge-stale")
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "Stage status 'draft' cannot be acknowledged"
+
+
+@pytest.mark.asyncio
 async def test_rollback_returns_updated_stage(app) -> None:
     stage = _make_stage()
 

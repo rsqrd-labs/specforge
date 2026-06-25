@@ -284,6 +284,28 @@ describe("GenerateBar", () => {
     expect(screen.getByRole("button", { name: /finalise spec/i })).toBeEnabled()
   })
 
+  it("offers an enabled Finalise action for a stale stage and fires onFinalise", async () => {
+    // A stale stage still surfaces "Finalise" (the page routes that click to the
+    // credit-free acknowledge path, not finaliseStage which rejects non-drafts).
+    const user = userEvent.setup()
+    const onFinalise = vi.fn()
+    const stage = makeStage({ status: "stale", content: "Existing tasks" })
+    render(
+      <GenerateBar
+        stage={stage}
+        onGenerate={noop}
+        onRegenerate={noop}
+        onRefine={noop}
+        onFinalise={onFinalise}
+        onUnlock={noop}
+      />,
+    )
+    const finaliseBtn = screen.getByRole("button", { name: /finalise spec/i })
+    expect(finaliseBtn).toBeEnabled()
+    await user.click(finaliseBtn)
+    expect(onFinalise).toHaveBeenCalledOnce()
+  })
+
   it("returns null when stage is locked", () => {
     const stage = makeStage({ status: "locked" })
     const { container } = render(
@@ -343,6 +365,22 @@ describe("StalenessWarning", () => {
     )
     await user.click(screen.getByRole("button", { name: /regenerate/i }))
     expect(onRegenerate).toHaveBeenCalledOnce()
+  })
+
+  it("calls onDismiss (Keep — accept content as-is) when Keep clicked", async () => {
+    const user = userEvent.setup()
+    const onDismiss = vi.fn()
+    const stage = makeStage({ status: "stale" })
+    render(
+      <StalenessWarning
+        stage={stage}
+        upstreamStageType="SPEC.md"
+        onRegenerate={vi.fn()}
+        onDismiss={onDismiss}
+      />,
+    )
+    await user.click(screen.getByRole("button", { name: /^keep$/i }))
+    expect(onDismiss).toHaveBeenCalledOnce()
   })
 })
 

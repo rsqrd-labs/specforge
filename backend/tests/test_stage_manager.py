@@ -2820,6 +2820,81 @@ async def test_rollback_marks_downstream_finalised_stages_stale() -> None:
 
 
 @pytest.mark.asyncio
+async def test_rollback_in_place_preserves_advisory_gate() -> None:
+    # Unlocking a finalised stage rolls back to the version that is already
+    # current (the Unlock button passes stage.current_version). The content does
+    # not change, so its non-blocking advisory suggestions are still valid and
+    # must survive — the user unlocked precisely to act on them.
+    workspace_id = uuid4()
+    spec_stage = _make_stage(
+        workspace_id, "spec", status="finalised", content="current", version=2
+    )
+    spec_stage.quality_gate_status = "advisory"
+    spec_stage.quality_gate_kind = "critic_findings"
+    spec_stage.quality_gate_payload = {
+        "stage": "spec",
+        "kind": "critic_findings",
+        "findings": [{"kind": "ShallowSection", "detail": "thin", "reference": None}],
+    }
+    spec_stage.quality_gate_version = 2
+
+    version = StageVersion(
+        id=uuid4(),
+        stage_id=spec_stage.id,
+        version=2,
+        content="current",
+        created_by="ai",
+        created_at=datetime.now(UTC),
+    )
+
+    svc = StageManager(redis_client=_FakeRedis())
+    db = _MultiQueryDB([version, spec_stage, []])
+    user = _make_user()
+
+    updated = await svc.rollback(spec_stage.id, 2, user, db)
+
+    assert updated.status == "draft"
+    assert updated.quality_gate_status == "advisory"
+    assert updated.quality_gate_version == 2
+
+
+@pytest.mark.asyncio
+async def test_rollback_to_older_version_clears_advisory_gate() -> None:
+    # A genuine rollback to an *older* version changes the content, so advisory
+    # findings pinned to the newer version are stale and get cleared.
+    workspace_id = uuid4()
+    spec_stage = _make_stage(
+        workspace_id, "spec", status="finalised", content="current", version=2
+    )
+    spec_stage.quality_gate_status = "advisory"
+    spec_stage.quality_gate_kind = "critic_findings"
+    spec_stage.quality_gate_payload = {
+        "stage": "spec",
+        "kind": "critic_findings",
+        "findings": [{"kind": "ShallowSection", "detail": "thin", "reference": None}],
+    }
+    spec_stage.quality_gate_version = 2
+
+    version = StageVersion(
+        id=uuid4(),
+        stage_id=spec_stage.id,
+        version=1,
+        content="v1 content",
+        created_by="ai",
+        created_at=datetime.now(UTC),
+    )
+
+    svc = StageManager(redis_client=_FakeRedis())
+    db = _MultiQueryDB([version, spec_stage, []])
+    user = _make_user()
+
+    updated = await svc.rollback(spec_stage.id, 1, user, db)
+
+    assert updated.status == "draft"
+    assert updated.quality_gate_status == "clear"
+
+
+@pytest.mark.asyncio
 async def test_mark_downstream_stale_tasks_stage_marks_nothing() -> None:
     workspace_id = uuid4()
     tasks_stage = _make_stage(workspace_id, "tasks", status="finalised")
@@ -2827,6 +2902,65 @@ async def test_mark_downstream_stale_tasks_stage_marks_nothing() -> None:
     svc = StageManager(redis_client=_FakeRedis())
     db = _MultiQueryDB([[]])
     await svc._mark_downstream_stale(tasks_stage, db)
+
+
+@pytest.mark.asyncio
+async def test_acknowledge_stale_restores_finalised() -> None:
+    # "Keep" on the staleness banner: a stale stage's content is accepted as-is
+    # and restored to finalised, with no regenerate and no credit charge.
+    workspace_id = uuid4()
+    tasks_stage = _make_stage(
+        workspace_id, "tasks", status="stale", content="kept content"
+    )
+    tasks_stage.finalised_at = None
+
+    svc = StageManager(redis_client=_FakeRedis())
+    db = _MultiQueryDB([tasks_stage])
+    user = _make_user()
+
+    updated = await svc.acknowledge_stale(tasks_stage.id, user, db)
+
+    assert updated.status == "finalised"
+    assert updated.finalised_at is not None
+    assert updated.content == "kept content"
+
+
+@pytest.mark.asyncio
+async def test_acknowledge_stale_middle_stage_leaves_downstream_finalised() -> None:
+    # The correctness case the dedicated method exists for: acknowledging a stale
+    # *middle* stage must NOT re-stale a finalised downstream. The downstream was
+    # built from this stage's unchanged content, so it is still consistent — only
+    # finalise()'s change-assuming side effects would wrongly invalidate it.
+    # Assert the contract directly: the downstream-stale cascade is never invoked.
+    workspace_id = uuid4()
+    plan_stage = _make_stage(
+        workspace_id, "plan", status="stale", content="plan content"
+    )
+
+    svc = StageManager(redis_client=_FakeRedis())
+    db = _MultiQueryDB([plan_stage])
+    user = _make_user()
+
+    with patch.object(svc, "_mark_downstream_stale", new_callable=AsyncMock) as cascade:
+        await svc.acknowledge_stale(plan_stage.id, user, db)
+
+    cascade.assert_not_called()
+    assert plan_stage.status == "finalised"
+
+
+@pytest.mark.asyncio
+async def test_acknowledge_stale_rejects_non_stale_stage() -> None:
+    workspace_id = uuid4()
+    draft_stage = _make_stage(workspace_id, "spec", status="draft", content="content")
+
+    svc = StageManager(redis_client=_FakeRedis())
+    db = _MultiQueryDB([draft_stage])
+    user = _make_user()
+
+    with pytest.raises(ValueError, match="cannot be acknowledged"):
+        await svc.acknowledge_stale(draft_stage.id, user, db)
+
+    assert draft_stage.status == "draft"
 
 
 @pytest.mark.asyncio
