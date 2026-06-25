@@ -18,10 +18,11 @@ export function CoveragePanel({
   if (stage.type !== "harness") return null
 
   const uncoveredReqs = evalResult?.uncovered_reqs ?? []
-  // Deferred reqs are an optional, paid expansion beyond the baseline harness
-  // (they never flag the eval). The harness patch covers them too — so the panel
-  // renders and the button lights even when uncovered_reqs is empty. The backend
-  // unions both sets.
+  // deferred_reqs are now genuine, deterministic coverage holes: requirements
+  // the test matrix maps to a test file that was never emitted in the harness
+  // (matrix→file integrity). They are real gaps to fill, NOT an optional "beyond
+  // baseline" upsell — the paid patch regenerates the missing tests. The backend
+  // unions them with any LLM-derived uncovered_reqs for the patch.
   const deferredReqs = evalResult?.deferred_reqs ?? []
   const regenerateHelpId = `${stage.id}-coverage-regenerate-help`
   const disabledReasonId = `${stage.id}-coverage-disabled-reason`
@@ -33,7 +34,7 @@ export function CoveragePanel({
   return (
     <div
       className={`ws-panel-section ws-coverage-card ${
-        uncoveredReqs.length > 0
+        uncoveredReqs.length > 0 || deferredReqs.length > 0
           ? "ws-coverage-card--gap"
           : "ws-coverage-card--deferred"
       }`}
@@ -64,14 +65,16 @@ export function CoveragePanel({
         <>
           <div className="ws-panel-section-header">
             <div>
-              <div className="ws-panel-title">Expand Test Coverage</div>
+              <div className="ws-panel-title">Missing Test Coverage</div>
               <p>
-                Add deeper, dedicated tests for these requirements to go beyond
-                the baseline harness — generate them whenever you want more
-                exhaustive coverage.
+                The test matrix maps these requirements to a test file that was
+                not generated in the harness. Regenerate to fill in the missing
+                tests.
               </p>
             </div>
-            <span className="ws-panel-chip">{deferredReqs.length} optional</span>
+            <span className="ws-panel-chip warning">
+              {deferredReqs.length} missing
+            </span>
           </div>
 
           <ul className="ws-issue-list">

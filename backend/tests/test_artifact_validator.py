@@ -11,6 +11,7 @@ from services.pipeline.artifact_validator import (
     IncompleteArtifactError,
     MissingSectionError,
     chunk_completion_sentinel,
+    dedupe_file_blocks,
     strip_completion_sentinel,
     validate_artifact_completeness,
     validate_completion_sentinel,
@@ -335,6 +336,92 @@ def test_validate_artifact_completeness_rejects_missing_harness_tree_block() -> 
         issue.code == "harness_file_tree_missing_block"
         for issue in excinfo.value.issues
     )
+
+
+def test_matrix_missing_file_is_language_agnostic() -> None:
+    """A TS/Vitest matrix row pointing at an unemitted file is caught.
+
+    The legacy `harness_matrix_missing_test` keys on the pytest `test_` prefix
+    and silently no-ops on non-Python harnesses; the file-path check does not.
+    """
+    artifact = "\n\n".join(
+        [
+            "## Harness Overview\nDetailed harness strategy and local commands.",
+            (
+                "## Requirement-to-Test Matrix\n"
+                "| Source ID | Test file | Test name |\n"
+                "|---|---|---|\n"
+                "| FR-001 | `tests/admin.test.ts` | `admin_config_updates` |\n"
+                "| NFR-001 | `tests/performance/perf.test.ts` "
+                "| `latency_budget_enforced` |"
+            ),
+            (
+                "## Coverage Plan\nDetailed integration, security, contract, "
+                "and migration_safety coverage."
+            ),
+            "## File Tree\n```text\nharness/tests/admin.test.ts\n```",
+            (
+                "## Files\n"
+                "### File: harness/tests/admin.test.ts\n"
+                "```ts\n"
+                "// Tests: FR-001\n"
+                "it('admin_config_updates', () => { expect(false).toBe(true); });\n"
+                "```"
+            ),
+        ]
+    )
+
+    with pytest.raises(IncompleteArtifactError) as excinfo:
+        validate_artifact_completeness("harness", artifact)
+
+    missing = [
+        issue
+        for issue in excinfo.value.issues
+        if issue.code == "harness_matrix_missing_file"
+    ]
+    assert missing, "expected a matrix→file integrity failure"
+    assert "tests/performance/perf.test.ts" in missing[0].reference
+    # The covered file must NOT be reported as missing.
+    assert "tests/admin.test.ts" not in missing[0].reference
+    # harness_matrix_missing_file is advisory: not in the refundable set.
+    assert all(not issue.is_refundable for issue in missing)
+
+
+def test_dedupe_file_blocks_removes_doubled_files_section() -> None:
+    """A harness whose ## Files section was emitted twice is self-healed."""
+    file_block = (
+        "### File: harness/tests/a.test.ts\n```ts\nit('a', () => {});\n```\n"
+        "### File: harness/tests/b.test.ts\n```ts\nit('b', () => {});\n```\n"
+    )
+    artifact = (
+        "## Harness Overview\nStrategy.\n\n"
+        "## Files\n" + file_block + file_block  # doubled
+    )
+
+    deduped, removed = dedupe_file_blocks(artifact)
+
+    assert removed == 2
+    assert deduped.count("### File: harness/tests/a.test.ts") == 1
+    assert deduped.count("### File: harness/tests/b.test.ts") == 1
+    # The Overview heading above ## Files is untouched.
+    assert "## Harness Overview" in deduped
+
+
+def test_dedupe_file_blocks_noop_without_duplicates() -> None:
+    artifact = (
+        "## Files\n"
+        "### File: harness/tests/a.test.ts\n```ts\nit('a', () => {});\n```\n"
+    )
+    deduped, removed = dedupe_file_blocks(artifact)
+    assert removed == 0
+    assert deduped == artifact
+
+
+def test_dedupe_file_blocks_noop_for_non_harness() -> None:
+    spec = "## Overview\nA product spec with no File blocks at all."
+    deduped, removed = dedupe_file_blocks(spec)
+    assert removed == 0
+    assert deduped == spec
 
 
 def test_validate_artifact_completeness_rejects_missing_task_harness_ref() -> None:

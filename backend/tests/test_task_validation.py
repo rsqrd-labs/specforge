@@ -385,49 +385,66 @@ class TestDroppedCategoryExtraction:
 
 
 class TestExtractDeferredReqs:
-    # Real bold-markdown-wrapped records as the harness emits them, including the
-    # property_based record whose reqs= holds domain entity names, not req IDs.
-    _HARNESS_REQS = (
+    """``extract_deferred_reqs`` reports genuine coverage holes (matrix→file).
+
+    A requirement is a gap only when its matrix-mapped test file(s) were never
+    emitted in ``## Files``. A requirement that maps to *some* emitted file — even
+    if another of its tiers was trimmed — is covered, not a gap. This mirrors the
+    real AWS-CUR harness, where the perf file was promised but never emitted
+    (NFR-001/NFR-002 = real gaps) while the accessibility file was emitted
+    (FR-006/NFR-005/AC-012 = covered, despite a TestCategoryGap depth record).
+    """
+
+    _HARNESS = (
+        "## Requirement-to-Test Matrix\n"
+        "| Source ID | behaviour | test file | test name |\n"
+        "|---|---|---|---|\n"
+        "| FR-002 | run starts | `tests/integration/ingest.test.ts` | starts |\n"
+        "| FR-002 | run promptly | `tests/performance/perf.test.ts` | budget |\n"
+        "| NFR-001 | p95 start | `tests/performance/perf.test.ts` | budget |\n"
+        "| NFR-002 | p95 e2e | `tests/performance/perf.test.ts` | e2e_budget |\n"
+        "| AC-012 | pdf a11y | `tests/accessibility/a11y.test.ts` | structure |\n"
+        "| `GET /v1/x` | endpoint | `tests/contract/schemas.test.ts` | shape |\n\n"
         "## Coverage Plan\n"
-        "**TestCategoryGap: category=performance_budget reason=token_budget "
-        "reqs=NFR-001,NFR-002,FR-002,FR-010**  \n"
         "**TestCategoryGap: category=accessibility reason=token_budget "
-        "reqs=FR-006,NFR-005,AC-012**  \n"
-        "**TestCategoryGap: category=property_based reason=token_budget "
-        "reqs=SourceObjectDetected,RecipientList,LLM narrative**  \n"
-        "**TestCategoryGap: category=supply_chain reason=other "
-        "reqs=NFR-008,SEC-003**\n"
+        "reqs=AC-012**\n\n"
+        "## Files\n"
+        "### File: harness/tests/integration/ingest.test.ts\n"
+        "```ts\nit('starts', () => {});\n```\n"
+        "### File: harness/tests/accessibility/a11y.test.ts\n"
+        "```ts\nit('structure', () => {});\n```\n"
+        "### File: harness/tests/contract/schemas.test.ts\n"
+        "```ts\nit('shape', () => {});\n```\n"
     )
 
-    def test_extracts_only_canonical_requirement_ids(self) -> None:
-        reqs = extract_deferred_reqs(self._HARNESS_REQS)
-        assert reqs == [
-            "NFR-001",
-            "NFR-002",
-            "FR-002",
-            "FR-010",
-            "FR-006",
-            "NFR-005",
-            "AC-012",
-            "NFR-008",
-            "SEC-003",
-        ]
+    def test_reports_only_genuine_holes(self) -> None:
+        # perf.test.ts was never emitted -> NFR-001/NFR-002 are real gaps.
+        assert extract_deferred_reqs(self._HARNESS) == ["NFR-001", "NFR-002"]
 
-    def test_filters_non_id_tokens(self) -> None:
-        reqs = extract_deferred_reqs(self._HARNESS_REQS)
-        # property_based entity names must never reach the harness patch.
-        assert "SourceObjectDetected" not in reqs
-        assert "RecipientList" not in reqs
-        assert "LLM" not in reqs
+    def test_requirement_with_one_emitted_file_is_covered(self) -> None:
+        # FR-002 maps to both perf (absent) and ingest (emitted) -> covered.
+        assert "FR-002" not in extract_deferred_reqs(self._HARNESS)
 
-    def test_dedupes_preserving_order(self) -> None:
-        content = (
-            "**TestCategoryGap: category=a reason=token_budget reqs=FR-001,FR-002**\n"
-            "**TestCategoryGap: category=b reason=token_budget reqs=FR-002,FR-003**\n"
+    def test_trimmed_but_emitted_tier_is_not_a_gap(self) -> None:
+        # AC-012 has a TestCategoryGap record but its a11y file WAS emitted.
+        assert "AC-012" not in extract_deferred_reqs(self._HARNESS)
+
+    def test_non_requirement_rows_are_ignored(self) -> None:
+        # The `GET /v1/x` endpoint row is not a requirement ID.
+        assert extract_deferred_reqs(self._HARNESS) == ["NFR-001", "NFR-002"]
+
+    def test_fully_emitted_harness_has_no_gaps(self) -> None:
+        emitted = self._HARNESS.replace(
+            "### File: harness/tests/integration/ingest.test.ts\n"
+            "```ts\nit('starts', () => {});\n```\n",
+            "### File: harness/tests/integration/ingest.test.ts\n"
+            "```ts\nit('starts', () => {});\n```\n"
+            "### File: harness/tests/performance/perf.test.ts\n"
+            "```ts\nit('budget', () => {});\nit('e2e_budget', () => {});\n```\n",
         )
-        assert extract_deferred_reqs(content) == ["FR-001", "FR-002", "FR-003"]
+        assert extract_deferred_reqs(emitted) == []
 
-    def test_no_records_returns_empty(self) -> None:
+    def test_no_matrix_or_empty_returns_empty(self) -> None:
         assert extract_deferred_reqs(_HARNESS) == []
         assert extract_deferred_reqs("") == []
 

@@ -51,7 +51,7 @@ describe("CoveragePanel — coverage expansion (paid one-click patch)", () => {
     expect(container).toBeEmptyDOMElement()
   })
 
-  it("lights the Regenerate button for a deferred-only harness", () => {
+  it("lights the Regenerate button for a missing-tests harness", () => {
     const onRegenerate = vi.fn()
     render(
       <CoveragePanel
@@ -60,12 +60,12 @@ describe("CoveragePanel — coverage expansion (paid one-click patch)", () => {
         onRegenerate={onRegenerate}
       />,
     )
-    expect(screen.getByText("Expand Test Coverage")).toBeInTheDocument()
+    expect(screen.getByText("Missing Test Coverage")).toBeInTheDocument()
     expect(screen.getByText("FR-002")).toBeInTheDocument()
-    expect(screen.getByText("2 optional")).toBeInTheDocument()
-    // The optional expansion is paid — no "free" language.
+    expect(screen.getByText("2 missing")).toBeInTheDocument()
+    // Regenerating the missing tests is paid — no "free" language.
     expect(screen.getByText(/costs 10 credits/)).toBeInTheDocument()
-    // No blocking "Coverage Gaps" section when there are no genuine gaps.
+    // The LLM-derived "Coverage Gaps" section is absent when uncovered_reqs is empty.
     expect(screen.queryByText("Coverage Gaps")).toBeNull()
 
     fireEvent.click(screen.getByRole("button", { name: "Regenerate HARNESS" }))
@@ -84,7 +84,7 @@ describe("CoveragePanel — coverage expansion (paid one-click patch)", () => {
       />,
     )
     expect(screen.getByText("Coverage Gaps")).toBeInTheDocument()
-    expect(screen.getByText("Expand Test Coverage")).toBeInTheDocument()
+    expect(screen.getByText("Missing Test Coverage")).toBeInTheDocument()
     expect(screen.getByText("FR-009")).toBeInTheDocument()
     expect(screen.getByText("FR-002")).toBeInTheDocument()
   })

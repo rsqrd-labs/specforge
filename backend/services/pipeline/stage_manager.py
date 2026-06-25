@@ -75,6 +75,7 @@ from services.observability import (
     PIPELINE_CRITIC_ADVISORY_FINDINGS,
     PIPELINE_GENERATION_DURATION,
     PIPELINE_GENERATION_FALLBACKS,
+    PIPELINE_HARNESS_FILE_DEDUP,
     PIPELINE_INCOMPLETE_OUTPUTS,
     PIPELINE_INTERRUPTED_STREAMS,
     PIPELINE_PROVIDER_LIMIT_STOPS,
@@ -95,6 +96,7 @@ from services.pipeline.artifact_validator import (
     IncompleteArtifactError,
     MissingSectionError,
     completion_instruction,
+    dedupe_file_blocks,
     strip_completion_sentinel,
     validate_artifact_completeness,
     validate_sections,
@@ -2972,6 +2974,26 @@ class StageManager:
                 return
 
             accumulated = _strip_code_fence(accumulated)
+
+            # Self-heal a duplicated harness: a cheap-tier model (or a chunk
+            # merge) can emit the entire ## Files section twice, doubling the
+            # artifact (observed: 122 KB that was an exact double of 61 KB).
+            # Deterministically drop duplicate `### File:` blocks before any gate
+            # or persistence — no LLM, no repair, no credit. Single chokepoint
+            # for both the chunked and non-chunked paths.
+            if stage.type == "harness":
+                accumulated, _deduped_blocks = dedupe_file_blocks(accumulated)
+                if _deduped_blocks:
+                    PIPELINE_HARNESS_FILE_DEDUP.labels(provider=route.provider).inc(
+                        _deduped_blocks
+                    )
+                    logger.warning(
+                        "stage_manager.harness_file_dedup stage_id=%s "
+                        "removed_blocks=%s provider=%s",
+                        stage.id,
+                        _deduped_blocks,
+                        route.provider,
+                    )
 
             # Streaming is done; the deterministic gates (security validation,
             # technology safety, section presence) run next (issue #21 Phase 2c).

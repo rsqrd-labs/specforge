@@ -119,6 +119,15 @@ PIPELINE_PROVIDER_LIMIT_STOPS = Counter(
     "Provider generations that stopped because max output tokens were reached",
     ["stage_type", "provider", "model", "operation"],
 )
+PIPELINE_HARNESS_FILE_DEDUP = Counter(
+    "specforge_pipeline_harness_file_dedup_total",
+    # Duplicate `### File:` blocks deterministically removed from a harness
+    # artifact before persistence — a self-heal for the cheap-tier model (or a
+    # chunk merge) emitting the whole Files section more than once. A non-zero
+    # rate is a core-generation health signal, not a user-facing failure.
+    "Duplicate harness File blocks removed by the deterministic dedup self-heal",
+    ["provider"],
+)
 PIPELINE_INTERRUPTED_STREAMS = Counter(
     "specforge_pipeline_interrupted_streams_total",
     "Stage generation streams interrupted before a usable completed artifact existed",

@@ -76,19 +76,12 @@ _TS_DESCRIBE_DEF_RE = re.compile(
 _TEST_CATEGORY_GAP_RE = re.compile(
     r"TestCategoryGap:\s*category=([A-Za-z0-9_.\-]+)", re.IGNORECASE
 )
-# The `reqs=` field of a TestCategoryGap record (comma-separated). Captured up to
-# the next newline or `*` so the bold-markdown wrapper (`…reqs=FR-1**`) is not
-# swallowed. NOTE: this field is NOT guaranteed to hold requirement IDs — some
-# categories (e.g. property_based) list domain entity names there — so callers
-# must filter the tokens through `_REQ_ID_RE` before treating them as reqs.
-_TEST_CATEGORY_GAP_REQS_RE = re.compile(
-    r"TestCategoryGap:[^\n*]*?\breqs=([^\n*]+)", re.IGNORECASE
-)
-# Canonical requirement identifier shape (FR-12, NFR-003, AC-12, SEC-3). Must
-# start with 2-6 uppercase letters, a hyphen, then a digit; an optional dotted
-# sub-index (FR-1.2) is allowed. Anything without this shape — bare entity names
-# like "SourceObjectDetected" — is rejected, never fed into a harness patch.
-_REQ_ID_RE = re.compile(r"^[A-Z]{2,6}-\d+(?:\.\d+)*$")
+# NOTE: the `reqs=`-field scrape that once fed extract_deferred_reqs is gone —
+# that field reports *category-depth* trims, not per-requirement gaps, so it
+# listed requirements that already had tests. Genuine coverage holes are now
+# derived from matrix→file emission in artifact_validator.uncovered_requirements.
+# `_TEST_CATEGORY_GAP_RE` (category names) is still used by the task-deferral
+# classifier (`_extract_dropped_categories`).
 # Common test-file extensions stripped before comparing a ref's file stem to a
 # dropped category name (longest-first so `.test.ts` wins over `.ts`).
 _TEST_FILE_EXTS = (
@@ -395,29 +388,30 @@ def _extract_dropped_categories(harness_content: str) -> set[str]:
 
 
 def extract_deferred_reqs(harness_content: str) -> list[str]:
-    """Ordered, deduped requirement IDs the harness recorded as deferred.
+    """Requirement IDs with a genuine coverage hole — the honest gap set.
 
-    Parses the ``reqs=`` field of every ``TestCategoryGap`` record and keeps only
-    canonical requirement identifiers (``FR-12``, ``NFR-003``, …). The field is
-    not a clean req-id list for every category — ``property_based`` records, for
-    instance, enumerate domain entity names — so non-id tokens are dropped rather
-    than passed to the free harness patch as bogus "requirements". This is the
-    single source of truth consumed by both the GET-eval response (to surface a
-    deferred-coverage gap to the user) and the ``regenerate-gaps`` endpoint (to
-    actually patch them), so the surfaced set and the patched set never diverge.
+    Delegates to :func:`artifact_validator.uncovered_requirements`, which reads
+    the Requirement-to-Test Matrix and reports only requirements whose every
+    mapped test file is absent from the ``## Files`` section. This is the single
+    source of truth consumed by both the GET-eval response (to surface a coverage
+    gap to the user) and the ``regenerate-gaps`` endpoint (to actually patch
+    them), so the surfaced set and the patched set never diverge.
+
+    It replaces the previous ``TestCategoryGap reqs=`` scrape, which reported
+    *category-depth* trims as per-requirement gaps and so listed requirements
+    that already had at least one emitted test (e.g. a requirement whose
+    accessibility tier was thinned but whose integration test exists). On a fully
+    emitted harness this returns ``[]`` — no false "you have missing coverage"
+    panel — and the paid patch only ever regenerates tests that genuinely do not
+    exist.
     """
-    out: list[str] = []
-    seen: set[str] = set()
-    for m in _TEST_CATEGORY_GAP_REQS_RE.finditer(harness_content):
-        for raw in m.group(1).split(","):
-            # Take the leading whitespace-delimited word so trailing prose like
-            # "LLM narrative" collapses to "LLM" (which then fails _REQ_ID_RE).
-            head = raw.strip().split(maxsplit=1)
-            tok = head[0].strip().upper() if head else ""
-            if _REQ_ID_RE.match(tok) and tok not in seen:
-                seen.add(tok)
-                out.append(tok)
-    return out
+    # Imported lazily to avoid a circular import at module load (the validator
+    # imports nothing from evals, but evals → pipeline is the established edge).
+    from services.pipeline.artifact_validator import (  # noqa: PLC0415
+        uncovered_requirements,
+    )
+
+    return uncovered_requirements(harness_content)
 
 
 def _ref_in_dropped_category(ref: str, dropped_categories: set[str]) -> bool:

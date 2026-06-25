@@ -533,6 +533,125 @@ def _plan_issues(artifact_md: str, deps: dict[str, str]) -> list[CompletenessIss
     return issues
 
 
+_FILE_HEADING_RE = re.compile(r"^###\s+File:\s+(.+?)\s*$", re.MULTILINE)
+# A backticked matrix cell that names a test file: a path with a directory
+# component and a file extension whose stem/path reads as a test (``test``,
+# ``spec``, or a ``tests/`` directory). Language-agnostic on purpose — the
+# previous matrix check keyed on the Python ``test_`` prefix / ``def test_`` and
+# silently no-opped on TS/Vitest, Go, Ruby, etc. harnesses.
+_MATRIX_TEST_FILE_RE = re.compile(r"`([^`]+?\.[A-Za-z0-9]+)`")
+
+
+def _normalise_harness_path(path: str) -> str:
+    """Strip a leading ``harness/`` segment and surrounding whitespace."""
+    cleaned = path.strip().replace("\\", "/")
+    if cleaned.startswith("harness/"):
+        cleaned = cleaned[len("harness/") :]
+    return cleaned
+
+
+def _looks_like_test_file_path(token: str) -> bool:
+    cleaned = token.strip()
+    if "/" not in cleaned or "." not in cleaned.rsplit("/", 1)[-1]:
+        return False
+    lowered = cleaned.lower()
+    return "test" in lowered or "spec" in lowered
+
+
+def dedupe_file_blocks(artifact_md: str) -> tuple[str, int]:
+    """Drop duplicate ``### File: <path>`` blocks, keeping the first of each.
+
+    Language-agnostic self-heal for a harness whose ``## Files`` section was
+    emitted more than once — the cheap-tier model looping, or a chunk merge
+    concatenating overlapping output (observed: a 122 KB harness that was an
+    exact doubling of a 61 KB one). Only the ``## Files`` region is touched, so
+    the Overview / Matrix / Coverage Plan / File Tree are never altered. Returns
+    the deduped artifact and the number of duplicate blocks removed (0 when the
+    artifact has no ``## Files`` section or no duplicates — a safe no-op for
+    every non-harness stage).
+    """
+    files_idx = artifact_md.find("\n## Files")
+    if files_idx == -1:
+        return artifact_md, 0
+    head = artifact_md[:files_idx]
+    files_region = artifact_md[files_idx:]
+    # Split at each File heading; segment[0] is the "## Files" preamble.
+    segments = re.split(r"(?m)(?=^###\s+File:\s+)", files_region)
+    seen: set[str] = set()
+    kept: list[str] = [segments[0]]
+    removed = 0
+    for segment in segments[1:]:
+        match = _FILE_HEADING_RE.match(segment)
+        path = _normalise_harness_path(match.group(1)) if match else ""
+        if path and path in seen:
+            removed += 1
+            continue
+        if path:
+            seen.add(path)
+        kept.append(segment)
+    if removed == 0:
+        return artifact_md, 0
+    return head + "".join(kept), removed
+
+
+_MATRIX_REQ_ID_RE = re.compile(r"^(?:FR|NFR|SEC|AC)-\d+(?:\.\d+)*$")
+
+
+def uncovered_requirements(harness_content: str) -> list[str]:
+    """Requirement IDs whose every mapped matrix test file was never emitted.
+
+    Reads the Requirement-to-Test Matrix as the source of truth for what each
+    requirement's test *should* be, then checks the ``## Files`` section for what
+    was actually emitted. A requirement is genuinely uncovered only when it maps
+    to ≥1 test file and **none** of those files exist as a ``### File:`` block —
+    so a requirement with at least one emitted test (even if another of its tiers
+    was trimmed) is correctly treated as covered, not a gap.
+
+    This replaces the old "scrape ``TestCategoryGap reqs=``" heuristic, which
+    surfaced *category-depth* trims as per-requirement gaps and so listed
+    requirements that already had tests. The returned set is the honest input to
+    both the coverage panel and the paid harness patch: it collapses to the real
+    holes (and to ``[]`` for a fully emitted harness). Order is matrix order;
+    duplicates are removed. Conservative by construction: a requirement whose row
+    names no parseable test file is never invented as a gap.
+    """
+    matrix = _section_body(harness_content, "## Requirement-to-Test Matrix")
+    if not matrix:
+        return []
+    emitted = {
+        _normalise_harness_path(path)
+        for path in _FILE_HEADING_RE.findall(harness_content)
+    }
+    req_files: dict[str, set[str]] = {}
+    order: list[str] = []
+    for line in matrix.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("|"):
+            continue
+        cells = [
+            cell.strip().strip("`").strip() for cell in stripped.strip("|").split("|")
+        ]
+        if not cells:
+            continue
+        req = cells[0].upper()
+        if not _MATRIX_REQ_ID_RE.match(req):
+            continue
+        files = {
+            _normalise_harness_path(cell)
+            for cell in cells[1:]
+            if _looks_like_test_file_path(cell)
+        }
+        if not files:
+            continue
+        if req not in req_files:
+            req_files[req] = set()
+            order.append(req)
+        req_files[req] |= files
+    return [
+        req for req in order if req_files[req] and req_files[req].isdisjoint(emitted)
+    ]
+
+
 def _harness_issues(artifact_md: str) -> list[CompletenessIssue]:
     issues: list[CompletenessIssue] = []
     tree_paths = _file_tree_paths(_section_body(artifact_md, "## File Tree"))
@@ -554,6 +673,34 @@ def _harness_issues(artifact_md: str) -> list[CompletenessIssue]:
                 )
             )
     matrix = _section_body(artifact_md, "## Requirement-to-Test Matrix")
+    # Language-agnostic matrix integrity: every test FILE the matrix promises a
+    # requirement must exist as a `### File:` block. Catches the silent coverage
+    # hole where the matrix maps NFR-001 to `tests/performance/perf.test.ts` but
+    # that file is never emitted (and is absent from the File Tree too, so the
+    # tree→files check above also misses it). Works on any test framework,
+    # unlike the `test_`-prefixed name check below which is pytest-shaped.
+    emitted_files = {
+        _normalise_harness_path(path) for path in _FILE_HEADING_RE.findall(artifact_md)
+    }
+    if matrix and emitted_files:
+        matrix_files = {
+            _normalise_harness_path(token)
+            for token in _MATRIX_TEST_FILE_RE.findall(matrix)
+            if _looks_like_test_file_path(token)
+        }
+        missing_files = sorted(matrix_files - emitted_files)
+        if missing_files:
+            issues.append(
+                CompletenessIssue(
+                    code="harness_matrix_missing_file",
+                    detail=(
+                        "HARNESS Requirement-to-Test Matrix maps requirements to "
+                        "test files that were never emitted in the ## Files "
+                        f"section: {', '.join(missing_files[:10])}."
+                    ),
+                    reference=", ".join(missing_files[:10]),
+                )
+            )
     file_body = _section_body(artifact_md, "## Files")
     test_names = set(re.findall(r"\btest_[A-Za-z0-9_]+", file_body))
     matrix_tests = set(re.findall(r"\btest_[A-Za-z0-9_]+", matrix))
