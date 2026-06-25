@@ -1,4 +1,5 @@
-import { useState } from "react"
+import { useEffect, useState } from "react"
+import { createPortal } from "react-dom"
 import type { QualityGateFinding, StageType } from "../../types/stage"
 import { findingKindLabel, isInformationalFinding } from "../../utils/qualityGate"
 
@@ -16,11 +17,15 @@ interface AdvisoryFindingsPanelProps {
 }
 
 /** Non-blocking "suggestions" surface for a delivered, finalisable draft whose
- *  LLM quality review left findings (issue #34). Unlike the blocking quality-gate
- *  panel this never stops finalisation — it makes clear the draft is ready and
- *  the findings are optional improvements. Reads from the persisted
- *  `Stage.quality_gate` (status="advisory"), so it survives refresh and is not
- *  tied to a transient stream event. */
+ *  LLM quality review left findings (issue #34). Rendered as a floating,
+ *  body-portaled popup — the same `.quality-gate-popup` chrome the blocking gate
+ *  uses (StreamingOverlay), in its amber `.advisory` tone — so it never reflows
+ *  the workspace column or gets clipped by `<main>`'s `overflow: clip`, and reads
+ *  coherently with the rest of the workspace. Unlike the blocking gate it never
+ *  stops finalisation, uses `role="status"` (not `alertdialog`), and dismiss
+ *  collapses it to a slim, re-openable chip rather than closing it outright.
+ *  Reads from the persisted `Stage.quality_gate` (status="advisory"), so it
+ *  survives refresh and is not tied to a transient stream event. */
 export function AdvisoryFindingsPanel({
   findings,
   stageType,
@@ -29,6 +34,19 @@ export function AdvisoryFindingsPanel({
   disabledReason,
 }: AdvisoryFindingsPanelProps) {
   const [collapsed, setCollapsed] = useState(false)
+
+  // Esc collapses the floating popup, like any lightweight overlay. No focus
+  // trap — it is non-blocking, so the user keeps reading and scrolling the
+  // generated document behind it.
+  useEffect(() => {
+    if (findings.length === 0 || collapsed) return undefined
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setCollapsed(true)
+    }
+    window.addEventListener("keydown", onKey)
+    return () => window.removeEventListener("keydown", onKey)
+  }, [findings.length, collapsed])
+
   if (findings.length === 0) return null
 
   const count = findings.length
@@ -39,24 +57,22 @@ export function AdvisoryFindingsPanel({
   // too: "suggestion" implies an action; an info-only panel reads as "note".
   const actionable = findings.some((f) => !isInformationalFinding(f.kind))
   const noun = actionable ? "suggestion" : "note"
+  const plural = count === 1 ? "" : "s"
   const disabledReasonId = disabledReason
     ? "advisory-findings-disabled-reason"
     : undefined
 
   if (collapsed) {
-    return (
-      <div className="quality-gate-collapsed" role="status">
-        <div className="quality-gate-collapsed-text">
-          <span className="workspace-advisory-chip">
-            {count} {noun}
-            {count === 1 ? "" : "s"}
-          </span>
-          <p className="quality-gate-collapsed-reason">
-            This {stageType} is ready to finalise. {actionable
-              ? "The quality review left some optional suggestions."
-              : "There are some notes about how it was generated."}
-          </p>
-        </div>
+    // A slim, re-openable chip pinned bottom-right (it shares the popup anchor,
+    // and the blocking gate is mutually exclusive with the advisory state, so
+    // they never collide). Keeps the suggestions reachable without holding the
+    // viewport.
+    return createPortal(
+      <div className="quality-gate-reopen advisory" role="status">
+        <span className="workspace-advisory-chip">
+          {count} {noun}
+          {plural}
+        </span>
         <button
           type="button"
           className="btn btn-ghost"
@@ -64,17 +80,34 @@ export function AdvisoryFindingsPanel({
         >
           Show {noun}s
         </button>
-      </div>
+      </div>,
+      document.body,
     )
   }
 
-  return (
-    <div className="quality-gate-inline advisory" role="status" aria-label="Quality review suggestions">
+  // Floating, body-portaled popup (not an inline block): fixed to the viewport so
+  // it never reflows the workspace column, never squeezes the document out of
+  // view, and is never clipped by `<main>`'s `overflow: clip`. Dismiss (✕ / Esc /
+  // "Dismiss") collapses it to the re-open chip.
+  return createPortal(
+    <div
+      className="quality-gate-popup advisory"
+      role="status"
+      aria-label="Quality review suggestions"
+    >
       <div className="quality-gate-panel">
+        <button
+          type="button"
+          className="quality-gate-close"
+          onClick={() => setCollapsed(true)}
+          aria-label={`Dismiss ${noun}s`}
+        >
+          ✕
+        </button>
         <h3 className="quality-gate-title">
           This {stageType} is ready — {count} {actionable ? "optional " : ""}
           {noun}
-          {count === 1 ? "" : "s"}
+          {plural}
         </h3>
         <p className="quality-gate-subtitle">
           {actionable
@@ -121,6 +154,7 @@ export function AdvisoryFindingsPanel({
           </button>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   )
 }

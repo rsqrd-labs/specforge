@@ -10043,13 +10043,103 @@ button:disabled {
 }
 
 /* Advisory variant (issue #34): non-blocking critic suggestions on a delivered,
-   finalisable draft. Amber/info tone so it never reads as a hard error. */
-.quality-gate-inline.advisory .quality-gate-panel {
-  border-color: rgba(217, 119, 6, 0.32);
+   finalisable draft. Amber/info tone so it never reads as a hard error. The
+   advisory surface is a floating `.quality-gate-popup` (same chrome as the
+   blocking gate), so the tone overrides target the popup variant too. */
+.quality-gate-inline.advisory .quality-gate-panel,
+.quality-gate-popup.advisory .quality-gate-panel {
+  border-color: rgba(217, 119, 6, 0.34);
+  box-shadow:
+    0 24px 70px rgba(120, 53, 15, 0.20),
+    inset 0 0 0 1px rgba(255, 247, 237, 0.6);
 }
 
-.quality-gate-inline.advisory .quality-gate-title {
+.quality-gate-inline.advisory .quality-gate-title,
+.quality-gate-popup.advisory .quality-gate-title {
   color: #b45309;
+}
+
+/* A 3px accent bar across the top of the advisory popup, echoing the document
+   card's gradient header so the two surfaces feel like one product. */
+.quality-gate-popup.advisory .quality-gate-panel::before {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto;
+  height: 3px;
+  border-radius: 8px 8px 0 0;
+  background: linear-gradient(90deg, #f59e0b, #fb923c, #fdba74);
+}
+
+.quality-gate-popup.advisory .quality-gate-finding {
+  border-color: rgba(217, 119, 6, 0.20);
+  background: rgba(251, 191, 36, 0.08);
+}
+
+/* Collapsed advisory state: a slim, re-openable chip pinned bottom-right (issue
+   #34 redesign). Replaces the old inline collapsed block — the advisory never
+   sits in the document flow now, so the workspace column is never reflowed and
+   the chip is never clipped by `<main>`'s `overflow: clip`. */
+.quality-gate-reopen {
+  pointer-events: auto;
+  position: fixed;
+  right: 24px;
+  bottom: 24px;
+  z-index: 70;
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px 8px 14px;
+  border-radius: 999px;
+  border: 1px solid rgba(217, 119, 6, 0.34);
+  background: rgba(255, 252, 248, 0.98);
+  box-shadow: 0 16px 40px rgba(120, 53, 15, 0.18);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  animation: quality-gate-popup-in 0.22s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.quality-gate-reopen .btn {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  min-height: 30px;
+  padding: 0 12px;
+  border-radius: 999px;
+  border: 1px solid rgba(217, 119, 6, 0.30);
+  background: rgba(255, 255, 255, 0.7);
+  color: #b45309;
+  font-size: 12px;
+  font-weight: 800;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease, transform 0.05s ease;
+}
+
+.quality-gate-reopen .btn:hover {
+  background: rgba(251, 191, 36, 0.12);
+  border-color: rgba(217, 119, 6, 0.46);
+}
+
+.quality-gate-reopen .btn:active {
+  transform: translateY(1px);
+}
+
+.quality-gate-reopen .btn:focus-visible {
+  outline: 2px solid #d97706;
+  outline-offset: 2px;
+}
+
+@media (max-width: 640px) {
+  .quality-gate-reopen {
+    right: 16px;
+    bottom: 16px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .quality-gate-reopen {
+    animation: none;
+  }
 }
 
 /* Collapsed blocked-state notice shown after "Hide details" (issue #28,
@@ -13982,8 +14072,12 @@ button:disabled {
   overflow-x: auto;
 }
 
+/* Harness content is code blocks, file trees and requirement-to-test tables —
+   width is an asset, not a readability cost. Let it fill the document column so
+   there is no dead horizontal band beside it (the prior 1100px cap left the
+   prose left-aligned with a wide empty gutter). */
 .md-prose-harness {
-  max-width: 1100px;
+  max-width: none;
 }
 
 .md-prose-harness .md-file-heading {

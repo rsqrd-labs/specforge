@@ -1733,9 +1733,15 @@ export default function Workspace() {
   const genuineGapIssues = taskIssues.filter(
     (i) => !i.gap_type || i.gap_type === "GENUINE_GAP"
   )
+  // The right column is reserved ONLY when something substantive renders in it.
+  // For harness that means actual coverage gaps — CoveragePanel returns null on a
+  // fully-covered ("ready") harness, so gating on `evalResult !== null` reserved a
+  // 380px column that rendered empty (the right-side vacant band). Gate on the gap
+  // count, mirroring the tasks branch, so a clean harness gets the full width.
+  const harnessCoverageGaps = evalResult?.uncovered_reqs?.length ?? 0
   const showRightPanel =
     Boolean(diffResult) ||
-    (activeStage.type === "harness" && evalResult !== null) ||
+    (activeStage.type === "harness" && harnessCoverageGaps > 0) ||
     (activeStage.type === "tasks" &&
       (genuineGapIssues.length > 0 || githubSync.data !== null))
   const finalisedCount = stages.filter((stage) => stage.status === "finalised").length
