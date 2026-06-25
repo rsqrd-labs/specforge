@@ -32,7 +32,7 @@ Every test maps to one or more findings from docs/CODE_REVIEW.md:
 
 Design invariants enforced here:
   * finalise() acquires a row-level lock — no concurrent finalise side-effects.
-  * generate_harness_patch() only starts on draft/stale/finalised stages.
+  * generate_harness_patch() only starts on draft/stale stages.
   * OAuth state is consumed atomically — no replay window.
   * PDF export runs in a thread pool — event loop stays unblocked.
   * Redis is injected as a pooled dependency — no per-request from_url calls.
@@ -87,7 +87,9 @@ def test_phase15_finalise_uses_select_for_update() -> None:
 def test_phase15_generate_harness_patch_status_allowlist() -> None:
     # T-174 / C-2: The status allowlist in generate_harness_patch must NOT
     # contain "in_progress" (allows double generation) or "final" (dead alias
-    # for "finalised"). Allowlist must be ("draft", "stale", "finalised").
+    # for "finalised"). It must also exclude "finalised" itself: a finalised
+    # stage is locked against regeneration, and the gap patch is a regeneration,
+    # so it follows generate()'s rule. Allowlist must be ("draft", "stale").
     source = read_backend_file("services", "pipeline", "stage_manager.py")
 
     assert "generate_harness_patch" in source, (
@@ -109,9 +111,14 @@ def test_phase15_generate_harness_patch_status_allowlist() -> None:
         "generate_harness_patch status allowlist must NOT contain 'final' "
         "(dead alias; real status is 'finalised'). C-2 — T-174."
     )
-    assert "finalised" in region, (
-        "generate_harness_patch status allowlist must contain 'finalised'. "
-        "C-2 — T-174."
+    # The guard tuple itself must be exactly ("draft", "stale") — a finalised
+    # (locked) harness is no longer patchable. Asserted against the guard
+    # expression (not a bare "finalised" substring sweep, which the rationale
+    # comment legitimately mentions). C-2 — T-174.
+    assert re.search(r'status not in \(\s*"draft",\s*"stale"\s*\)', region), (
+        "generate_harness_patch status allowlist must be exactly "
+        '("draft", "stale") — finalised stages are locked against regeneration '
+        "and must be unlocked (restore a version) before patching. C-2 — T-174."
     )
 
 

@@ -202,16 +202,17 @@ async def test_finalise_race_second_call_raises_when_not_draft() -> None:
 def test_harness_patch_in_progress_raises_stage_state_error() -> None:
     """C-2 — generate_harness_patch must reject in_progress stages with StageStateError.
 
-    The patch generator uses ``stage.status not in ('draft', 'stale', 'finalised')``
-    as its guard.  An in_progress stage is NOT in that set, so the call must raise
-    StageStateError before any LLM call is made.
+    The patch generator uses ``stage.status not in ('draft', 'stale')`` as its
+    guard.  An in_progress stage is NOT in that set, so the call must raise
+    StageStateError before any LLM call is made.  A finalised stage is locked
+    against regeneration and is likewise excluded — parity with generate().
     """
     # StageStateError is the production exception; verify the guard condition
     # matches the documented C-2 semantics.
-    in_progress_statuses = ("in_progress",)
-    allowed_statuses = frozenset(("draft", "stale", "finalised"))
+    rejected_statuses = ("in_progress", "finalised", "locked")
+    allowed_statuses = frozenset(("draft", "stale"))
 
-    for status in in_progress_statuses:
+    for status in rejected_statuses:
         # The guard: stage.status not in allowed_statuses → raise
         assert (
             status not in allowed_statuses

@@ -4778,7 +4778,15 @@ class StageManager:
         stage = await self._load_stage(stage_id, db, lock=True)
         workspace = await self._load_workspace(stage.workspace_id, db)
 
-        if stage.status not in ("draft", "stale", "finalised"):
+        # Parity with generate(): a gap patch may only run on a draft or stale
+        # harness — never a finalised (locked) one. A finalised stage is locked
+        # against any regeneration (the GenerateBar shows "Unlock", not
+        # "Regenerate"); the gap patch is a regeneration, so it must follow the
+        # same rule. To patch or expand coverage on a finalised harness the user
+        # first unlocks it (restore a version → draft). Excluding "finalised"
+        # here also stops the paid deferred-coverage expansion from silently
+        # mutating an artifact the user has locked in.
+        if stage.status not in ("draft", "stale"):
             raise StageStateError(f"Stage status {stage.status!r} cannot be patched")
 
         redis = await self._redis_client()
