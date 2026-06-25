@@ -75,11 +75,17 @@ export function isInformationalFinding(
 
 /** The non-blocking critic suggestions attached to a delivered draft. Present
  *  only when the persisted gate is `advisory` (issue #34); the draft is fully
- *  finalisable, these are improvement hints, never a block. */
+ *  finalisable, these are improvement hints, never a block.
+ *
+ *  Suppressed once the stage is `finalised`: the user has accepted the artifact
+ *  as-is, so the suggestions are moot and must not keep floating on screen. They
+ *  return automatically if the stage is unlocked (status leaves `finalised`),
+ *  since the persisted advisory gate is untouched. */
 export function deriveAdvisoryFindings(
   stage: Stage | null | undefined,
 ): QualityGateFinding[] {
-  if (stage?.quality_gate?.status !== "advisory") return []
+  if (!stage || stage.status === "finalised") return []
+  if (stage.quality_gate?.status !== "advisory") return []
   return stage.quality_gate.findings ?? []
 }
 

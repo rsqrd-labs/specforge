@@ -234,4 +234,19 @@ describe("deriveAdvisoryFindings", () => {
     expect(deriveAdvisoryFindings(makeStage(null))).toEqual([])
     expect(deriveAdvisoryFindings(null)).toEqual([])
   })
+
+  it("suppresses suggestions once the stage is finalised, restores on unlock", () => {
+    const advisoryGate = {
+      stage: "spec" as StageType,
+      kind: "critic_findings",
+      status: "advisory" as const,
+      findings: [{ kind: "ShallowSection", detail: "thin", reference: null }],
+    }
+    // Finalised: the user accepted the artifact as-is — no floating suggestions.
+    const finalised = { ...makeStage(advisoryGate), status: "finalised" as const }
+    expect(deriveAdvisoryFindings(finalised)).toEqual([])
+    // Unlocking it back to draft (same persisted gate) brings them back.
+    const unlocked = { ...finalised, status: "draft" as const }
+    expect(deriveAdvisoryFindings(unlocked)).toHaveLength(1)
+  })
 })
