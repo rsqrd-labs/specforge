@@ -1777,6 +1777,15 @@ export default function Workspace() {
       (genuineGapIssues.length > 0 ||
         deferredCoverageIssues.length > 0 ||
         githubSync.data !== null))
+  // A finalised stage is locked-in: its content is read-only until it is
+  // explicitly regenerated/refined into a new draft, so the Edit toggle must
+  // be disabled rather than silently dropping the user into an editor that
+  // cannot be saved.
+  const isStageFinalised = activeStage.status === "finalised"
+  const editToggleDisabled = workspaceGenerationLock.locked || isStageFinalised
+  const editToggleDisabledReason = isStageFinalised
+    ? "This stage is finalised. Regenerate or refine it to make changes."
+    : workspaceLockReason
   const finalisedCount = stages.filter((stage) => stage.status === "finalised").length
   const readiness = stages.length === 0 ? 0 : Math.round((finalisedCount / stages.length) * 100)
   const currentStageIndex = STAGE_ORDER.indexOf(activeStage.type)
@@ -2317,8 +2326,8 @@ export default function Workspace() {
                         type="button"
                         className={specViewMode === "edit" ? "active" : ""}
                         onClick={() => setSpecViewMode("edit")}
-                        disabled={workspaceGenerationLock.locked}
-                        title={workspaceGenerationLock.locked ? workspaceLockReason : undefined}
+                        disabled={editToggleDisabled}
+                        title={editToggleDisabled ? editToggleDisabledReason : undefined}
                         aria-describedby={workspaceGenerationLock.locked ? "workspace-lock-action-reason" : undefined}
                       >
                         Edit
@@ -2338,7 +2347,7 @@ export default function Workspace() {
                     disabled={workspaceGenerationLock.locked}
                     disabledReason={workspaceLockReason}
                   />
-                ) : isActiveStageBusy || specViewMode === "edit" ? (
+                ) : isActiveStageBusy || (specViewMode === "edit" && !isStageFinalised) ? (
                   <StageEditor
                     key={`${activeStage.id}-${activeStage.status}`}
                     ref={editorRef}
@@ -2427,8 +2436,8 @@ export default function Workspace() {
                       type="button"
                       onClick={() => setIsEditMode((m) => !m)}
                       className="ws-view-toggle"
-                      disabled={workspaceGenerationLock.locked}
-                      title={workspaceGenerationLock.locked ? workspaceLockReason : undefined}
+                      disabled={editToggleDisabled}
+                      title={editToggleDisabled ? editToggleDisabledReason : undefined}
                       aria-describedby={workspaceGenerationLock.locked ? "workspace-lock-action-reason" : undefined}
                     >
                       {isEditMode ? "Preview" : "Edit"}
@@ -2437,7 +2446,7 @@ export default function Workspace() {
                 </div>
               </div>
               <div className="stage-card-body">
-                {isEditMode || isActiveStageBusy ? (
+                {(isEditMode && !isStageFinalised) || isActiveStageBusy ? (
                   <StageEditor
                     key={`${activeStage.id}-${activeStage.status}`}
                     ref={editorRef}
@@ -2483,8 +2492,21 @@ export default function Workspace() {
                     <CoveragePanel
                       stage={activeStage}
                       evalResult={evalResult}
-                      disabled={workspaceGenerationLock.locked}
-                      disabledReason={workspaceLockReason}
+                      // A finalised harness is locked against regeneration: the
+                      // gap/expansion patch is a regeneration, so the button is
+                      // disabled until the user unlocks the stage (restore a
+                      // version → draft). The backend rejects it either way
+                      // (stage_not_generatable); this just stops the user
+                      // clicking a button that only errors.
+                      disabled={
+                        workspaceGenerationLock.locked ||
+                        activeStage.status === "finalised"
+                      }
+                      disabledReason={
+                        activeStage.status === "finalised"
+                          ? "Finalised — unlock this stage to patch or expand coverage."
+                          : workspaceLockReason
+                      }
                       onRegenerate={() => void requestGapPatch()}
                     />
                     <TaskValidationPanel
