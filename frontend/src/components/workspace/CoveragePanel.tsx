@@ -3,7 +3,6 @@ import type { EvalResult, Stage } from "../../types/stage"
 interface CoveragePanelProps {
   stage: Stage
   evalResult: EvalResult | null | undefined
-  freeRegenUsed: boolean
   onRegenerate: () => void
   disabled?: boolean
   disabledReason?: string
@@ -12,7 +11,6 @@ interface CoveragePanelProps {
 export function CoveragePanel({
   stage,
   evalResult,
-  freeRegenUsed,
   onRegenerate,
   disabled = false,
   disabledReason,
@@ -20,9 +18,10 @@ export function CoveragePanel({
   if (stage.type !== "harness") return null
 
   const uncoveredReqs = evalResult?.uncovered_reqs ?? []
-  // Deferred reqs are non-blocking (they never flag the eval), but the free
-  // harness patch now covers them too — so the panel renders and the button
-  // lights even when uncovered_reqs is empty. The backend unions both sets.
+  // Deferred reqs are an optional, paid expansion beyond the baseline harness
+  // (they never flag the eval). The harness patch covers them too — so the panel
+  // renders and the button lights even when uncovered_reqs is empty. The backend
+  // unions both sets.
   const deferredReqs = evalResult?.deferred_reqs ?? []
   const regenerateHelpId = `${stage.id}-coverage-regenerate-help`
   const disabledReasonId = `${stage.id}-coverage-disabled-reason`
@@ -59,14 +58,14 @@ export function CoveragePanel({
         <>
           <div className="ws-panel-section-header">
             <div>
-              <div className="ws-panel-title">Deferred Coverage</div>
+              <div className="ws-panel-title">Expand Test Coverage</div>
               <p>
-                These requirements had their test category deferred under the
-                harness token budget. This is non-blocking — generate them when
-                you want fuller coverage.
+                Add deeper, dedicated tests for these requirements to go beyond
+                the baseline harness — generate them whenever you want more
+                exhaustive coverage.
               </p>
             </div>
-            <span className="ws-panel-chip">{deferredReqs.length} deferred</span>
+            <span className="ws-panel-chip">{deferredReqs.length} optional</span>
           </div>
 
           <ul className="ws-issue-list">
@@ -91,9 +90,9 @@ export function CoveragePanel({
       </button>
 
       <p id={regenerateHelpId} className="ws-panel-muted">
-        {freeRegenUsed
-          ? "This regeneration costs 10 credits. It generates tests for the requirements above. If genuine gaps remain afterwards, your Plan needs more detail — use Refine on the Plan, then regenerate."
-          : "This regeneration is free. It generates the missing and deferred tests above in one pass. If genuine gaps remain afterwards, your Plan needs more detail — use Refine on the Plan, then regenerate."}
+        This regeneration costs 10 credits. It generates tests for the
+        requirements above in one pass. If genuine gaps remain afterwards, your
+        Plan needs more detail — use Refine on the Plan, then regenerate.
       </p>
       {disabled && disabledReason ? (
         <p id={disabledReasonId} className="workspace-lock-inline-note">

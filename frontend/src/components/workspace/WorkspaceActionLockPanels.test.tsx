@@ -50,7 +50,6 @@ describe("workspace action lock panels", () => {
       <CoveragePanel
         stage={stage()}
         evalResult={evalResult()}
-        freeRegenUsed={false}
         onRegenerate={onRegenerate}
         disabled
         disabledReason="Editing resumes when generation finishes."

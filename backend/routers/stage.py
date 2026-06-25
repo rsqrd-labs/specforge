@@ -244,6 +244,9 @@ async def _stream_harness_patch(
     except SecurityError as exc:
         payload = json.dumps({"error": "security_check_failed", "detail": str(exc)})
         yield f"data: {payload}\n\n"
+    except InsufficientCreditsError:
+        payload = json.dumps({"error": "insufficient_credits", "required": 10})
+        yield f"data: {payload}\n\n"
     except Exception:
         logger.exception(
             "harness_patch_stream_error", extra={"stage_id": str(stage_id)}
@@ -257,21 +260,17 @@ async def regenerate_stage_for_gaps(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ) -> StreamingResponse:
-    """Targeted free patch for harness stages with eval-detected coverage gaps.
+    """Targeted paid patch for harness stages with coverage gaps to fill.
 
-    Generates only the new test files needed for uncovered requirements and merges
-    them into the existing harness. No credits charged — gaps are our failure.
+    Generates only the new test files needed for the listed requirements and merges
+    them into the existing harness. Charges credits (see ``generate_harness_patch``)
+    and is repeatable — gated on the user's balance, not a one-shot free flag.
     """
     stage = await _load_stage(id, db, user.id)
     if stage.type != "harness":
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail={"error": "not_harness_stage"},
-        )
-    if stage.gap_patch_used:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail={"error": "free_regen_already_used"},
         )
 
     result = await db.execute(
@@ -283,7 +282,7 @@ async def regenerate_stage_for_gaps(
     )
     latest_eval = result.scalar_one_or_none()
 
-    # The free patch covers two distinct sources, unioned (eval reqs first):
+    # The patch covers two distinct sources, unioned (eval reqs first):
     #   1. LLM-derived uncovered_reqs on the latest harness eval, and
     #   2. requirement IDs the harness deterministically recorded as deferred
     #      under token budget (TestCategoryGap reqs=), parsed straight from the

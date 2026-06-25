@@ -781,15 +781,21 @@ def test_phase14_github_export_endpoint_is_unchanged() -> None:
     )
 
 
-def test_phase14_stage_gap_patch_used_endpoint_still_gates() -> None:
-    # Tests: Phase 14 must not regress the gap_patch_used server-side gate
-    # introduced shortly before this phase. The /regenerate-gaps endpoint
-    # still checks the flag and returns 403 when consumed.
-    source = read_backend_file("routers", "stage.py")
-    assert "gap_patch_used" in source, (
-        "routers/stage.py must continue to gate /regenerate-gaps on "
-        "stage.gap_patch_used (introduced before Phase 14). The free-regen "
-        "abuse fix must not regress."
+def test_phase14_stage_gap_patch_is_a_paid_operation() -> None:
+    # Tests: the /regenerate-gaps harness patch is a paid, repeatable operation.
+    # The original free-regen abuse vector was a one-shot free patch gated on
+    # stage.gap_patch_used; that gate was deliberately replaced by an up-front
+    # credit charge (deferred-coverage reframe), which is the new abuse defence —
+    # the patch is gated on the user's balance, not a one-shot flag. The charge
+    # must therefore exist in generate_harness_patch.
+    source = read_backend_file("services", "pipeline", "stage_manager.py")
+    fn_start = source.find("async def generate_harness_patch")
+    assert fn_start != -1, "stage_manager.py must define generate_harness_patch."
+    fn_body = source[fn_start : fn_start + 4000]
+    assert 'credit_service.deduct(' in fn_body and '"regenerate_gaps"' in fn_body, (
+        "generate_harness_patch must charge credits (credit_service.deduct with "
+        "the 'regenerate_gaps' reason). The free-regen abuse vector is now "
+        "prevented by charging, not by a one-shot gap_patch_used gate."
     )
 
 

@@ -4702,10 +4702,15 @@ class StageManager:
         *,
         trace_id: str | None = None,
     ) -> AsyncGenerator[str, None]:
-        """Stream a focused patch for uncovered requirements, free of charge.
+        """Stream a focused, paid patch for the listed harness requirements.
 
         Generates only the new test files needed to cover the listed requirements
         and merges them into the existing harness, preserving all existing tests.
+        Charges ``CREDIT_COSTS["regenerate"]`` as part of the same transaction the
+        patch commits at the end: a fail-fast balance check, then a deduction that
+        only persists if the patch succeeds — any failure or client disconnect
+        rolls back to no charge, so no separate refund path is needed. Repeatable:
+        gated on the user's balance, not on a one-shot free flag.
         """
         from prompts.harness_patch import (  # noqa: PLC0415
             build_patch_user_prompt,
@@ -4737,6 +4742,19 @@ class StageManager:
                 user.id,
             )
 
+        # The gap patch is a paid, repeatable operation (issue: deferred-coverage
+        # reframe). Fail fast on an unaffordable balance, then deduct as part of
+        # the SAME transaction the patch commits at the end — the deduction is
+        # flushed but NOT committed here, so any mid-stream failure, security
+        # rejection, or client disconnect rolls the whole session back (get_db's
+        # `async with` closes → rollback) and the user is never charged for an
+        # undelivered patch. No separate refund path is needed, and the
+        # _load_stage SELECT FOR UPDATE lock stays held across the stream,
+        # serialising concurrent patches (no double-charge).
+        credit_cost = CREDIT_COSTS["regenerate"]
+        _assert_visible_credit_balance(user, credit_cost)
+        await credit_service.deduct(db, user.id, credit_cost, "regenerate_gaps")
+
         existing_content = stage.content or ""
         system_prompt = await get_patch_system_prompt()
         user_prompt = build_patch_user_prompt(existing_content, uncovered_reqs)
@@ -4745,12 +4763,13 @@ class StageManager:
             lambda: _route_for_stage_generation("harness", workspace)
         )
 
-        # generate_harness_patch is credit-free and idempotent.  We intentionally
-        # skip the active-generation status transition that generate() uses: the
-        # SELECT FOR UPDATE lock from _load_stage serialises concurrent patch
-        # requests, and omitting that transition means a crash mid-stream leaves
-        # the stage in its original status (no partial writes are ever committed),
-        # making recovery-service involvement unnecessary.  C-2 — T-174.
+        # We intentionally skip the active-generation status transition that
+        # generate() uses: the SELECT FOR UPDATE lock from _load_stage serialises
+        # concurrent patch requests (and the up-front deduction above rides this
+        # same uncommitted transaction), and omitting that transition means a
+        # crash mid-stream leaves the stage in its original status with no
+        # committed writes — neither the patch nor the charge — making
+        # recovery-service involvement unnecessary.  C-2 — T-174.
         accumulated = ""
         try:
             adapter = InstrumentedAdapter(
@@ -4807,6 +4826,9 @@ class StageManager:
                 workspace.id, "harness"
             )
             await db.commit()
+            # The deduction committed atomically with the patch above — refresh
+            # the balance cache so it reflects the charge.
+            await credit_service.invalidate(user.id)
             await self._invalidate_stage_cache(workspace.id, "harness", redis)
 
             # Inline deterministic findings, then a non-blocking background score
@@ -4849,7 +4871,8 @@ class StageManager:
 
         except (ProviderError, TimeoutError) as exc:
             # On provider failure the stage remains in its pre-patch status
-            # (draft / stale / finalised) — no state change needed.
+            # (draft / stale / finalised) and nothing committed — the deduction
+            # rolls back with the session, so the user is not charged.
             # Record the failure so the circuit breaker can trip if the
             # provider has consecutive errors.  CF-2 — T-197.
             from services.llm.provider_status import (  # noqa: PLC0415

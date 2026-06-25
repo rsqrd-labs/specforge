@@ -39,13 +39,12 @@ function makeEval(overrides: Partial<EvalResult> = {}): EvalResult {
   }
 }
 
-describe("CoveragePanel — deferred coverage (one-click patch)", () => {
+describe("CoveragePanel — coverage expansion (paid one-click patch)", () => {
   it("renders nothing for a clean harness (no gaps, no deferred)", () => {
     const { container } = render(
       <CoveragePanel
         stage={makeStage()}
         evalResult={makeEval()}
-        freeRegenUsed={false}
         onRegenerate={() => {}}
       />,
     )
@@ -58,13 +57,14 @@ describe("CoveragePanel — deferred coverage (one-click patch)", () => {
       <CoveragePanel
         stage={makeStage()}
         evalResult={makeEval({ uncovered_reqs: [], deferred_reqs: ["FR-002", "NFR-001"] })}
-        freeRegenUsed={false}
         onRegenerate={onRegenerate}
       />,
     )
-    expect(screen.getByText("Deferred Coverage")).toBeInTheDocument()
+    expect(screen.getByText("Expand Test Coverage")).toBeInTheDocument()
     expect(screen.getByText("FR-002")).toBeInTheDocument()
-    expect(screen.getByText("2 deferred")).toBeInTheDocument()
+    expect(screen.getByText("2 optional")).toBeInTheDocument()
+    // The optional expansion is paid — no "free" language.
+    expect(screen.getByText(/costs 10 credits/)).toBeInTheDocument()
     // No blocking "Coverage Gaps" section when there are no genuine gaps.
     expect(screen.queryByText("Coverage Gaps")).toBeNull()
 
@@ -80,12 +80,11 @@ describe("CoveragePanel — deferred coverage (one-click patch)", () => {
           uncovered_reqs: ["FR-009"],
           deferred_reqs: ["FR-002"],
         })}
-        freeRegenUsed={false}
         onRegenerate={() => {}}
       />,
     )
     expect(screen.getByText("Coverage Gaps")).toBeInTheDocument()
-    expect(screen.getByText("Deferred Coverage")).toBeInTheDocument()
+    expect(screen.getByText("Expand Test Coverage")).toBeInTheDocument()
     expect(screen.getByText("FR-009")).toBeInTheDocument()
     expect(screen.getByText("FR-002")).toBeInTheDocument()
   })
@@ -95,12 +94,11 @@ describe("CoveragePanel — deferred coverage (one-click patch)", () => {
       <CoveragePanel
         stage={makeStage()}
         evalResult={makeEval({ uncovered_reqs: ["FR-009"], deferred_reqs: [] })}
-        freeRegenUsed={false}
         onRegenerate={() => {}}
       />,
     )
     expect(screen.getByText("Coverage Gaps")).toBeInTheDocument()
-    expect(screen.queryByText("Deferred Coverage")).toBeNull()
+    expect(screen.queryByText("Expand Test Coverage")).toBeNull()
   })
 
   it("returns null on a non-harness stage", () => {
@@ -108,7 +106,6 @@ describe("CoveragePanel — deferred coverage (one-click patch)", () => {
       <CoveragePanel
         stage={makeStage({ type: "tasks" })}
         evalResult={makeEval({ deferred_reqs: ["FR-002"] })}
-        freeRegenUsed={false}
         onRegenerate={() => {}}
       />,
     )

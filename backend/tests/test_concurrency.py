@@ -244,6 +244,49 @@ async def test_harness_patch_in_progress_raises_via_manager() -> None:
             pass  # pragma: no cover
 
 
+@pytest.mark.asyncio
+async def test_harness_patch_insufficient_credits_raises_before_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The paid gap patch must reject a too-low balance before any provider work.
+
+    The deferred-coverage reframe made /regenerate-gaps a paid operation. A user
+    who cannot afford it must hit InsufficientCreditsError at the up-front
+    balance check — never an LLM call, never a deduction.
+    """
+    import services.pipeline.stage_manager as sm
+    from services.credit_service import InsufficientCreditsError
+
+    manager = sm.StageManager()
+    stage = _make_stage(status="draft", stage_type="harness")
+    user = _make_user()
+    user.credit_balance = 0  # cannot afford the 10-credit charge
+
+    class _DB:
+        async def execute(self, stmt: Any) -> Any:
+            return _ScalarResult(stage)
+
+    async def _always_allowed(*_args: Any, **_kwargs: Any) -> bool:
+        return True
+
+    async def _fake_redis(self: Any) -> Any:  # bound-method shape
+        return MagicMock()
+
+    # Sentinel: deduct must never be reached when the pre-check rejects.
+    async def _explode_deduct(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("deduct must not run when the balance pre-check fails")
+
+    monkeypatch.setattr(sm, "sliding_window_check", _always_allowed)
+    monkeypatch.setattr(sm.StageManager, "_redis_client", _fake_redis)
+    monkeypatch.setattr(sm.credit_service, "deduct", _explode_deduct)
+
+    with pytest.raises(InsufficientCreditsError):
+        async for _ in manager.generate_harness_patch(
+            stage.id, user, _DB(), ["FR-001"]
+        ):
+            pass  # pragma: no cover
+
+
 # ---------------------------------------------------------------------------
 # C-3: OAuth state replay protection
 # ---------------------------------------------------------------------------

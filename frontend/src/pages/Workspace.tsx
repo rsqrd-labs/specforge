@@ -1073,7 +1073,7 @@ export default function Workspace() {
     setPendingClarify(null)
   }, [])
 
-  const requestFreeRegeneration = useCallback(async () => {
+  const requestGapPatch = useCallback(async () => {
     if (!activeStage) return
     if (generationActivityRef.current || guardWorkspaceMutation()) return
     await runGeneration("regenerate-gaps")
@@ -2462,14 +2462,9 @@ export default function Workspace() {
                     <CoveragePanel
                       stage={activeStage}
                       evalResult={evalResult}
-                      freeRegenUsed={activeStage.gap_patch_used}
                       disabled={workspaceGenerationLock.locked}
                       disabledReason={workspaceLockReason}
-                      onRegenerate={
-                        activeStage.gap_patch_used
-                          ? () => void requestGeneration("regenerate")
-                          : () => void requestFreeRegeneration()
-                      }
+                      onRegenerate={() => void requestGapPatch()}
                     />
                     <TaskValidationPanel
                       stage={activeStage}
