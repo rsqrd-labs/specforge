@@ -8960,31 +8960,6 @@ button:disabled {
   line-height: 1.4;
 }
 
-.document-mode-toggle {
-  display: inline-flex;
-  flex-shrink: 0;
-  overflow: hidden;
-  border: 1px solid rgba(143, 78, 0, 0.16);
-  border-radius: 8px;
-  background: rgba(255, 255, 255, 0.55);
-}
-
-.document-mode-toggle button {
-  min-height: 34px;
-  padding: 0 12px;
-  border: 0;
-  background: transparent;
-  color: var(--color-on-surface-variant);
-  font-size: 13px;
-  font-weight: 700;
-  cursor: pointer;
-}
-
-.document-mode-toggle button.active {
-  background: rgba(143, 78, 0, 0.10);
-  color: var(--color-primary);
-}
-
 .spec-document-card {
   position: relative;
 }

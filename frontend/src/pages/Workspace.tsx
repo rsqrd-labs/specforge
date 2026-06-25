@@ -2310,29 +2310,19 @@ export default function Workspace() {
                     error={isEvalError}
                     checking={activeStage.status === "in_progress"}
                   />
-                  {!diffResult && (
-                    <div className="document-mode-toggle" aria-label="Spec view mode">
-                      <button
-                        type="button"
-                        className={specViewMode === "preview" ? "active" : ""}
-                        onClick={() => setSpecViewMode("preview")}
-                        disabled={workspaceGenerationLock.locked}
-                        title={workspaceGenerationLock.locked ? workspaceLockReason : undefined}
-                        aria-describedby={workspaceGenerationLock.locked ? "workspace-lock-action-reason" : undefined}
-                      >
-                        Preview
-                      </button>
-                      <button
-                        type="button"
-                        className={specViewMode === "edit" ? "active" : ""}
-                        onClick={() => setSpecViewMode("edit")}
-                        disabled={editToggleDisabled}
-                        title={editToggleDisabled ? editToggleDisabledReason : undefined}
-                        aria-describedby={workspaceGenerationLock.locked ? "workspace-lock-action-reason" : undefined}
-                      >
-                        Edit
-                      </button>
-                    </div>
+                  {!diffResult && activeStage.status !== "locked" && (
+                    <button
+                      type="button"
+                      className="ws-view-toggle"
+                      onClick={() =>
+                        setSpecViewMode((m) => (m === "edit" ? "preview" : "edit"))
+                      }
+                      disabled={editToggleDisabled}
+                      title={editToggleDisabled ? editToggleDisabledReason : undefined}
+                      aria-describedby={workspaceGenerationLock.locked ? "workspace-lock-action-reason" : undefined}
+                    >
+                      {specViewMode === "edit" ? "Preview" : "Edit"}
+                    </button>
                   )}
                 </div>
               </div>
