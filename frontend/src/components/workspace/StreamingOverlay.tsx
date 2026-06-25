@@ -4,6 +4,7 @@ import { featureFlags } from "../../config/featureFlags"
 import type { GenerationProgress } from "../../services/sseService"
 import type { QualityGateInfo, StageType } from "../../types/stage"
 import type { AIProvider } from "../../types/workspace"
+import { findingKindLabel, findingSeverityLabel } from "../../utils/qualityGate"
 import { BrandLoader } from "../shared/BrandLoader"
 import {
   type EtaEstimate,
@@ -200,10 +201,13 @@ export function StreamingOverlay({
               {structuredIssues.map((reason, index) => (
                 <li key={index} className="quality-gate-finding">
                   <span className="quality-gate-kind">
-                    {reason.code ?? reason.kind}
+                    {findingKindLabel(reason.code ?? reason.kind, "Issue")}
                   </span>
                   {"severity" in reason && reason.severity ? (
-                    <span className="quality-gate-ref"> · {reason.severity}</span>
+                    <span className="quality-gate-ref">
+                      {" · "}
+                      {findingSeverityLabel(reason.severity)}
+                    </span>
                   ) : null}
                   {reason.reference ? (
                     <span className="quality-gate-ref"> · {reason.reference}</span>
@@ -219,7 +223,9 @@ export function StreamingOverlay({
             <ul className="quality-gate-findings">
               {missing.map((heading) => (
                 <li key={heading} className="quality-gate-finding">
-                  <span className="quality-gate-kind">MissingSection</span>
+                  <span className="quality-gate-kind">
+                    {findingKindLabel("MissingSection")}
+                  </span>
                   <span className="quality-gate-detail"> — {heading}</span>
                 </li>
               ))}
@@ -228,7 +234,9 @@ export function StreamingOverlay({
             <ul className="quality-gate-findings">
               {findings.map((finding, index) => (
                 <li key={index} className="quality-gate-finding">
-                  <span className="quality-gate-kind">{finding.kind}</span>
+                  <span className="quality-gate-kind">
+                    {findingKindLabel(finding.kind, "Issue")}
+                  </span>
                   {finding.reference ? (
                     <span className="quality-gate-ref"> · {finding.reference}</span>
                   ) : null}

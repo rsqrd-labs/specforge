@@ -65,7 +65,7 @@ const technologySafetyGate: QualityGateInfo = {
   policy_version: "tech-safety-v1",
   reasons: [
     {
-      code: "runtime_eol",
+      code: "technology_eol",
       severity: "critical",
       technology: "Node.js",
       version: "18",
@@ -373,6 +373,10 @@ describe("StreamingOverlay quality gate", () => {
     ).toBeInTheDocument()
     expect(screen.getAllByText(/Node\.js 22 LTS/i).length).toBeGreaterThan(0)
     expect(screen.queryByRole("note")).not.toBeInTheDocument()
+    // The finding code and severity render as plain language, never raw jargon.
+    expect(screen.getByText("End-of-life technology")).toBeInTheDocument()
+    expect(screen.queryByText("technology_eol")).not.toBeInTheDocument()
+    expect(screen.getByText(/· Critical/)).toBeInTheDocument()
   })
 
   it("omits the refund sub-copy when no refund actually happened", () => {

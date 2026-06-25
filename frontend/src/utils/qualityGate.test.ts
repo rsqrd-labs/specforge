@@ -6,6 +6,7 @@ import {
   deriveAdvisoryFindings,
   deriveFinaliseGateBlock,
   findingKindLabel,
+  findingSeverityLabel,
   gateFallbackMessage,
   isInformationalFinding,
 } from "./qualityGate"
@@ -155,6 +156,46 @@ describe("findingKindLabel", () => {
     expect(findingKindLabel("ProblemStatementCondensed")).toBe(
       "Condensed problem statement",
     )
+  })
+
+  it("humanizes every blocking technology-safety code", () => {
+    // The blocking gate popup used to render these raw; none may fall through.
+    const codes = [
+      "technology_eol",
+      "technology_near_eol",
+      "support_status_blocked",
+      "vulnerable_dependency",
+      "technology_unmaintained",
+      "hard_denylist_match",
+      "technology_safety_unverified",
+      "technology_policy_stale",
+      "technology_policy_unverified",
+      "provider_stopped_by_limit",
+    ]
+    for (const code of codes) {
+      const label = findingKindLabel(code, "Issue")
+      expect(label).not.toBe("Issue")
+      expect(label).not.toBe(code)
+    }
+  })
+
+  it("uses the caller's neutral fallback on a blocking surface, not 'Suggestion'", () => {
+    // An unmapped code on a blocking gate must never read as optional.
+    expect(findingKindLabel("brand_new_block_code", "Issue")).toBe("Issue")
+  })
+})
+
+describe("findingSeverityLabel", () => {
+  it("capitalizes known severities and relabels the confusing 'unknown'", () => {
+    expect(findingSeverityLabel("critical")).toBe("Critical")
+    expect(findingSeverityLabel("HIGH")).toBe("High")
+    expect(findingSeverityLabel("unknown")).toBe("Could not verify")
+  })
+
+  it("returns null when there is no severity to show", () => {
+    expect(findingSeverityLabel(null)).toBeNull()
+    expect(findingSeverityLabel(undefined)).toBeNull()
+    expect(findingSeverityLabel("")).toBeNull()
   })
 })
 

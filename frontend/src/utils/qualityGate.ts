@@ -1,10 +1,12 @@
 import type { QualityGateFinding, Stage } from "../types/stage"
 
-/** Plain-language labels for critic finding kinds. The raw kinds (e.g.
- *  "CoverageGap", "ADRIncomplete") read like internal jargon; users see a short
- *  human label instead. Unknown kinds fall back to a generic "Suggestion".
- *  (issue #34 — "recommendations are not intuitive".) */
+/** Plain-language labels for quality-gate finding kinds. The raw kinds and
+ *  technology-safety codes (e.g. "CoverageGap", "ADRIncomplete",
+ *  "technology_eol", "vulnerable_dependency") read like internal jargon; users
+ *  see a short human label instead. (issue #34 — "recommendations are not
+ *  intuitive"; the blocking gate popup used to render these codes raw.) */
 const FINDING_KIND_LABELS: Record<string, string> = {
+  // Critic finding kinds (advisory + legacy blocking critic gate).
   CoverageGap: "Uncovered requirement",
   MissingSection: "Missing section",
   ShallowSection: "Needs more detail",
@@ -12,11 +14,51 @@ const FINDING_KIND_LABELS: Record<string, string> = {
   DeprecatedAPI: "Outdated technology",
   ADRIncomplete: "Incomplete decision record",
   ProblemStatementCondensed: "Condensed problem statement",
+  // Technology-safety codes (blocking gate; see backend tech_safety.py).
+  technology_eol: "End-of-life technology",
+  technology_near_eol: "Technology nearing end-of-life",
+  support_status_blocked: "Unsupported technology",
+  vulnerable_dependency: "Known security vulnerability",
+  technology_unmaintained: "Unmaintained technology",
+  hard_denylist_match: "Disallowed technology",
+  technology_safety_unverified: "Could not verify technology",
+  technology_policy_stale: "Safety policy needs review",
+  technology_policy_unverified: "Safety policy needs review",
+  // Incomplete-output reason code (blocking gate; see backend validator).
+  provider_stopped_by_limit: "Output was cut off",
 }
 
-export function findingKindLabel(kind: string | null | undefined): string {
-  if (!kind) return "Suggestion"
-  return FINDING_KIND_LABELS[kind] ?? "Suggestion"
+/** Map a finding/reason code to a plain-language label.
+ *
+ *  The `fallback` matters: the advisory panel defaults to "Suggestion" (its
+ *  findings are optional), but the BLOCKING gate must pass a neutral fallback
+ *  like "Issue" — calling an unmapped EOL/vulnerability block a "Suggestion"
+ *  would tell the user a hard block is optional. Keep the kind map exhaustive
+ *  for the blocking codes above so the fallback rarely fires there anyway. */
+export function findingKindLabel(
+  kind: string | null | undefined,
+  fallback = "Suggestion",
+): string {
+  if (!kind) return fallback
+  return FINDING_KIND_LABELS[kind] ?? fallback
+}
+
+/** Plain-language severity labels. Raw values ("critical", "unknown") render as
+ *  lowercase jargon; "unknown" in particular reads as broken ("· unknown"), so
+ *  it becomes "Could not verify". Returns null when there is nothing to show. */
+const SEVERITY_LABELS: Record<string, string> = {
+  critical: "Critical",
+  high: "High",
+  medium: "Medium",
+  low: "Low",
+  unknown: "Could not verify",
+}
+
+export function findingSeverityLabel(
+  severity: string | null | undefined,
+): string | null {
+  if (!severity) return null
+  return SEVERITY_LABELS[severity.toLowerCase()] ?? severity
 }
 
 /** Finding kinds that are purely informational — a notice about how the input was
