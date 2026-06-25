@@ -571,7 +571,15 @@ class CreditService:
         db: AsyncSession,
         ledger_entry_id: UUID,
         user_id: UUID | None = None,
-    ) -> None:
+    ) -> int:
+        """Idempotently reverse a deduction; return the credits this call refunded.
+
+        The return value is the amount actually credited back by THIS call —
+        ``abs(original.amount)`` on success, and ``0`` on every no-op branch
+        (missing/positive/mismatched entry, or an already-applied refund). Callers
+        that log a refunded figure (e.g. the recovery sweep) must use this real
+        amount rather than a hardcoded cost constant (audit finding #8).
+        """
         original = await self._get_ledger_entry(db, ledger_entry_id)
         if original is None:
             logger.error(
@@ -579,7 +587,7 @@ class CreditService:
                 ledger_entry_id,
                 user_id,
             )
-            return
+            return 0
         if original.amount >= 0:
             logger.error(
                 "credit.refund.not_a_deduction ledger_entry_id=%s amount=%d user_id=%s",
@@ -587,7 +595,7 @@ class CreditService:
                 original.amount,
                 original.user_id,
             )
-            return
+            return 0
         if user_id is not None and original.user_id != user_id:
             logger.error(
                 "credit.refund.user_mismatch ledger_entry_id=%s "
@@ -596,7 +604,7 @@ class CreditService:
                 user_id,
                 original.user_id,
             )
-            return
+            return 0
 
         refund_reason = f"refund:{ledger_entry_id}"
         existing_refund = await self._get_refund_entry(
@@ -605,7 +613,7 @@ class CreditService:
             refund_reason,
         )
         if existing_refund is not None:
-            return
+            return 0
 
         user = await self._get_user(db, original.user_id, lock=True)
         if user is None:
@@ -614,7 +622,7 @@ class CreditService:
                 ledger_entry_id,
                 original.user_id,
             )
-            return
+            return 0
 
         refund_amount = abs(original.amount)
         refund_entry = CreditLedger(
@@ -639,10 +647,11 @@ class CreditService:
                 ledger_entry_id,
                 original.user_id,
             )
-            return
+            return 0
         user.credit_balance = int(user.credit_balance or 0) + refund_amount
         await db.flush()
         await self._invalidate(original.user_id)
+        return refund_amount
 
     async def _get_ledger_entry(
         self,

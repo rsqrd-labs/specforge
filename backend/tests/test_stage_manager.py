@@ -451,8 +451,26 @@ class _FakeResult:
     def scalars(self) -> "_FakeResult":
         return self
 
+    def all(self) -> list:
+        return self._many
+
     def __iter__(self):
         yield from self._many
+
+
+def _is_stage_deps_select(statement: Any) -> bool:
+    """True for ``_orm_stage_deps``' ``SELECT stages.type, stages.content`` read.
+
+    That gate-dependency read (audit finding #3) replaced the former Redis reader,
+    which returned empty in these unit tests (no seeded cache). Model the same
+    empty result WITHOUT consuming an ordered response so the generate/finalise
+    flows' precisely-ordered responses are not shifted.
+    """
+    try:
+        names = [cd.get("name") for cd in statement.column_descriptions]
+    except Exception:
+        return False
+    return names == ["type", "content"]
 
 
 def _is_eval_result_select(statement: Any) -> bool:
@@ -525,6 +543,10 @@ class _MultiQueryDB:
         # responses precisely and this lookup must not shift them.
         if _is_eval_result_select(statement):
             return _FakeResult(None)
+        # The gate-dependency read (_orm_stage_deps) returns empty here without
+        # consuming an ordered response — matching the prior empty-Redis reader.
+        if _is_stage_deps_select(statement):
+            return _FakeResult(many=[])
         # A by-id re-load of a previously-seen Stage/Workspace replays that row
         # without consuming a response, mirroring a real DB across sessions.
         if (

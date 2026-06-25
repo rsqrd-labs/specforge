@@ -27,12 +27,14 @@ from services.credit_service import credit_service
 from services.integrations.task_parser import compute_task_ref
 from services.pipeline.increment_service import (
     INCREMENT_CREDIT_COST,
+    INCREMENT_STUCK_THRESHOLD_MINUTES,
     IncrementModeNotSupportedError,
     IncrementService,
     _grow_tasks_markdown,
     _highest_task_number,
     _reconcile_delta,
     _system_prompt,
+    recover_stuck_increments,
 )
 
 BASELINE_TASKS = (
@@ -346,6 +348,146 @@ async def test_increment_refund_on_validation_failure(
         .all()
     )
     assert all(r.status == "draft" for r in rows)
+
+
+@pytest.mark.asyncio
+async def test_recover_stuck_increment_refunds_and_resets(
+    session: AsyncSession, user: User, workspace: Workspace
+) -> None:
+    """A 'generating' increment whose in-request refund never ran (hard death) is
+    refunded and reset to a retryable draft by the recovery sweep (finding #7),
+    and a second sweep is an idempotent no-op."""
+    from datetime import timedelta
+
+    # Charge-then-generate leaves a committed deduction pinned on a 'generating'
+    # row; simulate the strand by committing exactly that, aged past the cutoff.
+    deduction = await credit_service.deduct(
+        session, user.id, INCREMENT_CREDIT_COST, "increment"
+    )
+    await session.commit()
+    await session.refresh(user)
+    assert user.credit_balance == 100 - INCREMENT_CREDIT_COST
+
+    stuck = Increment(
+        workspace_id=workspace.id,
+        sequence=1,
+        title="stranded increment",
+        status="generating",
+        baseline_version_ids=[],
+        deduction_ledger_id=deduction.id,
+        updated_at=datetime.now(UTC)
+        - timedelta(minutes=INCREMENT_STUCK_THRESHOLD_MINUTES + 5),
+    )
+    session.add(stuck)
+    await session.commit()
+    stuck_id = stuck.id
+
+    recovered = await recover_stuck_increments(session)
+    assert recovered == 1
+
+    refreshed = (
+        await session.execute(select(Increment).where(Increment.id == stuck_id))
+    ).scalar_one()
+    assert refreshed.status == "draft"
+    await session.refresh(user)
+    assert user.credit_balance == 100  # fully refunded
+
+    # Idempotent: the row is no longer 'generating', so a second sweep is a no-op
+    # and the balance is unchanged (refund reason is unique-constrained anyway).
+    recovered_again = await recover_stuck_increments(session)
+    assert recovered_again == 0
+    await session.refresh(user)
+    assert user.credit_balance == 100
+
+
+@pytest.mark.asyncio
+async def test_finalise_increment_does_not_resurrect_a_reset_row(
+    session: AsyncSession, user: User, workspace: Workspace
+) -> None:
+    """The Tx2 race guard: if the recovery sweep already reset the increment to
+    'draft' (a stall far longer than the LLM timeout), finalise must NOT resurrect
+    it into 'ready' or append a TASKS version (audit finding #6/#7 race guard)."""
+    from sqlalchemy import func as sa_func
+
+    from services.pipeline.increment_service import IncrementGenerationError
+
+    ws_id = workspace.id
+    svc = IncrementService(redis_client=_FakeRedis())
+    reset = Increment(
+        workspace_id=ws_id,
+        sequence=1,
+        title="already recovered",
+        status="draft",  # the sweep beat us to it
+        baseline_version_ids=[],
+    )
+    session.add(reset)
+    await session.commit()
+    reset_id = reset.id
+
+    tasks_stage = (
+        await session.execute(
+            select(Stage).where(Stage.workspace_id == ws_id, Stage.type == "tasks")
+        )
+    ).scalar_one()
+    tasks_stage_id = tasks_stage.id
+    versions_before = (
+        await session.execute(
+            select(sa_func.count())
+            .select_from(StageVersion)
+            .where(StageVersion.stage_id == tasks_stage_id)
+        )
+    ).scalar_one()
+
+    with pytest.raises(IncrementGenerationError):
+        await svc._finalise_increment(
+            session, reset_id, tasks_stage, BASELINE_TASKS + "\n### T-003: New\n"
+        )
+
+    await session.rollback()
+    # The TASKS stage was never grown — no orphaned version against a reset row.
+    versions_after = (
+        await session.execute(
+            select(sa_func.count())
+            .select_from(StageVersion)
+            .where(StageVersion.stage_id == tasks_stage_id)
+        )
+    ).scalar_one()
+    assert versions_after == versions_before
+    # And the row stays 'draft' — never resurrected to 'ready'.
+    status_after = (
+        await session.execute(select(Increment.status).where(Increment.id == reset_id))
+    ).scalar_one()
+    assert status_after == "draft"
+
+
+@pytest.mark.asyncio
+async def test_recover_skips_recent_generating_increment(
+    session: AsyncSession, user: User, workspace: Workspace
+) -> None:
+    """An increment within the stuck threshold (a legitimately in-flight one) is
+    never swept — the threshold sits far above the hard LLM timeout."""
+    from datetime import timedelta
+
+    fresh = Increment(
+        workspace_id=workspace.id,
+        sequence=1,
+        title="in-flight increment",
+        status="generating",
+        baseline_version_ids=[],
+        deduction_ledger_id=None,
+        updated_at=datetime.now(UTC)
+        - timedelta(minutes=INCREMENT_STUCK_THRESHOLD_MINUTES - 5),
+    )
+    session.add(fresh)
+    await session.commit()
+    fresh_id = fresh.id
+
+    recovered = await recover_stuck_increments(session)
+    assert recovered == 0
+    refreshed = (
+        await session.execute(select(Increment).where(Increment.id == fresh_id))
+    ).scalar_one()
+    assert refreshed.status == "generating"
 
 
 @pytest.mark.asyncio

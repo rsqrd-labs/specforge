@@ -3067,6 +3067,14 @@ class StageManager:
                 emit(json.dumps({"quality_gate_failed": gate_payload}))
                 return
 
+            # Tracks whether the artifact bytes changed since the first
+            # technology-safety pass above.  Only the legacy inline critic
+            # regenerate mutates `accumulated` between the two passes; when it
+            # does not (the async-advisory default, the disable_critic path, or a
+            # critic that passed first try) the second pass would re-validate
+            # identical bytes — pure wasted work — so it is skipped (finding #4).
+            content_changed_since_tech_safety = False
+
             # Post-stream quality gates.  docs/CRITIC_ASYNC_ADVISORY_PLAN.md takes
             # the LLM critic OFF the critical path (settings.critic_async_advisory,
             # default True): only the zero-LLM section gate runs inline, the usable
@@ -3088,9 +3096,10 @@ class StageManager:
                 # wholesale when the owner toggled the audited disable_critic
                 # escape hatch (no section gate, no judge — matching legacy).
                 if not workspace.disable_critic:
-                    critic_deps_for_async = await self._critic_deps(
-                        workspace.id, stage.type
-                    )
+                    # Authoritative ORM upstream deps already in scope (finding
+                    # #3) — a copy so the detached background critic never aliases
+                    # the pipeline's dict.
+                    critic_deps_for_async = dict(deps)
                     try:
                         validate_sections(
                             stage.type, accumulated, critic_deps_for_async
@@ -3131,7 +3140,8 @@ class StageManager:
                 else:
                     record_judge_call_skipped("critic", "disabled")
             elif not workspace.disable_critic:
-                critic_deps = await self._critic_deps(workspace.id, stage.type)
+                # Authoritative ORM upstream deps already in scope (finding #3).
+                critic_deps = dict(deps)
                 # T-248: zero-LLM section-presence gate runs FIRST — it is the
                 # cheapest gate (regex/substring, no LLM call) and short-circuits
                 # a missing-heading failure before burning a critic call.  A
@@ -3234,6 +3244,9 @@ class StageManager:
                             ),
                         )
                         stream_chunks = [accumulated]
+                        # The artifact was replaced — the post-critic
+                        # technology-safety pass must re-validate the new bytes.
+                        content_changed_since_tech_safety = True
                     except IncompleteArtifactError as exc:
                         stage_metric_outcome = "incomplete_output"
                         gate_payload = await self._block_incomplete_output(
@@ -3275,57 +3288,64 @@ class StageManager:
                 # silently absent.
                 record_judge_call_skipped("critic", "disabled")
 
-            try:
-                accumulated, tech_repaired = await self._ensure_technology_safe(
-                    route=route,
-                    system_prompt=system_prompt,
-                    user_prompt=user_prompt,
-                    stage_type=stage.type,
-                    content=accumulated,
-                    deps=deps,
-                    redis=redis,
-                    allow_repair=not technology_repair_used,
-                )
-                if tech_repaired:
-                    # This is the second (post-critic-regenerate) and final
-                    # safety pass, so we don't re-set technology_repair_used —
-                    # nothing reads it again. allow_repair above already used
-                    # the flag to forbid a second repair when pass one repaired.
-                    stream_chunks = [accumulated]
-            except TechSafetyError as exc:
-                stage_metric_outcome = "technology_safety_failed"
-                gate_payload = await self._block_technology_safety_output(
-                    db=db,
-                    redis=redis,
-                    stage=stage,
-                    user_id=user_id,
-                    deduction_id=deduction_id,
-                    route=route,
-                    exc=exc,
-                )
-                _cleanup_done = True
-                if span_id:
-                    await self._mark_langfuse_span_failed(span_id, exc)
-                    span_finished = True
-                emit(json.dumps({"quality_gate_failed": gate_payload}))
-                return
-            except IncompleteArtifactError as exc:
-                stage_metric_outcome = "incomplete_output"
-                gate_payload = await self._block_incomplete_output(
-                    db=db,
-                    redis=redis,
-                    stage=stage,
-                    user_id=user_id,
-                    deduction_id=deduction_id,
-                    route=route,
-                    exc=exc,
-                )
-                _cleanup_done = True
-                if span_id:
-                    await self._mark_langfuse_span_failed(span_id, exc)
-                    span_finished = True
-                emit(json.dumps({"quality_gate_failed": gate_payload}))
-                return
+            # Second (post-critic-regenerate) technology-safety pass.  Only the
+            # legacy inline regenerate mutates the artifact between the two
+            # passes, so when nothing changed (the async-advisory default, the
+            # disable_critic path, or a critic that passed first try) re-running
+            # the deterministic, Redis-cached check on identical bytes is pure
+            # wasted work and is skipped (audit finding #4).
+            if content_changed_since_tech_safety:
+                try:
+                    accumulated, tech_repaired = await self._ensure_technology_safe(
+                        route=route,
+                        system_prompt=system_prompt,
+                        user_prompt=user_prompt,
+                        stage_type=stage.type,
+                        content=accumulated,
+                        deps=deps,
+                        redis=redis,
+                        allow_repair=not technology_repair_used,
+                    )
+                    if tech_repaired:
+                        # This is the second (post-critic-regenerate) and final
+                        # safety pass, so we don't re-set technology_repair_used —
+                        # nothing reads it again. allow_repair above already used
+                        # the flag to forbid a second repair when pass one repaired.
+                        stream_chunks = [accumulated]
+                except TechSafetyError as exc:
+                    stage_metric_outcome = "technology_safety_failed"
+                    gate_payload = await self._block_technology_safety_output(
+                        db=db,
+                        redis=redis,
+                        stage=stage,
+                        user_id=user_id,
+                        deduction_id=deduction_id,
+                        route=route,
+                        exc=exc,
+                    )
+                    _cleanup_done = True
+                    if span_id:
+                        await self._mark_langfuse_span_failed(span_id, exc)
+                        span_finished = True
+                    emit(json.dumps({"quality_gate_failed": gate_payload}))
+                    return
+                except IncompleteArtifactError as exc:
+                    stage_metric_outcome = "incomplete_output"
+                    gate_payload = await self._block_incomplete_output(
+                        db=db,
+                        redis=redis,
+                        stage=stage,
+                        user_id=user_id,
+                        deduction_id=deduction_id,
+                        route=route,
+                        exc=exc,
+                    )
+                    _cleanup_done = True
+                    if span_id:
+                        await self._mark_langfuse_span_failed(span_id, exc)
+                        span_finished = True
+                    emit(json.dumps({"quality_gate_failed": gate_payload}))
+                    return
 
             # Every gate cleared; persist the version, cache, and schedule evals.
             phase.set(PIPELINE_PHASE_PERSISTING)
@@ -3820,7 +3840,7 @@ class StageManager:
                 await self._assert_technology_safe(
                     stage.type,
                     stage.content or "",
-                    await self._critic_deps(stage.workspace_id, stage.type),
+                    await self._orm_stage_deps(db, stage.workspace_id, stage.type),
                     redis,
                 )
             except TechSafetyError as exc:
@@ -3980,7 +4000,7 @@ class StageManager:
             await self._assert_technology_safe(
                 stage.type,
                 stage.content or "",
-                await self._critic_deps(stage.workspace_id, stage.type),
+                await self._orm_stage_deps(db, stage.workspace_id, stage.type),
                 redis,
             )
         except TechSafetyError as exc:
@@ -4030,7 +4050,7 @@ class StageManager:
             await self._assert_technology_safe(
                 stage.type,
                 stage.content or "",
-                await self._critic_deps(stage.workspace_id, stage.type),
+                await self._orm_stage_deps(db, stage.workspace_id, stage.type),
                 redis,
             )
         except TechSafetyError as exc:
@@ -4179,21 +4199,34 @@ class StageManager:
         spec = await redis.get(f"{_STAGE_CACHE_PREFIX}{workspace_id}:spec") or ""
         return spec, None
 
-    async def _critic_deps(self, workspace_id: UUID, stage_type: str) -> dict[str, str]:
-        """Upstream dependency contents for the critic, from the stage cache.
+    async def _orm_stage_deps(
+        self, db: AsyncSession, workspace_id: UUID, stage_type: str
+    ) -> dict[str, str]:
+        """Upstream dependency contents read authoritatively from the database.
 
-        Finalised upstream stages are cached on finalise(); the critic reads
-        them to check coverage (e.g. every upstream FR appears in this stage).
-        A missing/empty dependency yields an empty string — the critic handles
-        that gracefully.
+        The gates (validate_sections, the critic, the finalise/edit/unlock and
+        gap-patch technology-safety re-checks) read upstream stage content from
+        here.  Replaces the former Redis-cache reader (`_critic_deps`): the
+        `stage:` cache is a TTL'd mirror that can be cold (e.g. a finalise → much
+        later generation, or a finalise re-check with no preceding prompt-build
+        re-warm), which made a gate run blind on a miss (audit finding #3).  The
+        ORM read is always present and authoritative, removing the divergence
+        between the two dependency sources entirely.  A missing dependency stage
+        yields an empty string — every consumer handles that gracefully.
         """
-        redis = await self._redis_client()
-        deps: dict[str, str] = {}
-        for dep_type in STAGE_DEPENDENCIES[stage_type]:
-            deps[dep_type] = (
-                await redis.get(f"{_STAGE_CACHE_PREFIX}{workspace_id}:{dep_type}") or ""
+        dep_types = STAGE_DEPENDENCIES[stage_type]
+        if not dep_types:
+            return {}
+        rows = (
+            await db.execute(
+                select(Stage.type, Stage.content).where(
+                    Stage.workspace_id == workspace_id,
+                    Stage.type.in_(dep_types),
+                )
             )
-        return deps
+        ).all()
+        content_by_type = {row_type: (content or "") for row_type, content in rows}
+        return {dep_type: content_by_type.get(dep_type, "") for dep_type in dep_types}
 
     def _clear_quality_gate(self, stage: Stage) -> None:
         stage.quality_gate_status = "clear"
@@ -4603,6 +4636,15 @@ class StageManager:
         kind: str,
         payload: dict,
     ) -> None:
+        # POLICY (audit finding #9): the blocking gates that funnel through here
+        # (missing_sections, technology_safety) reset the stage to draft WITHOUT a
+        # refund — only genuinely truncated incomplete_output refunds. The charge
+        # is fair only because the artifact is still delivered and the user can
+        # Override (free) or Regenerate. That fairness rests ENTIRELY on the
+        # Override affordance staying discoverable in the UI: the frontend renders
+        # Regenerate + Override actions on the quality_gate_failed SSE event this
+        # path persists. If that affordance ever regresses this silently becomes a
+        # "charged for nothing" path — intentional, but load-bearing.
         blocked_content = _strip_code_fence(content).strip()
         now = datetime.now(UTC)
         stage.content = blocked_content
@@ -4900,7 +4942,7 @@ class StageManager:
                 await self._assert_technology_safe(
                     "harness",
                     merged,
-                    await self._critic_deps(stage.workspace_id, "harness"),
+                    await self._orm_stage_deps(db, stage.workspace_id, "harness"),
                     redis,
                 )
             except TechSafetyError as exc:

@@ -14,7 +14,6 @@ from services.pipeline.stage_manager import (
     _POLL_INTERVAL_SECONDS,
     _RECOVERY_LOCK_KEY,
     _RECOVERY_LOCK_TTL,
-    CREDIT_COSTS,
     run_recovery_cycle,
 )
 
@@ -41,8 +40,13 @@ async def recover_stuck_stages(db: AsyncSession) -> int:
     for stage in stuck_stages:
         credits_refunded = 0
         if stage.deduction_ledger_id is not None:
-            await credit_service.refund(db, stage.deduction_ledger_id)
-            credits_refunded = CREDIT_COSTS["generate"]
+            # Log the amount the refund ACTUALLY reversed (abs of the real ledger
+            # row), not a hardcoded generate cost — a stage whose deduction was a
+            # different size (e.g. a future cost change) would otherwise log a
+            # misleading figure into dashboards/alerts (audit finding #8).
+            credits_refunded = await credit_service.refund(
+                db, stage.deduction_ledger_id
+            )
 
         stage.status = "draft"
         stage.updated_at = datetime.now(UTC)
@@ -68,6 +72,15 @@ async def recover_stuck_stages(db: AsyncSession) -> int:
     )
 
     recovered += await recover_stuck_storyboards(db)
+
+    # Increment generations stranded in 'generating' (charge-then-generate after
+    # audit finding #6) are refunded + reset in the same cycle. Mirrors the
+    # storyboard lane: its own commit, lazy import to keep the graph acyclic.
+    from services.pipeline.increment_service import (  # noqa: PLC0415
+        recover_stuck_increments,
+    )
+
+    recovered += await recover_stuck_increments(db)
 
     return recovered
 

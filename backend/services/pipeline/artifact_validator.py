@@ -55,7 +55,14 @@ SECTION_CONTRACTS: dict[str, list[str]] = {
         "## Threat Model",  # T-240 (STRIDE)
         "## SLOs and Error Budgets",  # T-240
         "## Failure Mode and Effects Analysis",  # T-240
-        "## Architecture Quality Attribute",  # T-240
+        # Stored as the FULL heading (not the truncated "## Architecture Quality
+        # Attribute") so it matches BOTH consumers of this list: the substring
+        # check in validate_sections AND the line-anchored regex in _section_body.
+        # A truncated entry passes the substring gate but makes _section_body
+        # extract an empty body, firing a false `shallow_required_section`
+        # advisory on every plan (audit finding #1). Keep contract headings
+        # verbatim with the prompt's real heading.
+        "## Architecture Quality Attribute Matrix",  # T-240
         "## Directory and File Structure",
         "## Module Boundaries and Interfaces",
         "## Data Model and Persistence",
@@ -360,14 +367,50 @@ def _required_headings(stage_type: str, deps: dict[str, str]) -> list[str]:
     return required
 
 
+def _conditional_headings_for_stage(stage_type: str) -> frozenset[str]:
+    """The set of headings that are CONDITIONAL (sentinel-gated) for a stage.
+
+    A conditional section may legitimately be answered with the prompt-blessed
+    one-line ``Not applicable because <reason>`` declaration when its surface is
+    out of scope (e.g. Frontend Architecture on a backend/CLI plan). The depth
+    floor must exempt that blessed body for these headings only — never for the
+    unconditional sections, which always require substantive content.
+    """
+    return frozenset(
+        heading for _, heading in _CONDITIONAL_SECTIONS.get(stage_type, [])
+    )
+
+
+# Matches the prompt-blessed "Not applicable because <reason>" body a conditional
+# section is explicitly authorised to carry when its surface is out of scope
+# (prompts/plan.py — Frontend Architecture on a backend-only project). Anchored
+# to the start of the *raw* section body so a section that merely mentions the
+# phrase deeper in real prose is not mistaken for an out-of-scope declaration.
+_NOT_APPLICABLE_RE = re.compile(r"^\s*not\s+applicable\b", re.IGNORECASE)
+
+
+def _is_not_applicable_body(body: str) -> bool:
+    return bool(_NOT_APPLICABLE_RE.match(body))
+
+
 def _section_body_issues(
     stage_type: str,
     artifact_md: str,
     deps: dict[str, str],
 ) -> list[CompletenessIssue]:
     issues: list[CompletenessIssue] = []
+    conditional = _conditional_headings_for_stage(stage_type)
     for heading in _required_headings(stage_type, deps):
         body = _section_body(artifact_md, heading)
+        # A conditional section answered with the blessed "Not applicable …"
+        # one-liner is valid even though it is well under the depth floor — the
+        # prompt explicitly authorises it for an out-of-scope surface. Honour
+        # that contract instead of firing a false shallow advisory (audit
+        # finding #2). The exemption is scoped to conditional headings so an
+        # unconditional section can never escape the floor by declaring itself
+        # not applicable.
+        if heading in conditional and _is_not_applicable_body(body):
+            continue
         body_text = _normalise_body_for_depth(body)
         if len(body_text) < _min_body_chars(stage_type):
             issues.append(
@@ -837,6 +880,12 @@ def _task_issues(artifact_md: str, deps: dict[str, str]) -> list[CompletenessIss
     ]
     issues: list[CompletenessIssue] = issues_floor
     tasks: list[tuple[int, str]] = []
+    # task_num -> the task numbers it declares a dependency on. Built here and
+    # checked for *cycles* (not numeric ordering) after the loop — a model may
+    # legitimately number tasks by feature area, so a forward reference like
+    # T-003 -> T-008 is valid as long as the dependency graph stays acyclic
+    # (audit finding #5).
+    dep_adjacency: dict[int, set[int]] = {}
     for index, match in enumerate(task_headers):
         end = (
             task_headers[index + 1].start()
@@ -860,26 +909,61 @@ def _task_issues(artifact_md: str, deps: dict[str, str]) -> list[CompletenessIss
                 )
             )
         deps_value = _task_field_value(block, "Dependencies")
-        if deps_value:
-            future = [
-                int(dep)
-                for dep in _TASK_DEP_RE.findall(deps_value)
-                if int(dep) >= task_num
-            ]
-            if future:
-                issues.append(
-                    CompletenessIssue(
-                        code="invalid_task_dependency_order",
-                        detail=(
-                            f"T-{task_num:03d} depends on a same or later task: "
-                            f"{', '.join(f'T-{n:03d}' for n in future[:10])}."
-                        ),
-                        reference=f"T-{task_num:03d}",
-                    )
-                )
+        dep_adjacency[task_num] = {
+            int(dep) for dep in _TASK_DEP_RE.findall(deps_value or "")
+        }
+    issues.extend(_task_dependency_cycle_issues(dep_adjacency))
     issues.extend(_effort_summary_issues(artifact_md, tasks))
     issues.extend(_task_harness_ref_issues(artifact_md, deps))
     return issues
+
+
+def _task_dependency_cycle_issues(
+    dep_adjacency: dict[int, set[int]],
+) -> list[CompletenessIssue]:
+    """Flag any *circular* task dependency (a genuinely unresolvable order).
+
+    Replaces the old ``dep_num >= task_num`` heuristic, which assumed strict
+    topological numbering and so falsely flagged legitimate forward references
+    (audit finding #5). Acyclicity is decided by a Kahn's-algorithm topological
+    peel over the subgraph of *defined* tasks (edges to undefined task numbers
+    cannot close a cycle and are ignored; a self-dependency is a one-node cycle).
+    The peel is iterative, so a pathologically deep dependency chain can never
+    blow the recursion limit. Emits a single advisory issue naming the tasks that
+    participate in a cycle, or none when the graph is acyclic.
+    """
+    defined = set(dep_adjacency)
+    # Restrict edges to defined tasks; a self-loop is kept so it is caught.
+    edges: dict[int, set[int]] = {
+        num: {dep for dep in deps if dep in defined}
+        for num, deps in dep_adjacency.items()
+    }
+    indegree: dict[int, int] = {num: 0 for num in defined}
+    for deps in edges.values():
+        for dep in deps:
+            indegree[dep] += 1
+    queue = [num for num in defined if indegree[num] == 0]
+    removed = 0
+    while queue:
+        num = queue.pop()
+        removed += 1
+        for dep in edges[num]:
+            indegree[dep] -= 1
+            if indegree[dep] == 0:
+                queue.append(dep)
+    if removed == len(defined):
+        return []
+    cyclic = sorted(num for num in defined if indegree[num] > 0)
+    return [
+        CompletenessIssue(
+            code="invalid_task_dependency_order",
+            detail=(
+                "TASKS.md has a circular task dependency among: "
+                f"{', '.join(f'T-{n:03d}' for n in cyclic[:10])}."
+            ),
+            reference=", ".join(f"T-{n:03d}" for n in cyclic[:10]),
+        )
+    ]
 
 
 def _task_field_value(block: str, field_name: str) -> str | None:

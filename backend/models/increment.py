@@ -64,6 +64,16 @@ class Increment(Base):
         nullable=False,
         server_default=text("'[]'::jsonb"),
     )
+    # The credit deduction this increment was charged. Set when generation is
+    # reserved (the deduction is committed BEFORE the LLM call so the user-row
+    # lock is not held across it — audit finding #6); the recovery sweep refunds
+    # it idempotently if a hard death strands the row in 'generating' (finding
+    # #7). SET NULL on ledger delete mirrors Stage.deduction_ledger_id.
+    deduction_ledger_id: Mapped[PythonUUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("credit_ledger.id", ondelete="SET NULL"),
+        nullable=True,
+    )
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True),
         nullable=False,

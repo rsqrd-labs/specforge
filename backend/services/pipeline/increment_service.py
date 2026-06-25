@@ -47,7 +47,7 @@ import logging
 import re
 from contextlib import nullcontext
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
@@ -59,6 +59,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from config import settings
 from database import get_shared_redis
 from models import (
+    CreditLedger,
     GitHubInstallation,
     Increment,
     IntegrationPush,
@@ -68,7 +69,7 @@ from models import (
     Workspace,
 )
 from prompts.base import SECURITY_AND_PRIVACY_RULES, wrap_untrusted_content
-from services.credit_service import credit_service
+from services.credit_service import InsufficientCreditsError, credit_service
 from services.integrations.task_parser import (
     AGENT_LABELS,
     ParsedTask,
@@ -100,6 +101,14 @@ logger = logging.getLogger(__name__)
 # the increment surface owns its own pricing without touching the shared table;
 # passed to ``credit_service.deduct`` with ``reason="increment"``.
 INCREMENT_CREDIT_COST = 5
+
+# A 'generating' increment older than this is considered stuck — its in-request
+# refund never ran (hard process death) — and is refunded + reset to a retryable
+# 'draft' by the recovery sweep (audit finding #7). Sized far above the hard LLM
+# timeout (settings.llm_complete_timeout_seconds, default 120s) so a legitimately
+# in-flight increment is never falsely swept; matches the storyboard threshold's
+# generous margin.
+INCREMENT_STUCK_THRESHOLD_MINUTES = 15
 
 # Increment generation produces TASKS-shaped output and shares the
 # ``tasks.generate`` operation/budget. It follows the same product-wide
@@ -236,15 +245,33 @@ class IncrementService:
         await db.flush()
         increment_id = increment.id
 
-        # Credit up front; deduct() raises InsufficientCreditsError before any LLM
-        # spend if the balance is short. Refunded on every downstream failure.
-        deduction = await credit_service.deduct(
-            db, user.id, INCREMENT_CREDIT_COST, "increment"
-        )
+        # Tx1 — reserve: deduct and COMMIT *before* the slow LLM call so the
+        # user-row FOR UPDATE lock deduct() takes is released immediately rather
+        # than held across the whole generation (audit finding #6). deduct()
+        # raises InsufficientCreditsError before any spend if the balance is
+        # short — roll the placeholder back so no orphan 'generating' row
+        # survives. The committed deduction is pinned on the increment so the
+        # recovery sweep can refund it idempotently if a hard death strands the
+        # row mid-generation (finding #7); the in-request except path below is
+        # the primary refund and the sweep is the backstop.
+        try:
+            deduction = await credit_service.deduct(
+                db, user.id, INCREMENT_CREDIT_COST, "increment"
+            )
+        except InsufficientCreditsError:
+            await db.rollback()
+            raise
+        deduction_id = deduction.id
+        increment.deduction_ledger_id = deduction_id
+        await db.commit()
+        await credit_service.invalidate(user.id)  # post-commit — H-2 (T-219)
 
         system_prompt = _system_prompt()
         user_prompt = _user_prompt(stages, feature_request, baseline_max)
 
+        # Generate with NO open transaction and NO row lock held across the model
+        # call. On any failure: refund the (already-committed) deduction and reset
+        # the increment to a retryable 'draft' in a fresh transaction.
         try:
             adapter = InstrumentedAdapter(
                 get_llm(route.provider, route.model),
@@ -289,25 +316,24 @@ class IncrementService:
                 raise IncrementError(
                     "Increment output would leave Markdown code fences unbalanced."
                 )
-
-            version_id = await self._append_tasks_version(
-                db, stages["tasks"], new_tasks_md
-            )
-            increment.status = "ready"
-            increment.updated_at = datetime.now(UTC)
-            await db.commit()
         except (
             ProviderError,
             ProviderTimeoutError,
             IncrementError,
             asyncio.TimeoutError,
         ) as exc:
-            await self._refund_and_mark_draft(db, increment_id, deduction, user)
+            await self._refund_and_mark_draft(db, increment_id, deduction_id, user)
             if isinstance(exc, asyncio.TimeoutError):
                 raise ProviderError(route.provider, exc) from exc
             raise
 
-        await credit_service.invalidate(user.id)  # post-commit — H-2 pattern (T-219)
+        # Tx2 — finalise: reload the increment under lock and persist. If the
+        # recovery sweep already failed+refunded it (only possible after a stall
+        # far longer than the hard LLM timeout), do NOT resurrect it.
+        version_id = await self._finalise_increment(
+            db, increment_id, stages["tasks"], new_tasks_md
+        )
+
         await self._invalidate_tasks_cache(workspace_id)
 
         _log_token_usage(
@@ -420,18 +446,54 @@ class IncrementService:
         await db.flush()
         return version.id
 
+    async def _finalise_increment(
+        self,
+        db: AsyncSession,
+        increment_id: UUID,
+        tasks_stage: Stage,
+        new_tasks_md: str,
+    ) -> UUID:
+        """Tx2: append the grown TASKS version and flip the increment to ``ready``.
+
+        Reloads the increment ``FOR UPDATE`` (authoritative under lock, refreshed
+        with ``populate_existing``) so a row the recovery sweep already
+        terminated + refunded — possible only after a stall far longer than the
+        hard LLM timeout — is never resurrected into a ``ready`` state against a
+        refunded charge. In that race the delta is dropped and the user retries
+        from the clean ``draft`` the sweep left.
+        """
+        locked = (
+            await db.execute(
+                select(Increment)
+                .where(Increment.id == increment_id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+        ).scalar_one_or_none()
+        if locked is None or locked.status != "generating":
+            raise IncrementGenerationError(
+                "The increment was reset during generation; please retry."
+            )
+        version_id = await self._append_tasks_version(db, tasks_stage, new_tasks_md)
+        locked.status = "ready"
+        locked.updated_at = datetime.now(UTC)
+        await db.commit()
+        return version_id
+
     async def _refund_and_mark_draft(
-        self, db: AsyncSession, increment_id: UUID, deduction, user
+        self, db: AsyncSession, increment_id: UUID, deduction_id: UUID, user
     ) -> None:
         """Refund the increment credit and leave the row in a retryable state.
 
-        The credit is returned exactly once; the increment is reset to ``draft``
-        so the user can retry without an orphaned ``generating`` row stuck in the
-        timeline. Committed here so the refund survives even if the caller's
-        request fails afterwards.
+        The credit is returned exactly once (the ledger refund path is idempotent
+        and SAVEPOINT-scoped); the increment is reset to ``draft`` so the user can
+        retry without an orphaned ``generating`` row stuck in the timeline.
+        Committed here so the refund survives even if the caller's request fails
+        afterwards. Co-exists safely with the recovery sweep — both converge the
+        row to ``draft`` and the refund is a no-op the second time.
         """
         try:
-            await credit_service.refund(db, deduction.id, user.id)
+            await credit_service.refund(db, deduction_id, user.id)
             increment = (
                 await db.execute(select(Increment).where(Increment.id == increment_id))
             ).scalar_one_or_none()
@@ -604,6 +666,63 @@ def _log_token_usage(
         prompt_tokens,
         completion_tokens,
     )
+
+
+async def recover_stuck_increments(db: AsyncSession) -> int:
+    """Refund + reset increments stranded in ``generating`` past the threshold.
+
+    Charge-then-generate (audit finding #6) commits the increment deduction
+    before the LLM call, so a hard process death can leave a committed charge
+    against a ``generating`` row whose in-request refund (``_refund_and_mark_draft``)
+    never ran. This sweep is the backstop (finding #7), mirroring
+    ``recover_stuck_storyboards``: it is invoked by the shared leader-locked
+    recovery cycle, refunds the pinned ``deduction_ledger_id`` idempotently, resets
+    the row to a retryable ``draft``, and commits once. Returns the number
+    recovered.
+
+    The threshold is far above the hard LLM timeout
+    (``settings.llm_complete_timeout_seconds``), so a legitimately in-flight
+    increment can never be falsely swept. The credit-ledger refund is idempotent,
+    so it is safe even if the in-request path also refunded.
+    """
+    cutoff = datetime.now(UTC) - timedelta(minutes=INCREMENT_STUCK_THRESHOLD_MINUTES)
+    result = await db.execute(
+        select(Increment).where(
+            Increment.status == "generating",
+            Increment.updated_at < cutoff,
+        )
+    )
+    stuck = list(result.scalars())
+
+    recovered = 0
+    refunded_users: set[UUID] = set()
+    for increment in stuck:
+        credits_refunded = 0
+        if increment.deduction_ledger_id is not None:
+            # Read the ledger before refunding so we can invalidate the right
+            # user's credit cache post-commit (the row has no user_id column).
+            ledger = await db.get(CreditLedger, increment.deduction_ledger_id)
+            credits_refunded = await credit_service.refund(
+                db, increment.deduction_ledger_id
+            )
+            if ledger is not None:
+                refunded_users.add(ledger.user_id)
+        increment.status = "draft"
+        increment.updated_at = datetime.now(UTC)
+        logger.warning(
+            "increment.recovery increment_id=%s workspace_id=%s credits_refunded=%d",
+            increment.id,
+            increment.workspace_id,
+            credits_refunded,
+        )
+        recovered += 1
+
+    if recovered > 0:
+        await db.commit()
+        # Credit cache must reflect post-refund balances on the next read (H-2).
+        for user_id in refunded_users:
+            await credit_service.invalidate(user_id)
+    return recovered
 
 
 # ===========================================================================
