@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react"
+import { QRCodeSVG } from "qrcode.react"
 import {
   disablePublicShare,
   enablePublicShare,
@@ -215,6 +216,21 @@ export function SharePublicLinkModal({
                   {copiedAt ? "Copied" : "Copy"}
                 </button>
               </div>
+
+              <figure className="share-modal-qr">
+                <QRCodeSVG
+                  value={state.url}
+                  size={148}
+                  level="M"
+                  marginSize={2}
+                  title={`QR code for ${state.url}`}
+                  role="img"
+                  aria-label={`QR code linking to ${state.url}`}
+                />
+                <figcaption className="share-modal-qr-caption">
+                  Scan with a phone camera to open the link.
+                </figcaption>
+              </figure>
 
               <div
                 className="share-modal-toggle-row"
