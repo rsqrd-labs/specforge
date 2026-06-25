@@ -33,7 +33,7 @@ Coverage and traceability:
 Required HARNESS structure:
 - ## Harness Overview — strategy, target stack, execution command(s), required services, deterministic setup, explicit harness assumptions.
 - ## Requirement-to-Test Matrix — columns: source ID, behaviour/contract, test file, test name, test type, positive/negative path, expected initial status (pass/fail-first). Every upstream FR/NFR/SEC/AC appears; missing one ID fails the HARNESS.
-- ## Coverage Plan — coverage across unit, integration, contract, security, privacy, accessibility, performance, migration, observability, and failure-recovery tests.
+- ## Coverage Plan — coverage across unit, integration, contract, security, privacy, accessibility, performance, migration, observability, failure-recovery, and (when the plan declares a frontend) frontend-behaviour tests.
 - ## File Tree — complete Markdown tree listing every harness file.
 - ## Files — every file's full content under `### File: path/to/file` then one fenced code block. No file in the tree may be omitted or stubbed.
 
@@ -53,7 +53,7 @@ Harness rules:
 - Tag every test on the line immediately before it with the IDs it covers — `# Tests: FR-001, SEC-002` (Python/Ruby/shell) or `// Tests: FR-001, SEC-002` (TS/JS/Go/Java/C#/Kotlin) — using stable names TASKS.md can reference, then a docstring/leading comment stating setup, action, expected outcome.
 - Unit: one public boundary in isolation; mock all I/O; cover branches and error paths; parameterize boundary values.
 - Integration: real test database; run migrations first; full request-response cycle including middleware (auth, CSRF, rate limits).
-- E2E: critical spec journeys at the highest practical level (API-level if no browser UI is planned).
+- E2E: critical spec journeys at the highest practical level. When the plan declares a browser UI, drive at least the critical journeys through the UI layer using the plan's frontend test tooling (component/interaction harness or browser driver), asserting on rendered output and user-visible state — not just the underlying API. Fall back to API-level journeys only when no browser UI is planned.
 - Security: SQL/prompt injection; auth bypass with expired/tampered/missing tokens; IDOR against another user's resource; CSRF for browser sessions; verify secrets/sensitive data are never echoed in responses, logs, events, or exports.
 - Privacy: PII minimisation, masking, deletion/export flows, consent, retention where specified.
 - Contract: validate every response and error shape against schemas/; assert required fields are always present.
@@ -69,14 +69,17 @@ Mandatory test categories (each name is a stable Coverage Plan identifier):
 - `chaos`: per external dependency (DB, cache, queue, third-party API, LLM provider), a dependency-kill test that drops the connection mid-request and asserts the documented graceful-degradation path.
 - `regression_safety`: schema-diff per public API contract against the last released contract (e.g. openapi-diff); breaking changes must fail.
 - `migration_safety`: per migration, a forward test (apply + new code reads), a backward test (apply + old code reads), and a rollback test (downgrade + new code reads).
+- `frontend_behaviour` (only when the plan declares a frontend framework or UI routes; omit entirely for backend-only/API-only products): per UI route/page and per stateful component, a component/interaction test written with the plan's frontend test tooling (e.g. Vitest + Testing Library, Vue Test Utils) that renders the component, drives real user interactions and form validation, exercises the data-fetching/loading/error/empty states, and asserts on rendered output and user-visible state — never a snapshot-only or render-without-assertion test. Use the plan's frontend state/data libraries (e.g. TanStack Query, React Hook Form) as the plan specifies.
 - `accessibility`: per frontend route, an axe-core run asserting zero serious-or-critical violations.
 - `performance_budget`: bundle-size assertion per route + Lighthouse score floor (frontend), and p95 latency assertion under load (backend).
 - `supply_chain`: SBOM presence test (CycloneDX or SPDX), lockfile-pinned test (no unpinned ranges), and SCA exit-0 test.
 
 Output budget discipline:
 - When token budget is exhausted, do NOT defer files. Drop categories in priority order: (1) `performance_budget`; (2) `accessibility` — still required as a stub in the tree with a single failing `assert False, "deferred: a11y"`; (3) `property_based`; (4) the `boundary_values` extras (keep ≥ 1 per resource).
+- When the plan declares a frontend framework or UI routes, the `frontend_behaviour` tier and per-route `accessibility` are part of the UI's product contract — they verify the frontend stack the plan committed to. Do NOT drop them ahead of `performance_budget`, `property_based`, or the `boundary_values` extras; the frontend is not the first thing to go. Prefer chunking the harness (a dedicated `tests/frontend/` chunk) over emitting a backend-only harness for a product that ships a UI.
 - NEVER drop these four: `integration`, `security`, `contract`, `migration_safety` — they are load-bearing for the product contract.
 - For every reduced or dropped category, write a Coverage Plan record exactly as: `TestCategoryGap: category=<name> reason=<token_budget|other> reqs=<FR-NNN,SEC-NNN>` so the prompt-eval suite (T-249) can detect silent coverage regressions.
+- Frontend coverage is never silently omitted: when the plan declares a frontend, the harness MUST contain either the `frontend_behaviour` tier or an explicit `TestCategoryGap: category=frontend_behaviour …` record (and likewise for `accessibility`). A planned UI that yields neither frontend tests nor a frontend `TestCategoryGap` is a defective harness.
 - Never split a file across two responses. A complete runnable file beats a partial one.
 """
 
@@ -138,5 +141,6 @@ Before returning, verify (internal — do not include a checklist in your output
 - coverage_percent is covered requirements / total requirements, not aspirational.
 - Every endpoint has a boundary_values test; every parser/validator/serializer a property_based test; every external dependency a chaos test.
 - The Coverage Plan has TestCategoryGap records for any reduced category and the NEVER-drop set (integration / security / contract / migration_safety) is fully populated.
+- If the plan declares a frontend framework or UI routes, the harness contains a frontend test tier (component/interaction tests in the plan's frontend tooling, per-route accessibility, and UI-level E2E for critical journeys) OR an explicit `TestCategoryGap: category=frontend_behaviour …` — never a backend-only harness silently missing the planned UI.
 
 Return only the HARNESS artifact: the file tree followed by every file's full content. No preamble, commentary, or summary."""
