@@ -494,6 +494,13 @@ const STAGE_ACTIVITY_COPY: Record<StageType, string> = {
   tasks: "Drafting implementation plan",
 }
 
+const STAGE_ACTIVITY_DETAIL: Record<StageType, string> = {
+  spec: "Turning your idea into functional requirements, constraints, and acceptance criteria.",
+  plan: "Mapping components, data models, and the trade-offs behind each decision.",
+  harness: "Defining the tests and contracts that will prove the build is correct.",
+  tasks: "Sequencing the work into concrete, buildable engineering tasks.",
+}
+
 /**
  * Map a backend pipeline phase (issue #21 Phase 2c) to a short, honest liveness
  * sentence. Pure and total: an unknown or future phase returns `null` so the
@@ -557,6 +564,6 @@ function getActivityCopy(activity: GenerationActivityInfo) {
   return {
     stageLabel,
     title: STAGE_ACTIVITY_COPY[activity.stageType],
-    detail: "Keeping the workspace responsive while the artifact is generated.",
+    detail: STAGE_ACTIVITY_DETAIL[activity.stageType],
   }
 }

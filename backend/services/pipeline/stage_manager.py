@@ -36,7 +36,11 @@ from services.credit_service import (
     credit_service,
 )
 from services.evals import eval_batch
-from services.evals.online_eval import persist_structural_eval, run_eval_background
+from services.evals.online_eval import (
+    extract_deferred_reqs,
+    persist_structural_eval,
+    run_eval_background,
+)
 from services.llm.base import ProviderError, ProviderTimeoutError
 from services.llm.complexity_classifier import (
     ComplexitySignals,
@@ -341,7 +345,12 @@ def _log_pipeline_error(task: asyncio.Task) -> None:
         logger.error("pipeline_background_failed", extra={"error": str(exc)})
 
 
-def _eval_to_dict(result: EvalResult) -> dict:
+def _eval_to_dict(result: EvalResult, harness_content: str = "") -> dict:
+    # ``harness_content`` is the harness stage's own content (empty for other
+    # stages). It lets the inline SSE eval payload carry the deterministic
+    # deferred-coverage reqs so CoveragePanel can light its free-patch button the
+    # moment generation finishes — matching the GET-eval response shape rather
+    # than waiting for the post-`done` refetch.
     return {
         "id": str(result.id),
         "stage_version_id": str(result.stage_version_id),
@@ -351,6 +360,7 @@ def _eval_to_dict(result: EvalResult) -> dict:
         "clarity": result.clarity,
         "coverage_percent": result.coverage_percent,
         "uncovered_reqs": result.uncovered_reqs,
+        "deferred_reqs": extract_deferred_reqs(harness_content),
         "tasks_without_ref": result.tasks_without_ref,
         "flagged": result.flagged,
         "created_at": result.created_at.isoformat(),
@@ -3376,7 +3386,16 @@ class StageManager:
                     content=accumulated,
                     harness_content=harness_content_for_eval,
                 )
-                eval_event = json.dumps({"eval": _eval_to_dict(structural_eval)})
+                eval_event = json.dumps(
+                    {
+                        "eval": _eval_to_dict(
+                            structural_eval,
+                            harness_content=(
+                                accumulated if stage.type == "harness" else ""
+                            ),
+                        )
+                    }
+                )
             except Exception:
                 logger.warning(
                     "structural_eval_persist_failed stage_id=%s",
@@ -4803,7 +4822,9 @@ class StageManager:
                     content=merged,
                     harness_content=None,
                 )
-                eval_event = json.dumps({"eval": _eval_to_dict(structural_eval)})
+                eval_event = json.dumps(
+                    {"eval": _eval_to_dict(structural_eval, harness_content=merged)}
+                )
             except Exception:
                 logger.warning(
                     "structural_eval_persist_failed stage_id=%s",

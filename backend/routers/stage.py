@@ -27,7 +27,10 @@ from schemas.stage import (
     StageVersionResponse,
 )
 from services.credit_service import InsufficientCreditsError
-from services.evals.online_eval import validate_stage_findings
+from services.evals.online_eval import (
+    extract_deferred_reqs,
+    validate_stage_findings,
+)
 from services.llm.base import ProviderError, ProviderTimeoutError
 from services.llm.generation_estimates import read_generation_estimates
 from services.pipeline.artifact_validator import MissingSectionError
@@ -279,13 +282,26 @@ async def regenerate_stage_for_gaps(
         .limit(1)
     )
     latest_eval = result.scalar_one_or_none()
-    if not latest_eval or not latest_eval.uncovered_reqs:
+
+    # The free patch covers two distinct sources, unioned (eval reqs first):
+    #   1. LLM-derived uncovered_reqs on the latest harness eval, and
+    #   2. requirement IDs the harness deterministically recorded as deferred
+    #      under token budget (TestCategoryGap reqs=), parsed straight from the
+    #      harness content — independent of the eval, so a harness with deferred
+    #      coverage but an empty/missing eval still patches. extract_deferred_reqs
+    #      filters out non-id tokens (e.g. property_based entity names) so the
+    #      patch is never asked to invent tests for bogus "requirements".
+    eval_uncovered: list[str] = list(
+        (latest_eval.uncovered_reqs if latest_eval else None) or []
+    )
+    deferred_reqs = extract_deferred_reqs(stage.content or "")
+    uncovered_reqs: list[str] = list(dict.fromkeys([*eval_uncovered, *deferred_reqs]))
+    if not uncovered_reqs:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail={"error": "no_coverage_gaps"},
         )
 
-    uncovered_reqs: list[str] = latest_eval.uncovered_reqs
     trace_id = str(uuid4())
     return StreamingResponse(
         _stream_harness_patch(stage.id, user, db, uncovered_reqs, trace_id),
@@ -474,6 +490,12 @@ async def get_eval(
         "clarity": eval_result.clarity,
         "coverage_percent": eval_result.coverage_percent,
         "uncovered_reqs": eval_result.uncovered_reqs,
+        # Requirement IDs whose harness test category was deferred under token
+        # budget (TestCategoryGap). Non-blocking, but remediable by the free
+        # harness patch — surfaced here so CoveragePanel can light the button
+        # even when the LLM-derived uncovered_reqs is empty. Only harness content
+        # carries these records; other stages yield an empty list.
+        "deferred_reqs": extract_deferred_reqs(stage.content or ""),
         "tasks_without_ref": eval_result.tasks_without_ref,
         "flagged": eval_result.flagged,
         "created_at": eval_result.created_at.isoformat(),
@@ -567,6 +589,9 @@ async def revalidate_tasks(
         "clarity": eval_result.clarity,
         "coverage_percent": eval_result.coverage_percent,
         "uncovered_reqs": eval_result.uncovered_reqs,
+        # Tasks content carries no TestCategoryGap records, so this is empty here;
+        # included only to keep the eval response shape uniform across endpoints.
+        "deferred_reqs": extract_deferred_reqs(stage.content or ""),
         "tasks_without_ref": eval_result.tasks_without_ref,
         "flagged": eval_result.flagged,
         "created_at": eval_result.created_at.isoformat(),

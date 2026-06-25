@@ -140,6 +140,22 @@ export function TaskValidationPanel({
                 <div className="ws-issue-reason">
                   {issue.remediation ?? issue.reason}
                 </div>
+
+                {onNavigateToHarness && (
+                  <button
+                    type="button"
+                    className="ws-issue-action"
+                    onClick={onNavigateToHarness}
+                    disabled={disabled}
+                    title={disabled ? disabledReason : undefined}
+                    aria-describedby={
+                      disabled && disabledReason ? disabledReasonId : undefined
+                    }
+                    aria-label="Open HARNESS"
+                  >
+                    Open
+                  </button>
+                )}
               </li>
             ))}
           </ul>

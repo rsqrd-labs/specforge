@@ -105,6 +105,10 @@ export interface EvalResult {
   clarity: number | null
   coverage_percent: number | null
   uncovered_reqs: string[] | null
+  /** Requirement IDs whose harness test category was deferred under token budget
+   *  (TestCategoryGap). Non-blocking — these never flag the eval — but remediable
+   *  in one click via the harness free patch, so CoveragePanel surfaces them. */
+  deferred_reqs?: string[] | null
   tasks_without_ref: TaskReferenceIssue[] | null
   flagged: boolean
   created_at: string

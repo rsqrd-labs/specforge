@@ -12,6 +12,7 @@ from services.evals.online_eval import (
     _ref_in_dropped_category,
     _ref_matches_harness,
     _validate_task_references,
+    extract_deferred_reqs,
     persist_structural_eval,
     run_eval,
     validate_stage_findings,
@@ -381,6 +382,54 @@ class TestDroppedCategoryExtraction:
     def test_ref_in_dropped_category_empty_set_is_false(self) -> None:
         ref = "tests/performance_budget.test.ts::budget_is_enforced"
         assert _ref_in_dropped_category(ref, set()) is False
+
+
+class TestExtractDeferredReqs:
+    # Real bold-markdown-wrapped records as the harness emits them, including the
+    # property_based record whose reqs= holds domain entity names, not req IDs.
+    _HARNESS_REQS = (
+        "## Coverage Plan\n"
+        "**TestCategoryGap: category=performance_budget reason=token_budget "
+        "reqs=NFR-001,NFR-002,FR-002,FR-010**  \n"
+        "**TestCategoryGap: category=accessibility reason=token_budget "
+        "reqs=FR-006,NFR-005,AC-012**  \n"
+        "**TestCategoryGap: category=property_based reason=token_budget "
+        "reqs=SourceObjectDetected,RecipientList,LLM narrative**  \n"
+        "**TestCategoryGap: category=supply_chain reason=other "
+        "reqs=NFR-008,SEC-003**\n"
+    )
+
+    def test_extracts_only_canonical_requirement_ids(self) -> None:
+        reqs = extract_deferred_reqs(self._HARNESS_REQS)
+        assert reqs == [
+            "NFR-001",
+            "NFR-002",
+            "FR-002",
+            "FR-010",
+            "FR-006",
+            "NFR-005",
+            "AC-012",
+            "NFR-008",
+            "SEC-003",
+        ]
+
+    def test_filters_non_id_tokens(self) -> None:
+        reqs = extract_deferred_reqs(self._HARNESS_REQS)
+        # property_based entity names must never reach the harness patch.
+        assert "SourceObjectDetected" not in reqs
+        assert "RecipientList" not in reqs
+        assert "LLM" not in reqs
+
+    def test_dedupes_preserving_order(self) -> None:
+        content = (
+            "**TestCategoryGap: category=a reason=token_budget reqs=FR-001,FR-002**\n"
+            "**TestCategoryGap: category=b reason=token_budget reqs=FR-002,FR-003**\n"
+        )
+        assert extract_deferred_reqs(content) == ["FR-001", "FR-002", "FR-003"]
+
+    def test_no_records_returns_empty(self) -> None:
+        assert extract_deferred_reqs(_HARNESS) == []
+        assert extract_deferred_reqs("") == []
 
 
 def _ref_gaps(issues: list[dict]) -> list[dict]:

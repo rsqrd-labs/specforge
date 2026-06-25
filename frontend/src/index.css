@@ -9079,6 +9079,11 @@ button:disabled {
 @media (min-width: 1024px) {
   .workspace-stage-grid {
     grid-template-columns: minmax(0, 1fr) 380px;
+    /* Constrain the single row to the grid's own height so each cell
+       (document card and right panel) scrolls internally instead of the
+       row growing to its tallest content and being clipped by the grid's
+       overflow:hidden — which left the Coverage Gaps list unreachable. */
+    grid-template-rows: minmax(0, 1fr);
   }
 }
 

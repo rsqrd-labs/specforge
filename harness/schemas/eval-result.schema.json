@@ -28,6 +28,9 @@
     "uncovered_reqs": {
       "oneOf": [{ "type": "null" }, { "type": "array", "items": { "type": "string" } }]
     },
+    "deferred_reqs": {
+      "oneOf": [{ "type": "null" }, { "type": "array", "items": { "type": "string" } }]
+    },
     "tasks_without_ref": {
       "oneOf": [{ "type": "null" }, { "type": "array", "items": { "type": "object" } }]
     },

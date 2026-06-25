@@ -1743,7 +1743,9 @@ export default function Workspace() {
   // fully-covered ("ready") harness, so gating on `evalResult !== null` reserved a
   // 380px column that rendered empty (the right-side vacant band). Gate on the gap
   // count, mirroring the tasks branch, so a clean harness gets the full width.
-  const harnessCoverageGaps = evalResult?.uncovered_reqs?.length ?? 0
+  const harnessCoverageGaps =
+    (evalResult?.uncovered_reqs?.length ?? 0) +
+    (evalResult?.deferred_reqs?.length ?? 0)
   const showRightPanel =
     Boolean(diffResult) ||
     (activeStage.type === "harness" && harnessCoverageGaps > 0) ||
