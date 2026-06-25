@@ -9969,7 +9969,11 @@ button:disabled {
 .quality-gate-popup {
   pointer-events: auto;
   position: fixed;
-  right: 24px;
+  /* Anchored bottom-LEFT so it floats over the document/reading column and
+   * clears the right-side panel (CoveragePanel / TaskValidationPanel) instead of
+   * landing on top of it. On narrow viewports the media query below spans it
+   * across the bottom. */
+  left: 24px;
   bottom: 24px;
   z-index: 70;
   display: flex;
@@ -10087,7 +10091,9 @@ button:disabled {
 .quality-gate-reopen {
   pointer-events: auto;
   position: fixed;
-  right: 24px;
+  /* Shares the popup anchor — bottom-LEFT, over the document column — so the
+   * dismissed chip never rests on the right-side panel cards. */
+  left: 24px;
   bottom: 24px;
   z-index: 70;
   display: inline-flex;
@@ -10136,7 +10142,7 @@ button:disabled {
 
 @media (max-width: 640px) {
   .quality-gate-reopen {
-    right: 16px;
+    left: 16px;
     bottom: 16px;
   }
 }
@@ -10993,9 +10999,145 @@ button:disabled {
   opacity: 0.55;
 }
 
-.ws-issue-action:disabled:hover {
-  background: transparent;
-  color: var(--color-primary);
+/* ---------------------------------------------------------------------------
+ * Coverage cards (shared) — the "Coverage Gaps" / "Deferred Coverage" /
+ * "Expand Test Coverage" cards rendered by CoveragePanel (harness stage) and
+ * TaskValidationPanel (tasks stage). Scoped to `.ws-coverage-card` so the two
+ * cards restyle together without touching the generic `.ws-panel-section`
+ * frame shared by VersionHistory / IncrementTimeline / TaskCompletion.
+ * Specificity (0,2,0) + later source order beats the base panel rules.
+ * ------------------------------------------------------------------------- */
+.ws-panel-section.ws-coverage-card {
+  --cov-accent: var(--color-secondary);
+  --cov-accent-soft: rgba(161, 56, 95, 0.08);
+  --cov-accent-line: rgba(161, 56, 95, 0.22);
+  padding-left: 18px;
+  border-color: var(--cov-accent-line);
+  background:
+    linear-gradient(145deg, rgba(255, 255, 255, 0.82), rgba(255, 255, 255, 0.5)),
+    var(--cov-accent-soft);
+  /* As a flex child of the bounded-height `.workspace-right-panel`, the card
+   * must (a) keep its natural height instead of being squeezed — the squeeze +
+   * the base `overflow:hidden` was clipping a long gap list down to ~2 rows and
+   * suppressing the aside's own scroll — and (b) carry `min-width:0` so a long,
+   * unbreakable child (a code stub's longest line) can't force the card wider
+   * than the aside and bleed off the right edge. */
+  flex: 0 0 auto;
+  min-width: 0;
+}
+
+/* Long task titles / requirement IDs wrap instead of forcing card width, and the
+ * header's text column can shrink (default `min-width:auto` would let it grow
+ * past the chip and overflow). */
+.ws-coverage-card .ws-panel-section-header > div {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+/* Severity stripe down the left edge — the unmistakable signal of card kind. */
+.ws-panel-section.ws-coverage-card::before {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 4px;
+  border-radius: 8px 0 0 8px;
+  background: var(--cov-accent);
+}
+
+/* Genuine, blocking gaps → rose/secondary (act-on-me). */
+.ws-panel-section.ws-coverage-card--gap {
+  --cov-accent: var(--color-secondary);
+  --cov-accent-soft: rgba(161, 56, 95, 0.08);
+  --cov-accent-line: rgba(161, 56, 95, 0.24);
+}
+
+/* Optional / deferred coverage → calm slate (informational, non-blocking). */
+.ws-panel-section.ws-coverage-card--deferred {
+  --cov-accent: var(--color-tertiary);
+  --cov-accent-soft: rgba(86, 94, 116, 0.07);
+  --cov-accent-line: rgba(86, 94, 116, 0.22);
+}
+
+/* Loading skeleton → muted, no alarm. */
+.ws-panel-section.ws-coverage-card--loading {
+  --cov-accent: var(--color-surface-dim);
+  --cov-accent-soft: rgba(85, 67, 54, 0.04);
+  --cov-accent-line: rgba(85, 67, 54, 0.14);
+}
+
+/* Title carries a leading dot tinted by the card's severity accent. */
+.ws-coverage-card .ws-panel-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 11px;
+  color: var(--color-on-surface);
+}
+
+.ws-coverage-card .ws-panel-title::before {
+  content: "";
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: var(--cov-accent);
+  box-shadow: 0 0 0 3px var(--cov-accent-soft);
+}
+
+/* Chip echoes the accent instead of the flat default. */
+.ws-coverage-card .ws-panel-chip {
+  border-color: var(--cov-accent-line);
+  background: var(--cov-accent-soft);
+  color: var(--cov-accent);
+}
+
+/* Issue rows: card-within-card with a leading marker + hover lift. These
+ * classes are exclusive to the coverage cards, so they're safe to restyle. */
+/* The card takes its natural height (`flex: 0 0 auto` above) and the bounded
+ * `.workspace-right-panel` aside is the scroll container, so a long gap list (the
+ * 18-gap AWS card) just makes the card taller and the aside scrolls. We
+ * deliberately do NOT cap the list here: a fixed `max-height` shrank the card and
+ * left a band of dead space below it when the aside had room to show more. */
+.ws-coverage-card .ws-issue-list {
+  padding-right: 4px;
+}
+
+.ws-coverage-card .ws-issue-item {
+  position: relative;
+  min-width: 0;
+  padding: 11px 13px 11px 28px;
+  border-color: var(--cov-accent-line);
+  background: rgba(255, 255, 255, 0.66);
+  overflow-wrap: anywhere;
+  transition: transform 0.12s ease, box-shadow 0.12s ease,
+    border-color 0.12s ease;
+}
+
+/* A code stub's longest line drives min-content width; without this the card
+ * (not the stub) widens and bleeds off-screen. Bounded here, its own
+ * `overflow-x:auto` finally engages and it scrolls within the row. */
+.ws-coverage-card .ws-issue-code-stub {
+  max-width: 100%;
+}
+
+.ws-coverage-card .ws-issue-item::before {
+  content: "";
+  position: absolute;
+  top: 15px;
+  left: 12px;
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--cov-accent);
+}
+
+.ws-coverage-card .ws-issue-item:hover {
+  transform: translateY(-1px);
+  border-color: var(--cov-accent);
+  box-shadow: 0 6px 18px rgba(47, 49, 49, 0.08);
+}
+
+.ws-coverage-card .ws-issue-title {
+  font-weight: 700;
 }
 
 .ws-panel-ok {

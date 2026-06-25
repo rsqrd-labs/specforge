@@ -20,7 +20,11 @@ describe("AdvisoryFindingsPanel", () => {
   it("frames findings as optional suggestions on a finalisable draft", () => {
     render(<AdvisoryFindingsPanel findings={findings} stageType="spec" />)
 
-    // Never reads as a hard block.
+    // Defaults to the slim, non-intrusive pill so it never covers the document.
+    expect(screen.getByText(/2 suggestions/)).toBeInTheDocument()
+    fireEvent.click(screen.getByRole("button", { name: "Show suggestions" }))
+
+    // Once expanded it never reads as a hard block.
     expect(screen.getByText(/ready/i)).toBeInTheDocument()
     expect(screen.getByRole("status")).toBeInTheDocument()
     // Plain-language kind labels, not raw critic jargon.
@@ -38,6 +42,9 @@ describe("AdvisoryFindingsPanel", () => {
         onRegenerate={onRegenerate}
       />,
     )
+
+    // Starts collapsed now — expand to reach the actions.
+    fireEvent.click(screen.getByRole("button", { name: "Show suggestions" }))
 
     fireEvent.click(screen.getByRole("button", { name: "Regenerate to address" }))
     expect(onRegenerate).toHaveBeenCalledOnce()
@@ -65,6 +72,10 @@ describe("AdvisoryFindingsPanel", () => {
         onRegenerate={onRegenerate}
       />,
     )
+
+    // Starts collapsed as a "note" pill; expand to inspect the card.
+    expect(screen.getByText(/1 note/)).toBeInTheDocument()
+    fireEvent.click(screen.getByRole("button", { name: "Show notes" }))
 
     // No misleading "Regenerate to address" action.
     expect(
@@ -100,6 +111,9 @@ describe("AdvisoryFindingsPanel", () => {
         onRegenerate={onRegenerate}
       />,
     )
+    // Starts collapsed now — expand to reach the action.
+    fireEvent.click(screen.getByRole("button", { name: "Show suggestions" }))
+
     // A genuine critic finding is present, so the action remains meaningful.
     expect(
       screen.getByRole("button", { name: "Regenerate to address" }),

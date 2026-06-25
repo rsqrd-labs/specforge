@@ -31,7 +31,13 @@ export function CoveragePanel({
   }
 
   return (
-    <div className="ws-panel-section">
+    <div
+      className={`ws-panel-section ws-coverage-card ${
+        uncoveredReqs.length > 0
+          ? "ws-coverage-card--gap"
+          : "ws-coverage-card--deferred"
+      }`}
+    >
       {uncoveredReqs.length > 0 && (
         <>
           <div className="ws-panel-section-header">

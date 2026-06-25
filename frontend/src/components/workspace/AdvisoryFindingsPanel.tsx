@@ -33,7 +33,12 @@ export function AdvisoryFindingsPanel({
   actionsDisabled = false,
   disabledReason,
 }: AdvisoryFindingsPanelProps) {
-  const [collapsed, setCollapsed] = useState(false)
+  // Default to the slim, re-openable pill rather than the full card. The advisory
+  // is optional/non-blocking, and the dense workspace has no collision-free corner
+  // for a 420px floating card (it landed on the coverage cards on the right and the
+  // Finalise action row on the left). The pill covers next to nothing; the user
+  // expands it on demand.
+  const [collapsed, setCollapsed] = useState(true)
 
   // Esc collapses the floating popup, like any lightweight overlay. No focus
   // trap — it is non-blocking, so the user keeps reading and scrolling the
@@ -63,10 +68,10 @@ export function AdvisoryFindingsPanel({
     : undefined
 
   if (collapsed) {
-    // A slim, re-openable chip pinned bottom-right (it shares the popup anchor,
+    // A slim, re-openable chip pinned bottom-left (it shares the popup anchor,
     // and the blocking gate is mutually exclusive with the advisory state, so
-    // they never collide). Keeps the suggestions reachable without holding the
-    // viewport.
+    // they never collide). This is the default state now, so the suggestions stay
+    // reachable without the full card holding the viewport.
     return createPortal(
       <div className="quality-gate-reopen advisory" role="status">
         <span className="workspace-advisory-chip">

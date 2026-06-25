@@ -32,7 +32,7 @@ export function TaskValidationPanel({
 
   if (!evalResult) {
     return (
-      <div className="ws-panel-section">
+      <div className="ws-panel-section ws-coverage-card ws-coverage-card--loading">
         <div className="ws-panel-title">Coverage Gaps</div>
         <p className="ws-panel-muted">Checking task traceability…</p>
       </div>
@@ -44,7 +44,7 @@ export function TaskValidationPanel({
   return (
     <>
       {genuineGaps.length > 0 && (
-        <div className="ws-panel-section">
+        <div className="ws-panel-section ws-coverage-card ws-coverage-card--gap">
           <div className="ws-panel-section-header">
             <div>
               <div className="ws-panel-title">Coverage Gaps</div>
@@ -108,7 +108,7 @@ export function TaskValidationPanel({
       )}
 
       {deferredGaps.length > 0 && (
-        <div className="ws-panel-section">
+        <div className="ws-panel-section ws-coverage-card ws-coverage-card--deferred">
           <div className="ws-panel-section-header">
             <div>
               <div className="ws-panel-title">Deferred Coverage</div>
