@@ -2859,6 +2859,43 @@ async def test_rollback_in_place_preserves_advisory_gate() -> None:
 
 
 @pytest.mark.asyncio
+async def test_rollback_in_place_does_not_stale_downstream() -> None:
+    # Unlocking a finalised stage rolls back to the current version (the Unlock
+    # button passes stage.current_version) and changes nothing. Downstream
+    # finalised stages are still consistent, so they must stay finalised — merely
+    # unlocking and re-finalising with no edits must NOT surface a spurious
+    # "out of sync" banner on later stages (staleness is an upstream-drift signal
+    # that fires only on a real content change).
+    workspace_id = uuid4()
+    spec_stage = _make_stage(
+        workspace_id, "spec", status="finalised", content="current", version=2
+    )
+    plan_stage = _make_stage(workspace_id, "plan", status="finalised")
+    harness_stage = _make_stage(workspace_id, "harness", status="finalised")
+
+    version = StageVersion(
+        id=uuid4(),
+        stage_id=spec_stage.id,
+        version=2,
+        content="current",
+        created_by="ai",
+        created_at=datetime.now(UTC),
+    )
+
+    svc = StageManager(redis_client=_FakeRedis())
+    # Seed the downstream-stale query response so a regression (calling
+    # _mark_downstream_stale on an in-place unlock) would actually stale them.
+    db = _MultiQueryDB([version, spec_stage, [plan_stage, harness_stage]])
+    user = _make_user()
+
+    updated = await svc.rollback(spec_stage.id, 2, user, db)
+
+    assert updated.status == "draft"
+    assert plan_stage.status == "finalised"
+    assert harness_stage.status == "finalised"
+
+
+@pytest.mark.asyncio
 async def test_rollback_to_older_version_clears_advisory_gate() -> None:
     # A genuine rollback to an *older* version changes the content, so advisory
     # findings pinned to the newer version are stale and get cleared.

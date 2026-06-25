@@ -3923,13 +3923,25 @@ class StageManager:
         stage = await self._load_stage(stage_id, db)
         # "Unlock in place" — rolling back to the version that is already current
         # (the Unlock button passes stage.current_version) — does not change the
-        # content, so an advisory gate pinned to that version is still valid.
-        # Preserve it so unlocking a finalised stage restores its non-blocking
-        # suggestions instead of silently dropping them (the user unlocked
-        # precisely to act on them). A genuine rollback to an *older* version
-        # changes the content, so its findings are stale and still get cleared.
+        # content. Two consequences flow from "content unchanged":
+        #
+        #  1. An advisory gate pinned to that version is still valid, so preserve
+        #     it: unlocking a finalised stage restores its non-blocking
+        #     suggestions instead of silently dropping them (the user unlocked
+        #     precisely to act on them).
+        #  2. Downstream finalised stages are still consistent with this stage,
+        #     so they must NOT be marked stale. Otherwise merely unlocking and
+        #     re-finalising a stage with no edits would surface a spurious
+        #     "out of sync" banner on every later stage. Staleness is an
+        #     *upstream-drift* signal — it fires only when the content actually
+        #     changes (a genuine rollback to an older version, a content edit, or
+        #     a regenerate).
+        #
+        # A genuine rollback to an *older* version changes the content, so its
+        # advisory findings are stale (cleared) and downstream stages drift.
+        unlock_in_place = version_number == stage.current_version
         preserve_advisory = (
-            version_number == stage.current_version
+            unlock_in_place
             and stage.quality_gate_status == "advisory"
             and stage.quality_gate_version == version_number
         )
@@ -3938,7 +3950,8 @@ class StageManager:
         stage.status = "draft"
         stage.updated_at = datetime.now(UTC)
 
-        await self._mark_downstream_stale(stage, db)
+        if not unlock_in_place:
+            await self._mark_downstream_stale(stage, db)
 
         redis = await self._redis_client()
         try:
