@@ -90,6 +90,26 @@ describe("QualityBadge — findings-derived status (issue #27 Phase 1)", () => {
     expect(screen.getByText("Ready")).toBeInTheDocument()
   })
 
+  it("treats a DEFERRED_COVERAGE-only eval as Ready (non-blocking)", () => {
+    render(
+      <QualityBadge
+        evalResult={makeEval({
+          stage_type: "tasks",
+          flagged: false,
+          tasks_without_ref: [
+            {
+              task_number: 3,
+              task_title: "Perf budget",
+              reason: "category deferred under budget",
+              gap_type: "DEFERRED_COVERAGE",
+            },
+          ],
+        })}
+      />,
+    )
+    expect(screen.getByText("Ready")).toBeInTheDocument()
+  })
+
   it("shows Unavailable (quiet, non-blocking) when validation could not complete", () => {
     render(<QualityBadge evalResult={null} error />)
     expect(screen.getByText("Unavailable")).toBeInTheDocument()

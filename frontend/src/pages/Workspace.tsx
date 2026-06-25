@@ -1733,6 +1733,11 @@ export default function Workspace() {
   const genuineGapIssues = taskIssues.filter(
     (i) => !i.gap_type || i.gap_type === "GENUINE_GAP"
   )
+  // Deferred-coverage notes are non-blocking but still surfaced — reserve the
+  // panel for them too so the harness's recorded deferral stays visible.
+  const deferredCoverageIssues = taskIssues.filter(
+    (i) => i.gap_type === "DEFERRED_COVERAGE"
+  )
   // The right column is reserved ONLY when something substantive renders in it.
   // For harness that means actual coverage gaps — CoveragePanel returns null on a
   // fully-covered ("ready") harness, so gating on `evalResult !== null` reserved a
@@ -1743,7 +1748,9 @@ export default function Workspace() {
     Boolean(diffResult) ||
     (activeStage.type === "harness" && harnessCoverageGaps > 0) ||
     (activeStage.type === "tasks" &&
-      (genuineGapIssues.length > 0 || githubSync.data !== null))
+      (genuineGapIssues.length > 0 ||
+        deferredCoverageIssues.length > 0 ||
+        githubSync.data !== null))
   const finalisedCount = stages.filter((stage) => stage.status === "finalised").length
   const readiness = stages.length === 0 ? 0 : Math.round((finalisedCount / stages.length) * 100)
   const currentStageIndex = STAGE_ORDER.indexOf(activeStage.type)

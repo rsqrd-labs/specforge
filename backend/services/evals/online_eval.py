@@ -55,8 +55,50 @@ _ESTIMATE_ENUM = {"S", "M", "L", "XL"}
 _HARNESS_FILE_HEADING_RE = re.compile(r"^#{2,3}\s+File:\s+(.+)$")
 _HARNESS_FENCE_OPEN_RE = re.compile(r"^(`{3,})[a-zA-Z0-9]*$")
 _CLASS_DEF_RE = re.compile(r"^class\s+(Test\w+)")
-# Matches Python test functions; TypeScript Jest tests are not parsed here.
+# Matches Python test functions.
 _TEST_FUNC_DEF_RE = re.compile(r"^\s*def\s+(test_\w+)")
+# TypeScript / JavaScript test runners (Vitest / Jest / Mocha). The harness
+# generator emits `it(...)` / `test(...)` blocks for any plan that declares a
+# frontend, and TASKS references those names — so they must be extracted as
+# matchable refs or every TS-test reference false-positives as a coverage gap.
+# `describe(...)` is the class analog used for `file::describe::test` refs.
+_TS_TEST_DEF_RE = re.compile(
+    r"""^\s*(?:it|test)(?:\.\w+)?\s*\(\s*['"`]([^'"`]+)['"`]"""
+)
+_TS_DESCRIBE_DEF_RE = re.compile(
+    r"""^\s*describe(?:\.\w+)?\s*\(\s*['"`]([^'"`]+)['"`]"""
+)
+# Coverage Plan records the harness emits for any category it could not fully
+# populate, e.g. `TestCategoryGap: category=performance_budget reason=token_budget
+# reqs=FR-012`. A task that references a test in a dropped category is pointing at
+# coverage the harness deliberately deferred — a recorded shortfall, not a
+# generation defect — so it is reclassified as DEFERRED_COVERAGE, never a hard gap.
+_TEST_CATEGORY_GAP_RE = re.compile(
+    r"TestCategoryGap:\s*category=([A-Za-z0-9_.\-]+)", re.IGNORECASE
+)
+# Common test-file extensions stripped before comparing a ref's file stem to a
+# dropped category name (longest-first so `.test.ts` wins over `.ts`).
+_TEST_FILE_EXTS = (
+    ".test.tsx",
+    ".spec.tsx",
+    ".test.ts",
+    ".spec.ts",
+    ".test.jsx",
+    ".spec.jsx",
+    ".test.js",
+    ".spec.js",
+    ".test.py",
+    ".tsx",
+    ".ts",
+    ".jsx",
+    ".js",
+    ".py",
+)
+# gap_type values that are not user-facing coverage gaps and must not flag the
+# eval: GENERATION_FAILURE (prompt-quality issue, hidden) and DEFERRED_COVERAGE
+# (the harness recorded the category as deferred under budget — a known,
+# surfaced-but-non-blocking shortfall, not a defect).
+_NON_FLAGGING_GAP_TYPES = frozenset({"GENERATION_FAILURE", "DEFERRED_COVERAGE"})
 
 _JUDGE_SYSTEM = (
     "You are an independent senior product and software engineering evaluator. "
@@ -244,8 +286,11 @@ def _parse_task_blocks(tasks_content: str) -> list[dict[str, Any]]:
 def _extract_harness_refs(harness_content: str) -> set[str]:
     """Build matchable test identifiers from harness file headings and code blocks.
 
-    Supports Python pytest conventions (def test_* / class Test*).
-    TypeScript Jest tests (it/describe/test) are not extracted.
+    Supports Python pytest conventions (def test_* / class Test*) and
+    TypeScript/JavaScript runner conventions (it/test/describe from
+    Vitest / Jest / Mocha). Both are needed: TASKS references the test names
+    verbatim, so a TS-only harness whose tests were not extracted would make
+    every task reference a phantom gap.
     """
     known: set[str] = set()
     lines = harness_content.split("\n")
@@ -266,6 +311,7 @@ def _extract_harness_refs(harness_content: str) -> set[str]:
                     fence = fence_m.group(1)
                     k = j + 1
                     current_class: str | None = None
+                    current_describe: str | None = None
                     while k < len(lines) and lines[k].rstrip() != fence:
                         line = lines[k]
                         cls_m = _CLASS_DEF_RE.match(line)
@@ -281,6 +327,21 @@ def _extract_harness_refs(harness_content: str) -> set[str]:
                             if current_class and line.startswith((" ", "\t")):
                                 known.add(f"{normalized}::{current_class}::{fn}")
                                 known.add(f"{current_class}::{fn}")
+                        # TS/JS: describe() is the grouping (class) analog; it()/
+                        # test() are the individual cases. Brace-scoped nesting is
+                        # not tracked, so describe attribution is best-effort — the
+                        # bare and file-qualified names below always match.
+                        desc_m = _TS_DESCRIBE_DEF_RE.match(line)
+                        if desc_m:
+                            current_describe = desc_m.group(1)
+                        ts_m = _TS_TEST_DEF_RE.match(line)
+                        if ts_m:
+                            name = ts_m.group(1)
+                            known.add(f"{normalized}::{name}")
+                            known.add(name)
+                            if current_describe:
+                                known.add(f"{normalized}::{current_describe}::{name}")
+                                known.add(f"{current_describe}::{name}")
                         k += 1
                     i = k + 1
                     continue
@@ -299,6 +360,53 @@ def _ref_matches_harness(ref: str, known_refs: set[str]) -> bool:
     if len(parts) >= 2 and "::".join(parts[-2:]) in known_refs:
         return True
     return bool(parts) and parts[-1] in known_refs
+
+
+def _normalise_category_token(value: str) -> str:
+    """Lowercase and drop all separators for category↔filename comparison."""
+    return re.sub(r"[^a-z0-9]", "", value.lower())
+
+
+def _extract_dropped_categories(harness_content: str) -> set[str]:
+    """Normalised names of every category the harness recorded as deferred.
+
+    Parses the ``TestCategoryGap: category=<name> …`` Coverage Plan records the
+    harness emits for any reduced/dropped category. Both ``reason=token_budget``
+    and ``reason=other`` count — either way the tests were not generated.
+    """
+    return {
+        token
+        for m in _TEST_CATEGORY_GAP_RE.finditer(harness_content)
+        if (token := _normalise_category_token(m.group(1)))
+    }
+
+
+def _ref_in_dropped_category(ref: str, dropped_categories: set[str]) -> bool:
+    """True only when the ref's *file* belongs to a recorded dropped category.
+
+    Conservative by design (the masking direction is the dangerous one): we match
+    the file-path component before ``::``, not the test/method name, because
+    category→filename is the harness's structural convention while
+    category→method-name is coincidence. The whole category token must appear in
+    the normalised file stem. When in doubt the caller keeps ``GENUINE_GAP`` —
+    silently reclassifying a real coverage hole as deferred is the one failure
+    mode that matters here.
+    """
+    if not dropped_categories:
+        return False
+    normalized = ref.strip().replace("\\", "/")
+    if normalized.startswith("harness/"):
+        normalized = normalized[len("harness/") :]
+    file_part = normalized.split("::", 1)[0]
+    stem = file_part.rsplit("/", 1)[-1]
+    for ext in _TEST_FILE_EXTS:
+        if stem.endswith(ext):
+            stem = stem[: -len(ext)]
+            break
+    stem_norm = _normalise_category_token(stem)
+    if not stem_norm:
+        return False
+    return any(cat in stem_norm for cat in dropped_categories)
 
 
 def _build_gap_details(
@@ -447,9 +555,13 @@ def _validate_task_references(
     GENERATION_FAILURE — task has no **Harness refs:** field (prompt quality issue,
       hidden from users but logged for observability).
     GENUINE_GAP — task refs a test that does not exist in the harness (shown to user).
+    DEFERRED_COVERAGE — every unmatched ref on the task belongs to a category the
+      harness explicitly recorded as deferred (TestCategoryGap). Surfaced as a
+      non-blocking note, not a hard gap. GENUINE_GAP always wins on a mixed task.
     """
     task_blocks = _parse_task_blocks(tasks_content)
     known_refs = _extract_harness_refs(harness_content)
+    dropped_categories = _extract_dropped_categories(harness_content)
 
     issues: list[dict[str, Any]] = []
     generation_failures: list[int] = []
@@ -476,25 +588,60 @@ def _validate_task_references(
         elif refs:
             unmatched = [r for r in refs if not _ref_matches_harness(r, known_refs)]
             if unmatched:
-                missing = unmatched[0]
-                harness_file, class_name, fn_name, code_stub, remediation = (
-                    _build_gap_details(missing)
-                )
-                issues.append(
-                    {
-                        "task_number": task_num,
-                        "task_title": task_title,
-                        "reason": (
-                            f"`{missing}` is referenced but not found "
-                            "in the harness."
-                        ),
-                        "referenced_test": missing,
-                        "gap_type": "GENUINE_GAP",
-                        "remediation": remediation,
-                        "harness_file": harness_file,
-                        "code_stub": code_stub,
-                    }
-                )
+                # Partition: a real defect (ref in a category the harness DID
+                # populate) always wins over a deferred one, so a task mixing both
+                # is never masked. Only when *every* unmatched ref is in a recorded
+                # dropped category is the whole task deferred rather than genuine.
+                genuine = [
+                    r
+                    for r in unmatched
+                    if not _ref_in_dropped_category(r, dropped_categories)
+                ]
+                if genuine:
+                    missing = genuine[0]
+                    harness_file, class_name, fn_name, code_stub, remediation = (
+                        _build_gap_details(missing)
+                    )
+                    issues.append(
+                        {
+                            "task_number": task_num,
+                            "task_title": task_title,
+                            "reason": (
+                                f"`{missing}` is referenced but not found "
+                                "in the harness."
+                            ),
+                            "referenced_test": missing,
+                            "gap_type": "GENUINE_GAP",
+                            "remediation": remediation,
+                            "harness_file": harness_file,
+                            "code_stub": code_stub,
+                        }
+                    )
+                else:
+                    deferred = unmatched[0]
+                    harness_file, _cls, _fn, _stub, _rem = _build_gap_details(deferred)
+                    issues.append(
+                        {
+                            "task_number": task_num,
+                            "task_title": task_title,
+                            "reason": (
+                                f"`{deferred}` belongs to a test category the "
+                                "harness deferred under its token budget "
+                                "(recorded as a TestCategoryGap), so it was not "
+                                "generated yet."
+                            ),
+                            "referenced_test": deferred,
+                            "gap_type": "DEFERRED_COVERAGE",
+                            "remediation": (
+                                "This coverage was intentionally deferred by the "
+                                "harness, not lost. Regenerate the harness to add "
+                                f"`{deferred}`, or mark this task setup-only if the "
+                                "deferral is acceptable for now."
+                            ),
+                            "harness_file": harness_file,
+                            "code_stub": None,
+                        }
+                    )
         # refs == [] means setup-only — not an issue
 
     if generation_failures:
@@ -536,7 +683,8 @@ def validate_stage_findings(
         return None, False
     tasks_without_ref = _validate_task_references(content, harness_content)
     flagged = any(
-        issue.get("gap_type") != "GENERATION_FAILURE" for issue in tasks_without_ref
+        issue.get("gap_type") not in _NON_FLAGGING_GAP_TYPES
+        for issue in tasks_without_ref
     )
     return tasks_without_ref, flagged
 
@@ -1054,7 +1202,7 @@ async def _persist_eval_data(
         # No harness to validate against — fall back to the judge's list.
         # GENERATION_FAILURE is a prompt quality issue — only GENUINE_GAP flags.
         flagged = any(
-            i.get("gap_type") != "GENERATION_FAILURE" for i in tasks_without_ref
+            i.get("gap_type") not in _NON_FLAGGING_GAP_TYPES for i in tasks_without_ref
         )
     else:
         flagged = False

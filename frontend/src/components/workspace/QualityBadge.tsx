@@ -25,8 +25,13 @@ export const QUALITY_STATUS_LABEL: Record<QualityStatus, string> = {
 export function hasActionableFindings(evalResult: EvalResult): boolean {
   if (evalResult.flagged) return true
   if ((evalResult.uncovered_reqs?.length ?? 0) > 0) return true
+  // GENERATION_FAILURE (hidden prompt-quality issue) and DEFERRED_COVERAGE (the
+  // harness recorded the category as deferred under budget — surfaced but
+  // non-blocking) are not user-actionable gaps and must not move the badge.
   return (evalResult.tasks_without_ref ?? []).some(
-    (issue) => issue.gap_type !== "GENERATION_FAILURE",
+    (issue) =>
+      issue.gap_type !== "GENERATION_FAILURE" &&
+      issue.gap_type !== "DEFERRED_COVERAGE",
   )
 }
 

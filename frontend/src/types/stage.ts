@@ -115,7 +115,12 @@ export interface TaskReferenceIssue {
   task_title: string
   reason: string
   referenced_test?: string
-  gap_type?: "GENERATION_FAILURE" | "GENUINE_GAP"
+  gap_type?:
+    | "GENERATION_FAILURE"
+    | "GENUINE_GAP"
+    | "DEFERRED_COVERAGE"
+    | "MISSING_PRIORITY"
+    | "MISSING_ESTIMATE"
   remediation?: string
   harness_file?: string
   code_stub?: string

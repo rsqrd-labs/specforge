@@ -6,8 +6,10 @@ from uuid import uuid4
 import pytest
 
 from services.evals.online_eval import (
+    _extract_dropped_categories,
     _extract_harness_refs,
     _parse_task_blocks,
+    _ref_in_dropped_category,
     _ref_matches_harness,
     _validate_task_references,
     persist_structural_eval,
@@ -36,6 +38,64 @@ def test_standalone():
 def test_charge_card():
     assert True
 ```
+"""
+
+_HARNESS_TS = """\
+### File: harness/tests/admin.test.ts
+
+```ts
+describe('admin api', () => {
+  it('health_live_returns_200', async () => {
+    expect(true).toBe(true)
+  })
+
+  it('delete_report_suppresses_delivery', async () => {
+    expect(true).toBe(true)
+  })
+})
+```
+
+### File: harness/tests/schemas.test.ts
+
+```typescript
+describe('contract schemas', () => {
+  test("admin_config_response_shape", async () => {
+    expect(true).toBe(true)
+  })
+})
+```
+"""
+
+_TASKS_TS = """\
+### T-001: Implement health endpoint
+
+**Phase:** API Layer
+**Spec refs:** FR-001
+**Harness refs:** `tests/admin.test.ts::health_live_returns_200`
+**Priority:** MUST
+**Estimate:** S
+**Estimated size:** S
+**Risk:** Low
+
+### T-002: Implement admin config schema
+
+**Phase:** API Layer
+**Spec refs:** FR-002
+**Harness refs:** `tests/schemas.test.ts::admin_config_response_shape`
+**Priority:** MUST
+**Estimate:** S
+**Estimated size:** S
+**Risk:** Low
+
+### T-003: Delete report flow
+
+**Phase:** API Layer
+**Spec refs:** FR-003
+**Harness refs:** `tests/admin.test.ts::admin api::delete_report_suppresses_delivery`
+**Priority:** MUST
+**Estimate:** M
+**Estimated size:** M
+**Risk:** Medium
 """
 
 _TASKS = """\
@@ -101,6 +161,60 @@ _TASKS_GENUINE_GAP = """\
 **Estimated size:** S
 """
 
+# Harness that populated auth but recorded performance_budget as deferred under
+# its token budget (a TestCategoryGap Coverage Plan record).
+_HARNESS_DROPPED = """\
+## Coverage Plan
+
+TestCategoryGap: category=performance_budget reason=token_budget reqs=FR-012
+
+## File: harness/tests/test_auth.py
+
+```python
+def test_login_success():
+    assert True
+```
+"""
+
+# Every unmatched ref is in the deferred performance_budget category → deferred.
+_TASKS_DEFERRED = """\
+### T-001: Enforce source-to-run budget
+
+**Phase:** Performance
+**Spec refs:** FR-012
+**Harness refs:** `tests/performance_budget.test.ts::budget_is_enforced`
+**Priority:** MUST
+**Estimate:** M
+**Estimated size:** M
+"""
+
+# One genuine defect (missing auth test, a category the harness DID populate) plus
+# one deferred ref → GENUINE_GAP must win; the real hole is never masked.
+_TASKS_MIXED = """\
+### T-001: Mixed refs
+
+**Phase:** Core
+**Spec refs:** FR-001
+**Harness refs:** `tests/performance_budget.test.ts::budget_is_enforced`,
+  `tests/test_auth.py::test_totally_missing`
+**Priority:** MUST
+**Estimate:** M
+**Estimated size:** M
+"""
+
+# Genuinely-missing ref in a category the harness populated (NOT dropped) → must
+# stay GENUINE_GAP even though a TestCategoryGap exists for a different category.
+_TASKS_GENUINE_WITH_DROP = """\
+### T-001: Missing auth test
+
+**Phase:** Core
+**Spec refs:** FR-001
+**Harness refs:** `tests/test_auth.py::test_totally_missing`
+**Priority:** MUST
+**Estimate:** S
+**Estimated size:** S
+"""
+
 
 class TestParseTaskBlocks:
     def test_extracts_task_titles_and_refs(self) -> None:
@@ -153,6 +267,20 @@ class TestExtractHarnessRefs:
             _extract_harness_refs("## File: tests/test_x.py\n\nNo code block.") == set()
         )
 
+    def test_finds_typescript_it_and_test_blocks(self) -> None:
+        # TS/JS runners (Vitest/Jest) use it()/test()/describe(); TASKS
+        # references these names verbatim, so they must be extracted or every
+        # TS-test reference false-positives as a coverage gap (issue: 18 gaps).
+        known = _extract_harness_refs(_HARNESS_TS)
+        assert "health_live_returns_200" in known
+        assert "tests/admin.test.ts::health_live_returns_200" in known
+        # test() form, double-quoted name
+        assert "admin_config_response_shape" in known
+
+    def test_finds_typescript_describe_qualified_variants(self) -> None:
+        known = _extract_harness_refs(_HARNESS_TS)
+        assert "admin api::delete_report_suppresses_delivery" in known
+
 
 class TestRefMatchesHarness:
     def setup_method(self) -> None:
@@ -191,6 +319,13 @@ class TestValidateTaskReferences:
         issues = _validate_task_references(_TASKS, _HARNESS)
         assert not any(i["task_number"] == 3 for i in issues)
 
+    def test_typescript_refs_produce_no_false_gaps(self) -> None:
+        # Regression: a full-stack generation whose harness ships TS tests must
+        # not flag every TS-referencing task as a GENUINE_GAP (the 18-gap bug).
+        issues = _validate_task_references(_TASKS_TS, _HARNESS_TS)
+        genuine_gaps = [i for i in issues if i["gap_type"] == "GENUINE_GAP"]
+        assert genuine_gaps == []
+
     def test_genuine_gap_for_unmatched_ref(self) -> None:
         issues = _validate_task_references(_TASKS_GENUINE_GAP, _HARNESS)
         assert len(issues) == 1
@@ -221,6 +356,71 @@ class TestValidateTaskReferences:
         issues = _validate_task_references(tasks, _HARNESS)
         assert issues[0]["gap_type"] == "GENUINE_GAP"
         assert "test_nonexistent" in issues[0]["remediation"]
+
+
+class TestDroppedCategoryExtraction:
+    def test_extracts_test_category_gap_records(self) -> None:
+        cats = _extract_dropped_categories(_HARNESS_DROPPED)
+        assert "performancebudget" in cats
+
+    def test_no_records_returns_empty(self) -> None:
+        assert _extract_dropped_categories(_HARNESS) == set()
+
+    def test_ref_in_dropped_category_matches_file_stem(self) -> None:
+        cats = {"performancebudget"}
+        ref = "tests/performance_budget.test.ts::budget_is_enforced"
+        assert _ref_in_dropped_category(ref, cats) is True
+
+    def test_ref_not_in_dropped_category_when_file_differs(self) -> None:
+        cats = {"performancebudget"}
+        # The category word appears only in the method name, not the file — must
+        # NOT match (method-name coincidence is the over-masking trap).
+        ref = "tests/test_auth.py::performance_budget_check"
+        assert _ref_in_dropped_category(ref, cats) is False
+
+    def test_ref_in_dropped_category_empty_set_is_false(self) -> None:
+        ref = "tests/performance_budget.test.ts::budget_is_enforced"
+        assert _ref_in_dropped_category(ref, set()) is False
+
+
+def _ref_gaps(issues: list[dict]) -> list[dict]:
+    """Only the traceability gaps (genuine + deferred), not field issues."""
+    return [i for i in issues if i["gap_type"] in ("GENUINE_GAP", "DEFERRED_COVERAGE")]
+
+
+class TestDeferredCoverageClassification:
+    def test_deferred_when_all_unmatched_refs_in_dropped_category(self) -> None:
+        issues = _validate_task_references(_TASKS_DEFERRED, _HARNESS_DROPPED)
+        gaps = _ref_gaps(issues)
+        assert len(gaps) == 1
+        assert gaps[0]["gap_type"] == "DEFERRED_COVERAGE"
+        assert "deferred" in gaps[0]["remediation"].lower()
+
+    def test_deferred_coverage_does_not_flag(self) -> None:
+        _tasks, flagged = validate_stage_findings(
+            "tasks", _TASKS_DEFERRED, _HARNESS_DROPPED
+        )
+        assert flagged is False
+
+    def test_genuine_wins_on_mixed_task(self) -> None:
+        # over-masking guard (c): one genuine + one deferred unmatched ref must
+        # report GENUINE_GAP, never mask the real hole as deferred.
+        issues = _validate_task_references(_TASKS_MIXED, _HARNESS_DROPPED)
+        gaps = _ref_gaps(issues)
+        assert len(gaps) == 1
+        assert gaps[0]["gap_type"] == "GENUINE_GAP"
+
+    def test_genuine_gap_in_non_dropped_category_still_genuine(self) -> None:
+        # over-masking guard (b): a real miss in a populated category stays
+        # GENUINE even when a TestCategoryGap exists for another category.
+        issues = _validate_task_references(_TASKS_GENUINE_WITH_DROP, _HARNESS_DROPPED)
+        gaps = _ref_gaps(issues)
+        assert len(gaps) == 1
+        assert gaps[0]["gap_type"] == "GENUINE_GAP"
+        _tasks, flagged = validate_stage_findings(
+            "tasks", _TASKS_GENUINE_WITH_DROP, _HARNESS_DROPPED
+        )
+        assert flagged is True
 
 
 @pytest.mark.asyncio
