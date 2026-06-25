@@ -53,6 +53,19 @@ def test_get_llm_rebuilds_adapter_when_provider_key_changes(
     clear_llm_cache()
 
 
+def test_get_llm_cache_is_operation_policy_aware() -> None:
+    clear_llm_cache()
+
+    first = get_llm("openai", "gpt-5.4-mini", operation="plan.generate")
+    second = get_llm("openai", "gpt-5.4-mini", operation="refine.section")
+    third = get_llm("openai", "gpt-5.4-mini", operation="plan.generate")
+
+    assert first is third
+    assert first is not second
+    assert len(gateway._INSTANCES) == 2
+    clear_llm_cache()
+
+
 def test_get_llm_rebuilds_adapter_after_ttl_expires(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

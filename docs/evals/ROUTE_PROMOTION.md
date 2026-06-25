@@ -92,12 +92,12 @@ and the `incomplete_output` block surfaces immediately; the refund and recovery
 contract are unchanged.
 
 **Under the live catalog this DOES fire for core generation.** Core-gen budgets
-are 24576 and the Haiku 4.5 / GPT-5.4 Mini ceilings are 32768, so an initial
-limit-stop's doubled budget (49152) clamps to 32768 = the ceiling → the bail
-triggers and actively cuts the repair call. It is therefore **not
-outcome-preserving**: a generation that only *just* overran 24576 could still fit
-at 32768, so the flag trades that recovery for the saved call. That is precisely
-why it ships **off**.
+are 49152 and the Haiku 4.5 / GPT-5.4 Mini / Gemini 3.5 Flash ceilings are
+64000, so an initial limit-stop's doubled budget (98304) clamps to 64000 = the
+ceiling → the bail triggers and actively cuts the 64K repair call. It is
+therefore **not outcome-preserving**: a generation that only *just* overran
+49152 could still fit at 64000, so the flag trades that recovery for the saved
+call. That is precisely why it remains a separate rollback flag.
 
 The deterministic dry run cannot measure the trade (its simulated output never
 limit-stops), so promotion is a **manual live step**: on the golden corpus, with

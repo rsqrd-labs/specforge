@@ -42,6 +42,11 @@ CORE_GENERATION_OPERATIONS = (
     "tasks.generate",
     "regenerate.full",
 )
+_LOW_REASONING_CORE_MODELS = {
+    ("anthropic", "claude-haiku-4-5-20251001"),
+    ("openai", "gpt-5.4-mini"),
+    ("google", "gemini-3.5-flash"),
+}
 
 # --- Core-generation tier ladder (issue #26 Phase 5b) -------------------------
 # The single, declarative source of truth for *how far below mid* each provider's
@@ -640,14 +645,38 @@ def model_max_output_tokens(provider: str, model_id: str) -> int:
     return model_entry(provider, model_id).default_max_output_tokens
 
 
-def model_request_policy(provider: str, model_id: str) -> dict[str, str | None | bool]:
+def _core_generation_low_reasoning_enabled() -> bool:
+    try:
+        from config import settings  # noqa: PLC0415
+
+        return bool(settings.core_generation_low_reasoning)
+    except Exception:
+        return False
+
+
+def model_request_policy(
+    provider: str,
+    model_id: str,
+    operation: str | None = None,
+) -> dict[str, str | None | bool]:
     entry = model_entry(provider, model_id)
+    reasoning_effort = entry.reasoning_effort
+    thinking_level = entry.thinking_level
+    if (
+        operation in CORE_GENERATION_OPERATIONS
+        and (provider, model_id) in _LOW_REASONING_CORE_MODELS
+        and _core_generation_low_reasoning_enabled()
+    ):
+        if entry.supports_reasoning:
+            reasoning_effort = "low"
+        if entry.supports_thinking:
+            thinking_level = "low"
     return {
         "adapter_api": entry.adapter_api,
         "supports_reasoning": entry.supports_reasoning,
         "supports_thinking": entry.supports_thinking,
-        "reasoning_effort": entry.reasoning_effort,
-        "thinking_level": entry.thinking_level,
+        "reasoning_effort": reasoning_effort,
+        "thinking_level": thinking_level,
     }
 
 

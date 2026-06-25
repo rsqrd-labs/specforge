@@ -956,6 +956,9 @@ async def test_generate_success_deducts_credits_and_saves_version() -> None:
     assert _streamed_artifact(tokens) == _VALID_SPEC
     assert any("done" in t for t in tokens)
     assert db._committed
+    assert {call.kwargs.get("operation") for call in mock_get_llm.call_args_list} == {
+        "spec.generate"
+    }
 
 
 @pytest.mark.asyncio
@@ -1271,6 +1274,56 @@ def _shallow_spec_stream_payload(user_prompt: str) -> str:
     return _swap_user_flow_body(user_prompt, "N/A.")
 
 
+def _no_sentinel_spec_stream_payload(user_prompt: str) -> str:
+    """A complete spec chunk that omits the internal completion sentinel."""
+    key = artifact_fixtures.chunk_key_from_prompt(user_prompt, "product-scope")
+    return artifact_fixtures.spec_chunk_md(key)
+
+
+@pytest.mark.asyncio
+async def test_generate_missing_sentinel_is_delivered_not_refunded() -> None:
+    # Refund-bleed regression: a model that finishes its turn naturally but drops
+    # the internal magic-comment completion sentinel used to refund the user AND
+    # spend a per-chunk regenerate.  The sentinel is advisory-only now — complete
+    # content without it is delivered clean: no refund, no repair, one call/chunk.
+    workspace_id = uuid4()
+    spec_stage = _make_stage(workspace_id, "spec", status="draft")
+    workspace = _make_workspace([spec_stage])
+    user = _make_user()
+    deduction = CreditLedger(id=uuid4(), user_id=user.id, amount=-10, reason="generate")
+    db = _MultiQueryDB([spec_stage, workspace, [], deduction])
+    adapter = _CompletionAwareAdapter(
+        [], stream_payload_fn=_no_sentinel_spec_stream_payload
+    )
+    svc = StageManager(redis_client=_FakeRedis())
+
+    with (
+        patch(
+            "services.pipeline.stage_manager.credit_service.deduct",
+            new_callable=AsyncMock,
+            return_value=deduction,
+        ),
+        patch(
+            "services.pipeline.stage_manager.credit_service.refund",
+            new_callable=AsyncMock,
+        ) as mock_refund,
+        patch(
+            "services.pipeline.stage_manager.build_prompt",
+            new_callable=AsyncMock,
+            return_value=("sys", "user", "0"),
+        ),
+        patch("services.pipeline.stage_manager.get_llm", return_value=adapter),
+    ):
+        tokens = [token async for token in svc.generate(spec_stage.id, user, db)]
+
+    mock_refund.assert_not_awaited()
+    # 3 chunks, no repair pass — a missing sentinel never trips a completeness
+    # failure now, so no chunk is regenerated.
+    assert len(adapter.stream_calls) == 3
+    assert spec_stage.quality_gate_status == "clear"
+    assert any("done" in token for token in tokens)
+
+
 @pytest.mark.asyncio
 async def test_generate_mermaid_user_flow_diagram_is_not_refunded() -> None:
     # Regression: a Mermaid-only User Flow Diagrams section used to be stripped to
@@ -1428,7 +1481,7 @@ async def test_parallel_provider_limit_stop_blocks_and_refunds(monkeypatch) -> N
         ) as mock_set_cache,
         patch(
             "services.pipeline.stage_manager.get_llm",
-            side_effect=lambda provider, model: _AlwaysLimitStopAdapter(),
+            side_effect=lambda provider, model, **kwargs: _AlwaysLimitStopAdapter(),
         ),
     ):
         tokens = [token async for token in svc.generate(spec_stage.id, user, db)]
@@ -1440,6 +1493,76 @@ async def test_parallel_provider_limit_stop_blocks_and_refunds(monkeypatch) -> N
     assert spec_stage.quality_gate_kind == "incomplete_output"
     assert spec_stage.quality_gate_payload["repair_attempted"] is True
     assert any("quality_gate_failed" in token for token in tokens)
+
+
+@pytest.mark.asyncio
+async def test_parallel_doomed_limit_stop_skips_repair_when_flag_on(
+    monkeypatch,
+) -> None:
+    from services.observability import PIPELINE_COMPLETION_REPAIRS
+    from services.pipeline import stage_manager as sm
+
+    monkeypatch.setattr(sm.settings, "pipeline_parallel_chunks", True)
+    monkeypatch.setattr(sm.settings, "pipeline_early_bail_unrecoverable_chunk", True)
+    monkeypatch.setattr(sm, "model_max_output_tokens", lambda provider, model: 49152)
+
+    before = PIPELINE_COMPLETION_REPAIRS.labels(
+        stage_type="spec", provider="anthropic", outcome="skipped_at_ceiling"
+    )._value.get()
+
+    workspace_id = uuid4()
+    spec_stage = _make_stage(workspace_id, "spec", status="draft")
+    workspace = _make_workspace([spec_stage])
+    user = _make_user()
+    deduction = CreditLedger(id=uuid4(), user_id=user.id, amount=-10, reason="generate")
+    db = _MultiQueryDB([spec_stage, workspace, [], deduction])
+    svc = StageManager(redis_client=_FakeRedis())
+    created: list[_AlwaysLimitStopAdapter] = []
+
+    def _new_adapter(provider, model, **kwargs):
+        adapter = _AlwaysLimitStopAdapter()
+        created.append(adapter)
+        return adapter
+
+    with (
+        patch(
+            "services.pipeline.stage_manager.credit_service.deduct",
+            new_callable=AsyncMock,
+            return_value=deduction,
+        ),
+        patch(
+            "services.pipeline.stage_manager.credit_service.refund",
+            new_callable=AsyncMock,
+        ) as mock_refund,
+        patch(
+            "services.pipeline.stage_manager.build_prompt",
+            new_callable=AsyncMock,
+            return_value=("sys", "user", "0"),
+        ),
+        patch(
+            "services.pipeline.stage_manager.set_cached_generation",
+            new_callable=AsyncMock,
+        ) as mock_set_cache,
+        patch("services.pipeline.stage_manager.get_llm", side_effect=_new_adapter),
+    ):
+        tokens = [token async for token in svc.generate(spec_stage.id, user, db)]
+
+    mock_refund.assert_awaited_once_with(db, deduction.id)
+    mock_set_cache.assert_not_awaited()
+    # The ignored pre-built adapter plus the two independent wave-1 chunk adapters
+    # were created. Neither wave-1 chunk spent a repair call, and the dependent wave
+    # was never started.
+    assert len(created) == 3
+    assert spec_stage.status == "draft"
+    assert spec_stage.quality_gate_status == "blocked"
+    assert spec_stage.quality_gate_kind == "incomplete_output"
+    assert spec_stage.quality_gate_payload["repair_attempted"] is False
+    assert any("quality_gate_failed" in token for token in tokens)
+
+    after = PIPELINE_COMPLETION_REPAIRS.labels(
+        stage_type="spec", provider="anthropic", outcome="skipped_at_ceiling"
+    )._value.get()
+    assert after >= before + 1
 
 
 def _route_for_doom_test(model: str = "claude-haiku-4-5-20251001"):
@@ -2233,6 +2356,7 @@ async def test_refine_cache_miss_writes_replacement() -> None:
         await svc.refine(stage.id, request, user, db)
 
     assert redis._store["refine-cache-key"] == "hi"
+    assert "operation" not in mock_get_llm.call_args.kwargs
 
 
 @pytest.mark.asyncio
@@ -3959,7 +4083,7 @@ async def test_generate_falls_back_to_strong_tier_after_primary_failure(
 
     requested_models: list[str] = []
 
-    def fake_get_llm(provider: str, model: str):
+    def fake_get_llm(provider: str, model: str, **kwargs):
         requested_models.append(model)
         return primary_adapter if len(requested_models) == 1 else fallback_adapter
 

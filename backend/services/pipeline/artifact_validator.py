@@ -137,33 +137,30 @@ def _ends_with_complete_table_row(final_line: str) -> bool:
     return final_line.endswith("|") and final_line.count("|") >= 2
 
 
-# Completeness codes that mean the model genuinely stopped early or emitted
-# corrupt markup — the artifact is *unusable*, so the generation is refunded and
-# repaired.  Every OTHER completeness code is a depth/quality opinion (a shallow
-# section, a thin requirement count, a traceability gap): the artifact is
-# complete and finalisable, just imperfect by our heuristics, so it is delivered
-# as a NON-blocking advisory finding and NEVER refunded (the user owns the
-# artifact — same stance as the critic / missing_sections, issue #34).  Keeping
-# the discriminator here, exhaustive over the codes the validator emits, is the
-# single source of truth for "does this cost the platform a refund".
+# The ONLY two signals that mean the platform produced genuinely unusable output
+# and must refund: the provider hard-stopped on its output-token cap
+# (`provider_stopped_by_limit`) or nothing was produced at all (`empty_artifact`).
+# These are objective, provider-reported facts — not heuristics — so they alone
+# cost the platform a refund (and earn the single budget-doubling repair).
 #
-# `dangling_trailing_line` is deliberately NOT refundable.  The check can only
-# run *after* `validate_completion_sentinel` has passed and the provider
-# `stopped_by_limit` guard has cleared (see every `validate_artifact_completeness`
-# call site in stage_manager.py) — i.e. the model itself asserted the artifact is
-# complete by emitting the final sentinel.  A genuinely truncated generation has
-# no sentinel (→ `missing_completion_sentinel`) or a hard provider stop
-# (→ `provider_stopped_by_limit`); those two own real truncation.  So a trailing
-# `:`/`,`/`|` on a model-complete artifact is a heuristic quality opinion, not
-# unusable output — it flows through as a non-blocking advisory finding (no
-# refund, no paid repair, finalisable) instead of refunding a complete artifact.
+# EVERY other completeness code — a missing internal completion sentinel, an
+# unbalanced code fence, an incomplete harness file block, a dangling trailing
+# line, plus all depth/quality opinions (shallow section, thin requirement count,
+# traceability gap) — is delivered as a NON-blocking advisory finding and NEVER
+# refunded or re-run.  The artifact is usable and the user owns it (same stance as
+# the critic / missing_sections, issue #34).  This is the fix for the false-refund
+# + rerun bleed: a model that ends its turn naturally (no `stopped_by_limit`) has
+# *finished* — if it merely omitted our magic-comment marker or emitted a stray
+# ``` , that is a formatting heuristic, not truncation, and must not burn the
+# user's credit or trigger a regenerate cascade.  Genuine structural loss (a
+# dropped required section) is still caught independently by `validate_sections`,
+# which blocks terminally **without** refunding and is user-overridable — strictly
+# better than a refund.  Keeping this discriminator exhaustive over the codes the
+# validator emits is the single source of truth for "does this cost a refund".
 REFUNDABLE_INCOMPLETE_CODES: frozenset[str] = frozenset(
     {
         "empty_artifact",
-        "missing_completion_sentinel",
         "provider_stopped_by_limit",
-        "unbalanced_code_fence",
-        "incomplete_harness_file_block",
     }
 )
 

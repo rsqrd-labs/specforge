@@ -149,6 +149,12 @@ PIPELINE_GENERATION_DURATION = Histogram(
     ["stage_type", "provider"],
     buckets=(15, 30, 60, 120, 180, 300, 450, 600, 900, float("inf")),
 )
+PIPELINE_STAGE_END_TO_END_DURATION = Histogram(
+    "specforge_pipeline_stage_end_to_end_duration_seconds",
+    "End-to-end wall-clock duration of a stage generation pipeline",
+    ["stage_type", "provider", "outcome"],
+    buckets=(15, 30, 60, 120, 180, 300, 450, 600, 900, float("inf")),
+)
 
 PIPELINE_TECH_SAFETY_FAILURES = Counter(
     "specforge_pipeline_technology_safety_failures_total",

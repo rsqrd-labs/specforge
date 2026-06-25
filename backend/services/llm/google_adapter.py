@@ -17,10 +17,15 @@ _DEFAULT_TIMEOUT_MS = 300_000  # 5 minutes
 
 
 class GoogleAdapter(BaseLLMAdapter):
-    def __init__(self, model: str, api_key: str | None = None) -> None:
+    def __init__(
+        self,
+        model: str,
+        api_key: str | None = None,
+        operation: str | None = None,
+    ) -> None:
         self.model = model
         self.last_completion: LLMCompletionInfo | None = None
-        self._request_policy = model_request_policy("google", model)
+        self._request_policy = model_request_policy("google", model, operation)
         self._client = genai.Client(
             api_key=api_key or settings.google_api_key,
             http_options=types.HttpOptions(timeout=_DEFAULT_TIMEOUT_MS),

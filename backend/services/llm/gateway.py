@@ -25,7 +25,8 @@ _PROVIDER_KEY_SETTINGS = {
     "openai": ("OPENAI_API_KEY", "openai_api_key"),
     "google": ("GOOGLE_API_KEY", "google_api_key"),
 }
-# Adapter instances are cached per provider, model, and API-key fingerprint.
+# Adapter instances are cached per provider, model, operation policy, and API-key
+# fingerprint.
 # When a provider key changes in the process environment, the fingerprint changes
 # and the next get_llm() call builds a fresh provider client automatically.
 # The cache is bounded to _INSTANCE_CACHE_MAX entries with LRU eviction so that
@@ -34,7 +35,7 @@ _INSTANCE_CACHE_MAX = 256
 # Adapters older than this are evicted on cache hit and rebuilt fresh.
 # Ensures stale httpx connection pools are recycled periodically.  L-1 — T-223.
 _INSTANCE_CACHE_TTL_SECONDS: float = 3600.0
-_INSTANCES: OrderedDict[tuple[str, str, str], tuple["BaseLLMAdapter", float]] = (
+_INSTANCES: OrderedDict[tuple[str, str, str, str], tuple["BaseLLMAdapter", float]] = (
     OrderedDict()
 )
 
@@ -53,6 +54,7 @@ def get_llm(
     provider: str,
     model: str,
     *,
+    operation: str | None = None,
     bypass_circuit: bool = False,
 ) -> "BaseLLMAdapter":
     """Return a cached adapter for *provider* / *model*.
@@ -92,7 +94,8 @@ def get_llm(
         )
 
     api_key = _provider_api_key(provider)
-    key = (provider, model, _secret_fingerprint(api_key))
+    policy_key = operation or "catalog"
+    key = (provider, model, policy_key, _secret_fingerprint(api_key))
     if key in _INSTANCES:
         adapter, created_at = _INSTANCES[key]
         if _time.monotonic() - created_at < _INSTANCE_CACHE_TTL_SECONDS:
@@ -104,7 +107,7 @@ def get_llm(
     # Evict the least-recently-used entry when the cache is full.
     if len(_INSTANCES) >= _INSTANCE_CACHE_MAX:
         _INSTANCES.popitem(last=False)
-    new_adapter = _REGISTRY[provider](model, api_key=api_key)
+    new_adapter = _REGISTRY[provider](model, api_key=api_key, operation=operation)
     _INSTANCES[key] = (new_adapter, _time.monotonic())
     return new_adapter
 
@@ -135,7 +138,7 @@ def get_instrumented_llm(
     from services.llm.instrumented_adapter import InstrumentedAdapter  # noqa: PLC0415
 
     return InstrumentedAdapter(
-        get_llm(provider, model),
+        get_llm(provider, model, operation=operation),
         span_id=span_id,
         trace_id=trace_id,
         provider=provider,

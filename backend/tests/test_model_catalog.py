@@ -155,3 +155,82 @@ def test_frontier_adapter_policy_is_explicit() -> None:
         model_request_policy("anthropic", "claude-opus-4-8")["reasoning_effort"]
         == "high"
     )
+
+
+def test_core_generation_low_reasoning_is_flagged_and_operation_scoped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from config import settings
+
+    monkeypatch.setattr(settings, "core_generation_low_reasoning", True)
+
+    assert (
+        model_request_policy(
+            "anthropic",
+            "claude-haiku-4-5-20251001",
+            "spec.generate",
+        )["reasoning_effort"]
+        == "low"
+    )
+    assert (
+        model_request_policy("openai", "gpt-5.4-mini", "tasks.generate")[
+            "reasoning_effort"
+        ]
+        == "low"
+    )
+    assert (
+        model_request_policy("google", "gemini-3.5-flash", "harness.generate")[
+            "thinking_level"
+        ]
+        == "low"
+    )
+
+    # The same cheap primary models keep their catalog policy outside core stage
+    # generation, preventing judge/eval/refine/storyboard policy leakage.
+    assert (
+        model_request_policy(
+            "anthropic",
+            "claude-haiku-4-5-20251001",
+            "refine.focused",
+        )["reasoning_effort"]
+        == "medium"
+    )
+    assert (
+        model_request_policy("openai", "gpt-5.4-mini", "eval.score")["reasoning_effort"]
+        == "medium"
+    )
+    assert (
+        model_request_policy("google", "gemini-3.5-flash", "storyboard.generate")[
+            "thinking_level"
+        ]
+        == "high"
+    )
+
+
+def test_core_generation_low_reasoning_flag_off_preserves_catalog_policy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from config import settings
+
+    monkeypatch.setattr(settings, "core_generation_low_reasoning", False)
+
+    assert (
+        model_request_policy(
+            "anthropic",
+            "claude-haiku-4-5-20251001",
+            "plan.generate",
+        )["reasoning_effort"]
+        == "medium"
+    )
+    assert (
+        model_request_policy("openai", "gpt-5.4-mini", "tasks.generate")[
+            "reasoning_effort"
+        ]
+        == "medium"
+    )
+    assert (
+        model_request_policy("google", "gemini-3.5-flash", "spec.generate")[
+            "thinking_level"
+        ]
+        == "high"
+    )

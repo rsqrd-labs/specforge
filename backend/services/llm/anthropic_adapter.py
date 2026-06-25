@@ -22,10 +22,15 @@ _DEFAULT_TIMEOUT = httpx.Timeout(connect=10.0, read=300.0, write=10.0, pool=5.0)
 
 
 class AnthropicAdapter(BaseLLMAdapter):
-    def __init__(self, model: str, api_key: str | None = None) -> None:
+    def __init__(
+        self,
+        model: str,
+        api_key: str | None = None,
+        operation: str | None = None,
+    ) -> None:
         self.model = model
         self.last_completion: LLMCompletionInfo | None = None
-        self._request_policy = model_request_policy("anthropic", model)
+        self._request_policy = model_request_policy("anthropic", model, operation)
         self._client = anthropic.AsyncAnthropic(
             api_key=api_key or settings.anthropic_api_key,
             timeout=_DEFAULT_TIMEOUT,

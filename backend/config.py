@@ -220,6 +220,13 @@ class Settings(BaseSettings):
     # toggle (mid start, strong escalation) if cheap-tier quality regresses.
     core_cheap_primary: bool = True
 
+    # Stage latency lever (docs/STAGE_LATENCY_PLAN.md): when enabled, only the
+    # primary stage-generation adapter requests use low reasoning/thinking on the
+    # cheap primary model. Other uses of the same model (judge/eval, refine,
+    # storyboard, increment, critic regenerate) keep the catalog default because
+    # their call sites do not opt into operation-aware adapter policy.
+    core_generation_low_reasoning: bool = True
+
     # Phase 5.2 (issue #26): deterministic, no-LLM complexity classifier that
     # raises the *starting* tier for predictably hard core generations (regulated
     # domains, large upstream chains, prior quality-gate failures) above the cheap
@@ -239,15 +246,14 @@ class Settings(BaseSettings):
     # case: 89 FRs, truncated) is unlikely to fit at the ceiling. With this flag on,
     # that ceiling-capped repair is skipped and the `incomplete_output` block
     # surfaces immediately instead of after another multi-minute call. Under the live
-    # catalog this NO LONGER fires for core generation (the 49152 budget doubles to
-    # 98304, clamped to the true 64K ceiling — a real step above the budget), so the
-    # repair always has headroom; the flag only short-circuits genuinely ceiling-capped
-    # cases. When it does fire it actively cuts a call — it is NOT outcome-preserving: a
-    # generation that only just overran could still fit at the ceiling, so the flag
-    # trades that recovery for the saved call. That is exactly why it ships Default
-    # False — a chunk-loop change that changes which artifacts recover rides the
-    # issue-#26 golden-corpus gate and is promoted only after the manual live review
-    # (`docs/evals/ROUTE_PROMOTION.md`). Flag OFF ⇒ the loop is byte-identical.
+    # catalog this DOES fire for core generation when a 49152-token chunk limit-stops:
+    # the doubled repair clamps to the true 64000-token ceiling, so there is no larger
+    # retry left after that 64K call. When it fires it actively cuts a call — it is NOT
+    # outcome-preserving: a generation that only just overran 49152 could still fit at
+    # 64000, so the flag trades that recovery for the saved call. That is exactly why it
+    # ships Default False — a chunk-loop change that changes which artifacts recover
+    # rides the issue-#26 golden-corpus gate and is promoted only after the manual live
+    # review (`docs/evals/ROUTE_PROMOTION.md`). Flag OFF ⇒ the loop is byte-identical.
     pipeline_early_bail_unrecoverable_chunk: bool = False
 
     # Parallel chunk generation (issue #39 latency). A stage's wall-clock to

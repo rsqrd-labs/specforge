@@ -75,6 +75,7 @@ from services.observability import (
     PIPELINE_INTERRUPTED_STREAMS,
     PIPELINE_PROVIDER_LIMIT_STOPS,
     PIPELINE_QUALITY_ESCALATIONS,
+    PIPELINE_STAGE_END_TO_END_DURATION,
     PIPELINE_STREAM_WATCHDOG_TIMEOUTS,
     PIPELINE_TECH_SAFETY_FAILURES,
     PIPELINE_TECH_SAFETY_FINALISE_BLOCKS,
@@ -92,7 +93,6 @@ from services.pipeline.artifact_validator import (
     completion_instruction,
     strip_completion_sentinel,
     validate_artifact_completeness,
-    validate_completion_sentinel,
     validate_sections,
 )
 from services.pipeline.critic import (
@@ -1515,6 +1515,17 @@ def _completion_finish_reason(adapter) -> str | None:
     return str(reason) if reason is not None else None
 
 
+def _set_adapter_attempt_metadata(
+    adapter,
+    *,
+    retry_count: int,
+    repair_count: int,
+) -> None:
+    setter = getattr(adapter, "set_call_attempt_metadata", None)
+    if callable(setter):
+        setter(retry_count=retry_count, repair_count=repair_count)
+
+
 class StageDependencyError(Exception):
     pass
 
@@ -1628,6 +1639,7 @@ class StageManager:
         emit: Callable[[str], None] | None = None,
         adapter_factory: Callable[[LLMRoute], object] | None = None,
         phase: "_PhaseTracker | None" = None,
+        retry_count: int = 0,
     ) -> GeneratedArtifact:
         # Issue #39: when enabled, generate dependency-independent chunks
         # concurrently in waves (sum of chunk latencies -> ~max per wave). Needs
@@ -1648,6 +1660,7 @@ class StageManager:
                 deps=deps,
                 emit=emit,
                 phase=phase,
+                retry_count=retry_count,
             )
         chunks: list[str] = []
         repair_attempted = False
@@ -1691,6 +1704,8 @@ class StageManager:
                     chunk=chunk,
                     prior_chunks=chunks,
                     max_tokens=max_tokens,
+                    retry_count=retry_count,
+                    repair_count=0,
                     emit=live_emit,
                 )
             except IncompleteArtifactError as exc:
@@ -1743,6 +1758,8 @@ class StageManager:
                         prior_chunks=chunks,
                         max_tokens=_repair_budget(route, max_tokens, exc.issues),
                         repair_issues=exc.issues,
+                        retry_count=retry_count,
+                        repair_count=1,
                     )
                 except IncompleteArtifactError as repair_exc:
                     PIPELINE_COMPLETION_REPAIRS.labels(
@@ -1807,6 +1824,8 @@ class StageManager:
                                 prior_chunks=repaired_chunks,
                                 max_tokens=repair_max_tokens,
                                 repair_issues=exc.truncation_issues,
+                                retry_count=retry_count,
+                                repair_count=1,
                             )
                         )
                 except IncompleteArtifactError as repair_exc:
@@ -1873,6 +1892,7 @@ class StageManager:
         deps: dict[str, str],
         emit: Callable[[str], None] | None = None,
         phase: "_PhaseTracker | None" = None,
+        retry_count: int = 0,
     ) -> GeneratedArtifact:
         """Issue #39 parallel happy path: generate chunks in concurrent waves.
 
@@ -1956,6 +1976,8 @@ class StageManager:
                         chunk=chunk,
                         prior_chunks=prior_chunks,
                         max_tokens=max_tokens,
+                        retry_count=retry_count,
+                        repair_count=0,
                         emit=None,
                     )
                 except IncompleteArtifactError as exc:
@@ -1963,6 +1985,20 @@ class StageManager:
                     # The lock keeps the "at most one repair in flight" intent and
                     # serialises the (rare) concurrent-failure case.
                     async with repair_lock:
+                        if settings.pipeline_early_bail_unrecoverable_chunk and (
+                            _limit_stop_repair_is_doomed(route, max_tokens, exc.issues)
+                        ):
+                            PIPELINE_COMPLETION_REPAIRS.labels(
+                                stage_type=stage_type,
+                                provider=route.provider,
+                                outcome="skipped_at_ceiling",
+                            ).inc()
+                            raise IncompleteArtifactError(
+                                stage_type,
+                                exc.issues,
+                                partial_content=exc.partial_content,
+                                repair_attempted=False,
+                            ) from exc
                         repair_attempted = True
                         PIPELINE_COMPLETION_REPAIRS.labels(
                             stage_type=stage_type,
@@ -1982,6 +2018,8 @@ class StageManager:
                                     route, max_tokens, exc.issues
                                 ),
                                 repair_issues=exc.issues,
+                                retry_count=retry_count,
+                                repair_count=1,
                             )
                         except IncompleteArtifactError:
                             PIPELINE_COMPLETION_REPAIRS.labels(
@@ -2078,6 +2116,8 @@ class StageManager:
                                 prior_chunks=repaired_chunks,
                                 max_tokens=repair_max_tokens,
                                 repair_issues=exc.truncation_issues,
+                                retry_count=retry_count,
+                                repair_count=1,
                             )
                         )
                         last_generation_id = (
@@ -2150,9 +2190,14 @@ class StageManager:
         prior_chunks: list[str],
         max_tokens: int,
         repair_issues: list[CompletenessIssue] | None = None,
+        retry_count: int = 0,
+        repair_count: int = 0,
         emit: Callable[[str], None] | None = None,
     ) -> str:
         accumulated = ""
+        _set_adapter_attempt_metadata(
+            adapter, retry_count=retry_count, repair_count=repair_count
+        )
         chunk_prompt = _chunk_user_prompt(
             user_prompt,
             stage_type=stage_type,
@@ -2233,7 +2278,16 @@ class StageManager:
                 ],
                 partial_content=accumulated,
             )
-        validate_completion_sentinel(stage_type, accumulated, chunk_key=chunk.key)
+        # The completion sentinel is an internal "the model thinks it finished"
+        # marker, NOT a truncation signal.  Real truncation is owned by the
+        # provider limit-stop guard just above (the provider hard-stops on its
+        # token cap); a stream that ends without that flag is a naturally
+        # finished turn.  Cheap models routinely produce complete content yet
+        # drop/move/reformat the magic comment — raising here used to refund the
+        # user and trigger a per-chunk regenerate for a purely cosmetic miss
+        # (the false-refund + rerun bleed).  So we strip the sentinel if present
+        # and silently accept the chunk if it is absent; genuine missing sections
+        # are still caught downstream by the non-refunding section gate.
         cleaned = strip_completion_sentinel(
             stage_type,
             accumulated,
@@ -2701,6 +2755,8 @@ class StageManager:
         # read an ORM attribute through a possibly-aborted transaction.
         stage_type = stage.type
         workspace_id = workspace.id
+        stage_started = asyncio.get_running_loop().time()
+        stage_metric_outcome = "error"
         # Liveness heartbeat for the recovery sweep: runs for the entire
         # generation (streaming, gates, critic regenerate) and is cancelled in
         # the finally below before the stage leaves in_progress.
@@ -2731,7 +2787,11 @@ class StageManager:
                 # Always wrap for cost capture (span_id/trace_id may be None when
                 # Langfuse is off — the wrapper's Langfuse calls are no-op there).
                 return InstrumentedAdapter(
-                    get_llm(attempt_route.provider, attempt_route.model),
+                    get_llm(
+                        attempt_route.provider,
+                        attempt_route.model,
+                        operation=attempt_route.operation,
+                    ),
                     span_id=span_id,
                     trace_id=trace_id,
                     provider=attempt_route.provider,
@@ -2755,6 +2815,7 @@ class StageManager:
                 is_fallback_attempt = False
                 while True:
                     try:
+                        attempt_retry_count = 1 if is_fallback_attempt else 0
                         generated = await self._generate_complete_artifact(
                             adapter=_build_stage_adapter(route),
                             route=route,
@@ -2765,6 +2826,7 @@ class StageManager:
                             emit=emit,
                             adapter_factory=_build_stage_adapter,
                             phase=phase,
+                            retry_count=attempt_retry_count,
                         )
                     except (ProviderError, TimeoutError) as attempt_exc:
                         # Any live-streamed draft from the failed attempt is
@@ -2832,6 +2894,11 @@ class StageManager:
                 # notice (quality-gate refund bleed fix).
                 completeness_advisory = list(generated.depth_findings)
             except (ProviderError, TimeoutError) as exc:
+                stage_metric_outcome = (
+                    "provider_timeout"
+                    if isinstance(exc, TimeoutError)
+                    else "provider_error"
+                )
                 # Record failure for stream timeouts ONLY — not for ProviderError.
                 # CRITICAL: Do NOT call record_provider_failure() unconditionally here.
                 # InstrumentedAdapter.stream() already calls record_provider_failure()
@@ -2877,6 +2944,7 @@ class StageManager:
                     ) from exc
                 raise exc
             except IncompleteArtifactError as exc:
+                stage_metric_outcome = "incomplete_output"
                 gate_payload = await self._block_incomplete_output(
                     db=db,
                     redis=redis,
@@ -2901,6 +2969,7 @@ class StageManager:
 
             validation = validate(accumulated)
             if not validation.is_safe:
+                stage_metric_outcome = "security_failed"
                 if deduction_id is not None:
                     await credit_service.refund(db, deduction_id)
                 stage.status = "draft"
@@ -2932,6 +3001,7 @@ class StageManager:
                     technology_repair_used = True
                     stream_chunks = [accumulated]
             except TechSafetyError as exc:
+                stage_metric_outcome = "technology_safety_failed"
                 gate_payload = await self._block_technology_safety_output(
                     db=db,
                     redis=redis,
@@ -2948,6 +3018,7 @@ class StageManager:
                 emit(json.dumps({"quality_gate_failed": gate_payload}))
                 return
             except IncompleteArtifactError as exc:
+                stage_metric_outcome = "incomplete_output"
                 gate_payload = await self._block_incomplete_output(
                     db=db,
                     redis=redis,
@@ -2993,6 +3064,7 @@ class StageManager:
                             stage.type, accumulated, critic_deps_for_async
                         )
                     except MissingSectionError as exc:
+                        stage_metric_outcome = "missing_sections"
                         PIPELINE_VALIDATOR_FAILURES.labels(stage=stage.type).inc()
                         # The zero-LLM section gate decided this generation is
                         # terminal, so no judge call (now or in the background) is
@@ -3036,6 +3108,7 @@ class StageManager:
                 try:
                     validate_sections(stage.type, accumulated, critic_deps)
                 except MissingSectionError as exc:
+                    stage_metric_outcome = "missing_sections"
                     PIPELINE_VALIDATOR_FAILURES.labels(stage=stage.type).inc()
                     # Issue #27 Phase 3: the zero-LLM section gate decided this
                     # generation is terminal, so the critic judge call is never
@@ -3130,6 +3203,7 @@ class StageManager:
                         )
                         stream_chunks = [accumulated]
                     except IncompleteArtifactError as exc:
+                        stage_metric_outcome = "incomplete_output"
                         gate_payload = await self._block_incomplete_output(
                             db=db,
                             redis=redis,
@@ -3150,6 +3224,7 @@ class StageManager:
                     # The regenerated artifact must clear the same security gate.
                     regen_validation = validate(accumulated)
                     if not regen_validation.is_safe:
+                        stage_metric_outcome = "security_failed"
                         await self._refund_and_reset(db, deduction_id, stage, user_id)
                         _cleanup_done = True
                         sec_error = SecurityError(
@@ -3186,6 +3261,7 @@ class StageManager:
                     # the flag to forbid a second repair when pass one repaired.
                     stream_chunks = [accumulated]
             except TechSafetyError as exc:
+                stage_metric_outcome = "technology_safety_failed"
                 gate_payload = await self._block_technology_safety_output(
                     db=db,
                     redis=redis,
@@ -3202,6 +3278,7 @@ class StageManager:
                 emit(json.dumps({"quality_gate_failed": gate_payload}))
                 return
             except IncompleteArtifactError as exc:
+                stage_metric_outcome = "incomplete_output"
                 gate_payload = await self._block_incomplete_output(
                     db=db,
                     redis=redis,
@@ -3361,6 +3438,7 @@ class StageManager:
                     provider=workspace.provider,
                     content_generation_id=content_generation_id,
                 )
+            stage_metric_outcome = "succeeded"
         except Exception as exc:
             if span_id and not span_finished:
                 await self._mark_langfuse_span_failed(span_id, exc)
@@ -3421,6 +3499,11 @@ class StageManager:
                         "stage.disconnect_cleanup_error",
                         extra={"stage_id": str(stage_id)},
                     )
+            PIPELINE_STAGE_END_TO_END_DURATION.labels(
+                stage_type=stage_type,
+                provider=route.provider,
+                outcome=stage_metric_outcome,
+            ).observe(asyncio.get_running_loop().time() - stage_started)
 
     async def refine(
         self,
@@ -4538,6 +4621,7 @@ class StageManager:
             model_tier=route.model_tier,
             prompt_version=STAGE_PROMPT_VERSIONS.get(stage_type, "local"),
             operation=route.operation,
+            repair_count=1,
             cost_context=(
                 cost_context
                 if cost_context is not None
@@ -4584,7 +4668,8 @@ class StageManager:
                 partial_content=raw,
                 repair_attempted=True,
             )
-        validate_completion_sentinel(stage_type, raw)
+        # Sentinel is advisory-only (see _generate_chunk_once): strip if present,
+        # accept if absent.  Real truncation is owned by the limit-stop guard above.
         raw = strip_completion_sentinel(stage_type, raw)
         validate_artifact_completeness(stage_type, raw, deps)
         return raw

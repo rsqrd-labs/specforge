@@ -73,6 +73,8 @@ class InstrumentedAdapter(BaseLLMAdapter):
         batch: bool = False,
         cross_provider_fallback: bool = False,
         cost_context: LLMCostContext | None = None,
+        retry_count: int | None = 0,
+        repair_count: int | None = 0,
     ) -> None:
         self._wrapped = wrapped
         self._span_id = span_id
@@ -88,10 +90,23 @@ class InstrumentedAdapter(BaseLLMAdapter):
         self._batch = batch
         self._cross_provider_fallback = cross_provider_fallback
         self._cost_context = cost_context
+        self._retry_count = retry_count
+        self._repair_count = repair_count
         # Set after each recorded generation so downstream code (T-127 eval
         # score linking) can attach scores or dataset items to the same id.
         self.last_generation_id: str | None = None
         self.last_completion: LLMCompletionInfo | None = None
+
+    def set_call_attempt_metadata(
+        self,
+        *,
+        retry_count: int | None = None,
+        repair_count: int | None = None,
+    ) -> None:
+        if retry_count is not None:
+            self._retry_count = retry_count
+        if repair_count is not None:
+            self._repair_count = repair_count
 
     async def stream(
         self,
@@ -278,6 +293,8 @@ class InstrumentedAdapter(BaseLLMAdapter):
             "cache_hit": self._cache_hit,
             "batch": self._batch,
             "cross_provider_fallback": self._cross_provider_fallback,
+            "retry_count": self._retry_count,
+            "repair_count": self._repair_count,
         }
         if self._cost_context is not None:
             metadata.update(self._cost_context.as_metadata())

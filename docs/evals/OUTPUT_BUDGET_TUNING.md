@@ -8,8 +8,11 @@ budget still fits real artifacts with headroom and without truncation.
 We never guess a budget down. The defaults in `OUTPUT_TOKEN_BUDGETS`
 (`backend/services/llm/output_budget.py`) are deliberately generous because
 frontier reasoning tokens bill against the same `max_tokens` as visible output
-(issue #19); the in-code measurements (spec chunks ~15-18K output tokens; 16384
-truncated them) justify the current sizes and support lowering none of them.
+(issue #19). Core stage generation currently uses a 49152-token first-attempt
+budget with a limit-stop repair that can grow to the 64000-token model ceiling.
+Do not lower those budgets in the latency v1 change; first collect telemetry
+after `core_generation_low_reasoning` lands, because lowering reasoning changes
+the output-token distribution this gate reads.
 
 ## The evidence
 

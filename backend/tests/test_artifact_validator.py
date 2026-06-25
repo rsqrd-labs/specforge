@@ -148,6 +148,27 @@ def test_refundable_partition_separates_truncation_from_depth() -> None:
     assert exc.depth_issues == [shallow]
 
 
+def test_only_provider_facts_are_refundable() -> None:
+    # The refund discriminator is narrowed to the two objective provider-reported
+    # facts.  Everything else — a missing internal sentinel, an unbalanced fence,
+    # an incomplete harness file block — is a heuristic the user owns, never a
+    # refund or rerun (the false-refund + rerun bleed fix).
+    from services.pipeline.artifact_validator import CompletenessIssue
+
+    refundable = {"empty_artifact", "provider_stopped_by_limit"}
+    advisory = {
+        "missing_completion_sentinel",
+        "unbalanced_code_fence",
+        "incomplete_harness_file_block",
+        "shallow_required_section",
+        "dangling_trailing_line",
+    }
+    for code in refundable:
+        assert CompletenessIssue(code, "x").is_refundable is True
+    for code in advisory:
+        assert CompletenessIssue(code, "x").is_refundable is False
+
+
 def test_artifact_ending_on_complete_table_is_not_dangling() -> None:
     # A plan that legitimately closes on a markdown table (e.g. an "Open
     # Questions" matrix) ends every row with '|'. That trailing pipe must NOT be

@@ -36,3 +36,48 @@ def test_anthropic_opus48_request_includes_effort() -> None:
     assert request["messages"] == [{"role": "user", "content": "user"}]
     assert request["max_tokens"] == 8192
     assert request["extra_body"] == {"effort": "high"}
+
+
+def test_core_stage_low_reasoning_reaches_provider_payloads(monkeypatch) -> None:
+    from config import settings
+    from services.llm.anthropic_adapter import AnthropicAdapter
+    from services.llm.google_adapter import GoogleAdapter
+    from services.llm.model_catalog import model_request_policy
+    from services.llm.openai_adapter import OpenAIAdapter
+
+    monkeypatch.setattr(settings, "core_generation_low_reasoning", True)
+
+    anthropic_adapter = AnthropicAdapter.__new__(AnthropicAdapter)
+    anthropic_adapter.model = "claude-haiku-4-5-20251001"
+    anthropic_adapter._request_policy = model_request_policy(
+        "anthropic",
+        anthropic_adapter.model,
+        "spec.generate",
+    )
+    anthropic_request = anthropic_adapter._messages_request(
+        system="sys", user="user", max_tokens=49152
+    )
+    assert anthropic_request["extra_body"] == {"effort": "low"}
+
+    openai_adapter = OpenAIAdapter.__new__(OpenAIAdapter)
+    openai_adapter.model = "gpt-5.4-mini"
+    openai_adapter._request_policy = model_request_policy(
+        "openai",
+        openai_adapter.model,
+        "tasks.generate",
+    )
+    openai_request = openai_adapter._responses_request(
+        system="sys", user="user", max_tokens=49152, stream=True
+    )
+    assert openai_request["reasoning"] == {"effort": "low", "summary": "auto"}
+
+    google_adapter = GoogleAdapter.__new__(GoogleAdapter)
+    google_adapter.model = "gemini-3.5-flash"
+    google_adapter._request_policy = model_request_policy(
+        "google",
+        google_adapter.model,
+        "harness.generate",
+    )
+    google_config = google_adapter._config("sys", 49152)
+    assert google_config.thinking_config is not None
+    assert google_config.thinking_config.thinking_level.value == "LOW"

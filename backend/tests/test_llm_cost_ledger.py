@@ -310,6 +310,8 @@ async def test_instrumented_adapter_records_provider_usage_and_context(
         cost_context=LLMCostContext(
             workspace_id="ws-1", product_surface="stage_generation"
         ),
+        retry_count=1,
+        repair_count=1,
     )
     out = await adapter.complete("sys", "user", 1000)
     assert out == "ok"
@@ -320,6 +322,8 @@ async def test_instrumented_adapter_records_provider_usage_and_context(
     assert captured["output_tokens"] == 400
     assert captured["reasoning_tokens"] == 120
     assert captured["finish_reason"] == "stop"
+    assert captured["retry_count"] == 1
+    assert captured["repair_count"] == 1
     # Cost context merged in.
     assert captured["product_surface"] == "stage_generation"
     assert captured["workspace_id"] == "ws-1"
