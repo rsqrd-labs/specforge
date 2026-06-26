@@ -663,10 +663,19 @@ async def _run_reconcile_drift(
     if swept:
         await db.commit()
 
+    # Only App pushes are backfillable: ``_run_backfill`` returns immediately
+    # without a GitHub call when ``repo_id`` is NULL (legacy v1-OAuth pushes,
+    # which also carry no installation). Filtering them here avoids enqueuing a
+    # job per legacy push every tick now that the legacy terminal status is the
+    # canonical ``completed`` (audit #4) — wasted work that scales with the
+    # legacy-push count (audit "worth a glance" #1).
     completed = list(
         (
             await db.execute(
-                select(IntegrationPush).where(IntegrationPush.status == "completed")
+                select(IntegrationPush).where(
+                    IntegrationPush.status == "completed",
+                    IntegrationPush.repo_id.isnot(None),
+                )
             )
         ).scalars()
     )

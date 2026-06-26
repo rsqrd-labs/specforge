@@ -552,6 +552,9 @@ async def resync_workspace(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="No GitHub push to re-sync for this workspace.",
         )
+    # Remember the live status so a transient enqueue failure can restore it
+    # rather than failing an already-healthy push (audit #3).
+    previous_status = push.status
     push.status = "pending"
     await db.commit()
     repo_name = push.repo_full_name.split("/")[-1]
@@ -560,7 +563,9 @@ async def resync_workspace(
             "export_push", str(push.id), repo_name, "private", job_id=str(push.id)
         )
     except QueueUnavailableError as exc:
-        await github_export_service.mark_push_unstarted(db, push)
+        # A queue blip during resync must NOT drop the live push and its
+        # bidirectional sync — restore the prior status (completed/stale).
+        await github_export_service.restore_push_status(db, push, previous_status)
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Background processing is unavailable; re-sync was not started.",

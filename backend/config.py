@@ -172,10 +172,27 @@ class Settings(BaseSettings):
     # the current secret and, if set, the previous one (spec §8/§12).
     github_app_webhook_secret: str = ""
     github_app_webhook_secret_prev: str = ""
-    # Optional identity OAuth for the App (learning the installing user's login).
-    # The integration works without these; leave blank to disable identity OAuth.
+    # Identity OAuth (user-to-server) for the App. This is the credential that
+    # proves the person completing the install callback actually administers the
+    # installation's account, closing the install-callback IDOR (GitHub
+    # integration audit #1): without it the setup callback would (re)bind an
+    # attacker-supplied ``installation_id`` to the caller with no proof of
+    # control. It is therefore **required** when the App is enabled in production
+    # (see ``validate_production_settings``).
     github_app_client_id: str = ""
     github_app_client_secret: str = ""
+
+    @property
+    def github_app_identity_enabled(self) -> bool:
+        """True when the App's user-to-server identity OAuth is configured.
+
+        Both the client id and secret are required to exchange the install
+        callback's ``code`` for a user token and verify the installer
+        administers the installation (audit #1). The single source of truth for
+        "can we verify an installer", mirrored by
+        ``github_install_service.app_identity_enabled``.
+        """
+        return bool(self.github_app_client_id and self.github_app_client_secret)
 
     @property
     def github_app_enabled(self) -> bool:
@@ -623,6 +640,18 @@ def validate_production_settings() -> None:
             errors.append(
                 "GITHUB_APP_WEBHOOK_SECRET must be set when the GitHub App is "
                 "enabled, or inbound webhooks cannot be signature-verified."
+            )
+        # Identity OAuth is the install-callback's proof-of-control (audit #1).
+        # Without it the setup callback cannot verify the installer administers
+        # the installation, so it would refuse every bind and installs would
+        # silently fail closed. Require it loudly at startup instead.
+        if not settings.github_app_identity_enabled:
+            errors.append(
+                "GITHUB_APP_CLIENT_ID and GITHUB_APP_CLIENT_SECRET must be set "
+                "when the GitHub App is enabled: they are the user-to-server "
+                "identity OAuth credentials the install callback uses to verify "
+                "the installer administers the installation (prevents the "
+                "install-callback IDOR). Without them every install is refused."
             )
 
     # Brave research guard (issue #12). The feature is allowed *off* in prod (no

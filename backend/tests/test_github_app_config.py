@@ -40,6 +40,8 @@ def _valid_production(**overrides: object):
         "github_app_private_key": "",
         "github_app_webhook_secret": "",
         "github_app_webhook_secret_prev": "",
+        "github_app_client_id": "",
+        "github_app_client_secret": "",
     }
     base.update(overrides)
     patches = [patch.object(config.settings, key, value) for key, value in base.items()]
@@ -146,12 +148,35 @@ def test_prod_guard_fails_on_empty_webhook_secret_when_app_enabled() -> None:
         _undo(patches)
 
 
+def test_prod_guard_fails_on_missing_identity_oauth_when_app_enabled() -> None:
+    """Audit #1: identity OAuth is the install-callback's proof-of-control, so an
+    App-enabled production deploy without it must fail startup loudly rather than
+    silently refuse every install."""
+    patches = _valid_production(
+        github_app_id="12345",
+        github_app_slug="specforge",
+        github_app_private_key=_FAKE_PEM,
+        github_app_webhook_secret="whsec-value",
+        github_app_client_id="",
+        github_app_client_secret="",
+    )
+    _apply(patches)
+    try:
+        with pytest.raises(RuntimeError) as exc:
+            config.validate_production_settings()
+        assert "GITHUB_APP_CLIENT_ID" in str(exc.value)
+    finally:
+        _undo(patches)
+
+
 def test_prod_guard_passes_when_app_fully_configured() -> None:
     patches = _valid_production(
         github_app_id="12345",
         github_app_slug="specforge",
         github_app_private_key=_FAKE_PEM,
         github_app_webhook_secret="whsec-value",
+        github_app_client_id="iv1.appclient",
+        github_app_client_secret="app-client-secret",
     )
     _apply(patches)
     try:

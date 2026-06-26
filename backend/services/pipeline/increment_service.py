@@ -76,6 +76,7 @@ from services.integrations.task_parser import (
     compute_task_ref,
     parse_tasks,
 )
+from services.integrations.task_ref_migration import migrate_legacy_task_refs
 from services.llm.base import ProviderError, ProviderTimeoutError
 from services.llm.cost_ledger import LLMCostContext
 from services.llm.gateway import get_llm
@@ -934,21 +935,25 @@ async def _sync_increment_issues(
 ) -> dict[str, int]:
     """Create issues for NEW tasks only; update existing ones in place.
 
-    Matching is on ``task_ref`` (the human ``T-NNN`` the baseline persisted), so a
-    task already exported keeps its issue and only genuinely new tasks open new
-    ones — filed under the increment milestone and tagged with ``increment_id`` so
-    the timeline records which increment introduced each task. Each new issue is
-    committed immediately so a mid-run failure resumes without recreating it.
+    Matching/identity is the **stable** ``compute_task_ref(title)`` (audit #2) —
+    not the volatile human ``T-NNN`` — so a task already exported keeps its issue
+    across a renumber/reorder and only genuinely new tasks open new ones, filed
+    under the increment milestone and tagged with ``increment_id`` so the
+    timeline records which increment introduced each task. Pre-existing rows on
+    the legacy key are migrated in place first. Each new issue is committed
+    immediately so a mid-run failure resumes without recreating it.
     """
     repo = push.repo_full_name
+    await migrate_legacy_task_refs(db, push.id, client, repo)
     existing = await _load_push_task_rows(db, push.id)
     issue_numbers: dict[str, int] = {
         ref: row.external_issue_number for ref, row in existing.items()
     }
     for parsed in tasks:
-        row = existing.get(parsed.ref)
+        ref = compute_task_ref(parsed.title)
+        row = existing.get(ref)
         if row is not None:
-            # Changed task (same task_ref) → update its issue in place.
+            # Changed task (same stable task_ref) → update its issue in place.
             await client.update_issue(
                 repo,
                 row.external_issue_number,
@@ -967,13 +972,13 @@ async def _sync_increment_issues(
             db.add(
                 IntegrationPushTask(
                     push_id=push.id,
-                    task_ref=parsed.ref,
+                    task_ref=ref,
                     external_issue_number=number,
                     increment_id=increment.id,
                 )
             )
             await db.commit()
-            issue_numbers[parsed.ref] = number
+            issue_numbers[ref] = number
     return issue_numbers
 
 
@@ -985,12 +990,16 @@ async def _close_obsoleted_issues(
 ) -> None:
     """Close (with a note, never delete) the issues of tasks dropped by the spec.
 
-    An existing ``IntegrationPushTask`` whose ``task_ref`` is no longer in the
-    current TASKS is obsolete. Reading live issue state first makes this
-    idempotent — an already-closed issue is skipped, so a re-run never re-comments.
+    An existing ``IntegrationPushTask`` whose stable ``task_ref`` is no longer in
+    the current TASKS is obsolete. ``current_refs`` is keyed on the same stable
+    ``compute_task_ref(title)`` the rows are stored under (audit #2), so a mere
+    renumber never makes a still-present task look obsolete. Reading live issue
+    state first makes this idempotent — an already-closed issue is skipped, so a
+    re-run never re-comments. Rows are already migrated to the stable key by
+    ``_sync_increment_issues`` (which runs first in ``_drive_increment_push``).
     """
     repo = push.repo_full_name
-    current_refs = {t.ref for t in tasks}
+    current_refs = {compute_task_ref(t.title) for t in tasks}
     existing = await _load_push_task_rows(db, push.id)
     for ref, row in existing.items():
         if ref in current_refs:
@@ -1022,8 +1031,10 @@ async def _open_increment_pr(
     from services.pipeline.export_service import parse_harness_files
 
     repo = push.repo_full_name
+    # ``_increment_task_refs`` returns stable compute_task_ref keys (audit #2), so
+    # match parsed tasks on the same stable key — never the human ``T-NNN``.
     new_refs = await _increment_task_refs(db, push.id, increment.id)
-    new_tasks = [t for t in tasks if t.ref in new_refs]
+    new_tasks = [t for t in tasks if compute_task_ref(t.title) in new_refs]
     if not new_tasks:
         return
 

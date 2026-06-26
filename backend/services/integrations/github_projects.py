@@ -50,7 +50,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from database import get_shared_redis
 from models import GitHubInstallation, IntegrationPush, IntegrationPushTask, Stage
 from services.integrations.github_api_client import GitHubProjectsPermissionError
-from services.integrations.task_parser import ParsedTask, parse_tasks
+from services.integrations.task_parser import (
+    ParsedTask,
+    compute_task_ref,
+    parse_tasks,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -234,7 +238,9 @@ async def _sync_milestones(
         if number is None:
             continue
         for task in tasks:
-            row = task_rows.get(task.ref)
+            # Rows are keyed on the stable compute_task_ref (audit #2); they were
+            # migrated to it by the export/increment sync that triggers this.
+            row = task_rows.get(compute_task_ref(task.title))
             if row is not None:
                 await client.set_issue_milestone(
                     repo, row.external_issue_number, number
@@ -270,7 +276,7 @@ async def _sync_project_board(
 
     for _phase_title, tasks in phased:
         for task in tasks:
-            row = task_rows.get(task.ref)
+            row = task_rows.get(compute_task_ref(task.title))  # stable key (audit #2)
             if row is None:
                 continue
             content_id = await client.get_issue_node_id(repo, row.external_issue_number)

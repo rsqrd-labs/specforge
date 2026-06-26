@@ -367,7 +367,7 @@ def _make_push_row(*, status: str, repo: str = "octocat/x", count: int = 5) -> A
         repo_full_name=repo,
         repo_url=f"https://github.com/{repo}",
         status=status,
-        pushed_at=datetime.now(UTC) if status == "success" else None,
+        pushed_at=datetime.now(UTC) if status == "completed" else None,
         created_at=datetime.now(UTC),
     )
     push.issue_count = count  # type: ignore[attr-defined]
@@ -562,7 +562,7 @@ class TestGitHubExport:
     async def test_get_export_returns_push_when_present(
         self, authed_app: Any, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        push = _make_push_row(status="success", count=42)
+        push = _make_push_row(status="completed", count=42)
 
         async def fake_get(workspace_id: Any, user_id: Any, db: Any) -> Any:
             return push
@@ -573,7 +573,7 @@ class TestGitHubExport:
             response = await client.get(f"/workspaces/{_workspace_id()}/export/github")
         assert response.status_code == 200
         body = response.json()
-        assert body["status"] == "success"
+        assert body["status"] == "completed"
         assert body["repo_full_name"] == "octocat/x"
         assert body["issue_count"] == 42
 
@@ -633,7 +633,7 @@ class TestGitHubRateLimit:
         Exhausting the GitHub tier must not lock the user out of ZIP
         downloads.
         """
-        push = _make_push_row(status="success", count=0)
+        push = _make_push_row(status="completed", count=0)
 
         async def fake_push(**kwargs: Any) -> Any:
             return push

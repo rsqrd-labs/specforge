@@ -129,13 +129,18 @@ def test_build_scaffold_emits_ci_workflow_and_per_task_stubs() -> None:
 
 def test_build_pr_body_links_closes_n() -> None:
     tasks = parse_tasks(_TASKS_CONTENT)
+    # issue_numbers is keyed on the stable compute_task_ref(title) (audit #2).
     body = pr_export_builder.build_pr_body(
         tasks=tasks,
-        issue_numbers={"T-001": 11, "T-002": 12},
+        issue_numbers={
+            compute_task_ref("First task"): 11,
+            compute_task_ref("Second task"): 12,
+        },
         stacks=["python"],
     )
     assert "Closes #11" in body
     assert "Closes #12" in body
+    # The human T-NNN remains in the display text of the link.
     assert "T-001: First task" in body
 
 

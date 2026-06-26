@@ -6,7 +6,14 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
-PushStatus = Literal["pending", "in_progress", "success", "error"]
+# Canonical push-status vocabulary — one source of truth shared with the App
+# surface (``schemas.github.PushStatus``) (audit #4). The legacy
+# ``in_progress``/``success``/``error`` words are retired: the App path persists
+# ``completed``/``failed`` and the legacy synchronous path now does too, so a
+# completed App export serialises through ``IntegrationPushRead`` without a
+# response-validation 500. A "live" push is any non-``failed`` row; ``stale`` is
+# the drift/disconnect state.
+PushStatus = Literal["pending", "completed", "failed", "stale"]
 Visibility = Literal["public", "private"]
 
 

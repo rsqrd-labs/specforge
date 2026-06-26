@@ -34,6 +34,7 @@ from services.integrations.github_api_client import (
     GitHubNotConnectedError,
     GitHubTokenExpiredError,
 )
+from services.integrations.task_parser import compute_task_ref
 from services.pipeline.export_service import ExportNotReadyError
 from services.pipeline.github_export_service import push_to_github
 from services.security import key_vault
@@ -236,7 +237,7 @@ async def test_first_export_creates_repo_pushes_files_and_creates_issues(
         client_factory=stub,
     )
 
-    assert result.status == "success"
+    assert result.status == "completed"
     assert result.repo_full_name == "octocat/my-export"
     assert result.repo_url == "https://github.com/octocat/my-export"
     assert stub.created_repos == [("my-export", True)]
@@ -301,7 +302,7 @@ async def test_re_export_skips_create_repo_and_updates_existing_issues(
 
     # create_repo NOT called second time
     assert stub.created_repos == []
-    assert result.status == "success"
+    assert result.status == "completed"
     # All 2 issues from first export should now be UPDATED, not created
     assert len(stub.issues_updated) == 2
     assert stub.issues_created == []
@@ -340,7 +341,7 @@ async def test_token_expired_deletes_integration_and_marks_push_failed(
             select(IntegrationPush).where(IntegrationPush.workspace_id == workspace.id)
         )
     ).scalar_one()
-    assert push_row.status == "error"
+    assert push_row.status == "failed"
 
 
 async def test_stage_not_finalised_raises_export_not_ready(
@@ -440,8 +441,12 @@ async def test_partial_failure_preserves_issue_progress(
         .scalars()
         .all()
     )
+    # Identity is the stable compute_task_ref(title) (audit #2): T-001's title is
+    # "one", so only its row is persisted before the mid-flight failure.
     refs = [r.task_ref for r in rows]
-    assert refs == ["T-001"], f"Expected only T-001 persisted, got {refs}"
+    assert refs == [
+        compute_task_ref("one")
+    ], f"Expected only T-001's stable ref persisted, got {refs}"
 
     # Push row is marked as error but repo_full_name is preserved
     push = (
@@ -449,5 +454,5 @@ async def test_partial_failure_preserves_issue_progress(
             select(IntegrationPush).where(IntegrationPush.workspace_id == workspace.id)
         )
     ).scalar_one()
-    assert push.status == "error"
+    assert push.status == "failed"
     assert push.repo_full_name == "octocat/partial"

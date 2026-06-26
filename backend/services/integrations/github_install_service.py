@@ -23,11 +23,13 @@ and raw payloads are never logged or persisted here.
 
 from __future__ import annotations
 
+import json
 import logging
 import secrets
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
+from urllib.parse import urlencode
 from uuid import UUID
 
 import httpx
@@ -57,9 +59,23 @@ GITHUB_PROVIDER = "github"
 INSTALL_STATE_PREFIX = "github_app_install_state:"
 INSTALL_STATE_TTL_SECONDS = 600
 
+# One-time identity-verification state for the second OAuth hop (audit #1). It
+# binds {user_id, installation_id} so the verify callback knows *which* install
+# the returning ``code`` is meant to confirm. Same TTL as the install state.
+IDENTITY_STATE_PREFIX = "github_app_identity_state:"
+IDENTITY_STATE_TTL_SECONDS = 600
+
 _GITHUB_ACCEPT = "application/vnd.github+json"
 _GITHUB_API_VERSION = "2022-11-28"
 _INSTALL_FETCH_TIMEOUT_SECONDS = 15.0
+
+# GitHub user-to-server (identity) OAuth endpoints. The App's own client
+# id/secret authenticate these — never the App JWT or an installation token.
+_GITHUB_OAUTH_AUTHORIZE_URL = "https://github.com/login/oauth/authorize"
+_GITHUB_OAUTH_TOKEN_URL = "https://github.com/login/oauth/access_token"  # nosec B105
+# /user/installations is paginated; an installer realistically has a handful of
+# installations, but bound the scan so a hostile/huge response cannot loop us.
+_IDENTITY_MAX_PAGES = 10
 
 
 class AppNotConfiguredError(Exception):
@@ -68,6 +84,17 @@ class AppNotConfiguredError(Exception):
 
 class InstallStateError(Exception):
     """The install callback state is missing, expired, or tampered with."""
+
+
+class InstallVerificationError(Exception):
+    """The installer could not be verified as an admin of the installation.
+
+    Raised by the identity-OAuth verification path (audit #1) on any failure to
+    prove the caller administers the installation's account: a code-exchange
+    failure, an unreadable installation list, or the installation simply not
+    appearing among the user's installations. The message is intentionally
+    generic — it never carries the user token or the raw GitHub response.
+    """
 
 
 @dataclass(frozen=True)
@@ -82,6 +109,16 @@ class InstallationAccount:
 def app_install_enabled() -> bool:
     """True when the GitHub App is configured enough to offer the install flow."""
     return settings.github_app_enabled
+
+
+def app_identity_enabled() -> bool:
+    """True when the App's user-to-server identity OAuth is configured (audit #1).
+
+    The install callback can only bind an installation to a user after verifying,
+    via this identity OAuth, that the user administers the installation's account.
+    When it is not configured the callback refuses to bind (fails closed).
+    """
+    return settings.github_app_identity_enabled
 
 
 # ---------------------------------------------------------------------------
@@ -130,6 +167,199 @@ async def consume_install_state(state: str | None, redis: Any) -> UUID:
         return UUID(raw)
     except (ValueError, TypeError) as exc:
         raise InstallStateError("malformed install state") from exc
+
+
+# ---------------------------------------------------------------------------
+# Identity verification (audit #1) — prove the installer administers the install
+# ---------------------------------------------------------------------------
+
+
+async def build_identity_verify_url(
+    user_id: UUID, installation_id: int, redis: Any
+) -> str:
+    """Return the user-to-server authorize URL for the second (verify) hop.
+
+    Used only when GitHub did *not* already include an OAuth ``code`` in the
+    install redirect (i.e. "Request user authorization (OAuth) during
+    installation" is off). Mints a one-time state binding
+    ``{user_id, installation_id}`` so the verify callback can confirm the
+    returning ``code`` is for this installation, then sends the browser to
+    GitHub's authorize endpoint. GitHub redirects back to the App's configured
+    callback URL (the setup endpoint) with a ``code``.
+    """
+    state = secrets.token_urlsafe(32)
+    payload = json.dumps(
+        {"user_id": str(user_id), "installation_id": int(installation_id)}
+    )
+    await redis.set(
+        f"{IDENTITY_STATE_PREFIX}{state}",
+        payload,
+        ex=IDENTITY_STATE_TTL_SECONDS,
+    )
+    query = urlencode(
+        {
+            "client_id": settings.github_app_client_id,
+            "state": state,
+            # Force a fresh authorization so a stale cached grant can't satisfy
+            # the proof-of-control check for an installation the user no longer
+            # administers.
+            "allow_signup": "false",
+        }
+    )
+    return f"{_GITHUB_OAUTH_AUTHORIZE_URL}?{query}"
+
+
+async def consume_identity_state(
+    state: str | None, redis: Any
+) -> tuple[UUID, int] | None:
+    """Validate + consume a verify-hop state, returning ``(user_id, install_id)``.
+
+    Single-use (deleted on read). Returns ``None`` — never raises — when the
+    state is absent, expired, or not an identity-verify state, so the setup
+    callback can cleanly fall through to treating the request as a first-hop
+    install redirect instead.
+    """
+    if not state:
+        return None
+    key = f"{IDENTITY_STATE_PREFIX}{state}"
+    raw = await redis.get(key)
+    if not raw:
+        return None
+    try:
+        await redis.delete(key)
+    except Exception:  # pragma: no cover — TTL reaps it anyway
+        logger.warning("github_install.identity_state_delete_failed")
+    try:
+        data = json.loads(raw)
+        return UUID(data["user_id"]), int(data["installation_id"])
+    except (ValueError, TypeError, KeyError, json.JSONDecodeError):
+        return None
+
+
+async def exchange_identity_code(
+    code: str,
+    *,
+    client: httpx.AsyncClient | None = None,
+) -> str:
+    """Exchange an install/identity ``code`` for a user-to-server access token.
+
+    Authenticated with the App's own client id/secret (never the App JWT). The
+    returned token is a short-lived user credential used *only* to confirm the
+    installer's access; it is never persisted or logged. Raises
+    :class:`InstallVerificationError` on any failure, without leaking the code,
+    the token, or the raw GitHub body.
+    """
+    owns_client = client is None
+    http = client or make_shared_async_client()
+    try:
+        response = await http.post(
+            _GITHUB_OAUTH_TOKEN_URL,
+            data={
+                "client_id": settings.github_app_client_id,
+                "client_secret": settings.github_app_client_secret,
+                "code": code,
+            },
+            # The OAuth token endpoint (github.com, NOT the api.github.com REST
+            # API) defaults to a form-encoded body and only returns JSON when
+            # asked with ``application/json`` — matching the legacy OAuth path
+            # (github_auth_service). The REST ``vnd.github+json`` accept type here
+            # would yield a form body that ``response.json()`` cannot parse.
+            headers={"Accept": "application/json"},
+            timeout=_INSTALL_FETCH_TIMEOUT_SECONDS,
+        )
+    except httpx.HTTPError as exc:
+        raise InstallVerificationError("identity code exchange failed") from exc
+    finally:
+        if owns_client:
+            await http.aclose()
+    if response.status_code != 200:
+        raise InstallVerificationError("identity code exchange returned non-200")
+    try:
+        body = response.json()
+    except ValueError as exc:
+        msg = "identity code exchange returned non-JSON"
+        raise InstallVerificationError(msg) from exc
+    if not isinstance(body, dict) or body.get("error"):
+        raise InstallVerificationError("identity code exchange returned an error")
+    token = body.get("access_token")
+    if not isinstance(token, str) or not token:
+        raise InstallVerificationError("identity code exchange returned no token")
+    return token
+
+
+async def user_can_access_installation(
+    user_token: str,
+    installation_id: int,
+    *,
+    client: httpx.AsyncClient | None = None,
+) -> bool:
+    """True iff ``installation_id`` is among the user's accessible installations.
+
+    Calls ``GET /user/installations`` with the user-to-server token. GitHub only
+    returns an installation here for an account the user **participates in** — their
+    own personal account, or an organization where they are a member the
+    installation is visible to (owners, and members granted access to a covered
+    repository). That participation is the proof-of-control gate that closes the
+    install-callback IDOR (audit #1): an external attacker holding only the
+    enumerable numeric id is excluded. It is an *access* check, not strictly an
+    *ownership/admin* check — the residual (an org member rebinding an
+    installation to repos they already reach) is a minor in-org escalation, not
+    the cross-tenant hijack the audit flagged. Paginated and bounded. Raises
+    :class:`InstallVerificationError` if the list cannot be read (fail closed —
+    an unreadable list must never be treated as "verified").
+    """
+    owns_client = client is None
+    http = client or make_shared_async_client()
+    try:
+        for page in range(1, _IDENTITY_MAX_PAGES + 1):
+            response = await http.get(
+                f"{GITHUB_API_BASE}/user/installations?per_page=100&page={page}",
+                headers={
+                    "Authorization": f"Bearer {user_token}",
+                    "Accept": _GITHUB_ACCEPT,
+                    "X-GitHub-Api-Version": _GITHUB_API_VERSION,
+                },
+                timeout=_INSTALL_FETCH_TIMEOUT_SECONDS,
+            )
+            if response.status_code != 200:
+                raise InstallVerificationError("could not list user installations")
+            payload = response.json()
+            installations = (
+                payload.get("installations") if isinstance(payload, dict) else None
+            )
+            if not isinstance(installations, list) or not installations:
+                break
+            for inst in installations:
+                if isinstance(inst, dict) and inst.get("id") == installation_id:
+                    return True
+            if len(installations) < 100:
+                break
+    except httpx.HTTPError as exc:
+        raise InstallVerificationError("could not list user installations") from exc
+    finally:
+        if owns_client:
+            await http.aclose()
+    return False
+
+
+async def verify_installer_can_access(
+    code: str,
+    installation_id: int,
+    *,
+    client: httpx.AsyncClient | None = None,
+) -> bool:
+    """Exchange ``code`` and confirm the installer participates in the install.
+
+    The composite proof-of-control check (audit #1): a single ``True`` here is
+    the only thing that authorises (re)binding the installation row to a user.
+    Returns ``False`` on a clean "no access" verdict; re-raises
+    :class:`InstallVerificationError` on any inability to *determine* the verdict
+    (both are treated as "do not bind" by the caller, but the distinction is kept
+    for observability). See :func:`user_can_access_installation` for the exact
+    (access, not strict-admin) semantics of the gate.
+    """
+    token = await exchange_identity_code(code, client=client)
+    return await user_can_access_installation(token, installation_id, client=client)
 
 
 # ---------------------------------------------------------------------------

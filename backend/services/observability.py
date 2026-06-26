@@ -640,6 +640,9 @@ GITHUB_CHECK_TOTAL = Counter(
 # modules outside the services blob, so centralising the names here also keeps
 # the vocabulary discoverable and testable in one place.
 GITHUB_AUDIT_INSTALLED = "github.installed"
+# Emitted when the install callback refuses to (re)bind an installation because
+# the installer could not be verified as an admin of the account (audit #1).
+GITHUB_AUDIT_INSTALL_REJECTED = "github.install.rejected"
 GITHUB_AUDIT_UNINSTALLED = "github.uninstalled"
 GITHUB_AUDIT_WEBHOOK_RECEIVED = "github.webhook.received"
 GITHUB_AUDIT_WEBHOOK_DUPLICATE_SKIPPED = "github.webhook.duplicate_skipped"

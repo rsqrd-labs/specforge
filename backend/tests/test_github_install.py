@@ -193,6 +193,108 @@ async def test_consume_missing_state_raises() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Identity verification helpers (audit #1) — the proof-of-control gate
+# ---------------------------------------------------------------------------
+
+
+def _mock_identity_client(handler: Any) -> Any:
+    """Build an httpx.AsyncClient backed by a MockTransport handler."""
+    import httpx
+
+    return httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+
+async def test_user_can_access_installation_membership_gate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The gate is membership in ``GET /user/installations``: present → access,
+    absent → no access (this is the property that closes the IDOR)."""
+    import httpx
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/user/installations"
+        return httpx.Response(
+            200, json={"total_count": 2, "installations": [{"id": 42}, {"id": 7}]}
+        )
+
+    async with _mock_identity_client(handler) as http:
+        assert await svc.user_can_access_installation("tok", 42, client=http) is True
+        assert await svc.user_can_access_installation("tok", 999, client=http) is False
+
+
+async def test_user_can_access_installation_fails_closed_on_error() -> None:
+    """An unreadable installations list raises (never silently "verified")."""
+    import httpx
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(403, json={"message": "forbidden"})
+
+    async with _mock_identity_client(handler) as http:
+        with pytest.raises(svc.InstallVerificationError):
+            await svc.user_can_access_installation("tok", 42, client=http)
+
+
+async def test_user_can_access_installation_paginates() -> None:
+    """The target installation on a second page is still found (pagination)."""
+    import httpx
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        page = request.url.params.get("page")
+        if page == "1":
+            return httpx.Response(
+                200,
+                json={"installations": [{"id": i} for i in range(100)]},
+            )
+        return httpx.Response(200, json={"installations": [{"id": 4242}]})
+
+    async with _mock_identity_client(handler) as http:
+        assert await svc.user_can_access_installation("tok", 4242, client=http) is True
+
+
+async def test_exchange_identity_code_returns_token() -> None:
+    import httpx
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.host == "github.com"
+        assert request.url.path == "/login/oauth/access_token"
+        # Must ask for JSON — the OAuth token endpoint returns a form-encoded
+        # body otherwise, which response.json() cannot parse (fail-closed bug).
+        assert request.headers.get("Accept") == "application/json"
+        return httpx.Response(200, json={"access_token": "u2s-token", "scope": ""})
+
+    async with _mock_identity_client(handler) as http:
+        token = await svc.exchange_identity_code("code", client=http)
+    assert token == "u2s-token"
+
+
+async def test_exchange_identity_code_rejects_error_body() -> None:
+    import httpx
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"error": "bad_verification_code"})
+
+    async with _mock_identity_client(handler) as http:
+        with pytest.raises(svc.InstallVerificationError):
+            await svc.exchange_identity_code("code", client=http)
+
+
+async def test_consume_identity_state_roundtrip_and_misses() -> None:
+    redis = _FakeRedis()
+    user_id = uuid4()
+    url = await svc.build_identity_verify_url(user_id, 55, redis)
+    assert url.startswith(svc._GITHUB_OAUTH_AUTHORIZE_URL)
+    state = url.split("state=", 1)[1].split("&", 1)[0]
+
+    got = await svc.consume_identity_state(state, redis)
+    assert got == (user_id, 55)
+    # Single-use.
+    assert await svc.consume_identity_state(state, redis) is None
+    # A non-identity state is a clean miss (None), not an error.
+    assert await svc.consume_identity_state("not-a-state", redis) is None
+    assert await svc.consume_identity_state(None, redis) is None
+
+
+# ---------------------------------------------------------------------------
 # Upsert / list / legacy flag
 # ---------------------------------------------------------------------------
 
@@ -466,14 +568,28 @@ async def test_setup_invalid_state_redirects_without_error(
     assert "github_installed=false" in resp.headers["location"]
 
 
-async def test_setup_valid_state_upserts_and_redirects(
+def _enable_identity(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Configure the App's identity OAuth so the verified-bind path is reachable."""
+    monkeypatch.setattr(settings, "github_app_client_id", "iv1.appclient")
+    monkeypatch.setattr(settings, "github_app_client_secret", "appsecret")
+
+
+async def test_setup_verified_install_upserts_and_redirects(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Single-hop: GitHub authorized the user during install (``code`` present),
+    verification confirms admin, the install is bound."""
+    _enable_identity(monkeypatch)
     app, redis = _app(monkeypatch)
-    # Seed a valid state bound to the route user.
+    # Seed a valid install state bound to the route user.
     await redis.set(f"{svc.INSTALL_STATE_PREFIX}good", str(_ROUTE_USER.id), ex=600)
 
     captured: dict[str, Any] = {}
+
+    async def fake_verify(code: str, installation_id: int, **kw: Any) -> bool:
+        captured["verified_code"] = code
+        captured["verified_install"] = installation_id
+        return True
 
     async def fake_fetch(installation_id: int, **kw: Any) -> InstallationAccount:
         captured["fetched"] = installation_id
@@ -481,16 +597,181 @@ async def test_setup_valid_state_upserts_and_redirects(
 
     async def fake_upsert(db: Any, **kwargs: Any) -> Any:
         captured["upserted"] = kwargs["installation_id"]
+        captured["bound_user"] = kwargs["user_id"]
         return None
 
+    monkeypatch.setattr(svc, "verify_installer_can_access", fake_verify)
     monkeypatch.setattr(svc, "fetch_installation_account", fake_fetch)
     monkeypatch.setattr(svc, "upsert_installation", fake_upsert)
 
     async with _client(app) as client:
         resp = await client.get(
-            "/integrations/github/setup?installation_id=42&setup_action=install&state=good",
+            "/integrations/github/setup"
+            "?installation_id=42&setup_action=install&code=oauthcode&state=good",
             follow_redirects=False,
         )
     assert resp.status_code == 307
     assert "github_installed=true" in resp.headers["location"]
-    assert captured == {"fetched": 42, "upserted": 42}
+    assert captured["fetched"] == 42
+    assert captured["upserted"] == 42
+    assert captured["bound_user"] == _ROUTE_USER.id
+    assert captured["verified_install"] == 42
+
+
+async def test_setup_install_hijack_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Audit #1 regression: an attacker's valid ``state`` + a victim's
+    ``installation_id`` must NOT bind when verification fails (the attacker does
+    not administer the victim's installation). No upsert; redirect false."""
+    _enable_identity(monkeypatch)
+    app, redis = _app(monkeypatch)
+    # Attacker holds a perfectly valid state bound to their own account.
+    await redis.set(f"{svc.INSTALL_STATE_PREFIX}attacker", str(_ROUTE_USER.id), ex=600)
+
+    upsert_calls: list[Any] = []
+
+    async def fake_verify(code: str, installation_id: int, **kw: Any) -> bool:
+        # /user/installations does not contain the victim's install for the
+        # attacker → not an admin.
+        return False
+
+    async def fake_upsert(db: Any, **kwargs: Any) -> Any:  # pragma: no cover
+        upsert_calls.append(kwargs)
+        return None
+
+    monkeypatch.setattr(svc, "verify_installer_can_access", fake_verify)
+    monkeypatch.setattr(svc, "upsert_installation", fake_upsert)
+
+    async with _client(app) as client:
+        resp = await client.get(
+            "/integrations/github/setup"
+            "?installation_id=999999&setup_action=install&code=stolen&state=attacker",
+            follow_redirects=False,
+        )
+    assert resp.status_code == 307
+    assert "github_installed=false" in resp.headers["location"]
+    assert upsert_calls == []  # the victim's installation was never rebound
+
+
+async def test_setup_verification_error_refuses_bind(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An *inability* to determine admin status (e.g. GitHub unreachable) fails
+    closed — never bind on an unverifiable installer."""
+    _enable_identity(monkeypatch)
+    app, redis = _app(monkeypatch)
+    await redis.set(f"{svc.INSTALL_STATE_PREFIX}good", str(_ROUTE_USER.id), ex=600)
+
+    async def fake_verify(code: str, installation_id: int, **kw: Any) -> bool:
+        raise svc.InstallVerificationError("github unreachable")
+
+    async def fake_upsert(db: Any, **kwargs: Any) -> Any:  # pragma: no cover
+        raise AssertionError("must not bind on a verification error")
+
+    monkeypatch.setattr(svc, "verify_installer_can_access", fake_verify)
+    monkeypatch.setattr(svc, "upsert_installation", fake_upsert)
+
+    async with _client(app) as client:
+        resp = await client.get(
+            "/integrations/github/setup"
+            "?installation_id=42&setup_action=install&code=c&state=good",
+            follow_redirects=False,
+        )
+    assert resp.status_code == 307
+    assert "github_installed=false" in resp.headers["location"]
+
+
+async def test_setup_without_code_redirects_to_authorize(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two-hop: no ``code`` in the install redirect → bounce the browser to the
+    user-to-server authorize endpoint to obtain proof of control."""
+    _enable_identity(monkeypatch)
+    app, redis = _app(monkeypatch)
+    await redis.set(f"{svc.INSTALL_STATE_PREFIX}good", str(_ROUTE_USER.id), ex=600)
+
+    async def fake_upsert(db: Any, **kwargs: Any) -> Any:  # pragma: no cover
+        raise AssertionError("must not bind before verification")
+
+    monkeypatch.setattr(svc, "upsert_installation", fake_upsert)
+
+    async with _client(app) as client:
+        resp = await client.get(
+            "/integrations/github/setup"
+            "?installation_id=42&setup_action=install&state=good",
+            follow_redirects=False,
+        )
+    assert resp.status_code == 307
+    location = resp.headers["location"]
+    assert location.startswith("https://github.com/login/oauth/authorize")
+    assert "client_id=iv1.appclient" in location
+    assert "state=" in location
+
+
+async def test_setup_verify_hop_returns_and_binds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Second hop: the verify-state round-trip returns with a ``code`` and binds
+    the installation captured in the verify state."""
+    _enable_identity(monkeypatch)
+    app, redis = _app(monkeypatch)
+    # Simulate the verify-state minted during hop 1.
+    import json as _json
+
+    await redis.set(
+        f"{svc.IDENTITY_STATE_PREFIX}verify",
+        _json.dumps({"user_id": str(_ROUTE_USER.id), "installation_id": 77}),
+        ex=600,
+    )
+
+    captured: dict[str, Any] = {}
+
+    async def fake_verify(code: str, installation_id: int, **kw: Any) -> bool:
+        captured["install"] = installation_id
+        return True
+
+    async def fake_fetch(installation_id: int, **kw: Any) -> InstallationAccount:
+        return _account()
+
+    async def fake_upsert(db: Any, **kwargs: Any) -> Any:
+        captured["upserted"] = kwargs["installation_id"]
+        return None
+
+    monkeypatch.setattr(svc, "verify_installer_can_access", fake_verify)
+    monkeypatch.setattr(svc, "fetch_installation_account", fake_fetch)
+    monkeypatch.setattr(svc, "upsert_installation", fake_upsert)
+
+    async with _client(app) as client:
+        resp = await client.get(
+            "/integrations/github/setup?code=returncode&state=verify",
+            follow_redirects=False,
+        )
+    assert resp.status_code == 307
+    assert "github_installed=true" in resp.headers["location"]
+    assert captured == {"install": 77, "upserted": 77}
+
+
+async def test_setup_refuses_when_identity_unconfigured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fail closed: with identity OAuth off we cannot prove control, so even a
+    valid install state must not bind."""
+    monkeypatch.setattr(settings, "github_app_client_id", "")
+    monkeypatch.setattr(settings, "github_app_client_secret", "")
+    app, redis = _app(monkeypatch)
+    await redis.set(f"{svc.INSTALL_STATE_PREFIX}good", str(_ROUTE_USER.id), ex=600)
+
+    async def fake_upsert(db: Any, **kwargs: Any) -> Any:  # pragma: no cover
+        raise AssertionError("must not bind without identity verification")
+
+    monkeypatch.setattr(svc, "upsert_installation", fake_upsert)
+
+    async with _client(app) as client:
+        resp = await client.get(
+            "/integrations/github/setup"
+            "?installation_id=42&setup_action=install&code=c&state=good",
+            follow_redirects=False,
+        )
+    assert resp.status_code == 307
+    assert "github_installed=false" in resp.headers["location"]

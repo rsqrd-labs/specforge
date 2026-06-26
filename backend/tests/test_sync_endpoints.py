@@ -13,7 +13,7 @@ from uuid import uuid4
 
 import pytest
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy import delete
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
@@ -219,6 +219,47 @@ async def test_resync_resets_pending_and_enqueues_202(engine) -> None:
         assert enqueued and enqueued[0][0] == "export_push"
         assert enqueued[0][1] == str(seeded["push"].id)
         assert enqueued[0][-1] == str(seeded["push"].id)  # job_id == push_id
+    finally:
+        monkey.undo()
+        await _teardown(maker, seeded)
+
+
+async def test_resync_queue_outage_restores_live_push(engine) -> None:
+    """Audit #3: a transient queue failure during resync must restore the push's
+    prior live status (here ``stale``) — never fail it — so ``find_live_push``
+    still sees it and bidirectional sync survives the blip."""
+    from services.integrations.push_repo import find_workspace_live_push
+    from services.queue import QueueUnavailableError
+
+    maker = async_sessionmaker(engine, expire_on_commit=False)
+    seeded = await _seed(maker)  # push seeded with status="stale"
+
+    async def boom(job: str, *args: Any, **kwargs: Any) -> str:
+        raise QueueUnavailableError("down")
+
+    app = _build_app(engine, seeded["user"], boom)
+    monkey = pytest.MonkeyPatch()
+    monkey.setattr(workspace_router, "enqueue", boom)
+    try:
+        async with _client(app) as client:
+            resp = await client.post(
+                f"/workspaces/{seeded['workspace'].id}/sync/resync"
+            )
+        assert resp.status_code == 503
+
+        # The push is restored to its prior live status, not left 'failed'.
+        async with maker() as check:
+            row = (
+                await check.execute(
+                    select(IntegrationPush).where(
+                        IntegrationPush.id == seeded["push"].id
+                    )
+                )
+            ).scalar_one()
+            assert row.status == "stale"
+            # And it is still the workspace's live push.
+            live = await find_workspace_live_push(check, seeded["workspace"].id)
+            assert live is not None and live.id == seeded["push"].id
     finally:
         monkey.undo()
         await _teardown(maker, seeded)

@@ -45,6 +45,7 @@ from services.integrations.github_api_client import (
     GitHubProjectsPermissionError,
     make_app_github_client,
 )
+from services.integrations.task_parser import compute_task_ref
 
 pytestmark = pytest.mark.asyncio
 
@@ -382,23 +383,25 @@ async def _seed(db: AsyncSession) -> dict[str, Any]:
     await db.commit()
     await db.refresh(push)
 
+    # Rows are keyed on the stable compute_task_ref(title) exactly as the export
+    # sync persists them (audit #2), so the board match resolves by title.
     db.add_all(
         [
             IntegrationPushTask(
                 push_id=push.id,
-                task_ref="T-001",
+                task_ref=compute_task_ref("Set up project"),
                 external_issue_number=101,
                 state="done",
             ),
             IntegrationPushTask(
                 push_id=push.id,
-                task_ref="T-002",
+                task_ref=compute_task_ref("Build the parser"),
                 external_issue_number=102,
                 state="open",
             ),
             IntegrationPushTask(
                 push_id=push.id,
-                task_ref="T-003",
+                task_ref=compute_task_ref("Add billing"),
                 external_issue_number=103,
                 state="open",
             ),

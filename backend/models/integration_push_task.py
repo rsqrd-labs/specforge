@@ -47,7 +47,11 @@ class IntegrationPushTask(Base):
         nullable=False,
         index=True,
     )
-    # Content-stable across increments, e.g. T-001.
+    # The stable, content-derived identity of the task: ``compute_task_ref(title)``
+    # (task_parser), shaped ``task-<hex>``. It is invariant under a renumber/reorder
+    # of the human ``T-NNN`` headings, which is exactly why matching/dedup keys on
+    # it and never on ``T-NNN`` (audit #2). Legacy rows persisted under the human
+    # ``T-NNN`` are migrated in place on the next sync (``task_ref_migration``).
     task_ref: Mapped[str] = mapped_column(Text, nullable=False)
     external_issue_number: Mapped[int] = mapped_column(Integer, nullable=False)
     # The increment that introduced/last changed this task. FK target

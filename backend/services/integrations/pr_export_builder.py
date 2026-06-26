@@ -138,7 +138,9 @@ def build_pr_body(
         "",
     ]
     for task in tasks:
-        number = issue_numbers.get(task.ref)
+        # ``issue_numbers`` is keyed on the stable compute_task_ref (audit #2);
+        # the human ``T-NNN`` stays in the link's display text only.
+        number = issue_numbers.get(compute_task_ref(task.title))
         if number is not None:
             lines.append(f"- Closes #{number} — {task.ref}: {task.title}")
         else:

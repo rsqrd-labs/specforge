@@ -50,8 +50,10 @@ from services.integrations.github_app_auth import verify_webhook_signature
 from services.integrations.github_install_service import (
     AppNotConfiguredError,
     InstallStateError,
+    InstallVerificationError,
 )
 from services.observability import (
+    GITHUB_AUDIT_INSTALL_REJECTED,
     GITHUB_AUDIT_WEBHOOK_DUPLICATE_SKIPPED,
     GITHUB_AUDIT_WEBHOOK_RECEIVED,
     GITHUB_WEBHOOK_DEDUPED_TOTAL,
@@ -125,18 +127,46 @@ async def github_app_setup(
     request: Request,
     installation_id: int | None = None,
     setup_action: str | None = None,
+    code: str | None = None,
     state: str | None = None,
     db: AsyncSession = Depends(get_db),
     redis: Redis = Depends(get_redis),
 ) -> RedirectResponse:
-    """GitHub App install callback.
+    """GitHub App install callback (identity-verified — audit #1).
 
-    Authenticated solely by the one-time ``state`` (the browser redirect from
-    GitHub carries no bearer token) — the state binding recovers the installing
-    user. Validates state, learns the account from GitHub (App JWT), upserts the
-    installation, and redirects to Settings. ``setup_action`` may be
+    The browser redirect from GitHub carries no bearer token, so the request is
+    authenticated by the one-time ``state`` *and* — critically — the
+    installation is only bound to the caller after a user-to-server OAuth check
+    proves the caller administers the installation's account. Without that proof
+    an attacker could supply a victim's ``installation_id`` with their own valid
+    ``state`` and hijack the install (IDOR).
+
+    Two shapes arrive here:
+
+    1. **First hop (install redirect)** — ``installation_id`` + ``state``, and,
+       when "Request user authorization (OAuth) during installation" is enabled
+       on the App, an OAuth ``code`` too. With a ``code`` we verify inline
+       (single hop). Without one we mint a verify-state and redirect to GitHub's
+       authorize endpoint (the App's callback URL must point back here).
+    2. **Second hop (verify return)** — ``code`` + a verify ``state`` minted in
+       hop 1; we exchange the code, confirm admin, and bind.
+
+    Any failure to *prove* control refuses the bind and redirects to Settings
+    with ``github_installed=false`` (fail closed). ``setup_action`` may be
     ``install`` / ``update`` / ``request``; only a real install id is persisted.
     """
+    # --- Second hop: a verify-state round-trip returning with an OAuth code. ---
+    verify = await github_install_service.consume_identity_state(state, redis)
+    if verify is not None:
+        verify_user_id, verify_install_id = verify
+        return await _complete_verified_install(
+            db,
+            user_id=verify_user_id,
+            installation_id=verify_install_id,
+            code=code,
+        )
+
+    # --- First hop: the install redirect, authenticated by the install state. ---
     try:
         user_id = await github_install_service.consume_install_state(state, redis)
     except InstallStateError:
@@ -147,20 +177,36 @@ async def github_app_setup(
         # persist; bounce back to Settings without an error.
         return _settings_redirect(installed=False)
 
-    try:
-        account = await github_install_service.fetch_installation_account(
-            installation_id
+    if not github_install_service.app_identity_enabled():
+        # Cannot prove the caller administers the installation, so we must not
+        # bind it (audit #1). In production this is unreachable —
+        # validate_production_settings requires identity OAuth when the App is
+        # enabled — but fail closed and log loudly if it is ever hit.
+        logger.error(
+            "github_app_setup.identity_oauth_unconfigured: refusing to bind "
+            "installation without proof of control (set GITHUB_APP_CLIENT_ID/"
+            "GITHUB_APP_CLIENT_SECRET)."
         )
-        await github_install_service.upsert_installation(
-            db,
-            installation_id=installation_id,
-            user_id=user_id,
-            account=account,
-        )
-    except InstallStateError:
+        _audit_install_rejected(installation_id, "identity_oauth_unconfigured")
         return _settings_redirect(installed=False)
 
-    return _settings_redirect(installed=True)
+    if code:
+        # Single hop: GitHub already authorized the user during installation.
+        return await _complete_verified_install(
+            db,
+            user_id=user_id,
+            installation_id=installation_id,
+            code=code,
+        )
+
+    # Two hops: obtain user authorization now, then bind on the verify return.
+    authorize_url = await github_install_service.build_identity_verify_url(
+        user_id, installation_id, redis
+    )
+    return RedirectResponse(
+        url=authorize_url,
+        status_code=status.HTTP_307_TEMPORARY_REDIRECT,
+    )
 
 
 @router.get("/github/installations", response_model=InstallationList)
@@ -337,6 +383,66 @@ async def handle_lifecycle_event(
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+async def _complete_verified_install(
+    db: AsyncSession,
+    *,
+    user_id: UUID,
+    installation_id: int,
+    code: str | None,
+) -> RedirectResponse:
+    """Verify the installer administers the install, then bind it (audit #1).
+
+    Binds (upserts) the installation only when the user-to-server OAuth check
+    confirms the caller administers the installation's account. Any failure —
+    missing code, a failed verdict, or an inability to determine the verdict —
+    refuses the bind, audits the rejection, and redirects to Settings with a
+    ``false`` flag. Fails closed in every branch.
+    """
+    if not code:
+        _audit_install_rejected(installation_id, "missing_identity_code")
+        return _settings_redirect(installed=False)
+    try:
+        verified = await github_install_service.verify_installer_can_access(
+            code, installation_id
+        )
+    except InstallVerificationError:
+        logger.warning(
+            "github_app_setup.verification_error installation_id=%s",
+            installation_id,
+        )
+        _audit_install_rejected(installation_id, "verification_error")
+        return _settings_redirect(installed=False)
+    if not verified:
+        _audit_install_rejected(installation_id, "no_installation_access")
+        return _settings_redirect(installed=False)
+
+    try:
+        account = await github_install_service.fetch_installation_account(
+            installation_id
+        )
+        await github_install_service.upsert_installation(
+            db,
+            installation_id=installation_id,
+            user_id=user_id,
+            account=account,
+        )
+    except InstallStateError:
+        _audit_install_rejected(installation_id, "account_lookup_failed")
+        return _settings_redirect(installed=False)
+
+    return _settings_redirect(installed=True)
+
+
+def _audit_install_rejected(installation_id: int, reason: str) -> None:
+    """Emit a structured audit row for a refused install bind (audit #1)."""
+    github_audit(
+        GITHUB_AUDIT_INSTALL_REJECTED,
+        installation_id=installation_id,
+        action=reason,
+        status="rejected",
+    )
 
 
 def _settings_redirect(*, installed: bool) -> RedirectResponse:

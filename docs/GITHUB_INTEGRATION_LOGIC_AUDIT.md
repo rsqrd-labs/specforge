@@ -200,3 +200,56 @@ vocabularies are an easy place for a future `status == "…"` check to go wrong.
    supported flow (re-finalise + resync).
 3. **#3 (resync fails a healthy push)** — availability on a queue blip.
 4. **#4 (status vocabulary)** — coherence debt.
+
+---
+
+## Resolution (2026-06-26)
+
+All four findings are fixed; the two "worth a glance" items are addressed.
+
+**#1 — install hijack (IDOR).** The setup callback is now identity-verified
+(`routers/integrations.py::github_app_setup` →
+`github_install_service.verify_installer_can_access`). It completes the GitHub App
+**user-to-server OAuth** — single-hop when GitHub includes `code` in the install
+redirect ("Request user authorization (OAuth) during installation"), otherwise a
+second authorize hop via `build_identity_verify_url` / `consume_identity_state` —
+and binds the installation **only** after `GET /user/installations` confirms the
+caller participates in (can access) it. That is an access check — sufficient to
+stop the cross-tenant hijack (an external attacker with only the enumerable
+numeric id is excluded); it is not a strict org-ownership check, and the residual
+in-org escalation is documented on `user_can_access_installation`. Any failure
+refuses the bind, redirects `github_installed=false`, and audits
+`github.install.rejected`. Identity OAuth is
+now **required** when the App is enabled (`config.github_app_identity_enabled` +
+`validate_production_settings`), so a misconfigured deploy fails loudly at startup
+instead of silently refusing installs. Regression: `test_github_install.py`
+(`test_setup_install_hijack_is_refused` and the membership-gate unit tests).
+
+**#2 — issue↔task identity.** Persistence and matching now key on the stable
+`compute_task_ref(title)` at **every** join site — export (`_sync_issues` + the
+legacy `_run_export`), increment sync (`_sync_increment_issues`,
+`_close_obsoleted_issues`, `_open_increment_pr`), the PR-body `Closes #N` map
+(`pr_export_builder.build_pr_body`), and the Projects board
+(`github_projects.py`). Pre-existing `T-NNN` rows are migrated in place from the
+**live GitHub issue titles** (renumber-invariant) on the next sync
+(`services/integrations/task_ref_migration.py`), gated by a fast-path that skips
+the GitHub call once no legacy refs remain. The model comment is corrected.
+Regression: `test_increment_renumber_resync_keeps_issue_mapping` (incl. an
+increment-origin row) and `test_task_ref_migration_fast_path_skips_github`. This
+also resolves "worth a glance" #2 (the agent-issue/PR `task_ref` now matches the
+tracked identity).
+
+**#3 — resync fails a healthy push.** `resync_workspace` captures the prior live
+status and restores it on a queue outage (`github_export_service.restore_push_status`)
+instead of failing the row. Regression:
+`test_resync_queue_outage_restores_live_push`.
+
+**#4 — status vocabulary.** Unified on the canonical
+`pending`/`completed`/`failed`/`stale` everywhere: the legacy synchronous path
+no longer writes `in_progress`/`success`/`error`, `schemas/integration.py`
+`PushStatus` matches the model + App schema (fixing a latent
+`IntegrationPushRead` response-validation 500 on a completed App push), and
+migration `0028` normalises existing rows. As a follow-on, `reconcile_drift` now
+only enqueues `backfill_repo` for backfillable (App, `repo_id`-bearing) pushes —
+addressing "worth a glance" #1's linear scaling and avoiding wasted no-op jobs
+for the newly-`completed` legacy pushes.

@@ -13,8 +13,10 @@ Two layers, both against the real DB (migrations applied):
 
 The acceptance test ``test_increment_push_creates_only_new_issues`` seeds baseline
 ``IntegrationPushTask`` rows exactly as ``github_export_service._sync_issues``
-persists them — keyed on the human ``T-NNN`` ``task_ref`` — so the test mirrors
-how real layering works rather than a synthetic key.
+persists them — keyed on the stable, content-derived ``compute_task_ref(title)``
+(audit #2) — so the test mirrors how real layering works rather than a synthetic
+key. ``test_increment_renumber_resync_keeps_issue_mapping`` covers the legacy →
+stable migration on a renumber, including an increment-origin row.
 """
 
 from __future__ import annotations
@@ -47,6 +49,7 @@ from models import (
 )
 from routers import workspace as workspace_router
 from services.integrations import github_reconcile
+from services.integrations.task_parser import compute_task_ref
 from services.pipeline import increment_service
 
 pytestmark = pytest.mark.asyncio
@@ -78,6 +81,9 @@ class _StubClient:
         self.milestones: dict[str, int] = {}
         self.issue_states: dict[int, str] = {}
         self.create_issue_error: Exception | None = None
+        # Rows returned by list_issues (used by the legacy→stable task_ref
+        # migration and the backfill reconcile). Each item: {number, title, ...}.
+        self.list_issues_result: list[dict[str, Any]] = []
         self._issue_counter = 200
         self._milestone_counter = 0
         # PR-mode bookkeeping.
@@ -131,7 +137,7 @@ class _StubClient:
     async def list_issues(
         self, repo: str, *, state: str = "all", since: str | None = None, **_: Any
     ) -> list[dict[str, Any]]:
-        return []
+        return list(self.list_issues_result)
 
     # ----- PR mode -----
     async def get_ref(self, repo: str, ref: str) -> str:
@@ -265,13 +271,13 @@ async def _seed_baseline(
         [
             IntegrationPushTask(
                 push_id=push.id,
-                task_ref="T-001",
+                task_ref=compute_task_ref("Set up project structure"),
                 external_issue_number=101,
                 state="open",
             ),
             IntegrationPushTask(
                 push_id=push.id,
-                task_ref="T-002",
+                task_ref=compute_task_ref("Build the parser"),
                 external_issue_number=102,
                 state="open",
             ),
@@ -346,10 +352,12 @@ async def test_increment_push_creates_only_new_issues(session: AsyncSession) -> 
                 )
             ).scalars()
         }
-        assert set(rows) == {"T-001", "T-002", "T-003"}
-        assert rows["T-003"].external_issue_number == created["number"]
-        assert rows["T-003"].increment_id == inc.id
-        assert rows["T-001"].increment_id is None  # baseline untouched
+        ref_t1 = compute_task_ref("Set up project structure")
+        ref_t3 = compute_task_ref("Add billing")
+        assert set(rows) == {ref_t1, compute_task_ref("Build the parser"), ref_t3}
+        assert rows[ref_t3].external_issue_number == created["number"]
+        assert rows[ref_t3].increment_id == inc.id
+        assert rows[ref_t1].increment_id is None  # baseline untouched
 
         await session.refresh(inc)
         assert inc.status == "pushed"
@@ -381,7 +389,185 @@ async def test_increment_push_is_idempotent(session: AsyncSession) -> None:
             )
         ).scalars()
         refs = [r.task_ref for r in rows]
-        assert sorted(refs) == ["T-001", "T-002", "T-003"]  # no duplicate row
+        assert sorted(refs) == sorted(
+            compute_task_ref(t)
+            for t in ("Set up project structure", "Build the parser", "Add billing")
+        )  # no duplicate row
+    finally:
+        await _teardown(session, seeded)
+
+
+async def test_increment_renumber_resync_keeps_issue_mapping(
+    session: AsyncSession,
+) -> None:
+    """Audit #2 regression: legacy ``T-NNN`` rows (incl. an increment-origin row)
+    are migrated to the stable identity from the live issue titles, so a sync
+    over a **renumbered** TASKS updates the *same* issues — no duplicate is
+    opened and no still-present task is wrongly closed.
+    """
+    # Current TASKS keeps the same three titles but RENUMBERED (T-005/6/7) vs the
+    # legacy rows seeded as T-001/2/3 — the exact shape that corrupts a T-NNN key.
+    renumbered = (
+        "# Tasks\n\n"
+        "### T-005: Set up project structure\n\n**Description:** Skeleton.\n\n"
+        "### T-006: Build the parser\n\n**Description:** Parser.\n\n"
+        "### T-007: Add billing\n\n**Description:** Stripe checkout.\n"
+    )
+    seeded = await _seed_baseline(session, tasks_content=renumbered)
+    push = seeded["push"]
+
+    # Replace the stable rows _seed_baseline created with LEGACY (T-NNN) rows,
+    # including one increment-origin row (tagged with a prior increment).
+    prior_inc = await _make_increment(session, seeded["workspace"], sequence=1)
+    await session.execute(
+        delete(IntegrationPushTask).where(IntegrationPushTask.push_id == push.id)
+    )
+    session.add_all(
+        [
+            IntegrationPushTask(
+                push_id=push.id,
+                task_ref="T-001",
+                external_issue_number=101,
+                state="open",
+            ),
+            IntegrationPushTask(
+                push_id=push.id,
+                task_ref="T-002",
+                external_issue_number=102,
+                state="open",
+            ),
+            IntegrationPushTask(
+                push_id=push.id,
+                task_ref="T-003",
+                external_issue_number=103,
+                state="open",
+                increment_id=prior_inc.id,  # increment-origin row
+            ),
+        ]
+    )
+    await session.commit()
+
+    inc = await _make_increment(session, seeded["workspace"], sequence=2)
+    stub = _StubClient()
+    # The live issue titles are the renumber-invariant identity source.
+    stub.list_issues_result = [
+        {"number": 101, "title": "Set up project structure"},
+        {"number": 102, "title": "Build the parser"},
+        {"number": 103, "title": "Add billing"},
+    ]
+    for n in (101, 102, 103):
+        stub.issue_states[n] = "open"
+    try:
+        await increment_service.run_increment_push(
+            {}, str(inc.id), db=session, client=stub
+        )
+
+        # No duplicate issue opened; nothing closed; all three updated in place.
+        assert stub.created_issues == []
+        assert stub.closed == []
+        assert {n for n, _ in stub.updated_issues} == {101, 102, 103}
+
+        rows = {
+            r.task_ref: r
+            for r in (
+                await session.execute(
+                    select(IntegrationPushTask).where(
+                        IntegrationPushTask.push_id == push.id
+                    )
+                )
+            ).scalars()
+        }
+        # Rows now carry the stable identity, exactly three (no duplicate row).
+        assert set(rows) == {
+            compute_task_ref("Set up project structure"),
+            compute_task_ref("Build the parser"),
+            compute_task_ref("Add billing"),
+        }
+        # The increment-origin row migrated too, keeping its mapping + tag.
+        billing = rows[compute_task_ref("Add billing")]
+        assert billing.external_issue_number == 103
+        assert billing.increment_id == prior_inc.id
+    finally:
+        await _teardown(session, seeded)
+
+
+async def test_task_ref_migration_fast_path_skips_github(
+    session: AsyncSession,
+) -> None:
+    """Steady state (no legacy-shaped refs) must NOT call list_issues — the
+    migration is free once every row is stable."""
+    from services.integrations.task_ref_migration import migrate_legacy_task_refs
+
+    seeded = await _seed_baseline(session)  # seeds rows on the stable key
+    push = seeded["push"]
+
+    class _ExplodingList(_StubClient):
+        async def list_issues(self, *a: Any, **k: Any) -> list[dict[str, Any]]:
+            raise AssertionError("list_issues must not be called on the fast path")
+
+    try:
+        migrated = await migrate_legacy_task_refs(
+            session, push.id, _ExplodingList(), "octo/app"
+        )
+        assert migrated == 0
+    finally:
+        await _teardown(session, seeded)
+
+
+async def test_task_ref_migration_collision_and_missing_title(
+    session: AsyncSession,
+) -> None:
+    """Defensive paths: two issues with the same title collide on the stable key
+    (first wins, the rest stay legacy — never violating uq_push_task_ref), and an
+    issue whose title cannot be recovered is left on its legacy ref."""
+    from services.integrations.task_ref_migration import (
+        is_legacy_task_ref,
+        migrate_legacy_task_refs,
+    )
+
+    seeded = await _seed_baseline(session)
+    push = seeded["push"]
+    await session.execute(
+        delete(IntegrationPushTask).where(IntegrationPushTask.push_id == push.id)
+    )
+    session.add_all(
+        [
+            IntegrationPushTask(
+                push_id=push.id, task_ref="T-001", external_issue_number=101
+            ),
+            IntegrationPushTask(  # same title as 101 → collision
+                push_id=push.id, task_ref="T-002", external_issue_number=102
+            ),
+            IntegrationPushTask(  # title not in list_issues → unrecoverable
+                push_id=push.id, task_ref="T-003", external_issue_number=103
+            ),
+        ]
+    )
+    await session.commit()
+
+    stub = _StubClient()
+    stub.list_issues_result = [
+        {"number": 101, "title": "Same title"},
+        {"number": 102, "title": "Same title"},
+        # 103 deliberately absent (e.g. issue deleted on GitHub).
+    ]
+    try:
+        migrated = await migrate_legacy_task_refs(session, push.id, stub, "octo/app")
+        assert migrated == 1  # only the first "Same title" row migrated
+
+        rows = {
+            r.external_issue_number: r.task_ref
+            for r in (
+                await session.execute(
+                    select(IntegrationPushTask).where(
+                        IntegrationPushTask.push_id == push.id
+                    )
+                )
+            ).scalars()
+        }
+        assert rows[101] == compute_task_ref("Same title")
+        assert is_legacy_task_ref(rows[102])  # collided → left legacy
+        assert rows[103] == "T-003"  # unrecoverable → left legacy
     finally:
         await _teardown(session, seeded)
 

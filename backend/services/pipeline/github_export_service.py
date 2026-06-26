@@ -4,12 +4,18 @@ Drives the full export sequence: validates the user's GitHub connection,
 creates or reuses a repo, pushes all four stage files (same layout as the
 ZIP export), and creates one GitHub Issue per T-NNN task.
 
+All push rows — App and legacy — use the single canonical status vocabulary
+``pending``/``completed``/``failed``/``stale`` (audit #4). The retired legacy
+words (``in_progress``/``success``/``error``) are gone so a completed push always
+serialises through ``IntegrationPushRead`` and ``find_live_push`` /
+``reconcile_drift`` never misread a legacy value.
+
 State machine:
 
     [no push row]                   [push row exists]
             \\                          /
              v                        v
-        status="in_progress" (push row is the lock — commit before any GitHub call)
+        status="pending" (push row is the lock — commit before any GitHub call)
                        |
         if repo_full_name is None: create_repo
                        |
@@ -17,16 +23,16 @@ State machine:
                        |
               create/update issues sequentially
                        |
-        status="success" + pushed_at + integration.last_used_at
+        status="completed" + pushed_at + integration.last_used_at
 
 On ``GitHubTokenExpiredError``:
   1. Delete UserIntegration in its own commit (a single-transaction wrap
      would lose the invalidation if the push update fails for any reason).
-  2. Mark push as ``status="error"``.
+  2. Mark push as ``status="failed"``.
   3. Re-raise.
 
 On any other exception after the push row is committed:
-  - Mark push as ``status="error"`` and re-raise. Re-export resumes from
+  - Mark push as ``status="failed"`` and re-raise. Re-export resumes from
     the same row — partial state (files pushed, issues partially created)
     is preserved because the IntegrationPushTask rows are committed one
     per issue.
@@ -80,7 +86,8 @@ from services.integrations.github_governor import (
     InstallationRateGovernor,
     make_governor,
 )
-from services.integrations.task_parser import ParsedTask, parse_tasks
+from services.integrations.task_parser import ParsedTask, compute_task_ref, parse_tasks
+from services.integrations.task_ref_migration import migrate_legacy_task_refs
 from services.observability import (
     GITHUB_AUDIT_EXPORT_COMPLETED,
     GITHUB_AUDIT_PR_OPENED,
@@ -125,7 +132,7 @@ async def push_to_github(
     optional override used by tests to inject a stub GitHub client — the
     production code path passes ``None`` and a real httpx client is built.
 
-    Returns the IntegrationPush row in ``status="success"`` on completion.
+    Returns the IntegrationPush row in ``status="completed"`` on completion.
     Raises:
         GitHubNotConnectedError: user has no GitHub integration row.
         ExportNotReadyError: workspace or any stage not finalised.
@@ -620,13 +627,19 @@ async def _sync_issues(
 ) -> dict[str, int]:
     """Create/update one issue per task; return the ``{task_ref: issue#}`` map.
 
-    Each new issue is committed immediately so a mid-run rate-limit resumes
-    without recreating issues 1..N-1.
+    Matching/identity is the **stable** ``compute_task_ref(title)`` (audit #2),
+    never the volatile human ``T-NNN`` — so a re-finalise that renumbers/reorders
+    tasks still updates each task's *same* issue instead of mismapping and
+    opening duplicates. Pre-existing rows on the legacy key are migrated in place
+    first. Each new issue is committed immediately so a mid-run rate-limit
+    resumes without recreating issues 1..N-1.
     """
+    await migrate_legacy_task_refs(db, push.id, client, repo)
     existing = await _load_existing_push_tasks(db, push.id)
     issue_numbers: dict[str, int] = dict(existing)
     for parsed in tasks:
-        existing_number = existing.get(parsed.ref)
+        ref = compute_task_ref(parsed.title)
+        existing_number = existing.get(ref)
         # Agent-ready body + labels (T-277): the issue is an optimal agent prompt.
         if existing_number is not None:
             await client.update_issue(
@@ -643,12 +656,12 @@ async def _sync_issues(
             db.add(
                 IntegrationPushTask(
                     push_id=push.id,
-                    task_ref=parsed.ref,
+                    task_ref=ref,
                     external_issue_number=number,
                 )
             )
             await db.commit()
-            issue_numbers[parsed.ref] = number
+            issue_numbers[ref] = number
     return issue_numbers
 
 
@@ -729,11 +742,15 @@ async def _run_export(
         )
 
     # Step 6 — create/update issues sequentially. GitHub has a secondary
-    # rate limit on content creation; gathering these would trip it.
+    # rate limit on content creation; gathering these would trip it. Identity is
+    # the stable compute_task_ref(title) (audit #2), migrating any legacy rows
+    # first so a renumber/reorder updates the same issue rather than duplicating.
+    await migrate_legacy_task_refs(db, push.id, client, push.repo_full_name)
     existing_tasks = await _load_existing_push_tasks(db, push.id)
     tasks = parse_tasks(stages["tasks"].content or "")
     for parsed in tasks:
-        existing_number = existing_tasks.get(parsed.ref)
+        ref = compute_task_ref(parsed.title)
+        existing_number = existing_tasks.get(ref)
         if existing_number is not None:
             await client.update_issue(
                 push.repo_full_name,
@@ -750,7 +767,7 @@ async def _run_export(
             db.add(
                 IntegrationPushTask(
                     push_id=push.id,
-                    task_ref=parsed.ref,
+                    task_ref=ref,
                     external_issue_number=number,
                 )
             )
@@ -759,8 +776,8 @@ async def _run_export(
             # from #50 without recreating them.
             await db.commit()
 
-    # Step 7 — finalise
-    push.status = "success"
+    # Step 7 — finalise (canonical status — audit #4)
+    push.status = "completed"
     push.pushed_at = datetime.now(UTC)
     integration.last_used_at = datetime.now(UTC)
     await db.commit()
@@ -810,13 +827,38 @@ async def mark_push_unstarted(db: AsyncSession, push: IntegrationPush) -> None:
     """Mark a just-prepared push ``failed`` when enqueue could not start it.
 
     Leaves no dangling non-``failed`` row that ``find_live_push`` would treat as
-    a live push for the repo.
+    a live push for the repo. Correct for a *first* export (the row had no prior
+    live state); a **resync** must use :func:`restore_push_status` instead so a
+    queue blip never drops an already-healthy push (audit #3).
     """
     await _mark_push_failed(db, push, status="failed")
 
 
+async def restore_push_status(
+    db: AsyncSession, push: IntegrationPush, status: str
+) -> None:
+    """Restore a push to a prior status after a transient enqueue failure.
+
+    Used by **resync** (audit #3): resync flips a live (``completed``/``stale``)
+    push to ``pending`` before enqueuing. If the queue is briefly unavailable,
+    failing the row would make ``find_live_push`` (``status <> 'failed'``)
+    exclude it, silently dropping the workspace's bidirectional sync until a full
+    re-export. Restoring the prior live status keeps the push live and re-syncable
+    on retry. Uses the same safe commit-with-rollback as ``_mark_push_failed``.
+    """
+    try:
+        push.status = status
+        await db.commit()
+    except Exception:
+        logger.exception("github_export.restore_status_commit_error")
+        try:
+            await db.rollback()
+        except Exception:  # pragma: no cover - best-effort rollback
+            logger.exception("github_export.restore_status_rollback_error")
+
+
 async def _mark_push_failed(
-    db: AsyncSession, push: IntegrationPush, *, status: str = "error"
+    db: AsyncSession, push: IntegrationPush, *, status: str = "failed"
 ) -> None:
     try:
         push.status = status
@@ -881,7 +923,7 @@ async def _upsert_push_row(
     user_id: UUID,
 ) -> IntegrationPush:
     """Reuse the workspace's existing github push or create one, marking it
-    ``in_progress``.
+    ``pending`` (the canonical in-flight status — audit #4).
 
     Historically this was a single ``INSERT ... ON CONFLICT`` on the
     ``uq_integration_push_workspace_provider`` constraint. Phase 21's migration
@@ -905,11 +947,11 @@ async def _upsert_push_row(
             workspace_id=workspace_id,
             user_id=user_id,
             provider=GITHUB_PROVIDER,
-            status="in_progress",
+            status="pending",
         )
         db.add(push)
     else:
-        push.status = "in_progress"
+        push.status = "pending"
     await db.commit()
     await db.refresh(push)
     return push
