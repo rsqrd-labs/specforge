@@ -1,4 +1,5 @@
 import { useRef } from "react"
+import { Link } from "react-router-dom"
 import { useFocusTrap } from "../../hooks/useFocusTrap"
 
 interface CreditConfirmModalProps {
@@ -33,6 +34,14 @@ const ACTION_COPY: Record<string, string> = {
     "Preview a precise edit for the selected text before accepting changes.",
 }
 
+// The noun each action becomes in the out-of-credits message, e.g.
+// "This generation needs 10 credits".
+const ACTION_NOUN: Record<string, string> = {
+  generate: "generation",
+  regenerate: "regeneration",
+  refine: "refinement",
+}
+
 export function CreditConfirmModal({
   action,
   creditCost,
@@ -49,6 +58,52 @@ export function CreditConfirmModal({
   const isInsufficient = resolvedBalance < resolvedCost
   const dialogRef = useRef<HTMLDivElement>(null)
   useFocusTrap(dialogRef, onCancel)
+
+  // Out of credits: rather than show a negative "After" figure and a dead
+  // disabled action, present a clear recovery card pointing at billing.
+  if (isInsufficient) {
+    const actionNoun = ACTION_NOUN[action] ?? "action"
+    return (
+      <div
+        className="create-modal-backdrop"
+        onClick={(e) => e.target === e.currentTarget && onCancel()}
+      >
+        <div
+          ref={dialogRef}
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="credit-modal-title"
+          className="create-modal workspace-credit-modal"
+        >
+          <div className="create-modal-header">
+            <h2 id="credit-modal-title" className="create-modal-title">
+              You&apos;re out of credits
+            </h2>
+            <button onClick={onCancel} className="create-modal-close" aria-label="Close">✕</button>
+          </div>
+
+          <div className="create-modal-body">
+            <div className="workspace-credit-empty" role="alert">
+              <p className="workspace-credit-empty-lede">
+                This {actionNoun} needs {resolvedCost} credits, and your balance is{" "}
+                {resolvedBalance}. Top up your account to keep building — your work
+                so far is saved.
+              </p>
+            </div>
+
+            <div className="modal-footer">
+              <button type="button" onClick={onCancel} className="modal-cancel">
+                Not now
+              </button>
+              <Link to="/billing" className="modal-submit modal-submit-link" onClick={onCancel}>
+                Buy credits
+              </Link>
+            </div>
+          </div>
+        </div>
+      </div>
+    )
+  }
 
   return (
     <div
@@ -90,18 +145,12 @@ export function CreditConfirmModal({
             </div>
             <div className="workspace-credit-after">
               <span>After</span>
-              <strong className={isInsufficient ? "danger" : ""}>
+              <strong>
                 <span>{remaining}</span> remaining
               </strong>
               <span className="sr-only">{remaining} remaining</span>
             </div>
           </div>
-
-          {isInsufficient && (
-            <p className="modal-error" style={{ marginTop: 0 }}>
-              Insufficient credits to proceed.
-            </p>
-          )}
 
           <div className="modal-footer">
             <button type="button" onClick={onCancel} className="modal-cancel">
@@ -110,7 +159,6 @@ export function CreditConfirmModal({
             <button
               type="button"
               onClick={onConfirm}
-              disabled={isInsufficient}
               className="modal-submit"
             >
               {ACTION_LABELS[action] ?? "Confirm"}

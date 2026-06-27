@@ -1,3 +1,4 @@
+import type { ComponentProps } from "react"
 import { render, screen } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { describe, expect, it, vi } from "vitest"
@@ -71,21 +72,33 @@ describe("CreditConfirmModal", () => {
     onCancel: vi.fn(),
   }
 
+  // The out-of-credits state renders a router <Link> to billing, so every
+  // case is wrapped in a MemoryRouter to supply the routing context.
+  function renderModal(
+    props: Partial<ComponentProps<typeof CreditConfirmModal>> = {},
+  ) {
+    return render(
+      <MemoryRouter>
+        <CreditConfirmModal {...defaults} {...props} />
+      </MemoryRouter>,
+    )
+  }
+
   it("displays the credit cost and current balance", () => {
-    render(<CreditConfirmModal {...defaults} />)
+    renderModal()
     expect(screen.getByText("10")).toBeInTheDocument()
     expect(screen.getByText("30")).toBeInTheDocument()
   })
 
   it("shows the action name capitalised in the heading", () => {
-    render(<CreditConfirmModal {...defaults} action="regenerate" />)
+    renderModal({ action: "regenerate" })
     expect(
       screen.getByRole("heading", { name: /^regenerate$/i }),
     ).toBeInTheDocument()
   })
 
   it("describes the selected action as value instead of token details", () => {
-    render(<CreditConfirmModal {...defaults} action="refine" creditCost={3} />)
+    renderModal({ action: "refine", creditCost: 3 })
     expect(
       screen.getByRole("heading", { name: /^refine$/i }),
     ).toBeInTheDocument()
@@ -96,7 +109,7 @@ describe("CreditConfirmModal", () => {
   it("calls onConfirm when the action button is clicked", async () => {
     const user = userEvent.setup()
     const onConfirm = vi.fn()
-    render(<CreditConfirmModal {...defaults} onConfirm={onConfirm} />)
+    renderModal({ onConfirm })
     await user.click(screen.getByRole("button", { name: /^generate$/i }))
     expect(onConfirm).toHaveBeenCalledOnce()
   })
@@ -104,8 +117,39 @@ describe("CreditConfirmModal", () => {
   it("calls onCancel when Cancel button is clicked", async () => {
     const user = userEvent.setup()
     const onCancel = vi.fn()
-    render(<CreditConfirmModal {...defaults} onCancel={onCancel} />)
+    renderModal({ onCancel })
     await user.click(screen.getByRole("button", { name: /cancel/i }))
     expect(onCancel).toHaveBeenCalledOnce()
+  })
+
+  describe("when the balance is insufficient", () => {
+    const broke = { currentBalance: 0 }
+
+    it("shows an out-of-credits card instead of a negative balance", () => {
+      renderModal(broke)
+      expect(
+        screen.getByRole("heading", { name: /out of credits/i }),
+      ).toBeInTheDocument()
+      // No negative "After" figure and no confirm/generate action.
+      expect(screen.queryByText("-10")).not.toBeInTheDocument()
+      expect(
+        screen.queryByRole("button", { name: /^generate$/i }),
+      ).not.toBeInTheDocument()
+    })
+
+    it("offers a billing link to buy more credits", () => {
+      renderModal(broke)
+      expect(
+        screen.getByRole("link", { name: /buy credits/i }),
+      ).toHaveAttribute("href", "/billing")
+    })
+
+    it("dismisses when the billing link is followed", async () => {
+      const user = userEvent.setup()
+      const onCancel = vi.fn()
+      renderModal({ ...broke, onCancel })
+      await user.click(screen.getByRole("link", { name: /buy credits/i }))
+      expect(onCancel).toHaveBeenCalledOnce()
+    })
   })
 })

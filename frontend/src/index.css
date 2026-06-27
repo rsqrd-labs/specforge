@@ -11473,6 +11473,29 @@ button:disabled {
   color: #dc2626;
 }
 
+.workspace-credit-empty {
+  border: 1px solid var(--color-error-container);
+  border-radius: 8px;
+  background: var(--color-error-container);
+  padding: 14px 16px;
+}
+
+.workspace-credit-empty-lede {
+  margin: 0;
+  color: var(--color-on-error-container);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+/* The billing CTA is a router <Link> (an <a>), so give it the button box
+   model that .modal-submit assumes on a <button>. */
+.modal-submit-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  text-decoration: none;
+}
+
 .storyboard-create-modal {
   max-width: 560px;
 }
