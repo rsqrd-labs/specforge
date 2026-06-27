@@ -95,6 +95,67 @@ SECTION_CONTRACTS: dict[str, list[str]] = {
     ],
 }
 
+# Demo Day mode contracts (docs/DEMO_DAY_MODE_IMPLEMENTATION_PLAN.md §6). A
+# parallel, mode-keyed structure: leaner than the standard contract and
+# re-pointed for a ≤5-hour build, plus the three rubric sections (AI Usage /
+# Security Posture / Scalability Story) so the demo-day questions are always
+# answered. Selected when ``workspace.mode == "demo_day"``. Standard contracts
+# above are untouched (the §4 byte-identical regression-pin contract).
+DEMO_DAY_SECTION_CONTRACTS: dict[str, list[str]] = {
+    "spec": [
+        "## Overview",
+        "## Target User and Core Problem",
+        "## Demo Day Scope",
+        "## Out of Scope",
+        "## Functional Requirements",
+        "## Acceptance Criteria",
+        "## Success Demo",
+        "## AI Usage",
+        "## Security Posture",
+        "## Scalability Story",
+        "## Risks and Assumptions",
+    ],
+    "plan": [
+        "## Architecture Overview",
+        "## Technology Stack",
+        "## Requirement Traceability Matrix",
+        "## Interface Contracts",
+        "## Data Model and Persistence",
+        "## Build Sequence",
+        "## Environment and Bootstrap",
+        "## Architecture Decision Records",
+        "## Scalability and Performance",
+        "## Security Architecture",
+        "## Risks and Mitigations",
+    ],
+    "harness": [
+        "## Harness Overview",
+        "## Frozen Interface Contracts",
+        "## Requirement-to-Test Matrix",
+        "## End-to-End Smoke Test",
+        "## File Tree",
+        "## Files",
+    ],
+    "tasks": [
+        "## Effort Summary",
+        "## Build Order",
+        "## Traceability Overview",
+        "## Tasks",
+    ],
+}
+
+
+def section_contract(stage_type: str, mode: str = "standard") -> list[str]:
+    """The required section headings for a stage, selected by workspace mode.
+
+    ``mode="demo_day"`` returns the lean rubric-aware Demo Day contract; any
+    other value (the default) returns the unchanged standard contract.
+    """
+    if mode == "demo_day":
+        return DEMO_DAY_SECTION_CONTRACTS.get(stage_type, [])
+    return SECTION_CONTRACTS.get(stage_type, [])
+
+
 # Conditional sections — keyed by stage, value is a list of (sentinel_regex,
 # section_heading) pairs.  When any sentinel matches an upstream artifact, the
 # section must appear in the current artifact.
@@ -228,21 +289,25 @@ def validate_sections(
     stage_type: str,
     artifact_md: str,
     deps: dict[str, str] | None = None,
+    mode: str = "standard",
 ) -> None:
     """Assert every required section heading appears in artifact_md.
 
-    Conditional sections (T-242 Frontend Architecture) are enforced only when
-    their sentinel matches in the upstream deps.
+    The contract is selected by ``mode`` (standard vs demo_day). Conditional
+    sections (T-242 Frontend Architecture) are a standard-mode concept enforced
+    only when their sentinel matches in the upstream deps; the lean Demo Day
+    contract has no conditional sections.
 
     Raises MissingSectionError listing all absent headings (does NOT
     short-circuit at the first miss — returning the full list improves UX).
     """
-    required = list(SECTION_CONTRACTS.get(stage_type, []))
+    required = list(section_contract(stage_type, mode))
     deps = deps or {}
     upstream = " ".join(deps.values())
-    for sentinel, heading in _CONDITIONAL_SECTIONS.get(stage_type, []):
-        if sentinel.search(upstream):
-            required.append(heading)
+    if mode != "demo_day":
+        for sentinel, heading in _CONDITIONAL_SECTIONS.get(stage_type, []):
+            if sentinel.search(upstream):
+                required.append(heading)
 
     missing = [heading for heading in required if heading not in artifact_md]
     if missing:
@@ -327,6 +392,7 @@ def validate_artifact_completeness(
     stage_type: str,
     artifact_md: str,
     deps: dict[str, str] | None = None,
+    mode: str = "standard",
 ) -> None:
     deps = deps or {}
     issues: list[CompletenessIssue] = []
@@ -338,17 +404,29 @@ def validate_artifact_completeness(
                 detail="The generated artifact is empty.",
             )
         )
-    issues.extend(_section_body_issues(stage_type, stripped, deps))
+    issues.extend(_section_body_issues(stage_type, stripped, deps, mode))
     issues.extend(_markdown_shape_issues(stripped))
-    if stage_type == "spec":
-        issues.extend(_spec_issues(stripped))
-    if stage_type == "plan":
-        issues.extend(_plan_issues(stripped, deps))
-    if stage_type == "harness":
-        issues.extend(_harness_issues(stripped))
-    if stage_type == "tasks":
-        issues.extend(_task_issues(stripped, deps))
+    if mode == "demo_day":
+        # Lean Demo-Day-appropriate floors (§6.5). NOT the standard 16-field /
+        # ≥5-FR rigor — a ≤5-hour build is deliberately smaller.
+        if stage_type == "spec":
+            issues.extend(_demo_day_spec_issues(stripped))
+        if stage_type == "harness":
+            issues.extend(_demo_day_harness_issues(stripped))
+        if stage_type == "tasks":
+            issues.extend(_demo_day_task_issues(stripped))
+    else:
+        if stage_type == "spec":
+            issues.extend(_spec_issues(stripped))
+        if stage_type == "plan":
+            issues.extend(_plan_issues(stripped, deps))
+        if stage_type == "harness":
+            issues.extend(_harness_issues(stripped))
+        if stage_type == "tasks":
+            issues.extend(_task_issues(stripped, deps))
     if stage_type in {"plan", "harness", "tasks"}:
+        # Cross-stage ID preservation (every upstream FR/NFR/SEC/AC present) is
+        # mode-agnostic and load-bearing for traceability in both modes.
         issues.extend(_traceability_issues(stripped, deps))
     if issues:
         raise IncompleteArtifactError(
@@ -358,8 +436,12 @@ def validate_artifact_completeness(
         )
 
 
-def _required_headings(stage_type: str, deps: dict[str, str]) -> list[str]:
-    required = list(SECTION_CONTRACTS.get(stage_type, []))
+def _required_headings(
+    stage_type: str, deps: dict[str, str], mode: str = "standard"
+) -> list[str]:
+    required = list(section_contract(stage_type, mode))
+    if mode == "demo_day":
+        return required
     upstream = " ".join(deps.values())
     for sentinel, heading in _CONDITIONAL_SECTIONS.get(stage_type, []):
         if sentinel.search(upstream):
@@ -397,10 +479,11 @@ def _section_body_issues(
     stage_type: str,
     artifact_md: str,
     deps: dict[str, str],
+    mode: str = "standard",
 ) -> list[CompletenessIssue]:
     issues: list[CompletenessIssue] = []
     conditional = _conditional_headings_for_stage(stage_type)
-    for heading in _required_headings(stage_type, deps):
+    for heading in _required_headings(stage_type, deps, mode):
         body = _section_body(artifact_md, heading)
         # A conditional section answered with the blessed "Not applicable …"
         # one-liner is valid even though it is well under the depth floor — the
@@ -1110,6 +1193,149 @@ def _ref_matches(ref: str, known: set[str]) -> bool:
         return True
     parts = normalized.split("::")
     return bool(parts) and (parts[-1] in known or "::".join(parts[-2:]) in known)
+
+
+# ---------------------------------------------------------------------------
+# Demo Day mode floors (docs/DEMO_DAY_MODE_IMPLEMENTATION_PLAN.md §6.5). These
+# replace the standard spec/harness/tasks floors for demo_day workspaces: a
+# ≤5-hour build is deliberately smaller, and the construction verifier (§7) does
+# the heavier structural verification. Every code emitted here is non-refundable
+# (not in REFUNDABLE_INCOMPLETE_CODES), so it surfaces as a non-blocking advisory
+# finding — the user owns the artifact (issue #34 stance), exactly as the
+# standard ``insufficient_task_count`` / ``insufficient_requirement_ids`` floors.
+# ---------------------------------------------------------------------------
+
+_DEMO_DAY_MIN_FR = 3
+_DEMO_DAY_MIN_AC = 3
+_DEMO_DAY_MIN_TASK_BLOCKS = 4
+# Per-task fields a Demo Day task block must carry (§6.4). Mirrors the standard
+# bold-field style and adds the two Demo-Day fields (Estimated minutes,
+# Precondition) the construction verifier joins on (C1/C5).
+_DEMO_DAY_TASK_FIELDS: tuple[str, ...] = (
+    "**Spec refs:**",
+    "**Plan refs:**",
+    "**Harness refs:**",
+    "**Priority:**",
+    "**Estimate:**",
+    "**Estimated minutes:**",
+    "**Precondition:**",
+    "**Steps**",
+    "**Acceptance Criteria**",
+)
+
+
+def _demo_day_spec_issues(artifact_md: str) -> list[CompletenessIssue]:
+    issues: list[CompletenessIssue] = []
+    distinct_fr = set(re.findall(r"\bFR-\d{3}\b", artifact_md))
+    if len(distinct_fr) < _DEMO_DAY_MIN_FR:
+        issues.append(
+            CompletenessIssue(
+                code="insufficient_requirement_ids",
+                detail=(
+                    f"Demo Day SPEC must define at least {_DEMO_DAY_MIN_FR} "
+                    f"distinct FR-NNN identifiers; found {len(distinct_fr)}."
+                ),
+                reference="FR",
+            )
+        )
+    # The AC ids must live in the ## Acceptance Criteria section so the verifier's
+    # C3 (AC → harness RTM → ≥1 task) can join on them (§7.1.1).
+    ac_section = _section_body(artifact_md, "## Acceptance Criteria")
+    distinct_ac = set(_AC_ID_RE.findall(ac_section))
+    if len(distinct_ac) < _DEMO_DAY_MIN_AC:
+        issues.append(
+            CompletenessIssue(
+                code="insufficient_requirement_ids",
+                detail=(
+                    f"Demo Day SPEC must define at least {_DEMO_DAY_MIN_AC} "
+                    "distinct AC-NNN identifiers in the Acceptance Criteria "
+                    f"section; found {len(distinct_ac)}."
+                ),
+                reference="AC",
+            )
+        )
+    return issues
+
+
+def _e2e_names_a_test(body: str) -> bool:
+    """True when the End-to-End Smoke Test section names a concrete test.
+
+    The guarantee-bearing e2e must be cited verbatim by the final task (verifier
+    C4), so the section has to name a backticked test file/path or test name —
+    not just prose. Conservative: an empty or prose-only section reads as a miss.
+    """
+    if not body.strip():
+        return False
+    tokens = re.findall(r"`([^`]+)`", body)
+    return any(
+        _looks_like_test_file_path(token)
+        or "test" in token.lower()
+        or "e2e" in token.lower()
+        or "smoke" in token.lower()
+        for token in tokens
+    )
+
+
+def _demo_day_harness_issues(artifact_md: str) -> list[CompletenessIssue]:
+    e2e_body = _section_body(artifact_md, "## End-to-End Smoke Test")
+    if not _e2e_names_a_test(e2e_body):
+        return [
+            CompletenessIssue(
+                code="missing_e2e_smoke_test",
+                detail=(
+                    "Demo Day HARNESS must define at least one End-to-End Smoke "
+                    "Test naming the guarantee-bearing test file/path (the "
+                    "unmockable test that must be green from the first slice)."
+                ),
+                reference="## End-to-End Smoke Test",
+            )
+        ]
+    return []
+
+
+def _demo_day_task_issues(artifact_md: str) -> list[CompletenessIssue]:
+    task_headers = list(_TASK_HEADER_RE.finditer(artifact_md))
+    if not task_headers:
+        return [
+            CompletenessIssue(
+                code="missing_task_blocks",
+                detail="Demo Day TASKS.md must include at least one ### T-NNN block.",
+                reference="tasks",
+            )
+        ]
+    issues: list[CompletenessIssue] = []
+    if len(task_headers) < _DEMO_DAY_MIN_TASK_BLOCKS:
+        issues.append(
+            CompletenessIssue(
+                code="insufficient_task_count",
+                detail=(
+                    f"Demo Day TASKS.md contains only {len(task_headers)} task "
+                    f"blocks; at least {_DEMO_DAY_MIN_TASK_BLOCKS} are required "
+                    "for a verifiable walking-skeleton build."
+                ),
+                reference="tasks",
+            )
+        )
+    for index, match in enumerate(task_headers):
+        end = (
+            task_headers[index + 1].start()
+            if index + 1 < len(task_headers)
+            else len(artifact_md)
+        )
+        block = artifact_md[match.start() : end]
+        missing = [field for field in _DEMO_DAY_TASK_FIELDS if field not in block]
+        if missing:
+            issues.append(
+                CompletenessIssue(
+                    code="incomplete_task_fields",
+                    detail=(
+                        f"{match.group(0).rstrip(':')} is missing required Demo Day "
+                        f"task fields: {', '.join(missing[:4])}."
+                    ),
+                    reference=match.group(0).rstrip(":"),
+                )
+            )
+    return issues
 
 
 def _upstream_requirement_ids(deps: dict[str, str]) -> set[str]:

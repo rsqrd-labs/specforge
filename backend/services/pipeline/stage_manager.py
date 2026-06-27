@@ -26,6 +26,7 @@ from models.stage import NON_OVERRIDABLE_GATE_KINDS, derive_quality_gate_recover
 from prompts.base import (
     SECURITY_AND_PRIVACY_RULES,
     STAGE_PROMPT_VERSIONS,
+    stage_prompt_version,
     wrap_untrusted_content,
 )
 from schemas.stage import DiffResponse, RefineRequest
@@ -91,6 +92,7 @@ from services.observability import (
     record_judge_call_skipped,
     record_problem_statement_tokens,
 )
+from services.pipeline import demo_day_verdict
 from services.pipeline.artifact_validator import (
     CompletenessIssue,
     IncompleteArtifactError,
@@ -106,6 +108,7 @@ from services.pipeline.critic import (
     CriticFinding,
     critic_review,
 )
+from services.pipeline.demo_day_plan_linter import ConstructionVerdict
 from services.pipeline.diff_engine import (
     apply_diff,
     compute_diff,
@@ -336,6 +339,69 @@ _BACKGROUND_PIPELINE_TASKS: set[asyncio.Task] = set()
 def _log_critic_error(task: asyncio.Task) -> None:
     if not task.cancelled() and (exc := task.exception()):
         logger.error("critic_background_failed", extra={"error": str(exc)})
+
+
+# Strong references to in-flight fire-and-forget Demo Day construction-verifier
+# tasks (plan §7.3) — same garbage-collection guard as _BACKGROUND_CRITIC_TASKS.
+# The verifier runs detached after the tasks stage of a demo_day workspace, so it
+# survives client disconnect on its own session. Tasks remove themselves on done.
+_BACKGROUND_VERIFIER_TASKS: set[asyncio.Task] = set()
+
+# Construction-check ownership for the one funded advisory regenerate (plan §7.3).
+# A failing check fails at the *seam between* stages; the rule routes a gap to the
+# most-downstream stage that owns it. Only the tasks-owned set is regenerable from
+# the detached verifier: regenerating tasks needs no upstream re-finalise. A
+# harness-owned gap (C3/C4) would need a harness regenerate + re-finalise +
+# tasks cascade, which the background path deliberately does NOT do — those gaps
+# stay advisory (a named gap beats a fragile silent cascade).
+_TASKS_OWNED_CHECKS = frozenset({"C1", "C2"})
+_HARNESS_OWNED_CHECKS = frozenset({"C3", "C4"})
+# The checks that flip the verdict (C5 is advisory-only — never triggers regen).
+_VERDICT_CHECKS = _TASKS_OWNED_CHECKS | _HARNESS_OWNED_CHECKS
+
+
+def _log_verifier_error(task: asyncio.Task) -> None:
+    if not task.cancelled() and (exc := task.exception()):
+        logger.error(
+            "construction_verifier_background_failed", extra={"error": str(exc)}
+        )
+
+
+def _failing_verdict_checks(verdict: ConstructionVerdict) -> set[str]:
+    """The verdict-affecting (C1–C4) check ids that failed."""
+    return {
+        cid
+        for cid, check in verdict.checks.items()
+        if cid in _VERDICT_CHECKS and not check.passed
+    }
+
+
+def _verdict_is_tasks_regenerable(verdict: ConstructionVerdict) -> bool:
+    """True when an unverified verdict's gaps are all tasks-owned (C1/C2).
+
+    Only then can the single funded regenerate run from the detached verifier
+    (tasks regenerate needs no upstream re-finalise). If any harness-owned gap
+    (C3/C4) is present, regenerating tasks alone cannot close it, so the package
+    is left for the user with the gaps named (advisory).
+    """
+    failing = _failing_verdict_checks(verdict)
+    return bool(failing) and failing <= _TASKS_OWNED_CHECKS
+
+
+def _verdict_regen_findings(verdict: ConstructionVerdict) -> list[dict]:
+    """Gap text from the failing tasks-owned checks, as injectable findings.
+
+    Shaped as plain dicts that ``_regenerate_with_findings`` consumes verbatim
+    (``kind``/``detail``/``reference`` are read by ``_finding_label`` /
+    ``_finding_value``), so the regenerate's prompt names the exact structural
+    gaps the linter found.
+    """
+    findings: list[dict] = []
+    for cid in sorted(_failing_verdict_checks(verdict) & _TASKS_OWNED_CHECKS):
+        check = verdict.checks[cid]
+        for gap in check.gaps:
+            findings.append({"kind": check.name, "detail": gap, "reference": cid})
+    return findings
 
 
 def _log_pipeline_error(task: asyncio.Task) -> None:
@@ -1215,7 +1281,53 @@ def _merge_harness_patch(existing: str, patch: str) -> str:
     return existing.rstrip() + "\n\n" + "\n\n".join(new_sections)
 
 
-def _chunk_specs_for_stage(stage_type: str) -> list[ArtifactChunkSpec]:
+def _demo_day_chunk_specs_for_stage(stage_type: str) -> list[ArtifactChunkSpec]:
+    """Chunking for Demo Day mode (single-pass per stage; harness split for files).
+
+    Demo Day artifacts are deliberately small (a ≤5-hour build), so they do not
+    need the standard multi-chunk depth-forcing — one focused pass per stage
+    keeps the document coherent and the parse-stable identifiers (§7.1.1)
+    consistent. Only the harness is split so the ``## Files`` section gets its own
+    output budget. All Demo Day waves are single-chunk, so the parallel path is
+    never taken for demo_day (see ``_stage_has_parallel_waves``).
+    """
+    if stage_type == "harness":
+        return [
+            ArtifactChunkSpec(
+                "demo-harness-contract",
+                (
+                    "Generate only these HARNESS sections, in order: Harness "
+                    "Overview, Frozen Interface Contracts, Requirement-to-Test "
+                    "Matrix, End-to-End Smoke Test, File Tree. The File Tree must "
+                    "name every test, fixture, and schema file the Files section "
+                    "will contain, including the end-to-end smoke test file."
+                ),
+            ),
+            ArtifactChunkSpec(
+                "demo-harness-files",
+                (
+                    "Generate only the HARNESS ## Files section. Include every file "
+                    "from the File Tree as a `### File: path` heading followed by "
+                    "one complete fenced code block — including the end-to-end "
+                    "smoke test file named in the End-to-End Smoke Test section. No "
+                    "placeholders or omitted files."
+                ),
+            ),
+        ]
+    return [
+        ArtifactChunkSpec(
+            "demo-full",
+            "Generate the complete Demo Day artifact for this stage with every "
+            "required section heading.",
+        )
+    ]
+
+
+def _chunk_specs_for_stage(
+    stage_type: str, mode: str = "standard"
+) -> list[ArtifactChunkSpec]:
+    if mode == "demo_day":
+        return _demo_day_chunk_specs_for_stage(stage_type)
     if stage_type == "spec":
         return [
             ArtifactChunkSpec(
@@ -1424,7 +1536,9 @@ def _task_parallel_waves() -> list[list[ArtifactChunkSpec]]:
     return [[overview], [foundation, interface, hardening]]
 
 
-def _chunk_waves_for_stage(stage_type: str) -> list[list[ArtifactChunkSpec]]:
+def _chunk_waves_for_stage(
+    stage_type: str, mode: str = "standard"
+) -> list[list[ArtifactChunkSpec]]:
     """Dependency-ordered wave grouping of a stage's chunks (issue #39).
 
     Each inner list is a set of chunks with NO cross-references among them, so
@@ -1433,6 +1547,10 @@ def _chunk_waves_for_stage(stage_type: str) -> list[list[ArtifactChunkSpec]]:
     parallel path behind ``pipeline_parallel_chunks``; ``_chunk_specs_for_stage``
     stays the regression-proof sequential fallback.
     """
+    if mode == "demo_day":
+        # Demo Day stages are single-chunk (harness is two strictly-ordered
+        # chunks), so each chunk is its own wave — no intra-wave parallelism.
+        return [[chunk] for chunk in _chunk_specs_for_stage(stage_type, mode)]
     if stage_type == "spec":
         specs = {c.key: c for c in _chunk_specs_for_stage(stage_type)}
         # product-scope mints FR IDs; system-expectations mints NFR/SEC IDs —
@@ -1454,9 +1572,13 @@ def _chunk_waves_for_stage(stage_type: str) -> list[list[ArtifactChunkSpec]]:
     return [[chunk] for chunk in _chunk_specs_for_stage(stage_type)]
 
 
-def _stage_has_parallel_waves(stage_type: str) -> bool:
-    """True when at least one wave holds >1 chunk (i.e. parallelism exists)."""
-    return any(len(wave) > 1 for wave in _chunk_waves_for_stage(stage_type))
+def _stage_has_parallel_waves(stage_type: str, mode: str = "standard") -> bool:
+    """True when at least one wave holds >1 chunk (i.e. parallelism exists).
+
+    Always False for demo_day (single-chunk waves), so a Demo Day generation
+    always takes the simple sequential path.
+    """
+    return any(len(wave) > 1 for wave in _chunk_waves_for_stage(stage_type, mode))
 
 
 def _chunk_user_prompt(
@@ -1652,16 +1774,18 @@ class StageManager:
         adapter_factory: Callable[[LLMRoute], object] | None = None,
         phase: "_PhaseTracker | None" = None,
         retry_count: int = 0,
+        mode: str = "standard",
     ) -> GeneratedArtifact:
         # Issue #39: when enabled, generate dependency-independent chunks
         # concurrently in waves (sum of chunk latencies -> ~max per wave). Needs
         # a factory so each concurrent chunk gets its own adapter (no shared
         # completion state). Falls through to the sequential path below when off,
         # when the stage has no parallelism, or when no factory was supplied.
+        # Demo Day stages are always single-chunk waves, so this is never taken.
         if (
             settings.pipeline_parallel_chunks
             and adapter_factory is not None
-            and _stage_has_parallel_waves(stage_type)
+            and _stage_has_parallel_waves(stage_type, mode)
         ):
             return await self._generate_complete_artifact_parallel(
                 adapter_factory=adapter_factory,
@@ -1673,6 +1797,7 @@ class StageManager:
                 emit=emit,
                 phase=phase,
                 retry_count=retry_count,
+                mode=mode,
             )
         chunks: list[str] = []
         repair_attempted = False
@@ -1696,7 +1821,7 @@ class StageManager:
                 live_emit(json.dumps({"stream_reset": True}))
                 live_emit = None
 
-        chunk_specs = _chunk_specs_for_stage(stage_type)
+        chunk_specs = _chunk_specs_for_stage(stage_type, mode)
         # Every chunk is always generated.  There is deliberately NO early
         # return when an intermediate chunk happens to pass the completeness
         # check on its own: chunked generation exists to force depth, and a
@@ -1798,7 +1923,7 @@ class StageManager:
         # Depth/quality findings that survive as advisory (no refund, no repair).
         advisory_issues: list[CompletenessIssue] = []
         try:
-            validate_artifact_completeness(stage_type, artifact, deps)
+            validate_artifact_completeness(stage_type, artifact, deps, mode)
         except IncompleteArtifactError as exc:
             if exc.truncation_issues:
                 _stop_live_streaming()
@@ -1863,7 +1988,7 @@ class StageManager:
                 # Re-validate: truncation still present -> refund; only depth
                 # remaining -> deliver with advisory findings (repair succeeded).
                 try:
-                    validate_artifact_completeness(stage_type, artifact, deps)
+                    validate_artifact_completeness(stage_type, artifact, deps, mode)
                 except IncompleteArtifactError as repair_exc:
                     try:
                         advisory_issues = _split_completeness_or_raise(
@@ -1905,6 +2030,7 @@ class StageManager:
         emit: Callable[[str], None] | None = None,
         phase: "_PhaseTracker | None" = None,
         retry_count: int = 0,
+        mode: str = "standard",
     ) -> GeneratedArtifact:
         """Issue #39 parallel happy path: generate chunks in concurrent waves.
 
@@ -1939,7 +2065,9 @@ class StageManager:
         # as it RESOLVES (after any per-chunk repair), never per LLM call — a
         # repaired chunk counts once.  Single-threaded asyncio makes the bare
         # increment safe without a lock.
-        total_parts = sum(len(wave) for wave in _chunk_waves_for_stage(stage_type))
+        total_parts = sum(
+            len(wave) for wave in _chunk_waves_for_stage(stage_type, mode)
+        )
         completed_parts = 0
         if phase is not None:
             phase.set_parts(0, total_parts)
@@ -2054,7 +2182,7 @@ class StageManager:
 
         chunks: list[str] = []
         try:
-            for wave in _chunk_waves_for_stage(stage_type):
+            for wave in _chunk_waves_for_stage(stage_type, mode):
                 prior_snapshot = list(chunks)
                 wave_results = await asyncio.gather(
                     *(
@@ -2075,7 +2203,7 @@ class StageManager:
         # Depth/quality findings that survive as advisory (no refund, no repair).
         advisory_issues: list[CompletenessIssue] = []
         try:
-            validate_artifact_completeness(stage_type, artifact, deps)
+            validate_artifact_completeness(stage_type, artifact, deps, mode)
         except IncompleteArtifactError as exc:
             if repair_attempted or not exc.truncation_issues:
                 # Already repaired once, OR nothing truncated to repair
@@ -2101,7 +2229,7 @@ class StageManager:
                 )
                 repair_specs = [
                     chunk
-                    for wave in _chunk_waves_for_stage(stage_type)
+                    for wave in _chunk_waves_for_stage(stage_type, mode)
                     for chunk in wave
                 ]
                 # This is a fresh, sequential pass over every chunk — not a
@@ -2160,7 +2288,7 @@ class StageManager:
                 # Re-validate: truncation still present -> refund; only depth
                 # remaining -> deliver with advisory findings (repair succeeded).
                 try:
-                    validate_artifact_completeness(stage_type, artifact, deps)
+                    validate_artifact_completeness(stage_type, artifact, deps, mode)
                 except IncompleteArtifactError as repair_exc:
                     try:
                         advisory_issues = _split_completeness_or_raise(
@@ -2469,14 +2597,18 @@ class StageManager:
                 )
             )
         )
+        # Demo Day mode uses a distinct prompt version, so the generation cache
+        # key never collides with a standard generation for the same workspace.
+        gen_mode = getattr(workspace, "mode", "standard") or "standard"
+        gen_prompt_version = stage_prompt_version(stage.type, gen_mode)
         _log_generation_route(
             route=route,
             stage_type=stage.type,
             action=action,
-            prompt_version=STAGE_PROMPT_VERSIONS[stage.type],
+            prompt_version=gen_prompt_version,
         )
         cache_key = build_generation_cache_key(
-            prompt_version=STAGE_PROMPT_VERSIONS[stage.type],
+            prompt_version=gen_prompt_version,
             stage_type=stage.type,
             operation=route.operation,
             provider=route.provider,
@@ -2786,6 +2918,10 @@ class StageManager:
             content_generation_id: str | None = None
             stream_chunks: list[str] = []
             deps = _workspace_stage_deps(workspace, stage.type)
+            # Demo Day mode threads through the whole post-preflight pipeline:
+            # mode-aware chunking, completeness floors, section gate, and the
+            # cost-ledger prompt version. Standard takes the unchanged path.
+            mode = getattr(workspace, "mode", "standard") or "standard"
             technology_repair_used = False
 
             stage_cost_context = LLMCostContext(
@@ -2811,7 +2947,7 @@ class StageManager:
                     stage_type=stage.type,
                     action=action,
                     model_tier=attempt_route.model_tier,
-                    prompt_version=STAGE_PROMPT_VERSIONS[stage.type],
+                    prompt_version=stage_prompt_version(stage.type, mode),
                     operation=attempt_route.operation,
                     cache_hit=False,
                     batch=False,
@@ -2839,6 +2975,7 @@ class StageManager:
                             adapter_factory=_build_stage_adapter,
                             phase=phase,
                             retry_count=attempt_retry_count,
+                            mode=mode,
                         )
                     except (ProviderError, TimeoutError) as attempt_exc:
                         # Any live-streamed draft from the failed attempt is
@@ -3102,7 +3239,7 @@ class StageManager:
                     critic_deps_for_async = dict(deps)
                     try:
                         validate_sections(
-                            stage.type, accumulated, critic_deps_for_async
+                            stage.type, accumulated, critic_deps_for_async, mode
                         )
                     except MissingSectionError as exc:
                         stage_metric_outcome = "missing_sections"
@@ -3148,7 +3285,7 @@ class StageManager:
                 # section miss is terminal (no regenerate): the prompt, not the
                 # sampling, omitted the heading.
                 try:
-                    validate_sections(stage.type, accumulated, critic_deps)
+                    validate_sections(stage.type, accumulated, critic_deps, mode)
                 except MissingSectionError as exc:
                     stage_metric_outcome = "missing_sections"
                     PIPELINE_VALIDATOR_FAILURES.labels(stage=stage.type).inc()
@@ -3242,6 +3379,7 @@ class StageManager:
                                 credit_reason="critic_regen",
                                 product_surface="stage_generation",
                             ),
+                            mode=mode,
                         )
                         stream_chunks = [accumulated]
                         # The artifact was replaced — the post-critic
@@ -3498,6 +3636,19 @@ class StageManager:
                     critic_deps=critic_deps_for_async or {},
                     provider=workspace.provider,
                     content_generation_id=content_generation_id,
+                )
+            # Demo Day construction verifier (plan §7.3): once the tasks stage
+            # exists, all four artifacts are present, so schedule the zero-LLM
+            # verifier OFF the critical path (its own session, never the pipeline
+            # task — it survives client disconnect like the async critic). It
+            # stamps the workspace-level verdict and may trigger ONE funded
+            # advisory regenerate. Demo-day-only; standard generations skip it
+            # entirely (the byte-identical contract).
+            if mode == "demo_day" and stage.type == "tasks":
+                self._schedule_construction_verifier(
+                    workspace_id=workspace.id,
+                    tasks_version=stage.current_version,
+                    user_id=user_id,
                 )
             stage_metric_outcome = "succeeded"
         except Exception as exc:
@@ -4375,6 +4526,233 @@ class StageManager:
                 exc_info=True,
             )
 
+    # ------------------------------------------------------------------
+    # Demo Day construction verifier (plan §7.3)
+    # ------------------------------------------------------------------
+
+    def _schedule_construction_verifier(
+        self,
+        *,
+        workspace_id: UUID,
+        tasks_version: int,
+        user_id: UUID,
+    ) -> asyncio.Task[None]:
+        """Fire-and-forget the post-tasks construction verifier (plan §7.3).
+
+        Mirrors _schedule_critic_review: held in a module-level strong-ref set so
+        the detached task is not garbage-collected mid-flight; removes itself on
+        completion and logs any unexpected error. Runs only for demo_day
+        workspaces (the caller guards on mode/stage).
+        """
+        task = asyncio.create_task(
+            self._dispatch_construction_verifier(
+                workspace_id=workspace_id,
+                tasks_version=tasks_version,
+                user_id=user_id,
+            )
+        )
+        _BACKGROUND_VERIFIER_TASKS.add(task)
+        task.add_done_callback(_BACKGROUND_VERIFIER_TASKS.discard)
+        task.add_done_callback(_log_verifier_error)
+        return task
+
+    async def _dispatch_construction_verifier(
+        self,
+        *,
+        workspace_id: UUID,
+        tasks_version: int,
+        user_id: UUID,
+    ) -> None:
+        """Run the zero-LLM verifier over the four stages; persist the verdict.
+
+        docs/DEMO_DAY_MODE_IMPLEMENTATION_PLAN.md §7.3. Opens its OWN short-lived
+        session (never the request/pipeline session — it survives client
+        disconnect like the async critic) and is fully fail-open: the tasks draft
+        is already delivered and charged, so any error here is logged and dropped
+        without ever touching the artifact.
+
+        Flow: staleness-guard on the tasks version → compute + persist the verdict
+        (durable first) → if unverified, the gaps are tasks-owned (C1/C2), and the
+        one funded regenerate has not run, attempt exactly ONE platform-funded
+        tasks regenerate with the gaps injected, then recompute once. The verdict
+        always carries regen_attempted forward so the window opens at most once.
+        """
+        from database import AsyncSessionLocal  # noqa: PLC0415
+
+        try:
+            async with AsyncSessionLocal() as db:
+                workspace = await self._load_workspace(workspace_id, db)
+                stages = {s.type: s for s in workspace.stages}
+                tasks_stage = stages.get("tasks")
+                # Staleness guard (§9.2): a tasks-version bump since this verifier
+                # was scheduled means a newer generation superseded it — its own
+                # verifier will (or did) run; never stamp a stale verdict.
+                if tasks_stage is None or tasks_stage.current_version != tasks_version:
+                    return
+                if not demo_day_verdict.all_stages_present(stages):
+                    return
+
+                prior = getattr(workspace, "construction_verdict", None)
+                prior_regen = (
+                    bool(prior.get("regen_attempted"))
+                    if isinstance(prior, dict)
+                    else False
+                )
+                verdict = demo_day_verdict.compute_verdict(
+                    workspace, stages, regen_attempted=prior_regen
+                )
+                # Persist the verdict first so it is durable even if the optional
+                # regenerate below fails.
+                workspace.construction_verdict = verdict.to_dict()
+                await db.commit()
+
+                # The one funded advisory regenerate (§7.3). Only when: the verdict
+                # failed, the gaps are all tasks-owned (C1/C2 — harness-owned C3/C4
+                # would need an upstream re-finalise we never do from here), the
+                # window has not been used, and the tasks stage is still a
+                # regeneratable draft (the user has not finalised it meanwhile).
+                if (
+                    verdict.verified
+                    or prior_regen
+                    or not _verdict_is_tasks_regenerable(verdict)
+                    or tasks_stage.status not in ("draft", "stale")
+                ):
+                    return
+
+                regen_ok = await self._run_construction_regen(
+                    db=db,
+                    workspace=workspace,
+                    tasks_stage=tasks_stage,
+                    findings=_verdict_regen_findings(verdict),
+                    user_id=user_id,
+                )
+                # The window is consumed on attempt (success or failure) so a
+                # platform-funded regenerate fires at most once per workspace.
+                if regen_ok:
+                    # Recompute against the regenerated tasks (same ORM object,
+                    # already mutated/committed by the regen) and stamp the new
+                    # versions.
+                    verdict2 = demo_day_verdict.compute_verdict(
+                        workspace, stages, regen_attempted=True
+                    )
+                    workspace.construction_verdict = verdict2.to_dict()
+                else:
+                    verdict.regen_attempted = True
+                    workspace.construction_verdict = verdict.to_dict()
+                await db.commit()
+        except Exception:
+            logger.warning(
+                "construction_verifier.dispatch_failed",
+                extra={"workspace_id": str(workspace_id)},
+                exc_info=True,
+            )
+
+    async def _run_construction_regen(
+        self,
+        *,
+        db: AsyncSession,
+        workspace: Workspace,
+        tasks_stage: Stage,
+        findings: list[dict],
+        user_id: UUID,
+    ) -> bool:
+        """One platform-funded tasks regenerate that injects the construction gaps.
+
+        Reuses _regenerate_with_findings (the same non-streaming, platform-funded
+        regenerate the legacy critic path uses — the artifact goes back through the
+        original generator prompt, never a direct rewrite). Persists a new tasks
+        StageVersion on success and returns True; fully fail-open (returns False
+        and rolls back on any error) so a regenerate failure never harms the
+        already-delivered draft.
+
+        ``user_id`` is the workspace owner whose generation triggered the verdict,
+        carried for audit attribution of the platform-funded regenerate.
+        """
+        try:
+            deps = _workspace_stage_deps(workspace, "tasks")
+            redis = await self._redis_client()
+            system_prompt, user_prompt, _rung = await build_prompt(
+                "tasks", workspace, db, redis
+            )
+            route = _route_for_stage_generation("tasks", workspace)
+            new_content = await self._regenerate_with_findings(
+                route=route,
+                system_prompt=system_prompt,
+                base_user_prompt=user_prompt,
+                findings=findings,
+                stage_type="tasks",
+                deps=deps,
+                cost_context=LLMCostContext(
+                    workspace_id=workspace.id,
+                    stage_id=tasks_stage.id,
+                    credit_reason="construction_regen",
+                    product_surface="stage_generation",
+                ),
+                mode="demo_day",
+            )
+            # The regenerated artifact must clear the same security gate as a
+            # streamed one (mirrors the inline critic-regen re-validation).
+            validation = validate(new_content)
+            if not validation.is_safe:
+                logger.warning(
+                    "construction_regen.security_rejected",
+                    extra={
+                        "workspace_id": str(workspace.id),
+                        "reason": validation.reason,
+                    },
+                )
+                return False
+            # It must also satisfy the Demo Day section contract — the normal
+            # pipeline enforces validate_sections as a terminal gate, and section
+            # presence is NOT one of C1–C5, so a regen that dropped a required
+            # section would otherwise silently replace the known-good draft (the
+            # verdict recompute would not catch it).
+            try:
+                validate_sections("tasks", new_content, deps, "demo_day")
+            except MissingSectionError as exc:
+                logger.warning(
+                    "construction_regen.missing_sections",
+                    extra={
+                        "workspace_id": str(workspace.id),
+                        "missing": exc.missing,
+                    },
+                )
+                return False
+            tasks_stage.content = new_content
+            tasks_stage.current_version += 1
+            tasks_stage.status = "draft"
+            tasks_stage.updated_at = datetime.now(UTC)
+            db.add(
+                StageVersion(
+                    stage_id=tasks_stage.id,
+                    version=tasks_stage.current_version,
+                    content=new_content,
+                    created_by="ai",
+                )
+            )
+            await db.commit()
+            await self._invalidate_stage_cache(workspace.id, "tasks", redis)
+            BILLING_CREDITS_CRITIC_REGEN.labels(stage="tasks").inc()
+            logger.info(
+                "construction_regen.completed",
+                extra={
+                    "workspace_id": str(workspace.id),
+                    "user_id": str(user_id),
+                    "tasks_version": tasks_stage.current_version,
+                    "gap_count": len(findings),
+                },
+            )
+            return True
+        except Exception:
+            logger.warning(
+                "construction_regen.failed",
+                extra={"workspace_id": str(workspace.id)},
+                exc_info=True,
+            )
+            with contextlib.suppress(Exception):
+                await db.rollback()
+            return False
+
     def _incomplete_gate_payload(
         self,
         stage_type: str,
@@ -4737,6 +5115,7 @@ class StageManager:
         stage_type: str,
         deps: dict[str, str],
         cost_context: LLMCostContext | None = None,
+        mode: str = "standard",
     ) -> str:
         """One platform-funded, non-streaming regenerate with findings injected.
 
@@ -4825,7 +5204,7 @@ class StageManager:
         # Sentinel is advisory-only (see _generate_chunk_once): strip if present,
         # accept if absent.  Real truncation is owned by the limit-stop guard above.
         raw = strip_completion_sentinel(stage_type, raw)
-        validate_artifact_completeness(stage_type, raw, deps)
+        validate_artifact_completeness(stage_type, raw, deps, mode)
         return raw
 
     async def generate_harness_patch(

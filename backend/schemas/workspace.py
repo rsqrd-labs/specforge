@@ -13,6 +13,13 @@ from services.security.problem_statement_gate import (
 
 Provider = Literal["anthropic", "openai", "google"]
 WorkspaceStatus = Literal["active", "archived"]
+# Demo Day mode (docs/DEMO_DAY_MODE_IMPLEMENTATION_PLAN.md). A generation profile
+# chosen at creation; default 'standard' keeps the existing path byte-identical.
+WorkspaceMode = Literal["standard", "demo_day"]
+TargetAgent = Literal["claude_code", "codex"]
+# Soft upper bound on the advisory build-time target (24h). Rejects absurd input
+# at the boundary; the linter's default is 300 (5h) when unset.
+_TIME_BUDGET_MAX_MINUTES = 24 * 60
 
 
 class WorkspaceCreate(BaseModel):
@@ -29,6 +36,15 @@ class WorkspaceCreate(BaseModel):
         default=None,
         max_length=100,
         pattern=r"^[a-z0-9][a-z0-9-]*$",
+    )
+    # Demo Day mode fields. All default to the standard-mode values so a client
+    # that omits them produces a byte-identical create request to today (§4).
+    mode: WorkspaceMode = "standard"
+    target_agent: TargetAgent | None = None
+    time_budget_minutes: int | None = Field(
+        default=None,
+        gt=0,
+        le=_TIME_BUDGET_MAX_MINUTES,
     )
 
     model_config = ConfigDict(from_attributes=True)
@@ -47,6 +63,24 @@ class WorkspaceCreate(BaseModel):
                     f"Allowed: {sorted(allowed)}"
                 )
         return v
+
+    @model_validator(mode="after")
+    def _validate_demo_day_fields(self) -> "WorkspaceCreate":
+        if self.mode == "demo_day":
+            # The construction guarantee requires a test-executing agent; the
+            # agent choice is therefore mandatory for a demo_day workspace.
+            if self.target_agent is None:
+                raise ValueError(
+                    "target_agent is required when mode is 'demo_day' "
+                    "(one of: claude_code, codex)"
+                )
+        else:
+            # Demo-Day-only metadata never rides a standard workspace — drop it
+            # so the persisted row is self-consistent and the standard path is
+            # unchanged regardless of what a client sent.
+            self.target_agent = None
+            self.time_budget_minutes = None
+        return self
 
 
 class WorkspaceUpdate(BaseModel):
@@ -173,12 +207,30 @@ class WorkspaceResponse(BaseModel):
     public_share_enabled: bool = False
     disable_critic: bool = False
     brave_research_enabled: bool = False
+    mode: WorkspaceMode = "standard"
+    target_agent: TargetAgent | None = None
+    time_budget_minutes: int | None = None
+    # The persisted construction verdict (Demo Day mode, plan §7.2). NULL for a
+    # standard workspace and until the verifier first runs; the shape is
+    # ``ConstructionVerdict.to_dict()``. Passed through as an opaque dict — the
+    # frontend badge/panel render it — so a future verdict-field addition needs no
+    # schema churn here. The column auto-populates via ``from_attributes``.
+    construction_verdict: dict | None = None
     coverage_summary: CoverageSummary | None = None
     stages: list[StageResponse] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime
 
     model_config = ConfigDict(from_attributes=True)
+
+    @field_validator("mode", mode="before")
+    @classmethod
+    def _default_mode(cls, v: object) -> object:
+        # A NOT NULL DB column with server_default 'standard' is never NULL on a
+        # persisted row, but an in-memory ORM object built without a flush (tests)
+        # has mode=None. Coerce to the standard default so serialisation never
+        # 500s on such rows.
+        return "standard" if v is None else v
 
 
 # T-USE-09: Public share allow-list — the contract for GET /public/{slug}.

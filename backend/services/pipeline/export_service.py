@@ -11,6 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models import Stage, Workspace
+from services.pipeline import agent_manual_service, demo_day_verdict
 
 logger = logging.getLogger(__name__)
 
@@ -166,5 +167,23 @@ async def build_export(workspace_id: UUID, user_id: UUID, db: AsyncSession) -> b
 
         for path, content in harness_files.items():
             zf.writestr(path, content)
+
+        # Demo Day mode (plan §8): add the agent operating manual so the bundle is
+        # ready to hand to the user's coding agent. Standard exports are
+        # byte-identical (this whole block is skipped).
+        if getattr(workspace, "mode", "standard") == "demo_day":
+            manual_filename, manual_body = agent_manual_service.build_agent_manual(
+                workspace, stages["plan"].content or ""
+            )
+            zf.writestr(manual_filename, manual_body)
+            # CONSTRUCTION_REPORT.md (plan §7.3/§8.2): refresh the verdict if a
+            # stage was refined after it was computed (zero-LLM, cheap), then
+            # render it. ensure_fresh_verdict is fail-open, so a hiccup just ships
+            # the last-known verdict (or omits the report) rather than failing the
+            # download.
+            verdict = await demo_day_verdict.ensure_fresh_verdict(db, workspace, stages)
+            if verdict:
+                report = agent_manual_service.build_construction_report(verdict)
+                zf.writestr(agent_manual_service.CONSTRUCTION_REPORT_FILENAME, report)
 
     return buf.getvalue()

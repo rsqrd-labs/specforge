@@ -2,6 +2,10 @@ import type { Stage } from "./stage"
 
 export type AIProvider = "anthropic" | "openai" | "google"
 export type WorkspaceStatus = "active" | "archived"
+// Demo Day mode (docs/DEMO_DAY_MODE_IMPLEMENTATION_PLAN.md). Default "standard"
+// keeps the existing UX unchanged; "demo_day" is gated behind VITE_DEMO_DAY_MODE.
+export type WorkspaceMode = "standard" | "demo_day"
+export type TargetAgent = "claude_code" | "codex"
 
 export interface CoverageSummary {
   tests: number
@@ -37,6 +41,16 @@ export interface Workspace {
    * per-generation credit cost. Generation always works without it.
    */
   brave_research_enabled?: boolean
+  /**
+   * Demo Day mode profile. "standard" (the default) is the unchanged pipeline;
+   * "demo_day" produces rubric-shaped artifacts plus a construction-verified
+   * agent handoff bundle.
+   */
+  mode?: WorkspaceMode
+  /** Coding agent the export's operating manual is tuned for (demo_day only). */
+  target_agent?: TargetAgent | null
+  /** Advisory build-time target in minutes (demo_day only; target ≤ 300). */
+  time_budget_minutes?: number | null
   coverage_summary?: CoverageSummary | null
 }
 
@@ -49,4 +63,8 @@ export interface CreateWorkspacePayload {
   problem_statement: string
   provider: AIProvider
   template_slug?: string | null
+  /** Demo Day mode (omit or "standard" for the default pipeline). */
+  mode?: WorkspaceMode
+  target_agent?: TargetAgent | null
+  time_budget_minutes?: number | null
 }

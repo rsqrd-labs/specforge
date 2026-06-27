@@ -8,6 +8,7 @@ from redis.asyncio import Redis
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+import prompts.demo_day as demo_day_prompts
 import prompts.harness as harness_prompts
 import prompts.plan as plan_prompts
 import prompts.spec as spec_prompts
@@ -67,6 +68,38 @@ _STAGE_KEEP_SECTIONS: dict[str, list[str]] = {
     ],
 }
 
+# Demo Day variant (§9.1). The Demo Day artifacts rename/lean some sections (e.g.
+# the plan uses ## Interface Contracts, not ## API Design), so the standard
+# keep-list above would silently drop the wrong sections under the section-aware
+# injection. Selected by workspace.mode. Keyed by the Demo Day section headings
+# (artifact_validator.DEMO_DAY_SECTION_CONTRACTS).
+_DEMO_DAY_STAGE_KEEP_SECTIONS: dict[str, list[str]] = {
+    "spec": [
+        "## Functional Requirements",
+        "## Acceptance Criteria",
+        "## Demo Day Scope",
+        "## Out of Scope",
+        "## Security Posture",
+    ],
+    "plan": [
+        "## Requirement Traceability Matrix",
+        "## Interface Contracts",
+        "## Data Model and Persistence",
+        "## Security Architecture",
+    ],
+    "harness": [
+        "## Requirement-to-Test Matrix",
+        "## End-to-End Smoke Test",
+        "## File Tree",
+    ],
+}
+
+
+def _keep_sections(stage_type: str, mode: str) -> list[str]:
+    if mode == "demo_day":
+        return _DEMO_DAY_STAGE_KEEP_SECTIONS.get(stage_type, [])
+    return _STAGE_KEEP_SECTIONS.get(stage_type, [])
+
 
 def _split_by_h2(content: str) -> list[tuple[str, str]]:
     """Split a markdown document on `## ` h2 headings.  Preserves order.
@@ -91,16 +124,18 @@ def _split_by_h2(content: str) -> list[tuple[str, str]]:
     return parts
 
 
-def _section_aware_injection(stage_type: str, content: str) -> str:
+def _section_aware_injection(
+    stage_type: str, content: str, mode: str = "standard"
+) -> str:
     """Keep critical sections verbatim, summarize narrative sections.
 
     Used only when content exceeds _MAX_UPSTREAM_CHARS even after the 200K
-    bump.  For each section in _STAGE_KEEP_SECTIONS[stage_type] that is
-    skipped (not preserved verbatim due to remaining budget), the metric
+    bump.  For each section in the mode-appropriate keep-list that is skipped
+    (not preserved verbatim due to remaining budget), the metric
     `pipeline_upstream_section_skipped_total{stage, section}` is
     incremented so dashboards can observe the quality regression.
     """
-    keep = _STAGE_KEEP_SECTIONS.get(stage_type, [])
+    keep = _keep_sections(stage_type, mode)
     sections = _split_by_h2(content)
     preserved: list[str] = []
     summarized: list[str] = []
@@ -141,6 +176,11 @@ async def build_prompt(
     """
     module = _PROMPT_MODULES[stage_type]
     dep_keys = _DEPENDENCIES[stage_type]
+    # Demo Day mode selects a parallel set of prompts, section contracts, and
+    # keep-lists; any other value takes the unchanged standard path (the §4
+    # byte-identical regression pin). getattr keeps callers that pass a lightweight
+    # workspace stub (tests) working.
+    mode = getattr(workspace, "mode", "standard") or "standard"
 
     deps: dict[str, str] = {"problem_statement": workspace.problem_statement}
 
@@ -168,7 +208,7 @@ async def build_prompt(
                     "upstream_content_section_aware_injection",
                     extra={"stage": dep_type, "original_len": len(content)},
                 )
-                content = _section_aware_injection(dep_type, content)
+                content = _section_aware_injection(dep_type, content, mode)
             deps[dep_type] = content
 
     # Problem-statement compression (compression plan Phase B/D), applied lazily
@@ -215,8 +255,13 @@ async def build_prompt(
             workspace.model,
         )
 
-    system_prompt = await module.get_system_prompt()
-    return system_prompt, module.build_user_prompt(deps), compression_rung
+    if mode == "demo_day":
+        system_prompt = await demo_day_prompts.get_system_prompt(stage_type)
+        user_prompt = demo_day_prompts.build_user_prompt(stage_type, deps)
+    else:
+        system_prompt = await module.get_system_prompt()
+        user_prompt = module.build_user_prompt(deps)
+    return system_prompt, user_prompt, compression_rung
 
 
 async def _fetch_stage_content(

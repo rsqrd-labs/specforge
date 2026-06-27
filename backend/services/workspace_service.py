@@ -26,6 +26,7 @@ class WorkspaceService:
     ) -> Workspace:
         self._assert_problem_statement_is_valid(payload.problem_statement)
         server_model = self._server_default_model(payload.provider)
+        mode, target_agent, time_budget_minutes = self._resolve_mode(payload)
 
         # Lock the user row so concurrent create requests are serialized and
         # the quota check + insert are atomic within this transaction.
@@ -47,6 +48,9 @@ class WorkspaceService:
             provider=payload.provider,
             model=server_model,
             status="active",
+            mode=mode,
+            target_agent=target_agent,
+            time_budget_minutes=time_budget_minutes,
         )
         db.add(workspace)
         await db.flush()
@@ -148,6 +152,22 @@ class WorkspaceService:
                     "hints": exc.result.hints,
                 },
             ) from exc
+
+    def _resolve_mode(
+        self, payload: WorkspaceCreate
+    ) -> tuple[str, str | None, int | None]:
+        """Resolve the persisted (mode, target_agent, time_budget_minutes).
+
+        The ``demo_day_mode_enabled`` config flag is the master server-side gate
+        (plan §4/§0): when it is off, ``mode`` is forced to ``"standard"`` and the
+        Demo-Day-only metadata is dropped, so a client cannot opt a workspace into
+        Demo Day mode before the feature is enabled and the standard create path
+        stays byte-identical. The schema already guarantees ``target_agent`` is
+        present when ``mode == "demo_day"`` and absent otherwise.
+        """
+        if not settings.demo_day_mode_enabled or payload.mode != "demo_day":
+            return "standard", None, None
+        return "demo_day", payload.target_agent, payload.time_budget_minutes
 
     def _server_default_model(self, provider: str) -> str:
         try:

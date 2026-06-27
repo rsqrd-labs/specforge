@@ -17,6 +17,26 @@ STAGE_PROMPT_VERSIONS: dict[str, str] = {
     "tasks": f"{ASDD_PROMPT_VERSION}:tasks-v4",
 }
 
+# Demo Day mode (docs/DEMO_DAY_MODE_IMPLEMENTATION_PLAN.md). Separate version
+# strings so the cost ledger / telemetry distinguishes Demo Day generations from
+# standard ones (a NEW key set — the standard versions above are never mutated,
+# per the §4 regression-pin contract).
+DEMO_DAY_PROMPT_VERSION = "demo-day-v1.0.0"
+DEMO_DAY_STAGE_PROMPT_VERSIONS: dict[str, str] = {
+    "spec": f"{DEMO_DAY_PROMPT_VERSION}:spec-v1",
+    "plan": f"{DEMO_DAY_PROMPT_VERSION}:plan-v1",
+    "harness": f"{DEMO_DAY_PROMPT_VERSION}:harness-v1",
+    "tasks": f"{DEMO_DAY_PROMPT_VERSION}:tasks-v1",
+}
+
+
+def stage_prompt_version(stage_type: str, mode: str = "standard") -> str:
+    """The telemetry/cost-ledger prompt version for a stage, selected by mode."""
+    if mode == "demo_day":
+        return DEMO_DAY_STAGE_PROMPT_VERSIONS.get(stage_type, "local")
+    return STAGE_PROMPT_VERSIONS.get(stage_type, "local")
+
+
 ASDD_METHODOLOGY_OVERVIEW = """
 ASDD (AI-Spec-Driven Development) turns a product idea into an executable build package via
 Spec → Plan → Harness → Tasks:

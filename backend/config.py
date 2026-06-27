@@ -346,6 +346,16 @@ class Settings(BaseSettings):
     # this caps the added latency, not correctness (plan §9 target: < 3s p95).
     problem_statement_abstractive_timeout_seconds: float = 8.0
 
+    # Demo Day mode (docs/DEMO_DAY_MODE_IMPLEMENTATION_PLAN.md). Master server-side
+    # gate for the whole feature: a generation profile producing Demo-Day-shaped
+    # artifacts + a construction verifier + an agent operating manual in the
+    # export. Default **False** — when off, `workspace.mode` is forced to
+    # 'standard' at creation (workspace_service.create), so every prompt, section
+    # contract, completeness floor, export bundle, and API response is
+    # byte-identical to today (the §4 regression-pin contract). Flip True (with the
+    # frontend's VITE_DEMO_DAY_MODE flag) after the golden-corpus live gate.
+    demo_day_mode_enabled: bool = False
+
     # Increment generation (Phase 21 — T-279). The MVP ships the *additive* path
     # only: an increment appends new tasks with their existing content pinned by
     # stable, content-derived task_refs. Behaviour-changing increments (compute

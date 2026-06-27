@@ -4,7 +4,16 @@ from datetime import datetime
 from typing import TYPE_CHECKING
 from uuid import UUID as PythonUUID
 
-from sqlalchemy import Boolean, CheckConstraint, ForeignKey, String, Text, func, text
+from sqlalchemy import (
+    Boolean,
+    CheckConstraint,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    func,
+    text,
+)
 from sqlalchemy.dialects.postgresql import JSONB, TIMESTAMP, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -33,6 +42,20 @@ class Workspace(Base):
             "char_length(problem_statement) BETWEEN "
             f"{PROBLEM_STATEMENT_MIN_CHARS} AND {PROBLEM_STATEMENT_MAX_CHARS}",
             name="ck_workspaces_problem_statement_len",
+        ),
+        # Demo Day mode (Phase 0). Literals mirror migration 0029 and the
+        # WorkspaceCreate enum validator (schemas/workspace.py).
+        CheckConstraint(
+            "mode IN ('standard', 'demo_day')",
+            name="ck_workspaces_mode",
+        ),
+        CheckConstraint(
+            "target_agent IS NULL OR target_agent IN ('claude_code', 'codex')",
+            name="ck_workspaces_target_agent",
+        ),
+        CheckConstraint(
+            "time_budget_minutes IS NULL OR time_budget_minutes > 0",
+            name="ck_workspaces_time_budget_minutes",
         ),
     )
 
@@ -88,6 +111,35 @@ class Workspace(Base):
         default=False,
         server_default=text("false"),
     )
+    # Demo Day mode (docs/DEMO_DAY_MODE_IMPLEMENTATION_PLAN.md). A generation
+    # profile chosen at creation and workspace-scoped (like `provider`), not a
+    # per-stage toggle: the four stages must be mutually coherent. Default
+    # 'standard' so every existing/standard workspace takes the unchanged code
+    # path everywhere (the §4 byte-identical regression-pin contract).
+    mode: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        default="standard",
+        server_default=text("'standard'"),
+    )
+    # The coding agent the export's operating manual is tuned for. NULL for
+    # standard workspaces; required (claude_code | codex) for demo_day. Selects
+    # the manual filename/idiom (CLAUDE.md vs AGENTS.md) and nothing else
+    # structural.
+    target_agent: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Advisory build-time target in minutes for a demo_day package. Nullable;
+    # the construction verifier falls back to 300 (5h) when NULL. Never certified
+    # — it exists to force scope down, not as a guarantee (plan §2.2).
+    time_budget_minutes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # The persisted construction verdict (plan §7.2 / §11.3). The verifier is
+    # workspace-level — it spans all four stage versions — so its verdict lives on
+    # the workspace row as nullable JSONB rather than per-stage. NULL until the
+    # verifier first runs (after the tasks stage exists for a demo_day workspace);
+    # always NULL for a standard workspace. The shape is
+    # ``ConstructionVerdict.to_dict()`` (verified / checks / estimated_minutes /
+    # time_budget_minutes / stage_versions / regen_attempted); the stamped
+    # ``stage_versions`` carry the staleness signal so no extra column is needed.
+    construction_verdict: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True),
         nullable=False,
