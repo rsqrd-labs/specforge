@@ -255,7 +255,10 @@ function formatStageStatus(status: Stage["status"]): string {
 
 interface WorkspaceGenerationLock {
   locked: boolean
+  /** Short headline of what is running, e.g. "Generating HARNESS". */
   message: string
+  /** Muted supporting line explaining the read-only state to the user. */
+  detail: string
   reason: string
   busyLabel: string
   stageLabel: string | null
@@ -285,6 +288,7 @@ function getWorkspaceGenerationLock(
     return {
       locked: false,
       message: "",
+      detail: "",
       reason,
       busyLabel: "",
       stageLabel: null,
@@ -295,7 +299,8 @@ function getWorkspaceGenerationLock(
   const verb = getWorkspaceGenerationVerb(operation)
   return {
     locked: true,
-    message: `${verb} ${stageLabel}. Editing is paused to keep outputs consistent. You can keep reading.`,
+    message: `${verb} ${stageLabel}`,
+    detail: "Editing is locked to keep this draft consistent — you can keep reading.",
     reason,
     busyLabel: `${verb} ${stageLabel}. Editing paused.`,
     stageLabel,
@@ -619,7 +624,7 @@ export default function Workspace() {
     showAlert(
       actionAlertFromMessage({
         title: "Editing is paused",
-        message: workspaceGenerationLock.message,
+        message: `${workspaceGenerationLock.message}. ${workspaceGenerationLock.detail}`,
         recovery: workspaceLockReason,
         source: "Workspace",
       }),
@@ -629,6 +634,7 @@ export default function Workspace() {
     showAlert,
     workspaceGenerationLock.locked,
     workspaceGenerationLock.message,
+    workspaceGenerationLock.detail,
     workspaceLockReason,
   ])
   const stagesWithEval = useMemo(
@@ -2136,10 +2142,16 @@ export default function Workspace() {
 
         {workspaceGenerationLock.locked && (
           <div className="ws-banner ws-lock" role="status" aria-live="polite">
-            <span>{workspaceGenerationLock.message}</span>
-            <span id="workspace-lock-action-reason" className="workspace-lock-reason">
-              {workspaceLockReason}
-            </span>
+            <span className="ws-lock-spinner" aria-hidden="true" />
+            <div className="ws-lock-copy">
+              <span className="ws-lock-headline">
+                {workspaceGenerationLock.message}
+                <span className="ws-lock-dots" aria-hidden="true" />
+              </span>
+              <span id="workspace-lock-action-reason" className="ws-lock-detail">
+                {workspaceGenerationLock.detail} {workspaceLockReason}
+              </span>
+            </div>
           </div>
         )}
 

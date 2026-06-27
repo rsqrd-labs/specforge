@@ -8283,7 +8283,11 @@ button:disabled {
 }
 
 .ws-banner.ws-lock {
-  align-items: flex-start;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 12px;
+  padding-top: 11px;
+  padding-bottom: 11px;
   border-color: rgba(86, 94, 116, 0.20);
   background:
     linear-gradient(135deg, rgba(86, 94, 116, 0.08), rgba(143, 78, 0, 0.05)),
@@ -8291,12 +8295,75 @@ button:disabled {
   color: var(--color-on-surface);
 }
 
-.workspace-lock-reason {
+/* Live "working" ring — signals the lock is active, not stuck. */
+.ws-lock-spinner {
   flex: 0 0 auto;
-  color: var(--color-on-surface-variant);
+  width: 15px;
+  height: 15px;
+  border-radius: 50%;
+  border: 2px solid rgba(86, 94, 116, 0.22);
+  border-top-color: var(--color-secondary);
+  animation: ws-lock-spin 0.85s linear infinite;
+}
+
+@keyframes ws-lock-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.ws-lock-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.ws-lock-headline {
+  display: inline-flex;
+  align-items: baseline;
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  color: var(--color-on-surface);
+}
+
+/* Animated "…" so the headline reads as in-progress without extra copy. */
+.ws-lock-dots::after {
+  content: "";
+  animation: ws-lock-ellipsis 1.4s steps(4, end) infinite;
+}
+
+@keyframes ws-lock-ellipsis {
+  0% {
+    content: "";
+  }
+  25% {
+    content: ".";
+  }
+  50% {
+    content: "..";
+  }
+  75% {
+    content: "...";
+  }
+}
+
+.ws-lock-detail {
   font-size: 12px;
-  font-weight: 800;
-  white-space: nowrap;
+  font-weight: 500;
+  line-height: 1.4;
+  color: var(--color-on-surface-variant);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ws-lock-spinner {
+    animation: none;
+  }
+  .ws-lock-dots::after {
+    content: "…";
+    animation: none;
+  }
 }
 
 .workspace-lock-inline-note {
