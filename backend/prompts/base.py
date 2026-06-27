@@ -21,12 +21,15 @@ STAGE_PROMPT_VERSIONS: dict[str, str] = {
 # strings so the cost ledger / telemetry distinguishes Demo Day generations from
 # standard ones (a NEW key set — the standard versions above are never mutated,
 # per the §4 regression-pin contract).
-DEMO_DAY_PROMPT_VERSION = "demo-day-v1.0.0"
+# v2.0.0 — depth rework: the v1 prompts biased to "lean", producing shallow,
+# direction-less artifacts; v2 separates narrow product SCOPE from
+# implementation-grade DETAIL and routes Demo Day to the mid tier (plan §6.5/§11.4).
+DEMO_DAY_PROMPT_VERSION = "demo-day-v2.0.0"
 DEMO_DAY_STAGE_PROMPT_VERSIONS: dict[str, str] = {
-    "spec": f"{DEMO_DAY_PROMPT_VERSION}:spec-v1",
-    "plan": f"{DEMO_DAY_PROMPT_VERSION}:plan-v1",
-    "harness": f"{DEMO_DAY_PROMPT_VERSION}:harness-v1",
-    "tasks": f"{DEMO_DAY_PROMPT_VERSION}:tasks-v1",
+    "spec": f"{DEMO_DAY_PROMPT_VERSION}:spec-v2",
+    "plan": f"{DEMO_DAY_PROMPT_VERSION}:plan-v2",
+    "harness": f"{DEMO_DAY_PROMPT_VERSION}:harness-v2",
+    "tasks": f"{DEMO_DAY_PROMPT_VERSION}:tasks-v2",
 }
 
 

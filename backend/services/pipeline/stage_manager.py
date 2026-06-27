@@ -571,6 +571,36 @@ def _core_generation_tier_policy(provider: str) -> tuple[str, str]:
     return generation_tier_policy(provider)
 
 
+# Demo Day generation runs mid-first, ALWAYS — independent of ``core_cheap_primary``
+# and ``core_complexity_routing`` (both of which can leave routing on the cheapest
+# tier, and the latter ships off). Demo Day artifacts are guarantee-bearing (the
+# zero-LLM construction verifier joins on them) and are handed to a coding agent as
+# the entire build spec, so the cheapest tier's shallow, direction-less output is not
+# acceptable here (plan §9.4/§11.4 — the lever taken once cheap-tier Demo Day quality
+# regressed). ``(mid, strong)`` is the product-wide mid-first default every provider's
+# route resolution already supports (it is the ``core_cheap_primary=False`` revert
+# target), so a provider without a distinct strong model (e.g. Google) degrades to its
+# mid model rather than erroring.
+_DEMO_DAY_TIER_POLICY: tuple[str, str] = ("mid", "strong")
+
+
+def _is_demo_day(workspace: Workspace) -> bool:
+    return (getattr(workspace, "mode", "standard") or "standard") == "demo_day"
+
+
+def _generation_tier_policy_for(workspace: Workspace) -> tuple[str, str]:
+    """``(requested_tier, escalation_tier)`` for a workspace's artifact generation.
+
+    Demo Day floors at the mid tier (``_DEMO_DAY_TIER_POLICY``); every other
+    workspace keeps the flag-gated cheap-primary policy byte-for-byte (the §4
+    regression pin). This is the single funnel both fresh generation and full
+    regenerate read, so the floor cannot be bypassed by one of those paths.
+    """
+    if _is_demo_day(workspace):
+        return _DEMO_DAY_TIER_POLICY
+    return _core_generation_tier_policy(workspace.provider)
+
+
 def _apply_complexity_floor(
     requested_tier: str,
     fallback_tier: str | None,
@@ -626,7 +656,7 @@ def _route_for_stage_generation(
     *,
     signals: ComplexitySignals | None = None,
 ) -> LLMRoute:
-    requested_tier, fallback_tier = _core_generation_tier_policy(workspace.provider)
+    requested_tier, fallback_tier = _generation_tier_policy_for(workspace)
     requested_tier, fallback_tier = _apply_complexity_floor(
         requested_tier,
         fallback_tier,
@@ -809,17 +839,25 @@ def _limit_stop_repair_is_doomed(
     return _repair_budget(route, current_max_tokens, issues) >= ceiling
 
 
-def _runtime_fallback_route(failed_route: LLMRoute) -> LLMRoute | None:
+def _runtime_fallback_route(
+    failed_route: LLMRoute, *, mode: str = "standard"
+) -> LLMRoute | None:
     """Resolve the one-shot escalation retry route after a core-gen failure.
 
     Stays on the same provider (switching providers mid-generation would
-    silently change the user's billing/key expectations) and escalates to the
-    provider's mid tier — the previous fast/cheap default.  Returns None when
-    the failed route already ran on the escalation tier or the provider has no
-    distinct active escalation model (e.g. Google, whose only strong model is
-    preview) — the original failure then surfaces.
+    silently change the user's billing/key expectations) and escalates one tier:
+    standard generation escalates to the provider's mid tier (the previous
+    fast/cheap default); a Demo Day generation already starts at mid, so it
+    escalates to ``strong`` (``_DEMO_DAY_TIER_POLICY``) instead of giving up on
+    the mid model that just failed.  Returns None when the failed route already
+    ran on the escalation tier or the provider has no distinct active escalation
+    model (e.g. Google, whose only strong model is preview) — the original
+    failure then surfaces.
     """
-    _, escalation_tier = _core_generation_tier_policy(failed_route.provider)
+    if mode == "demo_day":
+        _, escalation_tier = _DEMO_DAY_TIER_POLICY
+    else:
+        _, escalation_tier = _core_generation_tier_policy(failed_route.provider)
     if failed_route.model_tier == escalation_tier:
         return None
     try:
@@ -850,10 +888,11 @@ def _route_for_refine(
         "full": "regenerate.full",
     }[mode]
     if mode == "full":
-        # Full regenerate follows the same cheap-primary core-gen policy (and
-        # mid-tier runtime escalation) as a fresh stage generation, including the
-        # Phase 5.2 complexity floor.
-        requested_tier, fallback_tier = _core_generation_tier_policy(workspace.provider)
+        # Full regenerate follows the same core-gen policy (and mid-tier runtime
+        # escalation) as a fresh stage generation, including the Phase 5.2
+        # complexity floor and the Demo Day mid-tier floor (a Demo Day full
+        # regenerate must not silently drop back to the cheap tier).
+        requested_tier, fallback_tier = _generation_tier_policy_for(workspace)
         requested_tier, fallback_tier = _apply_complexity_floor(
             requested_tier,
             fallback_tier,
@@ -865,11 +904,11 @@ def _route_for_refine(
         # Focused and section refine follow the same product-wide cheap-primary
         # policy as core generation (issue #17 follow-up): start on the provider's
         # cheapest viable tier, escalate one tier on a runtime failure.  Routing
-        # them through `_core_generation_tier_policy` (not a hardcoded per-mode
-        # tier) means the single `core_cheap_primary` flag governs refine too, so
-        # section refine no longer pins to the mid tier (gpt-5.4 / Sonnet 4.6)
-        # while every other generation path is on the cheap tier.
-        requested_tier, fallback_tier = _core_generation_tier_policy(workspace.provider)
+        # them through `_generation_tier_policy_for` (not a hardcoded per-mode
+        # tier) means the single `core_cheap_primary` flag governs standard refine,
+        # while a Demo Day refine inherits the same mid-tier floor as its
+        # generation so an edited Demo Day section keeps the higher-tier quality.
+        requested_tier, fallback_tier = _generation_tier_policy_for(workspace)
     return resolve_llm_route(
         operation=operation,
         preferred_provider=workspace.provider,
@@ -1284,11 +1323,17 @@ def _merge_harness_patch(existing: str, patch: str) -> str:
 def _demo_day_chunk_specs_for_stage(stage_type: str) -> list[ArtifactChunkSpec]:
     """Chunking for Demo Day mode (single-pass per stage; harness split for files).
 
-    Demo Day artifacts are deliberately small (a ≤5-hour build), so they do not
-    need the standard multi-chunk depth-forcing — one focused pass per stage
-    keeps the document coherent and the parse-stable identifiers (§7.1.1)
-    consistent. Only the harness is split so the ``## Files`` section gets its own
-    output budget. All Demo Day waves are single-chunk, so the parallel path is
+    Demo Day stays single-pass per stage (except the harness, split so ``## Files``
+    gets its own output budget) because one focused pass keeps the parse-stable
+    identifiers (§7.1.1) coherent — multi-chunk risks the cross-chunk FR/AC/T-NNN
+    drift that breaks the verifier joins and manufactures "gaps". Post-v2, depth
+    comes from the depth-first prompts and the mid-tier route, NOT from chunk count
+    (a mid-tier model has ample output budget for a focused ≤5-hour package in one
+    pass). **Remaining depth lever:** if the live golden-corpus gate shows
+    spec/plan still thin on the mid tier, splitting spec/plan into 2–3
+    depth-forcing chunks (``_DEMO_DAY_STAGE_KEEP_SECTIONS`` is already wired for it)
+    is the next move — deferred now to avoid the identifier-drift risk before it is
+    shown necessary. All Demo Day waves are single-chunk, so the parallel path is
     never taken for demo_day (see ``_stage_has_parallel_waves``).
     """
     if stage_type == "harness":
@@ -2989,7 +3034,7 @@ class StageManager:
                                 outcome="failed",
                             ).inc()
                             raise
-                        fallback_route = _runtime_fallback_route(route)
+                        fallback_route = _runtime_fallback_route(route, mode=mode)
                         if fallback_route is None:
                             raise
                         if isinstance(attempt_exc, TimeoutError):
@@ -3352,7 +3397,7 @@ class StageManager:
                     # returns None when already at/above the escalation tier, so
                     # Google/Flash, mid-first ops, and increment generation are
                     # automatically unaffected.
-                    _quality_escalated = _runtime_fallback_route(route)
+                    _quality_escalated = _runtime_fallback_route(route, mode=mode)
                     if _quality_escalated is not None:
                         PIPELINE_QUALITY_ESCALATIONS.labels(
                             stage_type=stage.type,

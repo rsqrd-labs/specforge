@@ -495,7 +495,7 @@ def _section_body_issues(
         if heading in conditional and _is_not_applicable_body(body):
             continue
         body_text = _normalise_body_for_depth(body)
-        if len(body_text) < _min_body_chars(stage_type):
+        if len(body_text) < _min_body_chars(stage_type, mode):
             issues.append(
                 CompletenessIssue(
                     code="shallow_required_section",
@@ -532,7 +532,7 @@ def _normalise_body_for_depth(body: str) -> str:
     return " ".join(body.split())
 
 
-def _min_body_chars(stage_type: str) -> int:
+def _min_body_chars(stage_type: str, mode: str = "standard") -> int:
     """Minimum normalised body characters for a required section to count as
     substantive.
 
@@ -541,7 +541,22 @@ def _min_body_chars(stage_type: str) -> int:
     required heading with a single throwaway sentence under each.  They stay
     below the size of a genuinely minimal-but-real section so terse legitimate
     artifacts (e.g. a focused Out of Scope list) still pass.
+
+    Demo Day uses a HIGHER floor (not the same as standard, as the v1 plan §6.5
+    assumed): the Demo Day section set is lean on breadth, so each retained
+    section must carry implementation-grade DEPTH or it gives the coding agent no
+    direction. The v1 "shared, low" floor is exactly what let cheap-tier Demo Day
+    generations pass with one-liner sections; a mode-scoped floor surfaces a thin
+    section as an advisory (non-blocking — issue #34 stance) without touching the
+    standard contract (the §4 regression pin).
     """
+    if mode == "demo_day":
+        return {
+            "spec": 160,
+            "plan": 180,
+            "harness": 90,
+            "tasks": 80,
+        }.get(stage_type, 80)
     return {
         "spec": 120,
         "plan": 150,

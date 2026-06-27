@@ -1,13 +1,29 @@
 # Demo Day Mode — Implementation Plan
 
-Status: **Implemented** (Phases 0–5). Last updated: 2026-06-27. The §11 open
-decisions were confirmed and built to their recommended defaults. Phases 0–3
+Status: **Implemented** (Phases 0–5) + **v2 depth rework**. Last updated: 2026-06-28.
+The §11 open decisions were confirmed and built to their recommended defaults. Phases 0–3
 (data model, prompts/contracts/floors, handoff bundle, construction verifier)
 landed in commit `2ba28ad`; Phases 4 (frontend) and 5 (rollout: credit pins,
 Demo Day golden corpus, RUNBOOK §13) followed. The feature ships **off**:
 `demo_day_mode_enabled` (backend) and `VITE_DEMO_DAY_MODE` (frontend) stay false
 until the live golden-corpus gate clears — flipping them on is a manual step
 (RUNBOOK §13.4), never automated.
+
+**v2 depth rework (2026-06-28).** The v1 build shipped shallow, direction-less
+artifacts — every stage read as a heading-shaped outline a coding agent could not build
+from, and the resulting dropped identifier scaffolding made the construction verifier
+report "gaps". Root cause: the profile optimised for brevity on three reinforcing axes —
+the prompts saturated "lean / favours focus over breadth / a lean section is fine", the
+floors were the low shared standard ones, and routing was the **cheapest** tier
+(Haiku 4.5 / GPT-5.4 Mini). v2 fixes it at the root, all `mode=="demo_day"`-scoped (the §4
+regression pin holds): (1) the prompts (`prompts/demo_day.py`, version
+`demo-day-v2.0.0`) now separate narrow product **scope** from implementation-grade
+**detail** — one happy path, documented so an agent never guesses (exact paths,
+signatures, schemas, commands, full runnable test bodies); (2) generation **floors at the
+mid tier** (§11.4); (3) `_min_body_chars` is mode-aware and higher (§6.5). **Not yet
+done:** the depth is only verifiable by the live golden-corpus run (RUNBOOK §13.4) — the
+unit/contract suite pins structure, not depth, so the live gate is still the promotion
+step before the flag flips on.
 
 This document is written to be picked up cold by a future agent or engineer. It is
 grounded in the current codebase (file paths and symbols are real as of the date
@@ -277,8 +293,14 @@ is overridable):
 - tasks: ≥4 task blocks (lower than standard's 6 — the Demo Day build is smaller), each with the new
   `Estimated minutes` and `Precondition` fields present (`incomplete_task_fields`).
 
-Keep `_min_body_chars` thresholds as-is (they are stage-level, not mode-level, and a
-leaner section is still substantive).
+`_min_body_chars` is now **mode-aware and higher for Demo Day** (spec 160 / plan 180 /
+harness 90 / tasks 80 vs standard 120 / 150 / 60 / 50). The v1 "keep thresholds as-is"
+assumption was wrong in practice: a lean *breadth* section still needs implementation-grade
+*depth*, and the shared low floor is exactly what let cheap-tier Demo Day generations pass
+with one-liner-per-section output (the "shallow / no direction" regression). The floor is a
+backstop only — non-blocking advisory (issue #34 stance), and below a genuinely terse-but-real
+section — the real depth levers are the v2 prompts (depth within narrow scope) and the
+mid-tier route (§11.4).
 
 ---
 
@@ -492,12 +514,13 @@ A future agent must address these explicitly:
    mode is byte-identical. Model it on the existing pinned derivation tests
    (`validate_core_generation_ladder`, the Rung-0 pin).
 
-4. **`VALID_MODELS` / tier policy.** Demo Day mode does not change routing by default, but the
-   guarantee-bearing artifacts are higher-stakes. **Recommended:** when
-   `core_complexity_routing` is on, add a Demo Day floor to `_apply_complexity_floor` in
-   `stage_manager.py` so Demo Day harness/tasks start at the mid tier (reuse the existing
-   "harness/tasks stage floor" hook). This is optional and flag-gated — note it, don't
-   hard-wire it.
+4. **`VALID_MODELS` / tier policy.** ~~Demo Day mode does not change routing by default.~~
+   **Superseded by v2 / §11.4 (resolved).** Demo Day generation now floors at the **mid
+   tier** for every provider, in `_generation_tier_policy_for(workspace)`. Do **not** wire
+   this into `_apply_complexity_floor` (the v1 recommendation): that helper early-returns
+   when `core_complexity_routing` is off, which is the default, so the floor would be a
+   silent no-op. The floor is applied unconditionally for `mode=="demo_day"` and is
+   independent of both adaptive-routing flags; standard routing stays byte-identical.
 
 ---
 
@@ -600,9 +623,19 @@ These have defaults so implementation is not blocked; confirm them when convenie
    column, no verdict JSONB, per-stage-version FK — see §7.2) and only earns its keep if
    cross-version verdict history matters. *Confirm.*
 
-4. **Demo Day tier floor.** **Recommended default:** leave routing unchanged in v1; revisit an
-   Demo Day complexity floor (§9.4) only if cheap-tier Demo Day quality regresses on the corpus.
-   *Confirm: ship cheap-primary for Demo Day too, yes.*
+4. **Demo Day tier floor.** ~~Recommended default: leave routing unchanged in v1.~~
+   **RESOLVED (v2, taken):** cheap-tier Demo Day quality regressed exactly as §9.4
+   anticipated — the artifacts were shallow and gave the coding agent no direction. Demo
+   Day generation now **floors at the mid tier** (`_DEMO_DAY_TIER_POLICY = ("mid","strong")`
+   in `stage_manager.py`), applied in `_generation_tier_policy_for(workspace)` — the single
+   funnel both fresh generation and full regenerate read, plus refine and the runtime
+   escalation (`_runtime_fallback_route(..., mode="demo_day")` escalates mid→strong). It is
+   **independent of `core_complexity_routing`** (which ships off, so wiring the floor only
+   into `_apply_complexity_floor` per §9.4 would have been a silent no-op) and of
+   `core_cheap_primary`. Standard routing is byte-identical (the floor is gated on
+   `mode=="demo_day"`). Google has no distinct strong model, so it stays on its mid model
+   and surfaces failures directly. This is a "which model runs" change and rides the
+   golden-corpus gate before the flag flips on.
 
 ---
 
