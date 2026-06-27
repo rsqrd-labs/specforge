@@ -1,6 +1,13 @@
 # Demo Day Mode — Implementation Plan
 
-Status: **Proposed** (not yet implemented). Last updated: 2026-06-26.
+Status: **Implemented** (Phases 0–5). Last updated: 2026-06-27. The §11 open
+decisions were confirmed and built to their recommended defaults. Phases 0–3
+(data model, prompts/contracts/floors, handoff bundle, construction verifier)
+landed in commit `2ba28ad`; Phases 4 (frontend) and 5 (rollout: credit pins,
+Demo Day golden corpus, RUNBOOK §13) followed. The feature ships **off**:
+`demo_day_mode_enabled` (backend) and `VITE_DEMO_DAY_MODE` (frontend) stay false
+until the live golden-corpus gate clears — flipping them on is a manual step
+(RUNBOOK §13.4), never automated.
 
 This document is written to be picked up cold by a future agent or engineer. It is
 grounded in the current codebase (file paths and symbols are real as of the date

@@ -14,6 +14,36 @@ export interface CoverageSummary {
   percent: number
 }
 
+/**
+ * One construction check's outcome (Demo Day mode). Mirrors the backend
+ * `CheckResult.to_dict()` in `services/pipeline/demo_day_plan_linter.py`:
+ * the human-readable check name (e.g. `dag_acyclic`), whether it passed, and
+ * the specific gaps when it did not.
+ */
+export interface ConstructionCheck {
+  name: string
+  passed: boolean
+  gaps: string[]
+}
+
+/**
+ * The persisted construction verdict for a Demo Day workspace (plan §7.2).
+ * Shape mirrors `ConstructionVerdict.to_dict()`. `verified` is C1–C4 only
+ * (C5/time-budget is advisory and never flips it). `checks` is keyed by the
+ * check id (`C1`…`C5`). `stage_versions` stamps the version of each stage the
+ * verdict ran against — comparing it to the live `Stage.current_version`s is the
+ * staleness signal (plan §9.2). `estimated_minutes` is null when no per-task
+ * estimate parsed (so the UI can say "no estimate" rather than imply a 0h build).
+ */
+export interface ConstructionVerdict {
+  verified: boolean
+  checks: Record<string, ConstructionCheck>
+  estimated_minutes: number | null
+  time_budget_minutes: number
+  stage_versions: Partial<Record<"spec" | "plan" | "harness" | "tasks", number>>
+  regen_attempted: boolean
+}
+
 export interface ClarificationQA {
   question: string
   answer: string
@@ -51,6 +81,11 @@ export interface Workspace {
   target_agent?: TargetAgent | null
   /** Advisory build-time target in minutes (demo_day only; target ≤ 300). */
   time_budget_minutes?: number | null
+  /**
+   * Persisted construction verdict (demo_day only, plan §7.2). Null for a
+   * standard workspace and until the verifier first runs after the tasks stage.
+   */
+  construction_verdict?: ConstructionVerdict | null
   coverage_summary?: CoverageSummary | null
 }
 

@@ -21,6 +21,7 @@ billing alerts and ops, and prompt pipeline quality gates.
 10. [Prompt Pipeline Quality Gates And Eval Workflow](#10-prompt-pipeline-quality-gates-and-eval-workflow)
 11. [Storyboard Operations](#11-storyboard-operations)
 12. [GitHub Living Integration — App, Worker & Webhook Ops](#12-github-living-integration--app-worker--webhook-ops)
+13. [Demo Day Mode — Construction Verdict & Rollout](#13-demo-day-mode--construction-verdict--rollout)
 
 ---
 
@@ -1503,3 +1504,102 @@ ORDER BY external_issue_number;
 Re-running the push after any fix is always safe — the job resumes from the
 ledger and never re-creates an issue already recorded in
 `integration_push_tasks`.
+
+---
+
+## 13. Demo Day Mode — Construction Verdict & Rollout
+
+Demo Day mode (`docs/DEMO_DAY_MODE_IMPLEMENTATION_PLAN.md`) is a generation
+profile that produces a rubric-shaped Spec/Plan/Harness/Tasks package plus a
+**construction-verified** agent handoff bundle. It is gated by two flags that
+**ship off** and are flipped on **only after** the live golden-corpus gate
+(below) clears:
+
+- `demo_day_mode_enabled` (`backend/config.py`, default `False`) — server gate.
+  While `False`, `WorkspaceCreate` forces `mode="standard"` and the whole feature
+  is dormant; every standard path stays byte-identical (the §4 regression pin).
+- `VITE_DEMO_DAY_MODE` (frontend build flag, default off) — gates only the
+  **creation** selector in `CreateWorkspaceModal`. The construction badge and
+  handoff panel render data-driven on `workspace.mode == "demo_day"`, so a
+  workspace already created in Demo Day mode keeps its handoff UI even if the
+  build flag is off.
+
+### §13.1 The construction verdict (what it is, where it lives)
+
+The verdict is **not** an `EvalResult` row and **not** a `Stage.quality_gate`
+finding. It is a workspace-level JSONB blob persisted on
+**`workspaces.construction_verdict`** (migration `0030`), shaped like
+`ConstructionVerdict.to_dict()`:
+
+```json
+{
+  "verified": true,
+  "checks": { "C1": {"name": "dag_acyclic", "passed": true, "gaps": []}, "...": {} },
+  "estimated_minutes": 240,
+  "time_budget_minutes": 300,
+  "stage_versions": {"spec": 1, "plan": 1, "harness": 1, "tasks": 1},
+  "regen_attempted": false
+}
+```
+
+`verified` is **C1–C4 only** (C5/time-budget is advisory and never flips it). The
+verifier is **zero-LLM** (`services/pipeline/demo_day_plan_linter.py`) and runs as
+a detached background task off the tasks stage, exactly like the async-advisory
+critic. It is **advisory** — it never blocks finalise or export.
+
+**Inspect a workspace's verdict:**
+
+```sql
+SELECT id, mode, target_agent, time_budget_minutes,
+       construction_verdict->>'verified'        AS verified,
+       construction_verdict->'stage_versions'   AS stamped_versions,
+       construction_verdict->>'regen_attempted' AS regen_attempted
+FROM workspaces
+WHERE id = '<workspace_id>';
+```
+
+### §13.2 Staleness & the on-demand re-run
+
+The verdict stamps each stage's version. If any stage is regenerated/refined
+afterward, the stamped `stage_versions` no longer match the live
+`stages.current_version` and the verdict is **stale** (`is_verdict_stale`). A
+stale verdict must never read as a green "verified" — the UI shows "out of date".
+There is **no separate re-run endpoint**: the export path recomputes a stale
+verdict synchronously (`demo_day_verdict.ensure_fresh_verdict`, fail-open) before
+rendering `CONSTRUCTION_REPORT.md`, and the frontend re-fetches the workspace
+after a handoff-bundle download to pick up the refreshed verdict. To force a
+recompute operationally, trigger an export (ZIP) for the workspace.
+
+### §13.3 The one platform-funded regenerate
+
+On a failing verdict whose gaps are all **tasks-owned** (C1/C2), the verifier
+fires **exactly one** platform-funded tasks regenerate (`construction_regen` cost
+reason; reuses `_regenerate_with_findings`, the same credit-free path as the
+critic regen). The `regen_attempted` flag in the verdict JSON consumes the window
+on the first attempt (success **or** failure) so it can never fire twice; a
+staleness re-run preserves it. Harness-owned gaps (C3/C4) are left **advisory with
+the gap named** (a fragile detached harness→tasks cascade is deliberately not
+attempted). **Credit posture (§11.2):** Demo Day costs the **same** per stage as
+standard (the charge is keyed on action, not mode); the manual + verifier are
+free; the one regenerate is platform-funded. Pinned by
+`tests/test_demo_day_phase5_credits.py`.
+
+### §13.4 The live golden-corpus gate (the flag-flip is a manual step)
+
+**Flipping `demo_day_mode_enabled` + `VITE_DEMO_DAY_MODE` on is a manual
+post-gate step — never automate it.** Per `docs/evals/ROUTE_PROMOTION.md`, any
+change to which artifact is produced rides the golden corpus. The Demo Day
+problem-statement corpus is `docs/evals/golden_prompts/demo_day_route_golden.json`
+(zero-provisioning bias so the e2e survives the handoff). The promotion gate:
+
+1. Generate the four stages from each corpus problem statement on the candidate
+   prompts (the live run — `scripts/run_llm_route_eval.py` drives the routing/
+   trait checks; quality is judged live).
+2. Assert the construction verifier **passes** on each generated package (the
+   offline pass-criterion proof lives in `tests/test_demo_day_phase3.py`; the
+   corpus is bound to it by `tests/test_demo_day_phase5_corpus.py`).
+3. Only then flip `demo_day_mode_enabled=true` (backend) and
+   `VITE_DEMO_DAY_MODE=true` (frontend build) and redeploy.
+
+To roll back, set both flags off and redeploy — existing Demo Day workspaces keep
+their data (the columns persist) but new workspaces fall back to standard.

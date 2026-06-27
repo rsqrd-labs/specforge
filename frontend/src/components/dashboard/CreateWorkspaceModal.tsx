@@ -2,11 +2,17 @@ import { useEffect, useRef, useState } from "react"
 import { useNavigate } from "react-router-dom"
 import { STARTER_WORKSPACES } from "../../config/starterWorkspaces"
 import { PROVIDERS } from "../../config/providers"
+import { featureFlags } from "../../config/featureFlags"
 import { useFocusTrap } from "../../hooks/useFocusTrap"
 import { getApiErrorMessage, getProviders } from "../../services/api"
 import { useWorkspaceStore } from "../../store/workspaceStore"
 import type { Template } from "../../types/template"
-import type { AIProvider } from "../../types/workspace"
+import type {
+  AIProvider,
+  CreateWorkspacePayload,
+  TargetAgent,
+  WorkspaceMode,
+} from "../../types/workspace"
 import type { Provider } from "../../services/api"
 import { ActionAlertPanel } from "../shared/ActionAlert"
 
@@ -27,6 +33,33 @@ const PROVIDER_DESCRIPTIONS: Record<string, string> = {
   openai: "Strong general-purpose generation",
   google: "Good balance of speed and quality",
 }
+
+// Demo Day mode (docs/DEMO_DAY_MODE_IMPLEMENTATION_PLAN.md §10 Phase 4). The
+// whole selector is gated behind `featureFlags.demoDayMode`; when off, the modal
+// is byte-identical to the standard create flow (the §4 regression pin).
+const MODE_OPTIONS: { id: WorkspaceMode; name: string; desc: string }[] = [
+  {
+    id: "standard",
+    name: "Standard",
+    desc: "Full four-stage spec for any project",
+  },
+  {
+    id: "demo_day",
+    name: "Demo Day",
+    desc: "Construction-verified handoff for a ~5h prototype",
+  },
+]
+
+// The two supported test-executing agents (plan §3). The choice only selects the
+// operating-manual filename/idiom in the export bundle (CLAUDE.md vs AGENTS.md).
+const AGENT_OPTIONS: { id: TargetAgent; name: string; desc: string }[] = [
+  { id: "claude_code", name: "Claude Code", desc: "CLAUDE.md operating manual" },
+  { id: "codex", name: "Codex", desc: "AGENTS.md operating manual" },
+]
+
+// Default agent for a Demo Day workspace. The backend requires target_agent when
+// mode is demo_day, so the selector is never left null.
+const DEFAULT_TARGET_AGENT: TargetAgent = "claude_code"
 
 export function CreateWorkspaceModal({
   onClose,
@@ -51,6 +84,11 @@ export function CreateWorkspaceModal({
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [errors, setErrors] = useState<Record<string, string>>({})
   const [isAdvancedOpen, setIsAdvancedOpen] = useState(false)
+  // Demo Day mode selection — only surfaced when the build flag is on.
+  const demoDayEnabled = featureFlags.demoDayMode
+  const [mode, setMode] = useState<WorkspaceMode>("standard")
+  const [targetAgent, setTargetAgent] = useState<TargetAgent>(DEFAULT_TARGET_AGENT)
+  const isDemoDay = demoDayEnabled && mode === "demo_day"
 
   const dialogRef = useRef<HTMLDivElement>(null)
   const nameInputRef = useRef<HTMLInputElement>(null)
@@ -101,12 +139,20 @@ export function CreateWorkspaceModal({
     }
     setIsSubmitting(true)
     try {
-      const ws = await createWorkspace({
+      const payload: CreateWorkspacePayload = {
         name: name.trim(),
         problem_statement: statement,
         provider,
         template_slug: activeTemplate?.slug ?? null,
-      })
+      }
+      // Only attach the Demo Day fields for an actual Demo Day workspace, so a
+      // standard create request stays byte-identical to today (§4 regression
+      // pin) regardless of whether the build flag is on.
+      if (isDemoDay) {
+        payload.mode = "demo_day"
+        payload.target_agent = targetAgent
+      }
+      const ws = await createWorkspace(payload)
       navigate(`/workspace/${ws.id}`)
     } catch (error) {
       setErrors({
@@ -238,6 +284,56 @@ export function CreateWorkspaceModal({
             {errors.statement && <p className="modal-error">{errors.statement}</p>}
           </div>
 
+          {/* Mode selector (Demo Day, build-flag gated). Above the Advanced
+              disclosure per plan §10 Phase 4. Hidden entirely when the flag is
+              off so the standard modal is unchanged. */}
+          {demoDayEnabled && (
+            <div className="modal-mode">
+              <span className="modal-label">Mode</span>
+              <div className="modal-mode-grid">
+                {MODE_OPTIONS.map((m) => (
+                  <button
+                    key={m.id}
+                    type="button"
+                    onClick={() => setMode(m.id)}
+                    aria-pressed={mode === m.id}
+                    className={`provider-pill${mode === m.id ? " selected" : ""}`}
+                  >
+                    <span>{m.name}</span>
+                    <small className="modal-provider-desc">{m.desc}</small>
+                  </button>
+                ))}
+              </div>
+
+              {/* Target-agent picker — revealed only for Demo Day, since the
+                  construction guarantee requires a test-executing agent. */}
+              {isDemoDay && (
+                <div className="modal-agent">
+                  <span className="modal-label">Coding agent</span>
+                  <div className="modal-mode-grid">
+                    {AGENT_OPTIONS.map((a) => (
+                      <button
+                        key={a.id}
+                        type="button"
+                        onClick={() => setTargetAgent(a.id)}
+                        aria-pressed={targetAgent === a.id}
+                        className={`provider-pill${targetAgent === a.id ? " selected" : ""}`}
+                      >
+                        <span>{a.name}</span>
+                        <small className="modal-provider-desc">{a.desc}</small>
+                      </button>
+                    ))}
+                  </div>
+                  <p className="modal-mode-hint">
+                    Hand the exported bundle to your agent, implement the tasks
+                    one by one, and arrive at a working prototype — verified by
+                    construction.
+                  </p>
+                </div>
+              )}
+            </div>
+          )}
+
           {/* Advanced (provider) */}
           <div className="modal-advanced">
             <button
@@ -301,15 +397,25 @@ export function CreateWorkspaceModal({
             )}
           </div>
 
-          {/* Pipeline preview */}
+          {/* Pipeline preview. Demo Day appends the rubric-aware handoff step so
+              the user sees the construction-verified bundle is the deliverable. */}
           <div className="modal-pipeline-preview" aria-label="What gets generated">
             <span className="modal-pipeline-label">Generates</span>
             {["Spec", "Plan", "Harness", "Tasks"].map((stage, i, arr) => (
               <span key={stage} className="modal-pipeline-stages">
                 <span className="modal-pipeline-step">{stage}</span>
-                {i < arr.length - 1 && <span className="modal-pipeline-arrow">→</span>}
+                {(i < arr.length - 1 || isDemoDay) && (
+                  <span className="modal-pipeline-arrow">→</span>
+                )}
               </span>
             ))}
+            {isDemoDay && (
+              <span className="modal-pipeline-stages">
+                <span className="modal-pipeline-step handoff">
+                  Construction-verified handoff
+                </span>
+              </span>
+            )}
           </div>
 
           {errors.submit && (

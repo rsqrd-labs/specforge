@@ -1,0 +1,104 @@
+[
+  {
+    "id": "demo_day_habit_tracker",
+    "category": "demo_day_simple_crud",
+    "operations": [
+      "spec.generate",
+      "plan.generate",
+      "harness.generate",
+      "tasks.generate"
+    ],
+    "problem_statement": "Demo Day build: a single-user habit tracker where I can add a daily habit, mark it done for today, and see a current streak count. Keep it tiny — SQLite or in-process storage, no auth, no external services — so it runs on a laptop in under five hours.",
+    "upstream_artifacts": {},
+    "complexity": {
+      "expected_level": "normal",
+      "expected_tier_floor": null
+    },
+    "expected_traits": {
+      "required_sections": [
+        "Demo Day Scope",
+        "Out of Scope",
+        "Functional Requirements",
+        "Acceptance Criteria",
+        "Success Demo",
+        "AI Usage",
+        "Security Posture",
+        "Scalability Story"
+      ],
+      "traceability_required": true,
+      "security_coverage": ["input validation", "what we would add for prod"],
+      "api_schema_specificity": ["habits", "completions", "streak"],
+      "markdown_code_fence_validity": true,
+      "max_output_chars": 14000,
+      "reject_expected": false
+    }
+  },
+  {
+    "id": "demo_day_meeting_summarizer",
+    "category": "demo_day_ai_facing",
+    "operations": [
+      "spec.generate",
+      "plan.generate",
+      "harness.generate",
+      "tasks.generate"
+    ],
+    "problem_statement": "Demo Day build: paste a meeting transcript and get back three bullet-point action items. The LLM call is mocked at the boundary in tests so the end-to-end smoke test is deterministic and needs no API key. One happy path only — no accounts, no history, no real provider calls in the harness.",
+    "upstream_artifacts": {},
+    "complexity": {
+      "expected_level": "normal",
+      "expected_tier_floor": null
+    },
+    "expected_traits": {
+      "required_sections": [
+        "Demo Day Scope",
+        "Out of Scope",
+        "Functional Requirements",
+        "Acceptance Criteria",
+        "Success Demo",
+        "AI Usage",
+        "Security Posture",
+        "Scalability Story"
+      ],
+      "traceability_required": true,
+      "security_coverage": ["prompt-injection awareness", "what we would add for prod"],
+      "api_schema_specificity": ["transcript", "action_items", "summarize"],
+      "markdown_code_fence_validity": true,
+      "max_output_chars": 14000,
+      "reject_expected": false
+    }
+  },
+  {
+    "id": "demo_day_live_poll",
+    "category": "demo_day_realtime",
+    "operations": [
+      "spec.generate",
+      "plan.generate",
+      "harness.generate",
+      "tasks.generate"
+    ],
+    "problem_statement": "Demo Day build: a one-question live poll. A host opens a question, viewers vote from a link, and the host sees the tally update. Keep it to a single in-process server with polling (no websockets, no external broker) so the end-to-end test runs without provisioning anything.",
+    "upstream_artifacts": {},
+    "complexity": {
+      "expected_level": "normal",
+      "expected_tier_floor": null
+    },
+    "expected_traits": {
+      "required_sections": [
+        "Demo Day Scope",
+        "Out of Scope",
+        "Functional Requirements",
+        "Acceptance Criteria",
+        "Success Demo",
+        "AI Usage",
+        "Security Posture",
+        "Scalability Story"
+      ],
+      "traceability_required": true,
+      "security_coverage": ["rate limiting", "what we would add for prod"],
+      "api_schema_specificity": ["polls", "votes", "tally"],
+      "markdown_code_fence_validity": true,
+      "max_output_chars": 14000,
+      "reject_expected": false
+    }
+  }
+]

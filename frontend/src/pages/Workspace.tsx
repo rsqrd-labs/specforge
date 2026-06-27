@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react"
 import { useNavigate, useParams } from "react-router-dom"
 import { CoveragePanel } from "../components/workspace/CoveragePanel"
+import { ConstructionVerifiedBadge } from "../components/workspace/ConstructionVerifiedBadge"
+import { DemoDayHandoffPanel } from "../components/workspace/DemoDayHandoffPanel"
 import {
   CreateStoryboardModal,
   canCreateStoryboardFromStages,
@@ -92,6 +94,7 @@ import {
   actionAlertFromStreamError,
 } from "../utils/errorPresentation"
 import { deriveAdvisoryFindings, deriveFinaliseGateBlock } from "../utils/qualityGate"
+import { pollForFreshVerdict } from "../utils/constructionVerdict"
 import { AdvisoryFindingsPanel } from "../components/workspace/AdvisoryFindingsPanel"
 import { featureFlags } from "../config/featureFlags"
 
@@ -407,6 +410,9 @@ export default function Workspace() {
   const [showShareModal, setShowShareModal] = useState(false)
   const [showExportMenu, setShowExportMenu] = useState(false)
   const [isPdfExporting, setIsPdfExporting] = useState(false)
+  // Demo Day handoff-bundle download (separate from the generic export so the
+  // panel's button has its own in-flight state and post-download verdict refresh).
+  const [isDownloadingBundle, setIsDownloadingBundle] = useState(false)
   const [latestStoryboard, setLatestStoryboard] =
     useState<StoryboardDetail | null>(null)
   const [isStoryboardLoading, setIsStoryboardLoading] = useState(false)
@@ -423,6 +429,17 @@ export default function Workspace() {
   const [generationActivity, setGenerationActivity] =
     useState<GenerationActivityInfo | null>(null)
   const generationActivityRef = useRef<GenerationActivityInfo | null>(null)
+  // Cancellation token for the in-flight post-`done` construction-verdict poll
+  // (Demo Day mode). A new generation (or unmount) flips `cancelled` so a stale
+  // poll can never overwrite a superseded workspace — mirrors `advisoryPollRef`
+  // in useStream.ts.
+  const verdictPollRef = useRef<{ cancelled: boolean } | null>(null)
+  useEffect(
+    () => () => {
+      if (verdictPollRef.current) verdictPollRef.current.cancelled = true
+    },
+    [],
+  )
 
   // "Connected enough to export" under the GitHub App living system means an
   // active App installation; we also honour a legacy OAuth connection so a
@@ -626,6 +643,12 @@ export default function Workspace() {
   const allFinalised =
     stages.length === STAGE_ORDER.length &&
     stages.every((stage) => stage.status === "finalised")
+  // Demo Day mode (docs/DEMO_DAY_MODE_IMPLEMENTATION_PLAN.md §10 Phase 4). The
+  // construction badge + handoff panel render data-driven on the workspace's
+  // persisted mode, NOT the build flag, so a workspace already created in Demo
+  // Day mode keeps its handoff UI even if VITE_DEMO_DAY_MODE is off.
+  const isDemoDayWorkspace = currentWorkspace?.mode === "demo_day"
+  const constructionVerdict = currentWorkspace?.construction_verdict ?? null
   const canCreateStoryboard = canCreateStoryboardFromStages(stages)
   const hasStaleStoryboardPrerequisite = stages.some(
     (stage) => stage.status === "stale",
@@ -880,6 +903,29 @@ export default function Workspace() {
     setStages(workspace.stages)
   }, [id, setCurrentWorkspace, setStages])
 
+  // Demo Day: the construction verdict is computed by a DETACHED backend task a
+  // few seconds AFTER the tasks stream ends (plan §7.3), so the single
+  // refreshWorkspace() that runGeneration does on `done` is too early to see it —
+  // without this the badge stays "pending" until a manual reload. Follow the
+  // refresh with a bounded poll that stops the instant a fresh verdict lands.
+  // Cancellable so a tasks regenerate (or unmount) can never let a late fetch
+  // clobber the now-in_progress workspace. Best-effort: every fetch error is
+  // swallowed and on timeout the verdict surfaces on the next natural fetch.
+  const pollForConstructionVerdict = useCallback(() => {
+    if (!id) return
+    if (verdictPollRef.current) verdictPollRef.current.cancelled = true
+    const token = { cancelled: false }
+    verdictPollRef.current = token
+    void pollForFreshVerdict({
+      fetchWorkspace: () => getWorkspace(id),
+      onWorkspace: (workspace) => {
+        setCurrentWorkspace(workspace)
+        setStages(workspace.stages)
+      },
+      isCancelled: () => token.cancelled,
+    })
+  }, [id, setCurrentWorkspace, setStages])
+
   const saveProblemStatement = useCallback(async () => {
     if (!id || !currentWorkspace || !problemDirty) return true
     if (guardWorkspaceMutation()) return false
@@ -944,6 +990,11 @@ export default function Workspace() {
         startGenerationActivity(activeStage, operation, true)
       }
 
+      // A fresh generation supersedes any verdict poll still running for the
+      // prior package (Demo Day) — cancel it before the new stream so a late
+      // fetch can't overwrite the now-in_progress workspace.
+      if (verdictPollRef.current) verdictPollRef.current.cancelled = true
+
       lastGenerationActionRef.current = action
       dismissAlert()
       setEvalResults((existing) => ({ ...existing, [stageId]: null }))
@@ -962,6 +1013,12 @@ export default function Workspace() {
           }))
         }
         await refreshWorkspace()
+        // Demo Day: a completed tasks generation (generate / regenerate /
+        // regenerate-gaps all reschedule the backend verifier) means the
+        // detached verdict run just started — poll until it lands.
+        if (result.stage.type === "tasks" && isDemoDayWorkspace) {
+          pollForConstructionVerdict()
+        }
       } finally {
         clearGenerationActivity(stageId)
       }
@@ -970,6 +1027,8 @@ export default function Workspace() {
       activeStage,
       clearGenerationActivity,
       dismissAlert,
+      isDemoDayWorkspace,
+      pollForConstructionVerdict,
       refreshWorkspace,
       setStage,
       startGenerationActivity,
@@ -1453,6 +1512,39 @@ export default function Workspace() {
     }
   }, [id, isPdfExporting, allFinalised, currentWorkspace?.name, showAlert])
 
+  // Demo Day handoff bundle (plan §8). Reuses the standard ZIP export — which,
+  // for a demo_day workspace, already carries the operating manual +
+  // CONSTRUCTION_REPORT.md and re-runs the construction verdict server-side when
+  // it is stale (export_service.build_export → ensure_fresh_verdict). After the
+  // download we re-fetch the workspace so the freshly-recomputed verdict updates
+  // the badge/panel (this is the §7.3 on-demand re-run, no extra endpoint).
+  const handleDownloadHandoffBundle = useCallback(async () => {
+    if (!id || isDownloadingBundle || !allFinalised) return
+    setIsDownloadingBundle(true)
+    try {
+      const blob = await exportWorkspace(id)
+      const url = URL.createObjectURL(blob)
+      const link = document.createElement("a")
+      link.href = url
+      link.download = `specforge-${id}-demo-day.zip`
+      link.click()
+      URL.revokeObjectURL(url)
+      // Pull the server-refreshed verdict so a stale badge turns fresh.
+      await fetchWorkspace(id)
+    } catch (exc) {
+      showAlert(
+        actionAlertFromMessage({
+          title: "Handoff bundle download failed",
+          message: getApiErrorMessage(exc, "Could not build the handoff bundle."),
+          recovery: "Your workspace is saved. Try the download again in a moment.",
+          source: "Export",
+        }),
+      )
+    } finally {
+      setIsDownloadingBundle(false)
+    }
+  }, [id, isDownloadingBundle, allFinalised, fetchWorkspace, showAlert])
+
   const handleCreateStoryboard = useCallback(async () => {
     if (!id || storyboardActionInFlightRef.current) return
 
@@ -1770,8 +1862,14 @@ export default function Workspace() {
   const harnessCoverageGaps =
     (evalResult?.uncovered_reqs?.length ?? 0) +
     (evalResult?.deferred_reqs?.length ?? 0)
+  // Demo Day: the handoff panel lives on the tasks pane and is always worth a
+  // rail column (it carries the bundle download + verdict even before the
+  // verifier has run). Without this the rail would stay collapsed and the panel
+  // would never render (the §9 silent-no-op integration point).
+  const showDemoDayHandoff = isDemoDayWorkspace && activeStage.type === "tasks"
   const showRightPanel =
     Boolean(diffResult) ||
+    showDemoDayHandoff ||
     (activeStage.type === "harness" && harnessCoverageGaps > 0) ||
     (activeStage.type === "tasks" &&
       (genuineGapIssues.length > 0 ||
@@ -2406,6 +2504,14 @@ export default function Workspace() {
                     error={isEvalError}
                     checking={activeStage.status === "in_progress"}
                   />
+                  {/* Workspace-level construction verdict — surfaced on the tasks
+                      pane (where the verifier runs) for a Demo Day workspace. */}
+                  {isDemoDayWorkspace && activeStage.type === "tasks" && (
+                    <ConstructionVerifiedBadge
+                      verdict={constructionVerdict}
+                      stages={stages}
+                    />
+                  )}
                   {activeStage.type === "tasks" && evalResult !== null && genuineGapIssues.length === 0 && (
                     <span className="ws-validation-ok-chip">✓ All tasks valid</span>
                   )}
@@ -2479,6 +2585,23 @@ export default function Workspace() {
                   </div>
                 ) : (
                   <>
+                    {showDemoDayHandoff && (
+                      <DemoDayHandoffPanel
+                        verdict={constructionVerdict}
+                        stages={stages}
+                        targetAgent={currentWorkspace?.target_agent}
+                        onDownloadBundle={() =>
+                          void handleDownloadHandoffBundle()
+                        }
+                        downloading={isDownloadingBundle}
+                        downloadDisabled={!allFinalised}
+                        downloadDisabledReason={
+                          allFinalised
+                            ? undefined
+                            : "Finalise all four stages to download the handoff bundle."
+                        }
+                      />
+                    )}
                     <CoveragePanel
                       stage={activeStage}
                       evalResult={evalResult}

@@ -12,9 +12,20 @@
  * `VITE_BRANDED_LOADERS=false` to opt back out to the legacy per-surface
  * loaders. Only the exact literal `"false"` disables it, so any unset/typo'd
  * value keeps the branded loader on.
+ *
+ * `demoDayMode` gates the **creation** of Demo Day workspaces (the mode +
+ * target-agent selectors in `CreateWorkspaceModal`) per the Demo Day plan
+ * (docs/DEMO_DAY_MODE_IMPLEMENTATION_PLAN.md §10 Phase 4). It ships **off**:
+ * unlike `brandedLoaders`, only the exact literal `"true"` opts in, so any
+ * unset/typo'd value fails closed (off) until the live golden-corpus gate
+ * promotes the feature. NOTE: this flag governs the *creation* surface only —
+ * the construction-verified badge and handoff panel render data-driven on
+ * `workspace.mode === "demo_day"`, so a workspace already created in Demo Day
+ * mode keeps displaying its handoff UI even if this build flag is off.
  */
 export const featureFlags = {
   brandedLoaders: import.meta.env.VITE_BRANDED_LOADERS !== "false",
+  demoDayMode: import.meta.env.VITE_DEMO_DAY_MODE === "true",
 } as const
 
 export type FeatureFlag = keyof typeof featureFlags
