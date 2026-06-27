@@ -152,12 +152,7 @@ export function attachAuthorizationHeader(
   }
 }
 
-export async function getCsrfToken(): Promise<string | null> {
-  const token = getAccessToken()
-  if (!token) {
-    return null
-  }
-
+async function requestCsrfToken(token: string): Promise<string> {
   const config = attachAuthorizationHeader(
     {
       headers: new AxiosHeaders(),
@@ -171,6 +166,44 @@ export async function getCsrfToken(): Promise<string | null> {
     { headers: config.headers },
   )
   return response.data.csrf_token
+}
+
+export async function getCsrfToken(): Promise<string | null> {
+  const token = getAccessToken()
+  if (!token) {
+    return null
+  }
+
+  try {
+    return await requestCsrfToken(token)
+  } catch (error) {
+    // The CSRF prefetch rides `refreshApi`, which has no response interceptor, so
+    // an expired access token surfaces here as a raw 401. It MUST be refreshed and
+    // retried inside this function. If it propagated, it would bubble out of the
+    // `api` request interceptor and into `api`'s response interceptor — where
+    // `error.config` is this csrf-token GET, not the mutating request that
+    // triggered the prefetch. That interceptor would refresh, replay the
+    // csrf-token GET, and hand *its* 200 back as the mutating request's result, so
+    // e.g. createWorkspace resolves with `{ csrf_token }`, `ws.id` is undefined,
+    // and the app navigates to `/workspace/undefined` → "Workspace unavailable."
+    // (the idle-then-Generate bug). Refreshing here keeps the 401 contained.
+    if (axios.isAxiosError(error) && error.response?.status === 401) {
+      try {
+        const refreshed = await refreshAccessToken()
+        if (!refreshed) {
+          return null
+        }
+        return await requestCsrfToken(refreshed)
+      } catch {
+        // Refresh or the retried prefetch failed — the session is genuinely dead.
+        // Return null (no CSRF header) so the mutating request itself 401s and is
+        // handled by `api`'s response interceptor against its own config, instead
+        // of leaking this csrf-token error there.
+        return null
+      }
+    }
+    throw error
+  }
 }
 
 export async function refreshAccessToken(): Promise<string | null> {
