@@ -39,7 +39,7 @@ describe("ConstructionVerifiedBadge", () => {
 
   it("shows the verified ✓ badge when the verdict matches the live versions", () => {
     render(<ConstructionVerifiedBadge verdict={verdict()} stages={stagesAt(1)} />)
-    expect(screen.getByText(/Construction-verified ✓/)).toBeInTheDocument()
+    expect(screen.getByText(/Build-ready ✓/)).toBeInTheDocument()
   })
 
   it("counts only the C1–C4 gaps, never the advisory C5", () => {
@@ -64,7 +64,7 @@ describe("ConstructionVerifiedBadge", () => {
     render(
       <ConstructionVerifiedBadge verdict={verdict()} stages={stagesAt(2)} />,
     )
-    expect(screen.getByText(/Verdict out of date/)).toBeInTheDocument()
-    expect(screen.queryByText(/Construction-verified/)).not.toBeInTheDocument()
+    expect(screen.getByText(/Check out of date/)).toBeInTheDocument()
+    expect(screen.queryByText(/Build-ready/)).not.toBeInTheDocument()
   })
 })

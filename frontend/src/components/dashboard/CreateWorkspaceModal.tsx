@@ -46,7 +46,7 @@ const MODE_OPTIONS: { id: WorkspaceMode; name: string; desc: string }[] = [
   {
     id: "demo_day",
     name: "Demo Day",
-    desc: "Construction-verified handoff for a ~5h prototype",
+    desc: "Build-ready handoff for a ~5h prototype",
   },
 ]
 
@@ -306,7 +306,7 @@ export function CreateWorkspaceModal({
               </div>
 
               {/* Target-agent picker — revealed only for Demo Day, since the
-                  construction guarantee requires a test-executing agent. */}
+                  build-ready guarantee requires a test-executing agent. */}
               {isDemoDay && (
                 <div className="modal-agent">
                   <span className="modal-label">Coding agent</span>
@@ -398,7 +398,7 @@ export function CreateWorkspaceModal({
           </div>
 
           {/* Pipeline preview. Demo Day appends the rubric-aware handoff step so
-              the user sees the construction-verified bundle is the deliverable. */}
+              the user sees the build-ready bundle is the deliverable. */}
           <div className="modal-pipeline-preview" aria-label="What gets generated">
             <span className="modal-pipeline-label">Generates</span>
             {["Spec", "Plan", "Harness", "Tasks"].map((stage, i, arr) => (
@@ -412,7 +412,7 @@ export function CreateWorkspaceModal({
             {isDemoDay && (
               <span className="modal-pipeline-stages">
                 <span className="modal-pipeline-step handoff">
-                  Construction-verified handoff
+                  Build-ready handoff
                 </span>
               </span>
             )}

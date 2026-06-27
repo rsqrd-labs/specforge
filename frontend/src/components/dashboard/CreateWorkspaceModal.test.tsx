@@ -68,7 +68,7 @@ describe("CreateWorkspaceModal — Demo Day mode", () => {
     expect(screen.queryByText("Demo Day")).not.toBeInTheDocument()
     expect(screen.queryByText(/Coding agent/)).not.toBeInTheDocument()
     // Standard pipeline preview is unchanged (no handoff step).
-    expect(screen.queryByText(/Construction-verified handoff/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/Build-ready handoff/)).not.toBeInTheDocument()
   })
 
   it("omits mode/target_agent from the payload on a standard create (regression pin)", async () => {
@@ -104,7 +104,7 @@ describe("CreateWorkspaceModal — Demo Day mode", () => {
     expect(screen.getByRole("button", { name: /Codex/ })).toBeInTheDocument()
     // The pipeline preview gains the handoff step (exact text — distinct from the
     // longer mode-option description).
-    expect(screen.getByText("Construction-verified handoff")).toBeInTheDocument()
+    expect(screen.getByText("Build-ready handoff")).toBeInTheDocument()
   })
 
   it("threads mode + the chosen agent into the create payload", async () => {

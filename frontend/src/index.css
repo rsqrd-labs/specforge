@@ -5159,7 +5159,7 @@ button:disabled {
 
 /* ---------------------------------------------------------------------------
  * Demo Day construction-verdict badge (ConstructionVerifiedBadge). A sibling of
- * .quality-badge; the value text is longer (e.g. "Construction-verified ✓") so
+ * .quality-badge; the value text is longer (e.g. "Build-ready ✓") so
  * it carries the smaller, findings-style strong size.
  * ------------------------------------------------------------------------- */
 .construction-badge {

@@ -13,8 +13,8 @@ interface ConstructionVerifiedBadgeProps {
 }
 
 const STATUS_LABEL: Record<"verified" | "stale", string> = {
-  verified: "Construction-verified ✓",
-  stale: "Verdict out of date",
+  verified: "Build-ready ✓",
+  stale: "Check out of date",
 }
 
 /**
@@ -41,7 +41,7 @@ export function ConstructionVerifiedBadge({
     const gaps = gapCount(verdict)
     return (
       <span className="construction-badge gaps" role="status">
-        <span>Construction</span>
+        <span>Build</span>
         <strong>
           {gaps} gap{gaps === 1 ? "" : "s"}
         </strong>

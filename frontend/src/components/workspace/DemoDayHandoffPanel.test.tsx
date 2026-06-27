@@ -40,7 +40,9 @@ describe("DemoDayHandoffPanel", () => {
       />,
     )
     expect(screen.getByText("Verified ✓")).toBeInTheDocument()
-    expect(screen.getByText(/by construction/)).toBeInTheDocument()
+    expect(
+      screen.getByText(/the prototype does what your approved spec says/),
+    ).toBeInTheDocument()
     expect(
       screen.getByRole("button", { name: /Download handoff bundle for CLAUDE\.md/ }),
     ).toBeInTheDocument()
@@ -117,7 +119,7 @@ describe("DemoDayHandoffPanel", () => {
     )
     expect(screen.getByText("Pending")).toBeInTheDocument()
     expect(
-      screen.getByText(/Finalise all four stages to run the construction check/),
+      screen.getByText(/Finalise all four stages to run the build check/),
     ).toBeInTheDocument()
     const button = screen.getByRole("button", { name: /Download handoff bundle/ })
     expect(button).toBeDisabled()

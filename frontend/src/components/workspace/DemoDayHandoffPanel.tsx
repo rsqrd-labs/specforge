@@ -93,15 +93,15 @@ export function DemoDayHandoffPanel({
     <div className="ws-panel-section ws-handoff-card">
       <div className="ws-panel-section-header">
         <div>
-          <div className="ws-panel-title">Construction Handoff</div>
+          <div className="ws-panel-title">Build Handoff</div>
           <p>
             {status === "verified"
-              ? "If every task's acceptance test passes, the prototype does what the approved spec says — by construction."
+              ? "Every task has a test and the build order checks out — when those tests pass, the prototype does what your approved spec says."
               : status === "gaps"
-                ? "The package ships with these construction gaps named — fix them or hand off as-is."
+                ? "The package ships with these build gaps named — fix them or hand off as-is."
                 : status === "stale"
-                  ? "A stage changed since the last check. The verdict is re-run automatically when you download the bundle."
-                  : "Finalise all four stages to run the construction check."}
+                  ? "A stage changed since the last check. The check is re-run automatically when you download the bundle."
+                  : "Finalise all four stages to run the build check."}
           </p>
         </div>
         {chip}
