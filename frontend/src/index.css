@@ -3451,6 +3451,9 @@ button:disabled {
   position: relative;
   width: 100%;
   max-width: 520px;
+  max-height: calc(100vh - 32px);
+  display: flex;
+  flex-direction: column;
   border-radius: 22px;
   border: 1px solid rgba(143, 78, 0, 0.18);
   background: rgba(253, 246, 238, 0.88);
@@ -3476,6 +3479,7 @@ button:disabled {
   justify-content: space-between;
   padding: 20px 24px 18px;
   border-bottom: 1px solid rgba(143, 78, 0, 0.10);
+  flex-shrink: 0;
 }
 
 .create-modal-title {
@@ -3519,6 +3523,8 @@ button:disabled {
   display: flex;
   flex-direction: column;
   gap: 18px;
+  overflow-y: auto;
+  min-height: 0;
 }
 
 .modal-label {
