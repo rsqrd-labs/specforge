@@ -4,6 +4,7 @@ import { STARTER_WORKSPACES } from "../../config/starterWorkspaces"
 import { PROVIDERS } from "../../config/providers"
 import { featureFlags } from "../../config/featureFlags"
 import { useFocusTrap } from "../../hooks/useFocusTrap"
+import { useScrollLock } from "../../hooks/useScrollLock"
 import { getApiErrorMessage, getProviders } from "../../services/api"
 import { useWorkspaceStore } from "../../store/workspaceStore"
 import type { Template } from "../../types/template"
@@ -91,8 +92,12 @@ export function CreateWorkspaceModal({
   const isDemoDay = demoDayEnabled && mode === "demo_day"
 
   const dialogRef = useRef<HTMLDivElement>(null)
+  const bodyRef = useRef<HTMLFormElement>(null)
   const nameInputRef = useRef<HTMLInputElement>(null)
   useFocusTrap(dialogRef, onClose, nameInputRef)
+  // Lock the dashboard behind the modal so a wheel/trackpad gesture only ever
+  // scrolls the card — never the blurred page behind it, wherever the pointer is.
+  useScrollLock()
 
   const selectableProviders = providers.filter((p) => p.selectable)
   const selectedProvider = providers.find((p) => p.id === provider)
@@ -165,6 +170,15 @@ export function CreateWorkspaceModal({
     }
   }
 
+  // Forward wheel gestures that land outside the scrollable body (the backdrop
+  // padding or the fixed header) into the card, so a scroll anywhere over the
+  // open modal scrolls the card rather than doing nothing.
+  function handleBackdropWheel(e: React.WheelEvent) {
+    const body = bodyRef.current
+    if (!body || body.contains(e.target as Node)) return
+    body.scrollTop += e.deltaY
+  }
+
   const isUnderMin = statement.length < MIN_STATEMENT
   const minFillPct = Math.min((statement.length / MIN_STATEMENT) * 100, 100)
   const isOverMax = statement.length > MAX_STATEMENT
@@ -174,6 +188,7 @@ export function CreateWorkspaceModal({
     <div
       className="create-modal-backdrop"
       onClick={(e) => e.target === e.currentTarget && onClose()}
+      onWheel={handleBackdropWheel}
     >
       <div
         ref={dialogRef}
@@ -193,7 +208,7 @@ export function CreateWorkspaceModal({
           </button>
         </div>
 
-        <form onSubmit={(e) => void handleSubmit(e)} className="create-modal-body">
+        <form ref={bodyRef} onSubmit={(e) => void handleSubmit(e)} className="create-modal-body">
 
           {activeTemplate && (
             <div className="modal-template-provenance">

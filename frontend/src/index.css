@@ -3524,6 +3524,7 @@ button:disabled {
   flex-direction: column;
   gap: 18px;
   overflow-y: auto;
+  overscroll-behavior: contain;
   min-height: 0;
 }
 
