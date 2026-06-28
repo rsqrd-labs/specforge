@@ -86,6 +86,38 @@ class Settings(BaseSettings):
     db_statement_timeout_ms: int = 30_000
     db_idle_in_transaction_timeout_ms: int = 300_000
 
+    # F3 (scalability audit) — transaction-pooler (PgBouncer) compatibility.
+    #
+    # Horizontal scale-out is gated by the idle Postgres connection footprint ×
+    # instance count (each process holds up to db_pool_size+db_max_overflow open
+    # connections). A transaction-mode pooler in front of Postgres multiplexes
+    # many app connections onto a small fixed server-connection pool, so the
+    # Postgres connection count stays flat regardless of instance count. It is
+    # ALREADY compatible here because the generation pipeline releases its
+    # connection during the multi-minute stream (audit §1) — no app code relies
+    # on session-scoped server state across statements.
+    #
+    # The one runtime hazard is asyncpg's server-side PREPARED STATEMENTS: in
+    # transaction mode consecutive statements may land on different backend
+    # connections, so a prepared statement cached against one is missing on the
+    # next (asyncpg raises InvalidCachedStatementError / a duplicate-name error).
+    # When this flag is true the engine disables SQLAlchemy's prepared-statement
+    # cache AND asyncpg's own type-introspection cache, and gives every prepared
+    # statement a unique name (per the SQLAlchemy asyncpg+PgBouncer guidance),
+    # making it safe behind a transaction pooler.
+    #
+    # CAVEAT (RUNBOOK §15): the F9 server_settings guards (statement_timeout /
+    # idle_in_transaction_session_timeout) are sent as connection STARTUP
+    # parameters, which a transaction pooler accepts (via the pooler's
+    # `ignore_startup_parameters`) but does NOT apply to the backend session. So
+    # in pooler mode those guards must be set at the Postgres ROLE/server level
+    # instead (e.g. `ALTER ROLE app SET statement_timeout = '30s'`); the app
+    # keeps emitting them harmlessly for the no-pooler path.
+    #
+    # Default False ⇒ direct-to-Postgres connect_args are byte-identical to
+    # today; flip true only when a pooler is actually in front (RUNBOOK §15).
+    db_transaction_pooler_mode: bool = False
+
     # F8 (scalability audit) — bound + health-check the shared Redis pool.
     #
     # Every request touches Redis (rate limiting, credit/generation cache,
@@ -127,6 +159,25 @@ class Settings(BaseSettings):
     generation_admission_lease_ttl_seconds: int = 1_800
     generation_rate_per_minute: int = 10
     generation_rate_window_seconds: int = 60
+
+    # F6 (scalability audit) — bound the post-`done` background-task fan-out.
+    #
+    # max_concurrent_advisory_tasks: shared ceiling on how many ADVISORY
+    #   background tasks (the best-effort eval score + the off-critical-path
+    #   critic judge + the Demo-Day construction verifier) run concurrently, so a
+    #   burst of post-`done` work cannot starve live generation streams for the
+    #   shared provider key / DB pool / event loop. The detached generation
+    #   pipeline itself is NOT gated — it is bounded upstream by F1 admission and
+    #   gating it would deadlock generation. 0 disables the gate (unbounded — the
+    #   pre-F6 behaviour, the instant-revert path).
+    # background_tasks_soft_max: per-registry soft ceiling that, when crossed,
+    #   emits a one-shot high-water WARNING (a back-pressure signal that a
+    #   registry is leaking tasks past the F1 cap). It NEVER drops a task —
+    #   shedding advisory work would silently lose eval/critic findings and a
+    #   dropped pipeline task would lose a paid generation. 0 disables the
+    #   warning. The live count is always exported as specforge_background_tasks.
+    max_concurrent_advisory_tasks: int = 12
+    background_tasks_soft_max: int = 200
 
     # F2 (scalability audit) — global provider budget + 429-aware backoff.
     #

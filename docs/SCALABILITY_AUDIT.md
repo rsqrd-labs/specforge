@@ -395,6 +395,37 @@ Per the brief ("no feature breaks under load"), one explicit pass per feature:
 7. **F5** scale worker replicas + split fast/bulk live queues; verify cron leadership.
 8. **F6** bound the eval/critic background fan-out.
 
+> **P1 status: IMPLEMENTED.** All four P1 items are shipped and tested
+> (`test_scalability_p1.py`, `test_background_tasks.py`, plus the queue/worker
+> suites). Full ops in `docs/RUNBOOK.md` §15/§16. Key facts:
+> - **F3** — env-driven pool sizing already shipped in P0/F9. A
+>   `DB_TRANSACTION_POOLER_MODE` flag (default **off** ⇒ byte-identical) makes the
+>   asyncpg engine transaction-pooler-safe (disables SQLAlchemy's **and** asyncpg's
+>   prepared-statement caches + unique statement names), **validated end-to-end**
+>   against a real PgBouncer (`deploy/pgbouncer/`, compose `pgbouncer` profile).
+>   Server-side guards (`statement_timeout`/idle) are stripped by the pooler as
+>   startup params, so in pooler mode they move to the Postgres ROLE (RUNBOOK §15).
+>   SQLAlchemy **pool metrics** (`specforge_db_pool_total_open` etc.) are exported
+>   for the capacity gate. `max_connections` remains a must-confirm deploy fact.
+> - **F4** — worker count comes from `WEB_CONCURRENCY` via `gunicorn.conf.py`
+>   (default **2**, no footprint change until the pooler lands); **no** worker
+>   recycling (it would sever in-flight SSE streams).
+> - **F5** — the live queue is **split** into a bulk lane (default `arq:queue`:
+>   GitHub bulk + LLM batch) and a fast lane (`arq:queue:fast`:
+>   `billing_process_webhook` + `pr_check`), each a **separate process**
+>   (`WorkerSettings` / `FastWorkerSettings`) so a bulk-export storm can't starve
+>   paid grants. Routing is single-sourced in `services.queue.queue_for_job`;
+>   global crons sit on exactly one lane (arq dedups per-queue across replicas);
+>   per-queue depth + oldest-job-age are sampled by a per-worker cron. **Deploy
+>   invariant:** the fast worker must run in every environment (compose
+>   `worker-fast`, Procfile `worker_fast`). The per-installation governor (F5 #4 /
+>   T-274) already exists.
+> - **F6** — the four module-level task sets are unified into one bounded
+>   `BoundedTaskRegistry` (strong-ref-until-done preserved, `len()` gauge,
+>   high-water warning); advisory eval/critic/verifier work shares a concurrency
+>   semaphore (`MAX_CONCURRENT_ADVISORY_TASKS`) so it can't starve live streams.
+>   The pipeline registry stays ungated (bounded upstream by F1).
+
 **P2 — tail latency & polish:**
 9. **F7** offload inline bleach/regex/diff to threads.
 10. Public-payload Redis cache; partial index on `in_progress`; per-installation GitHub

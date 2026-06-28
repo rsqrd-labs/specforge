@@ -1,0 +1,6 @@
+; PgBouncer userlist (F3 — scalability audit). LOCAL DEV ONLY.
+; Even auth_type=trust requires the connecting user to exist here. The plaintext
+; password also lets PgBouncer perform SCRAM auth to the Postgres server.
+; In production, generate this from your real credentials (or use auth_query)
+; and never commit real secrets — see RUNBOOK §15.
+"specforge" "specforge"

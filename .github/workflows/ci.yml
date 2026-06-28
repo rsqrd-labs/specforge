@@ -400,9 +400,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # The Phase 21 durable worker (Procfile `worker: arq worker.WorkerSettings`,
-      # the docker-compose `worker` service) ships the backend image. Building it
-      # here proves the worker image is deployable before main is allowed to ship.
+      # The durable workers — the bulk lane (`worker: arq worker.WorkerSettings`)
+      # and the F5 fast lane (`worker_fast: arq worker.FastWorkerSettings`) — share
+      # this backend image (same image, different start command; compose `worker`
+      # + `worker-fast`). Building it here proves the worker image is deployable
+      # before main is allowed to ship.
       - name: Build backend / worker image
         run: docker build -t specforge-worker:ci ./backend
 

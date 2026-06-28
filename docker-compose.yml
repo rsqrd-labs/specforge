@@ -66,9 +66,10 @@ services:
     entrypoint: ["/bin/sh", "-c", "uv sync --frozen --no-dev && uv run --no-sync alembic upgrade head && uv run --no-sync uvicorn main:app --reload --timeout-graceful-shutdown 15 --reload-dir /app/routers --reload-dir /app/services --reload-dir /app/models --reload-dir /app/middleware --reload-dir /app/prompts --reload-dir /app/schemas --reload-dir /app/config --reload-exclude '.venv/*' --reload-exclude 'tests/*' --reload-exclude '.pytest_cache/*' --reload-exclude '.ruff_cache/*' --host 0.0.0.0 --port 8000"]
 
   worker:
-    # Durable background worker (Phase 21 — T-269). Shares the backend image and
-    # REDIS_URL/DATABASE_URL with `api`; runs the arq worker that performs all
-    # GitHub I/O off the request path. No migrations here — `api` owns those.
+    # Durable background worker — BULK lane (Phase 21 — T-269; F5). Shares the
+    # backend image and REDIS_URL/DATABASE_URL with `api`; drains the default
+    # queue (GitHub bulk I/O + LLM eval batches) off the request path. No
+    # migrations here — `api` owns those.
     build: ./backend
     env_file:
       - backend/.env
@@ -86,6 +87,63 @@ services:
       # Same .venv mask as `api` — see comment there.
       - worker_venv:/app/.venv
     entrypoint: ["/bin/sh", "-c", "uv sync --frozen --no-dev && uv run --no-sync arq worker.WorkerSettings"]
+
+  worker-fast:
+    # Durable background worker — FAST lane (F5 — scalability audit). A SEPARATE
+    # process draining the fast queue (paid credit grants + PR status checks) so
+    # a bulk-export storm on `worker` can never occupy these slots. DEPLOY
+    # INVARIANT: this must run in every environment, or paid grants never drain
+    # (RUNBOOK §16). Shares the image/env with `worker`; runs no migrations.
+    build: ./backend
+    env_file:
+      - backend/.env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://specforge:specforge@db:5432/specforge
+      REDIS_URL: redis://redis:6379/0
+      FRONTEND_URL: http://localhost:5173
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./backend:/app
+      # Same .venv mask as `api` — see comment there.
+      - worker_venv:/app/.venv
+    entrypoint: ["/bin/sh", "-c", "uv sync --frozen --no-dev && uv run --no-sync arq worker.FastWorkerSettings"]
+
+  pgbouncer:
+    # Transaction-mode connection pooler (F3 — scalability audit). Opt-in via the
+    # `pgbouncer` profile so the default stack is unchanged:
+    #   docker compose --profile pgbouncer up -d pgbouncer
+    # then point the app at it and flip the flag:
+    #   DATABASE_URL=postgresql+asyncpg://specforge:specforge@pgbouncer:6432/specforge
+    #   DB_TRANSACTION_POOLER_MODE=1
+    # Env vars mirror deploy/pgbouncer/pgbouncer.ini (the production reference).
+    image: edoburu/pgbouncer:v1.23.1-p2
+    profiles: ["pgbouncer"]
+    # Mount the production-reference ini as-is and run pgbouncer directly,
+    # bypassing the image's env-var config generator — so local validation uses
+    # the exact config shape documented for production (transaction mode +
+    # ignore_startup_parameters + inline server password for SCRAM-to-Postgres).
+    entrypoint: ["/usr/bin/pgbouncer"]
+    command: ["/etc/pgbouncer/pgbouncer.ini"]
+    volumes:
+      - ./deploy/pgbouncer/pgbouncer.ini:/etc/pgbouncer/pgbouncer.ini:ro
+      - ./deploy/pgbouncer/userlist.txt:/etc/pgbouncer/userlist.txt:ro
+    ports:
+      - target: 6432
+        published: 6432
+        host_ip: "127.0.0.1"
+        protocol: tcp
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -p 6432 -U specforge -d specforge || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
 
   frontend:
     image: node:22-alpine

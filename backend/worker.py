@@ -1,20 +1,29 @@
-"""Durable background worker (Phase 21 — T-269).
+"""Durable background worker (Phase 21 — T-269; F5 live-queue split).
 
-SpecForge's first process that runs work *outside* FastAPI. Started with
-``arq worker.WorkerSettings`` (see ``docker-compose.yml`` / ``Procfile``), it
-drives every GitHub write/sync job off the request path.
+SpecForge's background-job processes that run work *outside* FastAPI. Since the
+F5 scalability remediation there are **two lanes**, each a separate process:
 
-Job roster (registered here as the single source of truth; producers come
-online across Phase 21):
+  - ``arq worker.WorkerSettings``      — the BULK lane (arq's default queue):
+    high-volume, latency-tolerant GitHub bulk I/O + LLM eval batch jobs.
+  - ``arq worker.FastWorkerSettings``  — the FAST lane (a dedicated queue):
+    latency-sensitive, money-/user-visible paid credit grants + the PR status
+    check, so a bulk-export storm can never occupy their job slots.
 
-  - ``export_push``      — push a workspace to GitHub (fully implemented here).
-  - ``reconcile_event``  — apply an inbound webhook (T-272).
-  - ``backfill_repo``    — reconcile missed events from the issues API (T-273).
-  - ``increment_push``   — push an increment delta (T-279/T-280).
-  - ``projects_sync``    — sync the Projects v2 board (T-281).
-  - ``pr_check``         — post the SpecForge status check (T-282).
-  - ``reconcile_drift``  — periodic cron that recomputes drift / catches missed
-    events (T-273).
+Both are stateless and horizontally scalable to N replicas — jobs are
+idempotent/checkpointed, and arq dedups crons per queue so each cron fires once
+per lane regardless of replica count. The producer/consumer split is single-
+sourced by ``services.queue.queue_for_job`` so routing can never drift.
+
+Job roster (registered here as the single source of truth):
+
+  - ``export_push``      — push a workspace to GitHub.               [bulk]
+  - ``reconcile_event``  — apply an inbound webhook (T-272).         [bulk]
+  - ``backfill_repo``    — reconcile missed events (T-273).          [bulk]
+  - ``increment_push``   — push an increment delta (T-279/T-280).    [bulk]
+  - ``projects_sync``    — sync the Projects v2 board (T-281).       [bulk]
+  - ``llm_batch_*``      — deferred eval batch submit/collect.       [bulk]
+  - ``pr_check``         — post the SpecForge status check (T-282).  [fast]
+  - ``billing_process_webhook`` — grant credits from a Lemon event.  [fast]
 
 Every job carries the shared base contract from ``services.queue`` (idempotency
 keying, exponential backoff + jitter retries to ``JOB_MAX_TRIES``, then a
@@ -33,8 +42,9 @@ import structlog
 from arq import cron
 
 from config import settings
-from services.observability import GITHUB_QUEUE_DEPTH
 from services.queue import (
+    BULK_QUEUE_NAME,
+    FAST_QUEUE_NAME,
     JOB_MAX_TRIES,
     _redis_settings,
     billing_job,
@@ -48,6 +58,12 @@ logger = structlog.get_logger(__name__)
 # Bounded global concurrency so a flood of jobs cannot exhaust the worker's DB
 # pool / sockets; per-tenant fairness (the per-installation governor) is T-274.
 _MAX_JOBS = 20
+# The fast lane (F5) does light, quick work (a webhook grant + a PR status post),
+# so it runs fewer jobs concurrently than the bulk lane. This also caps its peak
+# DB-connection draw — adding the fast worker process therefore adds far less
+# than a full per-process pool to the Postgres connection footprint (RUNBOOK §15
+# deploy prerequisite). Per-process pool size itself is DB_POOL_SIZE-tunable.
+_FAST_MAX_JOBS = 10
 # Hard ceiling on a single job's wall-clock (a large export of many issues).
 _JOB_TIMEOUT_SECONDS = 1800
 # Do NOT retain job results. Status is polled from the DB push row, not from
@@ -85,6 +101,13 @@ _LLM_BATCH_SWEEP_CRON_SECOND = {30}
 # 15-minute cache TTL guarantees the cached estimates never expire while the
 # worker is healthy; the startup run warms the cache right after a deploy.
 _GENERATION_ESTIMATES_CRON_MINUTE = {3, 13, 23, 33, 43, 53}
+
+# Per-queue backpressure sampler (F5). Fires every minute at :45 — a second that
+# collides with no other tick (billing sweep {0}, llm batch {30}) — on BOTH
+# worker classes, each sampling only the queue IT consumes. This is per-queue
+# work, so running it on both lanes is correct (not a double-fire): a fast
+# replica samples the fast queue, a bulk replica samples the bulk queue.
+_QUEUE_SAMPLE_CRON_SECOND = {45}
 
 
 @github_job("export_push")
@@ -288,53 +311,151 @@ async def _on_startup(ctx: dict[str, Any]) -> None:
             environment=settings.environment,
             traces_sample_rate=0.0,
         )
-    from redis.asyncio import Redis
+    from database import _initialize_redis, build_redis_client
 
-    from database import _initialize_redis
-
-    _initialize_redis(Redis.from_url(settings.redis_url, decode_responses=True))
-    logger.info("github.worker.started", max_jobs=_MAX_JOBS)
+    # Use the single bounded/health-checked Redis factory (F8) — the worker now
+    # scales to N replicas (F5), so an unbounded per-process pool here would
+    # multiply Redis connections the same way the API path did before F8.
+    _initialize_redis(build_redis_client())
+    queue = getattr(ctx.get("redis"), "default_queue_name", "unknown")
+    logger.info("worker.started", queue=queue, max_jobs=_MAX_JOBS)
 
 
 async def _on_shutdown(ctx: dict[str, Any]) -> None:
     await close_arq_pool()
 
 
-async def _on_job_start(ctx: dict[str, Any]) -> None:
-    """Surface approximate queue depth as a gauge for backpressure alerts."""
+async def sample_queue_stats(ctx: dict[str, Any]) -> None:
+    """Cron: publish THIS worker's queue depth + oldest-job age (F5 backpressure).
+
+    Sampled from a cron rather than on_job_start because a STALLED queue starts
+    no jobs — an on-job-start gauge would read stale (or never update) exactly
+    when the alert must fire. Each worker samples only the queue it consumes
+    (``ctx['redis'].default_queue_name``), so the fast and bulk lanes are
+    independently visible and a missing fast worker shows as a climbing
+    ``specforge_worker_queue_oldest_age_seconds{queue="arq:queue:fast"}``.
+
+    Reads the queue's Redis sorted-set directly (zcard for depth, the lowest
+    score for the oldest ready job) rather than fetching every job definition, so
+    the sample stays O(log n) even on a deep backlog. Plain cron — the body
+    catches and logs; a metrics blip must never surface as a worker error.
+    """
+    import time
+
+    from services.observability import GITHUB_QUEUE_DEPTH, record_worker_queue_stats
+
     try:
-        depth = await ctx["redis"].queued_jobs()
-        GITHUB_QUEUE_DEPTH.set(len(depth))
-    except Exception:  # pragma: no cover — never let metrics break a job
-        logger.debug("github.worker.queue_depth_unavailable")
+        redis = ctx["redis"]
+        queue = getattr(redis, "default_queue_name", BULK_QUEUE_NAME)
+        depth = await redis.zcard(queue)
+        oldest_age_seconds = 0.0
+        oldest = await redis.zrange(queue, 0, 0, withscores=True)
+        if oldest:
+            # arq scores a ready job with its enqueue time (ms); a deferred job
+            # with its future run time, so its age clamps to 0 (not yet waiting).
+            score_ms = float(oldest[0][1])
+            oldest_age_seconds = max(0.0, (time.time() * 1000 - score_ms) / 1000)
+        record_worker_queue_stats(queue, int(depth), oldest_age_seconds)
+        # Back-compat: the pre-split gauge maps to the bulk (GitHub) queue.
+        if queue == BULK_QUEUE_NAME:
+            GITHUB_QUEUE_DEPTH.set(int(depth))
+    except Exception:  # pragma: no cover — never let metrics break the worker
+        logger.debug("worker.queue_stats_unavailable")
 
 
-class WorkerSettings:
-    """arq worker entrypoint: ``arq worker.WorkerSettings``."""
+def _queue_sampler_cron():
+    """The per-queue backpressure sampler — runs on BOTH lanes (see F5 note).
 
+    It is per-queue work (each worker samples only the queue it consumes), so
+    registering it on both WorkerSettings classes is correct, not a double-fire.
+    A fresh ``cron(...)`` object per class keeps each lane's scheduling state
+    independent.
+    """
+    return cron(
+        sample_queue_stats,
+        second=_QUEUE_SAMPLE_CRON_SECOND,
+        run_at_startup=True,
+    )
+
+
+class _BaseWorkerSettings:
+    """Shared worker config for both lanes (F5).
+
+    The two lanes are separate PROCESSES — separate event loops, DB pools, and
+    arq job-slot budgets — so a bulk-export storm cannot occupy the fast lane's
+    slots. Everything except the queue name, function roster, and cron set is
+    identical, so it lives here once.
+    """
+
+    redis_settings = _redis_settings()
+    max_jobs = _MAX_JOBS
+    max_tries = JOB_MAX_TRIES
+    job_timeout = _JOB_TIMEOUT_SECONDS
+    keep_result = _KEEP_RESULT_SECONDS
+    on_startup = _on_startup
+    on_shutdown = _on_shutdown
+
+
+class WorkerSettings(_BaseWorkerSettings):
+    """BULK lane — the default queue: ``arq worker.WorkerSettings``.
+
+    Drains the high-volume, latency-tolerant GitHub bulk I/O and the LLM eval
+    batch jobs, plus their crons. Kept on arq's DEFAULT queue so any job enqueued
+    before the F5 split still drains here (nothing stranded at the cutover).
+    Crons here are GLOBAL (drift, purges, batch sweep, estimates) so each is
+    registered on EXACTLY this one class — arq dedups a cron per queue across
+    replicas, so registering it on both lanes would fire it twice.
+    """
+
+    queue_name = BULK_QUEUE_NAME
     functions = [
         export_push,
         reconcile_event,
         backfill_repo,
         increment_push,
         projects_sync,
-        pr_check,
-        billing_process_webhook,
         llm_batch_submit,
         llm_batch_collect,
     ]
     cron_jobs = [
-        cron(
-            reconcile_drift,
-            minute=_DRIFT_CRON_MINUTES,
-            run_at_startup=False,
-        ),
+        cron(reconcile_drift, minute=_DRIFT_CRON_MINUTES, run_at_startup=False),
         cron(
             purge_webhook_events,
             hour=_PURGE_CRON_HOUR,
             minute=_PURGE_CRON_MINUTE,
             run_at_startup=False,
         ),
+        cron(
+            llm_batch_sweep,
+            second=_LLM_BATCH_SWEEP_CRON_SECOND,
+            run_at_startup=False,
+        ),
+        cron(
+            refresh_generation_estimates,
+            minute=_GENERATION_ESTIMATES_CRON_MINUTE,
+            run_at_startup=True,
+        ),
+        _queue_sampler_cron(),
+    ]
+
+
+class FastWorkerSettings(_BaseWorkerSettings):
+    """FAST lane — ``arq worker.FastWorkerSettings``.
+
+    Drains the latency-sensitive, money-/user-visible jobs (paid credit grants
+    and the PR status check) on a dedicated queue so a bulk-export storm can
+    never occupy their job slots. The billing recovery crons live here too, as
+    the billing domain's home lane. DEPLOY INVARIANT: this process MUST run in
+    every environment, or paid credit grants never drain (RUNBOOK §16).
+    """
+
+    queue_name = FAST_QUEUE_NAME
+    max_jobs = _FAST_MAX_JOBS  # lighter concurrency than the bulk lane (footprint)
+    functions = [
+        billing_process_webhook,
+        pr_check,
+    ]
+    cron_jobs = [
         cron(
             billing_process_pending_webhooks,
             second=_BILLING_SWEEP_CRON_SECOND,
@@ -351,22 +472,5 @@ class WorkerSettings:
             minute=_BILLING_PURGE_CRON_MINUTE,
             run_at_startup=False,
         ),
-        cron(
-            llm_batch_sweep,
-            second=_LLM_BATCH_SWEEP_CRON_SECOND,
-            run_at_startup=False,
-        ),
-        cron(
-            refresh_generation_estimates,
-            minute=_GENERATION_ESTIMATES_CRON_MINUTE,
-            run_at_startup=True,
-        ),
+        _queue_sampler_cron(),
     ]
-    redis_settings = _redis_settings()
-    max_jobs = _MAX_JOBS
-    max_tries = JOB_MAX_TRIES
-    job_timeout = _JOB_TIMEOUT_SECONDS
-    keep_result = _KEEP_RESULT_SECONDS
-    on_startup = _on_startup
-    on_shutdown = _on_shutdown
-    on_job_start = _on_job_start

@@ -47,6 +47,50 @@ from services.observability import (
 
 logger = structlog.get_logger(__name__)
 
+# ---------------------------------------------------------------------------
+# Live-queue split (F5 — scalability audit).
+#
+# A single worker queue means a burst of bulk GitHub exports (up to 1800s each)
+# fills the worker's job slots and starves the latency-sensitive jobs behind
+# them — most damagingly the billing webhook processor, which grants credits a
+# user has already PAID for. We split the live queues by latency class:
+#
+#   - BULK_QUEUE_NAME = arq's DEFAULT queue. Kept as the default deliberately so
+#     any job enqueued by older code (or in flight across the deploy) still
+#     drains — nothing is stranded at the cutover. Carries the GitHub bulk I/O
+#     (export/backfill/increment/projects/reconcile) and the LLM eval batch jobs.
+#   - FAST_QUEUE_NAME = a separate queue drained by its OWN worker process
+#     (`arq worker.FastWorkerSettings`), so a bulk-export storm cannot occupy its
+#     job slots. Carries paid credit grants and the user-visible PR status check.
+#
+# Routing is by job NAME via queue_for_job(), so every enqueue() call site is
+# unchanged — the home queue is resolved centrally (DRY) and worker.py partitions
+# the two WorkerSettings classes off the SAME table.
+#
+# DEPLOY INVARIANT: the FastWorkerSettings process MUST be running in every
+# environment, or fast-queue jobs (paid grants) never drain. The
+# specforge_worker_queue_oldest_age_seconds{queue="arq:queue:fast"} and
+# specforge_billing_webhook_pending_age_seconds alerts are the backstop signal
+# for a missing/stalled fast worker (RUNBOOK §9.6 / §16).
+# ---------------------------------------------------------------------------
+BULK_QUEUE_NAME = "arq:queue"  # arq's built-in default queue name.
+FAST_QUEUE_NAME = "arq:queue:fast"
+
+# Jobs whose latency is user-/money-visible and must not queue behind a bulk
+# GitHub-export storm (audit §F5): paid credit grants + the PR status check.
+_FAST_QUEUE_JOBS = frozenset({"billing_process_webhook", "pr_check"})
+
+
+def queue_for_job(job: str) -> str:
+    """Resolve a job's home queue from its name (F5 — single source of truth).
+
+    Used by both enqueue() (to route a producer's job) and worker.py (to
+    partition which functions each WorkerSettings class drains), so the split can
+    never drift between the producer and consumer sides.
+    """
+    return FAST_QUEUE_NAME if job in _FAST_QUEUE_JOBS else BULK_QUEUE_NAME
+
+
 # Job base contract (Plan §24.1 / T-269).
 JOB_MAX_TRIES = 5
 # Exponential backoff base/cap (seconds) with full jitter so retries from many
@@ -102,6 +146,7 @@ async def enqueue(
     *args: Any,
     job_id: str | None = None,
     defer_by: float | None = None,
+    queue_name: str | None = None,
     pool: ArqRedis | None = None,
     **kwargs: Any,
 ) -> str | None:
@@ -112,13 +157,23 @@ async def enqueue(
     queued/in-flight, returning ``None``, so re-submitting an export does not
     start a second push.
 
+    ``queue_name`` overrides the job's home queue; when omitted it is resolved
+    from the job name via :func:`queue_for_job` (the F5 fast/bulk split), so
+    callers never have to know which lane a job belongs to.
+
     Raises :class:`QueueUnavailableError` if the Redis-backed queue cannot be
     reached — the caller surfaces a 503, never an inline fallback.
     """
+    target_queue = queue_name or queue_for_job(job)
     try:
         arq_pool = pool or await get_arq_pool()
         job_def = await arq_pool.enqueue_job(
-            job, *args, _job_id=job_id, _defer_by=defer_by, **kwargs
+            job,
+            *args,
+            _job_id=job_id,
+            _defer_by=defer_by,
+            _queue_name=target_queue,
+            **kwargs,
         )
     except QueueUnavailableError:
         raise

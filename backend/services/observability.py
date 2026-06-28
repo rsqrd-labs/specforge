@@ -11,11 +11,13 @@ import structlog
 from fastapi import FastAPI, Request, Response
 from prometheus_client import (
     CONTENT_TYPE_LATEST,
+    REGISTRY,
     Counter,
     Gauge,
     Histogram,
     generate_latest,
 )
+from prometheus_client.core import GaugeMetricFamily
 from sentry_sdk.integrations.fastapi import FastApiIntegration
 from sqlalchemy.ext.asyncio import AsyncEngine
 from starlette.responses import Response as StarletteResponse
@@ -540,6 +542,145 @@ GITHUB_QUEUE_DEPTH = Gauge(
     "specforge_github_queue_depth",
     "Approximate number of GitHub worker jobs currently queued/in-flight.",
 )
+
+# Per-queue worker backpressure (F5 — scalability audit). After the live-queue
+# split (latency-sensitive `fast` vs bulk), depth + oldest-job age are sampled
+# per queue by a lightweight per-worker cron so an export storm filling the bulk
+# queue is visibly distinct from the billing/PR `fast` queue — and a `fast`
+# queue with no consumer surfaces as a climbing oldest-age alert. Sampled from a
+# cron (not on_job_start): a stalled queue starts no jobs, so an on-job-start
+# gauge would read stale exactly when the alert must fire.
+WORKER_QUEUE_DEPTH = Gauge(
+    "specforge_worker_queue_depth",
+    "Approximate number of worker jobs queued/in-flight, labelled by arq queue.",
+    labelnames=["queue"],
+)
+WORKER_QUEUE_OLDEST_AGE_SECONDS = Gauge(
+    "specforge_worker_queue_oldest_age_seconds",
+    "Age of the oldest queued job (seconds since enqueue), labelled by arq "
+    "queue. 0 when the queue is empty. A sustained climb on the `fast` queue "
+    "means its dedicated worker is down/starved (paid grants not draining).",
+    labelnames=["queue"],
+)
+
+
+def record_worker_queue_stats(
+    queue: str, depth: int, oldest_age_seconds: float
+) -> None:
+    """Publish a queue's sampled depth + oldest-job age (F5).
+
+    Called from the per-worker sampler cron with the stats for the queue that
+    worker consumes. ``GITHUB_QUEUE_DEPTH`` is kept in sync for the bulk queue so
+    existing dashboards/alerts that key on it keep working through the split.
+    """
+    WORKER_QUEUE_DEPTH.labels(queue=queue).set(max(0, depth))
+    WORKER_QUEUE_OLDEST_AGE_SECONDS.labels(queue=queue).set(
+        max(0.0, oldest_age_seconds)
+    )
+
+
+BACKGROUND_TASKS = Gauge(
+    "specforge_background_tasks",
+    "Live detached background tasks held in a strong-ref registry, labelled by "
+    "registry (pipeline / eval / critic / verifier). A runaway count signals a "
+    "fan-out leaking past the F1 admission cap (audit §6/§8).",
+    labelnames=["registry"],
+)
+
+
+def set_background_task_count(registry: str, count: int) -> None:
+    """Publish a background-task registry's live size (F6)."""
+    BACKGROUND_TASKS.labels(registry=registry).set(max(0, count))
+
+
+class _DbPoolCollector:
+    """Prometheus collector exposing SQLAlchemy connection-pool stats (F3).
+
+    Surfaces per-process Postgres connection usage so the horizontal-scale-out
+    capacity gate (audit §8: pool checked-out / overflow + total open per
+    instance vs the confirmed ``max_connections``) is observable, and so a
+    PgBouncer rollout (F3) can be verified to flatten the Postgres connection
+    count regardless of instance count.
+
+    Read lazily at scrape time from the live engine pool — no background sampler,
+    so it always reflects the instant a scrape happens. Fail-soft: a pool that
+    does not implement a given stat (e.g. ``NullPool``) simply omits that series,
+    and any error yields nothing rather than breaking the whole ``/metrics``
+    response.
+    """
+
+    def collect(self):  # noqa: D401 — prometheus_client collector protocol
+        try:
+            from database import async_engine
+
+            pool = async_engine.sync_engine.pool
+        except Exception:  # pragma: no cover — engine not built (import order)
+            return
+
+        def _stat(name: str):
+            method = getattr(pool, name, None)
+            if method is None:
+                return None
+            try:
+                return method()
+            except Exception:  # pragma: no cover — pool type without this stat
+                return None
+
+        checked_out = _stat("checkedout")
+        checked_in = _stat("checkedin")
+        overflow = _stat("overflow")
+        size = _stat("size")
+
+        if checked_out is not None:
+            yield GaugeMetricFamily(
+                "specforge_db_pool_checked_out",
+                "Connections currently checked out of the SQLAlchemy pool (in use).",
+                value=checked_out,
+            )
+        if checked_in is not None:
+            yield GaugeMetricFamily(
+                "specforge_db_pool_checked_in",
+                "Idle connections currently held in the SQLAlchemy pool.",
+                value=checked_in,
+            )
+        if overflow is not None:
+            yield GaugeMetricFamily(
+                "specforge_db_pool_overflow",
+                "Current overflow connections open beyond the configured pool_size "
+                "(negative means the pool is not yet full).",
+                value=overflow,
+            )
+        if size is not None:
+            yield GaugeMetricFamily(
+                "specforge_db_pool_size",
+                "Configured SQLAlchemy pool_size (steady-state pooled connections).",
+                value=size,
+            )
+        if checked_out is not None and checked_in is not None:
+            yield GaugeMetricFamily(
+                "specforge_db_pool_total_open",
+                "Total open Postgres connections from this process "
+                "(checked_in + checked_out) — compare against max_connections.",
+                value=checked_in + checked_out,
+            )
+        # The per-process ceiling: how many connections this process can open at
+        # peak (pool_size + max_overflow). An alert compares total_open × the
+        # instance count against the confirmed Postgres max_connections.
+        yield GaugeMetricFamily(
+            "specforge_db_pool_max",
+            "Maximum Postgres connections this process can open at peak "
+            "(db_pool_size + db_max_overflow).",
+            value=settings.db_pool_size + settings.db_max_overflow,
+        )
+
+
+# Register the pool collector once at import (the module imports once per
+# process, so this never double-registers). Guarded so a re-import in a test
+# harness that reset the registry does not raise.
+try:
+    REGISTRY.register(_DbPoolCollector())
+except ValueError:  # pragma: no cover — already registered (re-import in tests)
+    pass
 
 # LLM batch job metrics (Phase 3 — issue #26). The deferred-batch eval lane has
 # its own ``llm:batch:deadletter`` Redis list so a stuck batch is never confused

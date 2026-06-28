@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncGenerator
 from typing import TYPE_CHECKING
+from uuid import uuid4
 
 from fastapi import Request
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -12,18 +13,38 @@ if TYPE_CHECKING:
     from redis.asyncio import Redis
 
 
-def _engine_connect_args() -> dict:
-    """asyncpg server-side guards for the postgres engine (F9 — scalability audit).
+def _unique_prepared_statement_name() -> str:
+    """Generate a process-unique prepared-statement name (F3 — pooler mode).
 
-    ``statement_timeout`` and ``idle_in_transaction_session_timeout`` are set as
-    asyncpg ``server_settings`` so every pooled connection enforces them at the
+    Behind a transaction-mode pooler (PgBouncer) consecutive statements can land
+    on different backend connections, so asyncpg's default numeric statement
+    names collide ("prepared statement ... already exists"). A UUID name per
+    prepare avoids the collision (SQLAlchemy asyncpg+PgBouncer guidance).
+    """
+    return f"__asyncpg_{uuid4()}__"
+
+
+def _engine_connect_args() -> dict:
+    """asyncpg connect args for the postgres engine (F9 + F3 — scalability audit).
+
+    F9: ``statement_timeout`` and ``idle_in_transaction_session_timeout`` are set
+    as asyncpg ``server_settings`` so every pooled connection enforces them at the
     database, bounding a runaway query and freeing a connection left idle in an
-    open transaction (defence-in-depth). They are postgres-only: a non-postgres
-    DATABASE_URL (e.g. a sqlite test URL) gets no ``server_settings``, so the
-    engine still builds. Migrations run on a separate engine and are unaffected.
+    open transaction (defence-in-depth).
+
+    F3: when ``db_transaction_pooler_mode`` is on, additionally disable
+    SQLAlchemy's prepared-statement cache and assign each prepared statement a
+    unique name so the engine is safe behind a transaction-mode pooler
+    (PgBouncer). The server_settings guards remain applied — the pooler must
+    allow them via ``ignore_startup_parameters`` (shipped deploy/pgbouncer.ini).
+
+    All of this is postgres-only: a non-postgres DATABASE_URL (e.g. a sqlite test
+    URL) gets no asyncpg-specific args, so the engine still builds. Migrations run
+    on a separate engine and are unaffected.
     """
     if not settings.database_url.startswith(("postgresql", "postgres")):
         return {}
+    connect_args: dict = {}
     server_settings: dict[str, str] = {}
     if settings.db_statement_timeout_ms > 0:
         server_settings["statement_timeout"] = str(settings.db_statement_timeout_ms)
@@ -31,7 +52,20 @@ def _engine_connect_args() -> dict:
         server_settings["idle_in_transaction_session_timeout"] = str(
             settings.db_idle_in_transaction_timeout_ms
         )
-    return {"server_settings": server_settings} if server_settings else {}
+    if server_settings:
+        connect_args["server_settings"] = server_settings
+    if settings.db_transaction_pooler_mode:
+        # Disable the prepared-statement cache and use unique names so the engine
+        # tolerates a transaction-mode pooler routing statements across backends.
+        connect_args["prepared_statement_cache_size"] = 0
+        connect_args["prepared_statement_name_func"] = _unique_prepared_statement_name
+        # asyncpg ALSO caches its own type-introspection queries as server-side
+        # prepared statements, independently of SQLAlchemy's cache above. Those
+        # collide under a transaction pooler too, so disable asyncpg's cache as
+        # well (forwarded straight to asyncpg.connect). This is the asyncpg
+        # statement_cache_size=0 its own pgbouncer error message recommends.
+        connect_args["statement_cache_size"] = 0
+    return connect_args
 
 
 async_engine = create_async_engine(

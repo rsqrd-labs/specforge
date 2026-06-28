@@ -23,6 +23,8 @@ billing alerts and ops, and prompt pipeline quality gates.
 12. [GitHub Living Integration — App, Worker & Webhook Ops](#12-github-living-integration--app-worker--webhook-ops)
 13. [Demo Day Mode — Construction Verdict & Rollout](#13-demo-day-mode--construction-verdict--rollout)
 14. [Generation Admission Control & Provider Budget (Scalability P0)](#14-generation-admission-control--provider-budget-scalability-p0)
+15. [Horizontal Scale-Out — Pooler, Workers & Pool Metrics (Scalability P1)](#15-horizontal-scale-out--pooler-workers--pool-metrics-scalability-p1)
+16. [Worker Lanes — Fast/Bulk Queue Split (Scalability P1)](#16-worker-lanes--fastbulk-queue-split-scalability-p1)
 
 ---
 
@@ -1701,3 +1703,174 @@ adds postgres fast-fail/server guards (`DB_POOL_TIMEOUT` default 5s,
 worker job legitimately holds a read transaction across external calls and trips
 `idle_in_transaction_session_timeout`, raise `DB_IDLE_IN_TRANSACTION_TIMEOUT_MS`
 (the API generation path commits before its stream, so it is never affected).
+
+---
+
+## 15. Horizontal Scale-Out — Pooler, Workers & Pool Metrics (Scalability P1)
+
+**Reference:** `docs/SCALABILITY_AUDIT.md` §F3/§F4/§F6
+**Modules:** `backend/database.py`, `backend/gunicorn.conf.py`,
+`backend/services/observability.py`, `deploy/pgbouncer/`
+
+### What it is
+
+P1 unblocks running **N API + worker instances** without exhausting Postgres
+`max_connections`. Three levers:
+
+- **F3 — transaction pooler (PgBouncer).** Each API/worker process holds up to
+  `DB_POOL_SIZE`+`DB_MAX_OVERFLOW` (=30) connections; 2 API workers + 2 worker
+  lanes already ≈ 120, crowding a default managed-Postgres limit of 100 **before**
+  any scale-out. A transaction-mode pooler multiplexes all app connections onto a
+  small fixed server pool, so the Postgres connection count stays **flat**
+  regardless of instance count. It is compatible because the generation pipeline
+  releases its connection during the stream (audit §1).
+- **F4 — `WEB_CONCURRENCY`-driven API workers** (`gunicorn.conf.py`).
+- **F6 — bounded background-task fan-out** (see also §16).
+
+### ⚠️ BEFORE DEPLOYING P1 — connection-footprint prerequisite
+
+F5 adds a **second worker process** (the fast lane, §16). That is unavoidable —
+a separate process is the whole point of the bulkhead — and it raises the
+Postgres connection footprint regardless of `WEB_CONCURRENCY`. Worked example
+at the defaults: 2 API workers + bulk worker + fast worker, each up to
+`DB_POOL_SIZE`+`DB_MAX_OVERFLOW` (=30) ⇒ **~120 peak vs a default
+`max_connections` of 100.** Do **one** of these before shipping F5, or a busy
+fleet will hit `FATAL: too many connections`:
+
+1. **Preferred — put the pooler in front** (enable `DB_TRANSACTION_POOLER_MODE`
+   with a real transaction-mode pooler, below). Postgres connections then stay
+   flat regardless of process/instance count.
+2. **Or confirm headroom** — verify the managed Postgres `max_connections` is
+   comfortably above the peak above (raise it, or it already is).
+3. **Or shrink per-process pools** — lower `DB_POOL_SIZE`/`DB_MAX_OVERFLOW` on the
+   worker services (set them per-service in the deploy env). The fast lane
+   already runs a smaller `max_jobs` (10) since it does light work, so its real
+   peak draw is well under a full pool.
+
+### F3 — turning on the pooler
+
+1. Stand up a transaction-mode pooler. Locally:
+   `docker compose --profile pgbouncer up -d pgbouncer` (port 6432). The
+   production reference config is `deploy/pgbouncer/pgbouncer.ini`
+   (`pool_mode = transaction`, `ignore_startup_parameters` for asyncpg, and
+   `server_reset_query = DISCARD ALL` with `server_reset_query_always = 1`).
+2. Point the app at it and flip the flag:
+   `DATABASE_URL=…@<pooler-host>:6432/specforge` and
+   `DB_TRANSACTION_POOLER_MODE=1`. The flag disables SQLAlchemy's **and**
+   asyncpg's prepared-statement caches and assigns each prepared statement a
+   unique name, so statements routed across pooled backends never collide.
+3. **CAVEAT — server-side guards.** In pooler mode the F9 `statement_timeout` /
+   `idle_in_transaction_session_timeout` guards are emitted as connection
+   *startup parameters*, which the pooler accepts (`ignore_startup_parameters`)
+   but does **not** apply to the backend session. Set them at the Postgres role
+   instead so the runaway-query / idle-txn protection survives the pooler:
+   ```sql
+   ALTER ROLE specforge SET statement_timeout = '30s';
+   ALTER ROLE specforge SET idle_in_transaction_session_timeout = '5min';
+   ```
+4. **Rollback:** set `DB_TRANSACTION_POOLER_MODE=0` and point `DATABASE_URL`
+   back at Postgres directly. No migration; effective on next process start.
+
+> ⚠️ **Must-confirm deploy fact:** the real `max_connections` on the managed
+> Postgres. Size the pooler's `default_pool_size` and the app's `DB_POOL_SIZE`
+> against it — total Postgres connections ≈ pooler `default_pool_size` ×
+> distinct `(db,user)` pairs, independent of API/worker instance count.
+
+### F4 — scaling API workers
+
+`gunicorn.conf.py` reads `WEB_CONCURRENCY` (default **2** — the prior hardcoded
+value, so no footprint change on upgrade). Raise toward `~2*cores+1` **only after
+the pooler (F3) is in front** — otherwise more workers × the per-process pool
+crowds `max_connections`. There is deliberately **no** `max_requests` worker
+recycling: a recycle would sever in-flight multi-minute SSE generation streams.
+
+### Metrics & alerts
+
+The `/metrics` endpoint now exposes the SQLAlchemy pool per instance (F3):
+
+| Metric | Meaning |
+|---|---|
+| `specforge_db_pool_checked_out` | connections in use right now |
+| `specforge_db_pool_checked_in` | idle pooled connections |
+| `specforge_db_pool_overflow` | overflow beyond `pool_size` (negative = not full) |
+| `specforge_db_pool_total_open` | **total open Postgres connections from this instance** |
+| `specforge_db_pool_max` | this instance's peak ceiling (`pool_size`+`max_overflow`) |
+| `specforge_background_tasks{registry}` | live detached tasks (pipeline/eval/critic/verifier) — F6 |
+
+**Acceptance gate / alert:** `sum(specforge_db_pool_total_open)` across instances
+must stay under the confirmed `max_connections` with margin. With the pooler in
+front, watch the pooler's own server-connection count instead — it should be flat
+as you add app instances. Alert on `specforge_background_tasks` climbing without
+bound (a fan-out leak past the F1 admission cap).
+
+---
+
+## 16. Worker Lanes — Fast/Bulk Queue Split (Scalability P1)
+
+**Reference:** `docs/SCALABILITY_AUDIT.md` §F5/§F6
+**Modules:** `backend/worker.py`, `backend/services/queue.py`,
+`backend/services/pipeline/background_tasks.py`
+
+### What it is
+
+A single worker queue let a burst of bulk GitHub exports (up to 1800s each) fill
+the worker's job slots and **starve the billing webhook processor** — delaying
+credit grants users had already paid for. F5 splits the live queues by latency
+class, each drained by its **own process**:
+
+- **Bulk lane** — `arq worker.WorkerSettings`, arq's **default** queue
+  (`arq:queue`). GitHub bulk I/O (export/backfill/increment/projects/reconcile) +
+  LLM eval batches. Kept on the default queue so nothing enqueued before the split
+  is stranded.
+- **Fast lane** — `arq worker.FastWorkerSettings`, a dedicated queue
+  (`arq:queue:fast`). Paid credit grants (`billing_process_webhook`) + the PR
+  status check (`pr_check`), plus the billing recovery crons.
+
+Routing is by job **name** via `services.queue.queue_for_job` (single source of
+truth; every `enqueue()` call site is unchanged). Both lanes are stateless and
+scale to **N replicas** — jobs are idempotent/checkpointed and arq dedups crons
+**per queue**, so each cron fires once per lane regardless of replica count.
+
+### ⚠️ DEPLOY INVARIANT — the fast worker must run everywhere
+
+Because `billing_process_webhook` and `pr_check` route to `arq:queue:fast`, those
+jobs **only drain if a `FastWorkerSettings` process is running**. The billing 60s
+sweep re-enqueues to the same fast queue, so it is **not** a substitute consumer.
+Deploy **both** worker process types in every environment:
+
+- **docker-compose:** the `worker` (bulk) and `worker-fast` services.
+- **Procfile (Railway/etc.):** the `worker` and `worker_fast` process types
+  (`arq worker.WorkerSettings` / `arq worker.FastWorkerSettings`).
+
+A missing/stalled fast worker surfaces as:
+`specforge_worker_queue_oldest_age_seconds{queue="arq:queue:fast"}` climbing, and
+`specforge_billing_webhook_pending_age_seconds > 300` (the existing
+`BillingWebhookPendingAge` alert, §9.1). **Recovery:** start the fast worker — the
+queued jobs and the next sweep drain it; grants are idempotent so nothing
+double-grants.
+
+### Per-queue backpressure metrics
+
+A lightweight per-worker cron (`sample_queue_stats`, every minute at :45) samples
+the queue **that worker consumes** — sampled from a cron, not on job start, so a
+stalled queue (which starts no jobs) still reports:
+
+| Metric | Meaning |
+|---|---|
+| `specforge_worker_queue_depth{queue}` | pending jobs in the queue |
+| `specforge_worker_queue_oldest_age_seconds{queue}` | age of the oldest ready job |
+| `specforge_github_queue_depth` | back-compat alias for the bulk queue depth |
+
+**Alert ideas:** `specforge_worker_queue_oldest_age_seconds{queue="arq:queue:fast"}
+> 120` (fast lane starved / no consumer — paid grants delayed); the bulk lane the
+same at a looser threshold (export backlog).
+
+### F6 — background-task fan-out (related)
+
+The post-`done` advisory work (eval score + critic judge + Demo-Day verifier)
+shares a concurrency ceiling (`MAX_CONCURRENT_ADVISORY_TASKS`, default 12; 0
+disables) so it can't starve live generation streams; each registry's live size
+is `specforge_background_tasks{registry}` and crossing
+`BACKGROUND_TASKS_SOFT_MAX` logs a one-shot high-water warning (it never drops a
+task). The detached generation pipeline is **not** gated — it is bounded upstream
+by F1 admission (§14).

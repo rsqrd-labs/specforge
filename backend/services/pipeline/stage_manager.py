@@ -96,6 +96,7 @@ from services.observability import (
     record_assembled_prompt_tokens,
     record_judge_call_skipped,
     record_problem_statement_tokens,
+    set_background_task_count,
 )
 from services.pipeline import demo_day_verdict
 from services.pipeline.admission import (
@@ -112,6 +113,10 @@ from services.pipeline.artifact_validator import (
     strip_completion_sentinel,
     validate_artifact_completeness,
     validate_sections,
+)
+from services.pipeline.background_tasks import (
+    BoundedTaskRegistry,
+    build_advisory_semaphore,
 )
 from services.pipeline.critic import (
     MAX_REGENERATES,
@@ -319,43 +324,68 @@ def _strip_code_fence(text: str) -> str:
     return stripped
 
 
-# Strong references to in-flight fire-and-forget background eval tasks, so the
-# event loop's weak reference does not let them be garbage-collected before they
-# finish (issue #27 Phase 1).  Tasks remove themselves on completion.
-_BACKGROUND_EVAL_TASKS: set[asyncio.Task] = set()
+# Detached fire-and-forget background tasks, held in bounded registries so the
+# event loop's weak reference cannot garbage-collect them mid-flight (the
+# registry adds a strong ref synchronously at spawn). Each registry exports its
+# live size as specforge_background_tasks{registry=...} and warns at a soft
+# high-water mark (F6 — scalability audit; see background_tasks.py).
+#
+# The three ADVISORY registries (eval score, off-critical-path critic judge,
+# Demo-Day construction verifier) share ONE concurrency semaphore so post-`done`
+# work cannot starve live generation streams for the provider key / DB pool /
+# event loop. The PIPELINE registry is deliberately ungated — the detached
+# generation pipeline is already bounded upstream by F1 admission, and gating it
+# would deadlock generation.
+#
+# Built at import (no running loop yet). asyncio.Semaphore binds to a loop only
+# when a coroutine actually BLOCKS on it (its count is exhausted), so this
+# module-level instance is safe under the single production event loop. In tests
+# it likewise never binds unless > max_concurrent_advisory_tasks advisory tasks
+# contend within one test loop — keep that in mind if a future test spawns a
+# large advisory burst.
+_ADVISORY_TASK_SEMAPHORE = build_advisory_semaphore(
+    settings.max_concurrent_advisory_tasks
+)
 
+# Best-effort eval score (issue #27 Phase 1) — strictly fire-and-forget.
+_BACKGROUND_EVAL_TASKS = BoundedTaskRegistry(
+    "eval",
+    error_event="eval_background_failed",
+    soft_max=settings.background_tasks_soft_max,
+    semaphore=_ADVISORY_TASK_SEMAPHORE,
+    gauge_setter=set_background_task_count,
+)
 
-def _log_eval_error(task: asyncio.Task) -> None:
-    if not task.cancelled() and (exc := task.exception()):
-        logger.error("eval_background_failed", extra={"error": str(exc)})
+# Off-critical-path critic judge (docs/CRITIC_ASYNC_ADVISORY_PLAN.md).
+_BACKGROUND_CRITIC_TASKS = BoundedTaskRegistry(
+    "critic",
+    error_event="critic_background_failed",
+    soft_max=settings.background_tasks_soft_max,
+    semaphore=_ADVISORY_TASK_SEMAPHORE,
+    gauge_setter=set_background_task_count,
+)
 
+# Detached generation pipeline tasks. A page refresh mid-generation closes the
+# SSE connection, tearing down the supervising generate() generator; the pipeline
+# must keep running to completion on its own DB session so the artifact is
+# persisted and the reloaded page can poll for it
+# (docs/REFRESH_DURING_GENERATION_PLAN.md). NOT advisory-gated (see above).
+_BACKGROUND_PIPELINE_TASKS = BoundedTaskRegistry(
+    "pipeline",
+    error_event="pipeline_background_failed",
+    soft_max=settings.background_tasks_soft_max,
+    gauge_setter=set_background_task_count,
+)
 
-# Strong references to in-flight fire-and-forget background CRITIC tasks — the
-# off-critical-path judge (docs/CRITIC_ASYNC_ADVISORY_PLAN.md) — so the event
-# loop's weak reference does not let them be garbage-collected before they
-# finish.  Tasks remove themselves on completion.  Mirrors _BACKGROUND_EVAL_TASKS.
-_BACKGROUND_CRITIC_TASKS: set[asyncio.Task] = set()
-
-# Strong references to the detached generation pipeline tasks.  A page refresh
-# mid-generation closes the SSE connection, which tears down the supervising
-# generate() generator; the pipeline must keep running to completion on its own
-# DB session so the artifact is persisted and the reloaded page can poll for it
-# (docs/REFRESH_DURING_GENERATION_PLAN.md).  The event loop holds only a weak
-# reference to a bare task, so without this set a detached pipeline could be
-# garbage-collected mid-flight.  Tasks remove themselves on completion.
-_BACKGROUND_PIPELINE_TASKS: set[asyncio.Task] = set()
-
-
-def _log_critic_error(task: asyncio.Task) -> None:
-    if not task.cancelled() and (exc := task.exception()):
-        logger.error("critic_background_failed", extra={"error": str(exc)})
-
-
-# Strong references to in-flight fire-and-forget Demo Day construction-verifier
-# tasks (plan §7.3) — same garbage-collection guard as _BACKGROUND_CRITIC_TASKS.
-# The verifier runs detached after the tasks stage of a demo_day workspace, so it
-# survives client disconnect on its own session. Tasks remove themselves on done.
-_BACKGROUND_VERIFIER_TASKS: set[asyncio.Task] = set()
+# Demo-Day construction-verifier tasks (plan §7.3): detached after the tasks
+# stage of a demo_day workspace, surviving client disconnect on its own session.
+_BACKGROUND_VERIFIER_TASKS = BoundedTaskRegistry(
+    "verifier",
+    error_event="construction_verifier_background_failed",
+    soft_max=settings.background_tasks_soft_max,
+    semaphore=_ADVISORY_TASK_SEMAPHORE,
+    gauge_setter=set_background_task_count,
+)
 
 # Construction-check ownership for the one funded advisory regenerate (plan §7.3).
 # A failing check fails at the *seam between* stages; the rule routes a gap to the
@@ -368,13 +398,6 @@ _TASKS_OWNED_CHECKS = frozenset({"C1", "C2"})
 _HARNESS_OWNED_CHECKS = frozenset({"C3", "C4"})
 # The checks that flip the verdict (C5 is advisory-only — never triggers regen).
 _VERDICT_CHECKS = _TASKS_OWNED_CHECKS | _HARNESS_OWNED_CHECKS
-
-
-def _log_verifier_error(task: asyncio.Task) -> None:
-    if not task.cancelled() and (exc := task.exception()):
-        logger.error(
-            "construction_verifier_background_failed", extra={"error": str(exc)}
-        )
 
 
 def _failing_verdict_checks(verdict: ConstructionVerdict) -> set[str]:
@@ -412,15 +435,6 @@ def _verdict_regen_findings(verdict: ConstructionVerdict) -> list[dict]:
         for gap in check.gaps:
             findings.append({"kind": check.name, "detail": gap, "reference": cid})
     return findings
-
-
-def _log_pipeline_error(task: asyncio.Task) -> None:
-    # The supervising generate() generator awaits the pipeline on the connected
-    # path and surfaces its error to the router.  On a client disconnect nobody
-    # awaits it, so a genuine failure would otherwise be swallowed — log it here
-    # so detached-pipeline crashes remain visible.
-    if not task.cancelled() and (exc := task.exception()):
-        logger.error("pipeline_background_failed", extra={"error": str(exc)})
 
 
 def _eval_to_dict(result: EvalResult, harness_content: str = "") -> dict:
@@ -539,7 +553,12 @@ def _schedule_stage_eval(
     generation_provider: str | None = None,
     generation_model: str | None = None,
 ) -> asyncio.Task[EvalResult | None]:
-    eval_task = asyncio.create_task(
+    # The LLM score is strictly fire-and-forget (issue #27 Phase 1 removed the
+    # inline await). The registry retains a strong reference until completion —
+    # the event loop only holds a weak reference to a bare task, which can
+    # otherwise be garbage-collected mid-flight and silently drop the score — and
+    # gates it behind the shared advisory semaphore (F6).
+    return _BACKGROUND_EVAL_TASKS.spawn(
         _dispatch_stage_eval(
             version_id=version_id,
             stage_type=stage_type,
@@ -553,14 +572,6 @@ def _schedule_stage_eval(
             generation_model=generation_model,
         )
     )
-    # The LLM score is now strictly fire-and-forget (issue #27 Phase 1 removed
-    # the inline await), so retain a strong reference until completion — the
-    # event loop only holds a weak reference to a bare task, which can otherwise
-    # be garbage-collected mid-flight and silently drop the score.
-    _BACKGROUND_EVAL_TASKS.add(eval_task)
-    eval_task.add_done_callback(_BACKGROUND_EVAL_TASKS.discard)
-    eval_task.add_done_callback(_log_eval_error)
-    return eval_task
 
 
 def _core_generation_tier_policy(provider: str) -> tuple[str, str]:
@@ -2821,7 +2832,12 @@ class StageManager:
             # torn down the instant generate() returns (e.g. on a client
             # disconnect), so the detached task must not touch `db`, `user`, or
             # `deduction` (docs/REFRESH_DURING_GENERATION_PLAN.md).
-            pipeline = asyncio.create_task(
+            # Hold a strong reference (via the registry) so a client disconnect —
+            # which stops the pump below from awaiting the task — can never let
+            # the detached pipeline be garbage-collected before it finishes
+            # persisting. The pipeline is NOT advisory-gated (it is the live work,
+            # already bounded by F1 admission).
+            pipeline = _BACKGROUND_PIPELINE_TASKS.spawn(
                 self._execute_generation_pipeline(
                     emit=events.put_nowait,
                     stage_id=stage_id,
@@ -2849,15 +2865,10 @@ class StageManager:
         finally:
             if not admission_handed_off:
                 await admission.release()
-        # Hold a strong reference so a client disconnect (which stops the pump
-        # below from awaiting the task) can never let the detached pipeline be
-        # garbage-collected before it finishes persisting.
-        _BACKGROUND_PIPELINE_TASKS.add(pipeline)
-        pipeline.add_done_callback(_BACKGROUND_PIPELINE_TASKS.discard)
-        pipeline.add_done_callback(_log_pipeline_error)
         # The sentinel is enqueued from the done-callback (not the pipeline
         # body) so it is guaranteed to arrive after every event the pipeline
-        # emitted, on success, failure, and cancellation alike.
+        # emitted, on success, failure, and cancellation alike. The registry
+        # already attached the strong-ref discard + error-log callbacks.
         pipeline.add_done_callback(lambda _task: events.put_nowait(_PIPELINE_END))
         heartbeat_loop = asyncio.get_running_loop()
         pipeline_started = heartbeat_loop.time()
@@ -4599,7 +4610,7 @@ class StageManager:
         without it the detached critic could be garbage-collected mid-flight.  The
         task removes itself on completion and logs any unexpected error.
         """
-        task = asyncio.create_task(
+        return _BACKGROUND_CRITIC_TASKS.spawn(
             self._dispatch_critic_review(
                 stage_id=stage_id,
                 version=version,
@@ -4610,10 +4621,6 @@ class StageManager:
                 content_generation_id=content_generation_id,
             )
         )
-        _BACKGROUND_CRITIC_TASKS.add(task)
-        task.add_done_callback(_BACKGROUND_CRITIC_TASKS.discard)
-        task.add_done_callback(_log_critic_error)
-        return task
 
     async def _dispatch_critic_review(
         self,
@@ -4711,17 +4718,13 @@ class StageManager:
         completion and logs any unexpected error. Runs only for demo_day
         workspaces (the caller guards on mode/stage).
         """
-        task = asyncio.create_task(
+        return _BACKGROUND_VERIFIER_TASKS.spawn(
             self._dispatch_construction_verifier(
                 workspace_id=workspace_id,
                 tasks_version=tasks_version,
                 user_id=user_id,
             )
         )
-        _BACKGROUND_VERIFIER_TASKS.add(task)
-        task.add_done_callback(_BACKGROUND_VERIFIER_TASKS.discard)
-        task.add_done_callback(_log_verifier_error)
-        return task
 
     async def _dispatch_construction_verifier(
         self,
