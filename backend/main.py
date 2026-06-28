@@ -11,7 +11,7 @@ from starlette.requests import Request
 from starlette.responses import Response
 
 from config import settings, validate_production_settings
-from database import _initialize_redis, async_engine
+from database import _initialize_redis, async_engine, build_redis_client
 from middleware.body_size import BodySizeLimitMiddleware
 from middleware.csrf import CsrfMiddleware
 from middleware.rate_limit import RateLimitMiddleware
@@ -69,12 +69,8 @@ async def check_database() -> DependencyStatus:
 async def check_redis(redis: Redis | None = None) -> DependencyStatus:
     _owns = redis is None
     if _owns:
-        redis = Redis.from_url(
-            settings.redis_url,
-            decode_responses=True,
-            socket_connect_timeout=2,
-            socket_timeout=2,
-        )
+        # Bounded, health-checked client (F8) via the single factory.
+        redis = build_redis_client()
     try:
         pong = await redis.ping()
     except Exception:
@@ -96,12 +92,8 @@ def create_app(redis_client: Redis | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         _owns_redis = redis_client is None
-        redis = redis_client or Redis.from_url(
-            settings.redis_url,
-            decode_responses=True,
-            socket_connect_timeout=2,
-            socket_timeout=2,
-        )
+        # Bounded, health-checked shared pool (F8) via the single factory.
+        redis = redis_client or build_redis_client()
         app.state.redis = redis
         # Register the pool with the module-level helper so services and
         # background tasks can call database.get_shared_redis() without

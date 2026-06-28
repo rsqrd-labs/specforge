@@ -42,7 +42,11 @@ from services.evals.online_eval import (
     persist_structural_eval,
     run_eval_background,
 )
-from services.llm.base import ProviderError, ProviderTimeoutError
+from services.llm.base import (
+    ProviderError,
+    ProviderRateLimitError,
+    ProviderTimeoutError,
+)
 from services.llm.complexity_classifier import (
     ComplexitySignals,
     classify_complexity,
@@ -80,6 +84,7 @@ from services.observability import (
     PIPELINE_INCOMPLETE_OUTPUTS,
     PIPELINE_INTERRUPTED_STREAMS,
     PIPELINE_PROVIDER_LIMIT_STOPS,
+    PIPELINE_PROVIDER_RATE_LIMIT_RETRIES,
     PIPELINE_QUALITY_ESCALATIONS,
     PIPELINE_STAGE_END_TO_END_DURATION,
     PIPELINE_STREAM_WATCHDOG_TIMEOUTS,
@@ -93,6 +98,11 @@ from services.observability import (
     record_problem_statement_tokens,
 )
 from services.pipeline import demo_day_verdict
+from services.pipeline.admission import (
+    GenerationAdmission,
+    GenerationCapacityError,
+    admit_generation,
+)
 from services.pipeline.artifact_validator import (
     CompletenessIssue,
     IncompleteArtifactError,
@@ -873,6 +883,31 @@ def _runtime_fallback_route(
     if route.model == failed_route.model:
         return None
     return route
+
+
+# Absolute clamp on an honored Retry-After so a pathological provider hint cannot
+# pin a generation for an unbounded time. The whole generation is a background
+# task with SSE heartbeats, so a wait up to this bound keeps the connection alive.
+_RATE_LIMIT_RETRY_AFTER_CAP = 120.0
+
+
+def _rate_limit_retry_delay(attempt: int, retry_after: float | None) -> float:
+    """Seconds to wait before retrying a 429'd generation on the SAME tier (F2).
+
+    Honors the provider's ``Retry-After`` hint when present (clamped to
+    ``_RATE_LIMIT_RETRY_AFTER_CAP``); otherwise applies exponential backoff with
+    full jitter, capped at ``provider_rate_limit_backoff_max_seconds``. ``attempt``
+    is 0-based (the count of retries already performed). Full jitter spreads a
+    thundering herd of simultaneously-throttled generations so they do not all
+    re-fire at the same instant.
+    """
+    if retry_after is not None and retry_after >= 0:
+        return min(retry_after, _RATE_LIMIT_RETRY_AFTER_CAP)
+    base = max(0.0, settings.provider_rate_limit_backoff_base_seconds)
+    cap = max(base, settings.provider_rate_limit_backoff_max_seconds)
+    ceiling = min(base * (2**attempt), cap)
+    # nosec B311 — jitter for load-spreading, not a security/crypto draw.
+    return random.uniform(0.0, ceiling)  # nosec B311
 
 
 def _route_for_refine(
@@ -2702,89 +2737,118 @@ class StageManager:
             yield f'{{"done": true, "stage_id": "{stage_id}"}}'
             return
 
-        # Issue #12 (Phase 3): optional Brave web-research grounding, fetched here
-        # — after the generation-cache miss so a cache hit never triggers a paid
-        # Brave call — and baked into user_prompt once. The mid-tier escalation
-        # retry reuses this same user_prompt, so a retry never re-fetches or
-        # re-charges. See _fetch_research_context for the fail-open gating.
-        # (Phase 4): the block feeds the prompt and the full context (block +
-        # sources) is threaded to the pipeline to persist on the StageVersion.
-        research = await self._fetch_research_context(
-            workspace,
-            stage.type,
-            user,
-            redis,
-            credit_cost=credit_cost,
-            free=free,
-        )
-        system_prompt, user_prompt, compression_rung = await build_prompt(
-            stage.type, workspace, db, redis, research_context=research.block
-        )
-        # Phase A instrumentation (compression plan §8): observe the size of the
-        # fully assembled prompt actually sent to the model. Reached only on a
-        # generation-cache miss (a hit returns above without assembling a
-        # prompt), which is correct — this is the figure the window-fit
-        # reliability ceiling (§5) is measured against.
-        record_assembled_prompt_tokens(
-            route.provider,
-            stage.type,
-            estimate_tokens(
-                route.provider,
-                route.model,
-                f"{system_prompt}\n{user_prompt}",
-            ),
-        )
-
-        deduction = (
-            None
-            if free
-            else await credit_service.deduct(db, user.id, credit_cost, credit_reason)
-        )
-
-        stage.status = "in_progress"
-        stage.deduction_ledger_id = deduction.id if deduction else None
-        stage.updated_at = datetime.now(UTC)
-        await db.commit()
-        if deduction is not None:
-            # Post-commit cache eviction — H-2 — T-219.
-            await credit_service.invalidate(user.id)
-
-        # The pipeline runs as a background task; this generator only pumps its
-        # SSE events to the client, interleaving {"progress": ...} heartbeats
-        # whenever the pipeline has been silent for a heartbeat interval.
-        # Heartbeats therefore cover the ENTIRE generation — artifact
-        # streaming, quality gates, critic review/regenerate, persistence —
-        # so proxies never see an idle connection and the UI always has a
-        # liveness signal, even while a frontier model reasons silently or a
-        # silent gate phase (critic complete() call) runs for minutes.
-        events: asyncio.Queue = asyncio.Queue()
-        # Shared phase state: the pipeline advances it; the heartbeat below reads
-        # it so each liveness ping reports the real phase (issue #21 Phase 2c).
-        phase_tracker = _PhaseTracker()
-        # The pipeline owns its own DB session and is identified only by ids /
-        # scalars, never the request-bound ORM objects: the request session is
-        # torn down the instant generate() returns (e.g. on a client
-        # disconnect), so the detached task must not touch `db`, `user`, or
-        # `deduction` (docs/REFRESH_DURING_GENERATION_PLAN.md).
-        pipeline = asyncio.create_task(
-            self._execute_generation_pipeline(
-                emit=events.put_nowait,
-                stage_id=stage_id,
-                workspace_id=workspace.id,
-                user_id=user.id,
-                redis=redis,
-                route=route,
-                deduction_id=deduction.id if deduction else None,
-                action=action,
-                trace_id=trace_id,
-                system_prompt=system_prompt,
-                user_prompt=user_prompt,
-                compression_rung=compression_rung,
-                cache_key=cache_key,
-                phase=phase_tracker,
-                research=research,
+        # Admission control (audit F1/F2): acquire a generation slot across the
+        # per-process, per-user, and per-provider budgets BEFORE any provider call
+        # (incl. the paid Brave research below). Acquired after the cache-miss so a
+        # cache hit never consumes a slot. Over budget ⇒ fast-fail with a
+        # Retry-After, surfaced through the existing RateLimitError SSE convention.
+        # The slot is owned by the pipeline once it is launched (released in the
+        # pipeline body's finally); generate() releases it only when it acquired
+        # but never handed off (a preflight failure before the task is created).
+        try:
+            admission = await admit_generation(
+                redis, user_id=str(user.id), provider=route.provider
             )
-        )
+        except GenerationCapacityError as exc:
+            raise RateLimitError(retry_after=exc.retry_after) from exc
+
+        admission_handed_off = False
+        try:
+            # Issue #12 (Phase 3): optional Brave web-research grounding, fetched
+            # here — after the generation-cache miss so a cache hit never triggers
+            # a paid Brave call — and baked into user_prompt once. The mid-tier
+            # escalation retry reuses this same user_prompt, so a retry never
+            # re-fetches or re-charges. See _fetch_research_context for the
+            # fail-open gating. (Phase 4): the block feeds the prompt and the full
+            # context (block + sources) is threaded to the pipeline to persist on
+            # the StageVersion.
+            research = await self._fetch_research_context(
+                workspace,
+                stage.type,
+                user,
+                redis,
+                credit_cost=credit_cost,
+                free=free,
+            )
+            system_prompt, user_prompt, compression_rung = await build_prompt(
+                stage.type, workspace, db, redis, research_context=research.block
+            )
+            # Phase A instrumentation (compression plan §8): observe the size of
+            # the fully assembled prompt actually sent to the model. Reached only
+            # on a generation-cache miss (a hit returns above without assembling a
+            # prompt), which is correct — this is the figure the window-fit
+            # reliability ceiling (§5) is measured against.
+            record_assembled_prompt_tokens(
+                route.provider,
+                stage.type,
+                estimate_tokens(
+                    route.provider,
+                    route.model,
+                    f"{system_prompt}\n{user_prompt}",
+                ),
+            )
+
+            deduction = (
+                None
+                if free
+                else await credit_service.deduct(
+                    db, user.id, credit_cost, credit_reason
+                )
+            )
+
+            stage.status = "in_progress"
+            stage.deduction_ledger_id = deduction.id if deduction else None
+            stage.updated_at = datetime.now(UTC)
+            await db.commit()
+            if deduction is not None:
+                # Post-commit cache eviction — H-2 — T-219.
+                await credit_service.invalidate(user.id)
+
+            # The pipeline runs as a background task; this generator only pumps its
+            # SSE events to the client, interleaving {"progress": ...} heartbeats
+            # whenever the pipeline has been silent for a heartbeat interval.
+            # Heartbeats therefore cover the ENTIRE generation — artifact
+            # streaming, quality gates, critic review/regenerate, persistence —
+            # so proxies never see an idle connection and the UI always has a
+            # liveness signal, even while a frontier model reasons silently or a
+            # silent gate phase (critic complete() call) runs for minutes.
+            events: asyncio.Queue = asyncio.Queue()
+            # Shared phase state: the pipeline advances it; the heartbeat below
+            # reads it so each liveness ping reports the real phase (Phase 2c).
+            phase_tracker = _PhaseTracker()
+            # The pipeline owns its own DB session and is identified only by ids /
+            # scalars, never the request-bound ORM objects: the request session is
+            # torn down the instant generate() returns (e.g. on a client
+            # disconnect), so the detached task must not touch `db`, `user`, or
+            # `deduction` (docs/REFRESH_DURING_GENERATION_PLAN.md).
+            pipeline = asyncio.create_task(
+                self._execute_generation_pipeline(
+                    emit=events.put_nowait,
+                    stage_id=stage_id,
+                    workspace_id=workspace.id,
+                    user_id=user.id,
+                    redis=redis,
+                    route=route,
+                    deduction_id=deduction.id if deduction else None,
+                    action=action,
+                    trace_id=trace_id,
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                    compression_rung=compression_rung,
+                    cache_key=cache_key,
+                    phase=phase_tracker,
+                    research=research,
+                    admission=admission,
+                )
+            )
+            # The pipeline now owns the admission slot (released in its body's
+            # finally). Mark handed off so generate()'s finally below does not
+            # also release it (the release is idempotent regardless, but this
+            # keeps ownership unambiguous).
+            admission_handed_off = True
+        finally:
+            if not admission_handed_off:
+                await admission.release()
         # Hold a strong reference so a client disconnect (which stops the pump
         # below from awaiting the task) can never let the detached pipeline be
         # garbage-collected before it finishes persisting.
@@ -2854,6 +2918,7 @@ class StageManager:
         cache_key: str,
         phase: _PhaseTracker,
         research: ResearchContext = _EMPTY_RESEARCH,
+        admission: GenerationAdmission | None = None,
     ) -> None:
         """Run the post-preflight generation pipeline on its OWN DB session.
 
@@ -2866,42 +2931,53 @@ class StageManager:
         it.  Callers identify the work only by ids / scalars (workspace_id,
         user_id, deduction_id).  The body then mutates and commits exactly as it
         did when it borrowed the request session.
+
+        ``admission`` is the generation slot acquired by generate() (audit F1/F2).
+        The pipeline owns it for its full lifetime and releases it in the finally
+        below — on every terminal path (success, failure, cancellation), and
+        because the pipeline is deliberately not cancelled on client disconnect,
+        the release lands at the true end of generation. ``release()`` is
+        idempotent, so the generate() preflight guard releasing it is harmless.
         """
         from database import AsyncSessionLocal  # noqa: PLC0415
 
-        async with AsyncSessionLocal() as own_db:
-            stage = await self._load_stage(stage_id, own_db)
-            workspace = await self._load_workspace(workspace_id, own_db)
-            # End the read transaction immediately so the pooled connection is
-            # released back during the (potentially many-minute) LLM stream
-            # instead of sitting idle-in-transaction the whole time — that would
-            # pin a connection per concurrent generation and, under a Postgres
-            # idle_in_transaction_session_timeout, get the session killed before
-            # the final persist.  commit (not rollback) because rollback expires
-            # the instances; with expire_on_commit=False the already-loaded
-            # stage/workspace scalars (and the selectinload'd workspace.stages)
-            # stay populated for the body to read without further IO, and the
-            # next write auto-begins a fresh transaction.
-            await own_db.commit()
-            await self._run_generation_pipeline_body(
-                emit=emit,
-                db=own_db,
-                stage=stage,
-                stage_id=stage_id,
-                workspace=workspace,
-                user_id=user_id,
-                redis=redis,
-                route=route,
-                deduction_id=deduction_id,
-                action=action,
-                trace_id=trace_id,
-                system_prompt=system_prompt,
-                user_prompt=user_prompt,
-                compression_rung=compression_rung,
-                cache_key=cache_key,
-                phase=phase,
-                research=research,
-            )
+        try:
+            async with AsyncSessionLocal() as own_db:
+                stage = await self._load_stage(stage_id, own_db)
+                workspace = await self._load_workspace(workspace_id, own_db)
+                # End the read transaction immediately so the pooled connection is
+                # released back during the (potentially many-minute) LLM stream
+                # instead of sitting idle-in-transaction the whole time — that
+                # would pin a connection per concurrent generation and, under a
+                # Postgres idle_in_transaction_session_timeout, get the session
+                # killed before the final persist.  commit (not rollback) because
+                # rollback expires the instances; with expire_on_commit=False the
+                # already-loaded stage/workspace scalars (and the selectinload'd
+                # workspace.stages) stay populated for the body to read without
+                # further IO, and the next write auto-begins a fresh transaction.
+                await own_db.commit()
+                await self._run_generation_pipeline_body(
+                    emit=emit,
+                    db=own_db,
+                    stage=stage,
+                    stage_id=stage_id,
+                    workspace=workspace,
+                    user_id=user_id,
+                    redis=redis,
+                    route=route,
+                    deduction_id=deduction_id,
+                    action=action,
+                    trace_id=trace_id,
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                    compression_rung=compression_rung,
+                    cache_key=cache_key,
+                    phase=phase,
+                    research=research,
+                )
+        finally:
+            if admission is not None:
+                await admission.release()
 
     async def _run_generation_pipeline_body(
         self,
@@ -3006,6 +3082,10 @@ class StageManager:
                 # provider failure.  SSE progress heartbeats are interleaved by
                 # the supervising generate() pump while this await is pending.
                 is_fallback_attempt = False
+                # F2: 429/overload retries are a SEPARATE budget from the
+                # one-shot tier escalation — a throughput failure must not consume
+                # (or trigger) the quality-escalation retry, and vice-versa.
+                rate_limit_attempts = 0
                 while True:
                     try:
                         attempt_retry_count = 1 if is_fallback_attempt else 0
@@ -3022,6 +3102,48 @@ class StageManager:
                             retry_count=attempt_retry_count,
                             mode=mode,
                         )
+                    except ProviderRateLimitError as rate_exc:
+                        # A provider 429/overload is a THROUGHPUT failure, not a
+                        # quality one: retry in place on the SAME tier (honoring
+                        # Retry-After, then exponential backoff + jitter) and
+                        # NEVER escalate. Escalating would fire a bigger,
+                        # more-token-hungry request at an already-throttled org —
+                        # turning throttling into a thundering herd (audit §F2.3).
+                        # The live-streamed partial draft (if any) is stale.
+                        emit(json.dumps({"stream_reset": True}))
+                        max_rate_retries = max(
+                            0, settings.provider_rate_limit_max_retries
+                        )
+                        if rate_limit_attempts >= max_rate_retries:
+                            PIPELINE_PROVIDER_RATE_LIMIT_RETRIES.labels(
+                                stage_type=stage.type,
+                                provider=route.provider,
+                                outcome="exhausted",
+                            ).inc()
+                            raise
+                        delay = _rate_limit_retry_delay(
+                            rate_limit_attempts, rate_exc.retry_after
+                        )
+                        rate_limit_attempts += 1
+                        PIPELINE_PROVIDER_RATE_LIMIT_RETRIES.labels(
+                            stage_type=stage.type,
+                            provider=route.provider,
+                            outcome="retried",
+                        ).inc()
+                        logger.warning(
+                            "stage.generation_rate_limited",
+                            extra={
+                                "stage_id": str(stage_id),
+                                "stage": stage.type,
+                                "provider": route.provider,
+                                "model": route.model,
+                                "attempt": rate_limit_attempts,
+                                "delay_seconds": round(delay, 2),
+                                "retry_after": rate_exc.retry_after,
+                            },
+                        )
+                        await asyncio.sleep(delay)
+                        continue
                     except (ProviderError, TimeoutError) as attempt_exc:
                         # Any live-streamed draft from the failed attempt is
                         # stale; clear the client buffer before the fallback

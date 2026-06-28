@@ -61,6 +61,101 @@ class Settings(BaseSettings):
 
     db_pool_size: int = 20
     db_max_overflow: int = 10
+    # F9 (scalability audit) — fast-fail + server-side DB guards.
+    #
+    # db_pool_timeout: seconds a checkout waits for a free pooled connection
+    #   before raising TimeoutError. SQLAlchemy's default is 30s; a saturated
+    #   pool should fast-fail (a 503 the caller can retry) rather than pile up
+    #   30s-blocked requests, so the default here is a small 5s.
+    # db_statement_timeout_ms: Postgres `statement_timeout` set per connection
+    #   via asyncpg server_settings. Bounds any single runaway query. 0 disables.
+    #   Migrations run on a separate NullPool engine (migrations/env.py) and are
+    #   unaffected.
+    # db_idle_in_transaction_timeout_ms: Postgres
+    #   `idle_in_transaction_session_timeout`. Frees a connection left idle
+    #   inside an open transaction (a leak/bug backstop). The same engine config
+    #   serves the API and the arq worker; some worker jobs (e.g. a large GitHub
+    #   re-sync) legitimately hold a read transaction open across a sequence of
+    #   external GitHub calls, so the default is generous (5 min) — it still
+    #   bounds a genuine leak while never false-killing a healthy long job. The
+    #   API generation path commits before its multi-minute stream (audit §1), so
+    #   it is never idle-in-transaction regardless of this bound. 0 disables.
+    # These are applied to the postgres engine only (asyncpg server_settings);
+    # a non-postgres DATABASE_URL (e.g. a test sqlite URL) never receives them.
+    db_pool_timeout: int = 5
+    db_statement_timeout_ms: int = 30_000
+    db_idle_in_transaction_timeout_ms: int = 300_000
+
+    # F8 (scalability audit) — bound + health-check the shared Redis pool.
+    #
+    # Every request touches Redis (rate limiting, credit/generation cache,
+    # admission control), so an unbounded pool can balloon connections toward
+    # Redis `maxclients` under a burst, and a connection left stale after a
+    # failover surfaces as an error on next use. These settings flow through the
+    # single client factory in database.build_redis_client():
+    #   redis_max_connections: hard cap on the pool size per process.
+    #   redis_socket_timeout: per-command read/write timeout (fast-fail).
+    #   redis_socket_connect_timeout: connection-establishment timeout.
+    #   redis_health_check_interval: seconds between idle-connection PINGs, so a
+    #     stale post-failover connection is detected and recycled, not handed out.
+    redis_max_connections: int = 50
+    redis_socket_timeout: float = 5.0
+    redis_socket_connect_timeout: float = 2.0
+    redis_health_check_interval: int = 30
+
+    # F1 (scalability audit) — admission control on the generation path.
+    #
+    # max_concurrent_generations_per_process: per-worker-process ceiling on
+    #   in-flight stage generations. The primary safety valve so one process
+    #   cannot self-immolate (event-loop saturation, background fan-out, shared
+    #   provider key). Sized off the measured provider budget; tune via env. 0
+    #   disables the per-process limiter.
+    # max_concurrent_generations_per_user: per-user ceiling on concurrent
+    #   in-flight generations, enforced via a self-healing Redis lease so it holds
+    #   across processes/instances. 0 disables.
+    # generation_admission_lease_ttl_seconds: how long a per-user/per-provider
+    #   admission lease survives without an explicit release (process-death
+    #   self-heal). Generously larger than a realistic full generation so a live
+    #   generation is never evicted; on the normal path the lease is released at
+    #   pipeline teardown well before this.
+    # generation_rate_per_minute / _window_seconds: the HTTP-native generation
+    #   rate tier enforced in RateLimitMiddleware (true 429 + Retry-After). This
+    #   is the authoritative per-minute generation cap; the daily ceiling lives in
+    #   the stage manager. 0 disables the tier.
+    max_concurrent_generations_per_process: int = 20
+    max_concurrent_generations_per_user: int = 3
+    generation_admission_lease_ttl_seconds: int = 1_800
+    generation_rate_per_minute: int = 10
+    generation_rate_window_seconds: int = 60
+
+    # F2 (scalability audit) — global provider budget + 429-aware backoff.
+    #
+    # provider_max_inflight_generations / provider_max_generations_per_minute:
+    #   global (Redis-coordinated) ceilings on concurrent / per-minute generation
+    #   calls against the shared platform key for a provider. They feed the F1
+    #   admission valve so the system sheds (503/busy) on OUR budget before the
+    #   provider returns a 429. SCOPE: these count ONLY the core generate /
+    #   regenerate path (the only callers of admit_generation). Storyboard,
+    #   increment, and the harness gap-patch also hit the shared key but are
+    #   governed by their OWN rate tiers and are NOT counted here — so this is a
+    #   core-generation budget, not a whole-account budget (audit F1/F2 scope;
+    #   those paths verifiably do not amplify on 429 — they surface it directly).
+    #   The real per-org RPM/TPM/concurrency limits MUST be measured before
+    #   setting these (audit §F2/§6); they ship at 0 (unlimited) so no environment
+    #   is throttled on an unmeasured guess — the 429-aware backoff below is the
+    #   protection that ships on.
+    # provider_rate_limit_max_retries: bounded same-tier retries when a provider
+    #   returns 429/overloaded. A rate-limit is a throughput failure, NOT a
+    #   quality failure, so it is retried in place (honoring Retry-After, then
+    #   exponential backoff + jitter) and NEVER escalated to a bigger/mid tier —
+    #   escalation amplifies load against an already-throttled org (audit §F2.3).
+    # provider_rate_limit_backoff_base_seconds / _max_seconds: the backoff used
+    #   when the provider sends no Retry-After header.
+    provider_max_inflight_generations: int = 0
+    provider_max_generations_per_minute: int = 0
+    provider_rate_limit_max_retries: int = 3
+    provider_rate_limit_backoff_base_seconds: float = 2.0
+    provider_rate_limit_backoff_max_seconds: float = 30.0
     # LLM circuit-breaker rejections emit specforge_llm_circuit_rejections_total.
     #
     # Stream-watchdog policy: a generation stream is killed only when it is

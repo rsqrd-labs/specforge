@@ -6,7 +6,14 @@ import httpx
 import openai
 
 from config import settings
-from services.llm.base import BaseLLMAdapter, ProviderError
+from services.llm.base import (
+    RATE_LIMIT_STATUS_CODES,
+    BaseLLMAdapter,
+    ProviderError,
+    ProviderRateLimitError,
+    classify_provider_status,
+    extract_retry_after,
+)
 from services.llm.completion import LLMCompletionInfo
 from services.llm.model_catalog import model_request_policy
 
@@ -14,6 +21,25 @@ from services.llm.model_catalog import model_request_policy
 # indefinitely.  connect/write are short (fast-fail on connection issues);
 # read allows long streaming responses.  H-6 — T-182.
 _DEFAULT_TIMEOUT = httpx.Timeout(connect=10.0, read=300.0, write=10.0, pool=5.0)
+
+
+def _wrap_openai_error(exc: openai.OpenAIError) -> ProviderError:
+    """Map an OpenAI SDK error to the right ProviderError subclass (F2).
+
+    A 429 (``RateLimitError``) becomes a ``ProviderRateLimitError`` carrying any
+    ``Retry-After`` hint so the pipeline retries in place without escalating the
+    model tier; everything else stays a generic ``ProviderError``.
+    """
+    status = classify_provider_status(exc)
+    is_rate_limited = (
+        isinstance(exc, getattr(openai, "RateLimitError", ()))
+        or status in RATE_LIMIT_STATUS_CODES
+    )
+    if is_rate_limited:
+        return ProviderRateLimitError(
+            "openai", exc, retry_after=extract_retry_after(exc)
+        )
+    return ProviderError("openai", exc)
 
 
 class OpenAIAdapter(BaseLLMAdapter):
@@ -77,7 +103,7 @@ class OpenAIAdapter(BaseLLMAdapter):
                 # "stalled" (issue #19).
                 yield delta if delta else ""
         except openai.OpenAIError as exc:
-            raise ProviderError("openai", exc) from exc
+            raise _wrap_openai_error(exc) from exc
         except RuntimeError as exc:
             raise ProviderError("openai", exc) from exc
 
@@ -125,7 +151,7 @@ class OpenAIAdapter(BaseLLMAdapter):
                     continue
                 yield content
         except openai.OpenAIError as exc:
-            raise ProviderError("openai", exc) from exc
+            raise _wrap_openai_error(exc) from exc
 
     async def complete(
         self,
@@ -163,7 +189,7 @@ class OpenAIAdapter(BaseLLMAdapter):
             _capture_openai_response_completion(self.last_completion, response)
             return _response_output_text(response)
         except openai.OpenAIError as exc:
-            raise ProviderError("openai", exc) from exc
+            raise _wrap_openai_error(exc) from exc
         except RuntimeError as exc:
             raise ProviderError("openai", exc) from exc
 
@@ -191,7 +217,7 @@ class OpenAIAdapter(BaseLLMAdapter):
                     self.last_completion.usage = _object_to_dict(usage)
             return choice.message.content or ""
         except openai.OpenAIError as exc:
-            raise ProviderError("openai", exc) from exc
+            raise _wrap_openai_error(exc) from exc
 
     def _uses_responses_api(self) -> bool:
         return self._request_policy["adapter_api"] == "responses"

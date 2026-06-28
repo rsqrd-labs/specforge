@@ -438,6 +438,85 @@ async def test_storyboard_section_regenerate_rate_limit_blocks_eleventh_section(
 
 
 @pytest.mark.asyncio
+async def test_generation_rate_limit_blocks_over_budget_generate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Scalability audit F1: the HTTP-native generation tier returns 429+Retry-After."""
+    from config import settings
+
+    user_id = "user-generation"
+    fake_redis = _FakeRedis()
+    monkeypatch.setattr(settings, "generation_rate_per_minute", 10)
+    monkeypatch.setattr(settings, "generation_rate_window_seconds", 60)
+    _fill_window(fake_redis, f"generation:{user_id}", 10)
+    monkeypatch.setattr(
+        rate_limit_module,
+        "decode_access_token_claims",
+        lambda token: {"sub": user_id} if token == "storyboard-token" else None,
+    )
+
+    response = await _rate_limited_request(
+        method="POST",
+        path="/stages/stage-1/generate",
+        fake_redis=fake_redis,
+        user_id=user_id,
+    )
+
+    assert response.status_code == 429
+    assert response.headers["Retry-After"] == "60"
+    assert "Generation rate limit" in response.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_generation_rate_limit_covers_regenerate_paths(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The tier applies to /generate, /regenerate and /regenerate-gaps alike."""
+    from config import settings
+
+    user_id = "user-generation-2"
+    monkeypatch.setattr(settings, "generation_rate_per_minute", 10)
+    monkeypatch.setattr(settings, "generation_rate_window_seconds", 60)
+    monkeypatch.setattr(
+        rate_limit_module,
+        "decode_access_token_claims",
+        lambda token: {"sub": user_id} if token == "storyboard-token" else None,
+    )
+    for path in ("/stages/s/regenerate", "/stages/s/regenerate-gaps"):
+        fake_redis = _FakeRedis()
+        _fill_window(fake_redis, f"generation:{user_id}", 10)
+        response = await _rate_limited_request(
+            method="POST", path=path, fake_redis=fake_redis, user_id=user_id
+        )
+        assert response.status_code == 429, path
+
+
+@pytest.mark.asyncio
+async def test_generation_rate_limit_disabled_when_zero(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """generation_rate_per_minute=0 disables the tier entirely."""
+    from config import settings
+
+    user_id = "user-generation-3"
+    fake_redis = _FakeRedis()
+    monkeypatch.setattr(settings, "generation_rate_per_minute", 0)
+    _fill_window(fake_redis, f"generation:{user_id}", 100)
+    monkeypatch.setattr(
+        rate_limit_module,
+        "decode_access_token_claims",
+        lambda token: {"sub": user_id} if token == "storyboard-token" else None,
+    )
+    response = await _rate_limited_request(
+        method="POST",
+        path="/stages/stage-1/generate",
+        fake_redis=fake_redis,
+        user_id=user_id,
+    )
+    assert response.status_code == 200
+
+
+@pytest.mark.asyncio
 async def test_storyboard_share_toggle_rate_limit_blocks_twenty_first_change(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

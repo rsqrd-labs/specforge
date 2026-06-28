@@ -48,6 +48,17 @@ CIRCUIT_REJECTIONS = Counter(
     ["provider"],
 )
 
+# Provider rate-limit / overload responses (HTTP 429/529/503). Distinct from a
+# circuit failure: a rate-limit is throughput backpressure, not an outage, so it
+# is counted here but deliberately NOT folded into the circuit-breaker failure
+# count (audit F2 — otherwise the in-place backoff retry would hit an open
+# circuit). A rising rate is the signal the shared provider key is at its ceiling.
+PROVIDER_RATE_LIMITED = Counter(
+    "specforge_llm_provider_rate_limited_total",
+    "LLM provider responses that throttled or overloaded the call (HTTP 429/529/503)",
+    ["provider"],
+)
+
 # Gauge for current circuit breaker state per provider.  0 = closed (healthy),
 # 1 = open (rejecting requests).  Updated synchronously in record_provider_failure()
 # and record_provider_success().  Per-process; under multi-worker deployment,
@@ -167,6 +178,18 @@ def record_provider_success(provider: str) -> None:
 
 
 def record_provider_failure(provider: str, exc: BaseException) -> None:
+    # A rate-limit / overload (HTTP 429/529/503) is throughput backpressure, not
+    # a provider outage: count it on its own meter but do NOT advance the circuit
+    # failure count (audit F2). Folding 429s into the circuit would open it under
+    # load and then HTTPException(503) the very backoff retry that honors
+    # Retry-After — turning graceful in-place retry into a hard failure.
+    from services.llm.base import ProviderRateLimitError  # noqa: PLC0415
+
+    if isinstance(exc, ProviderRateLimitError):
+        PROVIDER_RATE_LIMITED.labels(provider=provider).inc()
+        record_llm_provider_failure(provider, exc.__class__.__name__)
+        return
+
     state = _FAILURES.setdefault(provider, ProviderFailureState())
     state.count += 1
     state.last_failure_at = time.time()

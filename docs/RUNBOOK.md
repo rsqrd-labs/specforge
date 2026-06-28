@@ -22,6 +22,7 @@ billing alerts and ops, and prompt pipeline quality gates.
 11. [Storyboard Operations](#11-storyboard-operations)
 12. [GitHub Living Integration — App, Worker & Webhook Ops](#12-github-living-integration--app-worker--webhook-ops)
 13. [Demo Day Mode — Construction Verdict & Rollout](#13-demo-day-mode--construction-verdict--rollout)
+14. [Generation Admission Control & Provider Budget (Scalability P0)](#14-generation-admission-control--provider-budget-scalability-p0)
 
 ---
 
@@ -1603,3 +1604,100 @@ problem-statement corpus is `docs/evals/golden_prompts/demo_day_route_golden.jso
 
 To roll back, set both flags off and redeploy — existing Demo Day workspaces keep
 their data (the columns persist) but new workspaces fall back to standard.
+
+---
+
+## 14. Generation Admission Control & Provider Budget (Scalability P0)
+
+The P0 remediation of `docs/SCALABILITY_AUDIT.md`. Two layers protect the core
+**generate / regenerate** path from a concurrent-generation burst, plus 429-aware
+backoff so a throttled provider key degrades gracefully instead of amplifying.
+
+### What it is
+
+- **Admission control** (`services/pipeline/admission.py`) — before any provider
+  call (and after the generation-cache miss, so a cache hit consumes no slot), a
+  generation must acquire a slot across three budgets, in order:
+  1. **Per-process** (`MAX_CONCURRENT_GENERATIONS_PER_PROCESS`, default 20) —
+     in-memory; the primary valve so one worker cannot self-immolate.
+  2. **Per-user** (`MAX_CONCURRENT_GENERATIONS_PER_USER`, default 3) — a
+     self-healing Redis lease (TTL `GENERATION_ADMISSION_LEASE_TTL_SECONDS`), so
+     it holds across instances and recovers if a process dies.
+  3. **Per-provider** (`PROVIDER_MAX_INFLIGHT_GENERATIONS` /
+     `PROVIDER_MAX_GENERATIONS_PER_MINUTE`, default **0 = unlimited**) — global
+     Redis budget against the shared platform key.
+  Over budget ⇒ fast-fail carrying `Retry-After`. **Redis budgets fail OPEN** (a
+  Redis blip never blocks a generation; the per-process limiter still applies).
+  **Scope:** these budgets count the **core generate/regenerate path only**.
+  Storyboard / increment / harness gap-patch hit the same key but are governed by
+  their own rate tiers and are NOT counted here — `PROVIDER_MAX_*` is a
+  core-generation budget, not a whole-account budget.
+- **HTTP-native generation tier** (`middleware/rate_limit.py`,
+  `GENERATION_RATE_PER_MINUTE` / `_WINDOW_SECONDS`) — a true **429 + Retry-After**
+  at the edge for `/stages/{id}/(generate|regenerate|regenerate-gaps)`, before the
+  stream starts. (Admission rejections, which happen inside the already-200 SSE
+  stream, instead surface as the existing `rate_limit_exceeded` **SSE event**.)
+- **429-aware backoff** (`services/pipeline/stage_manager.py`) — a provider
+  429/529/503 is a *throughput* failure, retried **in place on the same tier**
+  (honor `Retry-After` → exponential backoff + jitter, bounded by
+  `PROVIDER_RATE_LIMIT_MAX_RETRIES`), **never escalated** to a bigger model. The
+  circuit breaker excludes rate-limits, so a 429 cannot open the circuit and then
+  hard-fail its own backoff retry.
+
+### Sizing the provider budget (measure, don't guess)
+
+`PROVIDER_MAX_*` ship at 0 because the binding constraint is the per-org provider
+limit, which is account-specific. Before enabling them:
+
+1. Get the **per-org RPM / TPM / concurrent-request** limits for each provider
+   account (Anthropic/OpenAI/Google dashboards or support).
+2. Watch `specforge_llm_provider_rate_limited_total` under real load — a non-zero,
+   rising rate means the shared key is already at its ceiling.
+3. Set `PROVIDER_MAX_GENERATIONS_PER_MINUTE` / `_INFLIGHT_GENERATIONS` a margin
+   **below** the measured org limit (account for the per-generation fan-out: each
+   user generation also drives a critic/judge call, and the judge defaults to
+   Anthropic for all providers, so Anthropic is the hottest).
+4. Roll out per provider; confirm over-budget requests shed as 503/SSE
+   `rate_limit_exceeded` (not 5xx/hangs) and that `/health` + login p99 stay flat.
+
+### Detecting & metrics
+
+```promql
+# Admission rejections by the budget that tripped (process/user/provider_*):
+sum by (reason) (rate(specforge_generation_admission_rejected_total[5m]))
+
+# Per-process in-flight generations on a worker (a non-zero idle floor = slot leak):
+specforge_generation_inflight_process
+
+# Provider throttling — the binding-constraint signal (the shared key is at its ceiling):
+sum by (provider) (rate(specforge_llm_provider_rate_limited_total[5m]))
+
+# 429-aware in-place retries; "exhausted" = bounded retries used up, failure surfaced:
+sum by (provider, outcome) (rate(specforge_pipeline_provider_rate_limit_retries_total[5m]))
+```
+
+**Alert ideas:** sustained `provider_rate_limited` rate > 0 (key at ceiling →
+size/raise the budget or add capacity); `generation_inflight_process` pinned at
+the cap for minutes (turn up `MAX_CONCURRENT_GENERATIONS_PER_PROCESS` only if the
+provider budget allows); a non-zero `inflight_process` floor at idle (slot leak —
+investigate the pipeline `finally` release).
+
+### Tuning & safe rollback
+
+Every knob is env-driven (`config.py`) and independently disable-able with **0**:
+`MAX_CONCURRENT_GENERATIONS_PER_PROCESS=0` (disable the per-process valve),
+`MAX_CONCURRENT_GENERATIONS_PER_USER=0`, `GENERATION_RATE_PER_MINUTE=0` (disable
+the HTTP tier), `PROVIDER_MAX_*=0` (unlimited). The 429-aware backoff is always on
+(it has no off switch — it only ever *helps* under throttling); to make it less
+aggressive lower `PROVIDER_RATE_LIMIT_MAX_RETRIES`. No migration or restart
+ordering is required — these take effect on the next process start.
+
+### F8/F9 — pool guards (related)
+
+The same P0 cut bounds the shared Redis pool (`REDIS_MAX_CONNECTIONS`,
+`REDIS_HEALTH_CHECK_INTERVAL`, built once in `database.build_redis_client`) and
+adds postgres fast-fail/server guards (`DB_POOL_TIMEOUT` default 5s,
+`DB_STATEMENT_TIMEOUT_MS`, `DB_IDLE_IN_TRANSACTION_TIMEOUT_MS`). If a long-running
+worker job legitimately holds a read transaction across external calls and trips
+`idle_in_transaction_session_timeout`, raise `DB_IDLE_IN_TRANSACTION_TIMEOUT_MS`
+(the API generation path commits before its stream, so it is never affected).

@@ -152,6 +152,20 @@ PIPELINE_GENERATION_FALLBACKS = Counter(
     ["stage_type", "provider", "outcome"],
 )
 
+# Provider rate-limit (429/overload) in-place retries during stage generation
+# (scalability audit F2). Distinct from PIPELINE_GENERATION_FALLBACKS: a 429 is
+# retried on the SAME tier (honoring Retry-After / backoff), never escalated, so
+# it never amplifies load against an already-throttled org. outcome is "retried"
+# (a backoff retry was issued) or "exhausted" (bounded retries used up; the
+# failure surfaces). A rising rate is the binding-constraint signal: the shared
+# provider key is hitting its account rate ceiling.
+PIPELINE_PROVIDER_RATE_LIMIT_RETRIES = Counter(
+    "specforge_pipeline_provider_rate_limit_retries_total",
+    "Stage generation stream retries triggered by a provider 429/overload, "
+    "retried in place on the same tier (no tier escalation), by outcome.",
+    ["stage_type", "provider", "outcome"],
+)
+
 PIPELINE_GENERATION_DURATION = Histogram(
     "specforge_pipeline_generation_duration_seconds",
     "Wall-clock duration of a full stage artifact generation (all chunks)",

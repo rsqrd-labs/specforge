@@ -11,12 +11,39 @@ from config import settings
 if TYPE_CHECKING:
     from redis.asyncio import Redis
 
+
+def _engine_connect_args() -> dict:
+    """asyncpg server-side guards for the postgres engine (F9 — scalability audit).
+
+    ``statement_timeout`` and ``idle_in_transaction_session_timeout`` are set as
+    asyncpg ``server_settings`` so every pooled connection enforces them at the
+    database, bounding a runaway query and freeing a connection left idle in an
+    open transaction (defence-in-depth). They are postgres-only: a non-postgres
+    DATABASE_URL (e.g. a sqlite test URL) gets no ``server_settings``, so the
+    engine still builds. Migrations run on a separate engine and are unaffected.
+    """
+    if not settings.database_url.startswith(("postgresql", "postgres")):
+        return {}
+    server_settings: dict[str, str] = {}
+    if settings.db_statement_timeout_ms > 0:
+        server_settings["statement_timeout"] = str(settings.db_statement_timeout_ms)
+    if settings.db_idle_in_transaction_timeout_ms > 0:
+        server_settings["idle_in_transaction_session_timeout"] = str(
+            settings.db_idle_in_transaction_timeout_ms
+        )
+    return {"server_settings": server_settings} if server_settings else {}
+
+
 async_engine = create_async_engine(
     settings.database_url,
     pool_pre_ping=True,
     pool_size=settings.db_pool_size,
     max_overflow=settings.db_max_overflow,
+    # F9: a saturated pool fast-fails (a retryable 503) instead of blocking the
+    # SQLAlchemy default 30s per checkout under load.
+    pool_timeout=settings.db_pool_timeout,
     pool_recycle=3600,
+    connect_args=_engine_connect_args(),
 )
 
 AsyncSessionLocal = async_sessionmaker(
@@ -36,6 +63,30 @@ AsyncSessionLocal = async_sessionmaker(
 # ---------------------------------------------------------------------------
 
 _shared_redis: "Redis | None" = None
+
+
+def build_redis_client() -> "Redis":
+    """Construct a Redis client with a bounded, health-checked pool (F8).
+
+    The single source of truth for how every Redis client in the process is
+    built — the lifespan pool, the health-check probe, and the
+    ``get_shared_redis()`` fallback all go through here so none can drift back to
+    an unbounded ``Redis.from_url(...)``. Bounds the connection pool, sets a
+    fast-fail socket timeout, enables TCP keepalive, and runs idle-connection
+    health checks so a connection left stale after a Redis failover is detected
+    and recycled rather than handed out and surfaced as an error.
+    """
+    from redis.asyncio import Redis
+
+    return Redis.from_url(
+        settings.redis_url,
+        decode_responses=True,
+        max_connections=settings.redis_max_connections,
+        socket_timeout=settings.redis_socket_timeout,
+        socket_connect_timeout=settings.redis_socket_connect_timeout,
+        socket_keepalive=True,
+        health_check_interval=settings.redis_health_check_interval,
+    )
 
 
 def _initialize_redis(client: "Redis") -> None:
@@ -73,10 +124,9 @@ def get_shared_redis() -> "Redis":
         return _shared_redis
     # Fallback: create a fresh client.  This path is only reachable when the
     # lifespan has not yet run (e.g. a service singleton is accessed before
-    # app startup in an integration test without explicit injection).
-    from redis.asyncio import Redis
-
-    return Redis.from_url(settings.redis_url, decode_responses=True)
+    # app startup in an integration test without explicit injection).  Built
+    # through the same bounded/health-checked factory as the lifespan pool (F8).
+    return build_redis_client()
 
 
 async def get_db() -> AsyncGenerator[AsyncSession, None]:

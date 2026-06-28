@@ -7,13 +7,35 @@ from google.genai import errors as genai_errors
 from google.genai import types
 
 from config import settings
-from services.llm.base import BaseLLMAdapter, ProviderError
+from services.llm.base import (
+    RATE_LIMIT_STATUS_CODES,
+    BaseLLMAdapter,
+    ProviderError,
+    ProviderRateLimitError,
+    classify_provider_status,
+    extract_retry_after,
+)
 from services.llm.completion import LLMCompletionInfo
 from services.llm.model_catalog import model_request_policy
 
 # Explicit read timeout (milliseconds) prevents a hung Gemini connection from
 # blocking a credit reservation indefinitely.  H-6 — T-182.
 _DEFAULT_TIMEOUT_MS = 300_000  # 5 minutes
+
+
+def _wrap_google_error(exc: genai_errors.APIError) -> ProviderError:
+    """Map a Google genai SDK error to the right ProviderError subclass (F2).
+
+    A 429 (RESOURCE_EXHAUSTED) or 503 (UNAVAILABLE) becomes a
+    ``ProviderRateLimitError`` so the pipeline retries in place without
+    escalating the model tier; everything else stays a generic ``ProviderError``.
+    The genai ``APIError`` exposes the HTTP status on ``.code``.
+    """
+    if classify_provider_status(exc) in RATE_LIMIT_STATUS_CODES:
+        return ProviderRateLimitError(
+            "google", exc, retry_after=extract_retry_after(exc)
+        )
+    return ProviderError("google", exc)
 
 
 class GoogleAdapter(BaseLLMAdapter):
@@ -72,7 +94,7 @@ class GoogleAdapter(BaseLLMAdapter):
                 # "stalled" (issue #19).
                 yield chunk.text or ""
         except genai_errors.APIError as exc:
-            raise ProviderError("google", exc) from exc
+            raise _wrap_google_error(exc) from exc
 
     async def complete(
         self,
@@ -97,7 +119,7 @@ class GoogleAdapter(BaseLLMAdapter):
             _capture_google_completion(self.last_completion, response)
             return response.text or ""
         except genai_errors.APIError as exc:
-            raise ProviderError("google", exc) from exc
+            raise _wrap_google_error(exc) from exc
 
 
 def _capture_google_completion(

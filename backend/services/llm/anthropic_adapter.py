@@ -7,10 +7,14 @@ import httpx
 
 from config import settings
 from services.llm.base import (
+    RATE_LIMIT_STATUS_CODES,
     BaseLLMAdapter,
     BatchRequest,
     BatchResultItem,
     ProviderError,
+    ProviderRateLimitError,
+    classify_provider_status,
+    extract_retry_after,
 )
 from services.llm.completion import LLMCompletionInfo
 from services.llm.model_catalog import model_request_policy
@@ -19,6 +23,22 @@ from services.llm.model_catalog import model_request_policy
 # indefinitely.  connect/write are short (fast-fail on connection issues);
 # read allows long streaming responses.  H-6 — T-182.
 _DEFAULT_TIMEOUT = httpx.Timeout(connect=10.0, read=300.0, write=10.0, pool=5.0)
+
+
+def _wrap_anthropic_error(exc: anthropic.APIError) -> ProviderError:
+    """Map an Anthropic SDK error to the right ProviderError subclass (F2).
+
+    A 429 (``RateLimitError``) or 529 overloaded becomes a
+    ``ProviderRateLimitError`` carrying any ``Retry-After`` hint so the pipeline
+    retries in place without escalating the model tier; everything else stays a
+    generic ``ProviderError``.
+    """
+    status = classify_provider_status(exc)
+    if isinstance(exc, anthropic.RateLimitError) or status in RATE_LIMIT_STATUS_CODES:
+        return ProviderRateLimitError(
+            "anthropic", exc, retry_after=extract_retry_after(exc)
+        )
+    return ProviderError("anthropic", exc)
 
 
 class AnthropicAdapter(BaseLLMAdapter):
@@ -81,7 +101,7 @@ class AnthropicAdapter(BaseLLMAdapter):
                     if usage is not None:
                         self.last_completion.usage = _object_to_dict(usage)
         except anthropic.APIError as exc:
-            raise ProviderError("anthropic", exc) from exc
+            raise _wrap_anthropic_error(exc) from exc
 
     async def complete(
         self,
@@ -116,7 +136,7 @@ class AnthropicAdapter(BaseLLMAdapter):
                     self.last_completion.usage = _object_to_dict(usage)
             return response.content[0].text
         except anthropic.APIError as exc:
-            raise ProviderError("anthropic", exc) from exc
+            raise _wrap_anthropic_error(exc) from exc
 
     async def submit_batch(self, requests: Sequence[BatchRequest]) -> str:
         """Create a Message Batch (50% discount) and return its id.
@@ -144,14 +164,14 @@ class AnthropicAdapter(BaseLLMAdapter):
             )
             return batch.id
         except anthropic.APIError as exc:
-            raise ProviderError("anthropic", exc) from exc
+            raise _wrap_anthropic_error(exc) from exc
 
     async def poll_batch(self, provider_batch_id: str) -> str:
         try:
             batch = await self._client.beta.messages.batches.retrieve(provider_batch_id)
             return str(getattr(batch, "processing_status", "") or "")
         except anthropic.APIError as exc:
-            raise ProviderError("anthropic", exc) from exc
+            raise _wrap_anthropic_error(exc) from exc
 
     async def fetch_batch_results(
         self, provider_batch_id: str
@@ -165,7 +185,7 @@ class AnthropicAdapter(BaseLLMAdapter):
             async for entry in stream:
                 results[entry.custom_id] = _normalize_batch_result(entry)
         except anthropic.APIError as exc:
-            raise ProviderError("anthropic", exc) from exc
+            raise _wrap_anthropic_error(exc) from exc
         return results
 
     def _batch_params(self, *, system: str, user: str, max_tokens: int) -> dict:

@@ -59,6 +59,84 @@ class ProviderTimeoutError(ProviderError):
         )
 
 
+class ProviderRateLimitError(ProviderError):
+    """A provider throttled the call (HTTP 429) or is overloaded (529/503).
+
+    A distinct subclass of ``ProviderError`` (scalability audit F2): a rate-limit
+    is a *throughput* failure, not a *quality* or *availability* failure, so the
+    generation pipeline must treat it differently — retry in place on the SAME
+    tier honoring ``retry_after``/backoff, and NEVER escalate to a bigger model
+    (escalation amplifies load against an already-throttled org, audit §F2.3).
+    Because it subclasses ``ProviderError``, every existing ``except
+    ProviderError`` still catches it, so the only behaviour change is at the call
+    sites that opt into the distinct handling.
+
+    ``retry_after`` is the provider's ``Retry-After`` hint in seconds when one was
+    supplied, else ``None`` (the caller falls back to exponential backoff).
+    """
+
+    def __init__(
+        self,
+        provider: str,
+        original: Exception,
+        *,
+        retry_after: float | None = None,
+    ) -> None:
+        self.retry_after = retry_after
+        super().__init__(provider, original)
+
+
+# HTTP status codes that mean "you are being throttled / the provider is
+# transiently overloaded", shared by every adapter's error classifier so the
+# distinction is defined once. 429 = rate limited; 529 = Anthropic overloaded;
+# 503 = service unavailable (Google ResourceExhausted/Unavailable maps here).
+RATE_LIMIT_STATUS_CODES = frozenset({429, 529, 503})
+
+
+def classify_provider_status(exc: Exception) -> int | None:
+    """Best-effort HTTP status code for a provider SDK exception.
+
+    Reads the common ``status_code`` (Anthropic/OpenAI) and ``code`` (Google
+    genai) attributes without importing any provider SDK, so it stays usable from
+    provider-neutral code. Returns ``None`` when no status can be determined.
+    """
+    for attr in ("status_code", "status", "code"):
+        value = getattr(exc, attr, None)
+        if isinstance(value, bool):  # guard: bools are ints in Python
+            continue
+        if isinstance(value, int):
+            return value
+        if isinstance(value, str) and value.isdigit():
+            return int(value)
+    return None
+
+
+def extract_retry_after(exc: Exception) -> float | None:
+    """Best-effort ``Retry-After`` (seconds) from a provider SDK exception.
+
+    Provider SDK errors carry the originating ``httpx.Response`` on ``.response``;
+    the ``Retry-After`` header is either a delta-seconds integer or an HTTP date.
+    Only the numeric form is honored (the common provider case); a non-numeric or
+    absent header returns ``None`` and the caller falls back to backoff. Never
+    raises — header parsing is purely advisory.
+    """
+    response = getattr(exc, "response", None)
+    headers = getattr(response, "headers", None)
+    if headers is None:
+        return None
+    try:
+        raw = headers.get("retry-after") or headers.get("Retry-After")
+    except Exception:
+        return None
+    if raw is None:
+        return None
+    try:
+        seconds = float(str(raw).strip())
+    except (TypeError, ValueError):
+        return None
+    return seconds if seconds >= 0 else None
+
+
 class BaseLLMAdapter(ABC):
     @abstractmethod
     async def stream(

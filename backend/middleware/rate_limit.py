@@ -43,6 +43,21 @@ _LOGIN_BURST_WINDOW_SECONDS = 300
 _LOGIN_HOURLY_LIMIT = 20
 _LOGIN_HOURLY_WINDOW_SECONDS = 3600
 
+# Stage generation tier (scalability audit F1): the HTTP-native, per-user,
+# per-minute admission gate on the core generation path — POST
+# /stages/{id}/generate, /regenerate, and /regenerate-gaps. Returns a true 429 +
+# Retry-After at the edge (the audit's explicit "generation rate tier"), shedding
+# the marginal request before it ever reaches the pipeline. It is the fast outer
+# guard; the stage manager additionally enforces a daily ceiling and a unified
+# cross-operation LLM-calls cap (shared with refine/harness-patch), and the
+# per-process / per-user-concurrency / per-provider budgets are acquired inside
+# generate() (services/pipeline/admission.py). Limit/window are env-driven
+# (generation_rate_per_minute / generation_rate_window_seconds); 0 disables.
+_GENERATION_PATH_RE = re.compile(
+    r"^/stages/[^/]+/(?:generate|regenerate|regenerate-gaps)/?$"
+)
+_GENERATION_DETAIL = "Generation rate limit reached. Please wait a moment and retry."
+
 # GitHub export tier (Phase 13): 3 exports per user per hour. Applies to
 # POST /workspaces/{id}/export/github only — the ZIP export at
 # /workspaces/{id}/export is NOT covered by this tier.
@@ -412,6 +427,29 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             request.state.jwt_claims = claims
         if user_id and not await check(f"user:{user_id}", 100, 60):
             return _rate_limited(60)
+
+        # Stage generation tier (audit F1): the HTTP-native fast-fail for the core
+        # generation path. Sized from settings so ops can tune it against the
+        # measured provider budget; 0 disables it.
+        generation_limit = settings.generation_rate_per_minute
+        if (
+            user_id
+            and generation_limit > 0
+            and request.method == "POST"
+            and _GENERATION_PATH_RE.match(path)
+        ):
+            generation_window = _positive_int(
+                settings.generation_rate_window_seconds, 60
+            )
+            if not await check(
+                f"generation:{user_id}",
+                generation_limit,
+                generation_window,
+            ):
+                return _rate_limited_custom(
+                    detail=_GENERATION_DETAIL,
+                    retry_after_seconds=generation_window,
+                )
 
         if user_id and request.method == "POST" and _GITHUB_EXPORT_PATH_RE.match(path):
             allowed = await check(
