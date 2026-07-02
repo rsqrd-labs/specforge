@@ -314,6 +314,25 @@ def validate_sections(
         raise MissingSectionError(stage_type, missing)
 
 
+async def validate_sections_async(
+    stage_type: str,
+    artifact_md: str,
+    deps: dict[str, str] | None = None,
+    mode: str = "standard",
+) -> None:
+    """Async ``validate_sections``: offloads the section scan off the loop (F7).
+
+    Raises ``MissingSectionError`` identically to ``validate_sections`` (the
+    exception propagates through the executor). Large artifacts are dispatched to
+    the dedicated CPU pool; small ones run inline.
+    """
+    from services.cpu_offload import run_cpu_bound
+
+    await run_cpu_bound(
+        artifact_md, validate_sections, stage_type, artifact_md, deps, mode
+    )
+
+
 def final_completion_sentinel(stage_type: str) -> str:
     return FINAL_COMPLETION_SENTINEL_TEMPLATE.format(stage=stage_type)
 
@@ -434,6 +453,32 @@ def validate_artifact_completeness(
             issues,
             partial_content=artifact_md,
         )
+
+
+async def validate_artifact_completeness_async(
+    stage_type: str,
+    artifact_md: str,
+    deps: dict[str, str] | None = None,
+    mode: str = "standard",
+) -> None:
+    """Async ``validate_artifact_completeness``: offloads the scan off the loop (F7).
+
+    The completeness pass runs many per-section / per-task regex loops over the
+    full artifact and is the heaviest validator on the hot generation path. Raises
+    ``IncompleteArtifactError`` identically (the exception propagates through the
+    executor). Large artifacts are dispatched to the dedicated CPU pool; small ones
+    run inline.
+    """
+    from services.cpu_offload import run_cpu_bound
+
+    await run_cpu_bound(
+        artifact_md,
+        validate_artifact_completeness,
+        stage_type,
+        artifact_md,
+        deps,
+        mode,
+    )
 
 
 def _required_headings(

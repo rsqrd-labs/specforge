@@ -76,6 +76,32 @@ def compute_verdict(
     return verdict
 
 
+async def compute_verdict_async(
+    workspace: Workspace,
+    stages: dict[str, Stage],
+    *,
+    regen_attempted: bool = False,
+) -> ConstructionVerdict:
+    """Async ``compute_verdict``: offloads the linter off the event loop (F7).
+
+    ``verify_construction`` cross-joins regex/line passes over ALL FOUR full
+    stage documents — the largest combined CPU payload on the pipeline — so on
+    the demo-day verifier and the export staleness re-run it is dispatched to
+    the dedicated CPU pool (sized by the combined artifact length; small
+    packages run inline). Result object is identical to ``compute_verdict``.
+    """
+    from services.cpu_offload import run_cpu_bound
+
+    sizer = "".join(
+        stages[stage_type].content or ""
+        for stage_type in STAGE_TYPES
+        if stages.get(stage_type) is not None
+    )
+    return await run_cpu_bound(
+        sizer, compute_verdict, workspace, stages, regen_attempted=regen_attempted
+    )
+
+
 def _prior_regen_attempted(verdict: dict | None) -> bool:
     return bool(verdict.get("regen_attempted")) if isinstance(verdict, dict) else False
 
@@ -106,7 +132,7 @@ async def ensure_fresh_verdict(
     try:
         if not is_verdict_stale(existing, current_versions(stages)):
             return existing
-        verdict = compute_verdict(
+        verdict = await compute_verdict_async(
             workspace, stages, regen_attempted=_prior_regen_attempted(existing)
         )
         workspace.construction_verdict = verdict.to_dict()

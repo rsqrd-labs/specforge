@@ -111,8 +111,8 @@ from services.pipeline.artifact_validator import (
     completion_instruction,
     dedupe_file_blocks,
     strip_completion_sentinel,
-    validate_artifact_completeness,
-    validate_sections,
+    validate_artifact_completeness_async,
+    validate_sections_async,
 )
 from services.pipeline.background_tasks import (
     BoundedTaskRegistry,
@@ -126,7 +126,7 @@ from services.pipeline.critic import (
 from services.pipeline.demo_day_plan_linter import ConstructionVerdict
 from services.pipeline.diff_engine import (
     apply_diff,
-    compute_diff,
+    compute_diff_async,
     markdown_fences_balanced,
     normalize_refine_replacement,
 )
@@ -141,13 +141,13 @@ from services.pipeline.tech_safety import (
 from services.research import research_service
 from services.research.research_service import _EMPTY as _EMPTY_RESEARCH
 from services.research.research_service import ResearchContext
-from services.security.output_validator import validate
+from services.security.output_validator import validate_async
 from services.security.problem_statement_gate import (
     ProblemStatementValidationError,
-    assert_valid_problem_statement,
+    assert_valid_problem_statement_async,
 )
-from services.security.prompt_guard import scan
-from services.security.sanitizer import sanitize_text
+from services.security.prompt_guard import scan_async
+from services.security.sanitizer import sanitize_text_async
 
 logger = logging.getLogger(__name__)
 
@@ -1047,8 +1047,10 @@ def _hash_text(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
-def _normalized_refine_text(value: str) -> str:
-    return " ".join(sanitize_text(value).lower().split())
+def _normalized_refine_text(sanitized_value: str) -> str:
+    """Lowercase + collapse whitespace. Callers pass already-sanitised text
+    (``refine`` bleaches each input exactly once, via ``sanitize_text_async``)."""
+    return " ".join(sanitized_value.lower().split())
 
 
 def _assert_visible_credit_balance(user, required: int) -> None:
@@ -1059,9 +1061,11 @@ def _assert_visible_credit_balance(user, required: int) -> None:
         )
 
 
-def _assert_refine_instruction_meaningful(request: RefineRequest) -> None:
-    instruction = _normalized_refine_text(request.instruction)
-    selected_text = _normalized_refine_text(request.selected_text)
+def _assert_refine_instruction_meaningful(
+    sanitized_instruction: str, sanitized_selected_text: str
+) -> None:
+    instruction = _normalized_refine_text(sanitized_instruction)
+    selected_text = _normalized_refine_text(sanitized_selected_text)
     if not instruction:
         raise PreflightError(
             "refine_instruction_empty",
@@ -2014,7 +2018,7 @@ class StageManager:
         # Depth/quality findings that survive as advisory (no refund, no repair).
         advisory_issues: list[CompletenessIssue] = []
         try:
-            validate_artifact_completeness(stage_type, artifact, deps, mode)
+            await validate_artifact_completeness_async(stage_type, artifact, deps, mode)
         except IncompleteArtifactError as exc:
             if exc.truncation_issues:
                 _stop_live_streaming()
@@ -2079,7 +2083,9 @@ class StageManager:
                 # Re-validate: truncation still present -> refund; only depth
                 # remaining -> deliver with advisory findings (repair succeeded).
                 try:
-                    validate_artifact_completeness(stage_type, artifact, deps, mode)
+                    await validate_artifact_completeness_async(
+                        stage_type, artifact, deps, mode
+                    )
                 except IncompleteArtifactError as repair_exc:
                     try:
                         advisory_issues = _split_completeness_or_raise(
@@ -2294,7 +2300,7 @@ class StageManager:
         # Depth/quality findings that survive as advisory (no refund, no repair).
         advisory_issues: list[CompletenessIssue] = []
         try:
-            validate_artifact_completeness(stage_type, artifact, deps, mode)
+            await validate_artifact_completeness_async(stage_type, artifact, deps, mode)
         except IncompleteArtifactError as exc:
             if repair_attempted or not exc.truncation_issues:
                 # Already repaired once, OR nothing truncated to repair
@@ -2379,7 +2385,9 @@ class StageManager:
                 # Re-validate: truncation still present -> refund; only depth
                 # remaining -> deliver with advisory findings (repair succeeded).
                 try:
-                    validate_artifact_completeness(stage_type, artifact, deps, mode)
+                    await validate_artifact_completeness_async(
+                        stage_type, artifact, deps, mode
+                    )
                 except IncompleteArtifactError as repair_exc:
                     try:
                         advisory_issues = _split_completeness_or_raise(
@@ -2524,7 +2532,7 @@ class StageManager:
             accumulated,
             chunk_key=chunk.key,
         ).strip()
-        validation = validate(cleaned)
+        validation = await validate_async(cleaned)
         if not validation.is_safe:
             raise SecurityError(f"Output failed validation: {validation.reason}")
         if emit is not None:
@@ -2623,7 +2631,7 @@ class StageManager:
 
         if stage.type == "spec":
             try:
-                assert_valid_problem_statement(workspace.problem_statement)
+                await assert_valid_problem_statement_async(workspace.problem_statement)
             except ProblemStatementValidationError as exc:
                 raise SecurityError(exc.result.message or str(exc)) from exc
             # Phase A instrumentation (compression plan §8): observe the token
@@ -2641,7 +2649,7 @@ class StageManager:
                 ),
             )
 
-        scan_result = scan(workspace.problem_statement)
+        scan_result = await scan_async(workspace.problem_statement)
         if not scan_result.is_safe:
             raise SecurityError(
                 f"Problem statement flagged: {scan_result.matched_pattern}"
@@ -3314,7 +3322,7 @@ class StageManager:
             # technology safety, section presence) run next (issue #21 Phase 2c).
             phase.set(PIPELINE_PHASE_QUALITY_GATE)
 
-            validation = validate(accumulated)
+            validation = await validate_async(accumulated)
             if not validation.is_safe:
                 stage_metric_outcome = "security_failed"
                 if deduction_id is not None:
@@ -3416,7 +3424,7 @@ class StageManager:
                     # the pipeline's dict.
                     critic_deps_for_async = dict(deps)
                     try:
-                        validate_sections(
+                        await validate_sections_async(
                             stage.type, accumulated, critic_deps_for_async, mode
                         )
                     except MissingSectionError as exc:
@@ -3463,7 +3471,9 @@ class StageManager:
                 # section miss is terminal (no regenerate): the prompt, not the
                 # sampling, omitted the heading.
                 try:
-                    validate_sections(stage.type, accumulated, critic_deps, mode)
+                    await validate_sections_async(
+                        stage.type, accumulated, critic_deps, mode
+                    )
                 except MissingSectionError as exc:
                     stage_metric_outcome = "missing_sections"
                     PIPELINE_VALIDATOR_FAILURES.labels(stage=stage.type).inc()
@@ -3583,7 +3593,7 @@ class StageManager:
                     BILLING_CREDITS_CRITIC_REGEN.labels(stage=stage.type).inc()
                     regenerate_count += 1
                     # The regenerated artifact must clear the same security gate.
-                    regen_validation = validate(accumulated)
+                    regen_validation = await validate_async(accumulated)
                     if not regen_validation.is_safe:
                         stage_metric_outcome = "security_failed"
                         await self._refund_and_reset(db, deduction_id, stage, user_id)
@@ -3911,7 +3921,9 @@ class StageManager:
             ("instruction", request.instruction),
             ("selected_text", request.selected_text),
         ):
-            scan_result = scan(text)
+            # selected_text runs to 100K chars (schema bound); the multi-candidate
+            # injection scan is offloaded off the event loop (F7).
+            scan_result = await scan_async(text)
             if not scan_result.is_safe:
                 raise SecurityError(
                     f"Refine {label} flagged: {scan_result.matched_pattern}"
@@ -3949,7 +3961,14 @@ class StageManager:
         doc_len = len(stage_content)
         selection_len = request.selection_end - request.selection_start
         large_selection = doc_len > 0 and (selection_len / doc_len) > 0.80
-        _assert_refine_instruction_meaningful(request)
+        # Sanitise once, off the event loop for large selections (F7), and feed
+        # the same result to both the no-op preflight check and the prompt build
+        # below — previously each input was bleached twice on this path.
+        sanitized_instruction = await sanitize_text_async(request.instruction)
+        sanitized_selected_text = await sanitize_text_async(request.selected_text)
+        _assert_refine_instruction_meaningful(
+            sanitized_instruction, sanitized_selected_text
+        )
         _assert_visible_credit_balance(user, CREDIT_COSTS["refine"])
 
         stage_refine_rules = _REFINE_STAGE_RULES.get(stage.type, "")
@@ -3971,8 +3990,6 @@ class StageManager:
             f"{stage_refine_rules}\n\n"
             f"{SECURITY_AND_PRIVACY_RULES}"
         )
-        sanitized_instruction = sanitize_text(request.instruction)
-        sanitized_selected_text = sanitize_text(request.selected_text)
         route = _resolve_preflight_route(
             lambda: _route_for_refine(workspace, request.mode)
         )
@@ -4027,7 +4044,7 @@ class StageManager:
                     "Refine output would leave Markdown code fences unbalanced."
                 )
             return DiffResponse(
-                diff=compute_diff(stage_content, proposed),
+                diff=await compute_diff_async(stage_content, proposed),
                 original=stage_content,
                 proposed=proposed,
                 large_selection=large_selection,
@@ -4081,7 +4098,7 @@ class StageManager:
                 timeout=settings.llm_complete_timeout_seconds,
             )
 
-            validation = validate(replacement)
+            validation = await validate_async(replacement)
             if not validation.is_safe:
                 raise SecurityError(
                     f"Refine output failed validation: {validation.reason}"
@@ -4115,7 +4132,7 @@ class StageManager:
                 await self._mark_langfuse_span_failed(span_id, exc)
             raise
 
-        diff = compute_diff(stage_content, proposed)
+        diff = await compute_diff_async(stage_content, proposed)
         if span_id:
             await self._end_langfuse_span(span_id)
 
@@ -4349,7 +4366,7 @@ class StageManager:
         workspace = await self._load_workspace(stage.workspace_id, db)
         was_finalised = stage.status == "finalised"
 
-        stage.content = sanitize_text(new_content)
+        stage.content = await sanitize_text_async(new_content)
         stage.current_version += 1
         stage.status = "draft" if not was_finalised else "stale"
         stage.updated_at = datetime.now(UTC)
@@ -4768,7 +4785,7 @@ class StageManager:
                     if isinstance(prior, dict)
                     else False
                 )
-                verdict = demo_day_verdict.compute_verdict(
+                verdict = await demo_day_verdict.compute_verdict_async(
                     workspace, stages, regen_attempted=prior_regen
                 )
                 # Persist the verdict first so it is durable even if the optional
@@ -4802,7 +4819,7 @@ class StageManager:
                     # Recompute against the regenerated tasks (same ORM object,
                     # already mutated/committed by the regen) and stamp the new
                     # versions.
-                    verdict2 = demo_day_verdict.compute_verdict(
+                    verdict2 = await demo_day_verdict.compute_verdict_async(
                         workspace, stages, regen_attempted=True
                     )
                     workspace.construction_verdict = verdict2.to_dict()
@@ -4862,7 +4879,7 @@ class StageManager:
             )
             # The regenerated artifact must clear the same security gate as a
             # streamed one (mirrors the inline critic-regen re-validation).
-            validation = validate(new_content)
+            validation = await validate_async(new_content)
             if not validation.is_safe:
                 logger.warning(
                     "construction_regen.security_rejected",
@@ -4878,7 +4895,7 @@ class StageManager:
             # section would otherwise silently replace the known-good draft (the
             # verdict recompute would not catch it).
             try:
-                validate_sections("tasks", new_content, deps, "demo_day")
+                await validate_sections_async("tasks", new_content, deps, "demo_day")
             except MissingSectionError as exc:
                 logger.warning(
                     "construction_regen.missing_sections",
@@ -5034,7 +5051,7 @@ class StageManager:
                     stage_type=stage_type,
                     deps=deps,
                 )
-                validation = validate(repaired)
+                validation = await validate_async(repaired)
                 if not validation.is_safe:
                     raise SecurityError(
                         f"Technology-safety repair failed validation: "
@@ -5374,7 +5391,7 @@ class StageManager:
         # Sentinel is advisory-only (see _generate_chunk_once): strip if present,
         # accept if absent.  Real truncation is owned by the limit-stop guard above.
         raw = strip_completion_sentinel(stage_type, raw)
-        validate_artifact_completeness(stage_type, raw, deps, mode)
+        await validate_artifact_completeness_async(stage_type, raw, deps, mode)
         return raw
 
     async def generate_harness_patch(

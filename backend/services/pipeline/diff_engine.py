@@ -28,6 +28,20 @@ def compute_diff(original: str, proposed: str) -> str:
     )
 
 
+async def compute_diff_async(original: str, proposed: str) -> str:
+    """Async ``compute_diff``: offloads difflib off the event loop (F7).
+
+    ``difflib.unified_diff`` runs ``SequenceMatcher`` over the two documents; on a
+    full-document refine (section/full mode) both sides are large and the diff
+    stalls the loop. The larger of the two sides gates the offload; small diffs run
+    inline. Byte-identical to ``compute_diff`` for any input.
+    """
+    from services.cpu_offload import run_cpu_bound
+
+    sizer = original if len(original) >= len(proposed) else proposed
+    return await run_cpu_bound(sizer, compute_diff, original, proposed)
+
+
 def apply_diff(original: str, start: int, end: int, replacement: str) -> str:
     return original[:start] + replacement + original[end:]
 

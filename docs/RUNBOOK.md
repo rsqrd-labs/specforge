@@ -1874,3 +1874,95 @@ is `specforge_background_tasks{registry}` and crossing
 `BACKGROUND_TASKS_SOFT_MAX` logs a one-shot high-water warning (it never drops a
 task). The detached generation pipeline is **not** gated — it is bounded upstream
 by F1 admission (§14).
+
+## 17. Tail Latency — CPU Offload, Public Cache & Partial Index (Scalability P2)
+
+**Reference:** `docs/SCALABILITY_AUDIT.md` §F7 / §4 / §5 (P2 roadmap items 9–10)
+**Modules:** `backend/services/cpu_offload.py`,
+`backend/services/sharing/public_share_service.py`, `backend/routers/public.py`,
+`backend/services/pipeline/pdf_export_service.py`,
+`backend/migrations/versions/0031_stages_in_progress_partial_index.py`
+
+### F7 — CPU offload off the event loop
+
+Sync, GIL-holding passes over LLM-scale payloads used to run **inline on the
+event loop**: `bleach.clean` (sanitise-on-persist/refine), the full-document
+regex validators (`output_validator`, `prompt_guard`, `artifact_validator`, the
+problem-statement gate, the Demo-Day construction linter) and `difflib` in the
+diff engine. On only `WEB_CONCURRENCY` async workers, one 200KB pass stalls
+every peer coroutine on that worker (SSE heartbeats, logins, health checks).
+
+All of those now route through one seam — `services.cpu_offload.run_cpu_bound`:
+
+- **Dedicated bounded pool** (`CPU_OFFLOAD_MAX_WORKERS`, default 4, clamped
+  ≥ 1), isolated from the PDF and Langfuse thread pools so a CPU burst cannot
+  starve their I/O offload.
+- **Size gate** (`CPU_OFFLOAD_MIN_CHARS`, default 4096): inputs below it run
+  inline — the thread round-trip costs more than a short pass. Ops escape
+  hatches: set it huge to force everything inline (offload off), `0` to offload
+  every call.
+- **Contract:** results and exceptions propagate unchanged (validators still
+  raise `MissingSectionError` / `IncompleteArtifactError` / gate errors
+  identically); every wrapper is byte-identical to its sync form.
+
+Deliberately **left inline**: bounded-small inputs (clarifier answers ≤1K,
+increment requests ≤4K, idea text ≤2K, per-snippet research/storyboard strings)
+and the arq-worker-side export/reconcile paths (not the API loop; bulk jobs are
+long-running by design). The post-`done` eval/verifier internals stay inline
+too — they are advisory, F6-gated, and the lag metric below is the tool that
+says if they ever matter.
+
+**Validation metric:** `specforge_event_loop_lag_seconds` (histogram) — a
+per-process sampler measures how late a fixed 5s timer fires; the excess is
+loop starvation. **Alert idea:** sustained p99 > 250ms means CPU work is
+stalling the loop again (F7 regressed or a new inline hot spot appeared).
+During a load test (audit §8) this is the "loop stays responsive" acceptance
+gate.
+
+### PDF render pool (env-driven)
+
+The WeasyPrint render pool size is `PDF_EXPORT_MAX_WORKERS` (default 2, clamped
+≥ 1, still isolated from the other pools). Raise it only if PDF export becomes
+a hot path — admission is capped separately by the PDF rate tier. Each render
+is CPU-bound for 0.5–3s, so size against available cores, not demand.
+
+### Public share payload cache
+
+`GET /public/{slug}` is unauthenticated and scraper-exposed; every miss costs
+two DB reads + a coverage rollup on the shared pool. The assembled response
+(etag + JSON body) is now cached in Redis for `PUBLIC_SHARE_CACHE_TTL_SECONDS`
+(default 60s — within the `Cache-Control: max-age=60` the response already
+advertises, so nothing gets staler than the HTTP contract).
+
+Operational properties:
+
+- **Positives only.** 404s are never cached (an arbitrary-slug scraper must not
+  grow Redis); junk-shaped slugs are rejected before Redis or the DB is touched.
+- **Immediate eviction** on disable / rotate / re-enable — a killed share stops
+  serving from cache at once; the retired slug of a rotate does too.
+- **Fail-open.** Any Redis error degrades to the authoritative DB read; cache
+  set/evict failures only log (`public_view_cache.*` warnings).
+- `0` disables the cache entirely (every request reads through).
+
+If a share must be killed **fleet-wide right now** and Redis is suspect:
+disable the share, then `redis-cli DEL "public_view:<slug>"` — the key name is
+`public_view:{slug}`.
+
+### Partial index for the recovery sweep (migration 0031)
+
+The 60s stuck-stage sweep filters `status = 'in_progress' AND updated_at <
+cutoff`; `in_progress` rows are rare (bounded by live generations) but the full
+`ix_stages_status` scans grow with table size. 0031 adds the tiny partial index
+`ix_stages_in_progress_updated_at ON stages (updated_at) WHERE status =
+'in_progress'` (Postgres-only; additive — `ix_stages_status` is kept for the
+other status filters). On a very large `stages` table build it out-of-band with
+`CREATE INDEX CONCURRENTLY` + `alembic stamp 0031` (see the migration
+docstring); otherwise the inline build is cheap.
+
+### Per-installation GitHub governor (T-274)
+
+Listed under P2 in the audit roadmap but shipped earlier
+(`services/integrations/github_governor.py`, tested by
+`test_github_governor.py`): per-installation concurrency + hourly budgets so
+one tenant's export storm cannot monopolise the worker lanes. No new ops knobs
+in P2.

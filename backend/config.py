@@ -179,6 +179,49 @@ class Settings(BaseSettings):
     max_concurrent_advisory_tasks: int = 12
     background_tasks_soft_max: int = 200
 
+    # F7 (scalability audit P2) — offload inline CPU-bound work off the event loop.
+    #
+    # bleach.clean (HTML sanitise), the full-document regex validators
+    # (output_validator / prompt_guard / artifact_validator), and difflib all run
+    # synchronously and hold the GIL. On a multi-KB-to-200KB LLM artifact a single
+    # inline pass can stall the asyncio event loop for many milliseconds, blocking
+    # every peer coroutine on that worker (only WEB_CONCURRENCY of them). Each is a
+    # *many-small-operations* workload (per-pattern .search, per-section/line
+    # loops, html5lib's pure-Python tokenizer), so the GIL is released at the
+    # interpreter switch interval and a worker thread lets the loop interleave
+    # peers between hand-offs. Routed through the dedicated bounded pool in
+    # services.cpu_offload (isolated from the Langfuse/PDF I/O offload).
+    #   cpu_offload_max_workers: size of the dedicated CPU-offload thread pool.
+    #     Deliberately small — extra threads cannot win back wall-clock on
+    #     GIL-bound work and only add scheduling contention. Clamped to >=1.
+    #   cpu_offload_min_chars: inputs below this many characters run INLINE — the
+    #     thread-dispatch round-trip costs more than a short regex/bleach pass, so
+    #     only genuinely large payloads are offloaded. Set huge to force inline
+    #     everywhere (disable offload); set 0 to offload every call.
+    cpu_offload_max_workers: int = 4
+    cpu_offload_min_chars: int = 4_096
+
+    # F10 (scalability audit P2) — env-driven PDF render thread-pool size. The
+    # WeasyPrint render is CPU-bound and runs on a dedicated bounded pool isolated
+    # from the Langfuse/CPU-offload threads (a PDF burst must not starve them).
+    # Two workers is the conservative default (the per-tier _PDF_EXPORT_LIMIT caps
+    # admission separately); raise only if PDF export becomes a hot path. Clamped
+    # to >=1.
+    pdf_export_max_workers: int = 2
+
+    # Public-share payload cache (scalability audit P2). The unauthenticated
+    # GET /public/{slug} surface is hit by anonymous viewers and scrapers; each
+    # miss runs two DB reads (workspace + stages) and a coverage rollup against
+    # the shared Postgres pool. A short Redis cache of the assembled, allow-listed
+    # response keeps a burst of public traffic off the pool. The TTL sits within
+    # the staleness the response already advertises (Cache-Control max-age=60), so
+    # it makes nothing staler than the HTTP contract; positives only are cached
+    # (never 404s — that would be a memory vector under arbitrary-slug scraping),
+    # and the key is evicted on disable/rotate so a killed share is never served.
+    # 0 disables the cache (every request reads through to the DB). Fail-open:
+    # any Redis error falls back to the DB read.
+    public_share_cache_ttl_seconds: int = 60
+
     # F2 (scalability audit) — global provider budget + 429-aware backoff.
     #
     # provider_max_inflight_generations / provider_max_generations_per_minute:

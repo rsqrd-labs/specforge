@@ -778,3 +778,20 @@ async def test_run_construction_regen_rejects_missing_sections(monkeypatch) -> N
     assert ok is False
     assert tasks_stage.current_version == start_version  # not persisted
     assert db.commits == 0
+
+
+# ---------------------------------------------------------------------------
+# F7 (scalability audit P2): compute_verdict_async parity. The linter joins all
+# four full stage documents (the largest combined CPU payload on the pipeline);
+# offloading it to the dedicated pool must not change the verdict.
+# ---------------------------------------------------------------------------
+
+
+async def test_compute_verdict_async_matches_sync_on_pool_path(monkeypatch) -> None:
+    from config import settings
+
+    monkeypatch.setattr(settings, "cpu_offload_min_chars", 0)
+    stages = _stage_map(versions={"spec": 2, "plan": 1, "harness": 4, "tasks": 3})
+    sync_verdict = demo_day_verdict.compute_verdict(_ws(), stages)
+    async_verdict = await demo_day_verdict.compute_verdict_async(_ws(), stages)
+    assert async_verdict.to_dict() == sync_verdict.to_dict()

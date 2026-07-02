@@ -461,7 +461,8 @@ def _generate_patches(svc: StageManager, *, complete_return: str | None = None):
         return_value=("sys", "user", "0"),
     )
     validate = patch(
-        "services.pipeline.stage_manager.validate",
+        "services.pipeline.stage_manager.validate_async",
+        new_callable=AsyncMock,
         return_value=MagicMock(is_safe=True, reason=""),
     )
     set_cache = patch(
@@ -589,7 +590,8 @@ async def test_missing_section_gate_persists_blocked_draft() -> None:
         set_cache as mc,
         get_llm,
         patch(
-            "services.pipeline.stage_manager.validate_sections",
+            "services.pipeline.stage_manager.validate_sections_async",
+            new_callable=AsyncMock,
             side_effect=MissingSectionError("spec", missing),
         ),
         patch(
@@ -1079,7 +1081,8 @@ async def test_async_advisory_section_gate_still_blocks_inline() -> None:
         set_cache,
         get_llm,
         patch(
-            "services.pipeline.stage_manager.validate_sections",
+            "services.pipeline.stage_manager.validate_sections_async",
+            new_callable=AsyncMock,
             side_effect=MissingSectionError("spec", missing),
         ),
         patch.object(svc, "_schedule_critic_review") as mock_schedule,

@@ -34,6 +34,8 @@ from jinja2 import Environment, FileSystemLoader, select_autoescape
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from config import settings
+
 # Note: weasyprint is imported lazily inside render_pdf so the module loads on
 # dev environments without the native pango/cairo/gobject libraries — only
 # the actual render path requires them. The Railway Docker image ships the
@@ -45,25 +47,30 @@ from services.pipeline.export_service import ExportNotReadyError
 
 logger = logging.getLogger(__name__)
 
+
 # Dedicated executor isolates CPU-bound WeasyPrint rendering from Langfuse I/O calls.
-# max_workers=2 because:
+# Default max_workers=2 because:
 # (a) WeasyPrint is CPU-bound and creates a new HTML Document per call,
 #     so two workers run without internal object contention; and
 # (b) PDF export must not share the default executor with Langfuse
 #     get_prompt() calls and other I/O-offloaded work — a burst of PDF
 #     requests would starve those operations.  HF-4 — T-201.  LF-2 — T-211.
-_PDF_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
-    max_workers=2,
-    thread_name_prefix="pdf-export",
-)
-_PDF_EXECUTOR_LOCK = threading.Lock()
+# The size is env-driven (settings.pdf_export_max_workers, scalability audit P2 /
+# F10) so ops can raise it if PDF export becomes a hot path, without a code change;
+# the per-tier _PDF_EXPORT_LIMIT caps admission separately.  Clamped to >=1.
+def _pdf_executor_workers() -> int:
+    return max(1, settings.pdf_export_max_workers)
 
 
 def _new_pdf_executor() -> concurrent.futures.ThreadPoolExecutor:
     return concurrent.futures.ThreadPoolExecutor(
-        max_workers=2,
+        max_workers=_pdf_executor_workers(),
         thread_name_prefix="pdf-export",
     )
+
+
+_PDF_EXECUTOR = _new_pdf_executor()
+_PDF_EXECUTOR_LOCK = threading.Lock()
 
 
 def _get_pdf_executor() -> concurrent.futures.ThreadPoolExecutor:

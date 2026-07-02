@@ -13,9 +13,9 @@ from schemas.workspace import WorkspaceCreate
 from services.llm.routing import LLMRoutingError, resolve_llm_route
 from services.security.problem_statement_gate import (
     ProblemStatementValidationError,
-    assert_valid_problem_statement,
+    assert_valid_problem_statement_async,
 )
-from services.security.sanitizer import sanitize_text
+from services.security.sanitizer import sanitize_text, sanitize_text_async
 
 _STAGE_ORDER = ["spec", "plan", "harness", "tasks"]
 
@@ -24,7 +24,7 @@ class WorkspaceService:
     async def create(
         self, user_id: UUID, payload: WorkspaceCreate, db: AsyncSession
     ) -> Workspace:
-        self._assert_problem_statement_is_valid(payload.problem_statement)
+        await self._assert_problem_statement_is_valid(payload.problem_statement)
         server_model = self._server_default_model(payload.provider)
         mode, target_agent, time_budget_minutes = self._resolve_mode(payload)
 
@@ -44,7 +44,10 @@ class WorkspaceService:
         workspace = Workspace(
             user_id=user_id,
             name=sanitize_text(payload.name),
-            problem_statement=sanitize_text(payload.problem_statement),
+            # Problem statements run to 50K chars; the bleach pass is offloaded
+            # off the event loop (F7 — scalability audit P2). The name (<=200
+            # chars) stays inline — the offload gate would keep it there anyway.
+            problem_statement=await sanitize_text_async(payload.problem_statement),
             provider=payload.provider,
             model=server_model,
             status="active",
@@ -111,8 +114,8 @@ class WorkspaceService:
         if name is not None:
             workspace.name = sanitize_text(name)
         if problem_statement is not None:
-            self._assert_problem_statement_is_valid(problem_statement)
-            workspace.problem_statement = sanitize_text(problem_statement)
+            await self._assert_problem_statement_is_valid(problem_statement)
+            workspace.problem_statement = await sanitize_text_async(problem_statement)
             self._mark_problem_statement_dependents_stale(workspace)
         await db.commit()
         await db.refresh(workspace)
@@ -140,9 +143,9 @@ class WorkspaceService:
         )
         return int(result.scalar() or 0)
 
-    def _assert_problem_statement_is_valid(self, problem_statement: str) -> None:
+    async def _assert_problem_statement_is_valid(self, problem_statement: str) -> None:
         try:
-            assert_valid_problem_statement(problem_statement)
+            await assert_valid_problem_statement_async(problem_statement)
         except ProblemStatementValidationError as exc:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,

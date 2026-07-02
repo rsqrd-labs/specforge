@@ -72,8 +72,13 @@ def test_refine_matches_raw_selection_and_sanitizes_prompt() -> None:
         "content[request.selection_start:request.selection_end]" in manager_source
         or "content[request.selection_start : request.selection_end]" in manager_source
     )
-    assert "sanitize_text(request.selected_text)" in manager_source
-    assert "sanitize_text(request.instruction)" in manager_source
+    # Both prompt inputs must flow through the sanitizer before the prompt
+    # build. Since scalability-audit P2 (F7) that is the async offload wrapper
+    # (byte-identical output, dispatched off the event loop for large
+    # selections) — pin the async form so a regression back to an inline
+    # sync bleach pass on the loop fails this contract.
+    assert "sanitize_text_async(request.selected_text)" in manager_source
+    assert "sanitize_text_async(request.instruction)" in manager_source
 
 
 def test_export_rejects_windows_unsafe_harness_filenames() -> None:

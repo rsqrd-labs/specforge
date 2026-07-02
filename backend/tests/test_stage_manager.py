@@ -4666,7 +4666,8 @@ async def test_generate_section_gate_skips_critic_before_judge(monkeypatch) -> N
             return_value=("sys", "user", "0"),
         ),
         patch(
-            "services.pipeline.stage_manager.validate_sections",
+            "services.pipeline.stage_manager.validate_sections_async",
+            new_callable=AsyncMock,
             side_effect=raise_missing,
         ),
         patch(

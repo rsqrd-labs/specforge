@@ -26,7 +26,8 @@ from routers import storyboards as storyboards_router
 from routers import templates as templates_router
 from routers import workspace as workspace_router
 from services import langfuse_service
-from services.observability import setup_observability
+from services.cpu_offload import shutdown_cpu_executor
+from services.observability import run_event_loop_lag_sampler, setup_observability
 from services.pipeline.pdf_export_service import shutdown_pdf_executor
 from services.pipeline.recovery_service import run_recovery_loop
 
@@ -107,13 +108,18 @@ def create_app(redis_client: Redis | None = None) -> FastAPI:
         if langfuse_client.enabled:
             await langfuse_client.startup_check()
         task = asyncio.create_task(run_recovery_loop())
+        # Event-loop lag sampler (F7 — scalability audit P2). One lightweight task
+        # per process publishing specforge_event_loop_lag_seconds so the "loop
+        # stays responsive under a generation storm" acceptance gate is observable.
+        lag_sampler = asyncio.create_task(run_event_loop_lag_sampler())
         yield
-        task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError:
-            # Expected: we just cancelled the recovery loop during shutdown.
-            pass
+        for background in (task, lag_sampler):
+            background.cancel()
+            try:
+                await background
+            except asyncio.CancelledError:
+                # Expected: we just cancelled the loop during shutdown.
+                pass
         # Drain any queued Langfuse events before the consumer thread is
         # dropped by interpreter shutdown. No-op when Langfuse is disabled.
         await langfuse_service.get_langfuse_client().flush()
@@ -121,6 +127,8 @@ def create_app(redis_client: Redis | None = None) -> FastAPI:
         # lifespan exit immediately; any in-flight render drains naturally
         # at interpreter exit.  HF-4 — T-201.
         shutdown_pdf_executor()
+        # Release the dedicated CPU-offload thread pool (F7) the same way.
+        shutdown_cpu_executor()
         if _owns_redis:
             await redis.aclose()
 

@@ -150,6 +150,20 @@ def scan(text: str) -> ScanResult:
     return ScanResult(is_safe=True)
 
 
+async def scan_async(text: str) -> ScanResult:
+    """Async ``scan``: offloads the multi-candidate regex scan off the loop (F7).
+
+    ``scan`` builds several decoded candidates (NFKC, HTML-unescape, percent- and
+    base64-decoded) and runs every injection pattern over each — meaningful work
+    on a large input (e.g. a 50K-char problem statement). Large inputs are
+    dispatched to the dedicated CPU pool; small inputs run inline. Byte-identical
+    to ``scan`` for any input.
+    """
+    from services.cpu_offload import run_cpu_bound
+
+    return await run_cpu_bound(text, scan, text)
+
+
 class PromptGuard:
     def scan(self, text: str) -> ScanResult:
         return scan(text)

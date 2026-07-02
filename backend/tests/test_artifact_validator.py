@@ -778,3 +778,51 @@ def test_min_body_chars_floors_catch_heading_restatements() -> None:
     assert _min_body_chars("plan") >= 150
     assert _min_body_chars("harness") >= 60
     assert _min_body_chars("tasks") >= 50
+
+
+# ---------------------------------------------------------------------------
+# F7 (scalability audit P2): async validator parity. The offloaded validators
+# must pass and raise exactly like the sync ones — including through the
+# dedicated CPU pool (min_chars=0 forces the dispatch path).
+# ---------------------------------------------------------------------------
+
+
+async def test_validate_sections_async_passes_when_all_present(monkeypatch) -> None:
+    from config import settings
+    from services.pipeline.artifact_validator import validate_sections_async
+
+    monkeypatch.setattr(settings, "cpu_offload_min_chars", 0)
+    await validate_sections_async("plan", _complete_plan_artifact(), {})
+
+
+async def test_validate_sections_async_raises_identically(monkeypatch) -> None:
+    from config import settings
+    from services.pipeline.artifact_validator import validate_sections_async
+
+    monkeypatch.setattr(settings, "cpu_offload_min_chars", 0)
+    dropped = {"## Capacity Model", "## API Design"}
+    artifact = "\n\n".join(
+        f"{heading}\nbody\n"
+        for heading in SECTION_CONTRACTS["plan"]
+        if heading not in dropped
+    )
+    with pytest.raises(MissingSectionError) as excinfo:
+        await validate_sections_async("plan", artifact, {})
+    assert set(excinfo.value.missing) == dropped
+    assert excinfo.value.stage_type == "plan"
+
+
+async def test_validate_artifact_completeness_async_raises_identically(
+    monkeypatch,
+) -> None:
+    from config import settings
+    from services.pipeline.artifact_validator import (
+        validate_artifact_completeness_async,
+    )
+
+    monkeypatch.setattr(settings, "cpu_offload_min_chars", 0)
+    artifact = "\n\n".join(
+        f"{heading}\nshallow\n" for heading in SECTION_CONTRACTS["spec"]
+    )
+    with pytest.raises(IncompleteArtifactError):
+        await validate_artifact_completeness_async("spec", artifact, {})

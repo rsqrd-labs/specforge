@@ -148,3 +148,35 @@ async def test_render_html_to_pdf_recreates_executor_after_shutdown(
     pdf = await pdf_module.render_html_to_pdf("after-shutdown")
 
     assert pdf == b"%PDF-after-shutdown"
+
+
+# ---------------------------------------------------------------------------
+# PE-6 (scalability audit P2): the pool size is env-driven via
+# settings.pdf_export_max_workers (default 2, clamped to >= 1) so ops can
+# raise it without a code change if PDF export becomes a hot path.
+# ---------------------------------------------------------------------------
+
+
+def test_new_pdf_executor_size_follows_settings(monkeypatch) -> None:
+    from config import settings
+
+    monkeypatch.setattr(settings, "pdf_export_max_workers", 5)
+    executor = pdf_module._new_pdf_executor()
+    try:
+        assert executor._max_workers == 5
+    finally:
+        executor.shutdown(wait=False)
+
+
+def test_new_pdf_executor_size_clamped_to_at_least_one(monkeypatch) -> None:
+    from config import settings
+
+    monkeypatch.setattr(settings, "pdf_export_max_workers", 0)
+    executor = pdf_module._new_pdf_executor()
+    try:
+        assert executor._max_workers == 1, (
+            "pdf_export_max_workers=0 must clamp to 1 — a zero-width pool "
+            "would deadlock every PDF export."
+        )
+    finally:
+        executor.shutdown(wait=False)

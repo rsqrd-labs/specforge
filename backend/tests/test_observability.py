@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from unittest.mock import patch
 
+import pytest
 from fastapi.testclient import TestClient
 
 from main import create_app
@@ -538,3 +540,61 @@ def test_judge_call_metrics_exposed_on_endpoint() -> None:
         )
     assert response.status_code == 200
     assert "specforge_judge_calls_total" in response.text
+
+
+# ---------------------------------------------------------------------------
+# F7 (scalability audit P2): event-loop lag sampler. The acceptance gate for
+# offloading inline CPU work is "the loop stays responsive under load"; this
+# sampler is what makes that observable (specforge_event_loop_lag_seconds).
+# ---------------------------------------------------------------------------
+
+
+def _lag_sample_count() -> float:
+    from services.observability import EVENT_LOOP_LAG_SECONDS
+
+    for metric in EVENT_LOOP_LAG_SECONDS.collect():
+        for sample in metric.samples:
+            if sample.name.endswith("_count"):
+                return sample.value
+    return 0.0
+
+
+@pytest.mark.asyncio
+async def test_event_loop_lag_sampler_records_samples() -> None:
+    from services.observability import run_event_loop_lag_sampler
+
+    before = _lag_sample_count()
+    task = asyncio.create_task(run_event_loop_lag_sampler(interval=0.01))
+    await asyncio.sleep(0.08)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert _lag_sample_count() > before, (
+        "The sampler must observe at least one lag measurement per interval; "
+        "zero new samples means the metric is dead and the F7 acceptance gate "
+        "is unobservable."
+    )
+
+
+@pytest.mark.asyncio
+async def test_event_loop_lag_sampler_survives_observe_errors(monkeypatch) -> None:
+    """Observability must never be load-bearing: a broken observe() is logged
+    and the sampler keeps running rather than dying silently."""
+    from services import observability
+
+    calls = 0
+
+    def broken_observe(value: float) -> None:
+        nonlocal calls
+        calls += 1
+        raise RuntimeError("registry broken")
+
+    monkeypatch.setattr(observability.EVENT_LOOP_LAG_SECONDS, "observe", broken_observe)
+    task = asyncio.create_task(observability.run_event_loop_lag_sampler(interval=0.01))
+    await asyncio.sleep(0.05)
+    assert not task.done(), "sampler task must survive observe() failures"
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert calls >= 2, "sampler must keep sampling after an observe() failure"

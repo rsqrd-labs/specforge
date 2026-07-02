@@ -60,3 +60,27 @@ def test_normalize_refine_replacement_preserves_selected_boundary_whitespace() -
 def test_markdown_fences_balanced_detects_broken_patch() -> None:
     assert markdown_fences_balanced("before\n```python\nprint('ok')\n```\nafter")
     assert not markdown_fences_balanced("before\n```python\nprint('oops')\nafter")
+
+
+# ---------------------------------------------------------------------------
+# F7 (scalability audit P2): compute_diff_async parity — offloading difflib
+# must be byte-identical to the sync path for any input.
+# ---------------------------------------------------------------------------
+
+
+async def test_compute_diff_async_matches_sync_on_pool_path(monkeypatch) -> None:
+    from config import settings
+    from services.pipeline.diff_engine import compute_diff, compute_diff_async
+
+    monkeypatch.setattr(settings, "cpu_offload_min_chars", 0)
+    original = "\n".join(f"line {i}" for i in range(400))
+    proposed = original.replace("line 200", "changed 200")
+    assert await compute_diff_async(original, proposed) == compute_diff(
+        original, proposed
+    )
+
+
+async def test_compute_diff_async_matches_sync_when_inline() -> None:
+    from services.pipeline.diff_engine import compute_diff, compute_diff_async
+
+    assert await compute_diff_async("a", "b") == compute_diff("a", "b")

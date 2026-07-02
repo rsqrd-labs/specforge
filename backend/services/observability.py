@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 import time
@@ -591,6 +592,50 @@ BACKGROUND_TASKS = Gauge(
 def set_background_task_count(registry: str, count: int) -> None:
     """Publish a background-task registry's live size (F6)."""
     BACKGROUND_TASKS.labels(registry=registry).set(max(0, count))
+
+
+# Event-loop lag (F7 — scalability audit P2). The acceptance gate for moving
+# inline CPU work (bleach / full-document regex / difflib) off the loop is "the
+# loop stays responsive while a generation storm is in flight" (audit §8). This
+# samples the scheduling delay directly: a watcher sleeps a fixed interval and
+# measures how much LONGER than that interval it actually took to be re-scheduled
+# — the extra time is loop starvation by a CPU-bound coroutine. A sustained climb
+# in the high buckets means CPU work is still blocking the loop (F7 regressed or a
+# new inline hot spot appeared).
+EVENT_LOOP_LAG_SECONDS = Histogram(
+    "specforge_event_loop_lag_seconds",
+    "Sampled asyncio event-loop scheduling delay: time a fixed-interval timer ran "
+    "LATE beyond its interval because the loop was busy. High buckets mean "
+    "CPU-bound work is starving the loop (audit §8 / F7).",
+    buckets=(0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0),
+)
+
+_EVENT_LOOP_LAG_SAMPLE_INTERVAL_SECONDS = 5.0
+
+
+async def run_event_loop_lag_sampler(
+    interval: float = _EVENT_LOOP_LAG_SAMPLE_INTERVAL_SECONDS,
+) -> None:
+    """Continuously sample event-loop scheduling lag (F7 validation).
+
+    One lightweight task per process, started from the app lifespan. Each cycle
+    records ``actual_sleep - interval`` (clamped at 0) — the delay the loop added
+    on top of the requested sleep. Cancelled cleanly on shutdown; a sampling error
+    is swallowed (this is observability, never load-bearing) and the loop
+    continues so a single hiccup does not stop the gauge.
+    """
+    loop = asyncio.get_running_loop()
+    while True:
+        start = loop.time()
+        try:
+            await asyncio.sleep(interval)
+        except asyncio.CancelledError:
+            raise
+        lag = loop.time() - start - interval
+        try:
+            EVENT_LOOP_LAG_SECONDS.observe(max(0.0, lag))
+        except Exception:  # pragma: no cover — never let metrics break the task
+            logger.warning("event_loop_lag.observe_failed")
 
 
 class _DbPoolCollector:

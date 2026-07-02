@@ -829,11 +829,12 @@ async def enable_public_share(
     id: UUID,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    redis: Redis = Depends(get_redis),
 ) -> ShareLinkResponse:
     # Authorise — get() raises 404 if not owned by caller.
     await workspace_service.get(id, user.id, db)
     try:
-        slug = await public_share_service.enable(id, db)
+        slug = await public_share_service.enable(id, db, redis)
     except WorkspaceNotFinalisedError as exc:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -851,10 +852,11 @@ async def disable_public_share(
     id: UUID,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    redis: Redis = Depends(get_redis),
 ) -> Response:
     await workspace_service.get(id, user.id, db)
     try:
-        await public_share_service.disable(id, db)
+        await public_share_service.disable(id, db, redis)
     except WorkspaceNotFoundError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="not_found"
@@ -867,10 +869,11 @@ async def rotate_public_share(
     id: UUID,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    redis: Redis = Depends(get_redis),
 ) -> ShareLinkResponse:
     await workspace_service.get(id, user.id, db)
     try:
-        slug = await public_share_service.rotate(id, db)
+        slug = await public_share_service.rotate(id, db, redis)
     except WorkspaceNotFinalisedError as exc:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,

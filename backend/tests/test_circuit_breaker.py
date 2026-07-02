@@ -421,8 +421,15 @@ async def test_generate_stream_timeout_records_provider_failure() -> None:
             AsyncMock(return_value=mocks["fake_workspace"]),
         ),
         patch.object(stage_manager, "_assert_dependencies_finalised", AsyncMock()),
-        patch("services.pipeline.stage_manager.assert_valid_problem_statement"),
-        patch("services.pipeline.stage_manager.scan", return_value=scan_result),
+        patch(
+            "services.pipeline.stage_manager.assert_valid_problem_statement_async",
+            new_callable=AsyncMock,
+        ),
+        patch(
+            "services.pipeline.stage_manager.scan_async",
+            new_callable=AsyncMock,
+            return_value=scan_result,
+        ),
         patch.object(
             stage_manager, "_redis_client", AsyncMock(return_value=mocks["fake_redis"])
         ),
@@ -536,8 +543,15 @@ async def test_generate_provider_error_does_not_double_count_record_provider_fai
             AsyncMock(return_value=mocks["fake_workspace"]),
         ),
         patch.object(stage_manager, "_assert_dependencies_finalised", AsyncMock()),
-        patch("services.pipeline.stage_manager.assert_valid_problem_statement"),
-        patch("services.pipeline.stage_manager.scan", return_value=scan_result),
+        patch(
+            "services.pipeline.stage_manager.assert_valid_problem_statement_async",
+            new_callable=AsyncMock,
+        ),
+        patch(
+            "services.pipeline.stage_manager.scan_async",
+            new_callable=AsyncMock,
+            return_value=scan_result,
+        ),
         patch.object(
             stage_manager, "_redis_client", AsyncMock(return_value=mocks["fake_redis"])
         ),

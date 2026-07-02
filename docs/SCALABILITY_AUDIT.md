@@ -431,6 +431,47 @@ Per the brief ("no feature breaks under load"), one explicit pass per feature:
 10. Public-payload Redis cache; partial index on `in_progress`; per-installation GitHub
     governor (T-274); env-driven PDF executor size.
 
+> **P2 status: IMPLEMENTED (2026-07-02).** Both P2 items are shipped and tested
+> (`test_cpu_offload.py`, the async-parity cases in the sanitizer/security/
+> validator/diff/gate/verdict suites, the cache + router cases in
+> `test_public_share_service.py`, the lag-sampler cases in
+> `test_observability.py`, `test_migration_0031_partial_index.py`). Ops in
+> `docs/RUNBOOK.md` §17. Key facts:
+> - **F7 CPU offload** — one seam, `services/cpu_offload.py::run_cpu_bound`: a
+>   **dedicated bounded pool** (`cpu_offload_max_workers`, default 4; isolated
+>   from the PDF/Langfuse thread pools) plus a **size gate**
+>   (`cpu_offload_min_chars`, default 4096 — below it the thread round-trip
+>   costs more than the pass, so small inputs stay inline; huge ⇒ offload off,
+>   0 ⇒ offload always). Async wrappers are byte-identical to their sync forms
+>   (exceptions propagate unchanged) and cover: `sanitize_text_async`
+>   (persist/refine/workspace create+update), `validate_async` (output leak
+>   scan), `scan_async` (prompt guard — generation preflight, refine, increment),
+>   `validate_sections_async` / `validate_artifact_completeness_async`,
+>   `compute_diff_async` (refine difflib), `assert_valid_problem_statement_async`
+>   (the 50K-char gate), and `compute_verdict_async` (the Demo-Day linter over
+>   all four artifacts — the largest combined payload). The refine path also
+>   stopped double-bleaching its inputs (sanitise once, reuse). Deliberately
+>   inline: bounded-small inputs (≤1–4K schema caps) and arq-worker-side paths.
+>   **Validation:** a per-process sampler exports
+>   `specforge_event_loop_lag_seconds` — the audit §8 "loop stays responsive"
+>   gate is now observable (alert on sustained p99 > 250ms).
+> - **Public-payload cache** — `GET /public/{slug}` read-through cache in Redis
+>   (`public_share_cache_ttl_seconds`, default 60s = the advertised
+>   `Cache-Control` max-age, so nothing gets staler than the HTTP contract).
+>   Positives only (404s never cached — scraper memory vector); slug-shape check
+>   runs before any Redis/DB work; **immediate eviction** on
+>   enable/disable/rotate; every operation fails open to the DB read.
+> - **Partial index** — migration `0031` adds
+>   `ix_stages_in_progress_updated_at ON stages (updated_at) WHERE status =
+>   'in_progress'` matching the recovery sweep's exact predicate; additive
+>   (`ix_stages_status` kept), Postgres-only, `CONCURRENTLY` escape hatch in the
+>   migration docstring.
+> - **PDF executor** — pool size is env-driven (`pdf_export_max_workers`,
+>   default 2, clamped ≥ 1), still isolated per T-201.
+> - **T-274 governor** — verified already shipped
+>   (`services/integrations/github_governor.py` + `test_github_governor.py`);
+>   no P2 work needed.
+
 ---
 
 ## 8. Validate it ("nothing breaks under load")

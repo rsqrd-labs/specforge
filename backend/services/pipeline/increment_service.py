@@ -91,8 +91,8 @@ from services.observability import (
     github_audit,
 )
 from services.pipeline.diff_engine import markdown_fences_balanced
-from services.security.output_validator import validate
-from services.security.prompt_guard import scan
+from services.security.output_validator import validate_async
+from services.security.prompt_guard import scan_async
 from services.security.sanitizer import sanitize_text
 
 logger = logging.getLogger(__name__)
@@ -215,7 +215,7 @@ class IncrementService:
                 "available. The MVP ships the additive path only."
             )
 
-        scan_result = scan(feature_request)
+        scan_result = await scan_async(feature_request)
         if not scan_result.is_safe:
             raise IncrementError(
                 f"Feature request flagged: {scan_result.matched_pattern}"
@@ -300,7 +300,7 @@ class IncrementService:
                 timeout=settings.llm_complete_timeout_seconds,
             )
 
-            validation = validate(completion)
+            validation = await validate_async(completion)
             if not validation.is_safe:
                 raise IncrementError(
                     f"Increment output failed validation: {validation.reason}"

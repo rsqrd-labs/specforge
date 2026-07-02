@@ -36,3 +36,15 @@ def validate(output: str) -> ValidationResult:
                 reason=f"System prompt content detected: {pattern.pattern}",
             )
     return ValidationResult(is_safe=True)
+
+
+async def validate_async(output: str) -> ValidationResult:
+    """Async ``validate``: offloads the leak-pattern scan off the event loop (F7).
+
+    The scan runs every leak pattern over the full LLM artifact. Large outputs are
+    dispatched to the dedicated CPU pool so the scan does not stall the loop; small
+    outputs run inline. Byte-identical to ``validate`` for any input.
+    """
+    from services.cpu_offload import run_cpu_bound
+
+    return await run_cpu_bound(output, validate, output)

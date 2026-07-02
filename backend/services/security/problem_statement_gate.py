@@ -223,3 +223,28 @@ def assert_valid_problem_statement(text: str) -> None:
     result = validate_problem_statement(text)
     if not result.is_valid:
         raise ProblemStatementValidationError(result)
+
+
+async def validate_problem_statement_async(text: str) -> ProblemStatementValidation:
+    """Async ``validate_problem_statement``: offloads the gate off the loop (F7).
+
+    The gate runs the full prompt-injection ``scan`` (several decoded candidates
+    x every pattern) plus four product-intent regexes over the whole statement —
+    up to ``PROBLEM_STATEMENT_MAX_CHARS`` (50K) chars of full-document regex work.
+    Large statements are dispatched to the dedicated CPU pool; small ones run
+    inline. Byte-identical result to ``validate_problem_statement``.
+    """
+    from services.cpu_offload import run_cpu_bound
+
+    return await run_cpu_bound(text, validate_problem_statement, text)
+
+
+async def assert_valid_problem_statement_async(text: str) -> None:
+    """Async ``assert_valid_problem_statement`` (F7).
+
+    Raises ``ProblemStatementValidationError`` identically (the exception
+    propagates through the executor).
+    """
+    result = await validate_problem_statement_async(text)
+    if not result.is_valid:
+        raise ProblemStatementValidationError(result)
