@@ -582,6 +582,47 @@ class Settings(BaseSettings):
     # Upper bound on provider API calls per reconcile run (bounds lane 2, T-301).
     lemonsqueezy_reconcile_max_calls_per_run: int = 200
 
+    # Payment gateway feature flags (issue #44). Exactly ONE gateway is active
+    # at a time, selected by ``payment_provider``; ``payments_enabled`` is the
+    # master kill switch. Default False — the product is not live yet, so
+    # checkout ships OFF until explicitly enabled. The flags gate checkout
+    # creation and package display ONLY (see ``billing_checkout_enabled``):
+    # both providers' webhook routes stay registered and keep processing
+    # regardless, so refunds/disputes for the inactive provider's old orders
+    # still settle after a switch. Flipping provider = env change + restart,
+    # same as every other flag here; production validates that the selector
+    # names a known gateway and that an enabled deployment's active provider
+    # is fully configured.
+    payments_enabled: bool = False
+    payment_provider: str = "lemonsqueezy"  # "lemonsqueezy" | "razorpay"
+
+    # Razorpay billing (issue #44) — the INR gateway alternative to Lemon
+    # Squeezy, via hosted Payment Links (no SDK, no frontend checkout changes).
+    # Leave the key id / key secret blank to keep it unconfigured
+    # (``razorpay_enabled`` false). When configured — active or not, because
+    # its webhook route always processes — production requires a complete LIVE
+    # config: webhook secret, HTTPS success URL, positive economics, a live
+    # key (rzp_live_…), and a checkout TTL of at least 16 minutes.
+    razorpay_key_id: str = ""  # rzp_test_… / rzp_live_…
+    razorpay_key_secret: str = ""
+    # HMAC signing secrets for the X-Razorpay-Signature webhook header. Two are
+    # accepted so a secret rotation does not drop in-flight deliveries.
+    razorpay_webhook_secret: str = ""
+    razorpay_webhook_secret_prev: str = ""
+    # Amounts are integer minor units (paise for INR): ₹799.00 = 79900. The
+    # existing price_cents columns carry these unchanged (plan D8).
+    razorpay_price_cents: int = 79900
+    razorpay_currency: str = "INR"
+    razorpay_credits_per_purchase: int = 200
+    razorpay_credit_validity_days: int = 30
+    razorpay_success_url: str = ""  # e.g. https://app.specforge.dev/billing
+    # Payment-link expire_by horizon. Razorpay rejects expiries under ~15
+    # minutes, so the production guard enforces >= 16.
+    razorpay_checkout_ttl_minutes: int = 30
+    razorpay_api_base: str = "https://api.razorpay.com"
+    # Upper bound on provider API calls per reconcile run (bounds lane 2).
+    razorpay_reconcile_max_calls_per_run: int = 200
+
     # Comma-separated allowlist of admin emails authorised to issue billing admin
     # corrections (T-302). The codebase has no role column, so this allowlist is
     # the ONLY admin authorization surface — an empty value means no admin exists
@@ -729,6 +770,55 @@ class Settings(BaseSettings):
         )
 
     @property
+    def razorpay_enabled(self) -> bool:
+        """True when Razorpay checkout is configured (issue #44).
+
+        The Razorpay analogue of ``lemonsqueezy_enabled``: a payment link
+        cannot be minted without both halves of the Basic-auth pair, so key id
+        + key secret define "configured". When configured in production —
+        active or not, because the webhook route always processes —
+        ``validate_production_settings`` additionally requires a complete LIVE
+        config (webhook secret, HTTPS success URL, live-key prefix, …).
+        """
+        return bool(self.razorpay_key_id and self.razorpay_key_secret)
+
+    @property
+    def razorpay_webhook_secrets(self) -> tuple[str, ...]:
+        """The non-empty Razorpay webhook secrets, current first (for rotation).
+
+        Passed to the inbound HMAC verifier so a signature is accepted against
+        the current secret and, during a rotation window, the previous one.
+        """
+        return tuple(
+            s
+            for s in (
+                self.razorpay_webhook_secret,
+                self.razorpay_webhook_secret_prev,
+            )
+            if s
+        )
+
+    @property
+    def billing_checkout_enabled(self) -> bool:
+        """THE gate for checkout creation and package display (issue #44).
+
+        True only when the master ``payments_enabled`` switch is on AND the
+        active ``payment_provider`` is fully configured. An unknown provider
+        value fails closed here — it must never resolve to some other
+        provider's checkout — and fails startup loudly in production (see
+        ``validate_production_settings``). This gates POST /billing/checkout
+        and the ``enabled`` field on GET /billing/package only; webhook
+        processing for both providers is deliberately NOT gated by it.
+        """
+        if not self.payments_enabled:
+            return False
+        if self.payment_provider == "lemonsqueezy":
+            return self.lemonsqueezy_enabled
+        if self.payment_provider == "razorpay":
+            return self.razorpay_enabled
+        return False
+
+    @property
     def admin_emails(self) -> set[str]:
         """The parsed, lower-cased billing-admin allowlist (empty when unset).
 
@@ -855,6 +945,65 @@ def validate_production_settings() -> None:
             errors.append(
                 "LEMONSQUEEZY_TEST_MODE must be False in production "
                 "(live mode required); a test-mode store charges nothing."
+            )
+
+    # Payment feature-flag guard (issue #44). The provider selector must name a
+    # known gateway: a typo'd value fails closed at runtime
+    # (billing_checkout_enabled → False), which would silently disable billing,
+    # so production refuses to start instead. And when the master switch is on,
+    # the ACTIVE provider must be fully configured — otherwise every checkout
+    # 503s at runtime while payments read as enabled.
+    if settings.payment_provider not in ("lemonsqueezy", "razorpay"):
+        errors.append(
+            "PAYMENT_PROVIDER must be one of 'lemonsqueezy' or 'razorpay' "
+            f"(got {settings.payment_provider!r}); a typo would silently "
+            "disable billing."
+        )
+    elif settings.payments_enabled and not settings.billing_checkout_enabled:
+        errors.append(
+            "PAYMENTS_ENABLED is true but the active provider "
+            f"'{settings.payment_provider}' is not fully configured "
+            "(its credentials are incomplete), so every checkout would fail "
+            "at runtime. Configure the provider or set PAYMENTS_ENABLED=false."
+        )
+
+    # Razorpay production guard (issue #44). Applies whenever Razorpay is
+    # CONFIGURED (key id + secret set), active or not: its webhook route
+    # processes independently of the active-provider flag (refunds for old
+    # orders must settle after a switch), so a configured-but-inactive
+    # Razorpay still needs a verifiable webhook secret and sane economics.
+    # The key id and secret are already guaranteed non-empty by
+    # ``razorpay_enabled``, so they are not re-checked here; a half-configured
+    # Razorpay (one of the two blank) is "disabled" and intentionally fails
+    # to-disabled.
+    if settings.razorpay_enabled:
+        if not settings.razorpay_webhook_secret.strip():
+            errors.append(
+                "RAZORPAY_WEBHOOK_SECRET must be set when Razorpay billing is "
+                "configured — inbound webhooks (the sole credit-grant "
+                "authority) cannot be signature-verified without it."
+            )
+        if not settings.razorpay_success_url.lower().startswith("https://"):
+            errors.append("RAZORPAY_SUCCESS_URL must use HTTPS in production.")
+        if settings.razorpay_price_cents <= 0:
+            errors.append("RAZORPAY_PRICE_CENTS must be a positive integer.")
+        if settings.razorpay_credits_per_purchase <= 0:
+            errors.append("RAZORPAY_CREDITS_PER_PURCHASE must be a positive integer.")
+        if settings.razorpay_credit_validity_days <= 0:
+            errors.append("RAZORPAY_CREDIT_VALIDITY_DAYS must be a positive integer.")
+        if not settings.razorpay_currency.strip():
+            errors.append("RAZORPAY_CURRENCY must be non-empty.")
+        if not settings.razorpay_key_id.startswith("rzp_live_"):
+            errors.append(
+                "RAZORPAY_KEY_ID must be a live key (rzp_live_…) in "
+                "production. Razorpay events carry no test-mode flag — the "
+                "key prefix IS the environment (the LEMONSQUEEZY_TEST_MODE "
+                "analogue); a test key charges nothing."
+            )
+        if settings.razorpay_checkout_ttl_minutes < 16:
+            errors.append(
+                "RAZORPAY_CHECKOUT_TTL_MINUTES must be at least 16: Razorpay "
+                "rejects payment-link expire_by values under ~15 minutes."
             )
 
     # Stream-watchdog guard: an idle timeout below 30s kills healthy frontier
