@@ -65,6 +65,7 @@ from services.llm.gateway import get_llm
 from services.llm.instrumented_adapter import InstrumentedAdapter
 from services.llm.model_catalog import model_max_output_tokens
 from services.llm.output_budget import resolve_output_budget
+from services.llm.prompt_cache import user_prefix_cache_hint
 from services.llm.provider_config import JUDGE_MODELS
 from services.llm.routing import LLMRoute, LLMRoutingError, resolve_llm_route
 from services.llm.tier_policy import (
@@ -2470,30 +2471,27 @@ class StageManager:
             live_emitted_chars = safe_length
             last_flush = now
 
-        async for token in _watchdog_stream(
-            adapter.stream(
-                system_prompt,
-                chunk_prompt,
-                max_tokens=max_tokens,
-                # The system prompt is identical across all chunks of a single
-                # stage generation (including repair retries), so marking it
-                # cacheable lets Anthropic reuse the cached token representation
-                # for chunks 2+ and repair calls (Phase 2 — issue #26).
-                cache_system=True,
-                # Issue #39 (Lever A): the base user prompt — the problem
-                # statement plus up to 200K chars of embedded upstream artifacts
-                # for plan/harness/tasks — is the stable prefix of every chunk's
-                # prompt (`_chunk_user_prompt` appends only the prior chunks and
-                # the per-chunk scope after it).  Caching it as well lets
-                # Anthropic reuse that (often dominant) input on chunks 2+/repairs
-                # instead of re-billing and re-processing it every call.
-                cache_user_prefix=user_prompt,
-            ),
-            stage_type=stage_type,
-            provider=route.provider,
-        ):
-            accumulated += token
-            _flush_live_safe()
+        # Issue #39 (Lever A): the base user prompt is the stable prefix of
+        # every chunk prompt. Keep that Anthropic transport hint scoped to this
+        # async call without growing the provider-neutral adapter signature.
+        with user_prefix_cache_hint(user_prompt):
+            async for token in _watchdog_stream(
+                adapter.stream(
+                    system_prompt,
+                    chunk_prompt,
+                    max_tokens=max_tokens,
+                    # The system prompt is identical across all chunks of a
+                    # single stage generation (including repair retries), so
+                    # marking it cacheable lets Anthropic reuse the cached token
+                    # representation for chunks 2+ and repair calls (Phase 2 —
+                    # issue #26).
+                    cache_system=True,
+                ),
+                stage_type=stage_type,
+                provider=route.provider,
+            ):
+                accumulated += token
+                _flush_live_safe()
         live_prefix = accumulated[:live_emitted_chars]
         accumulated = _strip_code_fence(accumulated)
         if _completion_stopped_by_limit(adapter):

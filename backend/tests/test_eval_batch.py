@@ -43,12 +43,12 @@ def test_estimate_cost_halved_for_batch() -> None:
 
 class _MinimalAdapter(BaseLLMAdapter):
     async def stream(  # type: ignore[override]
-        self, system, user, max_tokens, *, cache_system=False, cache_user_prefix=None
+        self, system, user, max_tokens, *, cache_system=False
     ):
         yield ""
 
     async def complete(  # type: ignore[override]
-        self, system, user, max_tokens, *, cache_system=False, cache_user_prefix=None
+        self, system, user, max_tokens, *, cache_system=False
     ):
         return ""
 

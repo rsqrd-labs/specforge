@@ -20,6 +20,7 @@ All tests are unit-level (no DB, no Redis, no live HTTP calls).
 
 from __future__ import annotations
 
+import inspect
 from collections.abc import AsyncGenerator
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -31,6 +32,7 @@ from services.llm.base import BaseLLMAdapter
 from services.llm.google_adapter import GoogleAdapter
 from services.llm.instrumented_adapter import InstrumentedAdapter
 from services.llm.openai_adapter import OpenAIAdapter
+from services.llm.prompt_cache import user_prefix_cache_hint
 from services.llm.usage import normalize_provider_usage
 
 # ---------------------------------------------------------------------------
@@ -311,6 +313,28 @@ async def test_google_adapter_accepts_cache_system(
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize(
+    "adapter_cls",
+    [
+        BaseLLMAdapter,
+        InstrumentedAdapter,
+        AnthropicAdapter,
+        OpenAIAdapter,
+        GoogleAdapter,
+    ],
+)
+def test_llm_adapter_public_cache_signature(adapter_cls: type) -> None:
+    """Only the issue-#26 cache_system flag is part of the public call surface."""
+    for method_name in ("stream", "complete"):
+        signature = inspect.signature(getattr(adapter_cls, method_name))
+        kwonly = [
+            name
+            for name, param in signature.parameters.items()
+            if param.kind is inspect.Parameter.KEYWORD_ONLY
+        ]
+        assert kwonly == ["cache_system"]
+
+
 @pytest.mark.asyncio
 async def test_instrumented_adapter_forwards_cache_system() -> None:
     """InstrumentedAdapter must forward cache_system to the wrapped adapter."""
@@ -319,7 +343,6 @@ async def test_instrumented_adapter_forwards_cache_system() -> None:
         def __init__(self) -> None:
             self.last_completion = None
             self.seen_cache_system: list[bool] = []
-            self.seen_cache_user_prefix: list[str | None] = []
 
         async def stream(
             self,
@@ -328,10 +351,8 @@ async def test_instrumented_adapter_forwards_cache_system() -> None:
             max_tokens: int,
             *,
             cache_system: bool = False,
-            cache_user_prefix: str | None = None,
         ) -> AsyncGenerator[str, None]:
             self.seen_cache_system.append(cache_system)
-            self.seen_cache_user_prefix.append(cache_user_prefix)
             yield "tok"
 
         async def complete(
@@ -341,10 +362,8 @@ async def test_instrumented_adapter_forwards_cache_system() -> None:
             max_tokens: int,
             *,
             cache_system: bool = False,
-            cache_user_prefix: str | None = None,
         ) -> str:
             self.seen_cache_system.append(cache_system)
-            self.seen_cache_user_prefix.append(cache_user_prefix)
             return "ok"
 
     inner = _RecordingAdapter()
@@ -365,19 +384,13 @@ async def test_instrumented_adapter_forwards_cache_system() -> None:
 
         await adapter.complete("sys", "user", 100, cache_system=True)
         tokens = [
-            t
-            async for t in adapter.stream(
-                "sys", "user", 100, cache_system=True, cache_user_prefix="sys-prefix"
-            )
+            t async for t in adapter.stream("sys", "user", 100, cache_system=True)
         ]
 
     assert inner.seen_cache_system == [
         True,
         True,
     ], "InstrumentedAdapter must forward cache_system=True to the wrapped adapter"
-    # The stream call passed cache_user_prefix; complete did not (so its forwarded
-    # value is the None default) — both must reach the wrapped adapter unchanged.
-    assert inner.seen_cache_user_prefix == [None, "sys-prefix"]
     assert "tok" in tokens
 
 
@@ -397,14 +410,10 @@ async def test_complete_with_timeout_forwards_cache_system(
         def __init__(self) -> None:
             self.last_completion = None
 
-        async def stream(
-            self, s, u, m, *, cache_system=False, cache_user_prefix=None
-        ):  # pragma: no cover
+        async def stream(self, s, u, m, *, cache_system=False):  # pragma: no cover
             yield ""
 
-        async def complete(
-            self, s, u, m, *, cache_system=False, cache_user_prefix=None
-        ) -> str:
+        async def complete(self, s, u, m, *, cache_system=False) -> str:
             seen_cache_system.append(cache_system)
             return "done"
 
@@ -584,11 +593,11 @@ def test_user_prefix_below_min_cacheable_stays_plain(
 
 
 @pytest.mark.asyncio
-async def test_anthropic_stream_forwards_user_prefix(
+async def test_anthropic_stream_uses_scoped_user_prefix_hint(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """PC-14: stream() forwards cache_user_prefix into _messages_request so the
-    chunked-generation call path actually caches the base prompt."""
+    """PC-14: stream() reads the scoped user-prefix hint for _messages_request
+    without growing the BaseLLMAdapter method signature."""
     adapter = _make_anthropic_adapter()
     monkeypatch.setattr(
         "services.llm.anthropic_adapter.settings",
@@ -622,9 +631,13 @@ async def test_anthropic_stream_forwards_user_prefix(
 
     adapter._client.messages.stream = MagicMock(return_value=_Ctx())
 
-    async for _ in adapter.stream(
-        _SYSTEM, _FULL_USER, _MAX_TOKENS, cache_system=True, cache_user_prefix=_PREFIX
-    ):
-        pass
+    with user_prefix_cache_hint(_PREFIX):
+        async for _ in adapter.stream(
+            _SYSTEM,
+            _FULL_USER,
+            _MAX_TOKENS,
+            cache_system=True,
+        ):
+            pass
 
     assert seen.get("cache_user_prefix") == _PREFIX

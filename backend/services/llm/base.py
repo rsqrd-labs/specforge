@@ -146,7 +146,6 @@ class BaseLLMAdapter(ABC):
         max_tokens: int,
         *,
         cache_system: bool = False,
-        cache_user_prefix: str | None = None,
     ) -> AsyncGenerator[str, None]:
         pass
 
@@ -158,7 +157,6 @@ class BaseLLMAdapter(ABC):
         max_tokens: int,
         *,
         cache_system: bool = False,
-        cache_user_prefix: str | None = None,
     ) -> str:
         pass
 

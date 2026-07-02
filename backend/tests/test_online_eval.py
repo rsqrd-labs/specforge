@@ -64,7 +64,6 @@ class _FakeJudge:
         max_tokens: int,
         *,
         cache_system: bool = False,
-        cache_user_prefix: str | None = None,
     ) -> str:
         self.calls.append({"system": system, "user": user, "max_tokens": max_tokens})
         if isinstance(self.response, Exception):

@@ -269,7 +269,6 @@ async def test_instrumented_adapter_records_provider_usage_and_context(
             max_tokens,
             *,
             cache_system=False,
-            cache_user_prefix=None,
         ):
             return "ok"
 
@@ -280,7 +279,6 @@ async def test_instrumented_adapter_records_provider_usage_and_context(
             max_tokens,
             *,
             cache_system=False,
-            cache_user_prefix=None,
         ):
             yield "ok"
 
@@ -356,7 +354,6 @@ async def test_instrumented_adapter_stream_records_provider_usage(monkeypatch) -
             max_tokens,
             *,
             cache_system=False,
-            cache_user_prefix=None,
         ):
             for tok in ("hel", "lo"):
                 yield tok
@@ -368,7 +365,6 @@ async def test_instrumented_adapter_stream_records_provider_usage(monkeypatch) -
             max_tokens,
             *,
             cache_system=False,
-            cache_user_prefix=None,
         ):
             return "x"
 

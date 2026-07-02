@@ -115,7 +115,6 @@ class InstrumentedAdapter(BaseLLMAdapter):
         max_tokens: int,
         *,
         cache_system: bool = False,
-        cache_user_prefix: str | None = None,
     ) -> AsyncGenerator[str, None]:
         accumulated: list[str] = []
         start = time.perf_counter()
@@ -125,7 +124,6 @@ class InstrumentedAdapter(BaseLLMAdapter):
                 user,
                 max_tokens,
                 cache_system=cache_system,
-                cache_user_prefix=cache_user_prefix,
             ):
                 accumulated.append(token)
                 yield token
@@ -150,7 +148,6 @@ class InstrumentedAdapter(BaseLLMAdapter):
         max_tokens: int,
         *,
         cache_system: bool = False,
-        cache_user_prefix: str | None = None,
     ) -> str:
         start = time.perf_counter()
         response: str = ""
@@ -162,7 +159,6 @@ class InstrumentedAdapter(BaseLLMAdapter):
                 user,
                 max_tokens=max_tokens,
                 cache_system=cache_system,
-                cache_user_prefix=cache_user_prefix,
             )
             record_provider_success(self._provider)
             return response

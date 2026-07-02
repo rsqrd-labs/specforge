@@ -149,7 +149,6 @@ class _ConcurrencyAdapter:
         max_tokens: int,
         *,
         cache_system: bool = False,
-        cache_user_prefix: str | None = None,
     ):
         self._tracker["active"] += 1
         self._tracker["max"] = max(self._tracker["max"], self._tracker["active"])
@@ -669,7 +668,6 @@ class _CompletionAwareAdapter:
         max_tokens: int,
         *,
         cache_system: bool = False,
-        cache_user_prefix: str | None = None,
     ):
         self.stream_calls.append((system, user, max_tokens))
         content, stopped_by_limit = self._next_attempt(None)
@@ -691,7 +689,6 @@ class _CompletionAwareAdapter:
         max_tokens: int,
         *,
         cache_system: bool = False,
-        cache_user_prefix: str | None = None,
     ) -> str:
         self.complete_calls.append((system, user, max_tokens))
         content, stopped_by_limit = self._next_attempt(_SAFE_PLAN_FINAL_STREAM)
@@ -1455,7 +1452,6 @@ class _AlwaysLimitStopAdapter:
         max_tokens: int,
         *,
         cache_system: bool = False,
-        cache_user_prefix: str | None = None,
     ):
         self.last_completion = LLMCompletionInfo.started(
             provider="anthropic",
