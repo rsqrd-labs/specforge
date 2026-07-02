@@ -180,8 +180,8 @@ export function WorkspaceCard({
           className="workspace-card-delete"
           onClick={() => onDelete(workspace)}
           disabled={isDeleting}
-          aria-label={`Delete ${workspace.name}`}
-          title="Delete workspace"
+          aria-label={`Move ${workspace.name} to trash`}
+          title="Move to trash"
         >
           {isDeleting ? (
             <span className="workspace-card-delete-spinner" aria-hidden="true" />

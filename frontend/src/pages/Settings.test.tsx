@@ -12,6 +12,18 @@ vi.mock("../components/settings/GitHubConnection", () => ({
 
 vi.mock("../services/api", () => ({
   getGitHubIntegration: vi.fn().mockResolvedValue(null),
+  // Settings now renders <DataRetentionPanel/>, which fetches the policy.
+  getRetentionPolicy: vi.fn().mockResolvedValue({
+    policy_version: "trash-v1",
+    trash_days: 30,
+    legacy_archived_days: 180,
+    stage_versions_keep: 20,
+    stage_versions_min_age_days: 90,
+    storyboards_keep: 5,
+    storyboards_min_age_days: 90,
+    cost_events_days: 180,
+    eval_results_days: 180,
+  }),
 }))
 
 function renderSettings() {

@@ -271,3 +271,22 @@ class ShareLinkResponse(BaseModel):
     enabled: bool
 
     model_config = ConfigDict(extra="forbid")
+
+
+class TrashedWorkspaceResponse(BaseModel):
+    """A trashed (archived) workspace for the "Recently deleted" surface (#43).
+
+    ``purge_after`` is the computed hard-delete date (``archived_at`` + the
+    applicable retention window: the short acked window when the delete recorded
+    an acknowledgment, the conservative legacy window otherwise). The client shows
+    the countdown + Restore + Export until then.
+    """
+
+    id: UUID
+    name: str
+    provider: Provider
+    archived_at: datetime
+    purge_after: datetime
+    acknowledged: bool
+
+    model_config = ConfigDict(extra="forbid")

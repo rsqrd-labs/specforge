@@ -21,6 +21,7 @@ from routers import credits as credits_router
 from routers import integrations as integrations_router
 from routers import providers as providers_router
 from routers import public as public_router
+from routers import retention as retention_router
 from routers import stage as stage_router
 from routers import storyboards as storyboards_router
 from routers import templates as templates_router
@@ -213,6 +214,8 @@ def create_app(redis_client: Redis | None = None) -> FastAPI:
     app.include_router(billing_router.router)
     # Phase 20: Storyboard owner + public API surface (T-251).
     app.include_router(storyboards_router.router)
+    # Issue #43: unauthenticated read-only data-retention policy metadata.
+    app.include_router(retention_router.router)
 
     return app
 

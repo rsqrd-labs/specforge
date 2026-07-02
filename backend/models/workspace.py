@@ -140,6 +140,21 @@ class Workspace(Base):
     # time_budget_minutes / stage_versions / regen_attempted); the stamped
     # ``stage_versions`` carry the staleness signal so no extra column is needed.
     construction_verdict: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    # Data-retention trash lifecycle (issue #43, Phase 3). ``archived_at`` is the
+    # purge clock: set to now() by the delete (archive) flow, cleared on restore.
+    # Backfilled to deploy time for pre-existing archived rows (``updated_at`` has
+    # no ``onupdate`` so it is unreliable — plan §1.5/§5.1). NULL for active rows.
+    archived_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True),
+        nullable=True,
+    )
+    # The retention-policy version string the delete dialog displayed (e.g.
+    # ``"trash-v1"``), stamped by the DELETE handler when the client supplies it.
+    # Its presence proves the user saw the trash notice, so the Tier-3 purge
+    # predicate uses the short ``retention_trash_days`` window for acked rows and
+    # the conservative ``retention_legacy_archived_days`` window for NULL (legacy /
+    # stale-SPA) rows (plan §5.2).
+    retention_ack_version: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True),
         nullable=False,

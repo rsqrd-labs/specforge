@@ -13,6 +13,7 @@ import { useLocation, useNavigate } from "react-router-dom"
 
 import { AiDisclaimer } from "../components/shared/AiDisclaimer"
 import { BrandLogo } from "../components/shared/BrandLogo"
+import DataRetentionPanel from "../components/settings/DataRetentionPanel"
 import GitHubConnection from "../components/settings/GitHubConnection"
 import { getGitHubIntegration } from "../services/api"
 
@@ -94,6 +95,11 @@ export default function Settings() {
 
           <div className="settings-hero-content">
             <GitHubConnection />
+          </div>
+        </section>
+        <section className="settings-card" aria-label="Data retention">
+          <div className="settings-hero-content">
+            <DataRetentionPanel />
           </div>
         </section>
         <AiDisclaimer variant="footer" className="settings-ai-disclaimer" />

@@ -109,6 +109,20 @@ _GENERATION_ESTIMATES_CRON_MINUTE = {3, 13, 23, 33, 43, 53}
 # replica samples the fast queue, a bulk replica samples the bulk queue.
 _QUEUE_SAMPLE_CRON_SECOND = {45}
 
+# Data retention & purging (issue #43). All BULK-lane global crons — registered on
+# exactly one class (F5 rule) so they never double-fire. The size sampler runs
+# hourly at :41 (clear of every minute-set above); the three tier purges run
+# off-peak at 4:11 / 4:31 / 4:51 — each clear of the drift {0,15,30,45}, billing
+# reconcile {7,22,37,52}, generation-estimate {3,13,23,33,43,53}, and the 3:17/3:42
+# purge ticks (plan §1.5 collision-free cron map).
+_TABLE_STATS_CRON_MINUTE = {41}
+_RETENTION_TIER1_CRON_HOUR = {4}
+_RETENTION_TIER1_CRON_MINUTE = {11}
+_RETENTION_TIER2_CRON_HOUR = {4}
+_RETENTION_TIER2_CRON_MINUTE = {31}
+_RETENTION_TIER3_CRON_HOUR = {4}
+_RETENTION_TIER3_CRON_MINUTE = {51}
+
 
 @github_job("export_push")
 async def export_push(
@@ -291,6 +305,74 @@ async def purge_billing_events(ctx: dict[str, Any]) -> None:
     await billing_worker.purge_billing_events(ctx)
 
 
+async def sample_table_stats(ctx: dict[str, Any]) -> None:
+    """Cron (hourly): publish the retention size baseline (issue #43, Phase 0).
+
+    Read-only, zero risk — samples ``pg_total_relation_size`` + ``n_live_tup`` for
+    the fixed table allowlist into gauges. Gated on the master ``retention_enabled``
+    AND ``retention_table_stats_enabled`` (plan §8: retention_enabled=false disables
+    the sampler too). Plain cron — the body catches and logs; a metrics blip must
+    never surface as a worker error.
+    """
+    if not (settings.retention_enabled and settings.retention_table_stats_enabled):
+        return
+    from database import AsyncSessionLocal
+    from services import retention
+
+    try:
+        async with AsyncSessionLocal() as db:
+            await retention.sample_table_stats(db)
+    except Exception:  # pragma: no cover — best-effort; next hourly tick retries
+        logger.exception("retention.table_stats_failed")
+
+
+async def retention_tier1_purge(ctx: dict[str, Any]) -> None:
+    """Cron (daily 4:11 UTC): Tier-1 telemetry TTL + failed-row purges (issue #43).
+
+    Gated on the master ``retention_enabled``; each job further honours dry-run and
+    its own tier flag. Plain cron — a missed daily run is inconsequential (the next
+    tick retries) so the body catches and logs rather than surfacing an error.
+    """
+    if not settings.retention_enabled:
+        return
+    from database import AsyncSessionLocal
+    from services import retention
+
+    try:
+        async with AsyncSessionLocal() as db:
+            await retention.run_tier1(db)
+    except Exception:  # pragma: no cover — best-effort; next daily tick retries
+        logger.exception("retention.tier1_purge_failed")
+
+
+async def retention_tier2_purge(ctx: dict[str, Any]) -> None:
+    """Cron (daily 4:31 UTC): Tier-2 stage-version/storyboard keep-N (issue #43)."""
+    if not settings.retention_enabled:
+        return
+    from database import AsyncSessionLocal
+    from services import retention
+
+    try:
+        async with AsyncSessionLocal() as db:
+            await retention.run_tier2(db)
+    except Exception:  # pragma: no cover — best-effort; next daily tick retries
+        logger.exception("retention.tier2_purge_failed")
+
+
+async def retention_tier3_purge(ctx: dict[str, Any]) -> None:
+    """Cron (daily 4:51 UTC): Tier-3 trashed-workspace hard-delete (issue #43)."""
+    if not settings.retention_enabled:
+        return
+    from database import AsyncSessionLocal
+    from services import retention
+
+    try:
+        async with AsyncSessionLocal() as db:
+            await retention.purge_trashed_workspaces(db)
+    except Exception:  # pragma: no cover — best-effort; next daily tick retries
+        logger.exception("retention.tier3_purge_failed")
+
+
 async def _on_startup(ctx: dict[str, Any]) -> None:
     """Initialise worker-process services: logging, Sentry, the shared Redis client.
 
@@ -434,6 +516,30 @@ class WorkerSettings(_BaseWorkerSettings):
             refresh_generation_estimates,
             minute=_GENERATION_ESTIMATES_CRON_MINUTE,
             run_at_startup=True,
+        ),
+        # Data retention (issue #43) — BULK-lane global crons, one class only.
+        cron(
+            sample_table_stats,
+            minute=_TABLE_STATS_CRON_MINUTE,
+            run_at_startup=False,
+        ),
+        cron(
+            retention_tier1_purge,
+            hour=_RETENTION_TIER1_CRON_HOUR,
+            minute=_RETENTION_TIER1_CRON_MINUTE,
+            run_at_startup=False,
+        ),
+        cron(
+            retention_tier2_purge,
+            hour=_RETENTION_TIER2_CRON_HOUR,
+            minute=_RETENTION_TIER2_CRON_MINUTE,
+            run_at_startup=False,
+        ),
+        cron(
+            retention_tier3_purge,
+            hour=_RETENTION_TIER3_CRON_HOUR,
+            minute=_RETENTION_TIER3_CRON_MINUTE,
+            run_at_startup=False,
         ),
         _queue_sampler_cron(),
     ]

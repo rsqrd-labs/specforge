@@ -631,6 +631,54 @@ class Settings(BaseSettings):
     # token-metered AI-grounding plan (§13 open question).
     brave_cost_usd_per_call: float = 0.005
 
+    # --- Data retention & purging (issue #43; docs/RETENTION_IMPLEMENTATION_PLAN.md).
+    #
+    # Steady-state DB size proportional to the *active* corpus, not lifetime
+    # history. Two keys must turn before ANYTHING deletes: the master enable AND
+    # dry_run=False. Per-tier flags then gate each purge job separately so the
+    # tiers roll out independently (plan §8). Everything is additive and reversible
+    # by flipping a flag — no API surface changes in Phases 0–2.
+    #
+    #   retention_enabled: master kill-switch for the whole feature — counting,
+    #     purging, AND the Phase-0 table-stats sampler. False ⇒ every retention job
+    #     and the sampler are no-ops (the instant, total backout).
+    #   retention_dry_run: True ⇒ every purge job only COUNTS candidates (feeds the
+    #     gauge + audit log) and deletes nothing, regardless of the tier flags.
+    #   retention_tierN_purge_enabled: per-tier delete gate. A job deletes only when
+    #     retention_enabled AND NOT retention_dry_run AND its tier flag is on; with
+    #     the flag off it still counts (so the gauge/backlog alert stay live).
+    retention_enabled: bool = True
+    retention_dry_run: bool = True
+    retention_tier1_purge_enabled: bool = False
+    retention_tier2_purge_enabled: bool = False
+    retention_tier3_purge_enabled: bool = False
+    # Bounded work per batch and per daily run so a single cron tick can never run
+    # unboundedly and a backlog drains over several days instead of one lock storm.
+    retention_purge_batch_size: int = 1000
+    retention_max_rows_per_run: int = 50_000
+    # Tier-1 telemetry TTL windows (days). The 180 d cost-events window sits far
+    # above the 28 d output-budget analysis lookback (issue #26) so tightening a
+    # budget never outruns its evidence.
+    retention_cost_events_days: int = 180
+    retention_eval_results_days: int = 180
+    retention_failed_batch_jobs_days: int = 30
+    retention_failed_pushes_days: int = 90
+    # Tier-2 content keep-N (the byte win). Keep the last N versions/storyboards and
+    # prune the rest only when older than the min-age floor. N is a product policy
+    # knob (it truncates visible version/diff history beyond N) — plan §4.1/§8.
+    retention_stage_versions_keep: int = 20
+    retention_stage_versions_min_age_days: int = 90
+    retention_storyboards_keep: int = 5
+    retention_storyboards_min_age_days: int = 90
+    # Tier-3 workspace trash windows (days). A workspace the user explicitly deleted
+    # with a recorded acknowledgment is hard-deleted retention_trash_days after the
+    # delete; a legacy / un-acked archived row waits the conservative legacy window.
+    retention_trash_days: int = 30
+    retention_legacy_archived_days: int = 180
+    # Phase-0 table-size sampler (plan §6). The size baseline every later "size
+    # stabilized" claim is judged against; also gated by retention_enabled (§8).
+    retention_table_stats_enabled: bool = True
+
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     @field_validator("eval_score_sample_rate")
@@ -851,6 +899,26 @@ def validate_production_settings() -> None:
                 "identity OAuth credentials the install callback uses to verify "
                 "the installer administers the installation (prevents the "
                 "install-callback IDOR). Without them every install is refused."
+            )
+
+    # Data-retention guard (issue #43). Tier-3 hard-deletes whole workspaces, so
+    # when its purge is enabled in production the two trash windows must be sane —
+    # a fat-fingered 0/1-day window would delete workspaces users just trashed (or
+    # legacy rows) before the restore/export window the UI advertises. The lower
+    # bounds mirror the plan §3.1 floors (7 d acked, 90 d legacy).
+    if settings.retention_tier3_purge_enabled:
+        if settings.retention_trash_days < 7:
+            errors.append(
+                "RETENTION_TRASH_DAYS must be >= 7 in production when "
+                "RETENTION_TIER3_PURGE_ENABLED is on: a shorter window would "
+                "hard-delete trashed workspaces before the advertised "
+                "restore/export window."
+            )
+        if settings.retention_legacy_archived_days < 90:
+            errors.append(
+                "RETENTION_LEGACY_ARCHIVED_DAYS must be >= 90 in production when "
+                "RETENTION_TIER3_PURGE_ENABLED is on: the legacy/un-acked window "
+                "must stay conservative for rows deleted before retention shipped."
             )
 
     # Brave research guard (issue #12). The feature is allowed *off* in prod (no

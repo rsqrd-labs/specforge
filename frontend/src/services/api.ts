@@ -18,6 +18,7 @@ import type {
   Workspace,
   WorkspaceWithStages,
 } from "../types/workspace"
+import type { RetentionPolicy, TrashedWorkspace } from "../types/retention"
 import type {
   GitHubExportMode,
   Increment,
@@ -367,8 +368,42 @@ export async function getWorkspace(id: string): Promise<WorkspaceWithStages> {
   return response.data
 }
 
-export async function deleteWorkspace(id: string): Promise<void> {
-  await api.delete(`/workspaces/${id}`)
+/**
+ * Move a workspace to the trash (issue #43). `ackVersion` is the retention-policy
+ * version the delete dialog displayed (from GET /retention/policy); sending it
+ * records that the user saw the trash notice, which selects the short trash
+ * window for the eventual hard-delete. Omitting it falls into the conservative
+ * legacy window (a stale client that predates the trash UI still works).
+ */
+export async function deleteWorkspace(
+  id: string,
+  ackVersion?: string,
+): Promise<void> {
+  await api.delete(`/workspaces/${id}`, {
+    params: ackVersion ? { ack_version: ackVersion } : undefined,
+  })
+}
+
+/** Restore a trashed workspace to active, clearing its purge clock (issue #43). */
+export async function restoreWorkspace(
+  id: string,
+): Promise<WorkspaceWithStages> {
+  const response = await api.post<WorkspaceWithStages>(
+    `/workspaces/${id}/restore`,
+  )
+  return response.data
+}
+
+/** The user's trashed workspaces for the "Recently deleted" surface (issue #43). */
+export async function listTrashedWorkspaces(): Promise<TrashedWorkspace[]> {
+  const response = await api.get<TrashedWorkspace[]>("/workspaces/trashed")
+  return response.data
+}
+
+/** Static data-retention policy metadata (unauthenticated, cacheable). */
+export async function getRetentionPolicy(): Promise<RetentionPolicy> {
+  const response = await api.get<RetentionPolicy>("/retention/policy")
+  return response.data
 }
 
 export async function updateWorkspace(

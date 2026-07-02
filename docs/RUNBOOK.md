@@ -1966,3 +1966,112 @@ Listed under P2 in the audit roadmap but shipped earlier
 `test_github_governor.py`): per-installation concurrency + hourly budgets so
 one tenant's export storm cannot monopolise the worker lanes. No new ops knobs
 in P2.
+
+## 18. Data Retention & Purging (issue #43)
+
+Keeps steady-state DB size proportional to the **active** corpus, not lifetime
+history. Everything is additive and reversible by flipping a flag — Phases 0–2
+change no API surface. Code: `services/retention.py`; crons in `worker.py`
+(BULK lane); metrics in `services/observability.py`.
+
+### The two-key safety model
+
+Nothing deletes unless **both** the master enable AND dry-run-off are set, *and*
+the tier's own flag is on:
+
+```
+will_delete = retention_enabled AND (NOT retention_dry_run) AND retention_tierN_purge_enabled
+```
+
+- `retention_enabled` (default **true**) — master kill-switch. `false` disables
+  every purge **and** the Phase-0 size sampler (the total backout).
+- `retention_dry_run` (default **true**) — every purge job only **counts**
+  candidates (feeds the gauge + audit log) and deletes nothing.
+- `retention_tier1/2/3_purge_enabled` (default **false**) — per-tier delete gate.
+  With a tier's flag off it still counts, so the gauge/backlog alert stay live.
+
+So on a fresh deploy: sampler + counting run, **zero deletions**. You enable a
+tier by flipping `retention_dry_run=false` and that tier's flag.
+
+### Cron schedule (BULK lane, collision-free — §1.5 map)
+
+| Job | When (UTC) | What |
+|---|---|---|
+| `sample_table_stats` | hourly at :41 | size baseline gauges (read-only) |
+| `retention_tier1_purge` | 04:11 daily | telemetry TTL + failed-row purges |
+| `retention_tier2_purge` | 04:31 daily | stage-version / storyboard keep-N |
+| `retention_tier3_purge` | 04:51 daily | trashed-workspace hard-delete |
+
+Each job caps at `retention_max_rows_per_run` (default 50 000) rows/run in
+`retention_purge_batch_size` (default 1000) batches, committing per batch — a
+backlog drains over several days rather than in one lock storm.
+
+### Enable order (dev/staging first — SpecForge is pre-production)
+
+Validate with **short windows** (set the `*_days` knobs to `1` so candidates
+materialise) + `tests/test_retention.py`, not calendar time.
+
+1. **Phase 0** ships with launch — the size baseline yardstick. Nothing to
+   "observe for weeks".
+2. **Tier 1** — confirm dry-run parity in staging (candidates counted ≈ rows
+   deleted), then `retention_tier1_purge_enabled=true` + `retention_dry_run=false`.
+   Row-count growth is bounded; zero user-visible change.
+3. **Tier 2** — gate on **EXPLAIN-verify** (staging: the keep-N query uses
+   `ix_stage_versions_stage_id`, no seq scan on a hot table) **and product
+   sign-off** on `retention_stage_versions_keep` (it truncates visible
+   version/diff history beyond N). *Byte* growth becomes bounded here.
+4. **Tier 3** — migration 0033 + API + UI ship, **`docs/RETENTION_POLICY.md` +
+   ToS/privacy published** (the real gate is legal sign-off) → staging dry-run →
+   `retention_tier3_purge_enabled=true`. Production `validate_production_settings`
+   then requires `retention_trash_days >= 7` and
+   `retention_legacy_archived_days >= 90`.
+
+**Backout at any point:** flip the tier flag off, or `retention_enabled=false`
+for everything (sampler included).
+
+### Workspace trash lifecycle (Tier 3)
+
+"Delete workspace" is **Move to trash**: `DELETE /workspaces/{id}` sets
+`status='archived'`, stamps `archived_at=now()` and the `retention_ack_version`
+the dialog showed. The workspace leaves the active list and appears under
+`GET /workspaces/trashed` (Dashboard "Recently deleted") with a countdown +
+**Restore** (`POST /workspaces/{id}/restore`, clears the clock, allowed over
+quota) + **Export** for the whole window. The Tier-3 cron hard-deletes only when:
+
+- **acked** (`retention_ack_version` set): `archived_at` older than
+  `retention_trash_days` (default 30); or
+- **legacy / un-acked** (NULL): older than `retention_legacy_archived_days`
+  (default 180) — a conservative window for rows deleted before retention shipped
+  or by a stale SPA.
+
+A hard-delete cascades the full subtree (stages → versions → evals, increments,
+ideas, storyboards, pushes → push tasks). **Financial/identity rows survive:**
+`credit_ledger` (only FK is `user_id`) is untouched, and `llm_cost_events`
+survive with `workspace_id` nulled (`SET NULL`). Each purged workspace emits a
+`retention.workspace_purged` audit row (workspace_id, user_id, archived_at,
+ack_version).
+
+### Metrics & alerts
+
+- `specforge_db_table_bytes{table}` / `_live_tuples{table}` — the size baseline.
+- `specforge_retention_candidates{job}` — set every run (incl. dry-run/flag-off).
+- `specforge_retention_purged_rows_total{job,table}` — rows deleted.
+- `specforge_retention_run_seconds{job}` — duration (index-rot / lock signal).
+- `specforge_retention_last_success_timestamp{job}` — missed-run pager.
+
+Alerts:
+
+- **Job failed / stalled:** `time() - specforge_retention_last_success_timestamp
+  > 26h` per job (the structlog `retention.*_failed` exception is the diagnostic).
+- **Backlog:** `retention_candidates{job}` rising for 7 d while that tier's purge
+  flag is on ⇒ per-run cap undersized — raise `retention_max_rows_per_run`.
+- **Not stabilising:** `specforge_db_table_bytes` slope still positive 4 weeks
+  after a tier enabled.
+
+### `DELETE` does not shrink files
+
+Autovacuum makes dead space **reusable**, so the success criterion is a
+**plateau, not a shrink** — a flat `specforge_db_table_bytes` slope at steady
+state. Actual disk reclamation needs `pg_repack` (or `VACUUM FULL`, which takes
+an `ACCESS EXCLUSIVE` lock) in a maintenance window — ops-optional, only if the
+files must physically shrink.

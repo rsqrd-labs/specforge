@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from uuid import UUID
 
 from fastapi import HTTPException, status
@@ -129,11 +130,57 @@ class WorkspaceService:
                 stage.status = "stale"
 
     async def archive(
-        self, workspace_id: UUID, user_id: UUID, db: AsyncSession
+        self,
+        workspace_id: UUID,
+        user_id: UUID,
+        db: AsyncSession,
+        ack_version: str | None = None,
     ) -> None:
+        """Move a workspace to the trash (issue #43).
+
+        Sets ``status='archived'`` and stamps the purge clock ``archived_at=now()``
+        plus the ``retention_ack_version`` the delete dialog displayed (when the
+        client supplied it — legacy/stale-SPA deletes leave it NULL and fall into
+        the conservative legacy window). Re-archiving a restored workspace restarts
+        the clock (matches "re-archiving restarts the ladder").
+        """
         workspace = await self.get(workspace_id, user_id, db)
         workspace.status = "archived"
+        workspace.archived_at = datetime.now(UTC)
+        workspace.retention_ack_version = ack_version
         await db.commit()
+
+    async def list_trashed(self, user_id: UUID, db: AsyncSession) -> list[Workspace]:
+        """Return the user's trashed (archived) workspaces, newest-deleted first."""
+        result = await db.execute(
+            select(Workspace)
+            .where(Workspace.user_id == user_id, Workspace.status == "archived")
+            .order_by(Workspace.archived_at.desc().nullslast())
+        )
+        return list(result.scalars())
+
+    async def restore(
+        self, workspace_id: UUID, user_id: UUID, db: AsyncSession
+    ) -> Workspace:
+        """Restore a trashed workspace: archived → active, clear the purge clock.
+
+        Allowed even when the user is at ``max_active_workspaces_per_user`` — this
+        is the user's own data returning, not a new workspace, so restore is never
+        gated on quota (a new create still is). Idempotent for an already-active
+        workspace. 404 when not owned by the caller (via ``get``).
+        """
+        workspace = await self.get(workspace_id, user_id, db)
+        if workspace.status == "archived":
+            workspace.status = "active"
+            workspace.archived_at = None
+            workspace.retention_ack_version = None
+            await db.commit()
+        result = await db.execute(
+            select(Workspace)
+            .where(Workspace.id == workspace.id)
+            .options(selectinload(Workspace.stages))
+        )
+        return result.scalar_one()
 
     async def _active_workspace_count(self, user_id: UUID, db: AsyncSession) -> int:
         result = await db.execute(

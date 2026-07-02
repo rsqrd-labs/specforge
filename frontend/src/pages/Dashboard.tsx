@@ -9,6 +9,7 @@ import { GitHubStatusPill } from "../components/shared/GitHubStatusPill"
 import { CreditMeter } from "../components/shared/CreditMeter"
 import { CreateWorkspaceModal } from "../components/dashboard/CreateWorkspaceModal"
 import { DeleteWorkspaceModal } from "../components/dashboard/DeleteWorkspaceModal"
+import { RecentlyDeletedSection } from "../components/dashboard/RecentlyDeletedSection"
 import { WorkspaceCard } from "../components/dashboard/WorkspaceCard"
 import { TemplatesStrip } from "../components/templates/TemplatesStrip"
 import { featureFlags } from "../config/featureFlags"
@@ -17,8 +18,10 @@ import {
   fetchBillingHistory,
   getApiErrorMessage,
   getCredits,
+  getRetentionPolicy,
   logout,
 } from "../services/api"
+import type { RetentionPolicy } from "../types/retention"
 import { useUserStore } from "../store/userStore"
 import { useWorkspaceStore } from "../store/workspaceStore"
 import type { BillingCreditPack } from "../types/billing"
@@ -237,7 +240,8 @@ function TemplatesErrorFallback() {
 
 export default function Dashboard() {
   const navigate = useNavigate()
-  const { workspaces, isLoading, fetchWorkspaces, deleteWorkspace } = useWorkspaceStore()
+  const { workspaces, isLoading, fetchWorkspaces, fetchTrashed, deleteWorkspace } =
+    useWorkspaceStore()
   const user = useUserStore((state) => state.user)
   const clearUser = useUserStore((state) => state.clearUser)
   const [balance, setBalance] = useState<number | null>(null)
@@ -254,6 +258,7 @@ export default function Dashboard() {
   const [deleteError, setDeleteError] = useState<string | null>(null)
   const [dashboardNotice, setDashboardNotice] = useState<string | null>(null)
   const [activePipelineInfo, setActivePipelineInfo] = useState<PipelineStageId | null>(null)
+  const [retentionPolicy, setRetentionPolicy] = useState<RetentionPolicy | null>(null)
 
   const loadCreditSummary = useCallback(async () => {
     setDashboardNotice(null)
@@ -280,8 +285,14 @@ export default function Dashboard() {
 
   useEffect(() => {
     void fetchWorkspaces()
+    void fetchTrashed()
     void loadCreditSummary()
-  }, [fetchWorkspaces, loadCreditSummary])
+    // Retention policy drives the delete-dialog window + ack version. Best-effort:
+    // a failure leaves the dialog on its generic copy and delete still works.
+    getRetentionPolicy()
+      .then(setRetentionPolicy)
+      .catch(() => setRetentionPolicy(null))
+  }, [fetchWorkspaces, fetchTrashed, loadCreditSummary])
 
   useEffect(() => {
     if (!activePipelineInfo) return
@@ -339,7 +350,7 @@ export default function Dashboard() {
     setDeletingWorkspaceId(workspaceToDelete.id)
     setDeleteError(null)
     try {
-      await deleteWorkspace(workspaceToDelete.id)
+      await deleteWorkspace(workspaceToDelete.id, retentionPolicy?.policy_version)
       setWorkspaceToDelete(null)
     } catch (error) {
       setDeleteError(
@@ -697,6 +708,8 @@ export default function Dashboard() {
         )}
       </div>
 
+      <RecentlyDeletedSection />
+
       <AiDisclaimer variant="footer" className="dashboard-ai-disclaimer" />
 
       {showCreate && (
@@ -720,6 +733,7 @@ export default function Dashboard() {
           workspace={workspaceToDelete}
           error={deleteError}
           isDeleting={deletingWorkspaceId === workspaceToDelete.id}
+          policy={retentionPolicy}
           onCancel={() => {
             if (deletingWorkspaceId) return
             setWorkspaceToDelete(null)

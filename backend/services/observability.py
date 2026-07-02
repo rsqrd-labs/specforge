@@ -594,6 +594,76 @@ def set_background_task_count(registry: str, count: int) -> None:
     BACKGROUND_TASKS.labels(registry=registry).set(max(0, count))
 
 
+# ---------------------------------------------------------------------------
+# Data retention & purging (issue #43; docs/RETENTION_IMPLEMENTATION_PLAN.md).
+# ---------------------------------------------------------------------------
+#
+# Phase 0 — the size baseline every later "size stabilized" claim is judged
+# against (plan §6). Sampled hourly by the worker's ``sample_table_stats`` cron
+# over a FIXED table allowlist, so the ``table`` label is bounded and can never
+# explode Prometheus cardinality. Postgres-only (the sampler no-ops elsewhere).
+DB_TABLE_BYTES = Gauge(
+    "specforge_db_table_bytes",
+    "Total on-disk size (pg_total_relation_size, incl. indexes + TOAST) of a "
+    "retention-tracked table, sampled hourly. The plateau-not-shrink success "
+    "metric: DELETE frees no files, so a flat slope at steady state is the win.",
+    labelnames=["table"],
+)
+DB_TABLE_LIVE_TUPLES = Gauge(
+    "specforge_db_table_live_tuples",
+    "Estimated live row count (pg_stat_user_tables.n_live_tup) of a "
+    "retention-tracked table, sampled hourly.",
+    labelnames=["table"],
+)
+
+
+def record_table_stats(
+    table: str, size_bytes: int | None, live_tuples: int | None
+) -> None:
+    """Publish one retention-tracked table's sampled size + live-tuple count.
+
+    No-op for ``None`` (a stat the sampler could not read is not a data point),
+    so a partial sample never publishes a misleading zero. Clamped ``>= 0``.
+    """
+    if size_bytes is not None:
+        DB_TABLE_BYTES.labels(table=table).set(max(0, size_bytes))
+    if live_tuples is not None:
+        DB_TABLE_LIVE_TUPLES.labels(table=table).set(max(0, live_tuples))
+
+
+# Phase 4 — retention job telemetry (plan §7). ``candidates`` is set every run
+# (including dry-run and flag-off counting) so the backlog alert can watch it
+# rise while a tier's purge flag is on; ``purged_rows`` is the money counter;
+# ``run_seconds`` catches index rot / lock contention; ``last_success`` powers
+# the missed-run pager and is set ONLY on the success path (a crashed run leaves
+# it stale so ``time() - last_success > 26h`` fires). ``job``/``table`` labels are
+# fixed internal strings (one per purge job), so both label sets are bounded.
+RETENTION_CANDIDATES = Gauge(
+    "specforge_retention_candidates",
+    "Rows a retention job found eligible for purge at the start of its run "
+    "(set even in dry-run / flag-off counting mode), labelled by job.",
+    labelnames=["job"],
+)
+RETENTION_PURGED_ROWS = Counter(
+    "specforge_retention_purged_rows_total",
+    "Rows actually deleted by a retention job, labelled by job and the primary "
+    "table it targets (cascade-deleted child rows are not separately counted).",
+    labelnames=["job", "table"],
+)
+RETENTION_RUN_SECONDS = Histogram(
+    "specforge_retention_run_seconds",
+    "Wall-clock duration of one retention job run, labelled by job.",
+    labelnames=["job"],
+    buckets=(0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0),
+)
+RETENTION_LAST_SUCCESS_TIMESTAMP = Gauge(
+    "specforge_retention_last_success_timestamp",
+    "Unix timestamp of a retention job's last successful completion, labelled by "
+    "job. Alert when time() - this > 26h (a missed daily run / persistent error).",
+    labelnames=["job"],
+)
+
+
 # Event-loop lag (F7 — scalability audit P2). The acceptance gate for moving
 # inline CPU work (bleach / full-document regex / difflib) off the loop is "the
 # loop stays responsive while a generation storm is in flight" (audit §8). This

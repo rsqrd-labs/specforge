@@ -29,7 +29,7 @@ def _all_version_modules() -> list:
     return modules
 
 
-def test_0031_revises_0030_and_is_the_single_head() -> None:
+def test_0031_revises_0030_and_history_is_linear() -> None:
     modules = _all_version_modules()
     by_revision = {m.revision: m for m in modules}
     assert "0031" in by_revision, "migration 0031 must exist"
@@ -37,9 +37,12 @@ def test_0031_revises_0030_and_is_the_single_head() -> None:
 
     revised = {m.down_revision for m in modules if m.down_revision}
     heads = [m.revision for m in modules if m.revision not in revised]
-    assert heads == ["0031"], (
-        f"Expected 0031 to be the single migration head, got {heads!r} — a "
-        "branched history breaks `alembic upgrade head` on deploy."
+    # The single head advances as migrations are added (0033 = the retention
+    # trash migration, issue #43). The guard is that there is exactly ONE head —
+    # a branched history breaks `alembic upgrade head` on deploy.
+    assert heads == ["0033"], (
+        f"Expected a single migration head (0033), got {heads!r} — a branched "
+        "history breaks `alembic upgrade head` on deploy."
     )
 
 

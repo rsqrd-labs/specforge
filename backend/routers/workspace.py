@@ -1,7 +1,8 @@
 import logging
+from datetime import timedelta
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from redis.asyncio import Redis
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -32,6 +33,7 @@ from schemas.workspace import (
     ClarifyResponse,
     ClarifySubmitRequest,
     ShareLinkResponse,
+    TrashedWorkspaceResponse,
     WorkspaceCreate,
     WorkspaceCriticToggle,
     WorkspaceResearchToggle,
@@ -138,6 +140,47 @@ async def list_workspaces(
     return responses
 
 
+def _trashed_response(workspace: Workspace) -> TrashedWorkspaceResponse:
+    """Map a trashed workspace to its response, computing the hard-delete date.
+
+    ``purge_after`` = ``archived_at`` + the applicable retention window: the short
+    acked window when the delete recorded an acknowledgment, the conservative
+    legacy window otherwise (mirrors the Tier-3 purge predicate, plan §5.2).
+    """
+    acknowledged = workspace.retention_ack_version is not None
+    window_days = (
+        settings.retention_trash_days
+        if acknowledged
+        else settings.retention_legacy_archived_days
+    )
+    return TrashedWorkspaceResponse(
+        id=workspace.id,
+        name=workspace.name,
+        provider=workspace.provider,
+        archived_at=workspace.archived_at,
+        purge_after=workspace.archived_at + timedelta(days=window_days),
+        acknowledged=acknowledged,
+    )
+
+
+# Declared BEFORE ``GET /{id}`` on purpose: ``/{id}`` has no path converter, so it
+# would otherwise match the literal segment ``trashed`` and 422 on the UUID parse
+# (Starlette matches by declaration order).
+@router.get("/trashed", response_model=list[TrashedWorkspaceResponse])
+async def list_trashed_workspaces(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> list[TrashedWorkspaceResponse]:
+    """Return the user's trashed workspaces for the "Recently deleted" surface.
+
+    Only rows with a set ``archived_at`` are returned (every archived row has one
+    since the 0033 backfill); each carries its computed ``purge_after`` so the UI
+    shows the countdown with Restore + Export until then.
+    """
+    workspaces = await workspace_service.list_trashed(user.id, db)
+    return [_trashed_response(w) for w in workspaces if w.archived_at is not None]
+
+
 @router.get("/{id}", response_model=WorkspaceResponse)
 async def get_workspace(
     id: UUID,
@@ -233,8 +276,41 @@ async def archive_workspace(
     id: UUID,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    ack_version: str | None = Query(
+        default=None,
+        max_length=64,
+        description=(
+            "The retention-policy version the delete dialog displayed "
+            "(from GET /retention/policy). Recorded as proof the user saw the "
+            "trash notice; its presence uses the short trash window for the "
+            "eventual hard-delete (a stale SPA omitting it falls into the "
+            "conservative legacy window)."
+        ),
+    ),
 ) -> None:
-    await workspace_service.archive(id, user.id, db)
+    """Move a workspace to the trash (issue #43).
+
+    Response is unchanged (204). The workspace becomes invisible to the normal
+    list but appears under GET /workspaces/trashed with a restore/export window;
+    the Tier-3 worker cron hard-deletes it only after that window elapses.
+    """
+    await workspace_service.archive(id, user.id, db, ack_version=ack_version)
+
+
+@router.post("/{id}/restore", response_model=WorkspaceResponse)
+async def restore_workspace(
+    id: UUID,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> WorkspaceResponse:
+    """Restore a trashed workspace to active (issue #43).
+
+    Clears the purge clock so it is no longer eligible for hard-delete. Allowed
+    even at the active-workspace quota — it is the user's own data returning.
+    404 when not owned by the caller.
+    """
+    workspace = await workspace_service.restore(id, user.id, db)
+    return await _workspace_response(workspace, db)
 
 
 # _get_redis removed — inject redis via Depends(get_redis).  H-1 — T-177.

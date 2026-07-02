@@ -343,6 +343,49 @@ async def test_archive_workspace_sets_status() -> None:
 
 
 @pytest.mark.asyncio
+async def test_archive_workspace_stamps_trash_clock_and_ack() -> None:
+    # Issue #43: archive sets the purge clock and records the ack version the
+    # delete dialog displayed (the acked short-window path).
+    svc = WorkspaceService()
+    workspace = _make_workspace()
+    workspace.archived_at = None
+    workspace.retention_ack_version = None
+    db = _FakeDB(workspace=workspace)
+    await svc.archive(workspace.id, workspace.user_id, db, ack_version="trash-v1")
+    assert workspace.status == "archived"
+    assert workspace.archived_at is not None
+    assert workspace.retention_ack_version == "trash-v1"
+
+
+@pytest.mark.asyncio
+async def test_archive_workspace_without_ack_leaves_version_null() -> None:
+    # A stale SPA that omits ack_version falls into the conservative legacy window.
+    svc = WorkspaceService()
+    workspace = _make_workspace()
+    workspace.retention_ack_version = "stale"
+    db = _FakeDB(workspace=workspace)
+    await svc.archive(workspace.id, workspace.user_id, db)
+    assert workspace.archived_at is not None
+    assert workspace.retention_ack_version is None
+
+
+@pytest.mark.asyncio
+async def test_restore_workspace_clears_trash_clock() -> None:
+    # Issue #43: restore flips archived → active and clears the purge clock so the
+    # workspace is no longer eligible for hard-delete.
+    svc = WorkspaceService()
+    workspace = _make_workspace(status="archived")
+    workspace.archived_at = datetime.now(UTC)
+    workspace.retention_ack_version = "trash-v1"
+    db = _FakeDB(workspace=workspace)
+    restored = await svc.restore(workspace.id, workspace.user_id, db)
+    assert restored.status == "active"
+    assert restored.archived_at is None
+    assert restored.retention_ack_version is None
+    assert db._committed is True
+
+
+@pytest.mark.asyncio
 async def test_list_for_user_returns_workspaces() -> None:
     svc = WorkspaceService()
     workspace = _make_workspace()
@@ -406,6 +449,49 @@ async def test_archive_workspace_route_wrong_owner_returns_404(app) -> None:
 
     assert response.status_code == 404
     assert response.json()["detail"] == "Workspace not found"
+
+
+@pytest.mark.asyncio
+async def test_trashed_route_is_not_shadowed_by_id_route(app) -> None:
+    # Issue #43: GET /workspaces/trashed must resolve to the trash list, not to
+    # GET /workspaces/{id} with id="trashed" (which would 422 on the UUID parse).
+    workspace = _make_workspace(user_id=_USER_ID, status="archived")
+    workspace.archived_at = datetime.now(UTC)
+    workspace.retention_ack_version = "trash-v1"
+
+    async def _fake_db():
+        yield _FakeDB(workspace=workspace)
+
+    app.dependency_overrides[get_db] = _fake_db
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        response = await client.get("/workspaces/trashed")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert isinstance(body, list)
+    assert body and body[0]["id"] == str(workspace.id)
+    assert body[0]["acknowledged"] is True
+    assert "purge_after" in body[0]
+
+
+@pytest.mark.asyncio
+async def test_retention_policy_route_returns_windows(app) -> None:
+    # Issue #43: the unauthenticated policy endpoint serves the live windows +
+    # the ack version the delete dialog stamps.
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        response = await client.get("/retention/policy")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["policy_version"] == "trash-v1"
+    assert body["trash_days"] >= 1
+    assert "stage_versions_keep" in body
+    assert response.headers.get("Cache-Control", "").startswith("public")
 
 
 # ---------------------------------------------------------------------------
