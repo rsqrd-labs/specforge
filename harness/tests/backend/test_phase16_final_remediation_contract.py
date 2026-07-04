@@ -712,10 +712,19 @@ def test_phase16_eval_orphan_tasks_are_cancelled() -> None:
     which cancels the inner work on expiry. This is strictly safer than the old
     approach.
 
+    Scalability F6 (issue #26 audit P1) then unified the module-level task sets
+    into the bounded ``BoundedTaskRegistry`` (services/pipeline/background_tasks.py):
+    ``_BACKGROUND_EVAL_TASKS`` becomes a registry instance and eval tasks are
+    created via ``_BACKGROUND_EVAL_TASKS.spawn(...)``, whose implementation
+    performs the exact same idiom in one place — create_task, retain a strong
+    reference in the registry set, discard via a done-callback.
+
     The invariant this guards is unchanged — *no orphaned eval tasks* — so the
-    contract accepts either the legacy shield()+explicit-cancel pattern OR the
-    issue-#27 retained-reference + done-callback-discard pattern. It still fails
-    on a bare, untracked ``asyncio.create_task`` with no leak protection.
+    contract accepts the legacy shield()+explicit-cancel pattern OR the
+    issue-#27 retained-reference + done-callback-discard pattern OR the F6
+    registry pattern (checked at both seams: stage_manager routes eval work
+    through the registry, and the registry itself retains + discards). It still
+    fails on a bare, untracked ``asyncio.create_task`` with no leak protection.
     """
     source = read_backend_file("services", "pipeline", "stage_manager.py")
 
@@ -748,13 +757,42 @@ def test_phase16_eval_orphan_tasks_are_cancelled() -> None:
         eval_task_created and retained_in_set and discarded_on_done
     )
 
-    assert has_cancel_on_timeout or has_tracked_fire_and_forget, (
+    # F6 pattern: eval work is spawned through the bounded BoundedTaskRegistry,
+    # which owns the retain/discard idiom for every detached-task family. Check
+    # both seams — stage_manager must actually route through the registry, and
+    # the registry implementation must retain a strong reference and discard it
+    # on completion — so a registry that silently dropped references (or an
+    # eval path that bypassed it) still fails the contract.
+    registry_declared = re.search(
+        r"_BACKGROUND_EVAL_TASKS\s*=\s*BoundedTaskRegistry\(", source
+    )
+    registry_spawned = re.search(r"_BACKGROUND_EVAL_TASKS\.spawn\(", source)
+    registry_source = read_backend_file(
+        "services", "pipeline", "background_tasks.py"
+    )
+    registry_retains = re.search(
+        r"self\._tasks\.add\(\s*task\s*\)", registry_source
+    )
+    registry_discards = re.search(
+        r"task\.add_done_callback\(", registry_source
+    ) and re.search(r"self\._tasks\.discard\(\s*task\s*\)", registry_source)
+    has_registry_fire_and_forget = bool(
+        registry_declared and registry_spawned and registry_retains and registry_discards
+    )
+
+    assert (
+        has_cancel_on_timeout
+        or has_tracked_fire_and_forget
+        or has_registry_fire_and_forget
+    ), (
         "stage_manager.py must protect background eval tasks from orphaning — "
-        "either by cancelling the shielded task in the TimeoutError handler "
-        "(legacy) or by retaining the created task in _BACKGROUND_EVAL_TASKS and "
-        "discarding it via add_done_callback (issue #27 fire-and-forget). Without "
-        "one of these, an untracked task can be GC'd mid-flight or leak open "
-        "connections and thread-pool slots under load. MF-1 — T-205."
+        "by cancelling the shielded task in the TimeoutError handler (legacy), "
+        "by retaining the created task in _BACKGROUND_EVAL_TASKS and discarding "
+        "it via add_done_callback (issue #27 fire-and-forget), or by spawning it "
+        "through the BoundedTaskRegistry which retains a strong reference until "
+        "completion (F6). Without one of these, an untracked task can be GC'd "
+        "mid-flight or leak open connections and thread-pool slots under load. "
+        "MF-1 — T-205."
     )
 
 
