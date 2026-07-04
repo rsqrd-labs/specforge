@@ -25,6 +25,11 @@ const PublicWorkspaceView = lazy(() => import("./pages/PublicWorkspaceView"))
 const Storyboard = lazy(() => import("./pages/Storyboard"))
 const StoryboardPublic = lazy(() => import("./pages/StoryboardPublic"))
 
+// Issue #43 — the published data-retention policy. Outside the auth guard (the
+// policy must be readable without signing in) and lazy-loaded like the other
+// public surfaces.
+const LegalRetention = lazy(() => import("./pages/LegalRetention"))
+
 // Dark-launched behind `branded_loaders`: until the flag flips, lazy chunks
 // keep the prior blank fallback; with it on, every route shows the branded
 // loader instead of a flash of nothing.
@@ -52,6 +57,14 @@ export default function App() {
             element={
               <Suspense fallback={routeFallback}>
                 <StoryboardPublic />
+              </Suspense>
+            }
+          />
+          <Route
+            path="/legal/retention"
+            element={
+              <Suspense fallback={routeFallback}>
+                <LegalRetention />
               </Suspense>
             }
           />

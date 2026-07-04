@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react"
+import { Link } from "react-router-dom"
 import { getRetentionPolicy } from "../../services/api"
 import type { RetentionPolicy } from "../../types/retention"
 
@@ -67,14 +68,12 @@ export default function DataRetentionPanel() {
         </dl>
       )}
 
-      <a
-        className="data-retention-policy-link"
-        href="https://specforge.dev/legal/retention"
-        target="_blank"
-        rel="noreferrer noopener"
-      >
+      {/* Client-side navigation to the in-app policy page: a relative Link
+          works on every origin the SPA is served from (localhost, staging,
+          production), unlike the old hardcoded absolute domain. */}
+      <Link className="data-retention-policy-link" to="/legal/retention">
         Read the full data retention policy →
-      </a>
+      </Link>
     </div>
   )
 }
