@@ -9,8 +9,9 @@ invariant ``remaining + consumed + expired + debt_recovered <= purchased``.
 
 Mirrors migration ``0018_billing_neutral_tables.py`` one-for-one — the same CHECK
 constraints are declared here for defence-in-depth (matching the ``StripeCreditPack``
-style). The partial unique idempotency indexes on ``(provider, provider_order_id)`` and
-``(provider, provider_checkout_id)`` live in the migration.
+style); the provider CHECK was widened for Razorpay by ``0034_razorpay_provider.py``
+(issue #44). The partial unique idempotency indexes on ``(provider, provider_order_id)``
+and ``(provider, provider_checkout_id)`` live in the migration.
 
 Phase 22 — T-291 (Plan §25.6).
 """
@@ -39,7 +40,7 @@ class BillingCreditPack(Base):
     __tablename__ = "billing_credit_packs"
     __table_args__ = (
         CheckConstraint(
-            "provider IN ('lemonsqueezy','stripe')",
+            "provider IN ('lemonsqueezy','stripe','razorpay')",
             name="ck_bcp_provider",
         ),
         CheckConstraint("credits_purchased > 0", name="ck_bcp_purchased_positive"),

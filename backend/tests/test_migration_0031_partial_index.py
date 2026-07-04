@@ -37,11 +37,11 @@ def test_0031_revises_0030_and_history_is_linear() -> None:
 
     revised = {m.down_revision for m in modules if m.down_revision}
     heads = [m.revision for m in modules if m.revision not in revised]
-    # The single head advances as migrations are added (0033 = the retention
-    # trash migration, issue #43). The guard is that there is exactly ONE head —
-    # a branched history breaks `alembic upgrade head` on deploy.
-    assert heads == ["0033"], (
-        f"Expected a single migration head (0033), got {heads!r} — a branched "
+    # The single head advances as migrations are added (0034 = the Razorpay
+    # provider-CHECK widening, issue #44). The guard is that there is exactly ONE
+    # head — a branched history breaks `alembic upgrade head` on deploy.
+    assert heads == ["0034"], (
+        f"Expected a single migration head (0034), got {heads!r} — a branched "
         "history breaks `alembic upgrade head` on deploy."
     )
 

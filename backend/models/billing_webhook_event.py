@@ -7,7 +7,8 @@ arq worker (T-297/T-298). The 4-part identity ``(provider, event_name,
 provider_object_id, payload_hash)`` is UNIQUE for duplicate detection under the
 provider's at-least-once retry semantics.
 
-Mirrors migration ``0018_billing_neutral_tables.py``; the partial index on the
+Mirrors migration ``0018_billing_neutral_tables.py``; the provider CHECK was widened
+for Razorpay by ``0034_razorpay_provider.py`` (issue #44). The partial index on the
 ``received/failed/processing`` pending set lives in the migration. Bounded by the
 daily ``purge_billing_events`` retention job (T-298).
 
@@ -33,7 +34,7 @@ class BillingWebhookEvent(Base):
     __tablename__ = "billing_webhook_events"
     __table_args__ = (
         CheckConstraint(
-            "provider IN ('lemonsqueezy','stripe')",
+            "provider IN ('lemonsqueezy','stripe','razorpay')",
             name="ck_bwe_provider",
         ),
         CheckConstraint(

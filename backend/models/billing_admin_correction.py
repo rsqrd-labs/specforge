@@ -8,7 +8,8 @@ a user with correction rows cannot be hard-deleted without settlement — Plan �
 
 There are deliberately **no** UPDATE/DELETE application paths — rows are written once.
 
-Mirrors migration ``0018_billing_neutral_tables.py``.
+Mirrors migration ``0018_billing_neutral_tables.py``; the provider CHECK was widened
+for Razorpay by ``0034_razorpay_provider.py`` (issue #44).
 
 Phase 22 — T-291 (Plan §25.6).
 """
@@ -31,7 +32,7 @@ class BillingAdminCorrection(Base):
     __tablename__ = "billing_admin_corrections"
     __table_args__ = (
         CheckConstraint(
-            "provider IN ('lemonsqueezy','stripe')",
+            "provider IN ('lemonsqueezy','stripe','razorpay')",
             name="ck_bac_provider",
         ),
         CheckConstraint("credits > 0", name="ck_bac_credits_positive"),

@@ -8,8 +8,9 @@ becomes a column. The signed ``order_created`` webhook is the sole grant authori
 prove ``checkout_ref`` + the stored nonce hash against this row.
 
 Mirrors migration ``0018_billing_neutral_tables.py`` one-for-one (same CHECKs at the
-app level for defence-in-depth, matching the ``StripeCreditPack`` style). The partial
-unique index on ``(provider, provider_checkout_id)`` lives in the migration.
+app level for defence-in-depth, matching the ``StripeCreditPack`` style); the provider
+CHECK was widened for Razorpay by ``0034_razorpay_provider.py`` (issue #44). The
+partial unique index on ``(provider, provider_checkout_id)`` lives in the migration.
 
 Phase 22 — T-291 (Plan §25.6).
 """
@@ -39,7 +40,7 @@ class BillingCheckoutAttempt(Base):
     __tablename__ = "billing_checkout_attempts"
     __table_args__ = (
         CheckConstraint(
-            "provider IN ('lemonsqueezy','stripe')",
+            "provider IN ('lemonsqueezy','stripe','razorpay')",
             name="ck_bca_provider",
         ),
         CheckConstraint("credits > 0", name="ck_bca_credits_positive"),

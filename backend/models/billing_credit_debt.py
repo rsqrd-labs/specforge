@@ -6,7 +6,8 @@ credits than a pack still has remaining (Plan §25 DC5). One debt row per source
 lost on pack deletion. A later purchase's grant pays debt first (``credits_recovered``
 climbs toward ``credits_owed``; ``status`` flips to ``recovered``).
 
-Mirrors migration ``0018_billing_neutral_tables.py`` (same CHECK at app level).
+Mirrors migration ``0018_billing_neutral_tables.py`` (same CHECK at app level); the
+provider CHECK was widened for Razorpay by ``0034_razorpay_provider.py`` (issue #44).
 
 Phase 22 — T-291 (Plan §25.6).
 """
@@ -29,7 +30,7 @@ class BillingCreditDebt(Base):
     __tablename__ = "billing_credit_debts"
     __table_args__ = (
         CheckConstraint(
-            "provider IN ('lemonsqueezy','stripe')",
+            "provider IN ('lemonsqueezy','stripe','razorpay')",
             name="ck_bcd_provider",
         ),
         CheckConstraint("credits_owed > 0", name="ck_bcd_owed_positive"),

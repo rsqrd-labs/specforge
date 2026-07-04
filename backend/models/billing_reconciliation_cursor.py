@@ -2,11 +2,12 @@
 
 The authoritative, durable state for the periodic three-lane reconcile job (T-301) —
 stored in Postgres, not Redis, so it survives a cache flush. ``provider`` is the
-primary key and is ``lemonsqueezy``-only (it never holds a ``stripe`` row); the
-migration seeds the single ``('lemonsqueezy')`` row. ``last_successful_run_at`` bounds
+primary key: one row per reconciling provider — ``lemonsqueezy`` (seeded by 0018)
+and ``razorpay`` (seeded by 0034, issue #44). It never holds a ``stripe`` row
+(Stripe never reconciles — T-308 decommission). ``last_successful_run_at`` bounds
 how far back lane-2 scans the provider's order list.
 
-Mirrors migration ``0018_billing_neutral_tables.py``.
+Mirrors migrations ``0018_billing_neutral_tables.py`` + ``0034_razorpay_provider.py``.
 
 Phase 22 — T-291 (Plan §25.6).
 """
@@ -24,12 +25,12 @@ from models import Base
 
 
 class BillingReconciliationCursor(Base):
-    """The single lemonsqueezy reconcile cursor (one row, provider is the PK)."""
+    """Per-provider reconcile cursor (one row per provider, provider is the PK)."""
 
     __tablename__ = "billing_reconciliation_cursors"
     __table_args__ = (
         CheckConstraint(
-            "provider IN ('lemonsqueezy')",
+            "provider IN ('lemonsqueezy','razorpay')",
             name="ck_brc_provider",
         ),
     )
