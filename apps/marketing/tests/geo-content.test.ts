@@ -167,6 +167,7 @@ describe("entity-language consistency", () => {
       "templates/index.html",
       "compare/index.html",
       "demos/index.html",
+      "legal/retention/index.html",
     ]) {
       expect(readDist(file)).toContain(ENTITY_DESCRIPTION)
     }

@@ -1,0 +1,178 @@
+---
+// Data retention policy — the user-facing legal page for issue #43. This is the
+// published policy that the SPA links from Settings → Data retention and that
+// the delete-confirmation dialog's acknowledgment references (policy version
+// "trash-v1", services/retention.py). Publishing it is a hard precondition for
+// enabling workspace hard-deletion in production (RETENTION_IMPLEMENTATION_PLAN
+// §5.5); the authoritative source text is docs/RETENTION_POLICY.md — keep the
+// two in sync and bump the policy version on any semantic change.
+//
+// The windows below are the production defaults from backend/config.py. They
+// are stated statically because this is a versioned policy document, not a live
+// dashboard — the live values render in the app under Settings → Data retention.
+import ContentLayout from "../../layouts/ContentLayout.astro"
+import Breadcrumbs from "../../components/content/Breadcrumbs.astro"
+import { breadcrumbListSchema, type BreadcrumbItem } from "../../lib/seo"
+
+const title = "SpecForge Data Retention Policy"
+const description =
+  "How long SpecForge keeps your workspaces, version history, and telemetry — the 30-day trash window, what you can restore or export, and what is retained for billing and audit."
+
+const path = "/legal/retention"
+
+const crumbs: BreadcrumbItem[] = [
+  { name: "Home", path: "/" },
+  { name: "Data retention policy", path },
+]
+const jsonLd = breadcrumbListSchema(crumbs)
+
+const windows = [
+  ["Trashed workspaces", "30 days after you delete a workspace", "Restore or export it any time before then"],
+  ["Workspaces deleted before this policy (or without a recorded notice)", "180 days", "Conservative fallback window"],
+  ["Stage version history", "Most recent 20 versions per stage always kept; older ones pruned after 90 days", "The current version and anything pushed to GitHub are never pruned"],
+  ["Keynotes (Storyboards)", "Most recent 5 per workspace always kept; older ones pruned after 90 days", "A keynote with a live public share link is never pruned"],
+  ["Internal telemetry (cost, quality, failed background jobs)", "Up to 180 days", "Never surfaced in the product"],
+  ["Account, credit ledger, billing history, integrations", "For as long as your account exists", "Financial, security, and audit record"],
+]
+---
+
+<ContentLayout title={title} description={description} path={path} jsonLd={jsonLd}>
+  <main class="content-main">
+    <Breadcrumbs items={crumbs} />
+    <article>
+      <header class="content-header">
+        <span class="content-kicker">Legal</span>
+        <h1>SpecForge Data Retention Policy</h1>
+        <p class="content-lede">
+          How long SpecForge keeps your data, and how you stay in control of it.
+          Policy version: <strong>trash-v1</strong>.
+        </p>
+      </header>
+
+      <div class="prose-body">
+        <p>
+          The guiding principle: SpecForge keeps your <strong>active</strong> work
+          indefinitely, prunes only redundant history and internal telemetry on a
+          schedule, and never permanently deletes a workspace without either your
+          recorded acknowledgment plus a restore/export window, or a long
+          conservative fallback window.
+        </p>
+
+        <h2>At a glance</h2>
+        <table class="comparison-table">
+          <thead>
+            <tr>
+              <th scope="col">Data</th>
+              <th scope="col">Kept for</th>
+              <th scope="col">Notes</th>
+            </tr>
+          </thead>
+          <tbody>
+            {windows.map(([data, kept, notes]) => (
+              <tr>
+                <td>{data}</td>
+                <td>{kept}</td>
+                <td>{notes}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+
+        <h2>Deleting a workspace: trash, then permanent deletion</h2>
+        <p>
+          Deleting a workspace <strong>moves it to the trash</strong>. It leaves
+          your active dashboard but is not destroyed:
+        </p>
+        <ul>
+          <li>
+            It appears under <strong>Recently deleted</strong> on your dashboard
+            with a countdown.
+          </li>
+          <li>
+            You can <strong>Restore</strong> it (it returns to active exactly as
+            it was) or <strong>Export</strong> it (a full ZIP of the finalised
+            spec, plan, harness, and tasks) any time during the window.
+          </li>
+          <li>
+            After <strong>30 days</strong> it is permanently deleted along with
+            its versions, keynotes, and GitHub-sync records. Your credit history
+            and account remain untouched, and anything already pushed to your
+            GitHub repository stays in your repository — SpecForge only removes
+            its own sync records.
+          </li>
+        </ul>
+        <p>Restoring, then deleting again, restarts the 30-day clock.</p>
+        <p>
+          Workspaces deleted before this policy took effect (or from an
+          out-of-date browser session that could not record the notice) are kept
+          for a longer conservative window of <strong>180 days</strong> before
+          permanent deletion.
+        </p>
+        <p>
+          Permanent deletion is irreversible. Export anything you want to keep
+          first.
+        </p>
+
+        <h2>Version and keynote history</h2>
+        <p>
+          To keep your workspaces fast and your storage bounded, older redundant
+          history is pruned:
+        </p>
+        <ul>
+          <li>
+            <strong>Stage versions</strong> — the most recent 20 versions of each
+            stage are always kept. Older versions are pruned only once they are
+            more than 90 days old. The version your workspace currently points at
+            is never pruned, and neither is any version that has been pushed to
+            GitHub.
+          </li>
+          <li>
+            <strong>Keynotes (Storyboards)</strong> — the most recent 5 keynotes
+            per workspace are kept; older ones are pruned once more than 90 days
+            old. A keynote with a live public share link is never pruned.
+          </li>
+        </ul>
+
+        <h2>Internal telemetry</h2>
+        <p>
+          SpecForge keeps internal operational logs (LLM cost and quality events,
+          evaluation results, failed background-job records) for up to
+          <strong>180 days</strong> to run and improve the service. These contain
+          no shareable artifact content beyond what is needed for cost and
+          quality accounting, and are never surfaced in the product.
+        </p>
+
+        <h2>What is kept indefinitely</h2>
+        <p>
+          Your account, credit ledger and billing history, connected integrations
+          (for example GitHub installations), and starter templates are retained
+          for as long as your account exists, for financial, security, and audit
+          reasons.
+        </p>
+
+        <h2>Your controls</h2>
+        <ul>
+          <li>
+            <strong>Restore</strong> or <strong>Export</strong> any trashed
+            workspace before its window ends.
+          </li>
+          <li>
+            <strong>Export</strong> any finalised workspace at any time (ZIP or
+            PDF).
+          </li>
+          <li>
+            The live retention windows are always shown in the app under
+            <strong>Settings → Data retention</strong>.
+          </li>
+        </ul>
+
+        <h2>Account deletion and data-subject requests</h2>
+        <p>
+          Deleting your entire account (as opposed to a single workspace) and
+          formal data-subject access or erasure requests are handled separately —
+          contact support and we will process your request.
+        </p>
+      </div>
+    </article>
+  </main>
+</ContentLayout>

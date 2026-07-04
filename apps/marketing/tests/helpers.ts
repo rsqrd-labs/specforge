@@ -28,6 +28,7 @@ export const INDEXABLE_ROUTES: Record<string, string> = {
   "/templates": "templates/index.html",
   "/compare": "compare/index.html",
   "/demos": "demos/index.html",
+  "/legal/retention": "legal/retention/index.html",
 }
 
 /** Route paths that MUST NOT appear in the sitemap or be Astro-built pages. */

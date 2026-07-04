@@ -7,6 +7,12 @@ of it. It is the user-facing companion to the operational runbook (`RUNBOOK.md`
 §18) and must be published — alongside the Terms of Service / Privacy updates
 that reference it — **before** workspace hard-deletion is enabled in production.
 
+**Published at `/legal/retention`** (the URL the Settings → Data retention panel
+links to), served by the marketing zone from
+`apps/marketing/src/pages/legal/retention.astro`. That page is the rendered form
+of this document — keep the two in sync and bump the policy version on any
+semantic change.
+
 The guiding principle: SpecForge keeps your **active** work indefinitely, prunes
 only redundant history and internal telemetry on a schedule, and **never**
 hard-deletes a workspace without either your recorded acknowledgment plus a
