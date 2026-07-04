@@ -467,6 +467,14 @@ class _BaseWorkerSettings:
     arq job-slot budgets — so a bulk-export storm cannot occupy the fast lane's
     slots. Everything except the queue name, function roster, and cron set is
     identical, so it lives here once.
+
+    arq's CLI introspects ``settings_cls.__dict__`` directly (``get_kwargs`` in
+    ``arq.worker``) and never walks the MRO, so attributes left only on this
+    base class are INVISIBLE to ``arq worker.WorkerSettings`` — both lanes
+    would silently boot on arq defaults (localhost Redis, no startup hook, no
+    job limits). ``__init_subclass__`` therefore materialises every shared
+    attribute into each subclass's own namespace at class-creation time; a
+    subclass override (e.g. the fast lane's ``max_jobs``) still wins.
     """
 
     redis_settings = _redis_settings()
@@ -476,6 +484,12 @@ class _BaseWorkerSettings:
     keep_result = _KEEP_RESULT_SECONDS
     on_startup = _on_startup
     on_shutdown = _on_shutdown
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        super().__init_subclass__(**kwargs)
+        for name, value in _BaseWorkerSettings.__dict__.items():
+            if not name.startswith("_") and name not in cls.__dict__:
+                setattr(cls, name, value)
 
 
 class WorkerSettings(_BaseWorkerSettings):

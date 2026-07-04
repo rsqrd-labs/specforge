@@ -235,6 +235,35 @@ def test_global_crons_registered_on_exactly_one_lane() -> None:
     assert "cron:reconcile_drift" in bulk_crons
 
 
+def test_shared_settings_visible_to_arq_cli_introspection() -> None:
+    from arq.worker import get_kwargs
+
+    import worker
+
+    # arq's CLI builds the Worker from settings_cls.__dict__ (get_kwargs) and
+    # never walks the MRO, so an attribute living only on _BaseWorkerSettings
+    # is invisible to `arq worker.WorkerSettings` — the lane would silently
+    # boot on arq defaults (localhost Redis, no on_startup, default max_jobs).
+    for lane in (worker.WorkerSettings, worker.FastWorkerSettings):
+        kwargs = get_kwargs(lane)
+        for attr in (
+            "redis_settings",
+            "max_jobs",
+            "max_tries",
+            "job_timeout",
+            "keep_result",
+            "on_startup",
+            "on_shutdown",
+        ):
+            assert attr in kwargs, f"{lane.__name__}.{attr} invisible to arq CLI"
+        assert kwargs["redis_settings"] is worker._BaseWorkerSettings.redis_settings
+    # A subclass override must still beat the materialised shared value.
+    assert (
+        get_kwargs(worker.FastWorkerSettings)["max_jobs"]
+        < get_kwargs(worker.WorkerSettings)["max_jobs"]
+    )
+
+
 async def test_sample_queue_stats_publishes_depth_and_age() -> None:
     import time
 
