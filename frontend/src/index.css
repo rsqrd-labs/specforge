@@ -424,6 +424,66 @@ button:disabled {
   fill: #3b2a20;
 }
 
+/* Warm catch-light on the eye; nested in `.squirrel-eye` so it inherits the
+   dark fill by default and must override it here. */
+.squirrel-eye-shine {
+  fill: #fff6ec;
+}
+
+/* Face/coat detail: pale belly + inner ears, blushed cheek, and the fine
+   dark whiskers + smile. Kept as their own tokens so they sit above the fur. */
+.squirrel-belly {
+  fill: #ffe7c8;
+  opacity: 0.9;
+}
+
+.squirrel-inner-ear {
+  fill: #ffd0b0;
+}
+
+.squirrel-cheek {
+  fill: #fd80a9;
+  opacity: 0.45;
+}
+
+.squirrel-whiskers,
+.squirrel-mouth {
+  fill: none;
+  stroke: #3b2a20;
+  stroke-linecap: round;
+}
+
+.squirrel-whiskers {
+  stroke-width: 0.32;
+  opacity: 0.4;
+}
+
+.squirrel-mouth {
+  stroke-width: 0.5;
+  opacity: 0.8;
+}
+
+/* Acorn clasped at the chest — the unambiguous squirrel cue. Warm nut body,
+   darker domed cap + stem. Its own tokens so it sits above the belly/paws. */
+.squirrel-acorn-nut {
+  fill: #d98e4a;
+}
+
+.squirrel-acorn-cap {
+  fill: #7a4a24;
+}
+
+.squirrel-acorn-cap-brim {
+  fill: #8a562c;
+}
+
+.squirrel-acorn-stem {
+  fill: none;
+  stroke: #6a3f1f;
+  stroke-width: 0.7;
+  stroke-linecap: round;
+}
+
 /* Motion lives on the shared mark itself, so the same squirrel bobs/flicks/blinks
    wherever it renders — the animated product logo ({@link BrandLogo}) and the
    loader ({@link BrandLoader}) alike. The logo has no JS reduced-motion swap, so
@@ -437,13 +497,13 @@ button:disabled {
 
 .squirrel-tail {
   transform-box: view-box;
-  transform-origin: 30px 40px;
+  transform-origin: 25px 41px;
   animation: squirrel-tail 1.4s ease-in-out infinite;
 }
 
 .squirrel-eye {
   transform-box: view-box;
-  transform-origin: 13.4px 14.4px;
+  transform-origin: 14.5px 12px;
   animation: squirrel-blink 3.4s ease-in-out infinite;
 }
 
@@ -484,10 +544,10 @@ button:disabled {
 @keyframes squirrel-tail {
   0%,
   100% {
-    transform: rotate(0deg);
+    transform: rotate(2deg);
   }
   50% {
-    transform: rotate(-13deg);
+    transform: rotate(-8deg);
   }
 }
 
