@@ -1171,6 +1171,8 @@ async def handle_order_created(ctx: dict, webhook_event_id: str) -> None:
             attempt.status = "completed"
             if attempt.completed_at is None:
                 attempt.completed_at = _now()
+            if attempt.provider_order_id is None:
+                attempt.provider_order_id = order_id
             webhook.status = "processed"
             webhook.processed_at = _now()
             await db.commit()
@@ -1243,6 +1245,11 @@ async def handle_order_created(ctx: dict, webhook_event_id: str) -> None:
 
         attempt.status = "completed"
         attempt.completed_at = _now()
+        # T-296 contract: GET /billing/status resolves the granted pack through
+        # (attempt.provider, attempt.provider_order_id) and 404s while the order
+        # id is NULL — without this stamp a completed Lemon purchase polls as
+        # pending forever (the Razorpay handler has stamped it from day one).
+        attempt.provider_order_id = order_id
         webhook.status = "processed"
         webhook.processed_at = _now()
         await db.commit()

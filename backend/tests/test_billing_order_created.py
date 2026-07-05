@@ -272,6 +272,7 @@ async def _attempt_status(maker: async_sessionmaker, attempt_id: UUID) -> tuple:
             select(
                 BillingCheckoutAttempt.status,
                 BillingCheckoutAttempt.completed_at,
+                BillingCheckoutAttempt.provider_order_id,
             ).where(BillingCheckoutAttempt.id == attempt_id)
         )
         return row.one()
@@ -331,9 +332,12 @@ async def test_grants_with_no_checkout_id_when_ref_and_nonce_match(
     assert pack.currency == currency
     assert pack.provider_order_total_cents == price_cents
 
-    status, completed_at = await _attempt_status(db_maker, attempt_id)
+    status, completed_at, stamped_order_id = await _attempt_status(db_maker, attempt_id)
     assert status == "completed"
     assert completed_at is not None
+    # T-296 contract: GET /billing/status 404s while provider_order_id is NULL,
+    # so the grant must stamp it or a completed purchase polls as pending forever.
+    assert stamped_order_id == order_id
 
     assert await _wh_status(db_maker, wid) == "processed"
     assert await _purchase_ledger_count(db_maker, order_id) == 1
@@ -531,6 +535,51 @@ async def test_duplicate_order_created_does_not_double_credit(
     assert await _pack_count(db_maker, user_id) == 1
     assert await _wh_status(db_maker, wh2_id) == "processed"
     assert await _purchase_ledger_count(db_maker, order_id) == 1
+
+
+async def test_redelivery_backfills_legacy_null_provider_order_id(
+    session, db_maker, cleanup
+) -> None:
+    """A redelivery heals a completed attempt whose order id was never stamped.
+
+    Attempts granted before the provider_order_id stamp existed sit at
+    status='completed' with a NULL order id, so GET /billing/status 404s them
+    forever. The duplicate path backfills the id from the redelivered payload.
+    """
+    nonce_hash = hashlib.sha256(b"nonce-legacy").hexdigest()
+    user = await _make_user(session, cleanup)
+    attempt = await _make_attempt(session, user, nonce_hash)
+    attempt_id = attempt.id
+    order_id = f"ord_{uuid4().hex[:10]}"
+    wh1 = await _make_webhook(
+        session, cleanup, _payload(attempt, nonce_hash, order_id=order_id)
+    )
+    wh2 = await _make_webhook(
+        session,
+        cleanup,
+        _payload(
+            attempt,
+            nonce_hash,
+            order_id=order_id,
+            updated_at="2026-06-06T12:12:12.000000Z",
+        ),
+    )
+    wh2_id = wh2.id
+
+    await billing_worker.handle_order_created({}, str(wh1.id))
+
+    # Simulate the legacy pre-fix state: granted, but the stamp never happened.
+    async with db_maker() as db:
+        legacy = await db.get(BillingCheckoutAttempt, attempt_id)
+        legacy.provider_order_id = None
+        await db.commit()
+
+    await billing_worker.handle_order_created({}, str(wh2_id))
+
+    status, _, stamped_order_id = await _attempt_status(db_maker, attempt_id)
+    assert status == "completed"
+    assert stamped_order_id == order_id
+    assert await _wh_status(db_maker, wh2_id) == "processed"
 
 
 async def test_reprocessing_same_row_is_idempotent(session, db_maker, cleanup) -> None:
