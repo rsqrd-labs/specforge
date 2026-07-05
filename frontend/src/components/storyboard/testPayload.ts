@@ -125,6 +125,93 @@ export function makeStoryboardPayload(
   return { ...payload, ...overrides }
 }
 
+// ---------------------------------------------------------------------------
+// Max-cap fixture (Storyboard output-quality plan P1.4) — a deck at the
+// generation-schema maxima from backend/prompts/storyboard.py. This is the
+// regression anchor for every future layout change: if it renders un-clipped,
+// every real deck does.
+// ---------------------------------------------------------------------------
+
+// 18 words / 140 characters — both headline maxima (15×7 + 3×6 chars + 17 spaces).
+export const MAX_CAP_HEADLINE = [
+  ...Array<string>(15).fill("maximal"),
+  ...Array<string>(3).fill("stress"),
+].join(" ")
+
+// 45 words / 359 characters (≤ the 360-char cap): 45×7 chars + 44 spaces.
+export const MAX_CAP_VISIBLE_TEXT = Array<string>(45).fill("connect").join(" ")
+
+// Five points of eight words each — the visual-descriptor stress shape.
+export const MAX_CAP_POINTS = Array.from({ length: 5 }, (_, index) =>
+  Array<string>(8).fill(`signal${index}`).join(" "),
+)
+
+// 120 characters — the diagram-layer label maximum.
+export const MAX_CAP_LAYER_LABEL = Array<string>(15).fill("maximal").join(" ")
+
+function maxCapLayer(kind: StoryboardLayerKind): StoryboardDiagramLayer {
+  return {
+    id: `${kind}-layer`,
+    kind,
+    label: MAX_CAP_LAYER_LABEL,
+    summary: `${kind} summary`,
+    source_refs: [source("PLAN", `${kind} architecture excerpt`)],
+  }
+}
+
+export function makeMaxCapStoryboardPayload(): StoryboardPayload {
+  const sections = STORYBOARD_TEST_ACTS.map((title) => {
+    const id = slideId(title)
+    const isArchitecture = title === "Technical Architecture"
+    return {
+      id,
+      title,
+      slides: [
+        {
+          id: `${id}-slide-a`,
+          type: isArchitecture ? ("architecture" as const) : ("hero" as const),
+          headline: MAX_CAP_HEADLINE,
+          visible_text: MAX_CAP_VISIBLE_TEXT,
+          visual: { kind: "bullets", points: MAX_CAP_POINTS },
+          speaker_notes_ref: `${id}-slide-a`,
+          sources: ["SPEC", "PLAN", "HARNESS", "TASKS"] as SourceRef["source"][],
+        },
+        {
+          id: `${id}-slide-b`,
+          type: "product" as const,
+          headline: MAX_CAP_HEADLINE,
+          visible_text: MAX_CAP_VISIBLE_TEXT,
+          visual: { kind: "metric", value: "99.999%", label: MAX_CAP_POINTS[0] },
+          speaker_notes_ref: `${id}-slide-b`,
+          sources: ["SPEC", "PLAN"] as SourceRef["source"][],
+        },
+      ],
+    }
+  })
+  return makeStoryboardPayload({
+    title: MAX_CAP_HEADLINE,
+    sections,
+    diagrams: [
+      {
+        id: "architecture-reveal",
+        type: "architecture_reveal",
+        layers: (
+          [
+            "client",
+            "frontend",
+            "api",
+            "data",
+            "llm",
+            "integrations",
+            "trust",
+            "recovery",
+          ] as StoryboardLayerKind[]
+        ).map(maxCapLayer),
+      },
+    ],
+  })
+}
+
 export function makePublicStoryboard(
   overrides: Partial<StoryboardPublicResponse> = {},
 ): StoryboardPublicResponse {

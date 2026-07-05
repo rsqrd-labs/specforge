@@ -324,7 +324,6 @@ export function ArchitectureReveal({
           const layer = byKind.get(kind) ?? layerForKind(all, kind)
           const index = seqIndex(kind)
           const active = isActiveKind(kind)
-          const sourceId = layer.source_refs[0]?.source_id
           return (
             <foreignObject
               key={kind}
@@ -344,7 +343,6 @@ export function ArchitectureReveal({
               <div className="arch-node" data-arch-node={kind}>
                 <span className="arch-node__kind">{kind}</span>
                 <strong className="arch-node__label">{layer.label}</strong>
-                {sourceId && <small className="arch-node__source">{sourceId}</small>}
               </div>
             </foreignObject>
           )

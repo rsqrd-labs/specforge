@@ -2,6 +2,7 @@ import {
   type CSSProperties,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -85,6 +86,35 @@ const VISUAL_KIND_LABEL: Record<string, string> = {
 }
 
 const VISUAL_POINTS_MAX = 5
+
+// Stepped autofit: the stage frame is a fixed 16:9 box, so a slide at the
+// schema maxima can overflow it. After each slide renders we measure overflow
+// and bump `data-fit-step` (0..MAX_SLIDE_FIT_STEP); CSS defines a reduced,
+// deterministic type scale per step (via --sb-fit). Font-size steps only —
+// never a continuous transform scale, which blurs text and breaks the glass
+// styling. A slide that still overflows at the last step scrolls (the CSS
+// overflow-y safety net) instead of being silently clipped.
+export const MAX_SLIDE_FIT_STEP = 3
+
+// The +1 fudge absorbs sub-pixel rounding so a slide that effectively fits is
+// never stepped down. Takes the minimal element surface so tests can drive it
+// with a plain object.
+export function applySlideFitStep(article: {
+  readonly scrollHeight: number
+  readonly clientHeight: number
+  setAttribute(name: string, value: string): void
+}): number {
+  let step = 0
+  article.setAttribute("data-fit-step", "0")
+  while (
+    step < MAX_SLIDE_FIT_STEP &&
+    article.scrollHeight > article.clientHeight + 1
+  ) {
+    step += 1
+    article.setAttribute("data-fit-step", String(step))
+  }
+  return step
+}
 
 // Every palette colour the LLM emits is validated as #RRGGBB at generation time;
 // we guard again here before injecting into a style object so a malformed value
@@ -224,9 +254,9 @@ function findArchitectureDiagram(
 
 // Deterministic, theme-driven slide visual. It renders from the slide's own
 // structured data keyed by visual.kind — descriptor bullets/metric when the
-// model supplied them, otherwise the headline as a clean caption — plus the
-// grounding source badges. It never renders source-artifact excerpts or any
-// generated media, so every slide reads as a designed keynote panel.
+// model supplied them, otherwise a theme motif band. It never renders
+// source-artifact excerpts, source citations, or any generated media, so every
+// slide reads as a designed keynote panel; evidence lives in the Sources layer.
 function SlideVisual({
   slide,
   palette,
@@ -358,6 +388,7 @@ export function StoryboardDeck({
   onExit,
 }: StoryboardDeckProps) {
   const shellRef = useRef<HTMLDivElement>(null)
+  const slideRef = useRef<HTMLElement>(null)
   const sections = useMemo(() => sixActSections(payload), [payload])
   const slides = useMemo(() => flattenSlides(sections), [sections])
   const architectureDiagram = useMemo(() => findArchitectureDiagram(payload), [payload])
@@ -497,6 +528,22 @@ export function StoryboardDeck({
     return () => window.removeEventListener("keydown", handleShortcut)
   }, [handleShortcut])
 
+  // Re-fit the active slide after every remount (the article is keyed on the
+  // slide index) and whenever the stage resizes. Measuring is synchronous in a
+  // layout effect so the audience never sees an oversized flash. ResizeObserver
+  // is guarded for test environments (jsdom) that do not implement it.
+  useLayoutEffect(() => {
+    const article = slideRef.current
+    if (!article) return
+    applySlideFitStep(article)
+    if (typeof ResizeObserver === "undefined") return
+    const observer = new ResizeObserver(() => {
+      if (slideRef.current) applySlideFitStep(slideRef.current)
+    })
+    observer.observe(article)
+    return () => observer.disconnect()
+  }, [activeSlideIndex, payload, canShowDeck])
+
   if (!canShowDeck || !payload) {
     return (
       <section className="storyboard-deck-shell storyboard-deck-shell-empty">
@@ -594,6 +641,8 @@ export function StoryboardDeck({
         </div>
         <article
           key={activeSlideIndex}
+          ref={slideRef}
+          data-fit-step="0"
           className={`storyboard-slide storyboard-slide--${slide?.type ?? "thesis"} storyboard-slide--layout-${layout}${
             isArchitectureSlide ? " storyboard-slide--arch" : ""
           }${isActOpening ? " storyboard-slide--act-open" : ""}${
@@ -619,13 +668,6 @@ export function StoryboardDeck({
             <div className="storyboard-slide-text">
               <MarkdownRenderer content={slide?.visible_text ?? ""} />
             </div>
-            {slide?.sources && slide.sources.length > 0 && (
-              <div className="storyboard-slide-source-badges" aria-label="Slide source badges">
-                {slide.sources.map((source) => (
-                  <span key={`${slide.id}-${source}`}>{source}</span>
-                ))}
-              </div>
-            )}
           </div>
 
           <div className="storyboard-slide-visual">

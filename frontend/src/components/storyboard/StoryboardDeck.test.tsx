@@ -2,7 +2,17 @@ import { act, fireEvent, render, screen, within } from "@testing-library/react"
 import { afterEach, describe, expect, it, vi } from "vitest"
 
 import { AI_DISCLAIMER_COPY } from "../shared/AiDisclaimer"
-import { StoryboardDeck, STORYBOARD_ACTS } from "./StoryboardDeck"
+import {
+  applySlideFitStep,
+  MAX_SLIDE_FIT_STEP,
+  StoryboardDeck,
+  STORYBOARD_ACTS,
+} from "./StoryboardDeck"
+import {
+  makeMaxCapStoryboardPayload,
+  MAX_CAP_HEADLINE,
+  MAX_CAP_VISIBLE_TEXT,
+} from "./testPayload"
 import type {
   StoryboardDiagramLayer,
   StoryboardLayerKind,
@@ -288,6 +298,49 @@ describe("StoryboardDeck", () => {
     expect(slide?.className).not.toContain("storyboard-slide--act-open")
   })
 
+  it("keeps SPEC/PLAN/HARNESS/TASKS citations off the slide surface", () => {
+    const { container } = render(
+      <StoryboardDeck payload={makePayload()} status="ready" isOwner />,
+    )
+
+    // The audience surface carries no source badges: a launch keynote must not
+    // read like an audit trail. `slide.sources` stays in the payload — it feeds
+    // the SourceLayer overlay, which remains the evidence surface.
+    expect(container.querySelector(".storyboard-slide-source-badges")).toBeNull()
+    const slide = container.querySelector(".storyboard-slide")
+    expect(slide?.textContent).not.toMatch(/\b(SPEC|PLAN|HARNESS|TASKS)\b/)
+
+    fireEvent.keyDown(window, { key: "s" })
+    expect(screen.getByLabelText(/source layer/i)).toHaveTextContent(/SPEC/)
+  })
+
+  it("renders the max-cap fixture without badges and with the autofit hook armed", () => {
+    const payload = makeMaxCapStoryboardPayload()
+    const { container } = render(
+      <StoryboardDeck payload={payload} status="ready" isOwner />,
+    )
+
+    expect(screen.getAllByText(MAX_CAP_HEADLINE).length).toBeGreaterThan(0)
+    expect(screen.getAllByText(MAX_CAP_VISIBLE_TEXT).length).toBeGreaterThan(0)
+
+    const slide = container.querySelector(".storyboard-slide")
+    // jsdom reports zero heights, so the measured deck never overflows here; the
+    // attribute proves the deterministic autofit pass ran on mount.
+    expect(slide?.getAttribute("data-fit-step")).toBe("0")
+    expect(slide?.textContent).not.toMatch(/\b(SPEC|PLAN|HARNESS|TASKS)\b/)
+
+    // Navigation across a two-slides-per-act deck stays coherent.
+    fireEvent.keyDown(window, { key: "ArrowRight" })
+    expect(container.querySelector(".storyboard-slide--layout-metric")).not.toBeNull()
+  })
+
+  it("fixture strings sit exactly at the generation-schema maxima", () => {
+    expect(MAX_CAP_HEADLINE).toHaveLength(140)
+    expect(MAX_CAP_HEADLINE.split(" ")).toHaveLength(18)
+    expect(MAX_CAP_VISIBLE_TEXT.length).toBeLessThanOrEqual(360)
+    expect(MAX_CAP_VISIBLE_TEXT.split(" ")).toHaveLength(45)
+  })
+
   it("keeps generated deck details in memory while shortcuts are used", () => {
     const localSpy = vi.spyOn(Storage.prototype, "setItem")
     render(<StoryboardDeck payload={makePayload()} status="ready" isOwner />)
@@ -297,5 +350,48 @@ describe("StoryboardDeck", () => {
     fireEvent.keyDown(window, { key: "s" })
 
     expect(localSpy).not.toHaveBeenCalled()
+  })
+})
+
+describe("applySlideFitStep", () => {
+  // A fake element whose scrollHeight readings advance per fit step, mirroring
+  // how shrinking the type scale reduces content height in a real layout.
+  function fakeSlide(clientHeight: number, scrollHeightPerStep: number[]) {
+    let step = 0
+    const attributes: Record<string, string> = {}
+    return {
+      attributes,
+      get scrollHeight() {
+        return scrollHeightPerStep[Math.min(step, scrollHeightPerStep.length - 1)]
+      },
+      clientHeight,
+      setAttribute(name: string, value: string) {
+        attributes[name] = value
+        if (name === "data-fit-step") step = Number(value)
+      },
+    }
+  }
+
+  it("leaves a fitting slide at step 0", () => {
+    const slide = fakeSlide(600, [480])
+    expect(applySlideFitStep(slide)).toBe(0)
+    expect(slide.attributes["data-fit-step"]).toBe("0")
+  })
+
+  it("steps down only until the slide fits", () => {
+    const slide = fakeSlide(600, [800, 700, 560])
+    expect(applySlideFitStep(slide)).toBe(2)
+    expect(slide.attributes["data-fit-step"]).toBe("2")
+  })
+
+  it("caps at the last step and lets the overflow safety net scroll the rest", () => {
+    const slide = fakeSlide(600, [2000, 1900, 1800, 1700])
+    expect(applySlideFitStep(slide)).toBe(MAX_SLIDE_FIT_STEP)
+    expect(slide.attributes["data-fit-step"]).toBe(String(MAX_SLIDE_FIT_STEP))
+  })
+
+  it("treats sub-pixel overshoot as fitting", () => {
+    const slide = fakeSlide(600, [601])
+    expect(applySlideFitStep(slide)).toBe(0)
   })
 })

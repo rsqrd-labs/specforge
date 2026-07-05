@@ -142,7 +142,8 @@ def test_render_deck_html_includes_content_and_csp() -> None:
     assert "From idea to engineered spec" in html
     # The visual is drawn from the slide's own visual.kind (a hero -> "Vision"
     # label), never from raw source ids or arbitrary descriptor text dumped onto
-    # the slide. Grounding stays in the source chips.
+    # the slide. Source evidence lives in the live deck's SourceLayer overlay
+    # and the technical appendix, never on the printed pages.
     assert "Vision" in html
     assert "SPEC:overview" not in html
     assert "full-bleed" not in html
@@ -296,6 +297,176 @@ def test_palette_only_valid_hex_is_inlined() -> None:
     # no CSS break-out and no remote url() survive.
     assert "evil" not in html
     assert renderer._DEFAULT_ACCENT in html
+
+
+# ---------------------------------------------------------------------------
+# Citations stay off presentation surfaces (output-quality plan P1.1)
+# ---------------------------------------------------------------------------
+
+
+def test_no_source_citations_on_any_printed_page() -> None:
+    # The payload carries slide `sources` (they feed SourceLayer and grounding
+    # validation), but the printed deck must never show the audit trail: no
+    # chip markup and no SPEC/PLAN/HARNESS/TASKS badge text on any page.
+    html = renderer.render_deck_html(_payload(), "Acme")
+    assert "chip" not in html
+    assert not re.search(r">\s*(SPEC|PLAN|HARNESS|TASKS)\s*<", html)
+
+
+# ---------------------------------------------------------------------------
+# Max-cap fixture + render clamps (output-quality plan P1.3 / P1.4)
+# ---------------------------------------------------------------------------
+
+# 18 words / 140 characters — both headline maxima (15×7 + 3×6 chars + 17
+# spaces). Mirrors MAX_CAP_HEADLINE in frontend testPayload.ts.
+_MAX_CAP_HEADLINE = " ".join(["maximal"] * 15 + ["stress"] * 3)
+# 45 words / 359 characters (≤ the 360-char visible_text cap).
+_MAX_CAP_VISIBLE_TEXT = " ".join(["connect"] * 45)
+# Five points of eight words each.
+_MAX_CAP_POINTS = [" ".join([f"signal{i}"] * 8) for i in range(5)]
+# 120 characters — the diagram-layer label maximum.
+_MAX_CAP_LAYER_LABEL = " ".join(["maximal"] * 15)
+# 139 characters — at the 140-char title render cap, distinct from the headline
+# so the headline-clamp assertions cannot be satisfied by the cover title.
+_MAX_CAP_TITLE = " ".join(["titleword"] * 14)
+
+_MAX_CAP_ACTS = (
+    "Opening Thesis",
+    "Product Vision",
+    "Product Walkthrough",
+    "Technical Architecture",
+    "Trust, Security, Reliability",
+    "Launch Close",
+)
+_MAX_CAP_LAYER_KINDS = (
+    "client",
+    "frontend",
+    "api",
+    "data",
+    "llm",
+    "integrations",
+    "trust",
+    "recovery",
+)
+
+
+def _max_cap_payload() -> dict:
+    """A deck at the generation-schema maxima — the layout regression anchor."""
+
+    sections = []
+    for index, title in enumerate(_MAX_CAP_ACTS):
+        act_id = f"act-{index}"
+        is_arch = title == "Technical Architecture"
+        sections.append(
+            {
+                "id": act_id,
+                "title": title,
+                "slides": [
+                    {
+                        "id": f"{act_id}-a",
+                        "type": "architecture" if is_arch else "hero",
+                        "headline": _MAX_CAP_HEADLINE,
+                        "visible_text": _MAX_CAP_VISIBLE_TEXT,
+                        "visual": {"kind": "bullets", "points": _MAX_CAP_POINTS},
+                        "speaker_notes_ref": f"{act_id}-a",
+                        "sources": ["SPEC", "PLAN", "HARNESS", "TASKS"],
+                    },
+                    {
+                        "id": f"{act_id}-b",
+                        "type": "product",
+                        "headline": _MAX_CAP_HEADLINE,
+                        "visible_text": _MAX_CAP_VISIBLE_TEXT,
+                        "visual": {
+                            "kind": "metric",
+                            "value": "99.999%",
+                            "label": _MAX_CAP_POINTS[0],
+                        },
+                        "speaker_notes_ref": f"{act_id}-b",
+                        "sources": ["SPEC", "PLAN"],
+                    },
+                ],
+            }
+        )
+    payload = _payload()
+    payload["title"] = _MAX_CAP_TITLE
+    payload["sections"] = sections
+    payload["diagrams"] = [
+        {
+            "id": "arch",
+            "type": "architecture_reveal",
+            "layers": [
+                {
+                    "id": f"l-{kind}",
+                    "kind": kind,
+                    "label": _MAX_CAP_LAYER_LABEL,
+                    "summary": f"{kind} summary",
+                    "source_refs": [],
+                }
+                for kind in _MAX_CAP_LAYER_KINDS
+            ],
+        }
+    ]
+    return payload
+
+
+def test_max_cap_fixture_sits_at_the_schema_maxima() -> None:
+    assert len(_MAX_CAP_HEADLINE) == 140
+    assert len(_MAX_CAP_HEADLINE.split()) == 18
+    assert len(_MAX_CAP_VISIBLE_TEXT) <= 360
+    assert len(_MAX_CAP_VISIBLE_TEXT.split()) == 45
+    assert len(_MAX_CAP_LAYER_LABEL) <= 120
+
+
+def test_max_cap_deck_renders_every_page_with_render_clamps() -> None:
+    html = renderer.render_deck_html(_max_cap_payload(), "Acme")
+
+    # All twelve slides render, plus the cover.
+    assert html.count('class="page ') == 13
+    # The 140-char headline is clamped to the 120-char render cap + ellipsis so
+    # it can never overrun the fixed page; the stored payload is untouched.
+    assert _MAX_CAP_HEADLINE not in html
+    clamped = _MAX_CAP_HEADLINE[:120].rstrip() + "…"
+    assert clamped in html
+    # visible_text sits at the schema max and renders whole, and so does the
+    # cover title (139 chars, at the 140-char title render cap).
+    assert _MAX_CAP_VISIBLE_TEXT in html
+    assert _MAX_CAP_TITLE in html
+    # No citation chips anywhere at the caps either.
+    assert not re.search(r">\s*(SPEC|PLAN|HARNESS|TASKS)\s*<", html)
+
+
+def test_render_clamps_bound_title_points_and_historical_overlong_text() -> None:
+    payload = _max_cap_payload()
+    # Historical payloads may pre-date the schema caps: a 500-char headline, a
+    # 600-char visible_text, and a 300-char point must all be clamped for
+    # rendering (invariant: every already-persisted Storyboard keeps rendering).
+    payload["sections"][0]["slides"][0]["headline"] = "H" * 500
+    payload["sections"][0]["slides"][0]["visible_text"] = "V" * 600
+    payload["sections"][0]["slides"][0]["visual"] = {
+        "kind": "bullets",
+        "points": ["P" * 300],
+    }
+    html = renderer.render_deck_html(payload, "Acme")
+
+    assert "H" * 121 not in html
+    assert ("H" * 120 + "…") in html
+    assert "V" * 361 not in html
+    assert ("V" * 360 + "…") in html
+    assert "P" * 91 not in html
+    assert ("P" * 90 + "…") in html
+
+    payload["title"] = "T" * 200
+    html = renderer.render_deck_html(payload, "Acme")
+    assert "T" * 141 not in html
+    assert ("T" * 140 + "…") in html
+
+
+def test_clamp_text_boundaries() -> None:
+    assert renderer._clamp_text("short", 10) == "short"
+    assert renderer._clamp_text("x" * 10, 10) == "x" * 10
+    assert renderer._clamp_text("x" * 11, 10) == "x" * 10 + "…"
+    # Trailing whitespace before the ellipsis is trimmed.
+    assert renderer._clamp_text("word " + "y" * 10, 5) == "word…"
 
 
 # ---------------------------------------------------------------------------

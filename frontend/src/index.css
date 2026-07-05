@@ -12419,6 +12419,13 @@ button:disabled {
   width: 100%;
   aspect-ratio: 16 / 9;
   min-height: 420px;
+  /* The stage is the type container: storyboard clamps below use cqw so type
+     scales with the *stage*, not the viewport (the deck also renders embedded
+     in the workspace page, where vw badly over-sizes). inline-size — not size —
+     because the ≤900px and fullscreen variants size the stage by content
+     (aspect-ratio: auto), which height containment would collapse to 0; cqw
+     only needs inline-size containment. */
+  container-type: inline-size;
   border: 1px solid var(--sb-act-accent, rgba(143, 78, 0, 0.14));
   border-radius: 14px;
   /* Palette-driven, per-act tint over a readable neutral surface. As the active
@@ -12525,14 +12532,28 @@ button:disabled {
 }
 
 .storyboard-slide {
+  /* Stepped autofit scale (see applySlideFitStep in StoryboardDeck.tsx): the
+     deck measures overflow and bumps data-fit-step 0→3; each step shrinks the
+     slide's type via this multiplier. Deterministic font-size steps — never a
+     continuous transform scale, which blurs text and breaks the glass styling. */
+  --sb-fit: 1;
   position: relative;
   z-index: 1;
   height: 100%;
+  min-height: 0;
   display: grid;
   grid-template-columns: minmax(0, 0.95fr) minmax(360px, 1.05fr);
   gap: 28px;
-  padding: clamp(26px, 4vw, 58px);
+  padding: clamp(24px, 3.6cqw, 48px);
+  /* Universal safety net (every layout, not just the arch slide): a slide that
+     still overflows after the autofit steps scrolls instead of being silently
+     clipped by the stage frame's overflow: hidden. */
+  overflow-y: auto;
 }
+
+.storyboard-slide[data-fit-step="1"] { --sb-fit: 0.86; }
+.storyboard-slide[data-fit-step="2"] { --sb-fit: 0.74; }
+.storyboard-slide[data-fit-step="3"] { --sb-fit: 0.64; }
 
 /* Slide-entry motion. The active slide remounts (keyed on its index), replaying
    one of three vetted transitions selected from the deck's transition mood. The
@@ -12567,7 +12588,6 @@ button:disabled {
   .storyboard-deck-shell .storyboard-slide-act,
   .storyboard-deck-shell .storyboard-slide h2,
   .storyboard-deck-shell .storyboard-slide-text,
-  .storyboard-deck-shell .storyboard-slide-source-badges,
   .storyboard-deck-shell .storyboard-visual-card,
   .storyboard-deck-shell .storyboard-visual-points li,
   .storyboard-deck-shell .storyboard-visual-metric,
@@ -12632,7 +12652,7 @@ button:disabled {
 
 .storyboard-slide--layout-feature h2 {
   /* Oversized cover/closing headline — the single biggest type in the deck. */
-  font-size: clamp(44px, 6.6vw, 104px);
+  font-size: calc(clamp(36px, 6cqw, 84px) * var(--sb-fit, 1));
 }
 
 .storyboard-slide--layout-feature h2::after {
@@ -12641,10 +12661,6 @@ button:disabled {
 
 .storyboard-slide--layout-feature .storyboard-slide-text {
   margin-inline: auto;
-}
-
-.storyboard-slide--layout-feature .storyboard-slide-source-badges {
-  justify-content: center;
 }
 
 .storyboard-slide--layout-feature .storyboard-slide-visual {
@@ -12662,7 +12678,7 @@ button:disabled {
 
 .storyboard-slide--layout-metric .storyboard-visual-card {
   width: 100%;
-  min-height: 320px;
+  min-height: calc(320px * var(--sb-fit, 1));
   align-content: center;
   justify-items: center;
   text-align: center;
@@ -12673,7 +12689,7 @@ button:disabled {
 }
 
 .storyboard-slide--layout-metric .storyboard-visual-metric strong {
-  font-size: clamp(64px, 11vw, 168px);
+  font-size: calc(clamp(48px, 9cqw, 132px) * var(--sb-fit, 1));
 }
 
 /* ── Cover + act-intro framing (Phase B) ────────────────────────────────────
@@ -12690,7 +12706,7 @@ button:disabled {
 .storyboard-slide-cover-mark {
   flex-basis: 100%;
   color: color-mix(in srgb, var(--sb-act-accent, #6d28d9) 70%, #160f2e);
-  font-size: clamp(12px, 1.2vw, 15px);
+  font-size: clamp(11px, 1.2cqw, 14px);
   font-weight: 900;
   letter-spacing: 0.24em;
   text-transform: uppercase;
@@ -12719,7 +12735,7 @@ button:disabled {
 
 /* The cover headline runs even larger than the other feature slides. */
 .storyboard-slide--cover h2 {
-  font-size: clamp(48px, 7.4vw, 120px);
+  font-size: calc(clamp(40px, 6.8cqw, 96px) * var(--sb-fit, 1));
 }
 
 /* Architecture slide: the topology graph is the star, so it takes the full slide
@@ -12738,7 +12754,7 @@ button:disabled {
 }
 
 .storyboard-slide--arch h2 {
-  font-size: clamp(26px, 3.4vw, 46px);
+  font-size: calc(clamp(24px, 3.2cqw, 42px) * var(--sb-fit, 1));
   margin: 10px 0 4px;
 }
 
@@ -12757,6 +12773,7 @@ button:disabled {
 
 .storyboard-slide-content {
   min-width: 0;
+  min-height: 0;
   align-self: center;
 }
 
@@ -12791,7 +12808,7 @@ button:disabled {
   -webkit-background-clip: text;
   background-clip: text;
   -webkit-text-fill-color: transparent;
-  font-size: clamp(36px, 5vw, 72px);
+  font-size: calc(clamp(28px, 4.6cqw, 56px) * var(--sb-fit, 1));
   line-height: 0.98;
   letter-spacing: -0.01em;
 }
@@ -12817,7 +12834,7 @@ button:disabled {
 
 .storyboard-slide-text .md-prose {
   color: var(--color-on-surface-variant);
-  font-size: clamp(15px, 1.55vw, 22px);
+  font-size: calc(clamp(14px, 1.5cqw, 20px) * var(--sb-fit, 1));
   line-height: 1.45;
 }
 
@@ -12825,42 +12842,9 @@ button:disabled {
   margin: 0;
 }
 
-.storyboard-slide-source-badges,
-.storyboard-source-preview div {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  flex-wrap: wrap;
-}
-
-.storyboard-slide-source-badges {
-  margin-top: 18px;
-}
-
-.storyboard-slide-source-badges span,
-.storyboard-source-preview span {
-  border-radius: 999px;
-  border: 1px solid transparent;
-  background: rgba(86, 94, 116, 0.10);
-  color: var(--color-tertiary);
-  padding: 4px 10px;
-  font-size: 10px;
-  font-weight: 900;
-  transition: transform 0.2s ease, background 0.2s ease, color 0.2s ease,
-    border-color 0.2s ease;
-}
-
-/* Source badges are interactive cues — they lift and pick up the act accent on
-   hover, so the grounding chips feel alive rather than static labels. */
-.storyboard-slide-source-badges span:hover {
-  transform: translateY(-2px);
-  background: color-mix(in srgb, var(--sb-act-accent, #6d28d9) 16%, transparent);
-  border-color: color-mix(in srgb, var(--sb-act-accent, #6d28d9) 36%, transparent);
-  color: color-mix(in srgb, var(--sb-act-accent, #6d28d9) 78%, #1f1233);
-}
-
 .storyboard-slide-visual {
   min-width: 0;
+  min-height: 0;
   align-self: stretch;
   display: grid;
   place-items: center;
@@ -12872,7 +12856,7 @@ button:disabled {
 .storyboard-visual-card {
   position: relative;
   width: min(440px, 100%);
-  min-height: 286px;
+  min-height: calc(286px * var(--sb-fit, 1));
   display: grid;
   align-content: center;
   gap: 14px;
@@ -12921,7 +12905,7 @@ button:disabled {
 
 .storyboard-visual-card strong {
   color: var(--color-on-surface);
-  font-size: 22px;
+  font-size: calc(22px * var(--sb-fit, 1));
   line-height: 1.1;
 }
 
@@ -12956,7 +12940,7 @@ button:disabled {
   border: 1px solid rgba(255, 255, 255, 0.5);
   background: rgba(255, 255, 255, 0.46);
   color: var(--color-on-surface);
-  font-size: 15px;
+  font-size: calc(15px * var(--sb-fit, 1));
   font-weight: 600;
   line-height: 1.32;
   transition: transform 0.24s ease, background 0.24s ease, border-color 0.24s ease;
@@ -12992,7 +12976,7 @@ button:disabled {
 }
 
 .storyboard-visual-metric strong {
-  font-size: clamp(44px, 5vw, 68px);
+  font-size: calc(clamp(36px, 4.6cqw, 60px) * var(--sb-fit, 1));
   line-height: 0.96;
   letter-spacing: -0.02em;
   background: linear-gradient(
@@ -13048,10 +13032,6 @@ button:disabled {
 .storyboard-deck-shell .storyboard-slide-text {
   animation: storyboard-build 0.6s cubic-bezier(0.22, 1, 0.36, 1) both;
   animation-delay: 0.26s;
-}
-.storyboard-deck-shell .storyboard-slide-source-badges {
-  animation: storyboard-build 0.55s cubic-bezier(0.22, 1, 0.36, 1) both;
-  animation-delay: 0.38s;
 }
 .storyboard-deck-shell .storyboard-visual-card {
   animation: storyboard-build 0.62s cubic-bezier(0.22, 1, 0.36, 1) both;
@@ -14168,8 +14148,7 @@ button:disabled {
   cursor: default;
 }
 
-.storyboard-presenter-preview,
-.storyboard-source-preview {
+.storyboard-presenter-preview {
   position: fixed;
   right: 22px;
   bottom: 22px;
@@ -14182,8 +14161,7 @@ button:disabled {
   padding: 16px;
 }
 
-.storyboard-presenter-preview strong,
-.storyboard-source-preview strong {
+.storyboard-presenter-preview strong {
   display: block;
   color: var(--color-on-surface);
   font-size: 13px;
@@ -14191,8 +14169,7 @@ button:disabled {
   margin-bottom: 6px;
 }
 
-.storyboard-presenter-preview p,
-.storyboard-source-preview p {
+.storyboard-presenter-preview p {
   margin: 0 0 8px;
   color: var(--color-on-surface-variant);
   font-size: 13px;
@@ -14298,17 +14275,6 @@ button:disabled {
   font-size: 15px;
   font-weight: 800;
   line-height: 1.18;
-}
-
-.arch-node__source {
-  align-self: flex-start;
-  margin-top: 3px;
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--node-accent, #6d28d9) 12%, transparent);
-  color: color-mix(in srgb, var(--node-accent, #6d28d9) 72%, #1f1233);
-  padding: 1px 8px;
-  font-size: 9px;
-  font-weight: 900;
 }
 
 /* ---- Edges ----------------------------------------------------------------- */
@@ -14500,8 +14466,7 @@ button:disabled {
   .storyboard-deck-header,
   .storyboard-act-tabs,
   .storyboard-deck-footer,
-  .storyboard-presenter-preview,
-  .storyboard-source-preview {
+  .storyboard-presenter-preview {
     display: none;
   }
 
@@ -14520,7 +14485,11 @@ button:disabled {
 
   .storyboard-slide {
     display: block;
+    height: auto;
     padding: 0;
+    /* Paper has no scrollbars: the screen overflow safety net must not clip
+       print output, so the slide flows to its natural height instead. */
+    overflow: visible;
   }
 
   .architecture-topology {

@@ -86,8 +86,12 @@
         height: 18mm;
         flex: 0 0 auto;
       }
+      /* Type scale is sized so the schema maxima (an 18-word / 140-char headline,
+         45 words of visible_text, five 90-char points) fit the fixed page without
+         touching the overflow:hidden backstop — verified by the max-cap fixture
+         in tests/test_storyboard_renderer.py. */
       .cover-title {
-        font-size: 54pt;
+        font-size: 44pt;
         font-weight: 800;
         line-height: 1.02;
         letter-spacing: -0.01em;
@@ -95,8 +99,8 @@
       }
       .cover-motif {
         margin-top: 8mm;
-        font-size: 15pt;
-        line-height: 1.4;
+        font-size: 13pt;
+        line-height: 1.38;
         max-width: 200mm;
         opacity: 0.94;
       }
@@ -169,9 +173,9 @@
       }
       .headline {
         margin: 0;
-        font-size: 30pt;
+        font-size: 24pt;
         font-weight: 800;
-        line-height: 1.08;
+        line-height: 1.06;
         letter-spacing: -0.01em;
         color: #11152b;
       }
@@ -184,21 +188,10 @@
       }
       .visible-text {
         margin: 0;
-        font-size: 13.5pt;
-        line-height: 1.45;
+        font-size: 11.5pt;
+        line-height: 1.38;
         color: #475569;
         max-width: 120mm;
-      }
-      .chips { margin-top: 8mm; }
-      .chip {
-        display: inline-block;
-        border: 1px solid #e2e8f0;
-        border-radius: 999px;
-        padding: 1mm 3mm;
-        margin: 0 1.5mm 1.5mm 0;
-        font-size: 8.5pt;
-        font-weight: 800;
-        color: #64748b;
       }
 
       /* Visual card — translucent panel with a gradient top strip + accent rail. */
@@ -232,7 +225,7 @@
         margin-bottom: 6mm;
       }
       .vcard__metric {
-        font-size: 34pt;
+        font-size: 28pt;
         font-weight: 800;
         line-height: 1.04;
         color: var(--ink);
@@ -251,11 +244,11 @@
       .vcard__points { margin: 0; padding: 0; list-style: none; }
       .vcard__points li {
         position: relative;
-        padding: 2.5mm 0 2.5mm 8mm;
-        font-size: 12pt;
+        padding: 2mm 0 2mm 8mm;
+        font-size: 10.5pt;
         font-weight: 600;
         color: #1f2937;
-        line-height: 1.3;
+        line-height: 1.28;
       }
       .vcard__points li::before {
         content: "";
@@ -282,7 +275,7 @@
          fixed-height band on top, the topology graph fills the full width below —
          the static (print) analogue of the live deck's animated SVG topology. The
          fixed copy band guarantees the diagram can never be pushed into overlap. */
-      .page--arch-slide .headline { font-size: 22pt; }
+      .page--arch-slide .headline { font-size: 18pt; }
       .arch-slide-copy {
         position: absolute;
         top: 28mm;
@@ -341,11 +334,6 @@
         <h2 class="headline">{{ page.headline }}</h2>
         <div class="headline-rule"></div>
         {% if page.visible_text %}<p class="visible-text">{{ page.visible_text }}</p>{% endif %}
-        {% if page.sources %}
-        <div class="chips">
-          {% for src in page.sources %}<span class="chip">{{ src }}</span>{% endfor %}
-        </div>
-        {% endif %}
       </div>
       {# font-family is set as an inherited SVG attribute (not a CSS rule) so it
          applies even where WeasyPrint does not cascade HTML CSS into inline SVG. #}
@@ -391,11 +379,6 @@
           <h2 class="headline">{{ page.headline }}</h2>
           <div class="headline-rule"></div>
           {% if page.visible_text %}<p class="visible-text">{{ page.visible_text }}</p>{% endif %}
-          {% if page.sources %}
-          <div class="chips">
-            {% for src in page.sources %}<span class="chip">{{ src }}</span>{% endfor %}
-          </div>
-          {% endif %}
         </div>
         <div class="vcard">
           <div class="vcard__label">{{ page.visual_label }}</div>

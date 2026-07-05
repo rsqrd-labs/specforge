@@ -129,6 +129,17 @@ describe("ArchitectureReveal", () => {
     )
   })
 
+  it("never prints source ids or SPEC/PLAN/HARNESS/TASKS citations inside diagram nodes", () => {
+    // Every layer carries source_refs; they ground the diagram but must never
+    // surface on the audience-facing nodes (evidence lives in SourceLayer).
+    const { container } = render(<ArchitectureReveal layers={allLayers()} />)
+    expect(container.querySelector(".arch-node__source")).toBeNull()
+    for (const node of container.querySelectorAll("[data-arch-node]")) {
+      expect(node.textContent).not.toContain("-source")
+      expect(node.textContent).not.toMatch(/\b(SPEC|PLAN|HARNESS|TASKS)\b/)
+    }
+  })
+
   it("falls back to canonical copy when a plane is missing from the diagram", () => {
     // Only a client layer is supplied; the other planes must still be drawn so the
     // topology is complete.

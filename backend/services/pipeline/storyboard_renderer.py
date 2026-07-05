@@ -81,7 +81,6 @@ _REMOTE_REFERENCE_RE = re.compile(r"(?i)\bhttps?://[^\s<>'\")]+|//[^\s<>'\")]+")
 _DEFAULT_ACCENT = "#6d28d9"
 _DEFAULT_ACCENT_2 = "#0ea5e9"
 
-_VALID_SOURCES = ("SPEC", "PLAN", "HARNESS", "TASKS")
 _ARCH_REVEAL_TYPE = "architecture_reveal"
 
 # The live deck (StoryboardDeck) renders the architecture reveal as the *visual of
@@ -222,6 +221,26 @@ def _clean(value: Any) -> str:
     return _REMOTE_REFERENCE_RE.sub("", sanitize_text(str(value))).strip()
 
 
+# Defensive per-field render caps. The printed page is a fixed 297×210mm canvas
+# with ``overflow: hidden`` (deliberate — it prevents one slide splitting across
+# two pages), so text that cannot fit must be clamped *for rendering*. Fresh
+# generations sit under these caps already; the clamps exist so any historical
+# payload shape still renders a complete, un-clipped page. Stored payloads are
+# never mutated.
+_RENDER_TITLE_MAX_CHARS = 140
+_RENDER_HEADLINE_MAX_CHARS = 120
+_RENDER_VISIBLE_TEXT_MAX_CHARS = 360
+_RENDER_POINT_MAX_CHARS = 90
+
+
+def _clamp_text(text: str, max_chars: int) -> str:
+    """Hard-cap already-sanitised text for rendering, with an ellipsis."""
+
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars].rstrip() + "…"
+
+
 # Human label per inert visual.kind — mirrors the live deck's VISUAL_KIND_LABEL so
 # the offline package reads the same as the presented deck. The renderer draws the
 # visual from the slide's own structured descriptors, never from raw source text.
@@ -294,7 +313,11 @@ def _visual_points(visual: Any) -> list[str]:
     for key in ("points", "items", "bullets", "highlights"):
         value = visual.get(key)
         if isinstance(value, list):
-            points = [_clean(v) for v in value if isinstance(v, str) and v.strip()]
+            points = [
+                _clamp_text(_clean(v), _RENDER_POINT_MAX_CHARS)
+                for v in value
+                if isinstance(v, str) and v.strip()
+            ]
             if points:
                 return points[:_VISUAL_POINTS_MAX]
     return []
@@ -579,6 +602,9 @@ def _build_deck_context(content: dict[str, Any], workspace_name: str) -> dict[st
                 _clean(slide.get("type")) == _ARCH_SLIDE_TYPE
                 or section_title == _ARCH_ACT_TITLE
             )
+            # ``slide.sources`` stays in the payload (it feeds the SourceLayer
+            # overlay and grounding validation) but is deliberately not passed
+            # to the template: a launch keynote never prints its audit trail.
             pages.append(
                 {
                     "slide_no": slide_no,
@@ -587,22 +613,27 @@ def _build_deck_context(content: dict[str, Any], workspace_name: str) -> dict[st
                     "accent": act_accent,
                     "accent_2": act_accent_2,
                     "ink": _readable_ink(act_accent),
-                    "headline": _clean(slide.get("headline")),
-                    "visible_text": _clean(slide.get("visible_text")),
+                    "headline": _clamp_text(
+                        _clean(slide.get("headline")), _RENDER_HEADLINE_MAX_CHARS
+                    ),
+                    "visible_text": _clamp_text(
+                        _clean(slide.get("visible_text")),
+                        _RENDER_VISIBLE_TEXT_MAX_CHARS,
+                    ),
                     "visual_label": _VISUAL_KIND_LABEL.get(kind, "Highlight"),
                     "visual_points": _visual_points(visual),
                     "visual_metric": _visual_metric(visual),
                     "architecture": (
                         arch_topology if is_arch_slide and arch_topology else None
                     ),
-                    "sources": [
-                        s for s in (slide.get("sources") or []) if s in _VALID_SOURCES
-                    ],
                 }
             )
 
     return {
-        "title": _clean(content.get("title")) or _clean(workspace_name) or "Storyboard",
+        "title": _clamp_text(
+            _clean(content.get("title")) or _clean(workspace_name) or "Storyboard",
+            _RENDER_TITLE_MAX_CHARS,
+        ),
         "motif": _clean(theme.get("motif")),
         "accent_color": accent,
         "accent_color_2": accent_2,
