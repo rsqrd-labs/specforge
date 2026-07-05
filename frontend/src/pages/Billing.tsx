@@ -53,7 +53,10 @@ function formatPrice(priceCents: number, currency: string): string {
       maximumFractionDigits: 0,
     })
   } catch {
-    return `$${(priceCents / 100).toFixed(0)}`
+    // Fallback for runtimes without the currency in Intl's data set: prefix the
+    // ISO code (e.g. "INR 799") rather than hardcoding "$", which would misprice
+    // every non-USD currency.
+    return `${normalizedCurrency} ${(priceCents / 100).toFixed(0)}`
   }
 }
 
@@ -365,15 +368,25 @@ export default function Billing() {
                     {billingPackage.validity_days}-day validity
                   </p>
                 </div>
-                <button
-                  type="button"
-                  className="billing-buy-btn"
-                  onClick={() => void handleBuyCredits()}
-                  disabled={isStartingCheckout}
-                >
-                  {isStartingCheckout ? "Opening checkout…" : "Buy Credits →"}
-                </button>
-                {checkoutError && (
+                {billingPackage.enabled ? (
+                  <button
+                    type="button"
+                    className="billing-buy-btn"
+                    onClick={() => void handleBuyCredits()}
+                    disabled={isStartingCheckout}
+                  >
+                    {isStartingCheckout ? "Opening checkout…" : "Buy Credits →"}
+                  </button>
+                ) : (
+                  // Kill switch / pre-launch (PAYMENTS_ENABLED=false): keep the pricing
+                  // card intact and swap only the button for a quiet slate note. Copy
+                  // reads coherently for someone arriving from an out-of-credits alert.
+                  <p className="billing-unavailable-note" role="note">
+                    Credit purchases aren't available yet. Any credits you've already
+                    bought remain valid.
+                  </p>
+                )}
+                {billingPackage.enabled && checkoutError && (
                   <ActionAlertPanel
                     severity="error"
                     title="Checkout could not open"

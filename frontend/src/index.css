@@ -6741,6 +6741,20 @@ button:disabled {
   opacity: 0.62;
 }
 
+/* Issue #44: quiet slate note shown in place of the Buy button when checkout is
+   off (PAYMENTS_ENABLED=false or the active provider is unconfigured). Same calm
+   idiom as .billing-debt-note — informational, never an error. */
+.billing-unavailable-note {
+  margin: 4px 0 0;
+  max-width: 42ch;
+  border-left: 2px solid var(--color-outline);
+  padding: 2px 0 2px 12px;
+  color: var(--color-on-surface-variant);
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.5;
+}
+
 .billing-checkout-error {
   grid-column: 1 / -1;
   margin: 0;

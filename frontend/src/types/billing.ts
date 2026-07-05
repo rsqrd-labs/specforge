@@ -3,6 +3,11 @@ export interface BillingPackage {
   price_cents: number
   validity_days: number
   currency: string
+  // Issue #44: false when PAYMENTS_ENABLED is off or the active provider is
+  // unconfigured — the frontend gates the Buy button on it instead of clicking
+  // into a 503. `provider` names the active gateway these economics belong to.
+  enabled: boolean
+  provider: string
 }
 
 export interface BillingCreditPack {
