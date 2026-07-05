@@ -240,7 +240,7 @@ async def test_concurrent_deduct_and_refund_are_deadlock_safe() -> None:
                             db,
                             source_pack=source,
                             # Half the order → ~50% proportional revoke.
-                            lemon_refunded_amount_cents=450,
+                            provider_refunded_amount_cents=450,
                             full_or_fraud=False,
                             reason_label="refund",
                         )
@@ -307,7 +307,7 @@ async def test_spend_then_reversal_creates_debt_then_repurchase_recovers_first()
                 outcome = await svc.apply_refund_reversal(
                     db,
                     source_pack=source,
-                    lemon_refunded_amount_cents=900,  # full
+                    provider_refunded_amount_cents=900,  # full
                     full_or_fraud=True,
                     reason_label="refund",
                 )

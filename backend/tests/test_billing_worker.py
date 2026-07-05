@@ -200,7 +200,7 @@ async def test_short_circuits_already_processed(session, cleanup_events) -> None
     async def _boom(ctx, wid):  # pragma: no cover - must never be called
         raise AssertionError("handler must not run for a processed row")
 
-    billing_worker.register_event_handler("subscription_created", _boom)
+    billing_worker.register_event_handler("lemonsqueezy", "subscription_created", _boom)
     await billing_worker.billing_process_webhook({}, str(row.id))
     reloaded = await _reload(session, row.id)
     assert reloaded.status == "processed"
@@ -221,7 +221,7 @@ async def test_success_via_registered_handler(session, cleanup_events) -> None:
             r.processed_at = datetime.now(UTC)
             await db.commit()
 
-    billing_worker.register_event_handler("order_created", _handler)
+    billing_worker.register_event_handler("lemonsqueezy", "order_created", _handler)
     await billing_worker.billing_process_webhook({}, str(row.id))
     assert calls["n"] == 1
     reloaded = await _reload(session, row.id)
@@ -244,7 +244,7 @@ async def test_failure_persists_failed_in_separate_transaction(
             await db.flush()
             raise RuntimeError("forced side-effect failure")
 
-    billing_worker.register_event_handler("order_created", _handler)
+    billing_worker.register_event_handler("lemonsqueezy", "order_created", _handler)
 
     with pytest.raises(RuntimeError):
         await billing_worker.billing_process_webhook({}, str(row.id))
@@ -259,7 +259,7 @@ async def test_order_event_without_handler_fails_loud(session, cleanup_events) -
     # order_created is registered at import by T-299; exercise the genuine
     # no-handler branch by removing it (the autouse restore_handlers fixture
     # restores the registry afterwards).
-    billing_worker._EVENT_HANDLERS.pop("order_created", None)
+    billing_worker._EVENT_HANDLERS.pop(("lemonsqueezy", "order_created"), None)
     row = await _insert_event(session, cleanup_events, event_name="order_created")
     with pytest.raises(RuntimeError):
         await billing_worker.billing_process_webhook({}, str(row.id))
@@ -284,7 +284,7 @@ async def test_claim_flips_received_to_processing_before_dispatch(
             r.processed_at = datetime.now(UTC)
             await db.commit()
 
-    billing_worker.register_event_handler("order_created", _handler)
+    billing_worker.register_event_handler("lemonsqueezy", "order_created", _handler)
     await billing_worker.billing_process_webhook({}, str(row.id))
     assert seen_status["at_dispatch"] == "processing"
 

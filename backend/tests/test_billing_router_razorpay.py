@@ -777,18 +777,15 @@ async def test_razorpay_webhook_processes_regardless_of_checkout_flags(
 
 
 def test_razorpay_money_events_are_fail_loud_in_worker() -> None:
-    """Both Razorpay money events sit in the worker's fail-loud set.
+    """Both Razorpay money events are fail-loud AND have registered handlers.
 
-    Until the Step-5 handlers register, a signed ``payment_link.paid`` /
-    ``refund.processed`` inbox row must dead-letter loudly via
-    ``_dispatch_claimed`` — never be acked as a harmless no-op (the T-297
-    precedent for Lemon's order events).
+    They sit in the worker's fail-loud ``_ORDER_EVENTS`` set (so an unhandled
+    money event dead-letters loudly via ``_dispatch_claimed`` rather than being
+    acked as a harmless no-op — the T-297 precedent for Lemon's order events), and
+    Step 5 registered their ``(provider, event_name)`` handlers.
     """
     from services.billing_worker import _EVENT_HANDLERS, _ORDER_EVENTS
 
     assert {"payment_link.paid", "refund.processed"} <= _ORDER_EVENTS
-    # Guard against this test outliving Step 5: once handlers register, the
-    # fail-loud membership above is still correct (money events keep a handler).
     for event_name in ("payment_link.paid", "refund.processed"):
-        handler = _EVENT_HANDLERS.get(event_name)
-        assert handler is None or callable(handler)
+        assert callable(_EVENT_HANDLERS.get(("razorpay", event_name)))

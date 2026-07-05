@@ -25,10 +25,14 @@ This module owns the durable scaffolding:
   * :func:`purge_billing_events` — daily retention purge bounding the inbox and the
     terminal checkout attempts.
 
-The per-``event_name`` money handlers register themselves in :data:`_EVENT_HANDLERS`
-via :func:`register_event_handler` at module import: ``order_created`` (T-299) is
-wired below; ``order_refunded`` (T-300) joins it. The ``arq``-registered wrappers and
-cron schedules live in ``worker.py``.
+The money handlers register themselves in :data:`_EVENT_HANDLERS` keyed by
+``(provider, event_name)`` via :func:`register_event_handler` at module import:
+Lemon ``order_created`` (T-299) / ``order_refunded`` (T-300), and Razorpay
+``payment_link.paid`` / ``refund.processed`` (issue #44 Step 5). Keying by
+``(provider, event_name)`` is defence-in-depth — the two providers' event-name
+namespaces are disjoint today, but the provider makes a future collision
+impossible. The ``arq``-registered wrappers and cron schedules live in
+``worker.py``.
 
 Handler contract (what T-299/T-300 must conform to)
 ---------------------------------------------------
@@ -84,6 +88,13 @@ from services.observability import (
     BILLING_WEBHOOK_PENDING_AGE_SECONDS,
 )
 from services.queue import JOB_MAX_TRIES, QueueUnavailableError, enqueue
+from services.razorpay_service import (
+    RazorpayError,
+    RazorpayPayment,
+    RazorpayRateLimitError,
+    razorpay_environment,
+    razorpay_service,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -145,8 +156,10 @@ _REFUND_GIVE_UP_HOURS = 24
 # anyway, so a ≤15-minute revocation latency on this rare out-of-order case is fine.
 _PACK_NOT_YET_GRANTED = "pack_not_yet_granted"
 
-# Reconcile (T-301). The single 'lemonsqueezy' cursor row is the run-state anchor.
-_RECONCILE_PROVIDER = "lemonsqueezy"
+# Reconcile (T-301). The run-state anchor is EVERY configured provider's cursor
+# row (``lemonsqueezy`` seeded by 0018 + ``razorpay`` by 0034) — all claimed
+# upfront under one NOWAIT lock so the provider-neutral lanes 1/3 can never be
+# double-run by overlapping ticks (D11, issue #44).
 # Postgres SQLSTATE for a FOR UPDATE NOWAIT that found the row already locked.
 _LOCK_NOT_AVAILABLE_SQLSTATE = "55P03"
 # Lane 2 sweeps packs that can still change refund/fraud state.
@@ -155,16 +168,24 @@ _RECONCILE_LIVE_PACK_STATUSES = ("active", "refunded")
 _RECONCILE_ATTEMPT_BATCH = 500
 _RECONCILE_STALE_ATTEMPT_ALERT = 200
 
-# A money/state handler for one event_name. See the module "Handler contract".
+# A money/state handler for one (provider, event_name). See "Handler contract".
 EventHandler = Callable[[dict, str], Awaitable[None]]
 
-# Populated by T-299 (order_created) and T-300 (order_refunded). Empty here.
-_EVENT_HANDLERS: dict[str, EventHandler] = {}
+# Keyed by (provider, event_name) — Lemon order_created/order_refunded (T-299/T-300)
+# and Razorpay payment_link.paid/refund.processed (issue #44). Populated at the
+# bottom of this module at import.
+_EVENT_HANDLERS: dict[tuple[str, str], EventHandler] = {}
 
 
-def register_event_handler(event_name: str, handler: EventHandler) -> None:
-    """Register the money/state handler for ``event_name`` (T-299/T-300)."""
-    _EVENT_HANDLERS[event_name] = handler
+def register_event_handler(
+    provider: str, event_name: str, handler: EventHandler
+) -> None:
+    """Register the money/state handler for ``(provider, event_name)``.
+
+    Keyed by the pair (issue #44) so a future event-name collision across
+    providers can never silently route a Razorpay event to a Lemon handler.
+    """
+    _EVENT_HANDLERS[(provider, event_name)] = handler
 
 
 def _now() -> datetime:
@@ -228,23 +249,29 @@ async def _dispatch_claimed(ctx: dict, wid: UUID) -> None:
         if row is None or row.status == "processed":
             return
         event_name = row.event_name
+        provider = row.provider
 
-    handler = _EVENT_HANDLERS.get(event_name)
+    handler = _EVENT_HANDLERS.get((provider, event_name))
     if handler is not None:
         # The handler owns its transaction and the 'processed' transition.
         await handler(ctx, str(wid))
         return
 
     if event_name in _ORDER_EVENTS:
-        # Money event with no handler yet (pre-T-299/T-300). This is unreachable
-        # while Lemon is dormant — the signature verifier fails closed with no
-        # secret, so no order rows can exist. Fail loud (it dead-letters and is
-        # visible/recoverable) rather than silently acking a paid order.
-        raise RuntimeError(f"no handler registered for order event {event_name!r}")
+        # Money event with no handler for this (provider, event_name). Fail loud
+        # (it dead-letters and is visible/recoverable) rather than silently acking
+        # a paid order. _ORDER_EVENTS stays keyed by event_name alone — the
+        # semantic "this is a money event" is provider-independent.
+        raise RuntimeError(
+            f"no handler registered for order event {event_name!r} "
+            f"(provider {provider!r})"
+        )
 
     # An event we will never act on (subscription_*, license_*, …) — ack it.
     await _mark_processed(wid)
-    logger.info("billing.process.acked_unhandled", event_name=event_name)
+    logger.info(
+        "billing.process.acked_unhandled", event_name=event_name, provider=provider
+    )
 
 
 async def _mark_processed(wid: UUID) -> None:
@@ -370,40 +397,117 @@ def _reversal_decision(order_status: str | None) -> tuple[bool, str]:
     return full_or_fraud, reason_label
 
 
+def _razorpay_has_reversal(payment: RazorpayPayment) -> bool:
+    """True when a re-read payment shows a refund the local pack may have missed."""
+    return payment.amount_refunded_cents > 0 or payment.refund_status in (
+        "partial",
+        "full",
+    )
+
+
+def _razorpay_reversal_decision(payment: RazorpayPayment) -> tuple[bool, str]:
+    """Map a re-read Razorpay payment to ``(full_or_fraud, reason_label)`` (issue #44).
+
+    Shared by the ``refund.processed`` handler (Step 5) and reconcile lane 2. A
+    refund is *full* when the provider marks ``refund_status == "full"`` **or** the
+    cumulative refunded amount covers the payment; ``reason_label`` is always
+    ``"refund"`` — Razorpay payments carry NO fraud/chargeback status (disputes are
+    separate entities, Plan §11), so there is no ``"fraud"`` analogue. The
+    ``amount_cents > 0`` guard keeps a payment with a missing/zero amount from
+    reading as a spurious full refund.
+    """
+    full = payment.refund_status == "full" or (
+        payment.amount_cents > 0
+        and payment.amount_refunded_cents >= payment.amount_cents
+    )
+    return full, "refund"
+
+
+@dataclass
+class _RereadReversal:
+    """A provider re-read normalised to lane-2's reversal decision (issue #44)."""
+
+    has_reversal: bool
+    refunded_amount_cents: int
+    full_or_fraud: bool
+    reason_label: str
+
+
+async def _reconcile_reread(provider: str, order_id: str) -> _RereadReversal:
+    """Re-read one order/payment and normalise its reversal decision (lane 2).
+
+    Provider dispatch: Lemon ``get_order`` (status-driven) or Razorpay
+    ``get_payment`` (refund-status/amount-driven). The provider's rate-limit /
+    contract-error types propagate unchanged so lane 2 backs off and stops the lane
+    with the cursor at the last success.
+    """
+    if provider == "razorpay":
+        payment = await razorpay_service.get_payment(order_id)
+        full_or_fraud, reason_label = _razorpay_reversal_decision(payment)
+        return _RereadReversal(
+            has_reversal=_razorpay_has_reversal(payment),
+            refunded_amount_cents=payment.amount_refunded_cents,
+            full_or_fraud=full_or_fraud,
+            reason_label=reason_label,
+        )
+    order = await lemonsqueezy_service.get_order(order_id)
+    full_or_fraud, reason_label = _reversal_decision(order.status)
+    return _RereadReversal(
+        has_reversal=_order_has_reversal(order),
+        refunded_amount_cents=order.refunded_amount_cents,
+        full_or_fraud=full_or_fraud,
+        reason_label=reason_label,
+    )
+
+
 async def billing_reconcile(ctx: dict) -> None:
     """15-minute reconciliation backstop (plain cron; catch + log — never raises).
 
-    Authoritative run-state lives in the single ``billing_reconciliation_cursors``
-    row (Postgres, not Redis). The row is claimed ``SELECT … FOR UPDATE NOWAIT`` and
-    the lock is **held in this session for the entire run** — that is the single-
-    active-run guarantee: an overlapping cron tick gets a lock-not-available error
-    and skips cleanly (not a failure, no retry/dead-letter). Three bounded lanes run
-    in order; on success the cursor state + ``last_successful_run_at`` advance and the
-    lock releases atomically; on failure the run rolls back (cursor unchanged) and
-    only ``last_error`` is persisted.
+    Authoritative run-state lives in the ``billing_reconciliation_cursors`` rows
+    (Postgres, not Redis) — one per configured provider (``lemonsqueezy`` +
+    ``razorpay``, issue #44). **All** rows are claimed in one ``SELECT … ORDER BY
+    provider FOR UPDATE NOWAIT`` and the locks are **held in this session for the
+    entire run** — that is the single-active-run guarantee (D11): an overlapping
+    cron tick that cannot claim *any* row gets a lock-not-available error and skips
+    the whole tick cleanly (not a failure, no retry/dead-letter). Claiming all rows
+    upfront (never per-provider) stops two overlapping ticks from splitting the
+    providers and double-running the provider-neutral lanes 1/3. On success every
+    cursor's state + ``last_successful_run_at`` advance and the locks release
+    atomically; on failure the run rolls back (cursors unchanged) and only
+    ``last_error`` is persisted on every claimed row.
 
-    Lane 1 — inbox replay: re-enqueue committed ``received``/retryable ``failed``/
-    reclaimed stale ``processing`` rows. The inbox row carries the signed
-    ``checkout_ref`` + nonce proof, so this is the **only** automatic path to recover
-    a missed ``order_created`` grant.
-    Lane 2 — bounded local-pack provider re-read: for live Lemon packs, ``get_order``
-    by id and run the same T-300 refund/fraud helper. Capped at
-    ``lemonsqueezy_reconcile_max_calls_per_run`` and cursor-paged by
-    ``provider_order_id``; backs off + stops (cursor unchanged) on 429/5xx.
-    Lane 3 — checkout-attempt hygiene: expire local attempts past ``expires_at`` and
-    alert on aggregate stale/pending patterns.
+    Lane 1 — inbox replay (provider-neutral): re-enqueue committed ``received``/
+    retryable ``failed``/reclaimed stale ``processing`` rows. The inbox row carries
+    the signed ``checkout_ref`` + nonce proof, so this is the **only** automatic path
+    to recover a missed grant.
+    Lane 2 — bounded per-provider re-read (D3 — every configured provider, not just
+    the active one): for each provider's live packs, ``get_order`` / ``get_payment``
+    by id and run that provider's refund/fraud helper. Capped at the provider's
+    ``*_reconcile_max_calls_per_run`` and cursor-paged by ``provider_order_id``; backs
+    off + stops (that provider's cursor unchanged) on 429/5xx.
+    Lane 3 — checkout-attempt hygiene (provider-neutral): expire local attempts past
+    ``expires_at`` (metric labelled by each attempt's provider) and alert on stale
+    buildup.
 
     It **never** invents a first grant from order listing/email/receipt/order
     number/amount/currency/time window/redirect — an unprovable paid checkout goes to
     the admin-correction path (T-302), never an automatic grant.
     """
     async with AsyncSessionLocal() as lock_db:
-        # 1. Claim the single-run lock on the cursor row (NOWAIT → skip if held).
+        # 1. Claim the single-run lock on ALL cursor rows (ordered by provider ASC,
+        #    NOWAIT). A consistent lock order + NOWAIT means any row already held ⇒
+        #    the whole statement raises lock-not-available ⇒ skip the tick (D11).
         try:
-            cursor = await lock_db.scalar(
-                select(BillingReconciliationCursor)
-                .where(BillingReconciliationCursor.provider == _RECONCILE_PROVIDER)
-                .with_for_update(nowait=True)
+            cursors = (
+                (
+                    await lock_db.execute(
+                        select(BillingReconciliationCursor)
+                        .order_by(BillingReconciliationCursor.provider.asc())
+                        .with_for_update(nowait=True)
+                    )
+                )
+                .scalars()
+                .all()
             )
         except DBAPIError as exc:
             await lock_db.rollback()
@@ -412,38 +516,55 @@ async def billing_reconcile(ctx: dict) -> None:
                 return
             logger.exception("billing.reconcile.cursor_lock_failed")
             return
-        if cursor is None:
-            # The migration seeds the single 'lemonsqueezy' row; its absence is a
+        if not cursors:
+            # 0018 seeds 'lemonsqueezy', 0034 seeds 'razorpay'; an empty table is a
             # deploy/migration fault, not something a tick should paper over.
             logger.warning("billing.reconcile.cursor_missing")
             return
 
+        # Snapshot the claimed providers as plain strings NOW — the failure path
+        # calls _persist_reconcile_error AFTER lock_db.rollback() expires these ORM
+        # rows, and reading cursor.provider then would trigger a sync lazy-refresh
+        # (MissingGreenlet).
+        claimed_providers = [cursor.provider for cursor in cursors]
+
         # Held until the final commit/rollback — do NOT commit mid-run (that would
-        # release the lock and break the single-active-run guarantee).
-        cursor.last_run_started_at = _now()
+        # release the locks and break the single-active-run guarantee).
+        started = _now()
+        for cursor in cursors:
+            cursor.last_run_started_at = started
 
         try:
             replayed = await _reconcile_lane1(ctx)
-            lane2 = await _reconcile_lane2(state=dict(cursor.state or {}))
+            # Lane 2 per provider: each provider re-reads only its own packs against
+            # its own API/budget/back-off; a provider I/O error stops just that
+            # provider's lane (returns normally), never the whole run.
+            lane2_results: dict[str, _Lane2Result] = {}
+            for cursor in cursors:
+                lane2_results[cursor.provider] = await _reconcile_lane2(
+                    provider=cursor.provider, state=dict(cursor.state or {})
+                )
             expired_attempts = await _reconcile_lane3()
         except Exception:
-            await lock_db.rollback()  # discards last_run_started_at; cursor unchanged
+            await lock_db.rollback()  # discards last_run_started_at; cursors unchanged
             logger.exception("billing.reconcile.failed")
-            await _persist_reconcile_error()
+            await _persist_reconcile_error(claimed_providers)
             return
 
-        # Success: advance the cursor + timestamps atomically and release the lock.
-        cursor.state = lane2.state
-        cursor.last_successful_run_at = _now()
-        cursor.last_run_completed_at = _now()
-        cursor.last_error = None
-        cursor.updated_at = _now()
+        # Success: advance every cursor + timestamps atomically and release the locks.
+        completed = _now()
+        for cursor in cursors:
+            cursor.state = lane2_results[cursor.provider].state
+            cursor.last_successful_run_at = completed
+            cursor.last_run_completed_at = completed
+            cursor.last_error = None
+            cursor.updated_at = completed
         await lock_db.commit()
         logger.info(
             "billing.reconcile.done",
             replayed=replayed,
-            lane2_calls=lane2.calls,
-            lane2_reversals=lane2.reversals,
+            lane2_calls=sum(r.calls for r in lane2_results.values()),
+            lane2_reversals=sum(r.reversals for r in lane2_results.values()),
             expired_attempts=expired_attempts,
         )
 
@@ -457,19 +578,24 @@ async def _reconcile_lane1(ctx: dict) -> int:
     return len(ids)
 
 
-async def _reconcile_lane2(*, state: dict) -> _Lane2Result:
-    """Lane 2 — bounded provider re-read of live local packs (refund/fraud backstop).
+async def _reconcile_lane2(*, provider: str, state: dict) -> _Lane2Result:
+    """Lane 2 — bounded re-read of one provider's live local packs (refund backstop).
 
-    Reads up to ``lemonsqueezy_reconcile_max_calls_per_run`` live Lemon packs ordered
+    Reads up to that provider's ``*_reconcile_max_calls_per_run`` live packs ordered
     by ``provider_order_id`` and resuming after the cursor's ``lane2_last_order_id``;
-    ``get_order`` each, and on a missed refund/fraud runs the same T-300 helper in its
-    own committed session (so a single bad order never poisons the batch). On a 429/
-    provider error it backs off and stops the lane with the cursor at the last
-    successfully processed id (it advances next run). When the ordered scan is
-    exhausted the cursor resets to the start so reconciliation is continuous. Never
-    grants — ``apply_refund_reversal`` only revokes, never credits.
+    re-reads each via the provider (``get_order`` / ``get_payment``), and on a missed
+    reversal runs ``apply_refund_reversal`` in its own committed session (so a single
+    bad order never poisons the batch). On a 429/provider error it backs off and
+    stops the lane with the cursor at the last successfully processed id (it advances
+    next run) — the error is swallowed here, never raised, so a rate-limited provider
+    can never roll back the *other* provider's cursor advance. When the ordered scan
+    is exhausted the cursor resets to the start so reconciliation is continuous.
+    Never grants — ``apply_refund_reversal`` only revokes, never credits.
     """
-    max_calls = settings.lemonsqueezy_reconcile_max_calls_per_run
+    if provider == "razorpay":
+        max_calls = settings.razorpay_reconcile_max_calls_per_run
+    else:
+        max_calls = settings.lemonsqueezy_reconcile_max_calls_per_run
     last_id = str(state.get("lane2_last_order_id") or "")
 
     async with AsyncSessionLocal() as db:
@@ -477,7 +603,7 @@ async def _reconcile_lane2(*, state: dict) -> _Lane2Result:
             await db.execute(
                 select(BillingCreditPack.id, BillingCreditPack.provider_order_id)
                 .where(
-                    BillingCreditPack.provider == _RECONCILE_PROVIDER,
+                    BillingCreditPack.provider == provider,
                     BillingCreditPack.status.in_(_RECONCILE_LIVE_PACK_STATUSES),
                     BillingCreditPack.provider_order_id.isnot(None),
                     BillingCreditPack.provider_order_id > last_id,
@@ -493,26 +619,38 @@ async def _reconcile_lane2(*, state: dict) -> _Lane2Result:
     stopped_early = False
     for pack_id, order_id in candidates:
         try:
-            order = await lemonsqueezy_service.get_order(order_id)
-        except LemonSqueezyRateLimitError as exc:
+            reread = await _reconcile_reread(provider, order_id)
+        except (LemonSqueezyRateLimitError, RazorpayRateLimitError) as exc:
             logger.warning(
                 "billing.reconcile.lane2_rate_limited",
+                provider=provider,
                 retry_after=round(exc.retry_after, 1),
                 order_id=order_id,
             )
             stopped_early = True
             break
-        except LemonSqueezyError:
-            logger.warning("billing.reconcile.lane2_provider_error", order_id=order_id)
+        except (LemonSqueezyError, RazorpayError):
+            logger.warning(
+                "billing.reconcile.lane2_provider_error",
+                provider=provider,
+                order_id=order_id,
+            )
             stopped_early = True
             break
         calls += 1
 
-        if _order_has_reversal(order):
-            if await _reconcile_apply_reversal(pack_id, order):
+        if reread.has_reversal:
+            if await _reconcile_apply_reversal(
+                provider=provider,
+                pack_id=pack_id,
+                refunded_amount_cents=reread.refunded_amount_cents,
+                full_or_fraud=reread.full_or_fraud,
+                reason_label=reread.reason_label,
+                order_id=order_id,
+            ):
                 reversals += 1
 
-        # Advance only after a successful get_order (+ any reversal commit).
+        # Advance only after a successful re-read (+ any reversal commit).
         new_last = order_id
 
     # A full, uninterrupted scan that returned fewer than the cap means we reached
@@ -524,12 +662,21 @@ async def _reconcile_lane2(*, state: dict) -> _Lane2Result:
     return _Lane2Result(state=state, calls=calls, reversals=reversals)
 
 
-async def _reconcile_apply_reversal(pack_id: UUID, order: LemonOrder) -> bool:
-    """Run the T-300 reversal helper for one re-read order in its own session.
+async def _reconcile_apply_reversal(
+    *,
+    provider: str,
+    pack_id: UUID,
+    refunded_amount_cents: int,
+    full_or_fraud: bool,
+    reason_label: str,
+    order_id: str | None,
+) -> bool:
+    """Run the T-300 reversal helper for one re-read pack in its own session.
 
-    Returns True if a revocation was actually applied (a webhook the path missed).
+    Provider-neutral: the caller (lane 2) has already resolved the reversal decision
+    from that provider's re-read. Returns True if a revocation was actually applied
+    (a webhook the path missed).
     """
-    full_or_fraud, reason_label = _reversal_decision(order.status)
     async with AsyncSessionLocal() as db:
         pack = await db.scalar(
             select(BillingCreditPack).where(BillingCreditPack.id == pack_id)
@@ -540,7 +687,7 @@ async def _reconcile_apply_reversal(pack_id: UUID, order: LemonOrder) -> bool:
         outcome = await credit_service.apply_refund_reversal(
             db,
             source_pack=pack,
-            lemon_refunded_amount_cents=order.refunded_amount_cents,
+            provider_refunded_amount_cents=refunded_amount_cents,
             full_or_fraud=full_or_fraud,
             reason_label=reason_label,
         )
@@ -548,19 +695,19 @@ async def _reconcile_apply_reversal(pack_id: UUID, order: LemonOrder) -> bool:
 
     await credit_service.invalidate(user_id)
     if outcome.credits_revoked > 0:
-        BILLING_CREDITS_REVOKED.labels(
-            provider=_RECONCILE_PROVIDER, reason=reason_label
-        ).inc(outcome.credits_revoked)
+        BILLING_CREDITS_REVOKED.labels(provider=provider, reason=reason_label).inc(
+            outcome.credits_revoked
+        )
     if outcome.debt_created > 0:
-        BILLING_CREDIT_DEBT_CREATED.labels(
-            provider=_RECONCILE_PROVIDER, reason=reason_label
-        ).inc(outcome.debt_created)
+        BILLING_CREDIT_DEBT_CREATED.labels(provider=provider, reason=reason_label).inc(
+            outcome.debt_created
+        )
     if outcome.applied:
-        BILLING_RECONCILE_MISMATCH.labels(provider=_RECONCILE_PROVIDER).inc()
+        BILLING_RECONCILE_MISMATCH.labels(provider=provider).inc()
         logger.warning(
             "billing.reconcile.mismatch",
-            provider=_RECONCILE_PROVIDER,
-            order_id=order.provider_order_id,
+            provider=provider,
+            order_id=order_id,
             reason=reason_label,
             credits_revoked=outcome.credits_revoked,
             debt_created=outcome.debt_created,
@@ -575,24 +722,21 @@ async def _reconcile_lane3() -> int:
     """
     now = _now()
     async with AsyncSessionLocal() as db:
-        ids = (
-            (
-                await db.execute(
-                    select(BillingCheckoutAttempt.id)
-                    .where(
-                        BillingCheckoutAttempt.status.in_(
-                            ("created", "provider_created")
-                        ),
-                        BillingCheckoutAttempt.expires_at < now,
-                    )
-                    .order_by(BillingCheckoutAttempt.expires_at)
-                    .limit(_RECONCILE_ATTEMPT_BATCH)
-                    .with_for_update(skip_locked=True)
+        # Select the provider alongside the id — an expired-attempt batch can span
+        # both providers, and the metric is labelled by each attempt's own provider.
+        rows = (
+            await db.execute(
+                select(BillingCheckoutAttempt.id, BillingCheckoutAttempt.provider)
+                .where(
+                    BillingCheckoutAttempt.status.in_(("created", "provider_created")),
+                    BillingCheckoutAttempt.expires_at < now,
                 )
+                .order_by(BillingCheckoutAttempt.expires_at)
+                .limit(_RECONCILE_ATTEMPT_BATCH)
+                .with_for_update(skip_locked=True)
             )
-            .scalars()
-            .all()
-        )
+        ).all()
+        ids = [row.id for row in rows]
         if ids:
             await db.execute(
                 update(BillingCheckoutAttempt)
@@ -613,7 +757,11 @@ async def _reconcile_lane3() -> int:
         await db.commit()
 
     if ids:
-        BILLING_CHECKOUT_EXPIRED.labels(provider=_RECONCILE_PROVIDER).inc(len(ids))
+        per_provider: dict[str, int] = {}
+        for row in rows:
+            per_provider[row.provider] = per_provider.get(row.provider, 0) + 1
+        for expired_provider, count in per_provider.items():
+            BILLING_CHECKOUT_EXPIRED.labels(provider=expired_provider).inc(count)
         logger.info("billing.reconcile.attempts_expired", count=len(ids))
     if still_open and still_open >= _RECONCILE_STALE_ATTEMPT_ALERT:
         logger.warning(
@@ -624,20 +772,32 @@ async def _reconcile_lane3() -> int:
     return len(ids)
 
 
-async def _persist_reconcile_error() -> None:
-    """Persist the failed run's ``last_error`` without advancing success state."""
+async def _persist_reconcile_error(providers: list[str]) -> None:
+    """Persist the failed run's ``last_error`` on every claimed cursor row.
+
+    Runs after the run session rolled back (releasing the locks), in a fresh
+    session; best-effort — a concurrent tick may re-run before this lands.
+    """
     try:
         async with AsyncSessionLocal() as db:
-            cursor = await db.scalar(
-                select(BillingReconciliationCursor).where(
-                    BillingReconciliationCursor.provider == _RECONCILE_PROVIDER
+            cursors = (
+                (
+                    await db.execute(
+                        select(BillingReconciliationCursor).where(
+                            BillingReconciliationCursor.provider.in_(providers)
+                        )
+                    )
                 )
+                .scalars()
+                .all()
             )
-            if cursor is None:
-                return
-            cursor.last_error = "reconcile run failed; see billing.reconcile.failed log"
-            cursor.last_run_started_at = _now()
-            cursor.updated_at = _now()
+            now = _now()
+            for cursor in cursors:
+                cursor.last_error = (
+                    "reconcile run failed; see billing.reconcile.failed log"
+                )
+                cursor.last_run_started_at = now
+                cursor.updated_at = now
             await db.commit()
     except Exception:  # pragma: no cover - best-effort error annotation
         logger.exception("billing.reconcile.error_persist_failed")
@@ -900,13 +1060,13 @@ async def _find_existing_pack(
     *,
     order_id: str | None,
     provider_checkout_id: str | None,
-    provider: str = "lemonsqueezy",
+    provider: str,
 ) -> BillingCreditPack | None:
     """Reload an already-granted pack for this order/checkout (the idempotency key).
 
     Matches on ``(provider, provider_order_id)`` OR ``(provider, provider_checkout_id)``
-    — guarding against a NULL key matching another NULL-keyed pack. ``provider``
-    defaults to lemonsqueezy (the only runtime provider since T-308).
+    — guarding against a NULL key matching another NULL-keyed pack. ``provider`` is a
+    required argument now that Razorpay joined Lemon as a runtime provider (issue #44).
     """
     conditions = []
     if order_id is not None:
@@ -1002,7 +1162,10 @@ async def handle_order_created(ctx: dict, webhook_event_id: str) -> None:
 
         # Idempotency pre-check under the lock: a prior delivery already granted.
         existing = await _find_existing_pack(
-            db, order_id=order_id, provider_checkout_id=provider_checkout_id
+            db,
+            order_id=order_id,
+            provider_checkout_id=provider_checkout_id,
+            provider="lemonsqueezy",
         )
         if existing is not None:
             attempt.status = "completed"
@@ -1171,7 +1334,7 @@ async def handle_order_refunded(ctx: dict, webhook_event_id: str) -> None:
         outcome = await credit_service.apply_refund_reversal(
             db,
             source_pack=source_pack,
-            lemon_refunded_amount_cents=refunded_amount,
+            provider_refunded_amount_cents=refunded_amount,
             full_or_fraud=full_or_fraud,
             reason_label=reason_label,
         )
@@ -1284,9 +1447,357 @@ async def _refund_without_pack(
     )
 
 
+# ---------------------------------------------------------------------------
+# Razorpay payment_link.paid — grant credits for a verified paid link (issue #44)
+# ---------------------------------------------------------------------------
+#
+# The Razorpay analogue of handle_order_created. Validation and the grant are
+# anchored to the checkout-attempt SNAPSHOT (never live RAZORPAY_* config — DC6):
+# an in-flight price change must not break or mis-price a purchase. Ownership is
+# proven ONLY by notes.checkout_ref + the stored nonce hash + notes.user_id — never
+# inferred from the payment id. The money authority is the PAYMENT entity (D10): the
+# link's amount is a value SpecForge set at creation, so it is corroboration only.
+# The normalized inbox payload uses the ``notes`` block (not Lemon's ``custom``) and
+# a top-level ``payment_id`` (the pay_… id → provider_order_id, D7).
+
+
+def _razorpay_link_paid_rejection(
+    payload: dict, notes: dict, attempt: BillingCheckoutAttempt | None
+) -> str | None:
+    """Run the payment_link.paid validation checklist; reason to reject, or None.
+
+    Every term is terminal on failure (no retry) — the webhook is marked processed
+    with a sanitised warning so a config/proof error is alertable rather than silent.
+    """
+    if attempt is None:
+        return "attempt_not_found"
+    # Ownership: notes.checkout_ref already loaded the attempt; corroborate the
+    # nonce hash + user id. Never inferred from the payment id.
+    raw_user_id = notes.get("user_id")
+    try:
+        notes_user_id = UUID(str(raw_user_id))
+    except (ValueError, TypeError):
+        return "user_id_invalid"
+    if notes_user_id != attempt.user_id:
+        return "user_id_mismatch"
+    if notes.get("checkout_nonce_hash_from_webhook") != attempt.checkout_nonce_hash:
+        return "nonce_mismatch"
+    if attempt.status not in _GRANTABLE_ATTEMPT_STATUSES:
+        return "attempt_status_invalid"
+    # Environment (test/live). Razorpay events carry no test_mode flag — the
+    # round-tripped notes.environment is the guard (re-checked against live config
+    # here, defence-in-depth beyond the webhook receiver's ingestion check).
+    if notes.get("environment") != razorpay_environment():
+        return "environment_mismatch"
+    # Payment-entity anchor (D10) — the money object is the authority.
+    payment = payload.get("payment") or {}
+    if _coerce_int(payment.get("amount")) != attempt.price_cents:
+        return "payment_amount_mismatch"
+    payment_currency = str(payment.get("currency") or "")
+    if payment_currency.upper() != attempt.currency.upper():
+        return "payment_currency_mismatch"
+    if payment.get("status") != "captured":
+        return "payment_not_captured"
+    # Link corroboration — accept_partial is off, so the full amount must match and
+    # the link must be paid (the status_not_paid analogue).
+    link = payload.get("payment_link") or {}
+    if _coerce_int(link.get("amount")) != attempt.price_cents:
+        return "link_amount_mismatch"
+    if link.get("status") != "paid":
+        return "link_status_not_paid"
+    return None
+
+
+async def handle_razorpay_link_paid(ctx: dict, webhook_event_id: str) -> None:
+    """Grant credits for a verified, proof-matched ``payment_link.paid`` (issue #44).
+
+    Idempotent: a duplicate delivery (or a redelivered inbox row with a different
+    ``payload_hash``) reloads the existing pack and writes no second grant — enforced
+    by the ``(provider, provider_order_id)`` / ``(provider, provider_checkout_id)``
+    pack uniqueness and the ``billing_purchase:razorpay:{payment_id}`` ledger index.
+    """
+    wid = UUID(webhook_event_id)
+
+    async with AsyncSessionLocal() as db:
+        webhook = await db.scalar(
+            select(BillingWebhookEvent)
+            .where(BillingWebhookEvent.id == wid)
+            .with_for_update()
+        )
+        if webhook is None or webhook.status == "processed":
+            return
+        payload = webhook.normalized_payload or {}
+        notes = payload.get("notes") or {}
+        link = payload.get("payment_link") or {}
+        payment_id = payload.get("payment_id")
+        checkout_ref = notes.get("checkout_ref")
+
+        # Locate the attempt by checkout_ref (the ownership key) and lock it.
+        attempt: BillingCheckoutAttempt | None = None
+        if checkout_ref:
+            attempt = await db.scalar(
+                select(BillingCheckoutAttempt)
+                .where(BillingCheckoutAttempt.checkout_ref == checkout_ref)
+                .with_for_update()
+            )
+
+        reason = _razorpay_link_paid_rejection(payload, notes, attempt)
+        if reason is not None:
+            webhook.status = "processed"
+            webhook.processed_at = _now()
+            await db.commit()
+            # A rejected link the provider reports as *paid* is money we took but
+            # could not turn into credits — the unprovable-paid-checkout path that
+            # needs an admin correction (T-302). The "provider says paid" predicate
+            # is payment_link.status == "paid" (D10 analogue of Lemon's status).
+            if link.get("status") == "paid":
+                BILLING_UNRECOVERABLE_CHECKOUT.labels(provider="razorpay").inc()
+            logger.warning(
+                "billing.razorpay_link_paid.rejected",
+                reason=reason,
+                payment_id=payment_id,
+                checkout_ref=checkout_ref,
+                webhook_event_id=str(wid),
+            )
+            return
+
+        # attempt is non-None and proof-matched past this point.
+        user_id = attempt.user_id
+        credits = attempt.credits
+        # Anchor money fields on the attempt snapshot (== the validated payment
+        # amount, D10). provider_order_total_cents is populated explicitly: the INR
+        # price is tax-inclusive, so item and order total coincide (no Lemon-style
+        # tax on top) — apply_refund_reversal normalises the refund through it.
+        price_cents = attempt.price_cents
+        currency = attempt.currency
+        validity_days = attempt.validity_days
+        provider_checkout_id = attempt.provider_checkout_id
+
+        # Lock the user row (canonical user→pack order shared with deduct/expire).
+        user = await db.scalar(select(User).where(User.id == user_id).with_for_update())
+        if user is None:  # FK guarantees this never happens; fail loud if it does.
+            raise RuntimeError(f"user {user_id} missing for granted attempt")
+
+        # Idempotency pre-check under the lock: a prior delivery already granted.
+        existing = await _find_existing_pack(
+            db,
+            order_id=payment_id,
+            provider_checkout_id=provider_checkout_id,
+            provider="razorpay",
+        )
+        if existing is not None:
+            attempt.status = "completed"
+            if attempt.completed_at is None:
+                attempt.completed_at = _now()
+            if attempt.provider_order_id is None:
+                attempt.provider_order_id = payment_id
+            webhook.status = "processed"
+            webhook.processed_at = _now()
+            await db.commit()
+            logger.info(
+                "billing.razorpay_link_paid.duplicate",
+                payment_id=payment_id,
+                pack_id=str(existing.id),
+                webhook_event_id=str(wid),
+            )
+            return
+
+        # Create the pack from the ATTEMPT SNAPSHOT (not live config — DC6). The
+        # normalized payload carries no order created_at, so the purchase (and expiry
+        # anchor) is stamped now — the webhook lands seconds after capture.
+        purchased_at = _now()
+        pack = BillingCreditPack(
+            user_id=user_id,
+            provider="razorpay",
+            provider_checkout_id=provider_checkout_id,
+            provider_order_id=payment_id,
+            provider_customer_id=None,
+            provider_variant_id=None,
+            credits_purchased=credits,
+            credits_remaining=credits,
+            price_cents=price_cents,
+            currency=currency,
+            paid_item_amount_cents=price_cents,
+            provider_order_total_cents=price_cents,
+            status="active",
+            purchased_at=purchased_at,
+            expires_at=purchased_at + timedelta(days=validity_days),
+        )
+        db.add(pack)
+
+        try:
+            # flush surfaces a (provider, provider_order_id|checkout_id) uniqueness
+            # conflict (a racing duplicate that committed first) before we grant.
+            await db.flush()
+            granted = await credit_service.grant_credits_with_debt_recovery(
+                db,
+                user_id=user_id,
+                pack=pack,
+                granted_credits=credits,
+                ledger_reason=f"billing_purchase:razorpay:{payment_id}",
+            )
+        except IntegrityError:
+            # A concurrent delivery won the insert; roll back this poisoned tx and
+            # acknowledge the redelivery in a fresh session. No second grant.
+            await db.rollback()
+            await _ack_order_processed(wid)
+            logger.info(
+                "billing.razorpay_link_paid.duplicate_conflict",
+                payment_id=payment_id,
+                webhook_event_id=str(wid),
+            )
+            return
+
+        if granted is None:
+            # The ledger-reason index rejected a duplicate grant; grant()'s SAVEPOINT
+            # rolled back its own rows but our pre-grant pack flush is still pending —
+            # never commit it. Roll back and ack the duplicate.
+            await db.rollback()
+            await _ack_order_processed(wid)
+            logger.info(
+                "billing.razorpay_link_paid.duplicate_ledger",
+                payment_id=payment_id,
+                webhook_event_id=str(wid),
+            )
+            return
+
+        attempt.status = "completed"
+        attempt.completed_at = _now()
+        attempt.provider_order_id = payment_id
+        webhook.status = "processed"
+        webhook.processed_at = _now()
+        await db.commit()
+
+    # Post-commit: evict the credit-balance cache, then record provider-labelled
+    # telemetry; provider context also rides in the structured log.
+    await credit_service.invalidate(user_id)
+    BILLING_CHECKOUT_COMPLETED.labels(provider="razorpay").inc()
+    BILLING_CREDITS_GRANTED.labels(provider="razorpay").inc(credits)
+    BILLING_PURCHASE_REVENUE_CENTS.labels(provider="razorpay").inc(price_cents)
+    # Debt repaid out of this grant (granted − surplus). Emitted post-commit so a
+    # failed outer commit can never leave an over-counted recovery metric.
+    recovered = credits - granted.amount
+    if recovered > 0:
+        BILLING_CREDIT_DEBT_RECOVERED.labels(provider="razorpay").inc(recovered)
+    logger.info(
+        "billing.razorpay_link_paid.granted",
+        provider="razorpay",
+        payment_id=payment_id,
+        user_id=str(user_id),
+        pack_id=str(pack.id),
+        credits_granted=credits,
+        paid_item_cents=price_cents,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Razorpay refund.processed — proportional revocation + recoverable debt (issue #44)
+# ---------------------------------------------------------------------------
+#
+# The Razorpay analogue of handle_order_refunded. The pack is found ONLY by
+# `(provider='razorpay', provider_order_id=payment_id)` — never inferred from notes.
+# The cumulative `amount_refunded` on the PAYMENT entity drives the same proportional
+# reversal as Lemon's `refunded_amount`, so partial + full refunds settle correctly
+# and re-deliveries are no-ops. Razorpay payments carry NO fraud/chargeback status
+# (disputes are separate entities — Plan §11), so reason is always "refund" and lane
+# 2 cannot detect a chargeback (a known, documented weakness vs the Lemon posture).
+
+
+async def handle_razorpay_refund(ctx: dict, webhook_event_id: str) -> None:
+    """Apply a Razorpay refund reversal exactly once, or route the no-pack branches.
+
+    Idempotent: the monotonic ``refunded_item_amount_cents_processed`` gate plus the
+    two-component ``refund:billing:{pack_id}:{cents}`` ledger reason make a replay of
+    the same or a lower refund level a no-op (durable processed state only). Shares
+    ``_refund_without_pack`` with Lemon — the refund's normalized payload carries the
+    payment entity's ``notes`` (checkout_ref + nonce hash + user_id), so the
+    park-and-retry proof branches work identically.
+    """
+    wid = UUID(webhook_event_id)
+
+    async with AsyncSessionLocal() as db:
+        webhook = await db.scalar(
+            select(BillingWebhookEvent)
+            .where(BillingWebhookEvent.id == wid)
+            .with_for_update()
+        )
+        if webhook is None or webhook.status == "processed":
+            return
+        payload = webhook.normalized_payload or {}
+        notes = payload.get("notes") or {}
+        payment_id = payload.get("payment_id")
+        payment = payload.get("payment") or {}
+        # Cumulative refunded total on the payment entity (same semantics as Lemon's
+        # refunded_amount). Coerced defensively: a refund arriving without a full
+        # payment entity degrades to a monotonic no-op (0), and lane 2's get_payment
+        # re-read is the backstop that catches the real cumulative later — never a
+        # spurious over-revocation.
+        amount_refunded = _coerce_int(payment.get("amount_refunded")) or 0
+        payment_amount = _coerce_int(payment.get("amount")) or 0
+        refund_status = str(payment.get("refund_status") or "")
+        full_or_fraud = refund_status == "full" or (
+            payment_amount > 0 and amount_refunded >= payment_amount
+        )
+        reason_label = "refund"  # Razorpay has no fraud/chargeback status on payments
+
+        # The pack is found ONLY by provider order id (the payment id, D7) — a signed
+        # refund with no notes still revokes. No lock here — apply_refund_reversal
+        # re-locks under the canonical order.
+        source_pack = await db.scalar(
+            select(BillingCreditPack)
+            .where(
+                BillingCreditPack.provider == "razorpay",
+                BillingCreditPack.provider_order_id == payment_id,
+            )
+            .limit(1)
+        )
+
+        if source_pack is None:
+            await _refund_without_pack(db, webhook, notes, payment_id)
+            return
+
+        user_id = source_pack.user_id
+        outcome = await credit_service.apply_refund_reversal(
+            db,
+            source_pack=source_pack,
+            provider_refunded_amount_cents=amount_refunded,
+            full_or_fraud=full_or_fraud,
+            reason_label=reason_label,
+        )
+        webhook.status = "processed"
+        webhook.processed_at = _now()
+        await db.commit()
+
+    # Post-commit: evict the credit-balance cache, then record telemetry.
+    await credit_service.invalidate(user_id)
+    if outcome.credits_revoked > 0:
+        BILLING_CREDITS_REVOKED.labels(provider="razorpay", reason=reason_label).inc(
+            outcome.credits_revoked
+        )
+    if outcome.debt_created > 0:
+        BILLING_CREDIT_DEBT_CREATED.labels(
+            provider="razorpay", reason=reason_label
+        ).inc(outcome.debt_created)
+    logger.info(
+        "billing.razorpay_refund.processed",
+        provider="razorpay",
+        payment_id=payment_id,
+        user_id=str(user_id),
+        reason=reason_label,
+        new_refunded_item_cents=outcome.new_refunded_item_cents,
+        credits_revoked=outcome.credits_revoked,
+        immediate_revoke=outcome.immediate_revoke,
+        debt_created=outcome.debt_created,
+        applied=outcome.applied,
+    )
+
+
 # Wire the handlers at import so they are present whenever the worker (or the dispatch
-# path) loads this module. The Lemon order events (T-299/T-300) dispatch by event_name
-# through the neutral pipeline. The late-Stripe grace handlers were removed with the
-# Stripe runtime decommission (T-308).
-register_event_handler("order_created", handle_order_created)
-register_event_handler("order_refunded", handle_order_refunded)
+# path) loads this module. Handlers dispatch by (provider, event_name) through the
+# neutral pipeline: Lemon order events (T-299/T-300) + Razorpay money events (issue
+# #44). The late-Stripe grace handlers were removed with the Stripe runtime
+# decommission (T-308).
+register_event_handler("lemonsqueezy", "order_created", handle_order_created)
+register_event_handler("lemonsqueezy", "order_refunded", handle_order_refunded)
+register_event_handler("razorpay", "payment_link.paid", handle_razorpay_link_paid)
+register_event_handler("razorpay", "refund.processed", handle_razorpay_refund)

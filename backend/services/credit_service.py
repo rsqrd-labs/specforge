@@ -321,7 +321,7 @@ class CreditService:
         db: AsyncSession,
         *,
         source_pack: BillingCreditPack,
-        lemon_refunded_amount_cents: int,
+        provider_refunded_amount_cents: int,
         full_or_fraud: bool,
         reason_label: str,
     ) -> RefundOutcome:
@@ -329,9 +329,11 @@ class CreditService:
 
         The shared credit-mutation half of the T-300 money path (the billing worker
         owns event routing + idempotency). ``source_pack`` is the pack found by
-        ``(provider, provider_order_id)``; ``lemon_refunded_amount_cents`` is the
-        provider's cumulative refunded amount (may include tax); ``full_or_fraud`` is
-        the worker's amount-primary full-refund decision; ``reason_label`` is the
+        ``(provider, provider_order_id)``; ``provider_refunded_amount_cents`` is the
+        provider's cumulative refunded amount (may include tax — Lemon
+        ``refunded_amount`` / Razorpay ``amount_refunded``, issue #44);
+        ``full_or_fraud`` is the worker's amount-primary full-refund decision;
+        ``reason_label`` is the
         metric/debt reason (``refund`` / ``fraud``).
 
         Normalisation + credit math are verbatim from Plan §25.6 T-300. Locking is
@@ -395,7 +397,7 @@ class CreditService:
         )
         # clamp(refunded, 0, provider_total)
         provider_refunded_total_cents = min(
-            max(lemon_refunded_amount_cents, 0), provider_total_cents
+            max(provider_refunded_amount_cents, 0), provider_total_cents
         )
         if full_or_fraud or provider_refunded_total_cents >= provider_total_cents:
             new_refunded_item_cents = paid_item_cents
