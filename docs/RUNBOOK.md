@@ -670,9 +670,19 @@ not long-lived secrets.
 
 ## 9. Billing Alerts And Lemon Squeezy Ops
 
-Billing runs on **Lemon Squeezy** (Phase 22). Lemon is the Merchant of Record,
-so it owns tax, chargebacks, and disputes; chargebacks/disputes surface to
-SpecForge through `order_refunded`/fraud revocation inputs. The Stripe runtime is
+Billing runs on **one flag-gated payment provider at a time** (issue #44):
+`PAYMENTS_ENABLED` is the master kill switch (default **false**) and
+`PAYMENT_PROVIDER` selects the active gateway (`lemonsqueezy` | `razorpay`).
+Checkout is live only when `billing_checkout_enabled` =
+`payments_enabled and (active provider fully configured)`. **Lemon Squeezy**
+(Phase 22) is the Merchant of Record, so it owns tax, chargebacks, and disputes;
+chargebacks/disputes surface to SpecForge through `order_refunded`/fraud
+revocation inputs. **Razorpay** (issue #44) is the INR alternative via hosted
+Payment Links — it is **not** a Merchant of Record (tax/dispute liability sits
+with the account holder), and its ops deltas are in §9.9. **Webhook endpoints for
+both providers always process regardless of which one is active** (D3), so
+refunds/disputes on old orders keep settling after a provider switch. The Stripe
+runtime is
 **fully decommissioned** (T-308): there is no Stripe SDK, config, or webhook
 processing — `POST /billing/webhook` answers a Stripe-shaped request (a
 `Stripe-Signature` header) with `{"status":"ignored_provider_disabled"}` and no
@@ -699,9 +709,12 @@ Architecture recap (so the procedures below make sense):
 ### 9.1 Grafana Alerts
 
 The following alert rules correspond to the provider-labelled counters defined in
-`services/observability.py` (Phase 22 — T-304). `{provider}` is `lemonsqueezy`
-(the only runtime emitter; `provider="stripe"` series persist only as historical
-audit data after the T-308 decommission).
+`services/observability.py` (Phase 22 — T-304). `{provider}` is whichever gateway
+emitted the event — `lemonsqueezy` or `razorpay` (issue #44); a provider switch
+does not silence the retired one's series, since its webhooks keep settling
+(§9.9). `provider="stripe"` series persist only as historical audit data after
+the T-308 decommission. Every alert below is provider-neutral and fires
+identically for Razorpay traffic (drill into the `provider` label to disambiguate).
 
 | Alert | Condition | Severity | Action |
 |---|---|---|---|
@@ -740,10 +753,13 @@ quality/research credits, not payment-flow metrics, and are out of scope here.
 - `GET /billing/package` is public and should keep returning the configured
   package even when checkout is disabled.
 - `POST /billing/checkout` requires authentication and is rate limited to five
-  attempts per user per hour. A **503** means Lemon billing is not configured
-  (one of `LEMONSQUEEZY_API_KEY` / `_STORE_ID` / `_VARIANT_ID` is blank); a
-  **502** means Lemon could not create the checkout, or the post-Lemon commit
-  failed (the URL is never exposed; reconcile settles the order later).
+  attempts per user per hour. A **503** means `billing_checkout_enabled` is false —
+  either `PAYMENTS_ENABLED=false` (the shipping default) or the **active** provider
+  is not fully configured (Lemon: one of `LEMONSQUEEZY_API_KEY` / `_STORE_ID` /
+  `_VARIANT_ID` blank; Razorpay: `RAZORPAY_KEY_ID` / `_KEY_SECRET` blank); a
+  **502** means the active provider could not create the checkout, or the
+  post-provider commit failed (the URL is never exposed; reconcile settles the
+  order later).
 - `POST /billing/webhook` is exempt from browser CSRF and app rate limits, but
   every event must pass `X-Signature` HMAC verification before any DB/queue work.
   Webhook retries are safe: the `billing_webhook_events` inbox is unique per Lemon
@@ -784,18 +800,28 @@ mix them). The constants are `BILLING_DEAD_LETTER_KEY` in
   crashed worker) and refreshes `specforge_billing_webhook_pending_age_seconds`
   to the age of the oldest non-`processed` row. A rising gauge is the primary
   "lost webhook" signal.
-- **Reconcile (15-minute backstop):** `billing_reconcile` holds the single
-  `billing_reconciliation_cursors` row under `SELECT … FOR UPDATE NOWAIT` (an
-  overlapping tick skips cleanly) and runs three bounded lanes:
-  - **Lane 1 — inbox replay:** re-enqueues committed/retryable rows. This is the
-    only automatic path that recovers a missed `order_created` (the signed
-    `checkout_ref`+nonce row is the proof).
-  - **Lane 2 — provider re-read:** for live Lemon packs, `get_order` is called
-    (bounded by `LEMONSQUEEZY_RECONCILE_MAX_CALLS_PER_RUN`); a missed
-    refund/fraud applies the **same** `apply_refund_reversal` and increments
-    `reconcile_mismatch`.
+- **Reconcile (15-minute backstop):** `billing_reconcile` claims **every
+  configured provider's** `billing_reconciliation_cursors` row upfront in one
+  session — ordered by provider, `SELECT … FOR UPDATE NOWAIT`, all held to the
+  final commit — as the single-active-run lock (D11). If **any** cursor row is
+  already locked the whole tick skips cleanly (never a per-provider split across
+  two overlapping ticks); on failure `_persist_reconcile_error` stamps
+  `last_error` on **every** claimed row. It then runs three bounded lanes:
+  - **Lane 1 — inbox replay:** re-enqueues committed/retryable rows (both
+    providers; labels come from each inbox row's provider). This is the only
+    automatic path that recovers a missed grant (`order_created` /
+    `payment_link.paid`) — the signed `checkout_ref`+nonce row is the proof.
+  - **Lane 2 — provider re-read:** iterates the configured providers, paging each
+    provider's live packs from its own cursor and re-reading via
+    `lemonsqueezy_service.get_order` / `razorpay_service.get_payment`, each under
+    its own `*_RECONCILE_MAX_CALLS_PER_RUN` budget and its own 429 back-off; a
+    missed refund/fraud applies the **same** `apply_refund_reversal` and
+    increments `reconcile_mismatch`. **Caveat:** lane 2 cannot detect a Razorpay
+    chargeback — Razorpay payments carry no fraud/dispute status (§9.9), unlike
+    Lemon's `fraudulent`.
   - **Lane 3 — hygiene:** expires checkout attempts past `expires_at` and emits a
-    stale-attempt operator count.
+    stale-attempt operator count, labelled by each attempt row's own provider (a
+    batch may mix providers).
 - **Reconcile never auto-grants.** It only re-enqueues signed inbox rows and
   revokes on existing packs — there is no code path that invents a first grant
   from order listing/amount/email. An unprovable paid checkout is settled via the
@@ -809,17 +835,22 @@ could not settle (e.g. `BillingUnprovablePaidCheckout`).
 - **Authorisation:** the caller's email must be in `ADMIN_USER_EMAILS`
   (comma-separated). An empty allowlist authorises nobody — the path is closed by
   default. There is no role column in V1.
-- **Request body:** `provider` (`lemonsqueezy`), `provider_order_id`,
-  `target_user_id`, `credits`, `price_cents`, `currency`, a `reason`
-  justification, and an `evidence_url` (the support ticket or the Lemon dashboard
-  order). The `evidence_url` is **required**.
+- **Request body:** `provider` (`lemonsqueezy` | `razorpay`), `provider_order_id`
+  (the Razorpay `pay_…` payment id, per D7), `target_user_id`, `credits`,
+  `price_cents`, `currency`, a `reason` justification, and an `evidence_url` (the
+  support ticket or the active provider's dashboard order). The `evidence_url` is
+  **required**. `expires_at` is derived from the named provider's
+  `credit_validity_days` (provider-aware), not a hardcoded Lemon value.
 - **Idempotency:** the write is append-only and unique on
   `(provider, provider_order_id)`. A repeat call returns `applied: false`,
   `credits_granted: 0` — never a second grant. Every call is audited
   (`billing_admin_corrections` row + `specforge_billing_admin_correction_total`).
-- **Procedure:** confirm the order is genuinely paid in the Lemon dashboard and
-  that no pack already exists for the order id; capture the evidence URL; issue
-  the correction; verify the user's balance moved by exactly `credits`.
+- **Procedure:** confirm the order is genuinely paid in the active provider's
+  dashboard (Lemon order, or the Razorpay payment `pay_…`) and that no pack
+  already exists for the order id; capture the evidence URL; issue the
+  correction; verify the user's balance moved by exactly `credits`. On Razorpay
+  this is also the settlement path for a **dispute/chargeback loss**, which lane 2
+  cannot detect (§9.9).
 
 ### 9.6 Optional Dedicated Billing Worker (Scale-Out)
 
@@ -879,6 +910,84 @@ ignored), so rotation is zero-downtime:
 create the new key in Lemon, set `LEMONSQUEEZY_API_KEY=<new>`, redeploy, confirm
 a test checkout creates and `get_order` succeeds (reconcile lane 2), then revoke
 the old key in Lemon. The key is never logged (redacted by `observability.py`).
+
+### 9.9 Razorpay Provider Ops (issue #44)
+
+Razorpay is the second, flag-selected gateway (INR, hosted Payment Links). It
+**reuses every mechanic above** — attempt-first checkout, the durable inbox, the
+same `billing_process_webhook` job on the same worker, `billing:deadletter`
+(§9.3), reconcile (§9.4), and admin-correction (§9.5). Only the deltas are here.
+
+**Setup (dashboard, before enabling — full checklist in the plan §10):**
+
+- Complete KYC so **live mode** activates (`rzp_live_` keys; `rzp_test_` keys work
+  pre-KYC for staging only).
+- **Payment capture → auto-capture ON.** A payment left in `authorized` never
+  fires `payment_link.paid`, so no grant ever lands.
+- Create webhooks in **both test and live modes** (Razorpay webhooks are
+  **per-mode** — test and live are configured separately, each with its own
+  secret), URL `https://<api-host>/billing/webhook/razorpay`, events
+  `payment_link.paid` + `refund.processed` (optionally subscribe
+  `payment.dispute.*` / `payment.failed` / `payment_link.expired` for log-level
+  visibility — they hit the acknowledged-ignored path, zero grant impact).
+- Config: `RAZORPAY_KEY_ID` / `_KEY_SECRET`, `RAZORPAY_WEBHOOK_SECRET`,
+  HTTPS `RAZORPAY_SUCCESS_URL`, and the economics
+  (`RAZORPAY_PRICE_CENTS` in **paise** — 79900 = ₹799 — `_CURRENCY`,
+  `_CREDITS_PER_PURCHASE`, `_CREDIT_VALIDITY_DAYS`). In production
+  `validate_production_settings()` requires the webhook secret, an HTTPS success
+  URL, positive economics, `RAZORPAY_CHECKOUT_TTL_MINUTES >= 16` (Razorpay rejects
+  `expire_by` under ~15 min), and a `rzp_live_` key prefix — the environment guard
+  (Razorpay events carry **no** `test_mode` flag; the key prefix *is* the
+  environment, round-tripped through `notes.environment` and enforced on every
+  `payment_link.paid`).
+
+**Provider-switch procedure (Lemon ⇄ Razorpay):**
+
+1. Set `PAYMENT_PROVIDER=<target>` (and `PAYMENTS_ENABLED=true`), restart. Read at
+   request time — a flag change + restart, no code change.
+2. Checkout and `GET /billing/package` immediately reflect the new provider's
+   economics and `enabled` flag; the frontend gates the Buy button on it.
+3. **The retired provider keeps settling (D3):** its webhook route stays live and
+   `refund.processed` / `order_refunded` for old orders still revoke credits and
+   create debt. Do **not** blank the old provider's webhook secret during the
+   settlement tail — leave it configured so late refunds/disputes verify.
+4. A user who redirected to the old provider's hosted page *just before* the
+   switch and returns with `?checkout_ref=` still gets credited — the webhook
+   grants regardless of the active flag and `PaymentStatusPanel` polls regardless
+   of `enabled` (kill-switch-mid-flight is a pinned frontend test).
+
+**Webhook-secret rotation (two-secret window, per-mode).** Identical mechanism to
+§9.8 but with `RAZORPAY_WEBHOOK_SECRET` / `RAZORPAY_WEBHOOK_SECRET_PREV` (the
+handler verifies `X-Razorpay-Signature` against both): stage both in env and
+redeploy → update the Razorpay webhook (for the mode you are rotating) to sign
+with the new secret → watch `specforge_billing_webhook_error_total` for one
+delivery cycle → clear `_PREV` and redeploy. Because Razorpay webhooks are
+per-mode, rotate the **live** webhook's secret against the live env; a test-mode
+secret change never touches production traffic.
+
+**Key rotation.** `RAZORPAY_KEY_ID` / `RAZORPAY_KEY_SECRET` are outbound-only
+(`create_payment_link`, `get_payment`) — no two-key acceptance window: create the
+new key pair in the Razorpay dashboard, set both env values, redeploy, confirm a
+test checkout creates and reconcile lane 2 (`get_payment`) succeeds, then revoke
+the old pair. Keys/secret/nonce are never logged (`razorpay_service` mirrors the
+Lemon log-safety; asserted by `test_razorpay_service.py`). **Rotating `KEY_ID`
+across the `rzp_test_`↔`rzp_live_` boundary changes the environment guard** — the
+server then only accepts webhooks whose `notes.environment` matches, so flip keys
+and the active webhook mode together.
+
+**Dispute/chargeback caveat (weaker than Lemon).** Razorpay payments expose **no**
+fraud/dispute status, so **reconcile lane 2 cannot detect a chargeback** — unlike
+Lemon, where a `fraudulent` `order_refunded` (and lane-2 re-read) auto-revokes.
+On an individual (non-MoR) account the money liability is the account holder's.
+Mitigation: subscribe `payment.dispute.*` for log-level visibility
+(`billing.webhook_ignored_event`); settle a dispute loss manually via the
+dashboard + admin-correction (§9.5, `provider=razorpay`). No automated dispute
+reversal in v1.
+
+**Dead-letter / reconcile / pending-sweep** are all provider-neutral and cover
+Razorpay by construction — §9.3, §9.4 apply unchanged (the dead-letter record's
+`billing_process_webhook` arg is the inbox row id regardless of provider; grants
+stay idempotent on `(provider='razorpay', pay_…)` so replay never double-credits).
 
 ## 10. Prompt Pipeline Quality Gates And Eval Workflow
 

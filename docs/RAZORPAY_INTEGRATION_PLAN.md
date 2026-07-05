@@ -1,6 +1,8 @@
 # Issue #44 — Payment Feature Flag + Razorpay Integration Plan
 
-Status: **PLANNED** (not yet implemented)
+Status: **IMPLEMENTED (code + docs)** — all 7 steps landed on `main` (2026-07-05).
+Live rollout (§10 — KYC, dashboard auto-capture, live smoke) is a pre-launch ops
+gate outside code; see the AC mapping in §14.
 Issue: [#44 — Add feature flag for payment gateway and integrate Razorpay alongside Lemonsqueezy](../../../issues/44)
 Prior art: Phase 22 Lemon Squeezy migration (`docs/RUNBOOK.md` §9, migration `0018`, T-291…T-308)
 
@@ -495,3 +497,23 @@ Then:
 
 Steps 1–2 land first (inert), 3–5 are the core PR, 6–7 close the issue. Everything is
 additive and default-off, so each step is independently shippable to `main`.
+
+## 14. Acceptance-criteria mapping (issue #44)
+
+All 7 steps are implemented and on `main` (2026-07-05). Mapping the issue's AC to
+what shipped:
+
+| # | Acceptance criterion | Status | Where |
+|---|----------------------|--------|-------|
+| 1 | Feature flag toggles the payment system | ✅ Met | `PAYMENTS_ENABLED` master kill switch + `billing_checkout_enabled` gate (Step 1, `config.py`); frontend gates the Buy button on `package.enabled` (Step 6) |
+| 2 | Razorpay integrated as a payment provider | ✅ Met (code) | `razorpay_service.py` (Step 3), router dispatch + `POST /billing/webhook/razorpay` (Step 4), worker handlers + per-provider reconcile (Step 5), migration `0034` (Step 2) |
+| 3 | Both gateways functional and configurable | ⚙️ Code complete; **live-functional gated on §10 ops** | Configurable now (env flags); "functional" against real money needs KYC + dashboard auto-capture + live smoke (§10 Phase 0/6–8) — cannot be done pre-launch |
+| 4 | Switch between gateways | ✅ Met | `PAYMENT_PROVIDER` (one active at a time), restart; old-provider webhooks keep settling (D3). Runbook: `docs/RUNBOOK.md` §9.9 provider-switch procedure |
+| 5 | Tests for the new integration | ✅ Met | `test_razorpay_config.py`, `test_billing_migration_0034.py`, `test_razorpay_service.py`, `test_billing_router_razorpay.py` + router flag-matrix, `test_billing_worker_razorpay.py` + reconcile cases, `Billing.test.tsx` |
+| 6 | Documentation updated with Razorpay setup | ✅ Met | This plan, `.env.example` `RAZORPAY_*` block (Step 1), `docs/RUNBOOK.md` §9/§9.9, `CLAUDE.md` billing paragraph (Step 7) |
+
+**5 of 6 criteria are met by code + docs.** #3 is code-complete and configurable;
+its live-functional half is the §10 rollout (KYC/dashboard/live smoke), which is
+ops work that cannot land before the product goes live. The GitHub issue is left
+open deliberately until that rollout closes it — see §10 and §11 (individual-account
+tax/dispute caveats requiring CA sign-off before live enablement).
