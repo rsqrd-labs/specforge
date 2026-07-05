@@ -556,3 +556,32 @@ async def test_row_id_is_uuid_for_enqueue() -> None:
     enqueued_id = enq.await_args.args[1]
     # Must parse as a UUID — never "None".
     UUID(enqueued_id)
+
+
+# ---------------------------------------------------------------------------
+# Feature-flag independence (issue #44 D3)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_lemon_webhook_processes_while_razorpay_active(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The Lemon webhook keeps settling old orders after a provider switch.
+
+    ``payments_enabled``/``payment_provider`` gate checkout creation ONLY (D3):
+    with the kill switch off and Razorpay selected, a signed Lemon refund/order
+    delivery is still verified, stored, and enqueued.
+    """
+    monkeypatch.setattr(settings, "payments_enabled", False, False)
+    monkeypatch.setattr(settings, "payment_provider", "razorpay", False)
+    session = _InboxSession()
+    app = _make_app(session)
+    with patch.object(billing_module, "enqueue", new_callable=AsyncMock):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await _post(client, _order_event(event_name="order_refunded"))
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "ok"
+    assert session.committed is True
+    assert session.stored_event.provider == "lemonsqueezy"

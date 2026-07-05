@@ -110,12 +110,15 @@ class RazorpayPayment:
     refund_status: str
 
 
-def _environment() -> str:
-    """The ``notes.environment`` marker the webhook handler validates against.
+def razorpay_environment() -> str:
+    """The ``notes.environment`` marker the webhook receiver validates against.
 
     Razorpay events carry no test-mode flag — the key prefix IS the
     environment (production startup requires ``rzp_live_``): ``"live"`` iff the
-    configured key id is a live key, ``"test"`` otherwise.
+    configured key id is a live key, ``"test"`` otherwise. Public because it is
+    the single source of truth for both sides of the round-trip: link creation
+    stamps it into ``notes`` here, and the webhook receiver
+    (``routers/billing.py``) enforces it as the test/live guard (issue #44).
     """
     return "live" if settings.razorpay_key_id.startswith("rzp_live_") else "test"
 
@@ -355,7 +358,7 @@ class RazorpayService:
                 "user_id": str(attempt.user_id),
                 "checkout_ref": attempt.checkout_ref,
                 "checkout_nonce": checkout_nonce,
-                "environment": _environment(),
+                "environment": razorpay_environment(),
                 "credits": str(attempt.credits),
                 "price_cents": str(attempt.price_cents),
                 "currency": attempt.currency,

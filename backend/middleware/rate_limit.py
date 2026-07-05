@@ -30,7 +30,13 @@ _BYPASS_PATHS = frozenset({"/health"})
 # rate from one IP, so it never drops a legitimate delivery, but it blunts a
 # single-source flood of bogus posts before the (cheap, verify-before-work) HMAC
 # check. The HMAC signature remains the primary DoS guard.
-_WEBHOOK_PATHS = frozenset({"/billing/webhook", "/integrations/github/webhook"})
+_WEBHOOK_PATHS = frozenset(
+    {
+        "/billing/webhook",
+        "/billing/webhook/razorpay",
+        "/integrations/github/webhook",
+    }
+)
 _WEBHOOK_IP_LIMIT = 6000
 _WEBHOOK_IP_WINDOW_SECONDS = 60
 _LOCAL_FALLBACK_MAX_KEYS = 10_000

@@ -27,6 +27,7 @@ _EXEMPT_PATHS = frozenset(
         "/auth/callback",  # exempt: OAuth provider callback — no auth token yet
         "/auth/refresh",  # exempt: exchanges HTTP-only refresh cookie for a new token
         "/billing/webhook",  # Lemon Squeezy webhook — HMAC-verified, no browser session
+        "/billing/webhook/razorpay",  # Razorpay webhook — HMAC-verified, no session
         "/integrations/github/webhook",  # GitHub webhook — HMAC-verified, no session
     }
 )

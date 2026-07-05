@@ -27,14 +27,30 @@ class PackageResponse(BaseModel):
 
     Sourced from config.Settings at request time so changes to env vars are
     reflected immediately without redeployment.  No auth required.
+
+    Issue #44: economics come from the **active** ``payment_provider``;
+    ``enabled`` mirrors ``settings.billing_checkout_enabled`` so the frontend can
+    gate the Buy button instead of discovering a 503 on click. When checkout is
+    off the configured numbers are still returned (the pricing card renders) with
+    ``enabled=false``.
     """
 
     credits: int = Field(ge=1, description="Credits granted per purchase")
-    price_cents: int = Field(ge=1, description="Price in cents (e.g. 900 = $9.00)")
+    price_cents: int = Field(
+        ge=1, description="Price in minor units (900 = $9.00, 79900 = ₹799.00)"
+    )
     validity_days: int = Field(
         ge=1, description="Days until the purchased pack expires"
     )
     currency: str = Field(default="USD", description="ISO 4217 currency code")
+    enabled: bool = Field(
+        default=True,
+        description="True when POST /billing/checkout is available (issue #44)",
+    )
+    provider: str = Field(
+        default="lemonsqueezy",
+        description="The active payment provider these economics belong to",
+    )
 
 
 class CheckoutResponse(BaseModel):
@@ -98,7 +114,7 @@ class AdminCorrectionRequest(BaseModel):
     be applied twice for the same order.
     """
 
-    provider: Literal["lemonsqueezy", "stripe"] = Field(
+    provider: Literal["lemonsqueezy", "stripe", "razorpay"] = Field(
         default="lemonsqueezy", description="Billing provider of the corrected order"
     )
     provider_order_id: str = Field(

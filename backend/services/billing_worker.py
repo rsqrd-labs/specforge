@@ -94,9 +94,20 @@ _PROCESS_JOB = "billing_process_webhook"
 _JOB_ID_PREFIX = "billing_wh:"
 
 # Order events carry money semantics and MUST have a registered handler before
-# Lemon is enabled (T-299/T-300). Any other verified event is acknowledged as a
-# no-op (we will never grant for it).
-_ORDER_EVENTS = frozenset({"order_created", "order_refunded"})
+# their provider is enabled (T-299/T-300; issue #44 for the Razorpay pair —
+# handlers land in plan Step 5, so until then a signed Razorpay money event
+# dead-letters loudly via _dispatch_claimed instead of being acked as a harmless
+# no-op). Any other verified event is acknowledged as a no-op (we will never
+# grant for it). Event names cannot collide across providers (Lemon's order_*
+# vs Razorpay's dotted names).
+_ORDER_EVENTS = frozenset(
+    {
+        "order_created",  # Lemon Squeezy — grant
+        "order_refunded",  # Lemon Squeezy — reversal
+        "payment_link.paid",  # Razorpay — grant (issue #44)
+        "refund.processed",  # Razorpay — reversal (issue #44)
+    }
+)
 
 # A 'processing' row whose claim is older than this is treated as abandoned by a
 # crashed worker and reclaimed. ``received_at`` is the reclaim clock (the only

@@ -1,19 +1,30 @@
-"""Billing router — Phase 22 Lemon Squeezy migration (T-296), Lemon-only checkout.
+"""Billing router — Phase 22 Lemon Squeezy migration, Razorpay alternative (issue #44).
 
 Endpoint inventory
 ------------------
-GET  /billing/package   Unauthenticated — current credit-package config (Lemon)
-POST /billing/checkout  Authenticated   — attempt-first Lemon hosted checkout
-GET  /billing/status    Authenticated   — poll a checkout by ``checkout_ref``
-GET  /billing/history   Authenticated   — the user's billing_credit_packs history
-POST /billing/webhook   No auth/CSRF    — provider webhook receiver
+GET  /billing/package           Unauthenticated — active provider's package config
+POST /billing/checkout          Authenticated   — attempt-first hosted checkout
+GET  /billing/status            Authenticated   — poll a checkout by ``checkout_ref``
+GET  /billing/history           Authenticated   — the user's billing_credit_packs rows
+POST /billing/webhook           No auth/CSRF    — Lemon Squeezy webhook receiver
+POST /billing/webhook/razorpay  No auth/CSRF    — Razorpay webhook receiver
+
+Exactly **one** gateway is active at a time (issue #44): ``PAYMENT_PROVIDER``
+selects it and ``PAYMENTS_ENABLED`` is the master kill switch. The two flags gate
+checkout creation and the package ``enabled`` field ONLY
+(``settings.billing_checkout_enabled``); **both** webhook routes stay registered
+and keep processing regardless (D3), so refunds/disputes for the inactive
+provider's old orders still settle after a switch. A provider with no webhook
+secret configured fails closed (400) on its webhook path.
 
 Checkout is **attempt-first** (Plan §25.6 T-296): SpecForge commits the local
-``billing_checkout_attempts`` row — carrying the economics snapshot and only the
-``sha256(checkout_nonce)`` — **before** calling Lemon, then mints the hosted
-checkout, then commits the ``provider_created`` transition, and only then returns
-``checkout_ref`` to the client. The signed ``order_created`` webhook (T-297/T-299)
-is the sole credit-grant authority; this router never grants credits.
+``billing_checkout_attempts`` row — carrying the active provider's economics
+snapshot and only the ``sha256(checkout_nonce)`` — **before** calling the
+provider, then mints the hosted checkout (Lemon checkout / Razorpay Payment
+Link), then commits the ``provider_created`` transition, and only then returns
+``checkout_ref`` to the client. The signed paid-order webhook (Lemon
+``order_created`` / Razorpay ``payment_link.paid``) is the sole credit-grant
+authority; this router never grants credits.
 
 ``GET /status`` is IDOR-safe: one query scoped by BOTH ``checkout_ref`` and
 ``user_id`` (404 on any mismatch — no resource-existence leak). The raw nonce is
@@ -30,6 +41,18 @@ and the worker (T-298/T-299/T-300) reads only the sanitised inbox. CSRF /
 rate-limit exemptions (``middleware/csrf.py``, ``middleware/rate_limit.py``) are
 reused.
 
+``POST /billing/webhook/razorpay`` is the Razorpay receiver with the same
+five-step verify-before-work shape (issue #44 Plan §5): raw body →
+constant-time ``X-Razorpay-Signature`` HMAC (current + previous secret, fail
+closed) → dispatch on the top-level ``event`` (only ``payment_link.paid`` and
+``refund.processed`` are actionable; everything else is acknowledged without an
+inbox row) → allow-listed ``normalized_payload`` (payment/link/refund entities;
+``notes`` nonce hashed; PII dropped; ``payload_hash`` computed BEFORE the
+``x-razorpay-event-id`` header is injected, so a dashboard resend with a fresh
+event id still dedups) → inbox row keyed by the **payment id** (D7) → the same
+``billing_process_webhook`` job, so the fast-lane routing, 60s pending sweep,
+dead-letter, and purge all apply unchanged.
+
 The Stripe runtime is fully decommissioned (T-308): a Stripe-shaped request (one
 carrying a ``Stripe-Signature`` header) is rejected with
 ``{"status": "ignored_provider_disabled"}`` before any body read, signature
@@ -40,6 +63,7 @@ them.
 Phase 22 — T-296 (Lemon-only checkout flow + ``checkout_ref`` polling),
            T-297 (durable Lemon webhook ingestion → sanitised inbox → enqueue),
            T-308 (Stripe runtime decommission — grace adapter removed).
+Issue #44 — payment feature flags + Razorpay provider dispatch and webhook.
 """
 
 from __future__ import annotations
@@ -50,7 +74,7 @@ import json
 import logging
 import secrets
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Awaitable, Callable, NamedTuple
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy import select
@@ -86,6 +110,11 @@ from services.observability import (
     BILLING_WEBHOOK_RECEIVED,
 )
 from services.queue import enqueue
+from services.razorpay_service import (
+    RazorpayError,
+    razorpay_environment,
+    razorpay_service,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -99,7 +128,74 @@ _REF_ENTROPY_BYTES = 32
 _LEMON_ORDER_EVENTS = frozenset({"order_created", "order_refunded"})
 _LEMON_OBJECT_TYPE = "orders"
 
+# Razorpay webhook (issue #44 Plan §5). Grant authority is ``payment_link.paid``
+# (its payload carries BOTH the link entity — with our notes/nonce — and the
+# payment entity, D4); reversal is ``refund.processed``. Everything else
+# (``payment.captured``, ``payment.failed``, ``payment_link.expired``, dispute
+# events subscribed for log-level visibility, …) is acknowledged without an
+# inbox row. The inbox object is the **payment** (``pay_…``) — the money object
+# refunds reference (D7) — hence object type "payments".
+_RAZORPAY_ACTIONABLE_EVENTS = frozenset({"payment_link.paid", "refund.processed"})
+_RAZORPAY_OBJECT_TYPE = "payments"
+
 router = APIRouter(prefix="/billing", tags=["billing"])
+
+
+class _ProviderEconomics(NamedTuple):
+    """The active gateway's package economics, snapshot into checkout attempts."""
+
+    credits: int
+    price_cents: int
+    currency: str
+    validity_days: int
+    checkout_ttl_minutes: int
+
+
+def _economics_for(provider: str) -> _ProviderEconomics:
+    """The package economics for ``provider`` (issue #44).
+
+    Unknown values (and the retained ``stripe`` audit provider) fall back to the
+    Lemon block: display stays sane while ``billing_checkout_enabled`` fails
+    closed, so nothing can be purchased against a misconfigured selector (and
+    ``validate_production_settings`` refuses to boot prod on a typo).
+    """
+    if provider == "razorpay":
+        return _ProviderEconomics(
+            credits=settings.razorpay_credits_per_purchase,
+            price_cents=settings.razorpay_price_cents,
+            currency=settings.razorpay_currency,
+            validity_days=settings.razorpay_credit_validity_days,
+            checkout_ttl_minutes=settings.razorpay_checkout_ttl_minutes,
+        )
+    return _ProviderEconomics(
+        credits=settings.lemonsqueezy_credits_per_purchase,
+        price_cents=settings.lemonsqueezy_price_cents,
+        currency=settings.lemonsqueezy_currency,
+        validity_days=settings.lemonsqueezy_credit_validity_days,
+        checkout_ttl_minutes=settings.lemonsqueezy_checkout_ttl_minutes,
+    )
+
+
+def _credit_validity_days_for(provider: str) -> int:
+    """Provider-aware pack validity for the admin-correction path (issue #44)."""
+    return _economics_for(provider).validity_days
+
+
+def _checkout_service_for(
+    provider: str,
+) -> Callable[..., Awaitable[tuple[str, str]]]:
+    """The hosted-checkout factory for ``provider`` (D6 — light dispatch).
+
+    Both callables share the ``(attempt, user, *, checkout_nonce) ->
+    (provider_checkout_id, checkout_url)`` contract, so the attempt-first flow
+    around them is provider-agnostic. Resolved at call time from the module
+    singletons (tests monkeypatch the singleton attributes). Only reachable for
+    a known provider — ``billing_checkout_enabled`` fails closed on anything
+    else before dispatch.
+    """
+    if provider == "razorpay":
+        return razorpay_service.create_payment_link
+    return lemonsqueezy_service.create_checkout
 
 
 async def require_admin(
@@ -122,17 +218,25 @@ async def require_admin(
 
 @router.get("/package", response_model=PackageResponse)
 async def get_package() -> PackageResponse:
-    """Return the current credit-package configuration (Lemon Squeezy economics).
+    """Return the active provider's credit-package configuration (issue #44).
 
     No authentication required — the pricing page calls this before login. Values
     come from ``config.Settings`` at request time, so changing the env vars and
     restarting is enough to update the displayed price without a code change.
+
+    ``enabled`` mirrors ``settings.billing_checkout_enabled`` — the frontend
+    gates the Buy button on it (a disabled server would otherwise 503 on click).
+    The configured numbers are returned either way so the package card renders.
     """
+    provider = settings.payment_provider
+    econ = _economics_for(provider)
     return PackageResponse(
-        credits=settings.lemonsqueezy_credits_per_purchase,
-        price_cents=settings.lemonsqueezy_price_cents,
-        validity_days=settings.lemonsqueezy_credit_validity_days,
-        currency=settings.lemonsqueezy_currency,
+        credits=econ.credits,
+        price_cents=econ.price_cents,
+        validity_days=econ.validity_days,
+        currency=econ.currency,
+        enabled=settings.billing_checkout_enabled,
+        provider=provider,
     )
 
 
@@ -145,29 +249,35 @@ async def create_checkout(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> CheckoutResponse:
-    """Create a Lemon Squeezy hosted checkout via the attempt-first flow (T-296).
+    """Create the active provider's hosted checkout via the attempt-first flow.
 
     1. Mint a high-entropy ``checkout_ref`` and a **separate** one-time
        ``checkout_nonce``; persist only ``sha256(checkout_nonce)``.
     2. **Commit** the ``billing_checkout_attempts`` row (``status='created'``)
-       snapshotting ``credits/price_cents/currency/validity_days`` from config —
-       SpecForge is the authority for the attempt before any provider call.
-    3. Call ``LemonSqueezyService.create_checkout`` (the charged amount is the
-       attempt's ``price_cents`` snapshot, immune to in-flight config changes).
+       snapshotting the **active provider's** ``credits/price_cents/currency/
+       validity_days`` from config — SpecForge is the authority for the attempt
+       before any provider call.
+    3. Dispatch to the active provider (D6): Lemon ``create_checkout`` or
+       Razorpay ``create_payment_link`` (the charged amount is the attempt's
+       ``price_cents`` snapshot, immune to in-flight config changes).
     4. **Commit** the ``provider_created`` transition with ``provider_checkout_id``.
        Only after that commit is the ``checkout_url`` returned.
 
-    Returns 503 when Lemon checkout is not configured; 502 when Lemon fails (the
-    attempt is marked ``failed``) or when the post-Lemon commit fails (orphaned —
-    the URL is never exposed; the reconcile lane settles the order later).
+    Returns 503 when checkout is off (``payments_enabled`` false, or the active
+    provider unconfigured/unknown — issue #44); 502 when the provider fails (the
+    attempt is marked ``failed``) or when the post-provider commit fails
+    (orphaned — the URL is never exposed; the reconcile lane settles the order
+    later).
 
     Rate limited: 5 checkouts per user per hour (``RateLimitMiddleware``).
     """
-    if not settings.lemonsqueezy_enabled:
+    if not settings.billing_checkout_enabled:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Billing is not configured on this server",
         )
+    provider = settings.payment_provider
+    econ = _economics_for(provider)
 
     # 1. High-entropy, non-sequential identifiers. The ref is the client polling
     #    key (returned + stored plaintext); the nonce is a secret proven back only
@@ -177,20 +287,21 @@ async def create_checkout(
     checkout_nonce_hash = hashlib.sha256(checkout_nonce.encode("utf-8")).hexdigest()
 
     now = datetime.now(timezone.utc)
-    expires_at = now + timedelta(minutes=settings.lemonsqueezy_checkout_ttl_minutes)
+    expires_at = now + timedelta(minutes=econ.checkout_ttl_minutes)
 
-    # 2. Commit the attempt BEFORE calling Lemon — the local row is the authority.
+    # 2. Commit the attempt BEFORE the provider call — the local row is the
+    #    authority.
     attempt = BillingCheckoutAttempt(
         checkout_ref=checkout_ref,
         user_id=current_user.id,
-        provider="lemonsqueezy",
+        provider=provider,
         checkout_nonce_hash=checkout_nonce_hash,
         # Economics snapshot — the grant (T-299) validates against THESE values,
         # not live config, so an in-flight price change is safe.
-        credits=settings.lemonsqueezy_credits_per_purchase,
-        price_cents=settings.lemonsqueezy_price_cents,
-        currency=settings.lemonsqueezy_currency,
-        validity_days=settings.lemonsqueezy_credit_validity_days,
+        credits=econ.credits,
+        price_cents=econ.price_cents,
+        currency=econ.currency,
+        validity_days=econ.validity_days,
         status="created",
         expires_at=expires_at,
     )
@@ -201,16 +312,16 @@ async def create_checkout(
     # 3. Mint the hosted checkout. On any failure mark the attempt failed (so the
     #    reconcile/purge lanes treat it as terminal) and return a safe 502.
     try:
-        provider_checkout_id, checkout_url = await lemonsqueezy_service.create_checkout(
+        provider_checkout_id, checkout_url = await _checkout_service_for(provider)(
             attempt,
             current_user,
             checkout_nonce=checkout_nonce,
         )
-    except LemonSqueezyError as exc:
+    except (LemonSqueezyError, RazorpayError) as exc:
         attempt.status = "failed"
         await db.commit()
         BILLING_CHECKOUT_API_ERROR.labels(
-            provider="lemonsqueezy", error_type="provider_error"
+            provider=provider, error_type="provider_error"
         ).inc()
         logger.error(
             "billing.checkout_provider_failed checkout_ref=%s attempt_id=%s user_id=%s",
@@ -224,9 +335,10 @@ async def create_checkout(
         ) from exc
 
     # 4. Commit the provider_created transition. If THIS commit fails the checkout
-    #    exists at Lemon but SpecForge could not record it — never expose the URL
-    #    (the client would pay against an attempt we cannot poll); the order will
-    #    be reconciled from the signed webhook. Emit billing.checkout.orphaned.
+    #    exists at the provider but SpecForge could not record it — never expose
+    #    the URL (the client would pay against an attempt we cannot poll); the
+    #    order will be reconciled from the signed webhook. Emit
+    #    billing.checkout.orphaned.
     attempt.provider_checkout_id = provider_checkout_id
     attempt.status = "provider_created"
     try:
@@ -234,7 +346,7 @@ async def create_checkout(
     except SQLAlchemyError as exc:
         await db.rollback()
         BILLING_CHECKOUT_API_ERROR.labels(
-            provider="lemonsqueezy", error_type="orphaned_commit"
+            provider=provider, error_type="orphaned_commit"
         ).inc()
         logger.error(
             "billing.checkout.orphaned checkout_ref=%s attempt_id=%s "
@@ -249,7 +361,7 @@ async def create_checkout(
             detail="Failed to create checkout. Please try again.",
         ) from exc
 
-    BILLING_CHECKOUT_CREATED.labels(provider="lemonsqueezy").inc()
+    BILLING_CHECKOUT_CREATED.labels(provider=provider).inc()
     return CheckoutResponse(checkout_url=checkout_url, checkout_ref=checkout_ref)
 
 
@@ -315,12 +427,14 @@ async def _status_by_checkout_ref(
         )
 
     # Contract with T-299: the granted pack is linked to the attempt by
-    # (provider, provider_order_id). provider_order_id is non-None here (guarded
-    # above) so this never degenerates to an IS NULL match on a NULL-keyed pack.
+    # (provider, provider_order_id) — the ATTEMPT's provider, not a hardcoded
+    # one, so a Razorpay attempt resolves its Razorpay pack (issue #44).
+    # provider_order_id is non-None here (guarded above) so this never
+    # degenerates to an IS NULL match on a NULL-keyed pack.
     pack = await db.scalar(
         select(BillingCreditPack).where(
             BillingCreditPack.user_id == current_user.id,
-            BillingCreditPack.provider == "lemonsqueezy",
+            BillingCreditPack.provider == attempt.provider,
             BillingCreditPack.provider_order_id == attempt.provider_order_id,
         )
     )
@@ -423,7 +537,7 @@ async def admin_correction(
         )
 
     now = datetime.now(timezone.utc)
-    expires_at = now + timedelta(days=settings.lemonsqueezy_credit_validity_days)
+    expires_at = now + timedelta(days=_credit_validity_days_for(provider))
     pack = BillingCreditPack(
         user_id=body.target_user_id,
         provider=provider,
@@ -817,3 +931,347 @@ def _payload_hash(normalized_payload: dict[str, Any]) -> str:
     """
     canonical = json.dumps(normalized_payload, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+# ---------------------------------------------------------------------------
+# Razorpay webhook (issue #44 Plan §5)
+# ---------------------------------------------------------------------------
+
+
+@router.post("/webhook/razorpay", status_code=status.HTTP_200_OK)
+async def razorpay_webhook(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Razorpay webhook receiver — verify, sanitise, persist, enqueue (issue #44).
+
+    The Razorpay counterpart of ``lemon_webhook``, same five-step
+    verify-before-work shape; it performs **no** money mutation inline:
+
+    1. Read the raw body BEFORE any parse — the HMAC covers the exact bytes.
+    2. Verify ``X-Razorpay-Signature`` = HMAC-SHA256(raw, secret), constant-time,
+       against every secret in ``razorpay_webhook_secrets`` (current + previous,
+       for the rotation window). Missing / malformed / non-matching → 400; no
+       secret configured fails closed (D3 — an unconfigured provider's route
+       rejects everything).
+    3. Parse JSON only after verification; dispatch on the top-level ``event``.
+       Only ``payment_link.paid`` (grant authority, D4) and ``refund.processed``
+       (reversal) are actionable; anything else — ``payment.captured``,
+       ``payment.failed``, ``payment_link.expired``, dispute events — is
+       acknowledged 200 without an inbox row.
+    4. Build the allow-listed ``normalized_payload`` (no PII — the payment
+       entity's ``email``/``contact`` are dropped; no raw nonce — sha256 only; no
+       signature). ``payment_link.paid`` **requires** ``notes.checkout_nonce``
+       and a matching ``notes.environment`` (Razorpay events carry no test-mode
+       flag; the round-tripped environment marker is the test/live guard) — the
+       grant authority requires proof. A signed refund is never rejected for
+       missing notes (same asymmetry as Lemon); its environment is enforced only
+       when present.
+    5. **Commit** the inbox row keyed by the **payment id** (D7 — the money
+       object refunds reference). ``payload_hash`` is computed BEFORE the
+       ``x-razorpay-event-id`` header is injected into the stored payload, so a
+       manual dashboard resend (which mints a fresh event id) still dedups. Then
+       enqueue ``billing_process_webhook`` by row id — the same job as Lemon, so
+       fast-lane routing, the 60s sweep, dead-letter, and purge apply unchanged.
+       If the enqueue fails the sweep recovers it, so still return 200.
+
+    No ``get_current_user`` dependency — the provider has no browser session. The
+    endpoint is CSRF- and rate-limit-exempt (``middleware/csrf.py`` /
+    ``middleware/rate_limit.py``). It processes independently of the
+    ``payments_enabled``/``payment_provider`` flags (D3): refunds for old
+    Razorpay orders must still settle after a switch back to Lemon.
+    """
+    logger.debug("billing.razorpay_webhook_received", extra={"method": request.method})
+
+    # Step 1: raw bytes BEFORE any parse — the HMAC is computed over these exact
+    # bytes; ``await request.json()`` would re-serialise and break verification.
+    raw = await request.body()
+    signature = request.headers.get("X-Razorpay-Signature", "")
+
+    # Step 2: constant-time HMAC over the two-secret rotation list. Fail closed.
+    if not _verify_razorpay_signature(raw, signature):
+        logger.warning("billing.razorpay_webhook_invalid_signature")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid signature",
+        )
+
+    # Step 3: parse only after the signature is proven.
+    try:
+        payload = json.loads(raw)
+    except (ValueError, UnicodeDecodeError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Malformed webhook payload",
+        ) from exc
+    if not isinstance(payload, dict):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Malformed webhook payload",
+        )
+
+    event_name = payload.get("event")
+    if not event_name or not isinstance(event_name, str):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Missing event name",
+        )
+
+    # Only the grant/reversal events are actionable; acknowledge anything else
+    # without storing (payment.captured, payment.failed, payment_link.expired,
+    # payment.dispute.* subscribed for log-level visibility, …).
+    if event_name not in _RAZORPAY_ACTIONABLE_EVENTS:
+        logger.info("billing.webhook_ignored_event event_name=%s", event_name)
+        return {"status": "ignored"}
+
+    entities = (
+        payload.get("payload") if isinstance(payload.get("payload"), dict) else {}
+    )
+
+    # Step 4: allow-listed, PII-free normalisation (raises 400 on contract
+    # violations — missing payment id, missing nonce / environment mismatch on
+    # the grant authority).
+    if event_name == "payment_link.paid":
+        normalized_payload = _normalize_razorpay_link_paid(entities)
+    else:
+        normalized_payload = _normalize_razorpay_refund(entities)
+
+    payment_id = normalized_payload["payment_id"]
+
+    # The dedup identity hashes the sanitised payload WITHOUT the delivery event
+    # id: automatic retries keep the id stable, but a manual dashboard resend can
+    # mint a new one, and that must not defeat the inbox unique index. The id is
+    # then carried inside the stored payload as belt-and-braces dedup evidence
+    # for ops.
+    payload_hash = _payload_hash(normalized_payload)
+    normalized_payload["event_id"] = request.headers.get("x-razorpay-event-id")
+
+    # Step 5: commit the sanitised inbox row. The 4-part identity
+    # (provider, event_name, provider_object_id, payload_hash) is UNIQUE, so a
+    # byte-identical redelivery raises IntegrityError → dedup → 200.
+    row = BillingWebhookEvent(
+        provider="razorpay",
+        event_name=event_name,
+        provider_object_type=_RAZORPAY_OBJECT_TYPE,
+        provider_object_id=payment_id,
+        payload_hash=payload_hash,
+        status="received",
+        normalized_payload=normalized_payload,
+    )
+    try:
+        async with db.begin_nested():  # SAVEPOINT isolates the unique-violation
+            db.add(row)
+            await db.flush()  # populates row.id and trips the unique index
+    except IntegrityError:
+        await db.rollback()
+        logger.info(
+            "billing.razorpay_webhook_duplicate event_name=%s payment_id=%s",
+            event_name,
+            payment_id,
+        )
+        BILLING_WEBHOOK_DUPLICATE.labels(provider="razorpay").inc()
+        return {"status": "already_processed"}
+
+    await db.commit()
+    BILLING_WEBHOOK_RECEIVED.labels(provider="razorpay", event_type=event_name).inc()
+
+    # Enqueue by row id. Never pass raw bytes through arq. If the enqueue fails
+    # (Redis blip), the row is durably 'received' and the 60s pending sweep
+    # (T-298) re-enqueues it — so acknowledge 200 regardless.
+    webhook_event_id = str(row.id)
+    try:
+        await enqueue(
+            "billing_process_webhook",
+            webhook_event_id,
+            job_id=f"billing_wh:{webhook_event_id}",
+        )
+    except Exception:
+        logger.error(
+            "billing.webhook_enqueue_failed webhook_event_id=%s", webhook_event_id
+        )
+
+    return {"status": "ok"}
+
+
+def _verify_razorpay_signature(raw: bytes, signature: str) -> bool:
+    """Constant-time HMAC-SHA256 verification over the two-secret rotation list.
+
+    The Razorpay analogue of ``_verify_lemon_signature`` — the hex
+    ``X-Razorpay-Signature`` header must match the HMAC of ``raw`` under one of
+    the configured ``razorpay_webhook_secrets``. Fails closed: an empty header or
+    an empty secret list returns False, so an unconfigured/misconfigured server
+    rejects rather than accepts forged deliveries.
+    """
+    if not signature:
+        return False
+    matched = False
+    for secret in settings.razorpay_webhook_secrets:
+        if not secret:
+            continue
+        expected = hmac.new(secret.encode("utf-8"), raw, hashlib.sha256).hexdigest()
+        # Compare every secret (no short-circuit) — constant-time per comparison.
+        if hmac.compare_digest(expected, signature):
+            matched = True
+    return matched
+
+
+def _razorpay_entity(entities: dict[str, Any], key: str) -> dict[str, Any]:
+    """Extract ``payload.{key}.entity`` defensively (empty dict when absent)."""
+    block = entities.get(key) if isinstance(entities.get(key), dict) else {}
+    entity = block.get("entity") if isinstance(block.get("entity"), dict) else {}
+    return entity
+
+
+def _razorpay_notes_block(
+    notes: dict[str, Any], nonce_hash: str | None
+) -> dict[str, Any]:
+    """The seven allow-listed SpecForge ``notes`` keys, raw nonce → sha256.
+
+    The Razorpay analogue of the Lemon ``custom`` block: every field is copied by
+    name, so anything else the provider echoed is inherently excluded, and the
+    raw nonce is replaced by its hash (it never enters the stored payload).
+    """
+    return {
+        "user_id": notes.get("user_id"),
+        "checkout_ref": notes.get("checkout_ref"),
+        "checkout_nonce_hash_from_webhook": nonce_hash,
+        "environment": notes.get("environment"),
+        "credits": notes.get("credits"),
+        "price_cents": notes.get("price_cents"),
+        "currency": notes.get("currency"),
+    }
+
+
+def _razorpay_payment_block(payment: dict[str, Any]) -> dict[str, Any]:
+    """The allow-listed payment-entity fields (the money object, D7/D10).
+
+    ``amount``/``currency``/``status`` anchor the grant validation (the payment
+    is the authority, the link only corroboration); the cumulative
+    ``amount_refunded`` and ``refund_status`` drive the proportional reversal.
+    PII on the entity (``email``, ``contact``) is inherently excluded.
+    """
+    return {
+        "payment_id": payment.get("id"),
+        "amount": payment.get("amount"),
+        "currency": payment.get("currency"),
+        "status": payment.get("status"),
+        "method": payment.get("method"),
+        "amount_refunded": payment.get("amount_refunded"),
+        "refund_status": payment.get("refund_status"),
+    }
+
+
+def _normalize_razorpay_link_paid(entities: dict[str, Any]) -> dict[str, Any]:
+    """Sanitise a ``payment_link.paid`` delivery (the grant authority, D4).
+
+    Requires the payment entity's id (the inbox identity and future
+    ``provider_order_id``, D7), the link ``notes.checkout_nonce`` (proof of the
+    SpecForge checkout attempt — hashed, never stored raw), and a
+    ``notes.environment`` matching this server's key environment (Razorpay
+    events carry no test-mode flag, so the round-tripped marker is the test/live
+    guard; a link SpecForge minted always carries it — hard requirement here).
+    """
+    link = _razorpay_entity(entities, "payment_link")
+    payment = _razorpay_entity(entities, "payment")
+
+    payment_id = payment.get("id")
+    if not payment_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Missing payment id",
+        )
+
+    notes = link.get("notes") if isinstance(link.get("notes"), dict) else {}
+
+    # The grant authority requires the nonce proof — hash it, DROP the raw value.
+    raw_nonce = notes.get("checkout_nonce")
+    if not raw_nonce:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Missing checkout nonce",
+        )
+    nonce_hash = hashlib.sha256(str(raw_nonce).encode("utf-8")).hexdigest()
+
+    # test/live guard — a test-key event must never settle against live config.
+    if notes.get("environment") != razorpay_environment():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Webhook environment does not match server configuration",
+        )
+
+    return {
+        "provider": "razorpay",
+        "event_name": "payment_link.paid",
+        "payment_id": str(payment_id),
+        # The checkout object — corroboration only; the link amount is a value
+        # SpecForge set at creation, so the grant anchors on the payment (D10).
+        "payment_link": {
+            "payment_link_id": link.get("id"),
+            "reference_id": link.get("reference_id"),
+            "amount": link.get("amount"),
+            "currency": link.get("currency"),
+            "status": link.get("status"),
+        },
+        "payment": _razorpay_payment_block(payment),
+        "refund": None,
+        "notes": _razorpay_notes_block(notes, nonce_hash),
+    }
+
+
+def _normalize_razorpay_refund(entities: dict[str, Any]) -> dict[str, Any]:
+    """Sanitise a ``refund.processed`` delivery (the reversal authority).
+
+    The refund's ownership/settlement proof rides the **payment** entity's
+    ``notes`` (Razorpay copies the link notes onto the payment) — best-effort:
+    absent notes never reject a signed refund (the pack lookup by payment id is
+    the primary path; the notes only serve ``_refund_without_pack``'s
+    park-and-retry branches). The environment guard is enforced only when the
+    marker is present — mismatch → 400, absence → processed (Lemon's
+    ``test_mode`` parity).
+    """
+    refund = _razorpay_entity(entities, "refund")
+    payment = _razorpay_entity(entities, "payment")
+
+    refund_id = refund.get("id")
+    payment_id = refund.get("payment_id") or payment.get("id")
+    if not refund_id or not payment_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Missing refund identity",
+        )
+
+    notes = payment.get("notes") if isinstance(payment.get("notes"), dict) else {}
+
+    # Best-effort nonce (never required on a signed refund) — hashed when present.
+    raw_nonce = notes.get("checkout_nonce")
+    nonce_hash = (
+        hashlib.sha256(str(raw_nonce).encode("utf-8")).hexdigest()
+        if raw_nonce
+        else None
+    )
+
+    # Environment: enforced when present; absence is never a rejection ground
+    # for a signed refund.
+    environment = notes.get("environment")
+    if environment is not None and environment != razorpay_environment():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Webhook environment does not match server configuration",
+        )
+
+    return {
+        "provider": "razorpay",
+        "event_name": "refund.processed",
+        "payment_id": str(payment_id),
+        "payment_link": None,
+        # The payment block carries the CUMULATIVE amount_refunded — the same
+        # cumulative semantics as Lemon's refunded_amount, so partial + full
+        # refunds settle correctly and re-deliveries are no-ops.
+        "payment": _razorpay_payment_block(payment),
+        "refund": {
+            "refund_id": refund_id,
+            "payment_id": refund.get("payment_id"),
+            "amount": refund.get("amount"),
+        },
+        "notes": _razorpay_notes_block(notes, nonce_hash),
+    }

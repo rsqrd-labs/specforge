@@ -1,20 +1,25 @@
-"""Integration tests for the Lemon-only billing router (Phase 22 — T-296).
+"""Integration tests for the billing router (Phase 22 — T-296; issue #44).
 
 App-level tests over the attempt-first checkout flow and ``checkout_ref`` polling.
 They stub the DB session (no real Postgres) and monkeypatch the
-``lemonsqueezy_service`` singleton, mirroring the in-process style of
-``test_stripe_payments.py``.
+``lemonsqueezy_service`` / ``razorpay_service`` singletons, mirroring the
+in-process style of ``test_stripe_payments.py``.
 
 Coverage:
-  * GET /package returns the Lemon economics (incl. currency).
-  * POST /checkout: 503 when disabled; commits ``created`` BEFORE Lemon and
+  * GET /package returns the ACTIVE provider's economics (incl. currency) plus
+    the issue-#44 ``enabled``/``provider`` fields; the kill switch flips
+    ``enabled`` false while the numbers still render.
+  * POST /checkout: 503 when disabled (kill switch off, or the active provider
+    unconfigured); commits ``created`` BEFORE the provider call and
     ``provider_created`` AFTER; returns ``checkout_ref`` (never the raw nonce);
-    Lemon failure marks the attempt ``failed`` → 502; a failed post-Lemon commit
-    is an orphaned 502 that never leaks the checkout URL; rate-limited at 6/hour;
-    increments the checkout-created metric.
+    provider failure marks the attempt ``failed`` → 502; a failed post-provider
+    commit is an orphaned 502 that never leaks the checkout URL; rate-limited at
+    6/hour; increments the checkout-created metric; the ``payment_provider``
+    flag dispatches to Razorpay and snapshots the Razorpay economics.
   * GET /status: 200 only when completed + pack exists; 404 for pending; IDOR
-    (cross-user) → 404 on the ``checkout_ref`` path; legacy ``session_id`` works
-    only during the Stripe grace window (key set) and 404s post-grace.
+    (cross-user) → 404 on the ``checkout_ref`` path; the pack lookup keys on the
+    ATTEMPT's provider (issue #44), not a hardcoded one; legacy ``session_id``
+    404s post-decommission.
   * GET /history reads ``billing_credit_packs``.
 """
 
@@ -34,6 +39,7 @@ from main import create_app
 from middleware.auth import get_current_user
 from models import BillingCheckoutAttempt, BillingCreditPack, User
 from services.lemonsqueezy_service import LemonSqueezyError, lemonsqueezy_service
+from services.razorpay_service import RazorpayError, razorpay_service
 
 _USER_ID = uuid4()
 _USER = User(
@@ -123,6 +129,7 @@ class _FakeSession:
         self._scalars = list(scalars_seq or [])
         self._history = list(history or [])
         self.added: list[Any] = []
+        self.statements: list[Any] = []
         self.commit_statuses: list[str | None] = []
         self.commit_count = 0
         self.rollback_count = 0
@@ -149,6 +156,7 @@ class _FakeSession:
         self.rollback_count += 1
 
     async def scalar(self, statement: Any) -> Any:
+        self.statements.append(statement)
         return self._scalars.pop(0) if self._scalars else None
 
     async def execute(self, statement: Any) -> Any:
@@ -180,8 +188,14 @@ def _make_app(session: _FakeSession, *, redis: Any | None = None):
 
 
 def _enable_lemon():
-    """Patch settings so ``lemonsqueezy_enabled`` is True with known economics."""
+    """Patch settings so Lemon is the active, enabled provider (issue #44).
+
+    ``payments_enabled`` defaults False now, so checkout tests must switch the
+    master flag on alongside the provider config (plan §2 behavioural note).
+    """
     return [
+        patch.object(settings, "payments_enabled", True),
+        patch.object(settings, "payment_provider", "lemonsqueezy"),
         patch.object(settings, "lemonsqueezy_api_key", "lemon_key"),
         patch.object(settings, "lemonsqueezy_store_id", "store_1"),
         patch.object(settings, "lemonsqueezy_variant_id", "variant_1"),
@@ -190,6 +204,26 @@ def _enable_lemon():
         patch.object(settings, "lemonsqueezy_currency", "USD"),
         patch.object(settings, "lemonsqueezy_credit_validity_days", 30),
         patch.object(settings, "lemonsqueezy_checkout_ttl_minutes", 30),
+    ]
+
+
+def _enable_razorpay():
+    """Patch settings so Razorpay is the active, enabled provider (issue #44).
+
+    Economics deliberately differ from the Lemon block (150 credits / paise /
+    45 days / 20-minute TTL) so a snapshot test can tell which provider's
+    numbers were captured.
+    """
+    return [
+        patch.object(settings, "payments_enabled", True),
+        patch.object(settings, "payment_provider", "razorpay"),
+        patch.object(settings, "razorpay_key_id", "rzp_test_abc"),
+        patch.object(settings, "razorpay_key_secret", "rzp_secret"),
+        patch.object(settings, "razorpay_credits_per_purchase", 150),
+        patch.object(settings, "razorpay_price_cents", 79900),
+        patch.object(settings, "razorpay_currency", "INR"),
+        patch.object(settings, "razorpay_credit_validity_days", 45),
+        patch.object(settings, "razorpay_checkout_ttl_minutes", 20),
     ]
 
 
@@ -261,7 +295,60 @@ async def test_package_returns_lemon_config() -> None:
         "price_cents": 900,
         "validity_days": 30,
         "currency": "USD",
+        "enabled": True,
+        "provider": "lemonsqueezy",
     }
+
+
+@pytest.mark.asyncio
+async def test_package_kill_switch_returns_numbers_with_enabled_false() -> None:
+    # PAYMENTS_ENABLED=false (issue #44 AC #1): the package card still renders
+    # the configured numbers, but the frontend gates the Buy button on enabled.
+    app = _make_app(_FakeSession())
+    patches = _enable_lemon()
+    patches[0] = patch.object(settings, "payments_enabled", False)
+    with _Patches(patches):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.get("/billing/package")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["enabled"] is False
+    assert body["provider"] == "lemonsqueezy"
+    assert body["price_cents"] == 900
+
+
+@pytest.mark.asyncio
+async def test_package_razorpay_active_returns_razorpay_economics() -> None:
+    app = _make_app(_FakeSession())
+    with _Patches(_enable_razorpay()):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.get("/billing/package")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body == {
+        "credits": 150,
+        "price_cents": 79900,
+        "validity_days": 45,
+        "currency": "INR",
+        "enabled": True,
+        "provider": "razorpay",
+    }
+
+
+@pytest.mark.asyncio
+async def test_package_active_provider_unconfigured_enabled_false() -> None:
+    # payments on, provider selected, but Razorpay has no key pair → fails closed.
+    app = _make_app(_FakeSession())
+    patches = _enable_razorpay()
+    patches[2] = patch.object(settings, "razorpay_key_id", "")
+    with _Patches(patches):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.get("/billing/package")
+    assert resp.status_code == 200
+    assert resp.json()["enabled"] is False
 
 
 # ---------------------------------------------------------------------------
@@ -273,8 +360,41 @@ async def test_package_returns_lemon_config() -> None:
 async def test_checkout_disabled_returns_503() -> None:
     session = _FakeSession()
     app = _make_app(session)
-    # Lemon disabled (empty api key) → 503, and no attempt is ever committed.
-    with _Patches([patch.object(settings, "lemonsqueezy_api_key", "")]):
+    # Payments on but the active provider unconfigured (empty api key) → 503,
+    # and no attempt is ever committed.
+    patches = _enable_lemon()
+    patches[2] = patch.object(settings, "lemonsqueezy_api_key", "")
+    with _Patches(patches):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.post("/billing/checkout")
+    assert resp.status_code == 503
+    assert session.commit_count == 0
+
+
+@pytest.mark.asyncio
+async def test_checkout_kill_switch_returns_503() -> None:
+    session = _FakeSession()
+    app = _make_app(session)
+    # Provider fully configured but PAYMENTS_ENABLED=false → 503 (issue #44 AC #1).
+    patches = _enable_lemon()
+    patches[0] = patch.object(settings, "payments_enabled", False)
+    with _Patches(patches):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.post("/billing/checkout")
+    assert resp.status_code == 503
+    assert session.commit_count == 0
+
+
+@pytest.mark.asyncio
+async def test_checkout_unknown_provider_returns_503() -> None:
+    session = _FakeSession()
+    app = _make_app(session)
+    # An unknown selector must fail closed, never fall through to some gateway.
+    patches = _enable_lemon()
+    patches[1] = patch.object(settings, "payment_provider", "paypal")
+    with _Patches(patches):
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:
             resp = await client.post("/billing/checkout")
@@ -442,6 +562,117 @@ async def test_checkout_created_metric_increments() -> None:
 
 
 # ---------------------------------------------------------------------------
+# POST /checkout — Razorpay provider dispatch (issue #44)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_checkout_razorpay_dispatches_and_snapshots_razorpay_economics() -> None:
+    session = _FakeSession()
+    app = _make_app(session)
+
+    captured: dict[str, Any] = {}
+
+    async def _fake_create_payment_link(attempt, user, *, checkout_nonce):  # type: ignore[no-untyped-def]
+        captured["status_at_call"] = attempt.status
+        captured["commits_before_provider"] = session.commit_count
+        return "plink_123", "https://rzp.io/i/abc"
+
+    async def _lemon_must_not_be_called(attempt, user, *, checkout_nonce):  # type: ignore[no-untyped-def]
+        raise AssertionError("lemonsqueezy_service must not be dispatched")
+
+    before = datetime.now(timezone.utc)
+    with _Patches(_enable_razorpay()):
+        with (
+            patch.object(
+                razorpay_service, "create_payment_link", _fake_create_payment_link
+            ),
+            patch.object(
+                lemonsqueezy_service, "create_checkout", _lemon_must_not_be_called
+            ),
+        ):
+            transport = ASGITransport(app=app)
+            async with AsyncClient(
+                transport=transport, base_url="http://test"
+            ) as client:
+                resp = await client.post("/billing/checkout")
+
+    assert resp.status_code == 200
+    assert resp.json()["checkout_url"] == "https://rzp.io/i/abc"
+
+    # Attempt-first shape holds under dispatch: committed 'created' before the
+    # provider call, 'provider_created' after.
+    assert captured["status_at_call"] == "created"
+    assert captured["commits_before_provider"] == 1
+    assert session.commit_statuses == ["created", "provider_created"]
+
+    # The attempt snapshots the RAZORPAY economics (distinct fixture values) and
+    # the razorpay TTL, and records the plink id.
+    attempt = session.added[0]
+    assert isinstance(attempt, BillingCheckoutAttempt)
+    assert attempt.provider == "razorpay"
+    assert attempt.credits == 150
+    assert attempt.price_cents == 79900
+    assert attempt.currency == "INR"
+    assert attempt.validity_days == 45
+    assert attempt.provider_checkout_id == "plink_123"
+    ttl = attempt.expires_at - before
+    assert timedelta(minutes=19) < ttl < timedelta(minutes=21)
+
+
+@pytest.mark.asyncio
+async def test_checkout_razorpay_failure_marks_attempt_failed_502() -> None:
+    from services.observability import BILLING_CHECKOUT_API_ERROR
+
+    session = _FakeSession()
+    app = _make_app(session)
+
+    async def _boom(attempt, user, *, checkout_nonce):  # type: ignore[no-untyped-def]
+        raise RazorpayError("provider down")
+
+    errors = BILLING_CHECKOUT_API_ERROR.labels(
+        provider="razorpay", error_type="provider_error"
+    )
+    before = errors._value.get()
+    with _Patches(_enable_razorpay()):
+        with patch.object(razorpay_service, "create_payment_link", _boom):
+            transport = ASGITransport(app=app)
+            async with AsyncClient(
+                transport=transport, base_url="http://test"
+            ) as client:
+                resp = await client.post("/billing/checkout")
+
+    assert resp.status_code == 502
+    assert session.commit_statuses == ["created", "failed"]
+    assert session.added[0].status == "failed"
+    assert errors._value.get() == before + 1
+
+
+@pytest.mark.asyncio
+async def test_checkout_razorpay_created_metric_uses_provider_label() -> None:
+    from services.observability import BILLING_CHECKOUT_CREATED
+
+    session = _FakeSession()
+    app = _make_app(session)
+
+    async def _ok(attempt, user, *, checkout_nonce):  # type: ignore[no-untyped-def]
+        return "plink_x", "https://rzp.io/i/x"
+
+    created = BILLING_CHECKOUT_CREATED.labels(provider="razorpay")
+    before = created._value.get()
+    with _Patches(_enable_razorpay()):
+        with patch.object(razorpay_service, "create_payment_link", _ok):
+            transport = ASGITransport(app=app)
+            async with AsyncClient(
+                transport=transport, base_url="http://test"
+            ) as client:
+                resp = await client.post("/billing/checkout")
+
+    assert resp.status_code == 200
+    assert created._value.get() == before + 1
+
+
+# ---------------------------------------------------------------------------
 # GET /status — checkout_ref path
 # ---------------------------------------------------------------------------
 
@@ -464,6 +695,31 @@ async def test_status_checkout_ref_completed_returns_200() -> None:
     # First-touch telemetry was stamped + committed.
     assert attempt.success_redirect_seen_at is not None
     assert session.commit_count == 1
+
+
+@pytest.mark.asyncio
+async def test_status_pack_lookup_uses_attempt_provider() -> None:
+    # Issue #44: the pack query keys on the ATTEMPT's provider, not a hardcoded
+    # 'lemonsqueezy' — a Razorpay attempt must resolve its Razorpay pack.
+    attempt = _completed_attempt()
+    attempt.provider = "razorpay"
+    attempt.provider_order_id = "pay_123"
+    pack = _active_pack()
+    pack.provider = "razorpay"
+    pack.provider_order_id = "pay_123"
+    session = _FakeSession(scalars_seq=[attempt, pack])
+    app = _make_app(session)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get("/billing/status", params={"checkout_ref": "ref_done"})
+
+    assert resp.status_code == 200
+    # The second scalar() call is the pack lookup; its bound parameters must
+    # carry the attempt's provider.
+    pack_query_params = session.statements[1].compile().params
+    assert "razorpay" in pack_query_params.values()
+    assert "lemonsqueezy" not in pack_query_params.values()
 
 
 @pytest.mark.asyncio
@@ -593,3 +849,39 @@ async def test_admin_correction_forbidden_when_allowlist_empty() -> None:
                 "/billing/admin/correction", json=_ADMIN_CORRECTION_BODY
             )
     assert resp.status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# Provider-aware helpers (issue #44)
+# ---------------------------------------------------------------------------
+
+
+def test_admin_correction_request_accepts_razorpay_provider() -> None:
+    from schemas.billing import AdminCorrectionRequest
+
+    body = AdminCorrectionRequest(
+        provider="razorpay",
+        provider_order_id="pay_admin_1",
+        target_user_id=uuid4(),
+        credits=150,
+        price_cents=79900,
+        currency="INR",
+        reason="paid order, webhook never arrived",
+        evidence_url="https://support.specforge.dev/tickets/2",
+    )
+    assert body.provider == "razorpay"
+
+
+def test_credit_validity_days_for_is_provider_aware() -> None:
+    from routers.billing import _credit_validity_days_for
+
+    with _Patches(
+        [
+            patch.object(settings, "razorpay_credit_validity_days", 45),
+            patch.object(settings, "lemonsqueezy_credit_validity_days", 30),
+        ]
+    ):
+        assert _credit_validity_days_for("razorpay") == 45
+        assert _credit_validity_days_for("lemonsqueezy") == 30
+        # The retained stripe audit provider falls back to the Lemon window.
+        assert _credit_validity_days_for("stripe") == 30
