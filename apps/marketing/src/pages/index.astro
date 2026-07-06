@@ -5,8 +5,9 @@
 // Phase 1). The SPA Landing stays as the in-app fallback.
 import BaseLayout from "../layouts/BaseLayout.astro"
 import SiteFooter from "../components/SiteFooter.astro"
+import FaqSection from "../components/content/FaqSection.astro"
 import { SIGN_IN_URL, CONTENT_HUBS } from "../consts"
-import { siteJsonLd } from "../lib/seo"
+import { siteJsonLd, faqPageSchema } from "../lib/seo"
 import "../styles/content.css"
 
 const title =
@@ -14,10 +15,39 @@ const title =
 const description =
   "SpecForge turns rough product ideas into build-ready SPEC, PLAN, HARNESS, and TASKS artifacts — structured requirements, validation, and traceable tasks for clean engineer and AI-agent handoffs."
 
+// Answer-ready Q&A for the entity anchor (issue #18, GEO). The homepage is the
+// highest-authority page and the one answer engines are most likely to cite for
+// "what is SpecForge", so it carries an explicit FAQ. The SAME array feeds both
+// the visible <FaqSection> and the FAQPage JSON-LD, so the on-page answer and
+// the structured-data answer are byte-identical (the geo-content invariant).
+const homeFaqs = [
+  {
+    question: "What is SpecForge?",
+    answer:
+      "SpecForge is an AI spec-to-build workspace that turns a rough product idea into four structured, build-ready artifacts — SPEC, PLAN, HARNESS, and TASKS — so founders, product teams, engineers, and AI coding agents start from explicit requirements, early validation, and traceable tasks instead of a vague brief.",
+  },
+  {
+    question: "What are the four stages — Spec, Plan, Harness, and Tasks?",
+    answer:
+      "Spec captures requirements, users, and acceptance criteria. Plan sets the architecture, risks, and implementation path. Harness generates validation assets before coding begins. Tasks breaks the work into traceable items linked back to requirements. Each stage has a human review gate before the next one starts.",
+  },
+  {
+    question: "How much does SpecForge cost?",
+    answer:
+      "You can start free with 50 starter credits — no setup or payment required. Generations consume credits, and you can connect your own LLM provider API keys (Anthropic, OpenAI, or Google) to run on your own account.",
+  },
+  {
+    question: "Who is SpecForge for?",
+    answer:
+      "Founders, product teams, engineers, and AI-agent teams who need the next step to be clearer than the idea — turning messy intent into requirements, plans, tests, and traceable tasks that a person or a coding agent can act on.",
+  },
+]
+
 // Site-wide structured data: the Organization + SoftwareApplication entities,
 // `@id`-anchored so answer engines resolve a single, consistent SpecForge
-// entity across every page (issue #18, Phase 2 — see src/lib/seo.ts).
-const jsonLd = siteJsonLd
+// entity across every page (issue #18, Phase 2 — see src/lib/seo.ts). The
+// homepage additionally carries a FAQPage built from the same `homeFaqs`.
+const jsonLd = [...siteJsonLd, faqPageSchema(homeFaqs)]
 
 const workflow = [
   ["01", "Spec", "Requirements, users, and acceptance criteria.", "Output: SPEC.md"],
@@ -281,6 +311,10 @@ const audiences = [
           ))}
         </div>
       </section>
+
+      {/* Self-contained: FaqSection emits its own <section> + heading, and the
+          same `homeFaqs` array drives the FAQPage JSON-LD above (byte-match). */}
+      <FaqSection faqs={homeFaqs} />
 
       <section class="landing-final-cta" aria-labelledby="final-cta-title">
         <div>

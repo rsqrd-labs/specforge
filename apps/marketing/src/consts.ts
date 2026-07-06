@@ -28,6 +28,19 @@ export const SITE_NAME = "SpecForge"
 export const ENTITY_DESCRIPTION =
   "SpecForge is an AI spec-to-build workspace that turns rough product ideas into structured SPEC, PLAN, HARNESS, and TASKS artifacts."
 
+/**
+ * Public profiles that verify the SpecForge entity (schema.org `sameAs` on the
+ * Organization node — issue #18, GEO). Answer engines use these to disambiguate
+ * "SpecForge" from other uses of the name and to ground the entity, so every URL
+ * MUST be a real, live profile the org controls — a dead or wrong link is worse
+ * than none. Left empty, no `sameAs` is emitted (see organizationSchema()).
+ *
+ * TODO(launch): add the real profiles before go-live, e.g.
+ *   "https://github.com/<org>", "https://x.com/<handle>",
+ *   "https://www.linkedin.com/company/<slug>", "https://www.crunchbase.com/organization/<slug>".
+ */
+export const SAME_AS: readonly string[] = []
+
 /** Absolute-URL helper for canonical/OG/sitemap concerns. */
 export function absoluteUrl(path = "/"): string {
   return new URL(path, `${SITE_URL}/`).href

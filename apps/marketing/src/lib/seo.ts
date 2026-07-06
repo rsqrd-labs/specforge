@@ -14,14 +14,33 @@
 //      directly, and they share stable `@id` anchors so the entities resolve to
 //      one connected graph instead of disconnected nodes — answer engines key on
 //      a single, consistent SpecForge entity.
-import { SITE_NAME, SITE_URL, ENTITY_DESCRIPTION, absoluteUrl } from "../consts"
+import {
+  SITE_NAME,
+  SITE_URL,
+  ENTITY_DESCRIPTION,
+  SAME_AS,
+  absoluteUrl,
+} from "../consts"
 
 /** Stable `@id` anchors for cross-referencing entities across pages. */
 export const ORGANIZATION_ID = `${SITE_URL}/#organization`
 export const SOFTWARE_ID = `${SITE_URL}/#software`
 
-/** Default social-share image. Site-relative; resolved to absolute by <Seo>. */
-export const DEFAULT_OG_IMAGE = "/brand/squirrel-mark.png"
+/**
+ * Default social-share image. Site-relative; resolved to absolute by <Seo>. A
+ * purpose-built 1200×630 card (the 1.91:1 ratio OG/Twitter `summary_large_image`
+ * expects) — not the square brand mark, which social + answer-engine previews
+ * would letterbox/crop. Regenerate with `node scripts/generate-og-card.mjs`.
+ */
+export const DEFAULT_OG_IMAGE = "/brand/og-card.png"
+/** Dimensions of DEFAULT_OG_IMAGE, emitted as og:image:width/height by <Seo>. */
+export const OG_IMAGE_WIDTH = 1200
+export const OG_IMAGE_HEIGHT = 630
+/**
+ * The square brand mark — used for schema.org `Organization.logo`, which wants a
+ * logo-shaped image, NOT the wide 1.91:1 social card (DEFAULT_OG_IMAGE).
+ */
+export const BRAND_LOGO = "/brand/squirrel-mark.png"
 /** Marketing copy is English; keep OG locale consistent across routes. */
 export const OG_LOCALE = "en_US"
 /** Large image card so OG previews render the brand mark prominently. */
@@ -41,8 +60,11 @@ export function organizationSchema(): JsonLdSchema {
     "@id": ORGANIZATION_ID,
     name: SITE_NAME,
     url: absoluteUrl("/"),
-    logo: absoluteUrl(DEFAULT_OG_IMAGE),
+    logo: absoluteUrl(BRAND_LOGO),
     description: ENTITY_DESCRIPTION,
+    // Only emit `sameAs` when real profiles are configured — an empty array (or a
+    // dead/placeholder link) weakens entity grounding rather than helping it.
+    ...(SAME_AS.length ? { sameAs: [...SAME_AS] } : {}),
   }
 }
 
