@@ -97,7 +97,10 @@ export default function Settings() {
             <GitHubConnection />
           </div>
         </section>
-        <section className="settings-card" aria-label="Data retention">
+        <section
+          className="settings-card settings-card--plain"
+          aria-label="Data retention"
+        >
           <div className="settings-hero-content">
             <DataRetentionPanel />
           </div>

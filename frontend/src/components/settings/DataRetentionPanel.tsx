@@ -7,7 +7,52 @@ import type { RetentionPolicy } from "../../types/retention"
  * "Data retention" settings panel (issue #43, plan §5.4). Renders the live
  * retention windows from GET /retention/policy so users can see how long
  * deleted workspaces, version history, and telemetry are kept. Read-only.
+ *
+ * Presentation: a scannable list where each window leads with its headline
+ * number (a saffron value chip) and a one-line plain-language explanation.
  */
+
+interface RetentionRow {
+  key: string
+  term: string
+  value: string
+  unit: string
+  desc: string
+}
+
+function buildRows(policy: RetentionPolicy): RetentionRow[] {
+  return [
+    {
+      key: "trash",
+      term: "Trash window",
+      value: String(policy.trash_days),
+      unit: "days",
+      desc: "A deleted workspace waits in the trash this long — restore or export it anytime before it's permanently removed.",
+    },
+    {
+      key: "versions",
+      term: "Version history",
+      value: String(policy.stage_versions_keep),
+      unit: "kept",
+      desc: `The latest versions of each stage are always kept; older ones are pruned after ${policy.stage_versions_min_age_days} days.`,
+    },
+    {
+      key: "keynotes",
+      term: "Keynotes",
+      value: String(policy.storyboards_keep),
+      unit: "kept",
+      desc: `The latest keynotes per workspace are kept; older ones are pruned after ${policy.storyboards_min_age_days} days.`,
+    },
+    {
+      key: "telemetry",
+      term: "Usage telemetry",
+      value: String(policy.cost_events_days),
+      unit: "days",
+      desc: "Internal cost and quality logs we keep to monitor product health.",
+    },
+  ]
+}
+
 export default function DataRetentionPanel() {
   const [policy, setPolicy] = useState<RetentionPolicy | null>(null)
   const [failed, setFailed] = useState(false)
@@ -23,48 +68,45 @@ export default function DataRetentionPanel() {
 
   return (
     <div className="data-retention-panel">
-      <h2 className="settings-section-title">Data retention</h2>
-      <p className="settings-section-copy">
-        How long SpecForge keeps your data. Deleting a workspace moves it to the
-        trash, where you can restore or export it before it is permanently
-        removed.
-      </p>
+      <div className="settings-panel-header">
+        <span className="settings-panel-icon" aria-hidden="true">
+          <RetentionIcon />
+        </span>
+        <div className="settings-panel-heading">
+          <h2 className="settings-section-title">Data retention</h2>
+          <p className="settings-section-copy">
+            How long SpecForge keeps your data. Nothing here is billed or
+            configurable — it's shown so you always know what's stored and for
+            how long.
+          </p>
+        </div>
+      </div>
 
       {failed ? (
-        <p className="settings-section-copy">
+        <p className="data-retention-status" role="status">
           Retention details are unavailable right now.
         </p>
       ) : policy === null ? (
-        <p className="settings-section-copy">Loading retention details…</p>
+        <div className="data-retention-skeleton" aria-hidden="true">
+          <span className="data-retention-skeleton-row" />
+          <span className="data-retention-skeleton-row" />
+          <span className="data-retention-skeleton-row" />
+          <span className="data-retention-skeleton-row" />
+        </div>
       ) : (
         <dl className="data-retention-list">
-          <div className="data-retention-row">
-            <dt>Trash window</dt>
-            <dd>
-              {policy.trash_days} days after you delete a workspace (restore or
-              export anytime before then)
-            </dd>
-          </div>
-          <div className="data-retention-row">
-            <dt>Version history</dt>
-            <dd>
-              The most recent {policy.stage_versions_keep} versions of each stage
-              are always kept; older ones are pruned after{" "}
-              {policy.stage_versions_min_age_days} days
-            </dd>
-          </div>
-          <div className="data-retention-row">
-            <dt>Keynotes</dt>
-            <dd>
-              The most recent {policy.storyboards_keep} keynotes per workspace are
-              kept; older ones are pruned after {policy.storyboards_min_age_days}{" "}
-              days
-            </dd>
-          </div>
-          <div className="data-retention-row">
-            <dt>Usage telemetry</dt>
-            <dd>Internal cost and quality logs are kept for {policy.cost_events_days} days</dd>
-          </div>
+          {buildRows(policy).map((row) => (
+            <div className="data-retention-row" key={row.key}>
+              <dt className="data-retention-term">
+                <span className="data-retention-term-label">{row.term}</span>
+                <span className="data-retention-value">
+                  <strong>{row.value}</strong>
+                  <span>{row.unit}</span>
+                </span>
+              </dt>
+              <dd className="data-retention-desc">{row.desc}</dd>
+            </div>
+          ))}
         </dl>
       )}
 
@@ -72,8 +114,31 @@ export default function DataRetentionPanel() {
           works on every origin the SPA is served from (localhost, staging,
           production), unlike the old hardcoded absolute domain. */}
       <Link className="data-retention-policy-link" to="/legal/retention">
-        Read the full data retention policy →
+        Read the full data retention policy
+        <span aria-hidden="true">→</span>
       </Link>
     </div>
+  )
+}
+
+function RetentionIcon() {
+  // A clock in a shield — "kept safely, for a bounded time".
+  return (
+    <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <path
+        d="M12 2.75 4.75 5.5v5.2c0 4.36 2.94 8.36 7.25 9.55 4.31-1.19 7.25-5.19 7.25-9.55V5.5L12 2.75Z"
+        stroke="currentColor"
+        strokeWidth="1.6"
+        strokeLinejoin="round"
+      />
+      <circle cx="12" cy="11" r="3.4" stroke="currentColor" strokeWidth="1.6" />
+      <path
+        d="M12 9.4V11l1.15 1.15"
+        stroke="currentColor"
+        strokeWidth="1.6"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
   )
 }
