@@ -2168,13 +2168,18 @@ class StageManager:
         able to see the others) before surfacing a terminal block. Only the
         happy-path generation is parallelized; correctness is unchanged.
 
-        Live token streaming is suppressed (parallel streams cannot be
-        interleaved into one document); the supervising progress heartbeats keep
-        the connection warm and the caller's canonical end-of-stream replay
-        paints the final artifact.  Because the user sees no growing text, each
-        chunk that resolves ticks a part counter on the shared ``phase`` tracker
-        and emits an immediate liveness ping, so the loading overlay shows honest
-        "N of M parts drafted" progress instead of a frozen-looking spinner.
+        Perceived-latency parity with the sequential path (the harness "feel"):
+        the *lead* chunk of each wave streams its tokens live, so the editor
+        fills with text from the first second, while the wave's remaining chunks
+        run silently — their tokens cannot be coherently interleaved with the
+        lead chunk's, so only one live stream is ever active (waves run in
+        order). The caller's canonical end-of-stream replay stays the source of
+        truth and repaints the assembled artifact. Because the silent siblings
+        show no text, each chunk that resolves also ticks a part counter on the
+        shared ``phase`` tracker and emits a liveness ping, so the overlay shows
+        honest "N of M parts drafted" progress alongside the live lead chunk.
+        Live streaming stops (one ``stream_reset``) the moment the lead chunk
+        enters a repair — its preview is then stale and the replay authoritative.
         """
         max_tokens = resolve_output_budget(
             route.operation, provider=route.provider, model=route.model
@@ -2185,6 +2190,21 @@ class StageManager:
         # stale — clear it once; the canonical replay is the source of truth.
         if emit is not None:
             emit(json.dumps({"stream_reset": True}))
+
+        # Live token streaming for perceived-latency parity with the sequential
+        # path: only the lead chunk of each wave streams. ``live_emit`` is handed
+        # to wave[0] (and None to its siblings), so at most one live stream is
+        # active at a time. Mirrors the sequential path's ``_stop_live_streaming``
+        # — the lead chunk's first repair flips it off (one stream_reset) because
+        # the streamed preview is then stale. The raw ``emit`` below (progress
+        # heartbeats / part ticks) is a separate channel and keeps firing.
+        live_emit = emit
+
+        def _stop_live_streaming() -> None:
+            nonlocal live_emit
+            if live_emit is not None:
+                live_emit(json.dumps({"stream_reset": True}))
+                live_emit = None
 
         # Part progress (issue #39 UX): total parts is the sum of every chunk
         # across every wave, known upfront.  ``completed`` ticks once per chunk
@@ -2228,9 +2248,13 @@ class StageManager:
         async def _generate_chunk_with_repair(
             chunk: ArtifactChunkSpec,
             prior_chunks: list[str],
+            stream_live: bool = False,
         ) -> str:
             nonlocal repair_attempted, last_generation_id
             adapter = adapter_factory(route)
+            # Only the wave's lead chunk streams live; siblings stay silent so
+            # their tokens are never interleaved into the one live preview.
+            chunk_emit = live_emit if stream_live else None
             async with semaphore:
                 try:
                     text = await self._generate_chunk_once(
@@ -2244,13 +2268,17 @@ class StageManager:
                         max_tokens=max_tokens,
                         retry_count=retry_count,
                         repair_count=0,
-                        emit=None,
+                        emit=chunk_emit,
                     )
                 except IncompleteArtifactError as exc:
                     # One funded per-chunk repair, mirroring the sequential loop.
                     # The lock keeps the "at most one repair in flight" intent and
                     # serialises the (rare) concurrent-failure case.
                     async with repair_lock:
+                        if stream_live:
+                            # The lead chunk's live preview is now stale — stop
+                            # streaming it; the canonical replay is authoritative.
+                            _stop_live_streaming()
                         if settings.pipeline_early_bail_unrecoverable_chunk and (
                             _limit_stop_repair_is_doomed(route, max_tokens, exc.issues)
                         ):
@@ -2308,12 +2336,19 @@ class StageManager:
 
         chunks: list[str] = []
         try:
-            for wave in _chunk_waves_for_stage(stage_type, mode):
+            for wave_index, wave in enumerate(_chunk_waves_for_stage(stage_type, mode)):
                 prior_snapshot = list(chunks)
+                # Separate this wave's live lead chunk from the prior wave's
+                # streamed text (mirrors the sequential path's inter-chunk
+                # "\n\n"); only while still live-streaming.
+                if wave_index and live_emit is not None:
+                    live_emit("\n\n")
                 wave_results = await asyncio.gather(
                     *(
-                        _generate_chunk_with_repair(chunk, prior_snapshot)
-                        for chunk in wave
+                        _generate_chunk_with_repair(
+                            chunk, prior_snapshot, stream_live=(chunk_index == 0)
+                        )
+                        for chunk_index, chunk in enumerate(wave)
                     )
                 )
                 chunks.extend(wave_results)

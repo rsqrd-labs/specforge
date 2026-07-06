@@ -11127,7 +11127,8 @@ button:disabled {
 }
 
 /* Issue #39 UX: honest, monotonic part progress for the parallel chunked path,
-   which streams no visible tokens. Sits just under the liveness line. */
+   whose silent (non-lead) chunks show no text. Sits just under the liveness
+   line. */
 .generation-loading-copy p.generation-loading-parts {
   margin-top: 4px;
   color: var(--color-on-surface-variant);

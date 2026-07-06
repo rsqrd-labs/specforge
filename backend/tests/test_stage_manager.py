@@ -259,10 +259,12 @@ def test_progress_payload_includes_parts_only_when_active() -> None:
 async def test_parallel_generation_reports_monotonic_part_progress(
     monkeypatch,
 ) -> None:
-    # Issue #39 UX: the parallel path streams no visible tokens, so it must tick
-    # honest, monotonic part progress on the phase tracker AND emit an immediate
-    # liveness ping per chunk (both carry the counts; the store replaces, so a
-    # heartbeat without them would wipe the counter).
+    # Issue #39 UX: the silent (non-lead) chunks show no text, so the parallel
+    # path must tick honest, monotonic part progress on the phase tracker AND
+    # emit an immediate liveness ping per chunk (both carry the counts; the store
+    # replaces, so a heartbeat without them would wipe the counter). The lead
+    # chunk of each wave also streams live tokens now (its own assertion below),
+    # but those raw text segments are filtered out of the progress-event view.
     import json
 
     from services.pipeline import stage_manager as sm
@@ -303,6 +305,52 @@ async def test_parallel_generation_reports_monotonic_part_progress(
     assert {p["total_parts"] for p in progress_events} == {3}
     assert {p["phase"] for p in progress_events} == {"streaming"}
     assert generated.content_generation_id == "gen-parallel"
+
+
+@pytest.mark.asyncio
+async def test_parallel_generation_streams_lead_chunk_live(monkeypatch) -> None:
+    # Perceived-latency parity with harness: the parallel path must stream the
+    # lead chunk of each wave live so the editor fills with text, instead of
+    # only ticking a part counter. Raw (non-JSON) segments in the emit stream
+    # are exactly those live tokens.
+    import json
+
+    from services.pipeline import stage_manager as sm
+
+    monkeypatch.setattr(sm.settings, "pipeline_parallel_chunks", True)
+
+    tracker = {"active": 0, "max": 0}
+
+    def factory(_route):
+        return _ConcurrencyAdapter(tracker, _spec_stream_payload)
+
+    phase = sm._PhaseTracker()
+    emitted: list[str] = []
+
+    await StageManager()._generate_complete_artifact(
+        adapter=factory(None),
+        route=_spec_generate_route(),
+        system_prompt="SYSTEM",
+        user_prompt="BASE SPEC PROMPT",
+        stage_type="spec",
+        deps={},
+        emit=emitted.append,
+        adapter_factory=factory,
+        phase=phase,
+    )
+
+    # A control event is any JSON-object payload the router passes through
+    # verbatim ({"stream_reset"...}, {"progress"...}); everything else the
+    # router wraps as a {"token": ...} event. So a non-"{" entry IS a live token.
+    live_tokens = [e for e in emitted if not e.startswith("{")]
+    assert live_tokens, "the lead chunk must stream live text, not just progress"
+    # It is the lead chunk (product-scope: the wave-1 first chunk) that streams —
+    # its sections appear in the live text.
+    streamed_text = "".join(live_tokens)
+    assert "## Overview" in streamed_text
+    # The very first emit is the initial buffer-clear so the live tokens land on
+    # a clean canvas.
+    assert emitted[0] == json.dumps({"stream_reset": True})
 
 
 def test_chunk_user_prompt_wraps_prior_chunks_as_untrusted_context() -> None:

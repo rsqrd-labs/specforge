@@ -175,8 +175,8 @@ describe("StreamingOverlay generation activity", () => {
   })
 
   it("shows honest, monotonic part progress while the parallel path drafts (issue #39)", () => {
-    // The parallel chunked path streams no visible tokens; the part counter is
-    // the liveness signal that a long generation is actually advancing, so it
+    // The parallel chunked path's silent (non-lead) chunks show no text; the
+    // part counter is the liveness signal that the whole set is advancing, so it
     // renders independent of the branded-loaders flag.
     render(
       <StreamingOverlay

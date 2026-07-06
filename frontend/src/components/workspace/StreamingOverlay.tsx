@@ -330,12 +330,16 @@ export function StreamingOverlay({
     featureFlags.brandedLoaders && progress?.phase
       ? phaseLivenessCopy(progress.phase)
       : null
-  // Issue #39 UX: the parallel chunked path streams no visible tokens, so the
-  // backend reports honest, monotonic part progress on the heartbeat. Show it
-  // only while parts are actually being generated (the `streaming`/`refining`
-  // phases) — once all parts are drafted the pipeline moves to the gate/critic
-  // phases, where a stale "N of N parts" would mislead. Independent of the
-  // branded-loaders flag: this is the core liveness signal, not decoration.
+  // Issue #39 UX: the parallel chunked path streams only its lead chunk per
+  // wave live, so its silent sibling chunks show no text — the backend reports
+  // honest, monotonic part progress on the heartbeat to cover the whole set.
+  // Show it only while parts are actually being generated (the
+  // `streaming`/`refining` phases) — once all parts are drafted the pipeline
+  // moves to the gate/critic phases, where a stale "N of N parts" would
+  // mislead. Independent of the branded-loaders flag: core liveness, not
+  // decoration. (When live tokens are flowing the overlay is already collapsed
+  // to the compact pill, so this full-overlay counter shows during the brief
+  // pre-token window and for the silent siblings.)
   const totalParts = progress?.total_parts ?? 0
   const showParts =
     totalParts > 0 &&

@@ -37,10 +37,11 @@ export interface GenerationProgress {
    *  degrade to the generic liveness copy, never throw. */
   phase?: string
   /** Parallel chunked generation part progress (issue #39 UX). The parallel
-   *  path streams no visible tokens, so these give the overlay honest, monotonic
-   *  "N of M parts drafted" feedback. Additive and optional: present only while
-   *  a part counter is active (`total_parts > 0`); absent on live-streamed
-   *  stages and older backends. */
+   *  path streams only its lead chunk per wave live, so its silent sibling
+   *  chunks show no text — these counts give the overlay honest, monotonic
+   *  "N of M parts drafted" feedback for the whole set. Additive and optional:
+   *  present only while a part counter is active (`total_parts > 0`); absent on
+   *  the fully sequential live-streamed stages (harness) and older backends. */
   completed_parts?: number
   total_parts?: number
 }
