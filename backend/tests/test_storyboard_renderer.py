@@ -64,6 +64,8 @@ def _payload() -> dict:
             {
                 "id": "arch",
                 "type": "architecture_reveal",
+                # Core subset (storyboard-v1.5): the three universal planes — the
+                # common shape of a fresh deck for a product with no extra planes.
                 "layers": [
                     {
                         "id": "l-client",
@@ -71,7 +73,21 @@ def _payload() -> dict:
                         "label": "Browser SPA",
                         "summary": "React 18 + Zustand.",
                         "source_refs": [],
-                    }
+                    },
+                    {
+                        "id": "l-api",
+                        "kind": "api",
+                        "label": "FastAPI services",
+                        "summary": "Async API layer.",
+                        "source_refs": [],
+                    },
+                    {
+                        "id": "l-data",
+                        "kind": "data",
+                        "label": "Postgres and Redis",
+                        "summary": "State and cache.",
+                        "source_refs": [],
+                    },
                 ],
             }
         ],
@@ -88,6 +104,39 @@ def _payload() -> dict:
         "demo_script_md": "## Demo\n1. Open editor.\n",
         "technical_appendix_md": "## Appendix\nDetails.\n",
     }
+
+
+# Canonical labels for the five optional planes when building a legacy full deck.
+_LEGACY_OPTIONAL_LABELS = {
+    "frontend": "React 18 SPA",
+    "llm": "Anthropic and OpenAI",
+    "integrations": "GitHub App worker",
+    "trust": "Trust boundaries",
+    "recovery": "Failure and recovery paths",
+}
+
+
+def _legacy_full_payload() -> dict:
+    """A pre-v1.5 deck carrying all eight planes (the back-compat shape).
+
+    Renders the full six-box, five-edge topology with both overlay regions, so it
+    is the fixture that locks legacy decks to their original appearance.
+    """
+
+    payload = _payload()
+    layers = list(payload["diagrams"][0]["layers"])
+    for kind, label in _LEGACY_OPTIONAL_LABELS.items():
+        layers.append(
+            {
+                "id": f"l-{kind}",
+                "kind": kind,
+                "label": label,
+                "summary": f"{kind} plane.",
+                "source_refs": [],
+            }
+        )
+    payload["diagrams"][0]["layers"] = layers
+    return payload
 
 
 # ---------------------------------------------------------------------------
@@ -182,23 +231,54 @@ def test_visual_descriptors_drive_the_slide_panel() -> None:
 
 
 def test_arch_slide_renders_full_svg_topology() -> None:
-    html = renderer.render_deck_html(_payload(), "Acme")
+    # A legacy deck carries all eight planes; it must still draw the full six-box,
+    # five-edge topology with both overlay regions (byte-for-byte back-compat).
+    html = renderer.render_deck_html(_legacy_full_payload(), "Acme")
     # The architecture slide draws an inline SVG topology graph, not a card grid.
     assert '<svg class="arch-topology"' in html
     assert 'viewBox="0 0 960 600"' in html
     # All six connectable planes are drawn as box nodes (kind labels, uppercased).
     for kind in renderer._ARCH_BOX_KINDS:
         assert f">{kind.upper()}<" in html
-    # The emitted client layer keeps its model label; omitted planes fall back to
-    # their canonical copy so the system diagram is complete (eight planes total).
+    # Each present layer keeps its own model label (no more canonical fallback copy
+    # for omitted planes — v1.5 omits absent planes rather than filling them).
     assert "Browser SPA" in html
-    assert "Trust boundaries" in html  # trust region (not emitted -> canonical)
-    assert "Failure and recovery paths" in html  # recovery region (canonical)
+    assert "Trust boundaries" in html  # the trust layer's own label
+    assert "Failure and recovery paths" in html  # the recovery layer's own label
     # Five directed edges, each with an arrowhead polygon.
     assert html.count("<polygon points=") == len(renderer._ARCH_EDGES) == 5
     # Static topology: no animation, no remote/script refs.
     assert "http://" not in html
     assert "https://" not in html
+
+
+def test_arch_core_only_subset_renders_only_present_planes() -> None:
+    # storyboard-v1.5: a product with just the three universal planes draws a
+    # three-box chain (client -> api -> data) and never invents a frontend / llm /
+    # integrations plane or a trust / recovery overlay it does not have.
+    html = renderer.render_deck_html(_payload(), "Acme")
+    assert '<svg class="arch-topology"' in html
+    for kind in ("client", "api", "data"):
+        assert f">{kind.upper()}<" in html
+    for absent in ("frontend", "llm", "integrations"):
+        assert f">{absent.upper()}<" not in html
+    # Two edges only (client -> api, api -> data), so two arrowhead polygons.
+    assert html.count("<polygon points=") == 2
+    # No trust boundary (dashed rect) and no recovery backplane (translucent rect).
+    assert 'stroke-dasharray="8 7"' not in html
+    assert 'fill-opacity="0.09"' not in html
+
+
+def test_arch_topology_geometry_all_eight_reduces_to_canonical() -> None:
+    # Parity lock: the present-subset geometry function must reproduce the original
+    # fixed coordinates/edges when every plane is present, so legacy eight-layer
+    # decks render byte-identically to the pre-v1.5 renderer.
+    present = set(renderer._ARCH_BOX_KINDS) | {"trust", "recovery"}
+    geometry = renderer._arch_topology_geometry(present)
+    assert geometry["centers"] == renderer._ARCH_NODE_CENTERS
+    assert tuple(geometry["edges"]) == renderer._ARCH_EDGES
+    assert geometry["trust"] is not None
+    assert geometry["recovery"] is not None
 
 
 def test_arch_topology_mirrors_the_frontend_constants() -> None:
@@ -222,7 +302,7 @@ def test_arch_topology_mirrors_the_frontend_constants() -> None:
 
 
 def test_arch_topology_tolerates_unknown_group_kind() -> None:
-    payload = _payload()
+    payload = _legacy_full_payload()
     payload["diagrams"][0]["layers"].append(
         {
             "id": "l-group",
@@ -234,7 +314,7 @@ def test_arch_topology_tolerates_unknown_group_kind() -> None:
     )
     html = renderer.render_deck_html(payload, "Acme")
     # The unknown kind renders as an unconnected annotation, never crashing, and
-    # never adds a sixth box-node kind or an extra edge.
+    # never adds a seventh box-node kind or an extra edge (five edges stay five).
     assert "Billing subsystem" in html
     assert html.count("<polygon points=") == 5
 

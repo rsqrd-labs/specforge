@@ -338,12 +338,16 @@
       {# font-family is set as an inherited SVG attribute (not a CSS rule) so it
          applies even where WeasyPrint does not cascade HTML CSS into inline SVG. #}
       <svg class="arch-topology" viewBox="0 0 {{ a.view_w }} {{ a.view_h }}" preserveAspectRatio="xMidYMid meet" font-family="Helvetica, Arial, sans-serif">
-        {# Recovery backplane (lowest layer). #}
+        {# Recovery backplane (lowest layer) — only when the plane is present. #}
+        {% if a.recovery %}
         <rect x="{{ a.recovery.x }}" y="{{ a.recovery.y }}" width="{{ a.recovery.w }}" height="{{ a.recovery.h }}" rx="22" fill="{{ a.recovery.fill }}" fill-opacity="0.09" stroke="{{ a.recovery.stroke }}" stroke-opacity="0.34" stroke-width="1.25" />
         <text x="{{ a.recovery.label_x }}" y="{{ a.recovery.label_y }}" fill="{{ a.recovery.label_fill }}" font-size="13" font-weight="700">{{ a.recovery.label }}</text>
-        {# Trust boundary (dashed outline). #}
+        {% endif %}
+        {# Trust boundary (dashed outline) — only when the plane is present. #}
+        {% if a.trust %}
         <rect x="{{ a.trust.x }}" y="{{ a.trust.y }}" width="{{ a.trust.w }}" height="{{ a.trust.h }}" rx="20" fill="none" stroke="{{ a.trust.stroke }}" stroke-opacity="0.6" stroke-width="1.75" stroke-dasharray="8 7" />
         <text x="{{ a.trust.label_x }}" y="{{ a.trust.label_y }}" fill="{{ a.trust.label_fill }}" font-size="13" font-weight="700">{{ a.trust.label }}</text>
+        {% endif %}
         {# Directed edges with arrowheads. #}
         {% for edge in a.edges %}
         <path d="{{ edge.d }}" fill="none" stroke="{{ edge.stroke }}" stroke-opacity="0.7" stroke-width="2.5" stroke-linecap="round" />

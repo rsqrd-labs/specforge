@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest"
 import {
   ARCHITECTURE_LAYER_SEQUENCE,
   ArchitectureReveal,
+  architectureTopology,
   orderArchitectureLayers,
 } from "./ArchitectureReveal"
 import type { StoryboardDiagramLayer, StoryboardLayerKind } from "../../types/storyboard"
@@ -140,13 +141,57 @@ describe("ArchitectureReveal", () => {
     }
   })
 
-  it("falls back to canonical copy when a plane is missing from the diagram", () => {
-    // Only a client layer is supplied; the other planes must still be drawn so the
-    // topology is complete.
-    const { container } = render(<ArchitectureReveal layers={[makeLayer("client")]} />)
-    expect(container.querySelectorAll("[data-arch-node]")).toHaveLength(BOX_KINDS.length)
-    expect(container.querySelectorAll("[data-arch-edge]")).toHaveLength(
-      CANONICAL_EDGES.length,
+  it("omits absent planes: a core-only diagram draws only the planes it has", () => {
+    // storyboard-v1.5: a product with just the three universal planes renders a
+    // three-box chain (client -> api -> data). Absent optional planes are omitted,
+    // never filled with "this layer was not described" placeholder copy, and the
+    // trust / recovery overlay regions do not appear.
+    const { container } = render(
+      <ArchitectureReveal
+        layers={[makeLayer("client"), makeLayer("api"), makeLayer("data")]}
+      />,
     )
+    const nodeKinds = Array.from(container.querySelectorAll("[data-arch-node]")).map(
+      (node) => node.getAttribute("data-arch-node"),
+    )
+    expect(nodeKinds.sort()).toEqual(["api", "client", "data"])
+    for (const absent of ["frontend", "llm", "integrations"]) {
+      expect(container.querySelector(`[data-arch-node="${absent}"]`)).toBeNull()
+    }
+
+    // Edges collapse to the present chain: client -> api -> data (the missing
+    // frontend hop is bridged), no api -> llm / api -> integrations fan-out.
+    const edges = Array.from(container.querySelectorAll("[data-arch-edge]")).map((edge) =>
+      edge.getAttribute("data-arch-edge"),
+    )
+    expect(edges.sort()).toEqual(["api-data", "client-api"])
+
+    // No overlay regions when their planes are absent.
+    expect(container.querySelector(".arch-region--trust")).toBeNull()
+    expect(container.querySelector(".arch-region--recovery")).toBeNull()
+    expect(screen.getByText(/3 of 3 architecture layers revealed/i)).toBeInTheDocument()
+  })
+
+  it("architectureTopology(all eight) reduces to the original fixed coordinates", () => {
+    // Parity lock: with every plane present the pure geometry function must
+    // reproduce the pre-v1.5 fixed topology, so legacy decks render byte-for-byte
+    // identically and the Python offline renderer stays a faithful mirror.
+    const topo = architectureTopology(new Set(ARCHITECTURE_LAYER_SEQUENCE))
+    const centers = Object.fromEntries(
+      Array.from(topo.centers.entries()).map(([kind, p]) => [kind, [p.x, p.y]]),
+    )
+    expect(centers).toEqual({
+      client: [104, 300],
+      frontend: [330, 300],
+      api: [556, 300],
+      data: [834, 118],
+      llm: [834, 300],
+      integrations: [834, 482],
+    })
+    expect(topo.edges.map(([from, to]) => `${from}-${to}`).sort()).toEqual(
+      [...CANONICAL_EDGES].sort(),
+    )
+    expect(topo.trust).not.toBeNull()
+    expect(topo.recovery).not.toBeNull()
   })
 })

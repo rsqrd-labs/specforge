@@ -7,7 +7,9 @@ import type {
 
 // The eight fixed architecture planes, in canonical reveal order. This is a
 // closed enum owned by trusted code; the LLM only ever fills a layer's
-// label/summary/source_refs, never the topology.
+// label/summary/source_refs, never the topology. storyboard-v1.5: a diagram no
+// longer has to carry all eight — only the three core planes (client/api/data)
+// are required — so the renderer lays out only the planes that are present.
 export const ARCHITECTURE_LAYER_SEQUENCE = [
   "client",
   "frontend",
@@ -33,17 +35,23 @@ const LAYER_COPY: Record<ArchitectureKind, string> = {
 }
 
 // ---------------------------------------------------------------------------
-// Topology constant (trusted code only — no LLM input reaches geometry).
+// Topology geometry (trusted code only — no LLM input reaches geometry).
 //
-//   client ─▶ frontend ─▶ api ─┬─▶ data
-//                              ├─▶ llm
-//                              └─▶ integrations
-//   trust:    boundary overlay spanning frontend·api·data·llm
-//   recovery: backplane under api·data·llm·integrations
+// storyboard-v1.5: the diagram lays out only the planes the product actually
+// has. The three core planes are always present (client → api → one-or-more
+// sinks); optional planes (frontend; the extra sinks llm/integrations; and the
+// trust/recovery overlay regions) render only when supplied. Geometry is a pure
+// function of the present set, driven by small constant tables so it stays
+// deterministic and the Python offline renderer (storyboard_renderer.py) can
+// mirror it exactly. When all eight planes are present it reduces to the original
+// fixed topology (locked by the parity test), so every legacy deck renders
+// byte-identically.
 //
-// Positions/edges/regions are computed deterministically below; the Python
-// offline renderer (services/pipeline/storyboard_renderer.py) mirrors these
-// numbers so the downloaded deck draws the same static topology.
+//   client ─▶ [frontend] ─▶ api ─┬─▶ data
+//                                ├─▶ [llm]
+//                                └─▶ [integrations]
+//   trust:    boundary overlay over present {frontend·api·data·llm}
+//   recovery: backplane under present {api·data·llm·integrations}
 // ---------------------------------------------------------------------------
 
 const VIEW_W = 960
@@ -51,8 +59,8 @@ const VIEW_H = 600
 const NODE_W = 168
 const NODE_H = 88
 
-// The six connectable box nodes (center coordinates). `trust` and `recovery`
-// are regions, not boxes, and are derived from these.
+// The six connectable box nodes. `trust` and `recovery` are overlay regions
+// derived from these, not boxes.
 const BOX_KINDS = [
   "client",
   "frontend",
@@ -64,52 +72,47 @@ const BOX_KINDS = [
 
 type BoxKind = (typeof BOX_KINDS)[number]
 
-const NODE_CENTERS: Record<BoxKind, { x: number; y: number }> = {
-  client: { x: 104, y: 300 },
-  frontend: { x: 330, y: 300 },
-  api: { x: 556, y: 300 },
-  data: { x: 834, y: 118 },
-  llm: { x: 834, y: 300 },
-  integrations: { x: 834, y: 482 },
+// The horizontal chain client → [frontend] → api. Column x-positions depend only
+// on whether the frontend plane is present; every chain node sits on the centre.
+const CHAIN_Y = 300
+const CHAIN_X_WITH_FRONTEND: Record<string, number> = {
+  client: 104,
+  frontend: 330,
+  api: 556,
+}
+const CHAIN_X_WITHOUT_FRONTEND: Record<string, number> = { client: 104, api: 430 }
+
+// Sinks hang off api in canonical order on a fixed column; their y-positions
+// depend only on how many sinks are present, so the fan stays vertically centred.
+const SINK_X = 834
+const SINK_KINDS = ["data", "llm", "integrations"] as const
+const SINK_Y_BY_COUNT: Record<number, readonly number[]> = {
+  0: [],
+  1: [300],
+  2: [180, 420],
+  3: [118, 300, 482],
 }
 
-const EDGES: readonly (readonly [BoxKind, BoxKind])[] = [
-  ["client", "frontend"],
-  ["frontend", "api"],
-  ["api", "data"],
-  ["api", "llm"],
-  ["api", "integrations"],
-]
-
+// A region bounds only its present members and renders only when its own kind is
+// present and at least two members remain (a boundary around < 2 boxes is noise).
 const TRUST_MEMBERS: readonly BoxKind[] = ["frontend", "api", "data", "llm"]
 const RECOVERY_MEMBERS: readonly BoxKind[] = ["api", "data", "llm", "integrations"]
+const TRUST_PAD = 24
+const RECOVERY_PAD = 38
+
+interface Point {
+  x: number
+  y: number
+}
 
 interface Box {
+  kind: BoxKind
   x: number
   y: number
   w: number
   h: number
   cx: number
   cy: number
-}
-
-function nodeBox(kind: BoxKind): Box {
-  const c = NODE_CENTERS[kind]
-  return { x: c.x - NODE_W / 2, y: c.y - NODE_H / 2, w: NODE_W, h: NODE_H, cx: c.x, cy: c.y }
-}
-
-// Smooth left-to-right connector from one node's right edge to the next node's
-// left edge. The control points are pulled horizontally so vertical fan-outs
-// (api → data/integrations) curve gracefully instead of kinking.
-function edgePath(from: BoxKind, to: BoxKind): string {
-  const a = NODE_CENTERS[from]
-  const b = NODE_CENTERS[to]
-  const sx = a.x + NODE_W / 2
-  const sy = a.y
-  const ex = b.x - NODE_W / 2
-  const ey = b.y
-  const dx = Math.max((ex - sx) * 0.5, 36)
-  return `M ${sx} ${sy} C ${sx + dx} ${sy}, ${ex - dx} ${ey}, ${ex} ${ey}`
 }
 
 interface Region {
@@ -119,8 +122,35 @@ interface Region {
   h: number
 }
 
-function boundingRegion(members: readonly BoxKind[], pad: number): Region {
-  const boxes = members.map(nodeBox)
+interface Topology {
+  centers: Map<BoxKind, Point>
+  boxes: Box[]
+  edges: [BoxKind, BoxKind][]
+  trust: Region | null
+  recovery: Region | null
+}
+
+function boxFromCenter(kind: BoxKind, c: Point): Box {
+  return {
+    kind,
+    x: c.x - NODE_W / 2,
+    y: c.y - NODE_H / 2,
+    w: NODE_W,
+    h: NODE_H,
+    cx: c.x,
+    cy: c.y,
+  }
+}
+
+function regionFor(
+  members: readonly BoxKind[],
+  centers: Map<BoxKind, Point>,
+  pad: number,
+): Region | null {
+  const boxes = members
+    .filter((kind) => centers.has(kind))
+    .map((kind) => boxFromCenter(kind, centers.get(kind)!))
+  if (boxes.length < 2) return null
   const minX = Math.min(...boxes.map((b) => b.x)) - pad
   const minY = Math.min(...boxes.map((b) => b.y)) - pad
   const maxX = Math.max(...boxes.map((b) => b.x + b.w)) + pad
@@ -128,11 +158,62 @@ function boundingRegion(members: readonly BoxKind[], pad: number): Region {
   return { x: minX, y: minY, w: maxX - minX, h: maxY - minY }
 }
 
-const TRUST_REGION = boundingRegion(TRUST_MEMBERS, 24)
-const RECOVERY_REGION = boundingRegion(RECOVERY_MEMBERS, 38)
+// Pure, deterministic topology for the set of present planes. Exported for the
+// parity test that locks the all-eight case to the original fixed coordinates.
+export function architectureTopology(present: ReadonlySet<string>): Topology {
+  const hasFrontend = present.has("frontend")
+  const chainX = hasFrontend ? CHAIN_X_WITH_FRONTEND : CHAIN_X_WITHOUT_FRONTEND
+  const centers = new Map<BoxKind, Point>()
+  for (const kind of ["client", "frontend", "api"] as const) {
+    if (present.has(kind) && chainX[kind] !== undefined) {
+      centers.set(kind, { x: chainX[kind], y: CHAIN_Y })
+    }
+  }
+  const presentSinks = SINK_KINDS.filter((kind) => present.has(kind))
+  const ys = SINK_Y_BY_COUNT[presentSinks.length] ?? []
+  presentSinks.forEach((kind, index) => {
+    centers.set(kind, { x: SINK_X, y: ys[index] ?? CHAIN_Y })
+  })
 
-function seqIndex(kind: string): number {
-  return ARCHITECTURE_LAYER_SEQUENCE.indexOf(kind as ArchitectureKind)
+  const boxes = BOX_KINDS.filter((kind) => centers.has(kind)).map((kind) =>
+    boxFromCenter(kind, centers.get(kind)!),
+  )
+
+  const edges: [BoxKind, BoxKind][] = []
+  if (hasFrontend) {
+    if (centers.has("client") && centers.has("frontend")) {
+      edges.push(["client", "frontend"])
+    }
+    if (centers.has("frontend") && centers.has("api")) {
+      edges.push(["frontend", "api"])
+    }
+  } else if (centers.has("client") && centers.has("api")) {
+    edges.push(["client", "api"])
+  }
+  if (centers.has("api")) {
+    for (const sink of presentSinks) edges.push(["api", sink])
+  }
+
+  const trust = present.has("trust")
+    ? regionFor(TRUST_MEMBERS, centers, TRUST_PAD)
+    : null
+  const recovery = present.has("recovery")
+    ? regionFor(RECOVERY_MEMBERS, centers, RECOVERY_PAD)
+    : null
+
+  return { centers, boxes, edges, trust, recovery }
+}
+
+// Smooth left-to-right connector from one node's right edge to the next node's
+// left edge. Control points are pulled horizontally so vertical fan-outs
+// (api → data/integrations) curve gracefully instead of kinking.
+function edgePath(from: Point, to: Point): string {
+  const sx = from.x + NODE_W / 2
+  const sy = from.y
+  const ex = to.x - NODE_W / 2
+  const ey = to.y
+  const dx = Math.max((ex - sx) * 0.5, 36)
+  return `M ${sx} ${sy} C ${sx + dx} ${sy}, ${ex - dx} ${ey}, ${ex} ${ey}`
 }
 
 // ---------------------------------------------------------------------------
@@ -151,25 +232,16 @@ function safeHex(value: string | undefined, fallback: string): string {
   return value && /^#[0-9A-Fa-f]{6}$/.test(value) ? value : fallback
 }
 
-function layerForKind(
-  layers: StoryboardDiagramLayer[],
-  kind: ArchitectureKind,
-): StoryboardDiagramLayer {
-  return (
-    layers.find((layer) => layer.kind === kind) ?? {
-      id: `missing-${kind}`,
-      kind,
-      label: LAYER_COPY[kind],
-      summary: "This layer was not described in the generated diagram.",
-      source_refs: [],
-    }
-  )
-}
-
+// The present canonical planes, in canonical reveal order. Unknown / `group`
+// kinds are handled separately as unconnected annotations; absent planes are
+// simply omitted (storyboard-v1.5 — no "this layer was not described" filler).
 export function orderArchitectureLayers(
   layers: StoryboardDiagramLayer[],
 ): StoryboardDiagramLayer[] {
-  return ARCHITECTURE_LAYER_SEQUENCE.map((kind) => layerForKind(layers, kind))
+  const byKind = new Map(layers.map((layer) => [layer.kind, layer]))
+  return ARCHITECTURE_LAYER_SEQUENCE.filter((kind) => byKind.has(kind)).map(
+    (kind) => byKind.get(kind)!,
+  )
 }
 
 function layerSummary(layer: StoryboardDiagramLayer): string {
@@ -188,6 +260,16 @@ export function ArchitectureReveal({
   const all = layers ?? diagram?.layers ?? []
   const ordered = orderArchitectureLayers(all)
   const byKind = new Map(ordered.map((layer) => [layer.kind, layer]))
+  const present = new Set<string>(ordered.map((layer) => layer.kind))
+  const topology = architectureTopology(present)
+
+  // Reveal order is the position within the *present* planes, not the fixed
+  // 0..7 canonical index — otherwise a core-only subset (client=0, api=2,
+  // data=3) would treat `data` as beyond a visibleCount of 3 and dim it.
+  const revealIndexByKind = new Map<string, number>(
+    ordered.map((layer, index) => [layer.kind, index]),
+  )
+  const revealIndexOf = (kind: string) => revealIndexByKind.get(kind) ?? 0
   const visibleCount = Math.max(0, Math.min(currentStep, ordered.length))
 
   // Layers whose kind is outside the closed enum (e.g. an optional `group`
@@ -203,7 +285,7 @@ export function ArchitectureReveal({
   const rotation = cycle.length >= 2 ? cycle : [primary, secondary, accent]
   const accentFor = (index: number) => rotation[index % rotation.length]
 
-  const isActiveKind = (kind: string) => seqIndex(kind) < visibleCount
+  const isActiveKind = (kind: string) => revealIndexOf(kind) < visibleCount
 
   const trustLayer = byKind.get("trust")
   const recoveryLayer = byKind.get("recovery")
@@ -241,60 +323,64 @@ export function ArchitectureReveal({
           </marker>
         </defs>
 
-        {/* Recovery backplane (lowest layer). */}
-        <g
-          className={`arch-region arch-region--recovery${
-            isActiveKind("recovery") ? "" : " pending"
-          }`}
-          style={{ "--reveal-index": seqIndex("recovery") } as CSSProperties}
-        >
-          <rect
-            className="arch-region__rect arch-region__rect--recovery"
-            x={RECOVERY_REGION.x}
-            y={RECOVERY_REGION.y}
-            width={RECOVERY_REGION.w}
-            height={RECOVERY_REGION.h}
-            rx={22}
-          />
-          <text
-            className="arch-region__label arch-region__label--recovery"
-            x={RECOVERY_REGION.x + 16}
-            y={RECOVERY_REGION.y + RECOVERY_REGION.h - 14}
+        {/* Recovery backplane (lowest layer) — only when the plane is present. */}
+        {topology.recovery && (
+          <g
+            className={`arch-region arch-region--recovery${
+              isActiveKind("recovery") ? "" : " pending"
+            }`}
+            style={{ "--reveal-index": revealIndexOf("recovery") } as CSSProperties}
           >
-            {recoveryLayer?.label || LAYER_COPY.recovery}
-          </text>
-        </g>
+            <rect
+              className="arch-region__rect arch-region__rect--recovery"
+              x={topology.recovery.x}
+              y={topology.recovery.y}
+              width={topology.recovery.w}
+              height={topology.recovery.h}
+              rx={22}
+            />
+            <text
+              className="arch-region__label arch-region__label--recovery"
+              x={topology.recovery.x + 16}
+              y={topology.recovery.y + topology.recovery.h - 14}
+            >
+              {recoveryLayer?.label || LAYER_COPY.recovery}
+            </text>
+          </g>
+        )}
 
-        {/* Trust boundary (dashed outline). */}
-        <g
-          className={`arch-region arch-region--trust${
-            isActiveKind("trust") ? "" : " pending"
-          }`}
-          style={{ "--reveal-index": seqIndex("trust") } as CSSProperties}
-        >
-          <rect
-            className="arch-region__rect arch-region__rect--trust"
-            x={TRUST_REGION.x}
-            y={TRUST_REGION.y}
-            width={TRUST_REGION.w}
-            height={TRUST_REGION.h}
-            rx={20}
-          />
-          <text
-            className="arch-region__label arch-region__label--trust"
-            x={TRUST_REGION.x + 16}
-            y={TRUST_REGION.y + 22}
+        {/* Trust boundary (dashed outline) — only when the plane is present. */}
+        {topology.trust && (
+          <g
+            className={`arch-region arch-region--trust${
+              isActiveKind("trust") ? "" : " pending"
+            }`}
+            style={{ "--reveal-index": revealIndexOf("trust") } as CSSProperties}
           >
-            {trustLayer?.label || LAYER_COPY.trust}
-          </text>
-        </g>
+            <rect
+              className="arch-region__rect arch-region__rect--trust"
+              x={topology.trust.x}
+              y={topology.trust.y}
+              width={topology.trust.w}
+              height={topology.trust.h}
+              rx={20}
+            />
+            <text
+              className="arch-region__label arch-region__label--trust"
+              x={topology.trust.x + 16}
+              y={topology.trust.y + 22}
+            >
+              {trustLayer?.label || LAYER_COPY.trust}
+            </text>
+          </g>
+        )}
 
         {/* Edges: a solid connector (the static base) plus a flowing dash on top
             (the animated data flow, disabled under reduced motion). */}
-        {EDGES.map(([from, to]) => {
-          const d = edgePath(from, to)
+        {topology.edges.map(([from, to]) => {
+          const d = edgePath(topology.centers.get(from)!, topology.centers.get(to)!)
           const active = isActiveKind(from) && isActiveKind(to)
-          const revealIndex = Math.max(seqIndex(from), seqIndex(to))
+          const revealIndex = Math.max(revealIndexOf(from), revealIndexOf(to))
           return (
             <g
               key={`${from}-${to}`}
@@ -302,7 +388,7 @@ export function ArchitectureReveal({
               style={
                 {
                   "--reveal-index": revealIndex,
-                  "--edge-accent": accentFor(seqIndex(to)),
+                  "--edge-accent": accentFor(revealIndexOf(to)),
                 } as CSSProperties
               }
             >
@@ -319,14 +405,13 @@ export function ArchitectureReveal({
 
         {/* Box nodes. HTML inside foreignObject gives wrapped, glass-styled text
             in the live deck; all dynamic text is escaped React text content. */}
-        {BOX_KINDS.map((kind) => {
-          const box = nodeBox(kind)
-          const layer = byKind.get(kind) ?? layerForKind(all, kind)
-          const index = seqIndex(kind)
-          const active = isActiveKind(kind)
+        {topology.boxes.map((box) => {
+          const layer = byKind.get(box.kind)!
+          const index = revealIndexOf(box.kind)
+          const active = isActiveKind(box.kind)
           return (
             <foreignObject
-              key={kind}
+              key={box.kind}
               x={box.x}
               y={box.y}
               width={box.w}
@@ -340,8 +425,8 @@ export function ArchitectureReveal({
                 } as CSSProperties
               }
             >
-              <div className="arch-node" data-arch-node={kind}>
-                <span className="arch-node__kind">{kind}</span>
+              <div className="arch-node" data-arch-node={box.kind}>
+                <span className="arch-node__kind">{box.kind}</span>
                 <strong className="arch-node__label">{layer.label}</strong>
               </div>
             </foreignObject>

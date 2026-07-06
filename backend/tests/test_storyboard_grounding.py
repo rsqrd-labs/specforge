@@ -12,7 +12,7 @@ from uuid import uuid4
 import pytest
 
 from prompts.storyboard import (
-    REQUIRED_ARCHITECTURE_LAYERS,
+    ARCHITECTURE_LAYER_KINDS,
     StoryboardPayload,
     StoryboardPayloadError,
 )
@@ -126,7 +126,7 @@ def _payload() -> dict:
                         "summary": "Plane summary.",
                         "source_refs": [plan_ref],
                     }
-                    for kind in REQUIRED_ARCHITECTURE_LAYERS
+                    for kind in ARCHITECTURE_LAYER_KINDS
                 ],
             }
         ],

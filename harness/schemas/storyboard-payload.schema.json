@@ -339,6 +339,7 @@
       }
     },
     "architecture_reveal_diagram": {
+      "$comment": "storyboard-v1.5: only the three core planes (client, api, data) are required; optional planes render only when the product has them. Legacy 8-layer decks still validate (8 superset of core). Kept equal-or-looser than the Pydantic model per invariant 1.6.",
       "allOf": [
         {
           "$ref": "#/$defs/diagram"
@@ -350,14 +351,36 @@
             },
             "layers": {
               "type": "array",
-              "minItems": 8,
-              "contains": {
-                "properties": {
-                  "kind": {
-                    "const": "client"
+              "minItems": 3,
+              "allOf": [
+                {
+                  "contains": {
+                    "properties": {
+                      "kind": {
+                        "const": "client"
+                      }
+                    }
+                  }
+                },
+                {
+                  "contains": {
+                    "properties": {
+                      "kind": {
+                        "const": "api"
+                      }
+                    }
+                  }
+                },
+                {
+                  "contains": {
+                    "properties": {
+                      "kind": {
+                        "const": "data"
+                      }
+                    }
                   }
                 }
-              }
+              ]
             }
           }
         }

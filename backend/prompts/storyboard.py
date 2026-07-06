@@ -36,7 +36,7 @@ from pydantic import (
 from prompts.base import SECURITY_AND_PRIVACY_RULES, wrap_untrusted_content
 from services.pipeline.storyboard_source import StoryboardSourcePackage
 
-STORYBOARD_PROMPT_VERSION = "storyboard-v1.4"
+STORYBOARD_PROMPT_VERSION = "storyboard-v1.5"
 
 # The main keynote has exactly six visible top-level acts, in this exact order.
 # Validation and Execution Plan are deliberately NOT acts — they belong in the
@@ -52,9 +52,25 @@ REQUIRED_SECTION_TITLES: tuple[str, ...] = (
 FORBIDDEN_TOP_LEVEL_ACTS: frozenset[str] = frozenset({"Validation", "Execution Plan"})
 
 ARCHITECTURE_REVEAL_TYPE = "architecture_reveal"
-# Every architecture reveal must layer these eight planes so the diagram tells a
-# complete system story (client through recovery).
-REQUIRED_ARCHITECTURE_LAYERS: tuple[str, ...] = (
+# The architecture-reveal diagram is drawn from a closed vocabulary of planes, not
+# a fixed quota (storyboard-v1.5). Three planes are universal to every product — an
+# actor/client, the compute/API, and the data/state store — so they are always
+# required. The rest are OPTIONAL: they render only when the SPEC/PLAN actually
+# describes such a component, so a CLI, batch job, or library with no browser UI /
+# no model calls / no third-party services is never forced to fabricate a
+# frontend / llm / integrations plane to pass validation. All eight kinds remain
+# valid; the geometry (both renderers) lays out only the present subset.
+CORE_ARCHITECTURE_LAYERS: tuple[str, ...] = ("client", "api", "data")
+OPTIONAL_ARCHITECTURE_LAYERS: tuple[str, ...] = (
+    "frontend",
+    "llm",
+    "integrations",
+    "trust",
+    "recovery",
+)
+# Full canonical reveal order (client through recovery) — the layer vocabulary and
+# the order both renderers reveal present planes in.
+ARCHITECTURE_LAYER_KINDS: tuple[str, ...] = (
     "client",
     "frontend",
     "api",
@@ -276,12 +292,16 @@ class StoryboardDiagram(BaseModel):
 
     @model_validator(mode="after")
     def _architecture_reveal_layers(self) -> "StoryboardDiagram":
+        # storyboard-v1.5: only the three core planes are required. Optional planes
+        # (frontend/llm/integrations/trust/recovery) are allowed but not mandated,
+        # so a product without them is not forced to invent them. Legacy 8-layer
+        # decks still validate (8 ⊇ core), so no grandfathering is needed.
         if self.type == ARCHITECTURE_REVEAL_TYPE:
             kinds = {layer.kind for layer in self.layers}
-            missing = [k for k in REQUIRED_ARCHITECTURE_LAYERS if k not in kinds]
+            missing = [k for k in CORE_ARCHITECTURE_LAYERS if k not in kinds]
             if missing:
                 raise ValueError(
-                    "architecture_reveal diagram is missing required layers: "
+                    "architecture_reveal diagram is missing required core layers: "
                     + ", ".join(missing)
                 )
         return self
@@ -326,8 +346,9 @@ class StoryboardPayload(BaseModel):
     """The complete structured keynote the LLM returns.
 
     Kept aligned with ``harness/schemas/storyboard-payload.schema.json``. Stricter
-    where the directive demands it (all eight architecture layers; the six exact
-    act titles), so any payload this model accepts also satisfies the JSON schema.
+    where the directive demands it (the three core architecture layers; the six
+    exact act titles), so any payload this model accepts also satisfies the JSON
+    schema.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -391,7 +412,9 @@ class StoryboardPayload(BaseModel):
 _ACTS_BLOCK = "\n".join(
     f"  {i + 1}. {t}" for i, t in enumerate(REQUIRED_SECTION_TITLES)
 )
-_LAYERS_BLOCK = ", ".join(REQUIRED_ARCHITECTURE_LAYERS)
+_LAYERS_BLOCK = ", ".join(ARCHITECTURE_LAYER_KINDS)
+_CORE_LAYERS_BLOCK = ", ".join(CORE_ARCHITECTURE_LAYERS)
+_OPTIONAL_LAYERS_BLOCK = ", ".join(OPTIONAL_ARCHITECTURE_LAYERS)
 _VISUAL_KINDS_BLOCK = ", ".join(ALLOWED_VISUAL_KINDS)
 _CANONICAL_KEYS_BLOCK = """CANONICAL JSON SHAPE — use these keys exactly.
 Root object keys:
@@ -425,7 +448,8 @@ typography_mood, text, note_ref, speaker_note_ref, speakerNotesRef, sourceRefs,
 sourceMap, demo_script, or technical_appendix. If you need slide body text, the
 key is visible_text. If you need theme colours, the key is palette."""
 _MINIMAL_PAYLOAD_SHAPE = """FIELD SHAPE EXAMPLE — expand this structure to six
-sections and all eight architecture layers, but do not rename keys:
+sections and the architecture layers your product actually has (the three core
+planes plus any optional planes the sources describe), but do not rename keys:
 {
   "title": "SpecForge Launch Keynote",
   "theme": {
@@ -507,10 +531,11 @@ sections and all eight architecture layers, but do not rename keys:
   "technical_appendix_md": "## Appendix\\nArchitecture backup."
 }
 
-The final architecture_reveal layers array must include at least one layer
-object for each required kind, using these exact kind values:
-client, frontend, api, data, llm, integrations, trust, recovery.
-Do not combine, rename, or omit any of those eight architecture layer kinds."""
+The final architecture_reveal layers array must include at least the three
+required core kinds — client, api, data — plus any of the optional kinds
+(frontend, llm, integrations, trust, recovery) the product actually has. Use
+these exact kind values; never rename them, and never fabricate an optional
+plane the sources do not describe. Omitting an absent plane is correct."""
 
 SYSTEM_PROMPT = f"""You are SpecForge's Storyboard keynote director. Turn a finalised
 SPEC + PLAN + HARNESS + TASKS into a polished, product-specific launch keynote — never a
@@ -530,11 +555,17 @@ Validation and Execution Plan are NOT top-level acts — never title a section "
 or "Execution Plan"; that material lives in the technical appendix, demo script, or Q&A
 backup, never on the main deck.
 
-ARCHITECTURE REVEAL — include at least one diagram of type "architecture_reveal" whose
-layers cover every plane: {_LAYERS_BLOCK}. Each layer needs a label and at least one source
-reference to PLAN/HARNESS/SPEC/TASKS. Prioritise PLAN architecture, security architecture,
-capacity model, STRIDE, SLO, and FMEA evidence for the Technical Architecture and Trust,
-Security, Reliability acts.
+ARCHITECTURE REVEAL — include at least one diagram of type "architecture_reveal". Always
+include the three core planes: {_CORE_LAYERS_BLOCK} — an actor/client, the compute/API, and
+the data/state store; every product has them. Include an optional plane ({_OPTIONAL_LAYERS_BLOCK})
+ONLY when the SPEC/PLAN actually describes such a component: omitting an absent plane is correct,
+fabricating one is a failure. A CLI, batch job, or library with no browser UI omits "frontend"; a
+product that makes no model calls omits "llm"; one with no third-party services omits
+"integrations". The valid layer kinds are: {_LAYERS_BLOCK}. Each layer needs a label that names the
+REAL components from the sources (e.g. "FastAPI + arq worker", never a bare "API layer") and at
+least one source reference to PLAN/HARNESS/SPEC/TASKS. Prioritise PLAN architecture, security
+architecture, capacity model, STRIDE, SLO, and FMEA evidence for the Technical Architecture and
+Trust, Security, Reliability acts.
 
 VISUALS — visual.kind must be one of these renderer-supported layouts: {_VISUAL_KINDS_BLOCK}.
 Never output "illustration", "video-demo", "video", "infographic", "call-to-action", "image",

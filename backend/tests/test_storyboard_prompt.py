@@ -16,8 +16,10 @@ import pytest
 
 from prompts.storyboard import (
     ALLOWED_VISUAL_KINDS,
+    ARCHITECTURE_LAYER_KINDS,
+    CORE_ARCHITECTURE_LAYERS,
     GRANDFATHER_NOTE_DEPTH,
-    REQUIRED_ARCHITECTURE_LAYERS,
+    OPTIONAL_ARCHITECTURE_LAYERS,
     REQUIRED_SECTION_TITLES,
     STORYBOARD_PROMPT_VERSION,
     SYSTEM_PROMPT,
@@ -77,20 +79,26 @@ def _note(slide_id: str) -> dict[str, Any]:
     }
 
 
-def _architecture_reveal() -> dict[str, Any]:
+def _arch_layers(kinds: tuple[str, ...]) -> list[dict[str, Any]]:
+    return [
+        {
+            "id": f"layer-{kind}",
+            "kind": kind,
+            "label": f"{kind} layer",
+            "summary": "",
+            "source_refs": [_source_ref()],
+        }
+        for kind in kinds
+    ]
+
+
+def _architecture_reveal(
+    kinds: tuple[str, ...] = ARCHITECTURE_LAYER_KINDS,
+) -> dict[str, Any]:
     return {
         "id": "arch-reveal",
         "type": "architecture_reveal",
-        "layers": [
-            {
-                "id": f"layer-{kind}",
-                "kind": kind,
-                "label": f"{kind} layer",
-                "summary": "",
-                "source_refs": [_source_ref()],
-            }
-            for kind in REQUIRED_ARCHITECTURE_LAYERS
-        ],
+        "layers": _arch_layers(kinds),
     }
 
 
@@ -166,7 +174,7 @@ def test_note_depth_floor_grandfathered_for_carried_over_notes() -> None:
 def test_storyboard_prompt_names_canonical_payload_keys_and_bad_aliases() -> None:
     """The live model needs exact field names, not conceptual aliases."""
 
-    assert STORYBOARD_PROMPT_VERSION == "storyboard-v1.4"
+    assert STORYBOARD_PROMPT_VERSION == "storyboard-v1.5"
     required_keys = [
         "palette",
         "typography",
@@ -262,15 +270,47 @@ def test_rejects_out_of_order_titles() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_storyboard_architecture_reveal_requires_layers() -> None:
+def test_storyboard_architecture_reveal_requires_core_layers() -> None:
+    # storyboard-v1.5: dropping a *core* plane (client/api/data) is a failure.
     data = _valid_payload()
-    # Drop the "recovery" layer.
     data["diagrams"][0]["layers"] = [
-        layer for layer in data["diagrams"][0]["layers"] if layer["kind"] != "recovery"
+        layer for layer in data["diagrams"][0]["layers"] if layer["kind"] != "data"
     ]
     with pytest.raises(Exception) as exc:
         StoryboardPayload.model_validate(data)
-    assert "recovery" in str(exc.value).lower()
+    assert "data" in str(exc.value).lower()
+
+
+def test_storyboard_architecture_reveal_allows_missing_optional_layers() -> None:
+    # Dropping an *optional* plane (recovery) is now valid — the product may not
+    # have one, and fabricating it was the old failure mode.
+    data = _valid_payload()
+    data["diagrams"][0]["layers"] = [
+        layer for layer in data["diagrams"][0]["layers"] if layer["kind"] != "recovery"
+    ]
+    StoryboardPayload.model_validate(data)
+
+
+def test_storyboard_architecture_reveal_accepts_core_only_subset() -> None:
+    # A CLI/batch product with only the three universal planes validates.
+    data = _valid_payload()
+    data["diagrams"][0]["layers"] = _arch_layers(CORE_ARCHITECTURE_LAYERS)
+    StoryboardPayload.model_validate(data)
+
+
+def test_storyboard_architecture_reveal_legacy_eight_layer_still_validates() -> None:
+    # Pre-v1.5 decks carry all eight planes; they remain valid (8 superset core).
+    data = _valid_payload()
+    data["diagrams"][0]["layers"] = _arch_layers(ARCHITECTURE_LAYER_KINDS)
+    StoryboardPayload.model_validate(data)
+
+
+def test_core_and_optional_layers_partition_the_canonical_kinds() -> None:
+    assert set(CORE_ARCHITECTURE_LAYERS) == {"client", "api", "data"}
+    assert set(CORE_ARCHITECTURE_LAYERS).isdisjoint(OPTIONAL_ARCHITECTURE_LAYERS)
+    assert set(CORE_ARCHITECTURE_LAYERS) | set(OPTIONAL_ARCHITECTURE_LAYERS) == set(
+        ARCHITECTURE_LAYER_KINDS
+    )
 
 
 def test_requires_at_least_one_architecture_reveal() -> None:
@@ -520,9 +560,20 @@ def test_pydantic_constants_match_harness_schema() -> None:
     assert schema["$defs"]["source_ref"]["properties"]["excerpt"]["maxLength"] == 1200
 
     # Architecture-reveal layer kinds the schema enumerates are a superset of the
-    # eight required kinds the Pydantic validator enforces.
+    # eight canonical kinds the Pydantic model recognises.
     layer_kinds = set(schema["$defs"]["diagram_layer"]["properties"]["kind"]["enum"])
-    assert set(REQUIRED_ARCHITECTURE_LAYERS).issubset(layer_kinds)
+    assert set(ARCHITECTURE_LAYER_KINDS).issubset(layer_kinds)
+
+    # storyboard-v1.5 loosening (invariant 1.6: Pydantic subset of JSON schema).
+    # Only the three core planes are required by both sides.
+    arch = schema["$defs"]["architecture_reveal_diagram"]["allOf"][1]["properties"][
+        "layers"
+    ]
+    assert arch["minItems"] == 3, "schema must require only the 3 core layers (v1.5)"
+    contained = {
+        clause["contains"]["properties"]["kind"]["const"] for clause in arch["allOf"]
+    }
+    assert contained == set(CORE_ARCHITECTURE_LAYERS)
 
 
 def test_valid_payload_round_trips_through_pydantic_and_json() -> None:

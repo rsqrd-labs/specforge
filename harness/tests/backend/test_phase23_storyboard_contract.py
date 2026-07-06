@@ -62,6 +62,7 @@ versions, and unsupported public HTML package downloads.
 
 from __future__ import annotations
 
+import json
 import re
 
 from conftest import BACKEND_ROOT, REPO_ROOT, read_backend_file
@@ -540,6 +541,44 @@ def test_t253_harness_schema_exists_for_storyboard_payload() -> None:
         )
 
 
+def test_storyboard_v15_schema_requires_only_the_three_core_arch_layers() -> None:
+    """The architecture_reveal layers contract accepts a core-only subset and
+    still rejects a diagram missing a core plane (storyboard-v1.5 loosening).
+
+    Dependency-free: we drive the check from the schema's own values (``minItems``
+    plus the ``contains`` core kinds), so a regression that re-tightens ``minItems``
+    back to 8 or drops a core ``contains`` fails here, not just in a shape assertion.
+    """
+
+    schema = json.loads(
+        _read_repo_file("harness", "schemas", "storyboard-payload.schema.json")
+    )
+    layers_schema = schema["$defs"]["architecture_reveal_diagram"]["allOf"][1][
+        "properties"
+    ]["layers"]
+    min_items = layers_schema["minItems"]
+    required_kinds = {
+        clause["contains"]["properties"]["kind"]["const"]
+        for clause in layers_schema["allOf"]
+    }
+    # v1.5 loosened the quota from eight planes to the three universal cores.
+    assert min_items == 3
+    assert required_kinds == {"client", "api", "data"}
+
+    def conforms(kinds: list[str]) -> bool:
+        return len(kinds) >= min_items and required_kinds.issubset(set(kinds))
+
+    # A CLI/batch product with only the three core planes is valid…
+    assert conforms(["client", "api", "data"])
+    # …and a legacy eight-layer deck stays valid (8 superset of the core three).
+    assert conforms(
+        ["client", "frontend", "api", "data", "llm", "integrations", "trust", "recovery"]
+    )
+    # …but dropping a core plane (here `api`) is still a contract failure, even
+    # when enough optional planes are present to clear minItems.
+    assert not conforms(["client", "data", "frontend"])
+
+
 def test_t253_harness_schema_exists_for_public_storyboard_allow_list() -> None:
     schema = _read_repo_file("harness", "schemas", "storyboard-public-response.schema.json")
     for token in [
@@ -923,7 +962,7 @@ def test_t263_backend_unit_tests_cover_storyboard_critical_paths() -> None:
         "test_storyboard_public_unknown_or_disabled_returns_404",
         "test_storyboard_source_map_contains_only_finalised_versions",
         "test_storyboard_schema_rejects_validation_or_execution_plan_top_level_acts",
-        "test_storyboard_architecture_reveal_requires_layers",
+        "test_storyboard_architecture_reveal_requires_core_layers",
         "test_storyboard_renderer_strips_script_and_remote_asset_references",
     ]:
         assert test_name in combined, f"Missing backend unit test {test_name}. T-263."

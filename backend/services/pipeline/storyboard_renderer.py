@@ -357,11 +357,21 @@ _ARCH_LAYER_COPY: dict[str, str] = {
 # a recovery backplane band. Geometry is integer-only so every path/coordinate is
 # an exact value (no float formatting) and is built entirely from trusted code —
 # only node labels (escaped text) come from the model.
+#
+# storyboard-v1.5: the diagram lays out only the planes the product actually has.
+# ``_arch_topology_geometry`` is a pure function of the present plane set that
+# mirrors ``architectureTopology()`` in ArchitectureReveal.tsx — keep the two
+# tables in lockstep. When all eight planes are present it reduces to the
+# canonical fixed coordinates below (locked by a parity test), so every legacy
+# deck renders byte-identically.
 _ARCH_VIEW_W = 960
 _ARCH_VIEW_H = 600
 _ARCH_NODE_W = 168
 _ARCH_NODE_H = 88
 _ARCH_BOX_KINDS = ("client", "frontend", "api", "data", "llm", "integrations")
+# Canonical full-topology reference: the exact node centres when all eight planes
+# are present. The runtime path computes centres from the chain/sink tables below
+# and the parity test asserts it reproduces this dict for the all-eight case.
 _ARCH_NODE_CENTERS: dict[str, tuple[int, int]] = {
     "client": (104, 300),
     "frontend": (330, 300),
@@ -370,6 +380,8 @@ _ARCH_NODE_CENTERS: dict[str, tuple[int, int]] = {
     "llm": (834, 300),
     "integrations": (834, 482),
 }
+# Canonical full edge set (client through the three sinks). The runtime derives a
+# present-only subset of these; the parity test asserts equality for all-eight.
 _ARCH_EDGES = (
     ("client", "frontend"),
     ("frontend", "api"),
@@ -380,34 +392,105 @@ _ARCH_EDGES = (
 _ARCH_TRUST_MEMBERS = ("frontend", "api", "data", "llm")
 _ARCH_RECOVERY_MEMBERS = ("api", "data", "llm", "integrations")
 
+# Present-subset geometry tables (mirror ArchitectureReveal.tsx). The chain
+# client → [frontend] → api sits on the vertical centre; the api sinks hang on a
+# fixed column with count-driven y-positions so the fan stays centred.
+_ARCH_CHAIN_Y = 300
+_ARCH_CHAIN_X_WITH_FRONTEND = {"client": 104, "frontend": 330, "api": 556}
+_ARCH_CHAIN_X_WITHOUT_FRONTEND = {"client": 104, "api": 430}
+_ARCH_SINK_X = 834
+_ARCH_SINK_KINDS = ("data", "llm", "integrations")
+_ARCH_SINK_Y_BY_COUNT: dict[int, tuple[int, ...]] = {
+    0: (),
+    1: (300,),
+    2: (180, 420),
+    3: (118, 300, 482),
+}
 
-def _arch_node_box(kind: str) -> tuple[int, int, int, int]:
-    cx, cy = _ARCH_NODE_CENTERS[kind]
+
+def _arch_node_box(cx: int, cy: int) -> tuple[int, int, int, int]:
     return cx - _ARCH_NODE_W // 2, cy - _ARCH_NODE_H // 2, _ARCH_NODE_W, _ARCH_NODE_H
 
 
-def _arch_edge_path(frm: str, to: str) -> tuple[str, tuple[int, int]]:
+def _arch_edge_path(
+    frm_center: tuple[int, int], to_center: tuple[int, int]
+) -> tuple[str, tuple[int, int]]:
     """Smooth left-to-right connector; returns the path ``d`` and the end point.
 
     The end tangent is always horizontal (control point shares the end's y), so
     the arrowhead at the target can be a fixed right-pointing triangle.
     """
 
-    ax, ay = _ARCH_NODE_CENTERS[frm]
-    bx, by = _ARCH_NODE_CENTERS[to]
+    ax, ay = frm_center
+    bx, by = to_center
     sx, sy = ax + _ARCH_NODE_W // 2, ay
     ex, ey = bx - _ARCH_NODE_W // 2, by
     dx = max((ex - sx) // 2, 36)
     return f"M {sx} {sy} C {sx + dx} {sy}, {ex - dx} {ey}, {ex} {ey}", (ex, ey)
 
 
-def _arch_region(members: tuple[str, ...], pad: int) -> tuple[int, int, int, int]:
-    boxes = [_arch_node_box(kind) for kind in members]
+def _arch_region(
+    members: tuple[str, ...], centers: dict[str, tuple[int, int]], pad: int
+) -> tuple[int, int, int, int] | None:
+    """Bounding box around the *present* members, or ``None`` if < 2 remain.
+
+    A boundary drawn around fewer than two boxes is noise, so an overlay region
+    whose product has only one member present is dropped entirely.
+    """
+
+    boxes = [_arch_node_box(*centers[kind]) for kind in members if kind in centers]
+    if len(boxes) < 2:
+        return None
     min_x = min(b[0] for b in boxes) - pad
     min_y = min(b[1] for b in boxes) - pad
     max_x = max(b[0] + b[2] for b in boxes) + pad
     max_y = max(b[1] + b[3] for b in boxes) + pad
     return min_x, min_y, max_x - min_x, max_y - min_y
+
+
+def _arch_topology_geometry(present: set[str]) -> dict[str, Any]:
+    """Deterministic node centres, edges, and overlay regions for present planes.
+
+    Pure function of the present plane set — the offline analogue of
+    ``architectureTopology()`` in ArchitectureReveal.tsx. Absent planes are simply
+    omitted (no invented boxes); overlay regions render only when their own kind
+    is present and they still bound at least two members. The all-eight case
+    reduces to ``_ARCH_NODE_CENTERS`` / ``_ARCH_EDGES`` (parity test).
+    """
+
+    has_frontend = "frontend" in present
+    chain_x = (
+        _ARCH_CHAIN_X_WITH_FRONTEND if has_frontend else _ARCH_CHAIN_X_WITHOUT_FRONTEND
+    )
+    centers: dict[str, tuple[int, int]] = {}
+    for kind in ("client", "frontend", "api"):
+        if kind in present and kind in chain_x:
+            centers[kind] = (chain_x[kind], _ARCH_CHAIN_Y)
+    present_sinks = [kind for kind in _ARCH_SINK_KINDS if kind in present]
+    ys = _ARCH_SINK_Y_BY_COUNT.get(len(present_sinks), ())
+    for index, kind in enumerate(present_sinks):
+        centers[kind] = (_ARCH_SINK_X, ys[index] if index < len(ys) else _ARCH_CHAIN_Y)
+
+    edges: list[tuple[str, str]] = []
+    if has_frontend:
+        if "client" in centers and "frontend" in centers:
+            edges.append(("client", "frontend"))
+        if "frontend" in centers and "api" in centers:
+            edges.append(("frontend", "api"))
+    elif "client" in centers and "api" in centers:
+        edges.append(("client", "api"))
+    if "api" in centers:
+        edges.extend(("api", sink) for sink in present_sinks)
+
+    trust = (
+        _arch_region(_ARCH_TRUST_MEMBERS, centers, 24) if "trust" in present else None
+    )
+    recovery = (
+        _arch_region(_ARCH_RECOVERY_MEMBERS, centers, 38)
+        if "recovery" in present
+        else None
+    )
+    return {"centers": centers, "edges": edges, "trust": trust, "recovery": recovery}
 
 
 def _wrap_label(text: str, width: int = 20, max_lines: int = 2) -> list[str]:
@@ -451,12 +534,13 @@ def _build_arch_topology(
 ) -> dict[str, Any] | None:
     """Build the static architecture topology, or ``None`` when none was emitted.
 
-    Mirrors the live ``ArchitectureReveal`` SVG: six connected box nodes (the
-    canonical planes), five directed edges, a dashed trust boundary, and a
-    recovery backplane. All eight planes are always drawn — a plane the model
-    omitted falls back to its canonical label so the system diagram stays whole.
-    Node/region labels are the only model-derived strings; they are sanitised here
-    and HTML-escaped by the template's autoescape.
+    Mirrors the live ``ArchitectureReveal`` SVG: the present box nodes, directed
+    edges between them, and the trust/recovery overlay regions when those planes
+    are present. storyboard-v1.5: only the planes the product actually has are
+    drawn — an absent frontend/llm/integrations plane is omitted, never invented
+    or filled with apologetic placeholder copy. Node/region labels are the only
+    model-derived strings; they are sanitised here and HTML-escaped by the
+    template's autoescape.
     """
 
     diagram: dict[str, Any] | None = None
@@ -478,6 +562,9 @@ def _build_arch_topology(
         elif kind:
             extras_raw.append(layer)
 
+    geometry = _arch_topology_geometry(set(by_kind))
+    centers: dict[str, tuple[int, int]] = geometry["centers"]
+
     def label_for(kind: str) -> str:
         layer = by_kind.get(kind)
         if layer:
@@ -491,7 +578,9 @@ def _build_arch_topology(
 
     nodes: list[dict[str, Any]] = []
     for kind in _ARCH_BOX_KINDS:
-        x, y, w, h = _arch_node_box(kind)
+        if kind not in centers:
+            continue
+        x, y, w, h = _arch_node_box(*centers[kind])
         accent = accent_for(kind)
         nodes.append(
             {
@@ -510,8 +599,8 @@ def _build_arch_topology(
         )
 
     edges: list[dict[str, Any]] = []
-    for frm, to in _ARCH_EDGES:
-        d, (ex, ey) = _arch_edge_path(frm, to)
+    for frm, to in geometry["edges"]:
+        d, (ex, ey) = _arch_edge_path(centers[frm], centers[to])
         accent = accent_for(to)
         edges.append(
             {
@@ -522,10 +611,38 @@ def _build_arch_topology(
             }
         )
 
-    trust_accent = palette[1 % len(palette)]
-    recovery_accent = palette[2 % len(palette)]
-    tx, ty, tw, th = _arch_region(_ARCH_TRUST_MEMBERS, 24)
-    rx, ry, rw, rh = _arch_region(_ARCH_RECOVERY_MEMBERS, 38)
+    trust: dict[str, Any] | None = None
+    if geometry["trust"] is not None:
+        tx, ty, tw, th = geometry["trust"]
+        trust_accent = palette[1 % len(palette)]
+        trust = {
+            "x": tx,
+            "y": ty,
+            "w": tw,
+            "h": th,
+            "stroke": trust_accent,
+            "label": label_for("trust"),
+            "label_x": tx + 16,
+            "label_y": ty + 22,
+            "label_fill": _readable_ink(trust_accent),
+        }
+
+    recovery: dict[str, Any] | None = None
+    if geometry["recovery"] is not None:
+        rx, ry, rw, rh = geometry["recovery"]
+        recovery_accent = palette[2 % len(palette)]
+        recovery = {
+            "x": rx,
+            "y": ry,
+            "w": rw,
+            "h": rh,
+            "fill": recovery_accent,
+            "stroke": recovery_accent,
+            "label": label_for("recovery"),
+            "label_x": rx + 16,
+            "label_y": ry + rh - 14,
+            "label_fill": _readable_ink(recovery_accent),
+        }
 
     extras: list[dict[str, Any]] = []
     for index, layer in enumerate(extras_raw):
@@ -545,29 +662,8 @@ def _build_arch_topology(
         "view_h": _ARCH_VIEW_H,
         "nodes": nodes,
         "edges": edges,
-        "trust": {
-            "x": tx,
-            "y": ty,
-            "w": tw,
-            "h": th,
-            "stroke": trust_accent,
-            "label": label_for("trust"),
-            "label_x": tx + 16,
-            "label_y": ty + 22,
-            "label_fill": _readable_ink(trust_accent),
-        },
-        "recovery": {
-            "x": rx,
-            "y": ry,
-            "w": rw,
-            "h": rh,
-            "fill": recovery_accent,
-            "stroke": recovery_accent,
-            "label": label_for("recovery"),
-            "label_x": rx + 16,
-            "label_y": ry + rh - 14,
-            "label_fill": _readable_ink(recovery_accent),
-        },
+        "trust": trust,
+        "recovery": recovery,
         "extras": extras,
     }
 
