@@ -103,6 +103,12 @@ _SOURCE_ENUM = ("SPEC", "PLAN", "HARNESS", "TASKS")
 # of a pre-v1.4 Storyboard re-validates the whole spliced payload).
 _TALK_TRACK_MIN_CHARS = 120
 _BACKUP_POINTS_MIN = 2
+# The single context flag that grandfathers ALL fresh-generation content floors
+# (note depth AND the P3.4 slide-substance floor) for spliced/legacy payloads.
+# Section regeneration splices a freshly generated act into an existing deck and
+# re-validates the whole payload with this flag set, so acts authored under an
+# older prompt never fail a floor tightened after they were written. Fresh
+# generations pass no context, so every floor still gates them.
 GRANDFATHER_NOTE_DEPTH = "grandfather_note_depth"
 
 _ID_PATTERN = r"^[a-z0-9-]+$"
@@ -227,6 +233,41 @@ class StoryboardVisual(BaseModel):
         return self
 
 
+# Slide types whose whole purpose is to convey product/technical substance. A
+# slide of one of these types must carry a real visual descriptor — a non-empty
+# ``points`` list or a ``metric``/``value`` — not a bare decorative visual
+# (storyboard-v1.5 P3.4). Enforced on fresh generations only; grandfathered for
+# spliced/legacy payloads via ``GRANDFATHER_NOTE_DEPTH`` (see the floor below).
+_SUBSTANCE_SLIDE_TYPES: frozenset[str] = frozenset({"product", "walkthrough", "trust"})
+
+
+def visual_has_substance(visual: "StoryboardVisual") -> bool:
+    """Whether *visual* carries real content, not just a bare ``kind``.
+
+    Substance is a non-empty ``points`` list (any entry with visible text) or a
+    non-empty ``metric``/``value`` descriptor. This is the single definition of
+    "substance" shared by the fresh-generation slide floor (P3.4, in this module)
+    and the deterministic deck quality gate (P3.5, ``storyboard_quality``), so the
+    two never drift.
+    """
+
+    extra = visual.__pydantic_extra__ or {}
+    points = extra.get("points")
+    if isinstance(points, (list, tuple)) and any(str(p).strip() for p in points):
+        return True
+    for key in ("metric", "value"):
+        val = extra.get(key)
+        if isinstance(val, bool):
+            continue
+        if isinstance(val, str) and val.strip():
+            return True
+        if isinstance(val, (int, float)):
+            return True
+        if isinstance(val, (list, tuple, dict)) and len(val) > 0:
+            return True
+    return False
+
+
 class StoryboardSlide(BaseModel):
     """One idea per slide. Headline <= 18 words, visible text sparse."""
 
@@ -243,7 +284,7 @@ class StoryboardSlide(BaseModel):
     sources: list[str] = Field(min_length=1)
 
     @model_validator(mode="after")
-    def _enforce_sparse_and_sources(self) -> "StoryboardSlide":
+    def _enforce_sparse_and_sources(self, info: ValidationInfo) -> "StoryboardSlide":
         for field_name, text in (
             ("headline", self.headline),
             ("visible_text", self.visible_text),
@@ -264,6 +305,19 @@ class StoryboardSlide(BaseModel):
         for source in self.sources:
             if source not in _SOURCE_ENUM:
                 raise ValueError(f"slide {self.id!r} has invalid source {source!r}")
+        # Substance floor (P3.4): a product/walkthrough/trust slide must carry a
+        # real points/metric descriptor, not a decorative swatch. Enforced on
+        # fresh generations; grandfathered for spliced/legacy payloads (section
+        # regeneration carries over acts authored before this floor) via the same
+        # ``GRANDFATHER_NOTE_DEPTH`` context flag that grandfathers note depth.
+        if not (info.context or {}).get(GRANDFATHER_NOTE_DEPTH):
+            if self.type in _SUBSTANCE_SLIDE_TYPES and not visual_has_substance(
+                self.visual
+            ):
+                raise ValueError(
+                    f"slide {self.id!r} of type {self.type!r} must carry a non-empty "
+                    "'points' array or a metric/value descriptor"
+                )
         return self
 
 
@@ -578,9 +632,13 @@ e.g. "4 pipeline stages" or "80% coverage gate") and a "label" naming what it me
 numbers that appear in the sources). Descriptors are drawn as the visual, not extra body
 text, and obey the same grounding/no-filler rules.
 
-SLIDE RULES — one idea per slide. Headlines ≤ 18 words. Visible slide text stays sparse: ≤ 45
-visible words per slide unless diagram labels require more. Depth lives in speaker notes,
-visual descriptors, and the technical appendix — not in long slide paragraphs.
+SLIDE RULES — one idea per slide. Aim for 12–18 slides total, 2–3 per act (Opening Thesis and
+Launch Close may run 1–2). Headlines ≤ 18 words and must add a distinct angle — never simply
+restate the slide's visible_text. Visible slide text stays sparse: ≤ 45 visible words per slide
+unless diagram labels require more. Every product, walkthrough, and trust slide must carry real
+substance in its visual — a "points" array of 3–5 concrete source-backed phrases or a "metric"
+value/label — never a bare decorative visual. Depth lives in speaker notes, visual descriptors,
+and the technical appendix — not in long slide paragraphs.
 
 SPEAKER NOTES — where the depth lives; make every note substantial. One note per slide, keyed
 by slide id. Each talk_track is a rich ~4–6 sentence (≈ 80–160 word) presenter script: open
@@ -601,8 +659,10 @@ reliability, testing, task, and Q&A backup depth, separate from the main deck.
 
 SOURCE MAP — map every major claim and architecture component to bounded finalised source
 excerpts. Cite only the source ids you were given, exactly as written ("SPEC:overview", not
-"SPEC"); never fabricate or paraphrase a citation id. Key source_map entries by slide id and
-copy excerpts verbatim from the provided source text.
+"SPEC"); never fabricate or paraphrase a citation id. Key source_map entries by slide id. Each
+excerpt is a SHORT supporting quote or tight paraphrase of the named source section — ≤ 300
+characters, never a wall of copied text. Grounding is proven by the source id, not by copying
+long passages.
 
 VISUAL IDENTITY — provide a theme distinctive to THIS product, not a house style. The renderer
 drives the cover gradient, per-act accent rotation, slide accents, and visual cards from your
@@ -693,8 +753,9 @@ changing"). Do not invent pricing, customer promises, real-time capabilities, or
 video-demo asset.
 
 SOURCE MAP — key source_map entries by slide id; every slide id needs at least one entry (the
-exact slide id or a key prefixed "<slide_id>."). Copy every source_map and diagram source_refs
-excerpt verbatim from the matching source excerpt above — no paraphrasing, no ellipses.
+exact slide id or a key prefixed "<slide_id>."). Each source_map and diagram source_refs excerpt
+is a SHORT supporting quote or tight paraphrase of the matching source section above — keep each
+to ≤ 300 characters; do not copy long passages verbatim.
 
 Return only the JSON Storyboard payload."""
 
@@ -751,8 +812,8 @@ class StoryboardPayloadError(Exception):
 StoryboardRepairFn = Callable[[str], Awaitable[str]]
 
 
-def _extract_json_object(raw: str) -> str:
-    """Strip Markdown fences and slice to the outer brace pair."""
+def _strip_code_fences(raw: str) -> str:
+    """Strip a wrapping Markdown code fence (```lang … ```), if present."""
 
     text = raw.strip()
     if text.startswith("```"):
@@ -762,11 +823,40 @@ def _extract_json_object(raw: str) -> str:
         else:
             lines = lines[1:]
         text = "\n".join(lines).strip()
+    return text
+
+
+def _extract_json_object(raw: str) -> str:
+    """Strip Markdown fences and slice to the outer brace pair."""
+
+    text = _strip_code_fences(raw)
     start = text.find("{")
     end = text.rfind("}")
     if start != -1 and end != -1 and end > start:
         return text[start : end + 1]
     return text
+
+
+def looks_truncated(raw: str) -> bool:
+    """Whether *raw* is a *truncated* JSON payload, not a complete-but-invalid one.
+
+    The dominant parse-failure mode for a large keynote payload is the model
+    hitting its output-token ceiling mid-object. The signature is two-part and
+    deliberately conservative: the payload fails to parse as JSON **and**, once
+    Markdown fences are stripped, it does not end on a closing brace (a complete
+    object always does, even a schema-invalid one). A complete payload that merely
+    fails schema validation parses cleanly here and returns ``False`` — so it
+    flows to the normal repair loop instead of a wasteful budget-doubling retry —
+    and so does complete-but-malformed JSON that still ends in ``}`` (a genuine
+    syntax error the repair prompt can fix under the same budget). This is the
+    gate the service uses to decide the one-shot doubled-budget retry (P3.3).
+    """
+
+    try:
+        json.loads(_extract_json_object(raw))
+    except json.JSONDecodeError:
+        return not _strip_code_fences(raw).rstrip().endswith("}")
+    return False
 
 
 def _summarise_validation_error(exc: Exception) -> str:

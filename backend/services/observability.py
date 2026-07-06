@@ -1114,6 +1114,18 @@ STORYBOARD_ESCALATIONS = Counter(
     labelnames=["action", "provider", "outcome"],
 )
 
+STORYBOARD_TRUNCATION_RETRIES = Counter(
+    "specforge_storyboard_truncation_retries_total",
+    "Storyboard completions detected as truncated (cut off at the model's output "
+    "token ceiling, the dominant parse-failure mode) that triggered a single "
+    "budget-doubling retry BEFORE the repair loop — repairing a truncated body "
+    "under the same cap is provably futile. Labelled by provider only; carries no "
+    "payload content. A rising rate for a provider means its cheap-tier ceiling is "
+    "too tight for a full keynote and the doubling on escalation is doing real "
+    "work.  P3.3 (storyboard output quality).",
+    labelnames=["provider"],
+)
+
 _STORYBOARD_ACTION_LABELS = frozenset({"generate", "regenerate", "regenerate_section"})
 _STORYBOARD_PROVIDER_LABELS = frozenset({"anthropic", "openai", "google"})
 _STORYBOARD_ESCALATION_OUTCOME_LABELS = frozenset(
@@ -1137,7 +1149,10 @@ _STORYBOARD_SOURCE_LABELS = frozenset({"spec", "plan", "harness", "tasks"})
 _STORYBOARD_SECTION_LABELS = frozenset(
     {
         "overview",
+        "requirements",
+        "journeys",
         "architecture",
+        "components",
         "security-architecture",
         "capacity-model",
         "stride",
@@ -1615,6 +1630,17 @@ def record_storyboard_escalation(action: str, provider: str, outcome: str) -> No
         provider=_storyboard_provider(provider),
         outcome=_storyboard_escalation_outcome(outcome),
     ).inc()
+
+
+def record_storyboard_truncation_retry(provider: str) -> None:
+    """Count one truncation-triggered budget-doubling retry (P3.3).
+
+    Called when a storyboard completion is detected as truncated (cut off at the
+    model output ceiling) and a single doubled-budget retry is issued before the
+    repair loop. ``provider`` outside the bounded vocabulary collapses to
+    ``unknown``; no payload content is ever passed.
+    """
+    STORYBOARD_TRUNCATION_RETRIES.labels(provider=_storyboard_provider(provider)).inc()
 
 
 def _storyboard_action(action: str) -> str:

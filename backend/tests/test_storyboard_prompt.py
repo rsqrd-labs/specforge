@@ -27,6 +27,7 @@ from prompts.storyboard import (
     StoryboardPayloadError,
     build_repair_user_prompt,
     build_user_prompt,
+    looks_truncated,
     parse_and_validate_payload,
 )
 from services.pipeline.storyboard_source import (
@@ -57,7 +58,13 @@ def _slide(slide_id: str, slide_type: str) -> dict[str, Any]:
         "type": slide_type,
         "headline": "A crisp headline",
         "visible_text": "Sparse supporting line.",
-        "visual": {"kind": "bullets"},
+        # Carry a substance descriptor so product/walkthrough/trust slides clear
+        # the P3.4 fresh-generation substance floor by default; tests that want to
+        # exercise the floor drop it explicitly.
+        "visual": {
+            "kind": "bullets",
+            "points": ["Grounded point one", "Grounded point two", "Third point"],
+        },
         "speaker_notes_ref": slide_id,
         "sources": ["PLAN"],
     }
@@ -169,6 +176,76 @@ def test_note_depth_floor_grandfathered_for_carried_over_notes() -> None:
         data, context={GRANDFATHER_NOTE_DEPTH: True}
     )
     assert payload.notes["s0"].talk_track == "Too short."
+
+
+# ---------------------------------------------------------------------------
+# P3.4 — slide substance floor (product / walkthrough / trust)
+# ---------------------------------------------------------------------------
+
+
+def test_slide_substance_floor_enforced_on_fresh_generation() -> None:
+    # A product-type slide with a bare decorative visual (no points, no metric)
+    # must fail the fresh-generation substance floor. Section index 1 (Product
+    # Vision) carries a "product"-type slide in _valid_payload.
+    data = _valid_payload()
+    data["sections"][1]["slides"][0]["visual"] = {"kind": "bullets"}
+    with pytest.raises(Exception) as exc:
+        StoryboardPayload.model_validate(data)
+    message = str(exc.value).lower()
+    assert "points" in message or "metric" in message
+
+
+def test_slide_substance_floor_grandfathered_for_spliced_payload() -> None:
+    # The same bare visual passes under the grandfather context section
+    # regeneration uses to re-validate a spliced payload carrying legacy acts.
+    data = _valid_payload()
+    data["sections"][1]["slides"][0]["visual"] = {"kind": "bullets"}
+    payload = StoryboardPayload.model_validate(
+        data, context={GRANDFATHER_NOTE_DEPTH: True}
+    )
+    assert payload.sections[1].slides[0].visual.kind == "bullets"
+
+
+def test_slide_substance_floor_ignores_framing_slide_types() -> None:
+    # thesis / architecture / closing slides are exempt: a bare visual is fine.
+    data = _valid_payload()
+    data["sections"][0]["slides"][0]["visual"] = {"kind": "thesis"}  # thesis type
+    data["sections"][3]["slides"][0]["visual"] = {"kind": "architecture"}  # arch type
+    payload = StoryboardPayload.model_validate(data)
+    assert payload.sections[0].slides[0].visual.kind == "thesis"
+
+
+def test_slide_substance_floor_accepts_metric_descriptor() -> None:
+    # A metric value/label counts as substance for a trust-type slide (index 4).
+    data = _valid_payload()
+    data["sections"][4]["slides"][0]["visual"] = {
+        "kind": "metric",
+        "value": "80% coverage",
+        "label": "Gate",
+    }
+    payload = StoryboardPayload.model_validate(data)
+    assert payload.sections[4].slides[0].visual.kind == "metric"
+
+
+# ---------------------------------------------------------------------------
+# P3.3 — truncation signature detection
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "raw, expected",
+    [
+        ('{"title": "X", "theme": {"palette":', True),  # cut off mid-object
+        ('{"a": 1, "b": [1, 2', True),  # truncated array, no closing brace
+        ("not json at all", True),  # unparseable and unterminated
+        ('{"a": 1}', False),  # complete valid JSON
+        ('```json\n{"a": 1}\n```', False),  # complete, fenced
+        ('{"a": 1} trailing chatter', False),  # complete + prose after (rfind }})
+        ('{"a": 1,}', False),  # malformed but terminated -> normal repair, not retry
+    ],
+)
+def test_looks_truncated(raw: str, expected: bool) -> None:
+    assert looks_truncated(raw) is expected
 
 
 def test_storyboard_prompt_names_canonical_payload_keys_and_bad_aliases() -> None:

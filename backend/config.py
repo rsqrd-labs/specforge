@@ -462,6 +462,16 @@ class Settings(BaseSettings):
     # review (`docs/evals/ROUTE_PROMOTION.md`). Flag OFF ⇒ the loop is byte-identical.
     pipeline_early_bail_unrecoverable_chunk: bool = False
 
+    # Storyboard quality escape hatch (storyboard output-quality plan P3.5). When
+    # True, storyboard generation starts on the provider's `mid` tier escalating
+    # to `strong`, bypassing the product-wide cheap-primary policy for THIS feature
+    # only (`_resolve_storyboard_primary_route`). Flip it if the deterministic deck
+    # quality gate (`storyboard_quality.assess_payload_quality`) shows the cheap
+    # tier keeps failing and the escalation rate stays high — one flag, no drift of
+    # `services.llm.tier_policy` for any other feature. Default False: cheap primary
+    # with a one-shot quality-triggered escalation is the intended steady state.
+    storyboard_force_mid_tier: bool = False
+
     # Parallel chunk generation (issue #39 latency). A stage's wall-clock to
     # `done` is the SUM of its sequential streaming chunk calls (spec=3, plan=4,
     # harness=2, tasks=4). When True, the happy path generates a stage's chunks

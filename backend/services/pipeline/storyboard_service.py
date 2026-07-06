@@ -62,6 +62,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from config import settings
 from models import CreditLedger, Storyboard, Workspace
 from prompts.storyboard import (
     GRANDFATHER_NOTE_DEPTH,
@@ -70,12 +71,15 @@ from prompts.storyboard import (
     StoryboardPayloadError,
     build_repair_user_prompt,
     build_user_prompt,
+    looks_truncated,
     parse_and_validate_payload,
 )
 from services.credit_service import InsufficientCreditsError, credit_service
 from services.llm.base import ProviderError
 from services.llm.cost_ledger import LLMCostContext
 from services.llm.gateway import complete_with_timeout
+from services.llm.model_catalog import model_max_output_tokens
+from services.llm.output_budget import resolve_output_budget
 from services.llm.routing import LLMRoute, LLMRoutingError, resolve_llm_route
 from services.llm.tier_policy import generation_tier_policy
 from services.observability import (
@@ -88,7 +92,9 @@ from services.observability import (
     record_storyboard_generation_failed,
     record_storyboard_generation_started,
     record_storyboard_section_regenerated,
+    record_storyboard_truncation_retry,
 )
+from services.pipeline.storyboard_quality import assess_payload_quality
 from services.pipeline.storyboard_source import (
     StoryboardSourcePackage,
     build_storyboard_source,
@@ -118,10 +124,17 @@ _RESERVE_LOCK_TTL_SECONDS = 30
 
 # Generated keynote payloads are large (six acts, slides, per-slide notes, demo
 # script, technical appendix, plus bounded citation excerpts on every source_map
-# entry and architecture layer). Sized generously so the structured JSON is not
-# truncated mid-object — a cut-off payload is the dominant *parse* failure mode.
-# The gateway still applies its hard wall-clock timeout on top.
-_OUTPUT_TOKEN_BUDGET = 16384
+# entry and architecture layer). The output-token budget is resolved per attempt
+# from ``resolve_output_budget("storyboard.generate", …)`` — clamped to each
+# routed model's ceiling, so the primary and escalation tiers get the right size
+# — and a truncated first attempt is retried once at a doubled budget before the
+# repair loop (P3.3). The gateway applies its hard wall-clock timeout on top.
+#
+# 32K tokens on a mid-tier reasoning model is comfortably slower than the gateway
+# default (360s), so storyboard opts into a longer explicit wall clock. This runs
+# as a detached background task — the HTTP request never waits on it — and the
+# 30-minute stuck-recovery sweep (below) is unaffected by this per-call bound.
+_STORYBOARD_COMPLETION_TIMEOUT_SECONDS = 540.0
 
 # A ``generating`` Storyboard older than this is considered stuck and is failed +
 # refunded by the recovery loop (T-254 req 7). Distinct from the 3-minute stage
@@ -644,8 +657,18 @@ def _resolve_storyboard_primary_route(source: StoryboardSourcePackage) -> LLMRou
     ``_run_storyboard_completion`` performs the one-shot escalation explicitly on
     a quality-gate failure (a richer trigger than the route's model-unavailability
     fallback), so the two never double-escalate.
+
+    Escape hatch (P3.5): when ``settings.storyboard_force_mid_tier`` is set, the
+    primary starts at ``mid`` escalating to ``strong`` regardless of the
+    cheap-primary policy — flip it if the escalation-rate metrics show the cheap
+    tier keeps failing the deterministic quality gate. This is storyboard-local
+    and leaves ``tier_policy`` the untouched product-wide source of truth for
+    every other feature.
     """
-    requested_tier, fallback_tier = generation_tier_policy(source.provider)
+    if settings.storyboard_force_mid_tier:
+        requested_tier, fallback_tier = "mid", "strong"
+    else:
+        requested_tier, fallback_tier = generation_tier_policy(source.provider)
     return resolve_llm_route(
         operation="storyboard.generate",
         preferred_provider=source.provider,
@@ -878,48 +901,92 @@ async def _complete_and_validate(
         workspace_id=source.workspace_id,
         product_surface="storyboard",
     )
+    # Per-attempt budget, clamped to THIS model's output ceiling so the cheap
+    # primary and the (larger-ceiling) escalation model each get the right size.
+    budget = resolve_output_budget(
+        "storyboard.generate", provider=_provider, model=_model
+    )
+
+    async def _complete(prompt: str, max_tokens: int) -> str:
+        return await complete_with_timeout(
+            _provider,
+            _model,
+            SYSTEM_PROMPT,
+            prompt,
+            max_tokens,
+            timeout=_STORYBOARD_COMPLETION_TIMEOUT_SECONDS,
+            operation="storyboard.generate",
+            stage_type="storyboard",
+            model_tier=model_tier,
+            cost_context=cost_context,
+            # SYSTEM_PROMPT is identical across the initial call and every repair
+            # round, so they share one provider cache entry (Phase 2 — issue #26).
+            cache_system=True,
+        )
 
     async def _repair(repair_prompt: str) -> str:
         try:
-            return await complete_with_timeout(
-                _provider,
-                _model,
-                SYSTEM_PROMPT,
-                repair_prompt,
-                _OUTPUT_TOKEN_BUDGET,
-                operation="storyboard.generate",
-                stage_type="storyboard",
-                model_tier=model_tier,
-                cost_context=cost_context,
-                # SYSTEM_PROMPT is identical across all repair rounds, so all
-                # three calls (initial + up to 2 repairs) share one cache entry
-                # on providers that support it (Phase 2 — issue #26).
-                cache_system=True,
-            )
+            return await _complete(repair_prompt, budget)
         except TimeoutError as exc:
             raise StoryboardPayloadError("parse", "llm repair timed out") from exc
         except ProviderError as exc:
             raise StoryboardPayloadError("parse", "llm repair provider error") from exc
 
     try:
-        raw = await complete_with_timeout(
-            _provider,
-            _model,
-            SYSTEM_PROMPT,
-            user_prompt,
-            _OUTPUT_TOKEN_BUDGET,
-            operation="storyboard.generate",
-            stage_type="storyboard",
-            model_tier=model_tier,
-            cost_context=cost_context,
-            cache_system=True,
-        )
+        raw = await _complete(user_prompt, budget)
     except TimeoutError as exc:
         raise StoryboardPayloadError("parse", "llm completion timed out") from exc
     except ProviderError as exc:
         raise StoryboardPayloadError("parse", "llm provider error") from exc
 
+    # Truncation-aware one-shot doubling BEFORE consuming any repair round.
+    # Repairing a cut-off body under the same cap is provably futile — the repair
+    # prompt re-sends the whole broken payload and asks for *more* under the same
+    # ceiling. Only fires when the model's output ceiling sits above the current
+    # budget (e.g. an escalation-tier model with a 64K ceiling); a cheap primary
+    # already at its ceiling has nothing larger to try, so we fall straight
+    # through to the repair ladder. The doubled budget also carries into the
+    # repair rounds (``_repair`` closes over ``budget``) so those are not re-capped
+    # at the size that already truncated.
+    if looks_truncated(raw):
+        doubled = _doubled_output_budget(_provider, _model, budget)
+        if doubled > budget:
+            record_storyboard_truncation_retry(_provider)
+            budget = doubled
+            try:
+                raw = await _complete(user_prompt, budget)
+            except TimeoutError as exc:
+                raise StoryboardPayloadError(
+                    "parse", "llm completion timed out"
+                ) from exc
+            except ProviderError as exc:
+                raise StoryboardPayloadError("parse", "llm provider error") from exc
+            # Content-free: provider/model/tier and the token budgets only.
+            logger.info(
+                "storyboard.truncation_retry",
+                provider=_provider,
+                model=_model,
+                model_tier=model_tier,
+                doubled_budget=budget,
+            )
+
     return await _parse_validate_and_ground(raw, source, repair=_repair)
+
+
+def _doubled_output_budget(provider: str, model: str, budget: int) -> int:
+    """``budget`` doubled, clamped to the model's output-token ceiling.
+
+    Returns ``budget`` unchanged when it already sits at the ceiling (nothing
+    larger to try — the caller then skips the retry). An unknown model (not in the
+    catalog) is doubled without a clamp: routing already accepted it, so budget
+    resolution must never brick a generation.
+    """
+
+    try:
+        ceiling = model_max_output_tokens(provider, model)
+    except ValueError:
+        return budget * 2
+    return min(budget * 2, ceiling)
 
 
 # Repair rounds after the initial completion. Two rounds (three total model
@@ -947,6 +1014,7 @@ async def _parse_validate_and_ground(
         try:
             payload = await parse_and_validate_payload(attempt_raw)
             _validate_payload_against_source(payload, source)
+            _assert_deck_quality(payload)
             return payload
         except StoryboardPayloadError as error:
             if round_index == _MAX_REPAIR_ROUNDS:
@@ -959,6 +1027,32 @@ async def _parse_validate_and_ground(
             attempt_raw = await repair(repair_prompt)
     # Unreachable: the final round either returns or raises above.
     raise AssertionError("storyboard repair loop exited without a result")
+
+
+def _assert_deck_quality(payload: StoryboardPayload) -> None:
+    """Deterministic deck-quality gate (P3.5) → repair, then tier escalation.
+
+    Runs after schema + grounding validation pass. The deterministic, content-free
+    structural findings from ``assess_payload_quality`` (thin/over-long deck,
+    monotone visuals, decorative interior acts, notes/headlines that only echo the
+    slide) are folded into a ``StoryboardPayloadError('schema', 'quality: …')``.
+    That feeds the same repair loop and one-shot mid-tier escalation as any other
+    quality failure: the cheap primary gets one cheap chance to fix pacing and
+    duplication, and a deck that stays thin escalates rather than shipping as-is.
+
+    The ``quality:`` summary is kept coarse and free of the substrings
+    (``provider`` / ``timeout``) that ``_payload_error_type`` keys transport
+    failures on, so it is always classified as an escalatable quality failure and
+    never carries slide/note text (findings are ids, counts, and fixed act
+    titles).
+    """
+
+    findings = assess_payload_quality(payload)
+    if findings:
+        summary = "quality: " + "; ".join(findings[:12])
+        if len(findings) > 12:
+            summary += f"; +{len(findings) - 12} more"
+        raise StoryboardPayloadError("schema", summary)
 
 
 def _validate_payload_against_source(

@@ -78,7 +78,16 @@ def _payload() -> dict:
                         "type": slide_types[idx],
                         "headline": f"{title} headline",
                         "visible_text": "Sparse source-backed line.",
-                        "visual": {"kind": slide_types[idx]},
+                        # Substance descriptor so product/walkthrough/trust slides
+                        # clear the P3.4 fresh-generation floor.
+                        "visual": {
+                            "kind": slide_types[idx],
+                            "points": [
+                                "Grounded one",
+                                "Grounded two",
+                                "Grounded three",
+                            ],
+                        },
                         "speaker_notes_ref": slide_id,
                         "sources": ["SPEC", "PLAN"],
                     }

@@ -79,14 +79,36 @@ _ARCH_LAYER_KINDS = (
 # ---------------------------------------------------------------------------
 
 
-def _slide(section_idx: int, slide_idx: int, headline: str) -> dict:
+# One slide type per act, so the two slides an act carries take a coherent type.
+_ACT_SLIDE_TYPES = (
+    "thesis",
+    "product",
+    "walkthrough",
+    "architecture",
+    "trust",
+    "closing",
+)
+
+
+def _slide(section_idx: int, slide_idx: int, headline: str, slide_type: str) -> dict:
     sid = f"s{section_idx}-{slide_idx}"
+    # Slide 0 of each act is a bullets visual with points; slide 1 is a metric
+    # visual. That gives the deck >= 2 distinct visual kinds and a substance
+    # descriptor on every slide, so both the P3.4 slide floor and the P3.5 deck
+    # quality gate (interior-act substance, monotone-visual check) pass.
+    if slide_idx == 0:
+        visual = {
+            "kind": "bullets",
+            "points": ["Concrete point", "Second point", "Third point"],
+        }
+    else:
+        visual = {"kind": "metric", "value": "4 stages", "label": "Pipeline"}
     return {
         "id": sid,
-        "type": "thesis",
+        "type": slide_type,
         "headline": headline,
         "visible_text": "Sparse supporting line.",
-        "visual": {"kind": "bullets"},
+        "visual": visual,
         "speaker_notes_ref": sid,
         "sources": ["SPEC", "PLAN"],
     }
@@ -95,37 +117,51 @@ def _slide(section_idx: int, slide_idx: int, headline: str) -> dict:
 def _note(slide_id: str) -> dict:
     return {
         "slide_id": slide_id,
-        "talk_track": "Explain the point clearly and confidently.",
+        # >= 120 chars and >= 2 backup points to clear the v1.4 note-depth floor,
+        # and distinct from the slide's visible_text so the P3.5 echo check passes.
+        "talk_track": (
+            "Open on the slide's single idea, then name the concrete product "
+            "capability drawn from the finalised sources, explain why it matters "
+            "to this audience, and land the takeaway before moving on to the next "
+            "beat of the story."
+        ),
         "transition": "Move to the next idea.",
         "timing_seconds": 45,
         "pause_cue": "Pause for emphasis.",
         "demo_cue": "",
-        "backup_points": ["Backup talking point."],
+        "backup_points": ["Backup talking point.", "A second backup point."],
     }
 
 
 def _payload_dict(
     *, title: str = "SpecForge Launch Keynote", first_headline: str | None = None
 ):
-    """Build a strict-schema-valid Storyboard payload (a plain dict)."""
+    """Build a strict-schema-valid, quality-gate-clean Storyboard payload.
+
+    Two slides per act (12 total, inside the 8-24 quality band) with varied
+    visual kinds and per-slide substance, so it validates under the strict schema
+    AND clears the deterministic deck quality gate (P3.5).
+    """
 
     sections = []
     notes: dict[str, dict] = {}
     for idx, section_title in enumerate(REQUIRED_SECTION_TITLES):
-        headline = (
-            first_headline
-            if (idx == 0 and first_headline is not None)
-            else f"Act {idx} headline summary"
-        )
-        slide = _slide(idx, 0, headline)
+        slides = []
+        for slide_idx in range(2):
+            if idx == 0 and slide_idx == 0 and first_headline is not None:
+                headline = first_headline
+            else:
+                headline = f"Act {idx} slide {slide_idx} distinct headline"
+            slide = _slide(idx, slide_idx, headline, _ACT_SLIDE_TYPES[idx])
+            slides.append(slide)
+            notes[slide["id"]] = _note(slide["id"])
         sections.append(
             {
                 "id": f"act-{idx}",
                 "title": section_title,
-                "slides": [slide],
+                "slides": slides,
             }
         )
-        notes[slide["id"]] = _note(slide["id"])
 
     spec_excerpt = "Finalised spec overview content for the keynote."
     plan_excerpt = "FastAPI + PostgreSQL + Redis; React SPA."

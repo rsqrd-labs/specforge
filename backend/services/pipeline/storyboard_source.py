@@ -48,8 +48,13 @@ from services.observability import (
 )
 from services.pipeline.problem_compressor import get_or_compress, problem_budget
 
-# Hard cap on every excerpt fed to the prompt. Keeps the prompt bounded and
-# prevents a single huge section from dominating the source map.
+# Default hard cap on an excerpt fed to the prompt. Keeps the prompt bounded and
+# prevents a single huge section from dominating the source map. Product-substance
+# sections (overview, requirements, journeys, architecture, components) raise this
+# per-spec via ``_SectionSpec.max_chars`` so the model sees enough real product
+# detail to write a specific keynote instead of a generic one (P3.1); the
+# security/ops sections stay at the default so grounding is not re-skewed toward
+# them.
 _MAX_EXCERPT_CHARS = 1200
 
 _STAGE_ORDER: tuple[StageType, ...] = ("spec", "plan", "harness", "tasks")
@@ -104,7 +109,7 @@ class SourceExcerpt:
     source_id: str  # e.g. "PLAN:architecture"
     stage: StageType  # "plan"
     heading: str  # the matched markdown heading text
-    excerpt: str  # scrubbed, <= 1200 chars
+    excerpt: str  # scrubbed, <= the spec's per-section max_chars cap
 
 
 @dataclass(frozen=True)
@@ -160,25 +165,73 @@ class _SectionSpec:
     include_any: tuple[str, ...]
     exclude_any: tuple[str, ...] = ()
     lead_fallback: bool = False
+    max_chars: int = _MAX_EXCERPT_CHARS
 
 
-# Citeable source sections. PLAN architecture / security / capacity / STRIDE /
-# SLO / FMEA evidence is prioritised because it backs the architecture reveal and
-# the Trust, Security, Reliability act. HARNESS coverage and TASKS must-ship
-# evidence inform demo cues, appendix, and Q&A backup — never a top-level
-# Validation or Execution Plan act.
+# Citeable source sections, ordered product-substance first (P3.1). The old
+# ordering front-loaded PLAN security/capacity/STRIDE/SLO/FMEA evidence and
+# starved the model of product detail — five of nine sections were security/ops
+# and there was no requirements, user-journey, or component-list excerpt at all,
+# so the model wrote generic decks. Product substance (overview, requirements,
+# journeys, architecture, components) now leads and carries larger per-section
+# caps; the security/ops evidence that backs the Technical Architecture and
+# Trust, Security, Reliability acts stays at the default cap. HARNESS coverage
+# and TASKS must-ship evidence inform demo cues, appendix, and Q&A backup — never
+# a top-level Validation or Execution Plan act.
 _SECTION_SPECS: tuple[_SectionSpec, ...] = (
     _SectionSpec(
         "SPEC:overview",
         "spec",
         ("overview", "introduction", "summary", "vision", "problem"),
         lead_fallback=True,
+        max_chars=2800,
+    ),
+    _SectionSpec(
+        "SPEC:requirements",
+        "spec",
+        (
+            "functional requirements",
+            "requirements",
+            "features",
+            "capabilities",
+        ),
+        max_chars=2800,
+    ),
+    _SectionSpec(
+        "SPEC:journeys",
+        "spec",
+        (
+            "user journey",
+            "user journeys",
+            "user stories",
+            "acceptance criteria",
+            "personas",
+            "user experience",
+            "ux",
+        ),
+        max_chars=2000,
     ),
     _SectionSpec(
         "PLAN:architecture",
         "plan",
         ("architecture", "system design", "components"),
         exclude_any=("security", "data architecture"),
+        max_chars=2400,
+    ),
+    _SectionSpec(
+        "PLAN:components",
+        "plan",
+        (
+            "components",
+            "component breakdown",
+            "modules",
+            "services",
+            "tech stack",
+            "technology choices",
+            "technology stack",
+        ),
+        exclude_any=("security",),
+        max_chars=2400,
     ),
     _SectionSpec(
         "PLAN:security-architecture",
@@ -275,17 +328,17 @@ def _scrub(text: str) -> str:
     return scrubbed
 
 
-def _bound(text: str) -> str:
-    """Trim to at most ``_MAX_EXCERPT_CHARS``, on a word boundary when truncating."""
+def _bound(text: str, max_chars: int = _MAX_EXCERPT_CHARS) -> str:
+    """Trim to at most ``max_chars``, on a word boundary when truncating."""
 
     text = text.strip()
-    if len(text) <= _MAX_EXCERPT_CHARS:
+    if len(text) <= max_chars:
         return text
-    clipped = text[:_MAX_EXCERPT_CHARS]
+    clipped = text[:max_chars]
     # Avoid cutting mid-word: drop the trailing partial token when there is a
     # safe whitespace boundary reasonably close to the cap.
     pivot = clipped.rfind(" ")
-    if pivot >= _MAX_EXCERPT_CHARS - 120:
+    if pivot >= max_chars - 120:
         clipped = clipped[:pivot]
     return clipped.rstrip()
 
@@ -370,7 +423,7 @@ def _extract_excerpts(
             source_id=spec.source_id,
             stage=spec.stage,
             heading=heading,
-            excerpt=_bound(body),
+            excerpt=_bound(body, spec.max_chars),
         )
     return excerpts, missing
 

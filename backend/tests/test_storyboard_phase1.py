@@ -37,6 +37,7 @@ from services.pipeline.storyboard_source import (
 )
 
 _ESCALATION_METRIC = "specforge_storyboard_escalations_total"
+_TRUNCATION_METRIC = "specforge_storyboard_truncation_retries_total"
 
 
 # ---------------------------------------------------------------------------
@@ -125,6 +126,10 @@ def _read_escalation_counter(action: str, provider: str, outcome: str) -> float:
         )
         or 0.0
     )
+
+
+def _read_truncation_counter(provider: str) -> float:
+    return REGISTRY.get_sample_value(_TRUNCATION_METRIC, {"provider": provider}) or 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -377,3 +382,94 @@ async def test_storyboard_postprocess_failure_triggers_escalation(monkeypatch):
     )
     assert after_attempted - before_attempted == 1.0
     assert after_succeeded - before_succeeded == 1.0
+
+
+# ---------------------------------------------------------------------------
+# P3.3 — per-attempt output budget + one-shot truncation-doubling retry
+# ---------------------------------------------------------------------------
+
+
+def test_doubled_output_budget_clamps_to_model_ceiling() -> None:
+    from services.pipeline.storyboard_service import _doubled_output_budget
+
+    # Haiku's catalog output ceiling is 64000; a 32768 budget doubles to 65536
+    # and clamps to 64000.
+    assert (
+        _doubled_output_budget("anthropic", "claude-haiku-4-5-20251001", 32768) == 64000
+    )
+    # Already at the ceiling -> unchanged, so the caller skips the retry.
+    assert (
+        _doubled_output_budget("anthropic", "claude-haiku-4-5-20251001", 64000) == 64000
+    )
+    # Unknown model -> doubled without a clamp (routing already accepted it).
+    assert _doubled_output_budget("anthropic", "no-such-model", 1000) == 2000
+
+
+@pytest.mark.asyncio
+async def test_complete_and_validate_doubles_budget_on_truncation(monkeypatch):
+    """A truncated first completion triggers exactly one doubled-budget retry.
+
+    The retry runs BEFORE the repair loop and its (larger) output is what gets
+    validated. Isolated from validation by stubbing ``_parse_validate_and_ground``
+    so only the completion + truncation path is under test.
+    """
+    source = _make_source("anthropic")
+    calls: list[int] = []
+    truncated = '{"title": "X", "theme": {"palette":'  # cut off, no closing brace
+
+    async def _fake_complete(provider, model, system, user, max_tokens, **kwargs):
+        calls.append(max_tokens)
+        return truncated if len(calls) == 1 else '{"ok": true}'
+
+    sentinel = object()
+    captured: dict[str, str] = {}
+
+    async def _fake_parse(raw, src, *, repair):
+        captured["raw"] = raw
+        return sentinel
+
+    monkeypatch.setattr(storyboard_service, "complete_with_timeout", _fake_complete)
+    monkeypatch.setattr(storyboard_service, "_parse_validate_and_ground", _fake_parse)
+
+    before = _read_truncation_counter("anthropic")
+    result = await storyboard_service._complete_and_validate(
+        source,
+        provider="anthropic",
+        model="claude-haiku-4-5-20251001",
+        model_tier="small",
+    )
+
+    assert result is sentinel
+    assert len(calls) == 2  # initial + exactly one doubled retry
+    assert calls[0] == 32768  # storyboard.generate budget, clamped to 64000 ceiling
+    assert calls[1] == 64000  # doubled (65536) then clamped to the ceiling
+    assert captured["raw"] == '{"ok": true}'  # the retry's output is validated
+    assert _read_truncation_counter("anthropic") - before == 1.0
+
+
+@pytest.mark.asyncio
+async def test_complete_and_validate_no_retry_when_not_truncated(monkeypatch):
+    """A complete first response (ends on a closing brace) skips the retry."""
+    source = _make_source("anthropic")
+    calls: list[int] = []
+
+    async def _fake_complete(provider, model, system, user, max_tokens, **kwargs):
+        calls.append(max_tokens)
+        return '{"complete": true}'
+
+    async def _fake_parse(raw, src, *, repair):
+        return object()
+
+    monkeypatch.setattr(storyboard_service, "complete_with_timeout", _fake_complete)
+    monkeypatch.setattr(storyboard_service, "_parse_validate_and_ground", _fake_parse)
+
+    before = _read_truncation_counter("anthropic")
+    await storyboard_service._complete_and_validate(
+        source,
+        provider="anthropic",
+        model="claude-haiku-4-5-20251001",
+        model_tier="small",
+    )
+
+    assert len(calls) == 1  # no retry
+    assert _read_truncation_counter("anthropic") == before

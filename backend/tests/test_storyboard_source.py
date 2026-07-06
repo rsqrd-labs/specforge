@@ -41,6 +41,10 @@ teams move from a problem statement to a shippable plan.
 
 ## Requirements
 - R1 must do X
+
+## User Journeys
+A user signs in, describes an idea, and reviews the generated spec, plan,
+harness, and tasks before exporting to GitHub.
 """
 
 _PLAN_MD = """# Engineering Plan
@@ -50,6 +54,10 @@ A FastAPI backend talks to PostgreSQL and Redis. The frontend is a React SPA.
 
 ### Data flow
 Requests stream over SSE.
+
+## Components
+The backend is split into routers, a pipeline service layer, provider adapters,
+and a credit ledger. A React SPA renders the editor.
 
 ## Security Architecture
 CSRF tokens guard mutations; keys are Fernet-encrypted at rest.
@@ -187,6 +195,39 @@ def test_bound_caps_excerpt_at_1200_chars() -> None:
     assert len(bounded) <= 1200
 
 
+def test_bound_honors_custom_cap() -> None:
+    long_text = "word " * 800  # 4000 chars
+    bounded = _bound(long_text, 2800)
+    assert len(bounded) <= 2800
+    assert len(bounded) > 1200  # a larger cap keeps more of the section
+
+
+def test_product_substance_sections_carry_larger_caps() -> None:
+    # A long product Overview is kept up to the 2800-char product-substance cap,
+    # not the 1200-char default the security/ops sections use (P3.1 rebalancing).
+    big_overview = "SpecForge overview sentence. " * 200  # ~5800 chars
+    artifacts = dict(_ARTIFACTS)
+    artifacts["spec"] = (
+        f"# Spec\n\n## Overview\n{big_overview}\n\n## Requirements\n- R1 must do X\n"
+    )
+    excerpts, _ = _extract_excerpts(artifacts)  # type: ignore[arg-type]
+    overview_len = len(excerpts["SPEC:overview"].excerpt)
+    assert 1200 < overview_len <= 2800
+
+
+def test_security_sections_stay_at_default_cap() -> None:
+    # The security/ops sections keep the 1200-char default so grounding is not
+    # re-skewed toward them (P3.1).
+    big_security = "Security control detail sentence. " * 200
+    artifacts = dict(_ARTIFACTS)
+    artifacts["plan"] = (
+        "# Plan\n\n## Architecture\nFastAPI backend.\n\n"
+        f"## Security Architecture\n{big_security}\n"
+    )
+    excerpts, _ = _extract_excerpts(artifacts)  # type: ignore[arg-type]
+    assert len(excerpts["PLAN:security-architecture"].excerpt) <= 1200
+
+
 def test_scrub_removes_email_and_tokens() -> None:
     raw = (
         "Reach me at alice@example.com with Authorization: Bearer abcDEF123456 "
@@ -205,7 +246,10 @@ def test_extract_excerpts_finds_all_priority_sections() -> None:
     assert missing == []
     for source_id in (
         "SPEC:overview",
+        "SPEC:requirements",
+        "SPEC:journeys",
         "PLAN:architecture",
+        "PLAN:components",
         "PLAN:security-architecture",
         "PLAN:capacity-model",
         "PLAN:stride",
@@ -215,7 +259,6 @@ def test_extract_excerpts_finds_all_priority_sections() -> None:
         "TASKS:must",
     ):
         assert source_id in excerpts, f"missing {source_id}"
-        assert len(excerpts[source_id].excerpt) <= 1200
 
 
 def test_architecture_excerpt_is_not_the_security_section() -> None:

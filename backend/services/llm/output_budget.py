@@ -59,6 +59,15 @@ OUTPUT_TOKEN_BUDGETS: dict[str, int] = {
     "regenerate.full": 49152,
     "summary.create": 2048,
     "eval.score": 1024,
+    # A full keynote payload is six acts of slides, one speaker note per slide,
+    # a demo script, a technical appendix, plus bounded citation excerpts on every
+    # source_map entry and architecture layer — routinely > 16K output tokens once
+    # notes and diagrams are dense. The old hardcoded 16384 systematically
+    # truncated the richest decks (the parse-failure signature), so this is sized
+    # to fit a full deck with reasoning headroom; the truncation-doubling retry
+    # (storyboard_service) still backstops a rare overrun on models whose output
+    # ceiling exceeds this (escalation-tier Sonnet/GPT/Gemini).  P3.3.
+    "storyboard.generate": 32768,
 }
 
 # Per-(operation, provider) budget overrides — the Phase-4 right-sizing surface.
@@ -84,6 +93,7 @@ _OUTPUT_BUDGET_FLOORS: dict[str, int] = {
     "harness.generate": 8192,
     "tasks.generate": 8192,
     "regenerate.full": 8192,
+    "storyboard.generate": 16384,
     "refine.section": 2048,
     "refine.focused": 512,
     "summary.create": 1024,
