@@ -1242,6 +1242,14 @@ _LIVE_STREAM_SENTINEL_HOLDBACK_CHARS = 160
 class ArtifactChunkSpec:
     key: str
     instruction: str
+    # When set, this chunk *is* a single named section and must open with this
+    # exact H2 heading. Chunked generation asks the model for "only the ## Files
+    # section" then describes the per-file `### File:` layout, so the model often
+    # jumps straight to `### File:` blocks and never prints the literal heading —
+    # the assembled artifact then lacks `## Files` and `validate_sections` blocks
+    # it terminally. `_ensure_chunk_heading` prepends the heading iff absent,
+    # making the section's presence deterministic regardless of model behaviour.
+    required_heading: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1402,12 +1410,14 @@ def _demo_day_chunk_specs_for_stage(stage_type: str) -> list[ArtifactChunkSpec]:
             ArtifactChunkSpec(
                 "demo-harness-files",
                 (
-                    "Generate only the HARNESS ## Files section. Include every file "
+                    "Generate only the HARNESS ## Files section. Begin with the "
+                    "heading `## Files` on its own line, then include every file "
                     "from the File Tree as a `### File: path` heading followed by "
                     "one complete fenced code block — including the end-to-end "
                     "smoke test file named in the End-to-End Smoke Test section. No "
                     "placeholders or omitted files."
                 ),
+                required_heading="## Files",
             ),
         ]
     return [
@@ -1417,6 +1427,22 @@ def _demo_day_chunk_specs_for_stage(stage_type: str) -> list[ArtifactChunkSpec]:
             "required section heading.",
         )
     ]
+
+
+def _ensure_chunk_heading(chunk: ArtifactChunkSpec, text: str) -> str:
+    """Guarantee a section-chunk opens with its required H2 heading.
+
+    The presence check mirrors ``validate_sections`` exactly (a plain substring
+    test): prepend only when the literal heading is absent, so a chunk that
+    already emitted it — or emitted a superset like ``## Files and Contents`` —
+    is left untouched and no duplicate heading is introduced. ``## Files`` is not
+    a substring of ``### File:`` or ``## File Tree``, so a chunk of bare
+    ``### File:`` blocks correctly triggers the prepend.
+    """
+    heading = chunk.required_heading
+    if heading and heading not in text:
+        return f"{heading}\n\n{text.lstrip()}"
+    return text
 
 
 def _chunk_specs_for_stage(
@@ -1506,10 +1532,12 @@ def _chunk_specs_for_stage(
             ArtifactChunkSpec(
                 "harness-files",
                 (
-                    "Generate only the HARNESS ## Files section. Include every file "
+                    "Generate only the HARNESS ## Files section. Begin with the "
+                    "heading `## Files` on its own line, then include every file "
                     "from the File Tree as a `### File: path` heading followed by one "
                     "complete fenced code block. No placeholders or omitted files."
                 ),
+                required_heading="## Files",
             ),
         ]
     if stage_type == "tasks":
@@ -2013,7 +2041,7 @@ class StageManager:
                     provider=route.provider,
                     outcome="succeeded",
                 ).inc()
-            chunks.append(chunk_text)
+            chunks.append(_ensure_chunk_heading(chunk, chunk_text))
 
         artifact = "\n\n".join(chunk for chunk in chunks if chunk.strip()).strip()
         # Depth/quality findings that survive as advisory (no refund, no repair).
@@ -2276,7 +2304,7 @@ class StageManager:
             )
             # The chunk is done (incl. any repair) — tick the part counter once.
             _tick_part()
-            return text
+            return _ensure_chunk_heading(chunk, text)
 
         chunks: list[str] = []
         try:

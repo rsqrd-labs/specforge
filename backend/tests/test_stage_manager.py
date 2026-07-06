@@ -15,6 +15,7 @@ from services.llm.completion import LLMCompletionInfo
 from services.pipeline.artifact_validator import (
     chunk_completion_sentinel,
     final_completion_sentinel,
+    validate_sections,
 )
 from services.pipeline.stage_manager import (
     _BACKGROUND_PIPELINE_TASKS,
@@ -24,6 +25,7 @@ from services.pipeline.stage_manager import (
     _chunk_specs_for_stage,
     _chunk_user_prompt,
     _chunk_waves_for_stage,
+    _ensure_chunk_heading,
     _stage_has_parallel_waves,
     _task_parallel_waves,
 )
@@ -318,6 +320,60 @@ def test_chunk_user_prompt_wraps_prior_chunks_as_untrusted_context() -> None:
     assert "BEGIN_UNTRUSTED_CONTENT:harness_prior_chunks" in prompt
     assert "harness/tests/test_auth.py" in prompt
     assert "Continue from them without duplicating" in prompt
+
+
+def test_harness_files_chunk_declares_required_heading() -> None:
+    # The files chunk *is* the `## Files` section, so it carries the required
+    # heading that the deterministic backstop guarantees.
+    files_chunk = _chunk_specs_for_stage("harness")[1]
+    assert files_chunk.key == "harness-files"
+    assert files_chunk.required_heading == "## Files"
+    # Other stages' final chunks enumerate several inline H2s — they do NOT get a
+    # required_heading (the backstop must not touch them).
+    assert all(
+        chunk.required_heading is None for chunk in _chunk_specs_for_stage("spec")
+    )
+
+
+def test_ensure_chunk_heading_prepends_only_when_absent() -> None:
+    files_chunk = _chunk_specs_for_stage("harness")[1]
+    # A headingless files chunk (bare `### File:` blocks) gets the heading.
+    bare = "### File: harness/tests/test_auth.py\n```python\nassert False\n```"
+    fixed = _ensure_chunk_heading(files_chunk, bare)
+    assert fixed.startswith("## Files\n\n")
+    assert "### File: harness/tests/test_auth.py" in fixed
+    # Already-present heading (or a superset) is a no-op — no duplicate heading.
+    already = f"## Files\n\n{bare}"
+    assert _ensure_chunk_heading(files_chunk, already) == already
+    superset = f"## Files and Contents\n\n{bare}"
+    assert _ensure_chunk_heading(files_chunk, superset) == superset
+    # A chunk with no required_heading is passed through untouched.
+    contract_chunk = _chunk_specs_for_stage("harness")[0]
+    assert _ensure_chunk_heading(contract_chunk, bare) == bare
+
+
+def test_headingless_harness_files_chunk_passes_section_gate_after_backstop() -> None:
+    # Reproduces the reported bug: the model emits `### File:` blocks for the
+    # files chunk without the literal `## Files` heading. Before the backstop the
+    # assembled harness failed validate_sections with "missing 1 section: ##
+    # Files"; the deterministic prepend makes it pass.
+    contract_chunk, files_chunk = _chunk_specs_for_stage("harness")
+    contract_text = (
+        "## Harness Overview\nstrategy\n\n"
+        "## Requirement-to-Test Matrix\n| id | test |\n|---|---|\n"
+        "## Coverage Plan\nunit + integration\n\n"
+        "## File Tree\n```\nharness/tests/test_auth.py\n```"
+    )
+    headingless_files = (
+        "### File: harness/tests/test_auth.py\n```python\nassert False\n```"
+    )
+    chunks = [
+        _ensure_chunk_heading(contract_chunk, contract_text),
+        _ensure_chunk_heading(files_chunk, headingless_files),
+    ]
+    assembled = "\n\n".join(chunks).strip()
+    # Would raise MissingSectionError(["## Files"]) without the backstop.
+    validate_sections("harness", assembled)
 
 
 def _streamed_artifact(tokens: list[str]) -> str:
