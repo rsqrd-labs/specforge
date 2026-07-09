@@ -1,4 +1,7 @@
+import { useEffect } from "react"
+import { Navigate } from "react-router-dom"
 import { BrandLockup } from "../components/shared/BrandLogo"
+import { useUserStore } from "../store/userStore"
 
 interface LandingProps {
   assignLocation?: (url: string) => void
@@ -7,6 +10,36 @@ interface LandingProps {
 export default function Landing({
   assignLocation = (url) => window.location.assign(url),
 }: LandingProps) {
+  const { user } = useUserStore()
+
+  // Sign-in leaves the SPA via a full-page redirect (window.location.assign
+  // below), so returning to "/" via browser Back is a cross-document
+  // navigation: either a fresh document (in-memory store starts empty) or a
+  // bfcache restore (JS is frozen, this effect won't re-run on its own —
+  // pageshow with `persisted` is the signal that fires when it's restored).
+  // Both cases need a real session probe, not just the in-memory user check
+  // above, to catch an already-authenticated visitor and bounce them off
+  // this screen.
+  useEffect(() => {
+    const { user, isLoading, fetchMe } = useUserStore.getState()
+    if (!user && !isLoading) {
+      fetchMe()
+    }
+
+    function handlePageShow(event: PageTransitionEvent) {
+      if (event.persisted) {
+        useUserStore.getState().fetchMe()
+      }
+    }
+
+    window.addEventListener("pageshow", handlePageShow)
+    return () => window.removeEventListener("pageshow", handlePageShow)
+  }, [])
+
+  if (user) {
+    return <Navigate to="/dashboard" replace />
+  }
+
   function handleGoogleSignIn() {
     assignLocation(`${import.meta.env.VITE_API_URL}/auth/google`)
   }
