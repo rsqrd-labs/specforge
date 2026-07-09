@@ -336,7 +336,7 @@ describe("phase13 index.css design-system classes", () => {
   })
 
   it("workspace-github-btn uses tertiary tints not saffron primary", async () => {
-    // Tests: T-158: the GitHub button must use --color-tertiary tints (blue-grey)
+    // Tests: T-158: the GitHub button must use --brand-tertiary tints (blue-grey)
     // to visually distinguish it from the saffron ZIP button while remaining
     // within the Modern Indica design language.
     const source = await readFile(
@@ -351,7 +351,7 @@ describe("phase13 index.css design-system classes", () => {
       btnSection.includes("tertiary") || btnSection.includes("565e74") || btnSection.includes("rgba(86")
     expect(
       usesTertiary,
-      ".workspace-github-btn must use tertiary colour tints (not --color-primary saffron) " +
+      ".workspace-github-btn must use tertiary colour tints (not --brand-primary saffron) " +
         "to distinguish it visually from the ZIP export button.",
     ).toBe(true)
   })

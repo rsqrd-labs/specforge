@@ -1842,7 +1842,7 @@ export default function Workspace() {
   if (!currentWorkspace || !activeStage) {
     return (
       <div className="workspace-center">
-        <p className="text-sm text-on-surface-variant">Workspace unavailable.</p>
+        <p className="text-sm text-ink-text-muted">Workspace unavailable.</p>
       </div>
     )
   }

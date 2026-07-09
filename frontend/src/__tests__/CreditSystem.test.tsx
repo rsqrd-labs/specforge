@@ -47,19 +47,19 @@ describe("CreditBanner", () => {
     )
   }
 
-  it("applies error-container class when balance is at low threshold (≤5)", () => {
+  it("applies error-soft class when balance is at low threshold (≤5)", () => {
     const { container } = renderCreditBanner(5)
-    expect(container.firstChild).toHaveClass("bg-error-container")
+    expect(container.firstChild).toHaveClass("bg-status-error-soft")
   })
 
-  it("applies error-container class when balance is 0", () => {
+  it("applies error-soft class when balance is 0", () => {
     const { container } = renderCreditBanner(0)
-    expect(container.firstChild).toHaveClass("bg-error-container")
+    expect(container.firstChild).toHaveClass("bg-status-error-soft")
   })
 
-  it("does not apply error-container class when balance is above threshold", () => {
+  it("does not apply error-soft class when balance is above threshold", () => {
     const { container } = renderCreditBanner(6)
-    expect(container.firstChild).not.toHaveClass("bg-error-container")
+    expect(container.firstChild).not.toHaveClass("bg-status-error-soft")
   })
 })
 

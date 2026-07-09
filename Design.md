@@ -4,99 +4,73 @@ name: Modern Indica
 
 colors:
 
-surface: '#f9f9f9'
+ink-canvas: '#f9f9f9'
 
-surface-dim: '#dadada'
+ink-canvas-dim: '#dadada'
 
-surface-bright: '#f9f9f9'
+ink-canvas-bright: '#f9f9f9'
 
-surface-container-lowest: '#ffffff'
+ink-panel-flat: '#ffffff'
 
-surface-container-low: '#f3f3f4'
+ink-panel-soft: '#f3f3f4'
 
-surface-container: '#eeeeee'
+ink-panel: '#eeeeee'
 
-surface-container-high: '#e8e8e8'
+ink-panel-raised: '#e8e8e8'
 
-surface-container-highest: '#e2e2e2'
+ink-panel-lifted: '#e2e2e2'
 
-on-surface: '#1a1c1c'
+ink-text: '#1a1c1c'
 
-on-surface-variant: '#554336'
+ink-text-muted: '#554336'
 
-inverse-surface: '#2f3131'
+ink-canvas-inverse: '#2f3131'
 
-inverse-on-surface: '#f0f1f1'
+ink-text-inverse: '#f0f1f1'
 
-outline: '#887364'
+ink-border: '#887364'
 
-outline-variant: '#dbc2b0'
+ink-border-soft: '#dbc2b0'
 
-surface-tint: '#8f4e00'
+ink-tint: '#8f4e00'
 
-primary: '#8f4e00'
+brand-primary: '#8f4e00'
 
-on-primary: '#ffffff'
+brand-primary-text: '#ffffff'
 
-primary-container: '#ff9933'
+brand-primary-soft: '#ff9933'
 
-on-primary-container: '#693800'
+brand-primary-soft-text: '#693800'
 
-inverse-primary: '#ffb77a'
+brand-primary-inverse: '#ffb77a'
 
-secondary: '#a1385f'
+brand-secondary: '#a1385f'
 
-on-secondary: '#ffffff'
+brand-secondary-text: '#ffffff'
 
-secondary-container: '#fd80a9'
+brand-secondary-soft: '#fd80a9'
 
-on-secondary-container: '#76143e'
+brand-secondary-soft-text: '#76143e'
 
-tertiary: '#565e74'
+brand-tertiary: '#565e74'
 
-on-tertiary: '#ffffff'
+brand-tertiary-text: '#ffffff'
 
-tertiary-container: '#aab1ca'
+brand-tertiary-soft: '#aab1ca'
 
-on-tertiary-container: '#3c4459'
+brand-tertiary-soft-text: '#3c4459'
 
-error: '#ba1a1a'
+status-error: '#ba1a1a'
 
-on-error: '#ffffff'
+status-error-text: '#ffffff'
 
-error-container: '#ffdad6'
+status-error-soft: '#ffdad6'
 
-on-error-container: '#93000a'
+status-error-soft-text: '#93000a'
 
-primary-fixed: '#ffdcc2'
+ink-page: '#f9f9f9'
 
-primary-fixed-dim: '#ffb77a'
-
-on-primary-fixed: '#2e1500'
-
-on-primary-fixed-variant: '#6d3a00'
-
-secondary-fixed: '#ffd9e1'
-
-secondary-fixed-dim: '#ffb1c6'
-
-on-secondary-fixed: '#3f001c'
-
-on-secondary-fixed-variant: '#831f48'
-
-tertiary-fixed: '#dae2fd'
-
-tertiary-fixed-dim: '#bec6e0'
-
-on-tertiary-fixed: '#131b2e'
-
-on-tertiary-fixed-variant: '#3f465c'
-
-background: '#f9f9f9'
-
-on-background: '#1a1c1c'
-
-surface-variant: '#e2e2e2'
+ink-page-text: '#1a1c1c'
 
 typography:
 

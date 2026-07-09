@@ -83,28 +83,35 @@ export function CreditMeter({
     )
   }
 
+  // The inverse variant is only ever composited over the dashboard's credit
+  // card, which already leads with the balance as a giant number — restating
+  // "N credits remaining" here duplicated that number a third time (after the
+  // card's headline value and its low-balance qualifier). Only the
+  // expiry-warning chip carries information the card doesn't already show.
+  if (isInverse) {
+    if (!expiryWarning) return null
+    return (
+      <span className="credit-meter">
+        <button
+          type="button"
+          className={`credit-expiry-chip ${expiryWarning.tone} inverse`}
+          onClick={() => navigate("/billing")}
+        >
+          {expiryWarning.credits} credits expire {expiryWarning.label} · Renew
+        </button>
+      </span>
+    )
+  }
+
   return (
     <span className="credit-meter">
-      <span
-        className={
-          isInverse ? "credit-meter-balance inverse" : "text-sm text-on-surface-variant"
-        }
-      >
-        <span
-          className={
-            isInverse
-              ? "credit-meter-balance-value inverse"
-              : "font-semibold text-on-surface"
-          }
-        >
-          {balance}
-        </span>{" "}
-        credits remaining
+      <span className="text-sm text-ink-text-muted">
+        <span className="font-semibold text-ink-text">{balance}</span> credits remaining
       </span>
       {expiryWarning && (
         <button
           type="button"
-          className={`credit-expiry-chip ${expiryWarning.tone}${isInverse ? " inverse" : ""}`}
+          className={`credit-expiry-chip ${expiryWarning.tone}`}
           onClick={() => navigate("/billing")}
         >
           {expiryWarning.credits} credits expire {expiryWarning.label} · Renew

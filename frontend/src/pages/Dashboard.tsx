@@ -5,8 +5,10 @@ import { AiDisclaimer } from "../components/shared/AiDisclaimer"
 import { ActionAlertPanel } from "../components/shared/ActionAlert"
 import { BrandLoader } from "../components/shared/BrandLoader"
 import { BrandLockup } from "../components/shared/BrandLogo"
+import { BoltIcon, CheckCircleIcon, FolderIcon } from "../components/shared/DashboardIcons"
 import { GitHubStatusPill } from "../components/shared/GitHubStatusPill"
 import { CreditMeter } from "../components/shared/CreditMeter"
+import { PipelineStageTrack, type PipelineTrackStage } from "../components/shared/PipelineStageTrack"
 import { CreateWorkspaceModal } from "../components/dashboard/CreateWorkspaceModal"
 import { DeleteWorkspaceModal } from "../components/dashboard/DeleteWorkspaceModal"
 import { RecentlyDeletedSection } from "../components/dashboard/RecentlyDeletedSection"
@@ -331,6 +333,22 @@ export default function Dashboard() {
   )[0]
   const latestStage = latestWorkspace ? nextStageForWorkspace(latestWorkspace) : null
   const latestProgress = latestWorkspace ? progressForWorkspace(latestWorkspace) : 0
+  const latestTrackStages: PipelineTrackStage[] = latestWorkspace
+    ? PIPELINE_STAGE_ORDER.map((stageId, i) => {
+        const stage = latestWorkspace.stages?.find((s) => s.type === stageId)
+        return {
+          id: stageId,
+          number: String(i + 1).padStart(2, "0"),
+          label: STAGE_LABELS[stageId],
+          state:
+            stage?.status === "finalised"
+              ? "done"
+              : latestStage?.type === stageId
+                ? "current"
+                : "upcoming",
+        }
+      })
+    : []
   const fillPct = balance !== null ? Math.min((balance / CREDIT_FULL) * 100, 100) : 0
   const activePipelineDetail = activePipelineInfo
     ? PIPELINE_STAGE_DETAILS[activePipelineInfo]
@@ -488,25 +506,12 @@ export default function Dashboard() {
             <p className="continue-panel-copy">
               {statusTextForStage(latestStage)}. Last touched {formatUpdatedDate(latestWorkspace.updated_at)}.
             </p>
-            <div className="continue-progress" aria-label={`${latestProgress}% complete`}>
-              <div className="continue-progress-track">
-                <div
-                  className="continue-progress-fill"
-                  style={{ width: `${latestProgress}%` }}
-                />
-              </div>
-              <span>{latestProgress}% complete</span>
+            <div aria-label={`${latestProgress}% complete`}>
+              <PipelineStageTrack stages={latestTrackStages} size="large" />
             </div>
           </div>
 
           <div className="continue-panel-meta">
-            <div className="continue-stage-orbit" aria-hidden="true">
-              <span>{latestStage ? STAGE_LABELS[latestStage.type][0] : "W"}</span>
-            </div>
-            <div className="continue-stage-label">
-              <span>Current focus</span>
-              <strong>{latestStage ? STAGE_LABELS[latestStage.type] : "Workspace"}</strong>
-            </div>
             <button
               type="button"
               className="continue-button"
@@ -539,7 +544,9 @@ export default function Dashboard() {
       {/* Stats */}
       <div className="stats-strip">
         <div className="stat-chip">
-          <span className="stat-chip-icon">🗂</span>
+          <span className="stat-chip-icon">
+            <FolderIcon />
+          </span>
           <div>
             <div className="stat-chip-value">{workspaces.length}</div>
             <div className="stat-chip-label">
@@ -548,76 +555,23 @@ export default function Dashboard() {
           </div>
         </div>
         <div className="stat-chip">
-          <span className="stat-chip-icon">✅</span>
+          <span className="stat-chip-icon">
+            <CheckCircleIcon />
+          </span>
           <div>
             <div className="stat-chip-value">{totalDone}</div>
             <div className="stat-chip-label">Stages Complete</div>
           </div>
         </div>
         <div className="stat-chip">
-          <span className="stat-chip-icon">⚡</span>
+          <span className="stat-chip-icon">
+            <BoltIcon />
+          </span>
           <div>
             <div className="stat-chip-value">{readyToExport}</div>
             <div className="stat-chip-label">Ready to Export</div>
           </div>
         </div>
-      </div>
-
-      {/* Pipeline overview */}
-      <div className="pipeline-strip">
-        <span className="pipeline-strip-label">Your launch path</span>
-        <div className="pipeline-stages">
-          {PIPELINE_STAGE_ORDER.map((stageId, index) => {
-            const stage = PIPELINE_STAGE_DETAILS[stageId]
-            const isActive = activePipelineInfo === stageId
-
-            return (
-              <Fragment key={stageId}>
-                {index > 0 && <div className="pipeline-arrow">→</div>}
-                <div className="pipeline-stage-wrap">
-                  <button
-                    type="button"
-                    className={`pipeline-stage pipeline-stage-button${isActive ? " active" : ""}`}
-                    onClick={() =>
-                      setActivePipelineInfo((active) =>
-                        active === stageId ? null : stageId,
-                      )
-                    }
-                    aria-expanded={isActive}
-                    aria-controls="pipeline-stage-info"
-                  >
-                    <div className="pipeline-stage-num">{stage.number}</div>
-                    <div className="pipeline-stage-name">{stage.name}</div>
-                    <div className="pipeline-stage-desc">{stage.description}</div>
-                  </button>
-                </div>
-              </Fragment>
-            )
-          })}
-        </div>
-        {activePipelineDetail && (
-          <div
-            id="pipeline-stage-info"
-            role="status"
-            className="spec-info-panel"
-          >
-            <div className="spec-info-beam" aria-hidden="true" />
-            <div className="spec-info-icon" aria-hidden="true">
-              {activePipelineDetail.number}
-            </div>
-            <div>
-              <p className="spec-info-kicker">{activePipelineDetail.kicker}</p>
-              <p className="spec-info-copy">
-                {activePipelineDetail.copy}
-              </p>
-              <div className="spec-info-points">
-                {activePipelineDetail.points.map((point) => (
-                  <span key={point}>{point}</span>
-                ))}
-              </div>
-            </div>
-          </div>
-        )}
       </div>
 
       {/* Workspace list */}
@@ -667,12 +621,74 @@ export default function Dashboard() {
                 onPick={openCreateWorkspaceFromTemplate}
               />
             </ErrorBoundary>
-            <div className="workspace-empty-icon">⚡</div>
+            <div className="workspace-empty-icon">
+              <BoltIcon />
+            </div>
             <p className="workspace-empty-heading">Your first great brief starts here</p>
             <p className="workspace-empty-body">
               Bring the messy version of the idea. SpecForge will help you
               sharpen it into a path your team can actually build.
             </p>
+
+            {/* "Your launch path" only earns its place before any real work
+                exists — once a workspace exists, its own stage track (below)
+                is the pipeline, live and specific, not an illustration. */}
+            <div className="pipeline-strip">
+              <span className="pipeline-strip-label">Your launch path</span>
+              <div className="pipeline-stages">
+                {PIPELINE_STAGE_ORDER.map((stageId, index) => {
+                  const stage = PIPELINE_STAGE_DETAILS[stageId]
+                  const isActive = activePipelineInfo === stageId
+
+                  return (
+                    <Fragment key={stageId}>
+                      {index > 0 && <div className="pipeline-arrow">→</div>}
+                      <div className="pipeline-stage-wrap">
+                        <button
+                          type="button"
+                          className={`pipeline-stage pipeline-stage-button${isActive ? " active" : ""}`}
+                          onClick={() =>
+                            setActivePipelineInfo((active) =>
+                              active === stageId ? null : stageId,
+                            )
+                          }
+                          aria-expanded={isActive}
+                          aria-controls="pipeline-stage-info"
+                        >
+                          <div className="pipeline-stage-num">{stage.number}</div>
+                          <div className="pipeline-stage-name">{stage.name}</div>
+                          <div className="pipeline-stage-desc">{stage.description}</div>
+                        </button>
+                      </div>
+                    </Fragment>
+                  )
+                })}
+              </div>
+              {activePipelineDetail && (
+                <div
+                  id="pipeline-stage-info"
+                  role="status"
+                  className="spec-info-panel"
+                >
+                  <div className="spec-info-beam" aria-hidden="true" />
+                  <div className="spec-info-icon" aria-hidden="true">
+                    {activePipelineDetail.number}
+                  </div>
+                  <div>
+                    <p className="spec-info-kicker">{activePipelineDetail.kicker}</p>
+                    <p className="spec-info-copy">
+                      {activePipelineDetail.copy}
+                    </p>
+                    <div className="spec-info-points">
+                      {activePipelineDetail.points.map((point) => (
+                        <span key={point}>{point}</span>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+
             <div className="starter-grid" aria-label="Starter workspace ideas">
               {STARTER_WORKSPACES.map((starter) => (
                 <button
@@ -693,23 +709,23 @@ export default function Dashboard() {
           </div>
         ) : (
           <>
+            <div className="workspace-grid">
+              {workspaces.map((ws, i) => (
+                <WorkspaceCard
+                  key={ws.id}
+                  workspace={ws}
+                  index={i}
+                  isDeleting={deletingWorkspaceId === ws.id}
+                  onDelete={(workspace) => {
+                    setDeleteError(null)
+                    setWorkspaceToDelete(workspace)
+                  }}
+                />
+              ))}
+            </div>
             <ErrorBoundary fallback={<TemplatesErrorFallback />}>
               <TemplatesStrip onPick={openCreateWorkspaceFromTemplate} />
             </ErrorBoundary>
-          <div className="workspace-grid">
-            {workspaces.map((ws, i) => (
-              <WorkspaceCard
-                key={ws.id}
-                workspace={ws}
-                index={i}
-                isDeleting={deletingWorkspaceId === ws.id}
-                onDelete={(workspace) => {
-                  setDeleteError(null)
-                  setWorkspaceToDelete(workspace)
-                }}
-              />
-            ))}
-          </div>
           </>
         )}
       </div>

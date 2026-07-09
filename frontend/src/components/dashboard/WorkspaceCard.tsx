@@ -3,6 +3,7 @@ import { Link } from "react-router-dom"
 import type { Stage, StageStatus, StageType } from "../../types/stage"
 import type { Workspace } from "../../types/workspace"
 import { HarnessCoverageChip } from "../workspace/HarnessCoverageChip"
+import { PipelineStageTrack, type PipelineTrackStage } from "../shared/PipelineStageTrack"
 
 interface WorkspaceCardProps {
   workspace: Workspace & { stages?: Stage[] }
@@ -103,6 +104,18 @@ export function WorkspaceCard({
   const nextStage = nextStageForCard(stageMap)
   const progressPct = Math.round((finalisedCount / STAGE_ORDER.length) * 100)
 
+  const trackStages: PipelineTrackStage[] = STAGE_ORDER.map((type, i) => ({
+    id: type,
+    number: String(i + 1).padStart(2, "0"),
+    label: STAGE_LABELS[type],
+    state:
+      stageMap[type]?.status === "finalised"
+        ? "done"
+        : nextStage?.type === type
+          ? "current"
+          : "upcoming",
+  }))
+
   const createdDate = new Date(workspace.created_at).toLocaleDateString(
     undefined,
     { month: "short", day: "numeric", year: "numeric" },
@@ -134,27 +147,7 @@ export function WorkspaceCard({
           coverage_summary={workspace.coverage_summary ?? null}
         />
 
-        <div className="workspace-card-pipeline">
-          {STAGE_ORDER.map((type, i) => {
-            const status = stageMap[type]?.status
-            const pipClass =
-              status === "finalised"
-                ? "ws-stage-pip done"
-                : status && status !== "locked"
-                  ? "ws-stage-pip active"
-                  : "ws-stage-pip"
-            return (
-              <div
-                key={type}
-                className={pipClass}
-                style={{ animationDelay: `${index * 0.07 + i * 0.09 + 0.1}s` }}
-              />
-            )
-          })}
-          <span className="workspace-stages-count">
-            {finalisedCount}/{STAGE_ORDER.length} done
-          </span>
-        </div>
+        <PipelineStageTrack stages={trackStages} />
 
         <div className="workspace-card-next">
           <div>
@@ -162,10 +155,6 @@ export function WorkspaceCard({
             <strong>{actionForStage(nextStage)}</strong>
           </div>
           <em>{progressPct}%</em>
-        </div>
-
-        <div className="workspace-card-progress" aria-hidden="true">
-          <span style={{ width: `${progressPct}%` }} />
         </div>
 
         <div className="workspace-card-footer">
