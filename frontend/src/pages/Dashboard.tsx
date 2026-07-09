@@ -158,8 +158,12 @@ function nextStageForWorkspace(workspace: WorkspaceWithStages): Stage | null {
 
   if (activeStage) return activeStage
 
+  // No stage is active (draft/in_progress/stale) — every existing stage is
+  // finalised, so the relevant one to surface is the last stage in the
+  // pipeline (e.g. Tasks), not the first (e.g. Spec).
   return PIPELINE_STAGE_ORDER
     .map((stageId) => stageMap[stageId])
+    .reverse()
     .find((stage): stage is Stage => Boolean(stage)) ?? null
 }
 
@@ -538,7 +542,9 @@ export default function Dashboard() {
           <span className="stat-chip-icon">🗂</span>
           <div>
             <div className="stat-chip-value">{workspaces.length}</div>
-            <div className="stat-chip-label">Workspaces</div>
+            <div className="stat-chip-label">
+              {workspaces.length === 1 ? "Workspace" : "Workspaces"}
+            </div>
           </div>
         </div>
         <div className="stat-chip">
@@ -551,8 +557,8 @@ export default function Dashboard() {
         <div className="stat-chip">
           <span className="stat-chip-icon">⚡</span>
           <div>
-            <div className="stat-chip-value">4</div>
-            <div className="stat-chip-label">Pipeline Stages</div>
+            <div className="stat-chip-value">{readyToExport}</div>
+            <div className="stat-chip-label">Ready to Export</div>
           </div>
         </div>
       </div>
