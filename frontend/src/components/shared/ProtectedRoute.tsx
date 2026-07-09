@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import { Navigate } from "react-router-dom"
 import { useUserStore } from "../../store/userStore"
 import { BrandLoader } from "./BrandLoader"
@@ -11,27 +11,28 @@ interface ProtectedRouteProps {
 export function ProtectedRoute({ children }: ProtectedRouteProps) {
   const { user, isLoading, fetchMe } = useUserStore()
   const [hasCheckedSession, setHasCheckedSession] = useState(Boolean(user))
+  const attemptedRef = useRef(false)
 
   useEffect(() => {
-    let cancelled = false
-
     if (user) {
       setHasCheckedSession(true)
       return
     }
 
-    if (!isLoading) {
-      fetchMe().finally(() => {
-        if (!cancelled) {
-          setHasCheckedSession(true)
-        }
-      })
+    // Only ever probe the session once per mount. `fetchMe` itself toggles
+    // `isLoading`, so gating this on `isLoading` (rather than a ref) re-fires
+    // the effect every time it settles back to false while `user` is still
+    // null — an infinite fetchMe()/refresh loop for any genuinely logged-out
+    // visitor who deep-links to a protected route.
+    if (attemptedRef.current) {
+      return
     }
+    attemptedRef.current = true
 
-    return () => {
-      cancelled = true
-    }
-  }, [user, isLoading, fetchMe])
+    fetchMe().finally(() => {
+      setHasCheckedSession(true)
+    })
+  }, [user, fetchMe])
 
   if (isLoading || !hasCheckedSession) {
     return (
