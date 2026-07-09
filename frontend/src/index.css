@@ -415,6 +415,20 @@ button:disabled {
    runs on the compositor; `transform-box: view-box` resolves each
    `transform-origin` against the 48×48 viewBox so rotations pivot on the right
    anatomical point. */
+
+/* Ink contour behind the fur silhouette (design pass, issue #21 follow-up):
+   solid fill plus a matching stroke to fatten the union of these shapes into a
+   halo. Same ink as the eyes/nose/whiskers so it reads as one deliberate
+   palette rather than a bolted-on outline. This is what lets the mark hold its
+   shape on white, on the warm hero gradient, and on dark surfaces alike. */
+.squirrel-outline,
+.squirrel-arm-outline {
+  fill: #3b2a20;
+  stroke: #3b2a20;
+  stroke-width: 1.5;
+  stroke-linejoin: round;
+}
+
 .squirrel-foot {
   opacity: 0.85;
 }
@@ -447,15 +461,16 @@ button:disabled {
 }
 
 .squirrel-whiskers,
-.squirrel-mouth {
+.squirrel-mouth,
+.squirrel-brow {
   fill: none;
   stroke: #3b2a20;
   stroke-linecap: round;
 }
 
 .squirrel-whiskers {
-  stroke-width: 0.32;
-  opacity: 0.4;
+  stroke-width: 0.4;
+  opacity: 0.5;
 }
 
 .squirrel-mouth {
@@ -463,10 +478,63 @@ button:disabled {
   opacity: 0.8;
 }
 
+.squirrel-brow {
+  stroke-width: 0.55;
+  opacity: 0.55;
+}
+
+.squirrel-eye-shine-small {
+  opacity: 0.85;
+}
+
+/* Volume cues layered over the flat fur fill, as if lit from the upper left:
+   a soft shadow crescent where the seat meets the belly, and light sheens
+   along the tail's outer curve and the crown of the head. Large and
+   low-opacity by design so they add depth up close without curdling into
+   noise at 16–28px nav sizes. */
+.squirrel-fur-shadow {
+  fill: #3b2a20;
+  opacity: 0.13;
+}
+
+.squirrel-fur-highlight {
+  fill: none;
+  stroke: #fff6ec;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  opacity: 0.4;
+}
+
+.squirrel-fur-highlight-head {
+  stroke-width: 1.1;
+  opacity: 0.3;
+}
+
+/* Two fine fur-lock strokes tracing the tail's sweep — cheap texture that
+   reads as glossy fur grain on the big tail without competing with the
+   silhouette. */
+.squirrel-tail-texture {
+  fill: none;
+  stroke: #fff6ec;
+  stroke-width: 0.7;
+  stroke-linecap: round;
+  opacity: 0.32;
+}
+
+.squirrel-tail-texture-inner {
+  stroke-width: 0.55;
+  opacity: 0.24;
+}
+
 /* Acorn clasped at the chest — the unambiguous squirrel cue. Warm nut body,
    darker domed cap + stem. Its own tokens so it sits above the belly/paws. */
 .squirrel-acorn-nut {
   fill: #d98e4a;
+}
+
+.squirrel-acorn-shine {
+  fill: #f3c98a;
+  opacity: 0.7;
 }
 
 .squirrel-acorn-cap {
@@ -495,7 +563,11 @@ button:disabled {
   animation: squirrel-bob 1.8s ease-in-out infinite;
 }
 
-.squirrel-tail {
+/* Drives the whole tail rig (ink outline + colored fill + sheen + texture) as
+   one transform, so everything that belongs to the tail pivots together in a
+   single paint step — see the comment on `.squirrel-tail-rig` in the markup
+   for why that atomicity matters. */
+.squirrel-tail-rig {
   transform-box: view-box;
   transform-origin: 25px 41px;
   animation: squirrel-tail 1.4s ease-in-out infinite;
@@ -508,7 +580,7 @@ button:disabled {
 }
 
 .brand-loader-mark.is-paused .squirrel,
-.brand-loader-mark.is-paused .squirrel-tail,
+.brand-loader-mark.is-paused .squirrel-tail-rig,
 .brand-loader-mark.is-paused .squirrel-eye {
   animation-play-state: paused;
 }
@@ -566,7 +638,7 @@ button:disabled {
   /* The loader also swaps to the static mark in JS; for the animated logo (which
      has no such swap) this is the sole guarantee the squirrel holds still. */
   .squirrel,
-  .squirrel-tail,
+  .squirrel-tail-rig,
   .squirrel-eye {
     animation: none;
   }
