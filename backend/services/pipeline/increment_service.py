@@ -281,6 +281,7 @@ class IncrementService:
                 stage_type="tasks",
                 action="increment",
                 model_tier=route.model_tier,
+                prompt_version=INCREMENT_PROMPT_VERSION,
                 operation=route.operation,
                 cost_context=LLMCostContext(
                     workspace_id=workspace_id,
@@ -582,6 +583,14 @@ def _grow_tasks_markdown(baseline_tasks_md: str, new_tasks: list[IncrementTask])
     if base:
         return f"{base}\n\n{appended}\n"
     return f"{appended}\n"
+
+
+# Audit finding #10 (process): increment_service.py was one of three prompts
+# with no STAGE_PROMPT_VERSIONS-equivalent constant, so InstrumentedAdapter
+# recorded prompt_version="local" for every increment call — edits to
+# _system_prompt/_user_prompt below were invisible to telemetry. Bump on any
+# future edit to either function (docs/evals/PROMPT_CHANGE_REVIEW.md).
+INCREMENT_PROMPT_VERSION = "increment-prompt-v1"
 
 
 def _system_prompt() -> str:

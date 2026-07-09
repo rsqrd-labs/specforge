@@ -26,6 +26,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from prompts.base import wrap_untrusted_content
 from services.llm.gateway import call_judge_model
 from services.observability import record_judge_call
+from services.text_compaction import compact_text
 
 if TYPE_CHECKING:
     from services.llm.cost_ledger import LLMCostContext
@@ -37,6 +38,23 @@ MAX_REGENERATES = 1
 # Artifacts shorter than this are too small to grade meaningfully (e.g. an early
 # stream abort).  The critic returns passed=True rather than burning a judge call.
 _MIN_GRADABLE_CHARS = 500
+
+# Length bound on the artifact and each dependency before building the judge
+# prompt (audit finding #4).  Unlike online_eval.py — which already bounds both
+# via _PROMPT_LIMITS/_COMPACT_RETRY_LIMITS — the critic previously sent the
+# full, untruncated artifact and every dependency on EVERY generation (not just
+# an opt-in eval), risking unbounded judge cost and a context-limit error that
+# the fail-open handler silently turns into passed=True, exactly when the
+# artifact is largest and most in need of grading.  Mirrors online_eval's
+# per-stage artifact sizing; each dependency gets its own, smaller bound since
+# the critic (unlike online_eval) can carry more than one dependency at once.
+_ARTIFACT_LIMITS: dict[str, int] = {
+    "spec": 28_000,
+    "plan": 18_000,
+    "harness": 20_000,
+    "tasks": 14_000,
+}
+_DEP_LIMIT = 10_000
 
 # Audit-event name written when a workspace owner toggles disable_critic.  This
 # codebase records audit events as structured logs (there is no AuditEvent
@@ -183,19 +201,27 @@ def _build_critic_user_prompt(
     artifact_text: str,
     deps: dict[str, str],
 ) -> str:
-    """Assemble the critic user prompt: artifact + deps wrapped as untrusted."""
+    """Assemble the critic user prompt: artifact + deps wrapped as untrusted.
+
+    Both the artifact and each dependency are bounded (``_ARTIFACT_LIMITS`` /
+    ``_DEP_LIMIT``) before wrapping — see the module-level comment on those
+    constants for why (finding #4).
+    """
+    artifact_limit = _ARTIFACT_LIMITS.get(stage_type, _ARTIFACT_LIMITS["spec"])
+    bounded_artifact = compact_text(artifact_text, artifact_limit)
     parts: list[str] = [
         f"Stage under review: {stage_type.upper()}",
         _per_stage_focus(stage_type),
         "",
         "Generated artifact to grade:",
-        wrap_untrusted_content(f"{stage_type}_artifact", artifact_text),
+        wrap_untrusted_content(f"{stage_type}_artifact", bounded_artifact),
     ]
     for dep_type, dep_content in deps.items():
         if dep_content:
+            bounded_dep = compact_text(dep_content, _DEP_LIMIT)
             parts.append("")
             parts.append(f"Upstream dependency — {dep_type}:")
-            parts.append(wrap_untrusted_content(f"{dep_type}_dependency", dep_content))
+            parts.append(wrap_untrusted_content(f"{dep_type}_dependency", bounded_dep))
     parts.append("")
     parts.append("Return the strict JSON verdict now. No prose, no markdown fences.")
     return "\n".join(parts)

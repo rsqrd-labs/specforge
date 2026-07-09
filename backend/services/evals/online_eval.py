@@ -20,6 +20,7 @@ from services.llm.gateway import get_llm
 from services.llm.output_budget import output_budget_for_operation
 from services.llm.provider_config import JUDGE_MODELS
 from services.observability import EVAL_POLL_FAILURES, record_judge_call
+from services.text_compaction import compact_text
 
 logger = logging.getLogger(__name__)
 _EVAL_TIMEOUT_SECONDS = 90.0
@@ -950,17 +951,16 @@ def _parse_eval_json(raw: str) -> dict[str, Any] | None:
     return None
 
 
-def _compact_text(value: str, limit: int) -> str:
-    if limit <= 0 or len(value) <= limit:
-        return value
-    head = max(0, int(limit * 0.65))
-    tail = max(0, limit - head)
-    omitted = len(value) - head - tail
-    return (
-        value[:head].rstrip()
-        + f"\n\n[... {omitted} characters omitted for eval budget ...]\n\n"
-        + value[-tail:].lstrip()
-    )
+# Placeholder tokens in _STAGE_PROMPTS, matched against the ORIGINAL template
+# only (never against already-substituted text). A chained `.replace().replace()`
+# re-scans its own output, so a `spec_content`/`context` value that happens to
+# contain the literal substring "{content}" (plausible in ordinary generated
+# output — e.g. an API Design section with an example JSON body naming a
+# "content" field) gets its second placeholder wrongly re-matched inside the
+# just-inserted context block, silently splicing the artifact into the wrong
+# slot. `re.sub` with a single compiled alternation walks the template once and
+# substitutes via a callback, so inserted values are never rescanned.
+_EVAL_PLACEHOLDER_RE = re.compile(r"\{spec_content\}|\{content\}")
 
 
 def _build_eval_prompt(
@@ -973,12 +973,11 @@ def _build_eval_prompt(
     context_limit, content_limit = (
         _COMPACT_RETRY_LIMITS if compact else _PROMPT_LIMITS
     ).get(stage_type, _PROMPT_LIMITS["spec"])
-    context = _compact_text(spec_content, context_limit)
-    artifact = _compact_text(content, content_limit)
-    return (
-        _STAGE_PROMPTS[stage_type]
-        .replace("{spec_content}", context)
-        .replace("{content}", artifact)
+    context = compact_text(spec_content, context_limit)
+    artifact = compact_text(content, content_limit)
+    substitutions = {"{spec_content}": context, "{content}": artifact}
+    return _EVAL_PLACEHOLDER_RE.sub(
+        lambda m: substitutions[m.group()], _STAGE_PROMPTS[stage_type]
     )
 
 

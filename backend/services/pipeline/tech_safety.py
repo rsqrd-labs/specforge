@@ -125,6 +125,37 @@ def policy_sources() -> list[str]:
     return ["local_policy", "osv", "endoflife.date"]
 
 
+def render_hard_denylist_prose() -> str:
+    """The named technologies/families this policy's ``hard_denylists`` blocks.
+
+    Single source of truth for finding #7: ``plan.py``'s prompt used to
+    hand-maintain its own prose copy of this list (with its own review date),
+    separate from this JSON policy's structured, regex-enforced entries (with
+    ITS own review date) — two facts, two clocks, drifting independently. The
+    prompt now renders this list from ``load_policy()`` at import time instead
+    of hardcoding it, so the two can no longer silently disagree.
+
+    The version *threshold* a human reads (e.g. "Python ≤ 3.10") is not
+    reverse-engineered from the enforcement regex — that would be a fragile
+    regex-of-a-regex. Instead each entry optionally carries its own
+    ``denied_versions`` string, authored by whoever edits the JSON right next
+    to the ``pattern`` it describes, so the model-facing threshold and the
+    machine-enforced one are declared together in the one place edits happen.
+    Entries with no version threshold (e.g. a whole deprecated model family)
+    render as just the technology name.
+    """
+    policy = load_policy()
+    clauses: list[str] = []
+    for entry in policy.get("hard_denylists", []):
+        technology = str(entry.get("technology") or "").strip()
+        if not technology:
+            continue
+        denied_versions = str(entry.get("denied_versions") or "").strip()
+        clause = f"{technology} {denied_versions}" if denied_versions else technology
+        clauses.append(clause)
+    return ", ".join(clauses)
+
+
 def _blocked_severities(policy: dict[str, Any]) -> set[str]:
     configured = {
         severity.strip().lower()

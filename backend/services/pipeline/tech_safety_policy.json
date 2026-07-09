@@ -1,6 +1,6 @@
 {
   "policy_version": "tech-safety-v1",
-  "last_reviewed": "2026-06-09",
+  "last_reviewed": "2026-07-09",
   "max_age_days": 30,
   "blocked_severities": ["critical", "high", "unknown"],
   "near_eol_block_days": 730,
@@ -9,6 +9,7 @@
       "code": "runtime_eol",
       "technology": "Python",
       "pattern": "\\bpython\\s*(?:<=|<|=)?\\s*3\\.(?:[0-9]|10)\\b",
+      "denied_versions": "≤ 3.10",
       "severity": "critical",
       "remediation": "Use Python 3.12 or the latest stable active Python release."
     },
@@ -16,6 +17,7 @@
       "code": "runtime_eol",
       "technology": "Node.js",
       "pattern": "\\bnode(?:\\.js)?\\s*(?:<=|<|=)?\\s*(?:1[0-8])\\b",
+      "denied_versions": "≤ 18",
       "severity": "critical",
       "remediation": "Use Node.js 22 LTS or the latest active LTS release."
     },
@@ -23,6 +25,7 @@
       "code": "runtime_eol",
       "technology": "Java",
       "pattern": "\\bjava\\s*(?:<=|<|=)?\\s*(?:[1-9]|10|11)\\b",
+      "denied_versions": "≤ 11",
       "severity": "high",
       "remediation": "Use Java 21 LTS or a currently supported LTS release."
     },

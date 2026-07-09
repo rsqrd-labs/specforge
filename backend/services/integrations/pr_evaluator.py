@@ -432,22 +432,36 @@ async def _resolve_acceptance_criteria(
     return criteria
 
 
+@dataclass
+class _JudgeOutcome:
+    """The judge's result plus whether the diff it saw was truncated."""
+
+    result: PRReviewResult | None
+    diff_truncated: bool
+
+
 async def _judge(
     db: AsyncSession,
     push: IntegrationPush,
     criteria: dict[str, str],
     diff: str | None,
-) -> PRReviewResult | None:
-    """Judge the diff against the acceptance criteria. ``None`` ⇒ fail-open neutral.
+) -> _JudgeOutcome:
+    """Judge the diff against the acceptance criteria.
+
+    ``result=None`` ⇒ fail-open neutral.
 
     Fail-open by design (spec Assumption 25): a flaky/slow judge or an unreadable
     diff must never red-light the PR. On any judge failure, unparseable output, or
-    a missing diff this returns ``None`` and the caller posts a neutral check.
+    a missing diff this returns ``result=None`` and the caller posts a neutral
+    check. ``diff_truncated`` signals the audit finding #6 fix: a PR author fully
+    controls diff ordering, so the caller must not report a clean pass on a
+    diff whose tail was never shown to the judge (see ``_verdict_for``).
     """
     if not diff:
-        return None
+        return _JudgeOutcome(None, False)
+    bounded_diff, diff_truncated = _truncate_diff_by_hunk(diff, _MAX_DIFF_CHARS)
     provider = await _workspace_provider(db, push.workspace_id)
-    user_prompt = _build_user_prompt(criteria, diff)
+    user_prompt = _build_user_prompt(criteria, bounded_diff, diff_truncated)
     record_judge_call("pr_check")
     try:
         async with _JUDGE_SEMAPHORE:
@@ -463,22 +477,72 @@ async def _judge(
             )
     except Exception:
         logger.warning("github.pr_check.judge_failed", push_id=str(push.id))
-        return None
+        return _JudgeOutcome(None, diff_truncated)
     try:
-        return PRReviewResult.model_validate_json(_extract_json_object(raw))
+        result = PRReviewResult.model_validate_json(_extract_json_object(raw))
     except ValidationError:
         logger.warning("github.pr_check.unparseable_verdict", push_id=str(push.id))
-        return None
+        return _JudgeOutcome(None, diff_truncated)
+    return _JudgeOutcome(result, diff_truncated)
 
 
-def _build_user_prompt(criteria: dict[str, str], diff: str) -> str:
+# Matches a unified diff's per-file section boundary. A PR author fully
+# controls diff ordering (audit finding #6): a fixed character cut can land
+# mid-hunk, and — worse — front-loading a compliant change with a malicious
+# one appended past the cut lets the judge see and pass only the compliant
+# head. Cutting on whole `diff --git` sections avoids corrupting a hunk; the
+# accompanying `diff_truncated` flag (see `_verdict_for`) prevents a clean pass
+# from being reported when any section had to be dropped.
+_DIFF_GIT_HEADER_RE = re.compile(r"(?m)^diff --git ")
+
+
+def _truncate_diff_by_hunk(diff: str, max_chars: int) -> tuple[str, bool]:
+    """Bound ``diff`` to at most ``max_chars``, cutting only on a file boundary.
+
+    Returns ``(bounded_diff, truncated)``. Greedily keeps whole per-file
+    sections until the budget would be exceeded, then stops — never emitting a
+    half-cut hunk. If the diff has no recognizable ``diff --git`` boundaries
+    (not a unified git diff), falls back to a raw character cut but always
+    reports it as truncated, since a hunk-safe cut is not possible there.
+    """
+    if len(diff) <= max_chars:
+        return diff, False
+    starts = [m.start() for m in _DIFF_GIT_HEADER_RE.finditer(diff)]
+    if not starts:
+        return diff[:max_chars], True
+    preamble = diff[: starts[0]]
+    ends = starts[1:] + [len(diff)]
+    sections = [diff[s:e] for s, e in zip(starts, ends)]
+    kept: list[str] = []
+    total = len(preamble)
+    for section in sections:
+        if total + len(section) > max_chars:
+            break
+        kept.append(section)
+        total += len(section)
+    if not kept:
+        # The very first file section alone exceeds the budget (a giant
+        # lockfile diff, say): a whole-section cut would hand the judge an
+        # empty diff, whose near-certain FAIL verdict `_verdict_for`
+        # deliberately preserves — red-lighting the PR on zero evidence and
+        # violating the fail-open contract. Fall back to the raw head cut so
+        # the judge grades real (if partial) content; the truncated flag still
+        # downgrades any pass to neutral.
+        return diff[:max_chars], True
+    # len(diff) > max_chars guarantees at least one section was dropped here.
+    return preamble + "".join(kept), True
+
+
+def _build_user_prompt(
+    criteria: dict[str, str], diff: str, diff_truncated: bool = False
+) -> str:
     """Assemble the judge prompt: acceptance criteria + bounded, wrapped diff."""
     parts: list[str] = ["Acceptance criteria the PR must satisfy:"]
     for ref, text in criteria.items():
         parts.append(wrap_untrusted_content(f"task_{ref}", text))
-    bounded = diff[:_MAX_DIFF_CHARS]
-    if len(diff) > _MAX_DIFF_CHARS:
-        bounded += "\n... [diff truncated by SpecForge] ..."
+    bounded = diff
+    if diff_truncated:
+        bounded += "\n... [diff truncated by SpecForge — one or more files omitted] ..."
     parts.append("")
     parts.append("Pull request diff to judge:")
     parts.append(wrap_untrusted_content("pr_diff", bounded))
@@ -487,8 +551,28 @@ def _build_user_prompt(criteria: dict[str, str], diff: str) -> str:
     return "\n".join(parts)
 
 
-def _verdict_for(result: PRReviewResult | None) -> _Verdict:
-    """Map a judge result (or ``None`` = errored) to check-run fields."""
+def _verdict_for(outcome: _JudgeOutcome) -> _Verdict:
+    """Map a judge outcome to check-run fields.
+
+    Finding #6: a diff a PR author engineered to hide a non-compliant change
+    past the truncation boundary must never be reported as a clean pass on the
+    compliant, visible head alone. A truncated diff that the judge nonetheless
+    passed is downgraded to neutral/inconclusive here — the one place that
+    matters, regardless of how the truncation happened upstream. A truncated
+    diff the judge FAILED is left as a genuine failure: that signal is still
+    correct and more informative than suppressing it.
+    """
+    result = outcome.result
+    if result is not None and outcome.diff_truncated and result.passed:
+        return _Verdict(
+            "neutral",
+            "SpecForge check inconclusive — diff truncated",
+            "This PR's diff exceeds SpecForge's per-check size bound, so one or "
+            "more files were not shown to the judge. A pass on the visible "
+            "portion alone is not reported as a pass; this check is neutral and "
+            "does not block the PR. Consider splitting the PR into smaller "
+            "changes.",
+        )
     if result is None:
         return _Verdict(
             "neutral",

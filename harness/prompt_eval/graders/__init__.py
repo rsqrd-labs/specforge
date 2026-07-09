@@ -9,6 +9,7 @@ from prompt_eval.graders.coverage import (
     harness_file_presence_pct,
     plan_section_presence_pct,
     rtm_coverage_pct,
+    test_category_gap_acknowledged_in_tasks,
 )
 from prompt_eval.graders.format import (
     code_fence_balance,
@@ -48,6 +49,7 @@ ALL_GRADERS: tuple[GraderFn, ...] = (
     fr_to_task_coverage_pct,
     plan_section_presence_pct,
     harness_file_presence_pct,
+    test_category_gap_acknowledged_in_tasks,
     deprecated_api_hit_count,
     banned_phrase_hit_count,
     adr_completeness_pct,

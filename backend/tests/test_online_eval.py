@@ -10,10 +10,59 @@ import pytest
 
 from models import EvalResult
 from services.evals.online_eval import (
+    _build_eval_prompt,
     _score_comment,
     run_eval,
     run_eval_background,
 )
+
+
+def test_build_eval_prompt_does_not_recursively_rescan_substituted_text() -> None:
+    # Audit finding #1 (SHIP-BLOCKER): a chained `.replace("{spec_content}", ctx)
+    # .replace("{content}", artifact)` re-scans its own output, so when `ctx`
+    # (spec/context content) itself contains the literal substring "{content}"
+    # — plausible in ordinary generated output, e.g. an API Design section
+    # showing an example JSON body with a "content" field — the second
+    # `.replace()` wrongly matches inside the just-inserted context block and
+    # splices the artifact into the wrong slot. This guards against that
+    # regression by asserting `artifact` appears only in its own labelled slot,
+    # never inside the spec/context block.
+    # NOTE: the fixture must contain the EXACT placeholder token `{content}` —
+    # a JSON-ish `{"content": ...}` does NOT contain it (the quotes break the
+    # match) and would pass even against the old buggy chained .replace().
+    spec_content = (
+        "## API Design\nTemplates interpolate the {content} placeholder "
+        "before send.\n"
+    )
+    assert "{content}" in spec_content  # the fixture exercises the bug
+    artifact = "PLAN_ARTIFACT_UNIQUE_MARKER"
+    rendered = _build_eval_prompt("plan", artifact, spec_content)
+
+    assert "Plan:\nPLAN_ARTIFACT_UNIQUE_MARKER" in rendered
+    # The literal "{content}" inside spec_content must survive untouched —
+    # never overwritten by the second substitution.
+    assert "interpolate the {content} placeholder" in rendered
+    # The artifact marker must not have leaked into the Spec: block.
+    spec_block = rendered.split("Spec:\n", 1)[1].split("\n\nPlan:\n", 1)[0]
+    assert artifact not in spec_block
+
+
+def test_build_eval_prompt_happy_path_spec_stage() -> None:
+    rendered = _build_eval_prompt("spec", "a spec body", "")
+    assert "Content:\na spec body" in rendered
+
+
+def test_build_eval_prompt_adversarial_content_field_in_artifact() -> None:
+    # The artifact itself containing the literal "{spec_content}" placeholder
+    # token must not corrupt the rendered prompt either (adversarial input
+    # case). In the tasks template {spec_content} is substituted BEFORE
+    # {content} positionally, so an exact token here proves inserted values are
+    # never rescanned regardless of substitution order.
+    spec_content = "spec body"
+    artifact = "tasks referencing the literal {spec_content} placeholder token"
+    rendered = _build_eval_prompt("tasks", artifact, spec_content)
+    assert "tasks referencing the literal {spec_content} placeholder token" in rendered
+    assert rendered.count("Reference context:\nspec body") == 1
 
 
 def test_score_comment_omits_unknown_route() -> None:

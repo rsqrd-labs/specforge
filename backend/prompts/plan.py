@@ -6,6 +6,7 @@ from prompts.base import (
     render_research_block,
     wrap_untrusted_content,
 )
+from services.pipeline.tech_safety import render_hard_denylist_prose
 
 # Date the hard deprecation denylist in SYSTEM_PROMPT (Technology Stack section,
 # T-241) was last reviewed.  The denylist goes stale on its own clock — Python
@@ -15,7 +16,16 @@ from prompts.base import (
 # When you re-review the denylist entries above, bump this date (ISO 8601).
 # This is metadata about the denylist, not prompt text the model sees, so it
 # does not require an ASDD_PROMPT_VERSION bump on its own.
-DENYLIST_LAST_REVIEWED = "2026-05-30"
+#
+# Audit finding #7: the named technologies/families below are now generated
+# from ``tech_safety_policy.json`` (``render_hard_denylist_prose()``) instead
+# of hand-duplicated here, so this prompt and the deterministic
+# ``tech_safety.py`` gate can no longer silently disagree about WHICH
+# technologies are denied — only the exact version thresholds still live
+# solely in the JSON's regex patterns. Keep this date in lockstep with the
+# JSON's own ``last_reviewed`` field (test_plan_prompt.py asserts they match);
+# re-reviewing one without the other is exactly the drift this fix closes.
+DENYLIST_LAST_REVIEWED = "2026-07-09"
 
 SYSTEM_PROMPT = f"""{ASDD_METHODOLOGY_OVERVIEW}
 
@@ -41,7 +51,7 @@ Required PLAN.md structure (every section mandatory):
 - ## Requirement Traceability Matrix — table: source ID, requirement summary, design response, verification method, residual risk. Every upstream FR/NFR/SEC/AC appears; a missing ID fails the PLAN.
 - ## Technology Stack and Rationale — table with EXACTLY these columns:
   `| Layer | Choice | Version (latest stable as of YYYY-MM) | Support status | EOL date | Why not the next-best alternative |`
-  Support status is exactly one of: Active (maintained, no sunset) · Maintenance (security fixes only; prefer the next-best) · Deprecated (do not use) · EOL (do not use). Cover language, framework, ORM, cache, queue, auth, observability, CI/CD, hosting, LLM provider, and frontend framework + state management when applicable. Hard denylist (no proposal without explicit spec override): Python ≤ 3.10 / Node ≤ 18 / Java ≤ 11 (security EOL); any vendor-deprecated or sunset SDK; deprecated LLM families gpt-3, gemini-1.x, claude-1.x, claude-2.x; libraries with no commit in the last 18 months unless no maintained alternative exists; database engines with end-of-support within 24 months. If the spec does not constrain a layer, pick a conservative Active default and mark it an assumption.
+  Support status is exactly one of: Active (maintained, no sunset) · Maintenance (security fixes only; prefer the next-best) · Deprecated (do not use) · EOL (do not use). Cover language, framework, ORM, cache, queue, auth, observability, CI/CD, hosting, LLM provider, and frontend framework + state management when applicable. Hard denylist (no proposal without explicit spec override; generated from tech_safety_policy.json, the deterministic gate's single source of truth for exact version/EOL thresholds): {render_hard_denylist_prose()}; any vendor-deprecated or sunset SDK; libraries with no commit in the last 18 months unless no maintained alternative exists; database engines with end-of-support within 24 months. If the spec does not constrain a layer, pick a conservative Active default and mark it an assumption.
 - ## Directory and File Structure — repo layout to important source files; per file/module: responsibility, owning layer, key dependencies.
 - ## Module Boundaries and Interfaces — per module: public interface (signatures, class names, events, commands), dependencies, what it must NOT depend on; dependency graph protecting product invariants.
 - ## Data Model and Persistence — full schema: every table/column (type/nullable/default/index), foreign keys, cascades, unique constraints, enums; retention/deletion per category; migration + rollback strategy; Mermaid ER diagram.

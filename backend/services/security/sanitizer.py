@@ -27,3 +27,15 @@ async def sanitize_text_async(text: str) -> str:
     from services.cpu_offload import run_cpu_bound
 
     return await run_cpu_bound(text, sanitize_text, text)
+
+
+# A generated stage artifact excerpt spliced into a file a *different* AI coding
+# agent (Claude Code, Codex, ...) auto-loads as high-trust project instructions
+# (CLAUDE.md / AGENTS.md) is a cross-agent trust escalation: without this gate,
+# an HTML comment or script-like payload smuggled through an upstream artifact
+# would land, unsanitized, in a file the receiving agent treats as authoritative
+# (audit finding #3). Both downstream-agent-artifact builders
+# (agents_md_builder.py, agent_manual_service.py) call this single function so
+# they cannot drift back apart — it is intentionally just ``sanitize_text``
+# under a name that documents *why* the call site sanitizes.
+sanitize_downstream_agent_content = sanitize_text

@@ -201,6 +201,34 @@ async def test_request_clarifying_questions_caches_questions(
 
 
 @pytest.mark.asyncio
+async def test_request_clarifying_questions_records_clarifier_prompt_version(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Finding #10 (process): the clarifier's InstrumentedAdapter call must
+    thread SPEC_CLARIFICATION_PROMPT_VERSION, or telemetry records the adapter
+    default prompt_version="local" and edits to spec_clarification.py stay
+    invisible to the cost ledger — the exact defect the audit called out."""
+    from prompts.spec_clarification import SPEC_CLARIFICATION_PROMPT_VERSION
+
+    raw = json.dumps([{"question": "Who?", "why_it_matters": "Persona drives FRs."}])
+    inner = SimpleNamespace(complete=AsyncMock(return_value=raw))
+    monkeypatch.setattr(spec_clarifier, "get_llm", lambda *a, **k: inner)
+
+    captured: dict[str, object] = {}
+
+    def fake_instrumented(adapter, **kwargs):
+        captured.update(kwargs)
+        return inner
+
+    monkeypatch.setattr(spec_clarifier, "InstrumentedAdapter", fake_instrumented)
+
+    questions = await request_clarifying_questions(_workspace(), _FakeRedis())
+    assert len(questions) == 1
+    assert captured["prompt_version"] == SPEC_CLARIFICATION_PROMPT_VERSION
+    assert captured["prompt_version"] != "local"
+
+
+@pytest.mark.asyncio
 async def test_persist_answers_rejects_unknown_question() -> None:
     workspace_id = uuid4()
     redis = _FakeRedis()

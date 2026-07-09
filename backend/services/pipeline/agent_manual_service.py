@@ -18,6 +18,8 @@ from __future__ import annotations
 import re
 from typing import Protocol
 
+from services.security.sanitizer import sanitize_downstream_agent_content
+
 _CLAUDE_FILENAME = "CLAUDE.md"
 _AGENTS_FILENAME = "AGENTS.md"
 CONSTRUCTION_REPORT_FILENAME = "CONSTRUCTION_REPORT.md"
@@ -38,7 +40,14 @@ def manual_filename(target_agent: str | None) -> str:
 
 
 def _extract_technology_stack(plan_content: str) -> str:
-    """Pull the PLAN ## Technology Stack body so the manual pins the stack inline."""
+    """Pull the PLAN ## Technology Stack body so the manual pins the stack inline.
+
+    Sanitized before interpolation (audit finding #3): this body lands verbatim
+    in CLAUDE.md/AGENTS.md, a file the user's own coding agent auto-loads as
+    high-trust instructions, so an HTML comment or script-like payload smuggled
+    through PLAN.md must not survive the splice — the same defense
+    ``agents_md_builder.build_agents_md`` already applies to its own excerpts.
+    """
     if not plan_content:
         return "See PLAN.md ## Technology Stack."
     pattern = re.compile(
@@ -47,6 +56,7 @@ def _extract_technology_stack(plan_content: str) -> str:
     )
     match = pattern.search(plan_content)
     body = match.group(1).strip() if match else ""
+    body = sanitize_downstream_agent_content(body).strip()
     return body or "See PLAN.md ## Technology Stack."
 
 

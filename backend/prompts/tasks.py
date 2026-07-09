@@ -104,6 +104,10 @@ Task design rules:
   tasks that weaken tests, bypass auth, expose secrets, disable validators, skip migrations, or remove security
   controls. Do not invent files, modules, endpoints, schemas, or technologies absent from the plan; if a missing
   detail blocks a task, create a task that resolves the plan gap and name the decision owner.
+- If HARNESS contains one or more `TestCategoryGap: category=<name> reason=... reqs=...` records, TASKS.md MUST
+  acknowledge every named category explicitly — either a task that closes the gap or an entry in Assumptions and
+  Open Questions naming the category and the affected requirement IDs. Never proceed as if coverage were complete
+  when the harness itself recorded a deferred category.
 - Every dependency-introducing task MUST include three Acceptance Criteria beyond its harness criteria:
   a. SCA tool exit-0: `pip-audit` (Python) / `pnpm audit` (Node) / equivalent exits 0 with no critical or high CVEs.
   b. Pinned version matches PLAN.md Technology Stack for the relevant Layer. If the task introduces a layer the
@@ -217,5 +221,6 @@ Before returning, verify (internal — do not include a checklist in your output
 - No task's Dependencies lists a higher T-NNN — the graph is acyclic; security control and data/migration tasks precede what depends on them.
 - Every dependency-adding task carries the three Acceptance Criteria (SCA exit-0 with no critical/high CVEs, version-pin matching PLAN.md Technology Stack, non-Deprecated/non-EOL Support status).
 - Every Frontend/Full-stack task has Steps for loading + error + empty states and ≥ 1 accessibility assertion in Acceptance Criteria.
+- Every harness `TestCategoryGap` record has an explicit acknowledgement in TASKS.md — a task or an Open Questions/Assumptions entry naming the category and the affected requirement IDs.
 
 Return only TASKS.md. No preamble, commentary, or summary."""  # nosec B608

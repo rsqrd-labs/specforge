@@ -11,8 +11,72 @@ from services.pipeline.tech_safety import (
     TechSafetyError,
     analyze_technology_safety,
     parse_technology_stack,
+    render_hard_denylist_prose,
     validate_technology_safety,
 )
+
+
+# ---------------------------------------------------------------------------
+# Audit finding #7: plan.py's prose denylist is now generated from this
+# policy (the deterministic gate's own single source of truth) instead of
+# hand-duplicated, so the two can no longer silently drift apart.
+# ---------------------------------------------------------------------------
+def test_render_hard_denylist_prose_names_every_entry() -> None:
+    prose = render_hard_denylist_prose()
+    for expected in (
+        "Python",
+        "Node.js",
+        "Java",
+        "OpenAI GPT-3 family",
+        "Google Gemini 1.x family",
+        "Anthropic Claude 1.x/2.x family",
+    ):
+        assert expected in prose
+
+
+def test_render_hard_denylist_prose_includes_version_thresholds() -> None:
+    # denied_versions is authored right next to the enforcement regex in the
+    # JSON, so the model-facing threshold and the machine-enforced one can
+    # never silently disagree.
+    prose = render_hard_denylist_prose()
+    assert "Python ≤ 3.10" in prose
+    assert "Node.js ≤ 18" in prose
+    assert "Java ≤ 11" in prose
+
+
+def test_render_hard_denylist_prose_reflects_policy_edits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A policy edit (new entry, changed threshold) must appear in the
+    rendered prose without any change to plan.py — proving the two files
+    cannot drift apart, closing the actual finding."""
+    policy = dict(tech_safety.load_policy())
+    policy["hard_denylists"] = [
+        {
+            "code": "runtime_eol",
+            "technology": "Ruby",
+            "denied_versions": "≤ 2.7",
+            "pattern": r"\bruby\s*2\.7\b",
+            "severity": "critical",
+            "remediation": "Use a supported Ruby release.",
+        }
+    ]
+    monkeypatch.setattr(tech_safety, "load_policy", lambda: policy)
+    assert render_hard_denylist_prose() == "Ruby ≤ 2.7"
+
+
+def test_plan_prompt_denylist_last_reviewed_matches_policy_last_reviewed() -> None:
+    """The two freshness clocks named in finding #7 must move together: a
+    reviewer who re-reviews one without the other is exactly the drift this
+    fix closes. This is a CI check, not a hand-maintained reminder."""
+    from prompts.plan import DENYLIST_LAST_REVIEWED
+
+    policy = tech_safety.load_policy()
+    assert DENYLIST_LAST_REVIEWED == policy["last_reviewed"], (
+        "backend/prompts/plan.py's DENYLIST_LAST_REVIEWED and "
+        "tech_safety_policy.json's last_reviewed must be updated together — "
+        "they document the same review of the same denylist facts."
+    )
 
 
 class _FakeRedis:

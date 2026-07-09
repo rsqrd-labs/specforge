@@ -384,6 +384,53 @@ def test_critic_prompt_template_held_in_code() -> None:
     assert len(critic_module._CRITIC_SYSTEM_PROMPT) > 200
 
 
+def test_build_critic_user_prompt_bounds_maximal_harness_and_deps() -> None:
+    """Finding #4: unlike online_eval.py, the critic previously sent the full,
+    untruncated artifact and every dependency on every generation, risking
+    unbounded judge cost/context-limit errors (silently swallowed as
+    passed=True by the fail-open handler exactly when the artifact is largest).
+    A synthetic maximal-size harness fixture (50 files x 200 lines, per the
+    remediation plan's own suggested fixture shape) plus three large
+    dependencies must render a bounded prompt, not one that scales unboundedly
+    with input size.
+    """
+    huge_file_block = "\n".join(
+        f"def test_case_{i}():\n    assert True  # padding line to reach ~200 lines\n"
+        * 40
+        for i in range(50)
+    )
+    huge_dep = "x" * 50_000
+
+    prompt = critic_module._build_critic_user_prompt(
+        "harness",
+        huge_file_block,
+        {"spec": huge_dep, "plan": huge_dep},
+    )
+
+    # Bounded: artifact capped at _ARTIFACT_LIMITS["harness"], each dep capped
+    # at _DEP_LIMIT, plus a small constant for headings/labels/omission notes —
+    # nowhere near the ~150K+ chars an unbounded render of these inputs would
+    # produce.
+    assert len(prompt) < 60_000
+    assert "characters omitted for eval budget" in prompt
+
+
+def test_build_critic_user_prompt_small_inputs_are_untouched() -> None:
+    """Happy path: inputs well under the bound must render byte-identical
+    (compact_text is a no-op below the limit) — the fix must not truncate
+    ordinary, well-within-budget generations."""
+    small_artifact = "## Harness Overview\nSmall harness body.\n"
+    small_dep = "## Spec\nSmall spec body.\n"
+
+    prompt = critic_module._build_critic_user_prompt(
+        "harness", small_artifact, {"spec": small_dep}
+    )
+
+    assert small_artifact in prompt
+    assert small_dep in prompt
+    assert "characters omitted" not in prompt
+
+
 @pytest.mark.asyncio
 async def test_critic_review_fail_open_on_judge_error() -> None:
     """A judge call that raises must not brick generation — return passed=True."""

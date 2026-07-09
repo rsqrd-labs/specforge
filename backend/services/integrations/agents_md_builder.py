@@ -30,7 +30,7 @@ from __future__ import annotations
 import re
 
 from services.integrations.task_parser import parse_tasks
-from services.security.sanitizer import sanitize_text
+from services.security.sanitizer import sanitize_downstream_agent_content
 
 MANAGED_START = "<!-- specforge:start -->"
 MANAGED_END = "<!-- specforge:end -->"
@@ -133,7 +133,7 @@ def _render_managed_block(stages: dict[str, str]) -> str:
 
 def _excerpt(stage_md: str) -> str:
     """A sanitised, bounded excerpt of a stage artifact."""
-    clean = sanitize_text(stage_md).strip()
+    clean = sanitize_downstream_agent_content(stage_md).strip()
     if not clean:
         return "_Not available._"
     if len(clean) <= _STAGE_EXCERPT_CHARS:
@@ -146,5 +146,9 @@ def _task_list(tasks_md: str) -> str:
     parsed = parse_tasks(tasks_md)
     if not parsed:
         return "_No tasks parsed._"
-    lines = [f"- [ ] {sanitize_text(t.ref)}: {sanitize_text(t.title)}" for t in parsed]
+    lines = [
+        f"- [ ] {sanitize_downstream_agent_content(t.ref)}: "
+        f"{sanitize_downstream_agent_content(t.title)}"
+        for t in parsed
+    ]
     return "\n".join(lines)

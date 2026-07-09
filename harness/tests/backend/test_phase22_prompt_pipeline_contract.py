@@ -111,7 +111,7 @@ import json
 import re
 from datetime import date, timedelta
 
-from conftest import BACKEND_ROOT, REPO_ROOT, read_backend_file
+from conftest import BACKEND_ROOT, REPO_ROOT, import_backend, read_backend_file
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -496,18 +496,29 @@ def test_t241_plan_prompt_technology_stack_requires_eol_date() -> None:
 def test_t241_plan_prompt_denylists_eol_python_and_node() -> None:
     """T-241 — denylist must name Python ≤ 3.10 and Node ≤ 18 as security EOL.
 
+    Prompt Quality Remediation finding #7: the denylist's technology/version
+    facts are now GENERATED at import time from
+    ``services/pipeline/tech_safety_policy.json`` (the deterministic gate's
+    single source of truth) rather than hand-duplicated as literal text in
+    plan.py's source — so this checks the RENDERED ``SYSTEM_PROMPT`` (what the
+    model actually reads), not the source file, which now legitimately
+    contains a function call instead of the literal facts.
+
     Accepts the Unicode form (``Python ≤ 3.10``), the ASCII less-than-or-equal
     (``Python <= 3.10``), bare less-than (``Python < 3.10``), or the literal
     version (``Python 3.10``) — any of those is a clear EOL declaration.
     """
-    src = _read_plan_prompt()
+    plan = import_backend("prompts.plan")
+    rendered = plan.SYSTEM_PROMPT
     python_pat = r"Python\s*(?:≤|<=|<|=)\s*3\.10|Python\s*3\.10\b"
-    node_pat = r"Node\s*(?:≤|<=|<|=)\s*18|Node\s*18\b"
-    assert re.search(python_pat, src), (
+    # "Node" may be immediately followed by ".js" now that the technology name
+    # comes from tech_safety_policy.json's "Node.js" entry.
+    node_pat = r"Node(?:\.js)?\s*(?:≤|<=|<|=)\s*18|Node(?:\.js)?\s*18\b"
+    assert re.search(python_pat, rendered), (
         "Deprecation denylist must name Python ≤ 3.10 (or <= 3.10) as security "
         "EOL.  T-241."
     )
-    assert re.search(node_pat, src), (
+    assert re.search(node_pat, rendered), (
         "Deprecation denylist must name Node ≤ 18 (or <= 18) as security EOL.  "
         "T-241."
     )
@@ -518,13 +529,31 @@ def test_t241_plan_prompt_denylists_deprecated_llm_families() -> None:
 
     We have first-hand evidence of this failure mode (the Gemini Flash
     replacement commit).  Naming the deprecated families explicitly is the
-    only way the model reliably avoids them.
+    only way the model reliably avoids them. Checks the rendered
+    ``SYSTEM_PROMPT`` — see the docstring above on finding #7.
+
+    The generated prose (tech_safety_policy.json's "technology" field) writes
+    these as prose ("Google Gemini 1.x family") rather than the hyphenated
+    slug form ("gemini-1.x") the hand-written text used, so each pattern
+    accepts either a hyphen or whitespace between the family name and its
+    version — same intent (the model must not choose these families), just
+    tolerant of the JSON-sourced formatting.
     """
-    src = _read_plan_prompt().lower()
-    for family in ["gpt-3", "gemini-1", "claude-1", "claude-2"]:
-        assert (
-            family in src
-        ), f"Deprecation denylist must call out the '{family}' family.  T-241."
+    plan = import_backend("prompts.plan")
+    rendered = plan.SYSTEM_PROMPT.lower()
+    family_patterns = {
+        "gpt-3": r"gpt[\s-]*3",
+        "gemini-1": r"gemini[\s-]*1",
+        "claude-1": r"claude[\s-]*1",
+        # The JSON groups both under one combined "Claude 1.x/2.x family"
+        # entry, so "2" can appear several characters after "claude" (past
+        # the "1.x/" prefix) rather than immediately adjacent to it.
+        "claude-2": r"claude[\d./x\s-]*2",
+    }
+    for family, pattern in family_patterns.items():
+        assert re.search(pattern, rendered), (
+            f"Deprecation denylist must call out the '{family}' family.  T-241."
+        )
 
 
 def test_t241_plan_prompt_denylists_stale_libraries() -> None:
@@ -563,6 +592,28 @@ def test_t241_tasks_prompt_blocks_deprecated_or_eol_packages() -> None:
     assert "Deprecated" in src and "EOL" in src, (
         "tasks.py must require an acceptance criterion that the chosen package "
         "is not on the Deprecated or EOL support-status line.  T-241."
+    )
+
+
+def test_finding8_tasks_prompt_requires_test_category_gap_acknowledgement() -> None:
+    """Prompt Quality Remediation finding #8: no mechanism connected tasks.py to
+    the harness's TestCategoryGap vocabulary — a harness that recorded a
+    deferred test category had no defined tasks-stage behavior, so known-
+    deferred coverage could silently disappear downstream. tasks.py's system
+    prompt (the task-design rules) and its user-prompt verify checklist must
+    both instruct acknowledgement of any TestCategoryGap record.
+    """
+    src = _read_tasks_prompt()
+    assert "TestCategoryGap" in src, (
+        "tasks.py must reference the harness's TestCategoryGap vocabulary so a "
+        "deferred coverage category is never silently unacknowledged."
+    )
+    # Must appear in both places: the generation rule (system prompt) and the
+    # verify checklist (user prompt) — a rule with no verify step is easy to
+    # regress silently.
+    assert src.count("TestCategoryGap") >= 2, (
+        "tasks.py must reference TestCategoryGap in both the task-design rules "
+        "and the 'Before returning, verify' checklist."
     )
 
 
@@ -686,14 +737,25 @@ def test_t242_frontend_section_requires_error_boundaries() -> None:
 
 
 def test_t243_tasks_prompt_requires_loading_error_empty_in_frontend_steps() -> None:
-    """T-243 — tasks.py must require loading + error + empty state in Steps."""
+    """T-243 — tasks.py must require loading + error + empty state in Steps.
+
+    Accepts the states named individually ("loading state", "error state",
+    "empty state") or as the compound checklist phrase the prompt actually
+    uses ("loading, error, and empty states" / "loading + error + empty
+    states") — the requirement is that all three are mandated together, not a
+    particular grammatical form.
+    """
     src = _read_tasks_prompt().lower()
-    # All three states must be mandated together in the FE-task checklist.
-    for state in ["loading state", "error state", "empty state"]:
-        assert state in src, (
-            f"tasks.py SYSTEM_PROMPT must require '{state}' implementation in "
-            f"Steps for frontend-touching tasks.  T-243 (audit F-5)."
-        )
+    compound = re.compile(
+        r"loading\s*(?:,|\+)\s*error\s*(?:,|\+)?\s*(?:and\s+)?empty\s+states?"
+    )
+    if not compound.search(src):
+        # Fall back to the individual-phrase form.
+        for state in ["loading state", "error state", "empty state"]:
+            assert state in src, (
+                f"tasks.py SYSTEM_PROMPT must require '{state}' implementation "
+                f"in Steps for frontend-touching tasks.  T-243 (audit F-5)."
+            )
 
 
 def test_t243_tasks_prompt_requires_focus_keyboard_interaction() -> None:

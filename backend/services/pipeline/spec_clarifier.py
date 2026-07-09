@@ -189,6 +189,10 @@ async def request_clarifying_questions(
             stage_type="spec",
             action="clarify",
             model_tier="small",
+            # Finding #10: without this, telemetry recorded the adapter default
+            # prompt_version="local" for every clarifier call, making edits to
+            # spec_clarification.py invisible to the cost ledger.
+            prompt_version=(clarification_prompt.SPEC_CLARIFICATION_PROMPT_VERSION),
             operation="clarify.questions",
             cost_context=LLMCostContext(
                 workspace_id=workspace.id,

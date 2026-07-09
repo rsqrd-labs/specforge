@@ -27,6 +27,7 @@ from services.credit_service import credit_service
 from services.integrations.task_parser import compute_task_ref
 from services.pipeline.increment_service import (
     INCREMENT_CREDIT_COST,
+    INCREMENT_PROMPT_VERSION,
     INCREMENT_STUCK_THRESHOLD_MINUTES,
     IncrementModeNotSupportedError,
     IncrementService,
@@ -170,6 +171,40 @@ def test_system_prompt_treats_baseline_as_immutable() -> None:
     # tasks (the failure mode that regresses into a full regeneration).
     assert "delta" in prompt.lower()
     assert "reproduce any task it already contains" in prompt
+
+
+@pytest.mark.asyncio
+async def test_increment_generation_records_increment_prompt_version(
+    session: AsyncSession, user: User, workspace: Workspace
+) -> None:
+    """Finding #10 (process): increment_service.py was one of three prompts
+    with no version constant, so telemetry recorded the InstrumentedAdapter
+    default prompt_version="local" for every call — an edit to _system_prompt
+    or _user_prompt was invisible to the cost-ledger/telemetry that every
+    other core-gen surface relies on for regression detection.
+    """
+    completion = "### T-003: Add billing\n\n**Description:** Stripe checkout.\n"
+    svc, adapter = _service_with_completion(completion)
+
+    captured: dict[str, object] = {}
+    real_adapter = AsyncMock()
+    real_adapter.complete = AsyncMock(return_value=completion)
+
+    def _fake_instrumented_adapter(*args, **kwargs):
+        captured.update(kwargs)
+        return real_adapter
+
+    with (
+        patch("services.pipeline.increment_service.get_llm", return_value=adapter),
+        patch(
+            "services.pipeline.increment_service.InstrumentedAdapter",
+            side_effect=_fake_instrumented_adapter,
+        ),
+    ):
+        await svc.generate_increment(workspace.id, "add billing", user, session)
+
+    assert captured["prompt_version"] == INCREMENT_PROMPT_VERSION
+    assert captured["prompt_version"] != "local"
 
 
 def test_highest_task_number_finds_max() -> None:

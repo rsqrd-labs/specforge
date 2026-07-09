@@ -273,6 +273,16 @@ def _progress_payload(
 # frontier generation.
 _STAGE_HEARTBEAT_DB_SECONDS = 30.0
 
+# Audit finding #9: refine is the highest-input-variance prompt in the product
+# (arbitrary free-text user instructions over an arbitrary selection) and, until
+# this constant, was the only core-gen surface with no version tracking at all
+# — a quality regression here was both more likely and harder to detect via
+# telemetry than for the four STAGE_PROMPT_VERSIONS-tracked stages. Threaded
+# through the same cache-key/telemetry mechanism those versions use (see
+# `refine()` below); bump on any future edit to the refine system/user prompt.
+# v2: added the worked example below (finding #9's other half).
+REFINE_PROMPT_VERSION = "refine-prompt-v2"
+
 _REFINE_STAGE_RULES: dict[str, str] = {
     "spec": (
         "Stage boundary — SPEC.md is implementation-neutral. Do not introduce API "
@@ -4047,7 +4057,16 @@ class StageManager:
             "- Do not alter section headings, heading levels, or document structure "
             "outside the selected text.\n"
             "- Use the same terminology as the surrounding document. Do not introduce "
-            "synonyms for defined domain terms or entities.\n"
+            "synonyms for defined domain terms or entities.\n\n"
+            "Example (different product; do not copy into your output):\n"
+            '  Selected text: "Users can reset their password."\n'
+            '  Instruction: "Add a rate limit."\n'
+            '  Replacement: "Users can request a password reset, limited to 5 '
+            "requests per 15 minutes per account; further requests return a "
+            'clear cooldown message."\n'
+            "  (Tight scope: only the targeted sentence is rewritten, no "
+            "adjacent identifiers or headings touched, length stays close to "
+            "the original unless expansion was requested.)\n\n"
             f"{stage_refine_rules}\n\n"
             f"{SECURITY_AND_PRIVACY_RULES}"
         )
@@ -4071,7 +4090,13 @@ class StageManager:
             "Provide the replacement text only. Do not rewrite surrounding content."
         )
         cache_key = build_generation_cache_key(
-            prompt_version=STAGE_PROMPT_VERSIONS[stage.type],
+            # REFINE_PROMPT_VERSION, not STAGE_PROMPT_VERSIONS[stage.type]
+            # (finding #9): refine's own prompt text is versioned independently
+            # of the stage's *generation* prompt — the two must not be coupled,
+            # or a refine-prompt edit is invisible to telemetry/cache
+            # invalidation and an unrelated generation-prompt bump spuriously
+            # invalidates every cached refine.
+            prompt_version=REFINE_PROMPT_VERSION,
             stage_type=stage.type,
             operation=route.operation,
             provider=route.provider,
@@ -4134,7 +4159,7 @@ class StageManager:
                 stage_type=stage.type,
                 action="refine",
                 model_tier=route.model_tier,
-                prompt_version=STAGE_PROMPT_VERSIONS[stage.type],
+                prompt_version=REFINE_PROMPT_VERSION,
                 operation=route.operation,
                 cache_hit=False,
                 batch=False,

@@ -364,7 +364,7 @@ def test_chunk_user_prompt_wraps_prior_chunks_as_untrusted_context() -> None:
         ],
     )
 
-    assert '<untrusted_content source="harness_prior_chunks">' in prompt
+    assert '<untrusted_content source="harness_prior_chunks" nonce="' in prompt
     assert "BEGIN_UNTRUSTED_CONTENT:harness_prior_chunks" in prompt
     assert "harness/tests/test_auth.py" in prompt
     assert "Continue from them without duplicating" in prompt
@@ -3355,17 +3355,90 @@ async def test_refine_matches_raw_selection_but_sanitizes_prompt_fields() -> Non
     assert result.proposed == "hello earth"
     system_prompt, user_prompt = mock_adapter.complete.await_args.args[:2]
     assert "Non-negotiable security and privacy rules:" in system_prompt
-    assert '<untrusted_content source="current_document">' in user_prompt
-    assert '<untrusted_content source="selected_text">' in user_prompt
-    assert '<untrusted_content source="instruction">' in user_prompt
+    assert '<untrusted_content source="current_document" nonce="' in user_prompt
+    assert '<untrusted_content source="selected_text" nonce="' in user_prompt
+    assert '<untrusted_content source="instruction" nonce="' in user_prompt
+    # The closing tag now carries a keyed, content-bound nonce
+    # (`</selected_text:{nonce}>` — finding #2's delimiter-spoofing fix), so
+    # split on the nonce-agnostic prefix rather than the old bare
+    # `</selected_text>` string.
     selected_prompt = user_prompt.split("<selected_text>\n", 1)[1].split(
-        "\n</selected_text>", 1
+        "\n</selected_text:", 1
     )[0]
     instruction_prompt = user_prompt.split("<instruction>\n", 1)[1].split(
-        "\n</instruction>", 1
+        "\n</instruction:", 1
     )[0]
     assert selected_prompt == "world"
     assert instruction_prompt == "tighten"
+
+
+def test_refine_system_prompt_contains_worked_example() -> None:
+    """Finding #9: refine is the single highest-input-variance prompt in the
+    product (arbitrary free-text instructions over an arbitrary selection) and
+    had zero worked examples, unlike every core-stage prompt (which each earn
+    full marks on examples via a complete worked instance). A regression here
+    (someone removing the example) should fail a test, not just a code review.
+    """
+    from pathlib import Path
+
+    from services.pipeline import stage_manager
+
+    src = Path(stage_manager.__file__).read_text()
+    assert "Example (different product; do not copy into your output):" in src
+    assert "Add a rate limit" in src
+    assert "Tight scope" in src
+
+
+@pytest.mark.asyncio
+async def test_refine_cache_key_and_telemetry_use_refine_prompt_version() -> None:
+    """Finding #9: refine's cache key / telemetry must be versioned by
+    REFINE_PROMPT_VERSION, not STAGE_PROMPT_VERSIONS[stage.type] (the stage's
+    *generation* prompt version). Coupling the two was a real bug: an edit to
+    refine's own prompt was invisible to telemetry unless the unrelated
+    generation prompt also bumped, and a generation-prompt bump spuriously
+    invalidated every cached refine.
+    """
+    from schemas.stage import RefineRequest
+    from services.pipeline.stage_manager import (
+        REFINE_PROMPT_VERSION,
+        STAGE_PROMPT_VERSIONS,
+    )
+
+    workspace_id = uuid4()
+    stage = _make_stage(workspace_id, "spec", status="draft", content="hello world")
+    workspace = _make_workspace([stage])
+    user = _make_user()
+    request = RefineRequest(
+        instruction="rewrite",
+        selection_start=0,
+        selection_end=5,
+        selected_text="hello",
+    )
+
+    svc = StageManager(redis_client=_FakeRedis())
+    db = _MultiQueryDB([stage, workspace])
+    deduction = CreditLedger(id=uuid4(), user_id=user.id, amount=-3, reason="refine")
+
+    captured: dict[str, Any] = {}
+    with (
+        patch(
+            "services.pipeline.stage_manager.credit_service.deduct",
+            new_callable=AsyncMock,
+            return_value=deduction,
+        ),
+        patch("services.pipeline.stage_manager.get_llm") as mock_get_llm,
+        patch(
+            "services.pipeline.stage_manager.build_generation_cache_key",
+            wraps=lambda **kw: captured.update(kw) or "cache-key",
+        ),
+    ):
+        mock_adapter = MagicMock()
+        mock_adapter.complete = AsyncMock(return_value="world")
+        mock_get_llm.return_value = mock_adapter
+        await svc.refine(stage.id, request, user, db)
+
+    assert captured["prompt_version"] == REFINE_PROMPT_VERSION
+    assert captured["prompt_version"] != STAGE_PROMPT_VERSIONS["spec"]
 
 
 @pytest.mark.asyncio

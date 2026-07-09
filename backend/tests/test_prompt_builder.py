@@ -77,7 +77,7 @@ async def test_build_prompt_spec_contains_problem_statement() -> None:
     redis = _FakeRedis()
     _, user_prompt, _ = await build_prompt("spec", workspace, _FakeDB(), redis)
     assert "Build a todo app with persistence" in user_prompt
-    assert '<untrusted_content source="problem_statement">' in user_prompt
+    assert '<untrusted_content source="problem_statement" nonce="' in user_prompt
     assert "BEGIN_UNTRUSTED_CONTENT:problem_statement" in user_prompt
     assert "END_UNTRUSTED_CONTENT:problem_statement" in user_prompt
 
@@ -170,7 +170,7 @@ async def test_build_prompt_plan_contains_spec_content() -> None:
     redis = _FakeRedis()
     _, user_prompt, _ = await build_prompt("plan", workspace, _FakeDB(stages), redis)
     assert "<spec_content>" in user_prompt
-    assert '<untrusted_content source="spec_content">' in user_prompt
+    assert '<untrusted_content source="spec_content" nonce="' in user_prompt
     assert "BEGIN_UNTRUSTED_CONTENT:spec_content" in user_prompt
     assert "END_UNTRUSTED_CONTENT:spec_content" in user_prompt
 
@@ -389,6 +389,9 @@ async def test_build_prompt_empty_research_context_is_byte_identical(
         stage_name, workspace, _FakeDB(stages), _FakeRedis(), research_context=""
     )
 
+    # wrap_untrusted_content's fence nonce is a keyed HMAC over
+    # (label, content) — deterministic by design (issue #39 prompt caching) —
+    # so identical inputs must render byte-identical prompts, no normalization.
     assert default_user == explicit_user
     assert default_sys == explicit_sys
     assert "External Research Context" not in default_user
