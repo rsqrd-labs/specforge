@@ -6710,6 +6710,7 @@ button:disabled {
 .billing-payment-status,
 .billing-state-panel,
 .billing-balance-panel,
+.billing-package-card,
 .billing-history-section {
   border: 1px solid rgba(143, 78, 0, 0.14);
   border-radius: 18px;
@@ -6857,27 +6858,18 @@ button:disabled {
 }
 
 .billing-offer-grid {
-  display: flex;
   margin-bottom: 30px;
 }
 
 .billing-package-card {
   position: relative;
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 24px;
-  width: min(100%, 540px);
+  justify-content: space-between;
+  gap: 18px 28px;
   overflow: hidden;
-  border: 1px solid rgba(143, 78, 0, 0.15);
-  border-radius: 18px;
-  background:
-    linear-gradient(145deg, rgba(255, 255, 255, 0.82), rgba(255, 248, 240, 0.64)),
-    rgba(253, 246, 238, 0.76);
-  padding: 24px;
-  box-shadow:
-    0 18px 50px rgba(143, 78, 0, 0.10),
-    inset 0 1px 0 rgba(255, 255, 255, 0.78);
+  padding: 28px 30px;
 }
 
 .billing-package-card::before {
@@ -6891,6 +6883,7 @@ button:disabled {
 .billing-package-copy {
   position: relative;
   z-index: 1;
+  min-width: 200px;
 }
 
 .billing-package-copy h2 {
@@ -6920,6 +6913,7 @@ button:disabled {
 .billing-buy-btn {
   position: relative;
   z-index: 1;
+  flex-shrink: 0;
   min-height: 46px;
   border: 0;
   border-radius: 12px;
@@ -6946,8 +6940,9 @@ button:disabled {
    off (PAYMENTS_ENABLED=false or the active provider is unconfigured). Same calm
    idiom as .billing-debt-note — informational, never an error. */
 .billing-unavailable-note {
-  margin: 4px 0 0;
+  flex: 1 1 260px;
   max-width: 42ch;
+  margin: 0;
   border-left: 2px solid var(--color-outline);
   padding: 2px 0 2px 12px;
   color: var(--color-on-surface-variant);
@@ -6957,7 +6952,7 @@ button:disabled {
 }
 
 .billing-checkout-error {
-  grid-column: 1 / -1;
+  flex-basis: 100%;
   margin: 0;
   border-radius: 10px;
   background: var(--color-error-container);
@@ -7216,9 +7211,12 @@ button:disabled {
     padding: 24px 16px 48px;
   }
 
-  .billing-balance-panel,
-  .billing-package-card {
+  .billing-balance-panel {
     grid-template-columns: 1fr;
+  }
+
+  .billing-package-card {
+    padding: 24px;
   }
 
   .billing-balance-summary {
