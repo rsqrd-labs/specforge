@@ -47,7 +47,7 @@ describe("LegalPrivacy", () => {
     renderPage()
     expect(screen.getByText(/refresh_token/)).toBeInTheDocument()
     expect(
-      screen.getByText(/don.t use advertising, analytics, or tracking cookies/i),
+      screen.getByText(/don.t use advertising, analytics, or third-party tracking cookies/i),
     ).toBeInTheDocument()
   })
 

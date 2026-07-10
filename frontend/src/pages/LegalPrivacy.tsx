@@ -108,18 +108,16 @@ going forward.
 
 ## 6. Cookies
 
-We use exactly one cookie:
+We use a single, strictly necessary cookie:
 
-| Cookie | Purpose | HttpOnly | Secure | SameSite | Lifetime |
-|---|---|---|---|---|---|
-| \`refresh_token\` | Keeps you signed in between visits | Yes | In production | \`None\` in prod, \`Lax\` in dev | 7 days |
+| Cookie | Purpose | Type | Lifetime |
+|---|---|---|---|
+| \`refresh_token\` | Keeps you signed in between visits | Strictly necessary (first-party) | 7 days |
 
-\`SameSite=None\` is required in production because the app and API are
-served from different origins; it does not make the cookie readable by other
-sites, since \`HttpOnly\` already prevents any script access to it.
-
-This cookie is strictly necessary for authentication — we don't use
-advertising, analytics, or tracking cookies.
+This cookie is essential for authentication, is protected with
+industry-standard security attributes, and cannot be used to track you
+across other sites. We don't use advertising, analytics, or third-party
+tracking cookies.
 
 ## 7. Data Retention
 
