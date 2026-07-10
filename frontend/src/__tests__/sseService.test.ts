@@ -4,6 +4,7 @@ import { createSSEConnection } from "../services/sseService"
 const apiMocks = vi.hoisted(() => ({
   accessToken: null as string | null,
   csrfToken: null as string | null,
+  sessionExpired: false,
   getCsrfToken: vi.fn<() => Promise<string | null>>(),
   refreshAccessToken: vi.fn<() => Promise<string | null>>(),
 }))
@@ -12,6 +13,7 @@ vi.mock("../services/api", () => ({
   getAccessToken: () => apiMocks.accessToken,
   getCsrfToken: apiMocks.getCsrfToken,
   refreshAccessToken: apiMocks.refreshAccessToken,
+  isSessionExpired: () => apiMocks.sessionExpired,
 }))
 
 function makeStream(text: string): ReadableStream<Uint8Array> {
@@ -42,6 +44,7 @@ beforeEach(() => {
   vi.spyOn(console, "warn").mockImplementation(() => {})
   apiMocks.accessToken = null
   apiMocks.csrfToken = null
+  apiMocks.sessionExpired = false
   apiMocks.getCsrfToken.mockReset()
   apiMocks.getCsrfToken.mockImplementation(() =>
     Promise.resolve(apiMocks.csrfToken),
@@ -209,6 +212,39 @@ describe("createSSEConnection retry behaviour", () => {
     expect(onDone).toHaveBeenCalledWith("s1")
     expect(onError).not.toHaveBeenCalled()
     expect(console.warn).not.toHaveBeenCalled()
+  })
+
+  it("fails fast without retrying when the session is confirmed expired", async () => {
+    // Regression: previously a definitively-dead refresh token (backend 401 on
+    // /auth/refresh) fell through to the generic transport-failure path and
+    // burned all 3 backoff retries (~7s), each re-attempting a refresh that
+    // was guaranteed to fail, before finally surfacing a vague "stream failed"
+    // error. It must now bail on the very first attempt with an honest,
+    // actionable message.
+    apiMocks.accessToken = "expired"
+    apiMocks.refreshAccessToken.mockImplementation(async () => {
+      apiMocks.sessionExpired = true
+      return null
+    })
+
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(() =>
+      mockFetchFail(401),
+    )
+
+    const onError = vi.fn()
+
+    createSSEConnection("/stream", vi.fn(), vi.fn(), onError, vi.fn())
+
+    await vi.runAllTimersAsync()
+
+    expect(apiMocks.refreshAccessToken).toHaveBeenCalledTimes(1)
+    expect(fetchSpy).toHaveBeenCalledTimes(1) // no retry burst
+    expect(onError).toHaveBeenCalledTimes(1)
+    expect(onError.mock.calls[0][0].code).toBe("session_expired")
+    expect(onError.mock.calls[0][0].message).toBe(
+      "Your session has expired. Please sign in again.",
+    )
+    expect(console.warn).not.toHaveBeenCalled() // never entered the retry path
   })
 
   it("uses a fresh CSRF token for each retry attempt", async () => {

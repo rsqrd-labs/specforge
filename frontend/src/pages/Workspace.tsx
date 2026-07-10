@@ -1160,7 +1160,16 @@ export default function Workspace() {
   }, [activeStage, guardWorkspaceMutation, setStage, refreshWorkspace])
 
   useEffect(() => {
-    if (!streamError || streamError.code === "quality_gate_failed") return
+    // `session_expired` is intentionally skipped here: the app-level
+    // SessionExpiryWatcher already shows the single authoritative explanation
+    // and redirects to sign-in — a second, generic "action could not finish"
+    // alert from this effect would just be noise on top of it.
+    if (
+      !streamError ||
+      streamError.code === "quality_gate_failed" ||
+      streamError.code === "session_expired"
+    )
+      return
 
     const retryable = new Set([
       "provider_timeout",

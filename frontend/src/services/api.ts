@@ -83,12 +83,93 @@ export interface ProviderCatalog {
 let accessToken: string | null = null
 let refreshPromise: Promise<string | null> | null = null
 
+// Session-death circuit breaker (resilience fix: an idle tab whose 15-minute
+// access token expires must not retry-loop /auth/refresh forever). Once the
+// backend has *definitively* rejected a refresh (its own 401 — the refresh
+// token is invalid, expired, or revoked), retrying immediately cannot
+// succeed: the server-side fact won't change on its own. Latching that fact
+// and skipping the network round trip is the difference between "one honest
+// failure" and every 30-second poller in the app hammering the endpoint
+// indefinitely.
+//
+// The latch is a cooldown, not a permanent trip. The refresh-token cookie is
+// shared across every tab on this origin, so another tab (or a fresh sign-in
+// in this one) can make the session valid again without this tab knowing —
+// a permanent latch would leave a stale tab stuck until a hard reload even
+// after the underlying session recovered. Expiring the latch after a bounded
+// window lets a later, deliberate access attempt (e.g. the user navigating
+// back into a protected route) probe again, while still capping the
+// worst-case call rate to at most once per window instead of once per poll.
+//
+// A transient failure (network error, timeout, 5xx) never latches this — the
+// refresh token may still be perfectly good, so the very next attempt must
+// be allowed to try again immediately.
+const SESSION_EXPIRED_COOLDOWN_MS = 60_000
+let sessionExpiredAt: number | null = null
+const sessionExpiredListeners = new Set<() => void>()
+
+// Bumped every time a token is proven fresh (login or successful refresh),
+// and also by `logout()` on a voluntary sign-out. A refresh call captures
+// this at start and re-checks it before latching a 401 as a definitive
+// failure: if the generation moved on while that call was in flight, its
+// now-stale rejection must not retroactively react to a session state that
+// already changed for a known reason. Two cases:
+//   - A newer, valid session was established (a login completing, or another
+//     refresh succeeding) — the fresh session must not be killed.
+//   - The user voluntarily logged out — a stale refresh that was already in
+//     flight (e.g. a background poller reacting to an earlier 401) rejecting
+//     moments later describes a session death we already caused deliberately,
+//     not a surprise worth alarming the user over.
+// In this app's current OAuth flow (a full-page redirect — see Landing.tsx)
+// the JS module is torn down on login, so the login-race case can't actually
+// occur today; the guard is cheap and keeps it that way if the flow ever
+// changes to something that preserves module state (e.g. a popup-based
+// sign-in).
+let authGeneration = 0
+
 export function setAccessToken(token: string | null): void {
   accessToken = token
+  if (token) {
+    // Fresh session proof (login or a successful refresh) — the latch, if
+    // set, no longer describes reality.
+    sessionExpiredAt = null
+    authGeneration += 1
+  }
 }
 
 export function getAccessToken(): string | null {
   return accessToken
+}
+
+/** True while a definitively-rejected refresh's cooldown window is still
+ *  active — refresh attempts are skipped (not retried against the network)
+ *  until it lapses. */
+export function isSessionExpired(): boolean {
+  return sessionExpiredAt !== null && Date.now() - sessionExpiredAt < SESSION_EXPIRED_COOLDOWN_MS
+}
+
+/**
+ * Subscribe to the "session confirmed dead" signal (fired once per cooldown
+ * window, not once per failed caller). Returns an unsubscribe function. Kept
+ * framework-agnostic (no store/React import here) so this module stays a
+ * plain HTTP client; the app wires a subscriber at boot to react (see
+ * `SessionExpiryWatcher`).
+ */
+export function onSessionExpired(listener: () => void): () => void {
+  sessionExpiredListeners.add(listener)
+  return () => sessionExpiredListeners.delete(listener)
+}
+
+function markSessionExpired(): void {
+  if (isSessionExpired()) return // still within the window — one alarm, not one per poller
+  sessionExpiredAt = Date.now()
+  for (const listener of sessionExpiredListeners) {
+    try {
+      listener()
+    } catch {
+      // A subscriber must never be able to break the auth pipeline.
+    }
+  }
 }
 
 export function getApiErrorMessage(
@@ -208,7 +289,16 @@ export async function getCsrfToken(): Promise<string | null> {
 }
 
 export async function refreshAccessToken(): Promise<string | null> {
+  if (isSessionExpired()) {
+    // Still within the cooldown window from a definitively-dead refresh —
+    // skip the network call rather than re-asking a question the server just
+    // answered. The window is bounded (not permanent), so a later, deliberate
+    // attempt can still probe again.
+    return null
+  }
+
   if (!refreshPromise) {
+    const generationAtStart = authGeneration
     refreshPromise = refreshApi
       .post<RefreshTokenResponse>("/auth/refresh")
       .then((response) => {
@@ -219,6 +309,20 @@ export async function refreshAccessToken(): Promise<string | null> {
 
         setAccessToken(refreshedToken)
         return refreshedToken
+      })
+      .catch((error) => {
+        // A definitive 401 from the refresh endpoint means the refresh token
+        // itself is invalid/expired/revoked — latch it. Anything else (no
+        // response, timeout, 5xx) is transient and must not lock the user out
+        // of a session that may still be valid. Also skip latching if a newer
+        // session was proven valid while this call was in flight — this
+        // failure describes a session that no longer matters.
+        const isDefinitiveRejection =
+          axios.isAxiosError(error) && error.response?.status === 401
+        if (isDefinitiveRejection && authGeneration === generationAtStart) {
+          markSessionExpired()
+        }
+        return null
       })
       .finally(() => {
         refreshPromise = null
@@ -337,8 +441,17 @@ export async function getCurrentUser(): Promise<User> {
 }
 
 export async function logout(): Promise<void> {
-  await refreshApi.post("/auth/logout")
-  setAccessToken(null)
+  // Bump the generation synchronously, before the network call — not after —
+  // so a stale refresh that was already in flight before this logout (e.g. a
+  // background poller reacting to an earlier 401) is covered even if its 401
+  // lands while this POST is still in flight (see the comment on
+  // `authGeneration` above).
+  authGeneration += 1
+  try {
+    await refreshApi.post("/auth/logout")
+  } finally {
+    setAccessToken(null)
+  }
 }
 
 export async function completeGoogleCallback(

@@ -16,6 +16,13 @@ export function ProtectedRoute({ children }: ProtectedRouteProps) {
   useEffect(() => {
     if (user) {
       setHasCheckedSession(true)
+      // Mark this mount as having checked the session even though it didn't
+      // need to call fetchMe(): otherwise, if `user` later flips back to null
+      // within the same mount (e.g. a live session dying mid-use — see
+      // SessionExpiryWatcher), this effect re-fires, sees an unset ref, and
+      // issues a redundant fetchMe()/refresh call moments before the render
+      // below redirects away anyway.
+      attemptedRef.current = true
       return
     }
 

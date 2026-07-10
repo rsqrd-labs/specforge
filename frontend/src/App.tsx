@@ -3,6 +3,7 @@ import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom"
 import { ActionAlertProvider } from "./components/shared/ActionAlert"
 import { BrandLoader } from "./components/shared/BrandLoader"
 import { ProtectedRoute } from "./components/shared/ProtectedRoute"
+import { SessionExpiryWatcher } from "./components/shared/SessionExpiryWatcher"
 import { featureFlags } from "./config/featureFlags"
 import AuthCallback from "./pages/AuthCallback"
 import Billing from "./pages/Billing"
@@ -41,6 +42,7 @@ export default function App() {
   return (
     <BrowserRouter>
       <ActionAlertProvider>
+        <SessionExpiryWatcher />
         <Routes>
           <Route path="/" element={<Landing />} />
           <Route path="/auth/callback" element={<AuthCallback />} />

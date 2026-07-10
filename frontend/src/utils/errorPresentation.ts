@@ -160,6 +160,20 @@ export function actionAlertFromStreamError(
         secondaryAction: options.secondaryAction,
         dismissLabel: options.dismissLabel,
       })
+    case "session_expired":
+      // Defense in depth: the app-level SessionExpiryWatcher (subscribed to
+      // api.ts's onSessionExpired) is the primary path — it clears the user
+      // and redirects to sign-in. This case only fires if a StreamError with
+      // this code reaches here through some other path, so it must still say
+      // something true rather than fall through to the generic message.
+      return actionAlertFromMessage({
+        title: "Session expired",
+        message: "Your session has expired. Please sign in again to continue.",
+        source: "Session",
+        primaryAction: options.primaryAction,
+        secondaryAction: options.secondaryAction,
+        dismissLabel: options.dismissLabel,
+      })
     default:
       return actionAlertFromMessage({
         title: "Action could not finish",

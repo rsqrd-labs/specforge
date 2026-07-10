@@ -21,6 +21,21 @@ describe("error presentation mappers", () => {
     expect(alert.source).toBe("Generation")
   })
 
+  it("maps session_expired to an honest, actionable message", () => {
+    // Defense-in-depth path: the app-level SessionExpiryWatcher is the
+    // primary handler for a dead session, but any StreamError with this code
+    // that reaches this mapper (rather than being filtered upstream) must
+    // still say something true, not fall through to the generic copy.
+    const alert = actionAlertFromStreamError({
+      code: "session_expired",
+      message: "raw code, not shown to the user",
+    })
+
+    expect(alert.title).toBe("Session expired")
+    expect(alert.message).toMatch(/sign in again/i)
+    expect(alert.source).toBe("Session")
+  })
+
   it("maps billing checkout and payment states to user-safe copy", () => {
     expect(billingAlert("checkout").message).toMatch(/not charged/i)
     expect(billingAlert("payment-timeout").title).toMatch(/credits still syncing/i)

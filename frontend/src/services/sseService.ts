@@ -1,5 +1,5 @@
 import type { EvalResult, QualityGateInfo } from "../types/stage"
-import { getAccessToken, getCsrfToken, refreshAccessToken } from "./api"
+import { getAccessToken, getCsrfToken, isSessionExpired, refreshAccessToken } from "./api"
 
 interface SSEControl {
   close: () => void
@@ -204,6 +204,19 @@ export function createSSEConnection(
             credentials: "include",
             signal: currentController.signal,
           })
+        } else if (isSessionExpired()) {
+          // The refresh was definitively rejected — the session is dead, not
+          // flaky. Retrying the connection 3 more times against a backend that
+          // will reject every attempt identically wastes ~7s of backoff and
+          // ends in a vague "stream failed" message. Fail fast with the truth.
+          onError(
+            new StreamError(
+              "session_expired",
+              "Your session has expired. Please sign in again.",
+            ),
+          )
+          close()
+          return true // terminal — do not retry
         }
       }
 
