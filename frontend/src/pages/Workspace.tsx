@@ -93,7 +93,11 @@ import {
   actionAlertFromMessage,
   actionAlertFromStreamError,
 } from "../utils/errorPresentation"
-import { deriveAdvisoryFindings, deriveFinaliseGateBlock } from "../utils/qualityGate"
+import {
+  deriveAdvisoryFindings,
+  deriveFinaliseGateBlock,
+  deriveJudgeReconciliationNote,
+} from "../utils/qualityGate"
 import { pollForFreshVerdict } from "../utils/constructionVerdict"
 import { AdvisoryFindingsPanel } from "../components/workspace/AdvisoryFindingsPanel"
 import { featureFlags } from "../config/featureFlags"
@@ -1849,6 +1853,13 @@ export default function Workspace() {
 
   const evalResult = evalResults[activeStage.id] ?? activeStage.eval_result ?? null
   const isEvalError = evalError[activeStage.id] ?? false
+  // When the eval badge says "Ready" while the critic left suggestions for the
+  // same version, explain the split instead of showing two silently
+  // contradictory signals (audit theme 1).
+  const judgeReconciliationNote = deriveJudgeReconciliationNote(
+    evalResult,
+    advisoryFindings,
+  )
   const showStaleWarning = activeStage.status === "stale"
   const upstreamType = previousStageType(activeStage.type)
   const taskIssues = evalResult?.tasks_without_ref ?? []
@@ -2269,6 +2280,7 @@ export default function Workspace() {
             onRegenerate={handleGateRegenerate}
             actionsDisabled={workspaceGenerationLock.locked}
             disabledReason={workspaceLockReason}
+            reconciliationNote={judgeReconciliationNote}
           />
         ) : null}
 

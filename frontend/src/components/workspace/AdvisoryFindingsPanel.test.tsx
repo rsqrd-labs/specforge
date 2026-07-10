@@ -120,3 +120,31 @@ describe("AdvisoryFindingsPanel", () => {
     ).toBeInTheDocument()
   })
 })
+
+describe("AdvisoryFindingsPanel reconciliation note", () => {
+  it("renders the judge-reconciliation note when provided", () => {
+    render(
+      <AdvisoryFindingsPanel
+        findings={findings}
+        stageType="spec"
+        reconciliationNote="The automated quality check found no gaps in this version, while the deeper review left these suggestions."
+      />,
+    )
+    fireEvent.click(screen.getByRole("button", { name: "Show suggestions" }))
+    expect(
+      screen.getByText(/automated quality check found no gaps/i),
+    ).toBeInTheDocument()
+  })
+
+  it("renders no reconciliation copy when the judges do not disagree", () => {
+    render(
+      <AdvisoryFindingsPanel
+        findings={findings}
+        stageType="spec"
+        reconciliationNote={null}
+      />,
+    )
+    fireEvent.click(screen.getByRole("button", { name: "Show suggestions" }))
+    expect(screen.queryByText(/automated quality check/i)).not.toBeInTheDocument()
+  })
+})

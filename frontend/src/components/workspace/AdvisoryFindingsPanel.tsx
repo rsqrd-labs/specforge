@@ -14,6 +14,11 @@ interface AdvisoryFindingsPanelProps {
   actionsDisabled?: boolean
   /** Reason the actions are disabled (shown as a note + tooltip). */
   disabledReason?: string
+  /** Optional reconciliation copy shown when the eval badge ("Ready") and
+   *  these suggestions visibly disagree about the same version — derived by
+   *  `deriveJudgeReconciliationNote`, otherwise the two independent judge
+   *  signals sit side by side reading as a contradiction (audit theme 1). */
+  reconciliationNote?: string | null
 }
 
 /** Non-blocking "suggestions" surface for a delivered, finalisable draft whose
@@ -32,6 +37,7 @@ export function AdvisoryFindingsPanel({
   onRegenerate,
   actionsDisabled = false,
   disabledReason,
+  reconciliationNote,
 }: AdvisoryFindingsPanelProps) {
   // Default to the slim, re-openable pill rather than the full card. The advisory
   // is optional/non-blocking, and the dense workspace has no collision-free corner
@@ -119,6 +125,11 @@ export function AdvisoryFindingsPanel({
             ? `You can finalise this ${stageType} now. These are improvements the quality review suggested — address them only if they matter to you.`
             : `You can finalise this ${stageType} now. These notes explain how it was generated — review them if they matter to you.`}
         </p>
+        {reconciliationNote ? (
+          <p className="quality-gate-subtitle quality-gate-reconciliation">
+            {reconciliationNote}
+          </p>
+        ) : null}
         <ul className="quality-gate-findings">
           {findings.map((finding, index) => (
             <li key={index} className="quality-gate-finding">

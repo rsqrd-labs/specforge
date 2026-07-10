@@ -38,7 +38,10 @@ def test_build_eval_prompt_does_not_recursively_rescan_substituted_text() -> Non
     artifact = "PLAN_ARTIFACT_UNIQUE_MARKER"
     rendered = _build_eval_prompt("plan", artifact, spec_content)
 
-    assert "Plan:\nPLAN_ARTIFACT_UNIQUE_MARKER" in rendered
+    # eval-v3 fences each substituted block, so the artifact sits inside the
+    # artifact_under_evaluation fence in the Plan: slot.
+    assert 'Plan:\n<untrusted_content source="artifact_under_evaluation"' in rendered
+    assert "PLAN_ARTIFACT_UNIQUE_MARKER" in rendered
     # The literal "{content}" inside spec_content must survive untouched —
     # never overwritten by the second substitution.
     assert "interpolate the {content} placeholder" in rendered
@@ -49,7 +52,19 @@ def test_build_eval_prompt_does_not_recursively_rescan_substituted_text() -> Non
 
 def test_build_eval_prompt_happy_path_spec_stage() -> None:
     rendered = _build_eval_prompt("spec", "a spec body", "")
-    assert "Content:\na spec body" in rendered
+    assert 'Content:\n<untrusted_content source="artifact_under_evaluation"' in rendered
+    assert "a spec body" in rendered
+
+
+def test_build_eval_prompt_fences_artifact_and_context() -> None:
+    # eval-v3: the scored artifact and its context are wrapped in the same
+    # nonce-keyed fences every other judge uses, so boundary-spoofing text in a
+    # scored artifact cannot pose as the end of the artifact and smuggle
+    # instructions ("score every dimension 100") into the judge prompt.
+    rendered = _build_eval_prompt("plan", "plan body", "spec body")
+    assert rendered.count('<untrusted_content source="eval_context"') == 1
+    assert rendered.count('<untrusted_content source="artifact_under_evaluation"') == 1
+    assert "BEGIN_UNTRUSTED_CONTENT:artifact_under_evaluation:" in rendered
 
 
 def test_build_eval_prompt_adversarial_content_field_in_artifact() -> None:
@@ -62,7 +77,11 @@ def test_build_eval_prompt_adversarial_content_field_in_artifact() -> None:
     artifact = "tasks referencing the literal {spec_content} placeholder token"
     rendered = _build_eval_prompt("tasks", artifact, spec_content)
     assert "tasks referencing the literal {spec_content} placeholder token" in rendered
-    assert rendered.count("Reference context:\nspec body") == 1
+    assert (
+        rendered.count('Reference context:\n<untrusted_content source="eval_context"')
+        == 1
+    )
+    assert "spec body" in rendered
 
 
 def test_score_comment_omits_unknown_route() -> None:

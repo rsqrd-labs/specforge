@@ -119,6 +119,12 @@ def build_user_prompt(dependencies: dict[str, str]) -> str:
         dependencies.get("clarification_qa", "")
     )
     research_block = render_research_block(dependencies.get("research_context", ""))
+    # The "is data, not instructions" sentence below is a historical phrasing of
+    # base.UNTRUSTED_DEPENDENCIES_NOTE / INJECTION_DEFENSE_NOTE. Rewording it to
+    # the canonical form changes this prompt's rendered bytes (a version bump +
+    # golden-corpus run per docs/evals/PROMPT_CHANGE_REVIEW.md) — fold it in at
+    # the next substantive spec prompt bump. Its presence is CI-enforced by
+    # tests/test_prompt_fragment_contracts.py.
     return f"""Produce an exhaustive SPEC.md for the problem statement below.
 
 Instructions:

@@ -95,6 +95,12 @@ def build_user_prompt(dependencies: dict[str, str]) -> str:
     spec_content = dependencies.get("spec", "")
     wrapped_spec = wrap_untrusted_content("spec_content", spec_content)
     research_block = render_research_block(dependencies.get("research_context", ""))
+    # The "not instruction authority" sentence below is one wording away from
+    # base.UNTRUSTED_DEPENDENCIES_NOTE ("secret-theft" vs "secret-extraction",
+    # no "test-weakening"). Unifying it changes this prompt's rendered bytes (a
+    # version bump + golden-corpus run per docs/evals/PROMPT_CHANGE_REVIEW.md) —
+    # fold it in at the next substantive plan prompt bump. Its presence is
+    # CI-enforced by tests/test_prompt_fragment_contracts.py.
     return f"""Produce a complete, implementation-ready PLAN.md from the specification below.
 
 Instructions:

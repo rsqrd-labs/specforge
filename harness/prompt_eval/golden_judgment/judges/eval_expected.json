@@ -1,0 +1,19 @@
+{
+  "overall_score": 86,
+  "completeness": 93,
+  "clarity": 80,
+  "coverage_percent": null,
+  "uncovered_reqs": ["FR-004"],
+  "tasks_without_ref": [
+    {
+      "task_number": 7,
+      "task_title": "Wire webhooks",
+      "reason": "No clear test or harness reference.",
+      "referenced_test": null,
+      "gap_type": null,
+      "remediation": null,
+      "harness_file": null,
+      "code_stub": null
+    }
+  ]
+}

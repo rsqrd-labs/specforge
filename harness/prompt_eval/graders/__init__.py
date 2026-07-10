@@ -19,6 +19,11 @@ from prompt_eval.graders.format import (
     table_column_counts,
     trailing_newline_policy,
 )
+from prompt_eval.graders.judgment import (
+    harness_patch_covers_targets,
+    harness_patch_is_additive,
+    increment_growth_is_monotonic,
+)
 from prompt_eval.graders.quality import (
     adr_completeness_pct,
     artifact_depth_pct,
@@ -80,4 +85,11 @@ __all__ = [
     "GraderResult",
     "clamp_score",
     "make_result",
+    # Non-stage-shaped graders for the previously uncovered surfaces (audit
+    # theme 4). Deliberately NOT in ALL_GRADERS: a gap-patch is graded against
+    # (existing_harness, target_reqs) and an increment against its baseline
+    # TASKS.md, not the (stage_type, artifact_md, deps) triple.
+    "harness_patch_covers_targets",
+    "harness_patch_is_additive",
+    "increment_growth_is_monotonic",
 ]

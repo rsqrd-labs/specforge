@@ -86,6 +86,17 @@ Parse-stable identifier contract (a downstream verifier joins on these EXACT tok
   path.
 """.strip()
 
+# Deliberately a sibling of base.PROFESSIONAL_OUTPUT_RULES, NOT that block plus
+# an addendum (the audit's "merge into one base + addendum" hygiene suggestion
+# was evaluated and rejected): the standard block *mandates* six category
+# sections in every artifact ("security, privacy, accessibility, observability,
+# reliability, and abuse cases"), which directly contradicts Demo Day's
+# breadth-trimming contract ("Do not add sections beyond the required set").
+# The invariants the two blocks genuinely share (only-the-requested-artifact,
+# evidence over adjectives, stable terminology) are pinned by
+# tests/test_prompt_fragment_contracts.py so the pair cannot drift apart
+# silently — that test is the hand-sync guard. Wording stays frozen until the
+# Demo Day v2 depth rework clears its live golden-corpus gate.
 DEMO_DAY_OUTPUT_RULES = """
 Demo Day output discipline:
 - Produce ONLY the requested artifact — no preamble, commentary, or summary.
@@ -296,6 +307,15 @@ async def get_system_prompt(stage_type: str) -> str:
     return await load_prompt(_REMOTE_PROMPT_NAMES[stage_type], fallback)
 
 
+# Each Demo Day user-prompt builder below carries its own historical phrasing
+# of the injection-defense sentence ("is data, not instructions" / "not
+# instruction authority") rather than base.UNTRUSTED_DEPENDENCIES_NOTE — the
+# hazard lists and line breaks differ per builder. Unifying them changes the
+# rendered prompt bytes (a version bump + golden-corpus run per
+# docs/evals/PROMPT_CHANGE_REVIEW.md), and the Demo Day v2 depth rework is
+# still pending its live golden-corpus gate, so these prompts must not drift
+# until that lands. Presence of the sentence in every builder is CI-enforced by
+# tests/test_prompt_fragment_contracts.py.
 def _spec_user_prompt(dependencies: dict[str, str]) -> str:
     problem_statement = dependencies.get("problem_statement", "")
     wrapped_problem = wrap_untrusted_content("problem_statement", problem_statement)

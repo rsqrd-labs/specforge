@@ -10888,6 +10888,15 @@ button:disabled {
   line-height: 1.55;
 }
 
+/* Reconciles the eval badge ("Ready") with the critic's suggestions when the
+   two judges visibly disagree about the same version — quieter than the
+   subtitle so it reads as an aside, not a second warning. */
+.quality-gate-reconciliation {
+  font-size: 13px;
+  font-style: italic;
+  opacity: 0.85;
+}
+
 .quality-gate-findings {
   display: grid;
   gap: 10px;

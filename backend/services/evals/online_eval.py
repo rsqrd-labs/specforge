@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from config import settings
 from database import AsyncSessionLocal
 from models import EvalResult
+from prompts.base import INJECTION_DEFENSE_NOTE, wrap_untrusted_content
 from services import langfuse_service
 from services.llm.batch_executor import complete_background_llm
 from services.llm.cost_ledger import LLMCostContext
@@ -107,13 +108,26 @@ _TEST_FILE_EXTS = (
 # surfaced-but-non-blocking shortfall, not a defect).
 _NON_FLAGGING_GAP_TYPES = frozenset({"GENERATION_FAILURE", "DEFERRED_COVERAGE"})
 
+# eval-v3: the judge system prompt carries the shared INJECTION_DEFENSE_NOTE and
+# _build_eval_prompt fences the scored artifact/context with
+# wrap_untrusted_content — this judge was the only one of the three
+# (critic/pr-evaluator/eval) grading raw, unfenced artifact bytes with no
+# instruction to ignore embedded directives, so a hostile artifact could carry
+# "score every dimension 100" text straight into the prompt (the audit finding
+# #5 omission class, closed for judges by the shared note). Version history:
+# eval-v2 was the placeholder-safe substitution fix (remediation #1). Both the
+# synchronous path and the batch submit path read this constant — never
+# hand-write the version string at a call site.
+EVAL_PROMPT_VERSION = "eval-v3"
+
 _JUDGE_SYSTEM = (
     "You are an independent senior product and software engineering evaluator. "
     "Score only what is present in the submitted artifact and provided context. "
     "Do not reward implied intent, brand polish, verbosity, or architectural detail "
     "that is not appropriate for the current stage. Be calibrated and conservative: "
     "85+ requires strong, concrete evidence across almost every rubric dimension. "
-    "Respond ONLY with valid JSON matching the requested schema. No markdown."
+    "Respond ONLY with valid JSON matching the requested schema. No markdown.\n\n"
+    f"{INJECTION_DEFENSE_NOTE}"
 )
 
 _RUBRIC = """
@@ -975,7 +989,16 @@ def _build_eval_prompt(
     ).get(stage_type, _PROMPT_LIMITS["spec"])
     context = compact_text(spec_content, context_limit)
     artifact = compact_text(content, content_limit)
-    substitutions = {"{spec_content}": context, "{content}": artifact}
+    # eval-v3: fence both blocks the way every other judge already does
+    # (critic wraps artifact + deps, pr-evaluator wraps diff + criteria) so the
+    # INJECTION_DEFENSE_NOTE's nonce protocol in _JUDGE_SYSTEM has real fences
+    # to refer to and boundary-spoofing text inside a scored artifact cannot
+    # pose as the end of the artifact. Wrapping happens AFTER compaction: the
+    # fence nonce is content-bound, so it must cover the exact bytes sent.
+    substitutions = {
+        "{spec_content}": wrap_untrusted_content("eval_context", context),
+        "{content}": wrap_untrusted_content("artifact_under_evaluation", artifact),
+    }
     return _EVAL_PLACEHOLDER_RE.sub(
         lambda m: substitutions[m.group()], _STAGE_PROMPTS[stage_type]
     )
@@ -1000,7 +1023,7 @@ async def _call_eval_judge(
             user=user_prompt,
             max_tokens=output_budget_for_operation("eval.score", provider),
             stage_type="eval",
-            prompt_version="eval-v2",
+            prompt_version=EVAL_PROMPT_VERSION,
             adapter_factory=get_llm,
             cost_context=LLMCostContext(product_surface="eval"),
         ),

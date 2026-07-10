@@ -1,4 +1,5 @@
-import type { QualityGateFinding, Stage } from "../types/stage"
+import { hasActionableFindings } from "../components/workspace/QualityBadge"
+import type { EvalResult, QualityGateFinding, Stage } from "../types/stage"
 
 /** Plain-language labels for quality-gate finding kinds. The raw kinds and
  *  technology-safety codes (e.g. "CoverageGap", "ADRIncomplete",
@@ -87,6 +88,37 @@ export function deriveAdvisoryFindings(
   if (!stage || stage.status === "finalised") return []
   if (stage.quality_gate?.status !== "advisory") return []
   return stage.quality_gate.findings ?? []
+}
+
+/** Reconcile the two independent judge signals when they visibly disagree
+ *  (audit theme 1): the eval badge derives "Ready" from deterministic eval
+ *  findings while the critic's advisory panel lists suggestions — shown side
+ *  by side with no explanation, "Ready" next to "3 suggestions" reads as a
+ *  contradiction. Returns a short note for the advisory panel explaining the
+ *  split, or null when there is nothing to reconcile.
+ *
+ *  Only the one soundly-derivable direction is reported: critic suggestions
+ *  present while the eval shows no actionable gaps. The converse (eval flags a
+ *  gap, critic silent) is NOT derivable — a passing critic persists nothing,
+ *  so "critic found nothing" is indistinguishable from "critic still running /
+ *  sampled out / failed open", and claiming agreement or disagreement there
+ *  would fabricate a signal. Pure and race-free: it derives from whatever both
+ *  surfaces already render, in whichever order the two background judges land. */
+export function deriveJudgeReconciliationNote(
+  evalResult: EvalResult | null | undefined,
+  findings: QualityGateFinding[],
+): string | null {
+  if (!evalResult) return null
+  const actionable = findings.filter((f) => !isInformationalFinding(f.kind))
+  if (actionable.length === 0) return null
+  if (hasActionableFindings(evalResult)) return null
+  const noun = actionable.length === 1 ? "suggestion" : "suggestions"
+  return (
+    "The automated quality check found no gaps in this version, while the " +
+    `deeper review left ${actionable.length === 1 ? "this" : "these"} ${noun}. ` +
+    "The two checks look at different things — read the " +
+    `${noun} as targeted improvements, not a lower overall rating.`
+  )
 }
 
 /** Last-resort finalise-block copy when the backend recovery contract is absent

@@ -10,6 +10,7 @@ import pytest
 
 from models import LLMBatchJob
 from services.evals import eval_batch
+from services.evals.online_eval import EVAL_PROMPT_VERSION
 from services.llm.base import (
     BaseLLMAdapter,
     BatchRequest,
@@ -189,7 +190,7 @@ def _row(**overrides) -> LLMBatchJob:
         provider="anthropic",
         model="claude-haiku-4-5-20251001",
         model_tier="small",
-        prompt_version="eval-v2",
+        prompt_version=EVAL_PROMPT_VERSION,
         custom_id="eval-1",
         request_system="sys",
         request_user="user",

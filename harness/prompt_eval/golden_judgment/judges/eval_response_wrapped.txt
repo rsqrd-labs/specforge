@@ -1,0 +1,18 @@
+Here is my calibrated evaluation of the plan artifact.
+
+```json
+{
+  "scores": {
+    "goal_alignment": 90,
+    "requirements_coverage": 86,
+    "specificity_testability": 70,
+    "traceability": 103,
+    "feasibility": "high",
+    "clarity": 80
+  },
+  "uncovered_reqs": ["FR-004"],
+  "tasks_without_ref": [
+    {"task_number": "7", "task": "Wire webhooks"}
+  ]
+}
+```

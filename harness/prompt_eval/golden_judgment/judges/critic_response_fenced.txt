@@ -1,0 +1,14 @@
+Verdict follows.
+
+```json
+{
+  "passed": false,
+  "findings": [
+    {
+      "kind": "ShallowSection",
+      "detail": "Security section asserts outcomes without naming controls.",
+      "reference": "## Security"
+    }
+  ]
+}
+```

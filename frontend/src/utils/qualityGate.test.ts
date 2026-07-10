@@ -1,10 +1,17 @@
 import { describe, expect, it } from "vitest"
 
-import type { QualityGateInfo, Stage, StageType } from "../types/stage"
+import type {
+  EvalResult,
+  QualityGateFinding,
+  QualityGateInfo,
+  Stage,
+  StageType,
+} from "../types/stage"
 import {
   blockedDraftLabel,
   deriveAdvisoryFindings,
   deriveFinaliseGateBlock,
+  deriveJudgeReconciliationNote,
   findingKindLabel,
   findingSeverityLabel,
   gateFallbackMessage,
@@ -248,5 +255,69 @@ describe("deriveAdvisoryFindings", () => {
     // Unlocking it back to draft (same persisted gate) brings them back.
     const unlocked = { ...finalised, status: "draft" as const }
     expect(deriveAdvisoryFindings(unlocked)).toHaveLength(1)
+  })
+})
+
+describe("deriveJudgeReconciliationNote", () => {
+  const criticFinding: QualityGateFinding = {
+    kind: "ShallowSection",
+    detail: "Security section is thin",
+    reference: "## Security",
+  }
+  const infoFinding: QualityGateFinding = {
+    kind: "ProblemStatementCondensed",
+    detail: "Input was condensed to fit budget",
+    reference: null,
+  }
+
+  function makeEval(overrides: Partial<EvalResult> = {}): EvalResult {
+    return {
+      id: "eval-1",
+      stage_version_id: "sv-1",
+      stage_type: "spec",
+      overall_score: 88,
+      completeness: 90,
+      clarity: 85,
+      coverage_percent: null,
+      uncovered_reqs: [],
+      tasks_without_ref: [],
+      flagged: false,
+      created_at: "2026-07-10T00:00:00Z",
+      ...overrides,
+    }
+  }
+
+  it("notes the disagreement when the eval is clean but the critic left suggestions", () => {
+    const note = deriveJudgeReconciliationNote(makeEval(), [criticFinding])
+    expect(note).toBeTruthy()
+    expect(note).toMatch(/found no gaps/i)
+    expect(note).toMatch(/not a lower overall rating/i)
+  })
+
+  it("stays silent when both judges agree there are gaps", () => {
+    // Eval flagged + critic suggestions point the same way — nothing to reconcile.
+    expect(
+      deriveJudgeReconciliationNote(makeEval({ flagged: true }), [criticFinding]),
+    ).toBeNull()
+    expect(
+      deriveJudgeReconciliationNote(
+        makeEval({ uncovered_reqs: ["FR-003"] }),
+        [criticFinding],
+      ),
+    ).toBeNull()
+  })
+
+  it("stays silent without an eval result — a missing signal is not agreement", () => {
+    expect(deriveJudgeReconciliationNote(null, [criticFinding])).toBeNull()
+    expect(deriveJudgeReconciliationNote(undefined, [criticFinding])).toBeNull()
+  })
+
+  it("ignores purely informational findings — they are not judge disagreement", () => {
+    expect(deriveJudgeReconciliationNote(makeEval(), [infoFinding])).toBeNull()
+    expect(deriveJudgeReconciliationNote(makeEval(), [])).toBeNull()
+    // ...but one actionable finding among informational ones still reconciles.
+    expect(
+      deriveJudgeReconciliationNote(makeEval(), [infoFinding, criticFinding]),
+    ).toBeTruthy()
   })
 })

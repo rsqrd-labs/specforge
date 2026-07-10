@@ -36,6 +36,7 @@ from sqlalchemy import select
 from database import AsyncSessionLocal
 from models import LLMBatchJob
 from services.evals.online_eval import (
+    EVAL_PROMPT_VERSION,
     build_eval_request,
     persist_eval_from_raw,
     run_eval,
@@ -56,7 +57,9 @@ from services.queue import enqueue
 logger = structlog.get_logger(__name__)
 
 _OPERATION = "eval.score"
-_PROMPT_VERSION = "eval-v2"
+# Single-sourced from online_eval so the batch submit path can never record a
+# different prompt version than the synchronous judge that built the prompt.
+_PROMPT_VERSION = EVAL_PROMPT_VERSION
 _PRODUCT_SURFACE = "eval"
 # Providers with a wired Message Batches adapter. Others fall back to sync even
 # though the catalog flags supports_batch=True (no verified SDK batch surface).
