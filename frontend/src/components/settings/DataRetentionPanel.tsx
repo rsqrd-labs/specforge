@@ -110,13 +110,25 @@ export default function DataRetentionPanel() {
         </dl>
       )}
 
-      {/* Client-side navigation to the in-app policy page: a relative Link
-          works on every origin the SPA is served from (localhost, staging,
-          production), unlike the old hardcoded absolute domain. */}
-      <Link className="data-retention-policy-link" to="/legal/retention">
-        Read the full data retention policy
-        <span aria-hidden="true">→</span>
-      </Link>
+      {/* Client-side navigation to the in-app policy pages: relative Links
+          work on every origin the SPA is served from (localhost, staging,
+          production), unlike a hardcoded absolute domain. Terms/Privacy are
+          only reachable from the signed-out Landing page otherwise, so a
+          signed-in user needs a way to get back to them too. */}
+      <div className="data-retention-links">
+        <Link className="data-retention-policy-link" to="/legal/retention">
+          Data retention policy
+          <span aria-hidden="true">→</span>
+        </Link>
+        <Link className="data-retention-policy-link" to="/legal/terms">
+          Terms of Service
+          <span aria-hidden="true">→</span>
+        </Link>
+        <Link className="data-retention-policy-link" to="/legal/privacy">
+          Privacy Policy
+          <span aria-hidden="true">→</span>
+        </Link>
+      </div>
     </div>
   )
 }

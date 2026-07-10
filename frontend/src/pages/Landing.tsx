@@ -1,5 +1,5 @@
 import { useEffect } from "react"
-import { Navigate } from "react-router-dom"
+import { Link, Navigate } from "react-router-dom"
 import { BrandLockup } from "../components/shared/BrandLogo"
 import { useUserStore } from "../store/userStore"
 
@@ -107,6 +107,12 @@ export default function Landing({
                 <span>50 starter credits</span>
                 <span>No setup required</span>
               </div>
+
+              <p className="auth-consent">
+                By continuing you agree to our{" "}
+                <Link to="/legal/terms">Terms of Service</Link> and{" "}
+                <Link to="/legal/privacy">Privacy Policy</Link>.
+              </p>
             </div>
 
             <div className="workflow-showcase" aria-label="SpecForge workflow">
@@ -316,6 +322,12 @@ export default function Landing({
             Start your first workspace
           </button>
         </section>
+
+        <footer className="landing-footer">
+          <Link to="/legal/privacy">Privacy Policy</Link>
+          <Link to="/legal/terms">Terms of Service</Link>
+          <Link to="/legal/retention">Data Retention Policy</Link>
+        </footer>
       </section>
     </main>
   )

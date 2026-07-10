@@ -145,6 +145,14 @@ export default function LegalRetention() {
 
       <footer className="public-view-footer">
         <p>
+          <Link to="/legal/terms" className="public-view-footer-link">
+            Terms of Service
+          </Link>
+          {" · "}
+          <Link to="/legal/privacy" className="public-view-footer-link">
+            Privacy Policy
+          </Link>
+          {" · "}
           <Link to="/" className="public-view-footer-link">
             ← Back to SpecForge
           </Link>

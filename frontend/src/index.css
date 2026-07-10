@@ -880,6 +880,22 @@ button:disabled {
   font-weight: 800;
 }
 
+.auth-consent {
+  margin: 12px 0 0;
+  color: var(--ink-text-muted);
+  font-size: 12px;
+}
+
+.auth-consent a {
+  color: var(--brand-primary);
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.auth-consent a:hover {
+  text-decoration: underline;
+}
+
 .auth-error {
   max-width: 520px;
   margin: 18px 0 0;
@@ -1687,6 +1703,28 @@ button:disabled {
 .audience-section,
 .landing-final-cta {
   margin-top: 18px;
+}
+
+.landing-footer {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px 20px;
+  margin-top: 28px;
+  padding: 20px 0 4px;
+  border-top: 1px solid rgba(219, 194, 176, 0.5);
+  color: var(--ink-text-muted);
+  font-size: 13px;
+}
+
+.landing-footer a {
+  color: inherit;
+  text-decoration: none;
+}
+
+.landing-footer a:hover {
+  color: var(--brand-primary);
+  text-decoration: underline;
 }
 
 .landing-problem-section,
@@ -3855,6 +3893,12 @@ button:disabled {
   );
   background-size: 200% 100%;
   animation: shimmer 1.4s linear infinite;
+}
+
+.data-retention-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 20px;
 }
 
 .data-retention-policy-link {

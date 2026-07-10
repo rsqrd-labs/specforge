@@ -31,6 +31,11 @@ const StoryboardPublic = lazy(() => import("./pages/StoryboardPublic"))
 // public surfaces.
 const LegalRetention = lazy(() => import("./pages/LegalRetention"))
 
+// Terms of Service and Privacy Policy — same constraint as LegalRetention:
+// outside the auth guard, lazy-loaded.
+const LegalTerms = lazy(() => import("./pages/LegalTerms"))
+const LegalPrivacy = lazy(() => import("./pages/LegalPrivacy"))
+
 // Dark-launched behind `branded_loaders`: until the flag flips, lazy chunks
 // keep the prior blank fallback; with it on, every route shows the branded
 // loader instead of a flash of nothing.
@@ -67,6 +72,22 @@ export default function App() {
             element={
               <Suspense fallback={routeFallback}>
                 <LegalRetention />
+              </Suspense>
+            }
+          />
+          <Route
+            path="/legal/terms"
+            element={
+              <Suspense fallback={routeFallback}>
+                <LegalTerms />
+              </Suspense>
+            }
+          />
+          <Route
+            path="/legal/privacy"
+            element={
+              <Suspense fallback={routeFallback}>
+                <LegalPrivacy />
               </Suspense>
             }
           />
