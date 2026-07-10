@@ -139,7 +139,7 @@ export default function LegalRetention() {
         </p>
       </header>
 
-      <main className="public-view-content">
+      <main className="public-view-content legal-prose">
         <MarkdownRenderer content={policyMarkdown(policy)} />
       </main>
 

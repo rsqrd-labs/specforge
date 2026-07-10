@@ -15357,6 +15357,27 @@ button:disabled {
 .md-prose strong { font-weight: 700; color: #0f172a; }
 .md-prose em { font-style: italic; }
 
+/* Legal documents (Terms/Privacy/Retention) render as sober prose, not the
+   field-label pill styling above — that rule matches on DOM position
+   (:first-child ignores text nodes), so it fires on nearly any single bolded
+   phrase in a paragraph, not just literal "**Field:** value" labels. A
+   contract with every emphasized word rendered as a colored uppercase tag
+   reads as unpolished, so legal pages opt out entirely. */
+.legal-prose .md-prose p > strong:first-child,
+.legal-prose .md-prose strong {
+  display: inline;
+  color: inherit;
+  font-size: inherit;
+  font-weight: 700;
+  letter-spacing: normal;
+  text-transform: none;
+  background: none;
+  border-radius: 0;
+  padding: 0;
+  margin-right: 0;
+  vertical-align: baseline;
+}
+
 .md-prose ul {
   list-style: disc;
   margin: 0.5em 0 0.85em 0;

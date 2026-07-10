@@ -25,10 +25,10 @@ describe("LegalPrivacy", () => {
     // Every section renders — a missing section is a policy change, not a
     // styling tweak.
     for (const section of [
-      /what we collect/i,
-      /how we use it/i,
+      /information we collect/i,
+      /how we use your information/i,
       /legal basis for processing/i,
-      /who we share it with/i,
+      /who we share your information with/i,
       /public sharing/i,
       /cookies/i,
       /data retention/i,
@@ -70,7 +70,9 @@ describe("LegalPrivacy", () => {
 
   it("states account/data deletion is a manual, support-mediated process", () => {
     renderPage()
-    expect(screen.getByText(/not a self-service button/i)).toBeInTheDocument()
+    expect(
+      screen.getByText(/rather than through automated self-service tooling/i),
+    ).toBeInTheDocument()
   })
 
   it("links back to the app root", () => {
