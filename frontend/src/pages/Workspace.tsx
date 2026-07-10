@@ -29,6 +29,8 @@ import {
   type GenerationActivityOperation,
 } from "../components/workspace/StreamingOverlay"
 import { MarkdownRenderer } from "../components/workspace/MarkdownRenderer"
+import { StageEmptyState } from "../components/workspace/StageEmptyState"
+import { TasksBoard } from "../components/workspace/TasksBoard"
 import { ProblemStatementPanel } from "../components/workspace/ProblemStatementPanel"
 import { ResearchConsentToggle } from "../components/workspace/ResearchConsentToggle"
 import { TaskValidationPanel } from "../components/workspace/TaskValidationPanel"
@@ -410,6 +412,7 @@ export default function Workspace() {
   )
   const [showRefineHint, setShowRefineHint] = useState(false)
   const [isExporting, setIsExporting] = useState(false)
+  const [isMobileNavOpen, setIsMobileNavOpen] = useState(false)
   const [isEditMode, setIsEditMode] = useState(false)
   const [specViewMode, setSpecViewMode] = useState<"preview" | "edit">("preview")
   const [problemDraft, setProblemDraft] = useState("")
@@ -904,6 +907,7 @@ export default function Workspace() {
   useEffect(() => {
     setIsEditMode(false)
     setSpecViewMode("preview")
+    setIsMobileNavOpen(false)
   }, [activeStageId])
 
   const refreshWorkspace = useCallback(async () => {
@@ -1919,6 +1923,10 @@ export default function Workspace() {
         : evalResult?.flagged
           ? 1
           : 0
+  // Distinct wording from the "Quality: Ready" row below on purpose — that row
+  // reports the content-eval verdict, this one reports the review gate, and
+  // the design review found both rows saying the bare word "Ready" for two
+  // different facts on the same finalised workspace (2026-07 remediation).
   const sidebarGateLabel =
     activeStage.status === "finalised"
       ? "Gate passed"
@@ -1926,7 +1934,7 @@ export default function Workspace() {
         ? `${activeIssueCount} flagged`
         : activeStage.status === "in_progress"
           ? "Generating"
-          : "Ready"
+          : "No blockers"
   const activeWordCount = activeStage.content?.trim()
     ? activeStage.content.trim().split(/\s+/).length
     : 0
@@ -1975,8 +1983,16 @@ export default function Workspace() {
         <div className="ambient-band band-lotus" />
       </div>
 
-      {/* Sidebar */}
-      <aside className="workspace-sidebar">
+      {/* Sidebar (an off-canvas drawer below ~1024px — see .workspace-sidebar-toggle) */}
+      {isMobileNavOpen && (
+        <button
+          type="button"
+          className="workspace-sidebar-scrim"
+          aria-label="Close workspace menu"
+          onClick={() => setIsMobileNavOpen(false)}
+        />
+      )}
+      <aside className={`workspace-sidebar${isMobileNavOpen ? " is-open" : ""}`}>
         <div className="workspace-sidebar-header">
           <BrandLockup variant="small" className="workspace-brand-lockup" />
         </div>
@@ -1999,12 +2015,17 @@ export default function Workspace() {
               <span>Readiness</span>
               <strong>{readiness}%</strong>
             </div>
+            {/* The percentage to the left already states this figure — the
+                ring is a purely visual reinforcement, not a second reading,
+                so the count moves to an aria-label instead of duplicate
+                on-screen text (2026-07 design review remediation: "stop
+                reporting readiness twice"). */}
             <div
               className="sidebar-readiness-ring"
               style={{ "--readiness": readiness } as CSSProperties}
-            >
-              <span>{finalisedCount}/{stages.length}</span>
-            </div>
+              role="img"
+              aria-label={`${finalisedCount} of ${stages.length} stages finalised`}
+            />
           </div>
 
           <div className="sidebar-mini-grid">
@@ -2018,7 +2039,11 @@ export default function Workspace() {
             </div>
           </div>
 
-          <div className="sidebar-handoff-card">
+          <div
+            className={`sidebar-handoff-card${
+              activeStage.status === "finalised" ? " is-quiet" : ""
+            }`}
+          >
             <div>
               <span>Review gate</span>
               <strong>{sidebarGateLabel}</strong>
@@ -2058,6 +2083,17 @@ export default function Workspace() {
       <main className="workspace-main">
         {/* Header */}
         <header className="workspace-header">
+          <button
+            type="button"
+            className="workspace-sidebar-toggle"
+            onClick={() => setIsMobileNavOpen((open) => !open)}
+            aria-label={isMobileNavOpen ? "Close workspace menu" : "Open workspace menu"}
+            aria-expanded={isMobileNavOpen}
+          >
+            <svg viewBox="0 0 20 20" fill="none" aria-hidden="true">
+              <path d="M3 5h14M3 10h14M3 15h14" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+            </svg>
+          </button>
           <h1 className="workspace-title">{currentWorkspace.name}</h1>
           <div className="workspace-header-actions">
             <div className="workspace-credit-pill" aria-label="Available credits">
@@ -2138,6 +2174,17 @@ export default function Workspace() {
             </button>
           </div>
         </header>
+
+        {/* Horizontal stage stepper — shown only below the mobile breakpoint,
+            replacing the vertical rail (which the drawer above hides there). */}
+        <div className="workspace-mobile-stepper">
+          <StageNavigator
+            stages={stagesWithEval}
+            activeStageId={activeStage.id}
+            onSelectStage={setActiveStageId}
+            orientation="horizontal"
+          />
+        </div>
 
         {/* Banners */}
         {showStaleWarning && (
@@ -2469,6 +2516,8 @@ export default function Workspace() {
                     readOnlyReason={workspaceLockInlineReason}
                     onContentChange={handleContentChange}
                   />
+                ) : !activeStage.content?.trim() ? (
+                  <StageEmptyState stageType={activeStage.type} creditCost={CREDIT_COSTS.generate} />
                 ) : (
                   <div className="document-markdown-scroll">
                     <MarkdownRenderer content={activeStage.content ?? ""} />
@@ -2576,6 +2625,10 @@ export default function Workspace() {
                     readOnlyReason={workspaceLockInlineReason}
                     onContentChange={handleContentChange}
                   />
+                ) : !activeStage.content?.trim() ? (
+                  <StageEmptyState stageType={activeStage.type} creditCost={CREDIT_COSTS.generate} />
+                ) : activeStage.type === "tasks" ? (
+                  <TasksBoard content={activeStage.content ?? ""} />
                 ) : (
                   <div className="document-markdown-scroll">
                     <MarkdownRenderer

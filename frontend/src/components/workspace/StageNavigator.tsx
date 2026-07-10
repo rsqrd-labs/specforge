@@ -6,6 +6,9 @@ interface StageNavigatorProps {
   activeStage?: StageType
   onSelectStage?: (stageId: string) => void
   onSelect?: (stageType: StageType) => void
+  /** "horizontal" renders a numbered stepper — used below the mobile
+   *  breakpoint, where the vertical rail has no room to also show content. */
+  orientation?: "vertical" | "horizontal"
 }
 
 const STAGE_ORDER: StageType[] = ["spec", "plan", "harness", "tasks"]
@@ -23,13 +26,18 @@ export function StageNavigator({
   activeStage,
   onSelectStage,
   onSelect,
+  orientation = "vertical",
 }: StageNavigatorProps) {
   const stageMap = Array.isArray(stages)
     ? Object.fromEntries(stages.map((s) => [s.type, s]))
     : stages
+  const isHorizontal = orientation === "horizontal"
 
   return (
-    <nav className="workspace-nav">
+    <nav
+      className={isHorizontal ? "workspace-nav workspace-nav--horizontal" : "workspace-nav"}
+      aria-label="Pipeline stage"
+    >
       {STAGE_ORDER.map((type, i) => {
         const stage = stageMap[type]
         if (!stage) return null
@@ -56,8 +64,13 @@ export function StageNavigator({
             }}
             className={cls}
             style={{ animationDelay: `${i * 0.06}s` }}
+            aria-current={isActive ? "step" : undefined}
           >
-            <span className={`ws-nav-dot ${stage.status}`} />
+            {isHorizontal ? (
+              <span className="ws-nav-step" aria-hidden="true">{i + 1}</span>
+            ) : (
+              <span className={`ws-nav-dot ${stage.status}`} />
+            )}
             <span className="ws-nav-label">{STAGE_LABELS[type]}</span>
           </button>
         )

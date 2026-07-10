@@ -39,6 +39,10 @@ const config: Config = {
         "status-error-text": "var(--status-error-text)",
         "status-error-soft": "var(--status-error-soft)",
         "status-error-soft-text": "var(--status-error-soft-text)",
+        "status-success": "var(--status-success)",
+        "status-success-text": "var(--status-success-text)",
+        "status-success-soft": "var(--status-success-soft)",
+        "status-success-soft-text": "var(--status-success-soft-text)",
       },
       borderRadius: {
         sm: "0.25rem",

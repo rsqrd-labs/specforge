@@ -114,3 +114,157 @@ export function parseEffortSummary(content: string): EffortSummary | null {
 export function formatEffortSummaryChip(summary: EffortSummary): string {
   return `${summary.estimateRange} · ${summary.totalTasks} tasks · ${summary.mustCount} MUST`
 }
+
+// ---------------------------------------------------------------------------
+// Per-task block parser (T-USE-05 task schema — see prompts/tasks.py
+// SYSTEM_PROMPT for the authoritative field list). Renders TASKS.md as
+// collapsible cards instead of one continuous scroll (2026-07 design review
+// remediation: "Tasks throws away its own structure").
+// ---------------------------------------------------------------------------
+
+export interface TaskBlock {
+  id: string
+  title: string
+  phase: string | null
+  priority: string | null
+  estimate: string | null
+  estimatedSize: string | null
+  risk: string | null
+  owner: string | null
+  specRefs: string | null
+  planRefs: string | null
+  harnessRefs: string | null
+  /** Markdown body for each named section, verbatim (still needs
+   *  MarkdownRenderer for code fences / inline code). Absent sections are
+   *  omitted rather than shown empty. */
+  description: string | null
+  inputs: string | null
+  outputs: string | null
+  steps: string | null
+  acceptanceCriteria: string | null
+  rollback: string | null
+  /** Dependency task IDs, e.g. ["T-008", "T-010"]. Empty when none/absent. */
+  dependencies: string[]
+  /** The full, untouched markdown for this task — always renderable even if
+   *  a field above failed to extract, so no content is ever lost. */
+  raw: string
+}
+
+const TASK_HEADING_RE = /^###\s+(T-\d+)\s*:\s*(.+?)\s*$/im
+const NEXT_BOUNDARY_RE = /^(?:###\s+T-\d+\s*:|##\s+)/m
+
+const METADATA_FIELDS: Array<[keyof TaskBlock, string]> = [
+  ["phase", "Phase"],
+  ["priority", "Priority"],
+  ["estimate", "Estimate"],
+  ["estimatedSize", "Estimated\\s+size"],
+  ["risk", "Risk"],
+  ["owner", "Owner"],
+  ["specRefs", "Spec\\s+refs"],
+  ["planRefs", "Plan\\s+refs"],
+  ["harnessRefs", "Harness\\s+refs"],
+]
+
+const BODY_SECTIONS: Array<[keyof TaskBlock, string]> = [
+  ["description", "Description"],
+  ["inputs", "Inputs"],
+  ["outputs", "Outputs"],
+  ["steps", "Steps"],
+  ["acceptanceCriteria", "Acceptance\\s+Criteria"],
+  ["rollback", "Rollback\\s*/\\s*Recovery"],
+  ["dependencies", "Dependencies"],
+]
+
+function extractMetadataField(body: string, label: string): string | null {
+  const re = new RegExp(`^[\\s\\-*]*\\*{0,2}\\s*${label}\\s*:\\*{0,2}\\s*(.+?)\\s*$`, "im")
+  const match = re.exec(body)
+  return match ? stripBold(match[1]) : null
+}
+
+/** Slices the markdown from one `**Section**` header to the next known
+ *  header (or the end of the task body), matching the same header-only-line
+ *  convention the effort-summary parser relies on above. */
+function extractBodySection(body: string, label: string): string | null {
+  const headingRe = new RegExp(`^\\*{1,2}${label}\\*{1,2}\\s*$`, "im")
+  const match = headingRe.exec(body)
+  if (!match || match.index === undefined) return null
+
+  const afterHeading = body.slice(match.index + match[0].length)
+  const otherHeadings = BODY_SECTIONS.map(([, l]) => l).filter((l) => l !== label)
+  const nextHeadingRe = new RegExp(`^\\*{1,2}(?:${otherHeadings.join("|")})\\*{1,2}\\s*$`, "im")
+  const next = nextHeadingRe.exec(afterHeading)
+  const section = next ? afterHeading.slice(0, next.index) : afterHeading
+  const trimmed = section.trim()
+  return trimmed.length > 0 ? trimmed : null
+}
+
+const DEPENDENCY_ID_RE = /T-\d+/g
+
+function parseSingleTaskBlock(raw: string): TaskBlock | null {
+  const headingMatch = TASK_HEADING_RE.exec(raw)
+  if (!headingMatch) return null
+
+  const block: Partial<TaskBlock> = { id: headingMatch[1], title: headingMatch[2] }
+  for (const [key, label] of METADATA_FIELDS) {
+    ;(block as Record<string, unknown>)[key] = extractMetadataField(raw, label)
+  }
+  for (const [key, label] of BODY_SECTIONS) {
+    if (key === "dependencies") continue
+    ;(block as Record<string, unknown>)[key] = extractBodySection(raw, label)
+  }
+  const dependenciesSection = extractBodySection(raw, "Dependencies")
+  block.dependencies = dependenciesSection
+    ? Array.from(dependenciesSection.matchAll(DEPENDENCY_ID_RE)).map((m) => m[0])
+    : []
+  block.raw = raw.trim()
+
+  return block as TaskBlock
+}
+
+/**
+ * Splits TASKS.md into individual task blocks. Returns `[]` (never throws)
+ * when the content doesn't contain the `### T-NNN:` heading shape at all —
+ * callers should fall back to plain markdown rendering in that case, the
+ * same degrade-silently contract `parseEffortSummary` uses for older content.
+ */
+export function parseTaskBlocks(content: string): TaskBlock[] {
+  if (!content || typeof content !== "string") return []
+
+  try {
+    const headingRe = /^###\s+T-\d+\s*:.*$/gm
+    const starts: number[] = []
+    let m: RegExpExecArray | null
+    while ((m = headingRe.exec(content)) !== null) {
+      starts.push(m.index)
+    }
+    if (starts.length === 0) return []
+
+    const blocks: TaskBlock[] = []
+    for (let i = 0; i < starts.length; i++) {
+      const start = starts[i]
+      const afterHeadingLine = content.indexOf("\n", start) + 1 || content.length
+      const rest = content.slice(afterHeadingLine)
+      const boundary = NEXT_BOUNDARY_RE.exec(rest)
+      const end = afterHeadingLine + (boundary ? boundary.index : rest.length)
+      const raw = content.slice(start, end)
+      const parsed = parseSingleTaskBlock(raw)
+      if (parsed) blocks.push(parsed)
+    }
+    return blocks
+  } catch {
+    // Never throws — an unparseable document just falls back to plain markdown.
+    return []
+  }
+}
+
+/**
+ * The markdown before the first `### T-NNN:` heading — Effort Summary,
+ * Traceability Overview, Dependency Graph, and the first `## Phase` heading.
+ * Rendered as-is via MarkdownRenderer above the task cards.
+ */
+export function extractTaskFrontMatter(content: string): string {
+  const headingRe = /^###\s+T-\d+\s*:/m
+  const match = headingRe.exec(content)
+  if (!match || match.index === undefined) return content
+  return content.slice(0, match.index).trim()
+}

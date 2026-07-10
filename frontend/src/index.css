@@ -37,6 +37,15 @@
   --status-error-text: #ffffff;
   --status-error-soft: #ffdad6;
   --status-error-soft-text: #93000a;
+  /* Design.md declares no success token even though the app has always needed
+     one for "finalised" / "passing" states — this canonizes the ad hoc green
+     (#16a34a / rgba(34,197,94,*)) already scattered across the workspace
+     screen into one source, rather than adding a new hue (2026-07 design
+     review remediation). */
+  --status-success: #16a34a;
+  --status-success-text: #ffffff;
+  --status-success-soft: #dcfce7;
+  --status-success-soft-text: #14532d;
   --ink-page: #f9f9f9;
   --ink-page-text: #1a1c1c;
 }
@@ -2452,7 +2461,8 @@ button:disabled {
   min-height: 42px;
   border: none;
   border-radius: 12px;
-  background: linear-gradient(135deg, var(--brand-secondary) 0%, var(--brand-primary) 100%);
+  /* Canonical primary-CTA recipe — see .modal-submit in the Workspace block. */
+  background: var(--brand-primary);
   padding: 0 18px;
   color: var(--brand-primary-text);
   font-size: 13px;
@@ -3075,8 +3085,9 @@ button:disabled {
   gap: 8px;
   padding: 11px 22px;
   border-radius: 12px;
-  background: linear-gradient(135deg, var(--brand-primary) 0%, var(--brand-secondary) 100%);
-  color: #fff;
+  /* Canonical primary-CTA recipe — see .modal-submit in the Workspace block. */
+  background: var(--brand-primary);
+  color: var(--brand-primary-text);
   font-size: 14px;
   font-weight: 700;
   letter-spacing: 0.01em;
@@ -4344,14 +4355,20 @@ button:disabled {
   color: var(--ink-text);
 }
 
+/* Canonical primary-CTA recipe (Design.md: "solid Saffron fill" — the
+   machine-readable token block's brand-primary-text wins over the prose's
+   "Deep Navy text", since the token is what the app can actually consume).
+   .gen-btn-primary and .workspace-share-btn share this exact fill/text pair
+   rather than each hardcoding their own gradient, so the three can no longer
+   drift apart the way the design review found them (2026-07 remediation). */
 .modal-submit {
   padding: 9px 22px;
   border-radius: 10px;
-  background: linear-gradient(135deg, var(--brand-primary) 0%, var(--brand-secondary) 100%);
+  background: var(--brand-primary);
   border: none;
   font-size: 14px;
   font-weight: 700;
-  color: #fff;
+  color: var(--brand-primary-text);
   cursor: pointer;
   box-shadow: 0 6px 20px rgba(143, 78, 0, 0.26), inset 0 1px 0 rgba(255, 255, 255, 0.18);
   transition: transform 0.16s cubic-bezier(0.16, 1, 0.3, 1), box-shadow 0.16s ease, opacity 0.16s;
@@ -5011,7 +5028,7 @@ button:disabled {
 
 .ws-nav-dot.locked   { background: rgba(143, 78, 0, 0.22); }
 .ws-nav-dot.draft    { background: var(--brand-primary); }
-.ws-nav-dot.finalised { background: #22c55e; }
+.ws-nav-dot.finalised { background: var(--status-success); }
 .ws-nav-dot.stale    { background: var(--brand-secondary); }
 .ws-nav-dot.in_progress {
   background: var(--brand-primary);
@@ -5025,6 +5042,45 @@ button:disabled {
   white-space: nowrap;
   letter-spacing: 0.05em;
   text-transform: uppercase;
+}
+
+/* Horizontal stepper (numbered pills), mirrors the four-step mockup on the
+   landing page. Hidden by default; the mobile breakpoint below swaps it in
+   for the vertical rail, which has no room to also show a document. */
+.workspace-nav--horizontal {
+  display: none;
+}
+
+.workspace-mobile-stepper {
+  display: none;
+}
+
+.ws-nav-step {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  font-size: 11px;
+  font-weight: 800;
+  background: rgba(143, 78, 0, 0.10);
+  color: var(--ink-text-muted);
+}
+
+.workspace-nav-item.ws-active .ws-nav-step {
+  background: var(--brand-primary);
+  color: var(--brand-primary-text);
+}
+
+/* Mobile sidebar drawer + hamburger toggle (hidden above the breakpoint). */
+.workspace-sidebar-toggle {
+  display: none;
+}
+
+.workspace-sidebar-scrim {
+  display: none;
 }
 
 .workspace-sidebar-insight {
@@ -5234,6 +5290,31 @@ button:disabled {
   text-transform: capitalize;
 }
 
+/* Once the gate has passed there is nothing left to act on, so this card
+   drops out of the sidebar's loudest register — visual weight should track
+   what needs attention, not what deserves a one-time celebration (2026-07
+   design review remediation: "the review-gate card outshouts everything
+   it's reporting on"). */
+.sidebar-handoff-card.is-quiet {
+  background: rgba(255, 255, 255, 0.5);
+  border-color: rgba(219, 194, 176, 0.62);
+  box-shadow: none;
+  color: var(--ink-text);
+}
+
+.sidebar-handoff-card.is-quiet span {
+  color: var(--ink-text-muted);
+}
+
+.sidebar-handoff-card.is-quiet strong {
+  color: var(--status-success);
+}
+
+.sidebar-handoff-card.is-quiet em {
+  background: color-mix(in srgb, var(--status-success) 14%, transparent);
+  color: var(--status-success);
+}
+
 .sidebar-signal-stack {
   display: grid;
   gap: 8px;
@@ -5312,13 +5393,23 @@ button:disabled {
   animation: sidebar-trace-pass 2.7s ease-in-out infinite;
 }
 
+/* A completed stage always reads as complete, even while it's the one being
+   viewed — "active" used to win the cascade over "done" here, so opening a
+   finalised stage repainted its own pill the in-progress saffron/maroon
+   gradient with no actual work outstanding (2026-07 design review
+   remediation: "renders red... for no evident reason"). "Currently viewing a
+   finished stage" now gets a quiet ring instead of erasing the done color. */
 .sidebar-pipeline-trace span.done {
-  background: linear-gradient(90deg, #22c55e, #16a34a);
+  background: linear-gradient(90deg, color-mix(in srgb, var(--status-success) 82%, white), var(--status-success));
 }
 
-.sidebar-pipeline-trace span.active {
+.sidebar-pipeline-trace span.active:not(.done) {
   background: linear-gradient(90deg, var(--brand-primary), var(--brand-secondary));
   box-shadow: 0 0 0 3px rgba(143, 78, 0, 0.09);
+}
+
+.sidebar-pipeline-trace span.active.done {
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--status-success) 22%, transparent);
 }
 
 @keyframes sidebar-trace-pass {
@@ -5580,13 +5671,13 @@ button:disabled {
   font-variant-numeric: tabular-nums;
 }
 
-.quality-badge.high    { border-color: rgba(34,197,94,0.28); background: rgba(34,197,94,0.08); color: #16a34a; }
+.quality-badge.high    { border-color: color-mix(in srgb, var(--status-success) 28%, transparent); background: color-mix(in srgb, var(--status-success) 8%, transparent); color: var(--status-success); }
 .quality-badge.mid     { border-color: rgba(143,78,0,0.20); background: rgba(143,78,0,0.06); color: var(--brand-primary); }
 .quality-badge.low     { border-color: rgba(239,68,68,0.24); background: rgba(239,68,68,0.07); color: #dc2626; }
 .quality-badge.pending { border-color: rgba(143,78,0,0.12); background: rgba(143,78,0,0.04); color: var(--ink-text-muted); }
 
 /* Findings-derived status (issue #27 Phase 1): no numeric score is shown. */
-.quality-badge.ready       { border-color: rgba(34,197,94,0.28); background: rgba(34,197,94,0.08); color: #16a34a; }
+.quality-badge.ready       { border-color: color-mix(in srgb, var(--status-success) 28%, transparent); background: color-mix(in srgb, var(--status-success) 8%, transparent); color: var(--status-success); }
 .quality-badge.attention   { border-color: rgba(239,68,68,0.24); background: rgba(239,68,68,0.07); color: #dc2626; }
 .quality-badge.checking    { border-color: rgba(143,78,0,0.12); background: rgba(143,78,0,0.04); color: var(--ink-text-muted); }
 .quality-badge.unavailable { border-color: rgba(143,78,0,0.12); background: rgba(143,78,0,0.04); color: var(--ink-text-muted); }
@@ -5630,7 +5721,7 @@ button:disabled {
   line-height: 1;
 }
 
-.construction-badge.verified { border-color: rgba(34,197,94,0.28); background: rgba(34,197,94,0.08); color: #16a34a; }
+.construction-badge.verified { border-color: color-mix(in srgb, var(--status-success) 28%, transparent); background: color-mix(in srgb, var(--status-success) 8%, transparent); color: var(--status-success); }
 .construction-badge.gaps     { border-color: rgba(239,68,68,0.24); background: rgba(239,68,68,0.07); color: #dc2626; }
 .construction-badge.stale    { border-color: rgba(143,78,0,0.24); background: rgba(143,78,0,0.07); color: var(--brand-primary); }
 
@@ -5746,11 +5837,11 @@ button:disabled {
 }
 
 .ws-export-trigger.ready {
-  border-color: rgba(34, 197, 94, 0.28);
+  border-color: color-mix(in srgb, var(--status-success) 28%, transparent);
   background:
-    linear-gradient(135deg, rgba(34, 197, 94, 0.09), rgba(143, 78, 0, 0.05)),
+    linear-gradient(135deg, color-mix(in srgb, var(--status-success) 9%, transparent), rgba(143, 78, 0, 0.05)),
     rgba(255, 255, 255, 0.82);
-  color: #166534;
+  color: var(--status-success-soft-text);
 }
 
 .ws-chevron {
@@ -5811,11 +5902,11 @@ button:disabled {
 }
 
 .ws-export-item.ready:not(:disabled) {
-  color: #166534;
+  color: var(--status-success-soft-text);
 }
 
 .ws-export-item.ready:hover:not(:disabled) {
-  background: rgba(34, 197, 94, 0.08);
+  background: color-mix(in srgb, var(--status-success) 8%, transparent);
 }
 
 .ws-export-item:disabled {
@@ -7859,10 +7950,11 @@ button:disabled {
   padding: 0 16px;
   border-radius: 10px;
   border: 1px solid transparent;
-  background: linear-gradient(135deg, var(--brand-primary) 0%, var(--brand-secondary) 100%);
+  /* Canonical primary-CTA recipe — see .modal-submit above. */
+  background: var(--brand-primary);
   font-size: 13px;
   font-weight: 800;
-  color: #fff;
+  color: var(--brand-primary-text);
   cursor: pointer;
   transition: opacity 0.15s, box-shadow 0.15s, transform 0.15s;
   box-shadow: 0 3px 10px rgba(143, 78, 0, 0.28);
@@ -8083,9 +8175,9 @@ button:disabled {
 }
 
 .harness-coverage-chip.is-full {
-  background: rgba(34, 197, 94, 0.12);
-  color: #16a34a;
-  border: 1px solid rgba(34, 197, 94, 0.28);
+  background: color-mix(in srgb, var(--status-success) 12%, transparent);
+  color: var(--status-success);
+  border: 1px solid color-mix(in srgb, var(--status-success) 28%, transparent);
 }
 
 .public-view-coverage-wrap {
@@ -8525,31 +8617,110 @@ button:disabled {
   }
 }
 
-@media (max-width: 820px) {
+/* Below ~1024px there is no room for a persistent 268px rail beside a
+   document — the vertical nav becomes an off-canvas drawer (opened by the
+   header's hamburger toggle) and stage-switching moves to a horizontal,
+   numbered stepper under the title, so the content column gets full width. */
+@media (max-width: 1024px) {
   .workspace-shell {
-    overflow: auto;
+    overflow: hidden;
+  }
+
+  .workspace-sidebar-toggle {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 36px;
+    height: 36px;
+    border-radius: 8px;
+    border: 1px solid rgba(143, 78, 0, 0.18);
+    background: rgba(255, 255, 255, 0.72);
+    color: var(--ink-text);
+    flex-shrink: 0;
+  }
+
+  .workspace-sidebar-toggle svg {
+    width: 18px;
+    height: 18px;
   }
 
   .workspace-sidebar {
-    width: 230px;
+    position: fixed;
+    inset: 0 auto 0 0;
+    width: min(84vw, 300px);
+    transform: translateX(-100%);
+    transition: transform 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+    z-index: 60;
+    box-shadow: 0 20px 60px rgba(30, 15, 0, 0.35);
   }
 
-  .workspace-brand-lockup.brand-lockup--small .brand-wordmark {
-    font-size: 20px;
+  .workspace-sidebar.is-open {
+    transform: translateX(0);
   }
 
-  .workspace-sidebar-insight {
-    min-height: 286px;
+  /* Stage-switching lives in the horizontal stepper now; the drawer keeps
+     only the workspace pulse card and the AI disclaimer. */
+  .workspace-sidebar > .workspace-nav {
+    display: none;
   }
 
-  .sidebar-readiness-card {
-    align-items: flex-start;
-    flex-direction: column;
+  .workspace-sidebar-scrim {
+    display: block;
+    position: fixed;
+    inset: 0;
+    background: rgba(20, 12, 0, 0.42);
+    z-index: 55;
+    border: none;
+    padding: 0;
+    cursor: default;
   }
 
-  .sidebar-readiness-ring {
-    width: 54px;
-    height: 54px;
+  .workspace-mobile-stepper {
+    display: block;
+    width: 100%;
+    padding: 0 20px 12px;
+  }
+
+  .workspace-nav--horizontal {
+    display: flex;
+    flex-direction: row;
+    gap: 6px;
+    padding: 0;
+  }
+
+  .workspace-nav--horizontal .workspace-nav-item {
+    flex: 1 1 0;
+    justify-content: center;
+    padding: 8px 4px;
+    font-size: 11px;
+  }
+
+  .workspace-main {
+    width: 100%;
+    min-width: 0;
+  }
+
+  .workspace-header {
+    padding-left: 16px;
+  }
+
+  /* The pane header's title+chips and its action row (Quality badge,
+     validation chip, Re-validate/Edit) no longer fit side by side once the
+     content column is the full viewport width instead of a desktop share of
+     it — stack them instead of clipping the second row. */
+  .workspace-pane-header {
+    flex-wrap: wrap;
+  }
+
+  .workspace-pane-actions {
+    justify-content: flex-start;
+    width: 100%;
+  }
+}
+
+@media (max-width: 480px) {
+  .workspace-nav--horizontal .ws-nav-label {
+    display: none;
   }
 }
 
@@ -8599,8 +8770,9 @@ button:disabled {
   gap: 9px;
   padding: 0 20px 0 13px;
   border-radius: 8px;
-  background: linear-gradient(135deg, var(--brand-primary) 0%, var(--brand-secondary) 100%);
-  color: #fff;
+  /* Canonical primary-CTA recipe — see .modal-submit above. */
+  background: var(--brand-primary);
+  color: var(--brand-primary-text);
   font-size: 14px;
   font-weight: 900;
   border: none;
@@ -9706,6 +9878,285 @@ button:disabled {
   max-width: 900px;
 }
 
+/* Pre-generation empty state — replaces a bare blank panel with what the
+   generation will cost and roughly how long it takes (2026-07 design review
+   remediation: "the empty state is an empty rectangle"). */
+.stage-empty-state {
+  height: 100%;
+  min-height: 320px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  padding: 40px 32px;
+  text-align: center;
+  background:
+    radial-gradient(circle at 92% 6%, rgba(255, 153, 51, 0.07), transparent 22rem),
+    radial-gradient(circle at 4% 88%, rgba(161, 56, 95, 0.05), transparent 18rem),
+    var(--ink-canvas);
+}
+
+.stage-empty-state-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 52px;
+  height: 52px;
+  border-radius: 999px;
+  color: var(--brand-primary);
+  background: rgba(143, 78, 0, 0.08);
+  border: 1px solid rgba(143, 78, 0, 0.14);
+}
+
+.stage-empty-state-icon svg {
+  width: 24px;
+  height: 24px;
+}
+
+.stage-empty-state-title {
+  margin: 0;
+  color: var(--ink-text);
+  font-size: 16px;
+  font-weight: 800;
+}
+
+.stage-empty-state-copy {
+  margin: 0;
+  max-width: 46ch;
+  color: var(--ink-text-muted);
+  font-size: 13.5px;
+  line-height: 1.6;
+}
+
+/* ─── Tasks board (collapsible per-task cards) ──────────────────────────────
+   2026-07 design review remediation: "Tasks throws away its own structure" —
+   the header chips already know the shape of this data (28 tasks, sizes,
+   dependency IDs); this is the render that finally matches it. */
+
+.tasks-board-frontmatter {
+  margin-bottom: 20px;
+  padding-bottom: 20px;
+  border-bottom: 1px solid rgba(143, 78, 0, 0.12);
+}
+
+.tasks-board-frontmatter .md-prose {
+  max-width: 900px;
+}
+
+.tasks-board-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 14px;
+}
+
+.tasks-board-count {
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--ink-text-muted);
+}
+
+.tasks-board-expand-all {
+  border: 1px solid rgba(143, 78, 0, 0.18);
+  background: rgba(255, 255, 255, 0.6);
+  color: var(--brand-primary);
+  font-size: 12px;
+  font-weight: 800;
+  padding: 6px 12px;
+  border-radius: 999px;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.tasks-board-expand-all:hover {
+  background: rgba(143, 78, 0, 0.08);
+  border-color: rgba(143, 78, 0, 0.28);
+}
+
+.tasks-board-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-width: 900px;
+}
+
+.task-card {
+  border: 1px solid rgba(143, 78, 0, 0.14);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.66);
+  overflow: hidden;
+  scroll-margin-top: 24px;
+  transition: box-shadow 0.4s ease, border-color 0.4s ease;
+}
+
+.task-card.is-expanded {
+  background: rgba(255, 255, 255, 0.86);
+  box-shadow: 0 8px 24px rgba(143, 78, 0, 0.08);
+}
+
+.task-card.is-highlighted {
+  border-color: rgba(255, 153, 51, 0.65);
+  box-shadow: 0 0 0 3px rgba(255, 153, 51, 0.22);
+}
+
+.task-card-summary {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 16px;
+  background: none;
+  border: none;
+  text-align: left;
+  cursor: pointer;
+  font: inherit;
+}
+
+.task-card-chevron {
+  width: 10px;
+  height: 6px;
+  flex-shrink: 0;
+  color: var(--ink-text-muted);
+  transition: transform 0.18s ease;
+}
+
+.task-card.is-expanded .task-card-chevron {
+  transform: rotate(180deg);
+}
+
+.task-card-id {
+  flex-shrink: 0;
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 12px;
+  font-weight: 800;
+  color: var(--brand-primary);
+}
+
+.task-card-badge {
+  flex-shrink: 0;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.task-card-priority-must { background: rgba(186, 26, 26, 0.10); color: var(--status-error); }
+.task-card-priority-should { background: rgba(143, 78, 0, 0.10); color: var(--brand-primary); }
+.task-card-priority-could { background: rgba(86, 94, 116, 0.12); color: var(--brand-tertiary); }
+.task-card-badge-muted { background: rgba(143, 78, 0, 0.08); color: var(--ink-text-muted); }
+
+.task-card-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13.5px;
+  font-weight: 700;
+  color: var(--ink-text);
+}
+
+.task-card-body {
+  padding: 0 16px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.task-card-meta-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+  gap: 10px;
+  padding: 12px;
+  border-radius: 8px;
+  background: rgba(143, 78, 0, 0.04);
+}
+
+.task-card-meta-grid span {
+  display: block;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--ink-text-muted);
+  margin-bottom: 2px;
+}
+
+.task-card-meta-grid strong {
+  font-size: 12.5px;
+  font-weight: 700;
+  color: var(--ink-text);
+}
+
+.task-card-deps {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.task-card-deps-label {
+  font-size: 11px;
+  font-weight: 800;
+  color: var(--ink-text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-right: 2px;
+}
+
+.task-card-dep-chip {
+  border: 1px solid rgba(143, 78, 0, 0.22);
+  background: rgba(255, 255, 255, 0.7);
+  color: var(--brand-primary);
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 3px 9px;
+  border-radius: 999px;
+  cursor: pointer;
+  transition: background 0.15s, transform 0.15s;
+}
+
+.task-card-dep-chip:hover:not(:disabled) {
+  background: rgba(143, 78, 0, 0.10);
+  transform: translateY(-1px);
+}
+
+.task-card-dep-chip:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.task-card-section h4 {
+  margin: 0 0 6px;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--brand-secondary);
+}
+
+.task-card-section .md-prose {
+  font-size: 13.5px;
+}
+
+.task-card-refs p {
+  margin: 3px 0;
+  font-size: 12.5px;
+  color: var(--ink-text-muted);
+}
+
+.task-card-refs p span {
+  font-weight: 800;
+  color: var(--ink-text);
+  margin-right: 6px;
+}
+
 .workspace-stage-grid {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
@@ -10546,9 +10997,9 @@ button:disabled {
   height: 30px;
   padding: 0 12px;
   border-radius: 999px;
-  border: 1px solid rgba(34, 197, 94, 0.28);
-  background: rgba(34, 197, 94, 0.08);
-  color: #16a34a;
+  border: 1px solid color-mix(in srgb, var(--status-success) 28%, transparent);
+  background: color-mix(in srgb, var(--status-success) 8%, transparent);
+  color: var(--status-success);
   font-size: 12px;
   font-weight: 700;
   white-space: nowrap;
@@ -11560,7 +12011,7 @@ button:disabled {
   transition: width 0.7s cubic-bezier(0.16, 1, 0.3, 1);
 }
 
-.ws-progress-fill.good { background: linear-gradient(90deg, #22c55e, #16a34a); }
+.ws-progress-fill.good { background: linear-gradient(90deg, color-mix(in srgb, var(--status-success) 82%, white), var(--status-success)); }
 .ws-progress-fill.low  { background: linear-gradient(90deg, var(--brand-secondary), #7c2d6b); }
 
 .ws-issue-list {
@@ -11849,7 +12300,7 @@ button:disabled {
   gap: 7px;
   margin: 10px 0 0;
   font-size: 12px;
-  color: #16a34a;
+  color: var(--status-success);
   font-weight: 800;
 }
 
