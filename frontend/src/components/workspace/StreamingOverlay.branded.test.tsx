@@ -60,15 +60,21 @@ describe("StreamingOverlay with branded_loaders enabled", () => {
     // The slim macro stage rail is present; the legacy trace bar is gone.
     expect(container.querySelector(".generation-stage-rail")).not.toBeNull()
     expect(container.querySelector(".generation-trace")).toBeNull()
+
+    // The round shape is now the progress ring, seating the mark inside it.
+    expect(container.querySelector(".generation-phase-ring")).not.toBeNull()
+    expect(
+      container.querySelectorAll(".generation-phase-ring .generation-ring-seg"),
+    ).toHaveLength(5)
   })
 
-  it("shows a phase stepper and NO numeric time caption on the heuristic path", () => {
+  it("shows the phase ring and NO numeric time caption on the heuristic path", () => {
     const { container } = render(
       <StreamingOverlay isVisible activity={agedActivity(0, { stageType: "plan" })} />,
     )
 
-    // The phase stepper replaces the synthetic ETA bar as the primary signal.
-    expect(container.querySelector(".generation-phase-steps")).not.toBeNull()
+    // The phase ring replaces the synthetic ETA bar as the primary signal.
+    expect(container.querySelector(".generation-phase-ring")).not.toBeNull()
     // No decelerating bar and no false-precision "~30s" / "usually" caption.
     expect(container.querySelector(".generation-eta-bar")).toBeNull()
     const status = screen.getByRole("status")
@@ -144,7 +150,7 @@ describe("StreamingOverlay with branded_loaders enabled", () => {
     })
   })
 
-  it("advances the phase stepper to the real backend phase", () => {
+  it("advances the phase ring to the real backend phase", () => {
     const { container } = render(
       <StreamingOverlay
         isVisible
@@ -153,9 +159,13 @@ describe("StreamingOverlay with branded_loaders enabled", () => {
       />,
     )
 
-    // The critic phase maps to the Reviewer step, which becomes active.
-    const active = container.querySelector(".generation-phase-step.is-active")
-    expect(active).toHaveTextContent("Reviewer")
+    // The critic phase maps to the Reviewer step (index 3), whose arc is active.
+    const segs = Array.from(container.querySelectorAll(".generation-ring-seg"))
+    expect(segs[3]).toHaveClass("is-active")
+    // The one-line phase status names the current step + count.
+    expect(container.querySelector(".generation-phase-line")).toHaveTextContent(
+      /Reviewer — step 4 of 5/i,
+    )
 
     // The single live region announces the current step (not a per-second tick).
     expect(screen.getByRole("status")).toHaveTextContent(
@@ -163,7 +173,7 @@ describe("StreamingOverlay with branded_loaders enabled", () => {
     )
   })
 
-  it("holds the stepper at Drafting for an unknown / future phase", () => {
+  it("holds the ring at Drafting for an unknown / future phase", () => {
     const { container } = render(
       <StreamingOverlay
         isVisible
@@ -177,8 +187,36 @@ describe("StreamingOverlay with branded_loaders enabled", () => {
       />,
     )
 
-    const active = container.querySelector(".generation-phase-step.is-active")
-    expect(active).toHaveTextContent("Drafting")
+    const segs = Array.from(container.querySelectorAll(".generation-ring-seg"))
+    expect(segs[0]).toHaveClass("is-active")
     expect(screen.getByRole("status")).not.toHaveTextContent(/reviewer model/i)
+  })
+
+  it("marks a jumped-over Reviewer step as skipped, never complete (issue #34)", () => {
+    // Default async-advisory path: phase hops quality_gate → persisting, so the
+    // Reviewer step (index 3) never runs on the critical path. Its arc must stay
+    // hollow (skipped), not draw a filled check for work that ran detached.
+    const { container, rerender } = render(
+      <StreamingOverlay
+        isVisible
+        activity={agedActivity(0)}
+        progress={{ stage: "spec", state: "generating", elapsed_seconds: 5, phase: "quality_gate" }}
+      />,
+    )
+    rerender(
+      <StreamingOverlay
+        isVisible
+        activity={agedActivity(0)}
+        progress={{ stage: "spec", state: "generating", elapsed_seconds: 10, phase: "persisting" }}
+      />,
+    )
+
+    const segs = Array.from(container.querySelectorAll(".generation-ring-seg"))
+    // Reviewer (3): jumped over → skipped, not complete.
+    expect(segs[3]).toHaveClass("is-skipped")
+    expect(segs[3]).not.toHaveClass("is-complete")
+    // Quality checks (2) was observed → complete; Saving (4) is now active.
+    expect(segs[2]).toHaveClass("is-complete")
+    expect(segs[4]).toHaveClass("is-active")
   })
 })

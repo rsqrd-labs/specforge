@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react"
+import { type CSSProperties, useEffect, useState } from "react"
 import { createPortal } from "react-dom"
 import { featureFlags } from "../../config/featureFlags"
 import type { GenerationProgress } from "../../services/sseService"
@@ -72,6 +72,13 @@ export function StreamingOverlay({
   const [elapsedSeconds, setElapsedSeconds] = useState(0)
   // Advance-only pipeline step index, driven by the real backend phase heartbeat.
   const [stepIndex, setStepIndex] = useState(0)
+  // The set of pipeline steps we have *actually observed* on a heartbeat. Drafting
+  // (0) is seeded because a generation always drafts. This lets the ring tell a
+  // step that genuinely ran (→ complete) apart from one the pipeline jumped over
+  // (→ skipped): in the default async-advisory path the phase hops
+  // `quality_gate`(2) → `persisting`(4), so Reviewer (3) is never seen and must
+  // not render a checkmark for work that ran detached (issue #34 honesty).
+  const [seenSteps, setSeenSteps] = useState<Set<number>>(() => new Set([0]))
 
   // Local elapsed ticker from the activity start, so the overlay visibly
   // progresses every second even between backend heartbeats.
@@ -91,14 +98,22 @@ export function StreamingOverlay({
   // changes), so a fresh run begins at Drafting rather than a stale later step.
   useEffect(() => {
     setStepIndex(0)
+    setSeenSteps(new Set([0]))
   }, [activity?.stageId, activity?.operation])
 
   // Map the backend phase heartbeat to a pipeline step. Advance-only: an unknown
   // or absent phase (`phaseStepIndex` → 0) holds the last known step so the
-  // stepper never visibly regresses mid-run.
+  // stepper never visibly regresses mid-run. A step is recorded as *seen* only
+  // when its phase actually arrives on a heartbeat, so a jumped-over step stays
+  // out of `seenSteps` and renders skipped rather than complete.
   useEffect(() => {
     const next = phaseStepIndex(progress?.phase)
     setStepIndex((prev) => (next > prev ? next : prev))
+    if (progress?.phase != null) {
+      setSeenSteps((prev) =>
+        prev.has(next) ? prev : new Set(prev).add(next),
+      )
+    }
   }, [progress?.phase])
 
   useEffect(() => {
@@ -437,10 +452,18 @@ export function StreamingOverlay({
   // estimate (never the guess table). `null` today ⇒ no number rendered.
   const upperBound = upperBoundCaption(eta)
   // A focused patch edits a selection, not the whole artifact — it does not run
-  // the five-stage pipeline, so it gets a calm activity cue instead of a stepper
-  // whose later steps would sit permanently inert.
-  const showStepper = variant !== "patch"
+  // the five-stage pipeline, so it gets a calm indeterminate cue instead of the
+  // phase ring, whose segments would sit permanently inert.
+  const isPipeline = variant !== "patch"
   const partsLabel = showParts ? `${completedParts} of ${totalParts} parts` : null
+  // The single status line that collapses the old vertical stepper + elapsed
+  // footer into one row under the title. Verb phrasing ("step N of 5") is the
+  // deliberate counterpoint to the noun stage rail ("SPEC/PLAN/…"), so the two
+  // progress scales never read as the same 4-vs-5 sequence.
+  const currentStep = PIPELINE_STEPS[stepIndex] ?? PIPELINE_STEPS[0]
+  const phaseLine = `${currentStep.label} — step ${stepIndex + 1} of ${
+    PIPELINE_STEPS.length
+  } · ${formatElapsed(elapsedSeconds)}${partsLabel ? ` · ${partsLabel}` : ""}`
 
   return (
     <div
@@ -457,7 +480,7 @@ export function StreamingOverlay({
 
       <div className={`generation-loading-card ${variant}`} aria-hidden="true">
         {/* Slim macro rail: which of the four stages this is. Deliberately quiet
-            so it reads as orientation, distinct from the phase stepper below. */}
+            so it reads as orientation, distinct from the phase line below. */}
         <div className="generation-stage-rail">
           {STAGE_FLOW.map((stage, index) => (
             <span
@@ -471,26 +494,35 @@ export function StreamingOverlay({
           ))}
         </div>
 
-        <BrandLoader variant="overlay" size="lg" />
+        {/* The round shape is now the instrument: the brand mark sits inside a
+            5-arc progress ring driven by the real phase heartbeat. On a focused
+            patch (no pipeline) the mark stays a calm, unchromed loader. */}
+        {isPipeline ? (
+          <PhaseRing activeIndex={stepIndex} seenSteps={seenSteps} />
+        ) : (
+          <BrandLoader variant="overlay" size="lg" />
+        )}
 
         <div className="generation-loading-copy">
-          <span className="generation-loading-kicker">{copy.stageLabel}</span>
           <strong>{copy.title}</strong>
           <p>{copy.detail}</p>
+          {isPipeline ? (
+            <p className="generation-phase-line">{phaseLine}</p>
+          ) : null}
         </div>
 
-        {showStepper ? (
-          <PhaseStepper activeIndex={stepIndex} partsLabel={partsLabel} />
-        ) : (
+        {isPipeline ? null : (
           <div className="generation-patch-activity">
             <span className="generation-patch-activity-fill" />
           </div>
         )}
 
         <div className={`generation-loading-status is-${band}`}>
-          <span className="generation-elapsed">
-            {formatElapsed(elapsedSeconds)} elapsed
-          </span>
+          {isPipeline ? null : (
+            <span className="generation-elapsed">
+              {formatElapsed(elapsedSeconds)} elapsed
+            </span>
+          )}
           {reassurance ? (
             <span className="generation-reassurance">{reassurance}</span>
           ) : upperBound ? (
@@ -575,42 +607,106 @@ function liveMilestone(band: EtaBand, stepIndex: number): string {
   return PIPELINE_STEPS[stepIndex]?.announce ?? PIPELINE_STEPS[0].announce
 }
 
+// Ring geometry (viewBox 0 0 100 100, centred). One arc per pipeline step. All
+// derived so the segments tile the circle and the comet aligns to the active
+// arc from the same formula.
+const RING_RADIUS = 44
+const RING_CIRC = 2 * Math.PI * RING_RADIUS
+const RING_SEG_SPAN = RING_CIRC / PIPELINE_STEPS.length
+const RING_GAP = RING_CIRC * 0.04
+const RING_ARC_LEN = RING_SEG_SPAN - RING_GAP
+const RING_COMET_LEN = RING_CIRC * 0.06
+
+type RingSegmentState = "complete" | "active" | "skipped" | "upcoming"
+
 /**
- * The primary progress signal: a vertical stepper driven by the real backend
- * phase heartbeat. Purely visual (`aria-hidden`) — the accessible equivalent is
- * the milestone live region in the overlay. Completed steps check off, the
- * active step pulses, and the honest "N of M parts" count sits under the active
- * Drafting step when the parallel path reports it.
+ * The visual state of ring segment `index`. A segment below the active one is
+ * `complete` only if its phase was actually observed (`seen`); a step the
+ * pipeline jumped over — Reviewer, in the default async-advisory path — is
+ * `skipped` and never draws a filled arc, so the card never claims work that
+ * did not run happened.
  */
-function PhaseStepper({
+function ringSegmentState(
+  index: number,
+  activeIndex: number,
+  seen: Set<number>,
+): RingSegmentState {
+  if (index === activeIndex) return "active"
+  if (index > activeIndex) return "upcoming"
+  return seen.has(index) ? "complete" : "skipped"
+}
+
+/** Per-segment stroke-dashoffset that slots arc `index` into its position. */
+function ringSegmentOffset(index: number): number {
+  return -(index * RING_SEG_SPAN)
+}
+
+/**
+ * The primary progress signal: a five-arc ring driven by the real backend phase
+ * heartbeat, with the brand mark seated inside it. Purely visual (`aria-hidden`)
+ * — the accessible equivalent is the milestone live region in the overlay.
+ * Completed arcs fill, the active arc carries a comet that sweeps within its own
+ * bounds (never a full-ring spin that would imply fake progress), skipped arcs
+ * stay hollow, and upcoming arcs sit faint.
+ */
+function PhaseRing({
   activeIndex,
-  partsLabel,
+  seenSteps,
 }: {
   activeIndex: number
-  partsLabel: string | null
+  seenSteps: Set<number>
 }) {
+  const hasActive = activeIndex < PIPELINE_STEPS.length
+  const cometFrom = ringSegmentOffset(activeIndex)
+  const cometTo = cometFrom - (RING_ARC_LEN - RING_COMET_LEN)
+  const cometStyle = {
+    "--comet-from": `${cometFrom}`,
+    "--comet-to": `${cometTo}`,
+  } as CSSProperties
+
   return (
-    <ol className="generation-phase-steps" aria-hidden="true">
-      {PIPELINE_STEPS.map((step, index) => {
-        const state =
-          index < activeIndex
-            ? "complete"
-            : index === activeIndex
-              ? "active"
-              : "upcoming"
-        return (
-          <li key={step.key} className={`generation-phase-step is-${state}`}>
-            <span className="generation-phase-marker" />
-            <span className="generation-phase-text">
-              <span className="generation-phase-label">{step.label}</span>
-              {state === "active" && partsLabel ? (
-                <span className="generation-phase-sub">{partsLabel}</span>
-              ) : null}
-            </span>
-          </li>
-        )
-      })}
-    </ol>
+    <div className="generation-phase-ring" aria-hidden="true">
+      <svg
+        className="generation-phase-ring-svg"
+        viewBox="0 0 100 100"
+        focusable="false"
+        role="presentation"
+      >
+        <g transform="rotate(-90 50 50)">
+          {PIPELINE_STEPS.map((step, index) => (
+            <circle
+              key={step.key}
+              className={`generation-ring-seg is-${ringSegmentState(
+                index,
+                activeIndex,
+                seenSteps,
+              )}`}
+              cx="50"
+              cy="50"
+              r={RING_RADIUS}
+              fill="none"
+              strokeDasharray={`${RING_ARC_LEN} ${RING_CIRC - RING_ARC_LEN}`}
+              strokeDashoffset={ringSegmentOffset(index)}
+            />
+          ))}
+          {hasActive ? (
+            <circle
+              className="generation-ring-comet"
+              cx="50"
+              cy="50"
+              r={RING_RADIUS}
+              fill="none"
+              strokeDasharray={`${RING_COMET_LEN} ${RING_CIRC - RING_COMET_LEN}`}
+              strokeDashoffset={cometFrom}
+              style={cometStyle}
+            />
+          ) : null}
+        </g>
+      </svg>
+      <span className="generation-phase-ring-mark">
+        <BrandLoader variant="overlay" size="lg" />
+      </span>
+    </div>
   )
 }
 
