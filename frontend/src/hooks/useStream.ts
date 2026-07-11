@@ -43,6 +43,17 @@ export function useStream(stageId: string | null) {
   useEffect(() => {
     return () => {
       streamRef.current?.close()
+      // Closing the fetch aborts the SSE read, but the awaited promise in
+      // `start()` never settles on an abort (sseService swallows the close),
+      // so the `finally` that would run `finaliseStream` never fires. Discard
+      // the orphaned client buffer explicitly here — otherwise a Workspace
+      // unmount mid-generation leaves a stale partial in `streamingContent`
+      // that a later remount would re-hydrate OVER the finished artifact the
+      // reconnect poll delivers (and a keystroke would then persist server-side).
+      const active = useStageStore.getState().activeStream
+      if (active) {
+        useStageStore.getState().discardStream(active)
+      }
       if (advisoryPollRef.current) {
         advisoryPollRef.current.cancelled = true
       }
