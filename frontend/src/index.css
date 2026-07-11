@@ -11059,6 +11059,23 @@ button:disabled {
 }
 
 /* Streaming overlay */
+/* Visually-hidden but screen-reader-available. Tailwind's `sr-only` utility is
+   not emitted in this build (the project is CSS-first and the class is used only
+   in a handful of places), so we define the conventional class by hand — this
+   backs `sr-only` usages across the app, including the overlay's single
+   milestone live region. */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
 .streaming-overlay {
   pointer-events: auto;
   position: absolute;
@@ -11755,60 +11772,191 @@ button:disabled {
   font-variant-numeric: tabular-nums;
 }
 
-/* Phase 2a honest ETA (issue #21): a decelerating progress bar + banded caption.
-   The bar asymptotes (caps ~90%) and never completes on estimate alone — the
-   real `done` removes the overlay. */
-.generation-eta {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  margin-top: 10px;
-}
+/* Issue #48 — branded honest-time overlay. The synthetic decelerating ETA bar
+   and the false-precision "~30s" caption are gone; progress is narrated by a
+   phase stepper driven by the real backend heartbeat, and the only number ever
+   shown is a live-data upper bound. */
 
-.generation-eta-bar {
+/* Slim macro rail — which of the four stages this is. Quieter than the legacy
+   `.generation-flow-rail` so it reads as orientation beneath the phase stepper,
+   not a second competing progress bar. */
+.generation-stage-rail {
   position: relative;
-  display: block;
-  width: 100%;
-  height: 4px;
+  z-index: 1;
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.generation-stage-node {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 22px;
+  border-radius: 6px;
+  background: rgba(86, 94, 116, 0.07);
+  color: var(--brand-tertiary);
+  font-size: 9px;
+  font-weight: 900;
+  letter-spacing: 0.1em;
+  opacity: 0.55;
+}
+
+.generation-stage-node.complete {
+  color: var(--brand-primary);
+  opacity: 0.8;
+}
+
+.generation-stage-node.active {
+  background: rgba(161, 56, 95, 0.1);
+  color: var(--ink-text);
+  opacity: 1;
+}
+
+/* Phase stepper — the primary, honest progress signal. */
+.generation-phase-steps {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  gap: 10px;
+  width: min(300px, 100%);
+  margin: 0 auto;
+  padding: 0;
+  list-style: none;
+  text-align: left;
+}
+
+.generation-phase-step {
+  display: grid;
+  grid-template-columns: 16px 1fr;
+  align-items: start;
+  gap: 10px;
+  color: var(--ink-text-muted);
+}
+
+.generation-phase-marker {
+  position: relative;
+  margin-top: 2px;
+  width: 14px;
+  height: 14px;
   border-radius: 999px;
-  overflow: hidden;
-  background: var(--ink-border-soft);
+  border: 2px solid rgba(86, 94, 116, 0.28);
+  background: transparent;
 }
 
-.generation-eta-fill {
+/* Completed steps: filled + check. */
+.generation-phase-step.is-complete .generation-phase-marker {
+  border-color: transparent;
+  background: var(--brand-primary);
+}
+
+.generation-phase-step.is-complete .generation-phase-marker::after {
+  content: "";
   position: absolute;
-  inset: 0;
-  border-radius: inherit;
-  background: linear-gradient(90deg, #ff9933, #fd80a9);
-  /* The fill is scaled from the left edge; only `transform` animates, so the
-     bar is compositor-only (no layout/paint) regardless of how many run. */
-  transform-origin: left center;
-  transform: scaleX(0);
-  /* Smooth the once-per-second `elapsedSeconds` step into a continuous glide. */
-  transition: transform 1s linear;
+  left: 4px;
+  top: 1px;
+  width: 4px;
+  height: 8px;
+  border: solid #fff;
+  border-width: 0 2px 2px 0;
+  transform: rotate(42deg);
 }
 
-/* Past p90 the band turns to the "still working" tone so a long generation
-   never reads as almost-done. */
-.generation-eta-bar--overdue .generation-eta-fill {
-  background: linear-gradient(90deg, #fd80a9, #b07cf6);
+/* Active step: brand ring + gentle pulse (the one moving element). */
+.generation-phase-step.is-active {
+  color: var(--ink-text);
 }
 
-.generation-eta-caption {
-  /* Same token as the proven `.generation-loading-copy p` detail line — matches
-     its (contrast-checked) treatment on this light card. */
+.generation-phase-step.is-active .generation-phase-marker {
+  border-color: var(--brand-secondary);
+  background: rgba(161, 56, 95, 0.14);
+  box-shadow: 0 0 0 4px rgba(161, 56, 95, 0.08);
+  animation: generation-node-pulse 1.6s ease-in-out infinite;
+}
+
+/* Upcoming steps: dimmed. */
+.generation-phase-step.is-upcoming {
+  opacity: 0.5;
+}
+
+.generation-phase-text {
+  display: grid;
+  gap: 2px;
+  line-height: 1.2;
+}
+
+.generation-phase-label {
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.generation-phase-sub {
   color: var(--ink-text-muted);
   font-size: 11px;
   font-weight: 700;
   font-variant-numeric: tabular-nums;
-  letter-spacing: 0.01em;
 }
 
-@media (prefers-reduced-motion: reduce) {
-  /* No continuous glide for reduced-motion users — the fill steps each second. */
-  .generation-eta-fill {
-    transition: none;
-  }
+/* Focused-patch overlay: a calm indeterminate cue (no five-step pipeline). */
+.generation-patch-activity {
+  position: relative;
+  z-index: 1;
+  width: min(300px, 100%);
+  height: 4px;
+  margin: 0 auto;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--ink-border-soft);
+}
+
+.generation-patch-activity-fill {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -32%;
+  width: 34%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, transparent, var(--brand-primary), transparent);
+  animation: generation-trace-sweep 1.45s cubic-bezier(0.16, 1, 0.3, 1) infinite;
+}
+
+/* Status footer — quiet elapsed count + band-driven reassurance. No time claim
+   in the typical band; concrete multi-minute copy only in the long band. */
+.generation-loading-status {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  gap: 4px;
+  text-align: center;
+}
+
+.generation-elapsed {
+  color: var(--ink-text-muted);
+  font-size: 12px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.generation-reassurance,
+.generation-eta-bound {
+  max-width: 420px;
+  margin: 0 auto;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.4;
+}
+
+.generation-eta-bound {
+  color: var(--ink-text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.generation-loading-status.is-overdue .generation-reassurance {
+  color: var(--brand-primary);
+}
+
+.generation-loading-status.is-long .generation-reassurance {
+  color: var(--brand-secondary);
 }
 
 /* Progressive streaming: slim status pill shown while live draft tokens
@@ -11964,11 +12112,20 @@ button:disabled {
   .patch-source-line,
   .patch-result-line,
   .patch-connector::after,
-  .generation-gate-check {
+  .generation-gate-check,
+  .generation-phase-step.is-active .generation-phase-marker,
+  .generation-patch-activity-fill {
     animation: none !important;
   }
 
   .generation-trace {
+    left: 0;
+    width: 100%;
+    opacity: 0.42;
+  }
+
+  /* Static, centred indeterminate cue for the focused-patch overlay. */
+  .generation-patch-activity-fill {
     left: 0;
     width: 100%;
     opacity: 0.42;

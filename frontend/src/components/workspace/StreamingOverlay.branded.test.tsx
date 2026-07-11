@@ -23,6 +23,14 @@ const activity: GenerationActivityInfo = {
   streamed: true,
 }
 
+/** An activity that started `secondsAgo` in the past, to drive the elapsed band. */
+function agedActivity(
+  secondsAgo: number,
+  overrides: Partial<GenerationActivityInfo> = {},
+): GenerationActivityInfo {
+  return { ...activity, startedAt: Date.now() - secondsAgo * 1000, ...overrides }
+}
+
 describe("StreamingOverlay with branded_loaders enabled", () => {
   beforeEach(() => {
     // BrandLoader reads matchMedia; jsdom lacks it.
@@ -38,7 +46,7 @@ describe("StreamingOverlay with branded_loaders enabled", () => {
     }) as unknown as typeof window.matchMedia
   })
 
-  it("embeds the decorative branded mark without nesting live regions", () => {
+  it("embeds the decorative branded mark and the slim macro stage rail", () => {
     const { container } = render(<StreamingOverlay isVisible activity={activity} />)
 
     // Exactly one live region — the overlay's. The embedded BrandLoader is
@@ -49,33 +57,55 @@ describe("StreamingOverlay with branded_loaders enabled", () => {
     expect(container.querySelector(".brand-loader--overlay")).not.toBeNull()
     expect(container.querySelector(".generation-document-shimmer")).toBeNull()
 
-    // The stage rail is preserved.
-    expect(container.querySelector(".generation-flow-rail")).not.toBeNull()
+    // The slim macro stage rail is present; the legacy trace bar is gone.
+    expect(container.querySelector(".generation-stage-rail")).not.toBeNull()
+    expect(container.querySelector(".generation-trace")).toBeNull()
   })
 
-  it("shows the honest ETA band alongside the stage rail (Phase 2a)", () => {
+  it("shows a phase stepper and NO numeric time caption on the heuristic path", () => {
     const { container } = render(
-      <StreamingOverlay
-        isVisible
-        activity={{ ...activity, stageType: "plan", startedAt: Date.now() }}
-      />,
+      <StreamingOverlay isVisible activity={agedActivity(0, { stageType: "plan" })} />,
     )
 
-    // ETA band caption ("usually ~{p50}s") and the stage rail render together.
-    expect(container.querySelector(".generation-flow-rail")).not.toBeNull()
-    const caption = container.querySelector(".generation-eta-caption")
-    expect(caption).not.toBeNull()
-    expect(caption?.textContent).toMatch(/usually ~\d+s/)
-
-    // The decorative bar must not introduce a second live region.
-    expect(screen.getAllByRole("status")).toHaveLength(1)
-    expect(container.querySelector(".generation-eta-bar")).toHaveAttribute(
+    // The phase stepper replaces the synthetic ETA bar as the primary signal.
+    expect(container.querySelector(".generation-phase-steps")).not.toBeNull()
+    // No decelerating bar and no false-precision "~30s" / "usually" caption.
+    expect(container.querySelector(".generation-eta-bar")).toBeNull()
+    const status = screen.getByRole("status")
+    expect(status).not.toHaveTextContent(/usually/i)
+    expect(status).not.toHaveTextContent(/~\d+s/)
+    // The card is aria-hidden so its per-second elapsed never reaches AT.
+    expect(container.querySelector(".generation-loading-card")).toHaveAttribute(
       "aria-hidden",
       "true",
     )
   })
 
-  it("uses the live data-backed band when present for the provider (Phase 2b)", () => {
+  it("keeps the typical band silent, then escalates reassurance by band", () => {
+    // Typical (elapsed 0 < spec p90 75): no time language at all.
+    const typical = render(<StreamingOverlay isVisible activity={agedActivity(0)} />)
+    expect(
+      typical.container.querySelector(".generation-reassurance"),
+    ).toBeNull()
+    typical.unmount()
+
+    // Overdue (75 ≤ elapsed < 180): "a little longer than usual".
+    const overdue = render(<StreamingOverlay isVisible activity={agedActivity(100)} />)
+    const overdueStatus = overdue.container.querySelector(
+      ".generation-loading-status",
+    )
+    expect(overdueStatus).toHaveClass("is-overdue")
+    expect(overdueStatus).toHaveTextContent(/a little longer than usual/i)
+    overdue.unmount()
+
+    // Long (≥ 180s): concrete multi-minute reassurance.
+    const long = render(<StreamingOverlay isVisible activity={agedActivity(200)} />)
+    const longStatus = long.container.querySelector(".generation-loading-status")
+    expect(longStatus).toHaveClass("is-long")
+    expect(longStatus).toHaveTextContent(/can take a few minutes/i)
+  })
+
+  it("shows a live-data upper bound (never a median) when real data exists", () => {
     // Pre-populate the live store (loaded + fresh) so the hook prefers it and
     // does not fire a network fetch.
     useGenerationEstimatesStore.setState({
@@ -96,18 +126,16 @@ describe("StreamingOverlay with branded_loaders enabled", () => {
     const { container } = render(
       <StreamingOverlay
         isVisible
-        activity={{
-          ...activity,
-          stageType: "plan",
-          provider: "anthropic",
-          startedAt: Date.now(),
-        }}
+        activity={agedActivity(0, { stageType: "plan", provider: "anthropic" })}
       />,
     )
 
-    // The live p50 (33s) drives the caption, not the heuristic plan baseline (45s).
-    const caption = container.querySelector(".generation-eta-caption")
-    expect(caption?.textContent).toMatch(/usually ~33s/)
+    // The live p90 (81s) drives a rounded-up upper bound — no lower anchor, no
+    // p50 (33s), no "~30s"-style median.
+    const bound = container.querySelector(".generation-eta-bound")
+    expect(bound).not.toBeNull()
+    expect(bound?.textContent).toBe("usually under ~2 min")
+    expect(bound?.textContent).not.toMatch(/33/)
 
     useGenerationEstimatesStore.setState({
       status: "idle",
@@ -116,32 +144,30 @@ describe("StreamingOverlay with branded_loaders enabled", () => {
     })
   })
 
-  it("names the real pipeline phase in the liveness copy (Phase 2c)", () => {
-    render(
+  it("advances the phase stepper to the real backend phase", () => {
+    const { container } = render(
       <StreamingOverlay
         isVisible
-        activity={{ ...activity, startedAt: Date.now() }}
-        progress={{
-          stage: "spec",
-          state: "generating",
-          elapsed_seconds: 30,
-          phase: "critic",
-        }}
+        activity={agedActivity(0)}
+        progress={{ stage: "spec", state: "generating", elapsed_seconds: 30, phase: "critic" }}
       />,
     )
 
-    // The critic phase is the one long enough to actually emit heartbeats; the
-    // liveness line reflects it instead of the generic "still working" copy.
-    const status = screen.getByRole("status")
-    expect(status).toHaveTextContent(/a reviewer model is checking the draft/i)
-    expect(status).not.toHaveTextContent(/the model is working/i)
+    // The critic phase maps to the Reviewer step, which becomes active.
+    const active = container.querySelector(".generation-phase-step.is-active")
+    expect(active).toHaveTextContent("Reviewer")
+
+    // The single live region announces the current step (not a per-second tick).
+    expect(screen.getByRole("status")).toHaveTextContent(
+      /a reviewer model is checking the draft/i,
+    )
   })
 
-  it("falls back to the generic liveness copy for an unknown phase (Phase 2c)", () => {
-    render(
+  it("holds the stepper at Drafting for an unknown / future phase", () => {
+    const { container } = render(
       <StreamingOverlay
         isVisible
-        activity={{ ...activity, startedAt: Date.now() }}
+        activity={agedActivity(0)}
         progress={{
           stage: "spec",
           state: "generating",
@@ -151,9 +177,8 @@ describe("StreamingOverlay with branded_loaders enabled", () => {
       />,
     )
 
-    // An unknown/future phase must degrade to the generic copy, never break.
-    expect(screen.getByRole("status")).toHaveTextContent(
-      "the model is working; this can take several minutes.",
-    )
+    const active = container.querySelector(".generation-phase-step.is-active")
+    expect(active).toHaveTextContent("Drafting")
+    expect(screen.getByRole("status")).not.toHaveTextContent(/reviewer model/i)
   })
 })

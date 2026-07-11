@@ -31,6 +31,21 @@ export interface EtaEstimate {
 }
 
 /**
+ * Provenance of a resolved estimate. `"live"` means the band came from real,
+ * per-provider aggregate percentiles; `"heuristic"` means the hard-coded guess
+ * table. The loading UI only ever shows a *number* on a `"live"` estimate — the
+ * guess table is honest enough to narrate a wait but not to make a time promise
+ * (issue #48). With no production traffic every estimate is `"heuristic"`, so the
+ * number stays hidden until real data accumulates.
+ */
+export type EtaSource = "live" | "heuristic"
+
+/** An `EtaEstimate` plus where it came from. */
+export interface ResolvedEta extends EtaEstimate {
+  source: EtaSource
+}
+
+/**
  * Fresh full-stage generation baselines. Spec is the cheapest stage; harness
  * (validation scaffolding) the most expensive. Generations here run into
  * minutes under the watchdog (180s idle / 900s hard cap), so the past-p90 copy
@@ -115,15 +130,15 @@ export function canonicalLookupOperation(
  * is trustworthy; we still guard the shape defensively (a malformed entry must
  * never beat the heuristic).
  */
-export function resolveEta(
+export function resolveEtaWithSource(
   stageType: StageType | null | undefined,
   operation: GenerationActivityOperation | null | undefined,
   provider: AIProvider | null | undefined,
   liveEstimates: readonly GenerationEstimate[],
-): EtaEstimate {
+): ResolvedEta {
   const heuristic = estimateEta(stageType, operation)
   if (!provider || !stageType || liveEstimates.length === 0) {
-    return heuristic
+    return { ...heuristic, source: "heuristic" }
   }
   const lookupOp = canonicalLookupOperation(operation)
   const hit = liveEstimates.find(
@@ -139,9 +154,29 @@ export function resolveEta(
     hit.p50 > 0 &&
     hit.p90 >= hit.p50
   ) {
-    return { p50: hit.p50, p90: hit.p90 }
+    return { p50: hit.p50, p90: hit.p90, source: "live" }
   }
-  return heuristic
+  return { ...heuristic, source: "heuristic" }
+}
+
+/**
+ * Backward-compatible band-only resolver (drops provenance). Retained for callers
+ * that only need `{ p50, p90 }`; new code that gates on data source should use
+ * `resolveEtaWithSource`.
+ */
+export function resolveEta(
+  stageType: StageType | null | undefined,
+  operation: GenerationActivityOperation | null | undefined,
+  provider: AIProvider | null | undefined,
+  liveEstimates: readonly GenerationEstimate[],
+): EtaEstimate {
+  const { p50, p90 } = resolveEtaWithSource(
+    stageType,
+    operation,
+    provider,
+    liveEstimates,
+  )
+  return { p50, p90 }
 }
 
 /** The bar decelerates toward this cap and never reaches it — the real `done`
@@ -176,11 +211,55 @@ export function etaProgressFraction(
   return clamp(fraction, 0, ETA_PROGRESS_CAP)
 }
 
-export type EtaBand = "typical" | "overdue"
+export type EtaBand = "typical" | "overdue" | "long"
 
-/** "typical" until the slow-tail `p90` mark, then "overdue" (still working). */
+/**
+ * The absolute mark past which a generation is "taking a while" regardless of the
+ * per-stage estimate — the reassurance copy shifts from "a little longer than
+ * usual" to concrete "this can take a few minutes" here so it never reads as
+ * sarcastic at the multi-minute tail (the watchdog allows up to 900s). Held below
+ * the hard cap so the "long" copy has room to sit before an actual stall surfaces.
+ */
+export const LONG_BAND_SECONDS = 180
+
+/**
+ * Three honest bands, monotonic in elapsed time:
+ * - `typical`  — under the slow-tail `p90` mark; no time language at all.
+ * - `overdue`  — past `p90` but not yet "long"; "a little longer than usual".
+ * - `long`     — past `LONG_BAND_SECONDS` (or `p90` if that is later); concrete
+ *                multi-minute reassurance.
+ */
 export function etaBand(elapsedSeconds: number, estimate: EtaEstimate): EtaBand {
-  return elapsedSeconds >= estimate.p90 ? "overdue" : "typical"
+  const longThreshold = Math.max(LONG_BAND_SECONDS, estimate.p90)
+  if (elapsedSeconds >= longThreshold) return "long"
+  if (elapsedSeconds >= estimate.p90) return "overdue"
+  return "typical"
+}
+
+function roundUpTo(value: number, step: number): number {
+  return Math.ceil(value / step) * step
+}
+
+/**
+ * Friendly upper-bound label for a *live* estimate — rounded up so we
+ * overestimate and beat it, never a false-precise median. Sub-minute rounds up to
+ * the nearest 15s ("~45s"); a minute or more rounds up to the whole minute
+ * ("~2 min"). Deliberately has no lower anchor — the median is exactly the number
+ * that trained users to distrust the old "~30s" caption.
+ */
+export function formatUpperBound(seconds: number): string {
+  if (seconds < 60) return `~${roundUpTo(Math.max(1, seconds), 15)}s`
+  return `~${Math.ceil(seconds / 60)} min`
+}
+
+/**
+ * The only numeric time caption the overlay may show, and only on a `"live"`
+ * estimate — an upper bound derived from the real p90. Returns `null` on the
+ * heuristic guess table (i.e. today, all traffic) so no number is shown.
+ */
+export function upperBoundCaption(estimate: ResolvedEta): string | null {
+  if (estimate.source !== "live") return null
+  return `usually under ${formatUpperBound(estimate.p90)}`
 }
 
 /**
@@ -200,20 +279,20 @@ export function useEtaEstimate(
   stageType: StageType | null | undefined,
   operation: GenerationActivityOperation | null | undefined,
   provider?: AIProvider | null,
-): EtaEstimate {
+): ResolvedEta {
   const liveEstimates = useGenerationEstimatesStore((s) => s.estimates)
   const ensureLoaded = useGenerationEstimatesStore((s) => s.ensureLoaded)
 
   useEffect(() => {
     // Best-effort, deduped in the store. Gated on the same flag that renders the
-    // ETA bar so a flag-off session makes zero new network calls (the bar is the
-    // only consumer of live data), and only worth fetching when a provider is
+    // branded overlay (the only consumer of live data) so a flag-off session
+    // makes zero new network calls, and only worth fetching when a provider is
     // known (otherwise we can only ever use the heuristic anyway).
     if (featureFlags.brandedLoaders && provider) void ensureLoaded()
   }, [provider, ensureLoaded])
 
   return useMemo(
-    () => resolveEta(stageType, operation, provider, liveEstimates),
+    () => resolveEtaWithSource(stageType, operation, provider, liveEstimates),
     [stageType, operation, provider, liveEstimates],
   )
 }

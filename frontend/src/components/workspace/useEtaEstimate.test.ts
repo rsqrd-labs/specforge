@@ -3,11 +3,15 @@ import { describe, expect, it } from "vitest"
 import type { GenerationEstimate } from "../../services/api"
 import {
   ETA_PROGRESS_CAP,
+  LONG_BAND_SECONDS,
   canonicalLookupOperation,
   estimateEta,
   etaBand,
   etaProgressFraction,
+  formatUpperBound,
   resolveEta,
+  resolveEtaWithSource,
+  upperBoundCaption,
   type EtaEstimate,
 } from "./useEtaEstimate"
 
@@ -102,14 +106,27 @@ describe("etaProgressFraction (decelerating asymptote)", () => {
 describe("etaBand", () => {
   const eta: EtaEstimate = { p50: 45, p90: 100 }
 
-  it("is 'typical' before p90", () => {
+  it("is 'typical' before p90 (no time claim in this window)", () => {
     expect(etaBand(0, eta)).toBe("typical")
     expect(etaBand(99, eta)).toBe("typical")
   })
 
-  it("flips to 'overdue' at and beyond p90", () => {
+  it("is 'overdue' from p90 until the long-band mark", () => {
     expect(etaBand(100, eta)).toBe("overdue")
-    expect(etaBand(250, eta)).toBe("overdue")
+    expect(etaBand(179, eta)).toBe("overdue")
+  })
+
+  it("is 'long' at and beyond the long-band mark", () => {
+    expect(etaBand(LONG_BAND_SECONDS, eta)).toBe("long")
+    expect(etaBand(600, eta)).toBe("long")
+  })
+
+  it("never enters 'long' before the estimate's own p90, even past 180s", () => {
+    // A slow-tail estimate whose p90 exceeds the absolute mark: overdue must
+    // still precede long so the copy escalates in order.
+    const slow: EtaEstimate = { p50: 120, p90: 240 }
+    expect(etaBand(200, slow)).toBe("typical")
+    expect(etaBand(240, slow)).toBe("long")
   })
 })
 
@@ -205,5 +222,52 @@ describe("resolveEta (live data preferred, heuristic fallback)", () => {
     expect(resolveEta("tasks", "generate", "google", bad)).toEqual(
       estimateEta("tasks", "generate"),
     )
+  })
+})
+
+describe("resolveEtaWithSource (provenance for the no-number gate, issue #48)", () => {
+  const live: GenerationEstimate[] = [
+    { provider: "anthropic", stage: "spec", operation: "generate", p50: 22, p90: 58, n: 300 },
+  ]
+
+  it("tags the guess table as 'heuristic' (no provider / no data / miss)", () => {
+    expect(resolveEtaWithSource("spec", "generate", undefined, live).source).toBe(
+      "heuristic",
+    )
+    expect(resolveEtaWithSource("spec", "generate", "anthropic", []).source).toBe(
+      "heuristic",
+    )
+    expect(resolveEtaWithSource("harness", "generate", "anthropic", live).source).toBe(
+      "heuristic",
+    )
+  })
+
+  it("tags a real data-backed band as 'live'", () => {
+    const resolved = resolveEtaWithSource("spec", "generate", "anthropic", live)
+    expect(resolved).toEqual({ p50: 22, p90: 58, source: "live" })
+  })
+})
+
+describe("upperBoundCaption / formatUpperBound (issue #48)", () => {
+  it("shows no number on a heuristic estimate (today's only path)", () => {
+    expect(upperBoundCaption({ p50: 30, p90: 75, source: "heuristic" })).toBeNull()
+  })
+
+  it("shows a rounded-up upper bound (never a median) on a live estimate", () => {
+    // p90 = 58 → sub-minute rounds up to the nearest 15s.
+    expect(upperBoundCaption({ p50: 22, p90: 58, source: "live" })).toBe(
+      "usually under ~60s",
+    )
+    // p90 = 81 → rounds up to the whole minute.
+    expect(upperBoundCaption({ p50: 33, p90: 81, source: "live" })).toBe(
+      "usually under ~2 min",
+    )
+  })
+
+  it("formats bounds without a lower anchor", () => {
+    expect(formatUpperBound(45)).toBe("~45s")
+    expect(formatUpperBound(46)).toBe("~60s")
+    expect(formatUpperBound(60)).toBe("~1 min")
+    expect(formatUpperBound(130)).toBe("~3 min")
   })
 })

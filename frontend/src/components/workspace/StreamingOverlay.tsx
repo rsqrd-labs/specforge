@@ -6,12 +6,7 @@ import type { QualityGateInfo, StageType } from "../../types/stage"
 import type { AIProvider } from "../../types/workspace"
 import { findingKindLabel, findingSeverityLabel } from "../../utils/qualityGate"
 import { BrandLoader } from "../shared/BrandLoader"
-import {
-  type EtaEstimate,
-  etaBand,
-  etaProgressFraction,
-  useEtaEstimate,
-} from "./useEtaEstimate"
+import { type EtaBand, etaBand, upperBoundCaption, useEtaEstimate } from "./useEtaEstimate"
 
 export type GenerationActivityOperation =
   | "generate"
@@ -75,6 +70,8 @@ export function StreamingOverlay({
     useState<GenerationActivityInfo | null>(activity ?? null)
   const [isExiting, setIsExiting] = useState(false)
   const [elapsedSeconds, setElapsedSeconds] = useState(0)
+  // Advance-only pipeline step index, driven by the real backend phase heartbeat.
+  const [stepIndex, setStepIndex] = useState(0)
 
   // Local elapsed ticker from the activity start, so the overlay visibly
   // progresses every second even between backend heartbeats.
@@ -89,6 +86,20 @@ export function StreamingOverlay({
     const intervalId = window.setInterval(tick, 1000)
     return () => window.clearInterval(intervalId)
   }, [activity, isVisible])
+
+  // Reset the phase stepper when a new generation starts (stage or operation
+  // changes), so a fresh run begins at Drafting rather than a stale later step.
+  useEffect(() => {
+    setStepIndex(0)
+  }, [activity?.stageId, activity?.operation])
+
+  // Map the backend phase heartbeat to a pipeline step. Advance-only: an unknown
+  // or absent phase (`phaseStepIndex` → 0) holds the last known step so the
+  // stepper never visibly regresses mid-run.
+  useEffect(() => {
+    const next = phaseStepIndex(progress?.phase)
+    setStepIndex((prev) => (next > prev ? next : prev))
+  }, [progress?.phase])
 
   useEffect(() => {
     if (activity && isVisible) {
@@ -321,25 +332,12 @@ export function StreamingOverlay({
   }
 
   const copy = getActivityCopy(renderedActivity)
-  // Issue #21 Phase 2c: when the backend heartbeat reports a real pipeline phase
-  // and the branded-loaders rollout is on, the liveness line names that phase
-  // instead of the generic "still working" copy. Gated on the flag so a
-  // flag-off session is byte-identical, and any unknown/missing phase falls back
-  // to the generic copy — the field is additive and must never break the line.
-  const phaseLiveness =
-    featureFlags.brandedLoaders && progress?.phase
-      ? phaseLivenessCopy(progress.phase)
-      : null
   // Issue #39 UX: the parallel chunked path streams only its lead chunk per
   // wave live, so its silent sibling chunks show no text — the backend reports
   // honest, monotonic part progress on the heartbeat to cover the whole set.
   // Show it only while parts are actually being generated (the
   // `streaming`/`refining` phases) — once all parts are drafted the pipeline
-  // moves to the gate/critic phases, where a stale "N of N parts" would
-  // mislead. Independent of the branded-loaders flag: core liveness, not
-  // decoration. (When live tokens are flowing the overlay is already collapsed
-  // to the compact pill, so this full-overlay counter shows during the brief
-  // pre-token window and for the silent siblings.)
+  // moves to the gate/critic phases, where a stale "N of N parts" would mislead.
   const totalParts = progress?.total_parts ?? 0
   const showParts =
     totalParts > 0 &&
@@ -355,39 +353,38 @@ export function StreamingOverlay({
         ? "gate"
         : "stream"
 
-  return (
-    <div
-      className={`streaming-overlay generation-loading-overlay ${isExiting ? "is-exiting" : ""}`}
-      role="status"
-      aria-live="polite"
-      aria-busy="true"
-      aria-label={`${copy.title} for ${copy.stageLabel}`}
-    >
-      <div className={`generation-loading-card ${variant}`}>
-        <div className="generation-flow" aria-hidden="true">
-          <div className="generation-flow-rail">
-            {STAGE_FLOW.map((stage, index) => (
-              <span
-                key={stage.type}
-                className={`generation-flow-node ${
-                  index === activeStageIndex ? "active" : ""
-                } ${index < activeStageIndex ? "complete" : ""}`}
-              >
-                {stage.label}
-              </span>
-            ))}
+  // Legacy per-surface overlay, rendered only when a session has explicitly
+  // opted out of branded loaders (`VITE_BRANDED_LOADERS=false`). Kept
+  // byte-identical to the pre-issue-#48 markup so the opt-out path never
+  // regresses; all the honest-time work below lives on the branded path.
+  if (!featureFlags.brandedLoaders) {
+    return (
+      <div
+        className={`streaming-overlay generation-loading-overlay ${isExiting ? "is-exiting" : ""}`}
+        role="status"
+        aria-live="polite"
+        aria-busy="true"
+        aria-label={`${copy.title} for ${copy.stageLabel}`}
+      >
+        <div className={`generation-loading-card ${variant}`}>
+          <div className="generation-flow" aria-hidden="true">
+            <div className="generation-flow-rail">
+              {STAGE_FLOW.map((stage, index) => (
+                <span
+                  key={stage.type}
+                  className={`generation-flow-node ${
+                    index === activeStageIndex ? "active" : ""
+                  } ${index < activeStageIndex ? "complete" : ""}`}
+                >
+                  {stage.label}
+                </span>
+              ))}
+            </div>
+            <div className="generation-trace-lane">
+              <span className="generation-trace" />
+            </div>
           </div>
-          <div className="generation-trace-lane">
-            <span className="generation-trace" />
-          </div>
-        </div>
 
-        {featureFlags.brandedLoaders ? (
-          // The overlay already owns the live region (role="status" above), so
-          // the branded mark is embedded with the decorative `overlay` variant.
-          // The stage rail and copy are preserved.
-          <BrandLoader variant="overlay" size="lg" />
-        ) : (
           <div className="generation-activity-visual" aria-hidden="true">
             {variant === "patch" ? (
               <div className="generation-patch-flow">
@@ -407,31 +404,97 @@ export function StreamingOverlay({
             )}
             {variant === "gate" ? <span className="generation-gate-check" /> : null}
           </div>
-        )}
+
+          <div className="generation-loading-copy">
+            <span className="generation-loading-kicker">{copy.stageLabel}</span>
+            <strong>{copy.title}</strong>
+            <p>{copy.detail}</p>
+            <p className="generation-loading-liveness">
+              {formatElapsed(elapsedSeconds)} elapsed
+              {progress
+                ? " — the model is working; this can take several minutes."
+                : elapsedSeconds >= 15
+                  ? " — frontier models can reason for a while before text appears."
+                  : ""}
+            </p>
+            {showParts ? (
+              <p className="generation-loading-parts" aria-live="polite">
+                {completedParts} of {totalParts} parts drafted
+              </p>
+            ) : null}
+          </div>
+        </div>
+      </div>
+    )
+  }
+
+  // Branded, honest-time overlay (issue #48). The card is `aria-hidden` and the
+  // single live region below announces only *milestone* changes (step / band),
+  // never the per-second elapsed tick — one calm announcement, not a stream.
+  const band = etaBand(elapsedSeconds, eta)
+  const reassurance = bandReassurance(band)
+  // The only numeric time caption we may show, and only on a live, data-backed
+  // estimate (never the guess table). `null` today ⇒ no number rendered.
+  const upperBound = upperBoundCaption(eta)
+  // A focused patch edits a selection, not the whole artifact — it does not run
+  // the five-stage pipeline, so it gets a calm activity cue instead of a stepper
+  // whose later steps would sit permanently inert.
+  const showStepper = variant !== "patch"
+  const partsLabel = showParts ? `${completedParts} of ${totalParts} parts` : null
+
+  return (
+    <div
+      className={`streaming-overlay generation-loading-overlay ${isExiting ? "is-exiting" : ""}`}
+      role="status"
+      aria-live="polite"
+      aria-busy="true"
+      aria-label={`${copy.title} for ${copy.stageLabel}`}
+    >
+      {/* Single, milestone-only announcement for assistive tech. The visual card
+          is `aria-hidden`, so its per-second elapsed updates never reach the
+          screen reader; only this string (changing on step / band) is spoken. */}
+      <p className="sr-only">{liveMilestone(band, stepIndex)}</p>
+
+      <div className={`generation-loading-card ${variant}`} aria-hidden="true">
+        {/* Slim macro rail: which of the four stages this is. Deliberately quiet
+            so it reads as orientation, distinct from the phase stepper below. */}
+        <div className="generation-stage-rail">
+          {STAGE_FLOW.map((stage, index) => (
+            <span
+              key={stage.type}
+              className={`generation-stage-node ${
+                index === activeStageIndex ? "active" : ""
+              } ${index < activeStageIndex ? "complete" : ""}`}
+            >
+              {stage.label}
+            </span>
+          ))}
+        </div>
+
+        <BrandLoader variant="overlay" size="lg" />
 
         <div className="generation-loading-copy">
           <span className="generation-loading-kicker">{copy.stageLabel}</span>
           <strong>{copy.title}</strong>
           <p>{copy.detail}</p>
-          <p className="generation-loading-liveness">
+        </div>
+
+        {showStepper ? (
+          <PhaseStepper activeIndex={stepIndex} partsLabel={partsLabel} />
+        ) : (
+          <div className="generation-patch-activity">
+            <span className="generation-patch-activity-fill" />
+          </div>
+        )}
+
+        <div className={`generation-loading-status is-${band}`}>
+          <span className="generation-elapsed">
             {formatElapsed(elapsedSeconds)} elapsed
-            {progress
-              ? ` — ${phaseLiveness ?? "the model is working; this can take several minutes."}`
-              : elapsedSeconds >= 15
-                ? " — frontier models can reason for a while before text appears."
-                : ""}
-          </p>
-          {showParts ? (
-            <p className="generation-loading-parts" aria-live="polite">
-              {completedParts} of {totalParts} parts drafted
-            </p>
-          ) : null}
-          {/* Not during the exit fade: the elapsed ticker resets to 0 the moment
-              the activity clears, so rendering the bar here would animate the
-              fill backward toward empty as the card fades (a "progress goes
-              backward" smell). The bar simply leaves with the card instead. */}
-          {featureFlags.brandedLoaders && !isExiting ? (
-            <EtaProgress elapsedSeconds={elapsedSeconds} eta={eta} />
+          </span>
+          {reassurance ? (
+            <span className="generation-reassurance">{reassurance}</span>
+          ) : upperBound ? (
+            <span className="generation-eta-bound">{upperBound}</span>
           ) : null}
         </div>
       </div>
@@ -439,42 +502,115 @@ export function StreamingOverlay({
   )
 }
 
-/**
- * Phase 2a honest ETA (issue #21). A decelerating bar that asymptotes near 90%
- * (`ETA_PROGRESS_CAP`) and a banded caption — never a countdown that hits zero
- * and keeps spinning. The bar is purely decorative (`aria-hidden`): it is a
- * heuristic, so the honest, screen-reader-announced signal is the caption text
- * (static app copy) sitting inside the overlay's existing live region. The fill
- * animates with `transform: scaleX` (compositor-only — no layout) so hundreds of
- * concurrent loaders cost nothing.
- */
-function EtaProgress({
-  elapsedSeconds,
-  eta,
-}: {
-  elapsedSeconds: number
-  eta: EtaEstimate
-}) {
-  const fraction = etaProgressFraction(elapsedSeconds, eta)
-  const band = etaBand(elapsedSeconds, eta)
-  const caption =
-    band === "overdue"
-      ? `usually ~${eta.p50}s · still working`
-      : `usually ~${eta.p50}s`
+/** The five pipeline steps the branded overlay narrates, in order. `announce`
+ *  is the assistive-tech sentence for the milestone live region. */
+interface PipelineStep {
+  key: string
+  label: string
+  announce: string
+}
 
+const PIPELINE_STEPS: PipelineStep[] = [
+  { key: "drafting", label: "Drafting", announce: "Drafting the document." },
+  { key: "refining", label: "Refining", announce: "Refining the draft." },
+  {
+    key: "quality",
+    label: "Quality checks",
+    announce: "Running quality checks.",
+  },
+  {
+    key: "reviewer",
+    label: "Reviewer",
+    announce: "A reviewer model is checking the draft.",
+  },
+  { key: "saving", label: "Saving", announce: "Saving your work." },
+]
+
+/**
+ * Map a backend pipeline phase to a `PIPELINE_STEPS` index. Total and pure: an
+ * unknown or absent phase returns 0 (Drafting) so the advance-only reducer in
+ * the component holds the last known step rather than regressing. `critic` maps
+ * to the Reviewer step, which the default async path usually skips — steps only
+ * ever advance, so a skipped step is not a regression.
+ */
+export function phaseStepIndex(phase?: string | null): number {
+  switch (phase) {
+    case "streaming":
+      return 0
+    case "refining":
+      return 1
+    case "quality_gate":
+      return 2
+    case "critic":
+      return 3
+    case "persisting":
+      return 4
+    default:
+      return 0
+  }
+}
+
+/** Elapsed-band reassurance copy. `null` in the typical band — below the slow
+ *  tail we make no time claim at all, so nothing can contradict the stepper. */
+function bandReassurance(band: EtaBand): string | null {
+  switch (band) {
+    case "long":
+      return "Still generating — detailed specs can take a few minutes. We'll flag it if it stalls."
+    case "overdue":
+      return "Taking a little longer than usual — still working."
+    default:
+      return null
+  }
+}
+
+/** The single assistive-tech announcement. Once overdue, the band reassurance is
+ *  the message; otherwise it names the current pipeline step. */
+function liveMilestone(band: EtaBand, stepIndex: number): string {
+  if (band === "long") {
+    return "Still generating. This is taking longer than usual, but it is still working."
+  }
+  if (band === "overdue") {
+    return "Still working. This is taking a little longer than usual."
+  }
+  return PIPELINE_STEPS[stepIndex]?.announce ?? PIPELINE_STEPS[0].announce
+}
+
+/**
+ * The primary progress signal: a vertical stepper driven by the real backend
+ * phase heartbeat. Purely visual (`aria-hidden`) — the accessible equivalent is
+ * the milestone live region in the overlay. Completed steps check off, the
+ * active step pulses, and the honest "N of M parts" count sits under the active
+ * Drafting step when the parallel path reports it.
+ */
+function PhaseStepper({
+  activeIndex,
+  partsLabel,
+}: {
+  activeIndex: number
+  partsLabel: string | null
+}) {
   return (
-    <div className="generation-eta">
-      <span
-        className={`generation-eta-bar generation-eta-bar--${band}`}
-        aria-hidden="true"
-      >
-        <span
-          className="generation-eta-fill"
-          style={{ transform: `scaleX(${fraction})` }}
-        />
-      </span>
-      <span className="generation-eta-caption">{caption}</span>
-    </div>
+    <ol className="generation-phase-steps" aria-hidden="true">
+      {PIPELINE_STEPS.map((step, index) => {
+        const state =
+          index < activeIndex
+            ? "complete"
+            : index === activeIndex
+              ? "active"
+              : "upcoming"
+        return (
+          <li key={step.key} className={`generation-phase-step is-${state}`}>
+            <span className="generation-phase-marker" />
+            <span className="generation-phase-text">
+              <span className="generation-phase-label">{step.label}</span>
+              {state === "active" && partsLabel ? (
+                <span className="generation-phase-sub">{partsLabel}</span>
+              ) : null}
+            </span>
+          </li>
+        )
+      })}
+    </ol>
   )
 }
 
@@ -545,7 +681,8 @@ function getActivityCopy(activity: GenerationActivityInfo) {
     return {
       stageLabel,
       title: "Regenerating with gate feedback",
-      detail: "Applying the flagged findings before the next quality pass.",
+      detail:
+        "Applying the reviewer's findings — this replaces the held draft with a corrected version.",
     }
   }
 
