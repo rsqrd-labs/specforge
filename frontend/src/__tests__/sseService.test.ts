@@ -73,7 +73,7 @@ describe("createSSEConnection retry behaviour", () => {
     const onError = vi.fn()
     const onEval = vi.fn()
 
-    createSSEConnection("/stream", onToken, onDone, onError, onEval)
+    createSSEConnection({ url: "/stream", onToken, onDone, onError, onEval })
 
     // Attempt 1 fails → backoff 1 000 ms scheduled
     await vi.advanceTimersByTimeAsync(1000)
@@ -92,7 +92,7 @@ describe("createSSEConnection retry behaviour", () => {
 
     const onError = vi.fn()
 
-    createSSEConnection("/stream", vi.fn(), vi.fn(), onError, vi.fn())
+    createSSEConnection({ url: "/stream", onToken: vi.fn(), onDone: vi.fn(), onError })
 
     // Three failed attempts with backoffs: 1 s → 2 s → 4 s
     await vi.advanceTimersByTimeAsync(1000)
@@ -113,7 +113,7 @@ describe("createSSEConnection retry behaviour", () => {
 
     const onError = vi.fn()
 
-    createSSEConnection("/stream", vi.fn(), vi.fn(), onError, vi.fn())
+    createSSEConnection({ url: "/stream", onToken: vi.fn(), onDone: vi.fn(), onError })
 
     await vi.runAllTimersAsync()
 
@@ -131,7 +131,7 @@ describe("createSSEConnection retry behaviour", () => {
 
     const onError = vi.fn()
 
-    createSSEConnection("/stream", vi.fn(), vi.fn(), onError, vi.fn())
+    createSSEConnection({ url: "/stream", onToken: vi.fn(), onDone: vi.fn(), onError })
 
     await vi.runAllTimersAsync()
 
@@ -149,7 +149,7 @@ describe("createSSEConnection retry behaviour", () => {
 
     const onError = vi.fn()
 
-    createSSEConnection("/stream", vi.fn(), vi.fn(), onError, vi.fn())
+    createSSEConnection({ url: "/stream", onToken: vi.fn(), onDone: vi.fn(), onError })
 
     await vi.runAllTimersAsync()
 
@@ -169,7 +169,7 @@ describe("createSSEConnection retry behaviour", () => {
     const onDone = vi.fn()
     const onError = vi.fn()
 
-    createSSEConnection("/stream", onToken, onDone, onError, vi.fn())
+    createSSEConnection({ url: "/stream", onToken, onDone, onError })
 
     await vi.advanceTimersByTimeAsync(1000)
     await vi.advanceTimersByTimeAsync(2000)
@@ -199,7 +199,7 @@ describe("createSSEConnection retry behaviour", () => {
     const onDone = vi.fn()
     const onError = vi.fn()
 
-    createSSEConnection("/stream", vi.fn(), onDone, onError, vi.fn())
+    createSSEConnection({ url: "/stream", onToken: vi.fn(), onDone, onError })
 
     await vi.runAllTimersAsync()
 
@@ -233,7 +233,7 @@ describe("createSSEConnection retry behaviour", () => {
 
     const onError = vi.fn()
 
-    createSSEConnection("/stream", vi.fn(), vi.fn(), onError, vi.fn())
+    createSSEConnection({ url: "/stream", onToken: vi.fn(), onDone: vi.fn(), onError })
 
     await vi.runAllTimersAsync()
 
@@ -261,7 +261,7 @@ describe("createSSEConnection retry behaviour", () => {
     const onDone = vi.fn()
     const onError = vi.fn()
 
-    createSSEConnection("/stream", vi.fn(), onDone, onError, vi.fn())
+    createSSEConnection({ url: "/stream", onToken: vi.fn(), onDone, onError })
 
     await vi.advanceTimersByTimeAsync(1000)
     await vi.runAllTimersAsync()
@@ -290,7 +290,13 @@ describe("createSSEConnection retry behaviour", () => {
     const onError = vi.fn()
     const onGate = vi.fn()
 
-    createSSEConnection("/stream", vi.fn(), onDone, onError, vi.fn(), onGate)
+    createSSEConnection({
+      url: "/stream",
+      onToken: vi.fn(),
+      onDone,
+      onError,
+      onQualityGateFailed: onGate,
+    })
 
     await vi.runAllTimersAsync()
 
@@ -311,13 +317,12 @@ describe("createSSEConnection retry behaviour", () => {
 
     const onError = vi.fn()
 
-    const { close } = createSSEConnection(
-      "/stream",
-      vi.fn(),
-      vi.fn(),
+    const { close } = createSSEConnection({
+      url: "/stream",
+      onToken: vi.fn(),
+      onDone: vi.fn(),
       onError,
-      vi.fn(),
-    )
+    })
 
     // Let the first attempt fail (backoff 1 000 ms queued)
     await vi.advanceTimersByTimeAsync(0)
@@ -360,17 +365,13 @@ describe("createSSEConnection abort settling", () => {
     const onError = vi.fn()
     const onAbort = vi.fn()
 
-    const { close } = createSSEConnection(
-      "/stream",
-      vi.fn(),
+    const { close } = createSSEConnection({
+      url: "/stream",
+      onToken: vi.fn(),
       onDone,
       onError,
-      vi.fn(),
-      vi.fn(),
-      vi.fn(),
-      vi.fn(),
       onAbort,
-    )
+    })
 
     // Let the first token flush, then tear the connection down mid-stream.
     await vi.advanceTimersByTimeAsync(0)
@@ -389,17 +390,13 @@ describe("createSSEConnection abort settling", () => {
     const onDone = vi.fn()
     const onAbort = vi.fn()
 
-    const { close } = createSSEConnection(
-      "/stream",
-      vi.fn(),
+    const { close } = createSSEConnection({
+      url: "/stream",
+      onToken: vi.fn(),
       onDone,
-      vi.fn(),
-      vi.fn(),
-      vi.fn(),
-      vi.fn(),
-      vi.fn(),
+      onError: vi.fn(),
       onAbort,
-    )
+    })
 
     await vi.runAllTimersAsync()
     // Caller closes after done (the useStream teardown): still no abort settle,
@@ -418,17 +415,13 @@ describe("createSSEConnection abort settling", () => {
     const onError = vi.fn()
     const onAbort = vi.fn()
 
-    createSSEConnection(
-      "/stream",
-      vi.fn(),
-      vi.fn(),
+    createSSEConnection({
+      url: "/stream",
+      onToken: vi.fn(),
+      onDone: vi.fn(),
       onError,
-      vi.fn(),
-      vi.fn(),
-      vi.fn(),
-      vi.fn(),
       onAbort,
-    )
+    })
 
     await vi.runAllTimersAsync()
 
@@ -444,17 +437,13 @@ describe("createSSEConnection abort settling", () => {
     const onError = vi.fn()
     const onAbort = vi.fn()
 
-    createSSEConnection(
-      "/stream",
-      vi.fn(),
-      vi.fn(),
+    createSSEConnection({
+      url: "/stream",
+      onToken: vi.fn(),
+      onDone: vi.fn(),
       onError,
-      vi.fn(),
-      vi.fn(),
-      vi.fn(),
-      vi.fn(),
       onAbort,
-    )
+    })
 
     await vi.advanceTimersByTimeAsync(1000)
     await vi.advanceTimersByTimeAsync(2000)
@@ -482,15 +471,15 @@ describe("createSSEConnection progress heartbeats", () => {
     const onQualityGate = vi.fn()
     const onProgress = vi.fn()
 
-    createSSEConnection(
-      "/stream",
+    createSSEConnection({
+      url: "/stream",
       onToken,
       onDone,
       onError,
       onEval,
-      onQualityGate,
+      onQualityGateFailed: onQualityGate,
       onProgress,
-    )
+    })
 
     await vi.runAllTimersAsync()
 
@@ -519,16 +508,13 @@ describe("createSSEConnection progress heartbeats", () => {
     const onError = vi.fn()
     const onReset = vi.fn()
 
-    createSSEConnection(
-      "/stream",
+    createSSEConnection({
+      url: "/stream",
       onToken,
       onDone,
       onError,
-      vi.fn(),
-      vi.fn(),
-      vi.fn(),
       onReset,
-    )
+    })
 
     await vi.runAllTimersAsync()
 
@@ -552,7 +538,7 @@ describe("createSSEConnection progress heartbeats", () => {
     const onDone = vi.fn()
     const onError = vi.fn()
 
-    createSSEConnection("/stream", onToken, onDone, onError)
+    createSSEConnection({ url: "/stream", onToken, onDone, onError })
 
     await vi.runAllTimersAsync()
 

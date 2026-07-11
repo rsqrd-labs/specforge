@@ -124,29 +124,30 @@ export function useStream(stageId: string | null) {
               : await generateStage(stageId)
 
         const doneStageId = await new Promise<string>((resolve, reject) => {
-          streamRef.current = createSSEConnection(
-            response.stream_url,
-            (token) => useStageStore.getState().appendToken(stageId, token),
-            resolve,
-            reject,
+          streamRef.current = createSSEConnection({
+            url: response.stream_url,
+            onToken: (token) => useStageStore.getState().appendToken(stageId, token),
+            onDone: resolve,
+            onError: reject,
             // Eval is not consumed from the stream: the independent stage-eval
             // poller in Workspace fetches it once the stage reaches draft. See
             // the done-handling note below.
-            () => {},
-            (info) => useStageStore.getState().setQualityGate(stageId, info),
-            (progress) =>
+            onEval: () => {},
+            onQualityGateFailed: (info) =>
+              useStageStore.getState().setQualityGate(stageId, info),
+            onProgress: (progress) =>
               useStageStore.getState().setStreamProgress(stageId, progress),
-            () => useStageStore.getState().clearStreamContent(stageId),
+            onReset: () => useStageStore.getState().clearStreamContent(stageId),
             // onAbort: the connection was torn down (unmount, cancel(), or a
             // superseding generation) before a terminal done/error. Settle this
             // executor so the frame unwinds and its `finally` runs — the
             // alternative is a Promise that never resolves and leaks this whole
             // closure for the connection's lifetime.
-            () =>
+            onAbort: () =>
               reject(
                 new StreamError("stream_aborted", "Generation stream was cancelled."),
               ),
-          )
+          })
         })
 
         // `done` is terminal for the loading UI — the backend persists the stage

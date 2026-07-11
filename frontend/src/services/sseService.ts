@@ -164,15 +164,24 @@ async function buildStreamHeaders(): Promise<Headers> {
   return headers
 }
 
-export function createSSEConnection(
-  url: string,
-  onToken: (token: string) => void,
-  onDone: (stageId: string) => void,
-  onError: (error: Error) => void,
-  onEval: (result: EvalResult | null) => void = () => {},
-  onQualityGateFailed: (info: QualityGateInfo) => void = () => {},
-  onProgress: (progress: GenerationProgress) => void = () => {},
-  onReset: () => void = () => {},
+/**
+ * Handlers + endpoint for a streamed generation. A single options object rather
+ * than positional args: `onReset` and `onAbort` (and the other tail callbacks)
+ * share the `() => void` shape, so a positional signature let a reorder mis-wire
+ * them while still type-checking. Named keys make that impossible and let a new
+ * callback be added as a non-breaking optional key. `url`, `onToken`, `onDone`
+ * and `onError` are required; the rest default to no-ops.
+ */
+export interface SSEConnectionOptions {
+  /** SSE endpoint. Relative URLs are resolved against `VITE_API_URL`. */
+  url: string
+  onToken: (token: string) => void
+  onDone: (stageId: string) => void
+  onError: (error: Error) => void
+  onEval?: (result: EvalResult | null) => void
+  onQualityGateFailed?: (info: QualityGateInfo) => void
+  onProgress?: (progress: GenerationProgress) => void
+  onReset?: () => void
   /** Fired exactly once when the connection tears down WITHOUT having delivered
    *  a terminal outcome — i.e. `close()`/abort was called (unmount, cancel, a
    *  superseding generation) or the stream ended without a `done`/error and no
@@ -180,8 +189,22 @@ export function createSSEConnection(
    *  Promise executor is guaranteed a settle; otherwise that Promise hangs for
    *  the connection's lifetime and its `async` frame (and every closure it
    *  captures) leaks. Never fires once `onDone` or `onError` has been called. */
-  onAbort: () => void = () => {},
-): SSEControl {
+  onAbort?: () => void
+}
+
+export function createSSEConnection(options: SSEConnectionOptions): SSEControl {
+  const {
+    url,
+    onToken,
+    onDone,
+    onError,
+    onEval = () => {},
+    onQualityGateFailed = () => {},
+    onProgress = () => {},
+    onReset = () => {},
+    onAbort = () => {},
+  } = options
+
   let closed = false
   let currentController = new AbortController()
   let lastError: Error | undefined
