@@ -43,13 +43,13 @@ export function useStream(stageId: string | null) {
   useEffect(() => {
     return () => {
       streamRef.current?.close()
-      // Closing the fetch aborts the SSE read, but the awaited promise in
-      // `start()` never settles on an abort (sseService swallows the close),
-      // so the `finally` that would run `finaliseStream` never fires. Discard
-      // the orphaned client buffer explicitly here — otherwise a Workspace
-      // unmount mid-generation leaves a stale partial in `streamingContent`
-      // that a later remount would re-hydrate OVER the finished artifact the
-      // reconnect poll delivers (and a keystroke would then persist server-side).
+      // Closing the fetch aborts the SSE read. sseService now settles the
+      // awaited `start()` promise on that abort (via onAbort), so the frame
+      // unwinds and no longer leaks — but its rejection lands on a microtask,
+      // AFTER a synchronous remount could re-hydrate this buffer OVER the
+      // finished artifact the reconnect poll delivers (and a keystroke would
+      // then persist that stale partial server-side). Discard the orphaned
+      // client buffer synchronously here to win that remount race.
       const active = useStageStore.getState().activeStream
       if (active) {
         useStageStore.getState().discardStream(active)
@@ -137,6 +137,15 @@ export function useStream(stageId: string | null) {
             (progress) =>
               useStageStore.getState().setStreamProgress(stageId, progress),
             () => useStageStore.getState().clearStreamContent(stageId),
+            // onAbort: the connection was torn down (unmount, cancel(), or a
+            // superseding generation) before a terminal done/error. Settle this
+            // executor so the frame unwinds and its `finally` runs — the
+            // alternative is a Promise that never resolves and leaks this whole
+            // closure for the connection's lifetime.
+            () =>
+              reject(
+                new StreamError("stream_aborted", "Generation stream was cancelled."),
+              ),
           )
         })
 
@@ -167,11 +176,22 @@ export function useStream(stageId: string | null) {
 
         return { stage: updatedStage, evalResult: null }
       } catch (streamError) {
+        const code =
+          streamError instanceof StreamError ? streamError.code : "internal_error"
+
+        // A deliberate teardown (unmount cleanup, cancel(), or a superseding
+        // generation) aborts the connection; sseService settles this executor
+        // with the sentinel so the frame can unwind. There's no error to show
+        // and no server state to reconcile — the caller that invoked close()
+        // owns the follow-up (the unmount cleanup discards the buffer; cancel()
+        // finalises it) — so bail without touching stage state or the error UI.
+        if (code === "stream_aborted") {
+          return null
+        }
+
         useStageStore.getState().finaliseStream(stageId)
         const message =
           streamError instanceof Error ? streamError.message : "Streaming failed"
-        const code =
-          streamError instanceof StreamError ? streamError.code : "internal_error"
         setError({ code, message })
 
         try {

@@ -173,10 +173,31 @@ export function createSSEConnection(
   onQualityGateFailed: (info: QualityGateInfo) => void = () => {},
   onProgress: (progress: GenerationProgress) => void = () => {},
   onReset: () => void = () => {},
+  /** Fired exactly once when the connection tears down WITHOUT having delivered
+   *  a terminal outcome — i.e. `close()`/abort was called (unmount, cancel, a
+   *  superseding generation) or the stream ended without a `done`/error and no
+   *  retry recovered it. It exists so a caller awaiting `onDone`/`onError` in a
+   *  Promise executor is guaranteed a settle; otherwise that Promise hangs for
+   *  the connection's lifetime and its `async` frame (and every closure it
+   *  captures) leaks. Never fires once `onDone` or `onError` has been called. */
+  onAbort: () => void = () => {},
 ): SSEControl {
   let closed = false
   let currentController = new AbortController()
   let lastError: Error | undefined
+  // Whether a terminal outcome (`onDone`/`onError`) has been handed to the
+  // caller. Gates `onAbort` so the caller is settled exactly once.
+  let settled = false
+
+  function settleDone(stageId: string) {
+    settled = true
+    onDone(stageId)
+  }
+
+  function settleError(error: Error) {
+    settled = true
+    onError(error)
+  }
 
   function close() {
     closed = true
@@ -209,7 +230,7 @@ export function createSSEConnection(
           // flaky. Retrying the connection 3 more times against a backend that
           // will reject every attempt identically wastes ~7s of backoff and
           // ends in a vague "stream failed" message. Fail fast with the truth.
-          onError(
+          settleError(
             new StreamError(
               "session_expired",
               "Your session has expired. Please sign in again.",
@@ -237,6 +258,12 @@ export function createSSEConnection(
       while (!closed) {
         const { done, value } = await reader.read()
         if (done) break
+        // A read that resolved (rather than rejecting with AbortError) can still
+        // race a close() that fired while it was pending — the loop-top guard
+        // already passed. Re-check here so we never dispatch onToken for a chunk
+        // that arrived after teardown, which would recreate the streamingContent
+        // buffer the unmount cleanup just discarded (the stale-remount hazard).
+        if (closed) break
 
         buffer += decoder.decode(value, { stream: true })
         const lastBoundary = buffer.lastIndexOf("\n\n")
@@ -276,7 +303,7 @@ export function createSSEConnection(
 
           if ("done" in data && data.done) {
             doneReceived = true
-            onDone((data as DoneEvent).stage_id)
+            settleDone((data as DoneEvent).stage_id)
             // Keep connection open to receive the follow-on eval event
             continue
           }
@@ -287,7 +314,7 @@ export function createSSEConnection(
             // Terminal: the backend persisted a blocked draft and ended the
             // stream without a `done`. Surface it as an application error so
             // the caller stops waiting and fetches the latest stage.
-            onError(
+            settleError(
               new StreamError(
                 "quality_gate_failed",
                 streamErrorMessage({ error: "quality_gate_failed" }),
@@ -299,7 +326,7 @@ export function createSSEConnection(
 
           if ("error" in data) {
             const ev = data as ErrorEvent
-            onError(new StreamError(ev.error, streamErrorMessage(ev)))
+            settleError(new StreamError(ev.error, streamErrorMessage(ev)))
             close()
             return true // application-level error — do not retry
           }
@@ -344,11 +371,17 @@ export function createSSEConnection(
         console.warn(`SSE retry ${attempt + 1}/${MAX_RETRIES} in ${delay}ms`)
         await new Promise<void>((resolve) => window.setTimeout(resolve, delay))
       } else {
-        onError(lastError ?? new Error("Stream failed after retries"))
+        settleError(lastError ?? new Error("Stream failed after retries"))
       }
     }
   }
 
-  void connect()
+  void connect().finally(() => {
+    // The connection has fully stopped. If no terminal outcome reached the
+    // caller (an external close()/abort, or an aborted retry that bailed via the
+    // `closed` guard), settle it now — otherwise a caller awaiting onDone/onError
+    // hangs forever and its executor closure leaks.
+    if (!settled) onAbort()
+  })
   return { close }
 }

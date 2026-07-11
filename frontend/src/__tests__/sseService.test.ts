@@ -332,6 +332,140 @@ describe("createSSEConnection retry behaviour", () => {
   })
 })
 
+describe("createSSEConnection abort settling", () => {
+  it("fires onAbort exactly once when close() aborts an in-flight stream", async () => {
+    // A stream that never resolves on its own: the reader stays open until the
+    // fetch is aborted, mimicking a live generation the user navigates away from.
+    let controllerRef: ReadableStreamDefaultController<Uint8Array> | null = null
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controllerRef = controller
+        controller.enqueue(new TextEncoder().encode('data: {"token":"hi"}\n\n'))
+      },
+    })
+    vi.spyOn(globalThis, "fetch").mockImplementation((_url, init) => {
+      const signal = (init as RequestInit).signal
+      signal?.addEventListener("abort", () => {
+        controllerRef?.error(new DOMException("aborted", "AbortError"))
+      })
+      return Promise.resolve(
+        new Response(body, {
+          status: 200,
+          headers: { "Content-Type": "text/event-stream" },
+        }),
+      )
+    })
+
+    const onDone = vi.fn()
+    const onError = vi.fn()
+    const onAbort = vi.fn()
+
+    const { close } = createSSEConnection(
+      "/stream",
+      vi.fn(),
+      onDone,
+      onError,
+      vi.fn(),
+      vi.fn(),
+      vi.fn(),
+      vi.fn(),
+      onAbort,
+    )
+
+    // Let the first token flush, then tear the connection down mid-stream.
+    await vi.advanceTimersByTimeAsync(0)
+    close()
+    await vi.runAllTimersAsync()
+
+    expect(onAbort).toHaveBeenCalledTimes(1)
+    expect(onDone).not.toHaveBeenCalled()
+    expect(onError).not.toHaveBeenCalled()
+  })
+
+  it("does not fire onAbort on a normal done — the caller is already settled", async () => {
+    const doneBody = 'data: {"done":true,"stage_id":"s1"}\n\n'
+    vi.spyOn(globalThis, "fetch").mockImplementation(() => mockFetchOk(doneBody))
+
+    const onDone = vi.fn()
+    const onAbort = vi.fn()
+
+    const { close } = createSSEConnection(
+      "/stream",
+      vi.fn(),
+      onDone,
+      vi.fn(),
+      vi.fn(),
+      vi.fn(),
+      vi.fn(),
+      vi.fn(),
+      onAbort,
+    )
+
+    await vi.runAllTimersAsync()
+    // Caller closes after done (the useStream teardown): still no abort settle,
+    // because a terminal outcome already reached the caller.
+    close()
+    await vi.runAllTimersAsync()
+
+    expect(onDone).toHaveBeenCalledWith("s1")
+    expect(onAbort).not.toHaveBeenCalled()
+  })
+
+  it("does not fire onAbort when the stream ends with an application error", async () => {
+    const errorBody = 'data: {"error":"provider_error"}\n\n'
+    vi.spyOn(globalThis, "fetch").mockImplementation(() => mockFetchOk(errorBody))
+
+    const onError = vi.fn()
+    const onAbort = vi.fn()
+
+    createSSEConnection(
+      "/stream",
+      vi.fn(),
+      vi.fn(),
+      onError,
+      vi.fn(),
+      vi.fn(),
+      vi.fn(),
+      vi.fn(),
+      onAbort,
+    )
+
+    await vi.runAllTimersAsync()
+
+    expect(onError).toHaveBeenCalledTimes(1)
+    expect(onAbort).not.toHaveBeenCalled()
+  })
+
+  it("fires onAbort after retries are exhausted only if no error was surfaced", async () => {
+    // Retry exhaustion surfaces onError, which counts as settled — onAbort must
+    // stay silent so the caller is never settled twice.
+    vi.spyOn(globalThis, "fetch").mockImplementation(() => mockFetchFail(503))
+
+    const onError = vi.fn()
+    const onAbort = vi.fn()
+
+    createSSEConnection(
+      "/stream",
+      vi.fn(),
+      vi.fn(),
+      onError,
+      vi.fn(),
+      vi.fn(),
+      vi.fn(),
+      vi.fn(),
+      onAbort,
+    )
+
+    await vi.advanceTimersByTimeAsync(1000)
+    await vi.advanceTimersByTimeAsync(2000)
+    await vi.advanceTimersByTimeAsync(4000)
+    await vi.runAllTimersAsync()
+
+    expect(onError).toHaveBeenCalledTimes(1)
+    expect(onAbort).not.toHaveBeenCalled()
+  })
+})
+
 describe("createSSEConnection progress heartbeats", () => {
   it("routes progress events to onProgress and never to onToken", async () => {
     const body =
