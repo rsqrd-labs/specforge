@@ -39,6 +39,12 @@ interface StageState {
   /** stream_reset: the live-streamed draft is being replaced (repair or
    *  canonical replay) — empty the buffer without ending the stream. */
   clearStreamContent: (stageId: string) => void
+  /** Drop the in-flight stream's client buffer WITHOUT persisting it into
+   *  `stages[…].content`. Called when the streaming client tears down (Workspace
+   *  unmount) before `done`: the detached backend pipeline keeps running and the
+   *  reconnect poll delivers the final artifact, so the orphaned partial must not
+   *  survive to be re-hydrated as a stale draft over the finished content. */
+  discardStream: (stageId: string) => void
   markStale: (stageType: StageType) => void
 }
 
@@ -152,6 +158,22 @@ export const useStageStore = create<StageState>()(
       set((state) => ({
         pendingReset: { ...state.pendingReset, [stageId]: true },
       })),
+
+    discardStream: (stageId) =>
+      set((state) => {
+        const streamingContent = { ...state.streamingContent }
+        delete streamingContent[stageId]
+        const streamProgress = { ...state.streamProgress }
+        delete streamProgress[stageId]
+        const pendingReset = { ...state.pendingReset }
+        delete pendingReset[stageId]
+        return {
+          streamingContent,
+          streamProgress,
+          pendingReset,
+          activeStream: state.activeStream === stageId ? null : state.activeStream,
+        }
+      }),
 
     setQualityGate: (stageId, info) =>
       set((state) => ({

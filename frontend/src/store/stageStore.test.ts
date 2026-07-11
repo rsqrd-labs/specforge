@@ -68,3 +68,41 @@ describe("stageStore stream_reset (deferred reset)", () => {
     expect(useStageStore.getState().pendingReset["s1"]).toBeUndefined()
   })
 })
+
+describe("stageStore discardStream", () => {
+  beforeEach(resetStore)
+
+  it("drops the orphaned client buffer WITHOUT persisting it into the stage", () => {
+    const store = useStageStore.getState()
+    store.startStream("s1")
+    store.appendToken("s1", "partial draft that was streaming")
+    store.setStreamProgress("s1", {
+      stage: "harness",
+      state: "streaming",
+      elapsed_seconds: 3,
+    })
+
+    store.discardStream("s1")
+
+    const state = useStageStore.getState()
+    expect(state.streamingContent["s1"]).toBeUndefined()
+    expect(state.streamProgress["s1"]).toBeUndefined()
+    expect(state.pendingReset["s1"]).toBeUndefined()
+    expect(state.activeStream).toBeNull()
+    // Critically: the partial must NOT be written into a stage's content —
+    // the reconnect poll owns delivering the final artifact.
+    expect(state.stages["s1"]).toBeUndefined()
+  })
+
+  it("leaves a different stage's active stream untouched", () => {
+    const store = useStageStore.getState()
+    store.startStream("s2")
+    store.appendToken("s2", "other stage")
+
+    store.discardStream("s1")
+
+    const state = useStageStore.getState()
+    expect(state.activeStream).toBe("s2")
+    expect(state.streamingContent["s2"]).toBe("other stage")
+  })
+})

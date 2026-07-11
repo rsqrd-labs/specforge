@@ -62,8 +62,30 @@ export const StageEditor = forwardRef<StageEditorHandle, StageEditorProps>(
       if (!containerRef.current) return
       if (mountedStageIdRef.current !== stageId) {
         mountedStageIdRef.current = stageId
-        contentRef.current = initialContent
-        lastStreamedRef.current = ""
+        // Hydrate from the live streaming buffer if a generation for this stage
+        // is mid-flight. Navigating between stages remounts the editor while the
+        // SSE stream keeps accumulating tokens into the store; without seeding
+        // from that buffer the doc starts empty and — because the streaming
+        // subscription below fires only on FUTURE writes — stays blank through
+        // any silent phase (post-stream quality gate / critic / repair) until
+        // `done`, so a returning user sees the generated draft "erased".
+        //
+        // The buffer is authoritative ONLY while THIS stage is generating
+        // (`status === "in_progress"`). Two failure modes this gates out:
+        //   • Stale orphan: a Workspace unmount mid-stream can leak a partial
+        //     into the store; once the stage settles to `draft` the reconnect
+        //     poll holds the FINAL artifact, so hydrating from the leaked partial
+        //     would show — and, on a keystroke, persist — a truncated draft.
+        //   • Regenerate: `startStream` sets an EMPTY buffer and the status flips
+        //     to in_progress before the first token; keying ownership on the
+        //     buffer *key* (not its length) seeds an empty doc so the first token
+        //     replaces from scratch instead of appending below the old artifact.
+        const state = useStageStore.getState()
+        const isGenerating = state.stages[stageId]?.status === "in_progress"
+        const buffered = state.streamingContent[stageId]
+        const ownsStream = isGenerating && typeof buffered === "string"
+        contentRef.current = ownsStream ? buffered : initialContent
+        lastStreamedRef.current = ownsStream ? buffered : ""
       }
 
       const view = new EditorView({
