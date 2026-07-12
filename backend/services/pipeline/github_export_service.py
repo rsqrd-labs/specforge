@@ -51,6 +51,7 @@ from __future__ import annotations
 import logging
 from contextlib import nullcontext
 from datetime import UTC, datetime
+from typing import Any
 from uuid import UUID
 
 import httpx
@@ -73,6 +74,8 @@ from services.integrations.github_api_client import (
     GitHubAPIError,
     GitHubNotConnectedError,
     GitHubRateLimitError,
+    GitHubRepoCreationPermissionError,
+    GitHubRepoCreationUnsupportedError,
     GitHubRepoExistsError,
     GitHubTokenExpiredError,
     GitHubUnavailableError,
@@ -126,6 +129,8 @@ _PERMANENT_EXPORT_ERRORS: tuple[type[Exception], ...] = (
     GitHubTokenExpiredError,
     GitHubRepoExistsError,
     GitHubWorkflowsPermissionError,
+    GitHubRepoCreationPermissionError,
+    GitHubRepoCreationUnsupportedError,
     ExportNotReadyError,
 )
 
@@ -263,6 +268,54 @@ async def get_push(
 # ---------------------------------------------------------------------------
 
 
+def installation_can_create_repos(installation: GitHubInstallation) -> bool:
+    """True when SpecForge can auto-create a repo under this installation.
+
+    GitHub gives GitHub Apps no way to create a repo in a personal (User)
+    account, and no App-compatible way to add a freshly-created repo to a
+    "selected repositories" installation — so auto-creation is only reachable
+    for an Organization installation scoped to "All repositories". This is the
+    single source of truth for that gate: :func:`_run_app_export` (the worker)
+    and the repo-picker listing endpoint (``can_create`` on ``RepoList``) both
+    read it, so the UI's "create a new repo" affordance can never drift from
+    what the export will actually do.
+    """
+    return (
+        installation.account_type == "Organization"
+        and installation.repository_selection == "all"
+    )
+
+
+async def list_repos_for_installation(
+    installation: GitHubInstallation,
+    *,
+    client: GitHubAPIClient | None = None,
+) -> tuple[list[dict[str, Any]], bool]:
+    """List the repos an installation's token can access (the repo-picker feed).
+
+    Unlike the worker paths above, this serves an interactive request, so the
+    client is built **without** the per-installation governor — the governor's
+    ``GitHubThrottledError`` is a worker-requeue signal that would surface as an
+    unhandled 500 here, and picker reads must never spend the write budget the
+    export jobs depend on. GitHub's request budget is instead protected by the
+    middleware rate tier on the endpoint plus the client's circuit breaker.
+
+    ``client`` is injected by tests; production builds one exactly like
+    :func:`run_export_push` (minus the governor).
+    """
+    if client is not None:
+        return await client.list_installation_repositories()
+    async with make_shared_async_client() as http:
+        redis = get_shared_redis()
+        token_provider = make_token_provider(redis, http)
+        built = make_app_github_client(
+            token_provider,
+            installation.installation_id,
+            http,
+        )
+        return await built.list_installation_repositories()
+
+
 async def load_owned_installation(
     db: AsyncSession,
     installation_id: UUID,
@@ -395,6 +448,7 @@ async def run_export_push(
             push=push,
             client=client,
             governor=None,
+            installation=installation,
             repo_name=repo_name,
             visibility=visibility,
             source_version_id=source_version_id,
@@ -420,6 +474,7 @@ async def run_export_push(
             push=push,
             client=built,
             governor=governor,
+            installation=installation,
             repo_name=repo_name,
             visibility=visibility,
             source_version_id=source_version_id,
@@ -459,6 +514,7 @@ async def _drive_app_export(
     push: IntegrationPush,
     client: GitHubAPIClient,
     governor: InstallationRateGovernor | None,
+    installation: GitHubInstallation,
     repo_name: str,
     visibility: str,
     source_version_id: UUID | None,
@@ -472,6 +528,7 @@ async def _drive_app_export(
             push=push,
             client=client,
             governor=governor,
+            installation=installation,
             repo_name=repo_name,
             visibility=visibility,
             source_version_id=source_version_id,
@@ -488,6 +545,39 @@ async def _drive_app_export(
         raise
 
 
+async def _resolve_existing_repo(
+    client: GitHubAPIClient,
+    installation: GitHubInstallation,
+    repo_name: str,
+) -> dict[str, Any] | None:
+    """Resolve ``repo_name`` to a repo this installation can actually write to.
+
+    The repo JSON's ``permissions`` block can never be the access signal here:
+    it describes an authenticated *user*, and under an installation token
+    GitHub returns it all-false even for fully writable repos (verified live —
+    a filter on it rejects every repo). Instead:
+
+    - A **"selected repositories"** installation's authoritative grant is the
+      ``GET /installation/repositories`` list — resolve by case-insensitive
+      bare name (GitHub repo names are case-insensitively unique per owner).
+      A visible-but-ungranted repo (e.g. a public repo under the same account
+      that wasn't added to the installation) correctly misses.
+    - An **"all repositories"** installation is granted everything under its
+      account by construction, so a plain ``GET /repos/{owner}/{repo}`` hit is
+      sufficient (the owner is pinned to ``installation.account_login``, so a
+      same-named repo under a different owner can never be resolved).
+    """
+    if installation.repository_selection == "selected":
+        granted, _truncated = await client.list_installation_repositories()
+        wanted = repo_name.lower()
+        for row in granted:
+            name = row.get("name")
+            if isinstance(name, str) and name.lower() == wanted:
+                return row
+        return None
+    return await client.get_repo(f"{installation.account_login}/{repo_name}")
+
+
 async def _run_app_export(
     *,
     db: AsyncSession,
@@ -496,18 +586,38 @@ async def _run_app_export(
     push: IntegrationPush,
     client: GitHubAPIClient,
     governor: InstallationRateGovernor | None,
+    installation: GitHubInstallation,
     repo_name: str,
     visibility: str,
     source_version_id: UUID | None,
 ) -> IntegrationPush:
-    # Step 1 — create repo (first run only). Resume skips this when the repo is
-    # already recorded, so a re-run never creates a second repo. A brand-new repo
-    # has no concurrent writer yet, so this single create runs outside the
-    # per-repo lock (which keys on repo_id, only known after this step).
+    # Step 1 — resolve or create the repo (first run only). Resume skips this
+    # when the repo is already recorded, so a re-run never re-resolves it. A
+    # brand-new repo has no concurrent writer yet, so this single step runs
+    # outside the per-repo lock (which keys on repo_id, only known after this
+    # step).
+    #
+    # Auto-creation is only reachable when installation_can_create_repos (see
+    # its docstring for GitHub's platform restrictions). Everywhere else, the
+    # repo must already exist (and already be granted to this installation) or
+    # export can't proceed.
     if push.repo_full_name is None:
-        repo_data = await client.create_repo(
-            repo_name, private=(visibility == "private")
-        )
+        owner_repo = f"{installation.account_login}/{repo_name}"
+        existing = await _resolve_existing_repo(client, installation, repo_name)
+        if existing is not None:
+            repo_data = existing
+        elif installation_can_create_repos(installation):
+            repo_data = await client.create_org_repo(
+                installation.account_login,
+                repo_name,
+                private=(visibility == "private"),
+            )
+        else:
+            raise GitHubRepoCreationUnsupportedError(
+                f"SpecForge can't auto-create {owner_repo!r}. Create it on "
+                "GitHub yourself, make sure this installation can access it, "
+                "then export again."
+            )
         full_name = repo_data.get("full_name")
         repo_id = repo_data.get("id")
         html_url = repo_data.get("html_url")

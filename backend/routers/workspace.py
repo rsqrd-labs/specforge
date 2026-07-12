@@ -551,6 +551,7 @@ async def get_workspace_github_push(
         repo_full_name=push.repo_full_name,
         repo_url=push.repo_url,
         issue_count=int(getattr(push, "issue_count", 0) or 0),
+        installation_id=push.installation_id,
         pushed_at=push.pushed_at,
         created_at=push.created_at,
     )

@@ -32,9 +32,12 @@ from models import (
 from services.integrations.github_api_client import (
     GitHubAPIError,
     GitHubNotConnectedError,
+    GitHubRepoCreationUnsupportedError,
     GitHubRepoExistsError,
 )
 from services.pipeline.github_export_service import (
+    installation_can_create_repos,
+    list_repos_for_installation,
     load_owned_installation,
     prepare_export_push,
     run_export_push,
@@ -64,7 +67,7 @@ _TASKS_CONTENT = """\
 
 
 class _StubClient:
-    """Records every GitHub call; create_repo returns a numeric id (repo_id)."""
+    """Records every GitHub call; create_org_repo returns a numeric id (repo_id)."""
 
     def __init__(self) -> None:
         self.created_repos: list[tuple[str, bool]] = []
@@ -74,11 +77,21 @@ class _StubClient:
         self.shas: dict[str, str] = {}
         self._issue_counter = 100
 
-    async def create_repo(self, name: str, private: bool) -> dict[str, Any]:
+    async def get_repo(self, owner_repo: str) -> dict[str, Any] | None:
+        return None  # repo doesn't exist yet, by default
+
+    async def list_installation_repositories(
+        self, **kwargs: Any
+    ) -> tuple[list[dict[str, Any]], bool]:
+        return [], False  # "selected" installs resolve against this grant list
+
+    async def create_org_repo(
+        self, org: str, name: str, private: bool
+    ) -> dict[str, Any]:
         self.created_repos.append((name, private))
         return {
-            "full_name": f"octocat/{name}",
-            "html_url": f"https://github.com/octocat/{name}",
+            "full_name": f"{org}/{name}",
+            "html_url": f"https://github.com/{org}/{name}",
             "id": 556677,
         }
 
@@ -195,7 +208,7 @@ async def installation(session: AsyncSession, user: User) -> GitHubInstallation:
         installation_id=uuid4().int % 1_000_000_000,
         account_login="octo-org",
         account_type="Organization",
-        repository_selection="selected",
+        repository_selection="all",
         user_id=user.id,
     )
     session.add(inst)
@@ -255,7 +268,7 @@ async def test_run_export_push_persists_three_fields_and_completes(
     assert result.repo_id == 556677
     assert result.installation_id == installation.id
     assert result.source_stage_version_id is not None
-    assert result.repo_full_name == "octocat/my-export"
+    assert result.repo_full_name == "octo-org/my-export"
     assert len(stub.created_repos) == 1
     assert len(stub.issues_created) == 2
     assert await _count_tasks(session, push.id) == 2
@@ -326,7 +339,9 @@ async def test_run_export_push_completed_is_noop(
 
 
 class _FailingClient(_StubClient):
-    async def create_repo(self, name: str, private: bool) -> dict[str, Any]:
+    async def create_org_repo(
+        self, org: str, name: str, private: bool
+    ) -> dict[str, Any]:
         raise GitHubAPIError(500, "boom")
 
 
@@ -450,7 +465,9 @@ async def test_run_export_push_transient_failure_fails_on_final_attempt(
 
 
 class _RepoExistsClient(_StubClient):
-    async def create_repo(self, name: str, private: bool) -> dict[str, Any]:
+    async def create_org_repo(
+        self, org: str, name: str, private: bool
+    ) -> dict[str, Any]:
         raise GitHubRepoExistsError(f"{name} already exists")
 
 
@@ -481,6 +498,163 @@ async def test_run_export_push_permanent_error_fails_even_on_non_final_attempt(
         )
     await session.refresh(push)
     assert push.status == "failed"
+
+
+async def test_run_export_push_unsupported_creation_fails_fast(
+    session: AsyncSession,
+    user: User,
+    workspace: Workspace,
+) -> None:
+    """A personal (User) account, or any "selected repositories" install, has
+    no App-compatible way to create a repo that doesn't exist yet — this must
+    fail on the very first attempt (no retries) without ever calling
+    create_org_repo."""
+    inst = GitHubInstallation(
+        installation_id=uuid4().int % 1_000_000_000,
+        account_login="a-user",
+        account_type="User",
+        repository_selection="selected",
+        user_id=user.id,
+    )
+    session.add(inst)
+    await session.commit()
+    await session.refresh(inst)
+    try:
+        push = await prepare_export_push(
+            session,
+            workspace_id=workspace.id,
+            user_id=user.id,
+            installation=inst,
+            export_mode="files_to_default",
+        )
+        client = _StubClient()
+        with pytest.raises(GitHubRepoCreationUnsupportedError):
+            await run_export_push(
+                push.id,
+                "new-repo",
+                "private",
+                db=session,
+                client=client,
+                is_final_attempt=False,
+            )
+        await session.refresh(push)
+        assert push.status == "failed"
+        assert client.created_repos == []
+    finally:
+        await session.execute(
+            delete(IntegrationPush).where(IntegrationPush.installation_id == inst.id)
+        )
+        await session.execute(
+            delete(GitHubInstallation).where(GitHubInstallation.id == inst.id)
+        )
+        await session.commit()
+
+
+class _ExistingRepoClient(_StubClient):
+    async def get_repo(self, owner_repo: str) -> dict[str, Any] | None:
+        return {
+            "full_name": owner_repo,
+            "html_url": f"https://github.com/{owner_repo}",
+            "id": 998877,
+        }
+
+
+async def test_run_export_push_skips_creation_when_repo_already_exists(
+    session: AsyncSession,
+    user: User,
+    workspace: Workspace,
+    installation: GitHubInstallation,
+) -> None:
+    """An "all repositories" install is granted everything under its account,
+    so a plain get_repo hit resolves the existing repo — export uses it
+    directly instead of attempting creation."""
+    push = await prepare_export_push(
+        session,
+        workspace_id=workspace.id,
+        user_id=user.id,
+        installation=installation,
+        export_mode="files_to_default",
+    )
+    client = _ExistingRepoClient()
+    result = await run_export_push(
+        push.id, "already-there", "private", db=session, client=client
+    )
+    assert result is not None and result.status == "completed"
+    assert result.repo_full_name == "octo-org/already-there"
+    assert result.repo_id == 998877
+    assert client.created_repos == []
+
+
+class _GrantListClient(_StubClient):
+    """Client for a "selected repositories" install: the grant list holds the
+    target; get_repo must never be consulted (its `permissions` block is
+    all-false under an installation token and a 200 doesn't prove a grant)."""
+
+    async def list_installation_repositories(
+        self, **kwargs: Any
+    ) -> tuple[list[dict[str, Any]], bool]:
+        return (
+            [
+                {
+                    "id": 445566,
+                    "name": "Granted-Repo",
+                    "full_name": "a-user/Granted-Repo",
+                    "html_url": "https://github.com/a-user/Granted-Repo",
+                }
+            ],
+            False,
+        )
+
+    async def get_repo(self, owner_repo: str) -> dict[str, Any] | None:
+        raise AssertionError(
+            "selected-repositories installs must resolve via the grant list, "
+            "never get_repo"
+        )
+
+
+async def test_run_export_push_selected_install_resolves_via_grant_list(
+    session: AsyncSession,
+    user: User,
+    workspace: Workspace,
+) -> None:
+    """A personal/"selected" install exports into a granted existing repo by
+    resolving it (case-insensitively) from GET /installation/repositories —
+    the fix for the live failure where get_repo's all-false permissions block
+    made every accessible repo look unusable."""
+    inst = GitHubInstallation(
+        installation_id=uuid4().int % 1_000_000_000,
+        account_login="a-user",
+        account_type="User",
+        repository_selection="selected",
+        user_id=user.id,
+    )
+    session.add(inst)
+    await session.commit()
+    await session.refresh(inst)
+    try:
+        push = await prepare_export_push(
+            session,
+            workspace_id=workspace.id,
+            user_id=user.id,
+            installation=inst,
+            export_mode="files_to_default",
+        )
+        client = _GrantListClient()
+        result = await run_export_push(
+            push.id, "granted-repo", "private", db=session, client=client
+        )
+        assert result is not None and result.status == "completed"
+        assert result.repo_full_name == "a-user/Granted-Repo"
+        assert result.repo_id == 445566
+        assert client.created_repos == []
+    finally:
+        await session.execute(
+            delete(IntegrationPush).where(IntegrationPush.installation_id == inst.id)
+        )
+        await session.execute(
+            delete(GitHubInstallation).where(GitHubInstallation.id == inst.id)
+        )
+        await session.commit()
 
 
 async def test_run_export_push_missing_installation_fails(
@@ -535,3 +709,63 @@ async def test_load_owned_installation_enforces_ownership(
     finally:
         await session.execute(delete(User).where(User.id == other.id))
         await session.commit()
+
+
+# ---------------------------------------------------------------------------
+# Repo-picker service surface (installation_can_create_repos /
+# list_repos_for_installation)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("account_type", "repository_selection", "expected"),
+    [
+        ("Organization", "all", True),
+        ("Organization", "selected", False),
+        ("User", "all", False),
+        ("User", "selected", False),
+    ],
+)
+def test_installation_can_create_repos_gate(
+    account_type: str, repository_selection: str, expected: bool
+) -> None:
+    """The single create gate _run_app_export and the picker endpoint share:
+    only an Organization installation scoped to all repositories can create."""
+    inst = GitHubInstallation(
+        installation_id=1,
+        account_login="octo",
+        account_type=account_type,
+        repository_selection=repository_selection,
+        user_id=uuid4(),
+    )
+    assert installation_can_create_repos(inst) is expected
+
+
+async def test_list_repos_for_installation_uses_injected_client() -> None:
+    """The injectable-client seam mirrors run_export_push: tests never build a
+    real token provider / httpx client."""
+
+    sentinel_rows = [{"id": 7, "name": "alpha", "full_name": "octo/alpha"}]
+
+    class _ListStub:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def list_installation_repositories(
+            self, **kwargs: Any
+        ) -> tuple[list[dict[str, Any]], bool]:
+            self.calls += 1
+            return sentinel_rows, True
+
+    inst = GitHubInstallation(
+        installation_id=1,
+        account_login="octo",
+        account_type="User",
+        repository_selection="selected",
+        user_id=uuid4(),
+    )
+    stub = _ListStub()
+    repos, truncated = await list_repos_for_installation(inst, client=stub)  # type: ignore[arg-type]
+    assert stub.calls == 1
+    assert repos == sentinel_rows
+    assert truncated is True

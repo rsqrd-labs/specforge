@@ -43,9 +43,15 @@ from config import settings
 from database import get_db, get_redis
 from middleware.auth import get_current_user
 from models import GitHubWebhookEvent, User
-from schemas.github import InstallationList, InstallationOption
+from schemas.github import InstallationList, InstallationOption, RepoList, RepoOption
 from schemas.integration import GitHubStatusResponse
 from services.integrations import github_auth_service, github_install_service
+from services.integrations.github_api_client import (
+    GitHubAPIError,
+    GitHubRateLimitError,
+    GitHubTokenExpiredError,
+    GitHubUnavailableError,
+)
 from services.integrations.github_app_auth import verify_webhook_signature
 from services.integrations.github_install_service import (
     AppNotConfiguredError,
@@ -62,6 +68,7 @@ from services.observability import (
     GITHUB_WEBHOOK_VERIFIED_TOTAL,
     github_audit,
 )
+from services.pipeline import github_export_service
 from services.queue import QueueUnavailableError, enqueue
 
 logger = logging.getLogger(__name__)
@@ -230,6 +237,87 @@ async def list_github_installations(
             for row in rows
         ],
         on_legacy_oauth=on_legacy,
+    )
+
+
+@router.get(
+    "/github/installations/{installation_id}/repos",
+    response_model=RepoList,
+)
+async def list_installation_repos(
+    installation_id: UUID,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> RepoList:
+    """List repositories one installation can export into (repo-picker feed).
+
+    Guards mirror the export route (``POST /workspaces/{id}/export/github``):
+    ownership is a 403 with the same wording — never a 404, so installation
+    existence is not leaked — and a suspended installation is a 403. GitHub
+    errors map to the same statuses the export route uses (429/502/503). The
+    interactive client carries no governor, so a burst here can never requeue
+    or throttle the worker's export jobs; the middleware rate tier plus the
+    client's circuit breaker bound the GitHub budget spent.
+    """
+    installation = await github_export_service.load_owned_installation(
+        db, installation_id, user.id
+    )
+    if installation is None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Install the GitHub App and choose an installation you own.",
+        )
+    if installation.suspended_at is not None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="This GitHub App installation is suspended. Re-enable it on GitHub.",
+        )
+
+    try:
+        repos, truncated = await github_export_service.list_repos_for_installation(
+            installation
+        )
+    except GitHubRateLimitError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="GitHub API rate limit exceeded.",
+        ) from exc
+    except GitHubUnavailableError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="GitHub is temporarily unavailable. Try again shortly.",
+        ) from exc
+    except (GitHubTokenExpiredError, GitHubAPIError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="GitHub API request failed.",
+        ) from exc
+
+    options: list[RepoOption] = []
+    for repo in repos:
+        repo_id = repo.get("id")
+        name = repo.get("name")
+        full_name = repo.get("full_name")
+        if (
+            not isinstance(repo_id, int)
+            or not isinstance(name, str)
+            or not isinstance(full_name, str)
+        ):
+            continue  # never let one malformed row 500 the whole picker
+        html_url = repo.get("html_url")
+        options.append(
+            RepoOption(
+                id=repo_id,
+                name=name,
+                full_name=full_name,
+                private=bool(repo.get("private")),
+                html_url=html_url if isinstance(html_url, str) else None,
+            )
+        )
+    return RepoList(
+        repositories=options,
+        truncated=truncated,
+        can_create=github_export_service.installation_can_create_repos(installation),
     )
 
 

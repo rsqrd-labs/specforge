@@ -94,6 +94,40 @@ class InstallationList(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+class RepoOption(BaseModel):
+    """One repository an installation can export into (the repo-picker feed).
+
+    ``id`` is GitHub's immutable numeric repo id (the same value persisted as
+    ``IntegrationPush.repo_id``); ``name`` is the bare name the picker submits
+    as :class:`GitHubExportRequest.repo_name`.
+    """
+
+    id: int
+    name: str
+    full_name: str
+    private: bool = False
+    html_url: str | None = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class RepoList(BaseModel):
+    """Repositories reachable by one installation, plus the create-repo gate.
+
+    ``can_create`` is computed server-side from the same helper the worker
+    export uses (``installation_can_create_repos``), so the UI's "create a new
+    repo" affordance cannot drift from what the export will actually do.
+    ``truncated`` flags that GitHub holds more repositories than the capped
+    listing returned — the picker keeps a type-a-name escape hatch for those.
+    """
+
+    repositories: list[RepoOption]
+    truncated: bool = False
+    can_create: bool = False
+
+    model_config = ConfigDict(from_attributes=True)
+
+
 class GitHubExportRequest(BaseModel):
     """Request body for the v2 worker export (POST returns 202; spec §11).
 

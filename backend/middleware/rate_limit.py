@@ -72,6 +72,21 @@ _GITHUB_EXPORT_LIMIT = 3
 _GITHUB_EXPORT_WINDOW_SECONDS = 3600
 _GITHUB_EXPORT_DETAIL = "GitHub export rate limit reached. Maximum 3 exports per hour."
 
+# GitHub Repo List tier (repo picker): 30 reads per user per hour on
+# GET /integrations/github/installations/{id}/repos. Each call fans out to as
+# many as 5 GitHub API requests against the installation's 5,000/hr budget, and
+# the interactive client deliberately carries no per-installation governor —
+# this tier (plus the client's circuit breaker) is the budget protection for
+# the picker path.
+_GITHUB_REPO_LIST_PATH_RE = re.compile(
+    r"^/integrations/github/installations/[^/]+/repos/?$"
+)
+_GITHUB_REPO_LIST_LIMIT = 30
+_GITHUB_REPO_LIST_WINDOW_SECONDS = 3600
+_GITHUB_REPO_LIST_DETAIL = (
+    "GitHub repository list rate limit reached. Try again in a little while."
+)
+
 # GitHub Sync tier (Phase 21 — T-283): 10 resync/backfill calls per user per
 # hour. Applies to the POST sync actions that enqueue worker jobs
 # (/sync/resync, /sync/backfill); the cheap GET /sync state read the live panel
@@ -467,6 +482,22 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
                 return _rate_limited_custom(
                     detail=_GITHUB_EXPORT_DETAIL,
                     retry_after_seconds=_GITHUB_EXPORT_WINDOW_SECONDS,
+                )
+
+        if (
+            user_id
+            and request.method == "GET"
+            and _GITHUB_REPO_LIST_PATH_RE.match(path)
+        ):
+            allowed = await check(
+                f"github_repo_list:{user_id}",
+                _GITHUB_REPO_LIST_LIMIT,
+                _GITHUB_REPO_LIST_WINDOW_SECONDS,
+            )
+            if not allowed:
+                return _rate_limited_custom(
+                    detail=_GITHUB_REPO_LIST_DETAIL,
+                    retry_after_seconds=_GITHUB_REPO_LIST_WINDOW_SECONDS,
                 )
 
         if user_id and request.method == "POST" and _GITHUB_SYNC_PATH_RE.match(path):

@@ -55,13 +55,20 @@ class GitHubExportResponse(BaseModel):
 
 
 class IntegrationPushRead(BaseModel):
-    """Response from GET /workspaces/{id}/export/github."""
+    """Response from GET /workspaces/{id}/export/github.
+
+    ``installation_id`` is the ``github_installations`` row the push is bound
+    to (``None`` for legacy v1-OAuth pushes or after the installation was
+    revoked). The export modal uses it to pin a re-export to the bound
+    installation instead of an arbitrary one when a user holds several.
+    """
 
     push_id: UUID = Field(alias="id")
     status: PushStatus
     repo_full_name: str | None
     repo_url: str | None
     issue_count: int
+    installation_id: UUID | None = None
     pushed_at: datetime | None
     created_at: datetime
 

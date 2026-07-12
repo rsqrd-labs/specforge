@@ -326,11 +326,16 @@ class _PRStubClient:
         self._pr_counter = 0
         self.shas: dict[str, str] = {}
 
-    async def create_repo(self, name: str, private: bool) -> dict[str, Any]:
+    async def get_repo(self, owner_repo: str) -> dict[str, Any] | None:
+        return None  # repo doesn't exist yet, by default
+
+    async def create_org_repo(
+        self, org: str, name: str, private: bool
+    ) -> dict[str, Any]:
         self.created_repos.append((name, private))
         return {
-            "full_name": f"octocat/{name}",
-            "html_url": f"https://github.com/octocat/{name}",
+            "full_name": f"{org}/{name}",
+            "html_url": f"https://github.com/{org}/{name}",
             "id": 999,
         }
 
@@ -443,7 +448,7 @@ async def installation(session: AsyncSession, user: User) -> GitHubInstallation:
         installation_id=uuid4().int % 1_000_000_000,
         account_login="octo-org",
         account_type="Organization",
-        repository_selection="selected",
+        repository_selection="all",
         user_id=user.id,
     )
     session.add(inst)

@@ -431,11 +431,24 @@ async def test_partial_failure_preserves_issue_progress(
             client_factory=stub,
         )
 
-    # First issue's IntegrationPushTask row WAS committed
+    # Push row is marked as error but repo_full_name is preserved
+    push = (
+        await session.execute(
+            select(IntegrationPush).where(IntegrationPush.workspace_id == workspace.id)
+        )
+    ).scalar_one()
+    assert push.status == "failed"
+    assert push.repo_full_name == "octocat/partial"
+
+    # First issue's IntegrationPushTask row WAS committed. Scoped to THIS
+    # test's push — an unscoped table read breaks against any database that
+    # already holds rows (real dev data, or debris from another test).
     rows = (
         (
             await session.execute(
-                select(IntegrationPushTask).order_by(IntegrationPushTask.task_ref)
+                select(IntegrationPushTask)
+                .where(IntegrationPushTask.push_id == push.id)
+                .order_by(IntegrationPushTask.task_ref)
             )
         )
         .scalars()
@@ -447,12 +460,3 @@ async def test_partial_failure_preserves_issue_progress(
     assert refs == [
         compute_task_ref("one")
     ], f"Expected only T-001's stable ref persisted, got {refs}"
-
-    # Push row is marked as error but repo_full_name is preserved
-    push = (
-        await session.execute(
-            select(IntegrationPush).where(IntegrationPush.workspace_id == workspace.id)
-        )
-    ).scalar_one()
-    assert push.status == "failed"
-    assert push.repo_full_name == "octocat/partial"

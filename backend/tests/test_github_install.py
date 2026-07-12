@@ -25,11 +25,18 @@ from middleware.auth import get_current_user
 from models import GitHubInstallation, IntegrationPush, User, Workspace
 from schemas.github import InstallationList, InstallationOption
 from services.integrations import github_install_service as svc
+from services.integrations.github_api_client import (
+    GitHubAPIError,
+    GitHubRateLimitError,
+    GitHubTokenExpiredError,
+    GitHubUnavailableError,
+)
 from services.integrations.github_install_service import (
     AppNotConfiguredError,
     InstallationAccount,
     InstallStateError,
 )
+from services.pipeline import github_export_service as export_svc
 
 pytestmark = pytest.mark.asyncio
 
@@ -775,3 +782,168 @@ async def test_setup_refuses_when_identity_unconfigured(
         )
     assert resp.status_code == 307
     assert "github_installed=false" in resp.headers["location"]
+
+
+# ---------------------------------------------------------------------------
+# Repo-picker listing route (GET /github/installations/{id}/repos)
+# ---------------------------------------------------------------------------
+
+
+def _installation_row(
+    *,
+    user_id: Any = None,
+    account_type: str = "User",
+    repository_selection: str = "selected",
+    suspended: bool = False,
+) -> GitHubInstallation:
+    """In-memory installation row for route tests (service is monkeypatched)."""
+    return GitHubInstallation(
+        id=uuid4(),
+        installation_id=4242,
+        user_id=user_id or _ROUTE_USER.id,
+        account_login="octo",
+        account_type=account_type,
+        repository_selection=repository_selection,
+        suspended_at=datetime.now(UTC) if suspended else None,
+    )
+
+
+async def test_repo_list_route_returns_repos_and_create_gate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Owner sees usable rows; malformed rows are dropped, never a 500; the
+    create gate comes from the same helper the worker export uses."""
+    app, _ = _app(monkeypatch)
+    inst = _installation_row(account_type="Organization", repository_selection="all")
+
+    async def fake_load(db: Any, installation_id: Any, user_id: Any) -> Any:
+        assert installation_id == inst.id
+        assert user_id == _ROUTE_USER.id
+        return inst
+
+    async def fake_list(installation: Any, **kwargs: Any) -> Any:
+        assert installation is inst
+        return (
+            [
+                {
+                    "id": 1,
+                    "name": "alpha",
+                    "full_name": "octo/alpha",
+                    "private": True,
+                    "html_url": "https://github.com/octo/alpha",
+                },
+                {"id": "malformed", "name": None, "full_name": 3},
+            ],
+            True,
+        )
+
+    monkeypatch.setattr(export_svc, "load_owned_installation", fake_load)
+    monkeypatch.setattr(export_svc, "list_repos_for_installation", fake_list)
+
+    async with _client(app) as client:
+        resp = await client.get(f"/integrations/github/installations/{inst.id}/repos")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["truncated"] is True
+    assert body["can_create"] is True
+    assert body["repositories"] == [
+        {
+            "id": 1,
+            "name": "alpha",
+            "full_name": "octo/alpha",
+            "private": True,
+            "html_url": "https://github.com/octo/alpha",
+        }
+    ]
+
+
+async def test_repo_list_route_personal_account_cannot_create(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app, _ = _app(monkeypatch)
+    inst = _installation_row(account_type="User", repository_selection="selected")
+
+    async def fake_load(db: Any, installation_id: Any, user_id: Any) -> Any:
+        return inst
+
+    async def fake_list(installation: Any, **kwargs: Any) -> Any:
+        return ([], False)
+
+    monkeypatch.setattr(export_svc, "load_owned_installation", fake_load)
+    monkeypatch.setattr(export_svc, "list_repos_for_installation", fake_list)
+
+    async with _client(app) as client:
+        resp = await client.get(f"/integrations/github/installations/{inst.id}/repos")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body == {"repositories": [], "truncated": False, "can_create": False}
+
+
+async def test_repo_list_route_unowned_installation_403(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unowned/missing installation is a 403 (mirroring the export route) —
+    never a 404, so installation existence is not leaked."""
+    app, _ = _app(monkeypatch)
+
+    async def fake_load(db: Any, installation_id: Any, user_id: Any) -> Any:
+        return None
+
+    monkeypatch.setattr(export_svc, "load_owned_installation", fake_load)
+
+    async with _client(app) as client:
+        resp = await client.get(f"/integrations/github/installations/{uuid4()}/repos")
+    assert resp.status_code == 403
+
+
+async def test_repo_list_route_suspended_installation_403(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app, _ = _app(monkeypatch)
+    inst = _installation_row(suspended=True)
+
+    async def fake_load(db: Any, installation_id: Any, user_id: Any) -> Any:
+        return inst
+
+    async def fake_list(installation: Any, **kwargs: Any) -> Any:  # pragma: no cover
+        raise AssertionError("suspended installation must never reach GitHub")
+
+    monkeypatch.setattr(export_svc, "load_owned_installation", fake_load)
+    monkeypatch.setattr(export_svc, "list_repos_for_installation", fake_list)
+
+    async with _client(app) as client:
+        resp = await client.get(f"/integrations/github/installations/{inst.id}/repos")
+    assert resp.status_code == 403
+
+
+@pytest.mark.parametrize(
+    ("raised", "expected_status"),
+    [
+        (GitHubRateLimitError("limited"), 429),
+        (GitHubUnavailableError("breaker open"), 503),
+        (GitHubTokenExpiredError("401"), 502),
+        (GitHubAPIError(500, "boom"), 502),
+    ],
+)
+async def test_repo_list_route_maps_github_errors(
+    monkeypatch: pytest.MonkeyPatch,
+    raised: Exception,
+    expected_status: int,
+) -> None:
+    """A GitHub blip surfaces as a typed 4xx/5xx, never an unhandled 500 —
+    the interactive path has no worker retry to hide behind."""
+    app, _ = _app(monkeypatch)
+    inst = _installation_row()
+
+    async def fake_load(db: Any, installation_id: Any, user_id: Any) -> Any:
+        return inst
+
+    async def fake_list(installation: Any, **kwargs: Any) -> Any:
+        raise raised
+
+    monkeypatch.setattr(export_svc, "load_owned_installation", fake_load)
+    monkeypatch.setattr(export_svc, "list_repos_for_installation", fake_list)
+
+    async with _client(app) as client:
+        resp = await client.get(f"/integrations/github/installations/{inst.id}/repos")
+    assert resp.status_code == expected_status
