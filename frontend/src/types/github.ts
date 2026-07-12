@@ -83,6 +83,30 @@ export interface InstallationStatus {
   on_legacy_oauth: boolean
 }
 
+// --- repo-picker feed (backend `RepoOption` / `RepoList`) -----------------
+
+/** One repository an installation can export into. `id` is GitHub's immutable
+ *  numeric repo id; `name` is the bare name submitted as the export's
+ *  `repo_name`. */
+export interface RepositoryOption {
+  id: number
+  name: string
+  full_name: string
+  private: boolean
+  html_url: string | null
+}
+
+/** The repo-picker feed for one installation. `can_create` is the
+ *  server-computed create gate (Organization installation scoped to all
+ *  repositories — the only shape GitHub Apps can create repos under);
+ *  `truncated` flags that GitHub holds more repos than the capped listing
+ *  returned, so the picker keeps a type-a-name escape hatch. */
+export interface RepoList {
+  repositories: RepositoryOption[]
+  truncated: boolean
+  can_create: boolean
+}
+
 // --- increment timeline + idea backlog (spec §10, §4.14.7) ---------------
 
 export type IncrementStatus =

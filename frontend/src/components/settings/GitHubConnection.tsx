@@ -38,17 +38,11 @@ import {
 } from "../../services/api"
 import type { InstallationOption } from "../../types/github"
 import { githubConnectionAlert } from "../../utils/errorPresentation"
+import { installationManageUrl } from "../../utils/github"
 import { ActionAlertPanel, type ActionAlertContent } from "../shared/ActionAlert"
 import { GitHubIcon, InstalledShieldIcon } from "../shared/icons"
 
 type PanelState = "loading" | "not_installed" | "installed" | "suspended"
-
-function installationManageUrl(install: InstallationOption): string {
-  // GitHub's own installation-settings page — org vs. personal account.
-  return install.account_type === "Organization"
-    ? `https://github.com/organizations/${install.account_login}/settings/installations/${install.installation_id}`
-    : `https://github.com/settings/installations/${install.installation_id}`
-}
 
 function repositoryScopeLabel(selection: InstallationOption["repository_selection"]): string {
   return selection === "all" ? "all repositories" : "selected repositories"

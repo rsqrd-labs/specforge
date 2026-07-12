@@ -27,6 +27,7 @@ import type {
   IncrementMode,
   IncrementPushAck,
   InstallationList,
+  RepoList,
   SyncState,
 } from "../types/github"
 import type {
@@ -929,6 +930,10 @@ export interface IntegrationPushRead {
   repo_full_name: string | null
   repo_url: string | null
   issue_count: number
+  /** The `github_installations` row the push is bound to (null for legacy
+   *  v1-OAuth pushes or after the installation was revoked). Lets the export
+   *  modal pin a re-export to the bound installation. */
+  installation_id: string | null
   pushed_at: string | null
 }
 
@@ -1017,6 +1022,24 @@ export async function getGitHubInstallations(): Promise<InstallationList> {
     }
     throw error
   }
+}
+
+/**
+ * List repositories one GitHub App installation can export into (the export
+ * modal's repo-picker feed).
+ *
+ * Deliberately NOT graceful-empty (unlike `getGitHubInstallations`): a fetch
+ * failure and "no repositories" demand different affordances — retry/manual
+ * name entry vs. "add repositories on GitHub" — so errors propagate for the
+ * modal to present its fallback.
+ */
+export async function getGitHubRepositories(
+  installationId: string,
+): Promise<RepoList> {
+  const response = await api.get<RepoList>(
+    `/integrations/github/installations/${installationId}/repos`,
+  )
+  return response.data
 }
 
 /**

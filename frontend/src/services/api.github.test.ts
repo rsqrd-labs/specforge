@@ -5,6 +5,7 @@ import {
   createIncrement,
   getGitHubInstallUrl,
   getGitHubInstallations,
+  getGitHubRepositories,
   getGitHubSync,
   listIncrements,
   resyncWorkspace,
@@ -77,6 +78,38 @@ describe("GitHub living-integration api client", () => {
   it("listIncrements maps a 404 to an empty timeline", async () => {
     vi.spyOn(api, "get").mockRejectedValueOnce(axiosError(404))
     await expect(listIncrements("ws-1")).resolves.toEqual([])
+  })
+
+  it("getGitHubRepositories returns the repo-picker feed on success", async () => {
+    const get = vi.spyOn(api, "get").mockResolvedValueOnce({
+      data: {
+        repositories: [
+          {
+            id: 1,
+            name: "alpha",
+            full_name: "octo/alpha",
+            private: true,
+            html_url: "https://github.com/octo/alpha",
+          },
+        ],
+        truncated: false,
+        can_create: true,
+      },
+    })
+    const list = await getGitHubRepositories("inst-1")
+    expect(list.repositories).toHaveLength(1)
+    expect(list.can_create).toBe(true)
+    expect(String(get.mock.calls[0][0])).toBe(
+      "/integrations/github/installations/inst-1/repos",
+    )
+  })
+
+  it("getGitHubRepositories propagates failures — a fetch error is NOT an empty list", async () => {
+    // Unlike getGitHubInstallations there is deliberately no graceful-empty:
+    // the modal must distinguish "no repos" (add-on-GitHub state) from "fetch
+    // failed" (retry + manual name entry).
+    vi.spyOn(api, "get").mockRejectedValueOnce(axiosError(502))
+    await expect(getGitHubRepositories("inst-1")).rejects.toThrow()
   })
 
   it("resyncWorkspace POSTs the resync endpoint and returns the pending push", async () => {

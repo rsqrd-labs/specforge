@@ -1,5 +1,6 @@
 /**
- * ExportGitHubModal — the mode-aware GitHub export modal (Phase 21, T-288).
+ * ExportGitHubModal — the mode-aware GitHub export modal (Phase 21, T-288 +
+ * repo picker).
  *
  * The moment-of-use feeling: a confident fork in the road, clearly explained.
  * The user should immediately grasp "drop the files in" vs. "open a PR my agent
@@ -8,32 +9,36 @@
  *
  * Layout sketch (configure phase, rendered in the existing create-modal shell):
  *
- *   Repository name        [ my-spec-export            ]
- *   Visibility             [ Public ]  [ Private ]
- *   Export mode
+ *   GitHub account          [ @acme-org            ▾ ]   (only when >1 install)
+ *   Repository
  *     ┌───────────────────────────────────────────────┐
- *     │ ◉  ⌗  Files            (saffron ring = default) │
- *     │       Commit the four files + harness to the    │
- *     │       default branch.                           │
- *     ├───────────────────────────────────────────────┤
- *     │ ○  ⤴  PR with tests                             │
- *     │       Open a pull request with failing tests +  │
- *     │       CI — the repo goes green as work lands.    │
+ *     │ [ filter repositories…                      ] │
+ *     │ ◉ api-server                        Private   │
+ *     │ ○ docs-site                         Public    │
  *     └───────────────────────────────────────────────┘
- *        (PR selected ⇒ slides in)  ⌥ Branch: specforge/inc-1
+ *       Create a new repository instead ­/ Type a name…
+ *   Export mode
+ *     ◉ ⌗ Files      ○ ⤴ PR with tests
  *   N issues will be created                  [Cancel] [Export]
  *
- * Visual hierarchy: the segmented mode choice is the focal decision (each option
- * carries a one-line plain-language consequence, the recommended *Files* mode
- * pre-selected with a subtle saffron ring); the repo name/visibility sit above
- * it as familiar setup. On submit the modal becomes a staged checklist — quiet
- * slate lines that each settle with a small saffron tick as the async export
- * (202 → poll) advances — never a bare spinner, never a fake percentage.
+ * Repo targeting rules (mirrors the backend exactly — see `_run_app_export`
+ * and `installation_can_create_repos` in
+ * backend/services/pipeline/github_export_service.py):
  *
- * The one delight: selecting *PR with tests* slides in a concrete inline preview
- * — "Branch: specforge/inc-1" — so the abstract choice feels real before submit;
- * and a finished export gets a single one-shot lotus accent (a shipped artifact
- * is a celebration — lotus, not green).
+ * - A workspace already bound to a repo (its push row has `repo_full_name`)
+ *   ALWAYS re-exports there — the backend skips repo resolution entirely — so
+ *   the modal shows the bound repo as a quiet locked banner instead of lying
+ *   with a picker. The bound installation is pinned when still active.
+ * - Unbound: pick an existing repository from the installation's list (the
+ *   primary path — GitHub Apps can never create repos in personal accounts),
+ *   or type a name ("manual" mode). The create-new framing appears only when
+ *   the server says `can_create` (org installation on all repositories).
+ * - A repo-list fetch failure is NOT an empty list: manual mode with a retry
+ *   notice, so the export path is never dead-ended by a GitHub blip.
+ *
+ * On submit the modal becomes a staged checklist — quiet slate lines that each
+ * settle with a small saffron tick as the async export (202 → poll) advances —
+ * never a bare spinner, never a fake percentage.
  */
 
 import { useCallback, useEffect, useRef, useState } from "react"
@@ -45,10 +50,17 @@ import {
   getApiErrorMessage,
   getGitHubInstallations,
   getGitHubPush,
+  getGitHubRepositories,
 } from "../../services/api"
-import type { GitHubExportMode } from "../../types/github"
+import type {
+  GitHubExportMode,
+  InstallationOption,
+  RepositoryOption,
+} from "../../types/github"
+import { installationManageUrl } from "../../utils/github"
 import { ActionAlertPanel } from "../shared/ActionAlert"
 import { BranchIcon, PullRequestIcon, ShippedCheckIcon } from "../shared/icons"
+import { RepoPicker } from "./RepoPicker"
 import { StagedProgress } from "./StagedProgress"
 
 interface ExportGitHubModalProps {
@@ -67,6 +79,9 @@ type Phase =
   | "success"
   | "error"
 
+/** How the target repo is chosen when the workspace isn't bound yet. */
+type RepoChoiceMode = "existing" | "manual"
+
 const REPO_NAME_PATTERN = /^[a-zA-Z0-9._-]+$/
 const REPO_NAME_MAX = 100
 
@@ -81,7 +96,7 @@ const PR_BRANCH_PREVIEW = "specforge/inc-1"
 const MODE_STAGES: Record<GitHubExportMode, string[]> = {
   files_to_default: [
     "Queued",
-    "Creating repository",
+    "Preparing repository",
     "Committing files & harness",
     "Opening issues",
   ],
@@ -101,9 +116,13 @@ const POLL_INTERVAL_MS = 1500
 // state instead of spinning forever (L-4 — T-189b).
 const EXPORT_REQUEST_TIMEOUT_MS = 30_000
 // After ~60s without a terminal status the export is still progressing on the
-// worker; we hand off to a calm "still working" state the user can close (the
-// TaskCompletionPanel is where they watch it finish) — never a red error.
+// worker; we hand off to a calm "still working" state the user can close —
+// never a red error. Polling does NOT stop there: it continues at the gentler
+// cadence below until a terminal status arrives, so a long export (a big task
+// list means many sequential issue creates) still lands on a visible "done"
+// instead of stranding the user to go verify on GitHub by hand.
 const POLL_MAX_ATTEMPTS = 40
+const SLOW_POLL_INTERVAL_MS = 5000
 
 function slugifyWorkspaceName(name: string): string {
   return name
@@ -112,6 +131,18 @@ function slugifyWorkspaceName(name: string): string {
     .replace(/-+/g, "-")
     .replace(/^-+|-+$/g, "")
     .slice(0, REPO_NAME_MAX)
+}
+
+/** Client-side fallback for the create gate, used only when the repo-list
+ *  fetch (whose `can_create` is authoritative — computed by the same backend
+ *  helper the worker export uses) failed. Mirrors
+ *  `installation_can_create_repos`. */
+function fallbackCanCreate(install: InstallationOption | undefined): boolean {
+  return (
+    !!install &&
+    install.account_type === "Organization" &&
+    install.repository_selection === "all"
+  )
 }
 
 export function ExportGitHubModal({
@@ -136,7 +167,21 @@ export function ExportGitHubModal({
   // retry) before this submit's reset-to-pending commits, and jump to a false
   // terminal state. We never poll for an operation we haven't confirmed.
   const [pollReady, setPollReady] = useState(false)
+  const [installations, setInstallations] = useState<InstallationOption[]>([])
   const [installationId, setInstallationId] = useState<string | null>(null)
+  // The repo this workspace's push row is already bound to. Once set, the
+  // backend re-exports there unconditionally (repo resolution is skipped), so
+  // the configure UI locks to it instead of offering a picker that would be
+  // silently ignored.
+  const [boundRepoFullName, setBoundRepoFullName] = useState<string | null>(null)
+  const [repos, setRepos] = useState<RepositoryOption[]>([])
+  const [reposTruncated, setReposTruncated] = useState(false)
+  const [canCreate, setCanCreate] = useState(false)
+  const [repoChoiceMode, setRepoChoiceMode] = useState<RepoChoiceMode>("existing")
+  const [selectedRepo, setSelectedRepo] = useState<RepositoryOption | null>(null)
+  const [reposLoading, setReposLoading] = useState(false)
+  const [repoLoadFailed, setRepoLoadFailed] = useState(false)
+  const [reposReloadNonce, setReposReloadNonce] = useState(0)
   const [stageIndex, setStageIndex] = useState(0)
   const [repoUrl, setRepoUrl] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -151,41 +196,92 @@ export function ExportGitHubModal({
     }
   }, [])
 
-  // Resolve the install identity up front. The backend export requires an
-  // installation_id (App model) and 403s without one; we derive readiness from
-  // the live installations list rather than the legacy `isConnected` prop, which
-  // can be false for an App-only user. The first active installation is used;
-  // managing/choosing installs lives in Settings (T-287), not here.
+  // Resolve the install identity + any existing repo binding up front. The
+  // backend export requires an installation_id (App model) and 403s without
+  // one; we derive readiness from the live installations list rather than the
+  // legacy `isConnected` prop, which can be false for an App-only user. The
+  // push read pins a bound workspace to its repo (and, when possible, its
+  // installation); it is best-effort — on failure the modal degrades to the
+  // unbound flow, which matches today's backend behaviour either way (a bound
+  // push ignores the submitted repo name).
   useEffect(() => {
     let cancelled = false
     void (async () => {
+      let list
+      let push
       try {
-        const list = await getGitHubInstallations()
-        if (cancelled) return
-        const active = list.installations.find((i) => !i.suspended)
-        if (active) {
-          setInstallationId(active.id)
-          setPhase("configure")
-        } else {
-          setNotInstalledHint(
-            list.installations.length > 0
-              ? "Your GitHub App installation is suspended. Re-enable it in Settings to export."
-              : "Install the GitHub App in Settings to export to a repository.",
-          )
-          setPhase("not_installed")
-        }
+        ;[list, push] = await Promise.all([
+          getGitHubInstallations(),
+          getGitHubPush(workspaceId).catch(() => null),
+        ])
       } catch {
         if (cancelled) return
         setNotInstalledHint(
           "Couldn't reach GitHub. Connect the GitHub App in Settings, then try again.",
         )
         setPhase("not_installed")
+        return
+      }
+      if (cancelled) return
+      const active = list.installations.filter((i) => !i.suspended)
+      if (active.length === 0) {
+        setNotInstalledHint(
+          list.installations.length > 0
+            ? "Your GitHub App installation is suspended. Re-enable it in Settings to export."
+            : "Install the GitHub App in Settings to export to a repository.",
+        )
+        setPhase("not_installed")
+        return
+      }
+      const pinned =
+        (push?.installation_id
+          ? active.find((i) => i.id === push.installation_id)
+          : undefined) ?? active[0]
+      setInstallations(active)
+      setInstallationId(pinned.id)
+      setBoundRepoFullName(push?.repo_full_name ?? null)
+      setPhase("configure")
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [workspaceId])
+
+  // Fetch the selected installation's repo list — unbound workspaces only (a
+  // bound one never consults it). Re-runs on installation switch and on the
+  // Retry nonce. A failure is surfaced as manual-mode + retry, never conflated
+  // with a genuinely empty list.
+  useEffect(() => {
+    if (installationId === null || boundRepoFullName !== null) return undefined
+    let cancelled = false
+    setReposLoading(true)
+    setRepoLoadFailed(false)
+    const currentInstallation = installations.find((i) => i.id === installationId)
+    void (async () => {
+      try {
+        const list = await getGitHubRepositories(installationId)
+        if (cancelled) return
+        setRepos(list.repositories)
+        setReposTruncated(list.truncated)
+        setCanCreate(list.can_create)
+        setSelectedRepo(null)
+        setRepoChoiceMode(list.repositories.length > 0 ? "existing" : "manual")
+      } catch {
+        if (cancelled) return
+        setRepos([])
+        setReposTruncated(false)
+        setCanCreate(fallbackCanCreate(currentInstallation))
+        setSelectedRepo(null)
+        setRepoLoadFailed(true)
+        setRepoChoiceMode("manual")
+      } finally {
+        if (!cancelled) setReposLoading(false)
       }
     })()
     return () => {
       cancelled = true
     }
-  }, [])
+  }, [installationId, boundRepoFullName, installations, reposReloadNonce])
 
   const stages = MODE_STAGES[exportMode]
 
@@ -205,10 +301,17 @@ export function ExportGitHubModal({
   // The authoritative outcome: poll getGitHubPush ONLY after the 202 resolved
   // (`pollReady`), so we read this submit's push, never a stale prior one. The
   // terminal success/fail transition comes from the poll status, not the clock.
+  // Past POLL_MAX_ATTEMPTS the modal softens to "still working" but polling
+  // continues at the slow cadence (the phase flip re-runs this effect with the
+  // new interval) — the modal must always land on a visible done/failed state
+  // while it is open, however long the worker takes.
   useEffect(() => {
-    if (phase !== "progress" || !pollReady) return undefined
+    if ((phase !== "progress" && phase !== "still_working") || !pollReady)
+      return undefined
 
     let attempts = 0
+    const interval =
+      phase === "progress" ? POLL_INTERVAL_MS : SLOW_POLL_INTERVAL_MS
     const poll = window.setInterval(() => {
       void (async () => {
         attempts += 1
@@ -228,11 +331,11 @@ export function ExportGitHubModal({
             "GitHub couldn't finish this export. Re-run it, or check the repository on GitHub.",
           )
           setPhase("error")
-        } else if (attempts >= POLL_MAX_ATTEMPTS) {
+        } else if (phase === "progress" && attempts >= POLL_MAX_ATTEMPTS) {
           setPhase("still_working")
         }
       })()
-    }, POLL_INTERVAL_MS)
+    }, interval)
 
     return () => window.clearInterval(poll)
   }, [phase, pollReady, workspaceId, stages.length])
@@ -249,12 +352,28 @@ export function ExportGitHubModal({
     setRepoNameError(validateRepoName(repoName))
   }
 
-  const handleSubmit = useCallback(async () => {
-    const validation = validateRepoName(repoName)
-    if (validation) {
-      setRepoNameError(validation)
-      return
+  /** The repo name the submit will send — bound name wins, then the picked
+   *  repo, then the typed name. Empty string means "not submittable yet". */
+  function resolveRepoName(): string {
+    if (boundRepoFullName !== null) {
+      // "owner/name" → bare name; the backend skips resolution for a bound
+      // push, but the request schema still requires a well-formed repo_name.
+      return boundRepoFullName.split("/")[1] ?? ""
     }
+    if (repoChoiceMode === "existing") return selectedRepo?.name ?? ""
+    return repoName
+  }
+
+  const handleSubmit = useCallback(async () => {
+    if (boundRepoFullName === null && repoChoiceMode === "manual") {
+      const validation = validateRepoName(repoName)
+      if (validation) {
+        setRepoNameError(validation)
+        return
+      }
+    }
+    const submitName = resolveRepoName()
+    if (!submitName) return
     if (!installationId) {
       setPhase("not_installed")
       return
@@ -277,7 +396,7 @@ export function ExportGitHubModal({
       await exportWorkspaceToGitHub(
         workspaceId,
         {
-          repo_name: repoName,
+          repo_name: submitName,
           visibility,
           installation_id: installationId,
           export_mode: exportMode,
@@ -317,7 +436,16 @@ export function ExportGitHubModal({
     } finally {
       window.clearTimeout(timeoutId)
     }
-  }, [repoName, visibility, exportMode, installationId, workspaceId])
+  }, [
+    boundRepoFullName,
+    repoChoiceMode,
+    selectedRepo,
+    repoName,
+    visibility,
+    exportMode,
+    installationId,
+    workspaceId,
+  ])
 
   function handleBackdropClick(e: React.MouseEvent<HTMLDivElement>) {
     // Block click-out only during the active staged hand-off; "still working"
@@ -336,8 +464,15 @@ export function ExportGitHubModal({
     onClose()
   }
 
+  const activeInstallation = installations.find((i) => i.id === installationId)
+
   const submitDisabled =
-    phase !== "configure" || !repoName.trim() || !!validateRepoName(repoName)
+    phase !== "configure" ||
+    reposLoading ||
+    (boundRepoFullName === null &&
+      (repoChoiceMode === "existing"
+        ? selectedRepo === null
+        : !repoName.trim() || !!validateRepoName(repoName)))
   const closeDisabled = phase === "progress"
 
   return (
@@ -387,49 +522,173 @@ export function ExportGitHubModal({
             </div>
           ) : phase === "configure" ? (
             <>
-              <label className="modal-label" htmlFor="github-repo-name">
-                Repository name
-              </label>
-              <input
-                ref={nameInputRef}
-                id="github-repo-name"
-                className={`modal-input${repoNameError ? " error" : ""}`}
-                type="text"
-                value={repoName}
-                onChange={(e) => {
-                  setRepoName(e.target.value)
-                  if (repoNameError) setRepoNameError(validateRepoName(e.target.value))
-                }}
-                onBlur={handleRepoNameBlur}
-                maxLength={REPO_NAME_MAX}
-                spellCheck={false}
-                autoComplete="off"
-              />
-              {repoNameError && <p className="modal-error">{repoNameError}</p>}
+              {boundRepoFullName === null && installations.length > 1 && (
+                <>
+                  <label
+                    className="modal-label"
+                    htmlFor="github-installation-select"
+                  >
+                    GitHub account
+                  </label>
+                  <select
+                    id="github-installation-select"
+                    className="modal-input"
+                    value={installationId ?? ""}
+                    onChange={(e) => setInstallationId(e.target.value)}
+                  >
+                    {installations.map((install) => (
+                      <option key={install.id} value={install.id}>
+                        {install.account_login}
+                      </option>
+                    ))}
+                  </select>
+                </>
+              )}
 
-              <label className="modal-label">Visibility</label>
-              <div className="github-modal-visibility-grid">
-                <button
-                  type="button"
-                  className={`github-modal-visibility-btn ${
-                    visibility === "public" ? "selected" : ""
-                  }`}
-                  onClick={() => setVisibility("public")}
-                  aria-pressed={visibility === "public"}
-                >
-                  Public
-                </button>
-                <button
-                  type="button"
-                  className={`github-modal-visibility-btn ${
-                    visibility === "private" ? "selected" : ""
-                  }`}
-                  onClick={() => setVisibility("private")}
-                  aria-pressed={visibility === "private"}
-                >
-                  Private
-                </button>
-              </div>
+              <label className="modal-label" id="github-repo-section-label">
+                Repository
+              </label>
+              {boundRepoFullName !== null ? (
+                <div className="gh-bound-repo">
+                  <span className="gh-bound-repo-name">{boundRepoFullName}</span>
+                  <p className="gh-bound-repo-note">
+                    This workspace is connected to this repository — exporting
+                    updates its files and issues in place.
+                  </p>
+                </div>
+              ) : reposLoading ? (
+                <div className="gh-modal-loading" aria-hidden="true">
+                  <span className="gh-modal-loading-line wide" />
+                  <span className="gh-modal-loading-line" />
+                </div>
+              ) : repoChoiceMode === "existing" ? (
+                <>
+                  <RepoPicker
+                    repos={repos}
+                    selectedRepoId={selectedRepo?.id ?? null}
+                    onSelect={setSelectedRepo}
+                    truncated={reposTruncated}
+                  />
+                  <button
+                    type="button"
+                    className="gh-repo-mode-link"
+                    onClick={() => setRepoChoiceMode("manual")}
+                  >
+                    {canCreate
+                      ? "Create a new repository instead"
+                      : "Type a repository name instead"}
+                  </button>
+                </>
+              ) : (
+                <>
+                  {repoLoadFailed && (
+                    <div className="gh-repo-notice" role="alert">
+                      <span>
+                        Couldn&apos;t load your repositories from GitHub. You
+                        can still export by typing the repository name.
+                      </span>
+                      <button
+                        type="button"
+                        className="gh-repo-notice-retry"
+                        onClick={() => setReposReloadNonce((n) => n + 1)}
+                      >
+                        Retry
+                      </button>
+                    </div>
+                  )}
+                  {!repoLoadFailed &&
+                    repos.length === 0 &&
+                    !canCreate &&
+                    activeInstallation && (
+                      <div className="gh-repo-notice">
+                        <span>
+                          This installation can&apos;t reach any repositories
+                          yet.{" "}
+                          <a
+                            href={installationManageUrl(activeInstallation)}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                          >
+                            Add repositories on GitHub
+                          </a>
+                          , then come back.
+                        </span>
+                        <button
+                          type="button"
+                          className="gh-repo-notice-retry"
+                          onClick={() => setReposReloadNonce((n) => n + 1)}
+                        >
+                          Refresh list
+                        </button>
+                      </div>
+                    )}
+                  <input
+                    ref={nameInputRef}
+                    id="github-repo-name"
+                    className={`modal-input${repoNameError ? " error" : ""}`}
+                    type="text"
+                    aria-labelledby="github-repo-section-label"
+                    value={repoName}
+                    onChange={(e) => {
+                      setRepoName(e.target.value)
+                      if (repoNameError)
+                        setRepoNameError(validateRepoName(e.target.value))
+                    }}
+                    onBlur={handleRepoNameBlur}
+                    maxLength={REPO_NAME_MAX}
+                    spellCheck={false}
+                    autoComplete="off"
+                  />
+                  {repoNameError && <p className="modal-error">{repoNameError}</p>}
+                  <p className="gh-repo-manual-hint">
+                    {canCreate
+                      ? "Exports into this repository, creating it first if it doesn't exist yet."
+                      : "Must be an existing repository this installation can access — GitHub doesn't let apps create repositories here."}
+                  </p>
+                  {repos.length > 0 && (
+                    <button
+                      type="button"
+                      className="gh-repo-mode-link"
+                      onClick={() => setRepoChoiceMode("existing")}
+                    >
+                      Choose from your repositories
+                    </button>
+                  )}
+                </>
+              )}
+
+              {/* Visibility only matters when this export may CREATE the repo
+                  (backend ignores it otherwise) — anywhere else it would be a
+                  lie in the UI. */}
+              {boundRepoFullName === null &&
+                canCreate &&
+                repoChoiceMode === "manual" && (
+                  <>
+                    <label className="modal-label">Visibility</label>
+                    <div className="github-modal-visibility-grid">
+                      <button
+                        type="button"
+                        className={`github-modal-visibility-btn ${
+                          visibility === "public" ? "selected" : ""
+                        }`}
+                        onClick={() => setVisibility("public")}
+                        aria-pressed={visibility === "public"}
+                      >
+                        Public
+                      </button>
+                      <button
+                        type="button"
+                        className={`github-modal-visibility-btn ${
+                          visibility === "private" ? "selected" : ""
+                        }`}
+                        onClick={() => setVisibility("private")}
+                        aria-pressed={visibility === "private"}
+                      >
+                        Private
+                      </button>
+                    </div>
+                  </>
+                )}
 
               <label className="modal-label" id="github-export-mode-label">
                 Export mode
@@ -490,8 +749,10 @@ export function ExportGitHubModal({
           ) : phase === "still_working" ? (
             <div className="github-modal-not-connected">
               <p>
-                Still working in the background — GitHub is finishing your export.
-                You can close this; the Tasks panel will show progress as it lands.
+                Still working — a big task list means GitHub is opening issues
+                one by one, which can take a few minutes. Keep this open and it
+                will switch to done by itself, or close it and watch the Tasks
+                stage panel.
               </p>
               <div className="modal-footer">
                 {repoUrl && (

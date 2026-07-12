@@ -234,3 +234,6 @@ harness/node_modules
 # Local-only docs (never commit)
 CLAUDE.md
 handoff.md
+
+# Playwright MCP browser-session artifacts (screenshots, snapshots, console logs)
+.playwright-mcp/

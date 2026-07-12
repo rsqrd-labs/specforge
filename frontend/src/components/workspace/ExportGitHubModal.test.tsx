@@ -1,20 +1,33 @@
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react"
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react"
 import { MemoryRouter } from "react-router-dom"
-import { afterEach, describe, expect, it, vi } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import { ExportGitHubModal } from "./ExportGitHubModal"
 import {
   exportWorkspaceToGitHub,
   getGitHubInstallations,
   getGitHubPush,
+  getGitHubRepositories,
 } from "../../services/api"
 import type { IntegrationPushRead } from "../../services/api"
-import type { InstallationList } from "../../types/github"
+import type {
+  InstallationList,
+  InstallationOption,
+  RepoList,
+} from "../../types/github"
 
 vi.mock("../../services/api", () => ({
   exportWorkspaceToGitHub: vi.fn(),
   getGitHubInstallations: vi.fn(),
   getGitHubPush: vi.fn(),
+  getGitHubRepositories: vi.fn(),
   // The real helper digs the backend `detail` out of an axios error; the modal
   // only needs the fallback for our cases.
   getApiErrorMessage: (_e: unknown, fallback: string) => fallback,
@@ -23,19 +36,25 @@ vi.mock("../../services/api", () => ({
 const mockInstalls = vi.mocked(getGitHubInstallations)
 const mockExport = vi.mocked(exportWorkspaceToGitHub)
 const mockPush = vi.mocked(getGitHubPush)
+const mockRepos = vi.mocked(getGitHubRepositories)
+
+function installation(
+  overrides: Partial<InstallationOption> = {},
+): InstallationOption {
+  return {
+    id: "inst-row-1",
+    installation_id: 4242,
+    account_login: "octocat",
+    account_type: "Organization",
+    repository_selection: "all",
+    suspended: false,
+    ...overrides,
+  }
+}
 
 function installed(suspended = false): InstallationList {
   return {
-    installations: [
-      {
-        id: "inst-row-1",
-        installation_id: 4242,
-        account_login: "octocat",
-        account_type: "Organization",
-        repository_selection: "all",
-        suspended,
-      },
-    ],
+    installations: [installation({ suspended })],
     on_legacy_oauth: false,
   }
 }
@@ -47,7 +66,32 @@ function push(overrides: Partial<IntegrationPushRead> = {}): IntegrationPushRead
     repo_full_name: "octocat/my-spec",
     repo_url: "https://github.com/octocat/my-spec",
     issue_count: 4,
+    installation_id: "inst-row-1",
     pushed_at: null,
+    ...overrides,
+  }
+}
+
+function repoList(overrides: Partial<RepoList> = {}): RepoList {
+  return {
+    repositories: [
+      {
+        id: 11,
+        name: "api-server",
+        full_name: "octocat/api-server",
+        private: true,
+        html_url: "https://github.com/octocat/api-server",
+      },
+      {
+        id: 12,
+        name: "docs-site",
+        full_name: "octocat/docs-site",
+        private: false,
+        html_url: "https://github.com/octocat/docs-site",
+      },
+    ],
+    truncated: false,
+    can_create: true,
     ...overrides,
   }
 }
@@ -67,6 +111,15 @@ function renderModal(props: Partial<Parameters<typeof ExportGitHubModal>[0]> = {
   )
   return { onClose }
 }
+
+beforeEach(() => {
+  // Defaults every test starts from: an unbound workspace (no push yet) whose
+  // installation has no listable repos but can create — this reproduces the
+  // pre-picker "type a name" configure phase, so the legacy-flow tests below
+  // exercise the same submit path they always did.
+  mockPush.mockResolvedValue(null)
+  mockRepos.mockResolvedValue(repoList({ repositories: [] }))
+})
 
 afterEach(() => {
   vi.clearAllMocks()
@@ -122,8 +175,10 @@ describe("ExportGitHubModal", () => {
   it("submits with the installation_id + export_mode, then polls to a success state", async () => {
     mockInstalls.mockResolvedValue(installed())
     mockExport.mockResolvedValue(push({ status: "pending", repo_url: null }))
-    // First poll still pending, then completed with the repo url.
+    // Mount read: no push yet (unbound). Then the post-submit polls: one
+    // pending, then completed with the repo url.
     mockPush
+      .mockResolvedValueOnce(null)
       .mockResolvedValueOnce(push({ status: "pending" }))
       .mockResolvedValue(push({ status: "completed" }))
 
@@ -159,7 +214,7 @@ describe("ExportGitHubModal", () => {
     expect(link).toHaveAttribute("href", "https://github.com/octocat/my-spec")
   })
 
-  it("does not consume a prior push's terminal status before the 202 resolves", async () => {
+  it("locks a bound workspace to its repo and does not consume the prior terminal status before the 202", async () => {
     mockInstalls.mockResolvedValue(installed())
     // Hold the POST so we can observe the window where a stale push could leak.
     let resolveExport: (v: IntegrationPushRead) => void = () => {}
@@ -168,18 +223,43 @@ describe("ExportGitHubModal", () => {
         resolveExport = resolve
       }),
     )
-    // A prior push row already reads "completed" — it must NOT be polled yet.
+    // The workspace already exported: the push row reads completed and is
+    // bound to octocat/my-spec.
     mockPush.mockResolvedValue(push({ status: "completed" }))
 
     renderModal()
-    fireEvent.click(await screen.findByRole("button", { name: /export/i }))
 
-    // Staged progress is showing, but polling is gated on the 202.
+    // Bound view: the connected repo is shown as a locked banner — no picker,
+    // no free-text name, no repo-list fetch (a bound push ignores them all).
+    expect(await screen.findByText("octocat/my-spec")).toBeInTheDocument()
+    expect(
+      screen.getByText(/exporting updates its files and issues/i),
+    ).toBeInTheDocument()
+    expect(screen.queryByRole("listbox")).not.toBeInTheDocument()
+    expect(screen.queryByLabelText(/filter repositories/i)).not.toBeInTheDocument()
+    expect(mockRepos).not.toHaveBeenCalled()
+
+    fireEvent.click(screen.getByRole("button", { name: /export/i }))
+
+    // The submit derives the bound repo's bare name.
+    await waitFor(() =>
+      expect(mockExport).toHaveBeenCalledWith(
+        "ws-1",
+        expect.objectContaining({
+          repo_name: "my-spec",
+          installation_id: "inst-row-1",
+        }),
+        expect.any(AbortSignal),
+      ),
+    )
+
+    // Staged progress is showing, but polling is gated on the 202: past a poll
+    // interval, only the single mount read may have happened — the stale
+    // "completed" must not have been consumed as this export's outcome.
     expect(await screen.findByRole("list")).toBeInTheDocument()
-    // Past a poll interval, the stale "completed" must not have been consumed.
     await new Promise((r) => setTimeout(r, 1700))
     expect(screen.queryByText(/exported to github/i)).not.toBeInTheDocument()
-    expect(mockPush).not.toHaveBeenCalled()
+    expect(mockPush).toHaveBeenCalledTimes(1)
 
     // Once the POST resolves, polling begins and the export completes.
     resolveExport(push({ status: "pending", repo_url: null }))
@@ -188,13 +268,213 @@ describe("ExportGitHubModal", () => {
     ).toBeInTheDocument()
   })
 
+  it("keeps polling past the still-working hand-off and lands on done by itself", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      mockInstalls.mockResolvedValue(installed())
+      mockExport.mockResolvedValue(push({ status: "pending", repo_url: null }))
+      // Mount read: unbound. Every poll after submit: still pending — a slow,
+      // many-issue export that outlives the fast-poll window.
+      mockPush
+        .mockResolvedValueOnce(null)
+        .mockResolvedValue(push({ status: "pending", repo_url: null }))
+
+      renderModal()
+      // Wait for the repo section to settle (submit is disabled while the
+      // repo list loads) before submitting.
+      await screen.findByDisplayValue("my-spec")
+      fireEvent.click(screen.getByRole("button", { name: /^export$/i }))
+
+      // Let the 202 resolve and polling begin, then run out the 40 fast polls
+      // (~60s) → the calm hand-off, never a red error.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5_000)
+      })
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(65_000)
+      })
+      expect(await screen.findByText(/still working/i)).toBeInTheDocument()
+
+      // The worker finishes AFTER the hand-off: the continued slow poll must
+      // surface it as a visible done state — the user never has to go verify
+      // on GitHub by hand.
+      mockPush.mockResolvedValue(push({ status: "completed" }))
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(11_000)
+      })
+      expect(await screen.findByText(/exported to github/i)).toBeInTheDocument()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it("lists the installation's repositories and submits the picked one", async () => {
+    mockInstalls.mockResolvedValue(installed())
+    mockRepos.mockResolvedValue(repoList())
+    mockExport.mockResolvedValue(push({ status: "pending", repo_url: null }))
+
+    renderModal()
+
+    // Existing-repo mode is the default when the list is non-empty.
+    const listbox = await screen.findByRole("listbox", { name: /repositories/i })
+    const row = within(listbox).getByRole("button", { name: /api-server/i })
+    fireEvent.click(row)
+
+    // Picking an existing repo never shows the visibility choice (it only
+    // applies when the export may create the repo).
+    expect(screen.queryByText(/visibility/i)).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole("button", { name: /^export$/i }))
+    await waitFor(() =>
+      expect(mockExport).toHaveBeenCalledWith(
+        "ws-1",
+        expect.objectContaining({ repo_name: "api-server" }),
+        expect.any(AbortSignal),
+      ),
+    )
+  })
+
+  it("disables Export in existing mode until a repository is picked", async () => {
+    mockInstalls.mockResolvedValue(installed())
+    mockRepos.mockResolvedValue(repoList())
+
+    renderModal()
+
+    await screen.findByRole("listbox", { name: /repositories/i })
+    expect(screen.getByRole("button", { name: /^export$/i })).toBeDisabled()
+  })
+
+  it("filters the repository list case-insensitively", async () => {
+    mockInstalls.mockResolvedValue(installed())
+    mockRepos.mockResolvedValue(repoList())
+
+    renderModal()
+
+    const filter = await screen.findByLabelText(/filter repositories/i)
+    fireEvent.change(filter, { target: { value: "DOCS" } })
+
+    const listbox = screen.getByRole("listbox", { name: /repositories/i })
+    expect(within(listbox).getByText("docs-site")).toBeInTheDocument()
+    expect(within(listbox).queryByText("api-server")).not.toBeInTheDocument()
+  })
+
+  it("keeps the create-new framing only for an org install on all repositories", async () => {
+    mockInstalls.mockResolvedValue(installed())
+    mockRepos.mockResolvedValue(repoList({ can_create: true }))
+
+    renderModal()
+
+    // Org + all-repos: the manual-mode toggle is framed as creation…
+    const createLink = await screen.findByRole("button", {
+      name: /create a new repository instead/i,
+    })
+    fireEvent.click(createLink)
+    expect(
+      await screen.findByText(/creating it first if it doesn't exist/i),
+    ).toBeInTheDocument()
+    // …and the visibility choice appears (creation is its only consumer).
+    expect(screen.getByText(/visibility/i)).toBeInTheDocument()
+  })
+
+  it("personal-account install never offers repo creation", async () => {
+    mockInstalls.mockResolvedValue({
+      installations: [
+        installation({ account_type: "User", repository_selection: "selected" }),
+      ],
+      on_legacy_oauth: false,
+    })
+    mockRepos.mockResolvedValue(repoList({ can_create: false }))
+
+    renderModal()
+
+    await screen.findByRole("listbox", { name: /repositories/i })
+    expect(
+      screen.queryByRole("button", { name: /create a new repository/i }),
+    ).not.toBeInTheDocument()
+    const manualLink = screen.getByRole("button", {
+      name: /type a repository name instead/i,
+    })
+    fireEvent.click(manualLink)
+    expect(
+      await screen.findByText(/must be an existing repository/i),
+    ).toBeInTheDocument()
+    expect(screen.queryByText(/visibility/i)).not.toBeInTheDocument()
+  })
+
+  it("shows the add-repositories empty state for a personal install with no repos", async () => {
+    mockInstalls.mockResolvedValue({
+      installations: [
+        installation({ account_type: "User", repository_selection: "selected" }),
+      ],
+      on_legacy_oauth: false,
+    })
+    mockRepos.mockResolvedValue(
+      repoList({ repositories: [], can_create: false }),
+    )
+
+    renderModal()
+
+    const manageLink = await screen.findByRole("link", {
+      name: /add repositories on github/i,
+    })
+    // Personal account → the user-scoped installations settings page.
+    expect(manageLink).toHaveAttribute(
+      "href",
+      "https://github.com/settings/installations/4242",
+    )
+  })
+
+  it("falls back to manual name entry with a retry when the repo list fails to load", async () => {
+    mockInstalls.mockResolvedValue(installed())
+    mockRepos
+      .mockRejectedValueOnce(new Error("boom"))
+      .mockResolvedValue(repoList())
+
+    renderModal()
+
+    // Failure is NOT an empty list: a retry notice + the name input remain.
+    expect(
+      await screen.findByText(/couldn't load your repositories/i),
+    ).toBeInTheDocument()
+    expect(screen.getByDisplayValue("my-spec")).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole("button", { name: /retry/i }))
+
+    // The retry refetches and lands in the picker.
+    expect(
+      await screen.findByRole("listbox", { name: /repositories/i }),
+    ).toBeInTheDocument()
+    expect(mockRepos).toHaveBeenCalledTimes(2)
+  })
+
+  it("offers an account selector for multi-install users and refetches on switch", async () => {
+    const second = installation({
+      id: "inst-row-2",
+      installation_id: 7777,
+      account_login: "acme-org",
+    })
+    mockInstalls.mockResolvedValue({
+      installations: [installation(), second],
+      on_legacy_oauth: false,
+    })
+    mockRepos.mockResolvedValue(repoList())
+
+    renderModal()
+
+    const select = await screen.findByLabelText(/github account/i)
+    await waitFor(() => expect(mockRepos).toHaveBeenCalledWith("inst-row-1"))
+
+    fireEvent.change(select, { target: { value: "inst-row-2" } })
+    await waitFor(() => expect(mockRepos).toHaveBeenCalledWith("inst-row-2"))
+  })
+
   it("maps a 403 on submit back to the install prompt (no red error)", async () => {
     mockInstalls.mockResolvedValue(installed())
     mockExport.mockRejectedValue({ response: { status: 403 } })
 
     renderModal()
 
-    fireEvent.click(await screen.findByRole("button", { name: /export/i }))
+    fireEvent.click(await screen.findByRole("button", { name: /^export$/i }))
 
     expect(
       await screen.findByText(/no longer available|reconnect it in settings/i),
@@ -205,11 +485,13 @@ describe("ExportGitHubModal", () => {
   it("surfaces a failed export and offers retry", async () => {
     mockInstalls.mockResolvedValue(installed())
     mockExport.mockResolvedValue(push({ status: "pending", repo_url: null }))
-    mockPush.mockResolvedValue(push({ status: "failed" }))
+    mockPush
+      .mockResolvedValueOnce(null)
+      .mockResolvedValue(push({ status: "failed" }))
 
     renderModal()
 
-    fireEvent.click(await screen.findByRole("button", { name: /export/i }))
+    fireEvent.click(await screen.findByRole("button", { name: /^export$/i }))
 
     expect(
       await screen.findByText(/couldn't finish this export/i, undefined, {

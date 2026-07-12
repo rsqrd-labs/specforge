@@ -7691,6 +7691,172 @@ button:disabled {
   }
 }
 
+/* ─── Repo picker — existing-repository chooser ────────── */
+.gh-repo-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.gh-repo-filter {
+  margin-bottom: 0;
+}
+
+.gh-repo-list {
+  margin: 0;
+  padding: 4px;
+  list-style: none;
+  max-height: 208px;
+  overflow-y: auto;
+  border-radius: 12px;
+  border: 1px solid rgba(143, 78, 0, 0.18);
+  background: rgba(255, 255, 255, 0.55);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.gh-repo-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 10px;
+  border-radius: 9px;
+  border: 1px solid transparent;
+  background: transparent;
+  font-family: inherit;
+  font-size: 13.5px;
+  color: var(--ink-text);
+  cursor: pointer;
+  text-align: left;
+  transition: border-color 0.14s, background 0.14s, box-shadow 0.14s;
+}
+
+.gh-repo-row:hover {
+  background: rgba(143, 78, 0, 0.05);
+}
+
+.gh-repo-row.selected {
+  border-color: var(--brand-primary);
+  background: rgba(143, 78, 0, 0.09);
+  box-shadow: 0 0 0 2px rgba(143, 78, 0, 0.10);
+}
+
+.gh-repo-row-name {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.gh-repo-row-badge {
+  flex: none;
+  padding: 1px 8px;
+  border-radius: 9999px;
+  border: 1px solid rgba(86, 94, 116, 0.20);
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: var(--ink-text-muted);
+}
+
+.gh-repo-list-empty,
+.gh-repo-truncated-note {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--ink-text-muted);
+}
+
+/* Mode-switch link (existing list ↔ type-a-name) + repo-section notices. */
+.gh-repo-mode-link {
+  align-self: flex-start;
+  padding: 0;
+  border: none;
+  background: none;
+  font-family: inherit;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--brand-primary);
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.gh-repo-manual-hint {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--ink-text-muted);
+}
+
+.gh-repo-notice {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid rgba(143, 78, 0, 0.18);
+  background: rgba(143, 78, 0, 0.05);
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--ink-text-muted);
+}
+
+.gh-repo-notice a {
+  color: var(--brand-primary);
+  font-weight: 600;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.gh-repo-notice-retry {
+  align-self: flex-start;
+  padding: 4px 12px;
+  border-radius: 9px;
+  border: 1px solid rgba(143, 78, 0, 0.24);
+  background: rgba(255, 255, 255, 0.6);
+  font-family: inherit;
+  font-size: 12.5px;
+  font-weight: 700;
+  color: var(--brand-primary);
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.gh-repo-notice-retry:hover {
+  border-color: rgba(143, 78, 0, 0.4);
+  background: rgba(143, 78, 0, 0.06);
+}
+
+/* Bound-workspace banner: re-exports update the connected repository. */
+.gh-bound-repo {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  border: 1px solid rgba(143, 78, 0, 0.18);
+  background: rgba(255, 255, 255, 0.55);
+}
+
+.gh-bound-repo-name {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--ink-text);
+  word-break: break-all;
+}
+
+.gh-bound-repo-note {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--ink-text-muted);
+}
+
 /* ─── Staged async progress checklist (T-288) ──────────── */
 .gh-stage-list {
   display: flex;
