@@ -233,13 +233,13 @@ describe("ExportGitHubModal", () => {
     // no free-text name, no repo-list fetch (a bound push ignores them all).
     expect(await screen.findByText("octocat/my-spec")).toBeInTheDocument()
     expect(
-      screen.getByText(/exporting updates its files and issues/i),
+      screen.getByText(/updates this repository's files and issues in place/i),
     ).toBeInTheDocument()
     expect(screen.queryByRole("listbox")).not.toBeInTheDocument()
     expect(screen.queryByLabelText(/filter repositories/i)).not.toBeInTheDocument()
     expect(mockRepos).not.toHaveBeenCalled()
 
-    fireEvent.click(screen.getByRole("button", { name: /export/i }))
+    fireEvent.click(screen.getByRole("button", { name: /update export/i }))
 
     // The submit derives the bound repo's bare name.
     await waitFor(() =>
@@ -266,6 +266,74 @@ describe("ExportGitHubModal", () => {
     expect(
       await screen.findByText(/exported to github/i, undefined, { timeout: 4000 }),
     ).toBeInTheDocument()
+  })
+
+  it("tells the user an already-completed export is already complete", async () => {
+    mockInstalls.mockResolvedValue(installed())
+    mockPush.mockResolvedValue(
+      push({ status: "completed", pushed_at: "2026-07-12T12:00:00" }),
+    )
+
+    renderModal()
+
+    // The prior push's outcome is surfaced, with when it landed — never a
+    // plain fresh-export screen for a workspace that already exported.
+    const badge = await screen.findByText(/already exported/i)
+    expect(badge.textContent).toMatch(/already exported — .+/i)
+    expect(
+      screen.getByText(/never duplicates them/i),
+    ).toBeInTheDocument()
+    // The copy flips to re-export language: issues sync in place, the CTA is
+    // an update, not a first export.
+    expect(screen.getByText(/4 issues will be synced/i)).toBeInTheDocument()
+    expect(
+      screen.getByRole("button", { name: /update export/i }),
+    ).toBeInTheDocument()
+    expect(
+      screen.queryByRole("button", { name: /^export$/i }),
+    ).not.toBeInTheDocument()
+  })
+
+  it("explains drift on a stale push: exported before, workspace moved on", async () => {
+    mockInstalls.mockResolvedValue(installed())
+    mockPush.mockResolvedValue(
+      push({ status: "stale", pushed_at: "2026-07-10T12:00:00" }),
+    )
+
+    renderModal()
+
+    expect(await screen.findByText(/already exported/i)).toBeInTheDocument()
+    expect(
+      screen.getByText(/changed since that export/i),
+    ).toBeInTheDocument()
+  })
+
+  it("frames a re-export after a failed push as a safe retry, not a first export", async () => {
+    mockInstalls.mockResolvedValue(installed())
+    mockPush.mockResolvedValue(push({ status: "failed" }))
+
+    renderModal()
+
+    expect(
+      await screen.findByText(/the last export didn't finish/i),
+    ).toBeInTheDocument()
+    // A failed push never claims "already exported".
+    expect(screen.queryByText(/already exported/i)).not.toBeInTheDocument()
+    expect(
+      screen.getByRole("button", { name: /update export/i }),
+    ).toBeInTheDocument()
+  })
+
+  it("keeps first-export copy for an unbound workspace", async () => {
+    mockInstalls.mockResolvedValue(installed())
+
+    renderModal()
+
+    expect(
+      await screen.findByText(/4 issues will be created/i),
+    ).toBeInTheDocument()
+    expect(screen.getByRole("button", { name: /^export$/i })).toBeInTheDocument()
+    expect(screen.queryByText(/already exported/i)).not.toBeInTheDocument()
   })
 
   it("keeps polling past the still-working hand-off and lands on done by itself", async () => {

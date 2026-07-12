@@ -29,6 +29,11 @@
  *   ALWAYS re-exports there — the backend skips repo resolution entirely — so
  *   the modal shows the bound repo as a quiet locked banner instead of lying
  *   with a picker. The bound installation is pinned when still active.
+ *   The banner is status-aware: a `completed` push says so outright ("Already
+ *   exported" + when), `stale` explains the workspace moved on, `failed` frames
+ *   the submit as a safe retry — and the CTA/issue-pill copy flips from
+ *   "Export"/"created" to "Update export"/"synced", because a re-export updates
+ *   files and issues in place rather than creating anything new.
  * - Unbound: pick an existing repository from the installation's list (the
  *   primary path — GitHub Apps can never create repos in personal accounts),
  *   or type a name ("manual" mode). The create-new framing appears only when
@@ -124,6 +129,16 @@ const EXPORT_REQUEST_TIMEOUT_MS = 30_000
 const POLL_MAX_ATTEMPTS = 40
 const SLOW_POLL_INTERVAL_MS = 5000
 
+/** "Jul 12, 3:41 PM" — matches the version-history timestamp shape. */
+function formatPushedAt(iso: string): string {
+  const d = new Date(iso)
+  return (
+    d.toLocaleDateString(undefined, { month: "short", day: "numeric" }) +
+    ", " +
+    d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })
+  )
+}
+
 function slugifyWorkspaceName(name: string): string {
   return name
     .toLowerCase()
@@ -174,6 +189,14 @@ export function ExportGitHubModal({
   // the configure UI locks to it instead of offering a picker that would be
   // silently ignored.
   const [boundRepoFullName, setBoundRepoFullName] = useState<string | null>(null)
+  // The prior push's outcome, read once at mount alongside the binding. This is
+  // what lets the modal say "already exported" instead of presenting a bound
+  // re-export as if it were a first export (the status/pushed_at were always
+  // fetched — they were just dropped on the floor before).
+  const [priorPush, setPriorPush] = useState<{
+    status: string
+    pushedAt: string | null
+  } | null>(null)
   const [repos, setRepos] = useState<RepositoryOption[]>([])
   const [reposTruncated, setReposTruncated] = useState(false)
   const [canCreate, setCanCreate] = useState(false)
@@ -240,6 +263,9 @@ export function ExportGitHubModal({
       setInstallations(active)
       setInstallationId(pinned.id)
       setBoundRepoFullName(push?.repo_full_name ?? null)
+      setPriorPush(
+        push ? { status: push.status, pushedAt: push.pushed_at } : null,
+      )
       setPhase("configure")
     })()
     return () => {
@@ -551,9 +577,30 @@ export function ExportGitHubModal({
               {boundRepoFullName !== null ? (
                 <div className="gh-bound-repo">
                   <span className="gh-bound-repo-name">{boundRepoFullName}</span>
+                  {/* Status-aware notice: never present a re-export as a first
+                      export. completed/stale mean "already exported" (stale
+                      just adds that the workspace moved on); failed frames the
+                      submit as a safe retry. */}
+                  {(priorPush?.status === "completed" ||
+                    priorPush?.status === "stale") && (
+                    <span className="gh-bound-repo-status">
+                      <ShippedCheckIcon />
+                      Already exported
+                      {priorPush.pushedAt
+                        ? ` — ${formatPushedAt(priorPush.pushedAt)}`
+                        : ""}
+                    </span>
+                  )}
                   <p className="gh-bound-repo-note">
-                    This workspace is connected to this repository — exporting
-                    updates its files and issues in place.
+                    {priorPush?.status === "completed"
+                      ? "Exporting again is safe — it updates this repository's files and issues in place, never duplicates them."
+                      : priorPush?.status === "stale"
+                        ? "The workspace has changed since that export — export again to bring the repository up to date."
+                        : priorPush?.status === "failed"
+                          ? "The last export didn't finish. Exporting again retries it — anything already on GitHub is updated in place, never duplicated."
+                          : priorPush?.status === "pending"
+                            ? "An export is already in progress — running it again is safe; files and issues are updated in place."
+                            : "This workspace is connected to this repository — exporting updates its files and issues in place."}
                   </p>
                 </div>
               ) : reposLoading ? (
@@ -726,8 +773,11 @@ export function ExportGitHubModal({
                 </p>
               )}
 
+              {/* A bound re-export syncs issues in place (keyed by task ref);
+                  only a first export creates them all. */}
               <div className="github-modal-issue-pill">
-                {taskCount} issue{taskCount === 1 ? "" : "s"} will be created
+                {taskCount} issue{taskCount === 1 ? "" : "s"} will be{" "}
+                {boundRepoFullName !== null ? "synced" : "created"}
               </div>
 
               <div className="modal-footer">
@@ -740,7 +790,7 @@ export function ExportGitHubModal({
                   onClick={() => void handleSubmit()}
                   disabled={submitDisabled}
                 >
-                  Export
+                  {boundRepoFullName !== null ? "Update export" : "Export"}
                 </button>
               </div>
             </>
