@@ -131,13 +131,27 @@ async def export_push(
     repo_name: str,
     visibility: str,
 ) -> None:
-    """Push a prepared workspace export to GitHub (idempotent, resumable)."""
+    """Push a prepared workspace export to GitHub (idempotent, resumable).
+
+    ``is_final_attempt`` tells the service whether this is the last try arq
+    will make (``job_try >= JOB_MAX_TRIES``): a possibly-transient failure
+    (a GitHub 5xx, a network blip) should only permanently mark the push
+    ``failed`` once the retry budget is actually exhausted — otherwise the
+    frontend's poll sees "failed", shows a terminal error, and stops polling
+    while this same job is about to retry and may well succeed (issue: a
+    single hiccup was surfacing as "GitHub export failed" on attempt 1 of 5).
+    """
     from database import AsyncSessionLocal
     from services.pipeline import github_export_service
 
+    job_try = int(ctx.get("job_try", 1) or 1)
     async with AsyncSessionLocal() as db:
         await github_export_service.run_export_push(
-            UUID(push_id), repo_name, visibility, db=db
+            UUID(push_id),
+            repo_name,
+            visibility,
+            db=db,
+            is_final_attempt=job_try >= JOB_MAX_TRIES,
         )
 
 

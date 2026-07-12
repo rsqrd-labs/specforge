@@ -76,6 +76,7 @@ from services.integrations.github_api_client import (
     GitHubRepoExistsError,
     GitHubTokenExpiredError,
     GitHubUnavailableError,
+    GitHubWorkflowsPermissionError,
     make_app_github_client,
     make_github_client,
     make_shared_async_client,
@@ -112,6 +113,21 @@ _HTTP_TIMEOUT_SECONDS = 30.0
 # instead of opening a second PR.
 _DEFAULT_BRANCH = "main"
 _INCREMENT_BRANCH = "specforge/inc-1"
+
+# Errors where retrying the identical job cannot change the outcome — the
+# repo name is taken, the App is missing a permission, the token is invalid
+# even after one re-mint, or the workspace's stages aren't finalised. These
+# always mark the push 'failed' immediately, regardless of how many attempts
+# the worker has left. Contrast with GitHubAPIError/GitHubRateLimitError/any
+# other exception, which may be a transient blip that a retry resolves, and
+# with GitHubThrottledError/GitHubUnavailableError (backpressure — handled
+# separately, never marked failed here).
+_PERMANENT_EXPORT_ERRORS: tuple[type[Exception], ...] = (
+    GitHubTokenExpiredError,
+    GitHubRepoExistsError,
+    GitHubWorkflowsPermissionError,
+    ExportNotReadyError,
+)
 
 # Type alias for a GitHubAPIClient factory. Tests inject a stub here so they
 # do not need to construct an httpx.AsyncClient.
@@ -319,6 +335,7 @@ async def run_export_push(
     *,
     db: AsyncSession,
     client: GitHubAPIClient | None = None,
+    is_final_attempt: bool = True,
 ) -> IntegrationPush | None:
     """Execute a prepared App-mode export (the body of the ``export_push`` job).
 
@@ -336,6 +353,13 @@ async def run_export_push(
 
     ``client`` is injected by tests; in production an App-mode client is built
     from the bound installation's token provider.
+
+    ``is_final_attempt`` is ``ctx["job_try"] >= JOB_MAX_TRIES`` from the arq
+    wrapper (default ``True`` for the rare direct/non-arq caller, preserving
+    today's "fail on first exception" semantics for them). It governs whether
+    a possibly-transient failure below is allowed to leave the push row live
+    for the worker's own retry, or must be marked ``failed`` now because no
+    further attempt is coming — see :func:`_fail_or_retry`.
     """
     push = await _load_push_by_id(db, push_id)
     if push is None:
@@ -349,9 +373,18 @@ async def run_export_push(
         await _mark_push_failed(db, push, status="failed")
         raise GitHubNotConnectedError("GitHub App installation not found for this push")
 
-    workspace = await _load_workspace_by_id(db, push.workspace_id)
-    stages = await _load_finalised_stages(db, push.workspace_id)
-    source_version_id = await _resolve_source_stage_version_id(db, stages["tasks"])
+    try:
+        workspace = await _load_workspace_by_id(db, push.workspace_id)
+        stages = await _load_finalised_stages(db, push.workspace_id)
+        source_version_id = await _resolve_source_stage_version_id(db, stages["tasks"])
+    except Exception as exc:
+        # Most likely ExportNotReadyError — a stage was un-finalised between
+        # `prepare_export_push` (request time) and the worker picking this job
+        # up. Routed through the same permanent/transient decision as the
+        # GitHub-call errors below so it doesn't strand the push `pending`
+        # through a pointless full retry cycle.
+        await _fail_or_retry(db, push, exc, is_final_attempt=is_final_attempt)
+        raise
 
     if client is not None:
         # Injected client (tests): no governor — serialization/budget are no-ops.
@@ -365,6 +398,7 @@ async def run_export_push(
             repo_name=repo_name,
             visibility=visibility,
             source_version_id=source_version_id,
+            is_final_attempt=is_final_attempt,
         )
 
     async with make_shared_async_client() as http:
@@ -389,7 +423,32 @@ async def run_export_push(
             repo_name=repo_name,
             visibility=visibility,
             source_version_id=source_version_id,
+            is_final_attempt=is_final_attempt,
         )
+
+
+async def _fail_or_retry(
+    db: AsyncSession,
+    push: IntegrationPush,
+    exc: Exception,
+    *,
+    is_final_attempt: bool,
+) -> None:
+    """Mark ``push`` terminally 'failed' now, or leave it live for a retry.
+
+    A deterministic error (:data:`_PERMANENT_EXPORT_ERRORS` — bad token, taken
+    repo name, missing App permission, an un-finalised stage) fails immediately:
+    no number of identical retries changes the outcome, so there is nothing to
+    wait for. Anything else (a GitHub 5xx, a network blip, an unexpected bug)
+    is only marked 'failed' once ``is_final_attempt`` is true — i.e. the arq
+    wrapper (``services/queue.py``) is not going to try again — so a single
+    transient hiccup on attempt 1 of ``JOB_MAX_TRIES`` doesn't make the push
+    row (and therefore the frontend's poll) report a terminal failure while a
+    retry that may well succeed is still coming.
+    """
+    if isinstance(exc, _PERMANENT_EXPORT_ERRORS) or is_final_attempt:
+        GITHUB_EXPORT_TOTAL.labels(export_mode=push.export_mode, outcome="failed").inc()
+        await _mark_push_failed(db, push, status="failed")
 
 
 async def _drive_app_export(
@@ -403,6 +462,7 @@ async def _drive_app_export(
     repo_name: str,
     visibility: str,
     source_version_id: UUID | None,
+    is_final_attempt: bool = True,
 ) -> IntegrationPush:
     try:
         return await _run_app_export(
@@ -423,12 +483,8 @@ async def _drive_app_export(
         # surfaces "sync paused" and retries. Marking 'failed' here would wrongly
         # drop the live push and skip the resume.
         raise
-    except Exception:
-        # A genuine failure marks the push failed and re-raises so the worker base
-        # contract can retry/backoff and ultimately dead-letter. v2 status is
-        # 'failed' so find_live_push (status <> 'failed') excludes it.
-        GITHUB_EXPORT_TOTAL.labels(export_mode=push.export_mode, outcome="failed").inc()
-        await _mark_push_failed(db, push, status="failed")
+    except Exception as exc:
+        await _fail_or_retry(db, push, exc, is_final_attempt=is_final_attempt)
         raise
 
 

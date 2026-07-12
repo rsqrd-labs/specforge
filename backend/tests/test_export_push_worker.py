@@ -32,6 +32,7 @@ from models import (
 from services.integrations.github_api_client import (
     GitHubAPIError,
     GitHubNotConnectedError,
+    GitHubRepoExistsError,
 )
 from services.pipeline.github_export_service import (
     load_owned_installation,
@@ -348,6 +349,137 @@ async def test_run_export_push_failure_marks_push_failed(
         )
     await session.refresh(push)
     # v2 'failed' so find_live_push (status <> 'failed') excludes it.
+    assert push.status == "failed"
+
+
+async def test_run_export_push_transient_failure_stays_live_when_not_final_attempt(
+    session: AsyncSession,
+    user: User,
+    workspace: Workspace,
+    installation: GitHubInstallation,
+) -> None:
+    """A transient GitHubAPIError on a non-final attempt must NOT mark 'failed'.
+
+    Regression for the premature "GitHub export failed" bug: the arq wrapper
+    (services/queue.py) is about to retry this same job, so the push row must
+    stay live (not 'failed') so the frontend's poll keeps waiting instead of
+    reporting a terminal error for a hiccup the system itself expects to retry.
+    """
+    push = await prepare_export_push(
+        session,
+        workspace_id=workspace.id,
+        user_id=user.id,
+        installation=installation,
+        export_mode="files_to_default",
+    )
+    with pytest.raises(GitHubAPIError):
+        await run_export_push(
+            push.id,
+            "proj",
+            "private",
+            db=session,
+            client=_FailingClient(),
+            is_final_attempt=False,
+        )
+    await session.refresh(push)
+    assert push.status == "pending"
+
+
+async def test_run_export_push_transient_failure_then_retry_succeeds(
+    session: AsyncSession,
+    user: User,
+    workspace: Workspace,
+    installation: GitHubInstallation,
+) -> None:
+    """End-to-end: a non-final transient failure never blocks a later success.
+
+    Simulates the real arq sequence — attempt 1 hits a transient error
+    (is_final_attempt=False, push stays 'pending'), attempt 2 (the retry)
+    succeeds against a healthy client and the push completes normally.
+    """
+    push = await prepare_export_push(
+        session,
+        workspace_id=workspace.id,
+        user_id=user.id,
+        installation=installation,
+        export_mode="files_to_default",
+    )
+    with pytest.raises(GitHubAPIError):
+        await run_export_push(
+            push.id,
+            "proj",
+            "private",
+            db=session,
+            client=_FailingClient(),
+            is_final_attempt=False,
+        )
+    await session.refresh(push)
+    assert push.status == "pending"
+
+    result = await run_export_push(
+        push.id, "proj", "private", db=session, client=_StubClient()
+    )
+    assert result is not None
+    assert result.status == "completed"
+
+
+async def test_run_export_push_transient_failure_fails_on_final_attempt(
+    session: AsyncSession,
+    user: User,
+    workspace: Workspace,
+    installation: GitHubInstallation,
+) -> None:
+    push = await prepare_export_push(
+        session,
+        workspace_id=workspace.id,
+        user_id=user.id,
+        installation=installation,
+        export_mode="files_to_default",
+    )
+    with pytest.raises(GitHubAPIError):
+        await run_export_push(
+            push.id,
+            "proj",
+            "private",
+            db=session,
+            client=_FailingClient(),
+            is_final_attempt=True,
+        )
+    await session.refresh(push)
+    assert push.status == "failed"
+
+
+class _RepoExistsClient(_StubClient):
+    async def create_repo(self, name: str, private: bool) -> dict[str, Any]:
+        raise GitHubRepoExistsError(f"{name} already exists")
+
+
+async def test_run_export_push_permanent_error_fails_even_on_non_final_attempt(
+    session: AsyncSession,
+    user: User,
+    workspace: Workspace,
+    installation: GitHubInstallation,
+) -> None:
+    """A deterministic error (taken repo name) fails immediately regardless of
+    the retry budget — retrying the identical job can never succeed, so there
+    is nothing worth waiting for."""
+    push = await prepare_export_push(
+        session,
+        workspace_id=workspace.id,
+        user_id=user.id,
+        installation=installation,
+        export_mode="files_to_default",
+    )
+    with pytest.raises(GitHubRepoExistsError):
+        await run_export_push(
+            push.id,
+            "taken-name",
+            "private",
+            db=session,
+            client=_RepoExistsClient(),
+            is_final_attempt=False,
+        )
+    await session.refresh(push)
     assert push.status == "failed"
 
 
