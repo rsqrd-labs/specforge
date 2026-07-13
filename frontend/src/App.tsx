@@ -16,6 +16,12 @@ import Settings from "./pages/Settings"
 // bundle — it loads only when a workspace is opened (LF-1 review remediation).
 const Workspace = lazy(() => import("./pages/Workspace"))
 
+// The GitHub exports hub (account-wide) and the per-workspace export detail
+// screen. Lazy-loaded like the other secondary surfaces — neither is on the
+// first-paint path.
+const GitHubHub = lazy(() => import("./pages/GitHubHub"))
+const WorkspaceGitHub = lazy(() => import("./pages/WorkspaceGitHub"))
+
 // T-USE-10: the public read-only view is registered OUTSIDE the auth guard
 // and lazy-loaded so unauthenticated visitors don't pay the full bundle.
 const PublicWorkspaceView = lazy(() => import("./pages/PublicWorkspaceView"))
@@ -105,6 +111,26 @@ export default function App() {
               <ProtectedRoute>
                 <Suspense fallback={routeFallback}>
                   <Workspace />
+                </Suspense>
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/workspace/:id/github"
+            element={
+              <ProtectedRoute>
+                <Suspense fallback={routeFallback}>
+                  <WorkspaceGitHub />
+                </Suspense>
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/github"
+            element={
+              <ProtectedRoute>
+                <Suspense fallback={routeFallback}>
+                  <GitHubHub />
                 </Suspense>
               </ProtectedRoute>
             }

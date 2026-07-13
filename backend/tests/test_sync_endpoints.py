@@ -28,8 +28,11 @@ from models import (
     User,
     Workspace,
 )
+from models.stage import Stage
+from models.stage_version import StageVersion
 from routers import workspace as workspace_router
 from services.integrations import github_reconcile
+from services.integrations.task_parser import compute_task_ref
 
 pytestmark = pytest.mark.asyncio
 
@@ -179,10 +182,137 @@ async def test_get_sync_returns_drift_and_completion(engine) -> None:
         assert body["push_id"] == str(seeded["push"].id)
         assert body["out_of_sync"] is True  # push status is 'stale'
         assert body["shipped"] == 1 and body["total"] == 2
-        # The response serialises the task issue number under its alias.
-        assert {t["external_issue_number"] for t in body["tasks"]} == {1, 2}
+        # The response serialises the task issue number under the field name the
+        # frontend contract reads — ``issue_number`` — never the DB column alias
+        # ``external_issue_number`` (regression: FastAPI's default by_alias=True
+        # used to leak the column name and break every issue deep-link).
+        assert {t["issue_number"] for t in body["tasks"]} == {1, 2}
+        assert all("external_issue_number" not in t for t in body["tasks"])
+        # This push has no source Tasks version, so the human identity is null
+        # and the UI falls back to the issue number.
+        assert all(t["human_ref"] is None and t["title"] is None for t in body["tasks"])
     finally:
         await _teardown(maker, seeded)
+
+
+async def test_get_sync_resolves_human_ref_and_title_from_source_version(
+    engine,
+) -> None:
+    """Each task carries its human ``T-NNN``/title, joined from the push's source
+    Tasks version on the drift-proof ``compute_task_ref`` key; a push task with no
+    matching source task degrades to null so the UI falls back to the issue #."""
+    maker = async_sessionmaker(engine, expire_on_commit=False)
+    async with maker() as db:
+        user = User(
+            email=f"sync-{uuid4()}@example.com",
+            google_id=f"g-{uuid4()}",
+            name="U",
+            avatar_url=None,
+        )
+        db.add(user)
+        await db.commit()
+        await db.refresh(user)
+        ws = Workspace(
+            user_id=user.id,
+            name="WS",
+            problem_statement="x" * 60,
+            provider="anthropic",
+            model="claude-sonnet-4-6",
+            status="active",
+        )
+        db.add(ws)
+        await db.commit()
+        await db.refresh(ws)
+        stage = Stage(workspace_id=ws.id, type="tasks", status="finalised")
+        db.add(stage)
+        await db.commit()
+        await db.refresh(stage)
+        tasks_md = (
+            "### T-001: Build the login form\n\nDo the thing.\n\n"
+            "### T-002: Wire the API client\n\nDo the other thing.\n"
+        )
+        sv = StageVersion(
+            stage_id=stage.id, version=1, content=tasks_md, created_by="user"
+        )
+        db.add(sv)
+        await db.commit()
+        await db.refresh(sv)
+        inst = GitHubInstallation(
+            installation_id=uuid4().int % 1_000_000_000,
+            account_login="octo",
+            account_type="Organization",
+            repository_selection="all",
+            user_id=user.id,
+        )
+        db.add(inst)
+        await db.commit()
+        await db.refresh(inst)
+        push = IntegrationPush(
+            workspace_id=ws.id,
+            user_id=user.id,
+            provider="github",
+            installation_id=inst.id,
+            repo_id=uuid4().int % 1_000_000_000,
+            repo_full_name="octo/app",
+            status="completed",
+            source_stage_version_id=sv.id,
+        )
+        db.add(push)
+        await db.commit()
+        await db.refresh(push)
+        db.add_all(
+            [
+                IntegrationPushTask(
+                    push_id=push.id,
+                    task_ref=compute_task_ref("Build the login form"),
+                    external_issue_number=1,
+                    state="open",
+                ),
+                IntegrationPushTask(
+                    push_id=push.id,
+                    task_ref=compute_task_ref("Wire the API client"),
+                    external_issue_number=2,
+                    state="done",
+                ),
+                IntegrationPushTask(
+                    push_id=push.id,
+                    task_ref="task-unmatched",
+                    external_issue_number=3,
+                    state="open",
+                ),
+            ]
+        )
+        await db.commit()
+
+    app = _build_app(engine, user, None)
+    try:
+        async with _client(app) as client:
+            resp = await client.get(f"/workspaces/{ws.id}/sync")
+        assert resp.status_code == 200
+        by_num = {t["issue_number"]: t for t in resp.json()["tasks"]}
+        assert by_num[1]["human_ref"] == "T-001"
+        assert by_num[1]["title"] == "Build the login form"
+        assert by_num[2]["human_ref"] == "T-002"
+        assert by_num[2]["title"] == "Wire the API client"
+        # Unmatched task → null identity; UI falls back to the issue number.
+        assert by_num[3]["human_ref"] is None and by_num[3]["title"] is None
+    finally:
+        async with maker() as db:
+            # Delete in FK-dependency order: the push references the source
+            # StageVersion, so it must go before the version/stage.
+            await db.execute(
+                delete(IntegrationPush).where(IntegrationPush.id == push.id)
+            )
+            await db.execute(
+                delete(StageVersion).where(StageVersion.stage_id == stage.id)
+            )
+            await db.execute(delete(Stage).where(Stage.id == stage.id))
+            await db.execute(
+                delete(GitHubInstallation).where(GitHubInstallation.id == inst.id)
+            )
+            await db.execute(delete(Workspace).where(Workspace.id == ws.id))
+            await db.execute(delete(User).where(User.id == user.id))
+            await db.commit()
 
 
 async def test_get_sync_404_when_no_push(engine) -> None:

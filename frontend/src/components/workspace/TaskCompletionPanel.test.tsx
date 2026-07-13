@@ -14,6 +14,8 @@ function task(overrides: Partial<TaskSyncState> = {}): TaskSyncState {
     done_via: null,
     done_at: null,
     synced_at: null,
+    human_ref: null,
+    title: null,
     ...overrides,
   }
 }
@@ -64,23 +66,78 @@ describe("TaskCompletionPanel", () => {
   it("renders the shipped/total progress and per-task issue deep links", () => {
     renderPanel()
 
-    expect(screen.getByText(/2 of 3 tasks shipped/i)).toBeInTheDocument()
     const progress = screen.getByRole("progressbar")
     expect(progress).toHaveAttribute("aria-valuenow", "2")
     expect(progress).toHaveAttribute("aria-valuemax", "3")
+    // The fraction lives once — on the header + the progressbar's label; the
+    // duplicate "X of Y tasks shipped" caption was removed.
+    expect(progress).toHaveAccessibleName(/2 of 3 tasks shipped/i)
+    expect(screen.queryByText(/tasks shipped/i)).toBeNull()
 
-    const issueLink = screen.getByRole("link", { name: /issue #11/i })
+    const issueLink = screen.getByRole("link", { name: /issue #11 on github/i })
     expect(issueLink).toHaveAttribute(
       "href",
       "https://github.com/octo/spec/issues/11",
     )
   })
 
+  it("shows the human T-NNN ref chip and the task title, never the hash", () => {
+    renderPanel({
+      data: syncState({
+        tasks: [
+          task({
+            task_ref: "task-abc123",
+            issue_number: 7,
+            human_ref: "T-007",
+            title: "Wire the API client",
+          }),
+        ],
+      }),
+    })
+
+    expect(screen.getByText("T-007")).toBeInTheDocument()
+    expect(screen.getByText("Wire the API client")).toBeInTheDocument()
+    // The opaque content-hash ref is never rendered.
+    expect(screen.queryByText(/task-abc123/)).toBeNull()
+  })
+
+  it("falls back to the issue number when a task has no resolved title", () => {
+    renderPanel({
+      data: syncState({
+        tasks: [task({ issue_number: 42, human_ref: null, title: null })],
+      }),
+    })
+
+    // Heading falls back to "Issue #42"; there is no ref chip.
+    expect(screen.getByText("Issue #42")).toBeInTheDocument()
+  })
+
   it("marks a merged-PR task with the via-PR (lotus) accent", () => {
     const { container } = renderPanel()
-    // T-001 closed via pr_merge → lotus check + 'via PR' label.
-    expect(screen.getByText("via PR")).toBeInTheDocument()
+    // T-001 closed via pr_merge → lotus check + 'Shipped via PR' sublabel.
+    expect(screen.getByText("Shipped via PR")).toBeInTheDocument()
     expect(container.querySelector(".ws-sync-check.done.via-pr")).not.toBeNull()
+  })
+
+  it("caps the list to a glance and links to the full status screen", () => {
+    const tasks = Array.from({ length: 8 }, (_, i) =>
+      task({
+        task_ref: `task-${i}`,
+        issue_number: i + 1,
+        human_ref: `T-00${i + 1}`,
+        title: `Task ${i + 1}`,
+        state: "open",
+      }),
+    )
+    const { container } = renderPanel({
+      data: syncState({ tasks, shipped: 0 }),
+      detailHref: "/workspace/ws-1/github",
+    })
+
+    // Only the first six rows render; the rest defer to the detail screen.
+    expect(container.querySelectorAll(".ws-sync-task")).toHaveLength(6)
+    const viewAll = screen.getByRole("link", { name: /view all 8 tasks/i })
+    expect(viewAll).toHaveAttribute("href", "/workspace/ws-1/github")
   })
 
   it("shows the drift banner and triggers resync when out_of_sync", async () => {
@@ -137,8 +194,8 @@ describe("TaskCompletionPanel", () => {
     const { container, rerender } = renderPanel({
       data: syncState({
         tasks: [
-          task({ task_ref: "T-001", issue_number: 11, state: "done", done_via: "manual" }),
-          task({ task_ref: "T-002", issue_number: 12, state: "open" }),
+          task({ task_ref: "task-1", human_ref: "T-001", issue_number: 11, state: "done", done_via: "manual" }),
+          task({ task_ref: "task-2", human_ref: "T-002", issue_number: 12, state: "open" }),
         ],
       }),
     })
@@ -151,8 +208,8 @@ describe("TaskCompletionPanel", () => {
         <TaskCompletionPanel
           data={syncState({
             tasks: [
-              task({ task_ref: "T-001", issue_number: 11, state: "done", done_via: "manual" }),
-              task({ task_ref: "T-002", issue_number: 12, state: "done", done_via: "manual" }),
+              task({ task_ref: "task-1", human_ref: "T-001", issue_number: 11, state: "done", done_via: "manual" }),
+              task({ task_ref: "task-2", human_ref: "T-002", issue_number: 12, state: "done", done_via: "manual" }),
             ],
           })}
           repoFullName="octo/spec"

@@ -7,6 +7,7 @@ import { BrandLoader } from "../components/shared/BrandLoader"
 import { BrandLockup } from "../components/shared/BrandLogo"
 import { BoltIcon, CheckCircleIcon, FolderIcon } from "../components/shared/DashboardIcons"
 import { GitHubStatusPill } from "../components/shared/GitHubStatusPill"
+import { GitHubIcon } from "../components/shared/icons"
 import { CreditMeter } from "../components/shared/CreditMeter"
 import { PipelineStageTrack, type PipelineTrackStage } from "../components/shared/PipelineStageTrack"
 import { CreateWorkspaceModal } from "../components/dashboard/CreateWorkspaceModal"
@@ -419,6 +420,17 @@ export default function Dashboard() {
                   {userDisplayName}
                 </span>
               </div>
+              <Link
+                to="/github"
+                className="dashboard-nav-link"
+                aria-label="View GitHub exports"
+                title="GitHub exports"
+              >
+                <span className="dashboard-nav-link-icon" aria-hidden="true">
+                  <GitHubIcon />
+                </span>
+                <span className="dashboard-nav-link-label">Exports</span>
+              </Link>
               <GitHubStatusPill />
               <button
                 type="button"

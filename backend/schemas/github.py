@@ -173,11 +173,24 @@ class TaskSyncState(BaseModel):
     """One task's bidirectional sync state (spec §10)."""
 
     task_ref: str
-    issue_number: int = Field(alias="external_issue_number")
+    # ``validation_alias`` (not ``alias``) so this populates from the ORM column
+    # ``external_issue_number`` while still *serialising* under the field name
+    # ``issue_number`` — FastAPI's response serialisation defaults to
+    # ``by_alias=True``, and a plain ``alias`` would leak the DB column name into
+    # the JSON, which the frontend contract (``issue_number``) never reads.
+    issue_number: int = Field(validation_alias="external_issue_number")
     state: TaskState
     done_via: DoneVia | None = None
     done_at: datetime | None = None
     synced_at: datetime | None = None
+    # Human-facing identity resolved from the push's *source* Tasks version
+    # (drift-proof: it matches the very ``task_ref``s that produced these issues).
+    # ``human_ref`` is the ``T-NNN`` number and ``title`` the task heading; both
+    # are ``None`` when the source version is gone or the row is an increment task
+    # not present in the baseline, in which case the UI falls back to the issue
+    # number. The opaque ``task_ref`` hash is never shown to users.
+    human_ref: str | None = None
+    title: str | None = None
 
     model_config = ConfigDict(from_attributes=True, populate_by_name=True)
 
@@ -196,6 +209,29 @@ class SyncStateResponse(BaseModel):
     shipped: int = 0
     total: int = 0
     tasks: list[TaskSyncState]
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class ExportSummary(BaseModel):
+    """One row of the account-wide exports hub (``GET
+    /integrations/github/exports``): a workspace's live GitHub export summarised
+    for a list view — repo coordinates, lifecycle status, drift, and issue
+    completion — without the full per-task payload the detail ``/sync`` carries.
+    """
+
+    workspace_id: UUID
+    workspace_name: str
+    push_id: UUID
+    status: PushStatus
+    export_mode: ExportMode
+    repo_full_name: str | None = None
+    repo_url: str | None = None
+    pr_number: int | None = None
+    out_of_sync: bool = False
+    shipped: int = 0
+    total: int = 0
+    pushed_at: datetime | None = None
 
     model_config = ConfigDict(from_attributes=True)
 

@@ -2735,6 +2735,7 @@ export default function Workspace() {
                         }}
                         disabled={workspaceGenerationLock.locked}
                         disabledReason={workspaceLockReason}
+                        detailHref={id ? `/workspace/${id}/github` : undefined}
                       />
                     )}
                     {/* The living-workspace timeline: only once the baseline is

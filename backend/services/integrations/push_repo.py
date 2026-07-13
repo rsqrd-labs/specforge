@@ -17,13 +17,18 @@ literal; the enum is ``pending``/``completed``/``failed``/``stale``).
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import dataclass
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.github_installation import GitHubInstallation
 from models.integration_push import IntegrationPush
+from models.integration_push_task import IntegrationPushTask
+from models.stage_version import StageVersion
+from models.workspace import Workspace
+from services.integrations.task_parser import compute_task_ref, parse_tasks
 
 # The canonical "live push" predicate, mirroring the partial unique index
 # predicate in migration 0016 (``status <> 'failed'``). Kept here, and only here,
@@ -85,6 +90,111 @@ async def find_live_pushes_for_event(
         )
     )
     return result.scalars().all()
+
+
+@dataclass
+class LiveExportRow:
+    """One row of the account-wide exports hub feed (see
+    :func:`list_user_live_exports`): a live push plus the display name of its
+    workspace and the issue-completion counts, resolved together so the router
+    never issues a per-push follow-up query."""
+
+    push: IntegrationPush
+    workspace_name: str
+    total: int
+    shipped: int
+
+
+async def list_user_live_exports(
+    db: AsyncSession,
+    user_id: UUID,
+) -> list[LiveExportRow]:
+    """Return the caller's live (non-``failed``) GitHub exports, one row per
+    workspace, newest-first — the feed for the account-wide exports hub.
+
+    A workspace may accumulate several non-``failed`` push rows over its life
+    (e.g. an increment push layered on the baseline); ``DISTINCT ON`` keeps the
+    newest per workspace, mirroring :func:`find_workspace_live_push`'s
+    newest-first resolution so the hub row and the per-workspace ``/sync`` detail
+    agree on *which* push is "the" export. Archived/trashed workspaces are
+    excluded (``status = 'active'``). Two queries only: the pushes, then a single
+    grouped count over all their task rows — never N+1.
+    """
+    push_rows = (
+        await db.execute(
+            select(IntegrationPush, Workspace.name)
+            .join(Workspace, IntegrationPush.workspace_id == Workspace.id)
+            .where(
+                IntegrationPush.user_id == user_id,
+                IntegrationPush.provider == "github",
+                IntegrationPush.status != _NON_FAILED_STATUS,
+                Workspace.status == "active",
+            )
+            .distinct(IntegrationPush.workspace_id)
+            .order_by(
+                IntegrationPush.workspace_id,
+                IntegrationPush.created_at.desc(),
+            )
+        )
+    ).all()
+    if not push_rows:
+        return []
+
+    by_id = {push.id: (push, name) for push, name in push_rows}
+    counts = (
+        await db.execute(
+            select(
+                IntegrationPushTask.push_id,
+                func.count().label("total"),
+                func.count()
+                .filter(IntegrationPushTask.state == "done")
+                .label("shipped"),
+            )
+            .where(IntegrationPushTask.push_id.in_(list(by_id)))
+            .group_by(IntegrationPushTask.push_id)
+        )
+    ).all()
+    count_map = {pid: (total, shipped) for pid, total, shipped in counts}
+
+    rows = [
+        LiveExportRow(
+            push=push,
+            workspace_name=name,
+            total=count_map.get(push.id, (0, 0))[0],
+            shipped=count_map.get(push.id, (0, 0))[1],
+        )
+        for push, name in by_id.values()
+    ]
+    # Newest export first; a still-pending push has no pushed_at yet, so fall
+    # back to created_at for a stable order.
+    rows.sort(key=lambda r: (r.push.pushed_at or r.push.created_at), reverse=True)
+    return rows
+
+
+async def resolve_push_task_titles(
+    db: AsyncSession,
+    push: IntegrationPush,
+) -> dict[str, tuple[str, str]]:
+    """Map each of a push's ``task_ref``s to its human ``(T-NNN, title)``.
+
+    The titles come from the push's **own** source Tasks :class:`StageVersion`
+    (``source_stage_version_id``) — the exact version that produced these issues
+    — so the ``compute_task_ref`` join is drift-proof: even if the workspace's
+    current Tasks have since been renumbered/reworded, the refs here still match
+    the version the issues were cut from. Returns an empty map when the source
+    version is missing or empty (e.g. a legacy push), and omits any ref it can't
+    resolve (an increment task not present in the baseline), so the caller falls
+    back to the issue number for those. Read-only; never raises on bad content.
+    """
+    if push.source_stage_version_id is None:
+        return {}
+    version = await db.get(StageVersion, push.source_stage_version_id)
+    if version is None or not version.content:
+        return {}
+    return {
+        compute_task_ref(task.title): (task.ref, task.title)
+        for task in parse_tasks(version.content)
+    }
 
 
 async def find_workspace_live_push(

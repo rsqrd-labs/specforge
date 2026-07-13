@@ -20,6 +20,7 @@ import type {
 } from "../types/workspace"
 import type { RetentionPolicy, TrashedWorkspace } from "../types/retention"
 import type {
+  ExportSummary,
   GitHubExportMode,
   Increment,
   IncrementGenerateResponse,
@@ -1073,6 +1074,18 @@ export async function getGitHubSync(
     }
     throw error
   }
+}
+
+/**
+ * List every live GitHub export the signed-in user owns — one row per
+ * workspace, newest first — for the account-wide exports hub (`/github`).
+ *
+ * Unlike `getGitHubSync`, an empty account is a normal empty array (never a
+ * 404): the hub renders its own empty state.
+ */
+export async function listGitHubExports(): Promise<ExportSummary[]> {
+  const response = await api.get<ExportSummary[]>("/integrations/github/exports")
+  return response.data
 }
 
 /** Re-sync the workspace's GitHub issues to the current spec (202). */

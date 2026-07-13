@@ -42,7 +42,10 @@ from schemas.workspace import (
 )
 from services.coverage_utils import derive_coverage_summaries, derive_coverage_summary
 from services.credit_service import InsufficientCreditsError
-from services.integrations.push_repo import find_workspace_live_push
+from services.integrations.push_repo import (
+    find_workspace_live_push,
+    resolve_push_task_titles,
+)
 from services.llm.provider_status import is_provider_configured
 from services.pipeline import github_export_service, pdf_export_service, spec_clarifier
 from services.pipeline.critic import AUDIT_EVENT_CRITIC_DISABLED
@@ -596,13 +599,24 @@ async def get_workspace_sync(
         ).scalars()
     )
     shipped = sum(1 for t in tasks if t.state == "done")
+    # Resolve human T-NNN/title from the push's source Tasks version so the UI
+    # shows a real task identity instead of the opaque content-hash task_ref.
+    titles = await resolve_push_task_titles(db, push)
+
+    def _to_state(t: IntegrationPushTask) -> TaskSyncState:
+        state = TaskSyncState.model_validate(t)
+        human_ref, title = titles.get(t.task_ref, (None, None))
+        state.human_ref = human_ref
+        state.title = title
+        return state
+
     return SyncStateResponse(
         push_id=push.id,
         status=push.status,
         out_of_sync=(push.status == "stale"),
         shipped=shipped,
         total=len(tasks),
-        tasks=[TaskSyncState.model_validate(t) for t in tasks],
+        tasks=[_to_state(t) for t in tasks],
     )
 
 

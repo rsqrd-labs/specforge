@@ -43,7 +43,13 @@ from config import settings
 from database import get_db, get_redis
 from middleware.auth import get_current_user
 from models import GitHubWebhookEvent, User
-from schemas.github import InstallationList, InstallationOption, RepoList, RepoOption
+from schemas.github import (
+    ExportSummary,
+    InstallationList,
+    InstallationOption,
+    RepoList,
+    RepoOption,
+)
 from schemas.integration import GitHubStatusResponse
 from services.integrations import github_auth_service, github_install_service
 from services.integrations.github_api_client import (
@@ -58,6 +64,7 @@ from services.integrations.github_install_service import (
     InstallStateError,
     InstallVerificationError,
 )
+from services.integrations.push_repo import list_user_live_exports
 from services.observability import (
     GITHUB_AUDIT_INSTALL_REJECTED,
     GITHUB_AUDIT_WEBHOOK_DUPLICATE_SKIPPED,
@@ -238,6 +245,38 @@ async def list_github_installations(
         ],
         on_legacy_oauth=on_legacy,
     )
+
+
+@router.get("/github/exports", response_model=list[ExportSummary])
+async def list_github_exports(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> list[ExportSummary]:
+    """List every live GitHub export the caller owns — one row per workspace,
+    newest first — for the account-wide exports hub.
+
+    Unlike the per-workspace ``GET /workspaces/{id}/sync`` (which 404s when a
+    workspace has never been exported), this returns an **empty list** when the
+    user has no exports: the hub renders its own empty state, never an error.
+    """
+    rows = await list_user_live_exports(db, user.id)
+    return [
+        ExportSummary(
+            workspace_id=row.push.workspace_id,
+            workspace_name=row.workspace_name,
+            push_id=row.push.id,
+            status=row.push.status,
+            export_mode=row.push.export_mode,
+            repo_full_name=row.push.repo_full_name,
+            repo_url=row.push.repo_url,
+            pr_number=row.push.pr_number,
+            out_of_sync=(row.push.status == "stale"),
+            shipped=row.shipped,
+            total=row.total,
+            pushed_at=row.push.pushed_at,
+        )
+        for row in rows
+    ]
 
 
 @router.get(

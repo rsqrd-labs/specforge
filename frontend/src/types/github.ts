@@ -37,6 +37,12 @@ export interface TaskSyncState {
   done_via: DoneVia | null
   done_at: string | null
   synced_at: string | null
+  /** Human task identity resolved from the push's source Tasks version — the
+   *  `T-NNN` number and the task heading. Both are `null` for a legacy push with
+   *  no source version, or an increment task absent from the baseline; the UI
+   *  then falls back to the issue number. The opaque `task_ref` is never shown. */
+  human_ref: string | null
+  title: string | null
 }
 
 /** The owner-scoped sync view for a workspace's live push (backend
@@ -49,6 +55,25 @@ export interface SyncState {
   shipped: number
   total: number
   tasks: TaskSyncState[]
+}
+
+/** One row of the account-wide exports hub (`GET /integrations/github/exports`):
+ *  a workspace's live GitHub export summarised for a list view — repo, lifecycle
+ *  status, drift, and issue completion — without the per-task payload the
+ *  per-workspace `SyncState` carries. Mirrors backend `ExportSummary`. */
+export interface ExportSummary {
+  workspace_id: string
+  workspace_name: string
+  push_id: string
+  status: PushStatus
+  export_mode: GitHubExportMode
+  repo_full_name: string | null
+  repo_url: string | null
+  pr_number: number | null
+  out_of_sync: boolean
+  shipped: number
+  total: number
+  pushed_at: string | null
 }
 
 // --- App installation identity (spec §8, not an OAuth token) --------------
