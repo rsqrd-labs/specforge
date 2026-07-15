@@ -18,7 +18,38 @@ import {
   type IntegrationPushRead,
 } from "../services/api"
 import { useGitHubSync } from "../hooks/useGitHubSync"
-import type { Increment, PushStatus, TaskSyncState } from "../types/github"
+import type {
+  Increment,
+  PushStatus,
+  TaskSyncState,
+  TaskVersionSyncStatus,
+} from "../types/github"
+
+export function taskSyncPresentation(
+  status: PushStatus,
+  taskSyncStatus: TaskVersionSyncStatus,
+  syncPaused: boolean,
+): { value: string; detail: string } {
+  if (syncPaused) {
+    return { value: "Sync paused", detail: "Reconnect GitHub to resume" }
+  }
+  if (status === "pending") {
+    return { value: "Updating", detail: "Pushing task changes" }
+  }
+  if (taskSyncStatus === "changes_pending") {
+    return {
+      value: "Changes pending",
+      detail: "Tasks changed after the last push",
+    }
+  }
+  if (taskSyncStatus === "up_to_date") {
+    return {
+      value: "Up to date",
+      detail: "Current Tasks version is on GitHub",
+    }
+  }
+  return { value: "Not verified", detail: "Push Tasks to establish sync" }
+}
 
 function issueHref(
   repoUrl: string | null,
@@ -178,8 +209,17 @@ export default function WorkspaceGitHub() {
   const pct = total > 0 ? Math.round((shipped / total) * 100) : 0
   const status: PushStatus =
     data?.status ?? (push?.status as PushStatus | undefined) ?? "pending"
-  const outOfSync = data?.out_of_sync ?? status === "stale"
+  const taskSyncStatus = data?.task_sync_status ?? "unknown"
+  const syncPaused =
+    (data?.sync_paused ?? false) || sync.connection !== "connected"
+  const outOfSync = taskSyncStatus === "changes_pending"
   const pushedWhen = formatWhen(push?.pushed_at ?? null)
+
+  const taskSyncCopy = taskSyncPresentation(
+    status,
+    taskSyncStatus,
+    syncPaused,
+  )
 
   const handleResync = useCallback(async () => {
     setActionNote(null)
@@ -293,7 +333,12 @@ export default function WorkspaceGitHub() {
                   {title}
                 </h1>
                 <div className="ghx-hero-meta">
-                  <ExportStatusBadge status={status} outOfSync={outOfSync} />
+                  <ExportStatusBadge
+                    status={status}
+                    outOfSync={outOfSync}
+                    syncPaused={syncPaused}
+                    taskSyncStatus={taskSyncStatus}
+                  />
                   {pushedWhen && (
                     <span className="ghx-hero-pushed">Last pushed {pushedWhen}</span>
                   )}
@@ -345,14 +390,14 @@ export default function WorkspaceGitHub() {
                 <span className="ghx-tile-value">{open}</span>
                 <span className="ghx-tile-sub">still on GitHub</span>
               </div>
-              <div className={`ghx-tile${outOfSync ? " ghx-tile-warn" : ""}`}>
-                <span className="ghx-tile-label">Drift</span>
+              <div
+                className={`ghx-tile${outOfSync || syncPaused ? " ghx-tile-warn" : ""}`}
+              >
+                <span className="ghx-tile-label">Task sync</span>
                 <span className="ghx-tile-value ghx-tile-value-sm">
-                  {outOfSync ? "Out of sync" : "In step"}
+                  {taskSyncCopy.value}
                 </span>
-                <span className="ghx-tile-sub">
-                  {outOfSync ? "Tasks changed since push" : "issues match the spec"}
-                </span>
+                <span className="ghx-tile-sub">{taskSyncCopy.detail}</span>
               </div>
             </section>
 
@@ -487,7 +532,7 @@ export default function WorkspaceGitHub() {
               </section>
             )}
 
-            {outOfSync && (
+            {outOfSync && !syncPaused && (
               <div className="ghx-notice ghx-notice-drift" role="status">
                 <span className="ghx-notice-icon" aria-hidden="true">
                   <DriftIcon />

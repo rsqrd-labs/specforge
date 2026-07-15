@@ -143,10 +143,14 @@ def test_task_sync_state_aliases_issue_number() -> None:
     resp = SyncStateResponse(
         push_id=uuid4(),
         status="completed",
+        task_sync_status="changes_pending",
+        sync_paused=False,
         out_of_sync=True,
         shipped=1,
         total=2,
         tasks=[task],
     )
     assert resp.out_of_sync is True
+    assert resp.task_sync_status == "changes_pending"
+    assert resp.sync_paused is False
     assert resp.tasks[0].issue_number == 42

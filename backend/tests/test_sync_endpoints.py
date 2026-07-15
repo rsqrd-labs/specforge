@@ -8,6 +8,7 @@ projects_v2_item routing) directly.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
 
@@ -90,6 +91,29 @@ async def _seed(maker: async_sessionmaker, *, with_push: bool = True) -> dict[st
         await db.refresh(ws)
         out: dict[str, Any] = {"user": user, "workspace": ws, "install": None}
         if with_push:
+            tasks_stage = Stage(
+                workspace_id=ws.id,
+                type="tasks",
+                content="### T-001: current",
+                status="finalised",
+                current_version=2,
+            )
+            db.add(tasks_stage)
+            await db.flush()
+            source_version = StageVersion(
+                stage_id=tasks_stage.id,
+                version=1,
+                content="### T-001: exported",
+                created_by="user",
+            )
+            current_version = StageVersion(
+                stage_id=tasks_stage.id,
+                version=2,
+                content="### T-001: current",
+                created_by="user",
+            )
+            db.add_all([source_version, current_version])
+            await db.flush()
             inst = GitHubInstallation(
                 installation_id=uuid4().int % 1_000_000_000,
                 account_login="octo",
@@ -108,6 +132,7 @@ async def _seed(maker: async_sessionmaker, *, with_push: bool = True) -> dict[st
                 repo_id=uuid4().int % 1_000_000_000,
                 repo_full_name="octo/app",
                 status="stale",
+                source_stage_version_id=source_version.id,
             )
             db.add(push)
             await db.commit()
@@ -131,6 +156,8 @@ async def _seed(maker: async_sessionmaker, *, with_push: bool = True) -> dict[st
             await db.commit()
             out["install"] = inst
             out["push"] = push
+            out["source_version"] = source_version
+            out["current_version"] = current_version
         return out
 
 
@@ -180,7 +207,9 @@ async def test_get_sync_returns_drift_and_completion(engine) -> None:
         assert resp.status_code == 200
         body = resp.json()
         assert body["push_id"] == str(seeded["push"].id)
-        assert body["out_of_sync"] is True  # push status is 'stale'
+        assert body["task_sync_status"] == "changes_pending"
+        assert body["sync_paused"] is False
+        assert body["out_of_sync"] is True
         assert body["shipped"] == 1 and body["total"] == 2
         # The response serialises the task issue number under the field name the
         # frontend contract reads — ``issue_number`` — never the DB column alias
@@ -191,6 +220,30 @@ async def test_get_sync_returns_drift_and_completion(engine) -> None:
         # This push has no source Tasks version, so the human identity is null
         # and the UI falls back to the issue number.
         assert all(t["human_ref"] is None and t["title"] is None for t in body["tasks"])
+    finally:
+        await _teardown(maker, seeded)
+
+
+async def test_get_sync_does_not_misreport_paused_install_as_task_drift(engine) -> None:
+    maker = async_sessionmaker(engine, expire_on_commit=False)
+    seeded = await _seed(maker)
+    async with maker() as db:
+        push = await db.get(IntegrationPush, seeded["push"].id)
+        install = await db.get(GitHubInstallation, seeded["install"].id)
+        assert push is not None and install is not None
+        push.source_stage_version_id = seeded["current_version"].id
+        install.suspended_at = datetime.now(UTC)
+        await db.commit()
+
+    app = _build_app(engine, seeded["user"], None)
+    try:
+        async with _client(app) as client:
+            resp = await client.get(f"/workspaces/{seeded['workspace'].id}/sync")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["task_sync_status"] == "up_to_date"
+        assert body["sync_paused"] is True
+        assert body["out_of_sync"] is False
     finally:
         await _teardown(maker, seeded)
 

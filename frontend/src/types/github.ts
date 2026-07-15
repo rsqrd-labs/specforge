@@ -24,6 +24,12 @@ export type PushStatus = "pending" | "completed" | "failed" | "stale"
 /** One task's bidirectional state: open on GitHub, or shipped (done). */
 export type TaskState = "open" | "done"
 
+/** Whether the current finalised Tasks version is the one last pushed. */
+export type TaskVersionSyncStatus =
+  | "up_to_date"
+  | "changes_pending"
+  | "unknown"
+
 /** How a task was closed — its issue's PR merged, or a manual issue close. */
 export type DoneVia = "pr_merge" | "manual"
 
@@ -51,6 +57,8 @@ export interface TaskSyncState {
 export interface SyncState {
   push_id: string
   status: PushStatus
+  task_sync_status: TaskVersionSyncStatus
+  sync_paused: boolean
   out_of_sync: boolean
   shipped: number
   total: number
@@ -79,6 +87,8 @@ export interface ExportSummary {
   repo_full_name: string | null
   repo_url: string | null
   pr_number: number | null
+  task_sync_status: TaskVersionSyncStatus
+  sync_paused: boolean
   out_of_sync: boolean
   shipped: number
   total: number

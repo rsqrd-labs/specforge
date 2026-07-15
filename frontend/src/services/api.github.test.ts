@@ -40,6 +40,8 @@ describe("GitHub living-integration api client", () => {
       data: {
         push_id: "push-1",
         status: "completed",
+        task_sync_status: "changes_pending",
+        sync_paused: false,
         out_of_sync: true,
         shipped: 1,
         total: 2,

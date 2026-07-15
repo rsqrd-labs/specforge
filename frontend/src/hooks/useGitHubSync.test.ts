@@ -24,6 +24,8 @@ const syncState = (
 ): SyncState => ({
   push_id: "push-1",
   status: "completed",
+  task_sync_status: "up_to_date",
+  sync_paused: false,
   out_of_sync: false,
   shipped: 0,
   total: 1,

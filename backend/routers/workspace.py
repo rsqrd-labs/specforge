@@ -45,6 +45,7 @@ from services.coverage_utils import derive_coverage_summaries, derive_coverage_s
 from services.credit_service import InsufficientCreditsError
 from services.integrations.push_repo import (
     find_workspace_live_push,
+    resolve_push_sync_metadata,
     resolve_push_task_titles,
 )
 from services.pipeline import github_export_service, pdf_export_service, spec_clarifier
@@ -628,6 +629,7 @@ async def get_workspace_sync(
     # Resolve human T-NNN/title from the push's source Tasks version so the UI
     # shows a real task identity instead of the opaque content-hash task_ref.
     titles = await resolve_push_task_titles(db, push)
+    sync_metadata = (await resolve_push_sync_metadata(db, [push]))[push.id]
 
     def _to_state(t: IntegrationPushTask) -> TaskSyncState:
         state = TaskSyncState.model_validate(t)
@@ -639,7 +641,9 @@ async def get_workspace_sync(
     return SyncStateResponse(
         push_id=push.id,
         status=push.status,
-        out_of_sync=(push.status == "stale"),
+        task_sync_status=sync_metadata.task_sync_status,
+        sync_paused=sync_metadata.sync_paused,
+        out_of_sync=sync_metadata.out_of_sync,
         shipped=shipped,
         total=len(tasks),
         last_inbound_sync_at=push.last_inbound_sync_at,

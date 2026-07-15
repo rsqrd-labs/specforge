@@ -542,6 +542,25 @@ async def test_update_issue_returns_none_on_200() -> None:
 
 
 @pytest.mark.asyncio
+async def test_get_issue_state_returns_none_only_when_issue_is_missing() -> None:
+    def missing(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404)
+
+    client = _make_client(missing)
+    assert await client.get_issue_state("octocat/repo", 42) is None
+
+
+@pytest.mark.asyncio
+async def test_get_issue_state_surfaces_server_failure() -> None:
+    def failed(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, json={"message": "server error"})
+
+    client = _make_client(failed)
+    with pytest.raises(GitHubAPIError):
+        await client.get_issue_state("octocat/repo", 42)
+
+
+@pytest.mark.asyncio
 async def test_create_issue_raises_token_expired_on_401() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(401)

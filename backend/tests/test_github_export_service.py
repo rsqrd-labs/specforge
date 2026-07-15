@@ -168,6 +168,9 @@ class _StubClient:
         self.upserted_files: list[tuple[str, str, str | None]] = []  # (repo, path, sha)
         self.issues_created: list[tuple[str, str]] = []  # (title, body)
         self.issues_updated: list[tuple[int, str]] = []  # (number, title)
+        self.issue_states: dict[int, str] = {}
+        self.issue_comments: list[tuple[int, str]] = []
+        self.issues_closed: list[int] = []
         self.shas: dict[str, str] = {}  # path → sha (None ⇒ 404)
         self.fail_on_create_repo_with: type[Exception] | None = None
         self.fail_on_first_create_issue_with: type[Exception] | None = None
@@ -214,6 +217,16 @@ class _StubClient:
         body: str,
     ) -> None:
         self.issues_updated.append((number, title))
+
+    async def get_issue_state(self, repo: str, number: int) -> str | None:
+        return self.issue_states.get(number)
+
+    async def add_issue_comment(self, repo: str, number: int, body: str) -> None:
+        self.issue_comments.append((number, body))
+
+    async def close_issue(self, repo: str, number: int) -> None:
+        self.issues_closed.append(number)
+        self.issue_states[number] = "closed"
 
 
 # ---------------------------------------------------------------------------
@@ -309,6 +322,65 @@ async def test_re_export_skips_create_repo_and_updates_existing_issues(
     # upsert_file calls for the three root files include the SHA (update path)
     spec_calls = [c for c in stub.upserted_files if c[1] == "SPEC.md"]
     assert spec_calls[-1][2] == "sha-spec"
+
+
+async def test_re_export_closes_and_retires_tasks_removed_from_spec(
+    session: AsyncSession,
+    user: User,
+    workspace: Workspace,
+    integration: UserIntegration,
+) -> None:
+    stub = _StubClient()
+    first = await push_to_github(
+        workspace_id=workspace.id,
+        user_id=user.id,
+        repo_name="retire-task",
+        visibility="private",
+        db=session,
+        client_factory=stub,
+    )
+    rows = list(
+        (
+            await session.execute(
+                select(IntegrationPushTask).where(
+                    IntegrationPushTask.push_id == first.id
+                )
+            )
+        ).scalars()
+    )
+    removed = next(
+        row for row in rows if row.task_ref == compute_task_ref("Second task")
+    )
+    stub.issue_states[removed.external_issue_number] = "open"
+
+    await session.execute(
+        Stage.__table__.update()
+        .where(Stage.workspace_id == workspace.id, Stage.type == "tasks")
+        .values(content="### T-001: First task\n\n**Description:** Do thing one.\n")
+    )
+    await session.commit()
+
+    await push_to_github(
+        workspace_id=workspace.id,
+        user_id=user.id,
+        repo_name="retire-task",
+        visibility="private",
+        db=session,
+        client_factory=stub,
+    )
+
+    assert stub.issues_closed == [removed.external_issue_number]
+    assert stub.issue_comments[0][0] == removed.external_issue_number
+    remaining_refs = set(
+        (
+            await session.execute(
+                select(IntegrationPushTask.task_ref).where(
+                    IntegrationPushTask.push_id == first.id
+                )
+            )
+        ).scalars()
+    )
+    assert remaining_refs == {compute_task_ref("First task")}
 
 
 async def test_token_expired_deletes_integration_and_marks_push_failed(

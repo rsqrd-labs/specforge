@@ -91,6 +91,7 @@ from services.integrations.github_governor import (
     InstallationRateGovernor,
     make_governor,
 )
+from services.integrations.task_issue_reconcile import retire_obsolete_task_issues
 from services.integrations.task_parser import ParsedTask, compute_task_ref, parse_tasks
 from services.integrations.task_ref_migration import migrate_legacy_task_refs
 from services.observability import (
@@ -811,6 +812,7 @@ async def _sync_issues(
     await migrate_legacy_task_refs(db, push.id, client, repo)
     existing = await _load_existing_push_tasks(db, push.id)
     issue_numbers: dict[str, int] = dict(existing)
+    current_refs = {compute_task_ref(parsed.title) for parsed in tasks}
     for parsed in tasks:
         ref = compute_task_ref(parsed.title)
         existing_number = existing.get(ref)
@@ -836,6 +838,9 @@ async def _sync_issues(
             )
             await db.commit()
             issue_numbers[ref] = number
+    retired = await retire_obsolete_task_issues(db, client, repo, push.id, current_refs)
+    for ref in retired:
+        issue_numbers.pop(ref, None)
     return issue_numbers
 
 
@@ -1061,6 +1066,7 @@ async def _run_export(
     await migrate_legacy_task_refs(db, push.id, client, push.repo_full_name)
     existing_tasks = await _load_existing_push_tasks(db, push.id)
     tasks = parse_tasks(stages["tasks"].content or "")
+    current_refs = {compute_task_ref(parsed.title) for parsed in tasks}
     for parsed in tasks:
         ref = compute_task_ref(parsed.title)
         existing_number = existing_tasks.get(ref)
@@ -1088,6 +1094,10 @@ async def _run_export(
             # issue #50 of 100) preserves issues 1-49 — re-export resumes
             # from #50 without recreating them.
             await db.commit()
+
+    await retire_obsolete_task_issues(
+        db, client, push.repo_full_name, push.id, current_refs
+    )
 
     # Step 7 — finalise (canonical status — audit #4)
     push.status = "completed"

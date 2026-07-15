@@ -817,8 +817,10 @@ class GitHubAPIClient:
         closed. Returns ``None`` if the issue cannot be read.
         """
         response = await self._request("GET", f"/repos/{repo}/issues/{number}")
-        if response.status_code != 200:
+        if response.status_code == 404:
             return None
+        if response.status_code != 200:
+            self._raise_for_status(response)
         data = response.json()
         state = data.get("state") if isinstance(data, dict) else None
         return state if isinstance(state, str) else None

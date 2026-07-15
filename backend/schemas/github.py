@@ -33,6 +33,7 @@ PushStatus = Literal["pending", "completed", "failed", "stale"]
 
 # Per-task bidirectional sync state (spec §10).
 TaskState = Literal["open", "done"]
+TaskVersionSyncStatus = Literal["up_to_date", "changes_pending", "unknown"]
 DoneVia = Literal["pr_merge", "manual"]
 InboundSyncError = Literal["installation_unavailable"]
 
@@ -206,6 +207,8 @@ class SyncStateResponse(BaseModel):
 
     push_id: UUID
     status: PushStatus
+    task_sync_status: TaskVersionSyncStatus = "unknown"
+    sync_paused: bool = False
     out_of_sync: bool = False
     shipped: int = 0
     total: int = 0
@@ -242,6 +245,8 @@ class ExportSummary(BaseModel):
     repo_full_name: str | None = None
     repo_url: str | None = None
     pr_number: int | None = None
+    task_sync_status: TaskVersionSyncStatus = "unknown"
+    sync_paused: bool = False
     out_of_sync: bool = False
     shipped: int = 0
     total: int = 0

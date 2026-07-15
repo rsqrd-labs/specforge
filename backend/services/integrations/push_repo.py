@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import Literal
 from uuid import UUID
 
 from sqlalchemy import func, select
@@ -26,6 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from models.github_installation import GitHubInstallation
 from models.integration_push import IntegrationPush
 from models.integration_push_task import IntegrationPushTask
+from models.stage import Stage
 from models.stage_version import StageVersion
 from models.workspace import Workspace
 from services.integrations.task_parser import compute_task_ref, parse_tasks
@@ -34,6 +36,94 @@ from services.integrations.task_parser import compute_task_ref, parse_tasks
 # predicate in migration 0016 (``status <> 'failed'``). Kept here, and only here,
 # so the definition lives in exactly one place.
 _NON_FAILED_STATUS = "failed"
+
+TaskVersionSyncStatus = Literal["up_to_date", "changes_pending", "unknown"]
+
+
+@dataclass(frozen=True)
+class PushSyncMetadata:
+    """Independent task-version and GitHub-connection state for one push.
+
+    ``IntegrationPush.status == 'stale'`` is retained as a storage/lifecycle
+    value for backwards compatibility, but it historically represented both a
+    changed Tasks version and a suspended/removed installation.  Product
+    surfaces must use this explicit metadata instead of guessing from that
+    overloaded status.
+    """
+
+    task_sync_status: TaskVersionSyncStatus
+    sync_paused: bool
+
+    @property
+    def out_of_sync(self) -> bool:
+        return self.task_sync_status == "changes_pending"
+
+
+async def resolve_push_sync_metadata(
+    db: AsyncSession,
+    pushes: Sequence[IntegrationPush],
+) -> dict[UUID, PushSyncMetadata]:
+    """Resolve sync metadata for ``pushes`` with two bounded queries.
+
+    Task drift is an immutable-version comparison, not a push-status alias.
+    Connection pause is derived independently from the App installation. Legacy
+    OAuth pushes have no ``repo_id`` and therefore do not pretend to have an App
+    connection state.
+    """
+    if not pushes:
+        return {}
+
+    workspace_ids = {push.workspace_id for push in pushes}
+    current_rows = (
+        await db.execute(
+            select(Stage.workspace_id, StageVersion.id)
+            .join(
+                StageVersion,
+                (StageVersion.stage_id == Stage.id)
+                & (StageVersion.version == Stage.current_version),
+            )
+            .where(Stage.workspace_id.in_(workspace_ids), Stage.type == "tasks")
+        )
+    ).all()
+    current_versions = {
+        workspace_id: version_id for workspace_id, version_id in current_rows
+    }
+
+    installation_ids = {
+        push.installation_id for push in pushes if push.installation_id is not None
+    }
+    installations: dict[UUID, object] = {}
+    if installation_ids:
+        installations = {
+            installation_id: suspended_at
+            for installation_id, suspended_at in (
+                await db.execute(
+                    select(
+                        GitHubInstallation.id, GitHubInstallation.suspended_at
+                    ).where(GitHubInstallation.id.in_(installation_ids))
+                )
+            ).all()
+        }
+
+    result: dict[UUID, PushSyncMetadata] = {}
+    for push in pushes:
+        current_version_id = current_versions.get(push.workspace_id)
+        if push.source_stage_version_id is None or current_version_id is None:
+            task_status: TaskVersionSyncStatus = "unknown"
+        elif push.source_stage_version_id == current_version_id:
+            task_status = "up_to_date"
+        else:
+            task_status = "changes_pending"
+
+        # repo_id distinguishes App pushes from legacy OAuth pushes. An App push
+        # with no installation row is detached/deleted and therefore paused.
+        sync_paused = push.repo_id is not None and (
+            push.installation_id is None
+            or push.installation_id not in installations
+            or installations[push.installation_id] is not None
+        )
+        result[push.id] = PushSyncMetadata(task_status, sync_paused)
+    return result
 
 
 async def find_live_push(
@@ -103,6 +193,8 @@ class LiveExportRow:
     workspace_name: str
     total: int
     shipped: int
+    task_sync_status: TaskVersionSyncStatus
+    sync_paused: bool
 
 
 async def list_user_live_exports(
@@ -117,8 +209,8 @@ async def list_user_live_exports(
     newest per workspace, mirroring :func:`find_workspace_live_push`'s
     newest-first resolution so the hub row and the per-workspace ``/sync`` detail
     agree on *which* push is "the" export. Archived/trashed workspaces are
-    excluded (``status = 'active'``). Two queries only: the pushes, then a single
-    grouped count over all their task rows — never N+1.
+    excluded (``status = 'active'``). Every follow-up query is batched over the
+    selected pushes/workspaces — never N+1.
     """
     push_rows = (
         await db.execute(
@@ -155,6 +247,9 @@ async def list_user_live_exports(
         )
     ).all()
     count_map = {pid: (total, shipped) for pid, total, shipped in counts}
+    metadata = await resolve_push_sync_metadata(
+        db, [push for push, _name in by_id.values()]
+    )
 
     rows = [
         LiveExportRow(
@@ -162,6 +257,8 @@ async def list_user_live_exports(
             workspace_name=name,
             total=count_map.get(push.id, (0, 0))[0],
             shipped=count_map.get(push.id, (0, 0))[1],
+            task_sync_status=metadata[push.id].task_sync_status,
+            sync_paused=metadata[push.id].sync_paused,
         )
         for push, name in by_id.values()
     ]

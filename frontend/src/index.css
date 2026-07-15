@@ -16332,6 +16332,18 @@ button:disabled {
   border-color: rgba(86, 94, 116, 0.24);
 }
 
+.ghx-badge-paused {
+  color: var(--brand-tertiary-soft-text);
+  background: rgba(86, 94, 116, 0.12);
+  border-color: rgba(86, 94, 116, 0.24);
+}
+
+.ghx-badge-exported {
+  color: var(--brand-tertiary-soft-text);
+  background: rgba(86, 94, 116, 0.12);
+  border-color: rgba(86, 94, 116, 0.24);
+}
+
 .ghx-badge-syncing .ghx-badge-dot {
   animation: ghx-pulse 1.3s ease-in-out infinite;
 }
@@ -17131,6 +17143,16 @@ button:disabled {
 }
 
 .ghx-row-mark-syncing {
+  background: rgba(86, 94, 116, 0.12);
+  color: var(--brand-tertiary);
+}
+
+.ghx-row-mark-paused {
+  background: rgba(86, 94, 116, 0.12);
+  color: var(--brand-tertiary);
+}
+
+.ghx-row-mark-exported {
   background: rgba(86, 94, 116, 0.12);
   color: var(--brand-tertiary);
 }

@@ -590,8 +590,18 @@ async def test_increment_push_closes_obsoleted_issue(session: AsyncSession) -> N
         assert stub.comments and stub.comments[0][0] == 102
         assert stub.closed == [102]
         assert 101 not in stub.closed
+        tracked_numbers = set(
+            (
+                await session.execute(
+                    select(IntegrationPushTask.external_issue_number).where(
+                        IntegrationPushTask.push_id == seeded["push"].id
+                    )
+                )
+            ).scalars()
+        )
+        assert tracked_numbers == {101}
 
-        # Idempotent: a re-run sees #102 already closed and does not re-comment.
+        # Idempotent: the retired mapping is gone, so a re-run cannot re-comment.
         await increment_service.run_increment_push(
             {}, str(inc.id), db=session, client=stub
         )

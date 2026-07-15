@@ -29,7 +29,12 @@ function formatWhen(iso: string | null): string | null {
 
 function ExportRow({ item }: { item: ExportSummary }) {
   const pct = item.total > 0 ? Math.round((item.shipped / item.total) * 100) : 0
-  const tone = exportTone(item.status, item.out_of_sync)
+  const tone = exportTone(
+    item.status,
+    item.out_of_sync,
+    item.sync_paused,
+    item.task_sync_status,
+  )
   const when = formatWhen(item.pushed_at)
 
   return (
@@ -54,7 +59,13 @@ function ExportRow({ item }: { item: ExportSummary }) {
           {item.shipped}/{item.total} shipped
         </span>
       </div>
-      <ExportStatusBadge status={item.status} outOfSync={item.out_of_sync} size="sm" />
+      <ExportStatusBadge
+        status={item.status}
+        outOfSync={item.out_of_sync}
+        syncPaused={item.sync_paused}
+        taskSyncStatus={item.task_sync_status}
+        size="sm"
+      />
       <span className="ghx-row-when">{when ?? ""}</span>
       <span className="ghx-row-chevron" aria-hidden="true">
         →
@@ -93,7 +104,7 @@ export default function GitHubHub() {
       repos: rows.length,
       shipped: rows.reduce((n, r) => n + r.shipped, 0),
       total: rows.reduce((n, r) => n + r.total, 0),
-      drift: rows.filter((r) => r.out_of_sync).length,
+      attention: rows.filter((r) => r.out_of_sync || r.sync_paused).length,
     }
   }, [exports])
 
@@ -153,9 +164,9 @@ export default function GitHubHub() {
                 </span>
                 <span className="ghx-hub-stat-label">Issues shipped</span>
               </div>
-              <div className={`ghx-hub-stat${summary.drift > 0 ? " warn" : ""}`}>
-                <span className="ghx-hub-stat-value">{summary.drift}</span>
-                <span className="ghx-hub-stat-label">Need sync</span>
+              <div className={`ghx-hub-stat${summary.attention > 0 ? " warn" : ""}`}>
+                <span className="ghx-hub-stat-value">{summary.attention}</span>
+                <span className="ghx-hub-stat-label">Need attention</span>
               </div>
             </div>
           )}
