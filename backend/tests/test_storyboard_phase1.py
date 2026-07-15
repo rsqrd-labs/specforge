@@ -142,9 +142,10 @@ def test_resolve_primary_route_picks_cheap_tier(monkeypatch):
     ``storyboard.generate``, escalating to mid.  Pin the cheap-primary policy on
     explicitly to exercise that path independent of the product default.
     """
-    from services.llm import tier_policy
+    from services.llm import provider_status, tier_policy
 
     monkeypatch.setattr(tier_policy.settings, "core_cheap_primary", True)
+    monkeypatch.setattr(provider_status, "can_route", lambda *_args: True)
 
     route = _resolve_storyboard_primary_route(_make_source("anthropic"))
     assert route.model == "claude-haiku-4-5-20251001"
