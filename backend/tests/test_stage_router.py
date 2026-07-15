@@ -110,6 +110,27 @@ class _EvalLookupDB:
         return result
 
 
+class _StaleTaskEvalDB:
+    def __init__(
+        self, stage: Stage, eval_result: EvalResult, harness_stage: Stage
+    ) -> None:
+        self._rows = [stage, eval_result, harness_stage]
+        self.statements: list[Any] = []
+        self.committed = False
+
+    async def execute(self, statement: Any) -> Any:
+        self.statements.append(statement)
+        result = MagicMock()
+        result.scalar_one_or_none.return_value = self._rows[len(self.statements) - 1]
+        return result
+
+    async def commit(self) -> None:
+        self.committed = True
+
+    async def refresh(self, instance: Any) -> None:
+        pass
+
+
 @pytest.fixture
 def app():
     _app = create_app(redis_client=_NoopRedis())
@@ -263,6 +284,57 @@ async def test_get_eval_only_returns_current_stage_version(app) -> None:
     compiled = db.statements[1].compile()
     assert "stage_versions.version" in str(compiled)
     assert stage.current_version in compiled.params.values()
+
+
+@pytest.mark.asyncio
+async def test_get_eval_lazily_repairs_stale_task_findings(app) -> None:
+    stage = _make_stage(stage_type="tasks")
+    stage.content = (
+        "### T-001: Build onboarding\n\n"
+        "**Harness refs:** `tests/e2e/onboarding-smoke.spec.ts`\n"
+        "**Priority:** MUST\n"
+        "**Estimate:** M\n"
+    )
+    harness_stage = _make_stage(
+        workspace_id=stage.workspace_id, stage_type="harness", status="finalised"
+    )
+    harness_stage.content = (
+        "### File: tests/e2e/onboarding-smoke.spec.ts\n\n"
+        "```ts\ntest('happy path', () => {});\n```\n"
+    )
+    eval_result = EvalResult(
+        id=uuid4(),
+        stage_version_id=uuid4(),
+        stage_type="tasks",
+        tasks_without_ref=[
+            {
+                "task_number": 1,
+                "task_title": "Build onboarding",
+                "gap_type": "GENUINE_GAP",
+            }
+        ],
+        flagged=True,
+        structural_validator_version=0,
+        created_at=datetime.now(UTC),
+    )
+    db = _StaleTaskEvalDB(stage, eval_result, harness_stage)
+
+    async def _fake_db():
+        yield db
+
+    app.dependency_overrides[get_db] = _fake_db
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        response = await client.get(f"/stages/{stage.id}/eval")
+
+    assert response.status_code == 200
+    assert response.json()["tasks_without_ref"] == []
+    assert response.json()["flagged"] is False
+    assert eval_result.structural_validator_version == 1
+    assert db.committed is True
+    assert len(db.statements) == 3
 
 
 @pytest.mark.asyncio

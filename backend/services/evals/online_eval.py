@@ -108,6 +108,13 @@ _TEST_FILE_EXTS = (
 # surfaced-but-non-blocking shortfall, not a defect).
 _NON_FLAGGING_GAP_TYPES = frozenset({"GENERATION_FAILURE", "DEFERRED_COVERAGE"})
 
+# Increment whenever deterministic task-finding semantics change. Persisted eval
+# rows carry the version that produced their structural findings; GET /eval lazily
+# refreshes older task rows against the current harness. This prevents validator
+# fixes from leaving already-generated workspaces permanently stuck with stale
+# false positives until a user discovers and clicks the manual Re-validate action.
+STRUCTURAL_TASK_VALIDATOR_VERSION = 1
+
 # eval-v3: the judge system prompt carries the shared INJECTION_DEFENSE_NOTE and
 # _build_eval_prompt fences the scored artifact/context with
 # wrap_untrusted_content — this judge was the only one of the three
@@ -319,10 +326,13 @@ def _extract_harness_refs(harness_content: str) -> set[str]:
     while i < len(lines):
         heading_m = _HARNESS_FILE_HEADING_RE.match(lines[i])
         if heading_m:
-            raw_path = heading_m.group(1).strip()
-            normalized = raw_path.replace("\\", "/")
-            if normalized.startswith("harness/"):
-                normalized = normalized[len("harness/") :]
+            normalized = _normalise_harness_ref(heading_m.group(1))
+            # A task may intentionally reference the whole harness artifact
+            # rather than one named test (for example a smoke-test file, runner
+            # config, or shared helper). The File heading is authoritative proof
+            # that artifact exists, even when it is not a test code block.
+            if normalized:
+                known.add(normalized)
             j = i + 1
             while j < len(lines) and lines[j].strip() == "":
                 j += 1
@@ -370,11 +380,20 @@ def _extract_harness_refs(harness_content: str) -> set[str]:
     return known
 
 
-def _ref_matches_harness(ref: str, known_refs: set[str]) -> bool:
-    """Lenient match: strip harness/ prefix, try full path, Class::method, bare name."""
-    normalized = ref.strip().replace("\\", "/")
+def _normalise_harness_ref(ref: str) -> str:
+    """Canonicalise a task/harness reference without weakening path identity."""
+    normalized = ref.strip().strip("`").replace("\\", "/")
     if normalized.startswith("harness/"):
         normalized = normalized[len("harness/") :]
+    # Generated traceability tables often render ``path :: test`` while task
+    # fields use ``path::test``. Whitespace around the structural delimiter has
+    # no semantic meaning and must not manufacture a gap.
+    return "::".join(part.strip() for part in normalized.split("::"))
+
+
+def _ref_matches_harness(ref: str, known_refs: set[str]) -> bool:
+    """Match file-, test-, class-, and bare-name harness references."""
+    normalized = _normalise_harness_ref(ref)
     if normalized in known_refs:
         return True
     parts = normalized.split("::")
@@ -459,18 +478,25 @@ def _ref_in_dropped_category(ref: str, dropped_categories: set[str]) -> bool:
 
 def _build_gap_details(
     missing_ref: str,
-) -> tuple[str | None, str | None, str, str, str]:
+) -> tuple[str | None, str | None, str, str | None, str]:
     """Parse a missing test ref into actionable details.
 
     Returns (harness_file, class_name, fn_name, code_stub, remediation_text).
     """
-    normalized = missing_ref.strip().replace("\\", "/")
-    if normalized.startswith("harness/"):
-        normalized = normalized[len("harness/") :]
+    normalized = _normalise_harness_ref(missing_ref)
 
     parts = normalized.split("::")
 
-    if len(parts) == 3 and "/" in parts[0]:
+    if len(parts) == 1 and re.fullmatch(r"[^\s`]+\.[A-Za-z0-9]+", normalized):
+        # Whole-file reference. Do not suggest a syntactically impossible
+        # ``def tests/path.spec.ts()`` stub when the actual missing artifact is
+        # the file itself.
+        harness_file = f"harness/{normalized}"
+        class_name = None
+        fn_name = normalized.rsplit("/", 1)[-1]
+        code_stub = None
+        remediation = f"Add the missing harness file `{harness_file}`."
+    elif len(parts) == 3 and "/" in parts[0]:
         # file::Class::method
         file_path, class_name, fn_name = parts[0], parts[1], parts[2]
         harness_file = f"harness/{file_path}"
@@ -787,6 +813,8 @@ async def persist_structural_eval(
     eval_result.stage_type = stage_type
     eval_result.tasks_without_ref = tasks_without_ref
     eval_result.flagged = flagged
+    if stage_type == "tasks" and harness_content:
+        eval_result.structural_validator_version = STRUCTURAL_TASK_VALIDATOR_VERSION
     db.add(eval_result)
     await db.commit()
     await db.refresh(eval_result)
@@ -1283,6 +1311,8 @@ async def _persist_eval_data(
     eval_result.uncovered_reqs = uncovered_reqs
     eval_result.tasks_without_ref = tasks_without_ref
     eval_result.flagged = flagged
+    if stage_type == "tasks" and harness_content:
+        eval_result.structural_validator_version = STRUCTURAL_TASK_VALIDATOR_VERSION
     db.add(eval_result)
     await db.commit()
     await db.refresh(eval_result)

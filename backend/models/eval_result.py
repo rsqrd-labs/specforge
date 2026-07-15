@@ -39,6 +39,12 @@ class EvalResult(Base):
         nullable=False,
         server_default=text("false"),
     )
+    structural_validator_version: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        server_default=text("0"),
+    )
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True),
         nullable=False,

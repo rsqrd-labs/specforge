@@ -28,6 +28,7 @@ from schemas.stage import (
 )
 from services.credit_service import InsufficientCreditsError
 from services.evals.online_eval import (
+    STRUCTURAL_TASK_VALIDATOR_VERSION,
     extract_deferred_reqs,
     validate_stage_findings,
 )
@@ -152,6 +153,56 @@ async def _load_stage(stage_id: UUID, db: AsyncSession, user_id: UUID) -> Stage:
     if stage is None:
         raise HTTPException(status_code=404, detail="Stage not found")
     return stage
+
+
+async def _refresh_stale_task_findings(
+    stage: Stage,
+    eval_result: EvalResult,
+    db: AsyncSession,
+) -> None:
+    """Lazily replace structural findings produced by an older validator.
+
+    Eval rows intentionally preserve sampled LLM scores, but task traceability is
+    deterministic and should always reflect the current parser. Versioning makes
+    this a one-time repair per stage version instead of recomputing on every read,
+    and makes validator fixes immediately correct existing workspaces.
+    """
+    if stage.type != "tasks" or (
+        (eval_result.structural_validator_version or 0)
+        >= STRUCTURAL_TASK_VALIDATOR_VERSION
+    ):
+        return
+
+    harness_result = await db.execute(
+        select(Stage).where(
+            Stage.workspace_id == stage.workspace_id,
+            Stage.type == "harness",
+        )
+    )
+    harness_stage = harness_result.scalar_one_or_none()
+    if harness_stage is None or not harness_stage.content:
+        # Do not erase judge-derived fallback findings when the source harness is
+        # unavailable. Leave the old version marker in place so a later read can
+        # retry after the workspace becomes internally consistent again.
+        return
+
+    tasks_without_ref, flagged = validate_stage_findings(
+        "tasks", stage.content or "", harness_stage.content
+    )
+    eval_result.tasks_without_ref = tasks_without_ref
+    eval_result.flagged = flagged
+    eval_result.structural_validator_version = STRUCTURAL_TASK_VALIDATOR_VERSION
+    await db.commit()
+    await db.refresh(eval_result)
+    logger.info(
+        "task_findings_lazily_revalidated",
+        extra={
+            "stage_id": str(stage.id),
+            "stage_version": stage.current_version,
+            "validator_version": STRUCTURAL_TASK_VALIDATOR_VERSION,
+            "finding_count": len(tasks_without_ref or []),
+        },
+    )
 
 
 @router.get("/generation-estimates", response_model=GenerationEstimatesResponse)
@@ -511,6 +562,7 @@ async def get_eval(
     eval_result = result.scalar_one_or_none()
     if eval_result is None:
         raise HTTPException(status_code=404, detail="No eval result found")
+    await _refresh_stale_task_findings(stage, eval_result, db)
     return {
         "id": str(eval_result.id),
         "stage_version_id": str(eval_result.stage_version_id),
@@ -581,6 +633,7 @@ async def revalidate_tasks(
     if eval_result is not None:
         eval_result.tasks_without_ref = tasks_without_ref
         eval_result.flagged = flagged
+        eval_result.structural_validator_version = STRUCTURAL_TASK_VALIDATOR_VERSION
     else:
         # No prior eval — create a minimal one with structural results only
         version_result = await db.execute(
@@ -604,6 +657,7 @@ async def revalidate_tasks(
             uncovered_reqs=None,
             tasks_without_ref=tasks_without_ref,
             flagged=flagged,
+            structural_validator_version=STRUCTURAL_TASK_VALIDATOR_VERSION,
         )
         db.add(eval_result)
 

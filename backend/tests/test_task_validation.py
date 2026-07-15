@@ -216,6 +216,47 @@ _TASKS_GENUINE_WITH_DROP = """\
 **Estimated size:** S
 """
 
+_TASKS_FILE_LEVEL_REFS = """\
+### T-001: Build onboarding walking skeleton
+
+**Harness refs:** `tests/e2e/onboarding-smoke.spec.ts`, `playwright.config.ts`
+**Priority:** MUST
+**Estimate:** M
+
+### T-002: Implement the start endpoint
+
+**Harness refs:** `tests/integration/api.start-onboarding.spec.ts`,
+  `tests/helpers/http.ts`
+**Priority:** MUST
+**Estimate:** L
+"""
+
+_HARNESS_FILE_LEVEL_REFS = """\
+### File: playwright.config.ts
+
+```ts
+export default {};
+```
+
+### File: tests/e2e/onboarding-smoke.spec.ts
+
+```ts
+test("completes onboarding", () => {});
+```
+
+### File: tests/integration/api.start-onboarding.spec.ts
+
+```ts
+test("creates a session", () => {});
+```
+
+### File: tests/helpers/http.ts
+
+```ts
+export function makeRequest() {}
+```
+"""
+
 
 class TestParseTaskBlocks:
     def test_extracts_task_titles_and_refs(self) -> None:
@@ -260,13 +301,19 @@ class TestExtractHarnessRefs:
         assert "harness/tests/test_auth.py::test_standalone" not in known
         assert "tests/test_auth.py::test_standalone" in known
 
+    def test_indexes_whole_file_references(self) -> None:
+        known = _extract_harness_refs(_HARNESS_FILE_LEVEL_REFS)
+        assert "tests/e2e/onboarding-smoke.spec.ts" in known
+        assert "playwright.config.ts" in known
+        assert "tests/helpers/http.ts" in known
+
     def test_empty_harness_returns_empty_set(self) -> None:
         assert _extract_harness_refs("") == set()
 
-    def test_harness_without_code_blocks_returns_empty_set(self) -> None:
-        assert (
-            _extract_harness_refs("## File: tests/test_x.py\n\nNo code block.") == set()
-        )
+    def test_harness_without_code_blocks_still_indexes_file(self) -> None:
+        assert _extract_harness_refs("## File: tests/test_x.py\n\nNo code block.") == {
+            "tests/test_x.py"
+        }
 
     def test_finds_typescript_it_and_test_blocks(self) -> None:
         # TS/JS runners (Vitest/Jest) use it()/test()/describe(); TASKS
@@ -303,6 +350,15 @@ class TestRefMatchesHarness:
     def test_bare_function_name(self) -> None:
         assert _ref_matches_harness("test_standalone", self.known)
 
+    def test_whole_file_reference(self) -> None:
+        assert _ref_matches_harness("tests/test_auth.py", self.known)
+        assert _ref_matches_harness("harness/tests/test_auth.py", self.known)
+
+    def test_ignores_whitespace_around_reference_delimiter(self) -> None:
+        assert _ref_matches_harness(
+            "tests/test_auth.py :: TestAuth :: test_login_success", self.known
+        )
+
     def test_nonexistent_ref_returns_false(self) -> None:
         assert not _ref_matches_harness(
             "tests/test_auth.py::TestAuth::test_bogus", self.known
@@ -326,6 +382,15 @@ class TestValidateTaskReferences:
         issues = _validate_task_references(_TASKS_TS, _HARNESS_TS)
         genuine_gaps = [i for i in issues if i["gap_type"] == "GENUINE_GAP"]
         assert genuine_gaps == []
+
+    def test_file_level_refs_produce_no_false_gaps(self) -> None:
+        # Real generated tasks commonly own a whole test/config/helper file.
+        # The file heading itself is sufficient traceability; requiring an
+        # individual test name manufactured one false gap per task.
+        issues = _validate_task_references(
+            _TASKS_FILE_LEVEL_REFS, _HARNESS_FILE_LEVEL_REFS
+        )
+        assert issues == []
 
     def test_genuine_gap_for_unmatched_ref(self) -> None:
         issues = _validate_task_references(_TASKS_GENUINE_GAP, _HARNESS)
@@ -357,6 +422,34 @@ class TestValidateTaskReferences:
         issues = _validate_task_references(tasks, _HARNESS)
         assert issues[0]["gap_type"] == "GENUINE_GAP"
         assert "test_nonexistent" in issues[0]["remediation"]
+
+    def test_missing_file_ref_has_file_remediation_not_invalid_code_stub(self) -> None:
+        tasks = (
+            "### T-001: Task\n\n"
+            "**Harness refs:** `tests/e2e/missing.spec.ts`\n"
+            "**Priority:** MUST\n"
+            "**Estimate:** S\n"
+        )
+        issues = _validate_task_references(tasks, _HARNESS_FILE_LEVEL_REFS)
+        assert len(issues) == 1
+        assert issues[0]["gap_type"] == "GENUINE_GAP"
+        assert issues[0]["harness_file"] == "harness/tests/e2e/missing.spec.ts"
+        assert issues[0]["code_stub"] is None
+        assert issues[0]["remediation"] == (
+            "Add the missing harness file `harness/tests/e2e/missing.spec.ts`."
+        )
+
+    def test_missing_root_config_ref_also_has_file_remediation(self) -> None:
+        tasks = (
+            "### T-001: Task\n\n"
+            "**Harness refs:** `missing.config.ts`\n"
+            "**Priority:** MUST\n"
+            "**Estimate:** S\n"
+        )
+        issues = _validate_task_references(tasks, _HARNESS_FILE_LEVEL_REFS)
+        assert len(issues) == 1
+        assert issues[0]["harness_file"] == "harness/missing.config.ts"
+        assert issues[0]["code_stub"] is None
 
 
 class TestDroppedCategoryExtraction:
