@@ -663,7 +663,11 @@ def _patch_regen_deps(monkeypatch, sm, *, regen_output: str):
 
     monkeypatch.setattr(smmod, "build_prompt", _async_return(("SYS", "USR", "0")))
     monkeypatch.setattr(
-        smmod, "_route_for_stage_generation", lambda *a, **k: SimpleNamespace()
+        smmod,
+        "_route_for_stage_generation",
+        lambda *a, **k: SimpleNamespace(
+            provider="anthropic", model="claude-haiku-4-5-20251001"
+        ),
     )
     monkeypatch.setattr(
         smmod, "_workspace_stage_deps", lambda ws, st: {"harness": _HARNESS}

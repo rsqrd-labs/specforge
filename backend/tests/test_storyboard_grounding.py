@@ -25,8 +25,6 @@ def _source_package() -> StoryboardSourcePackage:
         workspace_id=uuid4(),
         workspace_name="SpecForge",
         problem_statement="Build a spec generator.",
-        provider="anthropic",
-        model="claude-sonnet-4-6",
         stage_versions={},
         artifacts={},
         excerpts={

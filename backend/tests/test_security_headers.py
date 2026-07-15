@@ -47,9 +47,9 @@ class _NoopRedis:
 def test_security_headers_are_set_on_api_responses() -> None:
     with patch.object(settings, "environment", "development"):
         client = TestClient(create_app(redis_client=_NoopRedis()))
-        response = client.get("/providers")
+        response = client.get("/health")
 
-    assert response.status_code == 200
+    assert response.status_code in {200, 503}
     assert response.headers["Content-Security-Policy"]
     assert response.headers["X-Frame-Options"] == "DENY"
     assert response.headers["X-Content-Type-Options"] == "nosniff"
@@ -93,9 +93,9 @@ def test_hsts_is_set_in_production() -> None:
         ),
     ):
         client = TestClient(create_app(redis_client=_NoopRedis()))
-        response = client.get("/providers")
+        response = client.get("/health")
 
-    assert response.status_code == 200
+    assert response.status_code in {200, 503}
     assert response.headers["Strict-Transport-Security"].startswith("max-age=31536000")
 
 

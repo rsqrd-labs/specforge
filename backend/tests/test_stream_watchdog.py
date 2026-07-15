@@ -140,6 +140,14 @@ def test_runtime_fallback_route_escalates_cheap_primary_to_mid_tier(
 
     monkeypatch.setattr(tier_policy.settings, "core_cheap_primary", True)
 
+    cross_provider = MagicMock()
+    cross_provider.provider = "openai"
+    cross_provider.model = "gpt-5.4-mini"
+    cross_provider.model_tier = "small"
+    monkeypatch.setattr(
+        stage_manager_module, "resolve_platform_route", lambda **_kwargs: cross_provider
+    )
+
     primary = MagicMock()
     primary.provider = "anthropic"
     primary.model = "claude-haiku-4-5-20251001"
@@ -149,13 +157,13 @@ def test_runtime_fallback_route_escalates_cheap_primary_to_mid_tier(
     fallback = _runtime_fallback_route(primary)
 
     assert fallback is not None
-    assert fallback.provider == "anthropic"
-    assert fallback.model_tier == "mid"
-    assert fallback.model == "claude-sonnet-4-6"
+    assert fallback.provider == "openai"
+    assert fallback.model_tier == "small"
+    assert fallback.model == "gpt-5.4-mini"
     assert fallback.model != primary.model
 
 
-def test_runtime_fallback_route_is_none_when_already_on_escalation_tier(
+def test_runtime_fallback_route_uses_next_provider_when_already_mid(
     monkeypatch,
 ) -> None:
     # Under the cheap-primary policy a mid-tier failure has nowhere left to
@@ -164,13 +172,22 @@ def test_runtime_fallback_route_is_none_when_already_on_escalation_tier(
 
     monkeypatch.setattr(tier_policy.settings, "core_cheap_primary", True)
 
+    cross_provider = MagicMock()
+    cross_provider.provider = "openai"
+    cross_provider.model = "gpt-5.4"
+    cross_provider.model_tier = "mid"
+    monkeypatch.setattr(
+        stage_manager_module, "resolve_platform_route", lambda **_kwargs: cross_provider
+    )
+
     mid = MagicMock()
     mid.provider = "anthropic"
     mid.model = "claude-sonnet-4-6"
     mid.model_tier = "mid"
     mid.operation = "spec.generate"
 
-    assert _runtime_fallback_route(mid) is None
+    fallback = _runtime_fallback_route(mid)
+    assert fallback is cross_provider
 
 
 def test_output_budgets_carry_reasoning_headroom() -> None:

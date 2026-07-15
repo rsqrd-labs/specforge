@@ -569,8 +569,6 @@ def test_build_user_prompt_wraps_sources_and_problem() -> None:
         workspace_id=__import__("uuid").uuid4(),
         workspace_name="SpecForge",
         problem_statement="Build a spec generator.",
-        provider="anthropic",
-        model="claude-sonnet-4-6",
         stage_versions={},
         artifacts={},
         excerpts={
@@ -595,8 +593,6 @@ def test_build_user_prompt_uses_spec_title_for_placeholder_workspace_name() -> N
         workspace_id=__import__("uuid").uuid4(),
         workspace_name="Test 3",
         problem_statement="Build workflows.",
-        provider="anthropic",
-        model="claude-sonnet-4-6",
         stage_versions={},
         artifacts={"spec": "# Workflow Automation Platform\n\n## Overview\n..."},
         excerpts={

@@ -46,13 +46,10 @@ _TRUNCATION_METRIC = "specforge_storyboard_truncation_retries_total"
 
 
 def _make_source(provider: str = "anthropic") -> StoryboardSourcePackage:
-    model = "claude-sonnet-4-6" if provider == "anthropic" else "gemini-3.5-flash"
     return StoryboardSourcePackage(
         workspace_id=uuid.uuid4(),
         workspace_name="Test WS",
         problem_statement="Build a test product.",
-        provider=provider,
-        model=model,
         stage_versions={
             "spec": uuid.uuid4(),
             "plan": uuid.uuid4(),
@@ -157,8 +154,11 @@ def test_resolve_primary_route_picks_cheap_tier(monkeypatch):
     assert route.selection_reason == "active_default"
 
 
-def test_resolve_primary_route_google_floors_at_mid():
+def test_resolve_primary_route_google_floors_at_mid(monkeypatch):
     """Google has no sub-Flash model, so its storyboard primary floors at mid."""
+    from config import settings
+
+    monkeypatch.setattr(settings, "llm_provider_priority", "google,anthropic,openai")
     route = _resolve_storyboard_primary_route(_make_source("google"))
     assert route.model == "gemini-3.5-flash"
     assert route.model_tier == "mid"

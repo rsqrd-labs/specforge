@@ -840,7 +840,7 @@ async def test_critic_failure_no_escalation_when_already_mid(
     )
     assert after - before == 0.0, "no escalation when already at/above escalation tier"
     assert len(captured_routes) == 1
-    assert captured_routes[0].provider == "google"
+    assert captured_routes[0].provider == "anthropic"
     assert any("done" in t for t in tokens)
     mr.assert_not_awaited()
 
