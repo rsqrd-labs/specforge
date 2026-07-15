@@ -49,7 +49,10 @@ from services.integrations.github_api_client import (
     make_app_github_client,
     make_shared_async_client,
 )
-from services.integrations.github_app_auth import make_token_provider
+from services.integrations.github_app_auth import (
+    GitHubAppAuthError,
+    make_token_provider,
+)
 from services.integrations.push_repo import find_live_pushes_for_event
 from services.observability import GITHUB_RECONCILE_LAG_SECONDS
 from services.security.sanitizer import sanitize_text
@@ -164,13 +167,15 @@ async def _reconcile_issue(
         # dropped. SpecForge does not sync issue titles back, so ignore it.
         return
 
-    for task in await _matched_tasks(db, repo_id, installation_id, issue_number):
+    tasks = await _matched_tasks(db, repo_id, installation_id, issue_number)
+    for task in tasks:
         if action == "reopened":
             _apply_reopen(task, event_ts=event_ts)
         elif action == "closed":
             changed = _apply_done(task, done_via="manual", event_ts=event_ts)
             if changed:
                 _audit_done(task, payload, done_via="manual")
+    await _mark_pushes_reconciled(db, tasks)
 
 
 async def _reconcile_merged_pr(db: AsyncSession, payload: dict[str, Any]) -> None:
@@ -186,11 +191,15 @@ async def _reconcile_merged_pr(db: AsyncSession, payload: dict[str, Any]) -> Non
     closed_numbers = _closing_issue_numbers(pr.get("body") or "")
     if not closed_numbers:
         return
+    matched: list[IntegrationPushTask] = []
     for issue_number in closed_numbers:
-        for task in await _matched_tasks(db, repo_id, installation_id, issue_number):
+        tasks = await _matched_tasks(db, repo_id, installation_id, issue_number)
+        matched.extend(tasks)
+        for task in tasks:
             changed = _apply_done(task, done_via="pr_merge", event_ts=event_ts)
             if changed:
                 _audit_done(task, payload, done_via="pr_merge")
+    await _mark_pushes_reconciled(db, matched)
 
 
 async def _capture_idea(db: AsyncSession, payload: dict[str, Any]) -> None:
@@ -285,6 +294,26 @@ async def _matched_tasks(
         )
     )
     return list(result.scalars())
+
+
+async def _mark_pushes_reconciled(
+    db: AsyncSession, tasks: list[IntegrationPushTask]
+) -> None:
+    """Record wall-clock completion without touching event-order cursors."""
+    push_ids = {task.push_id for task in tasks}
+    if not push_ids:
+        return
+    pushes = list(
+        (
+            await db.execute(
+                select(IntegrationPush).where(IntegrationPush.id.in_(push_ids))
+            )
+        ).scalars()
+    )
+    completed_at = datetime.now(UTC)
+    for push in pushes:
+        push.last_inbound_sync_at = completed_at
+        push.last_inbound_sync_error = None
 
 
 def _apply_done(
@@ -559,6 +588,9 @@ async def _run_backfill(db: AsyncSession, push_id: str, client: Any) -> None:
         ).scalars()
     )
     if not tasks:
+        push.last_inbound_sync_at = datetime.now(UTC)
+        push.last_inbound_sync_error = None
+        await db.commit()
         return
     by_number = {t.external_issue_number: t for t in tasks}
     since = _last_synced_iso(tasks)
@@ -566,16 +598,35 @@ async def _run_backfill(db: AsyncSession, push_id: str, client: Any) -> None:
     if client is not None:
         issues = await client.list_issues(push.repo_full_name, state="all", since=since)
     else:
-        async with make_shared_async_client() as http:
-            from database import get_shared_redis
+        try:
+            async with make_shared_async_client() as http:
+                from database import get_shared_redis
 
-            provider = make_token_provider(get_shared_redis(), http)
-            built = make_app_github_client(provider, installation.installation_id, http)
-            issues = await built.list_issues(
-                push.repo_full_name, state="all", since=since
+                provider = make_token_provider(get_shared_redis(), http)
+                built = make_app_github_client(
+                    provider, installation.installation_id, http
+                )
+                issues = await built.list_issues(
+                    push.repo_full_name, state="all", since=since
+                )
+        except GitHubAppAuthError as exc:
+            if exc.status != 404:
+                raise
+            # GitHub no longer recognises this installation. Retrying with
+            # exponential backoff cannot recover it, so fail fast and persist a
+            # safe, actionable result for the waiting UI. Transient auth/server
+            # failures still bubble into the durable retry policy.
+            installation.suspended_at = datetime.now(UTC)
+            push.last_inbound_sync_at = datetime.now(UTC)
+            push.last_inbound_sync_error = "installation_unavailable"
+            await db.commit()
+            logger.warning(
+                "github.backfill.installation_unavailable",
+                push_id=str(push.id),
+                installation_row_id=str(installation.id),
             )
+            return
 
-    changed = False
     for issue in issues:
         # GitHub's issues endpoint also returns PRs — they carry a
         # 'pull_request' key. Filtering them out is mandatory (a PR is not a task
@@ -590,13 +641,14 @@ async def _run_backfill(db: AsyncSession, push_id: str, client: Any) -> None:
         if event_ts is None:
             continue
         if issue.get("state") == "closed":
-            if _apply_done(task, done_via="manual", event_ts=event_ts):
-                changed = True
+            _apply_done(task, done_via="manual", event_ts=event_ts)
         elif issue.get("state") == "open":
-            if _apply_reopen(task, event_ts=event_ts):
-                changed = True
-    if changed:
-        await db.commit()
+            _apply_reopen(task, event_ts=event_ts)
+    # Completion is observable even when GitHub is already up to date. This is
+    # separate from each task's event-time ``synced_at`` ordering cursor.
+    push.last_inbound_sync_at = datetime.now(UTC)
+    push.last_inbound_sync_error = None
+    await db.commit()
 
 
 def _last_synced_iso(tasks: list[IntegrationPushTask]) -> str | None:

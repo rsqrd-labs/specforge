@@ -29,6 +29,7 @@ import type {
   IncrementPushAck,
   InstallationList,
   RepoList,
+  SyncRefreshAccepted,
   SyncState,
 } from "../types/github"
 import type {
@@ -1086,8 +1087,8 @@ export async function resyncWorkspace(
 /** Recover task states from GitHub's issues list — reconcile missed events (202). */
 export async function backfillWorkspace(
   workspaceId: string,
-): Promise<IntegrationPushRead> {
-  const response = await api.post<IntegrationPushRead>(
+): Promise<SyncRefreshAccepted> {
+  const response = await api.post<SyncRefreshAccepted>(
     `/workspaces/${workspaceId}/sync/backfill`,
   )
   return response.data

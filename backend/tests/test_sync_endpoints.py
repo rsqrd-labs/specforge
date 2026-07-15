@@ -413,7 +413,10 @@ async def test_backfill_enqueues_202(engine) -> None:
                 f"/workspaces/{seeded['workspace'].id}/sync/backfill"
             )
         assert resp.status_code == 202
-        assert enqueued == [("backfill_repo", str(seeded["push"].id))]
+        assert enqueued == [("refresh_task_states", str(seeded["push"].id))]
+        body = resp.json()
+        assert body["push_id"] == str(seeded["push"].id)
+        assert body["requested_at"]
     finally:
         monkey.undo()
         await _teardown(maker, seeded)

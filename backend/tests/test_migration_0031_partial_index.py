@@ -37,11 +37,11 @@ def test_0031_revises_0030_and_history_is_linear() -> None:
 
     revised = {m.down_revision for m in modules if m.down_revision}
     heads = [m.revision for m in modules if m.revision not in revised]
-    # The single head advances as migrations are added (0035 widens the workspace
-    # agent-instruction target CHECK). The guard is that there is exactly ONE head
+    # The single head advances as migrations are added (0036 records inbound
+    # GitHub reconciliation completion). The guard is that there is exactly ONE head
     # — a branched history breaks `alembic upgrade head` on deploy.
-    assert heads == ["0035"], (
-        f"Expected a single migration head (0035), got {heads!r} — a branched "
+    assert heads == ["0036"], (
+        f"Expected a single migration head (0036), got {heads!r} — a branched "
         "history breaks `alembic upgrade head` on deploy."
     )
 

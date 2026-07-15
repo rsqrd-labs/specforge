@@ -248,6 +248,9 @@ async def test_issue_close_flips_task_done_with_correct_done_via(
         assert task.state == "done"
         assert task.done_via == "manual"
         assert task.done_at is not None
+        push = await session.get(IntegrationPush, task.push_id)
+        assert push is not None
+        assert push.last_inbound_sync_at is not None
 
         # A merged PR that closes the same issue upgrades attribution → pr_merge.
         await github_reconcile.reconcile_event(

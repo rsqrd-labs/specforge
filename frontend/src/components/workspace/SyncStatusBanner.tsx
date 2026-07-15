@@ -68,9 +68,9 @@ export function SyncStatusBanner({
         disabled={resyncing || disabled}
         title={disabled ? disabledReason : undefined}
         aria-describedby={disabled ? disabledReasonId : undefined}
-        aria-label="Sync changed tasks"
+        aria-label="Push changed tasks to GitHub"
       >
-        {resyncing ? "Syncing..." : "Sync"}
+        {resyncing ? "Pushing..." : "Push changes"}
       </button>
     </div>
   )

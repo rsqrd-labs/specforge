@@ -448,8 +448,15 @@ async def github_webhook(
     # would silently drop an event on a transient broker failure. The worker is
     # the single dumb dispatcher: the raw bytes are passed so it re-parses and
     # fans out by (event_type, action).
+    # Issue events are tiny, directly user-visible state transitions and must
+    # not sit behind long exports. Other webhook types retain the bulk lane;
+    # routing all GitHub event traffic onto the fast lane would undermine its
+    # billing/interactive isolation during a check-suite storm.
+    reconcile_job = (
+        "reconcile_issue_event" if event_type == "issues" else "reconcile_event"
+    )
     try:
-        await enqueue("reconcile_event", delivery_id, event_type, raw_body)
+        await enqueue(reconcile_job, delivery_id, event_type, raw_body)
     except QueueUnavailableError as exc:
         GITHUB_WEBHOOK_FAILED_TOTAL.labels(error_type="enqueue_unavailable").inc()
         raise HTTPException(

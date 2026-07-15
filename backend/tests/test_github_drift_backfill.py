@@ -7,6 +7,7 @@ stuck-``pending`` sweep (keyed on arq job absence, injected here).
 
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
@@ -27,6 +28,7 @@ from models import (
     Workspace,
 )
 from services.integrations import github_reconcile
+from services.integrations.github_app_auth import GitHubAppAuthError
 
 pytestmark = pytest.mark.asyncio
 
@@ -288,8 +290,10 @@ async def test_backfill_filters_out_pull_request_rows(
         )
         await session.refresh(task)
         await session.refresh(pr_task)
+        await session.refresh(push)
         assert task.state == "done"  # the real issue was reconciled
         assert pr_task.state == "open"  # the PR row was filtered out
+        assert push.last_inbound_sync_at is not None
     finally:
         await _cleanup(session, inst)
 
@@ -320,8 +324,52 @@ async def test_backfill_does_not_downgrade_pr_merge_attribution(
             {}, str(push.id), db=session, client=_StubIssuesClient(issues)
         )
         await session.refresh(task)
+        await session.refresh(push)
         assert task.state == "done"
         assert task.done_via == "pr_merge"  # never downgraded to manual
+        # A no-change refresh still records completion for the waiting client.
+        assert push.last_inbound_sync_at is not None
+    finally:
+        await _cleanup(session, inst)
+
+
+async def test_backfill_marks_deleted_installation_without_retrying(
+    session: AsyncSession,
+    user: User,
+    workspace: Workspace,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    inst = await _make_install(session, user)
+    push = await _make_push(
+        session, workspace=workspace, user=user, installation=inst, status="completed"
+    )
+    await _make_task(session, push, issue_number=5, state="open")
+
+    class _UnavailableClient:
+        async def list_issues(self, *args: Any, **kwargs: Any) -> list[dict[str, Any]]:
+            raise GitHubAppAuthError(404, "installation unavailable")
+
+    @asynccontextmanager
+    async def _http_client():
+        yield object()
+
+    monkeypatch.setattr(github_reconcile, "make_shared_async_client", _http_client)
+    monkeypatch.setattr(github_reconcile, "make_token_provider", lambda *_: object())
+    monkeypatch.setattr(
+        github_reconcile,
+        "make_app_github_client",
+        lambda *_: _UnavailableClient(),
+    )
+    try:
+        # A 404 is permanent for this installation: the service records the
+        # actionable result and returns normally, so the queue does not back off
+        # and retry five times.
+        await github_reconcile.backfill_repo({}, str(push.id), db=session)
+        await session.refresh(push)
+        await session.refresh(inst)
+        assert push.last_inbound_sync_at is not None
+        assert push.last_inbound_sync_error == "installation_unavailable"
+        assert inst.suspended_at is not None
     finally:
         await _cleanup(session, inst)
 

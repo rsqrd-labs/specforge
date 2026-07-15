@@ -106,6 +106,18 @@ class IntegrationPush(Base):
     pushed_at: Mapped[datetime | None] = mapped_column(
         TIMESTAMP(timezone=True),
     )
+    # Wall-clock completion marker for inbound GitHub reconciliation. Unlike a
+    # task's ``synced_at`` (an event-time ordering cursor), this is deliberately
+    # updated even when a manual refresh finds no state changes. The frontend
+    # uses it to keep "Check GitHub" pending until the worker has actually
+    # completed instead of treating the HTTP 202 enqueue acknowledgement as
+    # success.
+    last_inbound_sync_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True),
+    )
+    # Machine-readable result of the last inbound check. Null means success;
+    # values are a deliberately small product contract, never raw GitHub text.
+    last_inbound_sync_error: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True),
         nullable=False,

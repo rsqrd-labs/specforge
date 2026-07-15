@@ -34,6 +34,7 @@ PushStatus = Literal["pending", "completed", "failed", "stale"]
 # Per-task bidirectional sync state (spec §10).
 TaskState = Literal["open", "done"]
 DoneVia = Literal["pr_merge", "manual"]
+InboundSyncError = Literal["installation_unavailable"]
 
 # GitHub App installation account shape (spec §10).
 AccountType = Literal["User", "Organization"]
@@ -208,9 +209,22 @@ class SyncStateResponse(BaseModel):
     out_of_sync: bool = False
     shipped: int = 0
     total: int = 0
+    last_inbound_sync_at: datetime | None = None
+    last_inbound_sync_error: InboundSyncError | None = None
     tasks: list[TaskSyncState]
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class SyncRefreshAccepted(BaseModel):
+    """Acknowledgement for an inbound refresh queued on the fast worker.
+
+    ``requested_at`` is compared with ``SyncStateResponse.last_inbound_sync_at``
+    so clients can distinguish queue admission from completed reconciliation.
+    """
+
+    push_id: UUID
+    requested_at: datetime
 
 
 class ExportSummary(BaseModel):

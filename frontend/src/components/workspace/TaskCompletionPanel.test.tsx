@@ -33,6 +33,8 @@ function syncState(overrides: Partial<SyncState> = {}): SyncState {
     out_of_sync: false,
     shipped,
     total: overrides.total ?? tasks.length,
+    last_inbound_sync_at: null,
+    last_inbound_sync_error: null,
     tasks,
     ...overrides,
   }
@@ -42,6 +44,7 @@ function renderPanel(
   props: Partial<React.ComponentProps<typeof TaskCompletionPanel>> = {},
 ) {
   const onResync = vi.fn()
+  const onRefresh = vi.fn()
   const merged: React.ComponentProps<typeof TaskCompletionPanel> = {
     data: syncState(),
     repoFullName: "octo/spec",
@@ -50,10 +53,14 @@ function renderPanel(
     loading: false,
     resyncing: false,
     onResync,
+    refreshing: false,
+    refreshError: null,
+    onRefresh,
     ...props,
   }
   return {
     onResync,
+    onRefresh,
     ...render(
       <MemoryRouter>
         <TaskCompletionPanel {...merged} />
@@ -145,7 +152,7 @@ describe("TaskCompletionPanel", () => {
     const { onResync } = renderPanel({ data: syncState({ out_of_sync: true }) })
 
     expect(screen.getByText(/tasks changed since the last push/i)).toBeInTheDocument()
-    await user.click(screen.getByRole("button", { name: /sync changed tasks/i }))
+    await user.click(screen.getByRole("button", { name: /push changed tasks/i }))
     expect(onResync).toHaveBeenCalledOnce()
   })
 
@@ -157,7 +164,7 @@ describe("TaskCompletionPanel", () => {
       disabledReason: "Editing resumes when generation finishes.",
     })
 
-    const sync = screen.getByRole("button", { name: /sync changed tasks/i })
+    const sync = screen.getByRole("button", { name: /push changed tasks/i })
     expect(sync).toBeDisabled()
     expect(sync).toHaveAccessibleDescription(
       /editing resumes when generation finishes/i,
@@ -218,11 +225,45 @@ describe("TaskCompletionPanel", () => {
           loading={false}
           resyncing={false}
           onResync={vi.fn()}
+          refreshing={false}
+          refreshError={null}
+          onRefresh={vi.fn()}
         />
       </MemoryRouter>,
     )
     const flashed = container.querySelectorAll(".ws-sync-task.just-shipped")
     expect(flashed).toHaveLength(1)
     expect(flashed[0].textContent).toContain("T-002")
+  })
+
+  it("offers an inbound GitHub refresh and keeps its pending state visible", async () => {
+    const user = userEvent.setup()
+    const { onRefresh, rerender } = renderPanel()
+
+    await user.click(
+      screen.getByRole("button", { name: /check github for task updates/i }),
+    )
+    expect(onRefresh).toHaveBeenCalledOnce()
+
+    rerender(
+      <MemoryRouter>
+        <TaskCompletionPanel
+          data={syncState()}
+          repoFullName="octo/spec"
+          repoUrl="https://github.com/octo/spec"
+          connection="connected"
+          loading={false}
+          resyncing={false}
+          onResync={vi.fn()}
+          refreshing
+          refreshError={null}
+          onRefresh={vi.fn()}
+        />
+      </MemoryRouter>,
+    )
+    expect(screen.getByRole("button", { name: /check github/i })).toBeDisabled()
+    expect(screen.getByRole("button", { name: /check github/i })).toHaveTextContent(
+      "Checking…",
+    )
   })
 })

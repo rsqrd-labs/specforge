@@ -54,7 +54,16 @@ export interface SyncState {
   out_of_sync: boolean
   shipped: number
   total: number
+  /** Wall-clock completion of the most recent inbound reconciliation. */
+  last_inbound_sync_at: string | null
+  last_inbound_sync_error: "installation_unavailable" | null
   tasks: TaskSyncState[]
+}
+
+/** Queue acknowledgement for a user-requested inbound GitHub refresh. */
+export interface SyncRefreshAccepted {
+  push_id: string
+  requested_at: string
 }
 
 /** One row of the account-wide exports hub (`GET /integrations/github/exports`):

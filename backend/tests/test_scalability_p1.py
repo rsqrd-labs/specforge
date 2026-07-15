@@ -153,6 +153,8 @@ def test_queue_for_job_routes_fast_and_bulk() -> None:
 
     assert queue_for_job("billing_process_webhook") == FAST_QUEUE_NAME
     assert queue_for_job("pr_check") == FAST_QUEUE_NAME
+    assert queue_for_job("reconcile_issue_event") == FAST_QUEUE_NAME
+    assert queue_for_job("refresh_task_states") == FAST_QUEUE_NAME
     for bulk in (
         "export_push",
         "backfill_repo",
@@ -212,7 +214,12 @@ def test_worker_settings_partition_is_disjoint_and_complete() -> None:
     for name in fast:
         assert queue_for_job(name) == FAST_QUEUE_NAME
     # The fast lane carries exactly the latency-sensitive jobs.
-    assert fast == {"billing_process_webhook", "pr_check"}
+    assert fast == {
+        "billing_process_webhook",
+        "pr_check",
+        "reconcile_issue_event",
+        "refresh_task_states",
+    }
     # keep_result is inherited from the shared base (the re-export dedup guard).
     assert worker.WorkerSettings.keep_result == 0
     assert worker.FastWorkerSettings.keep_result == 0

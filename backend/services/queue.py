@@ -58,10 +58,10 @@ logger = structlog.get_logger(__name__)
 #   - BULK_QUEUE_NAME = arq's DEFAULT queue. Kept as the default deliberately so
 #     any job enqueued by older code (or in flight across the deploy) still
 #     drains — nothing is stranded at the cutover. Carries the GitHub bulk I/O
-#     (export/backfill/increment/projects/reconcile) and the LLM eval batch jobs.
+#     (export/periodic-backfill/increment/projects) and the LLM eval batch jobs.
 #   - FAST_QUEUE_NAME = a separate queue drained by its OWN worker process
 #     (`arq worker.FastWorkerSettings`), so a bulk-export storm cannot occupy its
-#     job slots. Carries paid credit grants and the user-visible PR status check.
+#     job slots. Carries paid credit grants and latency-sensitive GitHub updates.
 #
 # Routing is by job NAME via queue_for_job(), so every enqueue() call site is
 # unchanged — the home queue is resolved centrally (DRY) and worker.py partitions
@@ -77,8 +77,18 @@ BULK_QUEUE_NAME = "arq:queue"  # arq's built-in default queue name.
 FAST_QUEUE_NAME = "arq:queue:fast"
 
 # Jobs whose latency is user-/money-visible and must not queue behind a bulk
-# GitHub-export storm (audit §F5): paid credit grants + the PR status check.
-_FAST_QUEUE_JOBS = frozenset({"billing_process_webhook", "pr_check"})
+# GitHub-export storm (audit §F5): paid credit grants, webhook reconciliation,
+# the PR status check, and an explicit user-requested inbound refresh. Periodic
+# repository backfill remains on bulk so fleet-wide recovery cannot starve this
+# lane.
+_FAST_QUEUE_JOBS = frozenset(
+    {
+        "billing_process_webhook",
+        "pr_check",
+        "reconcile_issue_event",
+        "refresh_task_states",
+    }
+)
 
 
 def queue_for_job(job: str) -> str:

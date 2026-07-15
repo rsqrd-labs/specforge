@@ -261,7 +261,7 @@ the **final checkpoint** of Phase 21 and **must be re-run after T-287–T-289**
 | Check | Command / evidence | Blocks release if |
 |---|---|---|
 | Worker image builds | `docker build ./backend` succeeds; the image runs `arq worker.WorkerSettings` | The backend/worker image fails to build |
-| Worker registers all jobs | `uv run python -c "from worker import WorkerSettings; print([f.__name__ for f in WorkerSettings.functions])"` lists `export_push, reconcile_event, backfill_repo, increment_push, projects_sync, pr_check` + one `reconcile_drift` cron | Any job or the cron is unregistered |
+| Workers register all jobs | Inspect both `WorkerSettings.functions` and `FastWorkerSettings.functions`; bulk includes `export_push, reconcile_event, backfill_repo, increment_push, projects_sync`, fast includes `reconcile_issue_event, refresh_task_states, pr_check, billing_process_webhook`, and `reconcile_drift` is registered once on bulk | Any job or the cron is unregistered |
 | Migrations round-trip | `uv run alembic upgrade head` then `downgrade -1`/`upgrade head` for `0016` + `0017` apply cleanly and restore the prior constraint | Migration or rollback fails on a clean DB |
 | Backend contract green | `uv run pytest ../harness/tests/backend/test_phase24_github_living_contract.py -q` is fully green | Any Phase 24 backend contract is red |
 | Behavioral suite green | `uv run pytest tests/ -q --cov=services --cov-fail-under=80` (incl. `tests/test_phase24_behavioral.py`) | Coverage drops below 80% or a behavioral pin fails |

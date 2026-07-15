@@ -412,7 +412,8 @@ Per the brief ("no feature breaks under load"), one explicit pass per feature:
 >   recycling (it would sever in-flight SSE streams).
 > - **F5** — the live queue is **split** into a bulk lane (default `arq:queue`:
 >   GitHub bulk + LLM batch) and a fast lane (`arq:queue:fast`:
->   `billing_process_webhook` + `pr_check`), each a **separate process**
+>   `billing_process_webhook` + `pr_check` + issue-event/manual GitHub reconciliation),
+>   each a **separate process**
 >   (`WorkerSettings` / `FastWorkerSettings`) so a bulk-export storm can't starve
 >   paid grants. Routing is single-sourced in `services.queue.queue_for_job`;
 >   global crons sit on exactly one lane (arq dedups per-queue across replicas);

@@ -6,8 +6,8 @@ F5 scalability remediation there are **two lanes**, each a separate process:
   - ``arq worker.WorkerSettings``      — the BULK lane (arq's default queue):
     high-volume, latency-tolerant GitHub bulk I/O + LLM eval batch jobs.
   - ``arq worker.FastWorkerSettings``  — the FAST lane (a dedicated queue):
-    latency-sensitive, money-/user-visible paid credit grants + the PR status
-    check, so a bulk-export storm can never occupy their job slots.
+    latency-sensitive, money-/user-visible paid credit grants + inbound GitHub
+    reconciliation, so a bulk-export storm can never occupy their job slots.
 
 Both are stateless and horizontally scalable to N replicas — jobs are
 idempotent/checkpointed, and arq dedups crons per queue so each cron fires once
@@ -17,7 +17,9 @@ sourced by ``services.queue.queue_for_job`` so routing can never drift.
 Job roster (registered here as the single source of truth):
 
   - ``export_push``      — push a workspace to GitHub.               [bulk]
-  - ``reconcile_event``  — apply an inbound webhook (T-272).         [bulk]
+  - ``reconcile_event``  — apply other inbound webhooks (T-272).     [bulk]
+  - ``reconcile_issue_event`` — apply issue updates/closures.        [fast]
+  - ``refresh_task_states`` — user-requested inbound refresh.        [fast]
   - ``backfill_repo``    — reconcile missed events (T-273).          [bulk]
   - ``increment_push``   — push an increment delta (T-279/T-280).    [bulk]
   - ``projects_sync``    — sync the Projects v2 board (T-281).       [bulk]
@@ -58,7 +60,8 @@ logger = structlog.get_logger(__name__)
 # Bounded global concurrency so a flood of jobs cannot exhaust the worker's DB
 # pool / sockets; per-tenant fairness (the per-installation governor) is T-274.
 _MAX_JOBS = 20
-# The fast lane (F5) does light, quick work (a webhook grant + a PR status post),
+# The fast lane (F5) does bounded, user-visible work (webhooks, inbound refresh,
+# and a PR status post),
 # so it runs fewer jobs concurrently than the bulk lane. This also caps its peak
 # DB-connection draw — adding the fast worker process therefore adds far less
 # than a full per-process pool to the Postgres connection footprint (RUNBOOK §15
@@ -168,9 +171,30 @@ async def reconcile_event(
     await github_reconcile.reconcile_event(ctx, delivery_id, event_type, raw)
 
 
+@github_job("reconcile_issue_event")
+async def reconcile_issue_event(
+    ctx: dict[str, Any],
+    delivery_id: str,
+    event_type: str,
+    raw: bytes,
+) -> None:
+    """Apply a latency-sensitive issue webhook on the fast queue."""
+    from services.integrations import github_reconcile
+
+    await github_reconcile.reconcile_event(ctx, delivery_id, event_type, raw)
+
+
 @github_job("backfill_repo")
 async def backfill_repo(ctx: dict[str, Any], push_id: str) -> None:
     """Reconcile missed events from the issues API (implemented in T-273)."""
+    from services.integrations import github_reconcile
+
+    await github_reconcile.backfill_repo(ctx, push_id)
+
+
+@github_job("refresh_task_states")
+async def refresh_task_states(ctx: dict[str, Any], push_id: str) -> None:
+    """User-requested inbound refresh; same reconcile logic, fast queue."""
     from services.integrations import github_reconcile
 
     await github_reconcile.backfill_repo(ctx, push_id)
@@ -414,7 +438,8 @@ async def _on_startup(ctx: dict[str, Any]) -> None:
     # multiply Redis connections the same way the API path did before F8.
     _initialize_redis(build_redis_client())
     queue = getattr(ctx.get("redis"), "default_queue_name", "unknown")
-    logger.info("worker.started", queue=queue, max_jobs=_MAX_JOBS)
+    lane_max_jobs = _FAST_MAX_JOBS if queue == FAST_QUEUE_NAME else _MAX_JOBS
+    logger.info("worker.started", queue=queue, max_jobs=lane_max_jobs)
 
 
 async def _on_shutdown(ctx: dict[str, Any]) -> None:
@@ -576,9 +601,10 @@ class WorkerSettings(_BaseWorkerSettings):
 class FastWorkerSettings(_BaseWorkerSettings):
     """FAST lane — ``arq worker.FastWorkerSettings``.
 
-    Drains the latency-sensitive, money-/user-visible jobs (paid credit grants
-    and the PR status check) on a dedicated queue so a bulk-export storm can
-    never occupy their job slots. The billing recovery crons live here too, as
+    Drains the latency-sensitive, money-/user-visible jobs (paid credit grants,
+    issue reconciliation, manual inbound refresh, and PR status checks) on a
+    dedicated queue so a bulk-export storm can never occupy their job slots.
+    The billing recovery crons live here too, as
     the billing domain's home lane. DEPLOY INVARIANT: this process MUST run in
     every environment, or paid credit grants never drain (RUNBOOK §16).
     """
@@ -587,6 +613,8 @@ class FastWorkerSettings(_BaseWorkerSettings):
     max_jobs = _FAST_MAX_JOBS  # lighter concurrency than the bulk lane (footprint)
     functions = [
         billing_process_webhook,
+        reconcile_issue_event,
+        refresh_task_states,
         pr_check,
     ]
     cron_jobs = [

@@ -2796,6 +2796,9 @@ export default function Workspace() {
                           if (guardWorkspaceMutation()) return
                           void githubSync.resync()
                         }}
+                        refreshing={githubSync.refreshing}
+                        refreshError={githubSync.refreshError}
+                        onRefresh={() => void githubSync.refreshFromGitHub()}
                         disabled={workspaceGenerationLock.locked}
                         disabledReason={workspaceLockReason}
                         detailHref={id ? `/workspace/${id}/github` : undefined}

@@ -12,7 +12,6 @@ import {
   ShippedCheckIcon,
 } from "../components/shared/icons"
 import {
-  backfillWorkspace,
   getGitHubPush,
   getWorkspace,
   listIncrements,
@@ -130,7 +129,6 @@ export default function WorkspaceGitHub() {
   const [increments, setIncrements] = useState<Increment[]>([])
   const [workspaceName, setWorkspaceName] = useState<string | null>(null)
   const [metaLoaded, setMetaLoaded] = useState(false)
-  const [backfilling, setBackfilling] = useState(false)
   const [actionNote, setActionNote] = useState<string | null>(null)
 
   const loadMeta = useCallback(async () => {
@@ -195,19 +193,19 @@ export default function WorkspaceGitHub() {
   }, [sync, loadMeta])
 
   const handleBackfill = useCallback(async () => {
-    if (!id) return
-    setBackfilling(true)
     setActionNote(null)
     try {
-      await backfillWorkspace(id)
-      setActionNote("Backfill started — pulling the latest issue states from GitHub.")
+      const completed = await sync.refreshFromGitHub()
+      setActionNote(
+        completed
+          ? "GitHub is up to date."
+          : "GitHub is taking longer than expected. Please try again.",
+      )
     } catch {
-      setActionNote("Could not start the backfill. Please try again.")
-    } finally {
-      setBackfilling(false)
+      setActionNote("GitHub is taking longer than expected. Please try again.")
     }
     void loadMeta()
-  }, [id, loadMeta])
+  }, [sync, loadMeta])
 
   const title = repoFullName ?? workspaceName ?? "GitHub export"
 
@@ -384,7 +382,7 @@ export default function WorkspaceGitHub() {
               <div className="ghx-action">
                 <div className="ghx-action-copy">
                   <span className="ghx-action-title">
-                    {outOfSync ? "Re-sync issues" : "Re-sync"}
+                    {outOfSync ? "Push changed tasks" : "Push tasks to GitHub"}
                   </span>
                   <span className="ghx-action-sub">
                     Push the current Tasks to GitHub — update changed issues and
@@ -397,24 +395,23 @@ export default function WorkspaceGitHub() {
                   onClick={() => void handleResync()}
                   disabled={sync.resyncing || sync.connection !== "connected"}
                 >
-                  {sync.resyncing ? "Syncing…" : "Re-sync now"}
+                  {sync.resyncing ? "Pushing…" : "Push task changes"}
                 </button>
               </div>
               <div className="ghx-action">
                 <div className="ghx-action-copy">
-                  <span className="ghx-action-title">Backfill from GitHub</span>
+                  <span className="ghx-action-title">Check GitHub</span>
                   <span className="ghx-action-sub">
-                    Pull the latest issue states in — recover closures the app
-                    missed while the worker was offline.
+                    Pull the latest issue states and update task completion here.
                   </span>
                 </div>
                 <button
                   type="button"
                   className="ghx-btn ghx-btn-ghost"
                   onClick={() => void handleBackfill()}
-                  disabled={backfilling || sync.connection !== "connected"}
+                  disabled={sync.refreshing || sync.connection !== "connected"}
                 >
-                  {backfilling ? "Starting…" : "Backfill"}
+                  {sync.refreshing ? "Checking…" : "Check now"}
                 </button>
               </div>
               {actionNote && (

@@ -49,6 +49,9 @@ interface TaskCompletionPanelProps {
   loading: boolean
   resyncing: boolean
   onResync: () => void
+  refreshing: boolean
+  refreshError: string | null
+  onRefresh: () => void
   disabled?: boolean
   disabledReason?: string
   /** When set, the panel shows a "full status →" link to the dedicated GitHub
@@ -79,6 +82,9 @@ export function TaskCompletionPanel({
   loading,
   resyncing,
   onResync,
+  refreshing,
+  refreshError,
+  onRefresh,
   disabled = false,
   disabledReason,
   detailHref,
@@ -162,9 +168,20 @@ export function TaskCompletionPanel({
           <div className="ws-panel-title">Task completion</div>
           <p>Issues close here as you ship them on GitHub.</p>
         </div>
-        <span className="ws-sync-count" aria-hidden="true">
-          {shipped} <span className="ws-sync-count-sep">of</span> {total}
-        </span>
+        <div className="ws-sync-header-actions">
+          <span className="ws-sync-count" aria-hidden="true">
+            {shipped} <span className="ws-sync-count-sep">of</span> {total}
+          </span>
+          <button
+            type="button"
+            className="ws-sync-refresh"
+            onClick={onRefresh}
+            disabled={refreshing}
+            aria-label="Check GitHub for task updates"
+          >
+            {refreshing ? "Checking…" : "Check GitHub"}
+          </button>
+        </div>
       </div>
 
       {/* The hero: a thin saffron fill; the header fraction is its label. */}
@@ -178,6 +195,11 @@ export function TaskCompletionPanel({
       >
         <span className="ws-sync-progress-fill" style={{ width: `${pct}%` }} />
       </div>
+      {refreshError && (
+        <p className="ws-sync-refresh-error" role="status">
+          {refreshError}
+        </p>
+      )}
       {(total === 0 || allShipped) && (
         <p className="ws-sync-progress-caption">
           {total === 0 ? "No tasks to ship yet." : "Every task has shipped."}

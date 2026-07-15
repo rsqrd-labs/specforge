@@ -183,8 +183,8 @@ async def test_valid_signed_delivery_enqueues_and_returns_queued(
         )
     assert resp.status_code == 200
     assert resp.json() == {"status": "queued"}
-    # Dispatched the dumb reconcile_event delivery with the raw bytes.
-    assert enqueued and enqueued[0][0] == "reconcile_event"
+    # Issue state transitions take the latency-sensitive worker lane.
+    assert enqueued and enqueued[0][0] == "reconcile_issue_event"
     assert enqueued[0][1] == "d1" and enqueued[0][2] == "issues"
     # Committed only after the successful handoff.
     assert fake_db.committed is True

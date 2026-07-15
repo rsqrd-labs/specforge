@@ -1334,11 +1334,13 @@ flows repository events back into SpecForge.
 - **API process** (`web` in `Procfile`, `api` in `docker-compose.yml`) accepts
   the export/sync/increment requests, owns migrations, and **enqueues** jobs —
   it never blocks on GitHub.
-- **Worker process** (`worker: arq worker.WorkerSettings` in `Procfile`, the
-  `worker` service in `docker-compose.yml`) drains the arq queue on the shared
-  Redis and performs every GitHub call. Jobs: `export_push`, `reconcile_event`,
-  `backfill_repo`, `increment_push`, `projects_sync`, `pr_check`, plus the
-  periodic `reconcile_drift` cron.
+- **Worker processes** drain separate shared-Redis lanes: the bulk worker
+  (`arq worker.WorkerSettings`) runs `export_push`, non-issue
+  `reconcile_event`, periodic `backfill_repo`, increments/projects, and the
+  `reconcile_drift` cron; the required fast worker
+  (`arq worker.FastWorkerSettings`) runs `reconcile_issue_event`, user-requested
+  `refresh_task_states`, `pr_check`, and billing jobs. This keeps issue closures
+  and explicit checks out of a long export backlog.
 - **Config:** the App is enabled when `GITHUB_APP_ID` + `GITHUB_APP_SLUG` are
   set. In production, `validate_production_settings()` additionally requires
   `GITHUB_APP_PRIVATE_KEY` and `GITHUB_APP_WEBHOOK_SECRET` (see `config.py`).

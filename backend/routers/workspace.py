@@ -1,5 +1,5 @@
 import logging
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
@@ -14,6 +14,7 @@ from models import Increment, IncrementIdea, IntegrationPushTask, User, Workspac
 from schemas.github import (
     GitHubExportRequest,
     PushStatusResponse,
+    SyncRefreshAccepted,
     SyncStateResponse,
     TaskSyncState,
 )
@@ -635,6 +636,8 @@ async def get_workspace_sync(
         out_of_sync=(push.status == "stale"),
         shipped=shipped,
         total=len(tasks),
+        last_inbound_sync_at=push.last_inbound_sync_at,
+        last_inbound_sync_error=push.last_inbound_sync_error,
         tasks=[_to_state(t) for t in tasks],
     )
 
@@ -686,18 +689,19 @@ async def resync_workspace(
 
 @router.post(
     "/{id}/sync/backfill",
-    response_model=PushStatusResponse,
+    response_model=SyncRefreshAccepted,
     status_code=status.HTTP_202_ACCEPTED,
 )
 async def backfill_workspace(
     id: UUID,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
-) -> PushStatusResponse:
+) -> SyncRefreshAccepted:
     """Recover task states from GitHub's issues list (202).
 
-    Enqueues ``backfill_repo`` to reconcile closures/reopens missed while the
-    worker was down. Idempotent with the webhook reconcile path.
+    Enqueues the user-visible ``refresh_task_states`` fast-lane job to reconcile
+    closures/reopens missed while the worker was down. Periodic recovery keeps
+    using the bulk ``backfill_repo`` job. Both call the same idempotent service.
     """
     await workspace_service.get(id, user.id, db)  # 404 if not owned
     push = await find_workspace_live_push(db, id)
@@ -707,13 +711,14 @@ async def backfill_workspace(
             detail="No GitHub push to backfill for this workspace.",
         )
     try:
-        await enqueue("backfill_repo", str(push.id))
+        requested_at = datetime.now(UTC)
+        await enqueue("refresh_task_states", str(push.id))
     except QueueUnavailableError as exc:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Background processing is unavailable; backfill was not started.",
         ) from exc
-    return PushStatusResponse.model_validate(push)
+    return SyncRefreshAccepted(push_id=push.id, requested_at=requested_at)
 
 
 # ---------------------------------------------------------------------------
