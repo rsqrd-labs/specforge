@@ -245,11 +245,11 @@ def test_adapters_expose_or_normalize_usage_without_changing_base_interface() ->
     changing the positional BaseLLMAdapter.stream(system, user, max_tokens) /
     complete(...) interface.
 
-    Issue #26 (prompt caching) added a keyword-only ``cache_system: bool = False``
-    to both methods — a deliberate, backward-compatible addition that leaves the
-    positional interface (and every existing call site) untouched. The contract
-    freezes the positional interface and permits only that sanctioned kw-only
-    flag, defaulting to False."""
+    Issue #26 (prompt caching) added the keyword-only ``cache_system`` and
+    ``cache_policy`` controls to both methods — a deliberate, backward-compatible
+    addition that leaves the positional interface (and every existing call site)
+    untouched. The contract freezes the positional interface and their safe
+    defaults."""
     base = import_backend("services.llm.base")
     BaseLLMAdapter = base.BaseLLMAdapter
 
@@ -272,12 +272,13 @@ def test_adapters_expose_or_normalize_usage_without_changing_base_interface() ->
             for p in params.values()
             if p.kind == inspect.Parameter.KEYWORD_ONLY
         }
-        assert set(kwonly) <= {"cache_system"}, (
-            f"BaseLLMAdapter.{name} grew unsanctioned keyword-only params "
-            f"{sorted(set(kwonly) - {'cache_system'})}."
+        expected_kwonly = {"cache_system", "cache_policy"}
+        assert set(kwonly) == expected_kwonly, (
+            f"BaseLLMAdapter.{name} keyword-only interface changed to "
+            f"{sorted(kwonly)}; expected {sorted(expected_kwonly)}."
         )
-        if "cache_system" in kwonly:
-            assert kwonly["cache_system"].default is False
+        assert kwonly["cache_system"].default is False
+        assert kwonly["cache_policy"].default is None
 
     usage_module = import_backend("services.llm.usage")
     for expected in [
