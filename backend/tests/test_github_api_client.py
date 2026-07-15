@@ -39,6 +39,32 @@ def _make_client(handler: Any) -> GitHubAPIClient:
     return make_github_client(token="ghp_fake", client=async_client)
 
 
+@pytest.mark.asyncio
+async def test_list_issues_url_encodes_offset_cursor() -> None:
+    cursor = "2026-07-15T18:31:53+00:00"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/repos/octo/app/issues"
+        assert request.url.params["since"] == cursor
+        assert "%2B00%3A00" in str(request.url)
+        return httpx.Response(
+            200,
+            json=[
+                {
+                    "number": 16,
+                    "state": "closed",
+                    "updated_at": "2026-07-15T18:58:58Z",
+                }
+            ],
+        )
+
+    client = _make_client(handler)
+    issues = await client.list_issues("octo/app", since=cursor)
+
+    assert issues[0]["number"] == 16
+    await client._client.aclose()
+
+
 # ---------------------------------------------------------------------------
 # create_repo
 # ---------------------------------------------------------------------------

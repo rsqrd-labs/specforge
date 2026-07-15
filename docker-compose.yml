@@ -112,6 +112,22 @@ services:
       - worker_venv:/app/.venv
     entrypoint: ["/bin/sh", "-c", "uv sync --frozen --no-dev && uv run --no-sync arq worker.FastWorkerSettings"]
 
+  github-webhook-forwarder:
+    # Local-development ingress for a GitHub App whose webhook URL is a Smee
+    # channel. GitHub cannot call the loopback-bound API directly, so this
+    # supervised process keeps the relay connected and forwards the original
+    # signed delivery to the normal HMAC-verifying endpoint. Production should
+    # point the App directly at its public HTTPS API and leave the proxy URL
+    # empty; the container then stays idle without weakening webhook security.
+    build: ./deploy/smee
+    env_file:
+      - backend/.env
+    environment:
+      GITHUB_WEBHOOK_TARGET_URL: http://api:8000/integrations/github/webhook
+    depends_on:
+      - api
+    restart: unless-stopped
+
   pgbouncer:
     # Transaction-mode connection pooler (F3 — scalability audit). Opt-in via the
     # `pgbouncer` profile so the default stack is unchanged:

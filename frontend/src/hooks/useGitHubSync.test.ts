@@ -68,6 +68,21 @@ describe("useGitHubSync", () => {
       ],
       on_legacy_oauth: false,
     })
+    vi.mocked(backfillWorkspace).mockResolvedValue({
+      push_id: "push-1",
+      requested_at: "2026-07-16T00:00:00Z",
+    })
+  })
+
+  it("requests a coalesced GitHub reconciliation when the Tasks screen opens", async () => {
+    vi.mocked(getGitHubSync).mockResolvedValue(syncState(null))
+
+    const { result } = renderHook(() => useGitHubSync("workspace-1", true))
+    await waitFor(() => expect(result.current.loading).toBe(false))
+
+    await waitFor(() =>
+      expect(backfillWorkspace).toHaveBeenCalledWith("workspace-1", true),
+    )
   })
 
   it("keeps a manual check pending until the worker completion marker advances", async () => {

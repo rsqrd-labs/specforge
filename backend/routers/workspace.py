@@ -74,6 +74,12 @@ from services.workspace_service import workspace_service
 
 logger = logging.getLogger(__name__)
 
+# A visible Tasks screen asks for a real GitHub reconciliation at this cadence
+# as a bounded safety net for delayed/missed webhooks.  The time-bucketed arq id
+# coalesces requests from multiple tabs/users watching the same workspace while
+# still allowing the next check promptly.  Webhooks remain the primary path.
+_AUTOMATIC_GITHUB_REFRESH_WINDOW_SECONDS = 30
+
 # Content-Security-Policy applied on the public /p/:slug share page.
 # The frontend _headers file and the backend public router both set this
 # header so it is enforced regardless of which layer serves the response.
@@ -694,6 +700,7 @@ async def resync_workspace(
 )
 async def backfill_workspace(
     id: UUID,
+    automatic: bool = Query(default=False),
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> SyncRefreshAccepted:
@@ -712,7 +719,14 @@ async def backfill_workspace(
         )
     try:
         requested_at = datetime.now(UTC)
-        await enqueue("refresh_task_states", str(push.id))
+        job_id = None
+        if automatic:
+            window = (
+                int(requested_at.timestamp())
+                // _AUTOMATIC_GITHUB_REFRESH_WINDOW_SECONDS
+            )
+            job_id = f"github-refresh:{push.id}:{window}"
+        await enqueue("refresh_task_states", str(push.id), job_id=job_id)
     except QueueUnavailableError as exc:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,

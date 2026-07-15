@@ -14,6 +14,7 @@ import type { SyncState } from "../types/github"
  * installation metadata are fetched once, avoiding the former three-request
  * poll while reducing worst-case visible webhook latency from 15s to 5s. */
 const POLL_INTERVAL_MS = 5_000
+const AUTOMATIC_REFRESH_INTERVAL_MS = 30_000
 const REFRESH_POLL_INTERVAL_MS = 1_000
 const REFRESH_TIMEOUT_MS = 45_000
 
@@ -96,17 +97,45 @@ export function useGitHubSync(
 
   useEffect(() => {
     if (!enabled || !workspaceId) return undefined
+    let automaticRefreshInFlight = false
+    const requestAutomaticRefresh = async () => {
+      if (
+        automaticRefreshInFlight ||
+        document.visibilityState !== "visible"
+      ) {
+        return
+      }
+      automaticRefreshInFlight = true
+      try {
+        // Webhooks are the low-latency primary path. This bounded fallback
+        // performs a real GitHub read for active workspaces, covering local
+        // development without public ingress and delayed/missed deliveries.
+        await backfillWorkspace(workspaceId, true)
+      } catch {
+        // Background recovery is deliberately silent. The explicit Check
+        // GitHub action remains available and surfaces actionable failures.
+      } finally {
+        automaticRefreshInFlight = false
+      }
+    }
     setLoading(true)
-    void refresh()
+    void refresh().then(requestAutomaticRefresh)
     const interval = window.setInterval(() => {
       if (document.visibilityState === "visible") void refreshSync()
     }, POLL_INTERVAL_MS)
+    const automaticRefreshInterval = window.setInterval(() => {
+      void requestAutomaticRefresh()
+    }, AUTOMATIC_REFRESH_INTERVAL_MS)
     const onVisibilityChange = () => {
-      if (document.visibilityState === "visible") void refreshSync()
+      if (document.visibilityState === "visible") {
+        void refreshSync()
+        void requestAutomaticRefresh()
+      }
     }
     document.addEventListener("visibilitychange", onVisibilityChange)
     return () => {
       window.clearInterval(interval)
+      window.clearInterval(automaticRefreshInterval)
       document.removeEventListener("visibilitychange", onVisibilityChange)
     }
   }, [enabled, workspaceId, refresh, refreshSync])

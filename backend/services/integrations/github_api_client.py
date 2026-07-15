@@ -32,7 +32,7 @@ import base64
 import logging
 import time
 from typing import Any, Protocol
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 
 import httpx
 
@@ -784,12 +784,20 @@ class GitHubAPIClient:
         """
         issues: list[dict[str, Any]] = []
         for page in range(1, max_pages + 1):
-            path = (
-                f"/repos/{repo}/issues?state={state}&per_page=100&page={page}"
-                "&sort=updated&direction=asc"
-            )
+            query: dict[str, str | int] = {
+                "state": state,
+                "per_page": 100,
+                "page": page,
+                "sort": "updated",
+                "direction": "asc",
+            }
             if since:
-                path += f"&since={since}"
+                query["since"] = since
+            # Never interpolate timestamps directly into a query string. A UTC
+            # offset contains '+', which form-style query decoding turns into a
+            # space; GitHub then returns an empty page and silently misses closed
+            # issues. urlencode preserves the exact cursor as `%2B00%3A00`.
+            path = f"/repos/{repo}/issues?{urlencode(query)}"
             response = await self._request("GET", path)
             if response.status_code != 200:
                 self._raise_for_status(response)

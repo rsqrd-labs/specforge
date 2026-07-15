@@ -211,10 +211,17 @@ GITHUB_APP_WEBHOOK_SECRET=the-secret-you-generated-in-B.2
 GITHUB_APP_WEBHOOK_SECRET_PREV=
 GITHUB_APP_CLIENT_ID=your-app-client-id
 GITHUB_APP_CLIENT_SECRET=your-app-client-secret
+GITHUB_WEBHOOK_PROXY_URL=https://smee.io/your-channel
 ```
 
 Leave `GITHUB_APP_WEBHOOK_SECRET_PREV` blank — it's only used later when
 *rotating* a secret (see `docs/RUNBOOK.md` §12.2), not for first-time setup.
+Set `GITHUB_WEBHOOK_PROXY_URL` to the same Smee URL configured on this separate
+development GitHub App. The default Compose stack supervises the forwarder and
+delivers the original signed request to `/integrations/github/webhook`; no
+separate terminal command is required. Leave this variable blank outside local
+development and configure the App with the deployed API's public HTTPS webhook
+URL instead.
 
 ### B.5 — Restart the backend and worker
 

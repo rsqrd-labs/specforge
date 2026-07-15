@@ -1087,9 +1087,12 @@ export async function resyncWorkspace(
 /** Recover task states from GitHub's issues list — reconcile missed events (202). */
 export async function backfillWorkspace(
   workspaceId: string,
+  automatic = false,
 ): Promise<SyncRefreshAccepted> {
   const response = await api.post<SyncRefreshAccepted>(
     `/workspaces/${workspaceId}/sync/backfill`,
+    null,
+    automatic ? { params: { automatic: true } } : undefined,
   )
   return response.data
 }

@@ -422,6 +422,42 @@ async def test_backfill_enqueues_202(engine) -> None:
         await _teardown(maker, seeded)
 
 
+async def test_automatic_backfill_coalesces_requests_by_time_window(engine) -> None:
+    maker = async_sessionmaker(engine, expire_on_commit=False)
+    seeded = await _seed(maker)
+    enqueued: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+
+    async def fake_enqueue(job: str, *args: Any, **kwargs: Any) -> str:
+        enqueued.append(((job, *args), kwargs))
+        return "job-id"
+
+    app = _build_app(engine, seeded["user"], fake_enqueue)
+    monkey = pytest.MonkeyPatch()
+    monkey.setattr(workspace_router, "enqueue", fake_enqueue)
+    try:
+        async with _client(app) as client:
+            first = await client.post(
+                f"/workspaces/{seeded['workspace'].id}/sync/backfill",
+                params={"automatic": "true"},
+            )
+            second = await client.post(
+                f"/workspaces/{seeded['workspace'].id}/sync/backfill",
+                params={"automatic": "true"},
+            )
+        assert first.status_code == 202
+        assert second.status_code == 202
+        assert [call[0] for call in enqueued] == [
+            ("refresh_task_states", str(seeded["push"].id)),
+            ("refresh_task_states", str(seeded["push"].id)),
+        ]
+        first_job_id = enqueued[0][1]["job_id"]
+        assert first_job_id.startswith(f"github-refresh:{seeded['push'].id}:")
+        assert enqueued[1][1]["job_id"] == first_job_id
+    finally:
+        monkey.undo()
+        await _teardown(maker, seeded)
+
+
 async def test_backfill_503_when_queue_unavailable(engine) -> None:
     from services.queue import QueueUnavailableError
 
