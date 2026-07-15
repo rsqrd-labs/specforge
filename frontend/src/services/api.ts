@@ -523,7 +523,7 @@ export async function getRetentionPolicy(): Promise<RetentionPolicy> {
 
 export async function updateWorkspace(
   id: string,
-  payload: Partial<Pick<Workspace, "name" | "problem_statement">>,
+  payload: Partial<Pick<Workspace, "name" | "problem_statement" | "target_agent">>,
 ): Promise<WorkspaceWithStages> {
   const response = await api.patch<WorkspaceWithStages>(`/workspaces/${id}`, payload)
   return response.data
@@ -649,6 +649,17 @@ export async function exportWorkspace(id: string): Promise<Blob> {
   const response = await api.post<Blob>(`/workspaces/${id}/export`, undefined, {
     responseType: "blob",
   })
+  return response.data
+}
+
+export async function downloadAgentInstructions(
+  id: string,
+  target: "codex" | "claude_code" | "both",
+): Promise<Blob> {
+  const response = await api.get<Blob>(
+    `/workspaces/${id}/export/agent-instructions/${target}`,
+    { responseType: "blob" },
+  )
   return response.data
 }
 

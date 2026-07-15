@@ -16,7 +16,7 @@ WorkspaceStatus = Literal["active", "archived"]
 # Demo Day mode (docs/DEMO_DAY_MODE_IMPLEMENTATION_PLAN.md). A generation profile
 # chosen at creation; default 'standard' keeps the existing path byte-identical.
 WorkspaceMode = Literal["standard", "demo_day"]
-TargetAgent = Literal["claude_code", "codex"]
+TargetAgent = Literal["claude_code", "codex", "both"]
 # Soft upper bound on the advisory build-time target (24h). Rejects absurd input
 # at the boundary; the linter's default is 300 (5h) when unset.
 _TIME_BUDGET_MAX_MINUTES = 24 * 60
@@ -72,13 +72,11 @@ class WorkspaceCreate(BaseModel):
             if self.target_agent is None:
                 raise ValueError(
                     "target_agent is required when mode is 'demo_day' "
-                    "(one of: claude_code, codex)"
+                    "(one of: claude_code, codex, both)"
                 )
         else:
-            # Demo-Day-only metadata never rides a standard workspace — drop it
-            # so the persisted row is self-consistent and the standard path is
-            # unchanged regardless of what a client sent.
-            self.target_agent = None
+            # The agent-instruction target applies to both workspace modes.
+            # Only the construction time budget remains Demo-Day-specific.
             self.time_budget_minutes = None
         return self
 
@@ -90,12 +88,17 @@ class WorkspaceUpdate(BaseModel):
         min_length=PROBLEM_STATEMENT_MIN_CHARS,
         max_length=PROBLEM_STATEMENT_MAX_CHARS,
     )
+    target_agent: TargetAgent | None = None
 
     model_config = ConfigDict(from_attributes=True)
 
     @model_validator(mode="after")
     def at_least_one_field(self) -> "WorkspaceUpdate":
-        if self.name is None and self.problem_statement is None:
+        if (
+            self.name is None
+            and self.problem_statement is None
+            and self.target_agent is None
+        ):
             raise ValueError("At least one workspace field must be provided")
         return self
 

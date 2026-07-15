@@ -34,6 +34,7 @@ const CHECK_LABELS: Record<string, string> = {
 const MANUAL_FILENAME: Record<TargetAgent, string> = {
   claude_code: "CLAUDE.md",
   codex: "AGENTS.md",
+  both: "CLAUDE.md + AGENTS.md",
 }
 
 /** Format an advisory minute estimate as a friendly "~Xh Ym" / "~Xm" string. */

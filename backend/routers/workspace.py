@@ -49,7 +49,11 @@ from services.integrations.push_repo import (
 from services.llm.provider_status import is_provider_configured
 from services.pipeline import github_export_service, pdf_export_service, spec_clarifier
 from services.pipeline.critic import AUDIT_EVENT_CRITIC_DISABLED
-from services.pipeline.export_service import ExportNotReadyError, build_export
+from services.pipeline.export_service import (
+    ExportNotReadyError,
+    build_agent_instruction_export,
+    build_export,
+)
 from services.pipeline.increment_service import (
     IncrementBaselineError,
     IncrementError,
@@ -207,6 +211,7 @@ async def update_workspace(
         payload.name,
         db,
         problem_statement=payload.problem_statement,
+        target_agent=payload.target_agent,
     )
     return WorkspaceResponse.model_validate(workspace)
 
@@ -401,6 +406,30 @@ async def export_workspace(
         content=zip_bytes,
         media_type="application/zip",
         headers={"Content-Disposition": (f'attachment; filename="specforge-{id}.zip"')},
+    )
+
+
+@router.get("/{id}/export/agent-instructions/{target}")
+async def export_agent_instructions(
+    id: UUID,
+    target: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> Response:
+    if target not in {"codex", "claude_code", "both"}:
+        raise HTTPException(status_code=404, detail="Unsupported instruction target")
+    try:
+        content, filename, media_type = await build_agent_instruction_export(
+            id, user.id, db, target
+        )
+    except ExportNotReadyError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail=str(exc)
+        ) from exc
+    return Response(
+        content=content,
+        media_type=media_type,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 
 

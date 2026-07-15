@@ -56,6 +56,7 @@ const MODE_OPTIONS: { id: WorkspaceMode; name: string; desc: string }[] = [
 const AGENT_OPTIONS: { id: TargetAgent; name: string; desc: string }[] = [
   { id: "claude_code", name: "Claude Code", desc: "CLAUDE.md operating manual" },
   { id: "codex", name: "Codex", desc: "AGENTS.md operating manual" },
+  { id: "both", name: "Both", desc: "CLAUDE.md and AGENTS.md" },
 ]
 
 // Default agent for a Demo Day workspace. The backend requires target_agent when
@@ -149,13 +150,11 @@ export function CreateWorkspaceModal({
         problem_statement: statement,
         provider,
         template_slug: activeTemplate?.slug ?? null,
+        target_agent: targetAgent,
       }
-      // Only attach the Demo Day fields for an actual Demo Day workspace, so a
-      // standard create request stays byte-identical to today (§4 regression
-      // pin) regardless of whether the build flag is on.
+      // Mode remains Demo-Day-only; agent instructions apply to every workspace.
       if (isDemoDay) {
         payload.mode = "demo_day"
-        payload.target_agent = targetAgent
       }
       const ws = await createWorkspace(payload)
       navigate(`/workspace/${ws.id}`)
@@ -320,34 +319,29 @@ export function CreateWorkspaceModal({
                 ))}
               </div>
 
-              {/* Target-agent picker — revealed only for Demo Day, since the
-                  build-ready guarantee requires a test-executing agent. */}
-              {isDemoDay && (
-                <div className="modal-agent">
-                  <span className="modal-label">Coding agent</span>
-                  <div className="modal-mode-grid">
-                    {AGENT_OPTIONS.map((a) => (
-                      <button
-                        key={a.id}
-                        type="button"
-                        onClick={() => setTargetAgent(a.id)}
-                        aria-pressed={targetAgent === a.id}
-                        className={`provider-pill${targetAgent === a.id ? " selected" : ""}`}
-                      >
-                        <span>{a.name}</span>
-                        <small className="modal-provider-desc">{a.desc}</small>
-                      </button>
-                    ))}
-                  </div>
-                  <p className="modal-mode-hint">
-                    Hand the exported bundle to your agent, implement the tasks
-                    one by one, and arrive at a working prototype — verified by
-                    construction.
-                  </p>
-                </div>
-              )}
             </div>
           )}
+
+          <div className="modal-agent">
+            <span className="modal-label">Coding agent instructions</span>
+            <div className="modal-mode-grid">
+              {AGENT_OPTIONS.map((a) => (
+                <button
+                  key={a.id}
+                  type="button"
+                  onClick={() => setTargetAgent(a.id)}
+                  aria-pressed={targetAgent === a.id}
+                  className={`provider-pill${targetAgent === a.id ? " selected" : ""}`}
+                >
+                  <span>{a.name}</span>
+                  <small className="modal-provider-desc">{a.desc}</small>
+                </button>
+              ))}
+            </div>
+            <p className="modal-mode-hint">
+              Selected instruction files are included in ZIP and GitHub exports.
+            </p>
+          </div>
 
           {/* Advanced (provider) */}
           <div className="modal-advanced">

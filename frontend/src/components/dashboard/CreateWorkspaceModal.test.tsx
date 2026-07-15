@@ -66,12 +66,12 @@ describe("CreateWorkspaceModal — Demo Day mode", () => {
   it("hides the Mode selector entirely when the build flag is off", () => {
     renderModal()
     expect(screen.queryByText("Demo Day")).not.toBeInTheDocument()
-    expect(screen.queryByText(/Coding agent/)).not.toBeInTheDocument()
+    expect(screen.getByText(/Coding agent instructions/)).toBeInTheDocument()
     // Standard pipeline preview is unchanged (no handoff step).
     expect(screen.queryByText(/Build-ready handoff/)).not.toBeInTheDocument()
   })
 
-  it("omits mode/target_agent from the payload on a standard create (regression pin)", async () => {
+  it("sends the selected agent for a standard create", async () => {
     const user = userEvent.setup()
     renderModal()
     await user.type(screen.getByLabelText("Idea Name"), "Todos")
@@ -81,7 +81,7 @@ describe("CreateWorkspaceModal — Demo Day mode", () => {
     await waitFor(() => expect(createWorkspaceMock).toHaveBeenCalledOnce())
     const payload = createWorkspaceMock.mock.calls[0][0]
     expect(payload).not.toHaveProperty("mode")
-    expect(payload).not.toHaveProperty("target_agent")
+    expect(payload.target_agent).toBe("claude_code")
   })
 
   it("reveals the Mode selector when the flag is on", () => {
@@ -89,8 +89,7 @@ describe("CreateWorkspaceModal — Demo Day mode", () => {
     renderModal()
     expect(screen.getByText("Standard")).toBeInTheDocument()
     expect(screen.getByText("Demo Day")).toBeInTheDocument()
-    // The agent picker is hidden until Demo Day is selected.
-    expect(screen.queryByText(/Coding agent/)).not.toBeInTheDocument()
+    expect(screen.getByText(/Coding agent instructions/)).toBeInTheDocument()
   })
 
   it("reveals the target-agent picker and handoff preview when Demo Day is chosen", async () => {
@@ -102,6 +101,7 @@ describe("CreateWorkspaceModal — Demo Day mode", () => {
     expect(screen.getByText(/Coding agent/)).toBeInTheDocument()
     expect(screen.getByRole("button", { name: /Claude Code/ })).toBeInTheDocument()
     expect(screen.getByRole("button", { name: /Codex/ })).toBeInTheDocument()
+    expect(screen.getByRole("button", { name: /Both/ })).toBeInTheDocument()
     // The pipeline preview gains the handoff step (exact text — distinct from the
     // longer mode-option description).
     expect(screen.getByText("Build-ready handoff")).toBeInTheDocument()

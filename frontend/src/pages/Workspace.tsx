@@ -85,12 +85,14 @@ import {
   updateWorkspace,
   updateStageContent,
   downloadStoryboard,
+  downloadAgentInstructions,
   type ClarifyAnswer,
 } from "../services/api"
 import { useStageStore } from "../store/stageStore"
 import { useWorkspaceStore } from "../store/workspaceStore"
 import type { EvalResult, RefineResponse, Stage, StageType } from "../types/stage"
 import type { StoryboardDetail, StoryboardDownloadKind } from "../types/storyboard"
+import type { TargetAgent } from "../types/workspace"
 import {
   actionAlertFromMessage,
   actionAlertFromStreamError,
@@ -422,6 +424,8 @@ export default function Workspace() {
   const [showShareModal, setShowShareModal] = useState(false)
   const [showExportMenu, setShowExportMenu] = useState(false)
   const [isPdfExporting, setIsPdfExporting] = useState(false)
+  const [agentDownloadTarget, setAgentDownloadTarget] = useState<TargetAgent | null>(null)
+  const [isUpdatingAgentTarget, setIsUpdatingAgentTarget] = useState(false)
   // Demo Day handoff-bundle download (separate from the generic export so the
   // panel's button has its own in-flight state and post-download verdict refresh).
   const [isDownloadingBundle, setIsDownloadingBundle] = useState(false)
@@ -1535,6 +1539,37 @@ export default function Workspace() {
     }
   }, [id, isPdfExporting, allFinalised, currentWorkspace?.name, showAlert])
 
+  const handleAgentTargetChange = useCallback(async (target: TargetAgent) => {
+    if (!id || isUpdatingAgentTarget) return
+    setIsUpdatingAgentTarget(true)
+    try {
+      const workspace = await updateWorkspace(id, { target_agent: target })
+      setCurrentWorkspace(workspace)
+    } catch (error) {
+      setGenericError(getApiErrorMessage(error, "Could not update agent instructions."))
+    } finally {
+      setIsUpdatingAgentTarget(false)
+    }
+  }, [id, isUpdatingAgentTarget, setCurrentWorkspace, setGenericError])
+
+  const handleAgentInstructionsDownload = useCallback(async (target: TargetAgent) => {
+    if (!id || !allFinalised || agentDownloadTarget) return
+    setAgentDownloadTarget(target)
+    try {
+      const blob = await downloadAgentInstructions(id, target)
+      const filename = target === "codex"
+        ? "AGENTS.md"
+        : target === "claude_code"
+          ? "CLAUDE.md"
+          : "specforge-agent-instructions.zip"
+      saveBlob(blob, filename)
+    } catch (error) {
+      setGenericError(getApiErrorMessage(error, "Agent-instruction download failed."))
+    } finally {
+      setAgentDownloadTarget(null)
+    }
+  }, [id, allFinalised, agentDownloadTarget, setGenericError])
+
   // Demo Day handoff bundle (plan §8). Reuses the standard ZIP export — which,
   // for a demo_day workspace, already carries the operating manual +
   // CONSTRUCTION_REPORT.md and re-runs the construction verdict server-side when
@@ -2127,6 +2162,20 @@ export default function Workspace() {
               </button>
               {showExportMenu && (
                 <div className="ws-export-menu" role="menu">
+                  <label className="ws-export-item" htmlFor="workspace-agent-target">
+                    <span>Bundle instructions</span>
+                    <select
+                      id="workspace-agent-target"
+                      aria-label="Bundle agent instructions"
+                      value={currentWorkspace?.target_agent ?? "codex"}
+                      disabled={isUpdatingAgentTarget}
+                      onChange={(event) => void handleAgentTargetChange(event.target.value as TargetAgent)}
+                    >
+                      <option value="codex">AGENTS.md</option>
+                      <option value="claude_code">CLAUDE.md</option>
+                      <option value="both">Both files</option>
+                    </select>
+                  </label>
                   <button
                     type="button"
                     role="menuitem"
@@ -2138,6 +2187,25 @@ export default function Workspace() {
                     <DownloadIcon />
                     <span>{isExporting ? "Exporting…" : "ZIP"}</span>
                   </button>
+                  {(["codex", "claude_code", "both"] as const).map((target) => (
+                    <button
+                      key={target}
+                      type="button"
+                      role="menuitem"
+                      className="ws-export-item"
+                      disabled={!allFinalised || agentDownloadTarget !== null}
+                      onClick={() => void handleAgentInstructionsDownload(target)}
+                    >
+                      <DownloadIcon />
+                      <span>
+                        {target === "codex"
+                          ? "Download AGENTS.md"
+                          : target === "claude_code"
+                            ? "Download CLAUDE.md"
+                            : "Download both instruction files"}
+                      </span>
+                    </button>
+                  ))}
                   <button
                     type="button"
                     role="menuitem"

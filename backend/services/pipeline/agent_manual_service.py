@@ -18,11 +18,15 @@ from __future__ import annotations
 import re
 from typing import Protocol
 
+from services.integrations import agents_md_builder
+from services.integrations.task_parser import parse_tasks
 from services.security.sanitizer import sanitize_downstream_agent_content
 
 _CLAUDE_FILENAME = "CLAUDE.md"
 _AGENTS_FILENAME = "AGENTS.md"
 CONSTRUCTION_REPORT_FILENAME = "CONSTRUCTION_REPORT.md"
+DEMO_MANAGED_START = "<!-- specforge:demo-day:start -->"
+DEMO_MANAGED_END = "<!-- specforge:demo-day:end -->"
 
 # The plan's ## Technology Stack section heading (Demo Day plan contract).
 _TECH_STACK_HEADING = "## Technology Stack"
@@ -37,6 +41,15 @@ class _WorkspaceLike(Protocol):
 def manual_filename(target_agent: str | None) -> str:
     """The operating-manual filename for the target agent (defaults to AGENTS.md)."""
     return _CLAUDE_FILENAME if target_agent == "claude_code" else _AGENTS_FILENAME
+
+
+def effective_targets(target_agent: str | None) -> tuple[str, ...]:
+    """Resolve the persisted selection; legacy NULL remains Codex-compatible."""
+    if target_agent == "both":
+        return ("codex", "claude_code")
+    if target_agent == "claude_code":
+        return ("claude_code",)
+    return ("codex",)
 
 
 def _extract_technology_stack(plan_content: str) -> str:
@@ -73,17 +86,32 @@ def _agent_todo_note(target_agent: str | None) -> str:
     )
 
 
-def build_agent_manual(workspace: _WorkspaceLike, plan_content: str) -> tuple[str, str]:
+def build_agent_manual(
+    workspace: _WorkspaceLike,
+    plan_content: str,
+    *,
+    target_agent: str | None = None,
+    tasks_content: str = "",
+) -> tuple[str, str]:
     """Return ``(filename, content)`` for the Demo Day operating manual.
 
     ``plan_content`` is the finalised PLAN.md text; the pinned stack is
     interpolated from its ## Technology Stack section.
     """
-    filename = manual_filename(workspace.target_agent)
+    selected = target_agent or workspace.target_agent
+    filename = manual_filename(selected)
     stack = _extract_technology_stack(plan_content)
-    todo_note = _agent_todo_note(workspace.target_agent)
+    todo_note = _agent_todo_note(selected)
     name = (workspace.name or "this build").strip() or "this build"
-    content = f"""# Build Protocol — {name}
+    task_lines = [
+        f"- [ ] {sanitize_downstream_agent_content(task.ref)}: "
+        f"{sanitize_downstream_agent_content(task.title)}"
+        for task in parse_tasks(tasks_content)
+    ]
+    checklist = "\n".join(task_lines) or "- Follow the ordered tasks in `TASKS.md`."
+    managed = f"""# Build Protocol — {name}
+
+_Renderer: demo-day-v2. Managed by SpecForge._
 
 You are implementing this Demo Day build from SPEC.md, PLAN.md, the harness, and
 TASKS.md. Follow this protocol exactly. The four documents are the contract; this file
@@ -114,11 +142,39 @@ For each task T-NNN:
 
 {todo_note}
 
+## Task checklist
+{checklist}
+
 ## Definition of done
 All tasks complete AND the end-to-end smoke test is green. At that point the prototype
 does what SPEC.md's Acceptance Criteria specify — by construction.
 """
+    content = f"{DEMO_MANAGED_START}\n{managed.strip()}\n{DEMO_MANAGED_END}\n"
     return filename, content
+
+
+def build_instruction_files(
+    workspace: _WorkspaceLike,
+    stages: dict[str, str],
+    *,
+    target_agent: str | None = None,
+) -> dict[str, str]:
+    """Render exactly the selected standard or Demo Day instruction files."""
+    selection = workspace.target_agent if target_agent is None else target_agent
+    files: dict[str, str] = {}
+    for target in effective_targets(selection):
+        if getattr(workspace, "mode", "standard") == "demo_day":
+            filename, content = build_agent_manual(
+                workspace,
+                stages.get("plan", ""),
+                target_agent=target,
+                tasks_content=stages.get("tasks", ""),
+            )
+        else:
+            filename = manual_filename(target)
+            content = agents_md_builder.build_agents_md(stages)
+        files[filename] = content
+    return files
 
 
 def build_construction_report(verdict: dict) -> str:

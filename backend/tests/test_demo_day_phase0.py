@@ -73,7 +73,7 @@ async def test_demo_day_payload_is_forced_standard_when_flag_off(
     )
     workspace = await svc.create(uuid4(), payload, db)
     assert workspace.mode == "standard"
-    assert workspace.target_agent is None
+    assert workspace.target_agent == "claude_code"
     assert workspace.time_budget_minutes is None
 
 
@@ -110,11 +110,11 @@ def test_demo_day_requires_target_agent() -> None:
         _standard_payload(mode="demo_day")
 
 
-def test_standard_mode_drops_demo_day_metadata() -> None:
+def test_standard_mode_keeps_agent_and_drops_demo_day_budget() -> None:
     payload = _standard_payload(
         mode="standard", target_agent="claude_code", time_budget_minutes=200
     )
-    assert payload.target_agent is None
+    assert payload.target_agent == "claude_code"
     assert payload.time_budget_minutes is None
 
 
@@ -126,6 +126,13 @@ def test_invalid_mode_rejected() -> None:
 def test_invalid_target_agent_rejected() -> None:
     with pytest.raises(ValidationError):
         _standard_payload(mode="demo_day", target_agent="cursor")
+
+
+def test_both_target_agents_is_valid_for_standard_and_demo_day() -> None:
+    assert _standard_payload(target_agent="both").target_agent == "both"
+    assert (
+        _standard_payload(mode="demo_day", target_agent="both").target_agent == "both"
+    )
 
 
 def test_non_positive_time_budget_rejected() -> None:

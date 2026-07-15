@@ -49,6 +49,7 @@ Idempotent re-export:
 from __future__ import annotations
 
 import logging
+import re
 from contextlib import nullcontext
 from datetime import UTC, datetime
 from typing import Any
@@ -703,10 +704,8 @@ async def _write_files_to_default(
     for path, content in files_to_push.items():
         sha = await client.get_file_sha(repo, path)
         await client.upsert_file(repo, path, content, sha, commit_message)
-    if not _suppress_generic_agents_md(workspace):
-        await _push_agents_md(client, repo, stages)
-    # Demo Day construction report on the default branch (plan §8.2). The manual
-    # already rode the file map; the report needs the (refreshed) verdict.
+    await _sync_agent_instruction_files(client, repo, workspace, stages)
+    # Demo Day construction report on the default branch (plan §8.2).
     if getattr(workspace, "mode", "standard") == "demo_day":
         await _push_demo_day_report(client, repo, db, workspace, stages)
     await _sync_issues(db, client, repo, push, tasks)
@@ -741,14 +740,10 @@ async def _write_pr_with_tests(
     for path, content in docs.items():
         sha = await client.get_file_sha(repo, path)
         await client.upsert_file(repo, path, content, sha, docs_message)
-    # Repo-level agent context on the default branch alongside the docs. For a
-    # codex Demo Day workspace the operating manual owns AGENTS.md, so the generic
-    # context file is suppressed and the manual is written below instead.
-    if not _suppress_generic_agents_md(workspace):
-        await _push_agents_md(client, repo, stages)
+    # Mode-aware agent instructions live on the default branch with the docs.
+    await _sync_agent_instruction_files(client, repo, workspace, stages)
     # Demo Day operating manual + construction report on the default branch (§8).
     if getattr(workspace, "mode", "standard") == "demo_day":
-        await _push_demo_day_manual(client, repo, workspace, stages)
         await _push_demo_day_report(client, repo, db, workspace, stages)
 
     # 2. Issues (records issue numbers used for the PR's Closes #N links).
@@ -881,7 +876,60 @@ async def _push_demo_day_report(
     )
 
 
-async def _push_demo_day_manual(
+_DEMO_MANAGED_RE = re.compile(
+    re.escape(agent_manual_service.DEMO_MANAGED_START)
+    + r".*?"
+    + re.escape(agent_manual_service.DEMO_MANAGED_END),
+    re.DOTALL,
+)
+
+
+def _merge_instruction_file(existing: str | None, generated: str) -> str:
+    """Merge a selected instruction block without touching user-authored text."""
+    if agent_manual_service.DEMO_MANAGED_START in generated:
+        block = generated.strip()
+        if not existing:
+            return block + "\n"
+        match = _DEMO_MANAGED_RE.search(existing)
+        if match:
+            return existing[: match.start()] + block + existing[match.end() :]
+        # Conservative migration of the old unmarked SpecForge manual. Its full
+        # fixed structure is distinctive; ambiguous files are preserved.
+        legacy_markers = (
+            existing.startswith("# Build Protocol — "),
+            "## Non-negotiable invariants" in existing,
+            "## The loop" in existing,
+            "## Definition of done" in existing,
+            "The tests are the frozen oracle" in existing,
+        )
+        if all(legacy_markers):
+            return block + "\n"
+        separator = (
+            ""
+            if existing.endswith("\n\n")
+            else "\n" if existing.endswith("\n") else "\n\n"
+        )
+        return f"{existing}{separator}{block}\n"
+    # Standard renderer already implements safe generic managed-block merging.
+    block = agents_md_builder.managed_block(generated)
+    if block is None:
+        return generated
+    if not existing:
+        return block + "\n"
+    return agents_md_builder.merge_managed_block(existing, block)
+
+
+def _remove_managed_instructions(existing: str) -> tuple[str, bool]:
+    updated, generic_changed = agents_md_builder.remove_managed_block(existing)
+    updated, demo_count = _DEMO_MANAGED_RE.subn("", updated)
+    if not generic_changed and not demo_count:
+        return existing, False
+    # Preserve user bytes outside the managed block. Whitespace-only residue is
+    # considered empty so a SpecForge-only file can be deleted.
+    return (updated if updated.strip() else ""), True
+
+
+async def _sync_agent_instruction_files(
     client: GitHubAPIClient,
     repo: str,
     workspace: Workspace,
@@ -889,58 +937,72 @@ async def _push_demo_day_manual(
     *,
     branch: str | None = None,
 ) -> None:
-    """Write the Demo Day operating manual (CLAUDE.md / AGENTS.md) to the repo.
-
-    Idempotent: reads the current file first and skips the write when the content
-    is unchanged so a re-export emits no spurious commit.
-    """
-    filename, content = agent_manual_service.build_agent_manual(
-        workspace, stages["plan"].content or ""
-    )
-    existing = await client.get_file_content(repo, filename, ref=branch)
-    existing_text = existing[0] if existing else None
-    existing_sha = existing[1] if existing else None
-    if existing is not None and content == existing_text:
-        return
-    await client.upsert_file(
-        repo,
-        filename,
-        content,
-        existing_sha,
-        "docs: SpecForge Demo Day build protocol",
-        branch=branch,
-    )
-
-
-async def _push_agents_md(
-    client: GitHubAPIClient,
-    repo: str,
-    stages: dict[str, Stage],
-    *,
-    branch: str | None = None,
-) -> None:
-    """Write a non-clobbering ``AGENTS.md`` to the repo (T-277).
-
-    Reads any existing file first so a hand-written ``AGENTS.md`` is preserved —
-    only SpecForge's delimited managed block is (re)generated. Deterministic
-    output means a re-sync with unchanged stages produces an identical file (no
-    spurious commit).
-    """
-    stage_md = {stage_type: (stages[stage_type].content or "") for stage_type in stages}
-    existing = await client.get_file_content(repo, "AGENTS.md", ref=branch)
-    existing_text = existing[0] if existing else None
-    existing_sha = existing[1] if existing else None
-    content = agents_md_builder.build_agents_md(stage_md, existing=existing_text)
-    if existing is not None and content == existing_text:
-        return  # idempotent — nothing changed, skip the write (no empty commit)
-    await client.upsert_file(
-        repo,
-        "AGENTS.md",
-        content,
-        existing_sha,
-        "docs: SpecForge agent context",
-        branch=branch,
-    )
+    """Reconcile selected files and safely remove only deselected managed blocks."""
+    stage_md = {kind: (stage.content or "") for kind, stage in stages.items()}
+    selected = agent_manual_service.build_instruction_files(workspace, stage_md)
+    for filename in ("AGENTS.md", "CLAUDE.md"):
+        existing = await client.get_file_content(repo, filename, ref=branch)
+        if filename in selected:
+            existing_text = existing[0] if existing else None
+            existing_sha = existing[1] if existing else None
+            content = _merge_instruction_file(existing_text, selected[filename])
+            if existing is not None and content == existing_text:
+                continue
+            await client.upsert_file(
+                repo,
+                filename,
+                content,
+                existing_sha,
+                "docs: SpecForge agent instructions",
+                branch=branch,
+            )
+            logger.info(
+                "agent instruction file synced: repo=%s path=%s", repo, filename
+            )
+            github_audit(
+                "github.agent_instruction.synced",
+                workspace_id=str(workspace.id),
+                status=filename,
+            )
+            continue
+        if existing is None:
+            continue
+        cleaned, changed = _remove_managed_instructions(existing[0])
+        if not changed:
+            logger.info(
+                "agent instruction cleanup skipped for unowned file: repo=%s path=%s",
+                repo,
+                filename,
+            )
+            github_audit(
+                "github.agent_instruction.cleanup_skipped",
+                workspace_id=str(workspace.id),
+                status=filename,
+            )
+            continue
+        if cleaned:
+            await client.upsert_file(
+                repo,
+                filename,
+                cleaned,
+                existing[1],
+                "docs: remove stale SpecForge agent instructions",
+                branch=branch,
+            )
+        else:
+            await client.delete_file(
+                repo,
+                filename,
+                existing[1],
+                "docs: remove stale SpecForge agent instructions",
+                branch=branch,
+            )
+        logger.info("agent instruction file cleaned: repo=%s path=%s", repo, filename)
+        github_audit(
+            "github.agent_instruction.cleaned",
+            workspace_id=str(workspace.id),
+            status=filename,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1290,32 +1352,12 @@ def _build_file_map(
 
     SPEC.md / PLAN.md / TASKS.md at repo root, plus everything from the
     harness/ directory parsed out of stages['harness'].content via the
-    same parser the ZIP export uses (single source of truth). For a Demo Day
-    workspace the agent operating manual (CLAUDE.md / AGENTS.md) is added so the
-    pushed repo is ready to hand to the user's coding agent (plan §8); standard
-    workspaces get the unchanged map.
+    same parser the ZIP export uses (single source of truth). Agent instruction
+    files are reconciled separately so user-authored content can be preserved.
     """
     files: dict[str, str] = {}
     for stage_type, filename in _STAGE_FILES.items():
         files[filename] = stages[stage_type].content or ""
     harness_files = parse_harness_files(stages["harness"].content or "")
     files.update(harness_files)
-    if workspace is not None and getattr(workspace, "mode", "standard") == "demo_day":
-        manual_filename, manual_body = agent_manual_service.build_agent_manual(
-            workspace, stages["plan"].content or ""
-        )
-        files[manual_filename] = manual_body
     return files
-
-
-def _suppress_generic_agents_md(workspace: Workspace) -> bool:
-    """True when the Demo Day operating manual already owns AGENTS.md (codex).
-
-    For a codex Demo Day workspace the operating manual IS AGENTS.md, so the
-    generic agent-context AGENTS.md must NOT overwrite it. claude_code uses
-    CLAUDE.md, so the generic AGENTS.md can coexist there.
-    """
-    return (
-        getattr(workspace, "mode", "standard") == "demo_day"
-        and workspace.target_agent == "codex"
-    )

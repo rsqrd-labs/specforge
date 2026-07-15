@@ -5914,6 +5914,18 @@ button:disabled {
   color: var(--brand-primary);
 }
 
+.ws-export-item select {
+  margin-left: auto;
+  max-width: 112px;
+  border: 1px solid rgba(143, 78, 0, 0.18);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.72);
+  color: var(--ink-text);
+  font: inherit;
+  font-weight: 600;
+  padding: 3px 5px;
+}
+
 .ws-export-item.ready:not(:disabled) {
   color: var(--status-success-soft-text);
 }

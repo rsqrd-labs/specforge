@@ -168,14 +168,14 @@ async def build_export(workspace_id: UUID, user_id: UUID, db: AsyncSession) -> b
         for path, content in harness_files.items():
             zf.writestr(path, content)
 
-        # Demo Day mode (plan §8): add the agent operating manual so the bundle is
-        # ready to hand to the user's coding agent. Standard exports are
-        # byte-identical (this whole block is skipped).
+        stage_md = {kind: (stage.content or "") for kind, stage in stages.items()}
+        for (
+            instruction_path,
+            instruction_body,
+        ) in agent_manual_service.build_instruction_files(workspace, stage_md).items():
+            zf.writestr(instruction_path, instruction_body)
+
         if getattr(workspace, "mode", "standard") == "demo_day":
-            manual_filename, manual_body = agent_manual_service.build_agent_manual(
-                workspace, stages["plan"].content or ""
-            )
-            zf.writestr(manual_filename, manual_body)
             # CONSTRUCTION_REPORT.md (plan §7.3/§8.2): refresh the verdict if a
             # stage was refined after it was computed (zero-LLM, cheap), then
             # render it. ensure_fresh_verdict is fail-open, so a hiccup just ships
@@ -187,3 +187,40 @@ async def build_export(workspace_id: UUID, user_id: UUID, db: AsyncSession) -> b
                 zf.writestr(agent_manual_service.CONSTRUCTION_REPORT_FILENAME, report)
 
     return buf.getvalue()
+
+
+async def build_agent_instruction_export(
+    workspace_id: UUID,
+    user_id: UUID,
+    db: AsyncSession,
+    target: str,
+) -> tuple[bytes, str, str]:
+    """Build one Markdown instruction file or a two-file ZIP download."""
+    if target not in {"codex", "claude_code", "both"}:
+        raise ValueError("unsupported agent-instruction target")
+    ws_result = await db.execute(select(Workspace).where(Workspace.id == workspace_id))
+    workspace = ws_result.scalar_one_or_none()
+    if workspace is None or workspace.user_id != user_id:
+        raise ExportNotReadyError("Workspace not found")
+    stages_result = await db.execute(
+        select(Stage).where(Stage.workspace_id == workspace_id)
+    )
+    stages = {stage.type: stage for stage in stages_result.scalars()}
+    for stage_type in ("spec", "plan", "harness", "tasks"):
+        stage = stages.get(stage_type)
+        if stage is None or stage.status != "finalised":
+            raise ExportNotReadyError(
+                f"Stage {stage_type!r} is not finalised — export unavailable"
+            )
+    stage_md = {kind: (stage.content or "") for kind, stage in stages.items()}
+    files = agent_manual_service.build_instruction_files(
+        workspace, stage_md, target_agent=target
+    )
+    if target != "both":
+        filename, content = next(iter(files.items()))
+        return content.encode("utf-8"), filename, "text/markdown; charset=utf-8"
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for filename in ("AGENTS.md", "CLAUDE.md"):
+            zf.writestr(filename, files[filename])
+    return buf.getvalue(), "specforge-agent-instructions.zip", "application/zip"

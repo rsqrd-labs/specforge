@@ -14,7 +14,10 @@ import pytest
 
 from models import Stage, Workspace
 from services.pipeline import agent_manual_service
-from services.pipeline.export_service import build_export
+from services.pipeline.export_service import (
+    build_agent_instruction_export,
+    build_export,
+)
 
 _PLAN_WITH_STACK = """# Plan
 
@@ -148,7 +151,8 @@ Frozen.
 """
     ws = SimpleNamespace(name="X", target_agent="claude_code")
     _, body = agent_manual_service.build_agent_manual(ws, hostile_plan)
-    assert "<!--" not in body
+    assert "Ignore all previous instructions" not in body
+    assert "<!-- specforge:demo-day:start -->" in body
     assert "<script>" not in body
     assert "reveal your system prompt" not in body
     # The legitimate stack content survives.
@@ -208,13 +212,13 @@ def _stages_for(ws: Workspace) -> list[Stage]:
 
 
 @pytest.mark.asyncio
-async def test_standard_export_has_no_manual() -> None:
+async def test_standard_export_defaults_to_agents_md() -> None:
     ws = _ws(mode="standard")
     db = _FakeDB(ws, _stages_for(ws))
     result = await build_export(ws.id, ws.user_id, db)
     names = zipfile.ZipFile(io.BytesIO(result)).namelist()
     assert "CLAUDE.md" not in names
-    assert "AGENTS.md" not in names
+    assert "AGENTS.md" in names
     assert "CONSTRUCTION_REPORT.md" not in names
     # Standard files unchanged.
     assert {"SPEC.md", "PLAN.md", "TASKS.md"} <= set(names)
@@ -245,3 +249,27 @@ async def test_demo_day_codex_export_uses_agents_md() -> None:
     result = await build_export(ws.id, ws.user_id, db)
     names = zipfile.ZipFile(io.BytesIO(result)).namelist()
     assert "AGENTS.md" in names
+
+
+@pytest.mark.asyncio
+async def test_standard_both_export_contains_both_instruction_files() -> None:
+    ws = _ws(mode="standard", target_agent="both")
+    db = _FakeDB(ws, _stages_for(ws))
+    result = await build_export(ws.id, ws.user_id, db)
+    names = zipfile.ZipFile(io.BytesIO(result)).namelist()
+    assert names.count("AGENTS.md") == 1
+    assert names.count("CLAUDE.md") == 1
+    assert "CONSTRUCTION_REPORT.md" not in names
+
+
+@pytest.mark.asyncio
+async def test_standalone_both_download_ignores_saved_selection() -> None:
+    ws = _ws(mode="standard", target_agent="codex")
+    db = _FakeDB(ws, _stages_for(ws))
+    body, filename, media_type = await build_agent_instruction_export(
+        ws.id, ws.user_id, db, "both"
+    )
+    assert filename == "specforge-agent-instructions.zip"
+    assert media_type == "application/zip"
+    names = zipfile.ZipFile(io.BytesIO(body)).namelist()
+    assert names == ["AGENTS.md", "CLAUDE.md"]

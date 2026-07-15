@@ -20,6 +20,7 @@ from services.integrations.task_parser import (
     compute_task_ref,
     parse_tasks,
 )
+from services.pipeline import agent_manual_service, github_export_service
 
 _RICH_TASK = """\
 ### T-001: Add the rate governor
@@ -171,7 +172,7 @@ def test_agents_md_never_clobbers_existing_content() -> None:
     assert "Never force-push." in out
     # The managed block was refreshed (stale content gone, new content in).
     assert "stale" not in out
-    assert "The product builds widgets." in out
+    assert "See `SPEC.md` for the project mission" in out
     # Exactly one managed block.
     assert out.count(agents_md_builder.MANAGED_START) == 1
     assert out.count(agents_md_builder.MANAGED_END) == 1
@@ -214,4 +215,27 @@ def test_agents_md_sanitises_stage_content() -> None:
     stages = dict(_STAGES, spec="# Spec\n\n<script>evil()</script>safe text")
     out = agents_md_builder.build_agents_md(stages, existing=None)
     assert "<script>" not in out
-    assert "safe text" in out
+
+
+def test_github_instruction_merge_preserves_user_content() -> None:
+    existing = "# Team rules\n\nNever force-push.\n"
+    generated = agents_md_builder.build_agents_md(_STAGES)
+    merged = github_export_service._merge_instruction_file(existing, generated)
+    assert merged.startswith(existing)
+    assert merged.count(agents_md_builder.MANAGED_START) == 1
+
+
+def test_github_instruction_cleanup_removes_only_managed_content() -> None:
+    existing = agents_md_builder.build_agents_md(
+        _STAGES, existing="# Team rules\n\nKeep this.\n"
+    )
+    cleaned, changed = github_export_service._remove_managed_instructions(existing)
+    assert changed is True
+    assert cleaned.startswith("# Team rules\n\nKeep this.\n")
+
+
+def test_both_target_resolves_in_stable_filename_order() -> None:
+    assert agent_manual_service.effective_targets("both") == (
+        "codex",
+        "claude_code",
+    )

@@ -580,6 +580,36 @@ class GitHubAPIClient:
             self._raise_for_status(response)
             return  # unreachable — _raise_for_status always raises on non-2xx
 
+    async def delete_file(
+        self,
+        repo: str,
+        path: str,
+        sha: str,
+        commit_message: str,
+        *,
+        branch: str | None = None,
+    ) -> None:
+        """Delete a file by SHA; absent files are success and 409s retry safely."""
+        current_sha: str | None = sha
+        for attempt in range(1, _UPSERT_MAX_ATTEMPTS + 1):
+            if current_sha is None:
+                return
+            body: dict[str, Any] = {"message": commit_message, "sha": current_sha}
+            if branch is not None:
+                body["branch"] = branch
+            response = await self._request(
+                "DELETE",
+                f"/repos/{repo}/contents/{_quote_path(path)}",
+                json=body,
+            )
+            if response.status_code in (200, 204, 404):
+                return
+            if response.status_code == 409 and attempt < _UPSERT_MAX_ATTEMPTS:
+                current_sha = await self.get_file_sha(repo, path, ref=branch)
+                continue
+            self._raise_for_status(response)
+            return
+
     # ----- git refs / branches / pulls (PR mode, T-276) -----
 
     async def get_ref(self, repo: str, ref: str) -> str:

@@ -10,7 +10,7 @@ from sqlalchemy.orm import selectinload
 
 from config import settings
 from models import Stage, User, Workspace
-from schemas.workspace import WorkspaceCreate
+from schemas.workspace import TargetAgent, WorkspaceCreate
 from services.llm.routing import LLMRoutingError, resolve_llm_route
 from services.security.problem_statement_gate import (
     ProblemStatementValidationError,
@@ -110,6 +110,7 @@ class WorkspaceService:
         name: str | None,
         db: AsyncSession,
         problem_statement: str | None = None,
+        target_agent: TargetAgent | None = None,
     ) -> Workspace:
         workspace = await self.get(workspace_id, user_id, db)
         if name is not None:
@@ -118,6 +119,8 @@ class WorkspaceService:
             await self._assert_problem_statement_is_valid(problem_statement)
             workspace.problem_statement = await sanitize_text_async(problem_statement)
             self._mark_problem_statement_dependents_stale(workspace)
+        if target_agent is not None:
+            workspace.target_agent = target_agent
         await db.commit()
         await db.refresh(workspace)
         return workspace
@@ -210,13 +213,12 @@ class WorkspaceService:
 
         The ``demo_day_mode_enabled`` config flag is the master server-side gate
         (plan §4/§0): when it is off, ``mode`` is forced to ``"standard"`` and the
-        Demo-Day-only metadata is dropped, so a client cannot opt a workspace into
-        Demo Day mode before the feature is enabled and the standard create path
-        stays byte-identical. The schema already guarantees ``target_agent`` is
-        present when ``mode == "demo_day"`` and absent otherwise.
+        Demo-Day-only time budget is dropped, so a client cannot opt a workspace
+        into Demo Day before the feature is enabled. Agent instructions apply to
+        both modes and therefore survive the standard-mode fallback.
         """
         if not settings.demo_day_mode_enabled or payload.mode != "demo_day":
-            return "standard", None, None
+            return "standard", payload.target_agent, None
         return "demo_day", payload.target_agent, payload.time_budget_minutes
 
     def _server_default_model(self, provider: str) -> str:

@@ -50,7 +50,7 @@ class Workspace(Base):
             name="ck_workspaces_mode",
         ),
         CheckConstraint(
-            "target_agent IS NULL OR target_agent IN ('claude_code', 'codex')",
+            "target_agent IS NULL OR target_agent IN ('claude_code', 'codex', 'both')",
             name="ck_workspaces_target_agent",
         ),
         CheckConstraint(
@@ -122,10 +122,8 @@ class Workspace(Base):
         default="standard",
         server_default=text("'standard'"),
     )
-    # The coding agent the export's operating manual is tuned for. NULL for
-    # standard workspaces; required (claude_code | codex) for demo_day. Selects
-    # the manual filename/idiom (CLAUDE.md vs AGENTS.md) and nothing else
-    # structural.
+    # Coding-agent instruction target. Legacy standard rows may be NULL (resolved
+    # as codex at export); Demo Day rows require claude_code | codex | both.
     target_agent: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Advisory build-time target in minutes for a demo_day package. Nullable;
     # the construction verifier falls back to 300 (5h) when NULL. Never certified

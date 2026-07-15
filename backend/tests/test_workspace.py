@@ -333,6 +333,22 @@ async def test_update_workspace_sanitizes_name() -> None:
 
 
 @pytest.mark.asyncio
+async def test_update_workspace_agent_instruction_target() -> None:
+    svc = WorkspaceService()
+    workspace = _make_workspace()
+    db = _FakeDB(workspace=workspace)
+    updated = await svc.update(
+        workspace.id,
+        workspace.user_id,
+        None,
+        db,
+        target_agent="both",
+    )
+    assert updated.target_agent == "both"
+    assert db._committed is True
+
+
+@pytest.mark.asyncio
 async def test_archive_workspace_sets_status() -> None:
     svc = WorkspaceService()
     workspace = _make_workspace()

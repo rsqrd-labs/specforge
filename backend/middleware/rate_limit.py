@@ -127,6 +127,17 @@ _PDF_EXPORT_LIMIT = 10
 _PDF_EXPORT_WINDOW_SECONDS = 3600
 _PDF_EXPORT_DETAIL = "PDF export rate limit reached. Maximum 10 exports per hour."
 
+# Agent-instruction downloads are cheap but still bounded like other workspace
+# downloads so an authenticated client cannot generate unbounded archive traffic.
+_AGENT_INSTRUCTIONS_PATH_RE = re.compile(
+    r"^/workspaces/[^/]+/export/agent-instructions/(?:codex|claude_code|both)/?$"
+)
+_AGENT_INSTRUCTIONS_LIMIT = 30
+_AGENT_INSTRUCTIONS_WINDOW_SECONDS = 3600
+_AGENT_INSTRUCTIONS_DETAIL = (
+    "Agent-instruction download limit reached. Maximum 30 downloads per hour."
+)
+
 # Public view tier (Phase 14, T-USE-09): 120 reads/IP/minute on /public/{slug}.
 # The endpoint is unauthenticated, so we key on the client IP rather than a
 # user_id. A higher per-minute cap than the per-user tiers is intentional —
@@ -550,6 +561,22 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
                 return _rate_limited_custom(
                     detail=_PDF_EXPORT_DETAIL,
                     retry_after_seconds=_PDF_EXPORT_WINDOW_SECONDS,
+                )
+
+        if (
+            user_id
+            and request.method == "GET"
+            and _AGENT_INSTRUCTIONS_PATH_RE.match(path)
+        ):
+            allowed = await check(
+                f"agent_instructions:{user_id}",
+                _AGENT_INSTRUCTIONS_LIMIT,
+                _AGENT_INSTRUCTIONS_WINDOW_SECONDS,
+            )
+            if not allowed:
+                return _rate_limited_custom(
+                    detail=_AGENT_INSTRUCTIONS_DETAIL,
+                    retry_after_seconds=_AGENT_INSTRUCTIONS_WINDOW_SECONDS,
                 )
 
         # T-USE-09: per-user cap on enable/disable/rotate. Catches POST and

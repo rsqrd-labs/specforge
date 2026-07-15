@@ -5,7 +5,7 @@ export type WorkspaceStatus = "active" | "archived"
 // Demo Day mode (docs/DEMO_DAY_MODE_IMPLEMENTATION_PLAN.md). Default "standard"
 // keeps the existing UX unchanged; "demo_day" is gated behind VITE_DEMO_DAY_MODE.
 export type WorkspaceMode = "standard" | "demo_day"
-export type TargetAgent = "claude_code" | "codex"
+export type TargetAgent = "claude_code" | "codex" | "both"
 
 export interface CoverageSummary {
   tests: number
@@ -77,7 +77,7 @@ export interface Workspace {
    * agent handoff bundle.
    */
   mode?: WorkspaceMode
-  /** Coding agent the export's operating manual is tuned for (demo_day only). */
+  /** Coding-agent instruction files included in ZIP and GitHub exports. */
   target_agent?: TargetAgent | null
   /** Advisory build-time target in minutes (demo_day only; target ≤ 300). */
   time_budget_minutes?: number | null
