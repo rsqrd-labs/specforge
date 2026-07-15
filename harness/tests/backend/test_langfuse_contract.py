@@ -207,12 +207,12 @@ def test_base_llm_adapter_signature_unchanged() -> None:
     interface (self, system, user, max_tokens). Phase 11 must not modify the
     abstract interface to instrument it.
 
-    Issue #26 (prompt caching) later added a keyword-only ``cache_system: bool =
-    False`` to both methods. That is a deliberate, backward-compatible interface
-    evolution unrelated to Langfuse — it does not disturb the positional
-    interface and every existing call site keeps working. So the contract here
-    asserts the positional interface is frozen AND that the only addition is the
-    optional keyword-only ``cache_system`` flag (no surprise required params)."""
+    Issue #26 (prompt caching) later added the keyword-only ``cache_system`` and
+    ``cache_policy`` controls to both methods. That is a deliberate,
+    backward-compatible interface evolution unrelated to Langfuse — it does not
+    disturb the positional interface and every existing call site keeps working.
+    So the contract here asserts the positional interface is frozen AND that
+    these are the complete set of optional keyword-only controls."""
     base = import_backend("services.llm.base")
     BaseLLMAdapter = base.BaseLLMAdapter
 
@@ -247,18 +247,19 @@ def test_base_llm_adapter_signature_unchanged() -> None:
         )
 
         kwonly = _keyword_only(method)
-        # The only permitted keyword-only addition is issue #26's cache_system.
-        assert set(kwonly) <= {"cache_system"}, (
-            f"BaseLLMAdapter.{name} grew unexpected keyword-only params "
-            f"{sorted(set(kwonly) - {'cache_system'})}. Only the issue-#26 "
-            "cache_system flag is sanctioned. See T-123."
+        expected_kwonly = {"cache_system", "cache_policy"}
+        assert set(kwonly) == expected_kwonly, (
+            f"BaseLLMAdapter.{name} keyword-only interface changed to "
+            f"{sorted(kwonly)}; expected {sorted(expected_kwonly)}. See T-123."
         )
-        if "cache_system" in kwonly:
-            cs = kwonly["cache_system"]
-            assert cs.default is False, (
-                f"BaseLLMAdapter.{name} cache_system must default to False so "
-                "every existing call site is unaffected. See T-123."
-            )
+        assert kwonly["cache_system"].default is False, (
+            f"BaseLLMAdapter.{name} cache_system must default to False so "
+            "every existing call site is unaffected. See T-123."
+        )
+        assert kwonly["cache_policy"].default is None, (
+            f"BaseLLMAdapter.{name} cache_policy must default to None so "
+            "every existing call site is unaffected. See T-123."
+        )
 
 
 def test_provider_adapters_do_not_import_langfuse() -> None:
