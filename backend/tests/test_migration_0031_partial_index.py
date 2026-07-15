@@ -2,7 +2,7 @@
 
 The unit suite builds its schema with ``Base.metadata.create_all`` and never
 drives Alembic against Postgres, so these pin the cheap-but-load-bearing facts
-statically: the revision chain stays linear (0031 is the single head), the
+statically: the revision chain stays linear, the
 index is PARTIAL on exactly the recovery sweep's predicate
 (``status = 'in_progress'`` keyed by ``updated_at`` — recovery_service filters
 ``Stage.status == "in_progress", Stage.updated_at < cutoff``), it is
@@ -37,11 +37,11 @@ def test_0031_revises_0030_and_history_is_linear() -> None:
 
     revised = {m.down_revision for m in modules if m.down_revision}
     heads = [m.revision for m in modules if m.revision not in revised]
-    # The single head advances as migrations are added (0034 = the Razorpay
-    # provider-CHECK widening, issue #44). The guard is that there is exactly ONE
-    # head — a branched history breaks `alembic upgrade head` on deploy.
-    assert heads == ["0034"], (
-        f"Expected a single migration head (0034), got {heads!r} — a branched "
+    # The single head advances as migrations are added (0035 widens the workspace
+    # agent-instruction target CHECK). The guard is that there is exactly ONE head
+    # — a branched history breaks `alembic upgrade head` on deploy.
+    assert heads == ["0035"], (
+        f"Expected a single migration head (0035), got {heads!r} — a branched "
         "history breaks `alembic upgrade head` on deploy."
     )
 
