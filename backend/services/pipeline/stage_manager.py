@@ -65,7 +65,11 @@ from services.llm.gateway import get_llm
 from services.llm.instrumented_adapter import InstrumentedAdapter
 from services.llm.model_catalog import model_max_output_tokens
 from services.llm.output_budget import resolve_output_budget
-from services.llm.prompt_cache import user_prefix_cache_hint
+from services.llm.prompt_cache import (
+    PromptCachePolicy,
+    build_prompt_cache_policy,
+    user_prefix_cache_hint,
+)
 from services.llm.provider_config import JUDGE_MODELS
 from services.llm.routing import LLMRoute, LLMRoutingError, resolve_llm_route
 from services.llm.tier_policy import (
@@ -1909,6 +1913,7 @@ class StageManager:
         phase: "_PhaseTracker | None" = None,
         retry_count: int = 0,
         mode: str = "standard",
+        cache_policy: PromptCachePolicy | None = None,
     ) -> GeneratedArtifact:
         # Issue #39: when enabled, generate dependency-independent chunks
         # concurrently in waves (sum of chunk latencies -> ~max per wave). Needs
@@ -1932,6 +1937,7 @@ class StageManager:
                 phase=phase,
                 retry_count=retry_count,
                 mode=mode,
+                cache_policy=cache_policy,
             )
         chunks: list[str] = []
         repair_attempted = False
@@ -1978,6 +1984,7 @@ class StageManager:
                     retry_count=retry_count,
                     repair_count=0,
                     emit=live_emit,
+                    cache_policy=cache_policy,
                 )
             except IncompleteArtifactError as exc:
                 _stop_live_streaming()
@@ -2031,6 +2038,7 @@ class StageManager:
                         repair_issues=exc.issues,
                         retry_count=retry_count,
                         repair_count=1,
+                        cache_policy=cache_policy,
                     )
                 except IncompleteArtifactError as repair_exc:
                     PIPELINE_COMPLETION_REPAIRS.labels(
@@ -2097,6 +2105,7 @@ class StageManager:
                                 repair_issues=exc.truncation_issues,
                                 retry_count=retry_count,
                                 repair_count=1,
+                                cache_policy=cache_policy,
                             )
                         )
                 except IncompleteArtifactError as repair_exc:
@@ -2167,6 +2176,7 @@ class StageManager:
         phase: "_PhaseTracker | None" = None,
         retry_count: int = 0,
         mode: str = "standard",
+        cache_policy: PromptCachePolicy | None = None,
     ) -> GeneratedArtifact:
         """Issue #39 parallel happy path: generate chunks in concurrent waves.
 
@@ -2279,6 +2289,7 @@ class StageManager:
                         retry_count=retry_count,
                         repair_count=0,
                         emit=chunk_emit,
+                        cache_policy=cache_policy,
                     )
                 except IncompleteArtifactError as exc:
                     # One funded per-chunk repair, mirroring the sequential loop.
@@ -2324,6 +2335,7 @@ class StageManager:
                                 repair_issues=exc.issues,
                                 retry_count=retry_count,
                                 repair_count=1,
+                                cache_policy=cache_policy,
                             )
                         except IncompleteArtifactError:
                             PIPELINE_COMPLETION_REPAIRS.labels(
@@ -2429,6 +2441,7 @@ class StageManager:
                                 repair_issues=exc.truncation_issues,
                                 retry_count=retry_count,
                                 repair_count=1,
+                                cache_policy=cache_policy,
                             )
                         )
                         last_generation_id = (
@@ -2506,6 +2519,7 @@ class StageManager:
         retry_count: int = 0,
         repair_count: int = 0,
         emit: Callable[[str], None] | None = None,
+        cache_policy: PromptCachePolicy | None = None,
     ) -> str:
         accumulated = ""
         _set_adapter_attempt_metadata(
@@ -2559,6 +2573,7 @@ class StageManager:
                     # representation for chunks 2+ and repair calls (Phase 2 —
                     # issue #26).
                     cache_system=True,
+                    cache_policy=cache_policy,
                 ),
                 stage_type=stage_type,
                 provider=route.provider,
@@ -3133,6 +3148,17 @@ class StageManager:
             # mode-aware chunking, completeness floors, section gate, and the
             # cost-ledger prompt version. Standard takes the unchanged path.
             mode = getattr(workspace, "mode", "standard") or "standard"
+            if not isinstance(mode, str):
+                mode = "standard"
+            cache_policy = build_prompt_cache_policy(
+                namespace="stage_generation",
+                stage_type=stage.type,
+                mode=mode,
+                prompt_version=stage_prompt_version(stage.type, mode),
+                system_prompt=system_prompt,
+                base_user_prompt=user_prompt,
+                retention=settings.openai_prompt_cache_retention,
+            )
             technology_repair_used = False
 
             stage_cost_context = LLMCostContext(
@@ -3191,6 +3217,7 @@ class StageManager:
                             phase=phase,
                             retry_count=attempt_retry_count,
                             mode=mode,
+                            cache_policy=cache_policy,
                         )
                     except ProviderRateLimitError as rate_exc:
                         # A provider 429/overload is a THROUGHPUT failure, not a
@@ -5418,6 +5445,15 @@ class StageManager:
             f"{findings_block}"
             f"{completion_instruction(stage_type)}"
         )
+        cache_policy = build_prompt_cache_policy(
+            namespace="stage_generation",
+            stage_type=stage_type,
+            mode=mode,
+            prompt_version=stage_prompt_version(stage_type, mode),
+            system_prompt=system_prompt,
+            base_user_prompt=base_user_prompt,
+            retention=settings.openai_prompt_cache_retention,
+        )
         adapter = InstrumentedAdapter(
             get_llm(route.provider, route.model),
             provider=route.provider,
@@ -5448,6 +5484,7 @@ class StageManager:
                 # same cache entry if the regenerate fires within the TTL
                 # (Phase 2 — issue #26).
                 cache_system=True,
+                cache_policy=cache_policy,
             ),
             timeout=settings.llm_stream_hard_cap_seconds,
         )

@@ -41,6 +41,7 @@ from services import langfuse_service
 from services.llm.base import BaseLLMAdapter
 from services.llm.completion import LLMCompletionInfo
 from services.llm.cost_ledger import LLMCostContext, persist_cost_event
+from services.llm.prompt_cache import PromptCachePolicy
 from services.llm.provider_status import (
     record_provider_failure,
     record_provider_success,
@@ -115,16 +116,18 @@ class InstrumentedAdapter(BaseLLMAdapter):
         max_tokens: int,
         *,
         cache_system: bool = False,
+        cache_policy: PromptCachePolicy | None = None,
     ) -> AsyncGenerator[str, None]:
         accumulated: list[str] = []
         start = time.perf_counter()
+        first_event_latency_ms: int | None = None
         try:
-            async for token in self._wrapped.stream(
-                system,
-                user,
-                max_tokens,
-                cache_system=cache_system,
-            ):
+            kwargs = {"cache_system": cache_system}
+            if cache_policy is not None:
+                kwargs["cache_policy"] = cache_policy
+            async for token in self._wrapped.stream(system, user, max_tokens, **kwargs):
+                if first_event_latency_ms is None:
+                    first_event_latency_ms = int((time.perf_counter() - start) * 1000)
                 accumulated.append(token)
                 yield token
         except Exception as exc:
@@ -139,6 +142,8 @@ class InstrumentedAdapter(BaseLLMAdapter):
                 user=user,
                 output="".join(accumulated),
                 start=start,
+                cache_policy=cache_policy,
+                first_event_latency_ms=first_event_latency_ms,
             )
 
     async def complete(
@@ -148,17 +153,18 @@ class InstrumentedAdapter(BaseLLMAdapter):
         max_tokens: int,
         *,
         cache_system: bool = False,
+        cache_policy: PromptCachePolicy | None = None,
     ) -> str:
         start = time.perf_counter()
         response: str = ""
         try:
             # Forward max_tokens as a keyword so the wrapper is transparent to
             # callers/tests that pass (and assert) it by name.
+            kwargs = {"cache_system": cache_system}
+            if cache_policy is not None:
+                kwargs["cache_policy"] = cache_policy
             response = await self._wrapped.complete(
-                system,
-                user,
-                max_tokens=max_tokens,
-                cache_system=cache_system,
+                system, user, max_tokens=max_tokens, **kwargs
             )
             record_provider_success(self._provider)
             return response
@@ -174,6 +180,7 @@ class InstrumentedAdapter(BaseLLMAdapter):
                 user=user,
                 output=response,
                 start=start,
+                cache_policy=cache_policy,
             )
 
     async def _record_generation(
@@ -183,6 +190,8 @@ class InstrumentedAdapter(BaseLLMAdapter):
         user: str,
         output: Any,
         start: float,
+        cache_policy: PromptCachePolicy | None = None,
+        first_event_latency_ms: int | None = None,
     ) -> None:
         """Submit one Langfuse generation. Never raises — LangfuseClient
         already swallows; the extra try/except here is belt-and-braces so a
@@ -196,6 +205,8 @@ class InstrumentedAdapter(BaseLLMAdapter):
                 user=user,
                 output=str(output),
                 latency_ms=latency_ms,
+                cache_policy=cache_policy,
+                first_event_latency_ms=first_event_latency_ms,
             )
             record_llm_cost_event(cost_metadata)
             logger.info("llm.cost_recorded", **cost_metadata)
@@ -240,6 +251,8 @@ class InstrumentedAdapter(BaseLLMAdapter):
         user: str,
         output: str,
         latency_ms: int,
+        cache_policy: PromptCachePolicy | None = None,
+        first_event_latency_ms: int | None = None,
     ) -> dict[str, Any]:
         # Prefer the provider-reported usage captured by the wrapped adapter
         # (real input/cached/output/reasoning tokens); fall back to the
@@ -282,6 +295,7 @@ class InstrumentedAdapter(BaseLLMAdapter):
                 float(estimated_cost) if estimated_cost is not None else None
             ),
             "latency_ms": latency_ms,
+            "first_event_latency_ms": first_event_latency_ms,
             "finish_reason": completion.finish_reason if completion else None,
             "stopped_by_limit": (
                 bool(completion.stopped_by_limit) if completion else False
@@ -291,6 +305,19 @@ class InstrumentedAdapter(BaseLLMAdapter):
             "cross_provider_fallback": self._cross_provider_fallback,
             "retry_count": self._retry_count,
             "repair_count": self._repair_count,
+            "provider_prompt_cache_hit": bool(usage.cached_input_tokens),
+            "prompt_cache_routing_key_fingerprint": (
+                cache_policy.routing_key[-16:] if cache_policy else None
+            ),
+            "eligible_prefix_fingerprint": (
+                cache_policy.eligible_prefix_fingerprint[:16] if cache_policy else None
+            ),
+            "prompt_cache_retention": (
+                cache_policy.retention if cache_policy else None
+            ),
+            "resolved_model": (
+                completion.raw.get("resolved_model") if completion else None
+            ),
         }
         if self._cost_context is not None:
             metadata.update(self._cost_context.as_metadata())

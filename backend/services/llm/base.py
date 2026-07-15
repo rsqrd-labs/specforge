@@ -2,6 +2,8 @@ from abc import ABC, abstractmethod
 from collections.abc import AsyncGenerator, Sequence
 from dataclasses import dataclass
 
+from services.llm.prompt_cache import PromptCachePolicy
+
 # HTTP timeout policy (H-6 — T-182): every concrete adapter MUST configure an
 # explicit timeout= on its underlying httpx client.  Use httpx.Timeout(
 # connect=10.0, read=300.0, write=10.0, pool=5.0) as the project default.
@@ -146,6 +148,7 @@ class BaseLLMAdapter(ABC):
         max_tokens: int,
         *,
         cache_system: bool = False,
+        cache_policy: PromptCachePolicy | None = None,
     ) -> AsyncGenerator[str, None]:
         pass
 
@@ -157,6 +160,7 @@ class BaseLLMAdapter(ABC):
         max_tokens: int,
         *,
         cache_system: bool = False,
+        cache_policy: PromptCachePolicy | None = None,
     ) -> str:
         pass
 

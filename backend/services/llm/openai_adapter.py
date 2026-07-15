@@ -16,6 +16,7 @@ from services.llm.base import (
 )
 from services.llm.completion import LLMCompletionInfo
 from services.llm.model_catalog import model_request_policy
+from services.llm.prompt_cache import PromptCachePolicy
 
 # Explicit timeouts prevent a hung provider from blocking a credit reservation
 # indefinitely.  connect/write are short (fast-fail on connection issues);
@@ -64,6 +65,7 @@ class OpenAIAdapter(BaseLLMAdapter):
         max_tokens: int,
         *,
         cache_system: bool = False,  # automatic prefix caching; no explicit opt-in
+        cache_policy: PromptCachePolicy | None = None,
     ) -> AsyncGenerator[str, None]:
         self.last_completion = LLMCompletionInfo.started(
             provider="openai",
@@ -71,10 +73,14 @@ class OpenAIAdapter(BaseLLMAdapter):
             max_tokens=max_tokens,
         )
         if self._uses_responses_api():
-            async for token in self._stream_responses_api(system, user, max_tokens):
+            async for token in self._stream_responses_api(
+                system, user, max_tokens, cache_policy
+            ):
                 yield token
             return
-        async for token in self._stream_chat_completions(system, user, max_tokens):
+        async for token in self._stream_chat_completions(
+            system, user, max_tokens, cache_policy
+        ):
             yield token
 
     async def _stream_responses_api(
@@ -82,6 +88,7 @@ class OpenAIAdapter(BaseLLMAdapter):
         system: str,
         user: str,
         max_tokens: int,
+        cache_policy: PromptCachePolicy | None,
     ) -> AsyncGenerator[str, None]:
         try:
             response = await self._responses_client().create(
@@ -90,6 +97,7 @@ class OpenAIAdapter(BaseLLMAdapter):
                     user=user,
                     max_tokens=max_tokens,
                     stream=True,
+                    cache_policy=cache_policy,
                 ),
             )
             async for event in response:
@@ -111,6 +119,7 @@ class OpenAIAdapter(BaseLLMAdapter):
         system: str,
         user: str,
         max_tokens: int,
+        cache_policy: PromptCachePolicy | None,
     ) -> AsyncGenerator[str, None]:
         try:
             response = await self._client.chat.completions.create(
@@ -118,10 +127,12 @@ class OpenAIAdapter(BaseLLMAdapter):
                     system=system,
                     user=user,
                     max_tokens=max_tokens,
+                    cache_policy=cache_policy,
                 ),
                 stream=True,
             )
             async for chunk in response:
+                _capture_openai_resolved_model(self.last_completion, chunk)
                 # Guard 1: OpenAI sends usage-only chunks where choices=[] to
                 # report token counts.  Accessing choices[0] on such a chunk
                 # raises IndexError and crashes the SSE stream, leaving any
@@ -159,6 +170,7 @@ class OpenAIAdapter(BaseLLMAdapter):
         max_tokens: int,
         *,
         cache_system: bool = False,  # automatic prefix caching; no explicit opt-in
+        cache_policy: PromptCachePolicy | None = None,
     ) -> str:
         self.last_completion = LLMCompletionInfo.started(
             provider="openai",
@@ -166,14 +178,19 @@ class OpenAIAdapter(BaseLLMAdapter):
             max_tokens=max_tokens,
         )
         if self._uses_responses_api():
-            return await self._complete_responses_api(system, user, max_tokens)
-        return await self._complete_chat_completions(system, user, max_tokens)
+            return await self._complete_responses_api(
+                system, user, max_tokens, cache_policy
+            )
+        return await self._complete_chat_completions(
+            system, user, max_tokens, cache_policy
+        )
 
     async def _complete_responses_api(
         self,
         system: str,
         user: str,
         max_tokens: int,
+        cache_policy: PromptCachePolicy | None,
     ) -> str:
         try:
             response = await self._responses_client().create(
@@ -182,6 +199,7 @@ class OpenAIAdapter(BaseLLMAdapter):
                     user=user,
                     max_tokens=max_tokens,
                     stream=False,
+                    cache_policy=cache_policy,
                 ),
             )
             _capture_openai_response_completion(self.last_completion, response)
@@ -196,6 +214,7 @@ class OpenAIAdapter(BaseLLMAdapter):
         system: str,
         user: str,
         max_tokens: int,
+        cache_policy: PromptCachePolicy | None,
     ) -> str:
         try:
             response = await self._client.chat.completions.create(
@@ -203,10 +222,12 @@ class OpenAIAdapter(BaseLLMAdapter):
                     system=system,
                     user=user,
                     max_tokens=max_tokens,
+                    cache_policy=cache_policy,
                 ),
             )
             choice = response.choices[0]
             if self.last_completion is not None:
+                _capture_openai_resolved_model(self.last_completion, response)
                 self.last_completion.apply_finish_reason(
                     getattr(choice, "finish_reason", None)
                 )
@@ -236,6 +257,7 @@ class OpenAIAdapter(BaseLLMAdapter):
         user: str,
         max_tokens: int,
         stream: bool,
+        cache_policy: PromptCachePolicy | None = None,
     ) -> dict:
         request = {
             "model": self.model,
@@ -254,10 +276,18 @@ class OpenAIAdapter(BaseLLMAdapter):
             # healthy (issue #19).  The deltas carry no output text — the
             # stream path yields them as empty liveness sentinels.
             request["reasoning"] = {"effort": effort, "summary": "auto"}
+        self._apply_prompt_cache_policy(request, cache_policy)
         return request
 
-    def _chat_request(self, *, system: str, user: str, max_tokens: int) -> dict:
-        return {
+    def _chat_request(
+        self,
+        *,
+        system: str,
+        user: str,
+        max_tokens: int,
+        cache_policy: PromptCachePolicy | None = None,
+    ) -> dict:
+        request = {
             "model": self.model,
             "messages": [
                 {"role": "system", "content": system},
@@ -265,6 +295,22 @@ class OpenAIAdapter(BaseLLMAdapter):
             ],
             "max_tokens": max_tokens,
         }
+        self._apply_prompt_cache_policy(request, cache_policy)
+        return request
+
+    def _apply_prompt_cache_policy(
+        self,
+        request: dict,
+        cache_policy: PromptCachePolicy | None,
+    ) -> None:
+        if not settings.llm_prompt_cache_enabled or cache_policy is None:
+            return
+        if self._request_policy.get("prompt_cache_key"):
+            request["prompt_cache_key"] = cache_policy.routing_key
+        if cache_policy.retention == "24h" and self._request_policy.get(
+            "extended_prompt_cache_retention"
+        ):
+            request["prompt_cache_retention"] = "24h"
 
 
 def _responses_event_text_delta(event) -> str | None:
@@ -288,6 +334,20 @@ def _capture_openai_response_completion(
     usage = getattr(response, "usage", None)
     if usage is not None:
         completion.usage = _object_to_dict(usage)
+    resolved_model = getattr(response, "model", None)
+    if resolved_model:
+        completion.raw["resolved_model"] = str(resolved_model)
+
+
+def _capture_openai_resolved_model(
+    completion: LLMCompletionInfo | None,
+    response_or_chunk,
+) -> None:
+    if completion is None:
+        return
+    resolved_model = getattr(response_or_chunk, "model", None)
+    if resolved_model:
+        completion.raw["resolved_model"] = str(resolved_model)
 
 
 def _response_output_text(response) -> str:

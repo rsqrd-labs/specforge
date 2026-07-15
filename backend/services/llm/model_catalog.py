@@ -131,6 +131,11 @@ class ModelCatalogEntry:
     thinking_level: str | None = None
     rollout_notes: str = ""
     routing_priority: int = 100
+    automatic_prompt_caching: bool = False
+    prompt_cache_key: bool = False
+    extended_prompt_cache_retention: bool = False
+    cached_token_accounting: bool = False
+    minimum_cacheable_input_tokens: int | None = None
 
     def to_registry_config(self) -> dict[str, Any]:
         return {
@@ -151,6 +156,11 @@ class ModelCatalogEntry:
             "thinking_level": self.thinking_level,
             "rollout_notes": self.rollout_notes,
             "routing_priority": self.routing_priority,
+            "automatic_prompt_caching": self.automatic_prompt_caching,
+            "prompt_cache_key": self.prompt_cache_key,
+            "extended_prompt_cache_retention": self.extended_prompt_cache_retention,
+            "cached_token_accounting": self.cached_token_accounting,
+            "minimum_cacheable_input_tokens": self.minimum_cacheable_input_tokens,
         }
 
 
@@ -313,6 +323,11 @@ MODEL_CATALOG: tuple[ModelCatalogEntry, ...] = (
             "escalation target when reverted to mid-first."
         ),
         routing_priority=1,
+        automatic_prompt_caching=True,
+        prompt_cache_key=True,
+        extended_prompt_cache_retention=True,
+        cached_token_accounting=True,
+        minimum_cacheable_input_tokens=1024,
     ),
     ModelCatalogEntry(
         provider="openai",
@@ -344,6 +359,11 @@ MODEL_CATALOG: tuple[ModelCatalogEntry, ...] = (
             "storyboard quality-failure escalation target (issue #17 follow-up)."
         ),
         routing_priority=20,
+        automatic_prompt_caching=True,
+        prompt_cache_key=True,
+        extended_prompt_cache_retention=True,
+        cached_token_accounting=True,
+        minimum_cacheable_input_tokens=1024,
     ),
     ModelCatalogEntry(
         provider="openai",
@@ -390,6 +410,11 @@ MODEL_CATALOG: tuple[ModelCatalogEntry, ...] = (
             "current-generation model — plus lightweight non-core operations."
         ),
         routing_priority=30,
+        automatic_prompt_caching=True,
+        prompt_cache_key=True,
+        extended_prompt_cache_retention=True,
+        cached_token_accounting=True,
+        minimum_cacheable_input_tokens=1024,
     ),
     ModelCatalogEntry(
         provider="openai",
@@ -407,6 +432,11 @@ MODEL_CATALOG: tuple[ModelCatalogEntry, ...] = (
         default_operations=(),
         rollout_notes="Deprecated legacy validation compatibility only.",
         routing_priority=500,
+        automatic_prompt_caching=True,
+        prompt_cache_key=True,
+        extended_prompt_cache_retention=True,
+        cached_token_accounting=True,
+        minimum_cacheable_input_tokens=1024,
     ),
     ModelCatalogEntry(
         provider="openai",
@@ -424,6 +454,11 @@ MODEL_CATALOG: tuple[ModelCatalogEntry, ...] = (
         default_operations=(),
         rollout_notes="Deprecated legacy validation compatibility only.",
         routing_priority=500,
+        automatic_prompt_caching=True,
+        prompt_cache_key=True,
+        extended_prompt_cache_retention=True,
+        cached_token_accounting=True,
+        minimum_cacheable_input_tokens=1024,
     ),
     ModelCatalogEntry(
         provider="openai",
@@ -441,6 +476,11 @@ MODEL_CATALOG: tuple[ModelCatalogEntry, ...] = (
         default_operations=(),
         rollout_notes="Deprecated legacy validation compatibility only.",
         routing_priority=500,
+        automatic_prompt_caching=True,
+        prompt_cache_key=True,
+        extended_prompt_cache_retention=True,
+        cached_token_accounting=True,
+        minimum_cacheable_input_tokens=1024,
     ),
     ModelCatalogEntry(
         provider="google",
@@ -658,7 +698,7 @@ def model_request_policy(
     provider: str,
     model_id: str,
     operation: str | None = None,
-) -> dict[str, str | None | bool]:
+) -> dict[str, Any]:
     entry = model_entry(provider, model_id)
     reasoning_effort = entry.reasoning_effort
     thinking_level = entry.thinking_level
@@ -677,6 +717,11 @@ def model_request_policy(
         "supports_thinking": entry.supports_thinking,
         "reasoning_effort": reasoning_effort,
         "thinking_level": thinking_level,
+        "automatic_prompt_caching": entry.automatic_prompt_caching,
+        "prompt_cache_key": entry.prompt_cache_key,
+        "extended_prompt_cache_retention": entry.extended_prompt_cache_retention,
+        "cached_token_accounting": entry.cached_token_accounting,
+        "minimum_cacheable_input_tokens": entry.minimum_cacheable_input_tokens,
     }
 
 

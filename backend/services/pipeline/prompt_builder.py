@@ -197,7 +197,12 @@ async def build_prompt(
     # second round of questioning. JSON-encoded to preserve the existing
     # dict[str, str] dependency contract; spec.build_user_prompt decodes.
     if stage_type == "spec" and getattr(workspace, "clarification_qa", None):
-        deps["clarification_qa"] = json.dumps(workspace.clarification_qa)
+        deps["clarification_qa"] = json.dumps(
+            workspace.clarification_qa,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        )
 
     if dep_keys:
         redis = redis_client or get_shared_redis()  # H-1 — T-177

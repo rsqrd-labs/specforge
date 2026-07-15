@@ -332,7 +332,7 @@ def test_llm_adapter_public_cache_signature(adapter_cls: type) -> None:
             for name, param in signature.parameters.items()
             if param.kind is inspect.Parameter.KEYWORD_ONLY
         ]
-        assert kwonly == ["cache_system"]
+        assert kwonly == ["cache_system", "cache_policy"]
 
 
 @pytest.mark.asyncio

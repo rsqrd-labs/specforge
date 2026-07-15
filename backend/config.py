@@ -275,6 +275,19 @@ class Settings(BaseSettings):
     # latency change) and the break-even is low for chunked/multi-round paths.
     # Flip False to disable the structured block without a redeploy.
     llm_prompt_cache_enabled: bool = True
+    # OpenAI's normal in-memory prompt cache is the privacy-safe launch default.
+    # ``24h`` opts into extended retention and must be approved against the
+    # deployment's data-retention policy before use.
+    openai_prompt_cache_retention: str = "memory"
+
+    @field_validator("openai_prompt_cache_retention")
+    @classmethod
+    def validate_openai_prompt_cache_retention(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        if normalized not in {"memory", "24h"}:
+            raise ValueError("must be 'memory' or '24h'")
+        return normalized
+
     # Phase 3 (issue #26): submit non-interactive judge/eval calls (eval.score)
     # through the provider Message Batches API for the 50% batch discount,
     # driven on the arq worker (submit → checkpoint batch id → cron poll →

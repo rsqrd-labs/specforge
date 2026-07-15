@@ -147,6 +147,11 @@ def test_frontier_adapter_policy_is_explicit() -> None:
         "supports_thinking": False,
         "reasoning_effort": "high",
         "thinking_level": None,
+        "automatic_prompt_caching": True,
+        "prompt_cache_key": True,
+        "extended_prompt_cache_retention": True,
+        "cached_token_accounting": True,
+        "minimum_cacheable_input_tokens": 1024,
     }
     assert (
         model_request_policy("google", "gemini-3.5-flash")["thinking_level"] == "high"

@@ -16,6 +16,7 @@ from services.llm.provider_status import CIRCUIT_REJECTIONS, can_route
 if TYPE_CHECKING:
     from services.llm.base import BaseLLMAdapter
     from services.llm.cost_ledger import LLMCostContext
+    from services.llm.prompt_cache import PromptCachePolicy
 
 logger = logging.getLogger(__name__)
 
@@ -168,6 +169,7 @@ async def complete_with_timeout(
     model_tier: str = "unknown",
     cost_context: "LLMCostContext | None" = None,
     cache_system: bool = False,
+    cache_policy: "PromptCachePolicy | None" = None,
 ) -> str:
     """Run adapter.complete() under a hard wall-clock timeout via asyncio.wait_for.
 
@@ -194,9 +196,11 @@ async def complete_with_timeout(
         )
     else:
         adapter = get_llm(provider, model)
+    kwargs = {"cache_system": cache_system}
+    if cache_policy is not None:
+        kwargs["cache_policy"] = cache_policy
     return await asyncio.wait_for(
-        adapter.complete(system, user, max_tokens, cache_system=cache_system),
-        timeout=timeout,
+        adapter.complete(system, user, max_tokens, **kwargs), timeout=timeout
     )
 
 

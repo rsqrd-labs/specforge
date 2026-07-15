@@ -18,7 +18,7 @@ from services.llm.base import (
 )
 from services.llm.completion import LLMCompletionInfo
 from services.llm.model_catalog import model_request_policy
-from services.llm.prompt_cache import current_user_prefix_cache_hint
+from services.llm.prompt_cache import PromptCachePolicy, current_user_prefix_cache_hint
 
 # Explicit timeouts prevent a hung provider from blocking a credit reservation
 # indefinitely.  connect/write are short (fast-fail on connection issues);
@@ -64,6 +64,7 @@ class AnthropicAdapter(BaseLLMAdapter):
         max_tokens: int,
         *,
         cache_system: bool = False,
+        cache_policy: PromptCachePolicy | None = None,
     ) -> AsyncGenerator[str, None]:
         self.last_completion = LLMCompletionInfo.started(
             provider="anthropic",
@@ -110,6 +111,7 @@ class AnthropicAdapter(BaseLLMAdapter):
         max_tokens: int,
         *,
         cache_system: bool = False,
+        cache_policy: PromptCachePolicy | None = None,
     ) -> str:
         self.last_completion = LLMCompletionInfo.started(
             provider="anthropic",

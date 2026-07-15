@@ -72,6 +72,16 @@ LLM_LATENCY_SECONDS = Histogram(
     "LLM request latency in seconds",
     ["provider", "model_tier", "operation", "stage_type"],
 )
+LLM_FIRST_EVENT_LATENCY_SECONDS = Histogram(
+    "llm_first_event_latency_seconds",
+    "Time from request start to the first provider stream event",
+    ["provider", "model_tier", "operation", "stage_type"],
+)
+LLM_PROVIDER_PROMPT_CACHE_REQUESTS = Counter(
+    "llm_provider_prompt_cache_requests_total",
+    "Instrumented calls by provider prompt-cache outcome",
+    ["provider", "model_tier", "operation", "stage_type", "outcome"],
+)
 LLM_CROSS_PROVIDER_FALLBACK_COUNT = Counter(
     "llm_cross_provider_fallback_total",
     "LLM requests that used an explicit cross-provider fallback route",
@@ -1527,6 +1537,16 @@ def record_llm_cost_event(metadata: dict[str, Any]) -> None:
     latency_ms = _as_float(metadata.get("latency_ms"))
     if latency_ms is not None and latency_ms >= 0:
         LLM_LATENCY_SECONDS.labels(*labels).observe(latency_ms / 1000)
+    first_event_latency_ms = _as_float(metadata.get("first_event_latency_ms"))
+    if first_event_latency_ms is not None and first_event_latency_ms >= 0:
+        LLM_FIRST_EVENT_LATENCY_SECONDS.labels(*labels).observe(
+            first_event_latency_ms / 1000
+        )
+    if metadata.get("eligible_prefix_fingerprint"):
+        cache_outcome = (
+            "hit" if bool(metadata.get("provider_prompt_cache_hit")) else "miss"
+        )
+        LLM_PROVIDER_PROMPT_CACHE_REQUESTS.labels(*labels, cache_outcome).inc()
     if bool(metadata.get("cross_provider_fallback")):
         LLM_CROSS_PROVIDER_FALLBACK_COUNT.labels(*labels).inc()
 

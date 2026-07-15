@@ -17,6 +17,7 @@ from services.llm.base import (
 )
 from services.llm.completion import LLMCompletionInfo
 from services.llm.model_catalog import model_request_policy
+from services.llm.prompt_cache import PromptCachePolicy
 
 # Explicit read timeout (milliseconds) prevents a hung Gemini connection from
 # blocking a credit reservation indefinitely.  H-6 — T-182.
@@ -72,6 +73,7 @@ class GoogleAdapter(BaseLLMAdapter):
         max_tokens: int,
         *,
         cache_system: bool = False,  # explicit caching deferred; implicit applies
+        cache_policy: PromptCachePolicy | None = None,
     ) -> AsyncGenerator[str, None]:
         self.last_completion = LLMCompletionInfo.started(
             provider="google",
@@ -102,6 +104,7 @@ class GoogleAdapter(BaseLLMAdapter):
         max_tokens: int,
         *,
         cache_system: bool = False,  # explicit caching deferred; implicit applies
+        cache_policy: PromptCachePolicy | None = None,
     ) -> str:
         self.last_completion = LLMCompletionInfo.started(
             provider="google",
