@@ -381,8 +381,6 @@ async def test_build_scrubs_problem_statement_and_excludes_draft() -> None:
     for content in pkg.artifacts.values():
         assert "DRAFT CONTENT" not in content
         assert "OLD STALE CONTENT" not in content
-    assert pkg.provider == "anthropic"
-    assert pkg.model == "claude-sonnet-4-6"
 
 
 @pytest.mark.asyncio

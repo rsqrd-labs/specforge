@@ -21,7 +21,6 @@ TemplateCategory = Literal[
     "agent",
     "tooling",
 ]
-TemplateProvider = Literal["anthropic", "openai", "google"]
 
 
 class TemplateRead(BaseModel):
@@ -35,8 +34,6 @@ class TemplateRead(BaseModel):
     # curated seed content — not user pastes — so they have no need for the large
     # input that the compression plan (§2/§10) raises the *workspace* cap for.
     problem_statement: str = Field(min_length=50, max_length=10_000)
-    suggested_provider: TemplateProvider | None = None
-    suggested_model: str | None = None
     sort_order: int = Field(ge=0)
     active: bool
     created_at: datetime

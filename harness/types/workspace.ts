@@ -1,5 +1,3 @@
-export type AIProvider = "anthropic" | "openai" | "google"
-
 export interface CoverageSummary {
   tests: number
   covered: number
@@ -17,8 +15,6 @@ export interface Workspace {
   user_id: string
   name: string
   problem_statement: string
-  provider: AIProvider
-  model: string
   status: "active" | "archived"
   template_slug: string | null
   clarification_qa: ClarificationQA[] | null
@@ -32,8 +28,6 @@ export interface Workspace {
 export interface CreateWorkspacePayload {
   name: string
   problem_statement: string
-  provider: AIProvider
-  model: string
   template_slug?: string | null
 }
 
@@ -44,7 +38,6 @@ export interface PublicWorkspaceStage {
 
 export interface PublicWorkspaceResponse {
   name: string
-  provider_label: string
   stages: PublicWorkspaceStage[]
   coverage_summary: CoverageSummary | null
   eval_summary: {

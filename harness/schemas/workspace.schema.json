@@ -8,8 +8,6 @@
     "user_id",
     "name",
     "problem_statement",
-    "provider",
-    "model",
     "status",
     "created_at",
     "updated_at"
@@ -20,8 +18,6 @@
     "user_id": { "type": "string", "format": "uuid" },
     "name": { "type": "string", "minLength": 1, "maxLength": 200 },
     "problem_statement": { "type": "string", "minLength": 50, "maxLength": 10000 },
-    "provider": { "enum": ["anthropic", "openai", "google"] },
-    "model": { "type": "string", "minLength": 1 },
     "status": { "enum": ["active", "archived"] },
     "created_at": { "type": "string", "format": "date-time" },
     "updated_at": { "type": "string", "format": "date-time" }

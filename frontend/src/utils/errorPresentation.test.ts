@@ -11,12 +11,12 @@ import {
 describe("error presentation mappers", () => {
   it("maps provider timeouts to clear generation recovery copy", () => {
     const alert = actionAlertFromStreamError({
-      code: "provider_timeout",
+      code: "generation_timeout",
       message: "raw timeout",
     })
 
     expect(alert.title).toBe("Generation timed out")
-    expect(alert.message).toMatch(/model did not finish/i)
+    expect(alert.message).toMatch(/generation did not finish/i)
     expect(alert.message).toMatch(/workspace is safe/i)
     expect(alert.source).toBe("Generation")
   })

@@ -71,7 +71,12 @@ from services.llm.prompt_cache import (
     user_prefix_cache_hint,
 )
 from services.llm.provider_config import JUDGE_MODELS
-from services.llm.routing import LLMRoute, LLMRoutingError, resolve_llm_route
+from services.llm.routing import (
+    LLMRoute,
+    LLMRoutingError,
+    platform_provider_priority,
+    resolve_platform_route,
+)
 from services.llm.tier_policy import (
     CHEAP_PRIMARY_TIER_POLICY,
     DEFAULT_TIER_POLICY,
@@ -100,7 +105,6 @@ from services.observability import (
     SSE_STREAM_FAILURES,
     record_assembled_prompt_tokens,
     record_judge_call_skipped,
-    record_problem_statement_tokens,
     set_background_task_count,
 )
 from services.pipeline import demo_day_verdict
@@ -634,7 +638,7 @@ def _generation_tier_policy_for(workspace: Workspace) -> tuple[str, str]:
     """
     if _is_demo_day(workspace):
         return _DEMO_DAY_TIER_POLICY
-    return _core_generation_tier_policy(workspace.provider)
+    return _core_generation_tier_policy(platform_provider_priority()[0])
 
 
 def _apply_complexity_floor(
@@ -697,12 +701,11 @@ def _route_for_stage_generation(
         requested_tier,
         fallback_tier,
         stage_type=stage_type,
-        provider=workspace.provider,
+        provider=platform_provider_priority()[0],
         signals=signals,
     )
-    return resolve_llm_route(
+    return resolve_platform_route(
         operation=f"{stage_type}.generate",
-        preferred_provider=workspace.provider,
         requested_tier=requested_tier,
         fallback_tier=fallback_tier,
         latency_class="interactive",
@@ -880,26 +883,31 @@ def _runtime_fallback_route(
 ) -> LLMRoute | None:
     """Resolve the one-shot escalation retry route after a core-gen failure.
 
-    Stays on the same provider (switching providers mid-generation would
-    silently change the user's billing/key expectations) and escalates one tier:
-    standard generation escalates to the provider's mid tier (the previous
-    fast/cheap default); a Demo Day generation already starts at mid, so it
-    escalates to ``strong`` (``_DEMO_DAY_TIER_POLICY``) instead of giving up on
-    the mid model that just failed.  Returns None when the failed route already
-    ran on the escalation tier or the provider has no distinct active escalation
-    model (e.g. Google, whose only strong model is preview) — the original
-    failure then surfaces.
+    Backend-owned routing first tries another eligible provider at the same tier,
+    then escalates the tier across the remaining platform routes. Rate-limit
+    retries are handled separately and never reach this function.
     """
     if mode == "demo_day":
         _, escalation_tier = _DEMO_DAY_TIER_POLICY
     else:
         _, escalation_tier = _core_generation_tier_policy(failed_route.provider)
+    try:
+        route = resolve_platform_route(
+            operation=failed_route.operation,
+            requested_tier=failed_route.model_tier,
+            fallback_tier=None,
+            latency_class="interactive",
+            exclude_providers=frozenset({failed_route.provider}),
+        )
+    except LLMRoutingError:
+        route = None
+    if route is not None and route.model != failed_route.model:
+        return route
     if failed_route.model_tier == escalation_tier:
         return None
     try:
-        route = resolve_llm_route(
+        route = resolve_platform_route(
             operation=failed_route.operation,
-            preferred_provider=failed_route.provider,
             requested_tier=escalation_tier,
             fallback_tier=None,
             latency_class="interactive",
@@ -958,7 +966,7 @@ def _route_for_refine(
             requested_tier,
             fallback_tier,
             stage_type=stage_type or "tasks",
-            provider=workspace.provider,
+            provider=platform_provider_priority()[0],
             signals=signals,
         )
     else:
@@ -970,9 +978,8 @@ def _route_for_refine(
         # while a Demo Day refine inherits the same mid-tier floor as its
         # generation so an edited Demo Day section keeps the higher-tier quality.
         requested_tier, fallback_tier = _generation_tier_policy_for(workspace)
-    return resolve_llm_route(
+    return resolve_platform_route(
         operation=operation,
-        preferred_provider=workspace.provider,
         requested_tier=requested_tier,
         fallback_tier=fallback_tier,
         latency_class="interactive",
@@ -2726,14 +2733,8 @@ class StageManager:
             # hits are counted too: this is the honest "how often a large input
             # enters generation" frequency, and the spec is the single entry
             # point where the raw statement is the primary input.
-            record_problem_statement_tokens(
-                workspace.provider,
-                estimate_tokens(
-                    workspace.provider,
-                    workspace.model,
-                    workspace.problem_statement,
-                ),
-            )
+            # Provider/model are resolved later by server policy. Token-size
+            # telemetry is emitted after that route exists.
 
         scan_result = await scan_async(workspace.problem_statement)
         if not scan_result.is_safe:
@@ -2876,7 +2877,13 @@ class StageManager:
                 free=free,
             )
             system_prompt, user_prompt, compression_rung = await build_prompt(
-                stage.type, workspace, db, redis, research_context=research.block
+                stage.type,
+                workspace,
+                db,
+                redis,
+                provider=route.provider,
+                model=route.model,
+                research_context=research.block,
             )
             # Phase A instrumentation (compression plan §8): observe the size of
             # the fully assembled prompt actually sent to the model. Reached only
@@ -3617,7 +3624,7 @@ class StageManager:
                         stage.type,
                         accumulated,
                         critic_deps,
-                        provider=workspace.provider,
+                        provider=route.provider,
                     )
                     if critic_result.passed:
                         break
@@ -3881,7 +3888,7 @@ class StageManager:
                 stage_type=stage.type,
                 content=accumulated,
                 eval_context=eval_context,
-                provider=workspace.provider,
+                provider=route.provider,
                 workspace_id=workspace.id,
                 content_generation_id=content_generation_id,
                 harness_content=harness_content_for_eval,
@@ -3920,7 +3927,7 @@ class StageManager:
                     stage_type=stage.type,
                     content=accumulated,
                     critic_deps=critic_deps_for_async or {},
-                    provider=workspace.provider,
+                    provider=route.provider,
                     content_generation_id=content_generation_id,
                 )
             # Demo Day construction verifier (plan §7.3): once the tasks stage
@@ -4546,7 +4553,7 @@ class StageManager:
                 stage_type=stage.type,
                 content=new_content,
                 eval_context=eval_context,
-                provider=workspace.provider,
+                provider=platform_provider_priority()[0],
                 workspace_id=workspace.id,
                 harness_content=harness_content_for_eval,
             )
@@ -4971,10 +4978,15 @@ class StageManager:
         try:
             deps = _workspace_stage_deps(workspace, "tasks")
             redis = await self._redis_client()
-            system_prompt, user_prompt, _rung = await build_prompt(
-                "tasks", workspace, db, redis
-            )
             route = _route_for_stage_generation("tasks", workspace)
+            system_prompt, user_prompt, _rung = await build_prompt(
+                "tasks",
+                workspace,
+                db,
+                redis,
+                provider=route.provider,
+                model=route.model,
+            )
             new_content = await self._regenerate_with_findings(
                 route=route,
                 system_prompt=system_prompt,
@@ -5693,7 +5705,7 @@ class StageManager:
                 stage_type="harness",
                 content=merged,
                 eval_context=eval_context,
-                provider=workspace.provider,
+                provider=route.provider,
                 workspace_id=workspace.id,
                 content_generation_id=None,
             )

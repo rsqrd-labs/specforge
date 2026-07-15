@@ -62,25 +62,6 @@ export interface CreditBalance {
   billing_debt_credits: number
 }
 
-export interface ProviderModel {
-  id: string
-  name: string
-}
-
-export type ProviderHealth = "not_configured" | "healthy" | "degraded" | "unhealthy"
-
-export interface Provider {
-  id: "anthropic" | "openai" | "google"
-  name: string
-  configured: boolean
-  selectable: boolean
-  health: ProviderHealth
-  message: string
-}
-
-export interface ProviderCatalog {
-  providers: Provider[]
-}
 
 let accessToken: string | null = null
 let refreshPromise: Promise<string | null> | null = null
@@ -764,7 +745,6 @@ export async function getTemplates(force = false): Promise<Template[]> {
 // Generation ETA — live percentiles (issue #21 Phase 2b)
 // ---------------------------------------------------------------------------
 
-import type { AIProvider } from "../types/workspace"
 import type { StageType } from "../types/stage"
 
 /** Canonical lookup operations the backend serves estimates for — the same
@@ -774,7 +754,6 @@ export type EstimateLookupOperation = "generate" | "focused-patch" | "regenerate
 /** One aggregate latency band for a (provider, stage, operation), in seconds.
  *  `n` is the sample count behind it. Aggregate-only — no per-user data. */
 export interface GenerationEstimate {
-  provider: AIProvider
   stage: StageType
   operation: EstimateLookupOperation
   p50: number
@@ -888,11 +867,6 @@ export async function fetchBillingStatus(
 
 export async function fetchBillingHistory(): Promise<BillingCreditPack[]> {
   const response = await api.get<BillingCreditPack[]>("/billing/history")
-  return response.data
-}
-
-export async function getProviders(): Promise<ProviderCatalog> {
-  const response = await api.get<ProviderCatalog>("/providers")
   return response.data
 }
 

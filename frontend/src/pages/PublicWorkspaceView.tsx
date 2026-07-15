@@ -161,9 +161,7 @@ export default function PublicWorkspaceView() {
       <header className="public-view-cover">
         <BrandLockup variant="compact" className="public-view-brand" />
         <h1 className="public-view-title">{data.name}</h1>
-        <p className="public-view-attribution">
-          Generated with SpecForge · {data.provider_label}
-        </p>
+        <p className="public-view-attribution">Generated with SpecForge</p>
         <CoverChip coverage={data.coverage_summary} />
       </header>
 

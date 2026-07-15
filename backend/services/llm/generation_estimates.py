@@ -28,13 +28,15 @@ from typing import Any
 import structlog
 
 from config import settings
-from services.llm.cost_ledger import generation_latency_percentiles
+from services.llm.cost_ledger import (
+    platform_generation_latency_percentiles as generation_latency_percentiles,
+)
 
 logger = structlog.get_logger(__name__)
 
 # Redis key holding the cached rollup payload. Versioned so a shape change is a
 # new key (an old reader never mis-parses a new blob, and vice versa).
-CACHE_KEY = "generation_estimates:v1"
+CACHE_KEY = "generation_estimates:v2"
 
 # The four pipeline stages, used both to recover a stage from a ledger operation
 # prefix and to validate the stage_type column.
@@ -43,8 +45,6 @@ _STAGE_TYPES = ("spec", "plan", "harness", "tasks")
 # Providers the response schema accepts. A ledger row for any other provider is
 # dropped in compute so a stray value can never reach (and 500) the schema's
 # Literal validation — the served payload only ever carries known providers.
-_ALLOWED_PROVIDERS = ("anthropic", "openai", "google")
-
 # The operation tokens the client looks up. These mirror the canonical grouping
 # the Phase-2a `estimateEta` already collapses its five activity operations into,
 # so a live hit and a heuristic fallback share one key space.
@@ -77,7 +77,6 @@ def _normalise_operation(operation: str, stage_type: str) -> tuple[str, str] | N
 
 def _build_estimate(
     *,
-    provider: str,
     stage: str,
     lookup_op: str,
     p50_ms: int,
@@ -100,7 +99,6 @@ def _build_estimate(
     if not (_MIN_ESTIMATE_SECONDS <= p50 <= p90 <= _MAX_ESTIMATE_SECONDS):
         return None
     return {
-        "provider": provider,
         "stage": stage,
         "operation": lookup_op,
         "p50": p50,
@@ -137,17 +135,13 @@ async def compute_generation_estimates(
         p90_ms = row.get("p90_latency_ms")
         operation = row.get("operation")
         stage_type = row.get("stage_type")
-        provider = row.get("provider")
-        if p50_ms is None or p90_ms is None or not operation or not provider:
-            continue
-        if str(provider) not in _ALLOWED_PROVIDERS:
+        if p50_ms is None or p90_ms is None or not operation:
             continue
         mapped = _normalise_operation(str(operation), str(stage_type or ""))
         if mapped is None:
             continue
         stage, lookup_op = mapped
         estimate = _build_estimate(
-            provider=str(provider),
             stage=stage,
             lookup_op=lookup_op,
             p50_ms=int(p50_ms),
@@ -159,7 +153,7 @@ async def compute_generation_estimates(
             estimates.append(estimate)
 
     # Stable order so the cached payload is deterministic for a given input.
-    estimates.sort(key=lambda e: (e["provider"], e["stage"], e["operation"]))
+    estimates.sort(key=lambda e: (e["stage"], e["operation"]))
     return estimates
 
 

@@ -474,6 +474,58 @@ async def generation_latency_percentiles(
     ]
 
 
+async def platform_generation_latency_percentiles(
+    db: Any,
+    *,
+    since: Any | None = None,
+    operations: list[str] | None = None,
+) -> list[dict[str, Any]]:
+    """Provider-blind latency percentiles per (operation, stage_type).
+
+    Percentiles are calculated from the underlying events, never combined from
+    per-provider percentiles, so the public ETA remains statistically honest.
+    """
+    from sqlalchemy import func, select  # noqa: PLC0415
+
+    from models import LLMCostEvent  # noqa: PLC0415
+
+    latency_col = LLMCostEvent.latency_ms
+    stmt = (
+        select(
+            LLMCostEvent.operation.label("operation"),
+            LLMCostEvent.stage_type.label("stage_type"),
+            func.count().label("samples"),
+            func.percentile_cont(0.50)
+            .within_group(latency_col.asc())
+            .label("p50_latency_ms"),
+            func.percentile_cont(0.90)
+            .within_group(latency_col.asc())
+            .label("p90_latency_ms"),
+        )
+        .where(latency_col.isnot(None), latency_col > 0)
+        .where(LLMCostEvent.cache_hit.is_(False), LLMCostEvent.batch.is_(False))
+        .where(LLMCostEvent.operation.isnot(None))
+        .where(LLMCostEvent.stage_type.isnot(None))
+        .group_by(LLMCostEvent.operation, LLMCostEvent.stage_type)
+        .order_by(LLMCostEvent.operation, LLMCostEvent.stage_type)
+    )
+    if since is not None:
+        stmt = stmt.where(LLMCostEvent.created_at >= since)
+    if operations:
+        stmt = stmt.where(LLMCostEvent.operation.in_(operations))
+    result = await db.execute(stmt)
+    return [
+        {
+            "operation": row.operation,
+            "stage_type": row.stage_type,
+            "samples": int(row.samples),
+            "p50_latency_ms": int(row.p50_latency_ms),
+            "p90_latency_ms": int(row.p90_latency_ms),
+        }
+        for row in result
+    ]
+
+
 def _row_kwargs_from_metadata(metadata: Mapping[str, Any]) -> dict[str, Any]:
     row: dict[str, Any] = {}
     for field in _EVENT_FIELDS:

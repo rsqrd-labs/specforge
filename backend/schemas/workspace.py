@@ -2,16 +2,15 @@ from datetime import datetime
 from typing import Literal
 from uuid import UUID
 
+from prometheus_client import Counter
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from schemas.stage import StageResponse
-from services.llm.provider_config import VALID_MODELS
 from services.security.problem_statement_gate import (
     PROBLEM_STATEMENT_MAX_CHARS,
     PROBLEM_STATEMENT_MIN_CHARS,
 )
 
-Provider = Literal["anthropic", "openai", "google"]
 WorkspaceStatus = Literal["active", "archived"]
 # Demo Day mode (docs/DEMO_DAY_MODE_IMPLEMENTATION_PLAN.md). A generation profile
 # chosen at creation; default 'standard' keeps the existing path byte-identical.
@@ -20,6 +19,11 @@ TargetAgent = Literal["claude_code", "codex", "both"]
 # Soft upper bound on the advisory build-time target (24h). Rejects absurd input
 # at the boundary; the linter's default is 300 (5h) when unset.
 _TIME_BUDGET_MAX_MINUTES = 24 * 60
+_LEGACY_LLM_SELECTION_FIELDS = Counter(
+    "specforge_legacy_llm_selection_fields_total",
+    "Deprecated workspace-create LLM selection fields received and ignored",
+    ["field"],
+)
 
 
 class WorkspaceCreate(BaseModel):
@@ -28,10 +32,6 @@ class WorkspaceCreate(BaseModel):
         min_length=PROBLEM_STATEMENT_MIN_CHARS,
         max_length=PROBLEM_STATEMENT_MAX_CHARS,
     )
-    provider: Provider
-    # Deprecated public input. Concrete model routing is server-owned; this
-    # optional field remains only to reject invalid legacy clients cleanly.
-    model: str | None = Field(default=None, min_length=1)
     template_slug: str | None = Field(
         default=None,
         max_length=100,
@@ -47,22 +47,22 @@ class WorkspaceCreate(BaseModel):
         le=_TIME_BUDGET_MAX_MINUTES,
     )
 
-    model_config = ConfigDict(from_attributes=True)
+    # Unknown fields are ignored for old-client compatibility. The validator
+    # below observes and removes only the retired LLM fields before validation,
+    # keeping them out of the generated public OpenAPI schema.
+    model_config = ConfigDict(from_attributes=True, extra="ignore")
 
-    @field_validator("model")
+    @model_validator(mode="before")
     @classmethod
-    def model_must_be_valid(cls, v: str | None, info: object) -> str | None:
-        if v is None:
-            return v
-        provider = getattr(info, "data", {}).get("provider")
-        if provider:
-            allowed = VALID_MODELS.get(provider, set())
-            if v not in allowed:
-                raise ValueError(
-                    f"model {v!r} is not supported for provider {provider!r}. "
-                    f"Allowed: {sorted(allowed)}"
-                )
-        return v
+    def _strip_legacy_llm_selection(cls, value: object) -> object:
+        if not isinstance(value, dict):
+            return value
+        cleaned = dict(value)
+        for field in ("provider", "model"):
+            if field in cleaned:
+                _LEGACY_LLM_SELECTION_FIELDS.labels(field=field).inc()
+                cleaned.pop(field)
+        return cleaned
 
     @model_validator(mode="after")
     def _validate_demo_day_fields(self) -> "WorkspaceCreate":
@@ -201,8 +201,6 @@ class WorkspaceResponse(BaseModel):
     user_id: UUID
     name: str
     problem_statement: str
-    provider: Provider
-    model: str
     status: WorkspaceStatus
     template_slug: str | None = None
     clarification_qa: list[ClarificationQA] | None = None
@@ -259,7 +257,6 @@ class PublicEvalSummary(BaseModel):
 
 class PublicWorkspaceResponse(BaseModel):
     name: str = Field(min_length=1, max_length=200)
-    provider_label: str
     stages: list[PublicStageView] = Field(min_length=4, max_length=4)
     coverage_summary: CoverageSummary | None = None
     eval_summary: PublicEvalSummary | None = None
@@ -287,7 +284,6 @@ class TrashedWorkspaceResponse(BaseModel):
 
     id: UUID
     name: str
-    provider: Provider
     archived_at: datetime
     purge_after: datetime
     acknowledged: bool

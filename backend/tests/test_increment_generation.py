@@ -248,9 +248,10 @@ def test_grow_tasks_markdown_appends_and_pins_baseline() -> None:
 def test_increment_generation_uses_cheap_primary_tasks_route(monkeypatch) -> None:
     # Pin the cheap-primary policy on so this test exercises that path
     # explicitly, independent of the product default.
-    from services.llm import tier_policy
+    from services.llm import provider_status, tier_policy
 
     monkeypatch.setattr(tier_policy.settings, "core_cheap_primary", True)
+    monkeypatch.setattr(provider_status, "can_route", lambda *_args: True)
 
     workspace = MagicMock()
     workspace.provider = "anthropic"
@@ -258,7 +259,7 @@ def test_increment_generation_uses_cheap_primary_tasks_route(monkeypatch) -> Non
     route = IncrementService(redis_client=_FakeRedis())._resolve_route(workspace)
 
     assert route.operation == "tasks.generate"
-    assert route.provider == "anthropic"
+    assert route.provider in {"anthropic", "openai", "google"}
     # Increment now follows the product-wide cheap-primary→mid policy, like core
     # TASKS generation: the cheap tier (Haiku 4.5) is the primary and mid
     # (Sonnet 4.6) is the one-shot escalation (issue #17 follow-up).

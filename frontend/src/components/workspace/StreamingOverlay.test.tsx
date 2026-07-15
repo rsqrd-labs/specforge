@@ -442,7 +442,6 @@ describe("StreamingOverlay quality gate", () => {
           actionLabel: "generate",
           startedAt: Date.now(),
           streamed: true,
-          provider: "anthropic",
         }}
       />,
     )

@@ -9,7 +9,6 @@ export type TemplateCategory =
   | "agent"
   | "tooling"
 
-export type TemplateProvider = "anthropic" | "openai" | "google"
 
 export interface Template {
   id: string
@@ -18,8 +17,6 @@ export interface Template {
   description: string
   category: TemplateCategory
   problem_statement: string
-  suggested_provider: TemplateProvider | null
-  suggested_model: string | null
   sort_order: number
   active: boolean
   created_at: string

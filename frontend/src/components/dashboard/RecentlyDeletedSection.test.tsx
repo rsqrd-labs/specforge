@@ -32,7 +32,6 @@ function trashed(overrides: Partial<TrashedWorkspace> = {}): TrashedWorkspace {
   return {
     id: "ws-1",
     name: "Payments API",
-    provider: "anthropic",
     archived_at: new Date().toISOString(),
     purge_after: purgeAfter,
     acknowledged: true,

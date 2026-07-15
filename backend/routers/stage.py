@@ -117,14 +117,19 @@ async def _stream_stage(
     except ProviderTimeoutError as exc:
         payload = json.dumps(
             {
-                "error": "provider_timeout",
-                "detail": str(exc),
+                "error": "generation_timeout",
+                "detail": "AI generation timed out. Please try again.",
                 "timeout_seconds": exc.timeout_seconds,
             }
         )
         yield f"data: {payload}\n\n"
-    except ProviderError as exc:
-        payload = json.dumps({"error": "provider_error", "detail": str(exc)})
+    except ProviderError:
+        payload = json.dumps(
+            {
+                "error": "generation_unavailable",
+                "detail": "AI generation is temporarily unavailable. Please try again.",
+            }
+        )
         yield f"data: {payload}\n\n"
     except InsufficientCreditsError:
         payload = json.dumps({"error": "insufficient_credits", "required": 10})
@@ -232,14 +237,19 @@ async def _stream_harness_patch(
     except ProviderTimeoutError as exc:
         payload = json.dumps(
             {
-                "error": "provider_timeout",
-                "detail": str(exc),
+                "error": "generation_timeout",
+                "detail": "AI generation timed out. Please try again.",
                 "timeout_seconds": exc.timeout_seconds,
             }
         )
         yield f"data: {payload}\n\n"
-    except ProviderError as exc:
-        payload = json.dumps({"error": "provider_error", "detail": str(exc)})
+    except ProviderError:
+        payload = json.dumps(
+            {
+                "error": "generation_unavailable",
+                "detail": "AI generation is temporarily unavailable. Please try again.",
+            }
+        )
         yield f"data: {payload}\n\n"
     except SecurityError as exc:
         payload = json.dumps({"error": "security_check_failed", "detail": str(exc)})

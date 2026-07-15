@@ -25,7 +25,6 @@ export interface PublicEvalSummary {
 
 export interface PublicWorkspaceResponse {
   name: string
-  provider_label: string
   stages: PublicStageView[]
   coverage_summary: PublicCoverageSummary | null
   eval_summary: PublicEvalSummary | null

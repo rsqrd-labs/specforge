@@ -106,11 +106,11 @@ function streamErrorMessage(event: ErrorEvent): string {
       return "Generation is temporarily busy. Please try again in a moment."
     case "security_check_failed":
       return "Generation stopped because the output did not pass safety checks."
-    case "provider_error":
-      return "The selected model provider failed to respond. Please try again."
-    case "provider_timeout":
+    case "generation_unavailable":
+      return "AI generation is temporarily unavailable. Please try again."
+    case "generation_timeout":
       return (
-        "Generation timed out. The model did not finish this stage in time. " +
+        "Generation timed out before this stage finished. " +
         "Your workspace is safe. Try again; long stages may need another run."
       )
     case "insufficient_credits":

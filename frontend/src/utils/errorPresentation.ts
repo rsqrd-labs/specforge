@@ -77,22 +77,22 @@ export function actionAlertFromStreamError(
   options: AlertOptions = {},
 ): ActionAlertContent {
   switch (error.code) {
-    case "provider_timeout":
+    case "generation_timeout":
       return actionAlertFromMessage({
         title: "Generation timed out",
         message:
-          "The model did not finish this stage in time. Your workspace is safe. Try again; long stages may need another run.",
+          "Generation did not finish this stage in time. Your workspace is safe. Try again; long stages may need another run.",
         recovery: "No credits are charged for backend-failed paid generation runs.",
         source: "Generation",
         primaryAction: options.primaryAction,
         secondaryAction: options.secondaryAction,
         dismissLabel: options.dismissLabel,
       })
-    case "provider_error":
+    case "generation_unavailable":
       return actionAlertFromMessage({
-        title: "Model provider did not respond",
+        title: "Generation is temporarily unavailable",
         message:
-          "The selected provider failed before completing this stage. Try again in a moment or choose another provider if this keeps happening.",
+          "The generation service could not complete this stage. Try again in a moment.",
         recovery: "Your current draft and edits are still saved.",
         source: "Generation",
         primaryAction: options.primaryAction,

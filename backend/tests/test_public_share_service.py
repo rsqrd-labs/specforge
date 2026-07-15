@@ -216,7 +216,6 @@ async def test_build_public_view_allow_list_contains_only_safe_keys() -> None:
     body = view.model_dump()
     allowed = {
         "name",
-        "provider_label",
         "stages",
         "coverage_summary",
         "eval_summary",

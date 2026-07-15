@@ -62,8 +62,8 @@ and any other content you submit ("Your Content"), and of the spec, plan,
 harness, and tasks artifacts SpecForge generates from it.
 
 You grant SpecForge a license to process, store, and transmit Your Content as
-needed to provide the Service — including sending it to the third-party LLM
-provider your workspace is configured to use, and, if you opt in, to Brave
+needed to provide the Service — including sending it to third-party AI model
+providers selected by SpecForge, and, if you opt in, to Brave
 Search for grounding research or to GitHub if you connect a repository. You
 represent that you have the right to submit Your Content and that it does not
 violate any law or infringe any third party's rights.

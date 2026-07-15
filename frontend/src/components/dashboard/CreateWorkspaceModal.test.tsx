@@ -25,18 +25,6 @@ vi.mock("react-router-dom", async (importOriginal) => {
 })
 
 vi.mock("../../services/api", () => ({
-  getProviders: vi.fn().mockResolvedValue({
-    providers: [
-      {
-        id: "openai",
-        name: "OpenAI",
-        selectable: true,
-        configured: true,
-        health: "healthy",
-        message: "",
-      },
-    ],
-  }),
   getApiErrorMessage: (_error: unknown, fallback: string) => fallback,
 }))
 

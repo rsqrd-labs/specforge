@@ -1,20 +1,17 @@
-import { useEffect, useRef, useState } from "react"
+import { useRef, useState } from "react"
 import { useNavigate } from "react-router-dom"
 import { STARTER_WORKSPACES } from "../../config/starterWorkspaces"
-import { PROVIDERS } from "../../config/providers"
 import { featureFlags } from "../../config/featureFlags"
 import { useFocusTrap } from "../../hooks/useFocusTrap"
 import { useScrollLock } from "../../hooks/useScrollLock"
-import { getApiErrorMessage, getProviders } from "../../services/api"
+import { getApiErrorMessage } from "../../services/api"
 import { useWorkspaceStore } from "../../store/workspaceStore"
 import type { Template } from "../../types/template"
 import type {
-  AIProvider,
   CreateWorkspacePayload,
   TargetAgent,
   WorkspaceMode,
 } from "../../types/workspace"
-import type { Provider } from "../../services/api"
 import { ActionAlertPanel } from "../shared/ActionAlert"
 
 interface CreateWorkspaceModalProps {
@@ -28,12 +25,6 @@ interface CreateWorkspaceModalProps {
 
 const MIN_STATEMENT = 50
 const MAX_STATEMENT = 10000
-
-const PROVIDER_DESCRIPTIONS: Record<string, string> = {
-  anthropic: "Best for nuanced reasoning and long-form specs",
-  openai: "Strong general-purpose generation",
-  google: "Good balance of speed and quality",
-}
 
 // Demo Day mode (docs/DEMO_DAY_MODE_IMPLEMENTATION_PLAN.md §10 Phase 4). The
 // whole selector is gated behind `featureFlags.demoDayMode`; when off, the modal
@@ -76,16 +67,11 @@ export function CreateWorkspaceModal({
 
   const [name, setName] = useState(initialName)
   const [statement, setStatement] = useState(initialStatement)
-  const [providers, setProviders] = useState<Provider[]>(PROVIDERS)
-  const [provider, setProvider] = useState<AIProvider>(
-    (initialTemplate?.suggested_provider as AIProvider | undefined) ?? "openai",
-  )
   const [activeTemplate, setActiveTemplate] = useState<Template | null>(
     initialTemplate,
   )
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [errors, setErrors] = useState<Record<string, string>>({})
-  const [isAdvancedOpen, setIsAdvancedOpen] = useState(false)
   // Demo Day mode selection — only surfaced when the build flag is on.
   const demoDayEnabled = featureFlags.demoDayMode
   const [mode, setMode] = useState<WorkspaceMode>("standard")
@@ -99,32 +85,6 @@ export function CreateWorkspaceModal({
   // Lock the dashboard behind the modal so a wheel/trackpad gesture only ever
   // scrolls the card — never the blurred page behind it, wherever the pointer is.
   useScrollLock()
-
-  const selectableProviders = providers.filter((p) => p.selectable)
-  const selectedProvider = providers.find((p) => p.id === provider)
-
-  function handleProviderChange(newProvider: AIProvider) {
-    const candidate = providers.find((p) => p.id === newProvider)
-    if (!candidate?.selectable) return
-    setProvider(newProvider)
-  }
-
-  useEffect(() => {
-    let cancelled = false
-    getProviders()
-      .then((catalog) => {
-        if (cancelled) return
-        setProviders(catalog.providers)
-        const firstSelectable = catalog.providers.find((p) => p.selectable)
-        if (firstSelectable && !catalog.providers.find((p) => p.id === provider)?.selectable) {
-          setProvider(firstSelectable.id)
-        }
-      })
-      .catch(() => undefined)
-    return () => {
-      cancelled = true
-    }
-  }, [provider])
 
   function validate() {
     const errs: Record<string, string> = {}
@@ -148,7 +108,6 @@ export function CreateWorkspaceModal({
       const payload: CreateWorkspacePayload = {
         name: name.trim(),
         problem_statement: statement,
-        provider,
         template_slug: activeTemplate?.slug ?? null,
         target_agent: targetAgent,
       }
@@ -343,69 +302,6 @@ export function CreateWorkspaceModal({
             </p>
           </div>
 
-          {/* Advanced (provider) */}
-          <div className="modal-advanced">
-            <button
-              type="button"
-              className="modal-advanced-toggle"
-              aria-expanded={isAdvancedOpen}
-              onClick={() => setIsAdvancedOpen((v) => !v)}
-            >
-              <span className="modal-advanced-label">AI Provider</span>
-              {!isAdvancedOpen && selectedProvider && (
-                <span className="modal-advanced-summary">{selectedProvider.name}</span>
-              )}
-              <svg
-                className="modal-advanced-chevron"
-                width="12"
-                height="12"
-                viewBox="0 0 12 12"
-                fill="none"
-                aria-hidden="true"
-                style={{ transform: isAdvancedOpen ? "rotate(180deg)" : "rotate(0deg)" }}
-              >
-                <path d="M2 4l4 4 4-4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-              </svg>
-            </button>
-
-            {isAdvancedOpen && (
-              <div className="modal-advanced-body">
-                <div className="provider-grid">
-                  {providers.map((p) => (
-                    <button
-                      key={p.id}
-                      type="button"
-                      onClick={() => handleProviderChange(p.id)}
-                      disabled={!p.selectable}
-                      title={p.message}
-                      className={[
-                        "provider-pill",
-                        provider === p.id ? "selected" : "",
-                        !p.selectable ? "disabled" : "",
-                        p.health === "degraded" ? "degraded" : "",
-                        p.health === "unhealthy" ? "unhealthy" : "",
-                      ].filter(Boolean).join(" ")}
-                    >
-                      <span>{p.name}</span>
-                      {!p.configured
-                        ? <small>Not configured</small>
-                        : p.health !== "healthy"
-                        ? <small>{p.health}</small>
-                        : <small className="modal-provider-desc">{PROVIDER_DESCRIPTIONS[p.id] ?? ""}</small>
-                      }
-                    </button>
-                  ))}
-                </div>
-                {selectableProviders.length === 0 && (
-                  <p className="modal-error">
-                    No model providers are configured. Add at least one provider API key
-                    on the backend.
-                  </p>
-                )}
-              </div>
-            )}
-          </div>
-
           {/* Pipeline preview. Demo Day appends the rubric-aware handoff step so
               the user sees the build-ready bundle is the deliverable. */}
           <div className="modal-pipeline-preview" aria-label="What gets generated">
@@ -432,7 +328,7 @@ export function CreateWorkspaceModal({
               severity="error"
               title="Workspace could not be created"
               message={errors.submit}
-              recovery="Your draft is still in this form. Try again after checking the provider and statement."
+              recovery="Your draft is still in this form. Check the statement and try again."
               source="Dashboard"
               onDismiss={() => setErrors((prev) => ({ ...prev, submit: "" }))}
             />
@@ -455,7 +351,7 @@ export function CreateWorkspaceModal({
               </button>
               <button
                 type="submit"
-                disabled={isSubmitting || selectableProviders.length === 0}
+                disabled={isSubmitting}
                 className="modal-submit"
                 aria-label="Generate workspace spec"
               >

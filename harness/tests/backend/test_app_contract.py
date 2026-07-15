@@ -51,7 +51,6 @@ def test_public_routes_include_auth_workspace_stage_credit_and_provider_contract
         "/stages/{id}/eval",
         "/credits/balance",
         "/credits/history",
-        "/providers",
     }
 
     assert expected.issubset(paths), "Missing API routes: " + ", ".join(sorted(expected - paths))

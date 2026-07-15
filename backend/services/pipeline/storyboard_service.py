@@ -80,7 +80,12 @@ from services.llm.cost_ledger import LLMCostContext
 from services.llm.gateway import complete_with_timeout
 from services.llm.model_catalog import model_max_output_tokens
 from services.llm.output_budget import resolve_output_budget
-from services.llm.routing import LLMRoute, LLMRoutingError, resolve_llm_route
+from services.llm.routing import (
+    LLMRoute,
+    LLMRoutingError,
+    resolve_llm_route,
+    resolve_platform_route,
+)
 from services.llm.tier_policy import generation_tier_policy
 from services.observability import (
     get_structured_logger,
@@ -668,10 +673,13 @@ def _resolve_storyboard_primary_route(source: StoryboardSourcePackage) -> LLMRou
     if settings.storyboard_force_mid_tier:
         requested_tier, fallback_tier = "mid", "strong"
     else:
-        requested_tier, fallback_tier = generation_tier_policy(source.provider)
-    return resolve_llm_route(
+        from services.llm.routing import platform_provider_priority
+
+        requested_tier, fallback_tier = generation_tier_policy(
+            platform_provider_priority()[0]
+        )
+    return resolve_platform_route(
         operation="storyboard.generate",
-        preferred_provider=source.provider,
         requested_tier=requested_tier,
         fallback_tier=fallback_tier,
         latency_class="background",
@@ -692,11 +700,10 @@ async def _run_storyboard_completion(
     escalation target (``mid`` while ``core_cheap_primary`` is live; ``strong``
     when reverted to mid-first).
 
-    Transport failures (timeout, provider error) are re-raised immediately
-    without escalation — the escalation tier is slower and pricier, and a
-    timed-out primary attempt is unlikely to recover on it.  Quality failures
-    (schema/parse/grounding errors, which a truncated payload also surfaces)
-    trigger a one-shot escalation with a fresh repair budget.
+    Transport failures (timeout, provider error) try the next eligible platform
+    provider at the same tier. Quality failures (schema/parse/grounding errors,
+    which a truncated payload also surfaces) trigger a one-shot tier escalation
+    with a fresh repair budget.
 
     When the provider has no active model at the escalation tier (e.g. Google,
     whose only strong candidate is preview-only and floors at mid with no further
@@ -722,7 +729,25 @@ async def _run_storyboard_completion(
     except StoryboardPayloadError as primary_exc:
         error_type = _payload_error_type(primary_exc)
         if error_type in ("timeout", "provider"):
-            raise  # transport failure — escalation would not help
+            try:
+                failover_route = resolve_platform_route(
+                    operation="storyboard.generate",
+                    requested_tier=primary_route.model_tier,
+                    fallback_tier=primary_route.fallback_tier,
+                    latency_class="background",
+                    exclude_providers={primary_route.provider},
+                )
+                payload = await _complete_and_validate(
+                    source,
+                    provider=failover_route.provider,
+                    model=failover_route.model,
+                    model_tier=failover_route.model_tier,
+                )
+                if postprocess is not None:
+                    payload = postprocess(payload)
+                return payload
+            except (LLMRoutingError, StoryboardPayloadError):
+                raise primary_exc
 
         escalation_tier = primary_route.fallback_tier
         # Quality failure: attempt a one-shot escalation to the next tier.
@@ -876,8 +901,8 @@ async def _run_section_generation(
 async def _complete_and_validate(
     source: StoryboardSourcePackage,
     *,
-    provider: str | None = None,
-    model: str | None = None,
+    provider: str,
+    model: str,
     model_tier: str = "unknown",
 ) -> StoryboardPayload:
     """Run the LLM completion + strict validation (with bounded repair rounds).
@@ -894,8 +919,8 @@ async def _complete_and_validate(
     ``model_tier`` is threaded to the cost ledger for accurate attribution.
     """
 
-    _provider = provider if provider is not None else source.provider
-    _model = model if model is not None else source.model
+    _provider = provider
+    _model = model
     user_prompt = build_user_prompt(source)
     cost_context = LLMCostContext(
         workspace_id=source.workspace_id,

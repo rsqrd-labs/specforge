@@ -55,7 +55,6 @@ def _sample_stages() -> dict[str, _FakeStage]:
 def test_render_pdf_returns_pdf_bytes() -> None:
     pdf = render_pdf(
         workspace_name="My Workspace",
-        provider_label="anthropic",
         stages=_sample_stages(),
         coverage_label="Harness coverage: 92%",
     )
@@ -72,7 +71,6 @@ def test_render_pdf_excludes_harness_directory_marker() -> None:
     # the section titles match the user-facing trio.
     pdf = render_pdf(
         workspace_name="My Workspace",
-        provider_label="anthropic",
         stages=_sample_stages(),
         coverage_label=None,
     )
@@ -86,7 +84,6 @@ def test_export_template_inlines_squirrel_brand_without_remote_assets() -> None:
     template = _jinja_env.get_template(_TEMPLATE_NAME)
     html = template.render(
         workspace_name="My Workspace",
-        provider_label="anthropic",
         generated_at="2026-06-09 00:00 UTC",
         coverage_label="Harness coverage: 92%",
         sections=_build_sections(_sample_stages()),

@@ -39,7 +39,6 @@ describe("api service contract", () => {
       "finaliseStage",
       "rollbackStage",
       "getCredits",
-      "getProviders",
     ]) {
       expect(exported[name], `${name} must be exported`).toBeTypeOf("function")
     }

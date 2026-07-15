@@ -80,7 +80,6 @@ describe("phase14 api.ts v1.3 exports", () => {
       "finaliseStage",
       "rollbackStage",
       "getCredits",
-      "getProviders",
       "getGitHubIntegration",
       "deleteGitHubIntegration",
       "exportWorkspaceToGitHub",

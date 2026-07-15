@@ -42,17 +42,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_PROVIDER_LABELS: dict[str, str] = {
-    "anthropic": "Anthropic Claude",
-    "openai": "OpenAI",
-    "google": "Google Gemini",
-}
-
-
-def _provider_label(provider: str) -> str:
-    return _PROVIDER_LABELS.get(provider, provider or "Unknown")
-
-
 # 31-character alphabet — no ambiguous chars (0/o/1/l/i are intentionally
 # excluded so the slug can be read off a screen and re-typed without confusion).
 ALPHABET = "abcdefghjkmnpqrstuvwxyz23456789"
@@ -97,7 +86,7 @@ def is_valid_slug(slug: str) -> bool:
 # falls back to the authoritative DB path.
 # ---------------------------------------------------------------------------
 
-_PUBLIC_VIEW_CACHE_KEY = "public_view:{slug}"
+_PUBLIC_VIEW_CACHE_KEY = "public_view:v2:{slug}"
 
 
 def _public_cache_key(slug: str) -> str:
@@ -318,7 +307,6 @@ async def build_public_view(
     # coverage_summary as its primary social proof signal.
     return PublicWorkspaceResponse(
         name=workspace.name,
-        provider_label=_provider_label(workspace.provider),
         stages=stage_views,
         coverage_summary=coverage_summary,
         eval_summary=None,

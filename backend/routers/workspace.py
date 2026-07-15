@@ -46,7 +46,6 @@ from services.integrations.push_repo import (
     find_workspace_live_push,
     resolve_push_task_titles,
 )
-from services.llm.provider_status import is_provider_configured
 from services.pipeline import github_export_service, pdf_export_service, spec_clarifier
 from services.pipeline.critic import AUDIT_EVENT_CRITIC_DISABLED
 from services.pipeline.export_service import (
@@ -113,14 +112,6 @@ async def create_workspace(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> WorkspaceResponse:
-    if not is_provider_configured(payload.provider):
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail={
-                "code": "provider_not_configured",
-                "message": "This provider is not configured on the backend.",
-            },
-        )
     workspace = await workspace_service.create(user.id, payload, db)
     return WorkspaceResponse.model_validate(workspace)
 
@@ -163,7 +154,6 @@ def _trashed_response(workspace: Workspace) -> TrashedWorkspaceResponse:
     return TrashedWorkspaceResponse(
         id=workspace.id,
         name=workspace.name,
-        provider=workspace.provider,
         archived_at=workspace.archived_at,
         purge_after=workspace.archived_at + timedelta(days=window_days),
         acknowledged=acknowledged,

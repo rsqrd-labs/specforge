@@ -1,5 +1,3 @@
-import type { AIProvider } from "./workspace"
-
 export type TemplateCategory =
   | "auth"
   | "payments"
@@ -15,8 +13,6 @@ export interface Template {
   description: string
   category: TemplateCategory
   problem_statement: string
-  suggested_provider: AIProvider | null
-  suggested_model: string | null
   sort_order: number
   active: boolean
   created_at: string

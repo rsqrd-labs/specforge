@@ -3,7 +3,6 @@ import { createPortal } from "react-dom"
 import { featureFlags } from "../../config/featureFlags"
 import type { GenerationProgress } from "../../services/sseService"
 import type { QualityGateInfo, StageType } from "../../types/stage"
-import type { AIProvider } from "../../types/workspace"
 import { findingKindLabel, findingSeverityLabel } from "../../utils/qualityGate"
 import { BrandLoader } from "../shared/BrandLoader"
 import { type EtaBand, etaBand, upperBoundCaption, useEtaEstimate } from "./useEtaEstimate"
@@ -22,10 +21,6 @@ export interface GenerationActivityInfo {
   actionLabel: string
   startedAt: number
   streamed: boolean
-  /** Workspace LLM provider, used to pick the live, data-backed ETA band for
-   *  this provider (issue #21 Phase 2b). Optional — without it the ETA falls
-   *  back to the provider-agnostic heuristic table. */
-  provider?: AIProvider
 }
 
 interface StreamingOverlayProps {
@@ -142,7 +137,6 @@ export function StreamingOverlay({
   const eta = useEtaEstimate(
     renderedActivity?.stageType,
     renderedActivity?.operation,
-    renderedActivity?.provider,
   )
 
   // The findings popup is a non-blocking floating card — Esc dismisses it like

@@ -119,7 +119,6 @@ describe("StreamingOverlay with branded_loaders enabled", () => {
       fetchedAt: Date.now(),
       estimates: [
         {
-          provider: "anthropic",
           stage: "plan",
           operation: "generate",
           p50: 33,
@@ -132,7 +131,7 @@ describe("StreamingOverlay with branded_loaders enabled", () => {
     const { container } = render(
       <StreamingOverlay
         isVisible
-        activity={agedActivity(0, { stageType: "plan", provider: "anthropic" })}
+        activity={agedActivity(0, { stageType: "plan" })}
       />,
     )
 

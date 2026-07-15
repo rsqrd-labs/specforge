@@ -44,7 +44,6 @@ class GenerationEstimate(BaseModel):
     Aggregate-only: no user, workspace, or content field ever appears here.
     """
 
-    provider: Literal["anthropic", "openai", "google"]
     stage: StageType
     operation: Literal["generate", "focused-patch", "regenerate-gaps"]
     p50: int = Field(ge=0)

@@ -6,7 +6,6 @@
   "type": "object",
   "required": [
     "name",
-    "provider_label",
     "stages",
     "shared_at"
   ],
@@ -17,10 +16,6 @@
       "minLength": 1,
       "maxLength": 200,
       "description": "Workspace name as set by the owner."
-    },
-    "provider_label": {
-      "type": "string",
-      "description": "Human-readable provider label used to generate the workspace (e.g. 'Anthropic Claude'). Display only; the raw provider id may be embedded but is not separately required."
     },
     "stages": {
       "type": "array",

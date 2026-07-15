@@ -13,7 +13,6 @@ vi.mock("../services/api", () => ({
 
 const PUBLIC_WORKSPACE: PublicWorkspaceResponse = {
   name: "Shared Spec",
-  provider_label: "OpenAI",
   stages: [
     { type: "spec", content: "# Spec\n\nGenerated requirements." },
     { type: "plan", content: "# Plan" },

@@ -77,8 +77,8 @@ the Service, with the following categories of recipients:
 
 - **AI model providers.** To generate the artifacts you request, we transmit
   your idea, clarification answers, and prior stage content to the AI
-  provider associated with your workspace — Anthropic, OpenAI, or Google —
-  as context for generation.
+  providers selected by SpecForge — Anthropic, OpenAI, or Google — as context
+  for generation. Provider selection is an internal service operation.
 - **Payment processors.** To process credit purchases, we share your email
   address, and no other billing information, with our payment processor.
   Depending on your region, this is Lemon Squeezy or Razorpay. Lemon Squeezy

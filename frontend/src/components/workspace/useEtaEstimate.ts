@@ -7,7 +7,6 @@ import type {
 } from "../../services/api"
 import { useGenerationEstimatesStore } from "../../store/generationEstimatesStore"
 import type { StageType } from "../../types/stage"
-import type { AIProvider } from "../../types/workspace"
 import type { GenerationActivityOperation } from "./StreamingOverlay"
 
 /**
@@ -133,17 +132,15 @@ export function canonicalLookupOperation(
 export function resolveEtaWithSource(
   stageType: StageType | null | undefined,
   operation: GenerationActivityOperation | null | undefined,
-  provider: AIProvider | null | undefined,
   liveEstimates: readonly GenerationEstimate[],
 ): ResolvedEta {
   const heuristic = estimateEta(stageType, operation)
-  if (!provider || !stageType || liveEstimates.length === 0) {
+  if (!stageType || liveEstimates.length === 0) {
     return { ...heuristic, source: "heuristic" }
   }
   const lookupOp = canonicalLookupOperation(operation)
   const hit = liveEstimates.find(
     (e) =>
-      e.provider === provider &&
       e.stage === stageType &&
       e.operation === lookupOp,
   )
@@ -167,13 +164,11 @@ export function resolveEtaWithSource(
 export function resolveEta(
   stageType: StageType | null | undefined,
   operation: GenerationActivityOperation | null | undefined,
-  provider: AIProvider | null | undefined,
   liveEstimates: readonly GenerationEstimate[],
 ): EtaEstimate {
   const { p50, p90 } = resolveEtaWithSource(
     stageType,
     operation,
-    provider,
     liveEstimates,
   )
   return { p50, p90 }
@@ -278,7 +273,6 @@ export function upperBoundCaption(estimate: ResolvedEta): string | null {
 export function useEtaEstimate(
   stageType: StageType | null | undefined,
   operation: GenerationActivityOperation | null | undefined,
-  provider?: AIProvider | null,
 ): ResolvedEta {
   const liveEstimates = useGenerationEstimatesStore((s) => s.estimates)
   const ensureLoaded = useGenerationEstimatesStore((s) => s.ensureLoaded)
@@ -288,11 +282,11 @@ export function useEtaEstimate(
     // branded overlay (the only consumer of live data) so a flag-off session
     // makes zero new network calls, and only worth fetching when a provider is
     // known (otherwise we can only ever use the heuristic anyway).
-    if (featureFlags.brandedLoaders && provider) void ensureLoaded()
-  }, [provider, ensureLoaded])
+    if (featureFlags.brandedLoaders) void ensureLoaded()
+  }, [ensureLoaded])
 
   return useMemo(
-    () => resolveEtaWithSource(stageType, operation, provider, liveEstimates),
-    [stageType, operation, provider, liveEstimates],
+    () => resolveEtaWithSource(stageType, operation, liveEstimates),
+    [stageType, operation, liveEstimates],
   )
 }

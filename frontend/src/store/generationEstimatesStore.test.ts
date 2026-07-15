@@ -13,7 +13,7 @@ vi.mock("../services/api", () => ({
 import { useGenerationEstimatesStore } from "./generationEstimatesStore"
 
 const SAMPLE: GenerationEstimate[] = [
-  { provider: "anthropic", stage: "spec", operation: "generate", p50: 22, p90: 58, n: 300 },
+  { stage: "spec", operation: "generate", p50: 22, p90: 58, n: 300 },
 ]
 
 describe("useGenerationEstimatesStore", () => {

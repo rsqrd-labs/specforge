@@ -146,66 +146,58 @@ describe("canonicalLookupOperation (Phase 2b grouping)", () => {
 
 describe("resolveEta (live data preferred, heuristic fallback)", () => {
   const live: GenerationEstimate[] = [
-    { provider: "anthropic", stage: "spec", operation: "generate", p50: 22, p90: 58, n: 300 },
+    { stage: "spec", operation: "generate", p50: 22, p90: 58, n: 300 },
     {
-      provider: "anthropic",
       stage: "spec",
       operation: "focused-patch",
       p50: 9,
       p90: 24,
       n: 120,
     },
-    { provider: "openai", stage: "plan", operation: "generate", p50: 40, p90: 88, n: 210 },
+    { stage: "plan", operation: "generate", p50: 40, p90: 88, n: 210 },
   ]
 
-  it("returns the heuristic when no provider is supplied", () => {
-    expect(resolveEta("spec", "generate", undefined, live)).toEqual(
-      estimateEta("spec", "generate"),
-    )
-  })
-
   it("returns the heuristic when there is no live data", () => {
-    expect(resolveEta("spec", "generate", "anthropic", [])).toEqual(
+    expect(resolveEta("spec", "generate", [])).toEqual(
       estimateEta("spec", "generate"),
     )
   })
 
   it("prefers the live band for a matching (provider, stage, operation)", () => {
-    expect(resolveEta("spec", "generate", "anthropic", live)).toEqual({ p50: 22, p90: 58 })
-    expect(resolveEta("plan", "generate", "openai", live)).toEqual({ p50: 40, p90: 88 })
+    expect(resolveEta("spec", "generate", live)).toEqual({ p50: 22, p90: 58 })
+    expect(resolveEta("plan", "generate", live)).toEqual({ p50: 40, p90: 88 })
   })
 
   it("canonicalises the operation before the live lookup", () => {
     // `regenerate` / `quality-gate-regenerate` resolve to the 'generate' band.
-    expect(resolveEta("spec", "regenerate", "anthropic", live)).toEqual({ p50: 22, p90: 58 })
+    expect(resolveEta("spec", "regenerate", live)).toEqual({ p50: 22, p90: 58 })
     expect(
-      resolveEta("spec", "quality-gate-regenerate", "anthropic", live),
+      resolveEta("spec", "quality-gate-regenerate", live),
     ).toEqual({ p50: 22, p90: 58 })
     // A focused patch resolves to its own live band, not the generate one.
-    expect(resolveEta("spec", "focused-patch", "anthropic", live)).toEqual({ p50: 9, p90: 24 })
+    expect(resolveEta("spec", "focused-patch", live)).toEqual({ p50: 9, p90: 24 })
   })
 
   it("falls back to the heuristic on a miss (wrong provider / stage / op)", () => {
     // No google data at all.
-    expect(resolveEta("spec", "generate", "google", live)).toEqual(
+    expect(resolveEta("spec", "generate", [])).toEqual(
       estimateEta("spec", "generate"),
     )
     // anthropic has spec data but not harness.
-    expect(resolveEta("harness", "generate", "anthropic", live)).toEqual(
+    expect(resolveEta("harness", "generate", live)).toEqual(
       estimateEta("harness", "generate"),
     )
     // No live regenerate-gaps band → heuristic gap estimate.
-    expect(resolveEta("spec", "regenerate-gaps", "anthropic", live)).toEqual(
+    expect(resolveEta("spec", "regenerate-gaps", live)).toEqual(
       estimateEta("spec", "regenerate-gaps"),
     )
   })
 
   it("rejects a malformed live entry rather than letting it beat the heuristic", () => {
     const bad: GenerationEstimate[] = [
-      { provider: "anthropic", stage: "spec", operation: "generate", p50: 0, p90: 50, n: 99 },
-      { provider: "openai", stage: "plan", operation: "generate", p50: 90, p90: 40, n: 99 },
+      { stage: "spec", operation: "generate", p50: 0, p90: 50, n: 99 },
+      { stage: "plan", operation: "generate", p50: 90, p90: 40, n: 99 },
       {
-        provider: "google",
         stage: "tasks",
         operation: "generate",
         p50: Number.NaN,
@@ -213,13 +205,13 @@ describe("resolveEta (live data preferred, heuristic fallback)", () => {
         n: 99,
       },
     ]
-    expect(resolveEta("spec", "generate", "anthropic", bad)).toEqual(
+    expect(resolveEta("spec", "generate", bad)).toEqual(
       estimateEta("spec", "generate"),
     )
-    expect(resolveEta("plan", "generate", "openai", bad)).toEqual(
+    expect(resolveEta("plan", "generate", bad)).toEqual(
       estimateEta("plan", "generate"),
     )
-    expect(resolveEta("tasks", "generate", "google", bad)).toEqual(
+    expect(resolveEta("tasks", "generate", bad)).toEqual(
       estimateEta("tasks", "generate"),
     )
   })
@@ -227,23 +219,20 @@ describe("resolveEta (live data preferred, heuristic fallback)", () => {
 
 describe("resolveEtaWithSource (provenance for the no-number gate, issue #48)", () => {
   const live: GenerationEstimate[] = [
-    { provider: "anthropic", stage: "spec", operation: "generate", p50: 22, p90: 58, n: 300 },
+    { stage: "spec", operation: "generate", p50: 22, p90: 58, n: 300 },
   ]
 
   it("tags the guess table as 'heuristic' (no provider / no data / miss)", () => {
-    expect(resolveEtaWithSource("spec", "generate", undefined, live).source).toBe(
+    expect(resolveEtaWithSource("spec", "generate", []).source).toBe(
       "heuristic",
     )
-    expect(resolveEtaWithSource("spec", "generate", "anthropic", []).source).toBe(
-      "heuristic",
-    )
-    expect(resolveEtaWithSource("harness", "generate", "anthropic", live).source).toBe(
+    expect(resolveEtaWithSource("harness", "generate", live).source).toBe(
       "heuristic",
     )
   })
 
   it("tags a real data-backed band as 'live'", () => {
-    const resolved = resolveEtaWithSource("spec", "generate", "anthropic", live)
+    const resolved = resolveEtaWithSource("spec", "generate", live)
     expect(resolved).toEqual({ p50: 22, p90: 58, source: "live" })
   })
 })

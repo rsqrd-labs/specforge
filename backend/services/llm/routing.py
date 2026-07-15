@@ -36,6 +36,81 @@ class LLMRoute:
     selection_reason: str
 
 
+def platform_provider_priority() -> tuple[str, ...]:
+    """Return the validated, server-owned provider precedence."""
+    from config import settings  # noqa: PLC0415
+
+    return tuple(settings.llm_provider_priority.split(","))
+
+
+def resolve_platform_route(
+    *,
+    operation: str,
+    requested_tier: str,
+    fallback_tier: str | None = None,
+    latency_class: str,
+    exclude_providers: frozenset[str] = frozenset(),
+) -> LLMRoute:
+    """Resolve a route without accepting a user/workspace provider preference.
+
+    Providers are considered only when their platform credential is configured,
+    their local circuit is routable, and their catalog supports the operation.
+    Rejection reasons stay internal; callers expose only a neutral availability
+    failure at the product boundary.
+    """
+    from services.llm.provider_status import (  # noqa: PLC0415
+        can_route,
+        is_provider_configured,
+    )
+
+    _validate_operation(operation)
+    _validate_tier(requested_tier)
+    if fallback_tier is not None:
+        _validate_tier(fallback_tier)
+
+    for provider in platform_provider_priority():
+        if provider in exclude_providers:
+            continue
+        if not is_provider_configured(provider) or not can_route(provider):
+            continue
+        route = _route_for_provider(
+            provider=provider,
+            operation=operation,
+            requested_tier=requested_tier,
+            fallback_tier=fallback_tier,
+            latency_class=latency_class,
+        )
+        if route is not None:
+            return route
+    raise LLMRoutingError("No platform LLM route is currently available.")
+
+
+def resolve_platform_judge_route(*, operation: str, latency_class: str) -> LLMRoute:
+    """Select a server-owned judge route for non-generation helper calls."""
+    from services.llm.provider_config import JUDGE_MODELS  # noqa: PLC0415
+    from services.llm.provider_status import (  # noqa: PLC0415
+        can_route,
+        is_provider_configured,
+    )
+
+    for provider in platform_provider_priority():
+        model = JUDGE_MODELS.get(provider)
+        if model and is_provider_configured(provider) and can_route(provider):
+            return LLMRoute(
+                provider=provider,
+                model=model,
+                model_tier=model_tier(provider, model),
+                operation=operation,
+                latency_class=latency_class,
+                cross_provider_fallback=False,
+                reason="platform_priority",
+                requested_tier="small",
+                fallback_tier=None,
+                selection_reason="server_owned_judge",
+            )
+    raise LLMRoutingError("No platform judge route is currently available.")
+
+
 def resolve_llm_route(
     *,
     operation: str,

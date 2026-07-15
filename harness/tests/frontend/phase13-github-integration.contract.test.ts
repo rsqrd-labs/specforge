@@ -63,7 +63,6 @@ describe("phase13 api.ts github integration exports", () => {
       "finaliseStage",
       "rollbackStage",
       "getCredits",
-      "getProviders",
     ]) {
       expect(exported[name], `pre-phase-13 function '${name}' must still be exported`).toBeTypeOf(
         "function",

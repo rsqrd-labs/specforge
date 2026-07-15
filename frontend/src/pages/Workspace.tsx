@@ -516,7 +516,6 @@ export default function Workspace() {
             actionLabel: getGenerationActionLabel("generate"),
             startedAt: Date.parse(activeStage.updated_at) || Date.now(),
             streamed: false,
-            provider: currentWorkspace?.provider,
           }
         : null,
     [
@@ -524,7 +523,6 @@ export default function Workspace() {
       activeStage?.id,
       activeStage?.type,
       activeStage?.updated_at,
-      currentWorkspace?.provider,
     ],
   )
   const activeGenerationActivity =
@@ -558,15 +556,12 @@ export default function Workspace() {
         actionLabel: getGenerationActionLabel(operation),
         startedAt: Date.now(),
         streamed,
-        // Drives the live, data-backed ETA band for this provider (issue #21
-        // Phase 2b); falls back to the heuristic table when absent.
-        provider: currentWorkspace?.provider,
       }
       generationActivityRef.current = nextActivity
       setGenerationActivity(nextActivity)
       return nextActivity
     },
-    [currentWorkspace?.provider],
+    [],
   )
 
   const clearGenerationActivity = useCallback((stageId?: string) => {
@@ -1176,8 +1171,8 @@ export default function Workspace() {
       return
 
     const retryable = new Set([
-      "provider_timeout",
-      "provider_error",
+      "generation_timeout",
+      "generation_unavailable",
       "rate_limit_exceeded",
       "internal_error",
       "generic",

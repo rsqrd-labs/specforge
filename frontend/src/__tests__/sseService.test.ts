@@ -144,7 +144,7 @@ describe("createSSEConnection retry behaviour", () => {
 
   it("maps provider timeouts separately from provider failures", async () => {
     vi.spyOn(globalThis, "fetch").mockImplementation(() =>
-      mockFetchOk('data: {"error":"provider_timeout","timeout_seconds":300}\n\n'),
+      mockFetchOk('data: {"error":"generation_timeout","timeout_seconds":300}\n\n'),
     )
 
     const onError = vi.fn()
@@ -155,7 +155,7 @@ describe("createSSEConnection retry behaviour", () => {
 
     expect(onError).toHaveBeenCalledTimes(1)
     expect(onError.mock.calls[0][0].message).toBe(
-      "Generation timed out. The model did not finish this stage in time. " +
+      "Generation timed out before this stage finished. " +
         "Your workspace is safe. Try again; long stages may need another run.",
     )
   })
@@ -409,7 +409,7 @@ describe("createSSEConnection abort settling", () => {
   })
 
   it("does not fire onAbort when the stream ends with an application error", async () => {
-    const errorBody = 'data: {"error":"provider_error"}\n\n'
+    const errorBody = 'data: {"error":"generation_unavailable"}\n\n'
     vi.spyOn(globalThis, "fetch").mockImplementation(() => mockFetchOk(errorBody))
 
     const onError = vi.fn()

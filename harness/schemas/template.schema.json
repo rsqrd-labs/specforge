@@ -41,13 +41,6 @@
       "maxLength": 10000,
       "description": "Seed text inserted into the workspace form when the user picks this template."
     },
-    "suggested_provider": {
-      "type": ["string", "null"],
-      "enum": ["anthropic", "openai", "google", null]
-    },
-    "suggested_model": {
-      "type": ["string", "null"]
-    },
     "sort_order": {
       "type": "integer",
       "minimum": 0,

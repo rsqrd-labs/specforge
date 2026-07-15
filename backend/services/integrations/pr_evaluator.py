@@ -743,7 +743,11 @@ async def _workspace_provider(db: AsyncSession, workspace_id: Any) -> str | None
     workspace = (
         await db.execute(select(Workspace).where(Workspace.id == workspace_id))
     ).scalar_one_or_none()
-    return workspace.provider if workspace is not None else None
+    if workspace is None:
+        return None
+    from services.llm.routing import platform_provider_priority  # noqa: PLC0415
+
+    return platform_provider_priority()[0]
 
 
 async def _pr_check_mode(db: AsyncSession, installation_pk: Any) -> str:

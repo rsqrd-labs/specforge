@@ -56,7 +56,7 @@ from models.workspace import Workspace
 from services.llm.cost_ledger import LLMCostContext
 from services.llm.gateway import get_llm
 from services.llm.instrumented_adapter import InstrumentedAdapter
-from services.llm.provider_config import JUDGE_MODELS
+from services.llm.routing import LLMRoutingError, resolve_platform_judge_route
 from services.observability import record_judge_call
 from services.pipeline.problem_compressor import get_or_compress, problem_budget
 from services.security.prompt_guard import PromptGuard
@@ -153,13 +153,15 @@ async def request_clarifying_questions(
     rate-limit-from-provider). The caller is expected to return 204 in that
     case so the frontend silently bypasses the modal.
     """
-    provider = workspace.provider
-    judge_model = JUDGE_MODELS.get(provider)
-    if judge_model is None:
-        logger.warning(
-            "clarify_no_judge_model_for_provider", extra={"provider": provider}
+    try:
+        route = resolve_platform_judge_route(
+            operation="clarify.questions",
+            latency_class="interactive",
         )
+    except LLMRoutingError:
+        logger.warning("clarify_no_platform_route")
         return []
+    provider, judge_model = route.provider, route.model
 
     system_prompt = clarification_prompt.SYSTEM_PROMPT
     # Compression is for *long*, not *vague* (plan §4): the clarifier still runs

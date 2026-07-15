@@ -132,8 +132,6 @@ class StoryboardSourcePackage:
     workspace_id: UUID
     workspace_name: str
     problem_statement: str
-    provider: str
-    model: str
     stage_versions: dict[StageType, UUID]
     artifacts: dict[StageType, str]
     excerpts: dict[str, SourceExcerpt]
@@ -482,12 +480,20 @@ async def build_storyboard_source(
     # storyboard prompt. Under-budget input is a byte-identical no-op.
     problem_statement = _scrub(workspace.problem_statement or "")
     if settings.problem_statement_compression:
+        from services.llm.routing import resolve_platform_route  # noqa: PLC0415
+
+        route = resolve_platform_route(
+            operation="storyboard.generate",
+            requested_tier="mid",
+            fallback_tier=None,
+            latency_class="background",
+        )
         problem_statement = await get_or_compress(
             problem_statement,
-            problem_budget(workspace.provider, workspace.model),
+            problem_budget(route.provider, route.model),
             get_shared_redis(),
-            workspace.provider,
-            workspace.model,
+            route.provider,
+            route.model,
             cost_context=LLMCostContext(
                 workspace_id=workspace.id,
                 product_surface="storyboard",
@@ -498,8 +504,6 @@ async def build_storyboard_source(
         workspace_id=workspace.id,
         workspace_name=workspace.name,
         problem_statement=problem_statement,
-        provider=workspace.provider,
-        model=workspace.model,
         stage_versions=stage_versions,
         artifacts=artifacts,
         excerpts=excerpts,

@@ -4,12 +4,6 @@ import { useWorkspaceStore } from "../../store/workspaceStore"
 import type { TrashedWorkspace } from "../../types/retention"
 import { ActionAlertPanel } from "../shared/ActionAlert"
 
-const PROVIDER_LABELS: Record<string, string> = {
-  anthropic: "Anthropic",
-  openai: "OpenAI",
-  google: "Google",
-}
-
 function daysUntil(iso: string): number {
   const ms = new Date(iso).getTime() - Date.now()
   return Math.max(0, Math.ceil(ms / (1000 * 60 * 60 * 24)))
@@ -122,7 +116,6 @@ export function RecentlyDeletedSection() {
                   {workspace.name}
                 </strong>
                 <span className="recently-deleted-card-meta">
-                  {PROVIDER_LABELS[workspace.provider] ?? workspace.provider} ·{" "}
                   {countdownLabel(workspace.purge_after)}
                 </span>
               </div>

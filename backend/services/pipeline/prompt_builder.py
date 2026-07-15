@@ -164,6 +164,8 @@ async def build_prompt(
     db: AsyncSession,
     redis_client: Redis | None = None,
     *,
+    provider: str | None = None,
+    model: str | None = None,
     research_context: str = "",
 ) -> tuple[str, str, str]:
     """Assemble ``(system_prompt, user_prompt, compression_rung)`` for a stage.
@@ -176,6 +178,16 @@ async def build_prompt(
     """
     module = _PROMPT_MODULES[stage_type]
     dep_keys = _DEPENDENCIES[stage_type]
+    if provider is None or model is None:
+        from services.llm.routing import resolve_platform_route  # noqa: PLC0415
+
+        route = resolve_platform_route(
+            operation=f"{stage_type}.generate",
+            requested_tier="mid",
+            fallback_tier=None,
+            latency_class="interactive",
+        )
+        provider, model = route.provider, route.model
     # Demo Day mode selects a parallel set of prompts, section contracts, and
     # keep-lists; any other value takes the unchanged standard path (the §4
     # byte-identical regression pin). getattr keeps callers that pass a lightweight
@@ -229,8 +241,8 @@ async def build_prompt(
     if settings.problem_statement_compression:
         redis = redis_client or get_shared_redis()
         budget = problem_budget(
-            workspace.provider,
-            workspace.model,
+            provider,
+            model,
             research_context=research_context,
             clarification_qa=deps.get("clarification_qa", ""),
             stage_type=stage_type,
@@ -239,8 +251,8 @@ async def build_prompt(
             workspace.problem_statement,
             budget,
             redis,
-            workspace.provider,
-            workspace.model,
+            provider,
+            model,
             cost_context=LLMCostContext(
                 workspace_id=workspace.id,
                 product_surface="problem_compression",
@@ -256,8 +268,8 @@ async def build_prompt(
             workspace.problem_statement,
             compressed,
             budget,
-            workspace.provider,
-            workspace.model,
+            provider,
+            model,
         )
 
     if mode == "demo_day":

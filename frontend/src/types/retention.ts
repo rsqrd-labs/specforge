@@ -1,5 +1,3 @@
-import type { AIProvider } from "./workspace"
-
 /**
  * Static data-retention policy metadata from GET /retention/policy (issue #43).
  * The delete dialog stamps `policy_version` as the ack; the Settings panel and
@@ -21,7 +19,6 @@ export interface RetentionPolicy {
 export interface TrashedWorkspace {
   id: string
   name: string
-  provider: AIProvider
   archived_at: string
   purge_after: string
   acknowledged: boolean

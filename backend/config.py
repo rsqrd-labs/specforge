@@ -24,6 +24,26 @@ class Settings(BaseSettings):
     anthropic_api_key: str
     openai_api_key: str
     google_api_key: str
+    # Server-owned LLM provider precedence. This is deliberately never exposed
+    # through a user API: product traffic is routed by backend policy.
+    llm_provider_priority: str = "anthropic,openai,google"
+
+    @field_validator("llm_provider_priority")
+    @classmethod
+    def validate_llm_provider_priority(cls, value: str) -> str:
+        providers = [item.strip().lower() for item in value.split(",") if item.strip()]
+        allowed = {"anthropic", "openai", "google"}
+        if not providers:
+            raise ValueError("LLM_PROVIDER_PRIORITY must contain at least one provider")
+        if len(providers) != len(set(providers)):
+            raise ValueError("LLM_PROVIDER_PRIORITY must not contain duplicates")
+        unknown = set(providers) - allowed
+        if unknown:
+            raise ValueError(
+                "LLM_PROVIDER_PRIORITY contains unknown providers: "
+                + ", ".join(sorted(unknown))
+            )
+        return ",".join(providers)
 
     encryption_master_key: str
     csrf_secret: str

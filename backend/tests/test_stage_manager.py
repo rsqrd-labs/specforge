@@ -12,6 +12,7 @@ import pytest
 
 from models import CreditLedger, EvalResult, Stage, StageVersion, Workspace
 from services.llm.completion import LLMCompletionInfo
+from services.llm.routing import LLMRoutingError
 from services.pipeline.artifact_validator import (
     chunk_completion_sentinel,
     final_completion_sentinel,
@@ -829,13 +830,14 @@ async def test_generate_raises_when_dependency_not_finalised() -> None:
 
 
 @pytest.mark.asyncio
-async def test_generate_invalid_route_skips_credit_and_provider_call() -> None:
+async def test_generate_unavailable_platform_route_skips_credit_and_provider_call() -> (
+    None
+):
     from services.pipeline.stage_manager import PreflightError
 
     workspace_id = uuid4()
     spec_stage = _make_stage(workspace_id, "spec", status="draft")
     workspace = _make_workspace([spec_stage])
-    workspace.provider = "unknown-provider"
     user = _make_user()
     svc = StageManager(redis_client=_FakeRedis())
     db = _MultiQueryDB([spec_stage, workspace, []])
@@ -850,6 +852,10 @@ async def test_generate_invalid_route_skips_credit_and_provider_call() -> None:
             new_callable=AsyncMock,
         ) as mock_build_prompt,
         patch("services.pipeline.stage_manager.get_llm") as mock_get_llm,
+        patch(
+            "services.pipeline.stage_manager.resolve_platform_route",
+            side_effect=LLMRoutingError("unavailable"),
+        ),
     ):
         with pytest.raises(PreflightError) as exc_info:
             async for _ in svc.generate(spec_stage.id, user, db):
@@ -869,9 +875,13 @@ def test_harness_generation_uses_cheap_primary_with_mid_escalation(
     # Pin the cheap-primary policy on so this test exercises that path
     # explicitly, independent of the product default.
     monkeypatch.setattr(stage_manager_module.settings, "core_cheap_primary", True)
+    monkeypatch.setattr(
+        stage_manager_module.settings,
+        "llm_provider_priority",
+        "openai,anthropic,google",
+    )
 
     workspace = _make_workspace()
-    workspace.provider = "openai"
 
     route = stage_manager_module._route_for_stage_generation("harness", workspace)
 
@@ -906,6 +916,7 @@ def test_complexity_classifier_off_by_default_keeps_cheap_primary(monkeypatch) -
     from services.pipeline import stage_manager as sm
 
     monkeypatch.setattr(sm.settings, "core_cheap_primary", True)
+    monkeypatch.setattr(sm.settings, "llm_provider_priority", "anthropic,openai,google")
 
     workspace = _make_workspace()
     workspace.provider = "anthropic"
@@ -925,6 +936,7 @@ def test_complexity_classifier_raises_regulated_prompt_to_mid(monkeypatch) -> No
     # The complexity floor only applies while the cheap-primary policy is on.
     monkeypatch.setattr(sm.settings, "core_cheap_primary", True)
     monkeypatch.setattr(sm.settings, "core_complexity_routing", True)
+    monkeypatch.setattr(sm.settings, "llm_provider_priority", "anthropic,openai,google")
 
     workspace = _make_workspace()
     workspace.provider = "anthropic"
@@ -952,6 +964,7 @@ def test_complexity_classifier_does_not_raise_for_google(monkeypatch) -> None:
     from services.pipeline import stage_manager as sm
 
     monkeypatch.setattr(sm.settings, "core_complexity_routing", True)
+    monkeypatch.setattr(sm.settings, "llm_provider_priority", "google,anthropic,openai")
 
     workspace = _make_workspace()
     workspace.provider = "google"
@@ -969,6 +982,7 @@ def test_prior_quality_gate_block_escalates_starting_tier(monkeypatch) -> None:
     from services.pipeline import stage_manager as sm
 
     monkeypatch.setattr(sm.settings, "core_complexity_routing", True)
+    monkeypatch.setattr(sm.settings, "llm_provider_priority", "openai,anthropic,google")
 
     workspace = _make_workspace()
     workspace.provider = "openai"
@@ -989,6 +1003,7 @@ def test_core_cheap_primary_revert_uses_mid_first(monkeypatch) -> None:
     from services.pipeline import stage_manager as sm
 
     monkeypatch.setattr(sm.settings, "core_cheap_primary", False)
+    monkeypatch.setattr(sm.settings, "llm_provider_priority", "anthropic,openai,google")
 
     workspace = _make_workspace()
     workspace.provider = "anthropic"
@@ -1001,8 +1016,8 @@ def test_core_cheap_primary_revert_uses_mid_first(monkeypatch) -> None:
 
     fallback = sm._runtime_fallback_route(route)
     assert fallback is not None
-    assert fallback.model_tier == "strong"
-    assert fallback.model == "claude-opus-4-8"
+    assert fallback.provider == "openai"
+    assert fallback.model_tier == "mid"
 
 
 @pytest.mark.asyncio

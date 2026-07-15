@@ -967,7 +967,7 @@ async def test_generate_internal_error_does_not_expose_detail(app) -> None:
 
 
 @pytest.mark.asyncio
-async def test_generate_timeout_emits_provider_timeout(app) -> None:
+async def test_generate_timeout_emits_neutral_timeout_error(app) -> None:
     import json as _json
 
     from services.llm.base import ProviderTimeoutError
@@ -1001,12 +1001,14 @@ async def test_generate_timeout_emits_provider_timeout(app) -> None:
 
     assert response.status_code == 200
     body = response.text
-    assert "provider_timeout" in body
-    assert "provider_error" not in body
+    assert "generation_timeout" in body
+    assert "provider_timeout" not in body
+    assert "openai" not in body
     for line in body.splitlines():
         if line.startswith("data:"):
             data = _json.loads(line[5:].strip())
-            if data.get("error") == "provider_timeout":
+            if data.get("error") == "generation_timeout":
+                assert data["detail"] == "AI generation timed out. Please try again."
                 assert data["timeout_seconds"] == 300
 
 

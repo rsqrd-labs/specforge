@@ -22,12 +22,6 @@ const STAGE_LABELS: Record<StageType, string> = {
   tasks: "Tasks",
 }
 
-const PROVIDER_LABELS: Record<string, string> = {
-  anthropic: "Anthropic",
-  openai: "OpenAI",
-  google: "Google",
-}
-
 function nextStageForCard(stageMap: Partial<Record<StageType, Stage>>): Stage | null {
   const activeStage = STAGE_ORDER
     .map((type) => stageMap[type])
@@ -138,9 +132,6 @@ export function WorkspaceCard({
       >
         <div className="workspace-card-head">
           <span className="workspace-card-name">{workspace.name}</span>
-          <span className="workspace-card-provider">
-            {PROVIDER_LABELS[workspace.provider] ?? workspace.provider}
-          </span>
         </div>
 
         <HarnessCoverageChip

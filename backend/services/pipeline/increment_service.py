@@ -82,7 +82,11 @@ from services.llm.cost_ledger import LLMCostContext
 from services.llm.gateway import get_llm
 from services.llm.instrumented_adapter import InstrumentedAdapter
 from services.llm.output_budget import output_budget_for_operation
-from services.llm.routing import LLMRoutingError, resolve_llm_route
+from services.llm.routing import (
+    LLMRoutingError,
+    platform_provider_priority,
+    resolve_platform_route,
+)
 from services.llm.tier_policy import generation_tier_policy
 from services.observability import (
     GITHUB_AUDIT_INCREMENT_PUSHED,
@@ -358,20 +362,18 @@ class IncrementService:
     # ------------------------------------------------------------------ helpers
 
     def _resolve_route(self, workspace: Workspace):
-        requested_tier, fallback_tier = generation_tier_policy(workspace.provider)
+        requested_tier, fallback_tier = generation_tier_policy(
+            platform_provider_priority()[0]
+        )
         try:
-            return resolve_llm_route(
+            return resolve_platform_route(
                 operation=_INCREMENT_OPERATION,
-                preferred_provider=workspace.provider,
                 requested_tier=requested_tier,
                 fallback_tier=fallback_tier,
                 latency_class="interactive",
             )
         except LLMRoutingError as exc:
-            raise IncrementError(
-                "The selected provider/model is not available for increment "
-                "generation."
-            ) from exc
+            raise IncrementError("AI generation is temporarily unavailable.") from exc
 
     async def _load_workspace(self, workspace_id: UUID, db: AsyncSession) -> Workspace:
         workspace = (

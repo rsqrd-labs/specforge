@@ -119,7 +119,6 @@ async def test_compute_converts_ms_to_seconds_and_adds_pipeline_tail(monkeypatch
     estimates = await ge.compute_generation_estimates(object())
     assert estimates == [
         {
-            "provider": "openai",
             "stage": "plan",
             "operation": "generate",
             "p50": 45,  # round(41) + 4
@@ -179,9 +178,7 @@ async def test_compute_drops_unmapped_and_out_of_band_rows(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_compute_drops_rows_with_unknown_provider(monkeypatch):
-    # A ledger provider outside the schema's allowed set must never reach the
-    # cached payload (it would 500 the endpoint's Literal validation).
+async def test_compute_ignores_provider_identity(monkeypatch):
     monkeypatch.setattr(ge.settings, "generation_estimates_min_samples", 1)
     monkeypatch.setattr(ge.settings, "generation_estimates_pipeline_tail_seconds", 0)
     _patch_rows(
@@ -197,7 +194,9 @@ async def test_compute_drops_rows_with_unknown_provider(monkeypatch):
             }
         ],
     )
-    assert await ge.compute_generation_estimates(object()) == []
+    result = await ge.compute_generation_estimates(object())
+    assert result[0]["stage"] == "spec"
+    assert "provider" not in result[0]
 
 
 @pytest.mark.asyncio
@@ -226,10 +225,9 @@ async def test_compute_maps_refine_focused_and_sorts_output(monkeypatch):
         ],
     )
     estimates = await ge.compute_generation_estimates(object())
-    # Sorted by (provider, stage, operation): anthropic/harness before openai/spec.
-    assert [(e["provider"], e["stage"], e["operation"]) for e in estimates] == [
-        ("anthropic", "harness", "focused-patch"),
-        ("openai", "spec", "generate"),
+    assert [(e["stage"], e["operation"]) for e in estimates] == [
+        ("harness", "focused-patch"),
+        ("spec", "generate"),
     ]
 
 
@@ -362,7 +360,6 @@ async def test_endpoint_returns_cached_estimates() -> None:
     payload = {
         "estimates": [
             {
-                "provider": "openai",
                 "stage": "plan",
                 "operation": "generate",
                 "p50": 45,

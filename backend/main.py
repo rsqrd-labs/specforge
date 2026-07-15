@@ -19,7 +19,6 @@ from routers import auth as auth_router
 from routers import billing as billing_router
 from routers import credits as credits_router
 from routers import integrations as integrations_router
-from routers import providers as providers_router
 from routers import public as public_router
 from routers import retention as retention_router
 from routers import stage as stage_router
@@ -200,7 +199,6 @@ def create_app(redis_client: Redis | None = None) -> FastAPI:
         return JSONResponse(status_code=status_code, content=content)
 
     app.include_router(auth_router.router)
-    app.include_router(providers_router.router)
     app.include_router(workspace_router.router)
     app.include_router(stage_router.router)
     app.include_router(credits_router.router)

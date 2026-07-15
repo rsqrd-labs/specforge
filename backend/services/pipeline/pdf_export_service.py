@@ -247,7 +247,6 @@ def _render_pdf_sync(html_text: str) -> bytes:
 def render_pdf(
     *,
     workspace_name: str,
-    provider_label: str,
     stages: dict[str, Stage],
     coverage_label: str | None,
 ) -> bytes:
@@ -259,7 +258,6 @@ def render_pdf(
     template = _jinja_env.get_template(_TEMPLATE_NAME)
     html_text = template.render(
         workspace_name=workspace_name,
-        provider_label=provider_label or "—",
         generated_at=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
         coverage_label=coverage_label,
         sections=_build_sections(stages),
@@ -303,7 +301,6 @@ async def render(
     template = _jinja_env.get_template(_TEMPLATE_NAME)
     html_text = template.render(
         workspace_name=workspace.name,
-        provider_label=workspace.provider or "—",
         generated_at=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
         coverage_label=_coverage_label(coverage_summary),
         sections=_build_sections(stages),

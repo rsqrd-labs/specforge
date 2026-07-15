@@ -1,6 +1,5 @@
 import type { Stage } from "./stage"
 
-export type AIProvider = "anthropic" | "openai" | "google"
 export type WorkspaceStatus = "active" | "archived"
 // Demo Day mode (docs/DEMO_DAY_MODE_IMPLEMENTATION_PLAN.md). Default "standard"
 // keeps the existing UX unchanged; "demo_day" is gated behind VITE_DEMO_DAY_MODE.
@@ -54,8 +53,6 @@ export interface Workspace {
   user_id: string
   name: string
   problem_statement: string
-  provider: AIProvider
-  model: string
   status: WorkspaceStatus
   created_at: string
   updated_at: string
@@ -96,7 +93,6 @@ export interface WorkspaceWithStages extends Workspace {
 export interface CreateWorkspacePayload {
   name: string
   problem_statement: string
-  provider: AIProvider
   template_slug?: string | null
   /** Demo Day mode (omit or "standard" for the default pipeline). */
   mode?: WorkspaceMode

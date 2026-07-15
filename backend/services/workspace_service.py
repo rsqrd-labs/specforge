@@ -11,7 +11,11 @@ from sqlalchemy.orm import selectinload
 from config import settings
 from models import Stage, User, Workspace
 from schemas.workspace import TargetAgent, WorkspaceCreate
-from services.llm.routing import LLMRoutingError, resolve_llm_route
+from services.llm.routing import (
+    LLMRoutingError,
+    platform_provider_priority,
+    resolve_llm_route,
+)
 from services.security.problem_statement_gate import (
     ProblemStatementValidationError,
     assert_valid_problem_statement_async,
@@ -26,7 +30,7 @@ class WorkspaceService:
         self, user_id: UUID, payload: WorkspaceCreate, db: AsyncSession
     ) -> Workspace:
         await self._assert_problem_statement_is_valid(payload.problem_statement)
-        server_model = self._server_default_model(payload.provider)
+        initial_route = self._server_default_route()
         mode, target_agent, time_budget_minutes = self._resolve_mode(payload)
 
         # Lock the user row so concurrent create requests are serialized and
@@ -49,8 +53,10 @@ class WorkspaceService:
             # off the event loop (F7 — scalability audit P2). The name (<=200
             # chars) stays inline — the offload gate would keep it there anyway.
             problem_statement=await sanitize_text_async(payload.problem_statement),
-            provider=payload.provider,
-            model=server_model,
+            # Expand-phase compatibility for workers still reading these
+            # columns. New routing code never treats them as user preference.
+            provider=initial_route.provider,
+            model=initial_route.model,
             status="active",
             mode=mode,
             target_agent=target_agent,
@@ -221,11 +227,11 @@ class WorkspaceService:
             return "standard", payload.target_agent, None
         return "demo_day", payload.target_agent, payload.time_budget_minutes
 
-    def _server_default_model(self, provider: str) -> str:
+    def _server_default_route(self):
         try:
-            route = resolve_llm_route(
+            return resolve_llm_route(
                 operation="spec.generate",
-                preferred_provider=provider,
+                preferred_provider=platform_provider_priority()[0],
                 requested_tier="mid",
                 fallback_tier=None,
                 latency_class="interactive",
@@ -234,11 +240,10 @@ class WorkspaceService:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail={
-                    "code": "provider_route_unavailable",
-                    "message": "This provider cannot currently route generation work.",
+                    "code": "generation_unavailable",
+                    "message": "AI generation is temporarily unavailable.",
                 },
             ) from exc
-        return route.model
 
 
 workspace_service = WorkspaceService()
