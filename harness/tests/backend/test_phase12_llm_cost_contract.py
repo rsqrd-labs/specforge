@@ -151,7 +151,11 @@ def test_stage_logic_uses_provider_neutral_routing_not_model_names() -> None:
         f"Found fragments: {leaked}"
     )
 
-    assert "resolve_llm_route" in stage_manager_source or "routing_policy" in stage_manager_source, (
+    assert (
+        "resolve_platform_route" in stage_manager_source
+        or "resolve_llm_route" in stage_manager_source
+        or "routing_policy" in stage_manager_source
+    ), (
         "Stage Manager should call a provider-neutral routing policy such as "
         "resolve_llm_route(...) before invoking get_llm()."
     )
