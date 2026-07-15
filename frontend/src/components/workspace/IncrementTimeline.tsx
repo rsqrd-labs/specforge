@@ -28,8 +28,8 @@
  *
  * Owns the increment + idea data, the synchronous credit-aware create (shown
  * with the shared StagedProgress vocabulary), the 202 push, and "promote" —
- * which *composes* (prefills the input) rather than mutating an idea, honest to
- * the backend (no update-idea endpoint; feature_request needs ≥ 8 chars).
+ * which prefills the input for confirmation and carries the idea identity into
+ * increment creation so the backend can link it to the generated version.
  */
 
 import { useCallback, useEffect, useRef, useState } from "react"
@@ -46,17 +46,11 @@ import type { Increment, IncrementIdea } from "../../types/github"
 import { ActionAlertPanel } from "../shared/ActionAlert"
 import { DriftIcon, ShippedCheckIcon } from "../shared/icons"
 import { IdeaBacklog } from "./IdeaBacklog"
-import { StagedProgress } from "./StagedProgress"
 
-const FEATURE_MIN = 8
+const FEATURE_MIN = 20
+const FEATURE_MIN_WORDS = 4
+const FEATURE_MIN_DISTINCT_WORDS = 3
 const FEATURE_MAX = 4000
-
-const CREATE_STAGES = [
-  "Reading your baseline",
-  "Planning the delta",
-  "Writing the new tasks",
-]
-const CREATE_STAGE_ADVANCE_MS = 1800
 
 // Gentle, visible-only poll so a worker-driven push (open→pushed) and ideas
 // flowing back from GitHub appear without a manual refresh.
@@ -86,6 +80,27 @@ function pushedSet(increments: Increment[]): Set<string> {
   )
 }
 
+function featureRequestError(value: string): string | null {
+  const normalised = value.trim().replace(/\s+/g, " ")
+  if (!normalised) return null
+  const words = normalised.match(/[\p{L}][\p{L}\p{N}'’-]*/gu) ?? []
+  const distinctWords = new Set(words.map((word) => word.toLocaleLowerCase()))
+  if (
+    normalised.length < FEATURE_MIN ||
+    words.length < FEATURE_MIN_WORDS ||
+    distinctWords.size < FEATURE_MIN_DISTINCT_WORDS
+  ) {
+    return "Describe a specific change in at least 4 words and 20 characters."
+  }
+  return null
+}
+
+function formatElapsed(totalSeconds: number): string {
+  const minutes = Math.floor(totalSeconds / 60)
+  const seconds = totalSeconds % 60
+  return `${minutes}:${seconds.toString().padStart(2, "0")}`
+}
+
 export function IncrementTimeline({
   workspaceId,
   enabled,
@@ -96,11 +111,13 @@ export function IncrementTimeline({
   const [increments, setIncrements] = useState<Increment[]>([])
   const [ideas, setIdeas] = useState<IncrementIdea[]>([])
   const [loading, setLoading] = useState(true)
+  const [loadError, setLoadError] = useState<string | null>(null)
 
   const [feature, setFeature] = useState("")
+  const [sourceIdea, setSourceIdea] = useState<IncrementIdea | null>(null)
   const [featureError, setFeatureError] = useState<string | null>(null)
   const [creating, setCreating] = useState(false)
-  const [createStage, setCreateStage] = useState(0)
+  const [generationElapsed, setGenerationElapsed] = useState(0)
   const [createError, setCreateError] = useState<string | null>(null)
 
   const [capturing, setCapturing] = useState(false)
@@ -120,14 +137,26 @@ export function IncrementTimeline({
   }, [])
 
   const refresh = useCallback(async () => {
-    const [incs, backlog] = await Promise.all([
-      listIncrements(workspaceId).catch(() => [] as Increment[]),
-      listIdeas(workspaceId).catch(() => [] as IncrementIdea[]),
-    ])
-    if (!mounted.current) return
-    setIncrements(incs)
-    setIdeas(backlog)
-    setLoading(false)
+    try {
+      const [incs, backlog] = await Promise.all([
+        listIncrements(workspaceId),
+        listIdeas(workspaceId),
+      ])
+      if (!mounted.current) return
+      setIncrements(incs)
+      setIdeas(backlog)
+      setLoadError(null)
+    } catch (caught) {
+      if (!mounted.current) return
+      setLoadError(
+        getApiErrorMessage(
+          caught,
+          "We couldn't load your versions and saved ideas.",
+        ),
+      )
+    } finally {
+      if (mounted.current) setLoading(false)
+    }
   }, [workspaceId])
 
   useEffect(() => {
@@ -154,24 +183,24 @@ export function IncrementTimeline({
     return () => window.clearTimeout(handle)
   }, [increments])
 
-  // Advance the staged-progress labels while a (synchronous) generate is in
-  // flight — purely cosmetic; the resolved request is the source of truth.
+  // Show real elapsed time instead of simulating backend stages the synchronous
+  // endpoint cannot actually report.
   useEffect(() => {
     if (!creating) return undefined
-    setCreateStage(0)
+    const startedAt = Date.now()
+    setGenerationElapsed(0)
     const timer = window.setInterval(() => {
-      setCreateStage((i) => Math.min(i + 1, CREATE_STAGES.length - 1))
-    }, CREATE_STAGE_ADVANCE_MS)
+      setGenerationElapsed(Math.floor((Date.now() - startedAt) / 1000))
+    }, 1000)
     return () => window.clearInterval(timer)
   }, [creating])
 
   async function handleCreate() {
     if (disabled) return
     const text = feature.trim()
-    if (text.length < FEATURE_MIN) {
-      setFeatureError(
-        "Describe the change in a little more detail (at least 8 characters).",
-      )
+    const validationError = featureRequestError(text)
+    if (validationError) {
+      setFeatureError(validationError)
       return
     }
     setFeatureError(null)
@@ -181,9 +210,11 @@ export function IncrementTimeline({
       await createIncrement(workspaceId, {
         feature_request: text,
         mode: "additive",
+        ...(sourceIdea ? { idea_id: sourceIdea.id } : {}),
       })
       if (!mounted.current) return
       setFeature("")
+      setSourceIdea(null)
       await refresh()
     } catch (caught) {
       if (!mounted.current) return
@@ -195,9 +226,11 @@ export function IncrementTimeline({
         status === 402
           ? "You're out of credits — top up to generate an increment."
           : status === 409
-            ? "Finalise all four stages before adding an increment."
+            ? sourceIdea
+              ? "That saved idea has already been used. Refresh and choose another idea."
+              : "Finalise all four stages before adding an increment."
             : status === 422
-              ? "That didn't produce any new tasks — try naming a concrete feature."
+              ? "The request was too vague or did not produce a concrete task delta. Describe the change, affected user, and expected outcome."
               : getApiErrorMessage(caught, "Couldn't generate the increment. Please try again."),
       )
     } finally {
@@ -205,16 +238,18 @@ export function IncrementTimeline({
     }
   }
 
-  async function handleCapture(text: string) {
-    if (disabled) return
+  async function handleCapture(text: string): Promise<boolean> {
+    if (disabled) return false
     setCapturing(true)
     setActionError(null)
     try {
       await createIdea(workspaceId, { text })
       await refresh()
+      return true
     } catch (caught) {
       if (mounted.current)
         setActionError(getApiErrorMessage(caught, "Couldn't save that idea."))
+      return false
     } finally {
       if (mounted.current) setCapturing(false)
     }
@@ -222,9 +257,10 @@ export function IncrementTimeline({
 
   function handlePromote(idea: IncrementIdea) {
     if (disabled) return
-    // Compose, don't mutate: prefill the increment input so the user confirms /
-    // expands the idea into a ≥ 8-char feature request and submits it.
+    // Prefill for confirmation and expansion; the idea is linked only after a
+    // sufficiently scoped request generates successfully.
     setFeature(idea.text)
+    setSourceIdea(idea)
     setFeatureError(null)
     composeRef.current?.focus()
   }
@@ -267,35 +303,88 @@ export function IncrementTimeline({
     )
   }
 
-  // Enabled on any text; the ≥ 8-char rule surfaces as a calm hint on submit
-  // rather than a silently disabled button with no explanation.
-  const canSubmit = feature.trim().length > 0 && !creating && !disabled
+  const nextVersion = increments.reduce(
+    (highest, increment) => Math.max(highest, increment.sequence + 2),
+    2,
+  )
+  const liveFeatureError = featureRequestError(feature)
+  // Keep an invalid action unavailable while the adjacent hint explains
+  // exactly what is missing. The backend repeats this validation authoritatively.
+  const canSubmit =
+    feature.trim().length > 0 &&
+    liveFeatureError === null &&
+    !creating &&
+    !disabled
   const disabledReasonId = disabledReason ? "increment-timeline-disabled-reason" : undefined
 
   return (
-    <div className="ws-panel-section ws-timeline-panel">
+    <section className="ws-panel-section ws-timeline-panel" aria-labelledby="workspace-versions-title">
       <div className="ws-panel-section-header">
         <div>
-          <div className="ws-panel-title">Increments</div>
-          <p>Your workspace, version by version.</p>
+          <div className="ws-panel-title">Workspace versions</div>
+          <h2 id="workspace-versions-title" className="ws-timeline-heading">
+            Build the next version
+          </h2>
+          <p>
+            Describe one focused change. SpecForge will turn it into new tasks
+            without rewriting your completed baseline.
+          </p>
         </div>
       </div>
 
-      <div className="ws-timeline-compose">
+      {loadError && (
+        <ActionAlertPanel
+          severity="error"
+          title="Versions could not be loaded"
+          message={loadError}
+          recovery="Your workspace data is unchanged. Retry the connection."
+          source="Workspace versions"
+          primaryAction={{ label: "Retry", onSelect: () => refresh() }}
+          className="ws-timeline-error"
+        />
+      )}
+
+      <div className="ws-timeline-compose" aria-busy={creating}>
+        <div className="ws-timeline-field-header">
+          <label htmlFor="next-version-request">What should change?</label>
+          <span>Creates Version {nextVersion}</span>
+        </div>
+        {sourceIdea && (
+          <div className="ws-timeline-source-idea" role="status">
+            <span>
+              Using saved idea: <strong>{sourceIdea.text}</strong>
+            </span>
+            <button
+              type="button"
+              onClick={() => setSourceIdea(null)}
+              disabled={creating}
+              aria-label="Stop using saved idea"
+            >
+              Remove
+            </button>
+          </div>
+        )}
         <textarea
+          id="next-version-request"
           ref={composeRef}
           className="ws-timeline-input"
           value={feature}
           maxLength={FEATURE_MAX}
           rows={2}
-          placeholder="What do you want to add?"
-          aria-label="Describe the next increment"
+          placeholder="For example: Add team invitations with role-based access"
+          aria-label="What should change in the next version?"
           aria-describedby={disabled ? disabledReasonId : undefined}
           disabled={creating || disabled}
           title={disabled ? disabledReason : undefined}
           onChange={(e) => {
             setFeature(e.target.value)
             if (featureError) setFeatureError(null)
+          }}
+          onKeyDown={(event) => {
+            if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
+              event.preventDefault()
+              if (canSubmit) void handleCreate()
+            }
           }}
         />
         <div className="ws-timeline-compose-actions">
@@ -304,6 +393,14 @@ export function IncrementTimeline({
               {featureError}
             </span>
           )}
+          {!featureError && liveFeatureError && (
+            <span className="ws-timeline-hint">
+              {liveFeatureError}
+            </span>
+          )}
+          <span className="ws-timeline-shortcut" aria-hidden="true">
+            {feature.length}/{FEATURE_MAX} · ⌘ Enter
+          </span>
           <button
             type="button"
             className="ws-timeline-add"
@@ -311,9 +408,9 @@ export function IncrementTimeline({
             title={disabled ? disabledReason : undefined}
             aria-describedby={disabled ? disabledReasonId : undefined}
             onClick={() => void handleCreate()}
-            aria-label="Add increment"
+            aria-label={`Generate Version ${nextVersion}`}
           >
-            Add
+            {creating ? "Generating…" : "Generate version"}
           </button>
         </div>
       </div>
@@ -324,8 +421,18 @@ export function IncrementTimeline({
       ) : null}
 
       {creating && (
-        <div className="ws-timeline-creating">
-          <StagedProgress stages={CREATE_STAGES} stageIndex={createStage} />
+        <div className="ws-timeline-creating" role="status" aria-live="polite">
+          <span className="ws-timeline-creating-indicator" aria-hidden="true" />
+          <div>
+            <strong>Generating Version {nextVersion}</strong>
+            <p>
+              Building a task-only delta from your finalised workspace. This
+              usually takes 1–2 minutes and stops after the server timeout.
+            </p>
+          </div>
+          <time dateTime={`PT${generationElapsed}S`} aria-hidden="true">
+            {formatElapsed(generationElapsed)}
+          </time>
         </div>
       )}
 
@@ -341,7 +448,19 @@ export function IncrementTimeline({
         />
       )}
 
-      <ol className="ws-timeline">
+      <div className="ws-timeline-section-heading">
+        <span>Version history</span>
+        <span>{increments.length + 1} version{increments.length === 0 ? "" : "s"}</span>
+      </div>
+
+      {increments.length === 0 && !loadError && (
+        <p className="ws-timeline-empty">
+          Version 1 is your completed baseline. Your first focused change will
+          appear here as Version 2.
+        </p>
+      )}
+
+      <ol className="ws-timeline" aria-label="Workspace version history">
         {increments.map((inc) => {
           const flash = justPushed.has(inc.id)
           const canPush =
@@ -364,10 +483,9 @@ export function IncrementTimeline({
                 )}
               </span>
               <div className="ws-timeline-body">
+                <span className="ws-timeline-version">Version {inc.sequence + 1}</span>
                 <span className="ws-timeline-node-title">{inc.title}</span>
                 <span className="ws-timeline-meta">
-                  Increment {inc.sequence}
-                  <span className="ws-timeline-meta-sep">·</span>
                   <span className={`ws-timeline-status status-${inc.status}`}>
                     {STATUS_LABEL[inc.status]}
                   </span>
@@ -383,8 +501,13 @@ export function IncrementTimeline({
                   onClick={() => void handlePush(inc)}
                   aria-label={`Push increment ${inc.sequence} to GitHub`}
                 >
-                  {pushingId === inc.id ? "Pushing…" : "Push"}
+                  {pushingId === inc.id ? "Starting…" : "Push to GitHub"}
                 </button>
+              )}
+              {!hasBaselinePush && (inc.status === "ready" || inc.status === "stale") && (
+                <span className="ws-timeline-push-note" title="Export Version 1 to GitHub first">
+                  Export Version 1 first
+                </span>
               )}
             </li>
           )
@@ -396,8 +519,9 @@ export function IncrementTimeline({
             <span className="ws-timeline-dot" />
           </span>
           <div className="ws-timeline-body">
-            <span className="ws-timeline-node-title">v1</span>
-            <span className="ws-timeline-meta">Baseline · finalised</span>
+            <span className="ws-timeline-version">Version 1</span>
+            <span className="ws-timeline-node-title">Original workspace</span>
+            <span className="ws-timeline-meta">Finalised baseline</span>
           </div>
         </li>
       </ol>
@@ -417,11 +541,12 @@ export function IncrementTimeline({
       <IdeaBacklog
         ideas={ideas}
         capturing={capturing}
-        onCapture={(text) => void handleCapture(text)}
+        onCapture={handleCapture}
         onPromote={handlePromote}
+        selectedIdeaId={sourceIdea?.id}
         disabled={disabled}
         disabledReason={disabledReason}
       />
-    </div>
+    </section>
   )
 }

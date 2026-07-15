@@ -773,6 +773,27 @@ async def create_increment(
     off), 402 (insufficient credits), 422 (no delta produced).
     """
     await workspace_service.get(id, user.id, db)  # 404 if not owned
+
+    promoted_idea: IncrementIdea | None = None
+    if payload.idea_id is not None:
+        promoted_idea = (
+            await db.execute(
+                select(IncrementIdea).where(
+                    IncrementIdea.id == payload.idea_id,
+                    IncrementIdea.workspace_id == id,
+                )
+            )
+        ).scalar_one_or_none()
+        if promoted_idea is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Idea not found in this workspace.",
+            )
+        if promoted_idea.status != "open":
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="This idea has already been added to an increment.",
+            )
     try:
         result = await increment_service.generate_increment(
             id, payload.feature_request, user, db, mode=payload.mode
@@ -801,6 +822,15 @@ async def create_increment(
     increment = (
         await db.execute(select(Increment).where(Increment.id == result.increment_id))
     ).scalar_one()
+    if promoted_idea is not None:
+        # generate_increment commits its final transaction before returning.
+        # Link the source idea only after generation succeeds, so a failed or
+        # refunded generation leaves the user's backlog untouched and retryable.
+        await db.refresh(promoted_idea)
+        if promoted_idea.status == "open" and promoted_idea.increment_id is None:
+            promoted_idea.status = "planned"
+            promoted_idea.increment_id = increment.id
+            await db.commit()
     response = IncrementGenerateResponse.model_validate(increment)
     response.new_task_count = len(result.new_tasks)
     return response

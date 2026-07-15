@@ -322,6 +322,13 @@ class IncrementService:
                 raise IncrementError(
                     "Increment output would leave Markdown code fences unbalanced."
                 )
+        except asyncio.CancelledError:
+            # Infrastructure shutdowns and any future server-side cancellation
+            # must not strand a charge or a permanently-generating row. A
+            # browser disconnect alone is not treated as cancellation because
+            # ASGI does not guarantee that it stops the handler.
+            await self._refund_and_mark_draft(db, increment_id, deduction_id, user)
+            raise
         except (
             ProviderError,
             ProviderTimeoutError,

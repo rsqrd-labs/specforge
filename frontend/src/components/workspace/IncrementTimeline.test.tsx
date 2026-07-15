@@ -79,7 +79,7 @@ describe("IncrementTimeline", () => {
     // newest increment first, baseline last
     expect(items[0]).toHaveTextContent("Add teams")
     expect(items[1]).toHaveTextContent("Add billing")
-    expect(items[items.length - 1]).toHaveTextContent("v1")
+    expect(items[items.length - 1]).toHaveTextContent("Version 1")
     expect(items[items.length - 1]).toHaveTextContent(/baseline/i)
   })
 
@@ -95,11 +95,11 @@ describe("IncrementTimeline", () => {
 
     renderTimeline()
 
-    const input = await screen.findByLabelText(/describe the next increment/i)
+    const input = await screen.findByLabelText(/what should change in the next version/i)
     fireEvent.change(input, {
       target: { value: "Add a billing page with Stripe checkout" },
     })
-    fireEvent.click(screen.getByRole("button", { name: /add increment/i }))
+    fireEvent.click(screen.getByRole("button", { name: /generate version 2/i }))
 
     await waitFor(() =>
       expect(mockCreate).toHaveBeenCalledWith("ws-1", {
@@ -111,17 +111,17 @@ describe("IncrementTimeline", () => {
     expect(await screen.findByText("Add billing")).toBeInTheDocument()
   })
 
-  it("blocks a too-short feature request with a calm hint (no request)", async () => {
+  it("explains a too-short request and keeps generation unavailable", async () => {
     mockListIncrements.mockResolvedValue([])
     mockListIdeas.mockResolvedValue([])
 
     renderTimeline()
 
-    const input = await screen.findByLabelText(/describe the next increment/i)
+    const input = await screen.findByLabelText(/what should change in the next version/i)
     fireEvent.change(input, { target: { value: "tiny" } })
-    fireEvent.click(screen.getByRole("button", { name: /add increment/i }))
-
-    expect(screen.getByRole("alert")).toHaveTextContent(/at least 8 characters/i)
+    const generate = screen.getByRole("button", { name: /generate version 2/i })
+    expect(generate).toBeDisabled()
+    expect(screen.getByText(/at least 4 words and 20 characters/i)).toBeInTheDocument()
     expect(mockCreate).not.toHaveBeenCalled()
   })
 
@@ -132,11 +132,29 @@ describe("IncrementTimeline", () => {
 
     renderTimeline()
 
-    const input = await screen.findByLabelText(/describe the next increment/i)
+    const input = await screen.findByLabelText(/what should change in the next version/i)
     fireEvent.change(input, { target: { value: "Add an admin dashboard" } })
-    fireEvent.click(screen.getByRole("button", { name: /add increment/i }))
+    fireEvent.click(screen.getByRole("button", { name: /generate version 2/i }))
 
     expect(await screen.findByText(/out of credits/i)).toBeInTheDocument()
+  })
+
+  it("shows truthful elapsed generation guidance instead of simulated stages", async () => {
+    mockListIncrements.mockResolvedValue([])
+    mockListIdeas.mockResolvedValue([])
+    mockCreate.mockImplementation(() => new Promise(() => {}))
+
+    renderTimeline()
+
+    const input = await screen.findByLabelText(/what should change in the next version/i)
+    fireEvent.change(input, {
+      target: { value: "Add team invitations for administrators" },
+    })
+    fireEvent.click(screen.getByRole("button", { name: /generate version 2/i }))
+
+    expect(await screen.findByText(/building a task-only delta/i)).toBeInTheDocument()
+    expect(screen.getByText(/usually takes 1–2 minutes/i)).toBeInTheDocument()
+    expect(screen.queryByText(/reading your baseline/i)).not.toBeInTheDocument()
   })
 
   it("pushes a ready increment to GitHub when a baseline push exists", async () => {
@@ -155,7 +173,9 @@ describe("IncrementTimeline", () => {
 
   it("pauses increment create, push, capture, and promote actions while locked", async () => {
     mockListIncrements.mockResolvedValue([inc({ status: "ready" })])
-    mockListIdeas.mockResolvedValue([idea({ text: "Webhook retries" })])
+    mockListIdeas.mockResolvedValue([
+      idea({ text: "Add automatic webhook retry handling" }),
+    ])
 
     renderTimeline({
       hasBaselinePush: true,
@@ -163,9 +183,9 @@ describe("IncrementTimeline", () => {
       disabledReason: "Editing resumes when generation finishes.",
     })
 
-    const incrementInput = await screen.findByLabelText(/describe the next increment/i)
+    const incrementInput = await screen.findByLabelText(/what should change in the next version/i)
     expect(incrementInput).toBeDisabled()
-    expect(screen.getByRole("button", { name: /add increment/i })).toBeDisabled()
+    expect(screen.getByRole("button", { name: /generate version 3/i })).toBeDisabled()
 
     const push = await screen.findByRole("button", { name: /push increment 1 to github/i })
     expect(push).toBeDisabled()
@@ -175,11 +195,11 @@ describe("IncrementTimeline", () => {
 
     const ideaInput = screen.getByLabelText(/capture an idea/i)
     expect(ideaInput).toBeDisabled()
-    expect(screen.getByRole("button", { name: /add idea/i })).toBeDisabled()
-    expect(screen.getByRole("button", { name: /promote idea to increment/i })).toBeDisabled()
+    expect(screen.getByRole("button", { name: /save idea/i })).toBeDisabled()
+    expect(screen.getByRole("button", { name: /use idea for next version/i })).toBeDisabled()
 
     fireEvent.click(push)
-    fireEvent.click(screen.getByRole("button", { name: /promote idea to increment/i }))
+    fireEvent.click(screen.getByRole("button", { name: /use idea for next version/i }))
     expect(mockPush).not.toHaveBeenCalled()
     expect(mockCreate).not.toHaveBeenCalled()
     expect(mockCreateIdea).not.toHaveBeenCalled()
@@ -195,20 +215,29 @@ describe("IncrementTimeline", () => {
     expect(
       screen.queryByRole("button", { name: /push increment 1 to github/i }),
     ).not.toBeInTheDocument()
+    expect(screen.getByText(/export version 1 first/i)).toBeInTheDocument()
   })
 
-  it("promote prefills the compose input rather than mutating the idea", async () => {
+  it("uses a saved idea as the source of the next version", async () => {
     mockListIncrements.mockResolvedValue([])
-    mockListIdeas.mockResolvedValue([idea({ text: "Webhook retries" })])
+    mockListIdeas.mockResolvedValue([
+      idea({ text: "Add automatic webhook retry handling" }),
+    ])
 
     renderTimeline()
 
-    fireEvent.click(await screen.findByRole("button", { name: /promote/i }))
+    fireEvent.click(await screen.findByRole("button", { name: /use idea/i }))
 
-    const input = screen.getByLabelText(/describe the next increment/i)
-    expect(input).toHaveValue("Webhook retries")
-    // it composes, it does not silently create an increment
-    expect(mockCreate).not.toHaveBeenCalled()
+    const input = screen.getByLabelText(/what should change in the next version/i)
+    expect(input).toHaveValue("Add automatic webhook retry handling")
+    fireEvent.click(screen.getByRole("button", { name: /generate version 2/i }))
+    await waitFor(() =>
+      expect(mockCreate).toHaveBeenCalledWith("ws-1", {
+        feature_request: "Add automatic webhook retry handling",
+        mode: "additive",
+        idea_id: "idea-1",
+      }),
+    )
   })
 
   it("captures a new idea into the backlog", async () => {
@@ -220,10 +249,33 @@ describe("IncrementTimeline", () => {
 
     const input = await screen.findByLabelText(/capture an idea/i)
     fireEvent.change(input, { target: { value: "Add SSO" } })
-    fireEvent.click(screen.getByRole("button", { name: /add idea/i }))
+    fireEvent.click(screen.getByRole("button", { name: /save idea/i }))
 
     await waitFor(() =>
       expect(mockCreateIdea).toHaveBeenCalledWith("ws-1", { text: "Add SSO" }),
     )
+  })
+
+  it("shows a retryable error instead of disguising a failed load as an empty timeline", async () => {
+    mockListIncrements.mockRejectedValue(new Error("offline"))
+    mockListIdeas.mockResolvedValue([])
+
+    renderTimeline()
+
+    expect(await screen.findByText(/versions could not be loaded/i)).toBeInTheDocument()
+    expect(screen.getByRole("button", { name: /retry/i })).toBeInTheDocument()
+  })
+
+  it("labels the next generated version after the newest persisted sequence", async () => {
+    mockListIncrements.mockResolvedValue([
+      inc({ id: "inc-2", sequence: 2, title: "Add teams" }),
+      inc({ id: "inc-1", sequence: 1, title: "Add billing" }),
+    ])
+    mockListIdeas.mockResolvedValue([])
+
+    renderTimeline()
+
+    expect(await screen.findByText("Creates Version 4")).toBeInTheDocument()
+    expect(screen.getByRole("button", { name: /generate version 4/i })).toBeInTheDocument()
   })
 })

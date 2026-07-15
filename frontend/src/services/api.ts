@@ -1112,13 +1112,18 @@ export async function listIncrements(
 
 /**
  * Generate a new increment from a feature request as a delta vs. the finalised
- * baseline (synchronous, credit-aware, 201). `feature_request` must be ≥ 8
- * chars; `mode` defaults to `additive` (the MVP path — `behaviour_changing` is
- * gated server-side). Returns the new increment plus its delta size.
+ * baseline (synchronous, credit-aware, 201). `feature_request` must contain at
+ * least 4 words / 20 characters; `mode` defaults to `additive` (the MVP path —
+ * `behaviour_changing` is gated server-side). Returns the new increment plus
+ * its delta size.
  */
 export async function createIncrement(
   workspaceId: string,
-  body: { feature_request: string; mode?: IncrementMode },
+  body: {
+    feature_request: string
+    mode?: IncrementMode
+    idea_id?: string
+  },
 ): Promise<IncrementGenerateResponse> {
   const response = await api.post<IncrementGenerateResponse>(
     `/workspaces/${workspaceId}/increments`,

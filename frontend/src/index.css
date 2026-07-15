@@ -10790,7 +10790,8 @@ button:disabled {
 .ws-timeline-panel {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 16px;
+  padding: 18px;
   /* Keep natural height inside the bounded, scrollable `.workspace-right-panel`.
    * Without this the default `flex:0 1 auto` + the base `overflow:hidden` let the
    * panel be squeezed and clip the v1 baseline node and the whole idea backlog,
@@ -10798,18 +10799,92 @@ button:disabled {
   flex: 0 0 auto;
 }
 
+.ws-timeline-panel .ws-panel-section-header {
+  margin-bottom: 0;
+}
+
+.ws-timeline-panel .ws-panel-section-header > div {
+  min-width: 0;
+}
+
+.ws-timeline-heading {
+  margin: 5px 0 0;
+  font-size: 17px;
+  line-height: 1.25;
+  color: var(--ink-text);
+}
+
+.ws-timeline-panel .ws-panel-section-header p {
+  max-width: 42ch;
+  margin-top: 7px;
+  font-weight: 500;
+  line-height: 1.5;
+}
+
 /* Compose: a calm focused note, not a ticket form. */
 .ws-timeline-compose {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 9px;
+  padding: 13px;
+  border: 1px solid rgba(143, 78, 0, 0.16);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.58);
+}
+
+.ws-timeline-field-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.ws-timeline-field-header label {
+  font-size: 12.5px;
+  font-weight: 800;
+  color: var(--ink-text);
+}
+
+.ws-timeline-field-header span {
+  flex: none;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--brand-primary);
+}
+
+.ws-timeline-source-idea {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 7px 9px;
+  border-radius: 8px;
+  background: rgba(143, 78, 0, 0.07);
+  font-size: 11.5px;
+  line-height: 1.35;
+  color: var(--ink-text-muted);
+}
+
+.ws-timeline-source-idea span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.ws-timeline-source-idea button {
+  flex: none;
+  border: 0;
+  background: transparent;
+  color: var(--brand-primary);
+  font: inherit;
+  font-weight: 800;
+  cursor: pointer;
 }
 
 .ws-timeline-input {
   width: 100%;
   resize: vertical;
-  min-height: 52px;
-  padding: 10px 12px;
+  min-height: 76px;
+  padding: 11px 12px;
   border-radius: 10px;
   border: 1px solid rgba(143, 78, 0, 0.18);
   background: rgba(255, 255, 255, 0.6);
@@ -10839,21 +10914,28 @@ button:disabled {
 .ws-timeline-compose-actions {
   display: flex;
   align-items: center;
-  justify-content: flex-end;
+  justify-content: space-between;
+  flex-wrap: wrap;
   gap: 10px;
 }
 
 .ws-timeline-hint {
-  margin-right: auto;
   font-size: 12px;
   line-height: 1.4;
   color: var(--brand-tertiary);
 }
 
+.ws-timeline-shortcut {
+  margin-left: auto;
+  font-size: 10.5px;
+  color: var(--ink-text-muted);
+  opacity: 0.72;
+}
+
 .ws-timeline-add {
   flex: none;
-  height: 32px;
-  padding: 0 14px;
+  min-height: 36px;
+  padding: 0 15px;
   border-radius: 8px;
   border: none;
   background: var(--brand-primary);
@@ -10863,6 +10945,36 @@ button:disabled {
   font-weight: 700;
   cursor: pointer;
   transition: filter 0.15s, opacity 0.15s, transform 0.15s;
+}
+
+.ws-timeline-section-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding-top: 2px;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ink-text-muted);
+}
+
+.ws-timeline-section-heading span:last-child {
+  font-size: 10.5px;
+  letter-spacing: 0;
+  text-transform: none;
+  font-weight: 700;
+}
+
+.ws-timeline-empty {
+  margin: -7px 0 0;
+  padding: 9px 11px;
+  border-radius: 8px;
+  background: rgba(86, 94, 116, 0.05);
+  color: var(--ink-text-muted);
+  font-size: 11.5px;
+  line-height: 1.45;
 }
 
 .ws-timeline-add:hover:not(:disabled) {
@@ -10876,10 +10988,46 @@ button:disabled {
 }
 
 .ws-timeline-creating {
-  padding: 2px 4px;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 10px;
+  padding: 11px 12px;
   border-radius: 12px;
   background: rgba(143, 78, 0, 0.04);
   border: 1px solid rgba(143, 78, 0, 0.10);
+}
+
+.ws-timeline-creating-indicator {
+  width: 10px;
+  height: 10px;
+  margin-top: 4px;
+  border-radius: 50%;
+  background: var(--brand-primary);
+  box-shadow: 0 0 0 4px rgba(143, 78, 0, 0.10);
+  animation: ws-timeline-pulse 1.3s ease-in-out infinite;
+}
+
+.ws-timeline-creating strong {
+  display: block;
+  font-size: 12.5px;
+  color: var(--ink-text);
+}
+
+.ws-timeline-creating p {
+  margin: 3px 0 0;
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--ink-text-muted);
+}
+
+.ws-timeline-creating time {
+  padding-top: 1px;
+  font-family: var(--font-mono, monospace);
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--brand-primary);
+  font-variant-numeric: tabular-nums;
 }
 
 .ws-timeline-error {
@@ -10892,7 +11040,7 @@ button:disabled {
 .ws-timeline {
   position: relative;
   list-style: none;
-  margin: 4px 0 0;
+  margin: -4px 0 0;
   padding: 0;
 }
 
@@ -10914,10 +11062,10 @@ button:disabled {
 .ws-timeline-node {
   position: relative;
   display: grid;
-  grid-template-columns: 21px 1fr auto;
+  grid-template-columns: 21px minmax(0, 1fr) auto;
   align-items: start;
   column-gap: 10px;
-  padding: 8px 0;
+  padding: 9px 0;
 }
 
 .ws-timeline-marker {
@@ -10962,6 +11110,14 @@ button:disabled {
   flex-direction: column;
   gap: 2px;
   min-width: 0;
+}
+
+.ws-timeline-version {
+  font-size: 10.5px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--brand-primary);
 }
 
 .ws-timeline-node-title {
@@ -11012,6 +11168,15 @@ button:disabled {
   transition: background 0.15s, opacity 0.15s;
 }
 
+.ws-timeline-push-note {
+  align-self: center;
+  max-width: 82px;
+  text-align: right;
+  font-size: 10.5px;
+  line-height: 1.25;
+  color: var(--ink-text-muted);
+}
+
 .ws-timeline-push:hover:not(:disabled) {
   background: rgba(143, 78, 0, 0.08);
 }
@@ -11031,7 +11196,7 @@ button:disabled {
 }
 
 .ws-timeline-node.baseline .ws-timeline-node-title {
-  color: var(--ink-text-muted);
+  color: var(--ink-text);
 }
 
 /* The one delight: a node settling onto the rail when its push completes. */
@@ -11047,6 +11212,14 @@ button:disabled {
 @keyframes ws-timeline-settle {
   0%   { background: rgba(143, 78, 0, 0.14); }
   100% { background: rgba(143, 78, 0, 0); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ws-timeline-node.status-generating .ws-timeline-dot,
+  .ws-timeline-creating-indicator,
+  .ws-timeline-node.just-pushed {
+    animation: none;
+  }
 }
 
 .ws-timeline-skeleton {
@@ -11074,8 +11247,8 @@ button:disabled {
 
 /* ─── Idea backlog — a quiet side inbox ─────────────────── */
 .ws-ideas {
-  margin-top: 6px;
-  padding-top: 14px;
+  margin-top: 2px;
+  padding-top: 16px;
   border-top: 1px solid rgba(86, 94, 116, 0.14);
   display: flex;
   flex-direction: column;
@@ -11085,7 +11258,19 @@ button:disabled {
 .ws-ideas-header {
   display: flex;
   align-items: center;
-  gap: 8px;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.ws-ideas-header > div {
+  min-width: 0;
+}
+
+.ws-ideas-header p {
+  margin: 4px 0 0;
+  color: var(--ink-text-muted);
+  font-size: 11.5px;
+  line-height: 1.4;
 }
 
 .ws-ideas-title {
@@ -11117,7 +11302,8 @@ button:disabled {
 
 .ws-ideas-input {
   flex: 1;
-  height: 34px;
+  min-width: 0;
+  height: 38px;
   padding: 0 12px;
   border-radius: 8px;
   border: 1px solid rgba(86, 94, 116, 0.2);
@@ -11147,12 +11333,16 @@ button:disabled {
 
 .ws-ideas-add {
   flex: none;
-  width: 34px;
-  height: 34px;
+  width: auto;
+  min-width: 78px;
+  height: 38px;
+  padding: 0 12px;
   border-radius: 8px;
   border: 1px solid rgba(86, 94, 116, 0.2);
   background: rgba(255, 255, 255, 0.6);
-  font-size: 18px;
+  font-family: inherit;
+  font-size: 11.5px;
+  font-weight: 800;
   line-height: 1;
   color: var(--brand-tertiary);
   cursor: pointer;
@@ -11171,6 +11361,10 @@ button:disabled {
 }
 
 .ws-ideas-empty {
+  margin: 0;
+  padding: 9px 11px;
+  border-radius: 8px;
+  background: rgba(86, 94, 116, 0.045);
   font-size: 12.5px;
   line-height: 1.5;
   color: var(--ink-text-muted);
@@ -11197,6 +11391,11 @@ button:disabled {
 
 .ws-idea.resolved {
   opacity: 0.6;
+}
+
+.ws-idea.selected {
+  border-color: rgba(143, 78, 0, 0.26);
+  background: rgba(143, 78, 0, 0.08);
 }
 
 .ws-idea-mark {

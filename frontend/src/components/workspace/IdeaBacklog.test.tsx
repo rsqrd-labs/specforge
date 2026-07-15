@@ -18,7 +18,7 @@ function idea(overrides: Partial<IncrementIdea> = {}): IncrementIdea {
 }
 
 function renderBacklog(props: Partial<Parameters<typeof IdeaBacklog>[0]> = {}) {
-  const onCapture = vi.fn()
+  const onCapture = vi.fn().mockResolvedValue(true)
   const onPromote = vi.fn()
   render(
     <IdeaBacklog
@@ -35,7 +35,7 @@ function renderBacklog(props: Partial<Parameters<typeof IdeaBacklog>[0]> = {}) {
 describe("IdeaBacklog", () => {
   it("shows a written empty state, not placeholder text", () => {
     renderBacklog()
-    expect(screen.getByText(/capture a feature as it occurs/i)).toBeInTheDocument()
+    expect(screen.getByText(/no saved ideas yet/i)).toBeInTheDocument()
   })
 
   it("marks a GitHub-sourced idea with its provenance", () => {
@@ -45,9 +45,9 @@ describe("IdeaBacklog", () => {
     expect(screen.getByTitle(/from a github issue/i)).toBeInTheDocument()
   })
 
-  it("offers Promote on open ideas and calls back with the idea", () => {
+  it("offers Use idea on open ideas and calls back with the idea", () => {
     const { onPromote } = renderBacklog({ ideas: [idea({ text: "SSO" })] })
-    fireEvent.click(screen.getByRole("button", { name: /promote/i }))
+    fireEvent.click(screen.getByRole("button", { name: /use idea/i }))
     expect(onPromote).toHaveBeenCalledWith(
       expect.objectContaining({ text: "SSO" }),
     )
@@ -55,19 +55,28 @@ describe("IdeaBacklog", () => {
 
   it("shows a status note instead of Promote for a resolved idea", () => {
     renderBacklog({ ideas: [idea({ status: "planned" })] })
-    expect(screen.getByText(/planned/i)).toBeInTheDocument()
-    expect(
-      screen.queryByRole("button", { name: /promote/i }),
-    ).not.toBeInTheDocument()
+    expect(screen.getByText(/added to version/i)).toBeInTheDocument()
+    expect(screen.queryByRole("button", { name: /use idea/i })).not.toBeInTheDocument()
   })
 
-  it("captures an idea on submit and clears the input", () => {
+  it("captures an idea on submit and clears the input after it is saved", async () => {
     const { onCapture } = renderBacklog()
     const input = screen.getByLabelText(/capture an idea/i)
     fireEvent.change(input, { target: { value: "Webhook retries" } })
-    fireEvent.click(screen.getByRole("button", { name: /add idea/i }))
+    fireEvent.click(screen.getByRole("button", { name: /save idea/i }))
     expect(onCapture).toHaveBeenCalledWith("Webhook retries")
-    expect(input).toHaveValue("")
+    await vi.waitFor(() => expect(input).toHaveValue(""))
+  })
+
+  it("keeps the draft when saving fails so the user's text is not lost", async () => {
+    const onCapture = vi.fn().mockResolvedValue(false)
+    renderBacklog({ onCapture })
+    const input = screen.getByLabelText(/capture an idea/i)
+    fireEvent.change(input, { target: { value: "Webhook retries" } })
+    fireEvent.click(screen.getByRole("button", { name: /save idea/i }))
+
+    await vi.waitFor(() => expect(onCapture).toHaveBeenCalled())
+    expect(input).toHaveValue("Webhook retries")
   })
 
   it("disables idea capture and promote with a lock reason", () => {
@@ -82,10 +91,10 @@ describe("IdeaBacklog", () => {
     expect(input).toHaveAccessibleDescription(
       /editing resumes when generation finishes/i,
     )
-    expect(screen.getByRole("button", { name: /add idea/i })).toBeDisabled()
-    expect(screen.getByRole("button", { name: /promote idea to increment/i })).toBeDisabled()
+    expect(screen.getByRole("button", { name: /save idea/i })).toBeDisabled()
+    expect(screen.getByRole("button", { name: /use idea for next version/i })).toBeDisabled()
 
-    fireEvent.click(screen.getByRole("button", { name: /promote idea to increment/i }))
+    fireEvent.click(screen.getByRole("button", { name: /use idea for next version/i }))
     expect(onCapture).not.toHaveBeenCalled()
     expect(onPromote).not.toHaveBeenCalled()
   })

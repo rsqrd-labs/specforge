@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from typing import Any
 from uuid import uuid4
 
@@ -802,6 +803,84 @@ async def test_idea_endpoints_create_and_list(session: AsyncSession) -> None:
             assert listed.status_code == 200
             assert any(i["text"] == "Add SSO login" for i in listed.json())
     finally:
+        async with maker() as db:
+            await _teardown(db, seeded)
+        await engine.dispose()
+
+
+async def test_create_increment_links_promoted_idea_to_generated_version(
+    session: AsyncSession,
+) -> None:
+    """The idea-to-version action must persist; it is not just a UI text copy."""
+    engine = create_async_engine(settings.database_url, poolclass=NullPool)
+    maker = async_sessionmaker(engine, expire_on_commit=False)
+    async with maker() as db:
+        seeded = await _seed_baseline(db)
+        idea = IncrementIdea(
+            workspace_id=seeded["workspace"].id,
+            source="user",
+            external_ref=None,
+            status="open",
+            text="Add SSO login for teams",
+        )
+        db.add(idea)
+        await db.commit()
+        await db.refresh(idea)
+        idea_id = idea.id
+
+    async def fake_generate(
+        workspace_id: Any,
+        feature_request: str,
+        user: User,
+        db: AsyncSession,
+        *,
+        mode: str,
+    ) -> Any:
+        assert workspace_id == seeded["workspace"].id
+        assert feature_request == "Add SSO login for teams"
+        assert mode == "additive"
+        increment = Increment(
+            workspace_id=workspace_id,
+            sequence=1,
+            title="Add SSO login for teams",
+            status="ready",
+            baseline_version_ids=[],
+        )
+        db.add(increment)
+        await db.commit()
+        await db.refresh(increment)
+        return SimpleNamespace(increment_id=increment.id, new_tasks=[object()])
+
+    app = _build_app(engine, seeded["user"])
+    monkey = pytest.MonkeyPatch()
+    monkey.setattr(
+        workspace_router.increment_service,
+        "generate_increment",
+        fake_generate,
+    )
+    try:
+        async with _client(app) as client:
+            response = await client.post(
+                f"/workspaces/{seeded['workspace'].id}/increments",
+                json={
+                    "feature_request": "  Add SSO login for teams  ",
+                    "mode": "additive",
+                    "idea_id": str(idea_id),
+                },
+            )
+        assert response.status_code == 201
+        assert response.json()["new_task_count"] == 1
+
+        async with maker() as db:
+            linked = (
+                await db.execute(
+                    select(IncrementIdea).where(IncrementIdea.id == idea_id)
+                )
+            ).scalar_one()
+            assert linked.status == "planned"
+            assert str(linked.increment_id) == response.json()["id"]
+    finally:
+        monkey.undo()
         async with maker() as db:
             await _teardown(db, seeded)
         await engine.dispose()

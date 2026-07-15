@@ -12,17 +12,20 @@ ref unchanged, and drop any task the model re-emits from the baseline.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
+from pydantic import ValidationError
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
 from config import settings
 from models import Increment, Stage, StageVersion, User, Workspace
+from schemas.increment import IncrementCreate
 from services.credit_service import credit_service
 from services.integrations.task_parser import compute_task_ref
 from services.pipeline.increment_service import (
@@ -212,6 +215,16 @@ def test_highest_task_number_finds_max() -> None:
     assert _highest_task_number("no tasks here") == 0
 
 
+def test_increment_request_rejects_underspecified_random_words() -> None:
+    with pytest.raises(ValidationError, match="at least 4 words and 20 characters"):
+        IncrementCreate(feature_request="nest idea")
+
+    request = IncrementCreate(
+        feature_request="  Add team invitations for administrators  "
+    )
+    assert request.feature_request == "Add team invitations for administrators"
+
+
 def test_reconcile_delta_pins_and_renumbers() -> None:
     pinned = {
         compute_task_ref("Set up project structure"),
@@ -252,6 +265,19 @@ def test_increment_generation_uses_cheap_primary_tasks_route(monkeypatch) -> Non
 
     monkeypatch.setattr(tier_policy.settings, "core_cheap_primary", True)
     monkeypatch.setattr(provider_status, "can_route", lambda *_args: True)
+    monkeypatch.setattr(
+        provider_status,
+        "is_provider_configured",
+        lambda provider: provider == "anthropic",
+    )
+    monkeypatch.setattr(
+        "services.pipeline.increment_service.platform_provider_priority",
+        lambda: ("anthropic", "openai", "google"),
+    )
+    monkeypatch.setattr(
+        "services.llm.routing.platform_provider_priority",
+        lambda: ("anthropic", "openai", "google"),
+    )
 
     workspace = MagicMock()
     workspace.provider = "anthropic"
@@ -384,6 +410,32 @@ async def test_increment_refund_on_validation_failure(
         .all()
     )
     assert all(r.status == "draft" for r in rows)
+
+
+@pytest.mark.asyncio
+async def test_increment_cancellation_refunds_and_clears_generating_state(
+    session: AsyncSession, user: User, workspace: Workspace
+) -> None:
+    svc, adapter = _service_with_completion("unused")
+    adapter.complete = AsyncMock(side_effect=asyncio.CancelledError)
+
+    with patch("services.pipeline.increment_service.get_llm", return_value=adapter):
+        with pytest.raises(asyncio.CancelledError):
+            await svc.generate_increment(
+                workspace.id,
+                "Add team invitations for administrators",
+                user,
+                session,
+            )
+
+    await session.refresh(user)
+    assert user.credit_balance == 100
+    increment = (
+        await session.execute(
+            select(Increment).where(Increment.workspace_id == workspace.id)
+        )
+    ).scalar_one()
+    assert increment.status == "draft"
 
 
 @pytest.mark.asyncio

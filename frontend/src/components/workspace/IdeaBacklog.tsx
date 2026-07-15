@@ -14,9 +14,9 @@
  *
  * Visual hierarchy: the capture input invites first; ideas are soft slate
  * chips, provenance legible by a small bespoke mark (GitHub vs. spark). The one
- * restraint: "Promote" is a quiet text action that *composes* — it prefills the
- * increment input above for the user to confirm — never a loud button, never a
- * silent state mutation.
+ * restraint: "Use idea" prefills the version input for confirmation and the
+ * parent carries the idea identity through generation, so this is never a
+ * silent or frontend-only state mutation.
  */
 
 import { useState } from "react"
@@ -29,15 +29,16 @@ const IDEA_MAX = 2000
 interface IdeaBacklogProps {
   ideas: IncrementIdea[]
   capturing: boolean
-  onCapture: (text: string) => void
+  onCapture: (text: string) => Promise<boolean>
   onPromote: (idea: IncrementIdea) => void
+  selectedIdeaId?: string
   disabled?: boolean
   disabledReason?: string
 }
 
 const STATUS_NOTE: Record<IncrementIdea["status"], string | null> = {
   open: null,
-  planned: "Planned",
+  planned: "Added to version",
   done: "Shipped",
   dismissed: "Dismissed",
 }
@@ -47,23 +48,27 @@ export function IdeaBacklog({
   capturing,
   onCapture,
   onPromote,
+  selectedIdeaId,
   disabled = false,
   disabledReason,
 }: IdeaBacklogProps) {
   const [draft, setDraft] = useState("")
   const disabledReasonId = disabledReason ? "idea-backlog-disabled-reason" : undefined
 
-  function submit() {
+  async function submit() {
     const text = draft.trim()
     if (!text || capturing || disabled) return
-    onCapture(text)
-    setDraft("")
+    const saved = await onCapture(text)
+    if (saved) setDraft("")
   }
 
   return (
     <div className="ws-ideas">
       <div className="ws-ideas-header">
-        <span className="ws-ideas-title">Ideas</span>
+        <div>
+          <span className="ws-ideas-title">Ideas for later</span>
+          <p>Save rough thoughts here without generating tasks yet.</p>
+        </div>
         {ideas.length > 0 && (
           <span className="ws-ideas-count">{ideas.length}</span>
         )}
@@ -75,7 +80,7 @@ export function IdeaBacklog({
           type="text"
           value={draft}
           maxLength={IDEA_MAX}
-          placeholder="Jot an idea…"
+          placeholder="For example: Support dark mode"
           aria-label="Capture an idea"
           aria-describedby={disabled ? disabledReasonId : undefined}
           disabled={disabled}
@@ -85,20 +90,20 @@ export function IdeaBacklog({
           onKeyDown={(e) => {
             if (e.key === "Enter") {
               e.preventDefault()
-              submit()
+              void submit()
             }
           }}
         />
         <button
           type="button"
           className="ws-ideas-add"
-          aria-label="Add idea"
+          aria-label="Save idea"
           disabled={!draft.trim() || capturing || disabled}
           title={disabled ? disabledReason : undefined}
           aria-describedby={disabled ? disabledReasonId : undefined}
-          onClick={submit}
+          onClick={() => void submit()}
         >
-          {capturing ? "…" : "＋"}
+          {capturing ? "Saving…" : "Save idea"}
         </button>
       </div>
       {disabled && disabledReason ? (
@@ -109,8 +114,8 @@ export function IdeaBacklog({
 
       {ideas.length === 0 ? (
         <p className="ws-ideas-empty">
-          Nothing yet — capture a feature as it occurs to you, and fold it into
-          an increment when you're ready.
+          No saved ideas yet. Add one above when something is worth remembering
+          but not ready to become a version.
         </p>
       ) : (
         <ul className="ws-ideas-list">
@@ -121,7 +126,9 @@ export function IdeaBacklog({
             return (
               <li
                 key={idea.id}
-                className={`ws-idea${promotable ? "" : " resolved"}`}
+                className={`ws-idea${promotable ? "" : " resolved"}${
+                  selectedIdeaId === idea.id ? " selected" : ""
+                }`}
               >
                 <span
                   className="ws-idea-mark"
@@ -140,12 +147,12 @@ export function IdeaBacklog({
                     onClick={() => {
                       if (!disabled) onPromote(idea)
                     }}
-                    disabled={disabled}
+                    disabled={disabled || selectedIdeaId === idea.id}
                     title={disabled ? disabledReason : undefined}
                     aria-describedby={disabled ? disabledReasonId : undefined}
-                    aria-label="Promote idea to increment"
+                    aria-label={`Use idea for next version: ${idea.text}`}
                   >
-                    Promote
+                    {selectedIdeaId === idea.id ? "Using" : "Use idea"}
                   </button>
                 )}
               </li>
