@@ -20,6 +20,7 @@ from typing import Protocol
 
 from services.integrations import agents_md_builder
 from services.integrations.task_parser import parse_tasks
+from services.security.downstream_command_guard import redact_unsafe_lines
 from services.security.sanitizer import sanitize_downstream_agent_content
 
 _CLAUDE_FILENAME = "CLAUDE.md"
@@ -69,7 +70,10 @@ def _extract_technology_stack(plan_content: str) -> str:
     )
     match = pattern.search(plan_content)
     body = match.group(1).strip() if match else ""
-    body = sanitize_downstream_agent_content(body).strip()
+    # This body lands verbatim in the pinned-stack section of the high-trust
+    # manual; strip any injected shell-exec directive smuggled through PLAN.md
+    # (same defense the standard AGENTS.md harvest applies).
+    body = redact_unsafe_lines(sanitize_downstream_agent_content(body)).strip()
     return body or "See PLAN.md ## Technology Stack."
 
 

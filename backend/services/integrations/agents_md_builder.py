@@ -30,6 +30,10 @@ from __future__ import annotations
 import re
 
 from services.integrations.task_parser import parse_tasks
+from services.security.downstream_command_guard import (
+    is_unsafe_command,
+    redact_unsafe_lines,
+)
 from services.security.sanitizer import sanitize_downstream_agent_content
 
 MANAGED_START = "<!-- specforge:start -->"
@@ -199,7 +203,9 @@ def _named_section(stage_md: str, headings: tuple[str, ...], fallback: str) -> s
             re.MULTILINE,
         )
         if match:
-            clean = _clean_derived(match.group(1))
+            # Drop any injected shell-exec directives smuggled into this
+            # free-text harvest before it lands in the high-trust file.
+            clean = redact_unsafe_lines(_clean_derived(match.group(1))).strip()
             if clean:
                 return clean
     return fallback
@@ -210,7 +216,12 @@ def _validation_commands(tasks_md: str, harness_md: str) -> str:
     for source in (tasks_md or "", harness_md or ""):
         for match in _COMMAND_FIELD_RE.finditer(source):
             command = _clean_derived(match.group(1))
-            if command and command not in commands:
+            # This line renders as backtick-wrapped "blessed shell" a downstream
+            # agent may auto-run. A harvested command that fetch-and-execs,
+            # escalates privilege, or writes outside the workspace is an injected
+            # directive — drop it and let the safe fallback stand rather than
+            # bless attacker-influenced shell.
+            if command and command not in commands and not is_unsafe_command(command):
                 commands.append(command)
     if not commands:
         return (
