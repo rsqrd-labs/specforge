@@ -48,6 +48,12 @@ _SECURITY_HEADERS = {
 _HSTS_HEADER = "Strict-Transport-Security"
 _HSTS_VALUE = "max-age=31536000; includeSubDomains"
 
+# Token/cookie-issuing responses that return credentials in the body but carry no
+# request Authorization header, so the header-based rule below can't catch them.
+_NO_STORE_PATHS = frozenset(
+    {"/auth/callback", "/auth/refresh", "/auth/github/callback"}
+)
+
 
 def _apply_security_headers(response: Response) -> Response:
     for header, value in _SECURITY_HEADERS.items():
@@ -55,6 +61,21 @@ def _apply_security_headers(response: Response) -> Response:
     if settings.environment == "production":
         response.headers.setdefault(_HSTS_HEADER, _HSTS_VALUE)
     return response
+
+
+def _apply_no_store_if_sensitive(request: Request, response: Response) -> None:
+    """Mark authenticated / credential-issuing responses as uncacheable.
+
+    Keyed on the request so it also covers the token endpoints (which return a
+    fresh access token / set a refresh cookie but carry no Authorization header).
+    ``setdefault`` preserves an endpoint's deliberate Cache-Control (e.g. the
+    unauthenticated public-share view's ``max-age=60``), which never enters this
+    branch anyway. Blocks both shared-cache storage and the browser bfcache from
+    retaining a signed-in user's data on a shared machine.
+    """
+    authed = request.headers.get("Authorization", "").startswith("Bearer ")
+    if authed or request.url.path in _NO_STORE_PATHS:
+        response.headers.setdefault("Cache-Control", "no-store")
 
 
 async def check_database() -> DependencyStatus:
@@ -162,7 +183,9 @@ def create_app(redis_client: Redis | None = None) -> FastAPI:
         call_next,
     ) -> Response:
         response = await call_next(request)
-        return _apply_security_headers(response)
+        _apply_security_headers(response)
+        _apply_no_store_if_sensitive(request, response)
+        return response
 
     @app.exception_handler(Exception)
     async def unhandled_exception_handler(

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import hmac
 import inspect
 import json
+import secrets
 from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
 from uuid import UUID, uuid4
@@ -83,23 +85,44 @@ class AuthService:
     def _redirect_uri(self) -> str:
         return f"{settings.frontend_url.rstrip('/')}/auth/callback"
 
-    async def get_google_auth_url(self) -> str:
+    async def get_google_auth_url(self) -> tuple[str, str]:
+        """Build the Google authorize URL and the browser-binding secret.
+
+        The returned ``binding`` is a fresh CSPRNG secret stored as the state's
+        Redis value. The router sets it as an HttpOnly cookie in the browser that
+        started the flow; ``handle_callback`` requires the callback to present the
+        same value. This binds the ``state`` to the initiating browser and closes
+        the login-CSRF / forced-login vector (an attacker who runs their own flow
+        cannot plant this cookie in a victim's browser). The secret lives only in
+        the cookie + Redis, never in the redirect URL, so it can't leak via a
+        Referer header, proxy log, or browser history.
+        """
         authorization_url, state = self.oauth_client.create_authorization_url(
             GOOGLE_AUTHORIZE_URL,
             scope=" ".join(GOOGLE_SCOPES),
             redirect_uri=self._redirect_uri,
         )
-        await self.redis.set(f"{OAUTH_STATE_PREFIX}{state}", "1", ex=OAUTH_STATE_TTL)
-        return authorization_url
+        binding = secrets.token_urlsafe(32)
+        await self.redis.set(
+            f"{OAUTH_STATE_PREFIX}{state}", binding, ex=OAUTH_STATE_TTL
+        )
+        return authorization_url, binding
 
     async def handle_callback(
-        self, code: str, state: str, db: AsyncSession
+        self, code: str, state: str, state_binding: str | None, db: AsyncSession
     ) -> tuple[str, str]:
         state_key = f"{OAUTH_STATE_PREFIX}{state}"
         # Atomic read-and-delete: getdel returns the value and removes the key
         # in a single round-trip, eliminating the TOCTOU window that the
-        # separate get() + delete() pair had (C-3 — T-175).
-        if not await self.redis.getdel(state_key):
+        # separate get() + delete() pair had (C-3 — T-175). getdel runs FIRST so
+        # the state is single-use regardless of the binding outcome below.
+        stored_binding = await self.redis.getdel(state_key)
+        # One AuthError message for both "state absent/expired/replayed" and
+        # "binding mismatch", so a failed callback can't be used as an oracle to
+        # tell a valid-but-unbound state apart from an unknown one.
+        if not stored_binding or not self._state_binding_matches(
+            stored_binding, state_binding
+        ):
             raise AuthError("Invalid or expired OAuth state")
 
         await self._maybe_await(
@@ -327,6 +350,21 @@ class AuthService:
         if session_keys:
             await self.redis.delete(*session_keys)
         await self.redis.delete(user_sessions_key)
+
+    @staticmethod
+    def _state_binding_matches(stored: object, presented: str | None) -> bool:
+        """Constant-time equality of the presented cookie binding to the stored one.
+
+        Returns False for a missing/empty presented value. Normalises the stored
+        Redis value (str with decode_responses, bytes without) before comparing.
+        """
+        if not presented:
+            return False
+        if isinstance(stored, (bytes, bytearray)):
+            stored_str = bytes(stored).decode("utf-8", "replace")
+        else:
+            stored_str = str(stored)
+        return hmac.compare_digest(stored_str, presented)
 
     def _required_claim(self, user_info: dict[str, Any], key: str) -> str:
         value = user_info.get(key)

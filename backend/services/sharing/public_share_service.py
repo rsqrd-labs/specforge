@@ -45,7 +45,16 @@ logger = logging.getLogger(__name__)
 # 31-character alphabet — no ambiguous chars (0/o/1/l/i are intentionally
 # excluded so the slug can be read off a screen and re-typed without confusion).
 ALPHABET = "abcdefghjkmnpqrstuvwxyz23456789"
-SLUG_LEN = 6
+# 16 chars over the 31-char alphabet ≈ 31^16 ≈ 2^79 of entropy — unguessable and
+# infeasible to bulk-harvest even behind the per-IP public-view rate tier. Raised
+# from 6 (≈2^30) to close the share-slug entropy finding and match the storyboard
+# public-share sibling's 16-char length. Existing shorter slugs stay valid
+# (`is_valid_slug` is length-agnostic under its ceiling); only new slugs are longer.
+SLUG_LEN = 16
+# Hard ceiling on an accepted slug length. Real slugs are exactly SLUG_LEN; the
+# ceiling only bounds the DB/Redis-key surface an arbitrary-slug scraper can probe
+# on the unauthenticated read path (no legitimate slug approaches it).
+_MAX_SLUG_LEN = 64
 _MAX_GENERATE_ATTEMPTS = 3
 _STAGE_ORDER: tuple[str, ...] = ("spec", "plan", "harness", "tasks")
 
@@ -70,7 +79,9 @@ def is_valid_slug(slug: str) -> bool:
     touched, so an arbitrary-slug scraper can neither hit the pool nor pollute the
     Redis cache key space with junk keys.
     """
-    return bool(slug) and all(ch in ALPHABET for ch in slug)
+    return (
+        bool(slug) and len(slug) <= _MAX_SLUG_LEN and all(ch in ALPHABET for ch in slug)
+    )
 
 
 # ---------------------------------------------------------------------------

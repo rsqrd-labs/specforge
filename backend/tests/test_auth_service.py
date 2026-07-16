@@ -157,11 +157,12 @@ async def test_handle_callback_creates_new_user(signing_keys: tuple[str, str]) -
     redis = FakeRedis()
     service = make_service(signing_keys, redis)
     db = FakeDB()
-    # Pre-seed the OAuth state as the login flow would
-    await redis.set("oauth:state:test-state", "1", ex=600)
+    # Pre-seed the OAuth state as the login flow would: value is the browser
+    # binding secret, which the callback must echo back from its cookie.
+    await redis.set("oauth:state:test-state", "bind-secret", ex=600)
 
     access_token, refresh_token = await service.handle_callback(  # type: ignore[arg-type]
-        "code", "test-state", db
+        "code", "test-state", "bind-secret", db
     )
 
     assert access_token
@@ -174,13 +175,41 @@ async def test_handle_callback_creates_new_user(signing_keys: tuple[str, str]) -
 
 
 @pytest.mark.asyncio
+async def test_handle_callback_rejects_missing_binding_cookie(
+    signing_keys: tuple[str, str],
+) -> None:
+    """Login-CSRF (F5): a valid state with no browser binding cookie is refused."""
+    redis = FakeRedis()
+    service = make_service(signing_keys, redis)
+    await redis.set("oauth:state:test-state", "bind-secret", ex=600)
+    with pytest.raises(AuthError, match="OAuth state"):
+        await service.handle_callback("code", "test-state", None, FakeDB())  # type: ignore[arg-type]
+    # The state was still consumed (single-use), so a replay also fails.
+    assert "oauth:state:test-state" not in redis.values
+
+
+@pytest.mark.asyncio
+async def test_handle_callback_rejects_mismatched_binding(
+    signing_keys: tuple[str, str],
+) -> None:
+    """Login-CSRF (F5): the attacker's binding must not satisfy a victim's state."""
+    redis = FakeRedis()
+    service = make_service(signing_keys, redis)
+    await redis.set("oauth:state:test-state", "victim-binding", ex=600)
+    with pytest.raises(AuthError, match="OAuth state"):
+        await service.handle_callback(  # type: ignore[arg-type]
+            "code", "test-state", "attacker-binding", FakeDB()
+        )
+
+
+@pytest.mark.asyncio
 async def test_handle_callback_rejects_missing_state(
     signing_keys: tuple[str, str],
 ) -> None:
     service = make_service(signing_keys)
     db = FakeDB()
     with pytest.raises(AuthError, match="OAuth state"):
-        await service.handle_callback("code", "nonexistent-state", db)  # type: ignore[arg-type]
+        await service.handle_callback("code", "nonexistent-state", "bind", db)  # type: ignore[arg-type]
 
 
 @pytest.mark.asyncio
@@ -190,12 +219,12 @@ async def test_handle_callback_rejects_replayed_state(
     redis = FakeRedis()
     service = make_service(signing_keys, redis)
     db = FakeDB()
-    await redis.set("oauth:state:one-time", "1", ex=600)
+    await redis.set("oauth:state:one-time", "bind-secret", ex=600)
     # First call consumes the state
-    await service.handle_callback("code", "one-time", db)  # type: ignore[arg-type]
+    await service.handle_callback("code", "one-time", "bind-secret", db)  # type: ignore[arg-type]
     # Second call with the same state must be rejected
     with pytest.raises(AuthError, match="OAuth state"):
-        await service.handle_callback("code", "one-time", FakeDB())  # type: ignore[arg-type]
+        await service.handle_callback("code", "one-time", "bind-secret", FakeDB())  # type: ignore[arg-type]
 
 
 @pytest.mark.asyncio
@@ -204,10 +233,13 @@ async def test_get_google_auth_url_stores_state_in_redis(
 ) -> None:
     redis = FakeRedis()
     service = make_service(signing_keys, redis)
-    url = await service.get_google_auth_url()
+    url, binding = await service.get_google_auth_url()
     assert url.startswith("https://accounts.google.com")
-    # The FakeOAuthClient always returns "state" as the state value
+    # The FakeOAuthClient always returns "state" as the state value; the stored
+    # value is now the browser-binding secret (not a placeholder "1").
     assert "oauth:state:state" in redis.values
+    assert redis.values["oauth:state:state"] == binding
+    assert binding
 
 
 @pytest.mark.asyncio

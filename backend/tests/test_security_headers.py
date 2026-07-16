@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
+from fastapi import Response
+from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 
 from config import settings
@@ -116,6 +118,69 @@ def test_security_headers_are_set_on_unhandled_500_responses() -> None:
     assert response.headers["X-Frame-Options"] == "DENY"
     assert response.headers["X-Content-Type-Options"] == "nosniff"
     assert response.headers["Referrer-Policy"] == "strict-origin-when-cross-origin"
+
+
+def test_authenticated_response_is_marked_no_store() -> None:
+    # F1: any request carrying an Authorization: Bearer header (all signed-in JSON
+    # reads) must come back uncacheable so a shared cache / bfcache never retains it.
+    app = create_app(redis_client=_NoopRedis())
+
+    @app.get("/whoami")
+    async def whoami() -> dict:
+        return {"ok": True}
+
+    with patch.object(settings, "environment", "development"):
+        client = TestClient(app)
+        response = client.get("/whoami", headers={"Authorization": "Bearer x.y.z"})
+
+    assert response.status_code == 200
+    assert response.headers["Cache-Control"] == "no-store"
+
+
+def test_unauthenticated_response_is_not_forced_no_store() -> None:
+    # A public GET with no Authorization is left cacheable (public share / templates
+    # opt into their own caching); the middleware must not blanket every response.
+    app = create_app(redis_client=_NoopRedis())
+
+    @app.get("/public-thing")
+    async def public_thing() -> dict:
+        return {"ok": True}
+
+    with patch.object(settings, "environment", "development"):
+        client = TestClient(app)
+        response = client.get("/public-thing")
+
+    assert response.status_code == 200
+    assert response.headers.get("Cache-Control") != "no-store"
+
+
+def test_no_store_does_not_override_explicit_cache_control() -> None:
+    # setdefault: an endpoint that deliberately opts into caching keeps its header
+    # even when the request is authenticated.
+    app = create_app(redis_client=_NoopRedis())
+
+    @app.get("/cached")
+    async def cached() -> Response:
+        return JSONResponse({"ok": True}, headers={"Cache-Control": "max-age=60"})
+
+    with patch.object(settings, "environment", "development"):
+        client = TestClient(app)
+        response = client.get("/cached", headers={"Authorization": "Bearer x.y.z"})
+
+    assert response.status_code == 200
+    assert response.headers["Cache-Control"] == "max-age=60"
+
+
+def test_token_issuing_paths_are_no_store_without_authorization() -> None:
+    # /auth/callback and /auth/refresh return credentials in the body but carry no
+    # Authorization header, so they're covered by the path list, not the header rule.
+    app = create_app(redis_client=_NoopRedis())
+    with patch.object(settings, "environment", "development"):
+        client = TestClient(app)
+        # Missing refresh cookie → 401, but the no-store header is applied regardless.
+        response = client.post("/auth/refresh")
+
+    assert response.headers.get("Cache-Control") == "no-store"
 
 
 def test_docs_are_disabled_in_production() -> None:

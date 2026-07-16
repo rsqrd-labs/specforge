@@ -48,6 +48,21 @@ def test_generate_slug_returns_only_alphabet_chars() -> None:
         assert all(ch in share.ALPHABET for ch in slug)
 
 
+def test_slug_length_has_sufficient_entropy() -> None:
+    # F5 (share-slug entropy): 16 chars over the 31-char alphabet ≈ 2^79. Guard
+    # against anyone silently lowering it back toward the harvestable ≈2^30 floor.
+    # 16 also matches the storyboard public-share sibling's length.
+    assert share.SLUG_LEN >= 16
+
+
+def test_is_valid_slug_bounds_length() -> None:
+    # A real slug is accepted; an over-long all-alphabet string (a scraper probing
+    # the unauthenticated read path) is rejected before any DB/Redis work.
+    assert share.is_valid_slug(share._generate_slug())
+    assert not share.is_valid_slug("a" * (share._MAX_SLUG_LEN + 1))
+    assert not share.is_valid_slug("")
+
+
 # ---------------------------------------------------------------------------
 # In-memory fake session covering just what the service touches.
 # ---------------------------------------------------------------------------

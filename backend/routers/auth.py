@@ -23,6 +23,17 @@ _REFRESH_COOKIE = "refresh_token"
 _COOKIE_MAX_AGE = 604800  # 7 days
 _REFRESH_COOKIE_PATH = "/auth"
 
+# OAuth login-CSRF binding cookie (holds the CSPRNG secret minted by
+# get_google_auth_url and echoed back on the callback). In production the cookie
+# is Secure, so it carries the __Host- prefix: the browser then refuses any
+# Set-Cookie bearing a Domain attribute and requires Secure + Path=/, structurally
+# preventing a sibling host under a shared parent domain from planting this cookie
+# (cookie-tossing → forced login). __Host- mandates Secure, so dev-HTTP falls back
+# to the plain name. Path is "/" in both (required by __Host-; harmless for dev).
+_OAUTH_STATE_COOKIE = "sf_oauth_state"
+_OAUTH_STATE_COOKIE_HOST = "__Host-sf_oauth_state"
+_OAUTH_STATE_MAX_AGE = 600  # mirrors auth_service.OAUTH_STATE_TTL
+
 
 def _refresh_cookie_secure() -> bool:
     return settings.environment.lower() == "production"
@@ -46,27 +57,64 @@ def _set_refresh_cookie(response: Response, token: str) -> None:
     )
 
 
+def _oauth_state_cookie_name() -> str:
+    return _OAUTH_STATE_COOKIE_HOST if _refresh_cookie_secure() else _OAUTH_STATE_COOKIE
+
+
+def _set_oauth_state_cookie(response: Response, binding: str) -> None:
+    response.set_cookie(
+        key=_oauth_state_cookie_name(),
+        value=binding,
+        httponly=True,
+        secure=_refresh_cookie_secure(),
+        samesite=_refresh_cookie_samesite(),
+        max_age=_OAUTH_STATE_MAX_AGE,
+        path="/",
+    )
+
+
+def _delete_oauth_state_cookie(response: Response) -> None:
+    response.delete_cookie(
+        key=_oauth_state_cookie_name(),
+        path="/",
+        secure=_refresh_cookie_secure(),
+        samesite=_refresh_cookie_samesite(),
+    )
+
+
 @router.get("/google")
 async def google_login() -> RedirectResponse:
-    url = await auth_service.get_google_auth_url()
-    return RedirectResponse(url)
+    url, binding = await auth_service.get_google_auth_url()
+    redirect = RedirectResponse(url)
+    _set_oauth_state_cookie(redirect, binding)
+    return redirect
 
 
 @router.get("/callback")
 async def google_callback(
     code: str,
     state: str,
+    request: Request,
     response: Response,
     db: AsyncSession = Depends(get_db),
 ) -> dict:
+    state_binding = request.cookies.get(_oauth_state_cookie_name())
     try:
         access_token, refresh_token = await auth_service.handle_callback(
-            code, state, db
+            code, state, state_binding, db
         )
     except AuthError as exc:
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail=str(exc)) from exc
+        # Clear the single-use binding cookie on the failure path too, then surface
+        # the same 401 {"detail": …} shape the endpoint returned before. Returning
+        # a dict (rather than raising) lets the injected Response carry both the
+        # cookie deletion and the 401 status; a raised HTTPException would drop the
+        # Set-Cookie header.
+        _delete_oauth_state_cookie(response)
+        response.status_code = status.HTTP_401_UNAUTHORIZED
+        return {"detail": str(exc)}
 
     _set_refresh_cookie(response, refresh_token)
+    _delete_oauth_state_cookie(response)
     return {"access_token": access_token}
 
 

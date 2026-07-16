@@ -327,7 +327,7 @@ async def test_oauth_replay_auth_service_rejects_missing_state() -> None:
     service = AuthService(redis_client=redis, oauth_client=None)
 
     with pytest.raises(AuthError, match="Invalid or expired OAuth state"):
-        await service.handle_callback("some-code", "missing-state", db=None)
+        await service.handle_callback("some-code", "missing-state", "binding", db=None)
 
 
 # ---------------------------------------------------------------------------

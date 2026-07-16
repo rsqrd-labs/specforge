@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hmac
 import logging
 import re
 import time
@@ -1489,7 +1490,9 @@ def setup_metrics(app: FastAPI) -> None:
         auth_header = request.headers.get("Authorization") or ""
         token = auth_header.removeprefix("Bearer ").strip()
         if settings.metrics_token:
-            if token != settings.metrics_token:
+            # Constant-time compare so a scraper can't recover the token byte by
+            # byte from response-timing deltas.
+            if not hmac.compare_digest(token.encode(), settings.metrics_token.encode()):
                 return StarletteResponse("Unauthorized", status_code=401)
         elif settings.environment.lower() == "production":
             return StarletteResponse("Metrics token required", status_code=503)

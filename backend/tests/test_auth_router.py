@@ -12,6 +12,7 @@ from database import get_db
 from main import create_app
 from middleware.auth import get_current_user
 from models import User
+from services.auth_service import AuthError
 from services.auth_service import auth_service as _auth_service
 from services.credit_service import credit_service as _credit_service
 
@@ -72,8 +73,11 @@ def app():
 async def test_get_auth_google_redirects_to_google(
     app: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    async def fake_get_url() -> str:
-        return "https://accounts.google.com/o/oauth2/v2/auth?client_id=test"
+    async def fake_get_url() -> tuple[str, str]:
+        return (
+            "https://accounts.google.com/o/oauth2/v2/auth?client_id=test",
+            "browser-binding-secret",
+        )
 
     monkeypatch.setattr(_auth_service, "get_google_auth_url", fake_get_url)
 
@@ -85,6 +89,40 @@ async def test_get_auth_google_redirects_to_google(
 
     assert response.status_code in (302, 307)
     assert "accounts.google.com" in response.headers["location"]
+    # F5: the redirect plants the login-CSRF binding cookie (HttpOnly, dev name)
+    # so the callback can bind the state to this browser.
+    set_cookie_header = response.headers.get("set-cookie", "")
+    assert "sf_oauth_state=browser-binding-secret" in set_cookie_header
+    assert "HttpOnly" in set_cookie_header
+
+
+@pytest.mark.asyncio
+async def test_get_auth_google_uses_host_prefixed_cookie_in_production(
+    app: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F5: in production the binding cookie carries the __Host- prefix with Secure
+    and NO Domain attribute — the property that makes cookie-tossing impossible."""
+
+    async def fake_get_url() -> tuple[str, str]:
+        return ("https://accounts.google.com/o/oauth2/v2/auth?x=1", "binding-secret")
+
+    monkeypatch.setattr(_auth_service, "get_google_auth_url", fake_get_url)
+    monkeypatch.setattr(settings, "environment", "production")
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(
+        transport=transport, base_url="https://api.test", follow_redirects=False
+    ) as client:
+        response = await client.get("/auth/google")
+
+    set_cookie_header = response.headers.get("set-cookie", "")
+    assert "__Host-sf_oauth_state=binding-secret" in set_cookie_header
+    assert "Secure" in set_cookie_header
+    assert "samesite=none" in set_cookie_header.lower()
+    assert "Path=/" in set_cookie_header
+    # __Host- is void if a Domain attribute is present — assert there is none.
+    assert "Domain=" not in set_cookie_header
+    assert "domain=" not in set_cookie_header
 
 
 @pytest.mark.asyncio
@@ -147,7 +185,9 @@ async def test_post_auth_logout_clears_cookie(
 async def test_refresh_cookie_uses_local_dev_security_attributes(
     app: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    async def fake_handle_callback(code: str, state: str, db: Any) -> tuple[str, str]:
+    async def fake_handle_callback(
+        code: str, state: str, state_binding: str | None, db: Any
+    ) -> tuple[str, str]:
         return "access-token", "refresh-token"
 
     monkeypatch.setattr(_auth_service, "handle_callback", fake_handle_callback)
@@ -171,7 +211,9 @@ async def test_refresh_cookie_uses_local_dev_security_attributes(
 async def test_refresh_cookie_uses_cross_site_production_attributes(
     app: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    async def fake_handle_callback(code: str, state: str, db: Any) -> tuple[str, str]:
+    async def fake_handle_callback(
+        code: str, state: str, state_binding: str | None, db: Any
+    ) -> tuple[str, str]:
         return "access-token", "refresh-token"
 
     monkeypatch.setattr(_auth_service, "handle_callback", fake_handle_callback)
@@ -189,3 +231,31 @@ async def test_refresh_cookie_uses_cross_site_production_attributes(
     assert "samesite=none" in set_cookie_header.lower()
     assert "Path=/auth" in set_cookie_header
     assert "Max-Age=604800" in set_cookie_header
+
+
+@pytest.mark.asyncio
+async def test_callback_rejects_state_binding_failure(
+    app: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F5: when the state/binding check fails, the callback 401s, issues no refresh
+    cookie, and clears the single-use binding cookie."""
+
+    async def fake_handle_callback(
+        code: str, state: str, state_binding: str | None, db: Any
+    ) -> tuple[str, str]:
+        raise AuthError("Invalid or expired OAuth state")
+
+    monkeypatch.setattr(_auth_service, "handle_callback", fake_handle_callback)
+    monkeypatch.setattr(settings, "environment", "development")
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/auth/callback?code=test-code&state=test-state")
+
+    assert response.status_code == 401
+    assert response.json() == {"detail": "Invalid or expired OAuth state"}
+    set_cookie_header = response.headers.get("set-cookie", "")
+    # No session is issued on the failure path...
+    assert "refresh_token=" not in set_cookie_header
+    # ...and the binding cookie is cleared (deletion sets an empty value).
+    assert "sf_oauth_state=" in set_cookie_header
