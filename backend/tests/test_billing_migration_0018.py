@@ -65,6 +65,14 @@ def _alembic(*args: str) -> None:
         )
 
 
+@pytest.fixture(autouse=True)
+def _restore_current_schema_after_test():
+    """Do not leak this migration's historical schema into the shared suite DB."""
+    yield
+    if TEST_DATABASE_URL:
+        _alembic("upgrade", "head")
+
+
 # Four legacy packs, one per Stripe status, with distinct accounting shapes.
 # (status, credits_purchased, credits_remaining, price_cents)
 _SEED_PACKS = (

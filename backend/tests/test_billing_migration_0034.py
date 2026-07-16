@@ -82,6 +82,14 @@ def _alembic(*args: str, expect_failure: bool = False) -> str:
     return output
 
 
+@pytest.fixture(autouse=True)
+def _restore_current_schema_after_test():
+    """Do not leak this migration's historical schema into the shared suite DB."""
+    yield
+    if TEST_DATABASE_URL:
+        _alembic("upgrade", "head")
+
+
 async def _reset_schema() -> None:
     engine = create_async_engine(TEST_DATABASE_URL, echo=False)
     try:
