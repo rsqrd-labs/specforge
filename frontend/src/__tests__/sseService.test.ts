@@ -160,10 +160,13 @@ describe("createSSEConnection retry behaviour", () => {
     )
   })
 
-  it("treats a stream ending before done as a retryable failure", async () => {
-    vi.spyOn(globalThis, "fetch").mockImplementation(() =>
-      mockFetchOk('data: {"token":"partial"}\n\n'),
-    )
+  it("treats a stream ending before done as a TERMINAL stream_interrupted (no re-POST)", async () => {
+    // P0-A: a Response existed, so generate() may have committed/persisted — a
+    // blind re-POST is the double-charge hazard W1. The old behavior re-POSTed
+    // here; the new contract settles terminally and lets useStream reconcile.
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(() => mockFetchOk('data: {"token":"partial"}\n\n'))
 
     const onToken = vi.fn()
     const onDone = vi.fn()
@@ -171,15 +174,90 @@ describe("createSSEConnection retry behaviour", () => {
 
     createSSEConnection({ url: "/stream", onToken, onDone, onError })
 
-    await vi.advanceTimersByTimeAsync(1000)
-    await vi.advanceTimersByTimeAsync(2000)
-    await vi.advanceTimersByTimeAsync(4000)
     await vi.runAllTimersAsync()
 
     expect(onToken).toHaveBeenCalled()
     expect(onDone).not.toHaveBeenCalled()
     expect(onError).toHaveBeenCalledTimes(1)
-    expect(onError.mock.calls[0][0].message).toMatch(/before generation completed/i)
+    expect(onError.mock.calls[0][0].code).toBe("stream_interrupted")
+    // Exactly one POST — never re-triggered a charged generation.
+    expect(fetchSpy).toHaveBeenCalledTimes(1)
+    expect(console.warn).not.toHaveBeenCalled()
+  })
+
+  it("maps 402 to a terminal insufficient_credits without re-POSTing", async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(() => mockFetchFail(402))
+
+    const onError = vi.fn()
+    createSSEConnection({ url: "/stream", onToken: vi.fn(), onDone: vi.fn(), onError })
+
+    await vi.runAllTimersAsync()
+
+    expect(onError).toHaveBeenCalledTimes(1)
+    expect(onError.mock.calls[0][0].code).toBe("insufficient_credits")
+    expect(fetchSpy).toHaveBeenCalledTimes(1)
+    expect(console.warn).not.toHaveBeenCalled()
+  })
+
+  it("does NOT re-POST when the transport drops mid-stream", async () => {
+    // A reader that yields one token then the connection resets — a Response
+    // existed, so this is terminal-and-reconcile, never a retry.
+    const encoder = new TextEncoder()
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(() => {
+      let sent = false
+      const body = {
+        getReader: () => ({
+          read: async () => {
+            if (!sent) {
+              sent = true
+              return { done: false, value: encoder.encode('data: {"token":"hi"}\n\n') }
+            }
+            throw new TypeError("network error: connection reset")
+          },
+          cancel: async () => {},
+        }),
+      }
+      return Promise.resolve({
+        status: 200,
+        ok: true,
+        headers: { get: () => null },
+        body,
+      } as unknown as Response)
+    })
+
+    const onError = vi.fn()
+    const onDone = vi.fn()
+    createSSEConnection({ url: "/stream", onToken: vi.fn(), onDone, onError })
+
+    await vi.runAllTimersAsync()
+
+    expect(onDone).not.toHaveBeenCalled()
+    expect(onError).toHaveBeenCalledTimes(1)
+    expect(onError.mock.calls[0][0].code).toBe("stream_interrupted")
+    expect(fetchSpy).toHaveBeenCalledTimes(1)
+  })
+
+  it("honors Retry-After on a 429 (a pre-route rejection, still retry-eligible)", async () => {
+    // 429/503 are the only retry-eligible statuses — generate() never ran.
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(() =>
+        Promise.resolve(
+          new Response(null, { status: 429, headers: { "Retry-After": "0" } }),
+        ),
+      )
+
+    const onError = vi.fn()
+    createSSEConnection({ url: "/stream", onToken: vi.fn(), onDone: vi.fn(), onError })
+
+    await vi.runAllTimersAsync()
+
+    expect(onError).toHaveBeenCalledTimes(1)
+    expect(onError.mock.calls[0][0].code).toBe("rate_limit_exceeded")
+    // Initial attempt + 3 retries.
+    expect(fetchSpy).toHaveBeenCalledTimes(4)
   })
 
   it("refreshes the access token once when the stream request gets a 401", async () => {
@@ -248,6 +326,9 @@ describe("createSSEConnection retry behaviour", () => {
   })
 
   it("uses a fresh CSRF token for each retry attempt", async () => {
+    // 503 is a pre-route rejection (retry-eligible); each retry rebuilds headers
+    // with a freshly-fetched CSRF token. (403 is now terminal, so it can't drive
+    // this — the retry lanes are pre-response errors and 429/503 only.)
     const doneBody = 'data: {"done":true,"stage_id":"s1"}\n\n'
     apiMocks.accessToken = "valid"
     apiMocks.getCsrfToken
@@ -255,7 +336,7 @@ describe("createSSEConnection retry behaviour", () => {
       .mockResolvedValueOnce("csrf-fresh")
 
     vi.spyOn(globalThis, "fetch")
-      .mockImplementationOnce(() => mockFetchFail(403))
+      .mockImplementationOnce(() => mockFetchFail(503))
       .mockImplementationOnce(() => mockFetchOk(doneBody))
 
     const onDone = vi.fn()
@@ -381,6 +462,35 @@ describe("createSSEConnection abort settling", () => {
     expect(onAbort).toHaveBeenCalledTimes(1)
     expect(onDone).not.toHaveBeenCalled()
     expect(onError).not.toHaveBeenCalled()
+  })
+
+  it("settles via onAbort (not onError) when close() races token processing", async () => {
+    // Regression for the after-loop `closed` guard: an external close() during
+    // synchronous token processing (the read RESOLVED, it did not reject with
+    // AbortError) exits the loop via the `!closed` condition. That must settle
+    // as a deliberate teardown (onAbort), never a spurious stream_interrupted.
+    vi.spyOn(globalThis, "fetch").mockImplementation(() =>
+      mockFetchOk('data: {"token":"a"}\n\ndata: {"token":"b"}\n\n'),
+    )
+
+    let control: { close: () => void } | undefined
+    const onError = vi.fn()
+    const onAbort = vi.fn()
+    // Close the connection from within the first token callback.
+    const onToken = vi.fn(() => control?.close())
+
+    control = createSSEConnection({
+      url: "/stream",
+      onToken,
+      onDone: vi.fn(),
+      onError,
+      onAbort,
+    })
+
+    await vi.runAllTimersAsync()
+
+    expect(onError).not.toHaveBeenCalled()
+    expect(onAbort).toHaveBeenCalledTimes(1)
   })
 
   it("does not fire onAbort on a normal done — the caller is already settled", async () => {

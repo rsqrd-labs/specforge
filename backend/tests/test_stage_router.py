@@ -784,6 +784,58 @@ async def test_rollback_returns_updated_stage(app) -> None:
 
 
 @pytest.mark.asyncio
+async def test_rollback_in_progress_returns_409(app) -> None:
+    # A1: rollback() now raises ValueError on an in_progress stage; the router
+    # maps it to a 409 instead of a 500.
+    stage = _make_stage()
+
+    async def _fake_db():
+        yield _FakeDB(stage)
+
+    app.dependency_overrides[get_db] = _fake_db
+
+    with patch(
+        "routers.stage.stage_manager.rollback",
+        new_callable=AsyncMock,
+        side_effect=ValueError("A generating stage cannot be rolled back."),
+    ):
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            response = await client.post(
+                f"/stages/{stage.id}/rollback", json={"version_number": 1}
+            )
+
+    assert response.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_edit_content_in_progress_returns_409(app) -> None:
+    # handle_content_edit() rejects an in_progress stage; the router maps it to
+    # a 409 (accept-diff shares the same handler + mapping).
+    stage = _make_stage()
+
+    async def _fake_db():
+        yield _FakeDB(stage)
+
+    app.dependency_overrides[get_db] = _fake_db
+
+    with patch(
+        "routers.stage.stage_manager.handle_content_edit",
+        new_callable=AsyncMock,
+        side_effect=ValueError("A generating stage cannot be edited."),
+    ):
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            response = await client.patch(
+                f"/stages/{stage.id}/content", json={"content": "hi there"}
+            )
+
+    assert response.status_code == 409
+
+
+@pytest.mark.asyncio
 async def test_acknowledge_gate_marks_stage_reviewed(app) -> None:
     stage = _make_stage(stage_type="plan")
     fake_db = _FakeDB(stage)

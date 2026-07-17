@@ -72,6 +72,13 @@ export interface Stage {
   quality_gate?: QualityGateInfo | null
   created_at: string
   updated_at: string
+  // Honest elapsed baseline for the streaming overlay (RC-1) and the reconnect
+  // operation label (A6). Both optional/nullable: absent on older backends and
+  // on cache-hit drafts, in which case the overlay falls back to a pinned
+  // `updated_at` baseline. `generation_started_at` is stamped once at the
+  // in_progress transition and never bumped by the DB heartbeat.
+  generation_started_at?: string | null
+  generation_action?: string | null
 }
 
 export interface ResearchSource {

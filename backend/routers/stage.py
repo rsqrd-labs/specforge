@@ -89,7 +89,9 @@ async def _stream_stage(
     except MissingSectionError as exc:
         # T-248: same contract as the critic gate above — the quality_gate_failed
         # (kind=missing_sections) event was already streamed before generate()
-        # raised, and credits were refunded + the stage reset to draft.
+        # raised, and the stage was reset to draft. Per audit #9 missing_sections
+        # is NOT refunded (the artifact is still delivered + overridable); only a
+        # genuinely truncated incomplete_output refunds.
         logger.info(
             "stage_missing_sections",
             extra={
@@ -102,7 +104,12 @@ async def _stream_stage(
         payload = json.dumps({"error": "dependency_not_finalised", "detail": str(exc)})
         yield f"data: {payload}\n\n"
     except StageStateError as exc:
-        payload = json.dumps({"error": "stage_not_generatable", "detail": str(exc)})
+        # `generation_in_progress` (a duplicate trigger against an already-running
+        # stage) is a distinct, benign code the client reconciles into the
+        # reconnect UX — never the "already complete → Unlock" affordance (A1).
+        payload = json.dumps(
+            {"error": exc.code or "stage_not_generatable", "detail": str(exc)}
+        )
         yield f"data: {payload}\n\n"
     except RateLimitError as exc:
         payload = json.dumps(
@@ -278,7 +285,9 @@ async def _stream_harness_patch(
             else:
                 yield f"data: {json.dumps({'token': token})}\n\n"
     except StageStateError as exc:
-        payload = json.dumps({"error": "stage_not_generatable", "detail": str(exc)})
+        payload = json.dumps(
+            {"error": exc.code or "stage_not_generatable", "detail": str(exc)}
+        )
         yield f"data: {payload}\n\n"
     except RateLimitError as exc:
         payload = json.dumps(
@@ -419,7 +428,14 @@ async def accept_diff(
     user: User = Depends(get_current_user),
 ) -> StageResponse:
     await _load_stage(id, db, user.id)
-    stage = await stage_manager.handle_content_edit(id, body.proposed_content, user, db)
+    try:
+        stage = await stage_manager.handle_content_edit(
+            id, body.proposed_content, user, db
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail=str(exc)
+        ) from exc
     return StageResponse.model_validate(stage)
 
 
@@ -492,7 +508,13 @@ async def rollback_stage(
     user: User = Depends(get_current_user),
 ) -> StageResponse:
     await _load_stage(id, db, user.id)
-    stage = await stage_manager.rollback(id, body.version_number, user, db)
+    try:
+        stage = await stage_manager.rollback(id, body.version_number, user, db)
+    except ValueError as exc:
+        # e.g. a rollback attempted while a generation is in progress (A1).
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail=str(exc)
+        ) from exc
     return StageResponse.model_validate(stage)
 
 
@@ -690,5 +712,10 @@ async def edit_content(
     user: User = Depends(get_current_user),
 ) -> StageResponse:
     await _load_stage(id, db, user.id)
-    stage = await stage_manager.handle_content_edit(id, body.content, user, db)
+    try:
+        stage = await stage_manager.handle_content_edit(id, body.content, user, db)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail=str(exc)
+        ) from exc
     return StageResponse.model_validate(stage)

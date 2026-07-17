@@ -35,6 +35,13 @@ export function useStream(stageId: string | null) {
   const [isStreaming, setIsStreaming] = useState(false)
   const [error, setError] = useState<StreamErrorState | null>(null)
   const streamRef = useRef<{ close: () => void } | null>(null)
+  // #3b: `error` is shared across stage navigations — Workspace calls this hook
+  // with `activeStage.id`, so the same hook instance serves every stage. Track
+  // the live stageId so a stream that settles with an error AFTER the user
+  // navigated away can't write it onto the stage they're now viewing, which would
+  // bind that stage's "Try again" to the wrong generation and charge it.
+  const currentStageIdRef = useRef(stageId)
+  currentStageIdRef.current = stageId
   // Cancellation token for the in-flight post-`done` advisory poll. A new
   // generation (or unmount) flips `cancelled` so a stale poll can never write
   // findings onto a superseded stage.
@@ -59,6 +66,13 @@ export function useStream(stageId: string | null) {
       }
     }
   }, [])
+
+  // Clear a stale error when the user navigates to a different stage (#3b): an
+  // alert from a failed generation on stage A must never persist onto stage B,
+  // where its "Try again" would charge B. Each stage owns its own error state.
+  useEffect(() => {
+    setError(null)
+  }, [stageId])
 
   // Poll the stage after `done` until the async critic's advisory findings land
   // (or a bounded number of attempts elapse). Best-effort and detached: errors
@@ -110,10 +124,71 @@ export function useStream(stageId: string | null) {
 
       const store = useStageStore.getState()
       const existing = store.stages[stageId]
+      // The stage version BEFORE this generation. A successful generation, a
+      // quality-gate block, and a gap-patch all bump current_version at persist;
+      // a provider/validation failure resets to draft WITHOUT bumping. That makes
+      // the version the reliable "did work actually land?" signal used to
+      // reconcile an interrupted stream WITHOUT ever re-POSTing (RC-2).
+      const existingVersion = existing?.current_version ?? -1
       if (existing) {
-        store.setStage({ ...existing, status: "in_progress" })
+        // Null the elapsed stamps in the optimistic flip (#5): `existing` still
+        // carries the PREVIOUS run's `generation_started_at`, and the overlay's
+        // reconnect baseline prefers that stamp when the stage is in_progress. If
+        // `isStreaming` clears while this optimistic stage is still in the store
+        // (a post-`done` refetch failure, or an offline reconcile), the overlay
+        // would otherwise compute elapsed from the prior generation's start and
+        // show a wildly wrong "41:07". Cleared here, it falls back to the pinned
+        // `updated_at` baseline until the server supplies the real start.
+        store.setStage({
+          ...existing,
+          status: "in_progress",
+          generation_started_at: null,
+          generation_action: null,
+        })
       }
       store.startStream(stageId)
+
+      // Per-invocation connection handle. Captured locally (not just in the
+      // shared ref) so THIS call's teardown always closes ITS OWN connection —
+      // a superseding start() that overwrote `streamRef` can't make our
+      // `finally` close its stream instead (RC-4 hygiene).
+      let connection: { close: () => void } | null = null
+      const closeConnection = () => {
+        connection?.close()
+        if (streamRef.current === connection) {
+          streamRef.current = null
+        }
+      }
+
+      // Surface an error only if THIS invocation's stage is still the active one
+      // (#3b): the stream may settle after the user navigated away, and writing
+      // its error onto the now-active stage would mis-bind that stage's retry.
+      const settleError = (state: StreamErrorState) => {
+        if (currentStageIdRef.current === stageId) {
+          setError(state)
+        }
+      }
+
+      // The shared post-`done` tail: deliver the persisted artifact and start the
+      // advisory-findings poll. Reused by the clean `done` path and by the
+      // reconcile "work landed" path. `discardStream` (not `finaliseStream`)
+      // drops the streamed buffer and lets `setStage(fresh)` supply the
+      // authoritative content in the same synchronous batch — so a *partial*
+      // buffer from an interrupted stream never flashes into the editor.
+      const runDoneTail = async (
+        settledStageId: string,
+      ): Promise<StreamResult> => {
+        const fresh = await getStage(settledStageId)
+        const s = useStageStore.getState()
+        s.discardStream(stageId)
+        s.setStage(fresh)
+        const baselineFindings =
+          fresh.quality_gate?.status === "advisory"
+            ? (fresh.quality_gate.findings?.length ?? 0)
+            : 0
+        pollForAdvisoryFindings(settledStageId, baselineFindings)
+        return { stage: fresh, evalResult: null }
+      }
 
       try {
         const response =
@@ -124,7 +199,11 @@ export function useStream(stageId: string | null) {
               : await generateStage(stageId)
 
         const doneStageId = await new Promise<string>((resolve, reject) => {
-          streamRef.current = createSSEConnection({
+          // Defense in depth: close any prior connection before overwriting the
+          // shared ref (the synchronous activity guards in Workspace already
+          // prevent a concurrent start(), so this is belt-and-braces).
+          streamRef.current?.close()
+          connection = createSSEConnection({
             url: response.stream_url,
             onToken: (token) => useStageStore.getState().appendToken(stageId, token),
             onDone: resolve,
@@ -148,6 +227,7 @@ export function useStream(stageId: string | null) {
                 new StreamError("stream_aborted", "Generation stream was cancelled."),
               ),
           })
+          streamRef.current = connection
         })
 
         // `done` is terminal for the loading UI — the backend persists the stage
@@ -158,24 +238,20 @@ export function useStream(stageId: string | null) {
         // reaches draft (structural findings are already there; the best-effort
         // LLM score updates the same row in the background), so closing the
         // stream never drops it.
-        closeStreamRef(streamRef)
-        useStageStore.getState().finaliseStream(stageId)
-        const updatedStage = await getStage(doneStageId)
-        useStageStore.getState().setStage(updatedStage)
-
-        // The async critic attaches its advisory findings shortly after `done`
-        // (docs/CRITIC_ASYNC_ADVISORY_PLAN.md §3.4), so the refetch above is too
-        // early to see them. Poll briefly until they land (counting past any
-        // notice already attached at `done`) so they surface without a manual
-        // refresh. Harmless on the legacy inline path — findings are already
-        // present, so the first poll sees no growth and it quietly times out.
-        const baselineFindings =
-          updatedStage.quality_gate?.status === "advisory"
-            ? (updatedStage.quality_gate.findings?.length ?? 0)
-            : 0
-        pollForAdvisoryFindings(doneStageId, baselineFindings)
-
-        return { stage: updatedStage, evalResult: null }
+        closeConnection()
+        try {
+          return await runDoneTail(doneStageId)
+        } catch {
+          // A2: the generation SUCCEEDED and `done` fired, but the confirming
+          // refetch failed (runDoneTail threw at getStage, before its own
+          // discard). Drop the orphaned streamed buffer + activeStream so they
+          // don't leak — the store still holds the optimistic `in_progress`
+          // stage, so `useReconnectPoll` delivers the persisted draft on its next
+          // tick. Do NOT surface an error or regress to pre-generation content:
+          // self-healing with zero fabricated state (Fable A2 variant).
+          useStageStore.getState().discardStream(stageId)
+          return null
+        }
       } catch (streamError) {
         const code =
           streamError instanceof StreamError ? streamError.code : "internal_error"
@@ -190,10 +266,62 @@ export function useStream(stageId: string | null) {
           return null
         }
 
+        // RC-2: an interrupted connection (any drop after a Response existed) or
+        // a duplicate-trigger `generation_in_progress` MUST NOT re-POST — that is
+        // the double-charge hazard. Reconcile against the persisted stage using
+        // the version bump as the signal, never a blind retry.
+        if (code === "stream_interrupted" || code === "generation_in_progress") {
+          try {
+            const fresh = await getStage(stageId)
+            const s = useStageStore.getState()
+            if (fresh.status === "in_progress") {
+              // Still running server-side — hand off to the reconnect overlay +
+              // poll, which engage the moment `isStreaming` clears below.
+              s.discardStream(stageId)
+              s.setStage(fresh)
+              return null
+            }
+            if (fresh.current_version > existingVersion) {
+              // Work landed (a completed draft or a quality-gate block) — deliver
+              // it exactly as a clean `done` would. One generation, one charge.
+              return await runDoneTail(stageId)
+            }
+            // Version unchanged ⇒ the generation failed and was refunded
+            // server-side (or a gap-patch rolled back). Surface a user-consented
+            // "Try again" — but only when the stage is still generatable; a stage
+            // another tab finalised meanwhile can't be retried.
+            s.discardStream(stageId)
+            s.setStage(fresh)
+            if (fresh.status === "draft" || fresh.status === "stale") {
+              settleError({
+                code: "stream_interrupted",
+                message:
+                  streamError instanceof Error
+                    ? streamError.message
+                    : "The generation was interrupted.",
+              })
+            }
+            return null
+          } catch {
+            // Couldn't reconcile (the refetch itself failed). Drop the partial
+            // and let the user retry — never regress to pre-generation content.
+            useStageStore.getState().discardStream(stageId)
+            settleError({
+              code: "stream_interrupted",
+              message:
+                "We couldn't confirm whether the generation finished. " +
+                "Refresh or try again.",
+            })
+            return null
+          }
+        }
+
+        // Genuine terminal error (timeout, unavailable, security, gate, etc.):
+        // the stage was reset to draft server-side, so refetch the truth.
         useStageStore.getState().finaliseStream(stageId)
         const message =
           streamError instanceof Error ? streamError.message : "Streaming failed"
-        setError({ code, message })
+        settleError({ code, message })
 
         try {
           const latestStage = await getStage(stageId)
@@ -206,11 +334,11 @@ export function useStream(stageId: string | null) {
 
         return null
       } finally {
-        closeStreamRef(streamRef)
+        closeConnection()
         setIsStreaming(false)
       }
     },
-    [stageId],
+    [stageId, pollForAdvisoryFindings],
   )
 
   const cancel = useCallback(() => {

@@ -3073,6 +3073,139 @@ async def test_rollback_to_older_version_clears_advisory_gate() -> None:
 
 
 @pytest.mark.asyncio
+async def test_rollback_rejects_in_progress_stage() -> None:
+    # A1: rollback must refuse a stage that is actively generating. The old
+    # "Unlock stage" affordance could otherwise flip a live generation back to
+    # draft and start a second charged run racing the detached pipeline.
+    workspace_id = uuid4()
+    spec_stage = _make_stage(
+        workspace_id, "spec", status="in_progress", content="live", version=3
+    )
+    version = StageVersion(
+        id=uuid4(),
+        stage_id=spec_stage.id,
+        version=2,
+        content="older",
+        created_by="ai",
+        created_at=datetime.now(UTC),
+    )
+    svc = StageManager(redis_client=_FakeRedis())
+    db = _MultiQueryDB([version, spec_stage])
+    user = _make_user()
+
+    with pytest.raises(ValueError, match="generating"):
+        await svc.rollback(spec_stage.id, 2, user, db)
+
+    # Untouched — still generating, never flipped to draft.
+    assert spec_stage.status == "in_progress"
+    assert spec_stage.current_version == 3
+
+
+@pytest.mark.asyncio
+async def test_handle_content_edit_rejects_in_progress_stage() -> None:
+    # Same class as the rollback guard (A1): editing content mid-generation would
+    # flip the stage to draft and bump the version under the running pipeline.
+    workspace_id = uuid4()
+    spec_stage = _make_stage(
+        workspace_id, "spec", status="in_progress", content="live", version=2
+    )
+    svc = StageManager(redis_client=_FakeRedis())
+    db = _MultiQueryDB([spec_stage])
+    user = _make_user()
+
+    with pytest.raises(ValueError, match="generating"):
+        await svc.handle_content_edit(spec_stage.id, "new content", user, db)
+
+    assert spec_stage.status == "in_progress"
+    assert spec_stage.current_version == 2
+
+
+@pytest.mark.asyncio
+async def test_generate_on_in_progress_stage_raises_generation_in_progress_code() -> (
+    None
+):
+    # A duplicate trigger against an already-running stage gets the distinct,
+    # benign code the client reconciles into the reconnect UX (never the
+    # dangerous "Unlock" affordance).
+    from services.pipeline.stage_manager import StageStateError
+
+    workspace_id = uuid4()
+    spec_stage = _make_stage(workspace_id, "spec", status="in_progress")
+    workspace = _make_workspace([spec_stage])
+    user = _make_user()
+    svc = StageManager(redis_client=_FakeRedis())
+    db = _MultiQueryDB([spec_stage, workspace])
+
+    with pytest.raises(StageStateError) as exc_info:
+        async for _ in svc.generate(spec_stage.id, user, db):
+            pass
+    assert exc_info.value.code == "generation_in_progress"
+
+
+@pytest.mark.asyncio
+async def test_generate_on_finalised_stage_raises_plain_state_error() -> None:
+    # A finalised/locked stage is NOT the reconnect case — it keeps the generic
+    # code so the frontend can still offer the (finalised-only) Unlock action.
+    from services.pipeline.stage_manager import StageStateError
+
+    workspace_id = uuid4()
+    spec_stage = _make_stage(workspace_id, "spec", status="finalised")
+    workspace = _make_workspace([spec_stage])
+    user = _make_user()
+    svc = StageManager(redis_client=_FakeRedis())
+    db = _MultiQueryDB([spec_stage, workspace])
+
+    with pytest.raises(StageStateError) as exc_info:
+        async for _ in svc.generate(spec_stage.id, user, db):
+            pass
+    assert exc_info.value.code is None
+
+
+@pytest.mark.asyncio
+async def test_generate_stamps_generation_started_at_and_action() -> None:
+    # RC-1: generate() stamps a write-once generation_started_at (the honest
+    # elapsed baseline) and generation_action (the reconnect operation label) at
+    # the in_progress commit. Both survive the successful persist.
+    from unittest.mock import AsyncMock, patch
+
+    workspace_id = uuid4()
+    spec_stage = _make_stage(workspace_id, "spec", status="draft")
+    workspace = _make_workspace([spec_stage])
+    user = _make_user()
+    deduction = CreditLedger(id=uuid4(), user_id=user.id, amount=-10, reason="generate")
+    db = _MultiQueryDB([spec_stage, workspace, [], deduction])
+
+    async def fake_stream(
+        system, user_prompt, max_tokens=0, **kwargs
+    ) -> AsyncGenerator[str, None]:
+        payload = _spec_stream_payload(user_prompt)
+        yield payload
+
+    svc = StageManager(redis_client=_FakeRedis())
+    with (
+        patch(
+            "services.pipeline.stage_manager.credit_service.deduct",
+            new_callable=AsyncMock,
+            return_value=deduction,
+        ),
+        patch(
+            "services.pipeline.stage_manager.build_prompt",
+            new_callable=AsyncMock,
+            return_value=("sys", "user", "0"),
+        ),
+        patch("services.pipeline.stage_manager.get_llm") as mock_get_llm,
+    ):
+        mock_adapter = MagicMock()
+        mock_adapter.stream = fake_stream
+        mock_get_llm.return_value = mock_adapter
+        async for _ in svc.generate(spec_stage.id, user, db):
+            pass
+
+    assert spec_stage.generation_action == "generate"
+    assert spec_stage.generation_started_at is not None
+
+
+@pytest.mark.asyncio
 async def test_mark_downstream_stale_tasks_stage_marks_nothing() -> None:
     workspace_id = uuid4()
     tasks_stage = _make_stage(workspace_id, "tasks", status="finalised")
@@ -3966,13 +4099,20 @@ async def test_generate_rejects_already_in_progress_stage() -> None:
 
 
 @pytest.mark.asyncio
-async def test_generate_build_prompt_failure_happens_before_credit_deduction() -> None:
+async def test_generate_build_prompt_failure_after_charge_refunds_and_resets() -> None:
+    # P1-B reorder (RC-3 Mode B): the charge + in_progress commit now PRECEDE
+    # prompt assembly (so a page refresh sees `in_progress` almost immediately),
+    # which means a build_prompt failure lands AFTER the deduction. It must refund
+    # the charge and reset the stage to draft — net-zero to the user — then
+    # re-raise the ORIGINAL error so the router maps it honestly.
     from unittest.mock import AsyncMock, patch
 
     workspace_id = uuid4()
     spec_stage = _make_stage(workspace_id, "spec", status="draft")
     workspace = _make_workspace([spec_stage])
     user = _make_user()
+
+    deduction = CreditLedger(id=uuid4(), user_id=user.id, amount=-10, reason="generate")
 
     svc = StageManager(redis_client=_FakeRedis())
     db = _MultiQueryDB([spec_stage, workspace, []])
@@ -3981,11 +4121,16 @@ async def test_generate_build_prompt_failure_happens_before_credit_deduction() -
         patch(
             "services.pipeline.stage_manager.credit_service.deduct",
             new_callable=AsyncMock,
+            return_value=deduction,
         ) as mock_deduct,
         patch(
             "services.pipeline.stage_manager.credit_service.refund",
             new_callable=AsyncMock,
         ) as mock_refund,
+        patch(
+            "services.pipeline.stage_manager.credit_service.invalidate",
+            new_callable=AsyncMock,
+        ),
         patch(
             "services.pipeline.stage_manager.build_prompt",
             new_callable=AsyncMock,
@@ -3996,9 +4141,214 @@ async def test_generate_build_prompt_failure_happens_before_credit_deduction() -
             async for _ in svc.generate(spec_stage.id, user, db):
                 pass
 
-    mock_deduct.assert_not_called()
-    mock_refund.assert_not_called()
+    mock_deduct.assert_awaited_once()
+    mock_refund.assert_awaited_once_with(db, deduction.id)
+    # Reset to draft, and the generation stamps cleared so the overlay never
+    # treats the failed attempt as still-generating.
     assert spec_stage.status == "draft"
+    assert spec_stage.generation_started_at is None
+    assert spec_stage.generation_action is None
+
+
+@pytest.mark.asyncio
+async def test_generate_preflight_failure_restores_prior_stale_status() -> None:
+    """#6 — a preflight failure must restore the PRIOR status, not hardcode draft.
+
+    generate() accepts both ``draft`` and ``stale`` stages. Resetting a failed
+    preflight to ``draft`` would silently clear a ``stale`` stage's upstream-drift
+    marker, so the reset must return it to ``stale``.
+    """
+    from unittest.mock import AsyncMock, patch
+
+    workspace_id = uuid4()
+    spec_stage = _make_stage(workspace_id, "spec", status="stale")
+    workspace = _make_workspace([spec_stage])
+    user = _make_user()
+
+    deduction = CreditLedger(id=uuid4(), user_id=user.id, amount=-10, reason="generate")
+    svc = StageManager(redis_client=_FakeRedis())
+    db = _MultiQueryDB([spec_stage, workspace, []])
+
+    with (
+        patch(
+            "services.pipeline.stage_manager.credit_service.deduct",
+            new_callable=AsyncMock,
+            return_value=deduction,
+        ),
+        patch(
+            "services.pipeline.stage_manager.credit_service.refund",
+            new_callable=AsyncMock,
+        ) as mock_refund,
+        patch(
+            "services.pipeline.stage_manager.credit_service.invalidate",
+            new_callable=AsyncMock,
+        ),
+        patch(
+            "services.pipeline.stage_manager.build_prompt",
+            new_callable=AsyncMock,
+            side_effect=RuntimeError("prompt cache miss"),
+        ),
+    ):
+        with pytest.raises(RuntimeError, match="prompt cache miss"):
+            async for _ in svc.generate(spec_stage.id, user, db):
+                pass
+
+    mock_refund.assert_awaited_once_with(db, deduction.id)
+    assert spec_stage.status == "stale"  # NOT downgraded to draft
+    assert spec_stage.generation_started_at is None
+    assert spec_stage.generation_action is None
+
+
+@pytest.mark.asyncio
+async def test_load_stage_lock_forces_populate_existing() -> None:
+    """#1 (Fable HIGH) — the locked load must refresh identity-mapped attributes.
+
+    Every guarded endpoint runs the router's ownership load on the SAME request
+    session first, so the Stage is already identity-mapped. Without
+    ``populate_existing`` the FOR UPDATE re-select returns that cached object and
+    DISCARDS the just-locked row — so a request that unblocked AFTER another
+    transaction committed ``in_progress`` still reads a stale ``draft`` and slips
+    past the guard (a second charge + a second pipeline). Pin that the locked
+    statement carries both a FOR UPDATE clause and populate_existing, and that the
+    unlocked read carries neither.
+    """
+    svc = StageManager(redis_client=_FakeRedis())
+    stage = _make_stage(uuid4(), "spec", status="draft")
+    captured: dict[str, Any] = {}
+
+    class _CapturingDB:
+        async def execute(self, statement: Any) -> Any:
+            captured["stmt"] = statement
+            result = MagicMock()
+            result.scalar_one_or_none.return_value = stage
+            return result
+
+    await svc._load_stage(stage.id, _CapturingDB(), lock=True)
+    locked = captured["stmt"]
+    assert locked.get_execution_options().get("populate_existing") is True
+    assert locked._for_update_arg is not None
+
+    await svc._load_stage(stage.id, _CapturingDB(), lock=False)
+    unlocked = captured["stmt"]
+    assert unlocked.get_execution_options().get("populate_existing") is None
+    assert unlocked._for_update_arg is None
+
+
+@pytest.mark.asyncio
+async def test_detached_preflight_cleanup_refunds_and_restores_prior_status() -> None:
+    """#2 — the disconnect-during-preflight cleanup refunds + restores prior status.
+
+    On a client disconnect after the charge + in_progress commit but before the
+    pipeline spawns, a detached fresh-session task refunds and resets the stage
+    (rather than waiting out the 3-minute sweep). Verify the happy path.
+    """
+    from unittest.mock import AsyncMock, patch
+
+    import database
+
+    user_id = uuid4()
+    deduction_id = uuid4()
+    stage = _make_stage(uuid4(), "spec", status="in_progress")
+    stage.deduction_ledger_id = deduction_id
+    stage.generation_started_at = datetime.now(UTC)
+    stage.generation_action = "generate"
+
+    class _CleanupSession:
+        def __init__(self) -> None:
+            self.committed = False
+
+        async def __aenter__(self) -> "_CleanupSession":
+            return self
+
+        async def __aexit__(self, *exc: Any) -> None:
+            return None
+
+        async def execute(self, statement: Any) -> Any:
+            result = MagicMock()
+            result.scalar_one_or_none.return_value = stage
+            return result
+
+        async def commit(self) -> None:
+            self.committed = True
+
+    session = _CleanupSession()
+    svc = StageManager(redis_client=_FakeRedis())
+
+    with (
+        patch.object(database, "AsyncSessionLocal", lambda: session),
+        patch(
+            "services.pipeline.stage_manager.credit_service.refund",
+            new_callable=AsyncMock,
+        ) as mock_refund,
+        patch(
+            "services.pipeline.stage_manager.credit_service.invalidate",
+            new_callable=AsyncMock,
+        ) as mock_invalidate,
+    ):
+        await svc._detached_preflight_cleanup(stage.id, deduction_id, user_id, "stale")
+
+    mock_refund.assert_awaited_once_with(session, deduction_id)
+    mock_invalidate.assert_awaited_once_with(user_id)
+    assert session.committed is True
+    assert stage.status == "stale"  # restored prior status, not draft
+    assert stage.generation_started_at is None
+    assert stage.generation_action is None
+
+
+@pytest.mark.asyncio
+async def test_detached_preflight_cleanup_is_a_noop_when_already_reconciled() -> None:
+    """#2 — the cleanup must not touch a stage the sweep (or a newer attempt)
+    already moved on from: it acts only while still in_progress AND still owning
+    the exact deduction ledger row, so it can never double-refund or clobber."""
+    from unittest.mock import AsyncMock, patch
+
+    import database
+
+    deduction_id = uuid4()
+
+    # Case A: the sweep already reset it to draft.
+    reset_stage = _make_stage(uuid4(), "spec", status="draft")
+    reset_stage.deduction_ledger_id = None
+    # Case B: a newer attempt owns a different ledger row.
+    reowned_stage = _make_stage(uuid4(), "spec", status="in_progress")
+    reowned_stage.deduction_ledger_id = uuid4()
+
+    svc = StageManager(redis_client=_FakeRedis())
+
+    for target in (reset_stage, reowned_stage):
+
+        class _Session:
+            async def __aenter__(self) -> Any:
+                return self
+
+            async def __aexit__(self, *exc: Any) -> None:
+                return None
+
+            async def execute(self, statement: Any) -> Any:
+                result = MagicMock()
+                result.scalar_one_or_none.return_value = target
+                return result
+
+            async def commit(self) -> None:  # pragma: no cover - must not run
+                raise AssertionError("cleanup must not commit on a reconciled stage")
+
+        with (
+            patch.object(database, "AsyncSessionLocal", _Session),
+            patch(
+                "services.pipeline.stage_manager.credit_service.refund",
+                new_callable=AsyncMock,
+            ) as mock_refund,
+            patch(
+                "services.pipeline.stage_manager.credit_service.invalidate",
+                new_callable=AsyncMock,
+            ) as mock_invalidate,
+        ):
+            await svc._detached_preflight_cleanup(
+                target.id, deduction_id, uuid4(), "draft"
+            )
+
+        mock_refund.assert_not_awaited()
+        mock_invalidate.assert_not_awaited()
 
 
 @pytest.mark.asyncio

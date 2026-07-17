@@ -211,7 +211,11 @@ export const useStageStore = create<StageState>()(
                 ...state.stages,
                 [stageId]: {
                   ...existing,
-                  content: accumulated ?? existing.content,
+                  // A3: `|| existing.content`, not `?? …` — an empty-string
+                  // buffer (a stream that errored before its first token) is not
+                  // nullish, so `??` would blank the editor. Keep prior content
+                  // when nothing was accumulated.
+                  content: accumulated || existing.content,
                 },
               }
             : state.stages,

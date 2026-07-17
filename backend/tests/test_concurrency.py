@@ -236,13 +236,18 @@ async def test_harness_patch_in_progress_raises_via_manager() -> None:
 
     user = _make_user(user_id=workspace.user_id)
 
-    with pytest.raises(StageStateError, match="cannot be patched"):
+    with pytest.raises(StageStateError, match="cannot be patched") as exc_info:
         # Consume the async generator — the guard fires before any yield.
         # Signature: generate_harness_patch(stage_id, user, db, uncovered_reqs)
         async for _ in manager.generate_harness_patch(
             stage.id, user, _DB(), ["requirement-1"]
         ):
             pass  # pragma: no cover
+
+    # A gap-patch fired while a full regenerate is live must reconcile into the
+    # reconnect UX, not the "already complete → Unlock" affordance — so it carries
+    # the same benign code generate() uses (#7).
+    assert exc_info.value.code == "generation_in_progress"
 
 
 @pytest.mark.asyncio

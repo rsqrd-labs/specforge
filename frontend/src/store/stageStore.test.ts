@@ -1,5 +1,23 @@
 import { beforeEach, describe, expect, it } from "vitest"
+import type { Stage } from "../types/stage"
 import { useStageStore } from "./stageStore"
+
+function makeStage(overrides: Partial<Stage> = {}): Stage {
+  return {
+    id: "s1",
+    workspace_id: "ws",
+    type: "spec",
+    content: null,
+    status: "in_progress",
+    current_version: 1,
+    finalised_at: null,
+    review_gate_acknowledged: false,
+    gap_patch_used: false,
+    created_at: "",
+    updated_at: "",
+    ...overrides,
+  }
+}
 
 function resetStore() {
   useStageStore.setState({
@@ -104,5 +122,33 @@ describe("stageStore discardStream", () => {
     const state = useStageStore.getState()
     expect(state.activeStream).toBe("s2")
     expect(state.streamingContent["s2"]).toBe("other stage")
+  })
+})
+
+describe("stageStore finaliseStream empty-buffer guard (A3)", () => {
+  beforeEach(resetStore)
+
+  it("keeps prior content when the stream errored before its first token", () => {
+    const store = useStageStore.getState()
+    store.setStage(makeStage({ content: "# Existing draft" }))
+    // startStream seeds streamingContent["s1"] = "" — an empty string, which is
+    // NOT nullish. `?? existing.content` would let it blank the editor; the fix
+    // uses `|| existing.content`.
+    store.startStream("s1")
+
+    store.finaliseStream("s1")
+
+    expect(useStageStore.getState().stages["s1"].content).toBe("# Existing draft")
+  })
+
+  it("commits the accumulated buffer when tokens actually streamed", () => {
+    const store = useStageStore.getState()
+    store.setStage(makeStage({ content: "old content" }))
+    store.startStream("s1")
+    store.appendToken("s1", "# New content")
+
+    store.finaliseStream("s1")
+
+    expect(useStageStore.getState().stages["s1"].content).toBe("# New content")
   })
 })

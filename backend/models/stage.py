@@ -164,6 +164,20 @@ class Stage(Base):
         TIMESTAMP(timezone=True),
         nullable=True,
     )
+    # Write-once generation start instant, stamped at the in_progress transition
+    # in StageManager.generate() and NEVER bumped by _stage_db_heartbeat (unlike
+    # updated_at). This is the honest elapsed baseline the streaming overlay pins
+    # after a page refresh, so the timer no longer sawtooths back to ~0 on every
+    # reconnect poll (RC-1). Nullable + additive: old rows / cache-hit drafts are
+    # NULL and the frontend falls back to updated_at.
+    generation_started_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True),
+        nullable=True,
+    )
+    # The action that started the in-flight generation ("generate"/"regenerate"),
+    # so a reconnect overlay after refresh shows the correct operation label
+    # instead of always "generate" (A6). NULL when not generating.
+    generation_action: Mapped[str | None] = mapped_column(String, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True),
         nullable=False,

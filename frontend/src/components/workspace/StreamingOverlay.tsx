@@ -83,7 +83,11 @@ export function StreamingOverlay({
       return undefined
     }
     const tick = () =>
-      setElapsedSeconds(Math.floor((Date.now() - activity.startedAt) / 1000))
+      // Clamp to ≥ 0: a startedAt slightly in the future (server/client clock
+      // skew on the reconnect baseline) must never render a negative timer.
+      setElapsedSeconds(
+        Math.max(0, Math.floor((Date.now() - activity.startedAt) / 1000)),
+      )
     tick()
     const intervalId = window.setInterval(tick, 1000)
     return () => window.clearInterval(intervalId)

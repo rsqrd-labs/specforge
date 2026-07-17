@@ -1818,9 +1818,17 @@ class PreflightError(Exception):
 
 class StageStateError(Exception):
     """Raised when generate() is called on a stage whose current status
-    does not permit generation (e.g. already in_progress, finalised, locked)."""
+    does not permit generation (e.g. already in_progress, finalised, locked).
 
-    pass
+    Carries an optional ``code`` so the router can distinguish the
+    *already-generating* case (``generation_in_progress`` — a benign duplicate
+    trigger that the client reconciles into the reconnect UX with no alert and
+    no dangerous "Unlock stage" affordance) from the generic
+    ``stage_not_generatable`` (finalised/locked)."""
+
+    def __init__(self, message: str, *, code: str | None = None) -> None:
+        super().__init__(message)
+        self.code = code
 
 
 class SecurityError(Exception):
@@ -2718,7 +2726,16 @@ class StageManager:
         workspace = await self._load_workspace(stage.workspace_id, db)
 
         if stage.status not in ("draft", "stale"):
-            raise StageStateError(f"Stage status {stage.status!r} is not generatable")
+            # An already-generating stage gets a distinct, benign code: a
+            # duplicate trigger (a client re-POST, or a second tab) must resolve
+            # into the reconnect UX, never the "already complete → Unlock"
+            # affordance that would flip a live generation back to draft (A1).
+            raise StageStateError(
+                f"Stage status {stage.status!r} is not generatable",
+                code=(
+                    "generation_in_progress" if stage.status == "in_progress" else None
+                ),
+            )
 
         await self._assert_dependencies_finalised(stage.type, workspace.id, db)
 
@@ -2860,46 +2877,18 @@ class StageManager:
 
         admission_handed_off = False
         try:
-            # Issue #12 (Phase 3): optional Brave web-research grounding, fetched
-            # here — after the generation-cache miss so a cache hit never triggers
-            # a paid Brave call — and baked into user_prompt once. The mid-tier
-            # escalation retry reuses this same user_prompt, so a retry never
-            # re-fetches or re-charges. See _fetch_research_context for the
-            # fail-open gating. (Phase 4): the block feeds the prompt and the full
-            # context (block + sources) is threaded to the pipeline to persist on
-            # the StageVersion.
-            research = await self._fetch_research_context(
-                workspace,
-                stage.type,
-                user,
-                redis,
-                credit_cost=credit_cost,
-                free=free,
-            )
-            system_prompt, user_prompt, compression_rung = await build_prompt(
-                stage.type,
-                workspace,
-                db,
-                redis,
-                provider=route.provider,
-                model=route.model,
-                research_context=research.block,
-            )
-            # Phase A instrumentation (compression plan §8): observe the size of
-            # the fully assembled prompt actually sent to the model. Reached only
-            # on a generation-cache miss (a hit returns above without assembling a
-            # prompt), which is correct — this is the figure the window-fit
-            # reliability ceiling (§5) is measured against.
-            record_assembled_prompt_tokens(
-                route.provider,
-                stage.type,
-                estimate_tokens(
-                    route.provider,
-                    route.model,
-                    f"{system_prompt}\n{user_prompt}",
-                ),
-            )
-
+            # Charge + flip to in_progress FIRST, before the seconds-long research
+            # fetch and prompt assembly below. This shrinks the
+            # "preflight-blindness" window — the span in which a page refresh sees
+            # the stage still `draft` and so wires up NEITHER the reconnect poll
+            # NOR the loading overlay (RC-3 Mode B, the strongest "the loading
+            # screen never comes up" explanation) — from seconds down to the
+            # sub-millisecond commit here, and shortens the FOR UPDATE lock hold
+            # (it no longer spans the Brave call). Every failure AFTER this commit
+            # (research, prompt assembly, provider, gates) already refunds and
+            # resets to draft, so moving the charge earlier is net-zero to the
+            # user — at worst one extra ledger row-pair on a rare preflight
+            # failure.
             deduction = (
                 None
                 if free
@@ -2908,13 +2897,145 @@ class StageManager:
                 )
             )
 
+            commit_now = datetime.now(UTC)
+            # The status to restore if the post-charge preflight fails (#6): a
+            # `stale` stage that failed preflight must stay `stale`, not silently
+            # downgrade to `draft` and lose its upstream-drift marker. generate()
+            # only accepts ("draft", "stale") in the first place.
+            prior_status = stage.status
             stage.status = "in_progress"
             stage.deduction_ledger_id = deduction.id if deduction else None
-            stage.updated_at = datetime.now(UTC)
+            # Write-once generation start + action: the honest elapsed baseline
+            # the overlay pins after refresh (RC-1) and the reconnect operation
+            # label (A6). Deliberately NOT bumped by _stage_db_heartbeat, unlike
+            # updated_at (which the heartbeat sawtooths every 30s).
+            stage.generation_started_at = commit_now
+            stage.generation_action = action
+            stage.updated_at = commit_now
             await db.commit()
             if deduction is not None:
                 # Post-commit cache eviction — H-2 — T-219.
                 await credit_service.invalidate(user.id)
+
+            # Prompt assembly runs AFTER the in_progress commit now. A failure
+            # here must undo the charge and reset the stage so a preflight failure
+            # stays user-invisible (net zero).
+            #
+            # The stage is committed `in_progress` but the pipeline (which owns the
+            # liveness heartbeat) is not spawned until AFTER research + build_prompt
+            # succeed. Cover that window with the same heartbeat the pipeline uses,
+            # so a slow-but-alive preflight (a large-statement compression call, a
+            # stalled Brave fetch) can't be mistaken for a dead generation and
+            # reaped by the 3-minute recovery sweep mid-flight — which would refund
+            # a generation that then streams and delivers (#4). Cancelled in every
+            # exit path (finally) so it never outlives the preflight.
+            preflight_heartbeat = asyncio.create_task(_stage_db_heartbeat(stage.id))
+            try:
+                # Issue #12 (Phase 3): optional Brave web-research grounding,
+                # fetched after the generation-cache miss so a cache hit never
+                # triggers a paid Brave call, and baked into user_prompt once. The
+                # mid-tier escalation retry reuses this same user_prompt, so a
+                # retry never re-fetches or re-charges. `credit_cost=0` because the
+                # generation charge is ALREADY deducted above: the research surplus
+                # guard must only ensure the remaining balance covers the research
+                # charge itself, not re-reserve the already-spent generation cost
+                # (post-reorder double-count fix). (Phase 4): the block feeds the
+                # prompt and the full context is threaded to the pipeline to
+                # persist on the StageVersion.
+                research = await self._fetch_research_context(
+                    workspace,
+                    stage.type,
+                    user,
+                    redis,
+                    credit_cost=0,
+                    free=free,
+                )
+                system_prompt, user_prompt, compression_rung = await build_prompt(
+                    stage.type,
+                    workspace,
+                    db,
+                    redis,
+                    provider=route.provider,
+                    model=route.model,
+                    research_context=research.block,
+                )
+                # Phase A instrumentation (compression plan §8): observe the size
+                # of the fully assembled prompt actually sent to the model. Reached
+                # only on a generation-cache miss (a hit returns above without
+                # assembling a prompt), which is correct — this is the figure the
+                # window-fit reliability ceiling (§5) is measured against.
+                record_assembled_prompt_tokens(
+                    route.provider,
+                    stage.type,
+                    estimate_tokens(
+                        route.provider,
+                        route.model,
+                        f"{system_prompt}\n{user_prompt}",
+                    ),
+                )
+            except Exception:
+                # A normal (non-cancellation) preflight failure after the charge:
+                # refund + reset to the PRIOR status on the still-live request
+                # session, best effort, then re-raise the ORIGINAL error so the
+                # router maps it honestly (a secondary DB error here must not mask
+                # the real cause). If this cleanup itself fails, the 3-minute
+                # recovery sweep is the backstop — it refunds (idempotently, keyed
+                # on the ledger row) and resets any stage left in_progress.
+                try:
+                    if deduction is not None:
+                        await credit_service.refund(db, deduction.id)
+                    stage.status = prior_status
+                    stage.generation_started_at = None
+                    stage.generation_action = None
+                    stage.updated_at = datetime.now(UTC)
+                    await db.commit()
+                    if deduction is not None:
+                        await credit_service.invalidate(user.id)
+                except Exception:
+                    logger.warning(
+                        "stage.preflight_reset_failed stage_id=%s — recovery "
+                        "sweep will reconcile the charge + status",
+                        stage_id,
+                        exc_info=True,
+                    )
+                raise
+            except (asyncio.CancelledError, GeneratorExit):
+                # Client disconnect DURING the post-charge preflight (#2): the
+                # request session is being torn down mid-await, so we cannot refund
+                # on it (and awaiting a cleanup here would be unsafe on the
+                # cancellation/GeneratorExit unwind). Spawn a detached
+                # fresh-session cleanup instead — a synchronous create_task, no
+                # await — to refund + reset promptly rather than leaving a charged
+                # `in_progress` zombie for the full 3-minute sweep window. It is
+                # idempotent (refund keyed on the ledger row; reset guarded on
+                # in_progress + ledger ownership) and the sweep remains the
+                # backstop if it never runs (e.g. loop shutdown), so it is a pure
+                # acceleration with no new correctness dependency. Then re-raise so
+                # the cancellation propagates unchanged.
+                if deduction is not None:
+                    try:
+                        _BACKGROUND_PIPELINE_TASKS.spawn(
+                            self._detached_preflight_cleanup(
+                                stage_id, deduction.id, user.id, prior_status
+                            )
+                        )
+                    except Exception:
+                        # Scheduling the cleanup must never mask the cancellation;
+                        # the recovery sweep still reconciles the charge + status.
+                        logger.warning(
+                            "stage.preflight_detached_cleanup_spawn_failed "
+                            "stage_id=%s — recovery sweep will reconcile",
+                            stage_id,
+                            exc_info=True,
+                        )
+                raise
+            finally:
+                # The preflight heartbeat has done its job (or the preflight is
+                # unwinding); stop it before the pipeline starts its own. cancel()
+                # is synchronous and safe on every exit path including the
+                # cancellation/GeneratorExit unwind; the heartbeat's WHERE-clause
+                # guard makes any late bump harmless.
+                preflight_heartbeat.cancel()
 
             # The pipeline runs as a background task; this generator only pumps its
             # SSE events to the client, interleaving {"progress": ...} heartbeats
@@ -4428,7 +4549,18 @@ class StageManager:
 
             raise HTTPException(status_code=404, detail="Version not found")
 
-        stage = await self._load_stage(stage_id, db)
+        # Lock the row and refuse a rollback while a generation is running. Two
+        # bugs close here (A1): (1) the "Unlock stage" affordance the frontend
+        # used to offer on a duplicate-trigger error would otherwise flip an
+        # actively-generating stage back to `draft`, re-enabling Generate and
+        # inviting a SECOND charged generation concurrent with the detached
+        # pipeline; (2) both the rollback and that pipeline hold stale ORM
+        # `current_version`s and would each `+= 1`, racing to duplicate
+        # StageVersion rows. The lock serialises against the in_progress commit;
+        # the status check is the actual guard.
+        stage = await self._load_stage(stage_id, db, lock=True)
+        if stage.status == "in_progress":
+            raise ValueError("A generating stage cannot be rolled back.")
         # "Unlock in place" — rolling back to the version that is already current
         # (the Unlock button passes stage.current_version) — does not change the
         # content. Two consequences flow from "content unchanged":
@@ -4482,7 +4614,15 @@ class StageManager:
     async def handle_content_edit(
         self, stage_id: UUID, new_content: str, user, db: AsyncSession
     ) -> Stage:
-        stage = await self._load_stage(stage_id, db)
+        # Lock + refuse edits mid-generation (same class as the rollback guard,
+        # A1): PATCH /content or accept-diff on an in_progress stage would flip it
+        # to draft and bump current_version while the detached pipeline is still
+        # running against a now-stale version — racing StageVersion rows and
+        # clobbering the generated artifact. The frontend lock hides this, but the
+        # API must not rely on that.
+        stage = await self._load_stage(stage_id, db, lock=True)
+        if stage.status == "in_progress":
+            raise ValueError("A generating stage cannot be edited.")
         workspace = await self._load_workspace(stage.workspace_id, db)
         was_finalised = stage.status == "finalised"
 
@@ -4612,7 +4752,18 @@ class StageManager:
     ) -> Stage:
         stmt = select(Stage).where(Stage.id == stage_id)
         if lock:
-            stmt = stmt.with_for_update()
+            # `populate_existing` is load-bearing, not cosmetic: every guarded
+            # endpoint (generate/rollback/edit/finalise) first runs the router's
+            # ownership load on THIS SAME request session, so the Stage is already
+            # in the identity map with its pre-lock attributes. Without
+            # populate_existing, SQLAlchemy returns that cached object and DISCARDS
+            # the row the FOR UPDATE just fetched — so a request that blocked on
+            # another transaction's lock, then acquired it AFTER that transaction
+            # committed `in_progress`, still reads a stale `draft` status and slips
+            # past the guard: a second charge + a second pipeline (the exact
+            # "duplicate LLM call" hazard the lock exists to prevent). Forcing a
+            # refresh makes the locked read reflect the just-committed row.
+            stmt = stmt.with_for_update().execution_options(populate_existing=True)
         result = await db.execute(stmt)
         stage = result.scalar_one_or_none()
         if stage is None:
@@ -4620,6 +4771,60 @@ class StageManager:
 
             raise HTTPException(status_code=404, detail="Stage not found")
         return stage
+
+    async def _detached_preflight_cleanup(
+        self,
+        stage_id: UUID,
+        deduction_id: UUID,
+        user_id: UUID,
+        prior_status: str,
+    ) -> None:
+        """Refund + reset a stage abandoned by a client disconnect during preflight.
+
+        generate() commits the stage `in_progress` and charges it BEFORE
+        assembling the prompt (so a duplicate trigger sees `in_progress` and the
+        reconnect overlay engages). If the client disconnects in that window the
+        request session is torn down mid-await and cannot refund, so this runs on
+        its OWN short-lived session (address-by-id, the same pattern as
+        `_stage_db_heartbeat` and the detached pipeline) to undo the charge and
+        restore the prior status promptly, instead of waiting out the 3-minute
+        recovery sweep.
+
+        Idempotent and race-safe: it only acts while the stage is still
+        `in_progress` AND still owns this exact deduction ledger row (so it never
+        clobbers a newer attempt), and `credit_service.refund` is keyed on the
+        ledger row. The recovery sweep remains the backstop if this never runs, so
+        it adds no new correctness dependency — only speed.
+        """
+        from database import AsyncSessionLocal  # noqa: PLC0415
+
+        try:
+            async with AsyncSessionLocal() as cleanup_db:
+                result = await cleanup_db.execute(
+                    select(Stage).where(Stage.id == stage_id).with_for_update()
+                )
+                stage = result.scalar_one_or_none()
+                if (
+                    stage is None
+                    or stage.status != "in_progress"
+                    or stage.deduction_ledger_id != deduction_id
+                ):
+                    # Already reconciled (sweep) or a newer attempt owns the stage.
+                    return
+                await credit_service.refund(cleanup_db, deduction_id)
+                stage.status = prior_status
+                stage.generation_started_at = None
+                stage.generation_action = None
+                stage.updated_at = datetime.now(UTC)
+                await cleanup_db.commit()
+            await credit_service.invalidate(user_id)
+        except Exception:
+            logger.warning(
+                "stage.preflight_detached_cleanup_failed stage_id=%s — recovery "
+                "sweep will reconcile the charge + status",
+                stage_id,
+                exc_info=True,
+            )
 
     async def _load_workspace(self, workspace_id: UUID, db: AsyncSession) -> Workspace:
         result = await db.execute(
@@ -5565,7 +5770,16 @@ class StageManager:
         # here also stops the paid deferred-coverage expansion from silently
         # mutating an artifact the user has locked in.
         if stage.status not in ("draft", "stale"):
-            raise StageStateError(f"Stage status {stage.status!r} cannot be patched")
+            # A gap-patch fired while a full harness regenerate is live (a second
+            # tab) must reconcile into the reconnect UX, not surface the "already
+            # complete → Unlock" affordance that would flip the running generation
+            # back to draft (parity with generate()'s A1 guard).
+            raise StageStateError(
+                f"Stage status {stage.status!r} cannot be patched",
+                code=(
+                    "generation_in_progress" if stage.status == "in_progress" else None
+                ),
+            )
 
         redis = await self._redis_client()
         try:

@@ -131,6 +131,12 @@ class StageResponse(BaseModel):
     quality_gate: StageQualityGate | None = None
     created_at: datetime
     updated_at: datetime
+    # Honest elapsed baseline for the streaming overlay (RC-1) + reconnect
+    # operation label (A6). Both nullable/additive — old rows serialize None and
+    # the frontend falls back to updated_at. Nested identically into the
+    # workspace load (schemas.workspace), so a post-refresh reconnect sees them.
+    generation_started_at: datetime | None = None
+    generation_action: str | None = None
 
     model_config = ConfigDict(from_attributes=True)
 

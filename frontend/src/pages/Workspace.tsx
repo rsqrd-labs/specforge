@@ -180,6 +180,17 @@ function getGenerationActionLabel(operation: GenerationActivityOperation) {
   }
 }
 
+/**
+ * Map the persisted `stages.generation_action` (backend "generate"/"regenerate")
+ * to the overlay operation for a reconnect after refresh, so a regenerate shows
+ * the right copy instead of always "generate" (A6). Unknown/NULL → "generate".
+ */
+function reconnectOperation(
+  action: string | null | undefined,
+): GenerationActivityOperation {
+  return action === "regenerate" ? "regenerate" : "generate"
+}
+
 const sleep = (ms: number) =>
   new Promise<void>((resolve) => window.setTimeout(resolve, ms))
 
@@ -445,6 +456,19 @@ export default function Workspace() {
   const [generationActivity, setGenerationActivity] =
     useState<GenerationActivityInfo | null>(null)
   const generationActivityRef = useRef<GenerationActivityInfo | null>(null)
+  // RC-1: a STABLE per-stage reconnect elapsed baseline. When a stage is
+  // observed in_progress but this client isn't streaming it (a refresh landed
+  // mid-generation), we pin the baseline once here — from the backend's
+  // write-once `generation_started_at` if present, else the stage's `updated_at`
+  // at first observation — and reuse it for every subsequent reconnect-poll
+  // re-render. Without this the memo below recomputed off `updated_at`, which
+  // the 30s DB heartbeat bumps, sawtoothing the timer back toward 0. Entries are
+  // pruned when the stage leaves in_progress (see the effect below).
+  const reconnectStartRef = useRef<Record<string, number>>({})
+  // P1-B belt-and-braces: fires at most one delayed post-load refetch per
+  // workspace to catch a generation that committed `in_progress` just after the
+  // initial load (the preflight-blindness window). Keyed by workspace id.
+  const preflightRecheckRef = useRef<string | null>(null)
   // Cancellation token for the in-flight post-`done` construction-verdict poll
   // (Demo Day mode). A new generation (or unmount) flips `cancelled` so a stale
   // poll can never overwrite a superseded workspace — mirrors `advisoryPollRef`
@@ -494,35 +518,62 @@ export default function Workspace() {
   // docs/REFRESH_DURING_GENERATION_PLAN.md). The detached pipeline keeps running
   // and `useReconnectPoll` delivers the settled artifact, but without a
   // synthetic activity the StreamingOverlay never shows, so the screen looks
-  // empty and the user thinks the generation was lost. Drive the overlay from
-  // the persisted stage: `updated_at` is stamped at the in_progress transition
-  // (stage_manager.generate) and nothing bumps the row mid-stream, so it is an
-  // accurate elapsed baseline. Stage-agnostic — works for spec/plan/harness/tasks.
-  // Memoised on its stable inputs so the synthesized activity keeps a steady
-  // object identity across the reconnect poll's 3s re-renders — otherwise the
-  // overlay's elapsed-timer effect would re-arm on every render.
+  // empty and the user thinks the generation was lost.
+  //
+  // Elapsed baseline (RC-1): `updated_at` is NOT a stable start instant — the
+  // 30s DB heartbeat (`_stage_db_heartbeat`) bumps it precisely so the recovery
+  // sweep never kills a live generation, so reading it live sawtoothed the timer
+  // back toward 0 on every reconnect-poll refetch. Prefer the write-once
+  // `generation_started_at`; when absent (older backends / cache-hit drafts) pin
+  // `updated_at` at first observation via `reconnectStartRef` and reuse it. Both
+  // clamped ≤ now for clock skew. The operation label comes from the persisted
+  // `generation_action` so a refreshed regenerate isn't mislabelled "generate"
+  // (A6). Memoised on stable inputs (NOT `updated_at`) so identity is steady
+  // across the poll's 3s re-renders and the overlay's timer effect never re-arms
+  // onto a fresh baseline.
   const reconnectStreaming =
     Boolean(activeStage) &&
     activeStage?.status === "in_progress" &&
     !isStreaming &&
     generationActivity?.stageId !== activeStage?.id
+  let reconnectStart = Date.now()
+  if (reconnectStreaming && activeStage) {
+    const now = Date.now()
+    const stamped = activeStage.generation_started_at
+      ? Date.parse(activeStage.generation_started_at)
+      : NaN
+    if (Number.isFinite(stamped)) {
+      reconnectStart = Math.min(stamped, now)
+    } else {
+      const pinned = reconnectStartRef.current[activeStage.id]
+      reconnectStart =
+        pinned ??
+        (reconnectStartRef.current[activeStage.id] = Math.min(
+          Date.parse(activeStage.updated_at) || now,
+          now,
+        ))
+    }
+  }
+  const reconnectOp = reconnectOperation(activeStage?.generation_action)
   const reconnectActivity: GenerationActivityInfo | null = useMemo(
     () =>
       reconnectStreaming && activeStage
         ? {
             stageId: activeStage.id,
             stageType: activeStage.type,
-            operation: "generate",
-            actionLabel: getGenerationActionLabel("generate"),
-            startedAt: Date.parse(activeStage.updated_at) || Date.now(),
+            operation: reconnectOp,
+            actionLabel: getGenerationActionLabel(reconnectOp),
+            startedAt: reconnectStart,
             streamed: false,
           }
         : null,
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     [
       reconnectStreaming,
       activeStage?.id,
       activeStage?.type,
-      activeStage?.updated_at,
+      reconnectOp,
+      reconnectStart,
     ],
   )
   const activeGenerationActivity =
@@ -603,6 +654,17 @@ export default function Workspace() {
     )
   }, [currentWorkspace?.stages, stageMap])
   const inProgressStage = stages.find((stage) => stage.status === "in_progress") ?? null
+  // Prune pinned reconnect baselines (RC-1) for any stage no longer in_progress,
+  // so a later generation of the same stage re-pins from its fresh start instead
+  // of reusing a stale one. Bounded to the handful of concurrent generations.
+  useEffect(() => {
+    const live = new Set(
+      stages.filter((s) => s.status === "in_progress").map((s) => s.id),
+    )
+    for (const id of Object.keys(reconnectStartRef.current)) {
+      if (!live.has(id)) delete reconnectStartRef.current[id]
+    }
+  }, [stages])
   const workspaceLockStage =
     (generationActivity ? stageMap[generationActivity.stageId] : null) ??
     inProgressStage ??
@@ -916,6 +978,25 @@ export default function Workspace() {
     setStages(workspace.stages)
   }, [id, setCurrentWorkspace, setStages])
 
+  // P1-B belt-and-braces (RC-3 Mode B): a page refresh can land in the brief
+  // preflight window BEFORE generate() commits `in_progress`. The backend
+  // reorder shrank that window to ~ms, but the cheap Redis/admission preflight
+  // before the charge is still nonzero, and a refresh there sees the stage as
+  // `draft` — so neither the reconnect overlay nor the poll engages and the
+  // screen looks idle. Once per workspace load, if nothing is in_progress, do
+  // ONE delayed refetch to catch a generation that committed just after we
+  // loaded. Harmless (a single extra GET) when the workspace really is idle.
+  useEffect(() => {
+    if (isLoading || !id) return
+    if (preflightRecheckRef.current === id) return
+    preflightRecheckRef.current = id
+    if (inProgressStage) return
+    const timer = window.setTimeout(() => {
+      void refreshWorkspace().catch(() => {})
+    }, 5000)
+    return () => window.clearTimeout(timer)
+  }, [id, isLoading, inProgressStage, refreshWorkspace])
+
   // Demo Day: the construction verdict is computed by a DETACHED backend task a
   // few seconds AFTER the tasks stream ends (plan §7.3), so the single
   // refreshWorkspace() that runGeneration does on `done` is too early to see it —
@@ -1152,10 +1233,18 @@ export default function Workspace() {
   const performRollback = useCallback(async (version: number) => {
     if (!activeStage) return
     if (guardWorkspaceMutation()) return
-    const updated = await rollbackStage(activeStage.id, version)
-    setStage(updated)
-    setEvalResults((existing) => ({ ...existing, [activeStage.id]: null }))
-    await refreshWorkspace()
+    try {
+      const updated = await rollbackStage(activeStage.id, version)
+      setStage(updated)
+      setEvalResults((existing) => ({ ...existing, [activeStage.id]: null }))
+      await refreshWorkspace()
+    } catch (error) {
+      // Rollback now 409s on an in_progress stage (A1). Surface it instead of an
+      // unhandled promise rejection; a concurrent generation reconciles itself.
+      setGenericError(
+        getApiErrorMessage(error, "Could not restore this version right now."),
+      )
+    }
   }, [activeStage, guardWorkspaceMutation, setStage, refreshWorkspace])
 
   useEffect(() => {
@@ -1163,10 +1252,14 @@ export default function Workspace() {
     // SessionExpiryWatcher already shows the single authoritative explanation
     // and redirects to sign-in — a second, generic "action could not finish"
     // alert from this effect would just be noise on top of it.
+    // `generation_in_progress` is skipped too: useStream reconciles a
+    // duplicate-trigger into the reconnect UX (no alert), so this should never
+    // fire, but suppress it defensively so a stray one can't nag the user.
     if (
       !streamError ||
       streamError.code === "quality_gate_failed" ||
-      streamError.code === "session_expired"
+      streamError.code === "session_expired" ||
+      streamError.code === "generation_in_progress"
     )
       return
 
@@ -1175,6 +1268,9 @@ export default function Workspace() {
       "generation_unavailable",
       "rate_limit_exceeded",
       "internal_error",
+      // An interrupted stream that reconciled to "failed + refunded" (or a
+      // gap-patch rollback): offer a user-consented retry — never an auto-POST.
+      "stream_interrupted",
       "generic",
     ])
     const canRetrySpecWithAnswers =
@@ -1191,7 +1287,17 @@ export default function Workspace() {
         label: "View billing",
         onSelect: () => navigate("/billing"),
       }
-    } else if (streamError.code === "stage_not_generatable" && activeStage) {
+    } else if (
+      streamError.code === "stage_not_generatable" &&
+      activeStage &&
+      activeStage.status === "finalised"
+    ) {
+      // "Unlock stage" is a rollback, and rollback flips the stage to draft. Only
+      // offer it for a FINALISED stage — the case the copy was written for.
+      // Offering it on an in_progress stage (the old behavior) let a duplicate
+      // trigger flip a LIVE generation back to draft and start a second charged
+      // run (A1). A genuine in_progress duplicate now arrives as
+      // `generation_in_progress` and is reconciled silently, never here.
       primaryAction = {
         label: "Unlock stage",
         onSelect: () => {
@@ -1268,6 +1374,18 @@ export default function Workspace() {
     const stage = stageMap[pendingCredit.stageId]
     if (!stage) return
 
+    // A5: `runGeneration` generates whatever is CURRENTLY active (the useStream
+    // hook is bound to `activeStage`), while this validated `stage` is the one
+    // the credit modal was opened for. They can only differ if navigation
+    // slipped between opening the modal and confirming; generating the wrong
+    // stage would silently charge for the wrong artifact. Refuse rather than
+    // generate the wrong one — a select-then-run can't work in one pass anyway
+    // (the captured closures wouldn't see the new active stage).
+    if (pendingCredit.stageId !== activeStage?.id) {
+      setPendingCredit(null)
+      return
+    }
+
     if (stage.type !== "spec" && !stage.review_gate_acknowledged) {
       setPendingReview(pendingCredit)
       setPendingCredit(null)
@@ -1278,11 +1396,21 @@ export default function Workspace() {
     setPendingCredit(null)
 
     await runGeneration(nextAction)
-  }, [guardWorkspaceMutation, pendingCredit, stageMap, runGeneration])
+  }, [activeStage?.id, guardWorkspaceMutation, pendingCredit, stageMap, runGeneration])
 
   const proceedThroughReviewGate = useCallback(async () => {
     if (!pendingReview) return
     if (guardWorkspaceMutation()) return
+
+    // A5: the review gate was queued for a specific stage, but `runGeneration`
+    // always generates the ACTIVE stage. If the user navigated to a different
+    // stage after the gate was raised, proceeding would acknowledge one stage's
+    // gate and then charge a generation on another. Refuse + clear, exactly like
+    // confirmCredits.
+    if (pendingReview.stageId !== activeStage?.id) {
+      setPendingReview(null)
+      return
+    }
 
     const stage = stageMap[pendingReview.stageId]
     if (!stage) return
@@ -1297,7 +1425,14 @@ export default function Workspace() {
     } catch {
       setGenericError("Could not acknowledge the review gate.")
     }
-  }, [guardWorkspaceMutation, pendingReview, stageMap, setStage, runGeneration])
+  }, [
+    activeStage?.id,
+    guardWorkspaceMutation,
+    pendingReview,
+    stageMap,
+    setStage,
+    runGeneration,
+  ])
 
   const runRefine = useCallback(async () => {
     if (guardWorkspaceMutation()) return
