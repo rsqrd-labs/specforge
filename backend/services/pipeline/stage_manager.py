@@ -85,11 +85,14 @@ from services.llm.tier_policy import (
 from services.llm.usage import estimate_tokens
 from services.observability import (
     BILLING_CREDITS_CRITIC_REGEN,
+    HARNESS_PATCH_BLOCK_REJECTED,
+    HARNESS_PATCH_NOOP,
     PIPELINE_COMPLETION_REPAIRS,
     PIPELINE_COMPLEXITY_TIER_FLOORS,
     PIPELINE_CRITIC_ADVISORY_FINDINGS,
     PIPELINE_GENERATION_DURATION,
     PIPELINE_GENERATION_FALLBACKS,
+    PIPELINE_HARNESS_AUTOCOMPLETE,
     PIPELINE_HARNESS_FILE_DEDUP,
     PIPELINE_INCOMPLETE_OUTPUTS,
     PIPELINE_INTERRUPTED_STREAMS,
@@ -117,8 +120,11 @@ from services.pipeline.artifact_validator import (
     CompletenessIssue,
     IncompleteArtifactError,
     MissingSectionError,
+    _canonical_test_path,
     completion_instruction,
     dedupe_file_blocks,
+    harness_file_tree_paths,
+    missing_harness_files,
     strip_completion_sentinel,
     validate_artifact_completeness_async,
     validate_sections_async,
@@ -1196,7 +1202,9 @@ _COMPLETENESS_ADVISORY_KIND: dict[str, str] = {
     "insufficient_upstream_traceability": "CoverageGap",
     "rtm_missing_upstream_id": "CoverageGap",
     "harness_file_tree_missing_block": "CoverageGap",
+    "harness_matrix_missing_file": "CoverageGap",
     "harness_matrix_missing_test": "CoverageGap",
+    "harness_requirement_not_test_mapped": "CoverageGap",
     "missing_test_traceability_comment": "CoverageGap",
     "task_harness_ref_not_found": "CoverageGap",
 }
@@ -1379,22 +1387,56 @@ async def run_recovery_cycle(redis: "Redis", db: AsyncSession) -> int:
         await asyncio.gather(_heartbeat, return_exceptions=True)
 
 
-def _merge_harness_patch(existing: str, patch: str) -> str:
-    """Append new ## File: sections from patch into existing harness.
+# A fence delimiter line is indented at most 3 SPACES (CommonMark). Spaces only,
+# not ``\s``: a leading tab is 4 columns (tab stop), so a tab-indented run of
+# backticks — Go's convention for a fence embedded in a tab-indented raw string —
+# is code CONTENT, not a delimiter. Counting it toward parity flipped a complete
+# file to odd-count "incomplete" and dropped it from the merge (Fable verify #5).
+_FENCE_LINE_RE = re.compile(r"^ {0,3}`{3,}", re.MULTILINE)
 
-    Only appends files whose paths are not already present — never overwrites
-    existing test files so there is no regression risk.
+
+def _file_block_is_complete(block: str) -> bool:
+    """True when a ``### File:`` block carries a balanced (open+close) fence.
+
+    A truncated final file — the tail of a patch that hit its output budget
+    mid-file — has an odd number of fence delimiters. Merging it would splice a
+    half-written code block into the harness and break fence parity for the whole
+    document, cascading into the ref scanner and manufacturing new false gaps.
+    An even, non-zero count means every opened fence was closed.
     """
-    existing_paths = {m.group(2).strip() for m in _FILE_HEADING_RE.finditer(existing)}
+    fence_count = len(_FENCE_LINE_RE.findall(block))
+    return fence_count >= 2 and fence_count % 2 == 0
+
+
+def _merge_harness_patch(existing: str, patch: str, *, source: str = "patch") -> str:
+    """Append new ``### File:`` sections from *patch* into *existing* harness.
+
+    Only appends files whose canonical path is not already present — never
+    overwrites an existing test file (first-wins), so a merge is idempotent and
+    additive with no regression risk. A candidate block whose fence is unbalanced
+    (a truncated trailing file) is dropped rather than merged: additive semantics
+    make dropping it always safe, and merging it would corrupt fence parity for
+    the whole harness. ``source`` labels the rejection counter (patch vs the
+    Prong-A auto-complete).
+    """
+    existing_paths = {
+        _canonical_test_path(m.group(2)) for m in _FILE_HEADING_RE.finditer(existing)
+    }
     matches = list(_FILE_HEADING_RE.finditer(patch))
     new_sections: list[str] = []
+    seen: set[str] = set()
     for i, m in enumerate(matches):
-        path = m.group(2).strip()
-        if path in existing_paths:
+        canon = _canonical_test_path(m.group(2))
+        if canon in existing_paths or canon in seen:
             continue
         start = m.start()
         end = matches[i + 1].start() if i + 1 < len(matches) else len(patch)
-        new_sections.append(patch[start:end].rstrip())
+        block = patch[start:end].rstrip()
+        if not _file_block_is_complete(block):
+            HARNESS_PATCH_BLOCK_REJECTED.labels(source=source).inc()
+            continue
+        seen.add(canon)
+        new_sections.append(block)
     if not new_sections:
         return existing
     return existing.rstrip() + "\n\n" + "\n\n".join(new_sections)
@@ -1755,11 +1797,41 @@ def _chunk_user_prompt(
             "\n\nPrevious attempt failed the completion contract. Regenerate this "
             f"chunk from scratch and fix these issues:\n{issue_lines}\n"
         )
+    # Prong-A prevention: the harness Files chunk must emit a block for every file
+    # the (already generated) File Tree named. The instruction says so in prose,
+    # but the model has to re-derive the list from the prior chunk — so inline the
+    # exact deterministic checklist and make omission unmissable. Cheap, zero-risk
+    # (the paths are the model's own prior output), and it attacks the chunk↔files
+    # divergence before the costlier auto-complete pass has to.
+    checklist_text = ""
+    if (
+        stage_type == "harness"
+        and chunk.required_heading == "## Files"
+        and prior_chunks
+    ):
+        tree_paths = harness_file_tree_paths("\n\n".join(prior_chunks))
+        # Defense-in-depth: these are the model's own prior File-Tree tokens, but
+        # they are still model-generated text spliced into the INSTRUCTION region
+        # (it cannot be wrapped as untrusted content without neutering it).
+        # `_file_tree_paths` already rejects whitespace/prose lines, so each entry
+        # is a bare path token; additionally cap the count and per-entry length so
+        # a pathological prior chunk can neither bloat the prompt nor smuggle a
+        # long directive-shaped string into the checklist.
+        safe_paths = [p for p in tree_paths if p and len(p) <= 200][:100]
+        if safe_paths:
+            listed = "\n".join(f"- {path}" for path in safe_paths)
+            checklist_text = (
+                "\n\nThe File Tree above lists these files. Your ## Files section "
+                "MUST contain a `### File: <path>` block with complete, runnable "
+                "content for EVERY one — do not omit, defer, stub, or rename any:\n"
+                f"{listed}\n"
+            )
     return (
         f"{base_user_prompt}\n\n"
         f"{prior_text}"
         f"Chunk scope for {stage_type.upper()} [{chunk.key}]:\n"
         f"{chunk.instruction}\n"
+        f"{checklist_text}"
         f"{issue_text}"
         f"{completion_instruction(stage_type, chunk_key=chunk.key)}"
     )
@@ -2167,6 +2239,23 @@ class StageManager:
                     outcome="succeeded",
                 ).inc()
 
+        # Capture the main generation's id BEFORE any auto-complete call so the
+        # eval/cost linkage stays attributed to the primary generation.
+        content_generation_id = getattr(adapter, "last_generation_id", None)
+        # Prong A: fill in any files the harness's own tree/matrix promised but
+        # the Files chunk never emitted, so the delivered harness actually
+        # contains every promised test. No-op (zero LLM cost) on a complete
+        # harness; bounded, additive, and fail-open otherwise.
+        if stage_type == "harness" and settings.harness_autocomplete_missing_files:
+            completed = await self._autocomplete_missing_harness_files(
+                artifact=artifact,
+                adapter=adapter,
+                route=route,
+            )
+            if completed != artifact:
+                artifact = completed
+                chunks = [artifact]
+
         PIPELINE_GENERATION_DURATION.labels(
             stage_type=stage_type, provider=route.provider
         ).observe(asyncio.get_running_loop().time() - generation_started)
@@ -2175,8 +2264,112 @@ class StageManager:
             chunks=chunks,
             repair_attempted=repair_attempted,
             depth_findings=advisory_issues,
-            content_generation_id=getattr(adapter, "last_generation_id", None),
+            content_generation_id=content_generation_id,
         )
+
+    _AUTOCOMPLETE_MAX_FILES = 8
+    _AUTOCOMPLETE_MAX_FRACTION = 0.4
+    # The fraction cap ("most of the tree is missing → failed chunk, not a
+    # patchable hole") is only meaningful once the tree is big enough that 40% is
+    # more than a file or two. Below this it would perversely skip the *easiest*
+    # repairs (a 2-file harness missing 1 file is 50%), so only the absolute
+    # _AUTOCOMPLETE_MAX_FILES cap applies to small trees.
+    _AUTOCOMPLETE_FRACTION_MIN_TREE = 5
+
+    async def _autocomplete_missing_harness_files(
+        self,
+        *,
+        artifact: str,
+        adapter,
+        route: LLMRoute,
+    ) -> str:
+        """Prong A — one bounded, additive pass to emit promised-but-missing files.
+
+        Computes the files the harness's File Tree / Requirement-to-Test Matrix
+        named but that never appeared as a ``### File:`` block, then makes a single
+        targeted regenerate call for exactly those files and merges them in
+        (first-wins, so nothing is overwritten). Guardrails:
+
+        * **No-op when complete** — an empty missing set makes zero LLM calls, so a
+          healthy harness pays nothing.
+        * **Capped** — a missing set larger than ``_AUTOCOMPLETE_MAX_FILES`` or
+          ``_AUTOCOMPLETE_MAX_FRACTION`` of the promised set is a failed Files
+          chunk, not a patchable hole; skip and let the advisory path surface it.
+        * **Monotone / one-shot** — the emitted set only grows, so no loop.
+        * **Fail-open** — any error returns the original artifact unchanged.
+
+        Returns the (possibly augmented) artifact.
+        """
+        provider = route.provider
+        try:
+            missing, total = missing_harness_files(artifact)
+        except Exception:  # noqa: BLE001 — a parser hiccup must never brick a gen
+            logger.warning("harness_autocomplete.detect_failed", exc_info=True)
+            return artifact
+        if not missing:
+            return artifact
+        if len(missing) > self._AUTOCOMPLETE_MAX_FILES or (
+            total >= self._AUTOCOMPLETE_FRACTION_MIN_TREE
+            and len(missing) > total * self._AUTOCOMPLETE_MAX_FRACTION
+        ):
+            PIPELINE_HARNESS_AUTOCOMPLETE.labels(
+                provider=provider, outcome="skipped_too_large"
+            ).inc()
+            logger.warning(
+                "harness_autocomplete.skipped_too_large missing=%d total=%d",
+                len(missing),
+                total,
+            )
+            return artifact
+
+        PIPELINE_HARNESS_AUTOCOMPLETE.labels(
+            provider=provider, outcome="attempted"
+        ).inc()
+        from prompts.harness_patch import (  # noqa: PLC0415
+            build_missing_files_user_prompt,
+            get_patch_system_prompt,
+        )
+
+        # Attribute this repair pass's cost to ``harness.repair_files`` rather
+        # than the ``harness.generate`` operation the passed-in adapter carries,
+        # so the Phase-4 ``output_token_percentiles`` for ``harness.generate``
+        # stay clean and the repair operation accrues its own ledger samples —
+        # the same telemetry hygiene the paid patch already got (Fable verify #7).
+        # Scoped: the adapter's ``stream()`` records the cost event as its
+        # generator finalises (before the ``async for`` below exits), so the
+        # restore in ``finally`` runs after the record. ``content_generation_id``
+        # was already captured by the caller before this method ran.
+        prev_operation = getattr(adapter, "_operation", None)
+        try:
+            if prev_operation is not None:
+                adapter._operation = "harness.repair_files"
+            system_prompt = await get_patch_system_prompt()
+            user_prompt = build_missing_files_user_prompt(artifact, missing)
+            budget = resolve_output_budget(
+                "harness.repair_files", provider=provider, model=route.model
+            )
+            accumulated = ""
+            async for token in _watchdog_stream(
+                adapter.stream(system_prompt, user_prompt, max_tokens=budget),
+                stage_type="harness",
+                provider=provider,
+            ):
+                accumulated += token
+            merged = _merge_harness_patch(artifact, accumulated, source="autocomplete")
+        except Exception:  # noqa: BLE001 — fail-open: a failed repair never blocks
+            logger.warning("harness_autocomplete.failed", exc_info=True)
+            PIPELINE_HARNESS_AUTOCOMPLETE.labels(
+                provider=provider, outcome="failed"
+            ).inc()
+            return artifact
+        finally:
+            if prev_operation is not None:
+                adapter._operation = prev_operation
+
+        still_missing, _ = missing_harness_files(merged)
+        outcome = "succeeded" if not still_missing else "partial"
+        PIPELINE_HARNESS_AUTOCOMPLETE.labels(provider=provider, outcome=outcome).inc()
+        return merged
 
     async def _generate_complete_artifact_parallel(
         self,
@@ -5837,15 +6030,26 @@ class StageManager:
                 stage_type="harness",
                 action="harness_patch",
                 model_tier=route.model_tier,
-                operation=route.operation,
+                # Attribute cost to the patch operation (not route.operation ==
+                # harness.generate) so the Phase-4 output_token_percentiles for
+                # harness.generate stay clean and harness.patch can be sized on its
+                # own ledger samples.
+                operation="harness.patch",
                 cost_context=LLMCostContext(
                     workspace_id=workspace.id,
                     stage_id=stage.id,
                     product_surface="harness_patch",
                 ),
             )
+            # A patch emits several complete test files; the old hard-coded 2048
+            # truncated after roughly one, leaving files half-written and breaking
+            # fence parity for the whole merged harness. Budget it like the other
+            # generation ops (clamped to the model's output ceiling).
+            patch_budget = resolve_output_budget(
+                "harness.patch", provider=route.provider, model=route.model
+            )
             async for token in _watchdog_stream(
-                adapter.stream(system_prompt, user_prompt, max_tokens=2048),
+                adapter.stream(system_prompt, user_prompt, max_tokens=patch_budget),
                 stage_type="harness",
                 provider=route.provider,
             ):
@@ -5853,6 +6057,26 @@ class StageManager:
                 yield token
 
             merged = _merge_harness_patch(existing_content, accumulated)
+            if merged == existing_content:
+                # Nothing new merged — the model re-emitted only files that
+                # already exist (canonical dedup), or its single trailing block
+                # was truncated and dropped for fence parity. Committing here would
+                # charge the user 10 credits for a byte-identical version. Roll the
+                # (uncommitted) deduction back so the patch is free, and surface a
+                # clear "no new coverage" signal instead of a phantom success.
+                await db.rollback()
+                HARNESS_PATCH_NOOP.inc()
+                logger.info(
+                    "harness_patch.no_op stage_id=%s user_id=%s — rolled back, "
+                    "no charge",
+                    stage_id,
+                    user.id,
+                )
+                raise StageStateError(
+                    "The patch produced no new test files to add — nothing was "
+                    "changed and you were not charged.",
+                    code="no_new_coverage",
+                )
             try:
                 await self._assert_technology_safe(
                     "harness",

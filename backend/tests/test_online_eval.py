@@ -467,7 +467,12 @@ async def test_run_eval_dataset_write_is_fire_and_forget() -> None:
 
 
 @pytest.mark.asyncio
-async def test_run_eval_harness_flags_when_coverage_below_80() -> None:
+async def test_run_eval_harness_does_not_flag_on_judge_coverage() -> None:
+    # Harness `flagged` is no longer derived from the judge's coverage_percent
+    # (Fable #6): the eval compacts the harness to ~20K chars, so on a normal-size
+    # harness the judge under-counts coverage and would set a "Needs attention"
+    # badge the deterministic CoveragePanel (deferred_reqs) contradicts. The judge
+    # coverage is still STORED for telemetry, just not authoritative for flagging.
     db = _FakeDB()
     judge_response = (
         '{"overall_score": 60, "completeness": 60, "clarity": 70, '
@@ -481,7 +486,7 @@ async def test_run_eval_harness_flags_when_coverage_below_80() -> None:
 
     assert result is not None
     assert result.coverage_percent == 65
-    assert result.flagged is True
+    assert result.flagged is False
     assert "auth" in result.uncovered_reqs
 
 
@@ -521,7 +526,8 @@ async def test_run_eval_extracts_json_from_fenced_judge_response() -> None:
     assert result is not None
     assert result.coverage_percent == 78
     assert result.overall_score == 77
-    assert result.flagged is True
+    # Harness no longer flags on judge coverage_percent < 80 (Fable #6).
+    assert result.flagged is False
     assert db._committed
 
 

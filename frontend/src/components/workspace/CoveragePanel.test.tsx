@@ -72,7 +72,9 @@ describe("CoveragePanel — coverage expansion (paid one-click patch)", () => {
     expect(onRegenerate).toHaveBeenCalledOnce()
   })
 
-  it("shows both sections when genuine gaps and deferred coverage coexist", () => {
+  it("ignores the judge's uncovered_reqs — only deterministic deferred_reqs surface", () => {
+    // The judge's uncovered_reqs is truncation-poisoned (D-1) and must never
+    // render a gap on its own; the panel is driven solely by deferred_reqs.
     render(
       <CoveragePanel
         stage={makeStage()}
@@ -83,22 +85,22 @@ describe("CoveragePanel — coverage expansion (paid one-click patch)", () => {
         onRegenerate={() => {}}
       />,
     )
-    expect(screen.getByText("Coverage Gaps")).toBeInTheDocument()
     expect(screen.getByText("Missing Test Coverage")).toBeInTheDocument()
-    expect(screen.getByText("FR-009")).toBeInTheDocument()
+    expect(screen.queryByText("Coverage Gaps")).toBeNull()
+    // The judge-only requirement is not surfaced.
+    expect(screen.queryByText("FR-009")).toBeNull()
     expect(screen.getByText("FR-002")).toBeInTheDocument()
   })
 
-  it("renders only the gaps section when there is no deferred coverage", () => {
-    render(
+  it("renders nothing when only the judge's uncovered_reqs is set (no deferred)", () => {
+    const { container } = render(
       <CoveragePanel
         stage={makeStage()}
         evalResult={makeEval({ uncovered_reqs: ["FR-009"], deferred_reqs: [] })}
         onRegenerate={() => {}}
       />,
     )
-    expect(screen.getByText("Coverage Gaps")).toBeInTheDocument()
-    expect(screen.queryByText("Expand Test Coverage")).toBeNull()
+    expect(container).toBeEmptyDOMElement()
   })
 
   it("returns null on a non-harness stage", () => {

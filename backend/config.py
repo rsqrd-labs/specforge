@@ -340,6 +340,16 @@ class Settings(BaseSettings):
     # one release (instant revert if quality/UX regresses) — the old branch is
     # removed in a follow-up once the new path is proven.
     critic_async_advisory: bool = True
+    # Prong A (issue: false coverage gaps / minimize lack of tests). After a
+    # harness assembles, if its File Tree / Requirement-to-Test Matrix promised
+    # files the ## Files chunk never emitted (the second chunk under-ran its
+    # budget), run ONE targeted, bounded regenerate that emits just those missing
+    # files and merges them in — so the harness actually contains every promised
+    # test instead of shipping a hole the user must pay 10 credits to patch. The
+    # pass is additive (never overwrites), capped (skips when the missing set is
+    # too large to be a patch), fail-open (an error never bricks generation), and
+    # runs on the same cheap route. Flip false to disable entirely.
+    harness_autocomplete_missing_files: bool = True
     # Issue #21 Phase 2b — honest, data-backed generation ETA. A cheap periodic
     # worker cron rolls llm_cost_events latency_ms up into aggregate p50/p90 per
     # (provider, stage, operation), caches the result in Redis, and the read-only

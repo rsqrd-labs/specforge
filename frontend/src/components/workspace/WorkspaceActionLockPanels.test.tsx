@@ -34,6 +34,7 @@ function evalResult(overrides: Partial<EvalResult> = {}): EvalResult {
     clarity: 80,
     coverage_percent: 75,
     uncovered_reqs: ["REQ-1"],
+    deferred_reqs: ["REQ-1"],
     tasks_without_ref: null,
     flagged: true,
     created_at: "2026-06-01T00:00:00Z",

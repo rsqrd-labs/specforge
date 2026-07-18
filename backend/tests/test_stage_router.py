@@ -13,6 +13,7 @@ from database import get_db
 from main import create_app
 from middleware.auth import get_current_user
 from models import EvalResult, Stage, User
+from services.evals.online_eval import STRUCTURAL_TASK_VALIDATOR_VERSION
 from services.pipeline.stage_manager import (
     QualityGateBlockedError,
     StageDependencyError,
@@ -332,7 +333,9 @@ async def test_get_eval_lazily_repairs_stale_task_findings(app) -> None:
     assert response.status_code == 200
     assert response.json()["tasks_without_ref"] == []
     assert response.json()["flagged"] is False
-    assert eval_result.structural_validator_version == 1
+    assert (
+        eval_result.structural_validator_version == STRUCTURAL_TASK_VALIDATOR_VERSION
+    )
     assert db.committed is True
     assert len(db.statements) == 3
 

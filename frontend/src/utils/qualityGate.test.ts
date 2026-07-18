@@ -301,7 +301,7 @@ describe("deriveJudgeReconciliationNote", () => {
     ).toBeNull()
     expect(
       deriveJudgeReconciliationNote(
-        makeEval({ uncovered_reqs: ["FR-003"] }),
+        makeEval({ deferred_reqs: ["FR-003"] }),
         [criticFinding],
       ),
     ).toBeNull()

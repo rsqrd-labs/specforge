@@ -130,6 +130,7 @@ export interface TaskReferenceIssue {
     | "GENERATION_FAILURE"
     | "GENUINE_GAP"
     | "DEFERRED_COVERAGE"
+    | "UNVERIFIED_COVERAGE"
     | "MISSING_PRIORITY"
     | "MISSING_ESTIMATE"
   remediation?: string

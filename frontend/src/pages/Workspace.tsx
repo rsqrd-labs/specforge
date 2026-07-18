@@ -2054,9 +2054,11 @@ export default function Workspace() {
   // fully-covered ("ready") harness, so gating on `evalResult !== null` reserved a
   // 380px column that rendered empty (the right-side vacant band). Gate on the gap
   // count, mirroring the tasks branch, so a clean harness gets the full width.
-  const harnessCoverageGaps =
-    (evalResult?.uncovered_reqs?.length ?? 0) +
-    (evalResult?.deferred_reqs?.length ?? 0)
+  // Coverage gaps are the deterministic deferred_reqs only — the same set
+  // CoveragePanel renders. The judge's uncovered_reqs is truncation-poisoned and
+  // no longer surfaced (issue: false coverage gaps, D-1), so counting it here
+  // would reserve the 380px rail for a panel that renders nothing.
+  const harnessCoverageGaps = evalResult?.deferred_reqs?.length ?? 0
   // Demo Day: the handoff panel lives on the tasks pane and is always worth a
   // rail column (it carries the bundle download + verdict even before the
   // verifier has run). Without this the rail would stay collapsed and the panel
@@ -2091,7 +2093,7 @@ export default function Workspace() {
       : STAGE_LABELS[nextStage.type]
   const activeIssueCount =
     activeStage.type === "harness"
-      ? evalResult?.uncovered_reqs?.length ?? 0
+      ? evalResult?.deferred_reqs?.length ?? 0
       : activeStage.type === "tasks"
         ? genuineGapIssues.length
         : evalResult?.flagged

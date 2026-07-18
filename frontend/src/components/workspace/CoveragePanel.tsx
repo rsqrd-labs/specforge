@@ -17,75 +17,44 @@ export function CoveragePanel({
 }: CoveragePanelProps) {
   if (stage.type !== "harness") return null
 
-  const uncoveredReqs = evalResult?.uncovered_reqs ?? []
-  // deferred_reqs are now genuine, deterministic coverage holes: requirements
-  // the test matrix maps to a test file that was never emitted in the harness
-  // (matrix→file integrity). They are real gaps to fill, NOT an optional "beyond
-  // baseline" upsell — the paid patch regenerates the missing tests. The backend
-  // unions them with any LLM-derived uncovered_reqs for the patch.
+  // Coverage gaps on the HARNESS screen are derived ONLY from deferred_reqs — the
+  // deterministic matrix→file integrity set (requirement IDs whose every mapped
+  // test file is genuinely absent from the harness). The eval judge's
+  // `uncovered_reqs` is intentionally NOT shown here: the judge scores a harness
+  // compacted to ~20K chars, so on a normal 60–120KB harness it reports reqs
+  // whose tests it simply could not see — a flood of phantom "missing coverage"
+  // that eroded trust and could never clear. That list stays on the eval payload
+  // for scoring/telemetry, but the gap panel and the paid patch are matrix-driven.
   const deferredReqs = evalResult?.deferred_reqs ?? []
   const regenerateHelpId = `${stage.id}-coverage-regenerate-help`
   const disabledReasonId = `${stage.id}-coverage-disabled-reason`
 
-  if (!evalResult || (uncoveredReqs.length === 0 && deferredReqs.length === 0)) {
+  if (!evalResult || deferredReqs.length === 0) {
     return null
   }
 
   return (
-    <div
-      className={`ws-panel-section ws-coverage-card ${
-        uncoveredReqs.length > 0 || deferredReqs.length > 0
-          ? "ws-coverage-card--gap"
-          : "ws-coverage-card--deferred"
-      }`}
-    >
-      {uncoveredReqs.length > 0 && (
-        <>
-          <div className="ws-panel-section-header">
-            <div>
-              <div className="ws-panel-title">Coverage Gaps</div>
-              <p>These requirements have no tests in the harness.</p>
-            </div>
-            <span className="ws-panel-chip warning">
-              {uncoveredReqs.length} gap{uncoveredReqs.length !== 1 ? "s" : ""}
-            </span>
-          </div>
+    <div className="ws-panel-section ws-coverage-card ws-coverage-card--gap">
+      <div className="ws-panel-section-header">
+        <div>
+          <div className="ws-panel-title">Missing Test Coverage</div>
+          <p>
+            The test matrix maps these requirements to a test file that was not
+            generated in the harness. Regenerate to fill in the missing tests.
+          </p>
+        </div>
+        <span className="ws-panel-chip warning">
+          {deferredReqs.length} missing
+        </span>
+      </div>
 
-          <ul className="ws-issue-list">
-            {uncoveredReqs.map((req) => (
-              <li key={req} className="ws-issue-item">
-                <div className="ws-issue-title">{req}</div>
-              </li>
-            ))}
-          </ul>
-        </>
-      )}
-
-      {deferredReqs.length > 0 && (
-        <>
-          <div className="ws-panel-section-header">
-            <div>
-              <div className="ws-panel-title">Missing Test Coverage</div>
-              <p>
-                The test matrix maps these requirements to a test file that was
-                not generated in the harness. Regenerate to fill in the missing
-                tests.
-              </p>
-            </div>
-            <span className="ws-panel-chip warning">
-              {deferredReqs.length} missing
-            </span>
-          </div>
-
-          <ul className="ws-issue-list">
-            {deferredReqs.map((req) => (
-              <li key={req} className="ws-issue-item">
-                <div className="ws-issue-title">{req}</div>
-              </li>
-            ))}
-          </ul>
-        </>
-      )}
+      <ul className="ws-issue-list">
+        {deferredReqs.map((req) => (
+          <li key={req} className="ws-issue-item">
+            <div className="ws-issue-title">{req}</div>
+          </li>
+        ))}
+      </ul>
 
       <button
         className="ws-action-btn"

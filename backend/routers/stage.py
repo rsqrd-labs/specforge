@@ -343,28 +343,19 @@ async def regenerate_stage_for_gaps(
             detail={"error": "not_harness_stage"},
         )
 
-    result = await db.execute(
-        select(EvalResult)
-        .join(StageVersion, EvalResult.stage_version_id == StageVersion.id)
-        .where(StageVersion.stage_id == stage.id)
-        .order_by(desc(EvalResult.created_at))
-        .limit(1)
-    )
-    latest_eval = result.scalar_one_or_none()
-
-    # The patch covers two distinct sources, unioned (eval reqs first):
-    #   1. LLM-derived uncovered_reqs on the latest harness eval, and
-    #   2. requirement IDs the harness deterministically recorded as deferred
-    #      under token budget (TestCategoryGap reqs=), parsed straight from the
-    #      harness content — independent of the eval, so a harness with deferred
-    #      coverage but an empty/missing eval still patches. extract_deferred_reqs
-    #      filters out non-id tokens (e.g. property_based entity names) so the
-    #      patch is never asked to invent tests for bogus "requirements".
-    eval_uncovered: list[str] = list(
-        (latest_eval.uncovered_reqs if latest_eval else None) or []
-    )
-    deferred_reqs = extract_deferred_reqs(stage.content or "")
-    uncovered_reqs: list[str] = list(dict.fromkeys([*eval_uncovered, *deferred_reqs]))
+    # The patch is driven ONLY by the deterministic gap set derived from the
+    # harness's own Requirement-to-Test Matrix vs its emitted Files
+    # (extract_deferred_reqs → uncovered_requirements): requirement IDs whose every
+    # mapped test file is genuinely absent. The LLM judge's uncovered_reqs is
+    # deliberately NOT unioned in here: the eval compacts the harness to ~20K
+    # chars before scoring, so on a normal 60–120KB harness the judge lists reqs
+    # whose tests it simply could not see — feeding those to the patch charged the
+    # user to "fill" tests that already exist. The judge list stays on the eval
+    # response for scoring/telemetry only (issue: false coverage gaps, D-1).
+    # This is also robust to a missing/empty eval — the harness content alone
+    # decides — and extract_deferred_reqs filters non-id tokens so the patch is
+    # never asked to invent tests for bogus "requirements".
+    uncovered_reqs = extract_deferred_reqs(stage.content or "")
     if not uncovered_reqs:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,

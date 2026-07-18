@@ -19,19 +19,28 @@ export const QUALITY_STATUS_LABEL: Record<QualityStatus, string> = {
   unavailable: "Unavailable",
 }
 
+/** gap_type values that never move the badge — non-blocking or hidden:
+ *  GENERATION_FAILURE (hidden prompt-quality issue), DEFERRED_COVERAGE (the
+ *  harness recorded the category as deferred under budget), and
+ *  UNVERIFIED_COVERAGE (the referenced file exists but its tests could not be
+ *  parsed — a checker limitation, not a confirmed gap). */
+const NON_ACTIONABLE_GAP_TYPES = new Set([
+  "GENERATION_FAILURE",
+  "DEFERRED_COVERAGE",
+  "UNVERIFIED_COVERAGE",
+])
+
 /** Whether an eval carries a concrete, user-actionable gap. `flagged` already
- *  encodes harness coverage < 80 and genuine task gaps; `uncovered_reqs` and
- *  genuine task issues are checked explicitly so a real gap is never missed. */
+ *  encodes harness coverage < 80 and genuine task gaps; the deterministic
+ *  `deferred_reqs` (matrix→file holes) and genuine task issues are checked
+ *  explicitly so a real gap is never missed. The judge's `uncovered_reqs` is
+ *  deliberately NOT used — it is truncation-poisoned on a normal-size harness
+ *  (issue: false coverage gaps, D-1) and would flood the badge with phantoms. */
 export function hasActionableFindings(evalResult: EvalResult): boolean {
   if (evalResult.flagged) return true
-  if ((evalResult.uncovered_reqs?.length ?? 0) > 0) return true
-  // GENERATION_FAILURE (hidden prompt-quality issue) and DEFERRED_COVERAGE (the
-  // harness recorded the category as deferred under budget — surfaced but
-  // non-blocking) are not user-actionable gaps and must not move the badge.
+  if ((evalResult.deferred_reqs?.length ?? 0) > 0) return true
   return (evalResult.tasks_without_ref ?? []).some(
-    (issue) =>
-      issue.gap_type !== "GENERATION_FAILURE" &&
-      issue.gap_type !== "DEFERRED_COVERAGE",
+    (issue) => !issue.gap_type || !NON_ACTIONABLE_GAP_TYPES.has(issue.gap_type),
   )
 }
 

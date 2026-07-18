@@ -16,6 +16,10 @@ function isDeferredCoverage(issue: TaskReferenceIssue): boolean {
   return issue.gap_type === "DEFERRED_COVERAGE"
 }
 
+function isUnverifiedCoverage(issue: TaskReferenceIssue): boolean {
+  return issue.gap_type === "UNVERIFIED_COVERAGE"
+}
+
 export function TaskValidationPanel({
   stage,
   evalResult,
@@ -28,6 +32,7 @@ export function TaskValidationPanel({
   const allIssues = evalResult?.tasks_without_ref ?? []
   const genuineGaps = allIssues.filter(isGenuineGap)
   const deferredGaps = allIssues.filter(isDeferredCoverage)
+  const unverifiedGaps = allIssues.filter(isUnverifiedCoverage)
   const disabledReasonId = `${stage.id}-task-validation-disabled-reason`
 
   if (!evalResult) {
@@ -39,7 +44,12 @@ export function TaskValidationPanel({
     )
   }
 
-  if (genuineGaps.length === 0 && deferredGaps.length === 0) return null
+  if (
+    genuineGaps.length === 0 &&
+    deferredGaps.length === 0 &&
+    unverifiedGaps.length === 0
+  )
+    return null
 
   return (
     <>
@@ -125,6 +135,61 @@ export function TaskValidationPanel({
 
           <ul className="ws-issue-list">
             {deferredGaps.map((issue) => (
+              <li
+                key={`${issue.task_number}-${issue.task_title}`}
+                className="ws-issue-item"
+              >
+                <div className="ws-issue-title">
+                  T-{issue.task_number}: {issue.task_title}
+                </div>
+
+                {issue.harness_file && (
+                  <div className="ws-issue-file-tag">{issue.harness_file}</div>
+                )}
+
+                <div className="ws-issue-reason">
+                  {issue.remediation ?? issue.reason}
+                </div>
+
+                {onNavigateToHarness && (
+                  <button
+                    type="button"
+                    className="ws-issue-action"
+                    onClick={onNavigateToHarness}
+                    disabled={disabled}
+                    title={disabled ? disabledReason : undefined}
+                    aria-describedby={
+                      disabled && disabledReason ? disabledReasonId : undefined
+                    }
+                    aria-label="Open HARNESS"
+                  >
+                    Open
+                  </button>
+                )}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {unverifiedGaps.length > 0 && (
+        <div className="ws-panel-section ws-coverage-card ws-coverage-card--deferred">
+          <div className="ws-panel-section-header">
+            <div>
+              <div className="ws-panel-title">Unverified Coverage</div>
+              <p>
+                {unverifiedGaps.length === 1
+                  ? "1 task references a harness file that exists, but its tests could not be automatically parsed. This is a checker limitation, not a confirmed gap — open the harness to confirm."
+                  : `${unverifiedGaps.length} tasks reference harness files that exist, but their tests could not be automatically parsed. This is a checker limitation, not a confirmed gap — open the harness to confirm.`}
+              </p>
+            </div>
+            <span className="ws-panel-chip">
+              {unverifiedGaps.length} unverified
+            </span>
+          </div>
+
+          <ul className="ws-issue-list">
+            {unverifiedGaps.map((issue) => (
               <li
                 key={`${issue.task_number}-${issue.task_title}`}
                 className="ws-issue-item"

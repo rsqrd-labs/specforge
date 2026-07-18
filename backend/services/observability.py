@@ -147,6 +147,41 @@ PIPELINE_INTERRUPTED_STREAMS = Counter(
     "Stage generation streams interrupted before a usable completed artifact existed",
     ["stage_type"],
 )
+# Harness auto-complete of files the tree/matrix promised but the Files chunk
+# never emitted (Prong A). outcome: attempted / succeeded / partial (some files
+# still missing after the targeted pass) / skipped_too_large (the missing set
+# exceeded the cap — a failed chunk, not a patchable hole) / failed. (The flag
+# gate short-circuits before the counter, so there is no "disabled" outcome.)
+# The trend is the "how often does the Files chunk under-emit" health signal.
+PIPELINE_HARNESS_AUTOCOMPLETE = Counter(
+    "specforge_pipeline_harness_autocomplete_total",
+    "Targeted regeneration passes for harness files missing from the Files section",
+    ["provider", "outcome"],
+)
+# Trailing gap-patch / auto-complete file blocks dropped before merge because
+# their code fence was unbalanced (truncated mid-file). Additive merge makes the
+# drop always safe; a non-zero rate flags a too-small patch budget.
+HARNESS_PATCH_BLOCK_REJECTED = Counter(
+    "specforge_harness_patch_block_rejected_total",
+    "Incomplete trailing harness file blocks dropped before merge",
+    ["source"],
+)
+# TASKS refs whose file exists in the harness but whose individual tests could
+# not be parsed (UNVERIFIED_COVERAGE). A rising trend marks a parser blind spot
+# (an unsupported language / fence style) to fix — the point is that these stay
+# measurable instead of being silently swallowed or shown as scary false gaps.
+UNVERIFIED_COVERAGE_FINDINGS = Counter(
+    "specforge_unverified_coverage_findings_total",
+    "TASKS refs downgraded to UNVERIFIED_COVERAGE (file present, tests unparsed)",
+)
+# Paid harness gap-patches that merged NOTHING new (the model re-emitted only
+# existing files, or its single block was truncated and rejected). These roll
+# back with no charge and surface a "no new coverage" signal instead of
+# committing a byte-identical version; a rising rate flags a weak patch prompt.
+HARNESS_PATCH_NOOP = Counter(
+    "specforge_harness_patch_noop_total",
+    "Paid harness gap-patches that produced no new files (rolled back, no charge)",
+)
 
 # Stream-watchdog kills: kind is "idle" (token gap exceeded the idle timeout —
 # a stalled provider stream) or "hard_cap" (the absolute per-stream bound hit —

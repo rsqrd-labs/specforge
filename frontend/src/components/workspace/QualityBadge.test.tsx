@@ -45,10 +45,19 @@ describe("QualityBadge — findings-derived status (issue #27 Phase 1)", () => {
   it("shows Needs attention when harness coverage gaps exist", () => {
     render(
       <QualityBadge
-        evalResult={makeEval({ stage_type: "harness", uncovered_reqs: ["FR-001"] })}
+        evalResult={makeEval({ stage_type: "harness", deferred_reqs: ["FR-001"] })}
       />,
     )
     expect(screen.getByText("Needs attention")).toBeInTheDocument()
+  })
+
+  it("ignores the judge's uncovered_reqs for the badge (truncation-poisoned)", () => {
+    render(
+      <QualityBadge
+        evalResult={makeEval({ stage_type: "harness", uncovered_reqs: ["FR-001"] })}
+      />,
+    )
+    expect(screen.getByText("Ready")).toBeInTheDocument()
   })
 
   it("shows Needs attention for a genuine task gap", () => {

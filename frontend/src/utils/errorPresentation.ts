@@ -140,6 +140,20 @@ export function actionAlertFromStreamError(
         secondaryAction: options.secondaryAction,
         dismissLabel: options.dismissLabel,
       })
+    case "no_new_coverage":
+      return actionAlertFromMessage({
+        title: "No new coverage to add",
+        message:
+          "The patch didn't find any new test files to add — your harness is " +
+          "unchanged and you were not charged.",
+        recovery:
+          "If a requirement still looks uncovered, regenerate the HARNESS stage " +
+          "to rebuild its tests from scratch.",
+        source: "Coverage patch",
+        primaryAction: options.primaryAction,
+        secondaryAction: options.secondaryAction,
+        dismissLabel: options.dismissLabel,
+      })
     case "security_check_failed":
       return actionAlertFromMessage({
         title: "Generation stopped by safety checks",

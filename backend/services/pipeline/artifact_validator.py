@@ -182,7 +182,7 @@ _TASK_HEADER_RE = re.compile(r"^###\s+T-\d{3}:", re.MULTILINE)
 _TASK_DEP_RE = re.compile(r"\bT-(\d{3})\b")
 _TASK_FIELD_RE = re.compile(r"^\*\*(?P<field>[^*]+):\*\*\s*(?P<value>.*)$")
 _FILE_BLOCK_RE = re.compile(
-    r"^###\s+File:\s+(.+?)\s*\n+```[^\n]*\n.*?\n```",
+    r"^#{2,3}\s+File:\s+(.+?)\s*\n+```[^\n]*\n.*?\n```",
     re.MULTILINE | re.DOTALL,
 )
 _INCOMPLETE_TRAILING_RE = re.compile(r"(:|,\s*|\|\s*)$")
@@ -440,7 +440,7 @@ def validate_artifact_completeness(
         if stage_type == "plan":
             issues.extend(_plan_issues(stripped, deps))
         if stage_type == "harness":
-            issues.extend(_harness_issues(stripped))
+            issues.extend(_harness_issues(stripped, deps))
         if stage_type == "tasks":
             issues.extend(_task_issues(stripped, deps))
     if stage_type in {"plan", "harness", "tasks"}:
@@ -552,14 +552,41 @@ def _section_body_issues(
 
 
 def _section_body(artifact_md: str, heading: str) -> str:
-    pattern = re.compile(
-        rf"^{re.escape(heading)}\s*$([\s\S]*?)(?=^##\s+|\Z)",
-        re.MULTILINE,
-    )
-    match = pattern.search(artifact_md)
-    if not match:
+    """Body text under ``heading``, up to the next same-or-higher-level heading.
+
+    Tolerant of the heading being emitted at any level from two to six hashes:
+    ``validate_sections`` gates on a plain substring, so a model that renders
+    ``### Requirement-to-Test Matrix`` (three hashes) — or even ``####`` — passes
+    the section gate, but the old exact-``##`` body regex then returned ``""``,
+    silently disabling ``uncovered_requirements`` and reporting a fully-covered
+    harness. Note that ``## X`` is a substring of ``#### X`` too, so an H4 heading
+    passed the gate while a ``#{2,3}`` body match still missed it — the same
+    silent-disable one level deeper. Matching at ``#{2,6}`` and terminating at the
+    next same-or-shallower heading closes that false-negative for every level
+    without swallowing the ``### File:`` subsections of a legitimate ``## Files``
+    section. When the same title appears at multiple levels, the SHALLOWEST
+    (then earliest) is chosen — the real section, not an incidental deeper echo.
+
+    The terminator deliberately starts at TWO hashes (``#{2,level}``), never one:
+    a single ``#`` at column 0 is overwhelmingly a code comment (``# Tests:
+    FR-001``) inside a ``## Files`` code block, not an H1 heading, and this
+    function is fence-unaware. Stopping at it would truncate the Files body mid
+    code block — so for the common H2 section this is byte-identical to the old
+    "next ``##``" behaviour, and a deeper section additionally stops at the next
+    same-or-shallower heading.
+    """
+    title = re.escape(heading.lstrip("#").strip())
+    start = re.compile(rf"^(#{{2,6}})[ \t]+{title}[ \t]*$", re.MULTILINE)
+    matches = list(start.finditer(artifact_md))
+    if not matches:
         return ""
-    return match.group(1).strip()
+    match = min(matches, key=lambda m: (len(m.group(1)), m.start()))
+    level = len(match.group(1))
+    rest = artifact_md[match.end() :]
+    terminator = re.compile(rf"^#{{2,{level}}}[ \t]+\S", re.MULTILINE)
+    end = terminator.search(rest)
+    body = rest[: end.start()] if end else rest
+    return body.strip()
 
 
 def _normalise_body_for_depth(body: str) -> str:
@@ -719,13 +746,55 @@ def _plan_issues(artifact_md: str, deps: dict[str, str]) -> list[CompletenessIss
     return issues
 
 
-_FILE_HEADING_RE = re.compile(r"^###\s+File:\s+(.+?)\s*$", re.MULTILINE)
+# A ``### File:`` heading — tolerant of the two- or three-hash form. The core
+# harness emits ``### File:``; a merged gap-patch historically emitted ``## File:``
+# (two hashes, see prompts/harness_patch.py). Reading both here means a patched
+# workspace's coverage heals with no content migration (a patched file is finally
+# counted as emitted), and the three file-heading parsers across the codebase
+# (this module, online_eval, stage_manager._merge_harness_patch) agree on shape.
+_FILE_HEADING_RE = re.compile(r"^#{2,3}\s+File:\s+(.+?)\s*$", re.MULTILINE)
 # A backticked matrix cell that names a test file: a path with a directory
 # component and a file extension whose stem/path reads as a test (``test``,
 # ``spec``, or a ``tests/`` directory). Language-agnostic on purpose — the
 # previous matrix check keyed on the Python ``test_`` prefix / ``def test_`` and
-# silently no-opped on TS/Vitest, Go, Ruby, etc. harnesses.
-_MATRIX_TEST_FILE_RE = re.compile(r"`([^`]+?\.[A-Za-z0-9]+)`")
+# silently no-opped on TS/Vitest, Go, Ruby, etc. harnesses. An optional
+# ``::test``/``::Class::method`` suffix is allowed before the closing backtick so
+# a file+test cell (`` `x_test.py::test_foo` ``) and the file token of a mixed
+# cell both decompose to the file path (`_canonical_test_path` drops the suffix)
+# instead of failing the match entirely and dropping the file.
+_MATRIX_TEST_FILE_RE = re.compile(r"`([^`]+?\.[A-Za-z0-9]+)(?:::[^`]+)?`")
+
+
+def _canonical_test_path(token: str) -> str:
+    """Canonical form of a harness file path, for MATCHING only (never display).
+
+    The single source of truth for "do these two strings name the same harness
+    file". Shared by :func:`uncovered_requirements`, :func:`_harness_issues`, and
+    the online-eval ref matchers so a Matrix cell, a ``### File:`` heading, a
+    File-Tree entry, and a TASKS ``Harness refs`` token that all mean the same
+    file compare equal — the divergent per-call-site normalisations were a
+    standing false-gap factory (a case difference, a ``./`` prefix, or a
+    ``file::test`` cell each manufactured a phantom "missing coverage").
+
+    Takes the path part before any ``::`` test/class suffix, normalises
+    backslashes, strips a leading ``./`` / ``/`` / ``harness/``, drops
+    surrounding backticks and whitespace, and casefolds. Case folding is safe:
+    two harness files differing only in case cannot coexist on a
+    case-insensitive filesystem, and every user-facing display string keeps its
+    original casing (this form is used solely for set membership).
+    """
+    cleaned = token.strip().strip("`").strip().replace("\\", "/")
+    cleaned = cleaned.split("::", 1)[0].strip()
+    # Casefold BEFORE stripping prefixes so a capitalised ``Harness/`` / ``./``
+    # is stripped identically to its lowercase form (the strips below are
+    # literal, case-sensitive comparisons).
+    cleaned = cleaned.casefold()
+    while cleaned.startswith("./"):
+        cleaned = cleaned[2:]
+    cleaned = cleaned.lstrip("/")
+    if cleaned.startswith("harness/"):
+        cleaned = cleaned[len("harness/") :]
+    return cleaned
 
 
 def _normalise_harness_path(path: str) -> str:
@@ -736,12 +805,158 @@ def _normalise_harness_path(path: str) -> str:
     return cleaned
 
 
+# Real source/test file extensions. A BARE token's extension must be one of
+# these to count as a test file. Without this allowlist the ``/``-free widening
+# (Fable #5/#8) admitted matrix prose tokens that merely CONTAIN ``test`` —
+# ``pytest.mark.slow`` (ext ``slow``), ``latest.md`` (ext ``md``, "la-test"),
+# ``pytest==7.4.0`` (ext ``0``) — each of which then armed the 10-credit patch on
+# a phantom AND fed the Prong-A autocomplete a garbage filename to synthesise
+# (Fable verify #4). Generous over real languages; excludes docs/config/version
+# fragments. A false negative (an exotic-extension test dropped) is the safe,
+# quiet direction; a false positive is a paid alarm + junk repair.
+_CODE_TEST_EXTS: frozenset[str] = frozenset(
+    {
+        "py",
+        "ts",
+        "tsx",
+        "js",
+        "jsx",
+        "mjs",
+        "cjs",
+        "go",
+        "rb",
+        "rs",
+        "java",
+        "kt",
+        "kts",
+        "cs",
+        "ex",
+        "exs",
+        "php",
+        "swift",
+        "scala",
+        "sc",
+        "cpp",
+        "cc",
+        "cxx",
+        "c",
+        "h",
+        "hh",
+        "hpp",
+        "m",
+        "mm",
+        "dart",
+        "clj",
+        "cljs",
+        "cljc",
+        "groovy",
+        "vue",
+        "svelte",
+        "lua",
+        "jl",
+        "fs",
+        "fsx",
+        "pl",
+        "pm",
+        "ml",
+        "mli",
+        "erl",
+        "hs",
+        "elm",
+    }
+)
+
+
 def _looks_like_test_file_path(token: str) -> bool:
-    cleaned = token.strip()
-    if "/" not in cleaned or "." not in cleaned.rsplit("/", 1)[-1]:
+    """True when *token* reads as a test-file path (or bare test filename).
+
+    Accepts both a directory-qualified path (``tests/unit/x_test.py``) and a
+    BARE test-convention filename (``x_test.py``). Cheap-tier harnesses sometimes
+    render bare filenames in the matrix or a nested File Tree; requiring a ``/``
+    dropped those, so a genuine coverage hole showed nowhere and the Prong-A
+    auto-repair silently no-opped (Fable #5/#8). A bare name is disambiguated
+    against emitted files by BASENAME (`_file_is_emitted`), so accepting it never
+    manufactures a phantom "missing" for a file that exists under a directory.
+
+    Guards against non-file matrix prose: an ``=`` (version pin / assignment)
+    disqualifies, and the file's extension must be a known code extension so
+    ``pytest.mark.slow`` / ``latest.md`` / ``pytest==7.4.0`` no longer read as
+    test files (Fable verify #4). A trailing ``::test`` / ``::Class::method``
+    suffix is stripped before the extension check so a ``file::test`` cell still
+    resolves to its file.
+    """
+    cleaned = token.strip().strip("`").strip()
+    if not cleaned or " " in cleaned or "\t" in cleaned or "=" in cleaned:
         return False
-    lowered = cleaned.lower()
+    file_part = cleaned.split("::", 1)[0]
+    last = file_part.rsplit("/", 1)[-1]
+    if "." not in last:
+        return False
+    if last.rsplit(".", 1)[-1].lower() not in _CODE_TEST_EXTS:
+        return False
+    lowered = file_part.lower()
     return "test" in lowered or "spec" in lowered
+
+
+def _canonical_basename(canon: str) -> str:
+    """Last path segment of a canonical path — for directory-insensitive match."""
+    return canon.rsplit("/", 1)[-1]
+
+
+def _emitted_file_index(artifact_md: str) -> tuple[set[str], set[str], set[str]]:
+    """Emitted ``### File:`` identity sets, for basename-safe presence checks.
+
+    Returns ``(canonical_paths, all_basenames, bare_heading_basenames)``:
+    every heading's canonical path, the basename of every heading, and the
+    basenames of headings rendered WITHOUT a directory. See ``_file_is_emitted``
+    for how the three combine to match a bare tree/matrix entry to a
+    directory-qualified heading (and vice versa) without masking a real gap.
+    """
+    canon = {
+        c
+        for c in (
+            _canonical_test_path(p) for p in _FILE_HEADING_RE.findall(artifact_md)
+        )
+        if c
+    }
+    all_bases = {_canonical_basename(c) for c in canon}
+    bare_bases = {c for c in canon if "/" not in c}
+    return canon, all_bases, bare_bases
+
+
+def _file_is_emitted(canon: str, emitted: tuple[set[str], set[str], set[str]]) -> bool:
+    """Whether a promised file *canon* was emitted as a ``### File:`` block.
+
+    Matches on the full canonical path first. Falls back to a BASENAME match only
+    in the safe, unambiguous directions, so a same-basename-different-directory
+    collision can never mask a genuine gap:
+
+      * a BARE promised name (no ``/``) matches any emitted file of that basename
+        — the harness declined to disambiguate, so the basename is the identity;
+      * a directory-qualified promised path matches only a BARE emitted heading of
+        that basename (the mirror case).
+
+    A directory-qualified promise is never matched to a different
+    directory-qualified emission by basename alone — that is the collision case,
+    where preserving the gap is the safe (primary-directive) choice.
+
+    KNOWN residual (Fable verify #6, accepted): this predicate is stateless, so
+    if the tree promises two same-basename files in different directories
+    (``tests/unit/auth_test.py`` AND ``tests/e2e/auth_test.py``) and the harness
+    emits a single BARE ``### File: auth_test.py`` heading, both promises read as
+    emitted — one genuine gap is masked. It requires a double coincidence (two
+    identically-named test files across directories, emitted as one un-qualified
+    heading); count-aware assignment would need a stateful pass across the whole
+    promised set. A well-formed harness emits directory-qualified headings, so
+    the exact-path branch matches and this fallback never triggers.
+    """
+    canon_set, all_bases, bare_bases = emitted
+    if canon in canon_set:
+        return True
+    base = _canonical_basename(canon)
+    if "/" not in canon:
+        return base in all_bases
+    return base in bare_bases
 
 
 def dedupe_file_blocks(artifact_md: str) -> tuple[str, int]:
@@ -762,7 +977,7 @@ def dedupe_file_blocks(artifact_md: str) -> tuple[str, int]:
     head = artifact_md[:files_idx]
     files_region = artifact_md[files_idx:]
     # Split at each File heading; segment[0] is the "## Files" preamble.
-    segments = re.split(r"(?m)(?=^###\s+File:\s+)", files_region)
+    segments = re.split(r"(?m)(?=^#{2,3}\s+File:\s+)", files_region)
     seen: set[str] = set()
     kept: list[str] = [segments[0]]
     removed = 0
@@ -804,29 +1019,20 @@ def uncovered_requirements(harness_content: str) -> list[str]:
     matrix = _section_body(harness_content, "## Requirement-to-Test Matrix")
     if not matrix:
         return []
-    emitted = {
-        _normalise_harness_path(path)
-        for path in _FILE_HEADING_RE.findall(harness_content)
-    }
+    emitted = _emitted_file_index(harness_content)
     req_files: dict[str, set[str]] = {}
     order: list[str] = []
     for line in matrix.splitlines():
         stripped = line.strip()
         if not stripped.startswith("|"):
             continue
-        cells = [
-            cell.strip().strip("`").strip() for cell in stripped.strip("|").split("|")
-        ]
+        cells = stripped.strip("|").split("|")
         if not cells:
             continue
-        req = cells[0].upper()
+        req = cells[0].strip().strip("`").strip().upper()
         if not _MATRIX_REQ_ID_RE.match(req):
             continue
-        files = {
-            _normalise_harness_path(cell)
-            for cell in cells[1:]
-            if _looks_like_test_file_path(cell)
-        }
+        files = _matrix_cell_test_files(cells[1:])
         if not files:
             continue
         if req not in req_files:
@@ -834,19 +1040,110 @@ def uncovered_requirements(harness_content: str) -> list[str]:
             order.append(req)
         req_files[req] |= files
     return [
-        req for req in order if req_files[req] and req_files[req].isdisjoint(emitted)
+        req
+        for req in order
+        if req_files[req]
+        and all(not _file_is_emitted(f, emitted) for f in req_files[req])
     ]
 
 
-def _harness_issues(artifact_md: str) -> list[CompletenessIssue]:
+def _matrix_cell_test_files(cells: list[str]) -> set[str]:
+    """Canonical test-file paths named across a matrix row's non-ID cells.
+
+    Scrapes every backticked token per cell (``_MATRIX_TEST_FILE_RE``) so a
+    multi-file cell (`` `a_test.py`, `b_test.py` ``) and a file+test cell
+    (`` `x_test.py::test_foo` ``) both decompose into their component file paths
+    instead of one unmatchable blob (the whole-cell ``strip('`')`` did the
+    latter). Falls back to whitespace tokens for a matrix that renders paths
+    without backticks. Only tokens that read as a test file path
+    (``_looks_like_test_file_path``) survive, so behaviour/type/status columns
+    never contribute phantom files.
+    """
+    files: set[str] = set()
+    for cell in cells:
+        for token in _MATRIX_TEST_FILE_RE.findall(cell):
+            if _looks_like_test_file_path(token):
+                files.add(_canonical_test_path(token))
+    if files:
+        return files
+    for cell in cells:
+        for raw in cell.split():
+            # An unbackticked path in a plain-text cell keeps its trailing list
+            # punctuation (``a.py,`` ``b.py``); strip it before matching or the
+            # canonical form (``a.py,``) never equals the emitted ``a.py`` and a
+            # covered requirement reads as uncovered.
+            token = raw.strip("`*_,;()[]")
+            if _looks_like_test_file_path(token):
+                files.add(_canonical_test_path(token))
+    return files
+
+
+def _promised_harness_files(artifact_md: str) -> dict[str, str]:
+    """Every file the harness's File Tree and Matrix promise, canonical→display.
+
+    The union of the ``## File Tree`` entries (all files: tests, fixtures,
+    factories, schemas, README) and the ``## Requirement-to-Test Matrix`` test
+    files. Keyed by :func:`_canonical_test_path` for matching; the value is the
+    original-cased display path (first seen wins) for a regenerate prompt. This
+    is the single promised-set definition shared by the advisory completeness
+    check and the Prong-A auto-repair, so they never disagree about what is
+    missing.
+    """
+    promised: dict[str, str] = {}
+    for path in _file_tree_paths(_section_body(artifact_md, "## File Tree")):
+        promised.setdefault(_canonical_test_path(path), path.strip())
+    matrix = _section_body(artifact_md, "## Requirement-to-Test Matrix")
+    if matrix:
+        for token in _MATRIX_TEST_FILE_RE.findall(matrix):
+            if _looks_like_test_file_path(token):
+                promised.setdefault(_canonical_test_path(token), token.strip())
+    return promised
+
+
+def harness_file_tree_paths(artifact_md: str) -> list[str]:
+    """Sorted File-Tree paths a harness's ``## Files`` section is meant to emit.
+
+    The deterministic checklist injected into the Files chunk's prompt (Prong-A
+    prevention) so the model cannot silently drop a file it just enumerated in
+    the File Tree — attacking the two-chunk divergence at its source, before the
+    (more expensive) auto-complete pass has to fire. Display casing is preserved.
+    """
+    return sorted(_file_tree_paths(_section_body(artifact_md, "## File Tree")))
+
+
+def missing_harness_files(artifact_md: str) -> tuple[list[str], int]:
+    """Files the tree/matrix promise but the ``## Files`` section never emitted.
+
+    Returns ``(missing_display_paths, total_promised)`` for the Prong-A targeted
+    auto-repair.  Deliberately independent of ``_harness_issues``' internal
+    guards — in particular it reports missing files even when the Files section
+    emitted **zero** ``### File:`` headings — because that "the whole Files chunk
+    fell over" case is exactly when a repair matters most.  Matching is canonical
+    (case/prefix/``::``-insensitive); the returned paths keep original casing for
+    the regenerate prompt.
+    """
+    emitted = _emitted_file_index(artifact_md)
+    promised = _promised_harness_files(artifact_md)
+    missing = [
+        disp for canon, disp in promised.items() if not _file_is_emitted(canon, emitted)
+    ]
+    return sorted(missing), len(promised)
+
+
+def _harness_issues(artifact_md: str, deps: dict[str, str]) -> list[CompletenessIssue]:
     issues: list[CompletenessIssue] = []
+    emitted = _emitted_file_index(artifact_md)
     tree_paths = _file_tree_paths(_section_body(artifact_md, "## File Tree"))
-    file_headings = [
-        path.strip()
-        for path in re.findall(r"^###\s+File:\s+(.+?)$", artifact_md, re.MULTILINE)
-    ]
     if tree_paths:
-        missing_blocks = sorted(tree_paths - set(file_headings))
+        # Compare canonically (case/`./`/`harness/`-insensitive) AND by basename
+        # (`_file_is_emitted`) so neither a normalisation difference nor a bare
+        # tree leaf vs a directory-qualified heading manufactures a phantom
+        # missing block. Display keeps the tree's original casing.
+        missing_blocks = sorted(
+            path
+            for path in tree_paths
+            if not _file_is_emitted(_canonical_test_path(path), emitted)
+        )
         if missing_blocks:
             issues.append(
                 CompletenessIssue(
@@ -865,16 +1162,16 @@ def _harness_issues(artifact_md: str) -> list[CompletenessIssue]:
     # that file is never emitted (and is absent from the File Tree too, so the
     # tree→files check above also misses it). Works on any test framework,
     # unlike the `test_`-prefixed name check below which is pytest-shaped.
-    emitted_files = {
-        _normalise_harness_path(path) for path in _FILE_HEADING_RE.findall(artifact_md)
-    }
-    if matrix and emitted_files:
-        matrix_files = {
-            _normalise_harness_path(token)
-            for token in _MATRIX_TEST_FILE_RE.findall(matrix)
-            if _looks_like_test_file_path(token)
-        }
-        missing_files = sorted(matrix_files - emitted_files)
+    if matrix:
+        matrix_files: dict[str, str] = {}
+        for token in _MATRIX_TEST_FILE_RE.findall(matrix):
+            if _looks_like_test_file_path(token):
+                matrix_files.setdefault(_canonical_test_path(token), token.strip())
+        missing_files = sorted(
+            disp
+            for canon, disp in matrix_files.items()
+            if not _file_is_emitted(canon, emitted)
+        )
         if missing_files:
             issues.append(
                 CompletenessIssue(
@@ -888,6 +1185,37 @@ def _harness_issues(artifact_md: str) -> list[CompletenessIssue]:
                 )
             )
     file_body = _section_body(artifact_md, "## Files")
+    # A requirement id that survives traceability (it appears SOMEWHERE in the
+    # harness) but is mapped to no test — present only in prose, e.g. an
+    # "FR-007..010 deferred to a follow-up" note — is the most genuine kind of
+    # missing coverage, and before this check it showed on ZERO deterministic
+    # surfaces: `uncovered_requirements`/`harness_matrix_missing_file` reason only
+    # about matrix rows that EXIST, and `_traceability_issues` counts the bare id
+    # string as covered. Advisory (non-blocking, CoverageGap) — mirrors the
+    # plan's `rtm_missing_upstream_id`. Fires only when BOTH the matrix and Files
+    # sections parsed (else a mis-titled section would false-positive every id),
+    # and an id counts as test-mapped if it appears in the matrix OR a File
+    # block's traceability comment — so a real test that merely lacks a matrix row
+    # is never falsely flagged (Fable verify #1).
+    if matrix and file_body:
+        upstream_req_ids = _upstream_requirement_ids(deps)
+        if upstream_req_ids:
+            mapped = set(_REQUIREMENT_ID_RE.findall(matrix))
+            mapped.update(_REQUIREMENT_ID_RE.findall(file_body))
+            present = set(_REQUIREMENT_ID_RE.findall(artifact_md))
+            untested = sorted((upstream_req_ids & present) - mapped)
+            if untested:
+                issues.append(
+                    CompletenessIssue(
+                        code="harness_requirement_not_test_mapped",
+                        detail=(
+                            "HARNESS names these requirements but maps none of "
+                            "them to a test in the Requirement-to-Test Matrix or a "
+                            f"test file: {', '.join(untested[:10])}."
+                        ),
+                        reference=", ".join(untested[:10]),
+                    )
+                )
     test_names = set(re.findall(r"\btest_[A-Za-z0-9_]+", file_body))
     matrix_tests = set(re.findall(r"\btest_[A-Za-z0-9_]+", matrix))
     missing_tests = sorted(matrix_tests - test_names)
@@ -929,7 +1257,7 @@ def _harness_issues(artifact_md: str) -> list[CompletenessIssue]:
                 reference="## Files",
             )
         )
-    file_headings = re.findall(r"^###\s+File:\s+(.+?)$", artifact_md, re.MULTILINE)
+    file_headings = _FILE_HEADING_RE.findall(artifact_md)
     complete_paths = {match.group(1).strip() for match in file_blocks}
     for path in file_headings:
         if path.strip() not in complete_paths:
@@ -965,11 +1293,26 @@ def _file_tree_paths(body: str) -> set[str]:
         line = raw.strip()
         if not line or line.startswith("```"):
             continue
-        line = re.sub(r"^[├└│\s`-]+", "", line).strip()
+        # Strip the tree-drawing prefix — Unicode box-drawing (├ └ │ ─ and the
+        # heavy/curved variants) and the ASCII fallbacks (`|`, `+`, `-`) both —
+        # then any trailing `# annotation`. The horizontal ─ (U+2500) MUST be in
+        # the class or a nested leaf keeps a ``── name`` prefix (with a space) and
+        # is then rejected as prose (the exact reason nested-tree leaves were
+        # dropped — Fable #8).
+        line = re.sub(r"^[\s`│─├└┃┏┗┣┓┛┫╰╯╭╮|+-]+", "", line).strip()
         line = line.split("#", 1)[0].strip()
-        if not line or line.endswith("/"):
+        if not line or line.endswith("/") or line.endswith(":"):
             continue
-        if "/" in line and "." in line.rsplit("/", 1)[-1]:
+        # A real tree entry is a single whitespace-free token. Reject prose lines
+        # (legends, notes) a model sometimes drops into the tree block — they
+        # would otherwise be mistaken for a "path" with spaces in it.
+        if " " in line or "\t" in line:
+            continue
+        # Accept a directory-qualified path OR a bare leaf filename (a nested
+        # tree renders leaves as bare names once the branch glyphs are stripped —
+        # Fable #8). Bare names are basename-matched against emitted headings, so
+        # this never manufactures a phantom "missing".
+        if "." in line.rsplit("/", 1)[-1]:
             paths.add(line)
     return paths
 
@@ -1218,7 +1561,7 @@ def _harness_test_refs(harness: str) -> set[str]:
     current_path: str | None = None
     current_class: str | None = None
     for line in harness.splitlines():
-        heading = re.match(r"^###\s+File:\s+(.+?)$", line)
+        heading = re.match(r"^#{2,3}\s+File:\s+(.+?)$", line)
         if heading:
             current_path = heading.group(1).strip()
             if current_path.startswith("harness/"):
