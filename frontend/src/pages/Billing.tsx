@@ -1,14 +1,6 @@
-/*
-Visual hierarchy: current balance first (with any payment-reversal debt shown as a
-quiet, distinct slate note beside it — never folded into the usable figure), the
-single credit pack offer second, and purchase history third. Tiny delight: the
-brand mark pulses while we settle the checkout, and the balance figure gives a gentle
-saffron tick-up when new credits land.
-*/
 import { useCallback, useEffect, useMemo, useState } from "react"
 import { Link, useSearchParams } from "react-router-dom"
 
-import { AiDisclaimer } from "../components/shared/AiDisclaimer"
 import { ActionAlertPanel } from "../components/shared/ActionAlert"
 import { BrandLogo } from "../components/shared/BrandLogo"
 import {
@@ -25,18 +17,22 @@ import { billingAlert } from "../utils/errorPresentation"
 type LoadState = "loading" | "ready" | "error"
 type PollingStatus = "idle" | "processing" | "completed" | "timeout" | "error"
 
+const PAYMENT_POLL_INTERVAL_MS = 2_000
+const PAYMENT_POLL_TIMEOUT_MS = 30_000
+const EXPIRY_WARNING_DAYS = 7
+
 const statusLabels: Record<BillingCreditPack["status"], string> = {
   active: "Active",
-  consumed: "Consumed",
+  consumed: "Used",
   expired: "Expired",
   refunded: "Refunded",
-  disputed: "Refunded",
+  disputed: "Disputed",
 }
 
 function formatDate(value: string | null | undefined, withYear = true): string {
-  if (!value) return "pending"
+  if (!value) return "—"
   const date = new Date(value)
-  if (Number.isNaN(date.getTime())) return "pending"
+  if (Number.isNaN(date.getTime())) return "—"
   return new Intl.DateTimeFormat(undefined, {
     month: "short",
     day: "numeric",
@@ -44,53 +40,83 @@ function formatDate(value: string | null | undefined, withYear = true): string {
   }).format(date)
 }
 
-function formatPrice(priceCents: number, currency: string): string {
-  const normalizedCurrency = (currency || "usd").toUpperCase()
+export function formatBillingPrice(priceMinorUnits: number, currency: string): string {
+  const normalizedCurrency = (currency || "USD").trim().toUpperCase()
   try {
-    return (priceCents / 100).toLocaleString("en-US", {
+    const formatter = new Intl.NumberFormat(undefined, {
       style: "currency",
       currency: normalizedCurrency,
-      maximumFractionDigits: 0,
     })
+    const fractionDigits = formatter.resolvedOptions().maximumFractionDigits ?? 2
+    return formatter.format(priceMinorUnits / 10 ** fractionDigits)
   } catch {
-    // Fallback for runtimes without the currency in Intl's data set: prefix the
-    // ISO code (e.g. "INR 799") rather than hardcoding "$", which would misprice
-    // every non-USD currency.
-    return `${normalizedCurrency} ${(priceCents / 100).toFixed(0)}`
+    const amount = priceMinorUnits / 100
+    return `${normalizedCurrency} ${amount.toFixed(priceMinorUnits % 100 === 0 ? 0 : 2)}`
   }
 }
 
-function activePackSummary(packs: BillingCreditPack[]): string | null {
+export function safeCheckoutUrl(value: string): string | null {
+  try {
+    const url = new URL(value)
+    return url.protocol === "https:" && url.username === "" && url.password === ""
+      ? url.toString()
+      : null
+  } catch {
+    return null
+  }
+}
+
+interface ActivePackSummary {
+  credits: number
+  count: number
+  nextExpiry: string
+  expiresSoon: boolean
+}
+
+function activePackSummary(packs: BillingCreditPack[]): ActivePackSummary | null {
   const activePacks = packs.filter(
     (pack) => pack.status === "active" && pack.credits_remaining > 0,
   )
   if (activePacks.length === 0) return null
 
-  const activeCredits = activePacks.reduce(
+  const credits = activePacks.reduce(
     (total, pack) => total + pack.credits_remaining,
     0,
   )
-  const soonest = [...activePacks].sort(
-    (a, b) => new Date(a.expires_at).getTime() - new Date(b.expires_at).getTime(),
-  )[0]
+  const nextExpiryTimestamp = Math.min(
+    ...activePacks
+      .map((pack) => new Date(pack.expires_at).getTime())
+      .filter((value) => Number.isFinite(value)),
+  )
+  const hasValidExpiry = Number.isFinite(nextExpiryTimestamp)
+  const daysUntilExpiry = hasValidExpiry
+    ? Math.ceil((nextExpiryTimestamp - Date.now()) / 86_400_000)
+    : Number.POSITIVE_INFINITY
 
-  return `${activeCredits} active · expires ${formatDate(soonest.expires_at, false)}`
+  return {
+    credits,
+    count: activePacks.length,
+    nextExpiry: hasValidExpiry
+      ? formatDate(new Date(nextExpiryTimestamp).toISOString(), false)
+      : "—",
+    expiresSoon: daysUntilExpiry >= 0 && daysUntilExpiry <= EXPIRY_WARNING_DAYS,
+  }
 }
 
 function BillingNav() {
   return (
-    <nav className="billing-nav">
+    <nav className="billing-nav" aria-label="Billing navigation">
       <div className="billing-nav-inner">
-        <Link to="/dashboard" className="billing-nav-back" aria-label="Back to Dashboard">
+        <Link to="/dashboard" className="billing-nav-back" aria-label="Back to dashboard">
           <span aria-hidden="true">←</span>
-          Dashboard
+          <span className="billing-nav-back-label">Dashboard</span>
         </Link>
         <div className="billing-nav-brand">
           <BrandLogo size="small" decorative />
           <span className="settings-nav-divider">/</span>
           <span className="settings-nav-section">Billing</span>
         </div>
-        <span className="billing-nav-spacer">spacer</span>
+        <span className="billing-nav-end" aria-hidden="true" />
       </div>
     </nav>
   )
@@ -100,88 +126,125 @@ interface PaymentStatusPanelProps {
   status: PollingStatus
   creditsAdded: number | null
   expiresAt: string | null
-  onRefresh: () => void
+  onRetry: () => void
+  onDismiss: () => void
 }
 
 function PaymentStatusPanel({
   status,
   creditsAdded,
   expiresAt,
-  onRefresh,
+  onRetry,
+  onDismiss,
 }: PaymentStatusPanelProps) {
   if (status === "idle") return null
 
+  if (status === "timeout" || status === "error") {
+    return (
+      <section className={`billing-payment-status ${status}`} aria-live="polite">
+        <ActionAlertPanel
+          {...billingAlert(status === "timeout" ? "payment-timeout" : "payment-error", {
+            primaryAction: {
+              label: "Check payment status",
+              onSelect: onRetry,
+              autoDismiss: false,
+            },
+          })}
+        />
+      </section>
+    )
+  }
+
   return (
-    <section className={`billing-payment-status ${status}`} aria-live="polite">
+    <section
+      className={`billing-payment-status ${status}`}
+      aria-live="polite"
+      aria-atomic="true"
+    >
       <div className="billing-payment-mark" aria-hidden="true">
-        <BrandLogo size="small" decorative />
+        {status === "completed" ? (
+          <svg viewBox="0 0 24 24" fill="none">
+            <path d="m6.5 12.5 3.4 3.4 7.6-8" />
+          </svg>
+        ) : (
+          <BrandLogo size="small" decorative />
+        )}
       </div>
-      {status === "processing" && (
-        <>
-          <h1>Adding your credits…</h1>
-          <p>This usually takes a few seconds.</p>
-        </>
-      )}
+      <div className="billing-payment-copy">
+        {status === "processing" ? (
+          <>
+            <h2>Confirming your payment</h2>
+            <p>Credits will appear automatically as soon as the payment is verified.</p>
+          </>
+        ) : (
+          <>
+            <h2>{creditsAdded ?? 0} credits added</h2>
+            <p>
+              Your balance is ready. These credits expire {formatDate(expiresAt)}.
+            </p>
+          </>
+        )}
+      </div>
       {status === "completed" && (
-        <>
-          <h1>
-            {creditsAdded ?? 0} credits added · expires {formatDate(expiresAt)}
-          </h1>
-          <p>Your balance has been refreshed.</p>
+        <div className="billing-payment-actions">
           <Link to="/dashboard" className="billing-status-link">
-            Continue to Dashboard →
+            Continue to dashboard
           </Link>
-        </>
-      )}
-      {status === "timeout" && (
-        <ActionAlertPanel
-          {...billingAlert("payment-timeout", {
-            primaryAction: {
-              label: "Refresh billing",
-              onSelect: onRefresh,
-              autoDismiss: false,
-            },
-          })}
-        />
-      )}
-      {status === "error" && (
-        <ActionAlertPanel
-          {...billingAlert("payment-error", {
-            primaryAction: {
-              label: "Refresh billing",
-              onSelect: onRefresh,
-              autoDismiss: false,
-            },
-          })}
-        />
+          <button type="button" className="billing-secondary-btn" onClick={onDismiss}>
+            Stay on billing
+          </button>
+        </div>
       )}
     </section>
   )
 }
 
+function BillingSkeleton() {
+  return (
+    <div className="billing-skeleton" aria-busy="true" aria-label="Loading billing details">
+      <div className="billing-skeleton-card billing-skeleton-balance" aria-hidden="true">
+        <span className="billing-skeleton-line short" />
+        <span className="billing-skeleton-line value" />
+        <span className="billing-skeleton-line medium" />
+      </div>
+      <div className="billing-skeleton-card billing-skeleton-offer" aria-hidden="true">
+        <span className="billing-skeleton-line short" />
+        <span className="billing-skeleton-line title" />
+        <span className="billing-skeleton-line medium" />
+        <span className="billing-skeleton-button" />
+      </div>
+      <div className="billing-skeleton-card billing-skeleton-history" aria-hidden="true">
+        <span className="billing-skeleton-line title" />
+        <span className="billing-skeleton-line wide" />
+        <span className="billing-skeleton-line wide" />
+      </div>
+    </div>
+  )
+}
+
 export default function Billing() {
-  const [searchParams] = useSearchParams()
+  const [searchParams, setSearchParams] = useSearchParams()
   const checkoutRef = searchParams.get("checkout_ref")
 
   const [loadState, setLoadState] = useState<LoadState>("loading")
   const [billingPackage, setBillingPackage] = useState<BillingPackage | null>(null)
   const [packs, setPacks] = useState<BillingCreditPack[]>([])
   const [balance, setBalance] = useState<number | null>(null)
+  const [generationCost, setGenerationCost] = useState<number | null>(null)
   const [debtCredits, setDebtCredits] = useState(0)
   const [checkoutError, setCheckoutError] = useState<string | null>(null)
   const [isStartingCheckout, setIsStartingCheckout] = useState(false)
+  const [pollAttempt, setPollAttempt] = useState(0)
   const [pollingStatus, setPollingStatus] = useState<PollingStatus>(
     checkoutRef ? "processing" : "idle",
   )
   const [creditsAdded, setCreditsAdded] = useState<number | null>(null)
   const [completedExpiresAt, setCompletedExpiresAt] = useState<string | null>(null)
-  // One-shot delight: tick the balance up in saffron when new credits land.
   const [balanceJustLanded, setBalanceJustLanded] = useState(false)
 
   const loadBillingData = useCallback(async (showLoading = true) => {
     if (showLoading) setLoadState("loading")
     try {
-      // Data endpoints: GET /billing/package, GET /billing/history, GET /credits/balance.
       const [packageResponse, historyResponse, creditsResponse] = await Promise.all([
         fetchBillingPackage(),
         fetchBillingHistory(),
@@ -190,8 +253,7 @@ export default function Billing() {
       setBillingPackage(packageResponse)
       setPacks(historyResponse)
       setBalance(creditsResponse.balance)
-      // Payment-reversal debt is read here but rendered as a distinct note — it is
-      // never added into the usable `balance` figure.
+      setGenerationCost(creditsResponse.generation_cost)
       setDebtCredits(creditsResponse.billing_debt_credits)
       setLoadState("ready")
     } catch {
@@ -227,27 +289,28 @@ export default function Billing() {
     }
 
     async function pollStatus() {
-      if (inFlight) return
+      if (inFlight || stopped) return
       inFlight = true
       try {
-        // Polling endpoint: GET /billing/status?checkout_ref=...
-        // A null result is a 404 = "not granted yet" (pending); a thrown error is real.
         const result = await fetchBillingStatus(ref)
         if (stopped) return
 
         if (result?.status === "completed") {
+          stopped = true
           stopPolling()
           setPollingStatus("completed")
           setCreditsAdded(result.credits_added)
           setCompletedExpiresAt(result.expires_at)
           setBalanceJustLanded(true)
           void loadBillingData(false)
-        } else if (elapsed >= 30) {
+        } else if (elapsed >= PAYMENT_POLL_TIMEOUT_MS) {
+          stopped = true
           stopPolling()
           setPollingStatus("timeout")
         }
       } catch {
         if (!stopped) {
+          stopped = true
           stopPolling()
           setPollingStatus("error")
         }
@@ -257,42 +320,60 @@ export default function Billing() {
     }
 
     intervalId = window.setInterval(() => {
-      elapsed += 2
+      elapsed += PAYMENT_POLL_INTERVAL_MS
       void pollStatus()
-    }, 2000)
+    }, PAYMENT_POLL_INTERVAL_MS)
     timeoutId = window.setTimeout(() => {
       if (stopped) return
       stopped = true
       stopPolling()
       setPollingStatus("timeout")
-    }, 30_000)
+    }, PAYMENT_POLL_TIMEOUT_MS)
     void pollStatus()
 
     return () => {
       stopped = true
       stopPolling()
     }
-  }, [loadBillingData, checkoutRef])
+  }, [checkoutRef, loadBillingData, pollAttempt])
 
-  const balanceSummary = useMemo(() => activePackSummary(packs), [packs])
+  const packSummary = useMemo(() => activePackSummary(packs), [packs])
+  const standardActions = useMemo(() => {
+    if (!billingPackage || !generationCost || generationCost <= 0) return null
+    return Math.floor(billingPackage.credits / generationCost)
+  }, [billingPackage, generationCost])
+
+  const dismissPaymentStatus = useCallback(() => {
+    const nextParams = new URLSearchParams(searchParams)
+    nextParams.delete("checkout_ref")
+    setSearchParams(nextParams, { replace: true })
+    setPollingStatus("idle")
+  }, [searchParams, setSearchParams])
+
+  const retryPaymentStatus = useCallback(() => {
+    setPollingStatus("processing")
+    setPollAttempt((attempt) => attempt + 1)
+  }, [])
 
   async function handleBuyCredits() {
-    if (isStartingCheckout) return
+    if (isStartingCheckout || !billingPackage) return
     setCheckoutError(null)
     setIsStartingCheckout(true)
     try {
       const response = await createCheckoutSession()
-      window.location.href = response.checkout_url
+      const checkoutUrl = safeCheckoutUrl(response.checkout_url)
+      if (!checkoutUrl) throw new Error("Unsafe checkout URL")
+      window.location.assign(checkoutUrl)
     } catch (error) {
       setCheckoutError(
-        getApiErrorMessage(error, "Could not open checkout. Please try again."),
+        getApiErrorMessage(error, "Could not open secure checkout. Please try again."),
       )
       setIsStartingCheckout(false)
     }
   }
 
   const packagePrice = billingPackage
-    ? formatPrice(billingPackage.price_cents, billingPackage.currency)
+    ? formatBillingPrice(billingPackage.price_cents, billingPackage.currency)
     : null
 
   return (
@@ -306,28 +387,39 @@ export default function Billing() {
       <BillingNav />
 
       <main className="billing-main">
+        <header className="billing-hero">
+          <div>
+            <p className="billing-eyebrow">Account</p>
+            <h1>Billing &amp; credits</h1>
+            <p className="billing-hero-copy">
+              Review your balance, add a one-time credit pack, and see when every
+              purchase expires.
+            </p>
+          </div>
+          <div className="billing-trust-list" aria-label="Purchase terms">
+            <span>One-time packs</span>
+            <span>Secure hosted checkout</span>
+            <span>No subscription</span>
+          </div>
+        </header>
+
         <PaymentStatusPanel
           status={pollingStatus}
           creditsAdded={creditsAdded}
           expiresAt={completedExpiresAt}
-          onRefresh={() => void loadBillingData(false)}
+          onRetry={retryPaymentStatus}
+          onDismiss={dismissPaymentStatus}
         />
 
         {loadState === "loading" && !billingPackage ? (
-          <section className="billing-state-panel" aria-live="polite">
-            <span className="billing-state-kicker">Billing</span>
-            <h1>Preparing your credit options…</h1>
-            <p>We are fetching your balance and the current package.</p>
-          </section>
+          <BillingSkeleton />
         ) : loadState === "error" && !billingPackage ? (
           <section className="billing-state-panel error">
             <ActionAlertPanel
               {...billingAlert("load", {
                 primaryAction: {
                   label: "Try again",
-                  onSelect: () => {
-                    void loadBillingData()
-                  },
+                  onSelect: () => void loadBillingData(),
                   autoDismiss: false,
                 },
               })}
@@ -335,55 +427,90 @@ export default function Billing() {
           </section>
         ) : billingPackage ? (
           <>
-            <section className="billing-balance-panel" aria-labelledby="billing-balance-title">
-              <div>
-                <p className="billing-eyebrow">Credit balance</p>
-                <h1
-                  id="billing-balance-title"
-                  className={`billing-balance-value${balanceJustLanded ? " landed" : ""}`}
-                  onAnimationEnd={() => setBalanceJustLanded(false)}
-                >
-                  {balance ?? "—"}
-                </h1>
-                <p className="billing-balance-label">credits remaining</p>
+            <div className="billing-overview-grid">
+              <section className="billing-balance-panel" aria-labelledby="billing-balance-title">
+                <div className="billing-card-heading">
+                  <p className="billing-eyebrow">Wallet</p>
+                  <h2 id="billing-balance-title">Available balance</h2>
+                </div>
+                <div className="billing-balance-display" aria-live="polite">
+                  <output
+                    className={`billing-balance-value${balanceJustLanded ? " landed" : ""}`}
+                    onAnimationEnd={() => setBalanceJustLanded(false)}
+                  >
+                    {balance ?? "—"}
+                  </output>
+                  <span>credits</span>
+                </div>
+                {packSummary ? (
+                  <div className="billing-balance-meta">
+                    <p>
+                      <strong>{packSummary.credits}</strong> purchased credits across{" "}
+                      {packSummary.count} active {packSummary.count === 1 ? "pack" : "packs"}
+                    </p>
+                    <p className={packSummary.expiresSoon ? "urgent" : ""}>
+                      Next expiry <strong>{packSummary.nextExpiry}</strong>
+                    </p>
+                  </div>
+                ) : (
+                  <p className="billing-balance-empty">
+                    Purchased credits will appear here after checkout.
+                  </p>
+                )}
+                {generationCost !== null && generationCost > 0 && (
+                  <p className="billing-generation-cost">
+                    A standard stage generation uses {generationCost} credits.
+                  </p>
+                )}
                 {debtCredits > 0 && (
                   <p className="billing-debt-note" role="note">
                     {debtCredits} {debtCredits === 1 ? "credit" : "credits"} from a
                     reversed payment will be recovered from your next top-up.
                   </p>
                 )}
-              </div>
-              <p className="billing-balance-summary">
-                {balanceSummary ?? "Purchased credits will appear here after checkout."}
-              </p>
-            </section>
+              </section>
 
-            <section className="billing-offer-grid" aria-label="Credit purchase options">
-              <article className="billing-package-card">
-                <div className="billing-package-copy">
-                  <span className="billing-eyebrow">Credit pack</span>
-                  <h2>{billingPackage.credits} credits</h2>
-                  <p className="billing-package-price">{packagePrice}</p>
-                  <p className="billing-package-validity">
-                    {billingPackage.validity_days}-day validity
-                  </p>
+              <article className="billing-package-card" aria-labelledby="billing-package-title">
+                <div className="billing-package-topline">
+                  <span className="billing-eyebrow">One-time credit pack</span>
+                  <span className="billing-package-badge">No subscription</span>
+                </div>
+                <div className="billing-package-hero">
+                  <div>
+                    <h2 id="billing-package-title">{billingPackage.credits} credits</h2>
+                    <p className="billing-package-price">{packagePrice}</p>
+                  </div>
+                  <dl className="billing-package-facts">
+                    {standardActions !== null && standardActions > 0 && (
+                      <div>
+                        <dt>{standardActions}</dt>
+                        <dd>standard stage generations</dd>
+                      </div>
+                    )}
+                    <div>
+                      <dt>{billingPackage.validity_days} days</dt>
+                      <dd>to use this pack</dd>
+                    </div>
+                  </dl>
                 </div>
                 {billingPackage.enabled ? (
-                  <button
-                    type="button"
-                    className="billing-buy-btn"
-                    onClick={() => void handleBuyCredits()}
-                    disabled={isStartingCheckout}
-                  >
-                    {isStartingCheckout ? "Opening checkout…" : "Buy Credits →"}
-                  </button>
+                  <div className="billing-purchase-action">
+                    <button
+                      type="button"
+                      className="billing-buy-btn"
+                      onClick={() => void handleBuyCredits()}
+                      disabled={isStartingCheckout}
+                    >
+                      {isStartingCheckout
+                        ? "Opening secure checkout…"
+                        : `Buy ${billingPackage.credits} credits · ${packagePrice}`}
+                    </button>
+                    <p>You’ll review the final total before payment.</p>
+                  </div>
                 ) : (
-                  // Kill switch / pre-launch (PAYMENTS_ENABLED=false): keep the pricing
-                  // card intact and swap only the button for a quiet slate note. Copy
-                  // reads coherently for someone arriving from an out-of-credits alert.
                   <p className="billing-unavailable-note" role="note">
-                    Credit purchases aren't available yet. Any credits you've already
-                    bought remain valid.
+                    Credit purchases are temporarily unavailable. Credits you already
+                    own remain valid.
                   </p>
                 )}
                 {billingPackage.enabled && checkoutError && (
@@ -395,9 +522,7 @@ export default function Billing() {
                     source="Billing"
                     primaryAction={{
                       label: "Try again",
-                      onSelect: () => {
-                        void handleBuyCredits()
-                      },
+                      onSelect: () => void handleBuyCredits(),
                       autoDismiss: false,
                     }}
                     onDismiss={() => setCheckoutError(null)}
@@ -405,45 +530,54 @@ export default function Billing() {
                   />
                 )}
               </article>
-            </section>
+            </div>
 
             <section className="billing-history-section" aria-labelledby="billing-history-title">
               <div className="billing-section-header">
                 <div>
                   <p className="billing-eyebrow">Purchase history</p>
-                  <h2 id="billing-history-title">Credits ledger</h2>
+                  <h2 id="billing-history-title">Credit packs</h2>
+                  <p>Purchased amounts, remaining balances, and expiry dates.</p>
                 </div>
               </div>
 
               {packs.length === 0 ? (
                 <div className="billing-empty-history">
-                  <p>No purchases yet.</p>
-                  <p>Credits are valid for {billingPackage.validity_days} days from purchase.</p>
+                  <p>No purchases yet</p>
+                  <p>
+                    New packs remain available for {billingPackage.validity_days} days
+                    from purchase.
+                  </p>
                 </div>
               ) : (
                 <div className="billing-history-table-wrap">
                   <table className="billing-history-table">
                     <thead>
                       <tr>
-                        <th scope="col">Date</th>
-                        <th scope="col">Credits</th>
+                        <th scope="col">Purchased</th>
+                        <th scope="col">Amount</th>
+                        <th scope="col">Credit balance</th>
                         <th scope="col">Status</th>
-                        <th scope="col">Expiry date</th>
+                        <th scope="col">Expires</th>
                       </tr>
                     </thead>
                     <tbody>
                       {packs.map((pack) => (
                         <tr key={pack.id}>
-                          <td>{formatDate(pack.purchased_at)}</td>
-                          <td>
-                            {pack.credits_purchased} / {pack.credits_remaining}
+                          <td data-label="Purchased">{formatDate(pack.purchased_at)}</td>
+                          <td data-label="Amount">
+                            {formatBillingPrice(pack.price_cents, pack.currency)}
                           </td>
-                          <td>
+                          <td data-label="Credit balance">
+                            <strong>{pack.credits_remaining}</strong> of{" "}
+                            {pack.credits_purchased} remaining
+                          </td>
+                          <td data-label="Status">
                             <span className={`billing-status-chip ${pack.status}`}>
                               {statusLabels[pack.status]}
                             </span>
                           </td>
-                          <td>{formatDate(pack.expires_at)}</td>
+                          <td data-label="Expires">{formatDate(pack.expires_at)}</td>
                         </tr>
                       ))}
                     </tbody>
@@ -453,7 +587,6 @@ export default function Billing() {
             </section>
           </>
         ) : null}
-        <AiDisclaimer variant="footer" className="billing-ai-disclaimer" />
       </main>
     </div>
   )

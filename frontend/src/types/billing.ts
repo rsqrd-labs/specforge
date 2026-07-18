@@ -15,6 +15,7 @@ export interface BillingCreditPack {
   credits_purchased: number
   credits_remaining: number
   price_cents: number
+  currency: string
   status: "active" | "consumed" | "expired" | "refunded" | "disputed"
   purchased_at: string
   expires_at: string

@@ -800,6 +800,7 @@ async def test_history_reads_billing_credit_packs() -> None:
     rows = resp.json()
     assert len(rows) == 1
     assert rows[0]["credits_purchased"] == 200
+    assert rows[0]["currency"] == "USD"
     assert rows[0]["status"] == "active"
 
 

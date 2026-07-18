@@ -97,6 +97,11 @@ class PackHistoryItem(BaseModel):
     credits_purchased: int = Field(ge=0)
     credits_remaining: int = Field(ge=0)
     price_cents: int = Field(ge=0)
+    currency: str = Field(
+        min_length=3,
+        max_length=3,
+        description="ISO 4217 currency code captured when the pack was purchased",
+    )
     status: Literal["active", "consumed", "expired", "refunded", "disputed"]
     purchased_at: datetime
     expires_at: datetime

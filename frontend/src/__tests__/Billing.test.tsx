@@ -1,9 +1,9 @@
 import { render, screen, waitFor } from "@testing-library/react"
+import userEvent from "@testing-library/user-event"
 import { MemoryRouter } from "react-router-dom"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
-import Billing from "../pages/Billing"
-import { AI_DISCLAIMER_COPY } from "../components/shared/AiDisclaimer"
+import Billing, { formatBillingPrice, safeCheckoutUrl } from "../pages/Billing"
 import {
   createCheckoutSession,
   fetchBillingHistory,
@@ -43,6 +43,7 @@ function pack(overrides: Partial<BillingCreditPack>): BillingCreditPack {
     credits_purchased: 200,
     credits_remaining: 200,
     price_cents: 900,
+    currency: "USD",
     status: "active",
     purchased_at: "2026-01-01T00:00:00Z",
     expires_at: "2026-02-01T00:00:00Z",
@@ -78,23 +79,39 @@ afterEach(() => {
 })
 
 describe("Billing — history rendering", () => {
-  it("renders BillingCreditPack rows with a calm 'Refunded' chip and no Stripe copy", async () => {
+  it("renders exact purchase economics and distinct lifecycle labels", async () => {
     mockHistory.mockResolvedValue([
       pack({ id: "p-active", status: "active" }),
-      pack({ id: "p-refunded", status: "refunded", credits_remaining: 0 }),
+      pack({
+        id: "p-disputed",
+        status: "disputed",
+        credits_remaining: 0,
+        price_cents: 1_050,
+      }),
     ])
 
     const { container } = renderBilling()
 
     await waitFor(() => expect(screen.getByText("Active")).toBeInTheDocument())
-    expect(screen.getByText("Refunded")).toBeInTheDocument()
-    // The refunded chip is the calm slate variant, never the red error chip.
-    const refundedChip = container.querySelector(".billing-status-chip.refunded")
-    expect(refundedChip).not.toBeNull()
+    expect(screen.getByText("Disputed")).toBeInTheDocument()
+    const creditCells = container.querySelectorAll(".billing-history-table td:nth-child(3)")
+    expect(creditCells[1]?.textContent).toMatch(/0 of 200 remaining/i)
+    expect(screen.getByText(/\$10\.50/)).toBeInTheDocument()
+    const disputedChip = container.querySelector(".billing-status-chip.disputed")
+    expect(disputedChip).not.toBeNull()
     expect(container.querySelector(".billing-nav-brand .brand-logo-image")).not.toBeNull()
     expect(container.textContent).not.toMatch(/Stripe/)
     expect(container.textContent).not.toMatch(/\bSF\b/)
-    expect(screen.getByText(AI_DISCLAIMER_COPY)).toBeInTheDocument()
+  })
+
+  it("uses a single page heading and presents checkout terms before the CTA", async () => {
+    renderBilling()
+
+    await waitFor(() => expect(screen.getByRole("heading", { level: 1 })).toBeVisible())
+    expect(screen.getAllByRole("heading", { level: 1 })).toHaveLength(1)
+    expect(screen.getByRole("heading", { name: /billing & credits/i })).toBeVisible()
+    expect(screen.getAllByText(/no subscription/i).length).toBeGreaterThan(0)
+    expect(screen.getByText(/secure hosted checkout/i)).toBeVisible()
   })
 })
 
@@ -122,7 +139,7 @@ describe("Billing — checkout_ref polling", () => {
     renderBilling("/billing?checkout_ref=ref-pending")
 
     await waitFor(() =>
-      expect(screen.getByText(/adding your credits/i)).toBeInTheDocument(),
+      expect(screen.getByText(/confirming your payment/i)).toBeInTheDocument(),
     )
     expect(screen.queryByText(/unable to verify/i)).not.toBeInTheDocument()
   })
@@ -135,6 +152,40 @@ describe("Billing — checkout_ref polling", () => {
     await waitFor(() =>
       expect(screen.getByText(/payment status could not be verified/i)).toBeInTheDocument(),
     )
+  })
+
+  it("restarts status polling when the recovery action is selected", async () => {
+    const user = userEvent.setup()
+    mockStatus
+      .mockRejectedValueOnce(new Error("temporary network failure"))
+      .mockResolvedValue({
+        status: "completed",
+        credits_added: 200,
+        expires_at: "2026-02-01T00:00:00Z",
+      })
+
+    renderBilling("/billing?checkout_ref=ref-retry")
+
+    const retry = await screen.findByRole("button", { name: /check payment status/i })
+    await user.click(retry)
+
+    await waitFor(() => expect(mockStatus).toHaveBeenCalledTimes(2))
+    expect(await screen.findByText(/200 credits added/i)).toBeVisible()
+  })
+
+  it("lets the user dismiss a completed receipt without losing billing data", async () => {
+    const user = userEvent.setup()
+    mockStatus.mockResolvedValue({
+      status: "completed",
+      credits_added: 200,
+      expires_at: "2026-02-01T00:00:00Z",
+    })
+
+    renderBilling("/billing?checkout_ref=ref-dismiss")
+
+    await user.click(await screen.findByRole("button", { name: /stay on billing/i }))
+    expect(screen.queryByText(/200 credits added/i)).not.toBeInTheDocument()
+    expect(screen.getByRole("heading", { name: /available balance/i })).toBeVisible()
   })
 })
 
@@ -177,17 +228,18 @@ describe("Billing — checkout availability gate (issue #44)", () => {
       expect(screen.getByText("200 credits")).toBeInTheDocument(),
     )
     expect(container.querySelector(".billing-package-card")).not.toBeNull()
-    expect(screen.getByText(/30-day validity/)).toBeInTheDocument()
+    expect(screen.getByText("30 days")).toBeInTheDocument()
+    expect(screen.getByText(/to use this pack/i)).toBeInTheDocument()
 
     // No Buy button; a calm role=note note in its place (coherent when arriving
     // from an out-of-credits alert).
     expect(
-      screen.queryByRole("button", { name: /buy credits/i }),
+      screen.queryByRole("button", { name: /buy .*credits/i }),
     ).not.toBeInTheDocument()
     const note = container.querySelector(".billing-unavailable-note")
     expect(note).not.toBeNull()
     expect(note?.getAttribute("role")).toBe("note")
-    expect(note?.textContent).toMatch(/aren't available yet/i)
+    expect(note?.textContent).toMatch(/temporarily unavailable/i)
   })
 
   it("shows the Buy button when checkout is enabled", async () => {
@@ -196,7 +248,7 @@ describe("Billing — checkout availability gate (issue #44)", () => {
     const { container } = renderBilling()
 
     await waitFor(() =>
-      expect(screen.getByRole("button", { name: /buy credits/i })).toBeInTheDocument(),
+      expect(screen.getByRole("button", { name: /buy .*credits/i })).toBeInTheDocument(),
     )
     expect(container.querySelector(".billing-unavailable-note")).toBeNull()
   })
@@ -223,6 +275,10 @@ describe("Billing — checkout availability gate (issue #44)", () => {
 })
 
 describe("Billing — currency formatting (issue #44)", () => {
+  it("preserves fractional minor units instead of rounding the displayed price", () => {
+    expect(formatBillingPrice(1_050, "USD")).toMatch(/\$10\.50/)
+  })
+
   it("renders INR as ₹ via the Intl path", async () => {
     mockPackage.mockResolvedValue({
       ...PACKAGE,
@@ -258,5 +314,31 @@ describe("Billing — currency formatting (issue #44)", () => {
     const price = container.querySelector(".billing-package-price")?.textContent ?? ""
     expect(price).toMatch(/INRX\s?799/)
     expect(price).not.toMatch(/\$/)
+  })
+})
+
+describe("Billing — checkout navigation hardening", () => {
+  it("accepts only credential-free HTTPS checkout URLs", () => {
+    expect(safeCheckoutUrl("https://pay.lemonsqueezy.com/checkout/abc")).toMatch(
+      /^https:\/\/pay\.lemonsqueezy\.com/,
+    )
+    expect(safeCheckoutUrl("http://pay.example.test/checkout")).toBeNull()
+    expect(safeCheckoutUrl("javascript:alert(1)")).toBeNull()
+    expect(safeCheckoutUrl("https://user:secret@pay.example.test/checkout")).toBeNull()
+    expect(safeCheckoutUrl("not a URL")).toBeNull()
+  })
+
+  it("does not navigate when the API returns an unsafe checkout URL", async () => {
+    const user = userEvent.setup()
+    mockCreateCheckout.mockResolvedValue({
+      checkout_url: "javascript:alert(1)",
+      checkout_ref: "ref-unsafe",
+    })
+
+    renderBilling()
+
+    await user.click(await screen.findByRole("button", { name: /buy 200 credits/i }))
+    expect(await screen.findByText(/checkout could not open/i)).toBeVisible()
+    expect(screen.getByText(/could not open secure checkout/i)).toBeVisible()
   })
 })
