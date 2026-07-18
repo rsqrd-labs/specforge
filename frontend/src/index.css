@@ -9813,6 +9813,67 @@ button:disabled {
   line-height: 1.2;
 }
 
+/* Stage cards share horizontal space with a persistent right rail, so their
+   real width is much smaller than the viewport. Keep identity/rollback on the
+   first tier and validation signals on a second tier; this prevents the signal
+   cluster from crushing the stage title down to a few clipped characters. */
+.workspace-stage-pane-header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 12px;
+}
+
+.workspace-stage-header-topline,
+.workspace-stage-header-summary {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  min-width: 0;
+  gap: 12px;
+}
+
+.workspace-stage-header-topline > .workspace-pane-left {
+  min-width: 12rem;
+}
+
+.workspace-stage-header-summary {
+  padding-top: 11px;
+  border-top: 1px solid rgba(143, 78, 0, 0.10);
+}
+
+.workspace-stage-header-summary .workspace-pane-actions {
+  justify-content: flex-start;
+  flex: 1 1 auto;
+  min-width: 0;
+  padding-top: 0;
+}
+
+.ws-view-toggle-compact {
+  min-height: 38px;
+  height: 38px;
+  padding-inline: 14px;
+  border-radius: 10px;
+  font-size: 13px;
+  flex: 0 0 auto;
+}
+
+.ws-stage-unlock-action {
+  background: rgba(255, 255, 255, 0.76);
+  color: var(--ink-text);
+}
+
+@container (max-width: 680px) {
+  .workspace-stage-header-topline,
+  .workspace-stage-header-summary {
+    flex-direction: column;
+  }
+
+  .workspace-stage-header-topline > .workspace-pane-left {
+    min-width: 0;
+    width: 100%;
+  }
+}
+
 .workspace-pane-subtitle {
   font-size: 12px;
   line-height: 1.4;
@@ -10393,6 +10454,11 @@ button:disabled {
     border-left: 0;
     border-top: 1px solid rgba(143, 78, 0, 0.09);
   }
+}
+
+.workspace-stage-document,
+.spec-document-card {
+  container-type: inline-size;
 }
 
 .workspace-stage-document {

@@ -30,6 +30,7 @@ import {
 } from "../components/workspace/StreamingOverlay"
 import { MarkdownRenderer } from "../components/workspace/MarkdownRenderer"
 import { StageEmptyState } from "../components/workspace/StageEmptyState"
+import { StageEditAction } from "../components/workspace/StageEditAction"
 import { TasksBoard } from "../components/workspace/TasksBoard"
 import { ProblemStatementPanel } from "../components/workspace/ProblemStatementPanel"
 import { ResearchConsentToggle } from "../components/workspace/ResearchConsentToggle"
@@ -2072,15 +2073,25 @@ export default function Workspace() {
       (genuineGapIssues.length > 0 ||
         deferredCoverageIssues.length > 0 ||
         githubSync.data !== null))
-  // A finalised stage is locked-in: its content is read-only until it is
-  // explicitly regenerated/refined into a new draft, so the Edit toggle must
-  // be disabled rather than silently dropping the user into an editor that
-  // cannot be saved.
+  const showQualitySignal =
+    evalResult !== null || isEvalError || activeStage.status === "in_progress"
+  const showConstructionSignal =
+    isDemoDayWorkspace &&
+    activeStage.type === "tasks" &&
+    constructionVerdict !== null &&
+    constructionVerdict !== undefined
+  const showTaskValidationSignals =
+    activeStage.type === "tasks" && evalResult !== null
+  const showStageHeaderSummary =
+    showQualitySignal || showConstructionSignal || showTaskValidationSignals
+  // A finalised stage stays read-only until the user explicitly unlocks it.
+  // The header swaps Edit for that rollback action, which remains available
+  // unless another generation currently owns the workspace action lock.
   const isStageFinalised = activeStage.status === "finalised"
-  const editToggleDisabled = workspaceGenerationLock.locked || isStageFinalised
-  const editToggleDisabledReason = isStageFinalised
-    ? "This stage is finalised. Regenerate or refine it to make changes."
-    : workspaceLockReason
+  const stageEditActionDisabled = workspaceGenerationLock.locked
+  const stageEditActionDisabledReason = workspaceGenerationLock.locked
+    ? workspaceLockReason
+    : undefined
   const finalisedCount = stages.filter((stage) => stage.status === "finalised").length
   const readiness = stages.length === 0 ? 0 : Math.round((finalisedCount / stages.length) * 100)
   const currentStageIndex = STAGE_ORDER.indexOf(activeStage.type)
@@ -2540,22 +2551,25 @@ export default function Workspace() {
           />
         ) : null}
 
-        {/* Generate bar */}
-        <div className="generate-bar">
-          <GenerateBar
-            stage={activeStage}
-            onGenerate={() => void requestGeneration("generate")}
-            onRegenerate={() => void requestGeneration("regenerate")}
-            onRefine={requestRefine}
-            onFinalise={handleFinalise}
-            onUnlock={() => void performRollback(activeStage.current_version)}
-            isBusy={isGenerationBusy}
-            busyOperation={activeBusyOperation}
-            busyLabel={workspaceGenerationLock.busyLabel || undefined}
-            qualityGateBlocked={qualityGateBlocked}
-            qualityGateBlockedMessage={qualityGateBlockedMessage}
-          />
-        </div>
+        {/* Finalised stages keep their rollback action beside the document
+            title. Avoid a full-width action band containing only "Unlock". */}
+        {activeStage.status !== "finalised" && (
+          <div className="generate-bar">
+            <GenerateBar
+              stage={activeStage}
+              onGenerate={() => void requestGeneration("generate")}
+              onRegenerate={() => void requestGeneration("regenerate")}
+              onRefine={requestRefine}
+              onFinalise={handleFinalise}
+              onUnlock={() => void performRollback(activeStage.current_version)}
+              isBusy={isGenerationBusy}
+              busyOperation={activeBusyOperation}
+              busyLabel={workspaceGenerationLock.busyLabel || undefined}
+              qualityGateBlocked={qualityGateBlocked}
+              qualityGateBlockedMessage={qualityGateBlockedMessage}
+            />
+          </div>
+        )}
 
         {/* Refine input */}
         {showRefineInput && (
@@ -2669,40 +2683,49 @@ export default function Workspace() {
             />
 
             <section className="workspace-document-card spec-document-card">
-              <div className="workspace-pane-header">
-                <div className="workspace-pane-left">
-                  <h2 className="workspace-pane-title spec-pane-title">Generated Spec</h2>
-                  <div className="ws-pane-chips">
-                    <span className={`workspace-status-chip ${activeStage.status}`}>
-                      {formatStageStatus(activeStage.status)}
-                    </span>
-                    <BlockedPartialBadge stage={activeStage} />
-                    {workspaceGenerationLock.locked && (
-                      <span className="workspace-lock-chip">Editing paused</span>
-                    )}
+              <div className="workspace-pane-header workspace-stage-pane-header">
+                <div className="workspace-stage-header-topline">
+                  <div className="workspace-pane-left">
+                    <h2 className="workspace-pane-title spec-pane-title">Generated Spec</h2>
+                    <div className="ws-pane-chips">
+                      <span className={`workspace-status-chip ${activeStage.status}`}>
+                        {formatStageStatus(activeStage.status)}
+                      </span>
+                      <BlockedPartialBadge stage={activeStage} />
+                      {workspaceGenerationLock.locked && (
+                        <span className="workspace-lock-chip">Editing paused</span>
+                      )}
+                    </div>
                   </div>
-                </div>
-                <div className="workspace-pane-actions">
-                  <QualityBadge
-                    evalResult={evalResult}
-                    error={isEvalError}
-                    checking={activeStage.status === "in_progress"}
-                  />
-                  {!diffResult && activeStage.status !== "locked" && (
-                    <button
-                      type="button"
-                      className="ws-view-toggle"
-                      onClick={() =>
+                  {!diffResult && (
+                    <StageEditAction
+                      stage={activeStage}
+                      isEditing={specViewMode === "edit"}
+                      onToggleEdit={() =>
                         setSpecViewMode((m) => (m === "edit" ? "preview" : "edit"))
                       }
-                      disabled={editToggleDisabled}
-                      title={editToggleDisabled ? editToggleDisabledReason : undefined}
-                      aria-describedby={workspaceGenerationLock.locked ? "workspace-lock-action-reason" : undefined}
-                    >
-                      {specViewMode === "edit" ? "Preview" : "Edit"}
-                    </button>
+                      onUnlock={() => void performRollback(activeStage.current_version)}
+                      disabled={stageEditActionDisabled}
+                      disabledReason={stageEditActionDisabledReason}
+                      describedBy={
+                        workspaceGenerationLock.locked
+                          ? "workspace-lock-action-reason"
+                          : undefined
+                      }
+                    />
                   )}
                 </div>
+                {showQualitySignal && (
+                  <div className="workspace-stage-header-summary">
+                    <div className="workspace-pane-actions">
+                      <QualityBadge
+                        evalResult={evalResult}
+                        error={isEvalError}
+                        checking={activeStage.status === "in_progress"}
+                      />
+                    </div>
+                  </div>
+                )}
               </div>
               <div className="spec-card-body">
                 {diffResult ? (
@@ -2747,81 +2770,94 @@ export default function Workspace() {
             style={!showRightPanel ? { gridTemplateColumns: "minmax(0, 1fr)" } : undefined}
           >
             <section className="workspace-document-card workspace-stage-document">
-              <div className="workspace-pane-header">
-                <div className="workspace-pane-left">
-                  <h2 className="workspace-pane-title">{STAGE_LABELS[activeStage.type]}</h2>
-                  <div className="ws-pane-chips">
-                    <span className={`workspace-status-chip ${activeStage.status}`}>
-                      {formatStageStatus(activeStage.status)}
-                    </span>
-                    <BlockedPartialBadge stage={activeStage} />
-                    {workspaceGenerationLock.locked && (
-                      <span className="workspace-lock-chip">Editing paused</span>
-                    )}
-                    {activeStage.type === "harness" && (
-                      <HarnessCoverageChip
-                        coverage_summary={currentWorkspace.coverage_summary ?? null}
-                      />
-                    )}
-                    {effortSummary && (
-                      <span
-                        className="effort-summary-chip"
-                        title="S = 0.5–1d · M = 1–3d · L = 3–7d · XL = 7d+ · informational only"
-                        aria-label={`Effort summary: ${formatEffortSummaryChip(effortSummary)}`}
-                      >
-                        <strong className="effort-summary-chip-estimate">
-                          {effortSummary.estimateRange}
-                        </strong>
-                        <span aria-hidden="true"> · </span>
-                        {effortSummary.totalTasks} tasks
-                        <span aria-hidden="true"> · </span>
-                        {effortSummary.mustCount} MUST
+              <div className="workspace-pane-header workspace-stage-pane-header">
+                <div className="workspace-stage-header-topline">
+                  <div className="workspace-pane-left">
+                    <h2 className="workspace-pane-title">{STAGE_LABELS[activeStage.type]}</h2>
+                    <div className="ws-pane-chips">
+                      <span className={`workspace-status-chip ${activeStage.status}`}>
+                        {formatStageStatus(activeStage.status)}
                       </span>
-                    )}
+                      <BlockedPartialBadge stage={activeStage} />
+                      {workspaceGenerationLock.locked && (
+                        <span className="workspace-lock-chip">Editing paused</span>
+                      )}
+                      {activeStage.type === "harness" && (
+                        <HarnessCoverageChip
+                          coverage_summary={currentWorkspace.coverage_summary ?? null}
+                        />
+                      )}
+                      {effortSummary && (
+                        <span
+                          className="effort-summary-chip"
+                          title="S = 0.5–1d · M = 1–3d · L = 3–7d · XL = 7d+ · informational only"
+                          aria-label={`Effort summary: ${formatEffortSummaryChip(effortSummary)}`}
+                        >
+                          <strong className="effort-summary-chip-estimate">
+                            {effortSummary.estimateRange}
+                          </strong>
+                          <span aria-hidden="true"> · </span>
+                          {effortSummary.totalTasks} tasks
+                          <span aria-hidden="true"> · </span>
+                          {effortSummary.mustCount} MUST
+                        </span>
+                      )}
+                    </div>
                   </div>
-                </div>
-                <div className="workspace-pane-actions">
-                  <QualityBadge
-                    evalResult={evalResult}
-                    error={isEvalError}
-                    checking={activeStage.status === "in_progress"}
+                  <StageEditAction
+                    stage={activeStage}
+                    isEditing={isEditMode}
+                    onToggleEdit={() => setIsEditMode((m) => !m)}
+                    onUnlock={() => void performRollback(activeStage.current_version)}
+                    disabled={stageEditActionDisabled}
+                    disabledReason={stageEditActionDisabledReason}
+                    describedBy={
+                      workspaceGenerationLock.locked
+                        ? "workspace-lock-action-reason"
+                        : undefined
+                    }
                   />
-                  {/* Workspace-level construction verdict — surfaced on the tasks
-                      pane (where the verifier runs) for a Demo Day workspace. */}
-                  {isDemoDayWorkspace && activeStage.type === "tasks" && (
-                    <ConstructionVerifiedBadge
-                      verdict={constructionVerdict}
-                      stages={stages}
-                    />
-                  )}
-                  {activeStage.type === "tasks" && evalResult !== null && genuineGapIssues.length === 0 && (
-                    <span className="ws-validation-ok-chip">✓ All tasks valid</span>
-                  )}
-                  {activeStage.type === "tasks" && evalResult !== null && (
-                    <button
-                      type="button"
-                      className="ws-view-toggle"
-                      onClick={handleRevalidateTasks}
-                      disabled={workspaceGenerationLock.locked}
-                      title={workspaceGenerationLock.locked ? workspaceLockReason : undefined}
-                      aria-describedby={workspaceGenerationLock.locked ? "workspace-lock-action-reason" : undefined}
-                    >
-                      Re-validate
-                    </button>
-                  )}
-                  {activeStage.status !== "locked" && (
-                    <button
-                      type="button"
-                      onClick={() => setIsEditMode((m) => !m)}
-                      className="ws-view-toggle"
-                      disabled={editToggleDisabled}
-                      title={editToggleDisabled ? editToggleDisabledReason : undefined}
-                      aria-describedby={workspaceGenerationLock.locked ? "workspace-lock-action-reason" : undefined}
-                    >
-                      {isEditMode ? "Preview" : "Edit"}
-                    </button>
-                  )}
                 </div>
+                {showStageHeaderSummary && (
+                  <div className="workspace-stage-header-summary">
+                    <div className="workspace-pane-actions">
+                      <QualityBadge
+                        evalResult={evalResult}
+                        error={isEvalError}
+                        checking={activeStage.status === "in_progress"}
+                      />
+                      {/* Workspace-level construction verdict — surfaced on the tasks
+                          pane (where the verifier runs) for a Demo Day workspace. */}
+                      {isDemoDayWorkspace && activeStage.type === "tasks" && (
+                        <ConstructionVerifiedBadge
+                          verdict={constructionVerdict}
+                          stages={stages}
+                        />
+                      )}
+                      {activeStage.type === "tasks" &&
+                        evalResult !== null &&
+                        genuineGapIssues.length === 0 && (
+                          <span className="ws-validation-ok-chip">✓ All tasks valid</span>
+                        )}
+                      {activeStage.type === "tasks" && evalResult !== null && (
+                        <button
+                          type="button"
+                          className="ws-view-toggle ws-view-toggle-compact"
+                          onClick={handleRevalidateTasks}
+                          disabled={workspaceGenerationLock.locked}
+                          title={workspaceGenerationLock.locked ? workspaceLockReason : undefined}
+                          aria-describedby={
+                            workspaceGenerationLock.locked
+                              ? "workspace-lock-action-reason"
+                              : undefined
+                          }
+                        >
+                          Re-validate
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                )}
               </div>
               <div className="stage-card-body">
                 {(isEditMode && !isStageFinalised) || isActiveStageBusy ? (

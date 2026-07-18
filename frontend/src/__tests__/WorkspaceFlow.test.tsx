@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from "vitest"
 import { GenerateBar } from "../components/workspace/GenerateBar"
 import { HumanReviewGate } from "../components/workspace/HumanReviewGate"
 import { StageNavigator } from "../components/workspace/StageNavigator"
+import { StageEditAction } from "../components/workspace/StageEditAction"
 import { StalenessWarning } from "../components/workspace/StalenessWarning"
 import type { Stage } from "../types/stage"
 
@@ -319,6 +320,55 @@ describe("GenerateBar", () => {
       />,
     )
     expect(container.firstChild).toBeNull()
+  })
+})
+
+describe("StageEditAction", () => {
+  it("replaces the disabled Edit affordance with an explicit unlock action after finalisation", async () => {
+    const user = userEvent.setup()
+    const onUnlock = vi.fn()
+
+    render(
+      <StageEditAction
+        stage={makeStage({ type: "tasks", status: "finalised" })}
+        isEditing={false}
+        onToggleEdit={vi.fn()}
+        onUnlock={onUnlock}
+      />,
+    )
+
+    expect(screen.queryByRole("button", { name: /^edit$/i })).not.toBeInTheDocument()
+    const unlock = screen.getByRole("button", { name: /unlock tasks to edit/i })
+    expect(unlock).toHaveTextContent("Unlock to edit")
+    await user.click(unlock)
+    expect(onUnlock).toHaveBeenCalledOnce()
+  })
+
+  it("keeps the normal edit and preview toggle for an editable stage", async () => {
+    const user = userEvent.setup()
+    const onToggleEdit = vi.fn()
+
+    const { rerender } = render(
+      <StageEditAction
+        stage={makeStage({ status: "draft" })}
+        isEditing={false}
+        onToggleEdit={onToggleEdit}
+        onUnlock={vi.fn()}
+      />,
+    )
+
+    await user.click(screen.getByRole("button", { name: /^edit$/i }))
+    expect(onToggleEdit).toHaveBeenCalledOnce()
+
+    rerender(
+      <StageEditAction
+        stage={makeStage({ status: "draft" })}
+        isEditing
+        onToggleEdit={onToggleEdit}
+        onUnlock={vi.fn()}
+      />,
+    )
+    expect(screen.getByRole("button", { name: /^preview$/i })).toBeInTheDocument()
   })
 })
 
