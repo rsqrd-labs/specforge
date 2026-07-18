@@ -15,6 +15,7 @@ import pytest
 from pydantic import ValidationError
 
 from schemas.github import (
+    ExportSummary,
     GitHubExportRequest,
     InstallationList,
     InstallationOption,
@@ -125,6 +126,22 @@ def test_push_status_response_maps_from_orm_attributes() -> None:
     assert resp.pr_number == 7
     # shipped/total default to 0 when not supplied by the row.
     assert resp.shipped == 0 and resp.total == 0
+
+
+def test_export_summary_includes_last_completed_inbound_sync() -> None:
+    synced_at = datetime.now(UTC)
+    summary = ExportSummary(
+        workspace_id=uuid4(),
+        workspace_name="Atlas",
+        push_id=uuid4(),
+        status="completed",
+        export_mode="files_to_default",
+        last_inbound_sync_at=synced_at,
+    )
+
+    assert summary.last_inbound_sync_at == synced_at
+    encoded = summary.model_dump(mode="json")["last_inbound_sync_at"]
+    assert datetime.fromisoformat(encoded.replace("Z", "+00:00")) == synced_at
 
 
 def test_task_sync_state_aliases_issue_number() -> None:

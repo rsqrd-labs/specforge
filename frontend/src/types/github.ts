@@ -93,6 +93,8 @@ export interface ExportSummary {
   shipped: number
   total: number
   pushed_at: string | null
+  /** Most recent completed inbound reconciliation, when one has run. */
+  last_inbound_sync_at: string | null
 }
 
 // --- App installation identity (spec §8, not an OAuth token) --------------

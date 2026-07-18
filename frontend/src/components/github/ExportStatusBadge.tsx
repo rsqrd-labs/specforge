@@ -35,7 +35,7 @@ export function exportTone(
 
 const LABELS: Record<ExportTone, string> = {
   syncing: "Syncing",
-  synced: "Synced",
+  synced: "In sync",
   drift: "Needs sync",
   paused: "Sync paused",
   exported: "Exported",

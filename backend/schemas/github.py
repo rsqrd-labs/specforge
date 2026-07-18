@@ -251,6 +251,7 @@ class ExportSummary(BaseModel):
     shipped: int = 0
     total: int = 0
     pushed_at: datetime | None = None
+    last_inbound_sync_at: datetime | None = None
 
     model_config = ConfigDict(from_attributes=True)
 

@@ -276,6 +276,7 @@ async def list_github_exports(
             shipped=row.shipped,
             total=row.total,
             pushed_at=row.push.pushed_at,
+            last_inbound_sync_at=row.push.last_inbound_sync_at,
         )
         for row in rows
     ]
