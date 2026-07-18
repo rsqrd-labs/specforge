@@ -333,9 +333,7 @@ async def test_get_eval_lazily_repairs_stale_task_findings(app) -> None:
     assert response.status_code == 200
     assert response.json()["tasks_without_ref"] == []
     assert response.json()["flagged"] is False
-    assert (
-        eval_result.structural_validator_version == STRUCTURAL_TASK_VALIDATOR_VERSION
-    )
+    assert eval_result.structural_validator_version == STRUCTURAL_TASK_VALIDATOR_VERSION
     assert db.committed is True
     assert len(db.statements) == 3
 

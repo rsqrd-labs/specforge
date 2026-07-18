@@ -791,7 +791,20 @@ def test_phase14_stage_gap_patch_is_a_paid_operation() -> None:
     source = read_backend_file("services", "pipeline", "stage_manager.py")
     fn_start = source.find("async def generate_harness_patch")
     assert fn_start != -1, "stage_manager.py must define generate_harness_patch."
-    fn_body = source[fn_start : fn_start + 4000]
+    # Slice the true method body (up to the next sibling method, or EOF) rather
+    # than a fixed-size window: hardening code added to the front of the method
+    # must not be able to push the required credit charge out of view.
+    after = fn_start + len("async def generate_harness_patch")
+    boundaries = [
+        pos
+        for pos in (
+            source.find("\n    async def ", after),
+            source.find("\n    def ", after),
+        )
+        if pos != -1
+    ]
+    fn_end = min(boundaries) if boundaries else len(source)
+    fn_body = source[fn_start:fn_end]
     assert 'credit_service.deduct(' in fn_body and '"regenerate_gaps"' in fn_body, (
         "generate_harness_patch must charge credits (credit_service.deduct with "
         "the 'regenerate_gaps' reason). The free-regen abuse vector is now "
