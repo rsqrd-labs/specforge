@@ -995,6 +995,253 @@ def dedupe_file_blocks(artifact_md: str) -> tuple[str, int]:
     return head + "".join(kept), removed
 
 
+# --- Assembly-time duplicate-section guard (prompt-quality audit H1) ---------
+
+# Per-stage headings the duplicate-section guard treats as contract sections
+# even though ``validate_sections`` does not require them: they are conditional
+# in the system prompt, so two chunks could still both emit them.
+_DEDUPE_EXTRA_HEADINGS: dict[str, list[str]] = {
+    "plan": ["## Prompt and AI Safety Controls"],
+}
+
+# ``## Files`` is additive and heterogeneous (### File: blocks) and has its own
+# first-wins self-heal (``dedupe_file_blocks``). Dropping a second ``## Files``
+# region wholesale would delete files that exist only there, so the section
+# guard never touches it.
+_DEDUPE_SKIP_HEADINGS = frozenset({"## Files"})
+
+_H2_HEADING_LINE_RE = re.compile(r"^##\s+\S")
+# H1 or H2 ends a section span; H3+ (### File:, ### T-NNN:) belongs to its
+# section and must travel with it when a duplicate is dropped.
+_SECTION_TERMINATOR_RE = re.compile(r"^#{1,2}\s+\S")
+_DEDUPE_FENCE_LINE_RE = re.compile(r"^ {0,3}`{3,}")
+
+
+def dedupe_contract_sections(
+    stage_type: str,
+    artifact_md: str,
+    mode: str = "standard",
+) -> tuple[str, int]:
+    """Drop duplicate contract-section bodies, keeping the first of each (H1).
+
+    Belt-and-braces backstop behind the disjoint chunk scopes: parallel chunks
+    have no cross-visibility, so a scope regression (or a model ignoring its
+    scope) can emit the same mandatory section twice — two *conflicting* bodies
+    in one document that ``validate_sections`` (a substring check) passes
+    silently. This generalises the harness ``dedupe_file_blocks`` self-heal to
+    every stage's H2 section contract: when a contract heading opens a second
+    time, that occurrence's span (up to the next H1/H2 heading) is dropped.
+    First-wins, deterministic, zero-LLM — the same idempotent, no-regression
+    semantics as the file-block dedup.
+
+    Only contract headings participate: non-contract H2s (``## Phase N``), H3s
+    (``### File:``, ``### T-NNN:``), and prose are never touched. A heading is
+    matched when the line *starts with* the contract heading (mirroring the
+    substring semantics of ``validate_sections``), so a decorated emission like
+    ``## Threat Model (STRIDE)`` still deduplicates against ``## Threat Model``.
+    Fenced code is tracked so a ``## `` line inside a code block is never read
+    as a heading boundary.
+
+    Returns ``(deduped_markdown, removed_section_count)``.
+    """
+    candidates = {
+        heading
+        for heading in (
+            *section_contract(stage_type, mode),
+            *(heading for _, heading in _CONDITIONAL_SECTIONS.get(stage_type, [])),
+            *_DEDUPE_EXTRA_HEADINGS.get(stage_type, []),
+        )
+        if heading not in _DEDUPE_SKIP_HEADINGS
+    }
+    if not candidates:
+        return artifact_md, 0
+    # Longest-first so an emitted heading resolves to the most specific
+    # contract entry when one contract heading is a prefix of another.
+    ordered = sorted(candidates, key=len, reverse=True)
+
+    def _contract_heading(line: str) -> str | None:
+        if not _H2_HEADING_LINE_RE.match(line):
+            return None
+        stripped = line.rstrip()
+        for heading in ordered:
+            if stripped == heading or stripped.startswith(
+                (f"{heading} ", f"{heading}:")
+            ):
+                return heading
+        return None
+
+    kept: list[str] = []
+    seen: set[str] = set()
+    removed = 0
+    in_fence = False
+    dropping = False
+    for line in artifact_md.split("\n"):
+        if _DEDUPE_FENCE_LINE_RE.match(line):
+            # Fence state is tracked even inside a dropped span so a heading
+            # inside a dropped section's code block can never end the drop.
+            in_fence = not in_fence
+            if not dropping:
+                kept.append(line)
+            continue
+        if not in_fence and _SECTION_TERMINATOR_RE.match(line):
+            heading = _contract_heading(line)
+            if heading is not None and heading in seen:
+                dropping = True
+                removed += 1
+                continue
+            if heading is not None:
+                seen.add(heading)
+            dropping = False
+            kept.append(line)
+            continue
+        if not dropping:
+            kept.append(line)
+    if removed == 0:
+        return artifact_md, 0
+    return "\n".join(kept), removed
+
+
+# --- Assembly-time Effort Summary reconciliation (prompt-quality audit M6) ---
+
+_EFFORT_TASK_HEADING_RE = re.compile(r"^###\s+T-\d+:")
+_EFFORT_PRIORITY_RE = re.compile(
+    r"^[\s\-*]*\*\*\s*Priority\s*:?\s*\*\*\s*:?\s*(.+?)\s*$", re.IGNORECASE
+)
+_EFFORT_ESTIMATE_RE = re.compile(
+    r"^[\s\-*]*\*\*\s*Estimate\s*:?\s*\*\*\s*:?\s*(.+?)\s*$", re.IGNORECASE
+)
+_EFFORT_PRIORITY_BUCKETS = ("MUST", "SHOULD", "COULD")
+# Estimate buckets in the decreasing-size order the Sizes line mandates.
+_EFFORT_SIZE_BUCKETS = ("XL", "L", "M", "S")
+# The two countable Effort Summary lines. Anchored on their distinctive shapes
+# (`Tasks: N total …` / `Sizes: …`) so an unrelated line is never rewritten;
+# prefix/suffix keep the list marker and optional backtick formatting intact.
+_EFFORT_TASKS_LINE_RE = re.compile(
+    r"^(?P<prefix>\s*(?:[-*]\s+)?`?)Tasks:\s*\d+\s*total\b[^`\n]*(?P<suffix>`?\s*)$"
+)
+_EFFORT_SIZES_LINE_RE = re.compile(
+    r"^(?P<prefix>\s*(?:[-*]\s+)?`?)Sizes:[^`\n]*(?P<suffix>`?\s*)$"
+)
+
+
+def _effort_field_value(line: str, regex: re.Pattern[str]) -> str | None:
+    match = regex.match(line.rstrip())
+    if not match:
+        return None
+    value = match.group(1).strip()
+    paren = value.find("(")
+    if paren > 0:
+        value = value[:paren].strip()
+    return value.strip("`*_ .,;").upper() or None
+
+
+def reconcile_effort_summary(artifact_md: str) -> tuple[str, bool]:
+    """Recompute the Effort Summary counts from the emitted task blocks (M6).
+
+    The overview chunk emits the Effort Summary *before any task block exists*
+    — and, on the parallel path, with no visibility into the block chunks at
+    all — so its ``Tasks:`` and ``Sizes:`` counts are a forecast the block
+    chunks never see. Rather than ask the model to satisfy an unsatisfiable
+    "counts match emitted blocks exactly" contract, the counts are reconciled
+    here deterministically at assembly: count the ``### T-NNN:`` blocks and
+    their per-task Priority/Estimate fields, then rewrite the two count lines
+    in place. The judgment lines (``Estimate range:``, ``Minimum cut:``) are
+    calendar estimates, not countable facts, and are left untouched.
+
+    Conservative by design: a count line is rewritten only when at least one
+    task block parsed a valid value for it (a fully unparsable list keeps the
+    model's own forecast rather than degrading it to zeros), and nothing
+    outside the ``## Effort Summary`` section is ever modified. Demo Day's
+    Effort Summary has neither line, so this is a natural no-op there.
+
+    Returns ``(reconciled_markdown, changed)``.
+    """
+    lines = artifact_md.split("\n")
+
+    # Locate the ## Effort Summary span (to the next H1/H2 heading).
+    section_start: int | None = None
+    for i, line in enumerate(lines):
+        if line.rstrip() == "## Effort Summary" or line.rstrip().startswith(
+            "## Effort Summary "
+        ):
+            section_start = i
+            break
+    if section_start is None:
+        return artifact_md, False
+    section_end = len(lines)
+    for i in range(section_start + 1, len(lines)):
+        if _SECTION_TERMINATOR_RE.match(lines[i]):
+            section_end = i
+            break
+
+    # Count task blocks and their Priority/Estimate fields.
+    heading_indices = [
+        i
+        for i, line in enumerate(lines)
+        if _EFFORT_TASK_HEADING_RE.match(line.rstrip())
+    ]
+    total = len(heading_indices)
+    if total == 0:
+        return artifact_md, False
+    priority_counts = dict.fromkeys(_EFFORT_PRIORITY_BUCKETS, 0)
+    estimate_counts = dict.fromkeys(_EFFORT_SIZE_BUCKETS, 0)
+    for idx, start in enumerate(heading_indices):
+        end = heading_indices[idx + 1] if idx + 1 < len(heading_indices) else len(lines)
+        priority: str | None = None
+        estimate: str | None = None
+        for line in lines[start:end]:
+            if priority is None:
+                priority = _effort_field_value(line, _EFFORT_PRIORITY_RE)
+            if estimate is None:
+                estimate = _effort_field_value(line, _EFFORT_ESTIMATE_RE)
+            if priority is not None and estimate is not None:
+                break
+        if priority in priority_counts:
+            priority_counts[priority] += 1
+        if estimate in estimate_counts:
+            estimate_counts[estimate] += 1
+
+    tasks_line_body: str | None = None
+    if any(priority_counts.values()):
+        tasks_line_body = (
+            f"Tasks: {total} total · {priority_counts['MUST']} MUST · "
+            f"{priority_counts['SHOULD']} SHOULD · {priority_counts['COULD']} COULD"
+        )
+    sizes_line_body: str | None = None
+    if any(estimate_counts.values()):
+        sizes_line_body = "Sizes: " + " · ".join(
+            f"{estimate_counts[bucket]}x{bucket}"
+            for bucket in _EFFORT_SIZE_BUCKETS
+            if estimate_counts[bucket]
+        )
+
+    changed = False
+    for i in range(section_start + 1, section_end):
+        if tasks_line_body is not None:
+            match = _EFFORT_TASKS_LINE_RE.match(lines[i])
+            if match:
+                replacement = (
+                    f"{match.group('prefix')}{tasks_line_body}{match.group('suffix')}"
+                )
+                if replacement != lines[i]:
+                    lines[i] = replacement
+                    changed = True
+                continue
+        if sizes_line_body is not None:
+            match = _EFFORT_SIZES_LINE_RE.match(lines[i])
+            if match:
+                replacement = (
+                    f"{match.group('prefix')}{sizes_line_body}{match.group('suffix')}"
+                )
+                if replacement != lines[i]:
+                    lines[i] = replacement
+                    changed = True
+
+    if not changed:
+        return artifact_md, False
+    return "\n".join(lines), True
+
+
 _MATRIX_REQ_ID_RE = re.compile(r"^(?:FR|NFR|SEC|AC)-\d+(?:\.\d+)*$")
 
 

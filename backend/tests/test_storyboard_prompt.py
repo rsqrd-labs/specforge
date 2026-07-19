@@ -132,7 +132,9 @@ def _valid_payload() -> dict[str, Any]:
     return {
         "title": "SpecForge Launch Keynote",
         "theme": {
-            "palette": ["#101010", "#2244FF", "#FFAA00"],
+            # 5 colours: fresh generations must meet the prompt's 5–8 palette
+            # floor (audit L16); only grandfathered legacy payloads may carry 3.
+            "palette": ["#101010", "#2244FF", "#FFAA00", "#F5F5F5", "#22CC88"],
             "typography": "Modern geometric sans",
             "motif": "Glass panels",
             "transition_style": "Smooth fades",
@@ -204,6 +206,51 @@ def test_slide_substance_floor_grandfathered_for_spliced_payload() -> None:
         data, context={GRANDFATHER_NOTE_DEPTH: True}
     )
     assert payload.sections[1].slides[0].visual.kind == "bullets"
+
+
+# ---------------------------------------------------------------------------
+# Audit L16 — palette floor: prompt demands 5–8, schema must agree for fresh
+# generations (a prompt-violating payload validating cleanly means the repair
+# pass that exists exactly for schema misses never fires).
+# ---------------------------------------------------------------------------
+
+
+def test_palette_floor_enforced_on_fresh_generation() -> None:
+    data = _valid_payload()
+    data["theme"]["palette"] = ["#101010", "#2244FF", "#FFAA00"]
+    with pytest.raises(Exception) as exc:
+        StoryboardPayload.model_validate(data)
+    assert "at least 5 colours" in str(exc.value)
+
+
+def test_palette_floor_grandfathered_for_legacy_payload() -> None:
+    # Stored pre-L16 decks (3–4 colours) re-validate during section regen under
+    # the same grandfather context that relaxes note depth — tightening the
+    # floor must never break existing decks.
+    data = _valid_payload()
+    data["theme"]["palette"] = ["#101010", "#2244FF", "#FFAA00"]
+    payload = StoryboardPayload.model_validate(
+        data, context={GRANDFATHER_NOTE_DEPTH: True}
+    )
+    assert len(payload.theme.palette) == 3
+
+
+def test_palette_structural_floor_still_three_when_grandfathered() -> None:
+    # The structural minimum stays 3 — fewer than 3 fails even grandfathered.
+    data = _valid_payload()
+    data["theme"]["palette"] = ["#101010", "#2244FF"]
+    with pytest.raises(Exception):
+        StoryboardPayload.model_validate(data, context={GRANDFATHER_NOTE_DEPTH: True})
+
+
+def test_palette_hex_check_runs_before_floor() -> None:
+    # A malformed colour is reported as the hex error even when the count is
+    # also under the fresh floor.
+    data = _valid_payload()
+    data["theme"]["palette"] = ["red", "#2244FF", "#FFAA00"]
+    with pytest.raises(Exception) as exc:
+        StoryboardPayload.model_validate(data)
+    assert "#RRGGBB" in str(exc.value)
 
 
 def test_slide_substance_floor_ignores_framing_slide_types() -> None:

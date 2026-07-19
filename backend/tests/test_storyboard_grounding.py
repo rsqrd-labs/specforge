@@ -114,7 +114,8 @@ def _payload() -> dict:
     return {
         "title": "SpecForge Launch Keynote",
         "theme": {
-            "palette": ["#101418", "#1FB6FF", "#F5A623"],
+            # 5 colours: fresh-generation palette floor (audit L16).
+            "palette": ["#101418", "#1FB6FF", "#F5A623", "#F5F5F5", "#22CC88"],
             "typography": "Geometric sans",
             "motif": "Layered product glass",
             "transition_style": "Cinematic fades",

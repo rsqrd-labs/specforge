@@ -18,6 +18,7 @@ Security contract (Phase 19 Prompt Pipeline Quality Directive):
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import TYPE_CHECKING, Literal
 
@@ -52,7 +53,12 @@ _ARTIFACT_LIMITS: dict[str, int] = {
     "spec": 28_000,
     "plan": 18_000,
     "harness": 20_000,
-    "tasks": 14_000,
+    # A real TASKS.md runs 30–80K chars; the previous 14K bound elided most of
+    # it and manufactured false MissingSection/CoverageGap findings on exactly
+    # the largest, most complete artifacts (prompt-quality audit H4). 24K keeps
+    # the judge call bounded while covering far more of the artifact; the
+    # elision-awareness sentence in the system prompt covers the remainder.
+    "tasks": 24_000,
 }
 _DEP_LIMIT = 10_000
 
@@ -69,6 +75,13 @@ CriticFindingKind = Literal[
     "BannedPhrase",
     "DeprecatedAPI",
     "ADRIncomplete",
+    # Prompt-quality audit M12: _per_stage_focus asks for defect classes the
+    # schema previously could not express — a judge that invented a kind for
+    # them invalidated its whole verdict (extra="forbid" + fail-open ⇒ silent
+    # passed=True). These two make the spec "no implementation leakage" and
+    # tasks "dependency graph is acyclic" asks expressible.
+    "ImplementationLeak",
+    "DependencyCycle",
 ]
 
 
@@ -126,8 +139,10 @@ no commentary.  The object has exactly two fields:
 "reference": <string or null>}
 
 Each finding's "kind" MUST be one of:
-- "CoverageGap": an upstream requirement ID (FR-NNN / NFR-NNN / SEC-NNN) that the
-  artifact fails to address. Put the requirement ID in "reference".
+- "CoverageGap": an upstream requirement ID (FR-NNN / NFR-NNN / SEC-NNN) — or a
+  named upstream contract (endpoint, schema, module, or harness test the artifact
+  was required to carry forward) — that the artifact fails to address. Put the
+  requirement ID or contract name in "reference".
 - "MissingSection": a mandatory section heading absent from the artifact. Put the
   section name in "reference".
 - "ShallowSection": a required section whose body is superficial — a one-line
@@ -143,10 +158,23 @@ Each finding's "kind" MUST be one of:
 - "ADRIncomplete": an Architecture Decision Record missing one of its five
   required lines (Decision, Forces, Options Considered, Chosen + WHY-not-next-best,
   Reversal Cost). Put the ADR title in "reference".
+- "ImplementationLeak": implementation detail (exact API endpoints, database
+  schemas, class or file names, framework/vendor choices, deployment topology)
+  inside an artifact whose stage must stay implementation-neutral (the SPEC).
+  Put the leaked detail in "reference".
+- "DependencyCycle": a task whose Dependencies field points at an equal or
+  later task ID, or a dependency chain that forms a cycle. Put the offending
+  task ID in "reference".
 
 Grading rules:
 - Set passed=true with an empty findings array ONLY when the artifact has no
   defects of the kinds above.
+- The artifact and dependency texts may be bounded for budget: a literal marker
+  like "[... N characters omitted for eval budget ...]" means a middle region
+  was elided before you received the text. Absence from the visible text is NOT
+  absence from the artifact. Never report a section, requirement, test, or task
+  as missing or unaddressed when it could plausibly fall inside an elided
+  region — report only absences the visible text positively establishes.
 - Depth is graded relative to the inputs: the artifact must engage with the
   specifics of the problem statement and upstream artifacts, not restate generic
   best practices. Judge proportionality, not raw length — a rich input answered
@@ -164,12 +192,19 @@ Grading rules:
 
 
 def _per_stage_focus(stage_type: str) -> str:
-    """Stage-specific emphasis appended to the critic user prompt."""
+    """Stage-specific emphasis appended to the critic user prompt.
+
+    Every defect class named here maps to a ``CriticFindingKind`` the schema
+    can express (audit M12): a focus ask the judge cannot report tempts it to
+    invent a kind, which under ``extra="forbid"`` + fail-open used to void the
+    entire verdict into a silent ``passed=True``.
+    """
     if stage_type == "spec":
         return (
             "Focus: every product requirement has a stable FR/NFR/SEC ID; the "
             "Security, Privacy, and Abuse Expectations and Acceptance Criteria "
-            "sections are present and non-empty; no implementation leakage."
+            "sections are present and non-empty; no implementation leakage "
+            "(flag ImplementationLeak)."
         )
     if stage_type == "plan":
         return (
@@ -177,23 +212,35 @@ def _per_stage_focus(stage_type: str) -> str:
             "FR/NFR/SEC ID; the Architecture Decision Records each have all five "
             "lines (flag ADRIncomplete otherwise); the Architecture Anti-Patterns, "
             "Multi-tenancy Stance, Data Model, API Design, and Security "
-            "Architecture sections are present; no deprecated/EOL technologies."
+            "Architecture sections are present; no deprecated/EOL technologies "
+            "(flag DeprecatedAPI)."
         )
     if stage_type == "harness":
         return (
             "Focus: every upstream requirement maps to at least one named test in "
             "the Requirement-to-Test Matrix; the integration, security, contract, "
             "and migration_safety categories are present (never dropped); no "
-            "placeholder or pass-body tests."
+            "placeholder or pass-body tests (flag them as BannedPhrase)."
         )
     if stage_type == "tasks":
         return (
             "Focus: every spec requirement and every harness test is referenced by "
-            "at least one task; Frontend/Full-stack tasks include loading/error/"
-            "empty states and an accessibility assertion; the dependency graph is "
-            "acyclic; no orphaned plan contracts."
+            "at least one task (flag CoverageGap); Frontend/Full-stack tasks "
+            "include loading/error/empty states and an accessibility assertion; "
+            "the dependency graph is acyclic (flag DependencyCycle); no orphaned "
+            "plan contracts (flag CoverageGap with the contract name)."
         )
     return "Focus: completeness, traceability, and absence of placeholder phrases."
+
+
+# Keys the critic may grade against (audit L17): the problem statement and the
+# real upstream stage artifacts. The generation deps dict also carries advisory
+# context — research_context (third-party search snippets) and clarification_qa
+# — which must not be presented to the judge as an "Upstream dependency", or it
+# grades the artifact against non-contract content.
+_GRADABLE_DEP_KEYS = frozenset(
+    {"problem_statement", "spec", "plan", "harness", "tasks"}
+)
 
 
 def _build_critic_user_prompt(
@@ -205,7 +252,9 @@ def _build_critic_user_prompt(
 
     Both the artifact and each dependency are bounded (``_ARTIFACT_LIMITS`` /
     ``_DEP_LIMIT``) before wrapping — see the module-level comment on those
-    constants for why (finding #4).
+    constants for why (finding #4). Only contract deps (``_GRADABLE_DEP_KEYS``)
+    are included; advisory context keys are dropped here, at the one chokepoint
+    every critic call flows through.
     """
     artifact_limit = _ARTIFACT_LIMITS.get(stage_type, _ARTIFACT_LIMITS["spec"])
     bounded_artifact = compact_text(artifact_text, artifact_limit)
@@ -217,6 +266,8 @@ def _build_critic_user_prompt(
         wrap_untrusted_content(f"{stage_type}_artifact", bounded_artifact),
     ]
     for dep_type, dep_content in deps.items():
+        if dep_type not in _GRADABLE_DEP_KEYS:
+            continue
         if dep_content:
             bounded_dep = compact_text(dep_content, _DEP_LIMIT)
             parts.append("")
@@ -225,6 +276,52 @@ def _build_critic_user_prompt(
     parts.append("")
     parts.append("Return the strict JSON verdict now. No prose, no markdown fences.")
     return "\n".join(parts)
+
+
+def _salvage_verdict(json_text: str, stage_type: str) -> StageCriticResult | None:
+    """Recover a usable verdict from a response that failed strict validation.
+
+    Audit M12: with ``extra="forbid"`` plus fail-open, one malformed finding —
+    e.g. a judge inventing an unlisted kind — used to discard the ENTIRE
+    verdict into a silent ``passed=True``, defeating the gate exactly when the
+    judge found something. Salvage keeps the security posture (each surviving
+    finding still validates against the strict ``CriticFinding`` schema, so no
+    free-form artifact bytes or unexpected keys get through) while preserving
+    every finding that IS well-formed. Returns ``None`` when nothing safe can
+    be recovered (non-dict JSON, unparseable ``passed``, or a failing verdict
+    whose findings all dropped — an unactionable verdict the caller treats as
+    the existing fail-open).
+    """
+    try:
+        data = json.loads(json_text)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(data, dict) or not isinstance(data.get("passed"), bool):
+        return None
+    raw_findings = data.get("findings")
+    findings: list[CriticFinding] = []
+    dropped = 0
+    if isinstance(raw_findings, list):
+        for item in raw_findings:
+            try:
+                findings.append(CriticFinding.model_validate(item))
+            except ValidationError:
+                dropped += 1
+    passed = data["passed"]
+    if not passed and not findings:
+        # A failing verdict with zero surviving findings carries nothing the
+        # regenerate/advisory paths can act on — fall open instead.
+        return None
+    if dropped:
+        logger.warning(
+            "critic.verdict_salvaged",
+            extra={
+                "stage": stage_type,
+                "kept_findings": len(findings),
+                "dropped_findings": dropped,
+            },
+        )
+    return StageCriticResult(passed=passed, findings=findings)
 
 
 def _extract_json_object(raw: str) -> str:
@@ -290,9 +387,15 @@ async def critic_review(
         )
         return StageCriticResult(passed=True)
 
+    json_text = _extract_json_object(result_json)
     try:
-        return StageCriticResult.model_validate_json(_extract_json_object(result_json))
+        return StageCriticResult.model_validate_json(json_text)
     except ValidationError:
+        # One malformed finding must not void the whole verdict (M12): salvage
+        # every finding that still validates strictly before falling open.
+        salvaged = _salvage_verdict(json_text, stage_type)
+        if salvaged is not None:
+            return salvaged
         logger.warning(
             "critic.unparseable_verdict",
             extra={"stage": stage_type},

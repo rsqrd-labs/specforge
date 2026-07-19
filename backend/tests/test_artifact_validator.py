@@ -826,3 +826,208 @@ async def test_validate_artifact_completeness_async_raises_identically(
     )
     with pytest.raises(IncompleteArtifactError):
         await validate_artifact_completeness_async("spec", artifact, {})
+
+
+# --------------------------------------------------------------------------- #
+# Prompt-quality audit H1 — assembly-time duplicate-section guard
+# --------------------------------------------------------------------------- #
+
+
+def test_dedupe_contract_sections_drops_second_occurrence_keeps_first() -> None:
+    from services.pipeline.artifact_validator import dedupe_contract_sections
+
+    artifact = (
+        "## Planning Summary\nsummary body\n\n"
+        "## Data Model and Persistence\nFIRST data model\n\n"
+        "## API Design\napi body\n\n"
+        "## Data Model and Persistence\nSECOND conflicting data model\n\n"
+        "## Testing Strategy\ntesting body"
+    )
+    deduped, removed = dedupe_contract_sections("plan", artifact)
+    assert removed == 1
+    assert "FIRST data model" in deduped
+    assert "SECOND conflicting data model" not in deduped
+    assert deduped.count("## Data Model and Persistence") == 1
+    # Neighbours are untouched.
+    assert "api body" in deduped
+    assert "testing body" in deduped
+
+
+def test_dedupe_contract_sections_noop_without_duplicates() -> None:
+    from services.pipeline.artifact_validator import dedupe_contract_sections
+
+    artifact = _complete_plan_artifact()
+    deduped, removed = dedupe_contract_sections("plan", artifact)
+    assert removed == 0
+    assert deduped == artifact
+
+
+def test_dedupe_contract_sections_matches_decorated_duplicate() -> None:
+    # A second emission decorated with the system prompt's parenthetical still
+    # dedupes against the shorter contract heading (startswith semantics,
+    # mirroring validate_sections' substring gate).
+    from services.pipeline.artifact_validator import dedupe_contract_sections
+
+    artifact = (
+        "## Threat Model (STRIDE)\nFIRST threat model\n\n"
+        "## Capacity Model\ncapacity body\n\n"
+        "## Threat Model (STRIDE)\nSECOND threat model"
+    )
+    deduped, removed = dedupe_contract_sections("plan", artifact)
+    assert removed == 1
+    assert "FIRST threat model" in deduped
+    assert "SECOND threat model" not in deduped
+
+
+def test_dedupe_contract_sections_ignores_non_contract_headings() -> None:
+    # Repeated ## Phase N headings are task-document structure, not contract
+    # sections — the guard must never touch them.
+    from services.pipeline.artifact_validator import dedupe_contract_sections
+
+    artifact = (
+        "## Effort Summary\ncounts\n\n"
+        "## Phase 1: Foundations\n### T-001: Task one\nbody\n\n"
+        "## Phase 1: Foundations\n### T-002: Task two\nbody"
+    )
+    deduped, removed = dedupe_contract_sections("tasks", artifact)
+    assert removed == 0
+    assert deduped == artifact
+
+
+def test_dedupe_contract_sections_never_touches_files_region() -> None:
+    # `## Files` is additive and has its own per-file self-heal; a duplicated
+    # `## Files` heading must not cause the whole second region to be dropped.
+    from services.pipeline.artifact_validator import dedupe_contract_sections
+
+    artifact = (
+        "## Harness Overview\noverview\n\n"
+        "## Files\n### File: a_test.py\n```python\nassert True\n```\n\n"
+        "## Files\n### File: b_test.py\n```python\nassert True\n```"
+    )
+    deduped, removed = dedupe_contract_sections("harness", artifact)
+    assert removed == 0
+    assert "b_test.py" in deduped
+
+
+def test_dedupe_contract_sections_ignores_headings_inside_fences() -> None:
+    from services.pipeline.artifact_validator import dedupe_contract_sections
+
+    artifact = (
+        "## API Design\napi body\n\n"
+        "```markdown\n## API Design\n(fenced example, not a heading)\n```\n\n"
+        "## Testing Strategy\ntesting body"
+    )
+    deduped, removed = dedupe_contract_sections("plan", artifact)
+    assert removed == 0
+    assert deduped == artifact
+
+
+def test_dedupe_contract_sections_drop_ends_at_next_heading() -> None:
+    from services.pipeline.artifact_validator import dedupe_contract_sections
+
+    artifact = (
+        "## Acceptance Criteria\nAC-001 first\n\n"
+        "## Edge Cases\nedge body\n\n"
+        "## Acceptance Criteria\nAC-001 duplicate\n### sub-detail\nkept? no\n\n"
+        "## Constraints\nconstraint body"
+    )
+    deduped, removed = dedupe_contract_sections("spec", artifact)
+    assert removed == 1
+    # The duplicate's H3 sub-content travels with the dropped section...
+    assert "sub-detail" not in deduped
+    # ...but the next contract section survives.
+    assert "constraint body" in deduped
+
+
+# --------------------------------------------------------------------------- #
+# Prompt-quality audit M6 — assembly-time Effort Summary reconciliation
+# --------------------------------------------------------------------------- #
+
+_EFFORT_TASKS_DOC = (
+    "## Effort Summary\n"
+    "- `Estimate range: ~3w`\n"
+    "- `Tasks: 40 total · 30 MUST · 8 SHOULD · 2 COULD`\n"
+    "- `Sizes: 5xXL · 20xL · 10xM · 5xS`\n"
+    "- `Minimum cut: Ship MUST-only → ~9d`\n\n"
+    "## Execution Overview\noverview\n\n"
+    "## Phase 1: Foundations\n\n"
+    "### T-001: First task\n\n"
+    "**Priority:** MUST\n"
+    "**Estimate:** M\n\n"
+    "### T-002: Second task\n\n"
+    "**Priority:** SHOULD\n"
+    "**Estimate:** S\n\n"
+    "### T-003: Third task\n\n"
+    "**Priority:** MUST\n"
+    "**Estimate:** M\n"
+)
+
+
+def test_reconcile_effort_summary_rewrites_counts_from_blocks() -> None:
+    from services.pipeline.artifact_validator import reconcile_effort_summary
+
+    reconciled, changed = reconcile_effort_summary(_EFFORT_TASKS_DOC)
+    assert changed is True
+    assert "- `Tasks: 3 total · 2 MUST · 1 SHOULD · 0 COULD`" in reconciled
+    assert "- `Sizes: 2xM · 1xS`" in reconciled
+    # Judgment lines are never rewritten.
+    assert "- `Estimate range: ~3w`" in reconciled
+    assert "- `Minimum cut: Ship MUST-only → ~9d`" in reconciled
+
+
+def test_reconcile_effort_summary_idempotent_when_counts_match() -> None:
+    from services.pipeline.artifact_validator import reconcile_effort_summary
+
+    reconciled, _ = reconcile_effort_summary(_EFFORT_TASKS_DOC)
+    again, changed = reconcile_effort_summary(reconciled)
+    assert changed is False
+    assert again == reconciled
+
+
+def test_reconcile_effort_summary_noop_without_section_or_tasks() -> None:
+    from services.pipeline.artifact_validator import reconcile_effort_summary
+
+    no_section = "### T-001: Task\n**Priority:** MUST\n**Estimate:** S\n"
+    assert reconcile_effort_summary(no_section) == (no_section, False)
+
+    no_tasks = "## Effort Summary\n- `Tasks: 4 total · 4 MUST · 0 SHOULD · 0 COULD`\n"
+    assert reconcile_effort_summary(no_tasks) == (no_tasks, False)
+
+
+def test_reconcile_effort_summary_noop_on_demo_day_format() -> None:
+    # Demo Day's Effort Summary has neither a Tasks: nor a Sizes: line.
+    from services.pipeline.artifact_validator import reconcile_effort_summary
+
+    doc = (
+        "## Effort Summary\n"
+        "Estimated build time: ~4h (target ≤ 5h)\n\n"
+        "## Tasks\n\n### T-001: Build the skeleton\n**Priority:** MUST\n"
+    )
+    assert reconcile_effort_summary(doc) == (doc, False)
+
+
+def test_reconcile_effort_summary_keeps_forecast_when_fields_unparsable() -> None:
+    # No valid Priority/Estimate anywhere: rewriting to zeros would be worse
+    # than the model's forecast, so both count lines stay untouched.
+    from services.pipeline.artifact_validator import reconcile_effort_summary
+
+    doc = (
+        "## Effort Summary\n"
+        "- `Tasks: 2 total · 2 MUST · 0 SHOULD · 0 COULD`\n"
+        "- `Sizes: 2xM`\n\n"
+        "### T-001: A task\nno fields\n\n### T-002: Another\nno fields\n"
+    )
+    assert reconcile_effort_summary(doc) == (doc, False)
+
+
+def test_reconcile_effort_summary_only_touches_effort_summary_section() -> None:
+    from services.pipeline.artifact_validator import reconcile_effort_summary
+
+    doc = (
+        _EFFORT_TASKS_DOC
+        + "\n## Notes\n- `Tasks: 99 total · 99 MUST · 0 SHOULD · 0 COULD`\n"
+    )
+    reconciled, changed = reconcile_effort_summary(doc)
+    assert changed is True
+    # The lookalike line outside ## Effort Summary is untouched.
+    assert "- `Tasks: 99 total · 99 MUST · 0 SHOULD · 0 COULD`" in reconciled

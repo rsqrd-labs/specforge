@@ -62,7 +62,7 @@ from typing import TYPE_CHECKING
 
 from config import settings
 from prompts.base import wrap_untrusted_content
-from services.llm.gateway import call_judge_model
+from services.llm.gateway import call_judge_model_with_info
 from services.llm.model_catalog import model_entry
 from services.llm.output_budget import OUTPUT_TOKEN_BUDGETS
 from services.llm.usage import estimate_tokens
@@ -76,7 +76,12 @@ logger = logging.getLogger(__name__)
 
 # Bumping this invalidates every cached compression once (like a prompt-version
 # bump), so a change to the ladder's output never serves a stale cached value.
-COMPRESSION_VERSION = "psc-v1"
+# psc-v2 (prompt-quality audit M11): the Rung-2 prompt text is unchanged, but
+# the version keys the compression cache, and v1 entries can hold silently
+# hard-truncated summaries (the stop reason was never checked). Bumping evicts
+# them so every cached compressed statement was produced under the
+# truncation-checked path.
+COMPRESSION_VERSION = "psc-v2"
 _CACHE_PREFIX = "psc:"
 _CACHE_TTL_SECONDS = 60 * 60 * 24 * 7  # 7 days — the raw statement is immutable
 # A *degraded* result — abstractive was requested but fell open to the Rung-3
@@ -370,6 +375,18 @@ def _chunk_by_tokens(text: str, chunk_tokens: int) -> list[str]:
     return [c for c in chunks if c.strip()]
 
 
+class _TruncatedSummaryError(RuntimeError):
+    """A Rung-2 summary hit its output cap twice — fall open to Rung 3.
+
+    Audit M11: "at most about N tokens" is a soft instruction while
+    ``max_tokens`` is a hard cap, and the old path never checked the stop
+    reason — a summary cut mid-sentence silently became the compressed problem
+    statement feeding all four downstream stages. Raising here lands in
+    ``_rung2_abstractive``'s fail-open handler, whose destination is the
+    deterministic Rung-3 clamp: lossy, but never mid-sentence-corrupt.
+    """
+
+
 async def _summarize_chunk(
     content: str,
     target_tokens: int,
@@ -379,23 +396,59 @@ async def _summarize_chunk(
     *,
     reduce: bool,
 ) -> str:
-    """One judge-model summarisation call. Raises on provider error/timeout."""
+    """One judge-model summarisation call. Raises on provider error/timeout.
+
+    Checks the provider stop reason (audit M11): a summary that hit the hard
+    ``max_tokens`` cap is retried ONCE with a doubled cap (still bounded by
+    ``_RUNG2_MAX_OUTPUT_TOKENS``); a second truncation — or a first one with no
+    headroom left to double into — raises ``_TruncatedSummaryError`` so the
+    whole pass falls open to the Rung-3 floor instead of feeding a mid-sentence
+    cut downstream.
+    """
     user_prompt = (
         f"Condense the following text to at most about {target_tokens} tokens, "
         "preserving all facts, constraints, names, and numbers. Output only the "
         "condensed prose.\n\n"
         + wrap_untrusted_content("problem_statement_narrative", content)
     )
-    raw = await call_judge_model(
+    operation = "problem_compression.reduce" if reduce else "problem_compression.map"
+    max_tokens = min(target_tokens + 256, _RUNG2_MAX_OUTPUT_TOKENS)
+    result = await call_judge_model_with_info(
         system_prompt=_RUNG2_SYSTEM_PROMPT,
         user_prompt=user_prompt,
         provider=provider,
-        max_tokens=min(target_tokens + 256, _RUNG2_MAX_OUTPUT_TOKENS),
-        operation="problem_compression.reduce" if reduce else "problem_compression.map",
+        max_tokens=max_tokens,
+        operation=operation,
         stage_type="spec",
         cost_context=cost_context,
     )
-    return (raw or "").strip()
+    if result.stopped_by_limit:
+        retry_tokens = min(max_tokens * 2, _RUNG2_MAX_OUTPUT_TOKENS)
+        if retry_tokens <= max_tokens:
+            raise _TruncatedSummaryError(
+                "Rung-2 summary hit the output cap at the ceiling"
+            )
+        logger.warning(
+            "problem_compression_rung2_truncated_retrying "
+            "operation=%s max_tokens=%d retry_tokens=%d",
+            operation,
+            max_tokens,
+            retry_tokens,
+        )
+        result = await call_judge_model_with_info(
+            system_prompt=_RUNG2_SYSTEM_PROMPT,
+            user_prompt=user_prompt,
+            provider=provider,
+            max_tokens=retry_tokens,
+            operation=operation,
+            stage_type="spec",
+            cost_context=cost_context,
+        )
+        if result.stopped_by_limit:
+            raise _TruncatedSummaryError(
+                "Rung-2 summary still truncated after the doubled-cap retry"
+            )
+    return (result.text or "").strip()
 
 
 async def _map_reduce_narrative(

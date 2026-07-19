@@ -88,10 +88,12 @@ Parse-stable identifier contract (a downstream verifier joins on these EXACT tok
 
 # Deliberately a sibling of base.PROFESSIONAL_OUTPUT_RULES, NOT that block plus
 # an addendum (the audit's "merge into one base + addendum" hygiene suggestion
-# was evaluated and rejected): the standard block *mandates* six category
-# sections in every artifact ("security, privacy, accessibility, observability,
-# reliability, and abuse cases"), which directly contradicts Demo Day's
-# breadth-trimming contract ("Do not add sections beyond the required set").
+# was evaluated and rejected): the standard block *mandates* coverage of six
+# categories ("security, privacy, accessibility, observability, reliability,
+# and abuse cases" — since the M10 rework, within the stage's required
+# structure rather than as extra headings), while Demo Day's breadth-trimming
+# contract deliberately does not mandate the six categories at all ("Do not
+# add sections beyond the required set").
 # The invariants the two blocks genuinely share (only-the-requested-artifact,
 # evidence over adjectives, stable terminology) are pinned by
 # tests/test_prompt_fragment_contracts.py so the pair cannot drift apart

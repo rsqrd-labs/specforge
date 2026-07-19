@@ -29,15 +29,20 @@ from schemas.increment import IncrementCreate
 from services.credit_service import credit_service
 from services.integrations.task_parser import compute_task_ref
 from services.pipeline.increment_service import (
+    _BASELINE_CONTEXT_LIMITS,
+    INCREMENT_COMPLETION_SENTINEL,
     INCREMENT_CREDIT_COST,
     INCREMENT_PROMPT_VERSION,
     INCREMENT_STUCK_THRESHOLD_MINUTES,
+    IncrementError,
     IncrementModeNotSupportedError,
     IncrementService,
     _grow_tasks_markdown,
     _highest_task_number,
     _reconcile_delta,
+    _strip_increment_sentinel,
     _system_prompt,
+    _user_prompt,
     recover_stuck_increments,
 )
 
@@ -157,6 +162,10 @@ async def workspace(session: AsyncSession, user: User) -> Workspace:
 def _service_with_completion(completion: str) -> tuple[IncrementService, MagicMock]:
     adapter = MagicMock()
     adapter.complete = AsyncMock(return_value=completion)
+    # A naturally finished response: without this, MagicMock auto-creates a
+    # truthy last_completion.stopped_by_limit and the M9 truncation check
+    # wrongly fails the increment.
+    adapter.last_completion = None
     svc = IncrementService(redis_client=_FakeRedis())
     return svc, adapter
 
@@ -192,6 +201,7 @@ async def test_increment_generation_records_increment_prompt_version(
     captured: dict[str, object] = {}
     real_adapter = AsyncMock()
     real_adapter.complete = AsyncMock(return_value=completion)
+    real_adapter.last_completion = None  # naturally finished (no truncation)
 
     def _fake_instrumented_adapter(*args, **kwargs):
         captured.update(kwargs)
@@ -213,6 +223,88 @@ async def test_increment_generation_records_increment_prompt_version(
 def test_highest_task_number_finds_max() -> None:
     assert _highest_task_number(BASELINE_TASKS) == 2
     assert _highest_task_number("no tasks here") == 0
+
+
+def test_system_prompt_requires_completion_sentinel() -> None:
+    """Audit M9: the prompt must demand the versioned completion sentinel as
+    the final line so silent truncation is detectable, and must tell the model
+    elided baseline regions exist rather than treating them as absent."""
+    prompt = _system_prompt()
+    assert INCREMENT_COMPLETION_SENTINEL in prompt
+    assert "exact sentinel on its own final line" in prompt
+    assert "treat elided content as existing, never as absent" in prompt
+
+
+def test_strip_increment_sentinel_round_trip() -> None:
+    body = "### T-003: Add billing\n\n**Description:** Stripe checkout."
+    with_sentinel = f"{body}\n{INCREMENT_COMPLETION_SENTINEL}\n"
+    stripped, present = _strip_increment_sentinel(with_sentinel)
+    assert present is True
+    assert stripped == body
+    assert INCREMENT_COMPLETION_SENTINEL not in stripped
+
+    # Absent sentinel: content untouched, reported missing.
+    unchanged, present = _strip_increment_sentinel(body)
+    assert present is False
+    assert unchanged == body
+
+    # A sentinel mid-document (e.g. quoted in a task body) is NOT the final
+    # line and must not be stripped.
+    mid = f"{body}\n{INCREMENT_COMPLETION_SENTINEL}\nmore content"
+    unchanged_mid, present = _strip_increment_sentinel(mid)
+    assert present is False
+    assert unchanged_mid == mid
+
+
+def _stage_stub(content: str):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(content=content)
+
+
+def test_user_prompt_bounds_oversized_baseline_artifacts() -> None:
+    """Audit M9: the baseline previously flowed into the prompt unbounded — a
+    mature workspace could exceed the model context and fail the increment
+    outright. Each artifact gets its own budget; the tasks tail (the highest
+    T-NNN numbers, which numbering continuity depends on) must survive."""
+    huge_tasks = "# Tasks\n\n" + "\n\n".join(
+        f"### T-{n:03d}: Task number {n}\n\n**Description:** " + "d" * 700
+        for n in range(1, 201)
+    )
+    assert len(huge_tasks) > _BASELINE_CONTEXT_LIMITS["tasks"]
+    stages = {
+        "spec": _stage_stub("SPEC_HEAD " + "s" * 80_000),
+        "plan": _stage_stub("PLAN_HEAD " + "p" * 80_000),
+        "harness": _stage_stub("HARNESS_HEAD " + "h" * 60_000),
+        "tasks": _stage_stub(huge_tasks),
+    }
+
+    prompt = _user_prompt(stages, "add billing to the product", baseline_max=200)
+
+    assert "characters omitted for context budget" in prompt
+    # Head of every artifact survives head+tail bounding.
+    for marker in ("SPEC_HEAD", "PLAN_HEAD", "HARNESS_HEAD", "# Tasks"):
+        assert marker in prompt
+    # The tasks TAIL survives: the highest task number is what the model must
+    # continue numbering after.
+    assert "### T-200: Task number 200" in prompt
+    assert "Start numbering at T-201" in prompt
+    # Total prompt stays within the summed per-artifact budgets plus fence and
+    # instruction overhead — never proportional to the unbounded baseline.
+    assert len(prompt) < sum(_BASELINE_CONTEXT_LIMITS.values()) + 5_000
+
+
+def test_user_prompt_small_baseline_untouched() -> None:
+    """Bounding is a no-op for ordinary baselines — no elision markers."""
+    stages = {
+        "spec": _stage_stub("# Spec\nsmall"),
+        "plan": _stage_stub("# Plan\nsmall"),
+        "harness": _stage_stub("# Harness\nsmall"),
+        "tasks": _stage_stub(BASELINE_TASKS),
+    }
+    prompt = _user_prompt(stages, "add billing to the product", baseline_max=2)
+    assert "characters omitted" not in prompt
+    assert "### T-002: Build the parser" in prompt
 
 
 def test_increment_request_rejects_underspecified_random_words() -> None:
@@ -410,6 +502,82 @@ async def test_increment_refund_on_validation_failure(
         .all()
     )
     assert all(r.status == "draft" for r in rows)
+
+
+@pytest.mark.asyncio
+async def test_increment_truncated_output_fails_and_refunds(
+    session: AsyncSession, user: User, workspace: Workspace
+) -> None:
+    """Audit M9: a provider hard-stop on the output cap means the delta is cut
+    mid-task — silently appending it would corrupt the grown TASKS.md. The
+    objective stopped_by_limit signal fails the increment, refunds, and leaves
+    a retryable draft; the parseable-looking prefix is never persisted."""
+    truncated = (
+        "### T-003: Add billing\n\n"
+        "**Description:** Stripe checkout.\n\n"
+        "### T-004: Add dark mo"  # cut mid-title by the cap
+    )
+    svc, adapter = _service_with_completion(truncated)
+    adapter.last_completion = MagicMock(stopped_by_limit=True, usage=None)
+
+    with patch("services.pipeline.increment_service.get_llm", return_value=adapter):
+        with pytest.raises(IncrementError, match="output-token cap"):
+            await svc.generate_increment(workspace.id, "add billing", user, session)
+
+    await session.refresh(user)
+    assert user.credit_balance == 100  # fully refunded
+
+    rows = (
+        (
+            await session.execute(
+                select(Increment).where(Increment.workspace_id == workspace.id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert all(r.status == "draft" for r in rows)
+
+    # The truncated delta never reached TASKS.md.
+    tasks_stage = (
+        await session.execute(
+            select(Stage).where(
+                Stage.workspace_id == workspace.id, Stage.type == "tasks"
+            )
+        )
+    ).scalar_one()
+    assert tasks_stage.current_version == 1
+    assert "Add billing" not in tasks_stage.content
+
+
+@pytest.mark.asyncio
+async def test_increment_sentinel_is_stripped_from_grown_tasks(
+    session: AsyncSession, user: User, workspace: Workspace
+) -> None:
+    """A completion ending with the sentinel succeeds, and the sentinel never
+    lands inside the grown TASKS.md (it would sit in the final task's body)."""
+    completion = (
+        "### T-003: Add billing\n\n"
+        "**Description:** Stripe checkout.\n"
+        f"{INCREMENT_COMPLETION_SENTINEL}\n"
+    )
+    svc, adapter = _service_with_completion(completion)
+
+    with patch("services.pipeline.increment_service.get_llm", return_value=adapter):
+        result = await svc.generate_increment(
+            workspace.id, "add billing please", user, session
+        )
+
+    assert [t.title for t in result.new_tasks] == ["Add billing"]
+    tasks_stage = (
+        await session.execute(
+            select(Stage).where(
+                Stage.workspace_id == workspace.id, Stage.type == "tasks"
+            )
+        )
+    ).scalar_one()
+    assert "### T-003: Add billing" in tasks_stage.content
+    assert INCREMENT_COMPLETION_SENTINEL not in tasks_stage.content
 
 
 @pytest.mark.asyncio

@@ -99,6 +99,7 @@ from services.pipeline.diff_engine import markdown_fences_balanced
 from services.security.output_validator import validate_async
 from services.security.prompt_guard import scan_async
 from services.security.sanitizer import sanitize_text
+from services.text_compaction import compact_text
 
 logger = logging.getLogger(__name__)
 
@@ -305,6 +306,24 @@ class IncrementService:
                 ),
                 timeout=settings.llm_complete_timeout_seconds,
             )
+
+            # Truncation handling (audit M9), mirroring the core pipeline's
+            # refund discriminator: the provider hard-stopping on its output
+            # cap is an objective fact and fails the increment (→ refund via
+            # the except path below); a merely-missing sentinel on a naturally
+            # finished response is a formatting heuristic and only logs.
+            completion_info = getattr(adapter, "last_completion", None)
+            if getattr(completion_info, "stopped_by_limit", False):
+                raise IncrementError(
+                    "Increment output hit the provider output-token cap and "
+                    "is truncated."
+                )
+            completion, sentinel_present = _strip_increment_sentinel(completion)
+            if not sentinel_present:
+                logger.warning(
+                    "increment.completion_sentinel_missing increment_id=%s",
+                    increment_id,
+                )
 
             validation = await validate_async(completion)
             if not validation.is_safe:
@@ -600,7 +619,30 @@ def _grow_tasks_markdown(baseline_tasks_md: str, new_tasks: list[IncrementTask])
 # recorded prompt_version="local" for every increment call — edits to
 # _system_prompt/_user_prompt below were invisible to telemetry. Bump on any
 # future edit to either function (docs/evals/PROMPT_CHANGE_REVIEW.md).
-INCREMENT_PROMPT_VERSION = "increment-prompt-v1"
+# v2 (prompt-quality audit 2026-07, M9): the baseline artifacts are bounded
+# per artifact (they previously embedded the FULL spec+plan+harness+tasks with
+# no cap — context overflow and attention dilution on exactly the mature
+# workspaces where increments matter most), and the response carries a
+# completion sentinel so a truncated delta is detectable.
+INCREMENT_PROMPT_VERSION = "increment-prompt-v2"
+
+# Emitted as the response's final line; stripped before parsing. Versioned like
+# the core pipeline's sentinels so a format change is detectable.
+INCREMENT_COMPLETION_SENTINEL = "<!-- SPECFORGE_INCREMENT_COMPLETE:v1 -->"
+
+# Per-artifact bounds on the baseline context, summing to prompt_builder's
+# _MAX_UPSTREAM_CHARS (200K) total upstream budget (audit M9). TASKS gets the
+# largest share — numbering, dedup, and terminology join on it — and
+# compact_text keeps head+tail, so the highest task numbers (the tail) always
+# survive. A baseline task elided from the middle can at worst be re-proposed
+# by the model, which _reconcile_delta already drops deterministically by
+# task_ref, so bounding never corrupts the grown document.
+_BASELINE_CONTEXT_LIMITS: dict[str, int] = {
+    "spec": 50_000,
+    "plan": 50_000,
+    "harness": 30_000,
+    "tasks": 70_000,
+}
 
 
 def _system_prompt() -> str:
@@ -624,9 +666,14 @@ def _system_prompt() -> str:
         "and test-path conventions. Do not invent synonyms for defined terms.\n"
         "- Reference existing baseline tasks by their T-NNN where a new task "
         "depends on them, but never restate or modify them.\n"
+        "- A baseline artifact may contain an elision marker ([... N characters "
+        "omitted for context budget ...]) where a middle region was bounded out; "
+        "treat elided content as existing, never as absent.\n"
         "- Each new task must be independently implementable and testable.\n"
         "- Emit nothing but the new ### T-NNN task sections — no preamble, no "
-        "recap of existing work, no closing commentary.\n\n"
+        "recap of existing work, no closing commentary.\n"
+        "- End the response with this exact sentinel on its own final line, with "
+        f"nothing after it: {INCREMENT_COMPLETION_SENTINEL}\n\n"
         f"{SECURITY_AND_PRIVACY_RULES}"
     )
 
@@ -635,10 +682,26 @@ def _user_prompt(
     stages: dict[str, Stage], feature_request: str, baseline_max: int
 ) -> str:
     sanitized_request = sanitize_text(feature_request)
-    spec = stages["spec"].content or ""
-    plan = stages["plan"].content or ""
-    harness = stages["harness"].content or ""
-    tasks = stages["tasks"].content or ""
+    spec = compact_text(
+        stages["spec"].content or "",
+        _BASELINE_CONTEXT_LIMITS["spec"],
+        reason="context budget",
+    )
+    plan = compact_text(
+        stages["plan"].content or "",
+        _BASELINE_CONTEXT_LIMITS["plan"],
+        reason="context budget",
+    )
+    harness = compact_text(
+        stages["harness"].content or "",
+        _BASELINE_CONTEXT_LIMITS["harness"],
+        reason="context budget",
+    )
+    tasks = compact_text(
+        stages["tasks"].content or "",
+        _BASELINE_CONTEXT_LIMITS["tasks"],
+        reason="context budget",
+    )
     next_number = baseline_max + 1
     return (
         "Baseline workspace (immutable — do not modify or re-emit):\n\n"
@@ -651,6 +714,19 @@ def _user_prompt(
         f"Append the new tasks only. Start numbering at T-{next_number:03d}. "
         "Do not repeat any task already present in the baseline TASKS."
     )
+
+
+def _strip_increment_sentinel(completion: str) -> tuple[str, bool]:
+    """Remove the trailing completion sentinel; report whether it was present.
+
+    The sentinel must never survive into the grown TASKS.md (it would land
+    inside the final task's body), so it is stripped before parsing. Presence
+    is reported for the truncation heuristic in the generation flow.
+    """
+    lines = completion.rstrip().splitlines()
+    if lines and lines[-1].strip() == INCREMENT_COMPLETION_SENTINEL:
+        return "\n".join(lines[:-1]).rstrip(), True
+    return completion, False
 
 
 def _derive_title(feature_request: str) -> str:

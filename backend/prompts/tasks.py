@@ -51,14 +51,17 @@ Each task uses this exact format:
 ### T-NNN: Task Title
 
 **Phase:** <phase name>
-**Spec refs:** FR-NNN, NFR-NNN, SEC-NNN (all requirements this task addresses)
+**Spec refs:** FR-NNN, NFR-NNN, SEC-NNN, AC-NNN (all requirements and acceptance criteria this task addresses)
 **Plan refs:** Section names, API names, schema names, module names, migration names
 **Harness refs:** `path/to/test_file.py::TestClass::test_method` (all tests that must pass when this task is
   complete; for setup-only tasks with no harness test write `_(none — <brief reason>)_`)
 **Priority:** MUST / SHOULD / COULD — exactly one. MUST = cannot ship without it; SHOULD = strongly desired in V1
   but cuttable; COULD = nice-to-have, deferrable.
-**Estimate:** S / M / L / XL — exactly one. S = 0.5–1d, M = 1–3d, L = 3–7d, XL = 7d+. Informational; feeds Effort Summary.
-**Estimated size:** XS / S / M / L
+**Estimate:** S / M / L / XL — exactly one, on the focused-session scale (a session ≈ 1–4h): S = ≤ 2h,
+  M = 2–4h (one full session), L = 4–8h (a full day — split it if any coherent split exists), XL = more than a
+  day (only for genuinely indivisible work; otherwise split). Informational; feeds Effort Summary.
+**Estimated size:** XS / S / M / L — expected DIFF size and review scope per the Task Sizing Legend. This is
+  code-review effort, not time; it is independent of Estimate and uses its own letter scale.
 **Risk:** Low / Medium / High — one phrase explaining why
 **Owner:** Backend / Frontend / Full-stack / DevOps / QA / Security / Data
 
@@ -145,8 +148,8 @@ Instructions:
    the Traceability Overview, using exact spec IDs and exact harness test paths.
 1. Use exact harness test paths as Harness refs (`path/to/test_file.py::ClassName::test_method_name`) — do not
    paraphrase, abbreviate, or invent paths; TASKS fails if references do not match the harness exactly.
-2. Break large concerns into small tasks; if a task exceeds half a day, split it. Aim for 20–50 tasks for a
-   non-trivial product.
+2. Break large concerns into small tasks; if a task exceeds one focused session (~4h), split it. Aim for 20–50
+   tasks for a non-trivial product.
 3. Write Steps as concrete file-level actions (exact paths, function names, SQL — "create `services/auth_service.py`
    with `hash_password(plain: str) -> str` using bcrypt cost factor 12") and Acceptance Criteria as exact commands
    or test names, verifiable without reading the code.

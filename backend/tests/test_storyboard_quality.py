@@ -82,7 +82,9 @@ def _clean_dict(slides_per_act: int = 2) -> dict[str, Any]:
     return {
         "title": "SpecForge Launch Keynote",
         "theme": {
-            "palette": ["#101010", "#2244FF", "#FFAA00"],
+            # 5 colours so non-grandfathered validations clear the L16 fresh-
+            # generation palette floor.
+            "palette": ["#101010", "#2244FF", "#FFAA00", "#F5F5F5", "#22CC88"],
             "typography": "Modern geometric sans",
             "motif": "Glass panels",
             "transition_style": "Smooth fades",

@@ -5245,3 +5245,140 @@ async def test_generate_section_gate_skips_critic_before_judge(monkeypatch) -> N
     ]
     assert gate_events, "a quality_gate_failed SSE is emitted on the terminal block"
     assert gate_events[0]["quality_gate_failed"]["kind"] == "missing_sections"
+
+
+# --------------------------------------------------------------------------- #
+# Prompt-quality audit H1/H2/M7/L19 — chunk scopes and the chunk user prompt
+# --------------------------------------------------------------------------- #
+
+
+def _scope_headings(instruction: str) -> list[str]:
+    import re as _re
+
+    return _re.findall(r"^- (## .+)$", instruction, _re.MULTILINE)
+
+
+def test_plan_chunk_scopes_are_disjoint_and_cover_the_contract() -> None:
+    # H1: every mandatory plan section is assigned to EXACTLY one chunk by
+    # verbatim heading; the two conditional sections are assigned to exactly
+    # one chunk each via their conditional sentences.
+    from services.pipeline.artifact_validator import SECTION_CONTRACTS
+
+    listed: list[str] = []
+    for chunk in _chunk_specs_for_stage("plan"):
+        listed.extend(_scope_headings(chunk.instruction))
+    assert len(listed) == len(set(listed)), "plan chunk scopes overlap"
+    for heading in SECTION_CONTRACTS["plan"]:
+        matches = [h for h in listed if h == heading or h.startswith(f"{heading} ")]
+        assert len(matches) == 1, f"{heading} not assigned to exactly one chunk"
+    joined = " ".join(c.instruction for c in _chunk_specs_for_stage("plan"))
+    assert joined.count("## Frontend Architecture") == 1
+    assert joined.count("## Prompt and AI Safety Controls") == 1
+
+
+def test_spec_chunk_scopes_list_compound_heading_verbatim() -> None:
+    # M7: "Security, Privacy, and Abuse Expectations" must be one list line,
+    # never a comma-joined fragment that reads as three sections.
+    chunks = _chunk_specs_for_stage("spec")
+    all_headings = [h for c in chunks for h in _scope_headings(c.instruction)]
+    assert "## Security, Privacy, and Abuse Expectations" in all_headings
+
+    from services.pipeline.artifact_validator import SECTION_CONTRACTS
+
+    assert sorted(all_headings) == sorted(SECTION_CONTRACTS["spec"])
+
+
+def test_chunk_scopes_carry_exact_heading_emission_rule() -> None:
+    # L19: every section-list chunk tells the model to emit headings exactly.
+    for stage in ("spec", "plan"):
+        for chunk in _chunk_specs_for_stage(stage):
+            assert "Emit each heading exactly as listed" in chunk.instruction
+    assert (
+        "Emit each heading exactly as listed"
+        in _chunk_specs_for_stage("harness")[0].instruction
+    )
+    assert (
+        "Emit each heading exactly as listed"
+        in _chunk_specs_for_stage("tasks")[0].instruction
+    )
+
+
+def _base_prompt_with_contract() -> str:
+    from prompts.base import wrap_untrusted_content
+
+    return (
+        "Produce an exhaustive SPEC.md.\n\n"
+        f"{wrap_untrusted_content('problem_statement', 'Build a todo app')}\n\n"
+        "Before returning, verify (internal — do not include in output):\n"
+        "- Every mandatory section is present.\n\n"
+        "Return only SPEC.md. No preamble, commentary, or summary."
+    )
+
+
+def test_partial_chunk_prompt_strips_whole_document_contract() -> None:
+    # H2: a partial chunk must not carry "Return only SPEC.md" or the
+    # whole-document verify checklist — it gets the chunk-scoped contract.
+    chunk = _chunk_specs_for_stage("spec")[0]
+    prompt = _chunk_user_prompt(
+        _base_prompt_with_contract(), stage_type="spec", chunk=chunk
+    )
+    assert "Return only SPEC.md" not in prompt
+    assert "Every mandatory section is present" not in prompt
+    assert "ONE PART of the final document" in prompt
+    assert "Every section named in the chunk scope is present" in prompt
+    # The fenced problem statement always survives the strip.
+    assert "Build a todo app" in prompt
+    # The chunk still ends with its completion sentinel contract.
+    assert chunk_completion_sentinel("spec", chunk.key) in prompt
+
+
+def test_whole_document_chunk_prompt_keeps_contract_intact() -> None:
+    base = _base_prompt_with_contract()
+    full_chunk = _chunk_specs_for_stage("unknown-stage")[0]
+    assert full_chunk.whole_document is True
+    prompt = _chunk_user_prompt(base, stage_type="spec", chunk=full_chunk)
+    assert "Return only SPEC.md" in prompt
+    assert "Before returning, verify" in prompt
+    assert "ONE PART of the final document" not in prompt
+
+
+def test_strip_whole_document_contract_fail_safes() -> None:
+    from services.pipeline.stage_manager import _strip_whole_document_contract
+
+    # No marker → unchanged.
+    assert _strip_whole_document_contract("BASE PROMPT") == "BASE PROMPT"
+    # Marker only INSIDE the fenced upstream content (before the last fence
+    # end) → unchanged; upstream bytes can never amputate the prompt.
+    poisoned = (
+        "Intro.\n"
+        "BEGIN_UNTRUSTED_CONTENT:spec:abc\n"
+        "Before returning, verify nothing here\n"
+        "END_UNTRUSTED_CONTENT:spec:abc\n"
+        "Trailing instruction without a marker."
+    )
+    assert _strip_whole_document_contract(poisoned) == poisoned
+
+
+def test_every_stage_user_prompt_carries_the_strip_marker_once_after_fences() -> None:
+    # The H2 strip anchors on this invariant: each stage's built user prompt
+    # contains "Before returning, verify" exactly once, after its last
+    # untrusted-content fence. If a prompt rewrite breaks this, the strip
+    # degrades to a no-op (fail-safe) and this pin names the regression.
+    from prompts import harness as harness_prompts
+    from prompts import plan as plan_prompts
+    from prompts import spec as spec_prompts
+    from prompts import tasks as tasks_prompts
+    from services.pipeline.stage_manager import _WHOLE_DOC_VERIFY_MARKER
+
+    deps = {
+        "problem_statement": "Build a todo app",
+        "spec": "spec body",
+        "plan": "plan body",
+        "harness": "harness body",
+    }
+    for module in (spec_prompts, plan_prompts, harness_prompts, tasks_prompts):
+        prompt = module.build_user_prompt(deps)
+        assert prompt.count(_WHOLE_DOC_VERIFY_MARKER) == 1, module.__name__
+        assert prompt.rfind(_WHOLE_DOC_VERIFY_MARKER) > prompt.rfind(
+            "END_UNTRUSTED_CONTENT"
+        ), module.__name__

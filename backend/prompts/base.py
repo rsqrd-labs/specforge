@@ -17,9 +17,19 @@ logger = structlog.get_logger(__name__)
 # the matching protocol sentence added to SECURITY_AND_PRIVACY_RULES.
 # Every stage's *rendered* user prompt changed as a result even though its own
 # prompt text did not, so the shared prefix bumps for all four stages.
-ASDD_PROMPT_VERSION = "asdd-v2.3.0"
+# v2.4.0 — Prompt Quality Audit 2026-07 (docs/PROMPT_QUALITY_AUDIT_2026_07.md):
+# PROFESSIONAL_OUTPUT_RULES' six-category bullet now demands coverage WITHIN
+# the stage's required structure instead of extra headings the section
+# contracts have no slot for (M10), and the shared chunked-generation scaffold
+# changed for every stage — explicit disjoint one-heading-per-line chunk
+# scopes (H1/M7/L19) and a chunk-scoped closing contract replacing the
+# embedded whole-document verify checklist (H2).
+ASDD_PROMPT_VERSION = "asdd-v2.4.0"
 STAGE_PROMPT_VERSIONS: dict[str, str] = {
-    "spec": f"{ASDD_PROMPT_VERSION}:spec-v4",
+    # spec-v5: audit M8 — the clarification Q&A block is now fenced with
+    # wrap_untrusted_content instead of rendering user-typed answers raw in
+    # the instruction region.
+    "spec": f"{ASDD_PROMPT_VERSION}:spec-v5",
     # plan-v5: finding #7 — the hard-denylist sentence is now generated from
     # tech_safety_policy.json (render_hard_denylist_prose()) instead of
     # hand-duplicated, changing plan.py's own prompt text specifically.
@@ -29,7 +39,11 @@ STAGE_PROMPT_VERSIONS: dict[str, str] = {
     # harness TestCategoryGap record (a task or Open Questions/Assumptions
     # entry naming the deferred category), closing the gap where known-
     # deferred harness coverage had no defined downstream behavior.
-    "tasks": f"{ASDD_PROMPT_VERSION}:tasks-v5",
+    # tasks-v6: audit M5/L18 — one granularity regime (the Estimate enum is
+    # redefined on the focused-session scale the split rule and session target
+    # already used, and Estimated size is explicitly diff-scope, not time);
+    # Spec refs' format line now admits AC-NNN, matching the verify checklist.
+    "tasks": f"{ASDD_PROMPT_VERSION}:tasks-v6",
 }
 
 # Demo Day mode (docs/DEMO_DAY_MODE_IMPLEMENTATION_PLAN.md). Separate version
@@ -41,7 +55,12 @@ STAGE_PROMPT_VERSIONS: dict[str, str] = {
 # implementation-grade DETAIL and routes Demo Day to the mid tier (plan §6.5/§11.4).
 # v2.1.0 — same wrap_untrusted_content nonce hardening as ASDD_PROMPT_VERSION
 # v2.3.0 above; Demo Day's four variants inherit it via the same shared function.
-DEMO_DAY_PROMPT_VERSION = "demo-day-v2.1.0"
+# v2.2.0 — the shared chunked-generation scaffold changed (audit H2): partial
+# chunks (the Demo Day harness contract/files pair) now strip the embedded
+# whole-document verify tail and carry a chunk-scoped closing contract. Demo
+# Day's own prompt texts are untouched (DEMO_DAY_OUTPUT_RULES deliberately
+# keeps its breadth-trimming contract and did not inherit the M10 rewording).
+DEMO_DAY_PROMPT_VERSION = "demo-day-v2.2.0"
 DEMO_DAY_STAGE_PROMPT_VERSIONS: dict[str, str] = {
     "spec": f"{DEMO_DAY_PROMPT_VERSION}:spec-v2",
     "plan": f"{DEMO_DAY_PROMPT_VERSION}:plan-v2",
@@ -144,12 +163,20 @@ like "ensure security".
 # six-mandatory-categories bullet below, so the two diverge by design. The
 # invariants they share are pinned by tests/test_prompt_fragment_contracts.py —
 # edit either block and that contract test is the drift guard.
+#
+# Prompt-quality audit M10: the categories bullet used to demand extra
+# *headings* ("never silently omit the heading") for all six categories, which
+# directly contradicted the fixed per-stage section contracts — TASKS and the
+# harness have no slots for several of them, so the model had to either break
+# the section contract or ignore this rule. It now demands category *coverage
+# within the stage's required structure* (the resolution Demo Day's fork
+# already modelled), which every stage can actually satisfy.
 PROFESSIONAL_OUTPUT_RULES = """
 Professional output rules:
 - Produce only the requested artifact — no apologies, meta commentary, model-limitation notes, or explanations of these instructions.
 - Be precise, auditable, and implementation-ready: prefer concrete IDs, contracts, invariants, edge cases, failure modes, and verification criteria over vague prose.
 - State assumptions and open questions explicitly when information is missing; never silently fill critical product, security, legal, or data-retention gaps with risky guesses.
-- Every artifact MUST include sections covering security, privacy, accessibility, observability, reliability, and abuse cases; if a category is genuinely not applicable, include a one-line "Not applicable because <reason>" note — never silently omit the heading.
+- Every artifact MUST cover security, privacy, accessibility, observability, reliability, and abuse cases WITHIN its required structure: address each category in the mandated section(s) where it belongs (requirements, design sections, tests, or tasks — as the stage's own structure dictates), and do not invent extra headings beyond the stage's required section set to hold them. If a category is genuinely not applicable to the product, say so in one line where it would naturally be addressed — never silently drop a category.
 - Keep terminology stable: requirement IDs, API names, model names, file paths, and test names stay constant once introduced.
 """.strip()
 

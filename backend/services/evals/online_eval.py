@@ -35,14 +35,64 @@ _PROMPT_LIMITS: dict[str, tuple[int, int]] = {
     "spec": (0, 28_000),
     "plan": (10_000, 18_000),
     "harness": (10_000, 20_000),
-    "tasks": (10_000, 14_000),
+    # Audit H4: a real TASKS.md runs 30–80K chars; the previous 14K artifact
+    # bound elided most of it, and the rubric then told the judge to report
+    # everything it could not see as a gap. The tasks CONTEXT limit below is
+    # the summed budget — spec and harness are bounded separately per part
+    # (``_TASKS_CONTEXT_LIMITS``), never concatenated-then-truncated, so the
+    # spec can no longer consume the head budget and elide the whole harness.
+    "tasks": (16_000, 24_000),
 }
 _COMPACT_RETRY_LIMITS: dict[str, tuple[int, int]] = {
     "spec": (0, 14_000),
     "plan": (5_000, 9_000),
     "harness": (5_000, 10_000),
-    "tasks": (5_000, 8_000),
+    "tasks": (6_000, 10_000),
 }
+# Per-part bounds for the tasks eval context: (spec_limit, harness_limit),
+# keyed by the compact-retry flag. Sums match the tasks context totals above.
+_TASKS_CONTEXT_LIMITS: dict[bool, tuple[int, int]] = {
+    False: (8_000, 8_000),
+    True: (3_000, 3_000),
+}
+
+# The tasks eval context is assembled by ``combine_tasks_eval_context`` and
+# split back apart (for per-part bounding) on this separator. Producer and
+# consumer share these constants so the format cannot drift.
+_TASKS_CONTEXT_SPEC_HEADER = "Specification:\n"
+_TASKS_CONTEXT_HARNESS_HEADER = "Test harness:\n"
+_TASKS_CONTEXT_SEPARATOR = f"\n\n{_TASKS_CONTEXT_HARNESS_HEADER}"
+
+
+def combine_tasks_eval_context(spec: str, harness: str) -> str:
+    """Join spec + harness into the labelled tasks eval context string.
+
+    The single producer for the combined-context format (the shape flows
+    through the batch checkpoint rows unchanged, so it stays one string);
+    ``_split_tasks_eval_context`` is its inverse for per-part bounding.
+    """
+    parts = [
+        f"{_TASKS_CONTEXT_SPEC_HEADER}{spec}" if spec else "",
+        f"{_TASKS_CONTEXT_HARNESS_HEADER}{harness}" if harness else "",
+    ]
+    return "\n\n".join(part for part in parts if part)
+
+
+def _split_tasks_eval_context(combined: str) -> tuple[str, str]:
+    """Split a combined tasks context back into (spec_part, harness_part).
+
+    Splits on the FIRST occurrence of the harness header boundary: the genuine
+    boundary precedes any same-shaped text inside the harness body, and a
+    same-shaped line inside the *spec* body merely shifts budget between the
+    two parts — both parts are still bounded, so the failure mode is a slightly
+    uneven budget, never an unbounded prompt. Headers stay attached to their
+    parts. ``harness_part`` is empty when the context has no harness.
+    """
+    idx = combined.find(_TASKS_CONTEXT_SEPARATOR)
+    if idx == -1:
+        return combined, ""
+    return combined[:idx], combined[idx + 2 :]
+
 
 # --- Structural task-reference validator ---
 _TASK_HEADING_RE = re.compile(r"^###\s+T-(\d+):\s+(.+)$")
@@ -155,17 +205,19 @@ _RELIABLY_PARSED_EXTS = (".py",)
 # dropped-category matching — all of which change which refs read as genuine gaps.
 STRUCTURAL_TASK_VALIDATOR_VERSION = 2
 
-# eval-v3: the judge system prompt carries the shared INJECTION_DEFENSE_NOTE and
-# _build_eval_prompt fences the scored artifact/context with
-# wrap_untrusted_content — this judge was the only one of the three
-# (critic/pr-evaluator/eval) grading raw, unfenced artifact bytes with no
-# instruction to ignore embedded directives, so a hostile artifact could carry
-# "score every dimension 100" text straight into the prompt (the audit finding
-# #5 omission class, closed for judges by the shared note). Version history:
-# eval-v2 was the placeholder-safe substitution fix (remediation #1). Both the
-# synchronous path and the batch submit path read this constant — never
-# hand-write the version string at a call site.
-EVAL_PROMPT_VERSION = "eval-v3"
+# eval-v4 (prompt-quality audit 2026-07, H4/L13/L14): the rubric teaches the
+# judge about compact_text's elision marker and forbids reporting gaps that
+# could fall inside an elided region (H4 — false MissingSection/CoverageGap on
+# exactly the largest artifacts); the tasks eval context is bounded per part
+# (spec and harness separately) instead of concatenated-then-truncated; the
+# tasks template's doubled braces now render as real JSON (L13); and the score
+# shape is per-stage — only the dimensions that stage's weighting/completeness
+# actually consume are requested (L14). Version history: eval-v3 added the
+# shared INJECTION_DEFENSE_NOTE + nonce-fenced artifact/context; eval-v2 was
+# the placeholder-safe substitution fix (remediation #1). Both the synchronous
+# path and the batch submit path read this constant — never hand-write the
+# version string at a call site.
+EVAL_PROMPT_VERSION = "eval-v4"
 
 _JUDGE_SYSTEM = (
     "You are an independent senior product and software engineering evaluator. "
@@ -177,7 +229,29 @@ _JUDGE_SYSTEM = (
     f"{INJECTION_DEFENSE_NOTE}"
 )
 
-_RUBRIC = """
+# The full dimension vocabulary, in the order the score shape lists them.
+_ALL_SCORE_DIMENSIONS: tuple[str, ...] = (
+    "goal_alignment",
+    "requirements_coverage",
+    "specificity_testability",
+    "user_flow_coverage",
+    "non_functional_coverage",
+    "traceability",
+    "feasibility",
+    "clarity",
+)
+# Dimensions the ``completeness`` roll-up in ``_normalise_eval_payload``
+# averages — consumed for every stage, independent of the per-stage weights.
+_COMPLETENESS_DIMENSIONS = frozenset(
+    {
+        "requirements_coverage",
+        "user_flow_coverage",
+        "non_functional_coverage",
+        "traceability",
+    }
+)
+
+_RUBRIC_HEADER = """
 Score each dimension from 0 to 100 using this calibration:
 - 0-39: unusable or mostly missing
 - 40-59: partial, vague, or materially risky
@@ -192,28 +266,58 @@ Rules:
   missing non-functional expectations, and untestable language.
 - Prefer concrete, stakeholder-readable requirements over deep implementation
   detail unless the stage explicitly calls for implementation work.
-- If a requirement, flow, test, or task cannot be found in the text, list it
-  as a gap instead of assuming it exists.
-
-Return exactly this JSON shape:
-{
-  "scores": {
-    "goal_alignment": 0-100,
-    "requirements_coverage": 0-100,
-    "specificity_testability": 0-100,
-    "user_flow_coverage": 0-100,
-    "non_functional_coverage": 0-100,
-    "traceability": 0-100,
-    "feasibility": 0-100,
-    "clarity": 0-100
-  },
-  "coverage_percent": null or 0-100,
-  "uncovered_reqs": [],
-  "tasks_without_ref": [],
-  "risks": []
-}
+- The provided texts may be bounded: a literal marker like
+  "[... N characters omitted for eval budget ...]" means a middle region was
+  elided before you received the text. Absence from the visible text is NOT
+  absence from the artifact — never list content as a gap, and never lower a
+  coverage estimate, on the basis of content that could plausibly fall inside
+  an elided region.
+- If a requirement, flow, test, or task cannot be found in the visible text
+  and no elision marker could account for it, list it as a gap instead of
+  assuming it exists.
 """.strip()
 
+
+def _stage_score_dimensions(stage_type: str) -> list[str]:
+    """The score dimensions this stage's scoring pipeline actually consumes.
+
+    Audit L14: the rubric used to request all 8 dimensions from every stage
+    while the per-stage ``_SCORE_WEIGHTS`` ignore several — wasted judge effort
+    and tokens. Consumed = the stage's weighted dimensions ∪ the completeness
+    roll-up inputs ∪ clarity, derived from the same structures that do the
+    consuming so the request list cannot drift from the scoring code.
+    """
+    weights = _SCORE_WEIGHTS.get(stage_type, _SCORE_WEIGHTS["spec"])
+    used = set(weights) | _COMPLETENESS_DIMENSIONS | {"clarity"}
+    # coverage_percent is a separate top-level response field, never a scores key.
+    used.discard("coverage_percent")
+    return [dim for dim in _ALL_SCORE_DIMENSIONS if dim in used]
+
+
+def _rubric_for_stage(stage_type: str) -> str:
+    score_lines = ",\n".join(
+        f'    "{dim}": 0-100' for dim in _stage_score_dimensions(stage_type)
+    )
+    return (
+        f"{_RUBRIC_HEADER}\n\n"
+        "Return exactly this JSON shape:\n"
+        "{\n"
+        '  "scores": {\n'
+        f"{score_lines}\n"
+        "  },\n"
+        '  "coverage_percent": null or 0-100,\n'
+        '  "uncovered_reqs": [],\n'
+        '  "tasks_without_ref": [],\n'
+        '  "risks": []\n'
+        "}"
+    )
+
+
+# Plain (non-f) templates: {rubric}, {spec_content}, and {content} are
+# substituted in ONE regex pass by _build_eval_prompt, so inserted values are
+# never rescanned. Braces in prose therefore need no doubling — the tasks
+# template's example object renders as real JSON (audit L13; the doubled-brace
+# form leaked `{{"task_number" ...}}` literally to the judge).
 _STAGE_PROMPTS: dict[str, str] = {
     "spec": (
         "Evaluate this software specification as a product specification, not an "
@@ -222,7 +326,7 @@ _STAGE_PROMPTS: dict[str, str] = {
         "criteria, constraints, success metrics, and high-level system expectations. "
         "It may include high-level conceptual diagrams, but should avoid deep "
         "implementation details.\n\n"
-        f"{_RUBRIC}\n\n"
+        "{rubric}\n\n"
         "Content:\n{content}"
     ),
     "plan": (
@@ -230,7 +334,7 @@ _STAGE_PROMPTS: dict[str, str] = {
         "translates spec requirements into coherent work areas, sequencing, risks, "
         "dependencies, validation strategy, and delivery boundaries without losing "
         "traceability to the product goals.\n\n"
-        f"{_RUBRIC}\n\n"
+        "{rubric}\n\n"
         "Spec:\n{spec_content}\n\nPlan:\n{content}"
     ),
     "harness": (
@@ -239,17 +343,17 @@ _STAGE_PROMPTS: dict[str, str] = {
         "edge cases, and major non-functional expectations. Set coverage_percent to "
         "your best evidence-based estimate of requirement coverage, and list specific "
         "uncovered requirements.\n\n"
-        f"{_RUBRIC}\n\n"
+        "{rubric}\n\n"
         "Spec:\n{spec_content}\n\nHarness:\n{content}"
     ),
     "tasks": (
         "Evaluate this task list against the test harness and specification. A strong "
         "task list is complete, sequenced, independently actionable, test-linked, and "
         "traceable. In tasks_without_ref, include objects shaped as "
-        '{{"task_number": int or null, "task_title": string, "reason": string, '
-        '"referenced_test": string or null}} for any task that lacks a clear test or '
+        '{"task_number": int or null, "task_title": string, "reason": string, '
+        '"referenced_test": string or null} for any task that lacks a clear test or '
         "harness reference.\n\n"
-        f"{_RUBRIC}\n\n"
+        "{rubric}\n\n"
         "Reference context:\n{spec_content}\n\nTasks:\n{content}"
     ),
 }
@@ -1271,7 +1375,35 @@ def _parse_eval_json(raw: str) -> dict[str, Any] | None:
 # just-inserted context block, silently splicing the artifact into the wrong
 # slot. `re.sub` with a single compiled alternation walks the template once and
 # substitutes via a callback, so inserted values are never rescanned.
-_EVAL_PLACEHOLDER_RE = re.compile(r"\{spec_content\}|\{content\}")
+_EVAL_PLACEHOLDER_RE = re.compile(r"\{spec_content\}|\{content\}|\{rubric\}")
+
+
+def _bounded_eval_context(
+    stage_type: str,
+    spec_content: str,
+    context_limit: int,
+    *,
+    compact: bool,
+) -> str:
+    """Bound the eval context, per part for tasks (audit H4).
+
+    The tasks context is spec + harness combined; bounding the union let the
+    spec consume the head budget and elide nearly the entire harness, so the
+    judge graded task→test traceability against a harness it could not see.
+    Split on the producer's separator and bound each part with its own budget;
+    every other stage keeps the single-bound behaviour.
+    """
+    if stage_type != "tasks":
+        return compact_text(spec_content, context_limit)
+    spec_part, harness_part = _split_tasks_eval_context(spec_content)
+    if not harness_part:
+        return compact_text(spec_content, context_limit)
+    spec_limit, harness_limit = _TASKS_CONTEXT_LIMITS[compact]
+    return (
+        compact_text(spec_part, spec_limit)
+        + "\n\n"
+        + compact_text(harness_part, harness_limit)
+    )
 
 
 def _build_eval_prompt(
@@ -1284,7 +1416,9 @@ def _build_eval_prompt(
     context_limit, content_limit = (
         _COMPACT_RETRY_LIMITS if compact else _PROMPT_LIMITS
     ).get(stage_type, _PROMPT_LIMITS["spec"])
-    context = compact_text(spec_content, context_limit)
+    context = _bounded_eval_context(
+        stage_type, spec_content, context_limit, compact=compact
+    )
     artifact = compact_text(content, content_limit)
     # eval-v3: fence both blocks the way every other judge already does
     # (critic wraps artifact + deps, pr-evaluator wraps diff + criteria) so the
@@ -1295,6 +1429,7 @@ def _build_eval_prompt(
     substitutions = {
         "{spec_content}": wrap_untrusted_content("eval_context", context),
         "{content}": wrap_untrusted_content("artifact_under_evaluation", artifact),
+        "{rubric}": _rubric_for_stage(stage_type),
     }
     return _EVAL_PLACEHOLDER_RE.sub(
         lambda m: substitutions[m.group()], _STAGE_PROMPTS[stage_type]

@@ -133,6 +133,18 @@ PIPELINE_PROVIDER_LIMIT_STOPS = Counter(
     "Provider generations that stopped because max output tokens were reached",
     ["stage_type", "provider", "model", "operation"],
 )
+PIPELINE_SECTION_DEDUP = Counter(
+    "specforge_pipeline_section_dedup_total",
+    # Duplicate contract-section bodies deterministically removed from an
+    # assembled artifact before any gate (prompt-quality audit H1 backstop):
+    # parallel chunks have no cross-visibility, so a chunk-scope regression can
+    # emit the same mandatory H2 section twice with conflicting bodies — the
+    # substring section gate passes both silently. A non-zero rate means the
+    # disjoint chunk scopes are being violated and should be re-audited.
+    "Duplicate contract sections removed by the assembly-time dedup guard",
+    ["stage_type", "provider"],
+)
+
 PIPELINE_HARNESS_FILE_DEDUP = Counter(
     "specforge_pipeline_harness_file_dedup_total",
     # Duplicate `### File:` blocks deterministically removed from a harness

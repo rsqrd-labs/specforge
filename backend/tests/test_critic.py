@@ -486,6 +486,174 @@ async def test_critic_review_short_artifact_skips_judge() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Audit M12: verdict salvage — one malformed finding must not void the verdict.
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_critic_review_salvages_verdict_with_one_invented_kind() -> None:
+    """M12 regression: a failing verdict where the judge invented one unlisted
+    finding kind used to fail strict validation entirely and fall open to a
+    silent passed=True — defeating the gate exactly when the judge found
+    defects. Salvage must keep the well-formed findings and the failing
+    verdict, dropping only the malformed finding."""
+    verdict = (
+        '{"passed": false, "findings": ['
+        '{"kind": "MissingSection", "detail": "No API Design section", '
+        '"reference": "API Design"}, '
+        '{"kind": "InventedKindTheSchemaForbids", "detail": "made up", '
+        '"reference": null}, '
+        '{"kind": "CoverageGap", "detail": "FR-003 unaddressed", '
+        '"reference": "FR-003"}]}'
+    )
+    with patch(
+        "services.pipeline.critic.call_judge_model",
+        new_callable=AsyncMock,
+        return_value=verdict,
+    ):
+        result = await critic_review("plan", _LONG_ARTIFACT, {})
+    assert result.passed is False
+    assert [f.kind for f in result.findings] == ["MissingSection", "CoverageGap"]
+
+
+@pytest.mark.asyncio
+async def test_critic_review_salvages_verdict_with_extra_top_level_key() -> None:
+    """A judge that adds an unrequested top-level field (e.g. confidence) fails
+    strict extra="forbid" validation; salvage recovers the verdict from the
+    fields that do conform."""
+    verdict = (
+        '{"passed": false, "confidence": 0.9, "findings": ['
+        '{"kind": "ShallowSection", "detail": "Data Model is one line", '
+        '"reference": "Data Model"}]}'
+    )
+    with patch(
+        "services.pipeline.critic.call_judge_model",
+        new_callable=AsyncMock,
+        return_value=verdict,
+    ):
+        result = await critic_review("plan", _LONG_ARTIFACT, {})
+    assert result.passed is False
+    assert result.findings[0].kind == "ShallowSection"
+
+
+@pytest.mark.asyncio
+async def test_critic_review_failing_verdict_with_no_salvageable_findings() -> None:
+    """A failing verdict whose findings ALL drop carries nothing the
+    regenerate/advisory paths can act on — the existing fail-open applies."""
+    verdict = (
+        '{"passed": false, "findings": ['
+        '{"kind": "NotAKind", "detail": "x", "reference": null}]}'
+    )
+    with patch(
+        "services.pipeline.critic.call_judge_model",
+        new_callable=AsyncMock,
+        return_value=verdict,
+    ):
+        result = await critic_review("plan", _LONG_ARTIFACT, {})
+    assert result.passed is True
+    assert result.findings == []
+
+
+def test_salvage_verdict_rejects_non_dict_and_bad_passed() -> None:
+    """Salvage never invents a verdict: non-object JSON, a missing/non-boolean
+    passed field, or unparseable text all return None (caller falls open)."""
+    assert critic_module._salvage_verdict("[1, 2]", "spec") is None
+    assert critic_module._salvage_verdict('{"findings": []}', "spec") is None
+    assert critic_module._salvage_verdict('{"passed": "yes"}', "spec") is None
+    assert critic_module._salvage_verdict("not json at all", "spec") is None
+
+
+def test_salvage_verdict_cannot_carry_artifact_bytes() -> None:
+    """Security posture preserved: salvage validates each finding against the
+    strict CriticFinding schema, so a finding smuggling extra fields (e.g. a
+    rewritten artifact) is dropped, not partially accepted."""
+    salvaged = critic_module._salvage_verdict(
+        '{"passed": false, "findings": ['
+        '{"kind": "CoverageGap", "detail": "d", "reference": "FR-001", '
+        '"artifact_md": "REWRITTEN CONTENT"}, '
+        '{"kind": "CoverageGap", "detail": "clean", "reference": "FR-002"}]}',
+        "spec",
+    )
+    assert salvaged is not None
+    assert len(salvaged.findings) == 1
+    assert salvaged.findings[0].detail == "clean"
+
+
+# ---------------------------------------------------------------------------
+# Audit M12 (schema side) + L17 (dep filtering) + elision awareness.
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_new_finding_kinds_validate_strictly() -> None:
+    """ImplementationLeak and DependencyCycle — the kinds _per_stage_focus asks
+    for — must parse through the strict (non-salvage) path."""
+    verdict = (
+        '{"passed": false, "findings": ['
+        '{"kind": "ImplementationLeak", "detail": "Spec names a Postgres '
+        'schema", "reference": "users table DDL"}, '
+        '{"kind": "DependencyCycle", "detail": "T-004 depends on T-009", '
+        '"reference": "T-004"}]}'
+    )
+    with patch(
+        "services.pipeline.critic.call_judge_model",
+        new_callable=AsyncMock,
+        return_value=verdict,
+    ) as judge:
+        result = await critic_review("tasks", _LONG_ARTIFACT, {})
+    assert result.passed is False
+    assert {f.kind for f in result.findings} == {
+        "ImplementationLeak",
+        "DependencyCycle",
+    }
+    judge.assert_awaited_once()
+
+
+def test_per_stage_focus_only_asks_for_expressible_kinds() -> None:
+    """M12 root cause guard: every kind name a focus string tells the judge to
+    flag must exist in the CriticFindingKind literal — an inexpressible ask
+    tempts the judge to invent a kind."""
+    import re
+    from typing import get_args
+
+    valid_kinds = set(get_args(critic_module.CriticFindingKind))
+    for stage in ("spec", "plan", "harness", "tasks", "unknown"):
+        focus = critic_module._per_stage_focus(stage)
+        for kind in re.findall(r"flag (?:them as )?([A-Z][A-Za-z]+)", focus):
+            assert kind in valid_kinds, f"{stage} focus asks for unknown kind {kind}"
+
+
+def test_build_critic_user_prompt_drops_advisory_deps() -> None:
+    """L17: research_context and clarification_qa are advisory generation
+    context, not upstream contracts — presenting them as 'Upstream dependency'
+    makes the judge grade the artifact against non-contract content. Only
+    _GRADABLE_DEP_KEYS may appear."""
+    prompt = critic_module._build_critic_user_prompt(
+        "tasks",
+        "## Task Breakdown\nA gradable artifact body.",
+        {
+            "spec": "## Spec\nReal upstream contract.",
+            "problem_statement": "Build a thing.",
+            "research_context": "SEARCH SNIPPET: unrelated blog post",
+            "clarification_qa": "Q: colour? A: blue",
+        },
+    )
+    assert "Upstream dependency — spec:" in prompt
+    assert "Upstream dependency — problem_statement:" in prompt
+    assert "research_context" not in prompt
+    assert "SEARCH SNIPPET" not in prompt
+    assert "clarification_qa" not in prompt
+    assert "Q: colour?" not in prompt
+
+
+def test_critic_system_prompt_is_elision_aware() -> None:
+    """H4 companion: bounded inputs carry a literal elision marker; the system
+    prompt must tell the judge that absence from visible text is not absence
+    from the artifact, keyed on the exact marker phrase compact_text emits."""
+    from services.text_compaction import ELISION_MARKER_PHRASE
+
+    prompt = critic_module._CRITIC_SYSTEM_PROMPT
+    assert ELISION_MARKER_PHRASE in prompt
+    assert "Absence from the visible text is NOT" in prompt
+
+
+# ---------------------------------------------------------------------------
 # Behavioral tests driving StageManager.generate() with a stubbed critic.
 # ---------------------------------------------------------------------------
 def _generate_patches(svc: StageManager, *, complete_return: str | None = None):

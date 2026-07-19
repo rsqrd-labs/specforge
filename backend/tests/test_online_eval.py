@@ -9,9 +9,11 @@ from uuid import uuid4
 import pytest
 
 from models import EvalResult
+from services.evals import online_eval as online_eval_module
 from services.evals.online_eval import (
     _build_eval_prompt,
     _score_comment,
+    combine_tasks_eval_context,
     run_eval,
     run_eval_background,
 )
@@ -82,6 +84,151 @@ def test_build_eval_prompt_adversarial_content_field_in_artifact() -> None:
         == 1
     )
     assert "spec body" in rendered
+
+
+# ---------------------------------------------------------------------------
+# Audit L14: per-stage rubric requests only the dimensions the stage consumes.
+# ---------------------------------------------------------------------------
+def test_stage_score_dimensions_derive_from_consuming_structures() -> None:
+    """The requested-dimension list is derived from _SCORE_WEIGHTS ∪ the
+    completeness roll-up ∪ clarity — the exact structures that consume the
+    scores — so the request list cannot drift from the scoring code."""
+    for stage in ("spec", "plan", "harness", "tasks"):
+        dims = online_eval_module._stage_score_dimensions(stage)
+        weights = online_eval_module._SCORE_WEIGHTS[stage]
+        expected = (set(weights) | online_eval_module._COMPLETENESS_DIMENSIONS) | {
+            "clarity"
+        }
+        expected.discard("coverage_percent")
+        assert set(dims) == expected, stage
+        # Order is the canonical _ALL_SCORE_DIMENSIONS order (stable prompts).
+        assert dims == [
+            d for d in online_eval_module._ALL_SCORE_DIMENSIONS if d in expected
+        ]
+
+
+def test_rubric_for_stage_omits_unconsumed_dimensions() -> None:
+    """L14 concrete cases: the spec pipeline never reads feasibility, and the
+    harness pipeline never reads goal_alignment or feasibility — their rubrics
+    must not ask the judge to score them. coverage_percent is a top-level
+    response field, never a scores key."""
+    spec_rubric = online_eval_module._rubric_for_stage("spec")
+    assert '"feasibility"' not in spec_rubric
+    assert '"requirements_coverage": 0-100' in spec_rubric
+
+    harness_rubric = online_eval_module._rubric_for_stage("harness")
+    assert '"goal_alignment"' not in harness_rubric
+    assert '"feasibility"' not in harness_rubric
+    assert (
+        '"coverage_percent": 0-100'
+        not in harness_rubric.split('"scores"')[1].split("},")[0]
+    )
+    assert '"coverage_percent": null or 0-100' in harness_rubric
+
+    plan_rubric = online_eval_module._rubric_for_stage("plan")
+    assert '"feasibility": 0-100' in plan_rubric
+
+
+def test_build_eval_prompt_substitutes_rubric_placeholder() -> None:
+    """L13/L14: every stage template carries a {rubric} placeholder that the
+    single-pass substitution must fill — no literal {rubric} may reach the
+    judge, and the calibration header must be present."""
+    for stage in ("spec", "plan", "harness", "tasks"):
+        rendered = _build_eval_prompt(stage, "artifact body", "context body")
+        assert "{rubric}" not in rendered, stage
+        assert "Score each dimension from 0 to 100" in rendered, stage
+
+
+def test_tasks_template_renders_example_object_as_real_json() -> None:
+    """Audit L13: the tasks template's tasks_without_ref example previously
+    used doubled braces inside a plain (non-f) string, leaking literal
+    `{{"task_number" ...}}` to the judge. It must render as real JSON."""
+    rendered = _build_eval_prompt("tasks", "tasks body", "context body")
+    assert '{"task_number": int or null' in rendered
+    assert '{{"task_number"' not in rendered
+
+
+def test_rubric_header_is_elision_aware() -> None:
+    """The rubric's elision rule must key on the exact marker phrase
+    compact_text emits, so bounded texts are never graded as gappy."""
+    from services.text_compaction import ELISION_MARKER_PHRASE
+
+    assert ELISION_MARKER_PHRASE in online_eval_module._RUBRIC_HEADER
+    assert "Absence from the visible text is NOT" in online_eval_module._RUBRIC_HEADER
+
+
+# ---------------------------------------------------------------------------
+# Audit H4: tasks eval context is bounded per part, never union-truncated.
+# ---------------------------------------------------------------------------
+def test_combine_and_split_tasks_eval_context_round_trip() -> None:
+    spec = "## Spec\nSPEC_BODY_MARKER"
+    harness = "## Harness\nHARNESS_BODY_MARKER"
+    combined = combine_tasks_eval_context(spec, harness)
+    spec_part, harness_part = online_eval_module._split_tasks_eval_context(combined)
+    assert spec_part == f"Specification:\n{spec}"
+    assert harness_part == f"Test harness:\n{harness}"
+
+    # Degenerate shapes: one part empty.
+    assert combine_tasks_eval_context(spec, "") == f"Specification:\n{spec}"
+    only_harness = combine_tasks_eval_context("", harness)
+    assert only_harness == f"Test harness:\n{harness}"
+
+
+def test_split_tasks_eval_context_splits_on_first_boundary() -> None:
+    """A 'Test harness:' line inside the harness body must not shift content
+    into the spec part — the genuine boundary is the FIRST occurrence."""
+    spec = "spec text"
+    harness = "harness intro\n\nTest harness:\nnested same-shaped line"
+    combined = combine_tasks_eval_context(spec, harness)
+    spec_part, harness_part = online_eval_module._split_tasks_eval_context(combined)
+    assert spec_part == "Specification:\nspec text"
+    assert "nested same-shaped line" in harness_part
+
+
+def test_bounded_eval_context_tasks_bounds_each_part_separately() -> None:
+    """H4 regression: a huge spec must not consume the head budget and elide
+    nearly the whole harness. With per-part budgets, distinctive text from the
+    head AND tail of BOTH parts survives bounding."""
+    spec = "SPEC_HEAD_MARKER\n" + ("s" * 60_000) + "\nSPEC_TAIL_MARKER"
+    harness = "HARNESS_HEAD_MARKER\n" + ("h" * 60_000) + "\nHARNESS_TAIL_MARKER"
+    combined = combine_tasks_eval_context(spec, harness)
+
+    bounded = online_eval_module._bounded_eval_context(
+        "tasks", combined, 16_000, compact=False
+    )
+
+    for marker in (
+        "SPEC_HEAD_MARKER",
+        "SPEC_TAIL_MARKER",
+        "HARNESS_HEAD_MARKER",
+        "HARNESS_TAIL_MARKER",
+    ):
+        assert marker in bounded, marker
+    # Each part is elided independently (two markers), and the total respects
+    # the summed per-part budget plus the joiner/marker overhead.
+    assert bounded.count("characters omitted") == 2
+    spec_limit, harness_limit = online_eval_module._TASKS_CONTEXT_LIMITS[False]
+    assert len(bounded) < spec_limit + harness_limit + 500
+
+
+def test_bounded_eval_context_tasks_without_harness_single_bound() -> None:
+    """A tasks context with no harness part falls back to the single-bound
+    behaviour instead of misapplying per-part budgets."""
+    combined = combine_tasks_eval_context("SPEC_ONLY_MARKER " + "s" * 40_000, "")
+    bounded = online_eval_module._bounded_eval_context(
+        "tasks", combined, 16_000, compact=False
+    )
+    assert "SPEC_ONLY_MARKER" in bounded
+    assert len(bounded) < 16_500
+
+
+def test_bounded_eval_context_non_tasks_unchanged() -> None:
+    """Other stages keep the existing single-bound behaviour byte-for-byte."""
+    ctx = "small plan context"
+    assert (
+        online_eval_module._bounded_eval_context("plan", ctx, 10_000, compact=False)
+        == ctx
+    )
 
 
 def test_score_comment_omits_unknown_route() -> None:

@@ -6,6 +6,7 @@ import logging
 import os
 import time as _time
 from collections import OrderedDict
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from fastapi import HTTPException
@@ -210,6 +211,62 @@ async def complete_with_timeout(
 _DEFAULT_JUDGE_PROVIDER = "anthropic"
 
 
+@dataclass(frozen=True)
+class JudgeCallResult:
+    """A judge-model completion plus the provider's stop information.
+
+    ``stopped_by_limit`` is the provider-reported "output hit max_tokens" fact
+    (never a heuristic) so callers that feed the completion downstream — e.g.
+    the Rung-2 problem compressor, whose output becomes the problem statement
+    for all four stages — can detect a silent hard truncation (audit M11).
+    """
+
+    text: str
+    stopped_by_limit: bool
+
+
+async def call_judge_model_with_info(
+    *,
+    system_prompt: str,
+    user_prompt: str,
+    provider: str | None = None,
+    max_tokens: int = 2048,
+    timeout: float | None = None,
+    operation: str = "judge.call",
+    stage_type: str = "-",
+    cost_context: "LLMCostContext | None" = None,
+) -> JudgeCallResult:
+    """``call_judge_model`` variant that also reports the stop reason.
+
+    Same routing, instrumentation, and timeout semantics; the adapter is held
+    locally so its ``last_completion`` can be read after the call.
+    """
+    from services.llm.provider_config import JUDGE_MODELS  # noqa: PLC0415
+
+    judge_provider = provider if provider in JUDGE_MODELS else _DEFAULT_JUDGE_PROVIDER
+    model = JUDGE_MODELS[judge_provider]
+    effective_timeout = (
+        timeout if timeout is not None else float(settings.llm_complete_timeout_seconds)
+    )
+    adapter = get_instrumented_llm(
+        judge_provider,
+        model,
+        operation=operation,
+        stage_type=stage_type,
+        model_tier="small",
+        cost_context=cost_context,
+    )
+    text = await asyncio.wait_for(
+        adapter.complete(system_prompt, user_prompt, max_tokens),
+        timeout=effective_timeout,
+    )
+    completion = getattr(adapter, "last_completion", None)
+    return JudgeCallResult(
+        text=text,
+        stopped_by_limit=bool(getattr(completion, "stopped_by_limit", False)),
+    )
+
+
 async def call_judge_model(
     *,
     system_prompt: str,
@@ -229,25 +286,17 @@ async def call_judge_model(
     model so the gate keeps working regardless of the workspace's primary
     provider.  T-247.
     """
-    from services.llm.provider_config import JUDGE_MODELS  # noqa: PLC0415
-
-    judge_provider = provider if provider in JUDGE_MODELS else _DEFAULT_JUDGE_PROVIDER
-    model = JUDGE_MODELS[judge_provider]
-    effective_timeout = (
-        timeout if timeout is not None else float(settings.llm_complete_timeout_seconds)
-    )
-    return await complete_with_timeout(
-        judge_provider,
-        model,
-        system_prompt,
-        user_prompt,
-        max_tokens,
-        timeout=effective_timeout,
+    result = await call_judge_model_with_info(
+        system_prompt=system_prompt,
+        user_prompt=user_prompt,
+        provider=provider,
+        max_tokens=max_tokens,
+        timeout=timeout,
         operation=operation,
         stage_type=stage_type,
-        model_tier="small",
         cost_context=cost_context,
     )
+    return result.text
 
 
 def clear_llm_cache() -> None:

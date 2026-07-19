@@ -103,6 +103,10 @@ _SOURCE_ENUM = ("SPEC", "PLAN", "HARNESS", "TASKS")
 # of a pre-v1.4 Storyboard re-validates the whole spliced payload).
 _TALK_TRACK_MIN_CHARS = 120
 _BACKUP_POINTS_MIN = 2
+# The prompt's palette quality floor (it asks for 5–8 colours with real range);
+# enforced on fresh generations only, grandfathered for stored/spliced decks
+# whose structural floor stays the Field's min_length=3 (audit L16).
+_PALETTE_MIN_COLOURS = 5
 # The single context flag that grandfathers ALL fresh-generation content floors
 # (note depth AND the P3.4 slide-substance floor) for spliced/legacy payloads.
 # Section regeneration splices a freshly generated act into an existing deck and
@@ -366,6 +370,11 @@ class StoryboardTheme(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    # Structural floor stays 3 so stored legacy decks keep validating; the
+    # prompt's 5-colour quality floor is enforced below for fresh generations
+    # only (audit L16 — the prompt demanded 5–8 while the schema accepted 3–8,
+    # so a prompt-violating payload validated cleanly and the repair pass that
+    # exists exactly for schema misses never fired).
     palette: list[str] = Field(min_length=3, max_length=8)
     typography: str = Field(min_length=1)
     motif: str = Field(min_length=1)
@@ -373,11 +382,20 @@ class StoryboardTheme(BaseModel):
     diagram_style: str = Field(min_length=1)
 
     @model_validator(mode="after")
-    def _palette_is_hex(self) -> "StoryboardTheme":
+    def _palette_is_hex(self, info: ValidationInfo) -> "StoryboardTheme":
         hex_re = re.compile(r"^#[0-9A-Fa-f]{6}$")
         for colour in self.palette:
             if not hex_re.match(colour):
                 raise ValueError(f"palette colour {colour!r} must be a #RRGGBB hex")
+        # Fresh generations must meet the prompt's 5-colour floor; spliced /
+        # legacy payloads are grandfathered by the same flag that relaxes the
+        # note-depth and slide-substance floors (see GRANDFATHER_NOTE_DEPTH).
+        if not (info.context or {}).get(GRANDFATHER_NOTE_DEPTH):
+            if len(self.palette) < _PALETTE_MIN_COLOURS:
+                raise ValueError(
+                    f"palette must have at least {_PALETTE_MIN_COLOURS} colours "
+                    "(the prompt asks for 5–8 with real range)"
+                )
         return self
 
 
