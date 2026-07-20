@@ -1128,6 +1128,7 @@ async def test_generate_cache_hit_skips_credit_and_provider_call() -> None:
             new_callable=AsyncMock,
         ) as mock_deduct,
         patch("services.pipeline.stage_manager.get_llm") as mock_get_llm,
+        patch("services.pipeline.stage_manager._schedule_stage_eval") as mock_schedule,
     ):
         tokens = []
         async for token in svc.generate(spec_stage.id, user, db):
@@ -1140,10 +1141,23 @@ async def test_generate_cache_hit_skips_credit_and_provider_call() -> None:
     assert spec_stage.content == "cached spec output"
     assert spec_stage.current_version == 3
     assert spec_stage.status == "draft"
-    assert any(
-        isinstance(item, StageVersion) and item.content == "cached spec output"
-        for item in db.added
-    )
+    versions = [item for item in db.added if isinstance(item, StageVersion)]
+    assert len(versions) == 1
+    version = versions[0]
+    assert version.content == "cached spec output"
+    eval_results = [item for item in db.added if isinstance(item, EvalResult)]
+    assert len(eval_results) == 1
+    assert eval_results[0].stage_version_id == version.id
+    mock_schedule.assert_called_once()
+    scheduled = mock_schedule.call_args.kwargs
+    assert scheduled["version_id"] == version.id
+    assert scheduled["stage_type"] == "spec"
+    assert scheduled["content"] == "cached spec output"
+    assert scheduled["eval_context"] == ""
+    assert scheduled["workspace_id"] == workspace.id
+    assert scheduled["harness_content"] is None
+    assert scheduled["provider"] == scheduled["generation_provider"]
+    assert scheduled["generation_model"]
     mock_deduct.assert_not_called()
     mock_get_llm.assert_not_called()
 

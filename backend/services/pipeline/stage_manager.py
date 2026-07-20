@@ -3271,8 +3271,52 @@ class StageManager:
                 created_by="ai",
             )
             db.add(version)
+            await db.flush()
+            version_id = version.id
+            eval_context = ""
+            harness_content_for_eval: str | None = None
+            if stage.type != "spec":
+                eval_context, harness_content_for_eval = (
+                    await self._eval_context_for_stage(workspace.id, stage.type)
+                )
             await db.commit()
             await self._invalidate_stage_cache(workspace.id, stage.type, redis)
+
+            # A cache replay creates a first-class immutable version, so it must
+            # carry the same quality signals as a provider-generated version.
+            # Persist deterministic findings only after the artifact commit:
+            # eval telemetry is best-effort and must never roll back or hide a
+            # successfully delivered cache hit.  The detached LLM score uses
+            # the cache key's generation route for model-quality attribution;
+            # there is no content_generation_id because no provider call (and
+            # therefore no new generation observation) occurred on this path.
+            try:
+                await persist_structural_eval(
+                    db,
+                    stage_version_id=version_id,
+                    stage_type=stage.type,
+                    content=cached_output,
+                    harness_content=harness_content_for_eval,
+                )
+            except Exception:
+                logger.warning(
+                    "structural_eval_persist_failed stage_id=%s",
+                    stage_id,
+                    exc_info=True,
+                )
+                with contextlib.suppress(Exception):
+                    await db.rollback()
+            _schedule_stage_eval(
+                version_id=version_id,
+                stage_type=stage.type,
+                content=cached_output,
+                eval_context=eval_context,
+                provider=route.provider,
+                workspace_id=workspace.id,
+                harness_content=harness_content_for_eval,
+                generation_provider=route.provider,
+                generation_model=route.model,
+            )
             yield cached_output
             yield f'{{"done": true, "stage_id": "{stage_id}"}}'
             return
