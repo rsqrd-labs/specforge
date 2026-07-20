@@ -601,9 +601,11 @@ export async function revalidateTasks(id: string): Promise<EvalResult> {
 export async function acceptStageDiff(
   id: string,
   proposedContent: string,
+  baseVersion: number,
 ): Promise<Stage> {
   const response = await api.post<Stage>(`/stages/${id}/accept-diff`, {
     proposed_content: proposedContent,
+    base_version: baseVersion,
   })
   return response.data
 }

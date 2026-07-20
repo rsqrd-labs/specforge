@@ -620,10 +620,17 @@ _ACTIVE_MULTI_QUERY_DB: "_MultiQueryDB | None" = None
 
 
 class _MultiQueryDB:
-    def __init__(self, responses: list[Any]) -> None:
+    def __init__(
+        self,
+        responses: list[Any],
+        *,
+        stage_contents: dict[str, str] | None = None,
+    ) -> None:
         self._responses = iter(responses)
+        self._stage_contents = stage_contents or {}
         self.added: list[Any] = []
         self._committed = False
+        self.commit_count = 0
         # First-seen Stage/Workspace rows, replayed for later by-id reads so the
         # pipeline's re-load on its own session returns the same seeded object a
         # real DB's identity map would (no response re-seeding needed).
@@ -651,7 +658,7 @@ class _MultiQueryDB:
         # The gate-dependency read (_orm_stage_deps) returns empty here without
         # consuming an ordered response — matching the prior empty-Redis reader.
         if _is_stage_deps_select(statement):
-            return _FakeResult(many=[])
+            return _FakeResult(many=list(self._stage_contents.items()))
         # A by-id re-load of a previously-seen Stage/Workspace replays that row
         # without consuming a response, mirroring a real DB across sessions.
         if (
@@ -692,6 +699,7 @@ class _MultiQueryDB:
 
     async def commit(self) -> None:
         self._committed = True
+        self.commit_count += 1
 
     async def refresh(self, instance: Any) -> None:
         # Mirror the DB server defaults the real refresh would populate, so a
@@ -1279,6 +1287,70 @@ async def test_generate_cache_miss_writes_completed_output() -> None:
             pass
 
     assert redis._store["cache-key"] == _VALID_SPEC
+
+
+@pytest.mark.asyncio
+async def test_research_enabled_generation_never_reads_or_writes_output_cache() -> None:
+    """Grounding provenance is not representable in the string-only cache.
+
+    Even an empty/fail-open research result must keep this workspace off the
+    shared generation cache: a later request may successfully ground the same
+    prompt and must persist its own sources with the resulting StageVersion.
+    """
+    from services.research.research_service import _EMPTY as empty_research
+
+    workspace_id = uuid4()
+    spec_stage = _make_stage(workspace_id, "spec", status="draft")
+    workspace = _make_workspace([spec_stage])
+    workspace.brave_research_enabled = True
+    user = _make_user()
+    deduction = CreditLedger(id=uuid4(), user_id=user.id, amount=-10, reason="generate")
+    redis = _FakeRedis()
+    db = _MultiQueryDB([spec_stage, workspace, [], deduction])
+    svc = StageManager(redis_client=redis)
+
+    async def fake_stream(
+        system, user_prompt, max_tokens=0, **kwargs
+    ) -> AsyncGenerator[str, None]:
+        yield _spec_stream_payload(user_prompt)
+
+    with (
+        patch(
+            "services.pipeline.stage_manager.get_cached_generation",
+            new_callable=AsyncMock,
+            return_value="must not be replayed",
+        ) as mock_get_cache,
+        patch(
+            "services.pipeline.stage_manager.set_cached_generation",
+            new_callable=AsyncMock,
+        ) as mock_set_cache,
+        patch.object(
+            svc,
+            "_fetch_research_context",
+            new_callable=AsyncMock,
+            return_value=empty_research,
+        ),
+        patch(
+            "services.pipeline.stage_manager.credit_service.deduct",
+            new_callable=AsyncMock,
+            return_value=deduction,
+        ),
+        patch(
+            "services.pipeline.stage_manager.build_prompt",
+            new_callable=AsyncMock,
+            return_value=("sys", "user", "0"),
+        ),
+        patch("services.pipeline.stage_manager.get_llm") as mock_get_llm,
+    ):
+        adapter = MagicMock()
+        adapter.stream = fake_stream
+        mock_get_llm.return_value = adapter
+        async for _ in svc.generate(spec_stage.id, user, db):
+            pass
+
+    mock_get_cache.assert_not_awaited()
+    mock_set_cache.assert_not_awaited()
+    assert spec_stage.content == _VALID_SPEC
 
 
 @pytest.mark.asyncio
@@ -2962,13 +3034,17 @@ async def test_rollback_marks_downstream_finalised_stages_stale() -> None:
     )
 
     svc = StageManager(redis_client=_FakeRedis())
-    db = _MultiQueryDB([version, spec_stage, [plan_stage, harness_stage]])
+    db = _MultiQueryDB([spec_stage, version, [plan_stage, harness_stage]])
     user = _make_user()
 
     await svc.rollback(spec_stage.id, 1, user, db)
 
     assert spec_stage.status == "draft"
     assert spec_stage.content == "v1 content"
+    assert spec_stage.current_version == 3
+    restored = next(item for item in db.added if isinstance(item, StageVersion))
+    assert restored.version == 3
+    assert restored.content == "v1 content"
     assert plan_stage.status == "stale"
     assert harness_stage.status == "stale"
     assert tasks_stage.status == "draft"
@@ -3003,7 +3079,7 @@ async def test_rollback_in_place_preserves_advisory_gate() -> None:
     )
 
     svc = StageManager(redis_client=_FakeRedis())
-    db = _MultiQueryDB([version, spec_stage, []])
+    db = _MultiQueryDB([spec_stage, version, []])
     user = _make_user()
 
     updated = await svc.rollback(spec_stage.id, 2, user, db)
@@ -3040,7 +3116,7 @@ async def test_rollback_in_place_does_not_stale_downstream() -> None:
     svc = StageManager(redis_client=_FakeRedis())
     # Seed the downstream-stale query response so a regression (calling
     # _mark_downstream_stale on an in-place unlock) would actually stale them.
-    db = _MultiQueryDB([version, spec_stage, [plan_stage, harness_stage]])
+    db = _MultiQueryDB([spec_stage, version, [plan_stage, harness_stage]])
     user = _make_user()
 
     updated = await svc.rollback(spec_stage.id, 2, user, db)
@@ -3077,7 +3153,7 @@ async def test_rollback_to_older_version_clears_advisory_gate() -> None:
     )
 
     svc = StageManager(redis_client=_FakeRedis())
-    db = _MultiQueryDB([version, spec_stage, []])
+    db = _MultiQueryDB([spec_stage, version, []])
     user = _make_user()
 
     updated = await svc.rollback(spec_stage.id, 1, user, db)
@@ -3104,7 +3180,7 @@ async def test_rollback_rejects_in_progress_stage() -> None:
         created_at=datetime.now(UTC),
     )
     svc = StageManager(redis_client=_FakeRedis())
-    db = _MultiQueryDB([version, spec_stage])
+    db = _MultiQueryDB([spec_stage, version])
     user = _make_user()
 
     with pytest.raises(ValueError, match="generating"):
@@ -3132,6 +3208,33 @@ async def test_handle_content_edit_rejects_in_progress_stage() -> None:
 
     assert spec_stage.status == "in_progress"
     assert spec_stage.current_version == 2
+
+
+@pytest.mark.asyncio
+async def test_handle_content_edit_rejects_stale_refine_base_version() -> None:
+    workspace_id = uuid4()
+    stage = _make_stage(
+        workspace_id,
+        "spec",
+        status="draft",
+        content="newer content",
+        version=4,
+    )
+    svc = StageManager(redis_client=_FakeRedis())
+    db = _MultiQueryDB([stage])
+
+    with pytest.raises(ValueError, match="older stage version"):
+        await svc.handle_content_edit(
+            stage.id,
+            "stale proposed content",
+            _make_user(),
+            db,
+            expected_version=3,
+        )
+
+    assert stage.current_version == 4
+    assert stage.content == "newer content"
+    assert not db.added
 
 
 @pytest.mark.asyncio
@@ -3291,12 +3394,16 @@ async def test_acknowledge_stale_rejects_non_stale_stage() -> None:
 @pytest.mark.asyncio
 async def test_eval_context_for_tasks_includes_spec_and_harness() -> None:
     workspace_id = uuid4()
-    redis = _FakeRedis()
-    await redis.set(f"stage:{workspace_id}:spec", "spec content")
-    await redis.set(f"stage:{workspace_id}:harness", "harness content")
-    svc = StageManager(redis_client=redis)
+    svc = StageManager(redis_client=_FakeRedis())
+    db = _MultiQueryDB(
+        [],
+        stage_contents={
+            "spec": "spec content",
+            "harness": "harness content",
+        },
+    )
 
-    context, harness = await svc._eval_context_for_stage(workspace_id, "tasks")
+    context, harness = await svc._eval_context_for_stage(db, workspace_id, "tasks")
 
     assert "Specification:\nspec content" in context
     assert "Test harness:\nharness content" in context
@@ -3315,10 +3422,11 @@ async def test_handle_content_edit_schedules_eval_for_new_version() -> None:
     )
     workspace = _make_workspace([stage])
     user = _make_user()
-    redis = _FakeRedis()
-    await redis.set(f"stage:{workspace_id}:spec", "spec content")
-    svc = StageManager(redis_client=redis)
-    db = _MultiQueryDB([stage, workspace])
+    svc = StageManager(redis_client=_FakeRedis())
+    db = _MultiQueryDB(
+        [stage, workspace],
+        stage_contents={"spec": "spec content"},
+    )
 
     with patch(
         "services.pipeline.stage_manager.run_eval_background",
@@ -3408,13 +3516,16 @@ async def test_rollback_restores_version_bytes_verbatim() -> None:
         created_at=datetime.now(UTC),
     )
     svc = StageManager(redis_client=_FakeRedis())
-    db = _MultiQueryDB([version, stage])
+    db = _MultiQueryDB([stage, version])
     user = _make_user()
 
     updated = await svc.rollback(stage.id, 2, user, db)
 
     assert updated.content == _CODE_BEARING_CONTENT
-    assert updated.current_version == 2
+    assert updated.current_version == 4
+    restored = next(item for item in db.added if isinstance(item, StageVersion))
+    assert restored.version == 4
+    assert restored.content == _CODE_BEARING_CONTENT
 
 
 @pytest.mark.asyncio
@@ -4071,6 +4182,90 @@ async def test_refine_provider_error_refunds_credits() -> None:
 
     mock_deduct.assert_awaited_once_with(db, user.id, 3, "refine")
     mock_refund.assert_awaited_once_with(db, deduction.id, user.id)
+    # One commit makes the debit durable before provider I/O; the second commits
+    # the idempotent refund from the helper's fresh-session path.
+    assert db.commit_count == 2
+
+
+@pytest.mark.asyncio
+async def test_refine_commits_charge_before_provider_call() -> None:
+    from schemas.stage import RefineRequest
+
+    workspace_id = uuid4()
+    stage = _make_stage(workspace_id, "spec", status="draft", content="hello world")
+    workspace = _make_workspace([stage])
+    user = _make_user()
+    db = _MultiQueryDB([stage, workspace])
+    svc = StageManager(redis_client=_FakeRedis())
+    request = RefineRequest(
+        instruction="improve",
+        selection_start=0,
+        selection_end=5,
+        selected_text="hello",
+    )
+    deduction = CreditLedger(id=uuid4(), user_id=user.id, amount=-3, reason="refine")
+
+    async def complete_after_commit(*args, **kwargs) -> str:
+        assert db._committed, "credit locks must be released before provider I/O"
+        return "hi"
+
+    with (
+        patch(
+            "services.pipeline.stage_manager.credit_service.deduct",
+            new_callable=AsyncMock,
+            return_value=deduction,
+        ),
+        patch("services.pipeline.stage_manager.get_llm") as mock_get_llm,
+    ):
+        adapter = MagicMock()
+        adapter.complete = complete_after_commit
+        mock_get_llm.return_value = adapter
+        response = await svc.refine(stage.id, request, user, db)
+
+    assert response.base_version == stage.current_version
+    assert response.proposed == "hi world"
+
+
+@pytest.mark.asyncio
+async def test_refine_unexpected_failure_durably_refunds_credits() -> None:
+    from schemas.stage import RefineRequest
+
+    workspace_id = uuid4()
+    stage = _make_stage(workspace_id, "spec", status="draft", content="hello world")
+    workspace = _make_workspace([stage])
+    user = _make_user()
+    db = _MultiQueryDB([stage, workspace])
+    svc = StageManager(redis_client=_FakeRedis())
+    request = RefineRequest(
+        instruction="improve",
+        selection_start=0,
+        selection_end=5,
+        selected_text="hello",
+    )
+    deduction = CreditLedger(id=uuid4(), user_id=user.id, amount=-3, reason="refine")
+
+    with (
+        patch(
+            "services.pipeline.stage_manager.credit_service.deduct",
+            new_callable=AsyncMock,
+            return_value=deduction,
+        ),
+        patch.object(
+            svc,
+            "_refund_refine_deduction",
+            new_callable=AsyncMock,
+            return_value=True,
+        ) as mock_refund,
+        patch("services.pipeline.stage_manager.get_llm") as mock_get_llm,
+    ):
+        adapter = MagicMock()
+        adapter.complete = AsyncMock(side_effect=RuntimeError("unexpected"))
+        mock_get_llm.return_value = adapter
+
+        with pytest.raises(RuntimeError, match="unexpected"):
+            await svc.refine(stage.id, request, user, db)
+
+    mock_refund.assert_awaited_once_with(deduction.id, user.id)
 
 
 @pytest.mark.asyncio

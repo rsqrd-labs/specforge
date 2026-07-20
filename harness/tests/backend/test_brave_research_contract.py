@@ -155,8 +155,11 @@ def test_migration_adds_stage_version_research_columns() -> None:
         if "research_context" in p.read_text() and "stage_versions" in p.read_text()
     ]
     assert matches, "An Alembic migration must add the StageVersion research columns."
-    body = matches[0].read_text()
-    assert "add_column" in body and "drop_column" in body
+    assert any(
+        "add_column" in migration.read_text()
+        and "drop_column" in migration.read_text()
+        for migration in matches
+    ), "A matching migration must add and remove the research columns."
 
 
 def test_research_service_records_brave_cogs_row() -> None:

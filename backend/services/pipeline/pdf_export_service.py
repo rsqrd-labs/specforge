@@ -206,6 +206,11 @@ _PDF_ALLOWED_ATTRIBUTES = {
 }
 _PDF_ALLOWED_PROTOCOLS = frozenset({"http", "https", "mailto", "data"})
 _PDF_CSS_SANITIZER = CSSSanitizer(allowed_css_properties=["text-align"])
+_PDF_SAFE_DATA_IMAGE = re.compile(
+    r"\Adata:image/(?:png|jpeg|gif|webp);base64,[A-Za-z0-9+/]*={0,2}\Z",
+    re.IGNORECASE,
+)
+_URL_ASCII_WHITESPACE_OR_CONTROL = re.compile(r"[\x00-\x20\x7f]+")
 
 # bleach's strip=True removes a disallowed element but keeps its text children;
 # for script/style that would leak the payload as visible PDF text. Drop those
@@ -217,13 +222,37 @@ _PDF_SCRIPT_OR_STYLE_BLOCK = re.compile(
 )
 
 
+def _allow_pdf_attribute(tag: str, name: str, value: str) -> bool:
+    """Apply tag-aware URL policy in addition to the static allowlist.
+
+    Bleach's ``protocols`` option is global: adding ``data`` for inline images
+    also permits ``data:text/html`` on links. Keep the global parser support but
+    restrict data URLs here to base64 raster image payloads on ``img[src]`` only.
+    SVG is deliberately excluded because it is an active document format.
+    """
+    if name not in _PDF_ALLOWED_ATTRIBUTES.get(tag, ()):
+        return False
+    if name not in {"href", "src"}:
+        return True
+
+    compact_url = _URL_ASCII_WHITESPACE_OR_CONTROL.sub("", value)
+    lowered = compact_url.lower()
+    if lowered.startswith("data:"):
+        return (
+            tag == "img"
+            and name == "src"
+            and bool(_PDF_SAFE_DATA_IMAGE.fullmatch(compact_url))
+        )
+    return True
+
+
 def _sanitize_rendered_html(html_text: str) -> str:
     """Allowlist-clean converter output before it reaches WeasyPrint."""
     without_executable_blocks = _PDF_SCRIPT_OR_STYLE_BLOCK.sub("", html_text)
     return bleach.clean(
         without_executable_blocks,
         tags=_PDF_ALLOWED_TAGS,
-        attributes=_PDF_ALLOWED_ATTRIBUTES,
+        attributes=_allow_pdf_attribute,
         protocols=_PDF_ALLOWED_PROTOCOLS,
         css_sanitizer=_PDF_CSS_SANITIZER,
         strip=True,

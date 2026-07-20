@@ -174,6 +174,9 @@ class DiffResponse(BaseModel):
     diff: str
     original: str
     proposed: str
+    # Optimistic-concurrency token. Accepting the proposal is valid only while
+    # the stage still points at the exact version this diff was generated from.
+    base_version: int = Field(ge=0)
     large_selection: bool = False
 
     model_config = ConfigDict(from_attributes=True)
@@ -184,6 +187,7 @@ _MAX_CONTENT_LENGTH = 500_000  # ~500 KB; prevents memory-exhaustion DoS
 
 class AcceptDiffRequest(BaseModel):
     proposed_content: str = Field(max_length=_MAX_CONTENT_LENGTH)
+    base_version: int = Field(ge=0)
 
     model_config = ConfigDict(from_attributes=True)
 

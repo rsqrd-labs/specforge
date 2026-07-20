@@ -60,8 +60,8 @@ export function DiffViewer({
 
       <div className="diff-actions">
         <p className="diff-credit-disclosure">
-          Rejecting keeps your document unchanged; the 3-credit refinement charge
-          is not refunded.
+          New refinements cost 3 credits. Rejecting keeps your document unchanged
+          and does not refund any charge; cached proposals are not charged again.
         </p>
         {disabled && disabledReason ? (
           <p id={disabledReasonId} className="workspace-lock-inline-note">

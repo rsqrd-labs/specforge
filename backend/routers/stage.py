@@ -423,7 +423,11 @@ async def accept_diff(
     await _load_stage(id, db, user.id)
     try:
         stage = await stage_manager.handle_content_edit(
-            id, body.proposed_content, user, db
+            id,
+            body.proposed_content,
+            user,
+            db,
+            expected_version=body.base_version,
         )
     except ValueError as exc:
         raise HTTPException(

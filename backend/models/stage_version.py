@@ -4,7 +4,15 @@ from datetime import datetime
 from typing import TYPE_CHECKING
 from uuid import UUID as PythonUUID
 
-from sqlalchemy import CheckConstraint, ForeignKey, Integer, Text, func, text
+from sqlalchemy import (
+    CheckConstraint,
+    ForeignKey,
+    Integer,
+    Text,
+    UniqueConstraint,
+    func,
+    text,
+)
 from sqlalchemy.dialects.postgresql import JSONB, TIMESTAMP, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -21,6 +29,11 @@ class StageVersion(Base):
         CheckConstraint(
             "created_by IN ('user', 'ai')",
             name="ck_stage_versions_created_by",
+        ),
+        UniqueConstraint(
+            "stage_id",
+            "version",
+            name="uq_stage_versions_stage_id_version",
         ),
     )
 

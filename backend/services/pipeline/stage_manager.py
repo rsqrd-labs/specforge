@@ -306,6 +306,11 @@ _STAGE_HEARTBEAT_DB_SECONDS = 30.0
 # produced occasional refusals to restructure; and all three refine modes
 # (focused/section/full) are defined, not just focused.
 REFINE_PROMPT_VERSION = "refine-prompt-v3"
+# Generation outputs produced with optional web grounding carry provenance that
+# the legacy string-only cache cannot represent. Version every ungrounded key
+# and bypass the shared output cache entirely while research is enabled so a
+# grounded artifact can never be replayed without its sources (or vice versa).
+GENERATION_RESEARCH_CACHE_POLICY_VERSION = "research-isolated-v1"
 
 _REFINE_STAGE_RULES: dict[str, str] = {
     "spec": (
@@ -3239,12 +3244,14 @@ class StageManager:
             upstream_artifact_hashes=_upstream_artifact_hashes(workspace, stage.type),
             user_instruction_hash=_hash_text(""),
             output_contract_version=(
-                f"{stage.type}-{TECH_SAFETY_OUTPUT_CONTRACT_VERSION}"
+                f"{stage.type}-{TECH_SAFETY_OUTPUT_CONTRACT_VERSION}-"
+                f"{GENERATION_RESEARCH_CACHE_POLICY_VERSION}"
             ),
         )
+        research_enabled = bool(getattr(workspace, "brave_research_enabled", False))
         cached_output = (
             None
-            if free or action == "regenerate"
+            if free or action == "regenerate" or research_enabled
             else await get_cached_generation(redis, cache_key)
         )
         if cached_output is not None:
@@ -3278,7 +3285,11 @@ class StageManager:
             harness_content_for_eval: str | None = None
             if stage.type != "spec":
                 eval_context, harness_content_for_eval = (
-                    await self._eval_context_for_stage(workspace.id, stage.type)
+                    await self._eval_context_for_stage(
+                        db,
+                        workspace.id,
+                        stage.type,
+                    )
                 )
             await db.commit()
             await self._invalidate_stage_cache(workspace.id, stage.type, redis)
@@ -4443,7 +4454,11 @@ class StageManager:
             harness_content_for_eval: str | None = None
             if stage.type != "spec":
                 eval_context, harness_content_for_eval = (
-                    await self._eval_context_for_stage(workspace.id, stage.type)
+                    await self._eval_context_for_stage(
+                        db,
+                        workspace.id,
+                        stage.type,
+                    )
                 )
             await db.commit()
             _cleanup_done = True
@@ -4454,7 +4469,11 @@ class StageManager:
                 content_generation_id,
                 "critic_advisory" if advisory_findings else "passed",
             )
-            if action == "generate":
+            if (
+                action == "generate"
+                and not research.block
+                and not bool(getattr(workspace, "brave_research_enabled", False))
+            ):
                 await set_cached_generation(redis, cache_key, accumulated)
             if span_id:
                 await self._end_langfuse_span(span_id)
@@ -4681,6 +4700,7 @@ class StageManager:
             raise RefineSelectionError("Selected text no longer matches the document")
 
         stage_content = content
+        base_version = stage.current_version
         doc_len = len(stage_content)
         selection_len = request.selection_end - request.selection_start
         large_selection = doc_len > 0 and (selection_len / doc_len) > 0.80
@@ -4810,12 +4830,42 @@ class StageManager:
                 diff=await compute_diff_async(stage_content, proposed),
                 original=stage_content,
                 proposed=proposed,
+                base_version=base_version,
                 large_selection=large_selection,
             )
 
         deduction = await credit_service.deduct(
             db, user.id, CREDIT_COSTS["refine"], "refine"
         )
+        deduction_id = deduction.id
+        # The provider call can take minutes. Commit the charge before it starts
+        # so the deduction is durable and, critically, the user/credit-pack row
+        # locks acquired by deduct() are released for other requests. Every
+        # unsuccessful path below compensates this committed debit by id from a
+        # fresh session.
+        try:
+            await db.commit()
+        except (Exception, asyncio.CancelledError):
+            # Commit failures can be ambiguous (the server may have committed
+            # before the connection failed). Roll back the request session, then
+            # let the idempotent compensator discover whether the ledger row is
+            # present and refund it if necessary.
+            with contextlib.suppress(Exception):
+                await db.rollback()
+            await asyncio.shield(self._refund_refine_deduction(deduction_id, user.id))
+            raise
+        try:
+            await credit_service.invalidate(user.id)
+        except Exception:
+            # Cache invalidation is coherence polish, not part of the durable
+            # debit. The deduction itself already performed an eager eviction;
+            # a failed post-commit second eviction must not charge the user for
+            # a proposal we never attempted to generate.
+            logger.warning(
+                "refine.credit_cache_invalidation_failed user_id=%s",
+                user.id,
+                exc_info=True,
+            )
 
         span_id: str | None = None
         try:
@@ -4880,31 +4930,96 @@ class StageManager:
                 raise SecurityError(
                     "Refine output would leave Markdown code fences unbalanced."
                 )
-            await set_cached_generation(redis, cache_key, replacement)
+            # Cache availability must never turn a successfully generated paid
+            # proposal into an error. Redis is an optimization on this path.
+            try:
+                await set_cached_generation(redis, cache_key, replacement)
+            except RedisError:
+                logger.warning(
+                    "refine.cache_write_failed stage_id=%s user_id=%s",
+                    stage_id,
+                    user.id,
+                    exc_info=True,
+                )
+
+            diff = await compute_diff_async(stage_content, proposed)
+            if span_id:
+                await self._end_langfuse_span(span_id)
+        except asyncio.CancelledError:
+            await asyncio.shield(self._refund_refine_deduction(deduction_id, user.id))
+            raise
         except (ProviderError, SecurityError, TimeoutError) as exc:
-            await credit_service.refund(db, deduction.id, user.id)
+            await self._refund_refine_deduction(deduction_id, user.id)
             if span_id:
                 await self._mark_langfuse_span_failed(span_id, exc)
             if isinstance(exc, TimeoutError):
                 raise ProviderError(route.provider, exc) from exc
             raise
         except Exception as exc:
-            # Distinct from the clause above (mutually exclusive), so the span
-            # has not been marked failed yet on this path.
+            # Unexpected failures are no less refundable than known provider or
+            # validation failures: no usable proposal reached the user.
+            await self._refund_refine_deduction(deduction_id, user.id)
             if span_id:
                 await self._mark_langfuse_span_failed(span_id, exc)
             raise
-
-        diff = await compute_diff_async(stage_content, proposed)
-        if span_id:
-            await self._end_langfuse_span(span_id)
 
         return DiffResponse(
             diff=diff,
             original=stage_content,
             proposed=proposed,
+            base_version=base_version,
             large_selection=large_selection,
         )
+
+    async def _refund_refine_deduction(
+        self,
+        deduction_id: UUID,
+        user_id: UUID,
+    ) -> bool:
+        """Durably compensate a committed refinement debit.
+
+        Refinement releases the credit-row locks before calling the provider, so
+        failure compensation cannot use the old request transaction. Refunds are
+        idempotent by ledger id; retrying with a fresh session handles transient
+        pool/database failures without risking a double credit. The original
+        provider/security error remains the user-visible failure even if all
+        compensation attempts fail, while the final log carries the immutable
+        ledger id operators need to reconcile it.
+        """
+        from database import AsyncSessionLocal  # noqa: PLC0415
+
+        for attempt in range(3):
+            try:
+                async with AsyncSessionLocal() as refund_db:
+                    await credit_service.refund(
+                        refund_db,
+                        deduction_id,
+                        user_id,
+                    )
+                    await refund_db.commit()
+                try:
+                    await credit_service.invalidate(user_id)
+                except Exception:
+                    # The ledger compensation is already committed. A secondary
+                    # cache eviction failure must not trigger misleading refund
+                    # retries (or report the durable refund as failed).
+                    logger.warning(
+                        "refine.refund_cache_invalidation_failed user_id=%s",
+                        user_id,
+                        exc_info=True,
+                    )
+                return True
+            except Exception:
+                if attempt < 2:
+                    await asyncio.sleep(0.05 * (2**attempt))
+                    continue
+                logger.error(
+                    "refine.refund_failed deduction_id=%s user_id=%s attempts=3",
+                    deduction_id,
+                    user_id,
+                    exc_info=True,
+                )
+        return False
 
     async def finalise(self, stage_id: UUID, user, db: AsyncSession) -> Stage:
         """Advance a draft stage to finalised status.
@@ -5059,6 +5174,13 @@ class StageManager:
     async def rollback(
         self, stage_id: UUID, version_number: int, user, db: AsyncSession
     ) -> Stage:
+        # Serialize the entire restore decision against generation, editing, and
+        # other restores. The target history row is immutable, so it is safe to
+        # read only after the mutable stage head has been locked.
+        stage = await self._load_stage(stage_id, db, lock=True)
+        if stage.status == "in_progress":
+            raise ValueError("A generating stage cannot be rolled back.")
+
         result = await db.execute(
             select(StageVersion).where(
                 StageVersion.stage_id == stage_id,
@@ -5071,18 +5193,6 @@ class StageManager:
 
             raise HTTPException(status_code=404, detail="Version not found")
 
-        # Lock the row and refuse a rollback while a generation is running. Two
-        # bugs close here (A1): (1) the "Unlock stage" affordance the frontend
-        # used to offer on a duplicate-trigger error would otherwise flip an
-        # actively-generating stage back to `draft`, re-enabling Generate and
-        # inviting a SECOND charged generation concurrent with the detached
-        # pipeline; (2) both the rollback and that pipeline hold stale ORM
-        # `current_version`s and would each `+= 1`, racing to duplicate
-        # StageVersion rows. The lock serialises against the in_progress commit;
-        # the status check is the actual guard.
-        stage = await self._load_stage(stage_id, db, lock=True)
-        if stage.status == "in_progress":
-            raise ValueError("A generating stage cannot be rolled back.")
         # "Unlock in place" — rolling back to the version that is already current
         # (the Unlock button passes stage.current_version) — does not change the
         # content. Two consequences flow from "content unchanged":
@@ -5099,9 +5209,13 @@ class StageManager:
         #     changes (a genuine rollback to an older version, a content edit, or
         #     a regenerate).
         #
-        # A genuine rollback to an *older* version changes the content, so its
-        # advisory findings are stale (cleared) and downstream stages drift.
-        unlock_in_place = version_number == stage.current_version
+        # A genuine restore appends a NEW immutable history row. Version numbers
+        # are monotonic sequence numbers, never pointers that can be rewound;
+        # otherwise the next edit can collide with an existing StageVersion.
+        unlock_in_place = (
+            version_number == stage.current_version
+            and version.content == (stage.content or "")
+        )
         preserve_advisory = (
             unlock_in_place
             and stage.quality_gate_status == "advisory"
@@ -5112,7 +5226,30 @@ class StageManager:
         # consumption boundaries only — so restoring a version is a plain byte
         # copy with no re-sanitize.
         stage.content = version.content
-        stage.current_version = version_number
+        restored_version_id: UUID | None = None
+        eval_context = ""
+        harness_content_for_eval: str | None = None
+        if not unlock_in_place:
+            stage.current_version += 1
+            restored_version = StageVersion(
+                stage_id=stage.id,
+                version=stage.current_version,
+                content=version.content,
+                created_by="user",
+                research_context=version.research_context,
+                research_sources=version.research_sources,
+            )
+            db.add(restored_version)
+            await db.flush()
+            restored_version_id = restored_version.id
+            if stage.type != "spec":
+                eval_context, harness_content_for_eval = (
+                    await self._eval_context_for_stage(
+                        db,
+                        stage.workspace_id,
+                        stage.type,
+                    )
+                )
         stage.status = "draft"
         stage.updated_at = datetime.now(UTC)
 
@@ -5135,10 +5272,42 @@ class StageManager:
         await self._invalidate_stage_cache(stage.workspace_id, stage.type, redis)
         await db.commit()
         await db.refresh(stage)
+        if restored_version_id is not None and stage.quality_gate_status != "blocked":
+            try:
+                await persist_structural_eval(
+                    db,
+                    stage_version_id=restored_version_id,
+                    stage_type=stage.type,
+                    content=stage.content or "",
+                    harness_content=harness_content_for_eval,
+                )
+            except Exception:
+                logger.warning(
+                    "structural_eval_persist_failed stage_id=%s",
+                    stage.id,
+                    exc_info=True,
+                )
+                with contextlib.suppress(Exception):
+                    await db.rollback()
+            _schedule_stage_eval(
+                version_id=restored_version_id,
+                stage_type=stage.type,
+                content=stage.content or "",
+                eval_context=eval_context,
+                provider=platform_provider_priority()[0],
+                workspace_id=stage.workspace_id,
+                harness_content=harness_content_for_eval,
+            )
         return stage
 
     async def handle_content_edit(
-        self, stage_id: UUID, new_content: str, user, db: AsyncSession
+        self,
+        stage_id: UUID,
+        new_content: str,
+        user,
+        db: AsyncSession,
+        *,
+        expected_version: int | None = None,
     ) -> Stage:
         # Lock + refuse edits mid-generation (same class as the rollback guard,
         # A1): PATCH /content or accept-diff on an in_progress stage would flip it
@@ -5149,6 +5318,11 @@ class StageManager:
         stage = await self._load_stage(stage_id, db, lock=True)
         if stage.status == "in_progress":
             raise ValueError("A generating stage cannot be edited.")
+        if expected_version is not None and stage.current_version != expected_version:
+            raise ValueError(
+                "This proposal was generated from an older stage version. "
+                "Review the latest content and run the refinement again."
+            )
         workspace = await self._load_workspace(stage.workspace_id, db)
         was_finalised = stage.status == "finalised"
 
@@ -5182,7 +5356,9 @@ class StageManager:
         harness_content_for_eval: str | None = None
         if stage.type != "spec":
             eval_context, harness_content_for_eval = await self._eval_context_for_stage(
-                stage.workspace_id, stage.type
+                db,
+                stage.workspace_id,
+                stage.type,
             )
 
         if was_finalised:
@@ -5383,23 +5559,32 @@ class StageManager:
         await redis.delete(f"{_STAGE_CACHE_PREFIX}{workspace_id}:{stage_type}")
 
     async def _eval_context_for_stage(
-        self, workspace_id: UUID, stage_type: str
+        self,
+        db: AsyncSession,
+        workspace_id: UUID,
+        stage_type: str,
     ) -> tuple[str, str | None]:
         """Return (eval_context_for_llm, raw_harness_content_or_None).
 
         For tasks, harness content is returned separately so the structural
         validator can use the raw harness rather than the combined LLM context.
+        This is an authoritative database read, not the one-hour Redis stage
+        mirror: eval correctness must not depend on cache warmth.
         """
-        redis = await self._redis_client()
-        if stage_type == "tasks":
-            spec = await redis.get(f"{_STAGE_CACHE_PREFIX}{workspace_id}:spec") or ""
-            harness = (
-                await redis.get(f"{_STAGE_CACHE_PREFIX}{workspace_id}:harness") or ""
+        wanted_types = ("spec", "harness") if stage_type == "tasks" else ("spec",)
+        result = await db.execute(
+            select(Stage.type, Stage.content).where(
+                Stage.workspace_id == workspace_id,
+                Stage.type.in_(wanted_types),
             )
+        )
+        contents = {row_type: content or "" for row_type, content in result.all()}
+        spec = contents.get("spec", "")
+        if stage_type == "tasks":
+            harness = contents.get("harness", "")
             # Assembled by the eval module's own producer so the format matches
             # the separator its per-part bounding splits on (audit H4).
             return combine_tasks_eval_context(spec, harness), harness or None
-        spec = await redis.get(f"{_STAGE_CACHE_PREFIX}{workspace_id}:spec") or ""
         return spec, None
 
     async def _orm_stage_deps(
@@ -6477,7 +6662,9 @@ class StageManager:
             await db.flush()
             version_id = version.id
             eval_context, _ = await self._eval_context_for_stage(
-                workspace_id, "harness"
+                db,
+                workspace_id,
+                "harness",
             )
             await db.commit()
             # The deduction committed atomically with the patch above — refresh

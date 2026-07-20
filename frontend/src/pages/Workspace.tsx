@@ -410,6 +410,8 @@ export default function Workspace() {
     text: string
   } | null>(null)
   const [diffResult, setDiffResult] = useState<RefineResponse | null>(null)
+  const [isDiffActionInFlight, setIsDiffActionInFlight] = useState(false)
+  const diffActionInFlightRef = useRef(false)
   const [largeSelectionWarning, setLargeSelectionWarning] = useState(false)
   const [evalResults, setEvalResults] = useState<Record<string, EvalResult | null>>(
     {},
@@ -1507,10 +1509,16 @@ export default function Workspace() {
 
   const acceptDiff = useCallback(
     async (proposed: string) => {
-      if (!activeStage) return
+      if (!activeStage || !diffResult || diffActionInFlightRef.current) return
       if (guardWorkspaceMutation()) return
+      diffActionInFlightRef.current = true
+      setIsDiffActionInFlight(true)
       try {
-        const updatedStage = await acceptStageDiff(activeStage.id, proposed)
+        const updatedStage = await acceptStageDiff(
+          activeStage.id,
+          proposed,
+          diffResult.base_version,
+        )
         setStage(updatedStage)
         setEvalResults((existing) => ({ ...existing, [updatedStage.id]: null }))
         setDiffResult(null)
@@ -1521,9 +1529,12 @@ export default function Workspace() {
         setGenericError(
           getApiErrorMessage(error, "Could not apply the proposed changes."),
         )
+      } finally {
+        diffActionInFlightRef.current = false
+        setIsDiffActionInFlight(false)
       }
     },
-    [activeStage, guardWorkspaceMutation, setStage, setGenericError],
+    [activeStage, diffResult, guardWorkspaceMutation, setStage, setGenericError],
   )
 
   const rejectDiff = useCallback(async () => {
@@ -1531,18 +1542,24 @@ export default function Workspace() {
       setDiffResult(null)
       return
     }
+    if (diffActionInFlightRef.current) return
     if (guardWorkspaceMutation()) return
 
+    diffActionInFlightRef.current = true
+    setIsDiffActionInFlight(true)
     try {
       await rejectStageDiff(activeStage.id)
       setDiffResult(null)
       setLargeSelectionWarning(false)
     } catch (error) {
-      // Reject is persisted server-side for audit/cleanup. If it fails, retain
-      // the proposal so the user can retry either action without regenerating.
+      // The ownership-checked reject request failed. Retain the proposal so the
+      // user can retry either action without regenerating.
       setGenericError(
         getApiErrorMessage(error, "Could not reject the proposed changes."),
       )
+    } finally {
+      diffActionInFlightRef.current = false
+      setIsDiffActionInFlight(false)
     }
   }, [activeStage, guardWorkspaceMutation, setGenericError])
 
@@ -2816,8 +2833,16 @@ export default function Workspace() {
                     proposed={diffResult.proposed}
                     onAccept={acceptDiff}
                     onReject={rejectDiff}
-                    disabled={workspaceGenerationLock.locked}
-                    disabledReason={workspaceLockReason}
+                    disabled={
+                      workspaceGenerationLock.locked || isDiffActionInFlight
+                    }
+                    disabledReason={
+                      workspaceGenerationLock.locked
+                        ? workspaceLockReason
+                        : isDiffActionInFlight
+                          ? "Saving your refinement decision…"
+                          : undefined
+                    }
                   />
                 ) : isActiveStageBusy || (specViewMode === "edit" && !isStageFinalised) ? (
                   <StageEditor
@@ -2982,8 +3007,16 @@ export default function Workspace() {
                       proposed={diffResult.proposed}
                       onAccept={acceptDiff}
                       onReject={rejectDiff}
-                      disabled={workspaceGenerationLock.locked}
-                      disabledReason={workspaceLockReason}
+                      disabled={
+                        workspaceGenerationLock.locked || isDiffActionInFlight
+                      }
+                      disabledReason={
+                        workspaceGenerationLock.locked
+                          ? workspaceLockReason
+                          : isDiffActionInFlight
+                            ? "Saving your refinement decision…"
+                            : undefined
+                      }
                     />
                   </div>
                 ) : (

@@ -257,6 +257,7 @@ beforeEach(() => {
     diff: "@@\n-Current artifact\n+Clearer artifact",
     original: "Current artifact",
     proposed: "Clearer artifact",
+    base_version: 1,
     large_selection: false,
   })
 })
@@ -294,6 +295,34 @@ describe("Workspace Phase 5 remediation", () => {
       )
     },
   )
+
+  it("deduplicates rapid diff acceptance and sends its base version", async () => {
+    const stage = makeStage("plan")
+    let resolveAccept!: (value: Stage) => void
+    mockAcceptStageDiff.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveAccept = resolve
+        }),
+    )
+    await renderWorkspace([stage])
+    const user = await generateDiff()
+    const accept = screen.getByRole("button", { name: /accept changes/i })
+
+    await user.dblClick(accept)
+
+    expect(mockAcceptStageDiff).toHaveBeenCalledTimes(1)
+    expect(mockAcceptStageDiff).toHaveBeenCalledWith(
+      stage.id,
+      "Clearer artifact",
+      1,
+    )
+    expect(accept).toBeDisabled()
+    resolveAccept({ ...stage, content: "Clearer artifact", current_version: 2 })
+    await waitFor(() =>
+      expect(screen.queryByText("Proposed changes")).not.toBeInTheDocument(),
+    )
+  })
 
   it("deduplicates rapid finalise clicks", async () => {
     const stage = makeStage("plan")

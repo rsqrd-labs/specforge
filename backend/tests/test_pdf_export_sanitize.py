@@ -53,6 +53,31 @@ def test_javascript_href_is_neutralised() -> None:
     assert "javascript:" not in out
 
 
+def test_html_data_url_href_is_removed() -> None:
+    out = _sanitize_rendered_html(
+        '<a href="data:text/html;base64,PHNjcmlwdD5hbGVydCgxKTwvc2NyaXB0Pg==">'
+        "click</a>"
+    )
+    assert "data:" not in out
+    assert "<a>click</a>" in out
+
+
+def test_base64_raster_data_image_is_allowed() -> None:
+    out = _sanitize_rendered_html(
+        '<img src="data:image/png;base64,iVBORw0KGgo=" alt="diagram">'
+    )
+    assert 'src="data:image/png;base64,iVBORw0KGgo="' in out
+
+
+def test_active_or_non_image_data_sources_are_removed() -> None:
+    for source in (
+        "data:image/svg+xml;base64,PHN2Zz48L3N2Zz4=",
+        "data:text/html;base64,PGgxPmJvb208L2gxPg==",
+    ):
+        out = _sanitize_rendered_html(f'<img src="{source}" alt="x">')
+        assert "data:" not in out
+
+
 def test_inline_and_fenced_code_survive_exactly() -> None:
     # The whole point of sanitizing the *rendered* HTML instead of the markdown
     # source: by conversion time code is already escaped, so the allowlist

@@ -487,6 +487,7 @@ async def test_refine_preserves_raw_instruction_for_stage_manager(app) -> None:
             "diff": "",
             "original": "some content",
             "proposed": "some content",
+            "base_version": stage.current_version,
             "large_selection": False,
         }
 
@@ -538,12 +539,19 @@ async def test_accept_diff_persists_prepaid_refine_preview(app) -> None:
         ) as client:
             response = await client.post(
                 f"/stages/{stage.id}/accept-diff",
-                json={"proposed_content": "accepted content"},
+                json={
+                    "proposed_content": "accepted content",
+                    "base_version": stage.current_version,
+                },
             )
 
     assert response.status_code == 200
     mock_handle_content_edit.assert_awaited_once_with(
-        stage.id, "accepted content", _USER, fake_db
+        stage.id,
+        "accepted content",
+        _USER,
+        fake_db,
+        expected_version=stage.current_version,
     )
 
 
@@ -569,12 +577,19 @@ async def test_accept_diff_does_not_charge_again_when_balance_is_low(
         ) as client:
             response = await client.post(
                 f"/stages/{stage.id}/accept-diff",
-                json={"proposed_content": "accepted content"},
+                json={
+                    "proposed_content": "accepted content",
+                    "base_version": stage.current_version,
+                },
             )
 
     assert response.status_code == 200
     mock_handle_content_edit.assert_awaited_once_with(
-        stage.id, "accepted content", _USER, fake_db
+        stage.id,
+        "accepted content",
+        _USER,
+        fake_db,
+        expected_version=stage.current_version,
     )
 
 
@@ -601,7 +616,10 @@ async def test_accept_diff_does_not_refund_prepaid_refine_when_saving_content_fa
         ) as client:
             response = await client.post(
                 f"/stages/{stage.id}/accept-diff",
-                json={"proposed_content": "accepted content"},
+                json={
+                    "proposed_content": "accepted content",
+                    "base_version": stage.current_version,
+                },
             )
 
     assert response.status_code == 500
@@ -932,6 +950,7 @@ async def test_refine_preserves_raw_selected_text_for_stage_manager(app) -> None
             "diff": "",
             "original": "some content",
             "proposed": "some content",
+            "base_version": stage.current_version,
             "large_selection": False,
         }
 

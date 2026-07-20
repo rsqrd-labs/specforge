@@ -147,5 +147,6 @@ export interface RefineResponse {
   diff: string
   original: string
   proposed: string
+  base_version: number
   large_selection: boolean
 }

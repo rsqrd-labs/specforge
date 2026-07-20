@@ -18,7 +18,7 @@ describe("DiffViewer", () => {
 
     expect(
       screen.getByText(
-        /rejecting keeps your document unchanged; the 3-credit refinement charge is not refunded/i,
+        /new refinements cost 3 credits.*cached proposals are not charged again/i,
       ),
     ).toBeInTheDocument()
   })
