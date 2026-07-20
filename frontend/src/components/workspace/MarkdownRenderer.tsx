@@ -280,9 +280,10 @@ export function MarkdownRenderer({
               const isTree = Children.toArray(children).some(
                 (c) =>
                   isValidElement(c) &&
-                  String(
-                    (c.props as Record<string, unknown>).className ?? ""
-                  ).includes("language-text"),
+                  typeof (c.props as Record<string, unknown>).className === "string" &&
+                  ((c.props as Record<string, unknown>).className as string).includes(
+                    "language-text",
+                  ),
               )
               return (
                 <pre {...props} className={isTree ? "md-directory-tree" : undefined}>

@@ -237,3 +237,6 @@ handoff.md
 
 # Playwright MCP browser-session artifacts (screenshots, snapshots, console logs)
 .playwright-mcp/
+frontend/coverage/
+frontend/playwright-report/
+frontend/test-results/
