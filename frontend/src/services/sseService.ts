@@ -139,6 +139,11 @@ function streamErrorMessage(event: ErrorEvent): string {
       )
     case "generation_in_progress":
       return "This stage is still generating. Reconnecting to it…"
+    case "stage_conflict":
+      return (
+        "The harness changed while this patch was generating. Review the latest " +
+        "version and regenerate the remaining coverage gaps."
+      )
     case "quality_gate_failed":
       return (
         "Generation was held back by the quality gate. Review the findings " +

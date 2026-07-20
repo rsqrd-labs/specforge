@@ -2119,8 +2119,9 @@ class StageStateError(Exception):
     Carries an optional ``code`` so the router can distinguish the
     *already-generating* case (``generation_in_progress`` — a benign duplicate
     trigger that the client reconciles into the reconnect UX with no alert and
-    no dangerous "Unlock stage" affordance) from the generic
-    ``stage_not_generatable`` (finalised/locked)."""
+    no dangerous "Unlock stage" affordance), an optimistic gap-patch
+    ``stage_conflict``, and the generic ``stage_not_generatable``
+    (finalised/locked)."""
 
     def __init__(self, message: str, *, code: str | None = None) -> None:
         super().__init__(message)
@@ -6278,19 +6279,24 @@ class StageManager:
 
         Generates only the new test files needed to cover the listed requirements
         and merges them into the existing harness, preserving all existing tests.
-        Charges ``CREDIT_COSTS["regenerate"]`` as part of the same transaction the
-        patch commits at the end: a fail-fast balance check, then a deduction that
-        only persists if the patch succeeds — any failure or client disconnect
-        rolls back to no charge, so no separate refund path is needed. Repeatable:
-        gated on the user's balance, not on a one-shot free flag.
+        The provider stream runs without an open database transaction. Once the
+        stream completes, a short locked transaction verifies the harness still
+        matches the version used to build the prompt, deducts the credits, and
+        commits the patch atomically. A conflict, provider failure, or client
+        disconnect therefore leaves both the harness and balance unchanged.
+        Repeatable: gated on the user's balance, not on a one-shot free flag.
         """
         from prompts.harness_patch import (  # noqa: PLC0415
             build_patch_user_prompt,
             get_patch_system_prompt,
         )
 
-        stage = await self._load_stage(stage_id, db, lock=True)
-        workspace = await self._load_workspace(stage.workspace_id, db)
+        # Read phase: intentionally do not lock. A patch can take minutes to
+        # stream, and holding SELECT FOR UPDATE (or even an idle transaction)
+        # across that network wait blocks edits/finalise and can be killed by the
+        # database's idle-in-transaction timeout. The mutation phase below uses
+        # an optimistic version check under a short row lock instead.
+        stage = await self._load_stage(stage_id, db)
 
         # Parity with generate(): a gap patch may only run on a draft or stale
         # harness — never a finalised (locked) one. A finalised stage is locked
@@ -6312,6 +6318,7 @@ class StageManager:
                 ),
             )
 
+        workspace = await self._load_workspace(stage.workspace_id, db)
         redis = await self._redis_client()
         try:
             if not await sliding_window_check(redis, f"llm:{user.id}", 10, 60):
@@ -6331,34 +6338,31 @@ class StageManager:
                 user.id,
             )
 
-        # The gap patch is a paid, repeatable operation (issue: deferred-coverage
-        # reframe). Fail fast on an unaffordable balance, then deduct as part of
-        # the SAME transaction the patch commits at the end — the deduction is
-        # flushed but NOT committed here, so any mid-stream failure, security
-        # rejection, or client disconnect rolls the whole session back (get_db's
-        # `async with` closes → rollback) and the user is never charged for an
-        # undelivered patch. No separate refund path is needed, and the
-        # _load_stage SELECT FOR UPDATE lock stays held across the stream,
-        # serialising concurrent patches (no double-charge).
+        # Fail fast on an unaffordable balance, but do not deduct until the
+        # streamed patch has completed and the baseline has been revalidated.
         credit_cost = CREDIT_COSTS["regenerate"]
         _assert_visible_credit_balance(user, credit_cost)
-        await credit_service.deduct(db, user.id, credit_cost, "regenerate_gaps")
 
-        existing_content = stage.content or ""
+        baseline_content = stage.content or ""
+        baseline_version = stage.current_version
+        workspace_id = workspace.id
         system_prompt = await get_patch_system_prompt()
-        user_prompt = build_patch_user_prompt(existing_content, uncovered_reqs)
+        user_prompt = build_patch_user_prompt(baseline_content, uncovered_reqs)
 
         route = _resolve_preflight_route(
             lambda: _route_for_stage_generation("harness", workspace)
         )
 
-        # We intentionally skip the active-generation status transition that
-        # generate() uses: the SELECT FOR UPDATE lock from _load_stage serialises
-        # concurrent patch requests (and the up-front deduction above rides this
-        # same uncommitted transaction), and omitting that transition means a
-        # crash mid-stream leaves the stage in its original status with no
-        # committed writes — neither the patch nor the charge — making
-        # recovery-service involvement unnecessary.  C-2 — T-174.
+        # End the read-only transaction before the first provider await. With
+        # expire_on_commit=False the captured primitives and resolved route remain
+        # available, while the connection and any router pre-read transaction are
+        # returned to the pool for the entire stream.
+        await db.commit()
+
+        # We intentionally skip generate()'s in_progress transition. Concurrent
+        # patches may stream in parallel, then serialize for only the mutation;
+        # all but the first committer fail the baseline check without a charge.
+        # A crash mid-stream likewise leaves no database writes to recover.
         accumulated = ""
         try:
             adapter = InstrumentedAdapter(
@@ -6374,8 +6378,8 @@ class StageManager:
                 # own ledger samples.
                 operation="harness.patch",
                 cost_context=LLMCostContext(
-                    workspace_id=workspace.id,
-                    stage_id=stage.id,
+                    workspace_id=workspace_id,
+                    stage_id=stage_id,
                     product_surface="harness_patch",
                 ),
             )
@@ -6394,6 +6398,35 @@ class StageManager:
                 accumulated += token
                 yield token
 
+            # Mutation phase: refresh under FOR UPDATE so the identity-map copy
+            # from the read phase cannot hide a concurrent commit. No credit is
+            # deducted until every conflict guard has passed.
+            stage = await self._load_stage(stage_id, db, lock=True)
+            if stage.status not in ("draft", "stale"):
+                conflict_code = (
+                    "generation_in_progress" if stage.status == "in_progress" else None
+                )
+                conflict_status = stage.status
+                await db.rollback()
+                raise StageStateError(
+                    f"Stage status {conflict_status!r} cannot be patched",
+                    code=conflict_code,
+                )
+            if (
+                stage.current_version != baseline_version
+                or (stage.content or "") != baseline_content
+            ):
+                await db.rollback()
+                raise StageStateError(
+                    "The harness changed while the patch was generating. Review "
+                    "the latest version and regenerate the remaining coverage gaps.",
+                    code="stage_conflict",
+                )
+
+            # The deduction and patch now share one short transaction. Any error
+            # before commit rolls both back, preserving the no-charge contract.
+            await credit_service.deduct(db, user.id, credit_cost, "regenerate_gaps")
+            existing_content = stage.content or ""
             merged = _merge_harness_patch(existing_content, accumulated)
             if merged == existing_content:
                 # Nothing new merged — the model re-emitted only files that
@@ -6419,10 +6452,11 @@ class StageManager:
                 await self._assert_technology_safe(
                     "harness",
                     merged,
-                    await self._orm_stage_deps(db, stage.workspace_id, "harness"),
+                    await self._orm_stage_deps(db, workspace_id, "harness"),
                     redis,
                 )
             except TechSafetyError as exc:
+                await db.rollback()
                 raise SecurityError(
                     "Harness patch introduced unsafe technology choices."
                 ) from exc
@@ -6443,13 +6477,13 @@ class StageManager:
             await db.flush()
             version_id = version.id
             eval_context, _ = await self._eval_context_for_stage(
-                workspace.id, "harness"
+                workspace_id, "harness"
             )
             await db.commit()
             # The deduction committed atomically with the patch above — refresh
             # the balance cache so it reflects the charge.
             await credit_service.invalidate(user.id)
-            await self._invalidate_stage_cache(workspace.id, "harness", redis)
+            await self._invalidate_stage_cache(workspace_id, "harness", redis)
 
             # Inline deterministic findings, then a non-blocking background score
             # — same decoupling as the main generate path (issue #27 Phase 1).
@@ -6482,7 +6516,7 @@ class StageManager:
                 content=merged,
                 eval_context=eval_context,
                 provider=route.provider,
-                workspace_id=workspace.id,
+                workspace_id=workspace_id,
                 content_generation_id=None,
             )
             yield f'{{"done": true, "stage_id": "{stage_id}"}}'
@@ -6490,9 +6524,8 @@ class StageManager:
                 yield eval_event
 
         except (ProviderError, TimeoutError) as exc:
-            # On provider failure the stage remains in its pre-patch status
-            # (draft / stale / finalised) and nothing committed — the deduction
-            # rolls back with the session, so the user is not charged.
+            # Provider failures happen before the mutation transaction begins, so
+            # the stage and balance are unchanged and no rollback/refund is needed.
             # Record the failure so the circuit breaker can trip if the
             # provider has consecutive errors.  CF-2 — T-197.
             from services.llm.provider_status import (  # noqa: PLC0415

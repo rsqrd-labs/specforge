@@ -11,6 +11,7 @@ T-195 — covers five missing test categories identified in the Testing Assessme
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
 from uuid import UUID, uuid4
@@ -146,6 +147,89 @@ class _ScalarAll:
 
     def all(self) -> list[Any]:
         return [self._value] if self._value is not None else []
+
+
+class _HarnessPatchDB:
+    """Transaction-aware session fake for gap-patch concurrency tests."""
+
+    def __init__(self, stage: MagicMock, workspace: MagicMock) -> None:
+        self.stage = stage
+        self.workspace = workspace
+        self.execute_count = 0
+        self.commit_count = 0
+        self.rollback_count = 0
+        self.locked_reads = 0
+        self.pending_charge = False
+        self.committed_charge = False
+        self.added: list[Any] = []
+
+    async def execute(self, stmt: Any) -> _ScalarResult:
+        self.execute_count += 1
+        if getattr(stmt, "_for_update_arg", None) is not None:
+            self.locked_reads += 1
+        if self.execute_count == 2:
+            return _ScalarResult(self.workspace)
+        return _ScalarResult(self.stage)
+
+    async def commit(self) -> None:
+        self.commit_count += 1
+        if self.pending_charge:
+            self.committed_charge = True
+            self.pending_charge = False
+
+    async def rollback(self) -> None:
+        self.rollback_count += 1
+        self.pending_charge = False
+
+    def add(self, instance: Any) -> None:
+        self.added.append(instance)
+
+    async def flush(self) -> None:
+        pass
+
+
+def _stub_harness_patch_stream(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    output: str,
+) -> Any:
+    """Install deterministic provider/preflight seams for patch transaction tests."""
+    import prompts.harness_patch as harness_patch_prompts
+    import services.pipeline.stage_manager as sm
+
+    route = SimpleNamespace(
+        provider="openai",
+        model="test-model",
+        model_tier="cheap",
+        operation="harness.generate",
+    )
+
+    class _Adapter:
+        def __init__(self, *_args: Any, **_kwargs: Any) -> None:
+            pass
+
+        async def stream(self, *_args: Any, **_kwargs: Any):
+            yield output
+
+    async def _always_allowed(*_args: Any, **_kwargs: Any) -> bool:
+        return True
+
+    async def _fake_redis(_self: Any) -> MagicMock:
+        return MagicMock()
+
+    async def _system_prompt() -> str:
+        return "test system prompt"
+
+    monkeypatch.setattr(sm, "sliding_window_check", _always_allowed)
+    monkeypatch.setattr(sm.StageManager, "_redis_client", _fake_redis)
+    monkeypatch.setattr(sm, "_route_for_stage_generation", lambda *_args: route)
+    monkeypatch.setattr(sm, "get_llm", lambda *_args: object())
+    monkeypatch.setattr(sm, "InstrumentedAdapter", _Adapter)
+    monkeypatch.setattr(sm, "resolve_output_budget", lambda *_args, **_kwargs: 1024)
+    monkeypatch.setattr(
+        harness_patch_prompts, "get_patch_system_prompt", _system_prompt
+    )
+    return sm
 
 
 # ---------------------------------------------------------------------------
@@ -291,6 +375,118 @@ async def test_harness_patch_insufficient_credits_raises_before_provider(
             stage.id, user, _DB(), ["FR-001"]
         ):
             pass  # pragma: no cover
+
+
+@pytest.mark.asyncio
+async def test_harness_patch_version_conflict_aborts_without_charge(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A concurrent edit wins; the streamed patch aborts without a deduction."""
+    patch_output = (
+        "### File: tests/test_patch.py\n"
+        "```python\n"
+        "# Tests: FR-001\n"
+        "def test_patch():\n"
+        "    assert True\n"
+        "```\n"
+    )
+    sm = _stub_harness_patch_stream(monkeypatch, output=patch_output)
+    manager = sm.StageManager()
+    stage = _make_stage(status="draft", stage_type="harness")
+    baseline_content = stage.content
+    workspace = MagicMock(id=stage.workspace_id)
+    db = _HarnessPatchDB(stage, workspace)
+    user = _make_user()
+    deductions: list[tuple[UUID, int, str]] = []
+
+    async def _deduct(
+        target_db: _HarnessPatchDB,
+        user_id: UUID,
+        amount: int,
+        reason: str,
+    ) -> None:
+        deductions.append((user_id, amount, reason))
+        target_db.pending_charge = True
+
+    monkeypatch.setattr(sm.credit_service, "deduct", _deduct)
+
+    stream = manager.generate_harness_patch(stage.id, user, db, ["FR-001"])
+    assert await anext(stream) == patch_output
+
+    # The read transaction was released before the provider yielded its first
+    # token, and no charge is pending while the model is streaming.
+    assert db.commit_count == 1
+    assert db.locked_reads == 0
+    assert deductions == []
+
+    # Simulate a user edit committing while the provider finishes its response.
+    stage.content = "# concurrent edit"
+    stage.current_version = 2
+
+    with pytest.raises(StageStateError) as exc_info:
+        await anext(stream)
+
+    assert exc_info.value.code == "stage_conflict"
+    assert "changed while the patch was generating" in str(exc_info.value)
+    assert db.locked_reads == 1
+    assert db.rollback_count == 1
+    assert deductions == []
+    assert db.committed_charge is False
+    assert db.added == []
+    assert stage.content == "# concurrent edit"
+    assert stage.current_version == 2
+    assert stage.content != baseline_content
+
+
+@pytest.mark.asyncio
+async def test_harness_patch_noop_rolls_back_deduction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A byte-identical merge releases the lock and never commits its charge."""
+    patch_output = "### File: tests/test_existing.py\n```python\nassert True\n```\n"
+    sm = _stub_harness_patch_stream(monkeypatch, output=patch_output)
+    manager = sm.StageManager()
+    stage = _make_stage(status="draft", stage_type="harness")
+    baseline_content = stage.content
+    workspace = MagicMock(id=stage.workspace_id)
+    db = _HarnessPatchDB(stage, workspace)
+    user = _make_user()
+    deductions: list[tuple[UUID, int, str]] = []
+
+    async def _deduct(
+        target_db: _HarnessPatchDB,
+        user_id: UUID,
+        amount: int,
+        reason: str,
+    ) -> None:
+        deductions.append((user_id, amount, reason))
+        target_db.pending_charge = True
+
+    monkeypatch.setattr(sm.credit_service, "deduct", _deduct)
+    monkeypatch.setattr(
+        sm,
+        "_merge_harness_patch",
+        lambda existing_content, _patch: existing_content,
+    )
+
+    stream = manager.generate_harness_patch(stage.id, user, db, ["FR-001"])
+    assert await anext(stream) == patch_output
+    assert db.commit_count == 1
+    assert deductions == []
+
+    with pytest.raises(StageStateError) as exc_info:
+        await anext(stream)
+
+    assert exc_info.value.code == "no_new_coverage"
+    assert deductions == [(user.id, 10, "regenerate_gaps")]
+    assert db.locked_reads == 1
+    assert db.rollback_count == 1
+    assert db.pending_charge is False
+    assert db.committed_charge is False
+    assert db.commit_count == 1  # read-phase release only
+    assert db.added == []
+    assert stage.content == baseline_content
+    assert stage.current_version == 1
 
 
 # ---------------------------------------------------------------------------

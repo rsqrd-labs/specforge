@@ -160,6 +160,33 @@ describe("createSSEConnection retry behaviour", () => {
     )
   })
 
+  it("maps a harness patch version conflict to actionable copy", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(() =>
+      mockFetchOk(
+        'data: {"error":"stage_conflict","detail":"raw server detail"}\n\n',
+      ),
+    )
+    const onError = vi.fn()
+
+    createSSEConnection({
+      url: "/stream",
+      onToken: vi.fn(),
+      onDone: vi.fn(),
+      onError,
+    })
+
+    await vi.runAllTimersAsync()
+
+    expect(onError).toHaveBeenCalledTimes(1)
+    expect(onError.mock.calls[0][0].code).toBe("stage_conflict")
+    expect(onError.mock.calls[0][0].message).toBe(
+      "The harness changed while this patch was generating. Review the latest " +
+        "version and regenerate the remaining coverage gaps.",
+    )
+    expect(fetchSpy).toHaveBeenCalledTimes(1)
+    expect(console.warn).not.toHaveBeenCalled()
+  })
+
   it("treats a stream ending before done as a TERMINAL stream_interrupted (no re-POST)", async () => {
     // P0-A: a Response existed, so generate() may have committed/persisted — a
     // blind re-POST is the double-charge hazard W1. The old behavior re-POSTed
