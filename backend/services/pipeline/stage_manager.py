@@ -842,8 +842,18 @@ async def _watchdog_stream(
         PIPELINE_STREAM_WATCHDOG_TIMEOUTS.labels(
             stage_type=stage_type, provider=provider, kind=kind
         ).inc()
+        timeout = StreamWatchdogTimeout(kind=kind, timeout_seconds=bound)
         await _bounded_close_stream(iterator)
-        raise StreamWatchdogTimeout(kind=kind, timeout_seconds=bound)
+        # The watchdog synthesizes this exception after cancelling the pending
+        # ``anext`` task, so InstrumentedAdapter cannot observe it and update
+        # provider health itself. Record the terminal timeout exactly once here
+        # before surfacing it to the runtime fallback path (#47).
+        from services.llm.provider_status import (  # noqa: PLC0415
+            record_provider_failure,
+        )
+
+        record_provider_failure(provider, timeout)
+        raise timeout
 
 
 async def _stage_db_heartbeat(stage_id: UUID, run_id: UUID | None = None) -> None:

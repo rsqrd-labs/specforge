@@ -130,6 +130,49 @@ async def test_watchdog_enforces_hard_cap_on_runaway_stream() -> None:
     assert exc_info.value.kind == "hard_cap"
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("idle", "cap", "expected_kind"),
+    [
+        (0.01, 10.0, "idle"),
+        (10.0, 0.01, "hard_cap"),
+    ],
+)
+async def test_watchdog_timeouts_open_provider_circuit(
+    idle: float,
+    cap: float,
+    expected_kind: str,
+) -> None:
+    """Synthesized watchdog failures must participate in provider health.
+
+    Cancelling the adapter iterator cannot record the watchdog's subsequently
+    created timeout, so the watchdog owns the exactly-once circuit update.
+    """
+    from services.llm import provider_status
+
+    async def stalled():
+        await asyncio.sleep(5)
+        yield "too late"
+
+    provider_status._FAILURES.clear()
+    try:
+        idle_patch, cap_patch = _patch_watchdog(idle, cap)
+        with idle_patch, cap_patch:
+            for _ in range(provider_status._UNHEALTHY_FAILURE_THRESHOLD):
+                with pytest.raises(StreamWatchdogTimeout) as exc_info:
+                    async for _ in _watchdog_stream(
+                        stalled(), stage_type="spec", provider="openai"
+                    ):
+                        pass
+                assert exc_info.value.kind == expected_kind
+
+        assert provider_status.can_route("openai") is False
+        assert provider_status._FAILURES["openai"].count == 3
+    finally:
+        provider_status._FAILURES.clear()
+        provider_status.record_provider_success("openai")
+
+
 def test_runtime_fallback_route_escalates_on_same_provider(
     monkeypatch,
 ) -> None:
