@@ -55,7 +55,12 @@ export function TasksBoard({ content }: TasksBoardProps) {
 
   if (tasks.length === 0) {
     return (
-      <div className="document-markdown-scroll">
+      <div
+        className="document-markdown-scroll"
+        role="region"
+        tabIndex={0}
+        aria-label="Tasks document"
+      >
         <MarkdownRenderer content={content} />
       </div>
     )
@@ -86,7 +91,12 @@ export function TasksBoard({ content }: TasksBoardProps) {
   const allExpanded = entries.every((e) => expanded.has(e.anchorId))
 
   return (
-    <div className="document-markdown-scroll tasks-board">
+    <div
+      className="document-markdown-scroll tasks-board"
+      role="region"
+      tabIndex={0}
+      aria-label="Task board"
+    >
       {frontMatter && (
         <div className="tasks-board-frontmatter">
           <MarkdownRenderer content={frontMatter} />

@@ -2316,7 +2316,7 @@ button:disabled {
   inset: 0;
   background: linear-gradient(135deg, rgba(255, 255, 255, 0.24) 0%, transparent 55%);
   border-radius: inherit;
-  pointer-events: none;
+  pointer-events: auto;
 }
 
 .credit-card-orb {
@@ -12109,7 +12109,7 @@ button:disabled {
   pointer-events: auto;
   position: absolute;
   inset: 0;
-  z-index: 10;
+  z-index: 40;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -12119,6 +12119,13 @@ button:disabled {
     linear-gradient(180deg, rgba(248, 246, 244, 0.95), rgba(240, 238, 240, 0.92));
   backdrop-filter: blur(8px) saturate(118%);
   animation: generation-overlay-in 0.18s ease-out both;
+}
+
+.streaming-overlay .generation-cancel-button,
+.generation-streaming-pill .generation-cancel-button {
+  position: relative;
+  z-index: 1;
+  pointer-events: auto;
 }
 
 .streaming-overlay.is-exiting {

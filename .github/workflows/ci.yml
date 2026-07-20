@@ -414,6 +414,45 @@ jobs:
     runs-on: ubuntu-latest
     needs: changes
     if: ${{ github.event_name == 'push' || needs.changes.outputs.frontend == 'true' }}
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: frontend_e2e
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgresql+asyncpg://postgres:postgres@127.0.0.1:5432/frontend_e2e
+      REDIS_URL: redis://127.0.0.1:6379/1
+      GOOGLE_CLIENT_ID: frontend-e2e-client
+      GOOGLE_CLIENT_SECRET: frontend-e2e-secret
+      FRONTEND_URL: http://127.0.0.1:4173
+      VITE_API_URL: http://127.0.0.1:8000
+      E2E_API_URL: http://127.0.0.1:8000
+      ANTHROPIC_API_KEY: e2e-disabled-anthropic
+      OPENAI_API_KEY: e2e-disabled-openai
+      GOOGLE_API_KEY: e2e-disabled-google
+      ENCRYPTION_MASTER_KEY: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+      CSRF_SECRET: frontend-e2e-csrf-secret-long-enough
+      ENVIRONMENT: test
+      PAYMENTS_ENABLED: "false"
+      UV_PROJECT_ENVIRONMENT: ../.venv/backend
     defaults:
       run:
         working-directory: frontend
@@ -442,6 +481,45 @@ jobs:
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+
+      - name: Prepare Docker-backed browser API
+        working-directory: backend
+        run: |
+          uv sync --frozen
+          uv run python - <<'PY' >> "$GITHUB_ENV"
+          from cryptography.hazmat.primitives import serialization
+          from cryptography.hazmat.primitives.asymmetric import rsa
+
+          key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+          private_pem = key.private_bytes(
+              serialization.Encoding.PEM,
+              serialization.PrivateFormat.TraditionalOpenSSL,
+              serialization.NoEncryption(),
+          ).decode()
+          public_pem = key.public_key().public_bytes(
+              serialization.Encoding.PEM,
+              serialization.PublicFormat.SubjectPublicKeyInfo,
+          ).decode()
+          for name, value in (("JWT_PRIVATE_KEY", private_pem), ("JWT_PUBLIC_KEY", public_pem)):
+              print(f"{name}<<__E2E_KEY__")
+              print(value, end="")
+              print("__E2E_KEY__")
+          PY
+
+      - name: Migrate, seed, and start deterministic browser API
+        working-directory: backend
+        run: |
+          uv run alembic upgrade head
+          echo "E2E_ACCESS_TOKEN=$(uv run python -m scripts.seed_frontend_e2e)" >> "$GITHUB_ENV"
+          nohup uv run python -m scripts.run_frontend_e2e_server > /tmp/specforge-e2e-api.log 2>&1 &
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:8000/health >/dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          cat /tmp/specforge-e2e-api.log
+          exit 1
 
       - name: Audit
         run: pnpm audit --audit-level moderate
@@ -483,7 +561,10 @@ jobs:
         run: pnpm exec playwright install --with-deps chromium firefox webkit
 
       - name: Browser, mobile, and accessibility gates
-        run: pnpm test:e2e
+        run: E2E_ACCESS_TOKEN= pnpm test:e2e
+
+      - name: Docker-backed authenticated browser journeys
+        run: pnpm test:e2e:backend
 
   marketing:
     name: Marketing

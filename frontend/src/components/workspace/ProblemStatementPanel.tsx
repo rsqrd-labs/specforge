@@ -59,6 +59,7 @@ export function ProblemStatementPanel({
           onBlur={onBlur}
           aria-describedby={readOnly && readOnlyReason ? readOnlyReasonId : undefined}
           className="problem-editor-textarea"
+          aria-label="Problem statement"
         />
       </div>
       <div className="source-metric-strip">

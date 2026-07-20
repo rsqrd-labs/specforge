@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react"
+import { fireEvent, render, screen, waitFor } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { afterEach, describe, expect, it, vi } from "vitest"
 
@@ -21,6 +21,27 @@ afterEach(() => {
 })
 
 describe("SpecClarificationModal", () => {
+  it.each([null, { questions: [] }, new Error("offline")])(
+    "bypasses an unavailable clarification round",
+    async (outcome) => {
+      const onProceed = vi.fn()
+      if (outcome instanceof Error) mockRequestClarification.mockRejectedValue(outcome)
+      else mockRequestClarification.mockResolvedValue(outcome)
+      render(<SpecClarificationModal workspaceId="workspace-1" onProceed={onProceed} onCancel={vi.fn()} />)
+      await waitFor(() => expect(onProceed).toHaveBeenCalledWith([]))
+    },
+  )
+
+  it("bypasses empty saved answers exactly once", async () => {
+    const onProceed = vi.fn()
+    const { rerender } = render(<SpecClarificationModal workspaceId="workspace-1" mode="existing" existingAnswers={[
+      { question: " ", answer: "ignored" }, { question: "Valid", answer: " " },
+    ]} onProceed={onProceed} onCancel={vi.fn()} />)
+    await waitFor(() => expect(onProceed).toHaveBeenCalledOnce())
+    rerender(<SpecClarificationModal workspaceId="workspace-1" mode="existing" existingAnswers={[]} onProceed={onProceed} onCancel={vi.fn()} />)
+    expect(onProceed).toHaveBeenCalledOnce()
+  })
+
   it("requests a new clarification round and submits round-mode answers", async () => {
     const user = userEvent.setup()
     const onProceed = vi.fn()
@@ -158,5 +179,35 @@ describe("SpecClarificationModal", () => {
         answer: "Workspace owners retrying after provider failure.",
       },
     ])
+  })
+
+  it("treats a passive close as skip for a new round and cancel for saved answers", async () => {
+    const proceed = vi.fn()
+    const cancel = vi.fn()
+    mockRequestClarification.mockImplementation(() => new Promise(() => {}))
+    const first = render(<SpecClarificationModal workspaceId="workspace-1" onProceed={proceed} onCancel={cancel} />)
+    fireEvent.click(screen.getByText("Thinking of the right questions…").closest(".create-modal-backdrop") as HTMLElement)
+    expect(proceed).toHaveBeenCalledWith([])
+    first.unmount()
+    render(<SpecClarificationModal workspaceId="workspace-1" mode="existing" existingAnswers={[{ question: "Q", answer: "A" }]} onProceed={proceed} onCancel={cancel} />)
+    await userEvent.click(screen.getByRole("button", { name: "Close" }))
+    expect(cancel).toHaveBeenCalled()
+  })
+
+  it.each(["new", "existing"] as const)("retains typed answers after a failed %s save", async (mode) => {
+    mockRequestClarification.mockResolvedValue({ questions: [{ question: "Who?", why_it_matters: "Scope" }] })
+    mockPersistClarification.mockRejectedValue(new Error("offline"))
+    render(<SpecClarificationModal workspaceId="workspace-1" mode={mode} existingAnswers={mode === "existing" ? [{ question: "Who?", answer: "Owner" }] : undefined} onProceed={vi.fn()} onCancel={vi.fn()} />)
+    const answer = await screen.findByLabelText("Who?")
+    if (mode === "new") await userEvent.type(answer, "Owner")
+    else {
+      await userEvent.clear(answer)
+      await userEvent.type(answer, "New owner")
+    }
+    fireEvent.click(screen.getByRole("button", { name: /generate from|save edited/i }))
+    expect(await screen.findByText("Answers could not be saved")).toBeInTheDocument()
+    expect(answer).toHaveValue(mode === "new" ? "Owner" : "New owner")
+    fireEvent.click(screen.getByRole("button", { name: "Dismiss" }))
+    expect(screen.queryByText("Answers could not be saved")).not.toBeInTheDocument()
   })
 })

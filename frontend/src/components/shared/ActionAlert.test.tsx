@@ -1,8 +1,9 @@
-import { render, screen } from "@testing-library/react"
+import { fireEvent, render, screen, waitFor } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { describe, expect, it, vi } from "vitest"
 import {
   ActionAlertPanel,
+  ActionAlertDialog,
   ActionAlertProvider,
   useActionAlert,
 } from "./ActionAlert"
@@ -114,5 +115,49 @@ describe("ActionAlertPanel", () => {
 
     await user.click(screen.getByRole("button", { name: /dismiss/i }))
     expect(onDismiss).toHaveBeenCalledOnce()
+  })
+})
+
+describe("ActionAlertDialog variants", () => {
+  it("renders no markup for an absent alert", () => {
+    const { container } = render(<ActionAlertDialog alert={null} onDismiss={vi.fn()} />)
+    expect(container).toBeEmptyDOMElement()
+  })
+
+  it.each(["success", "info", "warning"] as const)("renders the %s icon", (severity) => {
+    render(<ActionAlertDialog alert={{ severity, title: severity, message: "message" }} onDismiss={vi.fn()} />)
+    expect(screen.getByRole("alertdialog")).toHaveClass(severity)
+  })
+
+  it("supports links, async actions, custom variants, and backdrop dismissal", async () => {
+    const dismiss = vi.fn()
+    const action = vi.fn(async () => undefined)
+    const { container } = render(<ActionAlertDialog alert={{
+      severity: "info", title: "Choose", message: "Continue safely",
+      secondaryAction: { label: "Docs", href: "/docs", variant: "danger", autoDismiss: false },
+      primaryAction: { label: "Continue", onSelect: action },
+    }} onDismiss={dismiss} />)
+    fireEvent.click(screen.getByRole("link", { name: "Docs" }))
+    expect(dismiss).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }))
+    await waitFor(() => expect(action).toHaveBeenCalled())
+    await waitFor(() => expect(dismiss).toHaveBeenCalled())
+    fireEvent.click(container.querySelector(".action-alert-backdrop") as HTMLElement)
+    expect(dismiss).toHaveBeenCalledTimes(2)
+  })
+
+  it("cannot dismiss a mandatory alert", () => {
+    const dismiss = vi.fn()
+    const { container } = render(<ActionAlertDialog alert={{
+      severity: "error", title: "Mandatory", message: "Act now", dismissible: false,
+    }} onDismiss={dismiss} />)
+    expect(screen.queryByRole("button", { name: /dismiss/i })).not.toBeInTheDocument()
+    fireEvent.click(container.querySelector(".action-alert-backdrop") as HTMLElement)
+    expect(dismiss).not.toHaveBeenCalled()
+  })
+
+  it("requires provider context", () => {
+    function Consumer() { useActionAlert(); return null }
+    expect(() => render(<Consumer />)).toThrow(/inside ActionAlertProvider/)
   })
 })

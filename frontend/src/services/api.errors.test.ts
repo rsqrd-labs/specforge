@@ -53,6 +53,23 @@ describe("getApiErrorMessage", () => {
     )
   })
 
+  it.each([null, { message: 42 }])(
+    "falls back for malformed detail %#",
+    (detail) => {
+      expect(getApiErrorMessage(axiosErrorWithDetail(detail), "fallback")).toBe("fallback")
+    },
+  )
+
+  it("preserves an explicitly empty string detail or structured message", () => {
+    expect(getApiErrorMessage(axiosErrorWithDetail(""), "fallback")).toBe("")
+    expect(getApiErrorMessage(axiosErrorWithDetail({ message: "" }), "fallback")).toBe("")
+  })
+
+  it("filters non-string structured hints and ignores non-array hints", () => {
+    expect(getApiErrorMessage(axiosErrorWithDetail({ message: "Blocked", hints: ["Retry", 42, null] }))).toBe("Blocked Retry")
+    expect(getApiErrorMessage(axiosErrorWithDetail({ message: "Blocked", hints: "Retry" }))).toBe("Blocked")
+  })
+
   it("falls back to the generic copy for a non-axios error", () => {
     expect(getApiErrorMessage(new Error("boom"), "fallback copy")).toBe(
       "fallback copy",

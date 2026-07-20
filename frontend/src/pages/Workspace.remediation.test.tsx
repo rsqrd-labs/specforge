@@ -24,7 +24,19 @@ import type { EvalResult, Stage, StageType } from "../types/stage"
 import type { WorkspaceWithStages } from "../types/workspace"
 
 const uiMocks = vi.hoisted(() => ({
+  cancelStream: vi.fn(),
   dismissAlert: vi.fn(),
+  editorContent: null as string | null,
+  isStopping: false,
+  isStreaming: false,
+  streamError: null as { code: string; message: string } | null,
+  terminal: null as null | {
+    generation_id: string
+    status: "cancelled" | "failed"
+    partial_saved: boolean
+    refunded_credits: number
+    credit_was_deducted?: boolean
+  },
   showAlert: vi.fn(),
   startStream: vi.fn(),
 }))
@@ -53,7 +65,7 @@ vi.mock("../components/workspace/StageEditor", async () => {
       ref,
       () => ({
         getSelection: () => ({ start: 0, end: 4, text: "Plan" }),
-        getContent: () => props.initialContent,
+        getContent: () => uiMocks.editorContent ?? props.initialContent,
       }),
       [props.initialContent],
     )
@@ -61,7 +73,7 @@ vi.mock("../components/workspace/StageEditor", async () => {
       <div data-testid="mock-stage-editor">
         <button
           type="button"
-          onClick={() => props.onContentChange?.(props.initialContent)}
+          onClick={() => props.onContentChange?.(uiMocks.editorContent ?? props.initialContent)}
         >
           Emit unchanged content
         </button>
@@ -104,8 +116,12 @@ vi.mock("../hooks/useReconnectPoll", () => ({
 vi.mock("../hooks/useStream", () => ({
   useStream: () => ({
     start: uiMocks.startStream,
-    isStreaming: false,
-    error: null,
+    cancel: uiMocks.cancelStream,
+    isStreaming: uiMocks.isStreaming,
+    isStopping: uiMocks.isStopping,
+    terminal: uiMocks.terminal,
+    generation: null,
+    error: uiMocks.streamError,
   }),
 }))
 
@@ -233,6 +249,11 @@ async function generateDiff() {
 }
 
 beforeEach(() => {
+  uiMocks.isStopping = false
+  uiMocks.isStreaming = false
+  uiMocks.streamError = null
+  uiMocks.terminal = null
+  uiMocks.editorContent = null
   useWorkspaceStore.setState({ currentWorkspace: null, isLoading: false })
   useStageStore.setState({
     stages: {},
@@ -274,6 +295,27 @@ describe("Workspace Phase 5 remediation", () => {
     await user.click(screen.getByRole("button", { name: /emit unchanged content/i }))
 
     expect(mockUpdateStageContent).not.toHaveBeenCalled()
+  })
+
+  it("persists changed editor content and keeps the canonical response", async () => {
+    const stage = makeStage("plan")
+    uiMocks.editorContent = "# PLAN\n\nEdited artifact"
+    mockUpdateStageContent.mockResolvedValue({ ...stage, content: uiMocks.editorContent, current_version: 2 })
+    await renderWorkspace([stage])
+    await userEvent.click(screen.getByRole("button", { name: /^edit$/i }))
+    await userEvent.click(screen.getByRole("button", { name: /emit unchanged content/i }))
+    await waitFor(() => expect(mockUpdateStageContent).toHaveBeenCalledWith(stage.id, uiMocks.editorContent))
+  })
+
+  it("surfaces a changed-content save failure", async () => {
+    uiMocks.editorContent = "# PLAN\n\nUnsaved edit"
+    mockUpdateStageContent.mockRejectedValue(new Error("offline"))
+    await renderWorkspace([makeStage("plan")])
+    await userEvent.click(screen.getByRole("button", { name: /^edit$/i }))
+    await userEvent.click(screen.getByRole("button", { name: /emit unchanged content/i }))
+    await waitFor(() => expect(uiMocks.showAlert).toHaveBeenCalledWith(expect.objectContaining({
+      message: "Could not save the latest edit.",
+    })))
   })
 
   it.each([
@@ -345,6 +387,26 @@ describe("Workspace Phase 5 remediation", () => {
     })
   })
 
+  it("finalises and advances to the newly unlocked next stage", async () => {
+    const spec = makeStage("spec")
+    const plan = makeStage("plan", { status: "locked" })
+    const refreshed = makeWorkspace([{ ...spec, status: "finalised" }, { ...plan, status: "draft" }])
+    mockFinaliseStage.mockResolvedValue({ ...spec, status: "finalised" })
+    await renderWorkspace([spec, plan])
+    mockGetWorkspace.mockResolvedValue(refreshed)
+    await userEvent.click(screen.getByRole("button", { name: /finalise spec/i }))
+    await waitFor(() => expect(screen.getAllByRole("button", { name: /plan stage/i })[0]).toHaveAttribute("aria-current", "step"))
+  })
+
+  it("surfaces finalise and stale-acknowledgement failures", async () => {
+    mockFinaliseStage.mockRejectedValueOnce(new Error("conflict"))
+    await renderWorkspace([makeStage("plan")])
+    fireEvent.click(screen.getByRole("button", { name: /finalise plan/i }))
+    await waitFor(() => expect(uiMocks.showAlert).toHaveBeenCalledWith(expect.objectContaining({
+      message: "Only draft stages can be finalised.",
+    })))
+  })
+
   it("deduplicates rapid stale-stage Keep clicks", async () => {
     const stage = makeStage("plan", { status: "stale" })
     let resolveAcknowledge!: (value: Stage) => void
@@ -364,6 +426,15 @@ describe("Workspace Phase 5 remediation", () => {
     await act(async () => {
       resolveAcknowledge({ ...stage, status: "finalised" })
     })
+  })
+
+  it("retains a paid diff after success rejection is acknowledged server-side", async () => {
+    mockRejectStageDiff.mockResolvedValue({ rejected: true })
+    await renderWorkspace([makeStage("plan")])
+    const user = await generateDiff()
+    await user.click(screen.getByRole("button", { name: /^reject$/i }))
+    await waitFor(() => expect(screen.queryByText("Proposed changes")).not.toBeInTheDocument())
+    expect(mockRejectStageDiff).toHaveBeenCalledWith("stage-plan")
   })
 
   it("uses the task parser for GitHub's issue-count preview", async () => {
@@ -434,5 +505,111 @@ describe("Workspace Phase 6 credit transparency", () => {
     await waitFor(() =>
       expect(uiMocks.startStream).toHaveBeenCalledWith("regenerate-gaps"),
     )
+  })
+})
+
+describe("Workspace state matrix", () => {
+  it.each([
+    ["insufficient_credits", "View billing"],
+    ["generation_timeout", "Try again"],
+    ["generation_unavailable", "Try again"],
+    ["rate_limit_exceeded", "Try again"],
+    ["internal_error", "Try again"],
+    ["stream_interrupted", "Try again"],
+    ["generic", "Try again"],
+    ["security_check_failed", null],
+  ] as const)("maps stream error %s to the correct recovery", async (code, action) => {
+    uiMocks.streamError = { code, message: `Failure ${code}` }
+    await renderWorkspace([makeStage("plan")])
+    await waitFor(() => expect(uiMocks.showAlert).toHaveBeenCalled())
+    const alert = uiMocks.showAlert.mock.calls.at(-1)?.[0]
+    if (action) expect(alert.primaryAction?.label).toBe(action)
+    else expect(alert.primaryAction).toBeUndefined()
+  })
+
+  it.each(["quality_gate_failed", "session_expired", "generation_in_progress"])(
+    "suppresses duplicate %s alerts",
+    async (code) => {
+      uiMocks.streamError = { code, message: code }
+      await renderWorkspace([makeStage("spec")])
+      expect(uiMocks.showAlert).not.toHaveBeenCalled()
+    },
+  )
+
+  it("offers an unlock only when a finalised stage is not generatable", async () => {
+    uiMocks.streamError = { code: "stage_not_generatable", message: "complete" }
+    await renderWorkspace([makeStage("plan", { status: "finalised" })])
+    await waitFor(() => expect(uiMocks.showAlert).toHaveBeenCalled())
+    expect(uiMocks.showAlert.mock.calls.at(-1)?.[0].primaryAction?.label).toBe("Unlock stage")
+  })
+
+  it("renders finalised, stale, draft, and locked stages and preserves navigation", async () => {
+    await renderWorkspace([
+      makeStage("spec", { status: "finalised" }),
+      makeStage("plan", { status: "stale" }),
+      makeStage("harness", { status: "draft", content: "" }),
+      makeStage("tasks", { status: "locked", content: null }),
+    ])
+    const user = userEvent.setup()
+    expect(screen.getAllByRole("button", { name: /spec stage/i })[0]).toHaveAttribute("aria-current", "step")
+    await user.click(screen.getAllByRole("button", { name: /plan stage/i })[0])
+    expect(screen.getByRole("button", { name: /^keep$/i })).toBeInTheDocument()
+    await user.click(screen.getAllByRole("button", { name: /harness stage/i })[0])
+    expect(screen.getAllByRole("button", { name: /harness stage/i })[0]).toHaveAttribute("aria-current", "step")
+    expect(screen.getAllByRole("button", { name: /tasks stage/i })[0]).toBeDisabled()
+  })
+
+  it("reconnects an in-progress regeneration with a stable locked reading view", async () => {
+    await renderWorkspace([
+      makeStage("spec", {
+        status: "in_progress",
+        generation_action: "regenerate",
+        generation_started_at: "2026-07-20T11:59:00Z",
+      }),
+    ])
+    expect(screen.getByText(/editing is locked/i)).toBeInTheDocument()
+    const cancel = screen.getByRole("button", { name: /cancel generation|cancel$/i })
+    await userEvent.click(cancel)
+    expect(uiMocks.cancelStream).toHaveBeenCalled()
+  })
+
+  it("surfaces terminal cancellation refund evidence", async () => {
+    uiMocks.terminal = {
+      generation_id: "g1",
+      status: "cancelled",
+      partial_saved: true,
+      refunded_credits: 10,
+      credit_was_deducted: true,
+    }
+    await renderWorkspace([makeStage("spec")])
+    await waitFor(() => expect(uiMocks.showAlert).toHaveBeenCalledWith(expect.objectContaining({
+      title: "Generation cancelled",
+      recovery: "10 credits were refunded.",
+    })))
+  })
+
+  it.each([
+    [false, false, "No credits were charged"],
+    [false, true, "retained its generation charge"],
+    [true, false, "safely generated portion was saved"],
+  ] as const)("explains a failed terminal outcome", async (partial, charged, copy) => {
+    uiMocks.terminal = {
+      generation_id: "g2", status: "failed", partial_saved: partial,
+      refunded_credits: 0, credit_was_deducted: charged,
+    }
+    await renderWorkspace([makeStage("spec")])
+    await waitFor(() => expect(JSON.stringify(uiMocks.showAlert.mock.calls.at(-1)?.[0])).toMatch(new RegExp(copy, "i")))
+  })
+
+  it("renders persisted blocking gates and advisory findings independently", async () => {
+    const blocked = makeStage("plan", {
+      quality_gate: {
+        stage: "plan", kind: "missing_sections", status: "blocked",
+        findings: [{ kind: "MissingSection", detail: "ADR missing", reference: "ADR" }],
+        recovery: { action: "regenerate", overridable: true, credit_required: 10, refunded_prior_attempt: false, message: "Review this blocked draft." },
+      },
+    })
+    await renderWorkspace([blocked])
+    expect(screen.getByText("Review this blocked draft.")).toBeInTheDocument()
   })
 })

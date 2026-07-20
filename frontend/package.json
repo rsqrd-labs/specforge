@@ -12,6 +12,7 @@
     "test:coverage": "vitest run --coverage",
     "test:harness": "vitest run --config vitest.harness.config.ts",
     "test:e2e": "playwright test",
+    "test:e2e:backend": "playwright test e2e/authenticated-backend.spec.ts --workers=1",
     "generate:api": "bash scripts/generate-api-types.sh",
     "check:api": "pnpm generate:api && git diff --exit-code -- src/types/api.generated.ts",
     "lint": "eslint src --max-warnings 0",

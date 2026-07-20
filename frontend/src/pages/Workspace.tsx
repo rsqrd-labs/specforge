@@ -179,7 +179,7 @@ interface PendingClarifyAction extends PendingReviewAction {
   mode: "new" | "existing"
 }
 
-function getGenerationActionLabel(operation: GenerationActivityOperation) {
+export function getGenerationActionLabel(operation: GenerationActivityOperation) {
   switch (operation) {
     case "focused-patch":
       return "Preparing refinement"
@@ -200,7 +200,7 @@ function getGenerationActionLabel(operation: GenerationActivityOperation) {
  * to the overlay operation for a reconnect after refresh, so a regenerate shows
  * the right copy instead of always "generate" (A6). Unknown/NULL → "generate".
  */
-function reconnectOperation(
+export function reconnectOperation(
   action: string | null | undefined,
 ): GenerationActivityOperation {
   return action === "regenerate" ? "regenerate" : "generate"
@@ -209,7 +209,7 @@ function reconnectOperation(
 const sleep = (ms: number) =>
   new Promise<void>((resolve) => window.setTimeout(resolve, ms))
 
-function storyboardFileStem(title: string, id: string): string {
+export function storyboardFileStem(title: string, id: string): string {
   return (
     title
       .toLowerCase()
@@ -219,7 +219,7 @@ function storyboardFileStem(title: string, id: string): string {
   )
 }
 
-function storyboardFilename(
+export function storyboardFilename(
   storyboard: StoryboardDetail,
   kind: StoryboardDownloadKind,
 ): string {
@@ -242,7 +242,7 @@ function saveBlob(blob: Blob, filename: string): void {
   window.setTimeout(() => URL.revokeObjectURL(url), 1_500)
 }
 
-function firstUnlockedStage(stages: Stage[]): Stage | null {
+export function firstUnlockedStage(stages: Stage[]): Stage | null {
   return (
     STAGE_ORDER.map((type) => stages.find((stage) => stage.type === type)).find(
       (stage) => stage && stage.status !== "locked",
@@ -272,18 +272,18 @@ export function pickActiveStageOnLoad(
   return generating?.id ?? firstUnlockedStage(stages)?.id ?? null
 }
 
-function sortStages(stages: Stage[]): Stage[] {
+export function sortStages(stages: Stage[]): Stage[] {
   return [...stages].sort(
     (a, b) => STAGE_ORDER.indexOf(a.type) - STAGE_ORDER.indexOf(b.type),
   )
 }
 
-function previousStageType(type: StageType): StageType {
+export function previousStageType(type: StageType): StageType {
   const index = STAGE_ORDER.indexOf(type)
   return STAGE_ORDER[Math.max(0, index - 1)]
 }
 
-function formatStageStatus(status: Stage["status"]): string {
+export function formatStageStatus(status: Stage["status"]): string {
   return status.replace("_", " ")
 }
 
@@ -298,7 +298,7 @@ interface WorkspaceGenerationLock {
   stageLabel: string | null
 }
 
-function getWorkspaceGenerationVerb(
+export function getWorkspaceGenerationVerb(
   operation: GenerationActivityOperation | null,
 ): string {
   if (operation === "focused-patch") return "Refining"
@@ -312,7 +312,7 @@ function getWorkspaceGenerationVerb(
   return "Generating"
 }
 
-function getWorkspaceGenerationLock(
+export function getWorkspaceGenerationLock(
   locked: boolean,
   stage: Stage | null,
   operation: GenerationActivityOperation | null,
@@ -2903,7 +2903,12 @@ export default function Workspace() {
                 ) : !activeStage.content?.trim() ? (
                   <StageEmptyState stageType={activeStage.type} creditCost={CREDIT_COSTS.generate} />
                 ) : (
-                  <div className="document-markdown-scroll">
+                  <div
+                    className="document-markdown-scroll"
+                    role="region"
+                    tabIndex={0}
+                    aria-label="Generated stage document"
+                  >
                     <MarkdownRenderer content={activeStage.content ?? ""} />
                   </div>
                 )}
@@ -3029,7 +3034,12 @@ export default function Workspace() {
                 ) : activeStage.type === "tasks" ? (
                   <TasksBoard content={activeStage.content ?? ""} />
                 ) : (
-                  <div className="document-markdown-scroll">
+                  <div
+                    className="document-markdown-scroll"
+                    role="region"
+                    tabIndex={0}
+                    aria-label="Generated stage document"
+                  >
                     <MarkdownRenderer
                       content={activeStage.content ?? ""}
                       variant={activeStage.type === "harness" ? "harness" : "default"}

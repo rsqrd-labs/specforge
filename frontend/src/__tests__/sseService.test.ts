@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import { createSSEConnection } from "../services/sseService"
+import { closeStreamRef, createSSEConnection } from "../services/sseService"
 
 const apiMocks = vi.hoisted(() => ({
   accessToken: null as string | null,
@@ -58,6 +58,14 @@ afterEach(() => {
 })
 
 describe("createSSEConnection retry behaviour", () => {
+  it("closes and clears a held stream reference", () => {
+    const close = vi.fn()
+    const ref = { current: { close } as { close: () => void } | null }
+    closeStreamRef(ref)
+    expect(close).toHaveBeenCalledOnce()
+    expect(ref.current).toBeNull()
+    closeStreamRef(ref)
+  })
   it("does not call onError when fetch fails twice then succeeds", async () => {
     const doneBody =
       'data: {"token":"hi"}\n\ndata: {"done":true,"stage_id":"s1"}\n\n'
@@ -158,6 +166,25 @@ describe("createSSEConnection retry behaviour", () => {
       "Generation timed out before this stage finished. " +
         "Your workspace is safe. Try again; long stages may need another run.",
     )
+  })
+
+  it.each([
+    ["dependency_not_finalised", "Finish the previous stage"],
+    ["security_check_failed", "safety checks"],
+    ["generation_unavailable", "temporarily unavailable"],
+    ["generation_in_progress", "still generating"],
+    ["internal_error", "Something went wrong"],
+    ["custom_error", "server detail"],
+    ["bare_custom", "bare_custom"],
+  ])("maps application error %s", async (code, copy) => {
+    const detail = code === "custom_error" ? ',"detail":"server detail"' : ""
+    vi.spyOn(globalThis, "fetch").mockImplementation(() =>
+      mockFetchOk(`data: {"error":"${code}"${detail}}\n\n`),
+    )
+    const onError = vi.fn()
+    createSSEConnection({ url: "/stream", onToken: vi.fn(), onDone: vi.fn(), onError })
+    await vi.runAllTimersAsync()
+    expect(onError.mock.calls[0][0].message).toContain(copy)
   })
 
   it("maps a harness patch version conflict to actionable copy", async () => {
@@ -350,6 +377,32 @@ describe("createSSEConnection retry behaviour", () => {
       "Your session has expired. Please sign in again.",
     )
     expect(console.warn).not.toHaveBeenCalled() // never entered the retry path
+  })
+
+  it("treats an unrefreshable but not-yet-latched 401 as interrupted", async () => {
+    apiMocks.accessToken = "expired"
+    apiMocks.refreshAccessToken.mockResolvedValue(null)
+    vi.spyOn(globalThis, "fetch").mockImplementation(() => mockFetchFail(401))
+    const onError = vi.fn()
+    createSSEConnection({ url: "/stream", onToken: vi.fn(), onDone: vi.fn(), onError })
+    await vi.runAllTimersAsync()
+    expect(onError.mock.calls[0][0].code).toBe("stream_interrupted")
+  })
+
+  it("buffers an incomplete frame until its event boundary arrives", async () => {
+    const encoder = new TextEncoder()
+    const pieces = ['data: {"token":"split"}', '\n\ndata: {"done":true,"stage_id":"s"}\n\n']
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(new ReadableStream({
+      pull(controller) {
+        const next = pieces.shift()
+        if (next) controller.enqueue(encoder.encode(next))
+        else controller.close()
+      },
+    }), { status: 200 }))
+    const onToken = vi.fn()
+    createSSEConnection({ url: "/stream", onToken, onDone: vi.fn(), onError: vi.fn() })
+    await vi.runAllTimersAsync()
+    expect(onToken).toHaveBeenCalledWith("split")
   })
 
   it("uses a fresh CSRF token for each retry attempt", async () => {
@@ -593,6 +646,106 @@ describe("createSSEConnection abort settling", () => {
 })
 
 describe("createSSEConnection progress heartbeats", () => {
+  it("keeps every optional control callback safely optional", async () => {
+    const body =
+      'data: {"generation_started":{"generation_id":"g","deadline":"d","action":"generate","total_parts":1}}\n\n' +
+      'data: {"stream_reset":true}\n\n' +
+      'data: {"quality_gate_failed":{"stage":"spec","kind":"missing_sections","findings":[]}}\n\n'
+    vi.spyOn(globalThis, "fetch").mockImplementation(() => mockFetchOk(body))
+    const onError = vi.fn()
+    createSSEConnection({ url: "/stream", onToken: vi.fn(), onDone: vi.fn(), onError })
+    await vi.runAllTimersAsync()
+    expect(onError.mock.calls[0][0].code).toBe("quality_gate_failed")
+  })
+
+  it("routes start, terminal, eval, and malformed control frames safely", async () => {
+    const body =
+      'data: not-json\n\n' +
+      'data: {"generation_started":{"generation_id":"g1","deadline":"soon","action":"regenerate","total_parts":2}}\n\n' +
+      'data: {"generation_terminal":{"generation_id":"g1","status":"timed_out","partial_saved":false,"refunded_credits":10}}\n\n'
+    vi.spyOn(globalThis, "fetch").mockImplementation(() => mockFetchOk(body))
+    const onGenerationStarted = vi.fn()
+    const onGenerationTerminal = vi.fn()
+    const onError = vi.fn()
+    createSSEConnection({
+      url: "https://api.example.test/stream", onToken: vi.fn(), onDone: vi.fn(), onError,
+      onGenerationStarted, onGenerationTerminal,
+    })
+    await vi.runAllTimersAsync()
+    expect(onGenerationStarted).toHaveBeenCalledWith(expect.objectContaining({ generation_id: "g1" }))
+    expect(onGenerationTerminal).toHaveBeenCalledOnce()
+    expect(onError.mock.calls[0][0]).toMatchObject({ code: "generation_timed_out" })
+  })
+
+  it.each([
+    ["cancelled", "Generation cancelled."],
+    ["failed", "Generation did not complete."],
+  ])("maps %s terminal copy", async (status, message) => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(() => mockFetchOk(
+      `data: {"generation_terminal":{"generation_id":"g","status":"${status}","partial_saved":true,"refunded_credits":0}}\n\n`,
+    ))
+    const onError = vi.fn()
+    createSSEConnection({ url: "/stream", onToken: vi.fn(), onDone: vi.fn(), onError })
+    await vi.runAllTimersAsync()
+    expect(onError.mock.calls[0][0].message).toBe(message)
+  })
+
+  it("delivers an eval and accepts multiline data frames", async () => {
+    const evaluation = { id: "e1", stage_type: "spec", flagged: false }
+    const body =
+      'data: {"token":"multi"}\n' +
+      'data: \n\n' +
+      `data: ${JSON.stringify({ eval: evaluation })}\n\n`
+    vi.spyOn(globalThis, "fetch").mockImplementation(() => mockFetchOk(body))
+    const onEval = vi.fn()
+    createSSEConnection({ url: "/stream", onToken: vi.fn(), onDone: vi.fn(), onError: vi.fn(), onEval })
+    await vi.runAllTimersAsync()
+    expect(onEval).toHaveBeenCalledWith(evaluation)
+  })
+
+  it("treats non-retryable responses and missing bodies as interrupted", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(new Response(null, { status: 403 }))
+      .mockResolvedValueOnce({ ok: true, status: 200, body: null } as Response)
+    for (let index = 0; index < 2; index++) {
+      const onError = vi.fn()
+      createSSEConnection({ url: "/stream", onToken: vi.fn(), onDone: vi.fn(), onError })
+      await vi.runAllTimersAsync()
+      expect(onError.mock.calls[0][0]).toMatchObject({ code: "stream_interrupted" })
+    }
+    expect(fetchSpy).toHaveBeenCalledTimes(2)
+  })
+
+  it("retries pre-response non-Error failures with the generic fallback", async () => {
+    vi.spyOn(globalThis, "fetch").mockRejectedValue("offline")
+    const onError = vi.fn()
+    createSSEConnection({ url: "/stream", onToken: vi.fn(), onDone: vi.fn(), onError })
+    await vi.runAllTimersAsync()
+    expect(onError.mock.calls[0][0].message).toBe("Stream failed")
+  })
+
+  it("falls back from invalid Retry-After and clamps excessive values", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(new Response(null, { status: 429, headers: { "Retry-After": "date" } }))
+      .mockResolvedValueOnce(new Response(null, { status: 429, headers: { "Retry-After": "999" } }))
+      .mockImplementation(() => mockFetchOk('data: {"done":true,"stage_id":"s"}\n\n'))
+    createSSEConnection({ url: "/stream", onToken: vi.fn(), onDone: vi.fn(), onError: vi.fn() })
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(fetchSpy).toHaveBeenCalledTimes(2)
+    await vi.advanceTimersByTimeAsync(30_000)
+    await vi.runAllTimersAsync()
+    expect(fetchSpy).toHaveBeenCalledTimes(3)
+  })
+
+  it("sends no auth or CSRF headers for an anonymous stream", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(() => mockFetchOk('data: {"done":true,"stage_id":"s"}\n\n'))
+    createSSEConnection({ url: "/stream", onToken: vi.fn(), onDone: vi.fn(), onError: vi.fn() })
+    await vi.runAllTimersAsync()
+    const headers = vi.mocked(globalThis.fetch).mock.calls[0][1]?.headers as Headers
+    expect(headers.has("Authorization")).toBe(false)
+    expect(apiMocks.getCsrfToken).not.toHaveBeenCalled()
+  })
+
   it("routes progress events to onProgress and never to onToken", async () => {
     const body =
       'data: {"progress":{"stage":"spec","state":"generating","elapsed_seconds":20}}\n\n' +
