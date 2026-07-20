@@ -6,6 +6,8 @@ import type { ResearchSource, Stage, StageVersion } from "../../types/stage"
 interface VersionHistoryPanelProps {
   stage: Stage
   onRollback: (version: number) => Promise<void>
+  disabled?: boolean
+  disabledReason?: string
 }
 
 function formatDate(iso: string): string {
@@ -48,16 +50,29 @@ function ResearchProvenance({ sources }: { sources?: ResearchSource[] | null }) 
   )
 }
 
-export function VersionHistoryPanel({ stage, onRollback }: VersionHistoryPanelProps) {
+export function VersionHistoryPanel({
+  stage,
+  onRollback,
+  disabled = false,
+  disabledReason,
+}: VersionHistoryPanelProps) {
   const [versions, setVersions] = useState<StageVersion[] | null>(null)
   const [rolling, setRolling] = useState<number | null>(null)
   const [rollbackError, setRollbackError] = useState<string | null>(null)
 
   useEffect(() => {
+    let cancelled = false
     setVersions(null)
     getStageVersions(stage.id)
-      .then(setVersions)
-      .catch(() => setVersions([]))
+      .then((nextVersions) => {
+        if (!cancelled) setVersions(nextVersions)
+      })
+      .catch(() => {
+        if (!cancelled) setVersions([])
+      })
+    return () => {
+      cancelled = true
+    }
   }, [stage.id, stage.current_version])
 
   if (!versions) return null
@@ -83,6 +98,10 @@ export function VersionHistoryPanel({ stage, onRollback }: VersionHistoryPanelPr
   }
 
   const isFinalised = stage.status === "finalised"
+  const disabledReasonId =
+    disabled && disabledReason
+      ? `${stage.id}-version-history-disabled-reason`
+      : undefined
 
   // Single grounded version: no restore UI yet, but surface the provenance so the
   // first grounded generation isn't silent. (Once 2+ versions exist the full
@@ -115,6 +134,12 @@ export function VersionHistoryPanel({ stage, onRollback }: VersionHistoryPanelPr
         <span className="ws-panel-chip">{versions.length} versions</span>
       </div>
 
+      {disabledReasonId ? (
+        <p id={disabledReasonId} className="workspace-lock-inline-note">
+          {disabledReason}
+        </p>
+      ) : null}
+
       <ul className="ws-version-list">
         {versions.map((v) => {
           const isCurrent = v.version === stage.current_version
@@ -132,7 +157,9 @@ export function VersionHistoryPanel({ stage, onRollback }: VersionHistoryPanelPr
                   <button
                     type="button"
                     className="ws-version-restore-btn"
-                    disabled={rolling !== null}
+                    disabled={disabled || rolling !== null}
+                    title={disabled ? disabledReason : undefined}
+                    aria-describedby={disabledReasonId}
                     onClick={() => void handleRollback(v.version)}
                   >
                     {rolling === v.version ? "Restoring…" : "Restore"}

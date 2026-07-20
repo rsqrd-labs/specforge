@@ -36,6 +36,7 @@ import { ProblemStatementPanel } from "../components/workspace/ProblemStatementP
 import { ResearchConsentToggle } from "../components/workspace/ResearchConsentToggle"
 import { TaskValidationPanel } from "../components/workspace/TaskValidationPanel"
 import { TaskCompletionPanel } from "../components/workspace/TaskCompletionPanel"
+import { VersionHistoryPanel } from "../components/workspace/VersionHistoryPanel"
 import { IncrementTimeline } from "../components/workspace/IncrementTimeline"
 import { ExportGitHubModal } from "../components/workspace/ExportGitHubModal"
 import {
@@ -2067,9 +2068,11 @@ export default function Workspace() {
   // verifier has run). Without this the rail would stay collapsed and the panel
   // would never render (the §9 silent-no-op integration point).
   const showDemoDayHandoff = isDemoDayWorkspace && activeStage.type === "tasks"
+  const hasVersionHistory = activeStage.current_version > 1
   const showRightPanel =
     Boolean(diffResult) ||
     showDemoDayHandoff ||
+    hasVersionHistory ||
     (activeStage.type === "harness" && harnessCoverageGaps > 0) ||
     (activeStage.type === "tasks" &&
       (genuineGapIssues.length > 0 ||
@@ -2657,32 +2660,40 @@ export default function Workspace() {
         {/* Editor + comparison panels */}
         {activeStage.type === "spec" ? (
           <div className="spec-compare-grid">
-            <ProblemStatementPanel
-              stage={activeStage}
-              problemStatement={problemDraft}
-              isDirty={problemDirty}
-              readOnly={workspaceGenerationLock.locked}
-              readOnlyReason={workspaceLockInlineReason}
-              onChange={(value) => {
-                if (workspaceGenerationLock.locked) return
-                setProblemDraft(value)
-                setProblemDirty(true)
-              }}
-              onBlur={() => void saveProblemStatement()}
-              footer={
-                <ResearchConsentToggle
-                  workspaceId={currentWorkspace.id}
-                  enabled={currentWorkspace.brave_research_enabled ?? false}
-                  disabled={workspaceGenerationLock.locked}
-                  onChanged={(enabled) =>
-                    setCurrentWorkspace({
-                      ...currentWorkspace,
-                      brave_research_enabled: enabled,
-                    })
-                  }
-                />
-              }
-            />
+            <div className="spec-source-column">
+              <ProblemStatementPanel
+                stage={activeStage}
+                problemStatement={problemDraft}
+                isDirty={problemDirty}
+                readOnly={workspaceGenerationLock.locked}
+                readOnlyReason={workspaceLockInlineReason}
+                onChange={(value) => {
+                  if (workspaceGenerationLock.locked) return
+                  setProblemDraft(value)
+                  setProblemDirty(true)
+                }}
+                onBlur={() => void saveProblemStatement()}
+                footer={
+                  <ResearchConsentToggle
+                    workspaceId={currentWorkspace.id}
+                    enabled={currentWorkspace.brave_research_enabled ?? false}
+                    disabled={workspaceGenerationLock.locked}
+                    onChanged={(enabled) =>
+                      setCurrentWorkspace({
+                        ...currentWorkspace,
+                        brave_research_enabled: enabled,
+                      })
+                    }
+                  />
+                }
+              />
+              <VersionHistoryPanel
+                stage={activeStage}
+                onRollback={performRollback}
+                disabled={workspaceGenerationLock.locked}
+                disabledReason={workspaceLockReason}
+              />
+            </div>
 
             <section className="workspace-document-card spec-document-card">
               <div className="workspace-pane-header workspace-stage-pane-header">
@@ -2955,6 +2966,12 @@ export default function Workspace() {
                         const h = stages.find((s) => s.type === "harness")
                         return h ? () => setActiveStageId(h.id) : undefined
                       })()}
+                    />
+                    <VersionHistoryPanel
+                      stage={activeStage}
+                      onRollback={performRollback}
+                      disabled={workspaceGenerationLock.locked}
+                      disabledReason={workspaceLockReason}
                     />
                     {/* Tasks-stage only — matches useGitHubSync's `enabled` so
                         the panel never renders (and never sticks on its loading

@@ -1,4 +1,5 @@
-import { render, screen, waitFor } from "@testing-library/react"
+import { act, render, screen, waitFor } from "@testing-library/react"
+import userEvent from "@testing-library/user-event"
 import { afterEach, describe, expect, it, vi } from "vitest"
 
 import { VersionHistoryPanel } from "./VersionHistoryPanel"
@@ -117,5 +118,69 @@ describe("VersionHistoryPanel research provenance (issue #12, Phase 4)", () => {
       expect(a.getAttribute("href")).toMatch(/^https?:\/\//)
     }
     expect(screen.getByRole("link", { name: "safe.example" })).toBeInTheDocument()
+  })
+
+  it("disables restore while another workspace generation holds the lock", async () => {
+    const user = userEvent.setup()
+    const onRollback = vi.fn().mockResolvedValue(undefined)
+    const disabledReason = "Editing resumes when generation finishes."
+    mockGet.mockResolvedValue([
+      version({ id: "v1", version: 1 }),
+      version({ id: "v2", version: 2 }),
+    ])
+
+    render(
+      <VersionHistoryPanel
+        stage={stage}
+        onRollback={onRollback}
+        disabled
+        disabledReason={disabledReason}
+      />,
+    )
+
+    const restore = await screen.findByRole("button", { name: "Restore" })
+    expect(restore).toBeDisabled()
+    expect(restore).toHaveAccessibleDescription(disabledReason)
+    expect(screen.getByText(disabledReason)).toBeInTheDocument()
+    await user.click(restore)
+    expect(onRollback).not.toHaveBeenCalled()
+  })
+
+  it("ignores a stale version response after navigating to another stage", async () => {
+    let resolveFirst!: (versions: StageVersion[]) => void
+    mockGet
+      .mockImplementationOnce(
+        () =>
+          new Promise<StageVersion[]>((resolve) => {
+            resolveFirst = resolve
+          }),
+      )
+      .mockResolvedValueOnce([
+        version({ id: "stage-2-v1", version: 1, stage_id: "stage-2" }),
+        version({ id: "stage-2-v2", version: 2, stage_id: "stage-2" }),
+      ])
+
+    const { rerender } = render(
+      <VersionHistoryPanel stage={stage} onRollback={vi.fn()} />,
+    )
+    rerender(
+      <VersionHistoryPanel
+        stage={{ ...stage, id: "stage-2" }}
+        onRollback={vi.fn()}
+      />,
+    )
+
+    expect(await screen.findByText("2 versions")).toBeInTheDocument()
+
+    await act(async () => {
+      resolveFirst([
+        version({ id: "stage-1-v1", version: 1 }),
+        version({ id: "stage-1-v2", version: 2 }),
+        version({ id: "stage-1-v3", version: 3 }),
+      ])
+    })
+
+    expect(screen.queryByText("3 versions")).not.toBeInTheDocument()
+    expect(screen.getByText("2 versions")).toBeInTheDocument()
   })
 })

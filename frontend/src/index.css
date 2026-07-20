@@ -10205,6 +10205,19 @@ button:disabled {
   background: rgba(253, 246, 238, 0.28);
 }
 
+.spec-source-column {
+  display: grid;
+  grid-template-rows: minmax(320px, 1fr) auto;
+  gap: 12px;
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.spec-source-column > .problem-editor-pane {
+  min-height: 320px;
+}
+
 @media (min-width: 1024px) {
   .spec-compare-grid {
     grid-template-columns: minmax(320px, 0.72fr) minmax(560px, 1.28fr);
