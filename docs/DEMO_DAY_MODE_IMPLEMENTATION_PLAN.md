@@ -139,10 +139,10 @@ future agent does not reopen them.
 
 ## 4. The regression-pin contract (non-negotiable)
 
-This codebase ships every flagged behavior change with a **byte-identical OFF-path
-regression pin** (see `core_cheap_primary`, `problem_statement_compression`,
-`pipeline_parallel_chunks` in `backend/config.py` — each documents "flag OFF ⇒
-byte-identical"). Demo Day mode must honor this:
+Flagged model/prompt behavior retains a **byte-identical OFF-path regression pin**
+(see `core_cheap_primary` and `problem_statement_compression`). Durable generation
+lifecycle and dependency-wave chunking are correctness architecture, not rollout
+flags. Demo Day mode must still honor the standard-workspace prompt contract:
 
 > For any standard workspace (`mode="standard"`, the default) **and** for any
 > workspace when `demo_day_mode_enabled=False`, every prompt, section contract,
@@ -414,16 +414,11 @@ This is open decision §11.3 — confirm before building.
 >    **through that column** and does not touch `Stage.quality_gate`. **Phase 4’s
 >    `DemoDayHandoffPanel`/`ConstructionVerifiedBadge` must read the verdict column,
 >    not `Stage.quality_gate`.**
-> 2. **The one funded regenerate is tasks-only (C1/C2 gaps).** `generate()` requires
->    upstream stages finalised (`_assert_dependencies_finalised`), so a background
->    harness regenerate would leave harness in `draft` and break the immediate tasks
->    regenerate — the C3/C4 "harness then tasks" cascade is not safely drivable from
->    a detached task. So a tasks-owned gap (C1/C2) gets the single funded regenerate
->    (via `_regenerate_with_findings`, which never re-enters the pipeline → no
->    verifier recursion); a harness-owned gap (C3/C4) is left **advisory with the gap
->    named** (a named gap beats a fragile silent cascade). The `regen_attempted`
->    marker in the verdict JSON consumes the window on the first attempt
->    (success *or* failure), and the export-time staleness re-run preserves it.
+> 2. **Construction verification is advisory-only.** The verifier never launches
+>    detached stage regeneration. All C1-C4 gaps are persisted in the workspace
+>    verdict and named for the owner; a user-requested Regenerate action starts a
+>    normal durable, chunked generation run. This avoids unowned background writes,
+>    duplicate provider calls, and credit races after a successful stage run.
 
 ---
 

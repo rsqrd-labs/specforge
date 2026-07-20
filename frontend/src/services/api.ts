@@ -34,6 +34,7 @@ import type {
 } from "../types/github"
 import type {
   EvalResult,
+  GenerationRun,
   RefineResponse,
   Stage,
   StageVersion,
@@ -542,6 +543,21 @@ export async function setWorkspaceResearch(
 
 export async function getStage(id: string): Promise<Stage> {
   const response = await api.get<Stage>(`/stages/${id}`)
+  return response.data
+}
+
+export async function getStageGeneration(id: string): Promise<GenerationRun | null> {
+  const response = await api.get<GenerationRun | null>(`/stages/${id}/generation`)
+  return response.data
+}
+
+export async function cancelStageGeneration(
+  id: string,
+  generationId: string,
+): Promise<GenerationRun> {
+  const response = await api.post<GenerationRun>(`/stages/${id}/generation/cancel`, {
+    generation_id: generationId,
+  })
   return response.data
 }
 

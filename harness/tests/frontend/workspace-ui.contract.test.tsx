@@ -1,5 +1,6 @@
 import { render, screen } from "@testing-library/react"
 import { describe, expect, it } from "vitest"
+import { MemoryRouter } from "react-router-dom"
 import { StageNavigator } from "../../../frontend/src/components/workspace/StageNavigator"
 import { CreditConfirmModal } from "../../../frontend/src/components/workspace/CreditConfirmModal"
 
@@ -25,14 +26,16 @@ describe("workspace UI contract", () => {
 
   it("shows exact credit cost and remaining balance before LLM actions", () => {
     render(
-      <CreditConfirmModal
-        open
-        action="generate"
-        cost={10}
-        balance={34}
-        onCancel={() => undefined}
-        onConfirm={() => undefined}
-      />,
+      <MemoryRouter>
+        <CreditConfirmModal
+          open
+          action="generate"
+          creditCost={10}
+          currentBalance={34}
+          onCancel={() => undefined}
+          onConfirm={() => undefined}
+        />
+      </MemoryRouter>,
     )
 
     expect(screen.getByText(/10 credits/i)).toBeTruthy()

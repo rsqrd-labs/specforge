@@ -54,14 +54,12 @@ OUTPUT_TOKEN_BUDGETS: dict[str, int] = {
     "plan.generate": 49152,
     "harness.generate": 49152,
     "tasks.generate": 49152,
-    # A gap patch / auto-complete emits several complete test files. The old
-    # hard-coded 2048 truncated after roughly one file, so the paid patch (and
-    # the Prong-A auto-complete of files the Files chunk dropped) systematically
-    # left files half-written — which then broke fence parity for the whole
-    # merged harness. Sized like a core-gen chunk with reasoning headroom; the
-    # completeness-aware merge drops any still-truncated trailing block.
+    # A user-requested gap patch emits several complete test files. The old
+    # hard-coded 2048 truncated after roughly one file and left files half-written,
+    # which then broke fence parity for the whole merged harness. Sized like a
+    # core-generation chunk with reasoning headroom; the completeness-aware merge
+    # drops any still-truncated trailing block.
     "harness.patch": 32768,
-    "harness.repair_files": 49152,
     "refine.focused": 768,
     "refine.section": 4096,
     "regenerate.full": 49152,
@@ -101,7 +99,6 @@ _OUTPUT_BUDGET_FLOORS: dict[str, int] = {
     "harness.generate": 8192,
     "tasks.generate": 8192,
     "harness.patch": 4096,
-    "harness.repair_files": 8192,
     "regenerate.full": 8192,
     "storyboard.generate": 16384,
     "refine.section": 2048,

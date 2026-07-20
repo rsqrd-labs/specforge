@@ -810,7 +810,7 @@ def _normalise_harness_path(path: str) -> str:
 # (Fable #5/#8) admitted matrix prose tokens that merely CONTAIN ``test`` —
 # ``pytest.mark.slow`` (ext ``slow``), ``latest.md`` (ext ``md``, "la-test"),
 # ``pytest==7.4.0`` (ext ``0``) — each of which then armed the 10-credit patch on
-# a phantom AND fed the Prong-A autocomplete a garbage filename to synthesise
+# a phantom and fed the completeness gate a garbage filename
 # (Fable verify #4). Generous over real languages; excludes docs/config/version
 # fragments. A false negative (an exotic-extension test dropped) is the safe,
 # quiet direction; a false positive is a paid alarm + junk repair.
@@ -873,8 +873,8 @@ def _looks_like_test_file_path(token: str) -> bool:
     Accepts both a directory-qualified path (``tests/unit/x_test.py``) and a
     BARE test-convention filename (``x_test.py``). Cheap-tier harnesses sometimes
     render bare filenames in the matrix or a nested File Tree; requiring a ``/``
-    dropped those, so a genuine coverage hole showed nowhere and the Prong-A
-    auto-repair silently no-opped (Fable #5/#8). A bare name is disambiguated
+    dropped those, so a genuine coverage hole showed nowhere (Fable #5/#8). A
+    bare name is disambiguated
     against emitted files by BASENAME (`_file_is_emitted`), so accepting it never
     manufactures a phantom "missing" for a file that exists under a directory.
 
@@ -1331,10 +1331,9 @@ def _promised_harness_files(artifact_md: str) -> dict[str, str]:
     The union of the ``## File Tree`` entries (all files: tests, fixtures,
     factories, schemas, README) and the ``## Requirement-to-Test Matrix`` test
     files. Keyed by :func:`_canonical_test_path` for matching; the value is the
-    original-cased display path (first seen wins) for a regenerate prompt. This
-    is the single promised-set definition shared by the advisory completeness
-    check and the Prong-A auto-repair, so they never disagree about what is
-    missing.
+    original-cased display path (first seen wins). This is the single promised-set
+    definition shared by prompt construction and the completeness gate, so they
+    never disagree about what is missing.
     """
     promised: dict[str, str] = {}
     for path in _file_tree_paths(_section_body(artifact_md, "## File Tree")):
@@ -1350,10 +1349,9 @@ def _promised_harness_files(artifact_md: str) -> dict[str, str]:
 def harness_file_tree_paths(artifact_md: str) -> list[str]:
     """Sorted File-Tree paths a harness's ``## Files`` section is meant to emit.
 
-    The deterministic checklist injected into the Files chunk's prompt (Prong-A
-    prevention) so the model cannot silently drop a file it just enumerated in
-    the File Tree — attacking the two-chunk divergence at its source, before the
-    (more expensive) auto-complete pass has to fire. Display casing is preserved.
+    The deterministic checklist is injected into the Files chunk's prompt so the
+    model cannot silently drop a file it just enumerated in the File Tree. This
+    attacks the two-chunk divergence at its source. Display casing is preserved.
     """
     return sorted(_file_tree_paths(_section_body(artifact_md, "## File Tree")))
 
@@ -1361,8 +1359,8 @@ def harness_file_tree_paths(artifact_md: str) -> list[str]:
 def missing_harness_files(artifact_md: str) -> tuple[list[str], int]:
     """Files the tree/matrix promise but the ``## Files`` section never emitted.
 
-    Returns ``(missing_display_paths, total_promised)`` for the Prong-A targeted
-    auto-repair.  Deliberately independent of ``_harness_issues``' internal
+    Returns ``(missing_display_paths, total_promised)`` for deterministic
+    completeness reporting. Deliberately independent of ``_harness_issues``' internal
     guards — in particular it reports missing files even when the Files section
     emitted **zero** ``### File:`` headings — because that "the whole Files chunk
     fell over" case is exactly when a repair matters most.  Matching is canonical

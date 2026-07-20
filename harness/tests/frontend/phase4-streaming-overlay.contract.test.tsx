@@ -4,14 +4,25 @@
  * GREEN after the component is created and mounted in Workspace.tsx.
  */
 import { render, screen } from "@testing-library/react"
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 
 // This import will fail (RED) until T-054 creates the file.
 import { StreamingOverlay } from "../../../frontend/src/components/workspace/StreamingOverlay"
 
 describe("T-054: StreamingOverlay component", () => {
+  const activity = {
+    stageId: "spec-id",
+    stageType: "spec" as const,
+    operation: "generate" as const,
+    actionLabel: "generate",
+    startedAt: Date.now(),
+    streamed: true,
+  }
+
   it("renders a visible overlay element when isVisible is true", () => {
-    const { container } = render(<StreamingOverlay isVisible={true} />)
+    const { container } = render(
+      <StreamingOverlay isVisible activity={activity} />,
+    )
     expect(container.firstChild).not.toBeNull()
   })
 
@@ -20,18 +31,18 @@ describe("T-054: StreamingOverlay component", () => {
     expect(container.firstChild).toBeNull()
   })
 
-  it("displays a 'Generating' label so users know the AI is working", () => {
-    render(<StreamingOverlay isVisible={true} />)
-    expect(screen.getByText(/generating/i)).toBeInTheDocument()
+  it("announces that generation is active", () => {
+    render(<StreamingOverlay isVisible activity={activity} />)
+    expect(screen.getByRole("status")).toHaveAttribute("aria-busy", "true")
+    expect(screen.getByText(/structuring requirements/i)).toBeInTheDocument()
   })
 
-  it("uses pointer-events-none so the overlay does not block scrolling", () => {
-    const { container } = render(<StreamingOverlay isVisible={true} />)
-    const overlayEl = container.firstChild as HTMLElement
-    // Accept either inline style or Tailwind class
-    const hasPointerEventsNone =
-      overlayEl.style.pointerEvents === "none" ||
-      overlayEl.className.includes("pointer-events-none")
-    expect(hasPointerEventsNone).toBe(true)
+  it("keeps server-side cancellation available while loading", () => {
+    render(
+      <StreamingOverlay isVisible activity={activity} onCancel={vi.fn()} />,
+    )
+    expect(
+      screen.getByRole("button", { name: /cancel generation/i }),
+    ).toBeEnabled()
   })
 })

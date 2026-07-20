@@ -11,7 +11,7 @@ genuine coverage gaps. Groups map to the fix prongs:
   Go/RSpec/it.each, over-long close fence)
 * the UNVERIFIED_COVERAGE file-level fallback (FP-3) and its non-flagging invariant
 * the completeness-aware patch merge + round-trip idempotence (D-2/D-3)
-* missing_harness_files (the Prong-A trigger predicate) and the auto-complete pass
+* missing_harness_files and its prompt/checkpoint completeness contract
 """
 
 from __future__ import annotations
@@ -439,110 +439,6 @@ def test_a(): assert False
         assert harness_file_tree_paths(harness) == ["tests/a.py", "tests/b.py"]
 
 
-class _FakeAdapter:
-    """Minimal async-streaming adapter for the auto-complete unit test."""
-
-    def __init__(self, text: str) -> None:
-        self._text = text
-        self.last_generation_id = "gen-fake"
-
-    async def stream(self, system: str, user: str, *, max_tokens: int):  # noqa: ARG002
-        yield self._text
-
-
-def _route():
-    from services.llm.routing import LLMRoute
-
-    return LLMRoute(
-        provider="anthropic",
-        model="claude-haiku-4-5-20251001",
-        model_tier="cheap",
-        operation="harness.generate",
-        latency_class="interactive",
-        cross_provider_fallback=False,
-        reason="test",
-        requested_tier="cheap",
-        fallback_tier=None,
-        selection_reason="test",
-    )
-
-
-class TestHarnessAutocomplete:
-    @pytest.mark.asyncio
-    async def test_fills_missing_promised_file(self) -> None:
-        from services.pipeline.stage_manager import StageManager
-
-        harness = """## File Tree
-```
-tests/unit/test_a.py
-tests/unit/test_b.py
-```
-
-## Files
-
-### File: tests/unit/test_a.py
-```python
-def test_a(): assert False
-```
-"""
-        patch = (
-            "### File: tests/unit/test_b.py\n```python\ndef test_b(): assert False\n```"
-        )
-        result = await StageManager()._autocomplete_missing_harness_files(
-            artifact=harness, adapter=_FakeAdapter(patch), route=_route()
-        )
-        assert "### File: tests/unit/test_b.py" in result
-        assert missing_harness_files(result) == ([], 2)
-
-    @pytest.mark.asyncio
-    async def test_complete_harness_makes_no_llm_call(self) -> None:
-        from services.pipeline.stage_manager import StageManager
-
-        harness = """## File Tree
-```
-tests/unit/test_a.py
-```
-
-## Files
-
-### File: tests/unit/test_a.py
-```python
-def test_a(): assert False
-```
-"""
-
-        class _ExplodingAdapter:
-            last_generation_id = "x"
-
-            async def stream(self, *a, **k):  # noqa: ANN002, ANN003
-                raise AssertionError("must not call the LLM for a complete harness")
-                yield ""  # pragma: no cover
-
-        result = await StageManager()._autocomplete_missing_harness_files(
-            artifact=harness, adapter=_ExplodingAdapter(), route=_route()
-        )
-        assert result == harness
-
-    @pytest.mark.asyncio
-    async def test_too_many_missing_files_skips(self) -> None:
-        from services.pipeline.stage_manager import StageManager
-
-        tree = "\n".join(f"tests/unit/test_{i}.py" for i in range(20))
-        harness = f"## File Tree\n```\n{tree}\n```\n\n## Files\n"
-
-        class _ExplodingAdapter:
-            last_generation_id = "x"
-
-            async def stream(self, *a, **k):  # noqa: ANN002, ANN003
-                raise AssertionError("must not call the LLM when over the cap")
-                yield ""  # pragma: no cover
-
-        result = await StageManager()._autocomplete_missing_harness_files(
-            artifact=harness, adapter=_ExplodingAdapter(), route=_route()
-        )
-        assert result == harness
-
-
 class TestDroppedCategoryFullPath:
     def test_category_in_directory_now_reclassifies_as_deferred(self) -> None:
         # `accessibility` lives in the directory, not the filename stem — the
@@ -751,7 +647,7 @@ def test_charge(): assert False
     def test_nested_tree_leaf_is_promised_and_basename_matched(self) -> None:
         # Fable #8: a nested tree renders leaves as bare names once branch glyphs
         # are stripped. They must be picked up (promised) AND basename-matched to
-        # emitted headings so Prong-A never regenerates an existing file.
+        # emitted headings so the completeness gate never flags an existing file.
         harness = """## File Tree
 ```
 tests/
@@ -909,8 +805,8 @@ def test_present(): assert False
     )
     def test_v4_non_file_prose_tokens_rejected(self, token: str) -> None:
         # V4: matrix prose that merely CONTAINS "test" is not a file path. Before
-        # the extension allowlist these armed the paid patch AND fed Prong-A a
-        # junk filename to synthesise.
+        # the extension allowlist these armed the paid patch and fed the
+        # completeness gate a junk filename.
         assert _looks_like_test_file_path(token) is False
 
     @pytest.mark.parametrize(
@@ -938,7 +834,7 @@ def test_present(): assert False
 ## Files
 """
         assert uncovered_requirements(harness) == []
-        # ...and Prong-A sees no junk file to regenerate.
+        # ...and the completeness gate sees no junk missing file.
         missing, _total = missing_harness_files(harness)
         assert missing == []
 
@@ -1074,35 +970,3 @@ def test_a(): assert False
             _validate_task_references(_task("`tests/doc_test.go::TestAfter`"), harness)
             == []
         )
-
-    @pytest.mark.asyncio
-    async def test_v7_repair_pass_runs_under_repair_operation(self) -> None:
-        # V7: the Prong-A repair stream must attribute its cost to
-        # harness.repair_files (not the passed adapter's harness.generate) and
-        # restore the label afterward, so harness.generate percentiles stay clean.
-        from services.pipeline.stage_manager import StageManager
-
-        seen: dict[str, str | None] = {}
-
-        class _OpAdapter:
-            _operation = "harness.generate"
-            last_generation_id = "gen-fake"
-
-            async def stream(self, system, user, *, max_tokens):  # noqa: ANN001, ARG002
-                seen["during"] = self._operation
-                yield (
-                    "### File: tests/unit/test_b.py\n"
-                    "```python\ndef test_b(): assert False\n```\n"
-                )
-
-        harness = (
-            "## File Tree\n```\ntests/unit/test_a.py\ntests/unit/test_b.py\n```\n\n"
-            "## Files\n\n### File: tests/unit/test_a.py\n"
-            "```python\ndef test_a(): assert False\n```\n"
-        )
-        adapter = _OpAdapter()
-        await StageManager()._autocomplete_missing_harness_files(
-            artifact=harness, adapter=adapter, route=_route()
-        )
-        assert seen["during"] == "harness.repair_files"
-        assert adapter._operation == "harness.generate"

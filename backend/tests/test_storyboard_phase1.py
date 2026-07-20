@@ -146,6 +146,12 @@ def test_resolve_primary_route_picks_cheap_tier(monkeypatch):
 
     monkeypatch.setattr(tier_policy.settings, "core_cheap_primary", True)
     monkeypatch.setattr(provider_status, "can_route", lambda *_args: True)
+    monkeypatch.setattr(provider_status, "is_provider_configured", lambda *_args: True)
+    monkeypatch.setattr(
+        tier_policy.settings,
+        "llm_provider_priority",
+        "anthropic,openai,google",
+    )
 
     route = _resolve_storyboard_primary_route(_make_source("anthropic"))
     assert route.model == "claude-haiku-4-5-20251001"
@@ -158,8 +164,11 @@ def test_resolve_primary_route_picks_cheap_tier(monkeypatch):
 def test_resolve_primary_route_google_floors_at_mid(monkeypatch):
     """Google has no sub-Flash model, so its storyboard primary floors at mid."""
     from config import settings
+    from services.llm import provider_status
 
     monkeypatch.setattr(settings, "llm_provider_priority", "google,anthropic,openai")
+    monkeypatch.setattr(provider_status, "can_route", lambda *_args: True)
+    monkeypatch.setattr(provider_status, "is_provider_configured", lambda *_args: True)
     route = _resolve_storyboard_primary_route(_make_source("google"))
     assert route.model == "gemini-3.5-flash"
     assert route.model_tier == "mid"

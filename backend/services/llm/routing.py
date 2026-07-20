@@ -6,6 +6,7 @@ timeout= enforcement is delegated to each concrete adapter implementation.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 from services.llm.cost_registry import (
@@ -71,6 +72,52 @@ def resolve_platform_route(
     for provider in platform_provider_priority():
         if provider in exclude_providers:
             continue
+        if not is_provider_configured(provider) or not can_route(provider):
+            continue
+        route = _route_for_provider(
+            provider=provider,
+            operation=operation,
+            requested_tier=requested_tier,
+            fallback_tier=fallback_tier,
+            latency_class=latency_class,
+        )
+        if route is not None:
+            return route
+    raise LLMRoutingError("No platform LLM route is currently available.")
+
+
+def resolve_platform_route_by_provider(
+    *,
+    operation: str,
+    tier_policy: Mapping[str, tuple[str, str | None]],
+    latency_class: str,
+    exclude_providers: frozenset[str] = frozenset(),
+) -> LLMRoute:
+    """Resolve a platform route using each provider's own tier vocabulary.
+
+    A single requested tier cannot represent the core-generation policy: the
+    inexpensive Anthropic model is ``small``, the inexpensive OpenAI model is
+    ``mini``, and Google's viable floor is ``mid``.  Applying the first
+    provider's policy to a later provider silently promotes that provider to a
+    more expensive model.  This resolver validates and applies a policy per
+    candidate before selecting it.
+    """
+    from services.llm.provider_status import (  # noqa: PLC0415
+        can_route,
+        is_provider_configured,
+    )
+
+    _validate_operation(operation)
+    for provider in platform_provider_priority():
+        if provider in exclude_providers:
+            continue
+        policy = tier_policy.get(provider)
+        if policy is None:
+            continue
+        requested_tier, fallback_tier = policy
+        _validate_tier(requested_tier)
+        if fallback_tier is not None:
+            _validate_tier(fallback_tier)
         if not is_provider_configured(provider) or not can_route(provider):
             continue
         route = _route_for_provider(

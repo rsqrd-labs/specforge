@@ -25,11 +25,18 @@ import pytest
 from prometheus_client import REGISTRY
 from pydantic import ValidationError
 
-from models import CreditLedger, EvalResult, Stage, StageVersion, Workspace
+from models import (
+    CreditLedger,
+    EvalResult,
+    Stage,
+    StageGenerationChunk,
+    StageGenerationRun,
+    StageVersion,
+    Workspace,
+)
 from services.pipeline import critic as critic_module
 from services.pipeline.artifact_validator import (
     MissingSectionError,
-    final_completion_sentinel,
 )
 from services.pipeline.critic import (
     AUDIT_EVENT_CRITIC_DISABLED,
@@ -39,17 +46,11 @@ from services.pipeline.critic import (
 )
 from services.pipeline.stage_manager import StageManager
 
-_REGEN_METRIC = "specforge_billing_credits_critic_regen_total"
-
 # A spec artifact containing every required section heading and the v1.9
 # evidence fields so the deterministic validator passes before the critic is
 # reached.  Also well past the critic's 500-char gradable floor so the direct
 # critic_review unit tests do real work.
 _LONG_ARTIFACT = artifact_fixtures.VALID_SPEC
-
-
-def _with_final_sentinel(content: str, stage: str = "spec") -> str:
-    return f"{content}\n{final_completion_sentinel(stage)}"
 
 
 # ---------------------------------------------------------------------------
@@ -92,6 +93,9 @@ class _FakeRedis:
         for k in keys:
             self._store.pop(k, None)
 
+    async def zrem(self, *_args: Any) -> int:
+        return 1
+
 
 class _FakeResult:
     def __init__(self, value: Any = None, many: list | None = None) -> None:
@@ -101,8 +105,14 @@ class _FakeResult:
     def scalar_one_or_none(self) -> Any:
         return self._value
 
+    def scalar_one(self) -> Any:
+        return self._value
+
     def scalars(self) -> "_FakeResult":
         return self
+
+    def all(self) -> list:
+        return self._many
 
     def __iter__(self):
         yield from self._many
@@ -153,6 +163,8 @@ class _MultiQueryDB:
         # real DB's identity map would.
         self._captured_stage: Stage | None = None
         self._captured_workspace: Workspace | None = None
+        self._generation_runs: list[StageGenerationRun] = []
+        self._generation_chunks: list[StageGenerationChunk] = []
         global _ACTIVE_MULTI_QUERY_DB
         _ACTIVE_MULTI_QUERY_DB = self
 
@@ -166,6 +178,54 @@ class _MultiQueryDB:
         pass
 
     async def execute(self, statement: Any) -> _FakeResult:
+        table_name = getattr(getattr(statement, "table", None), "name", None)
+        entity = _select_entity(statement)
+        rendered = str(statement)
+        params = statement.compile().params
+        if table_name == "stage_generation_chunks":
+            if statement.__class__.__name__ == "Insert":
+                run_id = params["generation_run_id"]
+                chunk_key = params["chunk_key"]
+                exists = any(
+                    row.generation_run_id == run_id and row.chunk_key == chunk_key
+                    for row in self._generation_chunks
+                )
+                if not exists:
+                    self._generation_chunks.append(
+                        StageGenerationChunk(
+                            id=uuid4(),
+                            generation_run_id=run_id,
+                            chunk_key=chunk_key,
+                            ordinal=params["ordinal"],
+                            content=params["content"],
+                            provider=params["provider"],
+                            model=params["model"],
+                            retry_count=params["retry_count"],
+                            created_at=datetime.now(UTC),
+                        )
+                    )
+                return _FakeResult()
+            if statement.__class__.__name__ == "Delete":
+                self._generation_chunks.clear()
+                return _FakeResult()
+        if (
+            table_name == "stage_generation_runs"
+            and statement.__class__.__name__ == "Update"
+        ):
+            if self._generation_runs:
+                run = self._generation_runs[-1]
+                for column, bind in statement._values.items():
+                    setattr(run, column.name, bind.value)
+            return _FakeResult()
+        if entity is StageGenerationRun:
+            return _FakeResult(
+                self._generation_runs[-1] if self._generation_runs else None
+            )
+        if entity is StageGenerationChunk:
+            if "count(stage_generation_chunks.id)" in rendered:
+                return _FakeResult(len(self._generation_chunks))
+            rows = sorted(self._generation_chunks, key=lambda row: row.ordinal)
+            return _FakeResult(many=rows)
         # The inline structural eval (issue #27 Phase 1) looks up the version's
         # existing EvalResult.  Model an empty eval_results table without
         # consuming a seeded response, so the ordered generate-flow responses
@@ -203,6 +263,8 @@ class _MultiQueryDB:
             getattr(instance, "id", None) is None
         ):
             instance.id = uuid4()
+        if isinstance(instance, StageGenerationRun):
+            self._generation_runs.append(instance)
         self.added.append(instance)
 
     async def flush(self) -> None:
@@ -256,8 +318,12 @@ def install_pipeline_session_patch(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _patch_pipeline_session(monkeypatch):
+    from services.llm import provider_status
+
     global _ACTIVE_MULTI_QUERY_DB
     install_pipeline_session_patch(monkeypatch)
+    monkeypatch.setattr(provider_status, "is_provider_configured", lambda _p: True)
+    monkeypatch.setattr(provider_status, "can_route", lambda _p: True)
     yield
     _ACTIVE_MULTI_QUERY_DB = None
 
@@ -302,21 +368,6 @@ def _make_user():
     user = MagicMock()
     user.id = uuid4()
     return user
-
-
-@pytest.fixture
-def legacy_inline_critic(monkeypatch):
-    """Pin the synchronous inline critic+regenerate path.
-
-    docs/CRITIC_ASYNC_ADVISORY_PLAN.md makes the async-advisory critic the
-    default (the judge runs off the critical path after `done`).  The legacy
-    inline regenerate loop is retained behind ``critic_async_advisory=False`` for
-    one release; the behavioural tests below exercise exactly that loop, so they
-    pin the flag rather than racing the detached background task.
-    """
-    from services.pipeline import stage_manager as stage_manager_module
-
-    monkeypatch.setattr(stage_manager_module.settings, "critic_async_advisory", False)
 
 
 class _FakeAdvisoryResult:
@@ -656,7 +707,7 @@ def test_critic_system_prompt_is_elision_aware() -> None:
 # ---------------------------------------------------------------------------
 # Behavioral tests driving StageManager.generate() with a stubbed critic.
 # ---------------------------------------------------------------------------
-def _generate_patches(svc: StageManager, *, complete_return: str | None = None):
+def _generate_patches(svc: StageManager):
     """Common patch set for generate(): credits, prompt, validate, adapter."""
     deduct = patch(
         "services.pipeline.stage_manager.credit_service.deduct",
@@ -686,105 +737,9 @@ def _generate_patches(svc: StageManager, *, complete_return: str | None = None):
     )
     adapter = MagicMock()
     adapter.stream = _fake_stream
-    if complete_return is not None:
-        adapter.complete = AsyncMock(return_value=complete_return)
+    adapter.last_completion = None
     get_llm = patch("services.pipeline.stage_manager.get_llm", return_value=adapter)
     return deduct, refund, invalidate, build, validate, set_cache, get_llm
-
-
-@pytest.mark.asyncio
-async def test_critic_pass_persists_artifact(legacy_inline_critic) -> None:
-    svc, stage, workspace, user, deduction, db = _build_generate_env()
-    deduct, refund, invalidate, build, validate, set_cache, get_llm = _generate_patches(
-        svc
-    )
-    with (
-        deduct as md,
-        refund as mr,
-        invalidate,
-        build,
-        validate,
-        set_cache as mc,
-        get_llm,
-        patch(
-            "services.pipeline.stage_manager.critic_review",
-            new_callable=AsyncMock,
-            return_value=StageCriticResult(passed=True),
-        ) as mock_critic,
-    ):
-        md.return_value = deduction
-        tokens = [t async for t in svc.generate(stage.id, user, db)]
-
-    mock_critic.assert_awaited_once()
-    assert any("done" in t for t in tokens)
-    assert stage.status == "draft"
-    assert stage.content == _LONG_ARTIFACT.strip()
-    assert any(isinstance(a, StageVersion) for a in db.added)
-    mc.assert_awaited_once()  # passed artifact is cached
-    mr.assert_not_awaited()  # no refund on success
-
-
-@pytest.mark.asyncio
-async def test_critic_one_regenerate_then_advisory(legacy_inline_critic) -> None:
-    """Issue #34: after the one regenerate the critic is advisory, not blocking.
-
-    A still-failing artifact is DELIVERED (status draft, finalisable) with the
-    findings attached as non-blocking suggestions (quality_gate_status=advisory),
-    never refunded, never a quality_gate_failed event.
-    """
-    svc, stage, workspace, user, deduction, db = _build_generate_env()
-    deduct, refund, invalidate, build, validate, set_cache, get_llm = _generate_patches(
-        svc, complete_return=_with_final_sentinel(_LONG_ARTIFACT)
-    )
-    fail = StageCriticResult(
-        passed=False,
-        findings=[CriticFinding(kind="MissingSection", detail="missing ADR")],
-    )
-    before = REGISTRY.get_sample_value(_REGEN_METRIC, {"stage": "spec"}) or 0.0
-
-    with (
-        deduct as md,
-        refund as mr,
-        invalidate,
-        build,
-        validate,
-        set_cache,
-        get_llm,
-        patch(
-            "services.pipeline.stage_manager.critic_review",
-            new_callable=AsyncMock,
-            return_value=fail,
-        ) as mock_critic,
-    ):
-        md.return_value = deduction
-        tokens: list[str] = []
-        async for t in svc.generate(stage.id, user, db):
-            tokens.append(t)
-
-    # Critic consulted twice (initial + after the one regenerate).
-    assert mock_critic.await_count == 2
-    # Exactly one regenerate happened and was attributed.
-    after = REGISTRY.get_sample_value(_REGEN_METRIC, {"stage": "spec"}) or 0.0
-    assert after - before == 1.0
-    # The user received a usable artifact, so the generation remains billed.
-    mr.assert_not_awaited()
-    # Stage is a finalisable draft carrying advisory suggestions.
-    assert stage.status == "draft"
-    assert stage.content == _LONG_ARTIFACT.strip()
-    assert stage.quality_gate_status == "advisory"
-    assert stage.quality_gate_kind == "critic_findings"
-    assert stage.quality_gate_version == stage.current_version
-    assert stage.quality_gate_payload["findings"][0]["kind"] == "MissingSection"
-    # Advisory carries no recovery contract (nothing to recover — it's finalisable).
-    assert stage.quality_gate is not None
-    assert "recovery" not in stage.quality_gate
-    assert any(
-        isinstance(a, StageVersion) and a.content == _LONG_ARTIFACT.strip()
-        for a in db.added
-    )
-    # The generation completes normally — no blocking event.
-    assert any("done" in t for t in tokens)
-    assert not any("quality_gate_failed" in t for t in tokens)
 
 
 @pytest.mark.asyncio
@@ -829,188 +784,6 @@ async def test_missing_section_gate_persists_blocked_draft() -> None:
     assert stage.quality_gate["recovery"]["refunded_prior_attempt"] is False
     assert any(isinstance(a, StageVersion) for a in db.added)
     assert any("quality_gate_failed" in t for t in tokens)
-
-
-@pytest.mark.asyncio
-async def test_critic_fail_then_pass_regenerates_once(legacy_inline_critic) -> None:
-    """First fail then pass: regenerate once, persist the corrected artifact."""
-    svc, stage, workspace, user, deduction, db = _build_generate_env()
-    regenerated = "## Corrected\n" + _LONG_ARTIFACT
-    deduct, refund, invalidate, build, validate, set_cache, get_llm = _generate_patches(
-        svc, complete_return=_with_final_sentinel(regenerated)
-    )
-    results = [
-        StageCriticResult(
-            passed=False,
-            findings=[CriticFinding(kind="CoverageGap", detail="FR-002 uncovered")],
-        ),
-        StageCriticResult(passed=True),
-    ]
-    before = REGISTRY.get_sample_value(_REGEN_METRIC, {"stage": "spec"}) or 0.0
-
-    with (
-        deduct as md,
-        refund as mr,
-        invalidate,
-        build,
-        validate,
-        set_cache,
-        get_llm,
-        patch(
-            "services.pipeline.stage_manager.critic_review",
-            new_callable=AsyncMock,
-            side_effect=results,
-        ) as mock_critic,
-    ):
-        md.return_value = deduction
-        tokens = [t async for t in svc.generate(stage.id, user, db)]
-
-    assert mock_critic.await_count == 2
-    after = REGISTRY.get_sample_value(_REGEN_METRIC, {"stage": "spec"}) or 0.0
-    assert after - before == 1.0
-    assert stage.content == regenerated.strip()  # corrected artifact persisted
-    assert any("done" in t for t in tokens)
-    assert not any("quality_gate_failed" in t for t in tokens)
-    mr.assert_not_awaited()  # success after regenerate — no refund
-
-
-_ESCALATION_METRIC = "specforge_pipeline_quality_escalations_total"
-
-
-@pytest.mark.asyncio
-async def test_critic_failure_escalates_regen_to_mid_tier(legacy_inline_critic) -> None:
-    """Phase 5.1: a critic failure on the cheap primary escalates the funded
-    regenerate to the mid tier instead of repeating on the same cheap model."""
-    from services.pipeline import stage_manager as sm_module
-
-    svc, stage, workspace, user, deduction, db = _build_generate_env()
-    regenerated = "## Corrected\n" + _LONG_ARTIFACT
-    deduct, refund, invalidate, build, validate, set_cache, get_llm = _generate_patches(
-        svc, complete_return=_with_final_sentinel(regenerated)
-    )
-    fail_then_pass = [
-        StageCriticResult(
-            passed=False,
-            findings=[CriticFinding(kind="MissingSection", detail="FR-001 gap")],
-        ),
-        StageCriticResult(passed=True),
-    ]
-    before = (
-        REGISTRY.get_sample_value(
-            _ESCALATION_METRIC, {"stage_type": "spec", "provider": "anthropic"}
-        )
-        or 0.0
-    )
-
-    captured_routes: list = []
-
-    original_regen = svc._regenerate_with_findings
-
-    async def spy_regen(**kwargs):
-        captured_routes.append(kwargs["route"])
-        return await original_regen(**kwargs)
-
-    with (
-        deduct as md,
-        refund as mr,
-        invalidate,
-        build,
-        validate,
-        set_cache,
-        get_llm,
-        patch(
-            "services.pipeline.stage_manager.critic_review",
-            new_callable=AsyncMock,
-            side_effect=fail_then_pass,
-        ),
-        patch.object(svc, "_regenerate_with_findings", side_effect=spy_regen),
-    ):
-        md.return_value = deduction
-        tokens = [t async for t in svc.generate(stage.id, user, db)]
-
-    after = (
-        REGISTRY.get_sample_value(
-            _ESCALATION_METRIC, {"stage_type": "spec", "provider": "anthropic"}
-        )
-        or 0.0
-    )
-    assert after - before == 1.0, "escalation counter must increment exactly once"
-    assert len(captured_routes) == 1
-    _, escalation_tier = sm_module._core_generation_tier_policy("anthropic")
-    assert (
-        captured_routes[0].model_tier == escalation_tier
-    ), "regenerate must use the escalation (mid) tier, not the cheap primary"
-    assert any("done" in t for t in tokens)
-    mr.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_critic_failure_no_escalation_when_already_mid(
-    legacy_inline_critic,
-) -> None:
-    """Phase 5.1: if the route is already at/above the escalation tier (e.g.
-    Google Flash which has no cheaper distinct tier), no escalation happens and
-    the counter stays flat."""
-
-    svc, stage, workspace, user, deduction, db = _build_generate_env()
-    # Switch workspace to google so the cheap primary IS the mid (no cheaper tier).
-    workspace.provider = "google"
-    workspace.model = "gemini-3.5-flash"
-
-    regenerated = "## Corrected\n" + _LONG_ARTIFACT
-    deduct, refund, invalidate, build, validate, set_cache, get_llm = _generate_patches(
-        svc, complete_return=_with_final_sentinel(regenerated)
-    )
-    fail_then_pass = [
-        StageCriticResult(
-            passed=False,
-            findings=[CriticFinding(kind="ShallowSection", detail="thin plan")],
-        ),
-        StageCriticResult(passed=True),
-    ]
-    before = (
-        REGISTRY.get_sample_value(
-            _ESCALATION_METRIC, {"stage_type": "spec", "provider": "google"}
-        )
-        or 0.0
-    )
-
-    captured_routes: list = []
-    original_regen = svc._regenerate_with_findings
-
-    async def spy_regen(**kwargs):
-        captured_routes.append(kwargs["route"])
-        return await original_regen(**kwargs)
-
-    with (
-        deduct as md,
-        refund as mr,
-        invalidate,
-        build,
-        validate,
-        set_cache,
-        get_llm,
-        patch(
-            "services.pipeline.stage_manager.critic_review",
-            new_callable=AsyncMock,
-            side_effect=fail_then_pass,
-        ),
-        patch.object(svc, "_regenerate_with_findings", side_effect=spy_regen),
-    ):
-        md.return_value = deduction
-        tokens = [t async for t in svc.generate(stage.id, user, db)]
-
-    after = (
-        REGISTRY.get_sample_value(
-            _ESCALATION_METRIC, {"stage_type": "spec", "provider": "google"}
-        )
-        or 0.0
-    )
-    assert after - before == 0.0, "no escalation when already at/above escalation tier"
-    assert len(captured_routes) == 1
-    assert captured_routes[0].provider == "anthropic"
-    assert any("done" in t for t in tokens)
-    mr.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -1159,44 +932,6 @@ async def test_condensed_problem_statement_surfaces_advisory_notice() -> None:
     mr.assert_not_awaited()  # informational notice never refunds
     # The generation completes normally — no blocking event.
     assert not any("quality_gate_failed" in t for t in tokens)
-
-
-@pytest.mark.asyncio
-async def test_condensed_notice_coexists_with_critic_findings(
-    legacy_inline_critic,
-) -> None:
-    """Phase D: when the critic is advisory AND the statement was condensed, both
-    findings ride the single advisory bucket (notice appended after critic ones)."""
-    svc, stage, workspace, user, deduction, db = _build_generate_env()
-    deduct, refund, invalidate, build, validate, set_cache, get_llm = _generate_patches(
-        svc, complete_return=_with_final_sentinel(_LONG_ARTIFACT)
-    )
-    fail = StageCriticResult(
-        passed=False,
-        findings=[CriticFinding(kind="MissingSection", detail="missing ADR")],
-    )
-    with (
-        deduct as md,
-        refund,
-        invalidate,
-        build as mock_build,
-        validate,
-        set_cache,
-        get_llm,
-        patch(
-            "services.pipeline.stage_manager.critic_review",
-            new_callable=AsyncMock,
-            return_value=fail,  # fails twice ⇒ advisory after the one regenerate
-        ),
-    ):
-        md.return_value = deduction
-        mock_build.return_value = ("sys", "user", "2")  # abstractive summary
-        tokens = [t async for t in svc.generate(stage.id, user, db)]
-
-    assert any("done" in t for t in tokens)
-    assert stage.quality_gate_status == "advisory"
-    kinds = [f["kind"] for f in stage.quality_gate_payload["findings"]]
-    assert kinds == ["MissingSection", "ProblemStatementCondensed"]
 
 
 @pytest.mark.asyncio

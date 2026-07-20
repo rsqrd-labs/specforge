@@ -52,31 +52,3 @@ Output one `### File: path/to/file` section per new file, with complete runnable
 content. Do not repeat or modify existing files.
 
 {wrapped}"""
-
-
-def build_missing_files_user_prompt(
-    existing_harness: str,
-    missing_files: list[str],
-) -> str:
-    """Prompt for the Prong-A auto-complete: emit the exact files the harness's
-    own File Tree / Requirement-to-Test Matrix named but whose content is missing
-    from the ## Files section. Unlike the coverage patch (which invents new files
-    for uncovered requirements), this fills in files the harness already committed
-    to, so the paths are fixed — the model must not rename or substitute them.
-    """
-    file_list = "\n".join(f"- `{path}`" for path in missing_files)
-    context = _harness_context_for_patch(existing_harness)
-    wrapped = wrap_untrusted_content("existing_harness", context)
-    return f"""The harness below names these files in its File Tree and/or
-Requirement-to-Test Matrix, but their content is missing from the `## Files`
-section. Emit the full content of ONLY these files, using each path EXACTLY as
-written (do not rename, move, or substitute a different path):
-
-{file_list}
-
-Output one `### File: path` section per file, each followed by one complete,
-runnable fenced code block. Match the existing harness's stack, imports, fixture
-names, factory usage, and traceability-comment style (`# Tests: <req-id>` or
-`// Tests: <req-id>`). Do not repeat, modify, or invent any other file.
-
-{wrapped}"""

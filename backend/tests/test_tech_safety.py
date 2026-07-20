@@ -150,27 +150,33 @@ async def test_validate_technology_safety_blocks_hard_denylist_choices() -> None
 
 
 @pytest.mark.asyncio
-async def test_validate_technology_safety_fails_when_policy_is_stale(
+async def test_validate_technology_safety_treats_stale_policy_as_advisory(
     monkeypatch,
 ) -> None:
     policy = dict(tech_safety.load_policy())
     policy["last_reviewed"] = "2025-01-01"
     monkeypatch.setattr(tech_safety, "load_policy", lambda: policy)
 
-    with pytest.raises(TechSafetyError) as exc_info:
-        await validate_technology_safety(
-            "spec",
-            "## Constraints\nNo implementation choices.",
-            {},
-            redis=_FakeRedis(),
-            today=date(2026, 6, 9),
-        )
+    findings = await analyze_technology_safety(
+        "spec",
+        "## Constraints\nNo implementation choices.",
+        {},
+        redis=_FakeRedis(),
+        today=date(2026, 6, 9),
+    )
 
-    assert exc_info.value.findings[0].code == "technology_policy_stale"
+    assert findings[0].code == "technology_policy_stale"
+    await validate_technology_safety(
+        "spec",
+        "## Constraints\nNo implementation choices.",
+        {},
+        redis=_FakeRedis(),
+        today=date(2026, 6, 9),
+    )
 
 
 @pytest.mark.asyncio
-async def test_validate_technology_safety_blocks_osv_high_advisory() -> None:
+async def test_validate_technology_safety_treats_osv_high_as_advisory() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/v1/querybatch"
         body = json.loads(request.content)
@@ -195,17 +201,16 @@ async def test_validate_technology_safety_blocks_osv_high_advisory() -> None:
     async with httpx.AsyncClient(
         transport=transport, base_url="https://api.osv.dev"
     ) as client:
-        with pytest.raises(TechSafetyError) as exc_info:
-            await validate_technology_safety(
-                "tasks",
-                "Install FastAPI with `pip install fastapi==0.95.0`.",
-                {"plan": ""},
-                redis=_FakeRedis(),
-                http_client=client,
-            )
+        findings = await analyze_technology_safety(
+            "tasks",
+            "Install FastAPI with `pip install fastapi==0.95.0`.",
+            {"plan": ""},
+            redis=_FakeRedis(),
+            http_client=client,
+        )
 
-    assert exc_info.value.findings[0].code == "vulnerable_dependency"
-    assert exc_info.value.findings[0].severity == "high"
+    assert findings[0].code == "vulnerable_dependency"
+    assert findings[0].severity == "high"
 
 
 @pytest.mark.asyncio

@@ -159,18 +159,7 @@ PIPELINE_INTERRUPTED_STREAMS = Counter(
     "Stage generation streams interrupted before a usable completed artifact existed",
     ["stage_type"],
 )
-# Harness auto-complete of files the tree/matrix promised but the Files chunk
-# never emitted (Prong A). outcome: attempted / succeeded / partial (some files
-# still missing after the targeted pass) / skipped_too_large (the missing set
-# exceeded the cap — a failed chunk, not a patchable hole) / failed. (The flag
-# gate short-circuits before the counter, so there is no "disabled" outcome.)
-# The trend is the "how often does the Files chunk under-emit" health signal.
-PIPELINE_HARNESS_AUTOCOMPLETE = Counter(
-    "specforge_pipeline_harness_autocomplete_total",
-    "Targeted regeneration passes for harness files missing from the Files section",
-    ["provider", "outcome"],
-)
-# Trailing gap-patch / auto-complete file blocks dropped before merge because
+# Trailing user-requested gap-patch file blocks dropped before merge because
 # their code fence was unbalanced (truncated mid-file). Additive merge makes the
 # drop always safe; a non-zero rate flags a too-small patch budget.
 HARNESS_PATCH_BLOCK_REJECTED = Counter(

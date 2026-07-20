@@ -78,26 +78,13 @@ Promotion requires:
 Live provider evals must be run from an operator-approved branch with explicit
 API keys and a saved JSON/Markdown report attached to the promotion review.
 
-## Early-bail on an unrecoverable chunk (issue #28, Phase 4)
+## Chunk failure policy
 
-`pipeline_early_bail_unrecoverable_chunk` (default **false**) is a chunk-loop
-change and therefore rides this same gate. A chunk that stops on its output-token
-budget is repaired with a *doubled* budget (`_repair_budget`). Once that doubled
-budget is already clamped to the model **ceiling**, the repair is the final
-escalation — there is no larger budget left to try — and a generation that
-over-produced at the prior budget (the d3 case: 89 FRs, truncated) is unlikely to
-fit at the ceiling. With the flag on, that ceiling-capped repair is skipped
-(counter `specforge_pipeline_completion_repairs_total{outcome="skipped_at_ceiling"}`)
-and the `incomplete_output` block surfaces immediately; the refund and recovery
-contract are unchanged.
-
-**Under the live catalog this DOES fire for core generation.** Core-gen budgets
-are 49152 and the Haiku 4.5 / GPT-5.4 Mini / Gemini 3.5 Flash ceilings are
-64000, so an initial limit-stop's doubled budget (98304) clamps to 64000 = the
-ceiling → the bail triggers and actively cuts the 64K repair call. It is
-therefore **not outcome-preserving**: a generation that only *just* overran
-49152 could still fit at 64000, so the flag trades that recovery for the saved
-call. That is precisely why it remains a separate rollback flag.
+Core stage generation has no automatic completeness-repair or whole-document
+regeneration path. A token-limit/completeness failure checkpoints successful
+siblings, saves a safe partial as `incomplete_output`, refunds once, and ends the
+durable run. A user-requested Regenerate starts a new run. Model-routing changes
+still require this promotion gate; failure cleanup does not have a rollout flag.
 
 The deterministic dry run cannot measure the trade (its simulated output never
 limit-stops), so promotion is a **manual live step**: on the golden corpus, with

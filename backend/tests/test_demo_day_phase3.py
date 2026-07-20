@@ -193,7 +193,6 @@ def test_golden_package_is_verified():
     assert verdict.estimated_minutes == 225
     assert verdict.time_budget_minutes == DEMO_DAY_DEFAULT_BUDGET_MINUTES
     assert verdict.stage_versions == {"spec": 1, "plan": 1, "harness": 1, "tasks": 1}
-    assert verdict.regen_attempted is False
 
 
 def test_verdict_to_dict_shape_round_trips_into_report():
@@ -205,7 +204,6 @@ def test_verdict_to_dict_shape_round_trips_into_report():
         "estimated_minutes",
         "time_budget_minutes",
         "stage_versions",
-        "regen_attempted",
     }
     assert payload["checks"]["C1"] == {
         "name": "dag_acyclic",

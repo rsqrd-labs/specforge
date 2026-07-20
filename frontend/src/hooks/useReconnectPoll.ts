@@ -1,7 +1,8 @@
 import { useEffect } from "react"
 
-import { getStage } from "../services/api"
+import { getStage, getStageGeneration } from "../services/api"
 import { useStageStore } from "../store/stageStore"
+import type { GenerationRun } from "../types/stage"
 
 // Reconnect-by-poll for a generation that is still running server-side after a
 // page refresh (docs/REFRESH_DURING_GENERATION_PLAN.md). A refresh closes the
@@ -21,12 +22,10 @@ export const RECONNECT_POLL_DELAY_MS = 3000
 // its whole life.
 export const RECONNECT_POLL_SLOW_DELAY_MS = 10000
 export const RECONNECT_POLL_SLOWDOWN_AFTER_MS = 120_000
-// Total lifetime. The previous fixed 240×3s = 12min cap UNDERSHOT a single
-// stream's worst case: the 900s (15min) hard cap PLUS a mid-tier retry PLUS
-// repairs. This bound comfortably exceeds that; past it, the server's 3-min
-// stuck-stage recovery sweep is the backstop (it resets any stage left
-// in_progress), so the overlay can never tick forever with no poll behind it.
-export const RECONNECT_POLL_MAX_MS = 30 * 60 * 1000
+// Total lifetime exceeds the 300-second absolute generation deadline plus its
+// 30-second recovery grace. The recovery sweep terminalises any run that misses
+// that bound, so reconnect polling never silently abandons an active overlay.
+export const RECONNECT_POLL_MAX_MS = 6 * 60 * 1000
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 
@@ -38,8 +37,13 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
  * @param isStreaming true when THIS client owns the live SSE stream (so it must
  *                    not poll — the stream hook already drives the stage)
  */
-export function useReconnectPoll(stageId: string | null, isStreaming: boolean): void {
+export function useReconnectPoll(
+  stageId: string | null,
+  isStreaming: boolean,
+  onTerminal?: (run: GenerationRun) => void,
+): void {
   const setStage = useStageStore((state) => state.setStage)
+  const setStreamProgress = useStageStore((state) => state.setStreamProgress)
 
   useEffect(() => {
     if (!stageId || isStreaming) return
@@ -56,9 +60,32 @@ export function useReconnectPoll(stageId: string | null, isStreaming: boolean): 
         await sleep(delay)
         if (cancelled) return
         try {
+          const run = await getStageGeneration(stageId)
+          if (cancelled) return
+          if (run?.status === "running") {
+            setStreamProgress(stageId, {
+              stage: "",
+              state: "generating",
+              phase: run.phase,
+              elapsed_seconds: Math.max(
+                0,
+                Math.floor((Date.now() - Date.parse(run.started_at)) / 1000),
+              ),
+              completed_parts: run.completed_parts,
+              total_parts: run.total_parts,
+              generation_id: run.id,
+              deadline: run.deadline_at,
+              last_server_progress: run.heartbeat_at,
+            })
+            continue
+          }
           const fresh = await getStage(stageId)
           if (cancelled) return
           setStage(fresh)
+          if (run) {
+            if (run.status !== "succeeded") onTerminal?.(run)
+            return
+          }
           if (fresh.status !== "in_progress") return
         } catch (err) {
           if (cancelled) return
@@ -74,5 +101,5 @@ export function useReconnectPoll(stageId: string | null, isStreaming: boolean): 
     return () => {
       cancelled = true
     }
-  }, [stageId, isStreaming, setStage])
+  }, [stageId, isStreaming, onTerminal, setStage, setStreamProgress])
 }

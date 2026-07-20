@@ -1651,8 +1651,7 @@ finding. It is a workspace-level JSONB blob persisted on
   "checks": { "C1": {"name": "dag_acyclic", "passed": true, "gaps": []}, "...": {} },
   "estimated_minutes": 240,
   "time_budget_minutes": 300,
-  "stage_versions": {"spec": 1, "plan": 1, "harness": 1, "tasks": 1},
-  "regen_attempted": false
+  "stage_versions": {"spec": 1, "plan": 1, "harness": 1, "tasks": 1}
 }
 ```
 
@@ -1666,8 +1665,7 @@ critic. It is **advisory** — it never blocks finalise or export.
 ```sql
 SELECT id, mode, target_agent, time_budget_minutes,
        construction_verdict->>'verified'        AS verified,
-       construction_verdict->'stage_versions'   AS stamped_versions,
-       construction_verdict->>'regen_attempted' AS regen_attempted
+       construction_verdict->'stage_versions'   AS stamped_versions
 FROM workspaces
 WHERE id = '<workspace_id>';
 ```
@@ -1684,19 +1682,14 @@ rendering `CONSTRUCTION_REPORT.md`, and the frontend re-fetches the workspace
 after a handoff-bundle download to pick up the refreshed verdict. To force a
 recompute operationally, trigger an export (ZIP) for the workspace.
 
-### §13.3 The one platform-funded regenerate
+### §13.3 Advisory-only construction verification
 
-On a failing verdict whose gaps are all **tasks-owned** (C1/C2), the verifier
-fires **exactly one** platform-funded tasks regenerate (`construction_regen` cost
-reason; reuses `_regenerate_with_findings`, the same credit-free path as the
-critic regen). The `regen_attempted` flag in the verdict JSON consumes the window
-on the first attempt (success **or** failure) so it can never fire twice; a
-staleness re-run preserves it. Harness-owned gaps (C3/C4) are left **advisory with
-the gap named** (a fragile detached harness→tasks cascade is deliberately not
-attempted). **Credit posture (§11.2):** Demo Day costs the **same** per stage as
-standard (the charge is keyed on action, not mode); the manual + verifier are
-free; the one regenerate is platform-funded. Pinned by
-`tests/test_demo_day_phase5_credits.py`.
+A failing verdict is persisted with each C1-C4 gap named. It never starts an LLM
+request or mutates a stage after that stage's durable run has succeeded. Owners
+may use the normal Regenerate action, which creates a fresh generation run with
+the same deadline, checkpointing, cancellation, and credit guarantees as every
+other generation. Demo Day costs the same per stage as standard; the manual and
+zero-LLM verifier are free.
 
 ### §13.4 The live golden-corpus gate (the flag-flip is a manual step)
 

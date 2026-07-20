@@ -416,9 +416,23 @@ async def test_cost_metrics_and_logs_exclude_prompt_and_output_content() -> None
         output=output,
     )
     expected_cost = estimate_cost_usd("openai", "gpt-4o-mini", usage)
-    mock_log.assert_called_once()
-    assert mock_log.call_args.args == ("llm.cost_recorded",)
-    log_fields = mock_log.call_args.kwargs
+    assert mock_log.call_count == 3
+    logs_by_event = {call.args[0]: call for call in mock_log.call_args_list}
+    assert set(logs_by_event) == {
+        "llm.request_started",
+        "llm.request_finished",
+        "llm.cost_recorded",
+    }
+    started_fields = logs_by_event["llm.request_started"].kwargs
+    finished_fields = logs_by_event["llm.request_finished"].kwargs
+    assert started_fields["provider_request_id"]
+    assert (
+        finished_fields["provider_request_id"] == started_fields["provider_request_id"]
+    )
+    assert finished_fields["outcome"] == "succeeded"
+    assert finished_fields["elapsed_ms"] >= 0
+
+    log_fields = logs_by_event["llm.cost_recorded"].kwargs
     assert log_fields["provider"] == "openai"
     assert log_fields["model_tier"] == "mini"
     assert log_fields["operation"] == "refine.focused"
@@ -430,7 +444,7 @@ async def test_cost_metrics_and_logs_exclude_prompt_and_output_content() -> None
     assert log_fields["cached_input_tokens"] == usage.cached_input_tokens
     assert log_fields["estimated_cost_usd"] == float(expected_cost)
 
-    serialized_log = str(mock_log.call_args)
+    serialized_log = str(mock_log.call_args_list)
     assert system_prompt not in serialized_log
     assert user_prompt not in serialized_log
     assert output not in serialized_log

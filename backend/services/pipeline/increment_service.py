@@ -86,7 +86,7 @@ from services.llm.output_budget import output_budget_for_operation
 from services.llm.routing import (
     LLMRoutingError,
     platform_provider_priority,
-    resolve_platform_route,
+    resolve_platform_route_by_provider,
 )
 from services.llm.tier_policy import generation_tier_policy
 from services.observability import (
@@ -389,14 +389,14 @@ class IncrementService:
     # ------------------------------------------------------------------ helpers
 
     def _resolve_route(self, workspace: Workspace):
-        requested_tier, fallback_tier = generation_tier_policy(
-            platform_provider_priority()[0]
-        )
+        provider_policies = {
+            provider: generation_tier_policy(provider)
+            for provider in platform_provider_priority()
+        }
         try:
-            return resolve_platform_route(
+            return resolve_platform_route_by_provider(
                 operation=_INCREMENT_OPERATION,
-                requested_tier=requested_tier,
-                fallback_tier=fallback_tier,
+                tier_policy=provider_policies,
                 latency_class="interactive",
             )
         except LLMRoutingError as exc:

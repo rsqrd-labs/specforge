@@ -93,7 +93,13 @@ import {
 } from "../services/api"
 import { useStageStore } from "../store/stageStore"
 import { useWorkspaceStore } from "../store/workspaceStore"
-import type { EvalResult, RefineResponse, Stage, StageType } from "../types/stage"
+import type {
+  EvalResult,
+  GenerationRun,
+  RefineResponse,
+  Stage,
+  StageType,
+} from "../types/stage"
 import type { StoryboardDetail, StoryboardDownloadKind } from "../types/storyboard"
 import type { TargetAgent } from "../types/workspace"
 import {
@@ -522,8 +528,45 @@ export default function Workspace() {
   }, [])
 
   const activeStage = activeStageId ? stageMap[activeStageId] : null
-  const { start: startStream, isStreaming, error: streamError } = useStream(
-    activeStage?.id ?? null,
+  const {
+    start: startStream,
+    cancel: cancelStream,
+    isStreaming,
+    isStopping,
+    terminal: generationTerminal,
+    error: streamError,
+  } = useStream(activeStage?.id ?? null)
+  const showGenerationTerminal = useCallback((terminal: {
+    status: GenerationRun["status"]
+    partial_saved: boolean
+    refunded_credits: number
+    credit_was_deducted?: boolean
+  }) => {
+    const stopped = terminal.status === "cancelled"
+    showAlert({
+      severity: stopped ? "info" : "warning",
+      title: stopped ? "Generation cancelled" : "Generation stopped",
+      message: terminal.partial_saved
+        ? "The safely generated portion was saved as a blocked draft."
+        : "No safe partial output was available, so the previous draft was restored.",
+      recovery:
+        terminal.refunded_credits > 0
+          ? `${terminal.refunded_credits} credits were refunded.`
+          : terminal.credit_was_deducted
+            ? "This delivered blocked draft retained its generation charge."
+            : "No credits were charged for this run.",
+      source: "Generation",
+    })
+  }, [showAlert])
+  useEffect(() => {
+    if (generationTerminal) showGenerationTerminal(generationTerminal)
+  }, [generationTerminal, showGenerationTerminal])
+  const handleReconnectTerminal = useCallback(
+    (run: GenerationRun) => {
+      if (generationTerminal?.generation_id === run.id) return
+      showGenerationTerminal(run)
+    },
+    [generationTerminal?.generation_id, showGenerationTerminal],
   )
   // Reconnect overlay: the stage is generating server-side but THIS client is
   // not the one streaming it (true on a fresh mount after a page refresh —
@@ -894,7 +937,11 @@ export default function Workspace() {
   // into the store, so the completed draft (or a quality-gate block) appears
   // without a manual re-generate. The active streamer drives the stage via the
   // SSE hook, so it never polls here.
-  useReconnectPoll(inProgressStage?.id ?? null, isStreaming)
+  useReconnectPoll(
+    inProgressStage?.id ?? null,
+    isStreaming,
+    handleReconnectTerminal,
+  )
 
   useEffect(() => {
     if (!latestStoryboard || latestStoryboard.status !== "generating") return
@@ -2866,6 +2913,8 @@ export default function Workspace() {
                   activity={activeGenerationActivity}
                   progress={activeStreamProgress}
                   compact={hasLiveDraft}
+                  onCancel={() => void cancelStream()}
+                  isStopping={isStopping}
                 />
               </div>
             </section>
@@ -2993,6 +3042,8 @@ export default function Workspace() {
                   activity={activeGenerationActivity}
                   progress={activeStreamProgress}
                   compact={hasLiveDraft}
+                  onCancel={() => void cancelStream()}
+                  isStopping={isStopping}
                 />
               </div>
             </section>

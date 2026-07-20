@@ -62,8 +62,8 @@ describe("T-093: useFocusTrap hook", () => {
       resolve(FRONTEND_SRC, "hooks/useFocusTrap.ts"),
       "utf-8",
     )
-    // focusable[0]?.focus() or similar
-    expect(source).toMatch(/focusable\[0\]\??\.focus\(\)/)
+    expect(source).toContain("focusable[0]")
+    expect(source).toMatch(/initial\??\.focus\(\)/)
   })
 })
 

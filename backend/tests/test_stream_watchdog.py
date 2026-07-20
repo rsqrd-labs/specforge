@@ -19,10 +19,10 @@ from services.llm.output_budget import (
     resolve_output_budget,
 )
 from services.pipeline import stage_manager as stage_manager_module
-from services.pipeline.artifact_validator import CompletenessIssue
 from services.pipeline.stage_manager import (
     StreamWatchdogTimeout,
-    _repair_budget,
+    _chunk_output_budget,
+    _chunk_specs_for_stage,
     _runtime_fallback_route,
     _watchdog_stream,
 )
@@ -32,12 +32,12 @@ def _patch_watchdog(idle: float, cap: float):
     return (
         patch.object(
             stage_manager_module.settings,
-            "llm_stream_idle_timeout_seconds",
+            "stage_provider_idle_timeout_seconds",
             idle,
         ),
         patch.object(
             stage_manager_module.settings,
-            "llm_stream_hard_cap_seconds",
+            "stage_provider_call_timeout_seconds",
             cap,
         ),
     )
@@ -130,7 +130,7 @@ async def test_watchdog_enforces_hard_cap_on_runaway_stream() -> None:
     assert exc_info.value.kind == "hard_cap"
 
 
-def test_runtime_fallback_route_escalates_cheap_primary_to_mid_tier(
+def test_runtime_fallback_route_escalates_on_same_provider(
     monkeypatch,
 ) -> None:
     # Pin the cheap-primary policy on explicitly (independent of the product
@@ -140,12 +140,12 @@ def test_runtime_fallback_route_escalates_cheap_primary_to_mid_tier(
 
     monkeypatch.setattr(tier_policy.settings, "core_cheap_primary", True)
 
-    cross_provider = MagicMock()
-    cross_provider.provider = "openai"
-    cross_provider.model = "gpt-5.4-mini"
-    cross_provider.model_tier = "small"
+    same_provider = MagicMock()
+    same_provider.provider = "anthropic"
+    same_provider.model = "claude-sonnet-4-6"
+    same_provider.model_tier = "mid"
     monkeypatch.setattr(
-        stage_manager_module, "resolve_platform_route", lambda **_kwargs: cross_provider
+        stage_manager_module, "resolve_llm_route", lambda **_kwargs: same_provider
     )
 
     primary = MagicMock()
@@ -156,14 +156,12 @@ def test_runtime_fallback_route_escalates_cheap_primary_to_mid_tier(
 
     fallback = _runtime_fallback_route(primary)
 
-    assert fallback is not None
-    assert fallback.provider == "openai"
-    assert fallback.model_tier == "small"
-    assert fallback.model == "gpt-5.4-mini"
-    assert fallback.model != primary.model
+    assert fallback is same_provider
+    assert fallback.provider == primary.provider
+    assert fallback.model_tier == "mid"
 
 
-def test_runtime_fallback_route_uses_next_provider_when_already_mid(
+def test_runtime_fallback_route_stops_when_already_at_escalation_tier(
     monkeypatch,
 ) -> None:
     # Under the cheap-primary policy a mid-tier failure has nowhere left to
@@ -172,14 +170,6 @@ def test_runtime_fallback_route_uses_next_provider_when_already_mid(
 
     monkeypatch.setattr(tier_policy.settings, "core_cheap_primary", True)
 
-    cross_provider = MagicMock()
-    cross_provider.provider = "openai"
-    cross_provider.model = "gpt-5.4"
-    cross_provider.model_tier = "mid"
-    monkeypatch.setattr(
-        stage_manager_module, "resolve_platform_route", lambda **_kwargs: cross_provider
-    )
-
     mid = MagicMock()
     mid.provider = "anthropic"
     mid.model = "claude-sonnet-4-6"
@@ -187,7 +177,7 @@ def test_runtime_fallback_route_uses_next_provider_when_already_mid(
     mid.operation = "spec.generate"
 
     fallback = _runtime_fallback_route(mid)
-    assert fallback is cross_provider
+    assert fallback is None
 
 
 def test_output_budgets_carry_reasoning_headroom() -> None:
@@ -232,43 +222,35 @@ def test_resolve_output_budget_clamps_to_model_ceiling() -> None:
     )
 
 
-def test_repair_budget_escalates_only_for_limit_stops() -> None:
+def test_chunk_output_budgets_are_fixed_and_model_clamped(monkeypatch) -> None:
     route = MagicMock()
     route.provider = "anthropic"
     route.model = "claude-opus-4-8"
+    spec_chunk = _chunk_specs_for_stage("spec")[0]
+    plan_chunk = _chunk_specs_for_stage("plan")[0]
+    harness_contract, harness_files = _chunk_specs_for_stage("harness")
+    tasks_chunk = _chunk_specs_for_stage("tasks")[0]
 
-    limit_issue = [CompletenessIssue(code="provider_stopped_by_limit", detail="limit")]
-    other_issue = [
-        CompletenessIssue(code="missing_completion_sentinel", detail="sentinel")
-    ]
+    assert _chunk_output_budget("spec", spec_chunk, route) == 32_768
+    assert _chunk_output_budget("plan", plan_chunk, route) == 32_768
+    assert _chunk_output_budget("tasks", tasks_chunk, route) == 32_768
+    assert _chunk_output_budget("harness", harness_contract, route) == 24_576
+    assert _chunk_output_budget("harness", harness_files, route) == 49_152
 
-    assert _repair_budget(route, 16384, limit_issue) == 32768
-    # Doubles into the true 64K ceiling rather than being clamped at 32768.
-    assert _repair_budget(route, 32768, limit_issue) == 64000
-    # Clamped at the model ceiling once doubling would exceed it.
-    assert _repair_budget(route, 49152, limit_issue) == 64000
-    # Non-limit failures keep the original budget.
-    assert _repair_budget(route, 16384, other_issue) == 16384
+    monkeypatch.setattr(
+        stage_manager_module, "model_max_output_tokens", lambda *_: 8_192
+    )
+    assert _chunk_output_budget("spec", spec_chunk, route) == 8_192
 
 
-def test_production_guard_rejects_unhealthy_watchdog_bounds() -> None:
+def test_settings_reject_generation_bounds_outside_contract() -> None:
+    from pydantic import ValidationError
+
     import config
 
-    with (
-        patch.object(config.settings, "environment", "production"),
-        patch.object(config.settings, "metrics_token", "token"),
-        patch.object(config.settings, "frontend_url", "https://app.example.com"),
-        patch.object(config.settings, "llm_stream_idle_timeout_seconds", 5),
-    ):
-        with pytest.raises(RuntimeError, match="LLM_STREAM_IDLE_TIMEOUT_SECONDS"):
-            config.validate_production_settings()
-
-    with (
-        patch.object(config.settings, "environment", "production"),
-        patch.object(config.settings, "metrics_token", "token"),
-        patch.object(config.settings, "frontend_url", "https://app.example.com"),
-        patch.object(config.settings, "llm_stream_idle_timeout_seconds", 120),
-        patch.object(config.settings, "llm_stream_hard_cap_seconds", 60),
-    ):
-        with pytest.raises(RuntimeError, match="LLM_STREAM_HARD_CAP_SECONDS"):
-            config.validate_production_settings()
+    with pytest.raises(ValidationError, match="must be 300"):
+        config.Settings(stage_generation_deadline_seconds=301)
+    with pytest.raises(ValidationError, match="must be 1..90"):
+        config.Settings(stage_provider_idle_timeout_seconds=91)
+    with pytest.raises(ValidationError, match="at least 45"):
+        config.Settings(stage_retry_min_remaining_seconds=44)

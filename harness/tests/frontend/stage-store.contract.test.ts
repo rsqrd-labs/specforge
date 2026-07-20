@@ -4,16 +4,16 @@ import { useStageStore } from "../../../frontend/src/store/stageStore"
 describe("stage store contract", () => {
   it("appends streaming tokens without replacing prior content", () => {
     useStageStore.setState({
-      streamingContent: "",
-      isStreaming: true,
-      activeStage: "spec",
-      lastSyncedLength: 0,
+      streamingContent: { "spec-id": "" },
+      activeStream: "spec-id",
     })
 
     useStageStore.getState().appendStreamToken("hello")
     useStageStore.getState().appendStreamToken(" world")
 
-    expect(useStageStore.getState().streamingContent).toBe("hello world")
+    expect(useStageStore.getState().streamingContent["spec-id"]).toBe(
+      "hello world",
+    )
   })
 
   it("marks downstream stages stale from the edited stage", () => {

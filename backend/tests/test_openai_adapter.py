@@ -24,6 +24,7 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
+import httpx
 import openai
 import pytest
 
@@ -277,6 +278,30 @@ async def test_openai_error_is_wrapped_as_provider_error() -> None:
     with pytest.raises(ProviderError):
         async for _ in adapter.stream("sys", "user", 100):
             pass
+
+
+@pytest.mark.asyncio
+async def test_incomplete_chunked_read_is_wrapped_as_provider_error() -> None:
+    """A response body cut off mid-stream must enter pipeline cleanup."""
+
+    async def _truncated_stream() -> AsyncIterator[Any]:
+        yield _chunk("partial")
+        raise httpx.RemoteProtocolError(
+            "peer closed connection without sending complete message body"
+        )
+
+    adapter = _make_adapter([])
+    adapter._client.chat.completions.create = AsyncMock(
+        return_value=_truncated_stream()
+    )
+
+    tokens: list[str] = []
+    with pytest.raises(ProviderError) as raised:
+        async for token in adapter.stream("sys", "user", 100):
+            tokens.append(token)
+
+    assert tokens == ["partial"]
+    assert raised.value.provider == "openai"
 
 
 @pytest.mark.asyncio

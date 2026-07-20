@@ -4,12 +4,14 @@ import asyncio
 import logging
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import exists, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from config import settings
 from database import get_shared_redis
-from models import Stage
+from models import Stage, StageGenerationRun
 from services.credit_service import credit_service
+from services.pipeline.generation_runs import terminalize_interrupted_run
 from services.pipeline.stage_manager import (
     _POLL_INTERVAL_SECONDS,
     _RECOVERY_LOCK_KEY,
@@ -19,25 +21,72 @@ from services.pipeline.stage_manager import (
 
 logger = logging.getLogger(__name__)
 
-_STUCK_THRESHOLD_MINUTES = 3
+_RUN_HEARTBEAT_GRACE_SECONDS = 30
 # _POLL_INTERVAL_SECONDS, _RECOVERY_LOCK_KEY, and _RECOVERY_LOCK_TTL are
 # canonical in stage_manager.py and imported above.  H-3 — T-179.
 
 
 async def recover_stuck_stages(db: AsyncSession) -> int:
-    """Reset stages stuck in_progress for >3 min and refund credits. Returns count."""
-    cutoff = datetime.now(UTC) - timedelta(minutes=_STUCK_THRESHOLD_MINUTES)
+    """Settle expired/dead runs plus legacy stages that have no run row."""
+    now = datetime.now(UTC)
+    heartbeat_cutoff = now - timedelta(seconds=_RUN_HEARTBEAT_GRACE_SECONDS)
+
+    active_runs = list(
+        (
+            await db.execute(
+                select(StageGenerationRun)
+                .where(
+                    StageGenerationRun.status == "running",
+                    or_(
+                        StageGenerationRun.deadline_at <= now,
+                        StageGenerationRun.heartbeat_at < heartbeat_cutoff,
+                    ),
+                )
+                .order_by(StageGenerationRun.deadline_at)
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+    recovered = 0
+    for run in active_runs:
+        deadline_expired = run.deadline_at <= now
+        target_status = "timed_out" if deadline_expired else "failed"
+        settled = await terminalize_interrupted_run(
+            db,
+            run_id=run.id,
+            status=target_status,
+            error_code=(
+                "generation_deadline_exceeded"
+                if deadline_expired
+                else "generation_worker_lost"
+            ),
+        )
+        if settled.status == target_status:
+            recovered += 1
+            logger.warning(
+                "stage.generation_run_recovered generation_id=%s "
+                "stage_id=%s status=%s partial_saved=%s refunded=%d",
+                run.id,
+                run.stage_id,
+                settled.status,
+                settled.partial_saved,
+                settled.refunded_credits,
+            )
 
     result = await db.execute(
         select(Stage).where(
             Stage.status == "in_progress",
-            Stage.updated_at < cutoff,
+            ~exists().where(
+                StageGenerationRun.stage_id == Stage.id,
+                StageGenerationRun.status == "running",
+            ),
         )
     )
-    stuck_stages = list(result.scalars())
+    legacy_stages = list(result.scalars())
 
-    recovered = 0
-    for stage in stuck_stages:
+    for stage in legacy_stages:
         credits_refunded = 0
         if stage.deduction_ledger_id is not None:
             # Log the amount the refund ACTUALLY reversed (abs of the real ledger
@@ -49,6 +98,8 @@ async def recover_stuck_stages(db: AsyncSession) -> int:
             )
 
         stage.status = "draft"
+        stage.generation_started_at = None
+        stage.generation_action = None
         stage.updated_at = datetime.now(UTC)
 
         logger.warning(
@@ -57,6 +108,51 @@ async def recover_stuck_stages(db: AsyncSession) -> int:
             stage.type,
             credits_refunded,
         )
+        recovered += 1
+
+    checking_cutoff = now - timedelta(
+        seconds=max(1, settings.stage_technology_check_stale_seconds)
+    )
+    checking_stages = list(
+        (await db.execute(select(Stage).where(Stage.quality_gate_status == "checking")))
+        .scalars()
+        .all()
+    )
+    for stage in checking_stages:
+        payload = dict(stage.quality_gate_payload or {})
+        started_at = stage.updated_at
+        raw_started_at = payload.get("checking_started_at")
+        if isinstance(raw_started_at, str):
+            try:
+                started_at = datetime.fromisoformat(raw_started_at)
+                if started_at.tzinfo is None:
+                    started_at = started_at.replace(tzinfo=UTC)
+            except ValueError:
+                pass
+        if started_at >= checking_cutoff:
+            continue
+        findings = list(payload.get("findings") or [])
+        findings.append(
+            {
+                "kind": "technology_safety_unverified",
+                "code": "technology_safety_unverified",
+                "severity": "unknown",
+                "source": "recovery",
+                "detail": (
+                    "Technology verification did not finish within its bounded "
+                    "window. Review versions before deployment."
+                ),
+            }
+        )
+        stage.quality_gate_status = "advisory"
+        stage.quality_gate_kind = "critic_findings"
+        stage.quality_gate_payload = {
+            "stage": stage.type,
+            "kind": "critic_findings",
+            "findings": findings,
+        }
+        stage.quality_gate_failed_at = now
+        stage.updated_at = now
         recovered += 1
 
     if recovered > 0:
@@ -86,7 +182,7 @@ async def recover_stuck_stages(db: AsyncSession) -> int:
 
 
 async def run_recovery_loop() -> None:
-    """Background task: polls every 60 seconds and recovers stuck stages.
+    """Background task: polls every 10 seconds and recovers stuck stages.
 
     Uses a Redis NX lock so only one gunicorn worker runs recovery per cycle.
     Workers that don't acquire the lock skip the cycle silently.

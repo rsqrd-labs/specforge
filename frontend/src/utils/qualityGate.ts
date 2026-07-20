@@ -166,11 +166,17 @@ export function deriveFinaliseGateBlock(
   stage: Stage | null | undefined,
 ): FinaliseGateBlock {
   const gate =
-    stage?.quality_gate?.status === "blocked" ? stage.quality_gate : null
+    stage?.quality_gate?.status === "blocked" ||
+    stage?.quality_gate?.status === "checking"
+      ? stage.quality_gate
+      : null
+  const checking = gate?.status === "checking"
   return {
     blocked: Boolean(gate),
-    message: gate?.recovery?.message ?? gateFallbackMessage(gate?.kind),
+    message: checking
+      ? "Technology verification is still running. You can read or edit this draft and finalise it as soon as the bounded check finishes."
+      : gate?.recovery?.message ?? gateFallbackMessage(gate?.kind),
     kind: gate?.kind ?? null,
-    label: blockedDraftLabel(gate?.kind),
+    label: checking ? "Technology check" : blockedDraftLabel(gate?.kind),
   }
 }

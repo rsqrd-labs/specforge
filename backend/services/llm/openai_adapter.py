@@ -43,6 +43,11 @@ def _wrap_openai_error(exc: openai.OpenAIError) -> ProviderError:
     return ProviderError("openai", exc)
 
 
+def _wrap_openai_transport_error(exc: Exception) -> ProviderError:
+    """Normalise SDK-bypassing stream transport failures."""
+    return ProviderError("openai", exc)
+
+
 class OpenAIAdapter(BaseLLMAdapter):
     def __init__(
         self,
@@ -111,8 +116,8 @@ class OpenAIAdapter(BaseLLMAdapter):
                 yield delta if delta else ""
         except openai.OpenAIError as exc:
             raise _wrap_openai_error(exc) from exc
-        except RuntimeError as exc:
-            raise ProviderError("openai", exc) from exc
+        except (httpx.HTTPError, RuntimeError, OSError) as exc:
+            raise _wrap_openai_transport_error(exc) from exc
 
     async def _stream_chat_completions(
         self,
@@ -162,6 +167,8 @@ class OpenAIAdapter(BaseLLMAdapter):
                 yield content
         except openai.OpenAIError as exc:
             raise _wrap_openai_error(exc) from exc
+        except (httpx.HTTPError, RuntimeError, OSError) as exc:
+            raise _wrap_openai_transport_error(exc) from exc
 
     async def complete(
         self,
@@ -206,8 +213,8 @@ class OpenAIAdapter(BaseLLMAdapter):
             return _response_output_text(response)
         except openai.OpenAIError as exc:
             raise _wrap_openai_error(exc) from exc
-        except RuntimeError as exc:
-            raise ProviderError("openai", exc) from exc
+        except (httpx.HTTPError, RuntimeError, OSError) as exc:
+            raise _wrap_openai_transport_error(exc) from exc
 
     async def _complete_chat_completions(
         self,
@@ -237,6 +244,8 @@ class OpenAIAdapter(BaseLLMAdapter):
             return choice.message.content or ""
         except openai.OpenAIError as exc:
             raise _wrap_openai_error(exc) from exc
+        except (httpx.HTTPError, RuntimeError, OSError) as exc:
+            raise _wrap_openai_transport_error(exc) from exc
 
     def _uses_responses_api(self) -> bool:
         return self._request_policy["adapter_api"] == "responses"
@@ -337,6 +346,9 @@ def _capture_openai_response_completion(
     resolved_model = getattr(response, "model", None)
     if resolved_model:
         completion.raw["resolved_model"] = str(resolved_model)
+    response_id = getattr(response, "id", None)
+    if response_id:
+        completion.raw["provider_response_id"] = str(response_id)
 
 
 def _capture_openai_resolved_model(

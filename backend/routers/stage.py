@@ -9,18 +9,28 @@ from uuid import UUID, uuid4
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import StreamingResponse
 from redis.asyncio import Redis
+from redis.exceptions import RedisError
 from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database import get_db, get_redis
 from middleware.auth import get_current_user
 from middleware.credit_check import require_credits
-from models import EvalResult, Stage, StageVersion, User, Workspace
+from models import (
+    EvalResult,
+    Stage,
+    StageGenerationRun,
+    StageVersion,
+    User,
+    Workspace,
+)
 from schemas.stage import (
     AcceptDiffRequest,
+    CancelGenerationRequest,
     ContentEditRequest,
     DiffResponse,
     GenerationEstimatesResponse,
+    GenerationRunResponse,
     RefineRequest,
     RollbackRequest,
     StageResponse,
@@ -36,6 +46,7 @@ from services.llm.base import ProviderError, ProviderTimeoutError
 from services.llm.generation_estimates import read_generation_estimates
 from services.pipeline.artifact_validator import MissingSectionError
 from services.pipeline.critic import StageQualityGateError
+from services.pipeline.generation_runs import cancel_key, signal_local_cancellation
 from services.pipeline.stage_manager import (
     PreflightError,
     QualityGateBlockedError,
@@ -69,6 +80,8 @@ async def _stream_stage(
                 or token.startswith('{"quality_gate_failed"')
                 or token.startswith('{"progress"')
                 or token.startswith('{"stream_reset"')
+                or token.startswith('{"generation_started"')
+                or token.startswith('{"generation_terminal"')
             ):
                 yield f"data: {token}\n\n"
             else:
@@ -237,6 +250,95 @@ async def get_stage(
 ) -> StageResponse:
     stage = await _load_stage(id, db, user.id)
     return StageResponse.model_validate(stage)
+
+
+@router.get("/{id}/generation", response_model=GenerationRunResponse | None)
+async def get_stage_generation(
+    id: UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> GenerationRunResponse | None:
+    await _load_stage(id, db, user.id)
+    run = (
+        (
+            await db.execute(
+                select(StageGenerationRun)
+                .where(StageGenerationRun.stage_id == id)
+                .order_by(desc(StageGenerationRun.started_at))
+                .limit(1)
+            )
+        )
+        .scalars()
+        .first()
+    )
+    return GenerationRunResponse.model_validate(run) if run is not None else None
+
+
+@router.post("/{id}/generation/cancel", response_model=GenerationRunResponse)
+async def cancel_stage_generation(
+    id: UUID,
+    request: CancelGenerationRequest,
+    db: AsyncSession = Depends(get_db),
+    redis: Redis = Depends(get_redis),
+    user: User = Depends(get_current_user),
+) -> GenerationRunResponse:
+    await _load_stage(id, db, user.id)
+    run = (
+        await db.execute(
+            select(StageGenerationRun)
+            .where(
+                StageGenerationRun.id == request.generation_id,
+                StageGenerationRun.stage_id == id,
+                StageGenerationRun.user_id == user.id,
+            )
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one_or_none()
+    if run is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "error": "stale_generation_id",
+                "message": "This generation no longer belongs to the active stage.",
+            },
+        )
+    if run.status == "cancelled":
+        # The same expected generation id is an idempotency key. A retry after
+        # the owning worker has already confirmed cancellation returns the
+        # durable terminal result instead of fabricating a conflict.
+        return GenerationRunResponse.model_validate(run)
+    if run.status != "running":
+        error = (
+            "generation_already_succeeded"
+            if run.status == "succeeded"
+            else "generation_not_active"
+        )
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "error": error,
+                "status": run.status,
+                "generation_id": str(run.id),
+            },
+        )
+    if run.cancel_requested_at is None:
+        now = datetime.now(UTC)
+        run.cancel_requested_at = now
+        run.phase = "stopping"
+        run.heartbeat_at = now
+        run.updated_at = now
+        await db.commit()
+    signal_local_cancellation(run.id)
+    ttl = max(60, int((run.deadline_at - datetime.now(UTC)).total_seconds()) + 60)
+    try:
+        await redis.set(cancel_key(run.id), "1", ex=ttl)
+    except RedisError:
+        logger.warning(
+            "stage.cancel_redis_unavailable",
+            extra={"generation_id": str(run.id), "stage_id": str(id)},
+        )
+    return GenerationRunResponse.model_validate(run)
 
 
 @router.post("/{id}/generate")

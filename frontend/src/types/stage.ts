@@ -1,7 +1,49 @@
 export type StageType = "spec" | "plan" | "harness" | "tasks"
 
 export type StageStatus = "locked" | "draft" | "in_progress" | "finalised" | "stale"
-export type QualityGateStatus = "clear" | "blocked" | "overridden" | "advisory"
+export type QualityGateStatus =
+  | "clear"
+  | "checking"
+  | "blocked"
+  | "overridden"
+  | "advisory"
+
+export type GenerationRunStatus =
+  | "running"
+  | "succeeded"
+  | "blocked"
+  | "cancelled"
+  | "timed_out"
+  | "failed"
+
+export type GenerationRunPhase =
+  | "preparing"
+  | "drafting"
+  | "assembling"
+  | "validating"
+  | "saving"
+  | "stopping"
+  | "complete"
+
+export interface GenerationRun {
+  id: string
+  stage_id: string
+  action: "generate" | "regenerate"
+  status: GenerationRunStatus
+  phase: GenerationRunPhase
+  completed_parts: number
+  total_parts: number
+  started_at: string
+  deadline_at: string
+  heartbeat_at: string
+  cancel_requested_at: string | null
+  finished_at: string | null
+  result_version: number | null
+  error_code: string | null
+  partial_saved: boolean
+  refunded_credits: number
+  credit_was_deducted: boolean
+}
 
 export interface QualityGateFinding {
   kind: string

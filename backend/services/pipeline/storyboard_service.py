@@ -83,8 +83,10 @@ from services.llm.output_budget import resolve_output_budget
 from services.llm.routing import (
     LLMRoute,
     LLMRoutingError,
+    platform_provider_priority,
     resolve_llm_route,
     resolve_platform_route,
+    resolve_platform_route_by_provider,
 )
 from services.llm.tier_policy import generation_tier_policy
 from services.observability import (
@@ -670,18 +672,17 @@ def _resolve_storyboard_primary_route(source: StoryboardSourcePackage) -> LLMRou
     and leaves ``tier_policy`` the untouched product-wide source of truth for
     every other feature.
     """
-    if settings.storyboard_force_mid_tier:
-        requested_tier, fallback_tier = "mid", "strong"
-    else:
-        from services.llm.routing import platform_provider_priority
-
-        requested_tier, fallback_tier = generation_tier_policy(
-            platform_provider_priority()[0]
+    provider_policies = {
+        provider: (
+            ("mid", "strong")
+            if settings.storyboard_force_mid_tier
+            else generation_tier_policy(provider)
         )
-    return resolve_platform_route(
+        for provider in platform_provider_priority()
+    }
+    return resolve_platform_route_by_provider(
         operation="storyboard.generate",
-        requested_tier=requested_tier,
-        fallback_tier=fallback_tier,
+        tier_policy=provider_policies,
         latency_class="background",
     )
 

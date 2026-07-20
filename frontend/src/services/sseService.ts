@@ -1,4 +1,5 @@
 import type { EvalResult, QualityGateInfo } from "../types/stage"
+import type { GenerationRunStatus } from "../types/stage"
 import { getAccessToken, getCsrfToken, isSessionExpired, refreshAccessToken } from "./api"
 
 interface SSEControl {
@@ -27,6 +28,29 @@ interface QualityGateFailedEvent {
   quality_gate_failed: QualityGateInfo
 }
 
+export interface GenerationStartedInfo {
+  generation_id: string
+  deadline: string
+  action: "generate" | "regenerate"
+  total_parts: number
+}
+
+export interface GenerationTerminalInfo {
+  generation_id: string
+  status: GenerationRunStatus
+  partial_saved: boolean
+  refunded_credits: number
+  credit_was_deducted?: boolean
+}
+
+interface GenerationStartedEvent {
+  generation_started: GenerationStartedInfo
+}
+
+interface GenerationTerminalEvent {
+  generation_terminal: GenerationTerminalInfo
+}
+
 export interface GenerationProgress {
   stage: string
   state: string
@@ -44,6 +68,9 @@ export interface GenerationProgress {
    *  the fully sequential live-streamed stages (harness) and older backends. */
   completed_parts?: number
   total_parts?: number
+  generation_id?: string
+  deadline?: string
+  last_server_progress?: string
 }
 
 interface ProgressEvent {
@@ -62,6 +89,8 @@ type SSEPayload =
   | QualityGateFailedEvent
   | ProgressEvent
   | StreamResetEvent
+  | GenerationStartedEvent
+  | GenerationTerminalEvent
 
 /**
  * Safely close and nullify an SSE stream reference.
@@ -210,6 +239,8 @@ export interface SSEConnectionOptions {
   onEval?: (result: EvalResult | null) => void
   onQualityGateFailed?: (info: QualityGateInfo) => void
   onProgress?: (progress: GenerationProgress) => void
+  onGenerationStarted?: (info: GenerationStartedInfo) => void
+  onGenerationTerminal?: (info: GenerationTerminalInfo) => void
   onReset?: () => void
   /** Fired exactly once when the connection tears down WITHOUT having delivered
    *  a terminal outcome — i.e. `close()`/abort was called (unmount, cancel, a
@@ -230,6 +261,8 @@ export function createSSEConnection(options: SSEConnectionOptions): SSEControl {
     onEval = () => {},
     onQualityGateFailed = () => {},
     onProgress = () => {},
+    onGenerationStarted = () => {},
+    onGenerationTerminal = () => {},
     onReset = () => {},
     onAbort = () => {},
   } = options
@@ -396,6 +429,28 @@ export function createSSEConnection(options: SSEConnectionOptions): SSEControl {
             // artifact bytes exist. Not a token: never append it to content.
             onProgress((data as ProgressEvent).progress)
             continue
+          }
+
+          if ("generation_started" in data) {
+            onGenerationStarted(data.generation_started)
+            continue
+          }
+
+          if ("generation_terminal" in data) {
+            const terminal = data.generation_terminal
+            onGenerationTerminal(terminal)
+            settleError(
+              new StreamError(
+                `generation_${terminal.status}`,
+                terminal.status === "cancelled"
+                  ? "Generation cancelled."
+                  : terminal.status === "timed_out"
+                    ? "Generation reached its five-minute deadline."
+                    : "Generation did not complete.",
+              ),
+            )
+            close()
+            return true
           }
 
           if ("stream_reset" in data) {

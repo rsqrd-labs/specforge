@@ -10,7 +10,7 @@ StageStatus = Literal["locked", "draft", "in_progress", "finalised", "stale"]
 # findings — the status the post-`done` refetch (GET /stages/{id} → StageResponse)
 # must serialize for AdvisoryFindingsPanel to render. Omitting it 500s the refetch
 # for every advisory stage (critic suggestions and the Phase-D condensed notice).
-QualityGateStatus = Literal["clear", "blocked", "overridden", "advisory"]
+QualityGateStatus = Literal["clear", "checking", "blocked", "overridden", "advisory"]
 
 
 class GenerateRequest(BaseModel):
@@ -60,6 +60,48 @@ class GenerationEstimatesResponse(BaseModel):
 
     estimates: list[GenerationEstimate] = Field(default_factory=list)
     generated_at: datetime | None = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+GenerationRunStatus = Literal[
+    "running", "succeeded", "blocked", "cancelled", "timed_out", "failed"
+]
+GenerationRunPhase = Literal[
+    "preparing",
+    "drafting",
+    "assembling",
+    "validating",
+    "saving",
+    "stopping",
+    "complete",
+]
+
+
+class GenerationRunResponse(BaseModel):
+    id: UUID
+    stage_id: UUID
+    action: Literal["generate", "regenerate"]
+    status: GenerationRunStatus
+    phase: GenerationRunPhase
+    completed_parts: int = Field(ge=0)
+    total_parts: int = Field(ge=0)
+    started_at: datetime
+    deadline_at: datetime
+    heartbeat_at: datetime
+    cancel_requested_at: datetime | None = None
+    finished_at: datetime | None = None
+    result_version: int | None = Field(default=None, ge=1)
+    error_code: str | None = None
+    partial_saved: bool = False
+    refunded_credits: int = Field(default=0, ge=0)
+    credit_was_deducted: bool = False
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class CancelGenerationRequest(BaseModel):
+    generation_id: UUID
 
     model_config = ConfigDict(from_attributes=True)
 

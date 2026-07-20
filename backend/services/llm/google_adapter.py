@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncGenerator
 
+import httpx
 from google import genai
 from google.genai import errors as genai_errors
 from google.genai import types
@@ -96,6 +97,8 @@ class GoogleAdapter(BaseLLMAdapter):
                 yield chunk.text or ""
         except genai_errors.APIError as exc:
             raise _wrap_google_error(exc) from exc
+        except (httpx.HTTPError, RuntimeError, OSError) as exc:
+            raise ProviderError("google", exc) from exc
 
     async def complete(
         self,
@@ -121,6 +124,8 @@ class GoogleAdapter(BaseLLMAdapter):
             return response.text or ""
         except genai_errors.APIError as exc:
             raise _wrap_google_error(exc) from exc
+        except (httpx.HTTPError, RuntimeError, OSError) as exc:
+            raise ProviderError("google", exc) from exc
 
 
 def _capture_google_completion(
@@ -129,6 +134,9 @@ def _capture_google_completion(
 ) -> None:
     if completion is None:
         return
+    response_id = getattr(response, "response_id", None)
+    if response_id:
+        completion.raw["provider_response_id"] = str(response_id)
     candidates = getattr(response, "candidates", None) or []
     for candidate in candidates:
         completion.apply_finish_reason(getattr(candidate, "finish_reason", None))

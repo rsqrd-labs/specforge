@@ -135,7 +135,7 @@ class Workspace(Base):
     # verifier first runs (after the tasks stage exists for a demo_day workspace);
     # always NULL for a standard workspace. The shape is
     # ``ConstructionVerdict.to_dict()`` (verified / checks / estimated_minutes /
-    # time_budget_minutes / stage_versions / regen_attempted); the stamped
+    # time_budget_minutes / stage_versions); the stamped
     # ``stage_versions`` carry the staleness signal so no extra column is needed.
     construction_verdict: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     # Data-retention trash lifecycle (issue #43, Phase 3). ``archived_at`` is the

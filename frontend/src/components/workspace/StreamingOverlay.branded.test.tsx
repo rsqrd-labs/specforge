@@ -65,7 +65,7 @@ describe("StreamingOverlay with branded_loaders enabled", () => {
     expect(container.querySelector(".generation-phase-ring")).not.toBeNull()
     expect(
       container.querySelectorAll(".generation-phase-ring .generation-ring-seg"),
-    ).toHaveLength(5)
+    ).toHaveLength(6)
   })
 
   it("shows the phase ring and NO numeric time caption on the heuristic path", () => {
@@ -154,21 +154,21 @@ describe("StreamingOverlay with branded_loaders enabled", () => {
       <StreamingOverlay
         isVisible
         activity={agedActivity(0)}
-        progress={{ stage: "spec", state: "generating", elapsed_seconds: 30, phase: "critic" }}
+        progress={{ stage: "spec", state: "generating", elapsed_seconds: 30, phase: "validating" }}
       />,
     )
 
-    // The critic phase maps to the Reviewer step (index 3), whose arc is active.
+    // The validating phase maps to the fourth server-owned step.
     const segs = Array.from(container.querySelectorAll(".generation-ring-seg"))
     expect(segs[3]).toHaveClass("is-active")
     // The one-line phase status names the current step + count.
     expect(container.querySelector(".generation-phase-line")).toHaveTextContent(
-      /Reviewer — step 4 of 5/i,
+      /Validating — step 4 of 6/i,
     )
 
     // The single live region announces the current step (not a per-second tick).
     expect(screen.getByRole("status")).toHaveTextContent(
-      /a reviewer model is checking the draft/i,
+      /validating the draft/i,
     )
   })
 
@@ -191,31 +191,29 @@ describe("StreamingOverlay with branded_loaders enabled", () => {
     expect(screen.getByRole("status")).not.toHaveTextContent(/reviewer model/i)
   })
 
-  it("marks a jumped-over Reviewer step as skipped, never complete (issue #34)", () => {
-    // Default async-advisory path: phase hops quality_gate → persisting, so the
-    // Reviewer step (index 3) never runs on the critical path. Its arc must stay
-    // hollow (skipped), not draw a filled check for work that ran detached.
+  it("marks a jumped-over assembly step as skipped, never complete", () => {
     const { container, rerender } = render(
       <StreamingOverlay
         isVisible
         activity={agedActivity(0)}
-        progress={{ stage: "spec", state: "generating", elapsed_seconds: 5, phase: "quality_gate" }}
+        progress={{ stage: "spec", state: "generating", elapsed_seconds: 5, phase: "drafting" }}
       />,
     )
     rerender(
       <StreamingOverlay
         isVisible
         activity={agedActivity(0)}
-        progress={{ stage: "spec", state: "generating", elapsed_seconds: 10, phase: "persisting" }}
+        progress={{ stage: "spec", state: "generating", elapsed_seconds: 10, phase: "saving" }}
       />,
     )
 
     const segs = Array.from(container.querySelectorAll(".generation-ring-seg"))
-    // Reviewer (3): jumped over → skipped, not complete.
+    // Assembling (2) and Validating (3) were never observed.
+    expect(segs[2]).toHaveClass("is-skipped")
     expect(segs[3]).toHaveClass("is-skipped")
     expect(segs[3]).not.toHaveClass("is-complete")
-    // Quality checks (2) was observed → complete; Saving (4) is now active.
-    expect(segs[2]).toHaveClass("is-complete")
+    // Drafting was observed and Saving is now active.
+    expect(segs[1]).toHaveClass("is-complete")
     expect(segs[4]).toHaveClass("is-active")
   })
 })

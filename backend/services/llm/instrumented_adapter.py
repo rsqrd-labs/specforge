@@ -31,9 +31,11 @@ Behaviour:
 
 from __future__ import annotations
 
+import asyncio
 import time
 from collections.abc import AsyncGenerator
 from typing import Any
+from uuid import uuid4
 
 import structlog
 
@@ -93,6 +95,9 @@ class InstrumentedAdapter(BaseLLMAdapter):
         self._cost_context = cost_context
         self._retry_count = retry_count
         self._repair_count = repair_count
+        self._generation_run_id: str | None = None
+        self._chunk_key: str | None = None
+        self._provider_request_id: str | None = None
         # Set after each recorded generation so downstream code (T-127 eval
         # score linking) can attach scores or dataset items to the same id.
         self.last_generation_id: str | None = None
@@ -109,6 +114,34 @@ class InstrumentedAdapter(BaseLLMAdapter):
         if repair_count is not None:
             self._repair_count = repair_count
 
+    def set_request_context(
+        self, *, generation_run_id: str | None, chunk_key: str | None
+    ) -> None:
+        self._generation_run_id = generation_run_id
+        self._chunk_key = chunk_key
+
+    def _request_log_fields(self, *, elapsed_ms: int | None = None) -> dict:
+        completion = self.last_completion
+        fields = {
+            "generation_id": self._generation_run_id,
+            "stage": self._stage_type,
+            "chunk": self._chunk_key,
+            "provider": self._provider,
+            "model": self._model,
+            "retry": self._retry_count,
+            # Client-generated correlation id written before dispatch. Provider
+            # response ids are attached separately when the stream returns one.
+            "provider_request_id": self._provider_request_id,
+            "provider_response_id": (
+                completion.raw.get("provider_response_id")
+                if completion is not None
+                else None
+            ),
+        }
+        if elapsed_ms is not None:
+            fields["elapsed_ms"] = elapsed_ms
+        return fields
+
     async def stream(
         self,
         system: str,
@@ -121,6 +154,10 @@ class InstrumentedAdapter(BaseLLMAdapter):
         accumulated: list[str] = []
         start = time.perf_counter()
         first_event_latency_ms: int | None = None
+        outcome = "failed"
+        error_type: str | None = None
+        self._provider_request_id = str(uuid4())
+        logger.info("llm.request_started", **self._request_log_fields())
         try:
             kwargs = {"cache_system": cache_system}
             if cache_policy is not None:
@@ -131,13 +168,23 @@ class InstrumentedAdapter(BaseLLMAdapter):
                 accumulated.append(token)
                 yield token
         except Exception as exc:
+            error_type = type(exc).__name__
             record_provider_failure(self._provider, exc)
             raise
         else:
+            outcome = "succeeded"
             record_provider_success(self._provider)
         finally:
             self.last_completion = getattr(self._wrapped, "last_completion", None)
-            await self._record_generation(
+            logger.info(
+                "llm.request_finished",
+                **self._request_log_fields(
+                    elapsed_ms=int((time.perf_counter() - start) * 1000)
+                ),
+                outcome=outcome,
+                error_type=error_type,
+            )
+            await self._record_generation_bounded(
                 system=system,
                 user=user,
                 output="".join(accumulated),
@@ -157,6 +204,10 @@ class InstrumentedAdapter(BaseLLMAdapter):
     ) -> str:
         start = time.perf_counter()
         response: str = ""
+        outcome = "failed"
+        error_type: str | None = None
+        self._provider_request_id = str(uuid4())
+        logger.info("llm.request_started", **self._request_log_fields())
         try:
             # Forward max_tokens as a keyword so the wrapper is transparent to
             # callers/tests that pass (and assert) it by name.
@@ -167,20 +218,41 @@ class InstrumentedAdapter(BaseLLMAdapter):
                 system, user, max_tokens=max_tokens, **kwargs
             )
             record_provider_success(self._provider)
+            outcome = "succeeded"
             return response
         except Exception as exc:
+            error_type = type(exc).__name__
             record_provider_failure(self._provider, exc)
             raise
         finally:
             self.last_completion = getattr(self._wrapped, "last_completion", None)
+            logger.info(
+                "llm.request_finished",
+                **self._request_log_fields(
+                    elapsed_ms=int((time.perf_counter() - start) * 1000)
+                ),
+                outcome=outcome,
+                error_type=error_type,
+            )
             # response stays "" if the wrapped call raised; recording an empty
             # output preserves trace context without re-raising the error.
-            await self._record_generation(
+            await self._record_generation_bounded(
                 system=system,
                 user=user,
                 output=response,
                 start=start,
                 cache_policy=cache_policy,
+            )
+
+    async def _record_generation_bounded(self, **kwargs: Any) -> None:
+        """Keep optional observability off the provider cleanup critical path."""
+        try:
+            async with asyncio.timeout(5):
+                await self._record_generation(**kwargs)
+        except TimeoutError:
+            logger.warning(
+                "instrumented_adapter.record_timeout",
+                **self._request_log_fields(),
             )
 
     async def _record_generation(

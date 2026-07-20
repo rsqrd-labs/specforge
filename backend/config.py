@@ -1,4 +1,4 @@
-from pydantic import field_validator
+from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -284,6 +284,51 @@ class Settings(BaseSettings):
     llm_stream_idle_timeout_seconds: int = 180
     llm_stream_hard_cap_seconds: int = 900
     llm_complete_timeout_seconds: int = 120
+    # Core stage-run deadline contract. These values are intentionally separate
+    # from storyboard/increment timeouts: Spec/Plan/Harness/Tasks are interactive
+    # and must reach a durable terminal state within five minutes.
+    stage_generation_deadline_seconds: int = 300
+    stage_generation_finalise_reserve_seconds: int = 30
+    stage_provider_call_timeout_seconds: int = 180
+    stage_provider_idle_timeout_seconds: int = 90
+    stage_retry_min_remaining_seconds: int = 45
+    stage_generation_cancel_poll_seconds: float = 1.0
+    stage_generation_cancel_db_poll_seconds: float = 5.0
+    # External technology lifecycle/advisory lookups run after the draft is
+    # committed. They are bounded independently and a stale pending result is
+    # converted to an advisory so finalisation can never remain blocked.
+    stage_technology_check_timeout_seconds: int = 10
+    stage_technology_check_stale_seconds: int = 30
+
+    @model_validator(mode="after")
+    def validate_stage_generation_bounds(self) -> "Settings":
+        if self.stage_generation_deadline_seconds != 300:
+            raise ValueError("STAGE_GENERATION_DEADLINE_SECONDS must be 300")
+        if self.stage_generation_finalise_reserve_seconds != 30:
+            raise ValueError("STAGE_GENERATION_FINALISE_RESERVE_SECONDS must be 30")
+        if not 1 <= self.stage_provider_call_timeout_seconds <= 180:
+            raise ValueError("STAGE_PROVIDER_CALL_TIMEOUT_SECONDS must be 1..180")
+        if not 1 <= self.stage_provider_idle_timeout_seconds <= 90:
+            raise ValueError("STAGE_PROVIDER_IDLE_TIMEOUT_SECONDS must be 1..90")
+        if (
+            self.stage_provider_idle_timeout_seconds
+            > self.stage_provider_call_timeout_seconds
+        ):
+            raise ValueError(
+                "STAGE_PROVIDER_IDLE_TIMEOUT_SECONDS cannot exceed the call timeout"
+            )
+        if self.stage_retry_min_remaining_seconds < 45:
+            raise ValueError("STAGE_RETRY_MIN_REMAINING_SECONDS must be at least 45")
+        if not 1 <= self.stage_technology_check_timeout_seconds <= 10:
+            raise ValueError("STAGE_TECHNOLOGY_CHECK_TIMEOUT_SECONDS must be 1..10")
+        if not 1 <= self.stage_technology_check_stale_seconds <= 30:
+            raise ValueError("STAGE_TECHNOLOGY_CHECK_STALE_SECONDS must be 1..30")
+        if self.stage_generation_cancel_poll_seconds <= 0:
+            raise ValueError("STAGE_GENERATION_CANCEL_POLL_SECONDS must be positive")
+        if self.stage_generation_cancel_db_poll_seconds <= 0:
+            raise ValueError("STAGE_GENERATION_CANCEL_DB_POLL_SECONDS must be positive")
+        return self
+
     # Phase 0 (issue #26) LLM cost ledger: persist one llm_cost_events row per
     # provider call. Fire-and-forget and fully exception-swallowed, but kept
     # behind a flag so a test/CI environment without a DB never even attempts
@@ -329,27 +374,6 @@ class Settings(BaseSettings):
     # Raise toward 1.0 only to gather model/provider quality telemetry. Must be in
     # [0.0, 1.0]; an out-of-range value fails startup in every environment.
     eval_score_sample_rate: float = 0.0
-    # Critic async-advisory (docs/CRITIC_ASYNC_ADVISORY_PLAN.md): take the Phase-19
-    # critic judge off the critical path. Default True — the usable draft is
-    # delivered the moment the deterministic gates pass (sections, depth,
-    # tech-safety) and the `done` SSE event fires; the LLM judge then runs in a
-    # detached background task (mirroring the best-effort eval score) and, on a
-    # failing verdict, attaches its findings to the already-delivered draft as
-    # non-blocking advisory suggestions. There is NO auto-regenerate in this path.
-    # Flip False to retain the legacy inline critic+regenerate loop verbatim for
-    # one release (instant revert if quality/UX regresses) — the old branch is
-    # removed in a follow-up once the new path is proven.
-    critic_async_advisory: bool = True
-    # Prong A (issue: false coverage gaps / minimize lack of tests). After a
-    # harness assembles, if its File Tree / Requirement-to-Test Matrix promised
-    # files the ## Files chunk never emitted (the second chunk under-ran its
-    # budget), run ONE targeted, bounded regenerate that emits just those missing
-    # files and merges them in — so the harness actually contains every promised
-    # test instead of shipping a hole the user must pay 10 credits to patch. The
-    # pass is additive (never overwrites), capped (skips when the missing set is
-    # too large to be a patch), fail-open (an error never bricks generation), and
-    # runs on the same cheap route. Flip false to disable entirely.
-    harness_autocomplete_missing_files: bool = True
     # Issue #21 Phase 2b — honest, data-backed generation ETA. A cheap periodic
     # worker cron rolls llm_cost_events latency_ms up into aggregate p50/p90 per
     # (provider, stage, operation), caches the result in Redis, and the read-only
@@ -487,24 +511,6 @@ class Settings(BaseSettings):
     # (`docs/evals/ROUTE_PROMOTION.md`).
     core_complexity_routing: bool = False
 
-    # Phase 4 (issue #28): early-bail on an unrecoverable chunk limit-stop. A chunk
-    # that stops on its output-token budget is repaired with a *doubled* budget
-    # (`_repair_budget`). Once that doubled budget is already clamped to the model
-    # output ceiling, the repair is the final escalation — there is no larger budget
-    # left to try — and a generation that over-produced at the prior budget (the d3
-    # case: 89 FRs, truncated) is unlikely to fit at the ceiling. With this flag on,
-    # that ceiling-capped repair is skipped and the `incomplete_output` block
-    # surfaces immediately instead of after another multi-minute call. Under the live
-    # catalog this DOES fire for core generation when a 49152-token chunk limit-stops:
-    # the doubled repair clamps to the true 64000-token ceiling, so there is no larger
-    # retry left after that 64K call. When it fires it actively cuts a call — it is NOT
-    # outcome-preserving: a generation that only just overran 49152 could still fit at
-    # 64000, so the flag trades that recovery for the saved call. That is exactly why it
-    # ships Default False — a chunk-loop change that changes which artifacts recover
-    # rides the issue-#26 golden-corpus gate and is promoted only after the manual live
-    # review (`docs/evals/ROUTE_PROMOTION.md`). Flag OFF ⇒ the loop is byte-identical.
-    pipeline_early_bail_unrecoverable_chunk: bool = False
-
     # Storyboard quality escape hatch (storyboard output-quality plan P3.5). When
     # True, storyboard generation starts on the provider's `mid` tier escalating
     # to `strong`, bypassing the product-wide cheap-primary policy for THIS feature
@@ -514,32 +520,6 @@ class Settings(BaseSettings):
     # `services.llm.tier_policy` for any other feature. Default False: cheap primary
     # with a one-shot quality-triggered escalation is the intended steady state.
     storyboard_force_mid_tier: bool = False
-
-    # Parallel chunk generation (issue #39 latency). A stage's wall-clock to
-    # `done` is the SUM of its sequential streaming chunk calls (spec=3, plan=4,
-    # harness=2, tasks=4). When True, the happy path generates a stage's chunks
-    # in dependency-ordered WAVES (`_chunk_waves_for_stage`), running the chunks
-    # within a wave concurrently — turning the sum into ~max(wave) and cutting
-    # wall-clock the most on the worst offenders (plan ~4→1 wave, tasks ~4→2).
-    # Each concurrent chunk uses its OWN adapter instance (no shared completion
-    # state) and live token streaming is suppressed in favour of the supervising
-    # progress heartbeats + the canonical end-of-stream replay (parallel token
-    # streams cannot be interleaved into one coherent document). The sequential
-    # path (`_chunk_specs_for_stage`) is left byte-identical as the OFF fallback,
-    # and any incompleteness still routes through the existing per-chunk repair
-    # plus a full SEQUENTIAL completeness-repair pass, so cross-chunk invariants
-    # (effort-summary counts, numbering, traceability) are reconciled exactly as
-    # today. It is OUTCOME-CHANGING (parallel chunks cannot see each other), so it
-    # rides the issue-#26 golden-corpus gate (`docs/evals/ROUTE_PROMOTION.md`)
-    # before promotion. Flag OFF ⇒ generation is byte-identical to the
-    # pre-#39 sequential loop. Shipped ON (user decision, issue #39) to cut the
-    # ~8-min/stage wall-clock now; instantly reversible by setting this False if
-    # the corpus/live quality of parallel chunks regresses.
-    pipeline_parallel_chunks: bool = True
-    # Max chunks generated concurrently within a single stage generation. Caps
-    # peak provider tokens-per-minute / concurrent streams so a fan-out does not
-    # trip rate limits (which would claw the latency win back via 429 retries).
-    pipeline_parallel_chunk_concurrency: int = 4
 
     # Problem-statement compression (docs/PROBLEM_STATEMENT_COMPRESSION_PLAN.md,
     # Phase B). When True, an over-budget problem statement is reduced to at most

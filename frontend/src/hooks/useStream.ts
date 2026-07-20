@@ -1,11 +1,18 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 import {
+  cancelStageGeneration,
   generateStage,
   getStage,
+  getStageGeneration,
   regenerateStage,
   regenerateStageForGaps,
 } from "../services/api"
-import { StreamError, closeStreamRef, createSSEConnection } from "../services/sseService"
+import {
+  StreamError,
+  createSSEConnection,
+  type GenerationStartedInfo,
+  type GenerationTerminalInfo,
+} from "../services/sseService"
 import { useStageStore } from "../store/stageStore"
 import type { EvalResult, Stage } from "../types/stage"
 
@@ -34,6 +41,9 @@ export interface StreamErrorState {
 export function useStream(stageId: string | null) {
   const [isStreaming, setIsStreaming] = useState(false)
   const [error, setError] = useState<StreamErrorState | null>(null)
+  const [generation, setGeneration] = useState<GenerationStartedInfo | null>(null)
+  const [terminal, setTerminal] = useState<GenerationTerminalInfo | null>(null)
+  const [isStopping, setIsStopping] = useState(false)
   const streamRef = useRef<{ close: () => void } | null>(null)
   // #3b: `error` is shared across stage navigations — Workspace calls this hook
   // with `activeStage.id`, so the same hook instance serves every stage. Track
@@ -114,6 +124,8 @@ export function useStream(stageId: string | null) {
       }
 
       setError(null)
+      setTerminal(null)
+      setIsStopping(false)
       setIsStreaming(true)
 
       // A fresh generation supersedes any advisory poll still running for a
@@ -216,6 +228,24 @@ export function useStream(stageId: string | null) {
               useStageStore.getState().setQualityGate(stageId, info),
             onProgress: (progress) =>
               useStageStore.getState().setStreamProgress(stageId, progress),
+            onGenerationStarted: (info) => {
+              setGeneration(info)
+              useStageStore.getState().setStreamProgress(stageId, {
+                stage: existing?.type ?? "",
+                state: "generating",
+                phase: "preparing",
+                elapsed_seconds: 0,
+                completed_parts: 0,
+                total_parts: info.total_parts,
+                generation_id: info.generation_id,
+                deadline: info.deadline,
+                last_server_progress: new Date().toISOString(),
+              })
+            },
+            onGenerationTerminal: (info) => {
+              setTerminal(info)
+              setIsStopping(false)
+            },
             onReset: () => useStageStore.getState().clearStreamContent(stageId),
             // onAbort: the connection was torn down (unmount, cancel(), or a
             // superseding generation) before a terminal done/error. Settle this
@@ -263,6 +293,21 @@ export function useStream(stageId: string | null) {
         // owns the follow-up (the unmount cleanup discards the buffer; cancel()
         // finalises it) — so bail without touching stage state or the error UI.
         if (code === "stream_aborted") {
+          return null
+        }
+
+        if (
+          code === "generation_cancelled" ||
+          code === "generation_timed_out" ||
+          code === "generation_failed" ||
+          code === "generation_blocked"
+        ) {
+          useStageStore.getState().discardStream(stageId)
+          try {
+            useStageStore.getState().setStage(await getStage(stageId))
+          } catch {
+            // The durable run remains queryable; reconnect polling will retry.
+          }
           return null
         }
 
@@ -341,13 +386,53 @@ export function useStream(stageId: string | null) {
     [stageId, pollForAdvisoryFindings],
   )
 
-  const cancel = useCallback(() => {
-    closeStreamRef(streamRef)
-    if (stageId) {
-      useStageStore.getState().finaliseStream(stageId)
+  const cancel = useCallback(async () => {
+    if (!stageId) return
+    setError(null)
+    try {
+      const active = generation ?? (await getStageGeneration(stageId))
+      if (!active || ("status" in active && active.status !== "running")) {
+        setError({
+          code: "cancellation_failed",
+          message: "This generation is no longer active.",
+        })
+        return
+      }
+      setIsStopping(true)
+      const generationId =
+        "generation_id" in active ? active.generation_id : active.id
+      const run = await cancelStageGeneration(stageId, generationId)
+      setGeneration({
+        generation_id: run.id,
+        deadline: run.deadline_at,
+        action: run.action,
+        total_parts: run.total_parts,
+      })
+      useStageStore.getState().setStreamProgress(stageId, {
+        stage: useStageStore.getState().stages[stageId]?.type ?? "",
+        state: "generating",
+        phase: "stopping",
+        elapsed_seconds: Math.max(
+          0,
+          Math.floor((Date.now() - Date.parse(run.started_at)) / 1000),
+        ),
+        completed_parts: run.completed_parts,
+        total_parts: run.total_parts,
+        generation_id: run.id,
+        deadline: run.deadline_at,
+        last_server_progress: run.heartbeat_at,
+      })
+    } catch (cancelError) {
+      setIsStopping(false)
+      setError({
+        code: "cancellation_failed",
+        message:
+          cancelError instanceof Error
+            ? cancelError.message
+            : "Cancellation could not be requested. Try again.",
+      })
     }
-    setIsStreaming(false)
-  }, [stageId])
+  }, [generation, stageId])
 
-  return { start, cancel, isStreaming, error }
+  return { start, cancel, isStreaming, isStopping, generation, terminal, error }
 }

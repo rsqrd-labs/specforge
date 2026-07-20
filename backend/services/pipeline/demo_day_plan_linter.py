@@ -86,10 +86,6 @@ class ConstructionVerdict:
     estimated_minutes: int | None
     time_budget_minutes: int
     stage_versions: dict[str, int] = field(default_factory=dict)
-    # Idempotency marker for the one platform-funded advisory regenerate (§7.3).
-    # Set once a funded regen has been attempted for this workspace so it never
-    # fires twice. Persisted inside the verdict JSON (no extra column).
-    regen_attempted: bool = False
 
     def to_dict(self) -> dict:
         return {
@@ -98,7 +94,6 @@ class ConstructionVerdict:
             "estimated_minutes": self.estimated_minutes,
             "time_budget_minutes": self.time_budget_minutes,
             "stage_versions": dict(self.stage_versions),
-            "regen_attempted": self.regen_attempted,
         }
 
 

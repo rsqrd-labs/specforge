@@ -47,6 +47,8 @@ interface StreamingOverlayProps {
   onDismiss?: () => void
   actionsDisabled?: boolean
   disabledReason?: string
+  onCancel?: () => void
+  isStopping?: boolean
 }
 
 export function StreamingOverlay({
@@ -60,6 +62,8 @@ export function StreamingOverlay({
   onDismiss,
   actionsDisabled = false,
   disabledReason,
+  onCancel,
+  isStopping = false,
 }: StreamingOverlayProps) {
   const [renderedActivity, setRenderedActivity] =
     useState<GenerationActivityInfo | null>(activity ?? null)
@@ -340,6 +344,16 @@ export function StreamingOverlay({
           {compactCopy.stageLabel}: {compactCopy.title} —{" "}
           {formatElapsed(elapsedSeconds)}
         </span>
+        {onCancel ? (
+          <button
+            type="button"
+            className="btn btn-ghost generation-cancel-button"
+            onClick={onCancel}
+            disabled={isStopping}
+          >
+            {isStopping ? "Stopping…" : "Cancel"}
+          </button>
+        ) : null}
       </div>
     )
   }
@@ -354,7 +368,7 @@ export function StreamingOverlay({
   const totalParts = progress?.total_parts ?? 0
   const showParts =
     totalParts > 0 &&
-    (progress?.phase === "streaming" || progress?.phase === "refining")
+    progress?.phase === "drafting"
   const completedParts = Math.min(progress?.completed_parts ?? 0, totalParts)
   const activeStageIndex = STAGE_FLOW.findIndex(
     (stage) => stage.type === renderedActivity.stageType,
@@ -365,6 +379,12 @@ export function StreamingOverlay({
       : renderedActivity.operation === "quality-gate-regenerate"
         ? "gate"
         : "stream"
+  const serverPhaseCopy = progress?.phase
+    ? phaseLivenessCopy(progress.phase)
+    : null
+  const deadlineSeconds = progress?.deadline
+    ? Math.max(0, Math.ceil((Date.parse(progress.deadline) - Date.now()) / 1000))
+    : Math.max(0, 300 - elapsedSeconds)
 
   // Legacy per-surface overlay, rendered only when a session has explicitly
   // opted out of branded loaders (`VITE_BRANDED_LOADERS=false`). Kept
@@ -424,12 +444,19 @@ export function StreamingOverlay({
             <p>{copy.detail}</p>
             <p className="generation-loading-liveness">
               {formatElapsed(elapsedSeconds)} elapsed
-              {progress
-                ? " — the model is working; this can take several minutes."
+              {serverPhaseCopy
+                ? ` — ${serverPhaseCopy}`
+                : progress
+                  ? " — the model is working; this can take several minutes."
                 : elapsedSeconds >= 15
                   ? " — frontier models can reason for a while before text appears."
                   : ""}
             </p>
+            {variant !== "patch" ? (
+              <p className="generation-deadline">
+                Five-minute limit · {formatElapsed(deadlineSeconds)} remaining
+              </p>
+            ) : null}
             {showParts ? (
               <p className="generation-loading-parts" aria-live="polite">
                 {completedParts} of {totalParts} parts drafted
@@ -437,6 +464,16 @@ export function StreamingOverlay({
             ) : null}
           </div>
         </div>
+        {onCancel ? (
+          <button
+            type="button"
+            className="btn btn-secondary generation-cancel-button"
+            onClick={onCancel}
+            disabled={isStopping}
+          >
+            {isStopping ? "Stopping…" : "Cancel generation"}
+          </button>
+        ) : null}
       </div>
     )
   }
@@ -462,7 +499,6 @@ export function StreamingOverlay({
   const phaseLine = `${currentStep.label} — step ${stepIndex + 1} of ${
     PIPELINE_STEPS.length
   } · ${formatElapsed(elapsedSeconds)}${partsLabel ? ` · ${partsLabel}` : ""}`
-
   return (
     <div
       className={`streaming-overlay generation-loading-overlay ${isExiting ? "is-exiting" : ""}`}
@@ -507,6 +543,11 @@ export function StreamingOverlay({
           {isPipeline ? (
             <p className="generation-phase-line">{phaseLine}</p>
           ) : null}
+          {isPipeline ? (
+            <p className="generation-deadline">
+              Five-minute limit · {formatElapsed(deadlineSeconds)} remaining
+            </p>
+          ) : null}
         </div>
 
         {isPipeline ? null : (
@@ -528,11 +569,21 @@ export function StreamingOverlay({
           ) : null}
         </div>
       </div>
+      {onCancel && isPipeline ? (
+        <button
+          type="button"
+          className="btn btn-secondary generation-cancel-button"
+          onClick={onCancel}
+          disabled={isStopping}
+        >
+          {isStopping ? "Stopping…" : "Cancel generation"}
+        </button>
+      ) : null}
     </div>
   )
 }
 
-/** The five pipeline steps the branded overlay narrates, in order. `announce`
+/** The six server-owned pipeline states the overlay narrates, in order. `announce`
  *  is the assistive-tech sentence for the milestone live region. */
 interface PipelineStep {
   key: string
@@ -541,19 +592,20 @@ interface PipelineStep {
 }
 
 const PIPELINE_STEPS: PipelineStep[] = [
+  { key: "preparing", label: "Preparing", announce: "Preparing generation." },
   { key: "drafting", label: "Drafting", announce: "Drafting the document." },
-  { key: "refining", label: "Refining", announce: "Refining the draft." },
+  { key: "assembling", label: "Assembling", announce: "Assembling the draft." },
   {
-    key: "quality",
-    label: "Quality checks",
-    announce: "Running quality checks.",
+    key: "validating",
+    label: "Validating",
+    announce: "Validating the draft.",
   },
   {
-    key: "reviewer",
-    label: "Reviewer",
-    announce: "A reviewer model is checking the draft.",
+    key: "saving",
+    label: "Saving",
+    announce: "Saving your work.",
   },
-  { key: "saving", label: "Saving", announce: "Saving your work." },
+  { key: "stopping", label: "Stopping", announce: "Stopping generation." },
 ]
 
 /**
@@ -565,16 +617,18 @@ const PIPELINE_STEPS: PipelineStep[] = [
  */
 export function phaseStepIndex(phase?: string | null): number {
   switch (phase) {
-    case "streaming":
+    case "preparing":
       return 0
-    case "refining":
+    case "drafting":
       return 1
-    case "quality_gate":
+    case "assembling":
       return 2
-    case "critic":
+    case "validating":
       return 3
-    case "persisting":
+    case "saving":
       return 4
+    case "stopping":
+      return 5
     default:
       return 0
   }
@@ -640,7 +694,7 @@ function ringSegmentOffset(index: number): number {
 }
 
 /**
- * The primary progress signal: a five-arc ring driven by the real backend phase
+ * The primary progress signal: a six-arc ring driven by the real backend phase
  * heartbeat, with the brand mark seated inside it. Purely visual (`aria-hidden`)
  * — the accessible equivalent is the milestone live region in the overlay.
  * Completed arcs fill, the active arc carries a comet that sweeps within its own
@@ -744,16 +798,18 @@ const STAGE_ACTIVITY_DETAIL: Record<StageType, string> = {
  */
 export function phaseLivenessCopy(phase: string): string | null {
   switch (phase) {
-    case "streaming":
+    case "preparing":
+      return "preparing prompts and generation inputs."
+    case "drafting":
       return "the model is drafting; this can take several minutes."
-    case "refining":
-      return "refining the draft to fill remaining gaps."
-    case "quality_gate":
+    case "assembling":
+      return "assembling completed parts in canonical order."
+    case "validating":
       return "checking the draft against the quality gates."
-    case "critic":
-      return "a reviewer model is checking the draft for quality."
-    case "persisting":
+    case "saving":
       return "finalising and saving the result."
+    case "stopping":
+      return "stopping server-side work and saving safe partial output."
     default:
       return null
   }

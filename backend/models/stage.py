@@ -20,6 +20,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from models import Base
 
 if TYPE_CHECKING:
+    from models.stage_generation import StageGenerationRun
     from models.stage_version import StageVersion
     from models.workspace import Workspace
 
@@ -116,7 +117,8 @@ class Stage(Base):
             name="ck_stages_status",
         ),
         CheckConstraint(
-            "quality_gate_status IN ('clear', 'blocked', 'overridden', 'advisory')",
+            "quality_gate_status IN "
+            "('clear', 'checking', 'blocked', 'overridden', 'advisory')",
             name="ck_stages_quality_gate_status",
         ),
     )
@@ -196,6 +198,10 @@ class Stage(Base):
 
     workspace: Mapped["Workspace"] = relationship(back_populates="stages")
     versions: Mapped[list["StageVersion"]] = relationship(
+        back_populates="stage",
+        cascade="all, delete-orphan",
+    )
+    generation_runs: Mapped[list["StageGenerationRun"]] = relationship(
         back_populates="stage",
         cascade="all, delete-orphan",
     )

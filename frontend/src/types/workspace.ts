@@ -40,7 +40,6 @@ export interface ConstructionVerdict {
   estimated_minutes: number | null
   time_budget_minutes: number
   stage_versions: Partial<Record<"spec" | "plan" | "harness" | "tasks", number>>
-  regen_attempted: boolean
 }
 
 export interface ClarificationQA {

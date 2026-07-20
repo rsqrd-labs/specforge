@@ -41,6 +41,9 @@ class _FakeResult:
     def scalars(self) -> "_FakeResult":
         return self
 
+    def all(self) -> list:
+        return self._many
+
     def __iter__(self):
         yield from self._many
 
@@ -79,11 +82,11 @@ async def test_recovery_uses_stored_deduction_id() -> None:
     ledger_id = uuid4()
     stage = _make_stuck_stage(15, deduction_ledger_id=ledger_id)
 
-    db = _FakeDB([[stage]])  # only the stuck-stages query
+    db = _FakeDB([[], [stage], []])
 
     with patch(
         "services.pipeline.recovery_service.credit_service.refund",
-        new=AsyncMock(),
+        new=AsyncMock(return_value=10),
     ) as mock_refund:
         count = await recover_stuck_stages(db)
 
@@ -99,11 +102,11 @@ async def test_recover_stage_stuck_15_minutes() -> None:
     ledger_id = uuid4()
     stage = _make_stuck_stage(15, deduction_ledger_id=ledger_id)
 
-    db = _FakeDB([[stage]])
+    db = _FakeDB([[], [stage], []])
 
     with patch(
         "services.pipeline.recovery_service.credit_service.refund",
-        new=AsyncMock(),
+        new=AsyncMock(return_value=10),
     ) as mock_refund:
         count = await recover_stuck_stages(db)
 
@@ -115,7 +118,7 @@ async def test_recover_stage_stuck_15_minutes() -> None:
 @pytest.mark.asyncio
 async def test_stages_stuck_9_minutes_not_recovered() -> None:
     """When DB returns no stuck stages, count is 0."""
-    db = _FakeDB([[]])
+    db = _FakeDB([[], [], []])
 
     count = await recover_stuck_stages(db)
 
@@ -128,7 +131,7 @@ async def test_recover_no_deduction_ledger_id_still_resets_stage() -> None:
     """Stage is reset to draft even if deduction_ledger_id is None."""
     stage = _make_stuck_stage(15, deduction_ledger_id=None)
 
-    db = _FakeDB([[stage]])
+    db = _FakeDB([[], [stage], []])
 
     with patch(
         "services.pipeline.recovery_service.credit_service.refund",
@@ -149,11 +152,11 @@ async def test_recover_multiple_stuck_stages() -> None:
     stage1 = _make_stuck_stage(20, deduction_ledger_id=ledger_id1)
     stage2 = _make_stuck_stage(30, deduction_ledger_id=ledger_id2)
 
-    db = _FakeDB([[stage1, stage2]])
+    db = _FakeDB([[], [stage1, stage2], []])
 
     with patch(
         "services.pipeline.recovery_service.credit_service.refund",
-        new=AsyncMock(),
+        new=AsyncMock(return_value=10),
     ) as mock_refund:
         count = await recover_stuck_stages(db)
 

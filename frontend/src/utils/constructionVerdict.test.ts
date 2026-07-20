@@ -35,7 +35,6 @@ function verdict(overrides: Partial<ConstructionVerdict> = {}): ConstructionVerd
     estimated_minutes: 240,
     time_budget_minutes: 300,
     stage_versions: { spec: 1, plan: 1, harness: 1, tasks: 1 },
-    regen_attempted: false,
     ...overrides,
   }
 }

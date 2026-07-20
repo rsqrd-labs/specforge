@@ -160,6 +160,47 @@ describe("StreamingOverlay generation activity", () => {
     expect(document.querySelector(".generation-loading-overlay")).toBeNull()
   })
 
+  it("keeps cancellation available in compact streaming mode", async () => {
+    const user = userEvent.setup()
+    const onCancel = vi.fn()
+    render(
+      <StreamingOverlay
+        isVisible
+        compact
+        activity={{ ...activity("generate", "plan"), startedAt: Date.now() }}
+        onCancel={onCancel}
+      />,
+    )
+
+    await user.click(screen.getByRole("button", { name: "Cancel" }))
+    expect(onCancel).toHaveBeenCalledOnce()
+  })
+
+  it("shows the absolute limit and server-owned stopping state", () => {
+    render(
+      <StreamingOverlay
+        isVisible
+        activity={{ ...activity("generate", "harness"), startedAt: Date.now() }}
+        progress={{
+          generation_id: "run-1",
+          stage: "harness",
+          state: "generating",
+          phase: "stopping",
+          elapsed_seconds: 84,
+          deadline: new Date(Date.now() + 216_000).toISOString(),
+        }}
+        onCancel={vi.fn()}
+        isStopping
+      />,
+    )
+
+    expect(screen.getByRole("status")).toHaveTextContent(/stopping server-side work/i)
+    expect(document.querySelector(".generation-deadline")).toHaveTextContent(
+      /five-minute limit/i,
+    )
+    expect(screen.getByRole("button", { name: "Stopping…" })).toBeDisabled()
+  })
+
   it("confirms backend liveness when a progress heartbeat has arrived", () => {
     render(
       <StreamingOverlay
@@ -186,7 +227,7 @@ describe("StreamingOverlay generation activity", () => {
           stage: "spec",
           state: "generating",
           elapsed_seconds: 42,
-          phase: "streaming",
+          phase: "drafting",
           completed_parts: 2,
           total_parts: 3,
         }}
@@ -244,11 +285,12 @@ describe("StreamingOverlay generation activity", () => {
 
 describe("phaseLivenessCopy (Phase 2c)", () => {
   it.each([
-    ["streaming", /drafting/i],
-    ["refining", /refining the draft/i],
-    ["quality_gate", /quality gates/i],
-    ["critic", /reviewer model/i],
-    ["persisting", /finalising and saving/i],
+    ["preparing", /preparing prompts/i],
+    ["drafting", /model is drafting/i],
+    ["assembling", /canonical order/i],
+    ["validating", /quality gates/i],
+    ["saving", /finalising and saving/i],
+    ["stopping", /saving safe partial output/i],
   ] as const)("maps the %s phase to honest copy", (phase, pattern) => {
     expect(phaseLivenessCopy(phase)).toMatch(pattern)
   })

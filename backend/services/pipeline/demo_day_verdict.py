@@ -8,9 +8,8 @@ the verdict to ``workspaces.construction_verdict`` (plan §7.2).
 Kept separate from the linter (which stays pure / ORM-free so it is trivially
 unit-testable) and from ``stage_manager`` (so ``export_service`` can reuse the
 export-time staleness re-run without importing the whole generation pipeline —
-avoiding an import cycle). The one piece that *must* live in ``stage_manager`` is
-the funded regenerate, because it needs the generation machinery; everything that
-is just "compute + persist + is-it-stale" lives here.
+avoiding an import cycle). Verification is advisory-only and never invokes the
+generation machinery.
 """
 
 from __future__ import annotations
@@ -56,15 +55,9 @@ def all_stages_present(stages: dict[str, Stage]) -> bool:
 def compute_verdict(
     workspace: Workspace,
     stages: dict[str, Stage],
-    *,
-    regen_attempted: bool = False,
 ) -> ConstructionVerdict:
-    """Run the zero-LLM linter over the workspace's four stage contents.
-
-    ``regen_attempted`` is carried through onto the verdict so a re-run never
-    re-opens the single platform-funded regenerate window (plan §7.3).
-    """
-    verdict = verify_construction(
+    """Run the zero-LLM linter over the workspace's four stage contents."""
+    return verify_construction(
         spec=stages["spec"].content or "",
         plan=stages["plan"].content or "",
         harness=stages["harness"].content or "",
@@ -72,15 +65,11 @@ def compute_verdict(
         time_budget_minutes=workspace.time_budget_minutes,
         stage_versions=current_versions(stages),
     )
-    verdict.regen_attempted = regen_attempted
-    return verdict
 
 
 async def compute_verdict_async(
     workspace: Workspace,
     stages: dict[str, Stage],
-    *,
-    regen_attempted: bool = False,
 ) -> ConstructionVerdict:
     """Async ``compute_verdict``: offloads the linter off the event loop (F7).
 
@@ -97,13 +86,7 @@ async def compute_verdict_async(
         for stage_type in STAGE_TYPES
         if stages.get(stage_type) is not None
     )
-    return await run_cpu_bound(
-        sizer, compute_verdict, workspace, stages, regen_attempted=regen_attempted
-    )
-
-
-def _prior_regen_attempted(verdict: dict | None) -> bool:
-    return bool(verdict.get("regen_attempted")) if isinstance(verdict, dict) else False
+    return await run_cpu_bound(sizer, compute_verdict, workspace, stages)
 
 
 async def ensure_fresh_verdict(
@@ -120,9 +103,8 @@ async def ensure_fresh_verdict(
 
     Fully best-effort: this runs on a read/export path and must never fail a
     download. Any error (or an incomplete package) falls back to the persisted
-    verdict (possibly ``None``). The single funded-regenerate window is *not*
-    reopened here — ``regen_attempted`` is preserved — so a stale re-run only ever
-    refreshes the structural verdict, never re-triggers an LLM regenerate.
+    verdict (possibly ``None``). A stale re-run only refreshes the structural
+    verdict and never triggers an LLM call.
     """
     if getattr(workspace, "mode", "standard") != "demo_day":
         return None
@@ -132,9 +114,7 @@ async def ensure_fresh_verdict(
     try:
         if not is_verdict_stale(existing, current_versions(stages)):
             return existing
-        verdict = await compute_verdict_async(
-            workspace, stages, regen_attempted=_prior_regen_attempted(existing)
-        )
+        verdict = await compute_verdict_async(workspace, stages)
         workspace.construction_verdict = verdict.to_dict()
         await db.commit()
         return workspace.construction_verdict

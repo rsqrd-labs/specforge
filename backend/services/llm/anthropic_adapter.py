@@ -95,6 +95,11 @@ class AnthropicAdapter(BaseLLMAdapter):
                         yield ""
                 final_message = await stream.get_final_message()
                 if self.last_completion is not None:
+                    response_id = getattr(final_message, "id", None)
+                    if response_id:
+                        self.last_completion.raw["provider_response_id"] = str(
+                            response_id
+                        )
                     self.last_completion.apply_finish_reason(
                         getattr(final_message, "stop_reason", None)
                     )
@@ -103,6 +108,8 @@ class AnthropicAdapter(BaseLLMAdapter):
                         self.last_completion.usage = _object_to_dict(usage)
         except anthropic.APIError as exc:
             raise _wrap_anthropic_error(exc) from exc
+        except (httpx.HTTPError, RuntimeError, OSError) as exc:
+            raise ProviderError("anthropic", exc) from exc
 
     async def complete(
         self,
@@ -129,6 +136,9 @@ class AnthropicAdapter(BaseLLMAdapter):
                 ),
             )
             if self.last_completion is not None:
+                response_id = getattr(response, "id", None)
+                if response_id:
+                    self.last_completion.raw["provider_response_id"] = str(response_id)
                 self.last_completion.apply_finish_reason(
                     getattr(response, "stop_reason", None)
                 )
@@ -138,6 +148,8 @@ class AnthropicAdapter(BaseLLMAdapter):
             return response.content[0].text
         except anthropic.APIError as exc:
             raise _wrap_anthropic_error(exc) from exc
+        except (httpx.HTTPError, RuntimeError, OSError) as exc:
+            raise ProviderError("anthropic", exc) from exc
 
     async def submit_batch(self, requests: Sequence[BatchRequest]) -> str:
         """Create a Message Batch (50% discount) and return its id.

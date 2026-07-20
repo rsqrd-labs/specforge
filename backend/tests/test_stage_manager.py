@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncGenerator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
@@ -10,14 +10,25 @@ from uuid import uuid4
 import artifact_fixtures
 import pytest
 
-from models import CreditLedger, EvalResult, Stage, StageVersion, Workspace
+from models import (
+    CreditLedger,
+    EvalResult,
+    Stage,
+    StageGenerationChunk,
+    StageGenerationRun,
+    StageVersion,
+    Workspace,
+)
+from services.llm.base import ProviderError
 from services.llm.completion import LLMCompletionInfo
-from services.llm.routing import LLMRoutingError
+from services.llm.routing import LLMRoute, LLMRoutingError
+from services.pipeline import stage_manager as stage_manager_module
 from services.pipeline.artifact_validator import (
     chunk_completion_sentinel,
     final_completion_sentinel,
     validate_sections,
 )
+from services.pipeline.generation_runs import GenerationControl
 from services.pipeline.stage_manager import (
     _BACKGROUND_PIPELINE_TASKS,
     QualityGateBlockedError,
@@ -187,14 +198,53 @@ def _spec_generate_route():
     )
 
 
+async def _run_durable_generation_for_test(
+    *,
+    adapter_factory,
+    emit=None,
+    phase=None,
+):
+    control = GenerationControl(
+        run_id=uuid4(),
+        stage_id=uuid4(),
+        redis=_FakeRedis(),
+        deadline_at=datetime.now(UTC) + timedelta(seconds=300),
+        duration_seconds=300,
+    )
+    control.start()
+    completed = 0
+
+    async def checkpoint(_chunk, _ordinal, _content, _route, _retry_count):
+        nonlocal completed
+        completed += 1
+        return completed
+
+    async def phase_change(_phase):
+        return None
+
+    tracker = phase or stage_manager_module._PhaseTracker()
+    try:
+        generated = await StageManager()._generate_durable_artifact(
+            route=_spec_generate_route(),
+            adapter_factory=adapter_factory,
+            system_prompt="SYSTEM",
+            user_prompt="BASE SPEC PROMPT",
+            stage_type="spec",
+            deps={},
+            mode="standard",
+            emit=emit,
+            phase=tracker,
+            control=control,
+            checkpoint=checkpoint,
+            phase_change=phase_change,
+        )
+        return generated, tracker
+    finally:
+        await control.close()
+
+
 @pytest.mark.asyncio
-async def test_parallel_generation_runs_chunks_concurrently_and_completes(
-    monkeypatch,
-) -> None:
-    from services.pipeline import stage_manager as sm
-
-    monkeypatch.setattr(sm.settings, "pipeline_parallel_chunks", True)
-
+async def test_parallel_generation_runs_chunks_concurrently_and_completes() -> None:
     tracker = {"active": 0, "max": 0}
     created: list[_ConcurrencyAdapter] = []
 
@@ -203,27 +253,117 @@ async def test_parallel_generation_runs_chunks_concurrently_and_completes(
         created.append(adapter)
         return adapter
 
-    generated = await StageManager()._generate_complete_artifact(
-        adapter=factory(None),
-        route=_spec_generate_route(),
-        system_prompt="SYSTEM",
-        user_prompt="BASE SPEC PROMPT",
-        stage_type="spec",
-        deps={},
-        emit=None,
-        adapter_factory=factory,
-    )
+    generated, _ = await _run_durable_generation_for_test(adapter_factory=factory)
 
     # The two wave-1 chunks (product-scope, system-expectations) ran together.
     assert tracker["max"] == 2
-    # One adapter per chunk (the pre-built `adapter=` is ignored by the parallel
-    # path): 3 spec chunks + the throwaway built for the `adapter=` kwarg.
-    assert len(created) == 4
+    assert len(created) == 3
     # The assembled artifact spans all three waves' section groups.
     assert "## Overview" in generated.content
     assert "## Non-Functional Requirements" in generated.content
     assert "## Acceptance Criteria" in generated.content
     assert generated.content_generation_id == "gen-parallel"
+
+
+@pytest.mark.asyncio
+async def test_failed_plan_chunk_does_not_rerun_checkpointed_siblings() -> None:
+    """A failed sibling has its own retry boundary; completed work is durable."""
+    failed_key = "quality-and-structure"
+    calls: dict[tuple[str, str], int] = {}
+    checkpointed: list[str] = []
+    primary = LLMRoute(
+        provider="openai",
+        model="gpt-5.4-mini",
+        model_tier="small",
+        operation="plan.generate",
+        latency_class="interactive",
+        cross_provider_fallback=False,
+        reason="test",
+        requested_tier="small",
+        fallback_tier=None,
+        selection_reason="test",
+    )
+    fallback = LLMRoute(
+        provider="openai",
+        model="gpt-5.4",
+        model_tier="mid",
+        operation="plan.generate",
+        latency_class="interactive",
+        cross_provider_fallback=False,
+        reason="test fallback",
+        requested_tier="mid",
+        fallback_tier=None,
+        selection_reason="test",
+    )
+
+    class _PlanAdapter:
+        def __init__(self, route: LLMRoute) -> None:
+            self.route = route
+            self.last_completion = LLMCompletionInfo.started(
+                provider=route.provider,
+                model=route.model,
+                max_tokens=32_768,
+            )
+
+        async def stream(self, _system, user, max_tokens, **_kwargs):
+            del max_tokens
+            key = artifact_fixtures.chunk_key_from_prompt(user, "plan")
+            calls[(key, self.route.model)] = calls.get((key, self.route.model), 0) + 1
+            if key == failed_key:
+                raise ProviderError("openai", RuntimeError("injected failure"))
+            yield artifact_fixtures.plan_stream_payload(user, _SAFE_TECH_STACK)
+
+    control = GenerationControl(
+        run_id=uuid4(),
+        stage_id=uuid4(),
+        redis=_FakeRedis(),
+        deadline_at=datetime.now(UTC) + timedelta(seconds=300),
+        duration_seconds=300,
+    )
+    control.start()
+
+    async def checkpoint(chunk, _ordinal, _content, _route, _retry_count):
+        checkpointed.append(chunk.key)
+        return len(checkpointed)
+
+    async def phase_change(_phase):
+        return None
+
+    try:
+        with patch(
+            "services.pipeline.stage_manager._runtime_fallback_route",
+            return_value=fallback,
+        ):
+            with pytest.raises(ProviderError):
+                await StageManager()._generate_durable_artifact(
+                    route=primary,
+                    adapter_factory=_PlanAdapter,
+                    system_prompt="SYSTEM",
+                    user_prompt="BASE PLAN PROMPT",
+                    stage_type="plan",
+                    deps={},
+                    mode="standard",
+                    emit=None,
+                    phase=stage_manager_module._PhaseTracker(),
+                    control=control,
+                    checkpoint=checkpoint,
+                    phase_change=phase_change,
+                )
+    finally:
+        await control.close()
+
+    successful = {
+        "architecture-foundation",
+        "data-api-security",
+        "operations-risk",
+    }
+    assert set(checkpointed) == successful
+    assert len(checkpointed) == len(successful)
+    for key in successful:
+        assert calls[(key, primary.model)] == 1
+        assert (key, fallback.model) not in calls
+    assert calls[(failed_key, primary.model)] == 1
+    assert calls[(failed_key, fallback.model)] == 1
 
 
 def test_progress_payload_includes_parts_only_when_active() -> None:
@@ -238,7 +378,7 @@ def test_progress_payload_includes_parts_only_when_active() -> None:
     assert idle == {
         "stage": "spec",
         "state": "generating",
-        "phase": "streaming",
+        "phase": "drafting",
         "elapsed_seconds": 5,
     }
 
@@ -258,9 +398,7 @@ def test_progress_payload_includes_parts_only_when_active() -> None:
 
 
 @pytest.mark.asyncio
-async def test_parallel_generation_reports_monotonic_part_progress(
-    monkeypatch,
-) -> None:
+async def test_parallel_generation_reports_monotonic_part_progress() -> None:
     # Issue #39 UX: the silent (non-lead) chunks show no text, so the parallel
     # path must tick honest, monotonic part progress on the phase tracker AND
     # emit an immediate liveness ping per chunk (both carry the counts; the store
@@ -271,8 +409,6 @@ async def test_parallel_generation_reports_monotonic_part_progress(
 
     from services.pipeline import stage_manager as sm
 
-    monkeypatch.setattr(sm.settings, "pipeline_parallel_chunks", True)
-
     tracker = {"active": 0, "max": 0}
 
     def factory(_route):
@@ -281,15 +417,9 @@ async def test_parallel_generation_reports_monotonic_part_progress(
     phase = sm._PhaseTracker()
     emitted: list[str] = []
 
-    generated = await StageManager()._generate_complete_artifact(
-        adapter=factory(None),
-        route=_spec_generate_route(),
-        system_prompt="SYSTEM",
-        user_prompt="BASE SPEC PROMPT",
-        stage_type="spec",
-        deps={},
-        emit=emitted.append,
+    generated, _ = await _run_durable_generation_for_test(
         adapter_factory=factory,
+        emit=emitted.append,
         phase=phase,
     )
 
@@ -305,21 +435,17 @@ async def test_parallel_generation_reports_monotonic_part_progress(
     # One ping per chunk, counting 1→2→3, each carrying the constant total.
     assert [p["completed_parts"] for p in progress_events] == [1, 2, 3]
     assert {p["total_parts"] for p in progress_events} == {3}
-    assert {p["phase"] for p in progress_events} == {"streaming"}
+    assert {p["phase"] for p in progress_events} == {"drafting"}
     assert generated.content_generation_id == "gen-parallel"
 
 
 @pytest.mark.asyncio
-async def test_parallel_generation_streams_lead_chunk_live(monkeypatch) -> None:
+async def test_parallel_generation_streams_lead_chunk_live() -> None:
     # Perceived-latency parity with harness: the parallel path must stream the
     # lead chunk of each wave live so the editor fills with text, instead of
     # only ticking a part counter. Raw (non-JSON) segments in the emit stream
     # are exactly those live tokens.
-    import json
-
     from services.pipeline import stage_manager as sm
-
-    monkeypatch.setattr(sm.settings, "pipeline_parallel_chunks", True)
 
     tracker = {"active": 0, "max": 0}
 
@@ -329,15 +455,9 @@ async def test_parallel_generation_streams_lead_chunk_live(monkeypatch) -> None:
     phase = sm._PhaseTracker()
     emitted: list[str] = []
 
-    await StageManager()._generate_complete_artifact(
-        adapter=factory(None),
-        route=_spec_generate_route(),
-        system_prompt="SYSTEM",
-        user_prompt="BASE SPEC PROMPT",
-        stage_type="spec",
-        deps={},
-        emit=emitted.append,
+    await _run_durable_generation_for_test(
         adapter_factory=factory,
+        emit=emitted.append,
         phase=phase,
     )
 
@@ -350,9 +470,7 @@ async def test_parallel_generation_streams_lead_chunk_live(monkeypatch) -> None:
     # its sections appear in the live text.
     streamed_text = "".join(live_tokens)
     assert "## Overview" in streamed_text
-    # The very first emit is the initial buffer-clear so the live tokens land on
-    # a clean canvas.
-    assert emitted[0] == json.dumps({"stream_reset": True})
+    assert not emitted[0].startswith("{")
 
 
 def test_chunk_user_prompt_wraps_prior_chunks_as_untrusted_context() -> None:
@@ -541,6 +659,9 @@ class _FakeRedis:
         for k in keys:
             self._store.pop(k, None)
 
+    async def zrem(self, *_args: Any) -> int:
+        return 1
+
 
 class _FakeResult:
     def __init__(self, value: Any = None, many: list = None) -> None:
@@ -636,6 +757,8 @@ class _MultiQueryDB:
         # real DB's identity map would (no response re-seeding needed).
         self._captured_stage: Stage | None = None
         self._captured_workspace: Workspace | None = None
+        self._generation_runs: list[StageGenerationRun] = []
+        self._generation_chunks: list[StageGenerationChunk] = []
         global _ACTIVE_MULTI_QUERY_DB
         _ACTIVE_MULTI_QUERY_DB = self
 
@@ -649,6 +772,54 @@ class _MultiQueryDB:
         pass
 
     async def execute(self, statement: Any) -> _FakeResult:
+        table_name = getattr(getattr(statement, "table", None), "name", None)
+        entity = _select_entity(statement)
+        rendered = str(statement)
+        params = statement.compile().params
+        if table_name == "stage_generation_chunks":
+            if statement.__class__.__name__ == "Insert":
+                run_id = params["generation_run_id"]
+                chunk_key = params["chunk_key"]
+                exists = any(
+                    row.generation_run_id == run_id and row.chunk_key == chunk_key
+                    for row in self._generation_chunks
+                )
+                if not exists:
+                    self._generation_chunks.append(
+                        StageGenerationChunk(
+                            id=uuid4(),
+                            generation_run_id=run_id,
+                            chunk_key=chunk_key,
+                            ordinal=params["ordinal"],
+                            content=params["content"],
+                            provider=params["provider"],
+                            model=params["model"],
+                            retry_count=params["retry_count"],
+                            created_at=datetime.now(UTC),
+                        )
+                    )
+                return _FakeResult()
+            if statement.__class__.__name__ == "Delete":
+                self._generation_chunks.clear()
+                return _FakeResult()
+        if (
+            table_name == "stage_generation_runs"
+            and statement.__class__.__name__ == "Update"
+        ):
+            if self._generation_runs:
+                run = self._generation_runs[-1]
+                for column, bind in statement._values.items():
+                    setattr(run, column.name, bind.value)
+            return _FakeResult()
+        if entity is StageGenerationRun:
+            return _FakeResult(
+                self._generation_runs[-1] if self._generation_runs else None
+            )
+        if entity is StageGenerationChunk:
+            if "count(stage_generation_chunks.id)" in rendered:
+                return _FakeResult(len(self._generation_chunks))
+            rows = sorted(self._generation_chunks, key=lambda row: row.ordinal)
+            return _FakeResult(many=rows)
         # The inline structural eval (issue #27 Phase 1) looks up the version's
         # existing EvalResult.  Model an empty eval_results table and, crucially,
         # do NOT consume a seeded response — the generate-flow tests order their
@@ -692,6 +863,8 @@ class _MultiQueryDB:
         if isinstance(instance, CreditLedger):
             if not hasattr(instance, "id") or instance.id is None:
                 instance.id = uuid4()
+        if isinstance(instance, StageGenerationRun):
+            self._generation_runs.append(instance)
         self.added.append(instance)
 
     async def flush(self) -> None:
@@ -731,6 +904,7 @@ def _patch_pipeline_session(monkeypatch):
     ``patch("database.AsyncSessionLocal", ...)``, which wins inside its block.
     """
     import database
+    from services.llm import provider_status
 
     global _ACTIVE_MULTI_QUERY_DB
     _ACTIVE_MULTI_QUERY_DB = None
@@ -744,6 +918,10 @@ def _patch_pipeline_session(monkeypatch):
         return _ACTIVE_MULTI_QUERY_DB
 
     monkeypatch.setattr(database, "AsyncSessionLocal", _factory)
+    # Routing tests must be deterministic and never depend on whichever local
+    # provider keys/circuit state happen to exist on the developer machine.
+    monkeypatch.setattr(provider_status, "is_provider_configured", lambda _p: True)
+    monkeypatch.setattr(provider_status, "can_route", lambda _p: True)
     yield
     _ACTIVE_MULTI_QUERY_DB = None
 
@@ -861,7 +1039,7 @@ async def test_generate_unavailable_platform_route_skips_credit_and_provider_cal
         ) as mock_build_prompt,
         patch("services.pipeline.stage_manager.get_llm") as mock_get_llm,
         patch(
-            "services.pipeline.stage_manager.resolve_platform_route",
+            "services.pipeline.stage_manager.resolve_platform_route_by_provider",
             side_effect=LLMRoutingError("unavailable"),
         ),
     ):
@@ -925,6 +1103,12 @@ def test_complexity_classifier_off_by_default_keeps_cheap_primary(monkeypatch) -
 
     monkeypatch.setattr(sm.settings, "core_cheap_primary", True)
     monkeypatch.setattr(sm.settings, "llm_provider_priority", "anthropic,openai,google")
+    monkeypatch.setattr(
+        "services.llm.provider_status.is_provider_configured", lambda _provider: True
+    )
+    monkeypatch.setattr(
+        "services.llm.provider_status.can_route", lambda _provider: True
+    )
 
     workspace = _make_workspace()
     workspace.provider = "anthropic"
@@ -945,6 +1129,12 @@ def test_complexity_classifier_raises_regulated_prompt_to_mid(monkeypatch) -> No
     monkeypatch.setattr(sm.settings, "core_cheap_primary", True)
     monkeypatch.setattr(sm.settings, "core_complexity_routing", True)
     monkeypatch.setattr(sm.settings, "llm_provider_priority", "anthropic,openai,google")
+    monkeypatch.setattr(
+        "services.llm.provider_status.is_provider_configured", lambda _provider: True
+    )
+    monkeypatch.setattr(
+        "services.llm.provider_status.can_route", lambda _provider: True
+    )
 
     workspace = _make_workspace()
     workspace.provider = "anthropic"
@@ -973,6 +1163,12 @@ def test_complexity_classifier_does_not_raise_for_google(monkeypatch) -> None:
 
     monkeypatch.setattr(sm.settings, "core_complexity_routing", True)
     monkeypatch.setattr(sm.settings, "llm_provider_priority", "google,anthropic,openai")
+    monkeypatch.setattr(
+        "services.llm.provider_status.is_provider_configured", lambda _provider: True
+    )
+    monkeypatch.setattr(
+        "services.llm.provider_status.can_route", lambda _provider: True
+    )
 
     workspace = _make_workspace()
     workspace.provider = "google"
@@ -1012,6 +1208,12 @@ def test_core_cheap_primary_revert_uses_mid_first(monkeypatch) -> None:
 
     monkeypatch.setattr(sm.settings, "core_cheap_primary", False)
     monkeypatch.setattr(sm.settings, "llm_provider_priority", "anthropic,openai,google")
+    monkeypatch.setattr(
+        "services.llm.provider_status.is_provider_configured", lambda _provider: True
+    )
+    monkeypatch.setattr(
+        "services.llm.provider_status.can_route", lambda _provider: True
+    )
 
     workspace = _make_workspace()
     workspace.provider = "anthropic"
@@ -1024,8 +1226,8 @@ def test_core_cheap_primary_revert_uses_mid_first(monkeypatch) -> None:
 
     fallback = sm._runtime_fallback_route(route)
     assert fallback is not None
-    assert fallback.provider == "openai"
-    assert fallback.model_tier == "mid"
+    assert fallback.provider == "anthropic"
+    assert fallback.model_tier == "strong"
 
 
 @pytest.mark.asyncio
@@ -1117,7 +1319,7 @@ async def test_generate_cache_hit_skips_credit_and_provider_call() -> None:
     workspace = _make_workspace([spec_stage])
     user = _make_user()
     redis = _FakeRedis()
-    redis._store["cache-key"] = "cached spec output"
+    redis._store["cache-key"] = _VALID_SPEC
     db = _MultiQueryDB([spec_stage, workspace, []])
     svc = StageManager(redis_client=redis)
 
@@ -1137,30 +1339,27 @@ async def test_generate_cache_hit_skips_credit_and_provider_call() -> None:
         ) as mock_deduct,
         patch("services.pipeline.stage_manager.get_llm") as mock_get_llm,
         patch("services.pipeline.stage_manager._schedule_stage_eval") as mock_schedule,
+        patch.object(svc, "_schedule_technology_check") as mock_technology,
     ):
         tokens = []
         async for token in svc.generate(spec_stage.id, user, db):
             tokens.append(token)
 
-    assert tokens == [
-        "cached spec output",
-        f'{{"done": true, "stage_id": "{spec_stage.id}"}}',
-    ]
-    assert spec_stage.content == "cached spec output"
+    assert "generation_started" in tokens[0]
+    assert _VALID_SPEC in tokens
+    assert any('"done": true' in token for token in tokens)
+    assert spec_stage.content == _VALID_SPEC
     assert spec_stage.current_version == 3
     assert spec_stage.status == "draft"
     versions = [item for item in db.added if isinstance(item, StageVersion)]
     assert len(versions) == 1
     version = versions[0]
-    assert version.content == "cached spec output"
-    eval_results = [item for item in db.added if isinstance(item, EvalResult)]
-    assert len(eval_results) == 1
-    assert eval_results[0].stage_version_id == version.id
+    assert version.content == _VALID_SPEC
     mock_schedule.assert_called_once()
     scheduled = mock_schedule.call_args.kwargs
     assert scheduled["version_id"] == version.id
     assert scheduled["stage_type"] == "spec"
-    assert scheduled["content"] == "cached spec output"
+    assert scheduled["content"] == _VALID_SPEC
     assert scheduled["eval_context"] == ""
     assert scheduled["workspace_id"] == workspace.id
     assert scheduled["harness_content"] is None
@@ -1168,16 +1367,11 @@ async def test_generate_cache_hit_skips_credit_and_provider_call() -> None:
     assert scheduled["generation_model"]
     mock_deduct.assert_not_called()
     mock_get_llm.assert_not_called()
+    mock_technology.assert_called_once()
 
 
 @pytest.mark.asyncio
-async def test_regenerate_bypasses_cache_and_uses_regenerate_credit_reason(
-    monkeypatch,
-) -> None:
-    # Asserts sequential-path stream-call counts; pin to the sequential path.
-    monkeypatch.setattr(
-        "services.pipeline.stage_manager.settings.pipeline_parallel_chunks", False
-    )
+async def test_regenerate_bypasses_cache_and_uses_regenerate_credit_reason() -> None:
     workspace_id = uuid4()
     spec_stage = _make_stage(
         workspace_id,
@@ -1241,7 +1435,7 @@ async def test_regenerate_bypasses_cache_and_uses_regenerate_credit_reason(
     assert _streamed_artifact(tokens) == _VALID_SPEC
     assert spec_stage.content == _VALID_SPEC
     assert spec_stage.current_version == 3
-    mock_get_llm.assert_called_once()
+    assert mock_get_llm.call_count == 3
     mock_deduct.assert_awaited_once_with(db, user.id, 10, "regenerate")
     mock_set_cache.assert_not_awaited()
 
@@ -1354,19 +1548,21 @@ async def test_research_enabled_generation_never_reads_or_writes_output_cache() 
 
 
 @pytest.mark.asyncio
-async def test_generate_provider_limit_stop_repairs_without_double_charging() -> None:
+async def test_generate_provider_limit_stop_saves_partial_and_refunds() -> None:
     workspace_id = uuid4()
     spec_stage = _make_stage(workspace_id, "spec", status="draft")
     workspace = _make_workspace([spec_stage])
     user = _make_user()
     deduction = CreditLedger(id=uuid4(), user_id=user.id, amount=-10, reason="generate")
     db = _MultiQueryDB([spec_stage, workspace, [], deduction])
-    adapter = _CompletionAwareAdapter(
-        [
-            (None, True),
-            (None, False),
-        ]
-    )
+    attempts = iter([True, False])
+    adapters: list[_CompletionAwareAdapter] = []
+
+    def adapter_factory(*_args, **_kwargs):
+        adapter = _CompletionAwareAdapter([(None, next(attempts))])
+        adapters.append(adapter)
+        return adapter
+
     svc = StageManager(redis_client=_FakeRedis())
 
     with (
@@ -1378,49 +1574,43 @@ async def test_generate_provider_limit_stop_repairs_without_double_charging() ->
         patch(
             "services.pipeline.stage_manager.credit_service.refund",
             new_callable=AsyncMock,
+            return_value=10,
         ) as mock_refund,
         patch(
             "services.pipeline.stage_manager.build_prompt",
             new_callable=AsyncMock,
             return_value=("sys", "user", "0"),
         ),
-        patch("services.pipeline.stage_manager.get_llm", return_value=adapter),
+        patch("services.pipeline.stage_manager.get_llm", side_effect=adapter_factory),
     ):
         tokens = [token async for token in svc.generate(spec_stage.id, user, db)]
 
     mock_deduct.assert_awaited_once_with(db, user.id, 10, "generate")
-    mock_refund.assert_not_awaited()
-    # chunk 1 limit-stop, chunk 1 repair, then chunks 2 and 3.
-    assert len(adapter.stream_calls) == 4
-    # The limit-stop repair retries with an escalated output budget.
-    assert adapter.stream_calls[1][2] > adapter.stream_calls[0][2]
-    assert spec_stage.content == _VALID_SPEC
-    assert spec_stage.quality_gate_status == "clear"
-    assert _streamed_artifact(tokens) == _VALID_SPEC
-    assert any("done" in token for token in tokens)
+    mock_refund.assert_awaited_once_with(db, deduction.id, user_id=user.id)
+    # The two independent first-wave chunks are each called once. A token-limit
+    # stop is terminal for its chunk and never triggers whole-stage repair.
+    assert sum(len(adapter.stream_calls) for adapter in adapters) == 2
+    assert spec_stage.status == "draft"
+    assert spec_stage.quality_gate_status == "blocked"
+    assert spec_stage.quality_gate_kind == "incomplete_output"
+    assert any("generation_terminal" in token for token in tokens)
 
 
 @pytest.mark.asyncio
-async def test_generate_provider_limit_stop_failed_repair_blocks_and_refunds(
-    monkeypatch,
-) -> None:
-    # Sequential-path mechanics (exact per-chunk stream-call count); the parallel
-    # path's limit-stop block+refund contract is covered separately.
-    monkeypatch.setattr(
-        "services.pipeline.stage_manager.settings.pipeline_parallel_chunks", False
-    )
+async def test_generate_parallel_limit_stops_terminalize_once() -> None:
     workspace_id = uuid4()
     spec_stage = _make_stage(workspace_id, "spec", status="draft")
     workspace = _make_workspace([spec_stage])
     user = _make_user()
     deduction = CreditLedger(id=uuid4(), user_id=user.id, amount=-10, reason="generate")
     db = _MultiQueryDB([spec_stage, workspace, [], deduction])
-    adapter = _CompletionAwareAdapter(
-        [
-            (None, True),
-            (None, True),
-        ]
-    )
+    adapters: list[_CompletionAwareAdapter] = []
+
+    def adapter_factory(*_args, **_kwargs):
+        adapter = _CompletionAwareAdapter([(None, True)])
+        adapters.append(adapter)
+        return adapter
+
     svc = StageManager(redis_client=_FakeRedis())
 
     with (
@@ -1432,6 +1622,7 @@ async def test_generate_provider_limit_stop_failed_repair_blocks_and_refunds(
         patch(
             "services.pipeline.stage_manager.credit_service.refund",
             new_callable=AsyncMock,
+            return_value=10,
         ) as mock_refund,
         patch(
             "services.pipeline.stage_manager.build_prompt",
@@ -1442,27 +1633,22 @@ async def test_generate_provider_limit_stop_failed_repair_blocks_and_refunds(
             "services.pipeline.stage_manager.set_cached_generation",
             new_callable=AsyncMock,
         ) as mock_set_cache,
-        patch("services.pipeline.stage_manager.get_llm", return_value=adapter),
+        patch("services.pipeline.stage_manager.get_llm", side_effect=adapter_factory),
     ):
         tokens = [token async for token in svc.generate(spec_stage.id, user, db)]
 
-    mock_refund.assert_awaited_once_with(db, deduction.id)
+    mock_refund.assert_awaited_once_with(db, deduction.id, user_id=user.id)
     mock_set_cache.assert_not_awaited()
-    assert len(adapter.stream_calls) == 2
+    assert sum(len(adapter.stream_calls) for adapter in adapters) == 2
     assert spec_stage.status == "draft"
     assert spec_stage.quality_gate_status == "blocked"
     assert spec_stage.quality_gate_kind == "incomplete_output"
-    assert (
-        spec_stage.quality_gate_payload["override_allowed"] is True
-    )  # issue #34: overridable
+    assert spec_stage.quality_gate["recovery"]["overridable"] is True
     # The generation-time block refunds, so the recovery contract must record it.
     assert spec_stage.quality_gate_payload["refunded_prior_attempt"] is True
     assert spec_stage.quality_gate["recovery"]["refunded_prior_attempt"] is True
-    assert spec_stage.quality_gate_payload["repair_attempted"] is True
-    assert spec_stage.quality_gate_payload["reasons"][0]["code"] == (
-        "provider_stopped_by_limit"
-    )
-    assert any("quality_gate_failed" in token for token in tokens)
+    assert db._generation_runs[-1].partial_saved is True
+    assert any("generation_terminal" in token for token in tokens)
 
 
 # --- Quality-gate refund bleed: depth findings are advisory, never refunded ---
@@ -1533,6 +1719,7 @@ async def test_generate_missing_sentinel_is_delivered_not_refunded() -> None:
         patch(
             "services.pipeline.stage_manager.credit_service.refund",
             new_callable=AsyncMock,
+            return_value=10,
         ) as mock_refund,
         patch(
             "services.pipeline.stage_manager.build_prompt",
@@ -1576,6 +1763,7 @@ async def test_generate_mermaid_user_flow_diagram_is_not_refunded() -> None:
         patch(
             "services.pipeline.stage_manager.credit_service.refund",
             new_callable=AsyncMock,
+            return_value=10,
         ) as mock_refund,
         patch(
             "services.pipeline.stage_manager.build_prompt",
@@ -1672,13 +1860,10 @@ class _AlwaysLimitStopAdapter:
 
 
 @pytest.mark.asyncio
-async def test_parallel_provider_limit_stop_blocks_and_refunds(monkeypatch) -> None:
+async def test_parallel_provider_limit_stop_blocks_and_refunds() -> None:
     # The block+refund contract must hold under the now-default parallel path:
     # every concurrent chunk limit-stops, its one funded repair re-stops, and the
     # assembled failure refunds the deduction and blocks the stage.
-    monkeypatch.setattr(
-        "services.pipeline.stage_manager.settings.pipeline_parallel_chunks", True
-    )
     workspace_id = uuid4()
     spec_stage = _make_stage(workspace_id, "spec", status="draft")
     workspace = _make_workspace([spec_stage])
@@ -1696,6 +1881,7 @@ async def test_parallel_provider_limit_stop_blocks_and_refunds(monkeypatch) -> N
         patch(
             "services.pipeline.stage_manager.credit_service.refund",
             new_callable=AsyncMock,
+            return_value=10,
         ) as mock_refund,
         patch(
             "services.pipeline.stage_manager.build_prompt",
@@ -1713,349 +1899,17 @@ async def test_parallel_provider_limit_stop_blocks_and_refunds(monkeypatch) -> N
     ):
         tokens = [token async for token in svc.generate(spec_stage.id, user, db)]
 
-    mock_refund.assert_awaited_once_with(db, deduction.id)
+    mock_refund.assert_awaited_once_with(db, deduction.id, user_id=user.id)
     mock_set_cache.assert_not_awaited()
     assert spec_stage.status == "draft"
     assert spec_stage.quality_gate_status == "blocked"
     assert spec_stage.quality_gate_kind == "incomplete_output"
-    assert spec_stage.quality_gate_payload["repair_attempted"] is True
-    assert any("quality_gate_failed" in token for token in tokens)
+    assert db._generation_runs[-1].partial_saved is True
+    assert any("generation_terminal" in token for token in tokens)
 
 
 @pytest.mark.asyncio
-async def test_parallel_doomed_limit_stop_skips_repair_when_flag_on(
-    monkeypatch,
-) -> None:
-    from services.observability import PIPELINE_COMPLETION_REPAIRS
-    from services.pipeline import stage_manager as sm
-
-    monkeypatch.setattr(sm.settings, "pipeline_parallel_chunks", True)
-    monkeypatch.setattr(sm.settings, "pipeline_early_bail_unrecoverable_chunk", True)
-    monkeypatch.setattr(sm, "model_max_output_tokens", lambda provider, model: 49152)
-
-    before = PIPELINE_COMPLETION_REPAIRS.labels(
-        stage_type="spec", provider="anthropic", outcome="skipped_at_ceiling"
-    )._value.get()
-
-    workspace_id = uuid4()
-    spec_stage = _make_stage(workspace_id, "spec", status="draft")
-    workspace = _make_workspace([spec_stage])
-    user = _make_user()
-    deduction = CreditLedger(id=uuid4(), user_id=user.id, amount=-10, reason="generate")
-    db = _MultiQueryDB([spec_stage, workspace, [], deduction])
-    svc = StageManager(redis_client=_FakeRedis())
-    created: list[_AlwaysLimitStopAdapter] = []
-
-    def _new_adapter(provider, model, **kwargs):
-        adapter = _AlwaysLimitStopAdapter()
-        created.append(adapter)
-        return adapter
-
-    with (
-        patch(
-            "services.pipeline.stage_manager.credit_service.deduct",
-            new_callable=AsyncMock,
-            return_value=deduction,
-        ),
-        patch(
-            "services.pipeline.stage_manager.credit_service.refund",
-            new_callable=AsyncMock,
-        ) as mock_refund,
-        patch(
-            "services.pipeline.stage_manager.build_prompt",
-            new_callable=AsyncMock,
-            return_value=("sys", "user", "0"),
-        ),
-        patch(
-            "services.pipeline.stage_manager.set_cached_generation",
-            new_callable=AsyncMock,
-        ) as mock_set_cache,
-        patch("services.pipeline.stage_manager.get_llm", side_effect=_new_adapter),
-    ):
-        tokens = [token async for token in svc.generate(spec_stage.id, user, db)]
-
-    mock_refund.assert_awaited_once_with(db, deduction.id)
-    mock_set_cache.assert_not_awaited()
-    # The ignored pre-built adapter plus the two independent wave-1 chunk adapters
-    # were created. Neither wave-1 chunk spent a repair call, and the dependent wave
-    # was never started.
-    assert len(created) == 3
-    assert spec_stage.status == "draft"
-    assert spec_stage.quality_gate_status == "blocked"
-    assert spec_stage.quality_gate_kind == "incomplete_output"
-    assert spec_stage.quality_gate_payload["repair_attempted"] is False
-    assert any("quality_gate_failed" in token for token in tokens)
-
-    after = PIPELINE_COMPLETION_REPAIRS.labels(
-        stage_type="spec", provider="anthropic", outcome="skipped_at_ceiling"
-    )._value.get()
-    assert after >= before + 1
-
-
-def _route_for_doom_test(model: str = "claude-haiku-4-5-20251001"):
-    from services.llm.routing import LLMRoute
-
-    return LLMRoute(
-        provider="anthropic",
-        model=model,
-        model_tier="small",
-        operation="generate_spec",
-        latency_class="interactive",
-        cross_provider_fallback=False,
-        reason="test",
-        requested_tier="small",
-        fallback_tier=None,
-        selection_reason="test",
-    )
-
-
-def _limit_stop_issue():
-    from services.pipeline.artifact_validator import CompletenessIssue
-
-    return CompletenessIssue(
-        code="provider_stopped_by_limit",
-        detail="The provider stopped because the output token limit was reached.",
-        reference="max_tokens",
-    )
-
-
-def _non_limit_issue():
-    from services.pipeline.artifact_validator import CompletenessIssue
-
-    return CompletenessIssue(
-        code="missing_completion_sentinel",
-        detail="The completion sentinel was absent.",
-    )
-
-
-@pytest.mark.parametrize(
-    ("budget", "ceiling", "issues_fn", "expected"),
-    [
-        # Phase 4 fires when the repair's DOUBLED budget would already be clamped
-        # to the model ceiling (its final escalation, no headroom left). These
-        # rows patch an explicit ceiling to exercise the pure logic; with the
-        # live 64K core-gen ceilings (all providers) the production budget
-        # (49152) doubles to 98304 → clamps to 64000 > 49152, so production is
-        # no longer doomed on any adapter.
-        # Budget already clamped at the ceiling.
-        (49152, 49152, _limit_stop_issue, True),
-        # Already at the ceiling.
-        (32768, 32768, _limit_stop_issue, True),
-        # Boundary: 2 × 16384 == 32768 == ceiling.
-        (16384, 32768, _limit_stop_issue, True),
-        # Sub-ceiling: the doubling lands strictly below the ceiling (2×16000 =
-        # 32000 < 32768), so the repair still gets a strictly larger budget.
-        (16000, 32768, _limit_stop_issue, False),
-        (8000, 32768, _limit_stop_issue, False),
-        # Non-limit completeness failures: a same-budget repair genuinely helps.
-        (49152, 49152, _non_limit_issue, False),
-    ],
-)
-def test_limit_stop_repair_is_doomed_matrix(
-    monkeypatch, budget, ceiling, issues_fn, expected
-) -> None:
-    from services.pipeline import stage_manager as sm
-
-    monkeypatch.setattr(sm, "model_max_output_tokens", lambda provider, model: ceiling)
-    assert (
-        sm._limit_stop_repair_is_doomed(_route_for_doom_test(), budget, [issues_fn()])
-        is expected
-    )
-
-
-def test_limit_stop_repair_is_not_doomed_when_ceiling_unknown(monkeypatch) -> None:
-    # An uncatalogued model gives no ceiling — we cannot prove the budget is
-    # maxed, so we must NOT bail: the repair and its doubling get to try.
-    from services.pipeline import stage_manager as sm
-
-    def _raise(provider, model):
-        raise ValueError("unknown model")
-
-    monkeypatch.setattr(sm, "model_max_output_tokens", _raise)
-    assert (
-        sm._limit_stop_repair_is_doomed(
-            _route_for_doom_test("mystery-model"), 999999, [_limit_stop_issue()]
-        )
-        is False
-    )
-
-
-@pytest.mark.asyncio
-async def test_doomed_limit_stop_still_repairs_when_flag_off(monkeypatch) -> None:
-    # The guardrail proof: with the Phase 4 flag OFF the chunk loop is
-    # byte-identical to today — a limit-stop STILL spends a funded repair (which
-    # re-stops and blocks), exactly as before. The flag-off path never consults
-    # _limit_stop_repair_is_doomed, so it always repairs regardless of the
-    # ceiling — we patch one low enough to force the repair to re-stop.
-    from services.pipeline import stage_manager as sm
-
-    monkeypatch.setattr(sm.settings, "pipeline_early_bail_unrecoverable_chunk", False)
-    # Per-chunk early-bail is sequential-path logic; pin to the sequential path.
-    monkeypatch.setattr(sm.settings, "pipeline_parallel_chunks", False)
-    monkeypatch.setattr(sm, "model_max_output_tokens", lambda provider, model: 49152)
-
-    workspace_id = uuid4()
-    spec_stage = _make_stage(workspace_id, "spec", status="draft")
-    workspace = _make_workspace([spec_stage])
-    user = _make_user()
-    deduction = CreditLedger(id=uuid4(), user_id=user.id, amount=-10, reason="generate")
-    db = _MultiQueryDB([spec_stage, workspace, [], deduction])
-    adapter = _CompletionAwareAdapter([(None, True), (None, True)])
-    svc = StageManager(redis_client=_FakeRedis())
-
-    with (
-        patch(
-            "services.pipeline.stage_manager.credit_service.deduct",
-            new_callable=AsyncMock,
-            return_value=deduction,
-        ),
-        patch(
-            "services.pipeline.stage_manager.credit_service.refund",
-            new_callable=AsyncMock,
-        ),
-        patch(
-            "services.pipeline.stage_manager.build_prompt",
-            new_callable=AsyncMock,
-            return_value=("sys", "user", "0"),
-        ),
-        patch("services.pipeline.stage_manager.get_llm", return_value=adapter),
-    ):
-        async for _ in svc.generate(spec_stage.id, user, db):
-            pass
-
-    # original chunk + funded repair = 2 calls; the repair was attempted.
-    assert len(adapter.stream_calls) == 2
-    assert spec_stage.quality_gate_status == "blocked"
-    assert spec_stage.quality_gate_payload["repair_attempted"] is True
-
-
-@pytest.mark.asyncio
-async def test_doomed_limit_stop_skips_repair_when_flag_on(
-    monkeypatch,
-) -> None:
-    # The flag-on bail skips the repair when the doubling has no headroom left.
-    # The live 64K core-gen ceilings now give the production budget (49152) a
-    # real doubling step, so we patch the ceiling down to the budget to construct
-    # the doomed (ceiling-capped) case the bail is designed to short-circuit.
-    from services.observability import PIPELINE_COMPLETION_REPAIRS
-    from services.pipeline import stage_manager as sm
-
-    monkeypatch.setattr(sm.settings, "pipeline_early_bail_unrecoverable_chunk", True)
-    # Per-chunk early-bail is sequential-path logic; pin to the sequential path.
-    monkeypatch.setattr(sm.settings, "pipeline_parallel_chunks", False)
-    monkeypatch.setattr(sm, "model_max_output_tokens", lambda provider, model: 49152)
-
-    before = PIPELINE_COMPLETION_REPAIRS.labels(
-        stage_type="spec", provider="anthropic", outcome="skipped_at_ceiling"
-    )._value.get()
-
-    workspace_id = uuid4()
-    spec_stage = _make_stage(workspace_id, "spec", status="draft")
-    workspace = _make_workspace([spec_stage])
-    user = _make_user()
-    deduction = CreditLedger(id=uuid4(), user_id=user.id, amount=-10, reason="generate")
-    db = _MultiQueryDB([spec_stage, workspace, [], deduction])
-    # A single limit-stop is enough: the repair is never spent.
-    adapter = _CompletionAwareAdapter([(None, True)])
-    svc = StageManager(redis_client=_FakeRedis())
-
-    with (
-        patch(
-            "services.pipeline.stage_manager.credit_service.deduct",
-            new_callable=AsyncMock,
-            return_value=deduction,
-        ),
-        patch(
-            "services.pipeline.stage_manager.credit_service.refund",
-            new_callable=AsyncMock,
-        ) as mock_refund,
-        patch(
-            "services.pipeline.stage_manager.set_cached_generation",
-            new_callable=AsyncMock,
-        ) as mock_set_cache,
-        patch(
-            "services.pipeline.stage_manager.build_prompt",
-            new_callable=AsyncMock,
-            return_value=("sys", "user", "0"),
-        ),
-        patch("services.pipeline.stage_manager.get_llm", return_value=adapter),
-    ):
-        tokens = [token async for token in svc.generate(spec_stage.id, user, db)]
-
-    # The doomed repair is skipped: exactly one provider call, no second stream.
-    assert len(adapter.stream_calls) == 1
-    # Still blocked + refunded — recovery contract identical to the repair path.
-    mock_refund.assert_awaited_once_with(db, deduction.id)
-    mock_set_cache.assert_not_awaited()
-    assert spec_stage.quality_gate_status == "blocked"
-    assert spec_stage.quality_gate_kind == "incomplete_output"
-    assert (
-        spec_stage.quality_gate_payload["override_allowed"] is True
-    )  # issue #34: overridable
-    assert spec_stage.quality_gate_payload["refunded_prior_attempt"] is True
-    # No funded repair was spent, and the payload says so honestly.
-    assert spec_stage.quality_gate_payload["repair_attempted"] is False
-    assert spec_stage.quality_gate_payload["reasons"][0]["code"] == (
-        "provider_stopped_by_limit"
-    )
-    assert any("quality_gate_failed" in token for token in tokens)
-
-    after = PIPELINE_COMPLETION_REPAIRS.labels(
-        stage_type="spec", provider="anthropic", outcome="skipped_at_ceiling"
-    )._value.get()
-    assert after == before + 1
-
-
-@pytest.mark.asyncio
-async def test_sub_ceiling_limit_stop_still_repairs_when_flag_on(monkeypatch) -> None:
-    # Flag ON but the budget is below the ceiling: the repair's doubling CAN grow
-    # the budget, so the bail must NOT fire — the funded repair runs and recovers.
-    from services.pipeline import stage_manager as sm
-
-    monkeypatch.setattr(sm.settings, "pipeline_early_bail_unrecoverable_chunk", True)
-    monkeypatch.setattr(
-        sm, "model_max_output_tokens", lambda provider, model: 10_000_000
-    )
-
-    workspace_id = uuid4()
-    spec_stage = _make_stage(workspace_id, "spec", status="draft")
-    workspace = _make_workspace([spec_stage])
-    user = _make_user()
-    deduction = CreditLedger(id=uuid4(), user_id=user.id, amount=-10, reason="generate")
-    db = _MultiQueryDB([spec_stage, workspace, [], deduction])
-    adapter = _CompletionAwareAdapter([(None, True), (None, False)])
-    svc = StageManager(redis_client=_FakeRedis())
-
-    with (
-        patch(
-            "services.pipeline.stage_manager.credit_service.deduct",
-            new_callable=AsyncMock,
-            return_value=deduction,
-        ),
-        patch(
-            "services.pipeline.stage_manager.credit_service.refund",
-            new_callable=AsyncMock,
-        ) as mock_refund,
-        patch(
-            "services.pipeline.stage_manager.build_prompt",
-            new_callable=AsyncMock,
-            return_value=("sys", "user", "0"),
-        ),
-        patch("services.pipeline.stage_manager.get_llm", return_value=adapter),
-    ):
-        tokens = [token async for token in svc.generate(spec_stage.id, user, db)]
-
-    mock_refund.assert_not_awaited()
-    # chunk 1 limit-stop, chunk 1 repair (doubled budget), then chunks 2 and 3.
-    assert len(adapter.stream_calls) == 4
-    assert adapter.stream_calls[1][2] > adapter.stream_calls[0][2]
-    assert spec_stage.content == _VALID_SPEC
-    assert spec_stage.quality_gate_status == "clear"
-    assert _streamed_artifact(tokens) == _VALID_SPEC
-
-
-@pytest.mark.asyncio
-async def test_generate_unsafe_plan_repairs_without_double_charging() -> None:
+async def test_generate_delivers_plan_before_technology_check() -> None:
     workspace_id = uuid4()
     spec_stage = _make_stage(
         workspace_id,
@@ -2091,83 +1945,58 @@ async def test_generate_unsafe_plan_repairs_without_double_charging() -> None:
             return_value=("sys", "user", "0"),
         ),
         patch("services.pipeline.stage_manager.get_llm", return_value=adapter),
+        patch.object(svc, "_schedule_technology_check") as mock_technology,
     ):
         tokens = [token async for token in svc.generate(plan_stage.id, user, db)]
 
     mock_deduct.assert_awaited_once_with(db, user.id, 10, "generate")
     mock_refund.assert_not_awaited()
     assert len(adapter.stream_calls) == 4
-    assert len(adapter.complete_calls) == 1
-    assert plan_stage.content == _SAFE_PLAN
-    assert plan_stage.quality_gate_status == "clear"
-    assert _SAFE_PLAN in tokens
+    assert len(adapter.complete_calls) == 0
+    assert plan_stage.content == _UNSAFE_PLAN
+    assert plan_stage.quality_gate_status == "checking"
+    assert _UNSAFE_PLAN in tokens
+    assert any('"done": true' in token for token in tokens)
+    mock_technology.assert_called_once()
 
 
 @pytest.mark.asyncio
-async def test_generate_unsafe_plan_failed_repair_blocks_no_refund() -> None:
-    workspace_id = uuid4()
-    spec_stage = _make_stage(
-        workspace_id,
-        "spec",
-        status="finalised",
-        content=_VALID_SPEC,
-        version=1,
-    )
-    plan_stage = _make_stage(workspace_id, "plan", status="draft")
-    workspace = _make_workspace([spec_stage, plan_stage])
-    user = _make_user()
-    deduction = CreditLedger(id=uuid4(), user_id=user.id, amount=-10, reason="generate")
-    db = _MultiQueryDB([plan_stage, workspace, [spec_stage], deduction])
-    adapter = _CompletionAwareAdapter(
-        [
-            (None, False),
-            (None, False),
-            (None, False),
-            (None, False),
-            (_UNSAFE_PLAN_FINAL_STREAM, False),
-        ],
-        stream_payload_fn=_unsafe_plan_stream_payload,
-    )
+async def test_background_technology_check_blocks_without_regeneration() -> None:
+    plan_stage = _make_stage(stage_type="plan", status="draft")
+    _MultiQueryDB([plan_stage])
     svc = StageManager(redis_client=_FakeRedis())
+    plan_stage.content = _UNSAFE_PLAN
+    plan_stage.current_version = 1
+    plan_stage.quality_gate_status = "checking"
+    plan_stage.quality_gate_kind = "technology_safety"
+    plan_stage.quality_gate_version = 1
+    findings = await stage_manager_module.analyze_technology_safety(
+        "plan", _UNSAFE_PLAN, {}, redis=None
+    )
 
-    with (
-        patch(
-            "services.pipeline.stage_manager.credit_service.deduct",
-            new_callable=AsyncMock,
-            return_value=deduction,
-        ),
-        patch(
-            "services.pipeline.stage_manager.credit_service.refund",
-            new_callable=AsyncMock,
-        ) as mock_refund,
-        patch(
-            "services.pipeline.stage_manager.build_prompt",
-            new_callable=AsyncMock,
-            return_value=("sys", "user", "0"),
-        ),
-        patch(
-            "services.pipeline.stage_manager.set_cached_generation",
-            new_callable=AsyncMock,
-        ) as mock_set_cache,
-        patch("services.pipeline.stage_manager.get_llm", return_value=adapter),
-    ):
-        tokens = [token async for token in svc.generate(plan_stage.id, user, db)]
+    with patch(
+        "services.pipeline.stage_manager.analyze_technology_safety",
+        new_callable=AsyncMock,
+        return_value=findings,
+    ) as mock_analyze:
+        await svc._dispatch_technology_check(
+            stage_id=plan_stage.id,
+            version=1,
+            stage_type="plan",
+            content=_UNSAFE_PLAN,
+            deps={"spec": _VALID_SPEC},
+        )
 
-    # Issue #34: a tech-safety block is overridable (artifact delivered), so the
-    # credit stands — no refund, unlike incomplete_output.
-    mock_refund.assert_not_awaited()
-    mock_set_cache.assert_not_awaited()
+    mock_analyze.assert_awaited_once()
     assert plan_stage.status == "draft"
     assert plan_stage.quality_gate_status == "blocked"
     assert plan_stage.quality_gate_kind == "technology_safety"
-    assert plan_stage.quality_gate_payload["override_allowed"] is True
+    assert plan_stage.quality_gate["recovery"]["overridable"] is True
     assert plan_stage.quality_gate_payload["refunded_prior_attempt"] is False
-    assert plan_stage.quality_gate_payload["repair_attempted"] is True
-    assert plan_stage.quality_gate_payload["reasons"][0]["code"] in {
+    assert plan_stage.quality_gate_payload["findings"][0]["code"] in {
         "runtime_eol",
         "deprecated_model_family",
     }
-    assert any("quality_gate_failed" in token for token in tokens)
 
 
 @pytest.mark.asyncio
@@ -2721,6 +2550,7 @@ async def test_generate_provider_error_refunds_credits() -> None:
         patch(
             "services.pipeline.stage_manager.credit_service.refund",
             new_callable=AsyncMock,
+            return_value=10,
         ) as mock_refund,
         patch(
             "services.pipeline.stage_manager.build_prompt",
@@ -2733,11 +2563,11 @@ async def test_generate_provider_error_refunds_credits() -> None:
         mock_adapter.stream = failing_stream
         mock_get_llm.return_value = mock_adapter
 
-        with pytest.raises(ProviderError):
-            async for _ in svc.generate(spec_stage.id, user, db):
-                pass
+        tokens = [token async for token in svc.generate(spec_stage.id, user, db)]
 
-    mock_refund.assert_called_once()
+    mock_refund.assert_awaited_once_with(db, deduction.id, user_id=user.id)
+    assert db._generation_runs[-1].status == "failed"
+    assert any('"status": "failed"' in token for token in tokens)
 
 
 @pytest.mark.asyncio
@@ -2819,33 +2649,25 @@ async def test_finalise_accepts_overridden_incomplete_output() -> None:
 
 
 @pytest.mark.asyncio
-async def test_finalise_rejects_manual_unsafe_technology_choices() -> None:
+async def test_finalise_rejects_bounded_technology_checking_window() -> None:
     plan_stage = _make_stage(
         stage_type="plan",
         status="draft",
         content=_UNSAFE_PLAN,
         version=3,
     )
+    plan_stage.quality_gate_status = "checking"
+    plan_stage.quality_gate_kind = "technology_safety"
+    plan_stage.quality_gate_version = 3
 
     svc = StageManager(redis_client=_FakeRedis())
     db = _MultiQueryDB([plan_stage])
     user = _make_user()
 
-    with pytest.raises(QualityGateBlockedError) as excinfo:
+    with pytest.raises(ValueError, match="verification is still in progress"):
         await svc.finalise(plan_stage.id, user, db)
 
-    exc = excinfo.value
-    assert "unsafe technology choices" in str(exc)
-    assert exc.kind == "technology_safety"
-    # Issue #34: technology_safety is overridable now; finalise charges nothing,
-    # so the contract still must not claim a refund.
-    assert exc.recovery["overridable"] is True
-    assert exc.recovery["refunded_prior_attempt"] is False
-    assert exc.message == exc.recovery["message"]
-    assert plan_stage.quality_gate_status == "blocked"
-    assert plan_stage.quality_gate_kind == "technology_safety"
-    assert plan_stage.quality_gate_payload["override_allowed"] is True
-    assert plan_stage.quality_gate_payload["refunded_prior_attempt"] is False
+    assert plan_stage.status == "draft"
 
 
 @pytest.mark.asyncio
@@ -3127,7 +2949,7 @@ async def test_rollback_in_place_does_not_stale_downstream() -> None:
 
 
 @pytest.mark.asyncio
-async def test_rollback_to_older_version_clears_advisory_gate() -> None:
+async def test_rollback_to_older_version_starts_fresh_technology_check() -> None:
     # A genuine rollback to an *older* version changes the content, so advisory
     # findings pinned to the newer version are stale and get cleared.
     workspace_id = uuid4()
@@ -3156,10 +2978,13 @@ async def test_rollback_to_older_version_clears_advisory_gate() -> None:
     db = _MultiQueryDB([spec_stage, version, []])
     user = _make_user()
 
-    updated = await svc.rollback(spec_stage.id, 1, user, db)
+    with patch.object(svc, "_schedule_technology_check") as mock_technology:
+        updated = await svc.rollback(spec_stage.id, 1, user, db)
 
     assert updated.status == "draft"
-    assert updated.quality_gate_status == "clear"
+    assert updated.quality_gate_status == "checking"
+    assert updated.quality_gate_version == updated.current_version
+    mock_technology.assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -3279,7 +3104,7 @@ async def test_generate_on_finalised_stage_raises_plain_state_error() -> None:
 
 
 @pytest.mark.asyncio
-async def test_generate_stamps_generation_started_at_and_action() -> None:
+async def test_generate_run_retains_start_and_action_after_stage_fields_clear() -> None:
     # RC-1: generate() stamps a write-once generation_started_at (the honest
     # elapsed baseline) and generation_action (the reconnect operation label) at
     # the in_progress commit. Both survive the successful persist.
@@ -3318,8 +3143,12 @@ async def test_generate_stamps_generation_started_at_and_action() -> None:
         async for _ in svc.generate(spec_stage.id, user, db):
             pass
 
-    assert spec_stage.generation_action == "generate"
-    assert spec_stage.generation_started_at is not None
+    assert spec_stage.generation_action is None
+    assert spec_stage.generation_started_at is None
+    run = db._generation_runs[-1]
+    assert run.action == "generate"
+    assert run.started_at is not None
+    assert run.status == "succeeded"
 
 
 @pytest.mark.asyncio
@@ -3813,11 +3642,9 @@ async def test_refine_cache_key_and_telemetry_use_refine_prompt_version() -> Non
     generation prompt also bumped, and a generation-prompt bump spuriously
     invalidated every cached refine.
     """
+    from prompts.base import STAGE_PROMPT_VERSIONS
     from schemas.stage import RefineRequest
-    from services.pipeline.stage_manager import (
-        REFINE_PROMPT_VERSION,
-        STAGE_PROMPT_VERSIONS,
-    )
+    from services.pipeline.stage_manager import REFINE_PROMPT_VERSION
 
     workspace_id = uuid4()
     stage = _make_stage(workspace_id, "spec", status="draft", content="hello world")
@@ -4270,7 +4097,6 @@ async def test_refine_unexpected_failure_durably_refunds_credits() -> None:
 
 @pytest.mark.asyncio
 async def test_generate_stream_timeout_refunds_credits() -> None:
-    from services.llm.base import ProviderTimeoutError
     from services.pipeline import stage_manager as stage_manager_module
 
     workspace_id = uuid4()
@@ -4288,7 +4114,7 @@ async def test_generate_stream_timeout_refunds_credits() -> None:
     with (
         patch.object(
             stage_manager_module.settings,
-            "llm_stream_idle_timeout_seconds",
+            "stage_provider_idle_timeout_seconds",
             0.001,
         ),
         patch(
@@ -4299,6 +4125,7 @@ async def test_generate_stream_timeout_refunds_credits() -> None:
         patch(
             "services.pipeline.stage_manager.credit_service.refund",
             new_callable=AsyncMock,
+            return_value=10,
         ) as mock_refund,
         patch("services.pipeline.stage_manager.get_llm") as mock_get_llm,
     ):
@@ -4306,12 +4133,12 @@ async def test_generate_stream_timeout_refunds_credits() -> None:
         mock_adapter.stream = hanging_stream
         mock_get_llm.return_value = mock_adapter
 
-        with pytest.raises(ProviderTimeoutError):
-            async for _ in svc.generate(stage.id, user, db):
-                pass
+        tokens = [token async for token in svc.generate(stage.id, user, db)]
 
     assert stage.status == "draft"
-    mock_refund.assert_awaited_once_with(db, deduction.id)
+    mock_refund.assert_awaited_once_with(db, deduction.id, user_id=user.id)
+    assert db._generation_runs[-1].status == "failed"
+    assert any('"status": "failed"' in token for token in tokens)
 
 
 @pytest.mark.asyncio
@@ -4374,6 +4201,7 @@ async def test_generate_uses_select_for_update_on_stage_row() -> None:
     user = _make_user()
     svc = StageManager(redis_client=_FakeRedis())
     db = _MultiQueryDB([])
+    db._captured_stage = spec_stage
 
     locked_called_with: list[bool] = []
 
@@ -4476,6 +4304,7 @@ async def test_generate_build_prompt_failure_after_charge_refunds_and_resets() -
         patch(
             "services.pipeline.stage_manager.credit_service.refund",
             new_callable=AsyncMock,
+            return_value=10,
         ) as mock_refund,
         patch(
             "services.pipeline.stage_manager.credit_service.invalidate",
@@ -4487,12 +4316,11 @@ async def test_generate_build_prompt_failure_after_charge_refunds_and_resets() -
             side_effect=RuntimeError("prompt cache miss"),
         ),
     ):
-        with pytest.raises(RuntimeError, match="prompt cache miss"):
-            async for _ in svc.generate(spec_stage.id, user, db):
-                pass
+        tokens = [token async for token in svc.generate(spec_stage.id, user, db)]
 
     mock_deduct.assert_awaited_once()
-    mock_refund.assert_awaited_once_with(db, deduction.id)
+    mock_refund.assert_awaited_once_with(db, deduction.id, user_id=user.id)
+    assert any('"status": "failed"' in token for token in tokens)
     # Reset to draft, and the generation stamps cleared so the overlay never
     # treats the failed attempt as still-generating.
     assert spec_stage.status == "draft"
@@ -4528,6 +4356,7 @@ async def test_generate_preflight_failure_restores_prior_stale_status() -> None:
         patch(
             "services.pipeline.stage_manager.credit_service.refund",
             new_callable=AsyncMock,
+            return_value=10,
         ) as mock_refund,
         patch(
             "services.pipeline.stage_manager.credit_service.invalidate",
@@ -4539,11 +4368,10 @@ async def test_generate_preflight_failure_restores_prior_stale_status() -> None:
             side_effect=RuntimeError("prompt cache miss"),
         ),
     ):
-        with pytest.raises(RuntimeError, match="prompt cache miss"):
-            async for _ in svc.generate(spec_stage.id, user, db):
-                pass
+        tokens = [token async for token in svc.generate(spec_stage.id, user, db)]
 
-    mock_refund.assert_awaited_once_with(db, deduction.id)
+    mock_refund.assert_awaited_once_with(db, deduction.id, user_id=user.id)
+    assert any('"status": "failed"' in token for token in tokens)
     assert spec_stage.status == "stale"  # NOT downgraded to draft
     assert spec_stage.generation_started_at is None
     assert spec_stage.generation_action is None
@@ -4803,17 +4631,15 @@ async def test_refine_unbalanced_markdown_fence_refunds_credits() -> None:
 async def test_generate_emits_structural_eval_without_blocking_on_score(
     monkeypatch,
 ) -> None:
-    """generate() emits the inline structural eval and never awaits the score.
+    """generate() persists structural evals after done and never awaits score.
 
     Phase 1 decouples deterministic findings from the LLM judge: the stream
-    persists structural findings, emits the ``{"eval": ...}`` event immediately
-    with the score fields null, and schedules the LLM score strictly
-    fire-and-forget.  A judge that blocks forever must not delay the stream —
+    persists structural findings and schedules the LLM score strictly
+    fire-and-forget after the durable ``done`` event. A judge that blocks forever
+    must not delay the stream —
     the previous 30s shield/wait_for block is gone, so there is no timeout to
     cancel.
     """
-    import json as _json
-
     workspace_id = uuid4()
     spec_stage = _make_stage(workspace_id, "spec", status="draft")
     workspace = _make_workspace([spec_stage])
@@ -4863,13 +4689,8 @@ async def test_generate_emits_structural_eval_without_blocking_on_score(
         # Must complete promptly even though the background score blocks forever.
         tokens = await asyncio.wait_for(_drain(), timeout=5.0)
 
-    eval_events = [_json.loads(t) for t in tokens if t.startswith('{"eval"')]
-    assert eval_events, "stream must emit an inline structural eval event"
-    payload = eval_events[0]["eval"]
-    assert payload["overall_score"] is None, (
-        "the inline eval is structural-only; the LLM score is fire-and-forget "
-        "and must not populate the streamed event's score (issue #27 Phase 1)"
-    )
+    assert any(t.startswith('{"done"') for t in tokens)
+    assert not any(t.startswith('{"eval"') for t in tokens)
     # The fire-and-forget score was scheduled (and left running), never awaited.
     assert score_started.is_set()
 
@@ -5127,23 +4948,17 @@ async def test_generate_spec_skips_score_judge_by_default(monkeypatch) -> None:
         tokens = [token async for token in svc.generate(spec_stage.id, user, db)]
         await asyncio.sleep(0)
 
-    assert any(t.startswith('{"eval"') for t in tokens), "structural eval still emits"
+    assert any(t.startswith('{"done"') for t in tokens)
+    assert not any(t.startswith('{"eval"') for t in tokens)
     run_eval_background.assert_not_called()
 
 
 @pytest.mark.asyncio
-async def test_generate_falls_back_to_strong_tier_after_primary_failure(
-    monkeypatch,
-) -> None:
-    """A mid-tier provider failure retries once on the strong tier and the
+async def test_generate_falls_back_only_failed_chunk_on_same_provider() -> None:
+    """A cheap-tier provider failure retries that chunk on the mid tier and the
     fallback generation is persisted normally with no refund."""
     from services.llm.base import ProviderError
 
-    # Asserts exact get_llm call-counting (2 total), which is sequential-path
-    # specific; the parallel fallback contract is covered by its own test below.
-    monkeypatch.setattr(
-        "services.pipeline.stage_manager.settings.pipeline_parallel_chunks", False
-    )
     workspace_id = uuid4()
     spec_stage = _make_stage(workspace_id, "spec", status="draft")
     workspace = _make_workspace([spec_stage])
@@ -5161,16 +4976,16 @@ async def test_generate_falls_back_to_strong_tier_after_primary_failure(
     ) -> AsyncGenerator[str, None]:
         yield _spec_stream_payload(user_prompt)
 
-    primary_adapter = MagicMock()
-    primary_adapter.stream = failing_stream
-    fallback_adapter = MagicMock()
-    fallback_adapter.stream = fallback_stream
-
     requested_models: list[str] = []
 
     def fake_get_llm(provider: str, model: str, **kwargs):
         requested_models.append(model)
-        return primary_adapter if len(requested_models) == 1 else fallback_adapter
+        adapter = MagicMock()
+        adapter.last_completion = None
+        adapter.stream = (
+            failing_stream if len(requested_models) == 1 else fallback_stream
+        )
+        return adapter
 
     with (
         patch(
@@ -5181,6 +4996,7 @@ async def test_generate_falls_back_to_strong_tier_after_primary_failure(
         patch(
             "services.pipeline.stage_manager.credit_service.refund",
             new_callable=AsyncMock,
+            return_value=10,
         ) as mock_refund,
         patch(
             "services.pipeline.stage_manager.build_prompt",
@@ -5191,8 +5007,9 @@ async def test_generate_falls_back_to_strong_tier_after_primary_failure(
     ):
         tokens = [token async for token in svc.generate(spec_stage.id, user, db)]
 
-    assert len(requested_models) == 2
-    assert requested_models[0] != requested_models[1]
+    assert len(requested_models) == 4
+    assert requested_models.count("claude-haiku-4-5-20251001") == 3
+    assert requested_models.count("claude-sonnet-4-6") == 1
     mock_refund.assert_not_awaited()
     assert spec_stage.content == _VALID_SPEC
     assert _streamed_artifact(tokens) == _VALID_SPEC
@@ -5264,9 +5081,7 @@ async def test_generate_emits_progress_heartbeats_while_model_reasons() -> None:
 
 
 @pytest.mark.asyncio
-async def test_generate_streams_tokens_live_before_canonical_replay(
-    monkeypatch,
-) -> None:
+async def test_generate_streams_tokens_live_before_canonical_replay() -> None:
     """Progressive streaming (issue #19 UX): generation tokens reach the SSE
     client while chunks generate — the user watches the document grow instead
     of staring at a blank screen for the whole run.  The stream then emits a
@@ -5274,11 +5089,6 @@ async def test_generate_streams_tokens_live_before_canonical_replay(
     buffer always equals what was persisted."""
     import json as _json
 
-    # Live token streaming is a sequential-path feature (the parallel path
-    # suppresses it in favour of progress heartbeats + the canonical replay).
-    monkeypatch.setattr(
-        "services.pipeline.stage_manager.settings.pipeline_parallel_chunks", False
-    )
     workspace_id = uuid4()
     spec_stage = _make_stage(workspace_id, "spec", status="draft")
     workspace = _make_workspace([spec_stage])
@@ -5390,7 +5200,7 @@ async def test_generate_runs_db_heartbeat_for_lifetime_of_generation() -> None:
 
     heartbeat_state = {"started": 0, "cancelled": 0}
 
-    async def fake_heartbeat(stage_id):
+    async def fake_heartbeat(stage_id, run_id=None):
         heartbeat_state["started"] += 1
         try:
             while True:
@@ -5429,7 +5239,9 @@ async def test_generate_runs_db_heartbeat_for_lifetime_of_generation() -> None:
 
         tokens = [token async for token in svc.generate(spec_stage.id, user, db)]
 
-    assert heartbeat_state == {"started": 1, "cancelled": 1}
+    # One heartbeat covers post-charge prompt assembly; ownership then hands to
+    # the pipeline heartbeat. Both are canceled at their respective boundary.
+    assert heartbeat_state == {"started": 2, "cancelled": 2}
     assert _streamed_artifact(tokens) == _VALID_SPEC
 
 

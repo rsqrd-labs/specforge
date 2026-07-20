@@ -23,6 +23,10 @@ from models.integration_push_task import IntegrationPushTask  # noqa: E402
 from models.llm_batch_job import LLMBatchJob  # noqa: E402
 from models.llm_cost_event import LLMCostEvent  # noqa: E402
 from models.stage import Stage  # noqa: E402
+from models.stage_generation import (  # noqa: E402
+    StageGenerationChunk,
+    StageGenerationRun,
+)
 from models.stage_version import StageVersion  # noqa: E402
 from models.storyboard import Storyboard  # noqa: E402
 from models.stripe_credit_pack import StripeCreditPack  # noqa: E402
@@ -51,6 +55,8 @@ __all__ = [
     "LLMBatchJob",
     "LLMCostEvent",
     "Stage",
+    "StageGenerationChunk",
+    "StageGenerationRun",
     "StageVersion",
     "Storyboard",
     "StripeCreditPack",
