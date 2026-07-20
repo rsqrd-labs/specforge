@@ -65,6 +65,12 @@ function renderTimeline(props: Partial<Parameters<typeof IncrementTimeline>[0]> 
 afterEach(() => vi.clearAllMocks())
 
 describe("IncrementTimeline", () => {
+  it("does not fetch while the feature is disabled", () => {
+    renderTimeline({ enabled: false })
+    expect(screen.getByText("Increments")).toBeInTheDocument()
+    expect(mockListIncrements).not.toHaveBeenCalled()
+  })
+
   it("renders the increments newest-first with the v1 baseline anchoring the spine", async () => {
     mockListIncrements.mockResolvedValue([
       inc({ id: "inc-2", sequence: 2, title: "Add teams", status: "pushed" }),
@@ -277,5 +283,69 @@ describe("IncrementTimeline", () => {
 
     expect(await screen.findByText("Creates Version 4")).toBeInTheDocument()
     expect(screen.getByRole("button", { name: /generate version 4/i })).toBeInTheDocument()
+  })
+
+  it.each([
+    [{ response: { status: 409 } }, "Finalise all four stages"],
+    [{ response: { status: 422 } }, "too vague"],
+    [new Error("offline"), "Couldn't generate"],
+  ])("explains create failure %#", async (failure, copy) => {
+    mockListIncrements.mockResolvedValue([])
+    mockListIdeas.mockResolvedValue([])
+    mockCreate.mockRejectedValue(failure)
+    renderTimeline()
+    const input = await screen.findByLabelText(/what should change/i)
+    fireEvent.change(input, { target: { value: "Add team invitation audit logs" } })
+    fireEvent.keyDown(input, { key: "Enter", ctrlKey: true })
+    expect(await screen.findByText(new RegExp(copy, "i"))).toBeInTheDocument()
+  })
+
+  it("distinguishes an already-used promoted idea and allows removing it", async () => {
+    mockListIncrements.mockResolvedValue([])
+    mockListIdeas.mockResolvedValue([idea({ text: "Add automatic webhook retry handling" })])
+    mockCreate.mockRejectedValue({ response: { status: 409 } })
+    renderTimeline()
+    fireEvent.click(await screen.findByRole("button", { name: /use idea/i }))
+    expect(screen.getByText(/using saved idea/i)).toBeInTheDocument()
+    fireEvent.click(screen.getByRole("button", { name: /generate version 2/i }))
+    expect(await screen.findByText(/already been used/i)).toBeInTheDocument()
+    fireEvent.click(screen.getByRole("button", { name: /stop using saved idea/i }))
+    expect(screen.queryByText(/using saved idea/i)).not.toBeInTheDocument()
+  })
+
+  it("surfaces idea capture failures", async () => {
+    mockListIncrements.mockResolvedValue([])
+    mockListIdeas.mockResolvedValue([])
+    mockCreateIdea.mockRejectedValue(new Error("offline"))
+    renderTimeline()
+    const input = await screen.findByLabelText(/capture an idea/i)
+    fireEvent.change(input, { target: { value: "Add SSO" } })
+    fireEvent.click(screen.getByRole("button", { name: /save idea/i }))
+    expect(await screen.findByText(/increment action failed/i)).toBeInTheDocument()
+  })
+
+  it.each([
+    [409, "Export this workspace"], [503, "Background processing"], [500, "Couldn't start"],
+  ])("maps push failure %s", async (status, copy) => {
+    mockListIncrements.mockResolvedValue([inc({ status: "stale" })])
+    mockListIdeas.mockResolvedValue([])
+    mockPush.mockRejectedValue(status === 500 ? new Error("offline") : { response: { status } })
+    renderTimeline()
+    fireEvent.click(await screen.findByRole("button", { name: /push increment 1/i }))
+    expect(await screen.findByText(new RegExp(copy, "i"))).toBeInTheDocument()
+  })
+
+  it("renders every persisted status without offering invalid push actions", async () => {
+    mockListIncrements.mockResolvedValue([
+      inc({ id: "draft", sequence: 1, status: "draft" }),
+      inc({ id: "generating", sequence: 2, status: "generating" }),
+      inc({ id: "pushed", sequence: 3, status: "pushed" }),
+    ])
+    mockListIdeas.mockResolvedValue([])
+    renderTimeline()
+    await screen.findByText("Draft")
+    expect(screen.getByText("Generating")).toBeInTheDocument()
+    expect(screen.getByText("Pushed")).toBeInTheDocument()
+    expect(screen.queryByRole("button", { name: /push increment/i })).not.toBeInTheDocument()
   })
 })

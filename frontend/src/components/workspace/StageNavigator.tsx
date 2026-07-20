@@ -56,6 +56,7 @@ export function StageNavigator({
         return (
           <button
             key={type}
+            aria-label={`${STAGE_LABELS[type]} stage${isLocked ? " (locked)" : ""}`}
             disabled={isLocked}
             onClick={() => {
               if (isLocked) return

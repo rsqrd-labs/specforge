@@ -152,3 +152,111 @@ describe("stageStore finaliseStream empty-buffer guard (A3)", () => {
     expect(useStageStore.getState().stages["s1"].content).toBe("# New content")
   })
 })
+
+describe("stageStore stage and gate lifecycle", () => {
+  beforeEach(resetStore)
+
+  it("hydrates and removes persisted blocked-gate state with the stage", () => {
+    const blocked = makeStage({
+      quality_gate: {
+        stage: "spec",
+        status: "blocked",
+        kind: "missing_sections",
+        findings: [{ kind: "missing_section", detail: "Missing scope", reference: null }],
+      },
+    })
+    useStageStore.getState().setStage(blocked)
+    expect(useStageStore.getState().qualityGate.s1).toMatchObject({
+      status: "blocked",
+      kind: "missing_sections",
+    })
+
+    useStageStore.getState().setStage(makeStage({ quality_gate: null }))
+    expect(useStageStore.getState().qualityGate.s1).toBeUndefined()
+  })
+
+  it("merges a stage batch and keeps gates for unrelated stages", () => {
+    useStageStore.setState({
+      qualityGate: {
+        unrelated: {
+          stage: "spec",
+          status: "blocked",
+          kind: "technology_safety",
+          findings: [],
+        },
+      },
+    })
+    useStageStore.getState().setStages([
+      makeStage({ id: "s1", quality_gate: null }),
+      makeStage({
+        id: "s2",
+        type: "plan",
+        quality_gate: {
+          stage: "plan",
+          status: "blocked",
+          kind: "incomplete_output",
+          findings: [{ kind: "truncated", detail: "Truncated", reference: null }],
+        },
+      }),
+    ])
+    expect(Object.keys(useStageStore.getState().stages)).toEqual(["s1", "s2"])
+    expect(Object.keys(useStageStore.getState().qualityGate).sort()).toEqual([
+      "s2",
+      "unrelated",
+    ])
+  })
+
+  it("routes stream tokens through the active stage and ignores orphan tokens", () => {
+    useStageStore.getState().appendStreamToken("orphan")
+    expect(useStageStore.getState().streamingContent).toEqual({})
+
+    useStageStore.getState().startStream("s1")
+    useStageStore.getState().appendStreamToken("first")
+    useStageStore.getState().clearStreamContent("s1")
+    useStageStore.getState().appendStreamToken("replacement")
+    expect(useStageStore.getState().streamingContent.s1).toBe("replacement")
+  })
+
+  it("tracks progress and supports explicit gate acknowledgement", () => {
+    useStageStore.getState().setStreamProgress("s1", {
+      stage: "spec",
+      state: "validating",
+      elapsed_seconds: 9,
+    })
+    useStageStore.getState().setQualityGate("s1", {
+      stage: "spec",
+      status: "advisory",
+      kind: "missing_sections",
+      findings: [{ kind: "missing_section", detail: "Missing scope", reference: null }],
+    })
+    expect(useStageStore.getState().qualityGate.s1.status).toBe("blocked")
+    expect(useStageStore.getState().streamProgress.s1.elapsed_seconds).toBe(9)
+    useStageStore.getState().clearQualityGate("s1")
+    expect(useStageStore.getState().qualityGate.s1).toBeUndefined()
+  })
+
+  it("ends an unknown stream without fabricating a stage", () => {
+    useStageStore.getState().startStream("missing")
+    useStageStore.getState().appendToken("missing", "draft")
+    useStageStore.getState().finaliseStream("missing")
+    expect(useStageStore.getState()).toMatchObject({
+      activeStream: null,
+      streamingContent: {},
+      stages: {},
+    })
+  })
+
+  it("marks only downstream finalised stages stale", () => {
+    useStageStore.getState().setStages([
+      makeStage({ id: "spec", type: "spec", status: "finalised" }),
+      makeStage({ id: "plan", type: "plan", status: "draft" }),
+      makeStage({ id: "harness", type: "harness", status: "finalised" }),
+      makeStage({ id: "tasks", type: "tasks", status: "locked" }),
+    ])
+    useStageStore.getState().markStale("plan")
+    expect(useStageStore.getState().stages.spec.status).toBe("finalised")
+    expect(useStageStore.getState().stages.plan.status).toBe("draft")
+    expect(useStageStore.getState().stages.harness.status).toBe("stale")
+    expect(useStageStore.getState().stages.tasks.status).toBe("locked")
+  })
+})

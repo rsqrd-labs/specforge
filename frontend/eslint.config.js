@@ -39,6 +39,9 @@ export default tseslint.config(
       "jsx-a11y/no-autofocus": "off",
       "jsx-a11y/no-noninteractive-element-interactions": "off",
       "jsx-a11y/no-noninteractive-element-to-interactive-role": "off",
+      // Scrollable document regions need tabIndex=0 for Safari keyboard access;
+      // axe validates that concrete requirement in the browser suite.
+      "jsx-a11y/no-noninteractive-tabindex": "off",
       "jsx-a11y/no-static-element-interactions": "off",
       "@typescript-eslint/consistent-type-imports": "error",
       "@typescript-eslint/no-floating-promises": "error",

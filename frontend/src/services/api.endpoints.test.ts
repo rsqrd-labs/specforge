@@ -1,4 +1,5 @@
 import axios from "axios"
+import { AxiosHeaders, type AxiosError, type AxiosInstance, type InternalAxiosRequestConfig } from "axios"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import * as client from "./api"
 
@@ -220,6 +221,113 @@ describe("authenticated API endpoint contracts", () => {
   })
 })
 
+describe("authentication helper contracts", () => {
+  afterEach(() => {
+    client.setAccessToken(null)
+    vi.restoreAllMocks()
+  })
+
+  it("attaches bearer identity only when a token exists", () => {
+    const config = {
+      headers: new AxiosHeaders(),
+      method: "get",
+      url: "/auth/me",
+    } as InternalAxiosRequestConfig
+    expect(client.attachAuthorizationHeader(config, null)).toBe(config)
+    const authorized = client.attachAuthorizationHeader(config, "token")
+    expect(AxiosHeaders.from(authorized.headers).get("Authorization")).toBe(
+      "Bearer token",
+    )
+  })
+
+  it("classifies retry eligibility using both status and the replay guard", () => {
+    expect(
+      client.shouldAttemptRefresh({
+        response: { status: 401 },
+        config: { headers: new AxiosHeaders() },
+      } as unknown as AxiosError),
+    ).toBe(true)
+    expect(
+      client.shouldAttemptRefresh({
+        response: { status: 500 },
+        config: { headers: new AxiosHeaders() },
+      } as unknown as AxiosError),
+    ).toBe(false)
+    expect(
+      client.shouldAttemptRefresh({
+        response: { status: 401 },
+        config: { headers: new AxiosHeaders(), _retry: true },
+      } as unknown as AxiosError),
+    ).toBe(false)
+  })
+
+  it("replays a 401 once through a supplied refresh client", async () => {
+    const replay = vi.fn().mockResolvedValue({ data: payload })
+    const refresh = {
+      post: vi.fn().mockResolvedValue({ data: { accessToken: "camel-token" } }),
+    }
+    const error = {
+      response: { status: 401 },
+      config: { headers: new AxiosHeaders(), method: "get", url: "/workspaces" },
+    } as AxiosError
+
+    await client.handleUnauthorizedResponse(
+      error,
+      replay as unknown as AxiosInstance,
+      refresh as unknown as AxiosInstance,
+    )
+    expect(refresh.post).toHaveBeenCalledWith("/auth/refresh")
+    expect(replay).toHaveBeenCalledTimes(1)
+    expect(client.getAccessToken()).toBe("camel-token")
+  })
+
+  it("rejects a non-retryable response and failed or empty refreshes", async () => {
+    const replay = vi.fn()
+    const nonRetryable = { response: { status: 403 } } as AxiosError
+    await expect(
+      client.handleUnauthorizedResponse(
+        nonRetryable,
+        replay as unknown as AxiosInstance,
+        { post: vi.fn() } as unknown as AxiosInstance,
+      ),
+    ).rejects.toBe(nonRetryable)
+
+    const original = {
+      response: { status: 401 },
+      config: { headers: new AxiosHeaders(), method: "get", url: "/workspaces" },
+    } as AxiosError
+    await expect(
+      client.handleUnauthorizedResponse(
+        original,
+        replay as unknown as AxiosInstance,
+        { post: vi.fn().mockResolvedValue({ data: {} }) } as unknown as AxiosInstance,
+      ),
+    ).rejects.toBe(original)
+
+    const refreshFailure = new Error("refresh offline")
+    const nextAttempt = {
+      response: { status: 401 },
+      config: { headers: new AxiosHeaders(), method: "get", url: "/workspaces" },
+    } as AxiosError
+    await expect(
+      client.handleUnauthorizedResponse(
+        nextAttempt,
+        replay as unknown as AxiosInstance,
+        {
+          post: vi.fn().mockRejectedValue(refreshFailure),
+        } as unknown as AxiosInstance,
+      ),
+    ).rejects.toBe(refreshFailure)
+  })
+
+  it("reads the current user with an established in-memory session", async () => {
+    client.setAccessToken("session-token")
+    const get = vi.spyOn(client.api, "get").mockResolvedValue({ data: payload })
+    await expect(client.getCurrentUser()).resolves.toBe(payload)
+    expect(get).toHaveBeenCalledWith("/auth/me")
+  })
+})
+
 describe("public API isolation and graceful fallbacks", () => {
   afterEach(() => vi.restoreAllMocks())
 
@@ -234,13 +342,111 @@ describe("public API isolation and graceful fallbacks", () => {
     await expect(client.getTemplates(true)).resolves.toEqual([])
   })
 
+  it("caches a successful template catalog unless force-refresh is requested", async () => {
+    const catalog = [{ id: "tpl" }]
+    const get = vi.spyOn(axios, "get").mockResolvedValue({ data: catalog })
+    await expect(client.getTemplates(true)).resolves.toBe(catalog)
+    await expect(client.getTemplates()).resolves.toBe(catalog)
+    expect(get).toHaveBeenCalledTimes(1)
+    await client.getTemplates(true)
+    expect(get).toHaveBeenCalledTimes(2)
+  })
+
   it("handles empty and unavailable advisory responses without blocking generation", async () => {
     vi.spyOn(client.api, "get").mockResolvedValue({ data: { estimates: null } })
+    await expect(client.fetchGenerationEstimates()).resolves.toEqual([])
+    vi.mocked(client.api.get).mockResolvedValueOnce({ data: undefined })
     await expect(client.fetchGenerationEstimates()).resolves.toEqual([])
     vi.mocked(client.api.get).mockRejectedValueOnce(new Error("offline"))
     await expect(client.fetchGenerationEstimates()).resolves.toEqual([])
 
     vi.spyOn(client.api, "post").mockResolvedValue({ status: 204, data: undefined })
     await expect(client.requestClarification("ws")).resolves.toBeNull()
+  })
+
+  it("maps every documented authenticated 404 empty state without hiding 5xx failures", async () => {
+    const notFound = Object.assign(new Error("not found"), {
+      isAxiosError: true,
+      response: { status: 404 },
+    })
+    const unavailable = Object.assign(new Error("unavailable"), {
+      isAxiosError: true,
+      response: { status: 503 },
+    })
+    const serverError = Object.assign(new Error("server error"), {
+      isAxiosError: true,
+      response: { status: 500 },
+    })
+    const get = vi.spyOn(client.api, "get")
+
+    get.mockRejectedValueOnce(notFound)
+    await expect(client.getGitHubIntegration()).resolves.toEqual({
+      connected: false,
+      github_username: null,
+    })
+    get.mockRejectedValueOnce(notFound)
+    await expect(client.getGitHubPush("ws")).resolves.toBeNull()
+    get.mockRejectedValueOnce(notFound)
+    await expect(client.getGitHubInstallations()).resolves.toEqual({
+      installations: [],
+      on_legacy_oauth: false,
+    })
+    get.mockRejectedValueOnce(notFound)
+    await expect(client.getGitHubSync("ws")).resolves.toBeNull()
+    get.mockRejectedValueOnce(notFound)
+    await expect(client.listIncrements("ws")).resolves.toEqual([])
+    get.mockRejectedValueOnce(notFound)
+    await expect(client.listIdeas("ws")).resolves.toEqual([])
+    get.mockRejectedValueOnce(notFound)
+    await expect(client.getLatestStoryboard("ws")).resolves.toBeNull()
+    get.mockRejectedValueOnce(notFound)
+    await expect(client.fetchBillingStatus("checkout")).resolves.toBeNull()
+    get.mockRejectedValueOnce(unavailable)
+    await expect(client.getGitHubInstallUrl()).resolves.toBeNull()
+
+    get.mockRejectedValueOnce(serverError)
+    await expect(client.getGitHubPush("ws")).rejects.toThrow("server error")
+    get.mockRejectedValueOnce(serverError)
+    await expect(client.getGitHubIntegration()).rejects.toThrow("server error")
+    get.mockRejectedValueOnce(serverError)
+    await expect(client.listIdeas("ws")).rejects.toThrow("server error")
+    get.mockRejectedValueOnce(serverError)
+    await expect(client.getLatestStoryboard("ws")).rejects.toThrow("server error")
+    get.mockRejectedValueOnce(serverError)
+    await expect(client.fetchBillingStatus("checkout")).rejects.toThrow("server error")
+    get.mockRejectedValueOnce(serverError)
+    await expect(client.getGitHubInstallUrl()).rejects.toThrow("server error")
+    get.mockRejectedValueOnce(serverError)
+    await expect(client.getGitHubInstallations()).rejects.toThrow("server error")
+    get.mockRejectedValueOnce(serverError)
+    await expect(client.listIncrements("ws")).rejects.toThrow("server error")
+  })
+
+  it("distinguishes missing public workspaces from actual public endpoint failures", async () => {
+    const get = vi.spyOn(axios, "get")
+    get.mockRejectedValueOnce(
+      Object.assign(new Error("not found"), {
+        isAxiosError: true,
+        response: { status: 404 },
+      }),
+    )
+    await expect(client.getPublicWorkspace("gone")).resolves.toBeNull()
+    get.mockRejectedValueOnce(new Error("offline"))
+    await expect(client.getPublicWorkspace("slug")).rejects.toThrow("offline")
+  })
+
+  it("returns null for both forms of a clarification bypass and rethrows real errors", async () => {
+    const post = vi.spyOn(client.api, "post")
+    post.mockResolvedValueOnce({ status: 200, data: {} })
+    await expect(client.requestClarification("ws")).resolves.toBeNull()
+    post.mockRejectedValueOnce(
+      Object.assign(new Error("no content"), {
+        isAxiosError: true,
+        response: { status: 204 },
+      }),
+    )
+    await expect(client.requestClarification("ws")).resolves.toBeNull()
+    post.mockRejectedValueOnce(new Error("provider failed"))
+    await expect(client.requestClarification("ws")).rejects.toThrow("provider failed")
   })
 })
