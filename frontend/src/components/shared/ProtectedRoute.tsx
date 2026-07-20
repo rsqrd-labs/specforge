@@ -36,7 +36,7 @@ export function ProtectedRoute({ children }: ProtectedRouteProps) {
     }
     attemptedRef.current = true
 
-    fetchMe().finally(() => {
+    void fetchMe().finally(() => {
       setHasCheckedSession(true)
     })
   }, [user, fetchMe])

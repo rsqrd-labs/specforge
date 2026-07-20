@@ -17,13 +17,6 @@ const STAGE_PREVIEW_COPY: Record<StageType, string> = {
   tasks: "an ordered, dependency-aware task breakdown",
 }
 
-const STAGE_DISPLAY_NAME: Record<StageType, string> = {
-  spec: "Spec",
-  plan: "Plan",
-  harness: "Harness",
-  tasks: "Tasks",
-}
-
 /**
  * Replaces a bare, empty markdown panel before a stage's first generation.
  * The design review found this moment — the highest-anticipation,

@@ -622,7 +622,6 @@ export default function Workspace() {
             streamed: false,
           }
         : null,
-    // eslint-disable-next-line react-hooks/exhaustive-deps
     [
       reconnectStreaming,
       activeStage?.id,

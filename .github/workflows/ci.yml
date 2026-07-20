@@ -434,17 +434,34 @@ jobs:
           cache: pnpm
           cache-dependency-path: "**/pnpm-lock.yaml"
 
+      - name: Set up uv for OpenAPI drift check
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.11.8"
+
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
       - name: Audit
         run: pnpm audit --audit-level moderate
 
+      - name: ESLint
+        run: pnpm lint
+
       - name: Typecheck
         run: pnpm tsc --noEmit
 
       - name: Vitest
         run: pnpm test -- --passWithNoTests
+
+      - name: Coverage ratchet
+        run: pnpm test:coverage -- --passWithNoTests
+
+      - name: Complete frontend harness
+        run: pnpm test:harness
+
+      - name: OpenAPI contract drift
+        run: pnpm check:api
 
       - name: Phase 13 frontend harness contracts
         run: pnpm vitest run --config vitest.harness.config.ts ../harness/tests/frontend/phase13-github-integration.contract.test.ts
@@ -460,6 +477,12 @@ jobs:
 
       - name: Build
         run: pnpm build
+
+      - name: Install Playwright browsers
+        run: pnpm exec playwright install --with-deps chromium firefox webkit
+
+      - name: Browser, mobile, and accessibility gates
+        run: pnpm test:e2e
 
   marketing:
     name: Marketing

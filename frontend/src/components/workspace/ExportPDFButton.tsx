@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from "react"
+import { useCallback, useState } from "react"
 import { exportWorkspacePdf, getApiErrorMessage } from "../../services/api"
 import { ActionAlertPanel } from "../shared/ActionAlert"
 import { PDFIcon } from "../shared/icons"
@@ -37,8 +37,6 @@ export function ExportPDFButton({
 }: ExportPDFButtonProps) {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const anchorRef = useRef<HTMLAnchorElement | null>(null)
-
   const handleClick = useCallback(async () => {
     if (busy || disabled) return
     setBusy(true)
@@ -46,7 +44,7 @@ export function ExportPDFButton({
     try {
       const blob = await exportWorkspacePdf(workspaceId)
       const url = URL.createObjectURL(blob)
-      const anchor = anchorRef.current ?? document.createElement("a")
+      const anchor = document.createElement("a")
       anchor.href = url
       anchor.download = `specforge-${slugify(workspaceName)}.pdf`
       // Programmatically click so the browser's native download UI fires.
@@ -77,7 +75,6 @@ export function ExportPDFButton({
       >
         {busy ? "Generating PDF…" : <><PDFIcon />PDF</>}
       </button>
-      <a ref={anchorRef} hidden aria-hidden="true" />
       {error && (
         <ActionAlertPanel
           severity="error"

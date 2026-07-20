@@ -108,7 +108,6 @@ export default function GitHubConnection() {
       cleaned.delete("github_installed")
       setSearchParams(cleaned, { replace: true })
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   async function handleInstall() {

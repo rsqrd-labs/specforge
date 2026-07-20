@@ -45,5 +45,20 @@ export default defineConfig({
     environment: "jsdom",
     globals: true,
     setupFiles: ["./src/__tests__/setup.ts"],
+    include: ["src/**/*.{test,spec}.{ts,tsx}"],
+    coverage: {
+      provider: "v8",
+      reporter: ["text", "json-summary", "html"],
+      include: ["src/**/*.{ts,tsx}"],
+      exclude: ["src/**/*.test.{ts,tsx}", "src/__tests__/**", "src/main.tsx", "src/vite-env.d.ts"],
+      thresholds: {
+        // Issue #30 baseline ratchet. Raise these monotonically as the
+        // risk-focused coverage remediation lands; never lower them.
+        statements: 60,
+        branches: 60,
+        functions: 60,
+        lines: 60,
+      },
+    },
   },
 })

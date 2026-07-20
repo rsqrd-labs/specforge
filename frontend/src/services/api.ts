@@ -1,10 +1,10 @@
 import axios, {
-  AxiosError,
   AxiosHeaders,
   type AxiosInstance,
   type AxiosResponse,
   type InternalAxiosRequestConfig,
 } from "axios"
+import type { AxiosError } from "axios"
 
 import type { User } from "../types/user"
 import type {

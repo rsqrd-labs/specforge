@@ -23,12 +23,12 @@ export default function Landing({
   useEffect(() => {
     const { user, isLoading, fetchMe } = useUserStore.getState()
     if (!user && !isLoading) {
-      fetchMe()
+      void fetchMe()
     }
 
     function handlePageShow(event: PageTransitionEvent) {
       if (event.persisted) {
-        useUserStore.getState().fetchMe()
+        void useUserStore.getState().fetchMe()
       }
     }
 
