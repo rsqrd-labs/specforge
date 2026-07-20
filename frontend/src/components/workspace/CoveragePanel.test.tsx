@@ -68,7 +68,7 @@ describe("CoveragePanel — coverage expansion (paid one-click patch)", () => {
     // The LLM-derived "Coverage Gaps" section is absent when uncovered_reqs is empty.
     expect(screen.queryByText("Coverage Gaps")).toBeNull()
 
-    fireEvent.click(screen.getByRole("button", { name: "Regenerate HARNESS" }))
+    fireEvent.click(screen.getByRole("button", { name: "Patch HARNESS coverage" }))
     expect(onRegenerate).toHaveBeenCalledOnce()
   })
 

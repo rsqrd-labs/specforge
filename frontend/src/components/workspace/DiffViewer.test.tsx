@@ -5,6 +5,24 @@ import { describe, expect, it, vi } from "vitest"
 import { DiffViewer } from "./DiffViewer"
 
 describe("DiffViewer", () => {
+  it("discloses that rejecting does not refund the refinement charge", () => {
+    render(
+      <DiffViewer
+        diff={"@@\n-old\n+new"}
+        original="old"
+        proposed="new"
+        onAccept={vi.fn()}
+        onReject={vi.fn()}
+      />,
+    )
+
+    expect(
+      screen.getByText(
+        /rejecting keeps your document unchanged; the 3-credit refinement charge is not refunded/i,
+      ),
+    ).toBeInTheDocument()
+  })
+
   it("disables accept and reject with a clear lock reason", async () => {
     const user = userEvent.setup()
     const onAccept = vi.fn()

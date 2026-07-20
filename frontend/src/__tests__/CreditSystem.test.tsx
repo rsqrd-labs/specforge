@@ -106,6 +106,15 @@ describe("CreditConfirmModal", () => {
     expect(screen.queryByText(/token/i)).not.toBeInTheDocument()
   })
 
+  it("uses patch-specific copy and the no-op charge guarantee", () => {
+    renderModal({ action: "patch", creditCost: 10 })
+    expect(
+      screen.getByRole("heading", { name: /patch coverage/i }),
+    ).toBeInTheDocument()
+    expect(screen.getByText(/only the missing harness tests/i)).toBeInTheDocument()
+    expect(screen.getByText(/only when new test files are added/i)).toBeInTheDocument()
+  })
+
   it("calls onConfirm when the action button is clicked", async () => {
     const user = userEvent.setup()
     const onConfirm = vi.fn()

@@ -40,7 +40,7 @@ export function CoveragePanel({
           <div className="ws-panel-title">Missing Test Coverage</div>
           <p>
             The test matrix maps these requirements to a test file that was not
-            generated in the harness. Regenerate to fill in the missing tests.
+            generated in the harness. Patch coverage to fill in the missing tests.
           </p>
         </div>
         <span className="ws-panel-chip warning">
@@ -61,16 +61,17 @@ export function CoveragePanel({
         onClick={onRegenerate}
         disabled={disabled}
         title={disabled ? disabledReason : undefined}
-        aria-label="Regenerate HARNESS"
+        aria-label="Patch HARNESS coverage"
         aria-describedby={`${regenerateHelpId}${disabled && disabledReason ? ` ${disabledReasonId}` : ""}`}
       >
-        Regenerate
+        Patch coverage
       </button>
 
       <p id={regenerateHelpId} className="ws-panel-muted">
-        This regeneration costs 10 credits. It generates tests for the
-        requirements above in one pass. If genuine gaps remain afterwards, your
-        Plan needs more detail — use Refine on the Plan, then regenerate.
+        This patch costs 10 credits only when new test files are added. It generates
+        tests for the requirements above in one pass. If genuine gaps remain
+        afterwards, your Plan needs more detail — use Refine on the Plan, then patch
+        coverage again.
       </p>
       {disabled && disabledReason ? (
         <p id={disabledReasonId} className="workspace-lock-inline-note">

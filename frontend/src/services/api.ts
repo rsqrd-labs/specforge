@@ -323,6 +323,10 @@ async function attachCsrfHeader(
     return config
   }
 
+  // CSRF tokens are deliberately fetched per mutation: the backend consumes
+  // each token exactly once using Redis SETNX replay protection. Caching a
+  // token client-side would turn the next request (or a concurrent mutation)
+  // into a replay and weaken the security contract rather than optimize it.
   const token = await getCsrfToken()
   if (!token) {
     return config

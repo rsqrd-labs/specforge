@@ -57,13 +57,15 @@ describe("workspace action lock panels", () => {
       />,
     )
 
-    const regenerate = screen.getByRole("button", { name: /regenerate harness/i })
-    expect(regenerate).toBeDisabled()
-    expect(regenerate).toHaveAccessibleDescription(
+    const patchCoverage = screen.getByRole("button", {
+      name: /patch harness coverage/i,
+    })
+    expect(patchCoverage).toBeDisabled()
+    expect(patchCoverage).toHaveAccessibleDescription(
       /editing resumes when generation finishes/i,
     )
 
-    await user.click(regenerate)
+    await user.click(patchCoverage)
     expect(onRegenerate).not.toHaveBeenCalled()
   })
 

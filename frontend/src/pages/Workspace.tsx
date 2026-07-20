@@ -58,6 +58,7 @@ import { useCredits } from "../hooks/useCredits"
 import {
   formatEffortSummaryChip,
   parseEffortSummary,
+  parseTaskBlocks,
 } from "../utils/tasksParser"
 import { useReconnectPoll } from "../hooks/useReconnectPoll"
 import { useStream } from "../hooks/useStream"
@@ -149,7 +150,8 @@ const REFINE_MODE_OPTIONS = [
   },
 ] as const
 
-type CreditAction = "generate" | "regenerate"
+type GenerationCreditAction = "generate" | "regenerate"
+type CreditAction = GenerationCreditAction | "patch"
 type StoryboardAction = "generate" | "regenerate" | "share" | "download" | "notes"
 
 interface StoryboardFlowMessage {
@@ -162,7 +164,12 @@ interface PendingCreditAction {
   stageId: string
 }
 
-interface PendingClarifyAction extends PendingCreditAction {
+interface PendingReviewAction {
+  action: GenerationCreditAction
+  stageId: string
+}
+
+interface PendingClarifyAction extends PendingReviewAction {
   mode: "new" | "existing"
 }
 
@@ -386,7 +393,7 @@ export default function Workspace() {
   const [pendingCredit, setPendingCredit] = useState<PendingCreditAction | null>(
     null,
   )
-  const [pendingReview, setPendingReview] = useState<PendingCreditAction | null>(
+  const [pendingReview, setPendingReview] = useState<PendingReviewAction | null>(
     null,
   )
   const [refineInstruction, setRefineInstruction] = useState("")
@@ -395,6 +402,7 @@ export default function Workspace() {
   )
   const [isRefining, setIsRefining] = useState(false)
   const refineInFlightRef = useRef(false)
+  const finaliseInFlightRef = useRef(false)
   const [showRefineInput, setShowRefineInput] = useState(false)
   const [selection, setSelection] = useState<{
     start: number
@@ -734,12 +742,13 @@ export default function Workspace() {
   const shouldShowCreateStoryboardCta =
     canCreateStoryboard && latestStoryboard === null && !isStoryboardLoading
 
-  // Count tasks for the GitHub modal's issue-count preview. Derived from the
-  // tasks stage content via regex — no API call.
+  // Count tasks for the GitHub modal's issue-count preview using the same
+  // canonical parser as TasksBoard, so the preview can never disagree with the
+  // cards users just reviewed (including whitespace before the heading colon).
   const taskCount = useMemo(() => {
     const tasksStage = stages.find((s) => s.type === "tasks")
     if (!tasksStage?.content) return 0
-    return (tasksStage.content.match(/^###\s+T-\d+:/gm) ?? []).length
+    return parseTaskBlocks(tasksStage.content).length
   }, [stages])
 
   // Effort Summary chip — only the TASKS stage carries this block, and only
@@ -1226,11 +1235,11 @@ export default function Workspace() {
     setPendingClarify(null)
   }, [])
 
-  const requestGapPatch = useCallback(async () => {
+  const requestGapPatch = useCallback(() => {
     if (!activeStage) return
     if (generationActivityRef.current || guardWorkspaceMutation()) return
-    await runGeneration("regenerate-gaps")
-  }, [activeStage, guardWorkspaceMutation, runGeneration])
+    setPendingCredit({ action: "patch", stageId: activeStage.id })
+  }, [activeStage, guardWorkspaceMutation])
 
   const performRollback = useCallback(async (version: number) => {
     if (!activeStage) return
@@ -1388,13 +1397,23 @@ export default function Workspace() {
       return
     }
 
-    if (stage.type !== "spec" && !stage.review_gate_acknowledged) {
-      setPendingReview(pendingCredit)
+    if (
+      pendingCredit.action !== "patch" &&
+      stage.type !== "spec" &&
+      !stage.review_gate_acknowledged
+    ) {
+      setPendingReview({
+        action: pendingCredit.action,
+        stageId: pendingCredit.stageId,
+      })
       setPendingCredit(null)
       return
     }
 
-    const nextAction = pendingCredit.action
+    const nextAction =
+      pendingCredit.action === "patch"
+        ? "regenerate-gaps"
+        : pendingCredit.action
     setPendingCredit(null)
 
     await runGeneration(nextAction)
@@ -1490,13 +1509,21 @@ export default function Workspace() {
     async (proposed: string) => {
       if (!activeStage) return
       if (guardWorkspaceMutation()) return
-      const updatedStage = await acceptStageDiff(activeStage.id, proposed)
-      setStage(updatedStage)
-      setEvalResults((existing) => ({ ...existing, [updatedStage.id]: null }))
-      setDiffResult(null)
-      setLargeSelectionWarning(false)
+      try {
+        const updatedStage = await acceptStageDiff(activeStage.id, proposed)
+        setStage(updatedStage)
+        setEvalResults((existing) => ({ ...existing, [updatedStage.id]: null }))
+        setDiffResult(null)
+        setLargeSelectionWarning(false)
+      } catch (error) {
+        // Keep the diff mounted on failure so the paid proposal is never lost
+        // to a transient network or concurrency error.
+        setGenericError(
+          getApiErrorMessage(error, "Could not apply the proposed changes."),
+        )
+      }
     },
-    [activeStage, guardWorkspaceMutation, setStage],
+    [activeStage, guardWorkspaceMutation, setStage, setGenericError],
   )
 
   const rejectDiff = useCallback(async () => {
@@ -1506,10 +1533,18 @@ export default function Workspace() {
     }
     if (guardWorkspaceMutation()) return
 
-    await rejectStageDiff(activeStage.id)
-    setDiffResult(null)
-    setLargeSelectionWarning(false)
-  }, [activeStage, guardWorkspaceMutation])
+    try {
+      await rejectStageDiff(activeStage.id)
+      setDiffResult(null)
+      setLargeSelectionWarning(false)
+    } catch (error) {
+      // Reject is persisted server-side for audit/cleanup. If it fails, retain
+      // the proposal so the user can retry either action without regenerating.
+      setGenericError(
+        getApiErrorMessage(error, "Could not reject the proposed changes."),
+      )
+    }
+  }, [activeStage, guardWorkspaceMutation, setGenericError])
 
   // Accept a stale stage's existing content as-is: restores it to finalised
   // server-side via the credit-free acknowledge path (no regenerate). This is
@@ -1519,7 +1554,9 @@ export default function Workspace() {
   // "Keep" button and the GenerateBar "Finalise" button when the stage is stale.
   const handleAcknowledgeStale = useCallback(async () => {
     if (!activeStage || !id) return
+    if (finaliseInFlightRef.current) return
     if (guardWorkspaceMutation()) return
+    finaliseInFlightRef.current = true
     try {
       const updatedStage = await acknowledgeStaleStage(activeStage.id)
       setStage(updatedStage)
@@ -1529,11 +1566,23 @@ export default function Workspace() {
       void refreshLatestStoryboard(true)
     } catch (err) {
       setGenericError(getApiErrorMessage(err, "Could not keep this stage as-is."))
+    } finally {
+      finaliseInFlightRef.current = false
     }
-  }, [activeStage, guardWorkspaceMutation, id, setStage, setCurrentWorkspace, setStages, refreshLatestStoryboard])
+  }, [
+    activeStage,
+    guardWorkspaceMutation,
+    id,
+    refreshLatestStoryboard,
+    setCurrentWorkspace,
+    setGenericError,
+    setStage,
+    setStages,
+  ])
 
   const handleFinalise = useCallback(async () => {
     if (!activeStage || !id) return
+    if (finaliseInFlightRef.current) return
     if (guardWorkspaceMutation()) return
     // A stale stage's "Finalise" means "accept what's already here": there is no
     // new draft to finalise, so route it to the credit-free acknowledge path.
@@ -1547,6 +1596,7 @@ export default function Workspace() {
       return
     }
     const finalisedType = activeStage.type
+    finaliseInFlightRef.current = true
     try {
       const updatedStage = await finaliseStage(activeStage.id)
       setStage(updatedStage)
@@ -1571,12 +1621,25 @@ export default function Workspace() {
       // is a plain-string detail and is surfaced as-is; the generic fallback
       // only applies when no structured detail is present (issue #28, Phase 1).
       setGenericError(getApiErrorMessage(err, "Only draft stages can be finalised."))
+    } finally {
+      finaliseInFlightRef.current = false
     }
-  }, [activeStage, guardWorkspaceMutation, id, handleAcknowledgeStale, setStage, setCurrentWorkspace, setStages, refreshLatestStoryboard])
+  }, [
+    activeStage,
+    guardWorkspaceMutation,
+    handleAcknowledgeStale,
+    id,
+    refreshLatestStoryboard,
+    setCurrentWorkspace,
+    setGenericError,
+    setStage,
+    setStages,
+  ])
 
   const handleContentChange = useCallback(
     async (content: string) => {
       if (!activeStage || workspaceGenerationLock.locked) return
+      if (content === (activeStage.content ?? "")) return
       setStage({ ...activeStage, content })
       setEvalResults((existing) => ({ ...existing, [activeStage.id]: null }))
       try {
@@ -1586,7 +1649,7 @@ export default function Workspace() {
         setGenericError("Could not save the latest edit.")
       }
     },
-    [activeStage, setStage, workspaceGenerationLock.locked],
+    [activeStage, setGenericError, setStage, workspaceGenerationLock.locked],
   )
 
   const handleRevalidateTasks = useCallback(async () => {
@@ -2627,14 +2690,19 @@ export default function Workspace() {
             </button>
             <button
               type="submit"
-              className="gen-btn-primary"
+              className="gen-btn-primary refine-submit-btn"
               disabled={isGenerationBusy}
               title={isGenerationBusy ? workspaceLockReason : undefined}
               aria-describedby={isGenerationBusy ? "workspace-lock-action-reason" : undefined}
             >
-              {activeBusyOperation === "focused-patch"
-                ? "Preparing patch..."
-                : activeRefineMode.submitLabel}
+              <span>
+                {activeBusyOperation === "focused-patch"
+                  ? "Preparing patch..."
+                  : activeRefineMode.submitLabel}
+              </span>
+              {activeBusyOperation !== "focused-patch" && (
+                <span className="refine-credit-cost">3 credits</span>
+              )}
             </button>
           </form>
         )}

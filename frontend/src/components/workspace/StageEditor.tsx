@@ -21,6 +21,8 @@ interface StageEditorProps {
   onContentChange?: (content: string) => void
 }
 
+const SAVE_DEBOUNCE_MS = 1500
+
 export const StageEditor = forwardRef<StageEditorHandle, StageEditorProps>(
   function StageEditor(
     { stageId, initialContent, readOnly = false, readOnlyReason, onContentChange },
@@ -100,7 +102,7 @@ export const StageEditor = forwardRef<StageEditorHandle, StageEditorProps>(
             if (debounceRef.current) clearTimeout(debounceRef.current)
             debounceRef.current = setTimeout(() => {
               onContentChangeRef.current?.(update.state.doc.toString())
-            }, 500)
+            }, SAVE_DEBOUNCE_MS)
           }),
           EditorView.theme({
             "&": { height: "100%", fontSize: "14px" },

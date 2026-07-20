@@ -1,10 +1,16 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react"
+import { EditorView } from "@codemirror/view"
 import { act } from "react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import { useStageStore } from "../../store/stageStore"
 import type { Stage, StageStatus } from "../../types/stage"
 import { StageEditor } from "./StageEditor"
+
+afterEach(() => {
+  vi.useRealTimers()
+  vi.restoreAllMocks()
+})
 
 function resetStore() {
   useStageStore.setState({
@@ -36,6 +42,37 @@ function seedStage(id: string, status: StageStatus, content = ""): Stage {
 }
 
 describe("StageEditor", () => {
+  it("debounces autosave for 1500 ms", () => {
+    const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout")
+    const onContentChange = vi.fn()
+    const { container, unmount } = render(
+      <StageEditor
+        stageId="stage-debounce"
+        initialContent="Initial"
+        onContentChange={onContentChange}
+      />,
+    )
+
+    const editor = container.querySelector(".cm-content") as HTMLElement
+    const view = EditorView.findFromDOM(editor)
+    expect(view).not.toBeNull()
+    if (!view) throw new Error("CodeMirror view did not mount")
+    act(() => {
+      view.dispatch({
+        changes: { from: view.state.doc.length, insert: " updated" },
+      })
+    })
+
+    expect(onContentChange).not.toHaveBeenCalled()
+    expect(
+      setTimeoutSpy.mock.calls.some(([, delay]) => delay === 1500),
+    ).toBe(true)
+
+    unmount()
+    expect(onContentChange).toHaveBeenCalledOnce()
+    setTimeoutSpy.mockRestore()
+  })
+
   it("reacts to readOnly changes after mount and explains the lock", async () => {
     const onContentChange = vi.fn()
     const { container, rerender } = render(

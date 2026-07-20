@@ -59,6 +59,10 @@ export function DiffViewer({
       </div>
 
       <div className="diff-actions">
+        <p className="diff-credit-disclosure">
+          Rejecting keeps your document unchanged; the 3-credit refinement charge
+          is not refunded.
+        </p>
         {disabled && disabledReason ? (
           <p id={disabledReasonId} className="workspace-lock-inline-note">
             {disabledReason}
