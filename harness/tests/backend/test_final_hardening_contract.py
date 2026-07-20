@@ -36,5 +36,9 @@ def test_refine_prompt_wraps_current_document_as_untrusted_content() -> None:
 
     assert "SECURITY_AND_PRIVACY_RULES" in source
     assert "wrap_untrusted_content('current_document', content)" in source
-    assert "wrap_untrusted_content('selected_text', sanitized_selected_text)" in source
-    assert "wrap_untrusted_content('instruction', sanitized_instruction)" in source
+    # Refinement inputs are intentionally fenced raw after injection scanning.
+    # Sanitizing them would corrupt code-bearing Markdown and selection offsets.
+    assert "wrap_untrusted_content('selected_text', request.selected_text)" in source
+    assert "wrap_untrusted_content('instruction', request.instruction)" in source
+    assert "scan_result = await scan_async(text)" in source
+    assert "validation = await validate_async(replacement)" in source

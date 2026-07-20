@@ -63,22 +63,35 @@ def test_trusted_proxy_configuration_rejects_universal_trust_ranges() -> None:
         rate_limit._parse_trusted_proxy_networks("::/0")
 
 
-def test_refine_matches_raw_selection_and_sanitizes_prompt() -> None:
+def test_refine_matches_and_fences_raw_inputs_after_injection_scan() -> None:
     router_source = read_backend_file("routers", "stage.py")
     manager_source = read_backend_file("services", "pipeline", "stage_manager.py")
 
+    # Raw byte matching is load-bearing for Markdown/code fidelity. Bleach-style
+    # sanitization changes offsets and destroys valid constructs such as
+    # ``List<String>`` and JSX, so neither prompt input may be rewritten.
     assert 'selected_text": sanitize_text' not in router_source
     assert (
         "content[request.selection_start:request.selection_end]" in manager_source
         or "content[request.selection_start : request.selection_end]" in manager_source
     )
-    # Both prompt inputs must flow through the sanitizer before the prompt
-    # build. Since scalability-audit P2 (F7) that is the async offload wrapper
-    # (byte-identical output, dispatched off the event loop for large
-    # selections) — pin the async form so a regression back to an inline
-    # sync bleach pass on the loop fails this contract.
-    assert "sanitize_text_async(request.selected_text)" in manager_source
-    assert "sanitize_text_async(request.instruction)" in manager_source
+    assert "sanitize_text_async(request.selected_text)" not in manager_source
+    assert "sanitize_text_async(request.instruction)" not in manager_source
+
+    # Security is enforced without mutating user bytes: both inputs enter the
+    # async injection scanner, then keyed untrusted-content fences; model output
+    # is validated before it can become a proposal.
+    assert '("instruction", request.instruction)' in manager_source
+    assert '("selected_text", request.selected_text)' in manager_source
+    assert "scan_result = await scan_async(text)" in manager_source
+    assert (
+        "wrap_untrusted_content('selected_text', request.selected_text)"
+        in manager_source
+    )
+    assert (
+        "wrap_untrusted_content('instruction', request.instruction)" in manager_source
+    )
+    assert "validation = await validate_async(replacement)" in manager_source
 
 
 def test_export_rejects_windows_unsafe_harness_filenames() -> None:
