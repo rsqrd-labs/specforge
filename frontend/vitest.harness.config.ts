@@ -14,7 +14,16 @@ import { resolve } from "node:path"
 export default defineConfig({
   plugins: [react()],
   resolve: {
-    modules: [resolve(__dirname, "node_modules"), "node_modules"],
+    // Harness files live outside `frontend/`, so bare imports otherwise walk
+    // toward the repository root and miss frontend's isolated pnpm install on
+    // clean CI runners. Vite 8 removed the old `resolve.modules` escape hatch;
+    // pin the one harness-owned bare import to this package explicitly.
+    alias: {
+      "@testing-library/react": resolve(
+        __dirname,
+        "node_modules/@testing-library/react",
+      ),
+    },
   },
   server: {
     fs: { allow: [__dirname, resolve(__dirname, "..")] },
