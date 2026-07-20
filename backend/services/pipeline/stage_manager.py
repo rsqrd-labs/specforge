@@ -166,7 +166,6 @@ from services.security.problem_statement_gate import (
     assert_valid_problem_statement_async,
 )
 from services.security.prompt_guard import scan_async
-from services.security.sanitizer import sanitize_text_async
 
 logger = logging.getLogger(__name__)
 
@@ -1086,10 +1085,9 @@ def _hash_text(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
-def _normalized_refine_text(sanitized_value: str) -> str:
-    """Lowercase + collapse whitespace. Callers pass already-sanitised text
-    (``refine`` bleaches each input exactly once, via ``sanitize_text_async``)."""
-    return " ".join(sanitized_value.lower().split())
+def _normalized_refine_text(value: str) -> str:
+    """Lowercase + collapse whitespace for the no-op refine comparison."""
+    return " ".join(value.lower().split())
 
 
 def _assert_visible_credit_balance(user, required: int) -> None:
@@ -1101,10 +1099,10 @@ def _assert_visible_credit_balance(user, required: int) -> None:
 
 
 def _assert_refine_instruction_meaningful(
-    sanitized_instruction: str, sanitized_selected_text: str
+    raw_instruction: str, raw_selected_text: str
 ) -> None:
-    instruction = _normalized_refine_text(sanitized_instruction)
-    selected_text = _normalized_refine_text(sanitized_selected_text)
+    instruction = _normalized_refine_text(raw_instruction)
+    selected_text = _normalized_refine_text(raw_selected_text)
     if not instruction:
         raise PreflightError(
             "refine_instruction_empty",
@@ -4641,13 +4639,15 @@ class StageManager:
         doc_len = len(stage_content)
         selection_len = request.selection_end - request.selection_start
         large_selection = doc_len > 0 and (selection_len / doc_len) > 0.80
-        # Sanitise once, off the event loop for large selections (F7), and feed
-        # the same result to both the no-op preflight check and the prompt build
-        # below — previously each input was bleached twice on this path.
-        sanitized_instruction = await sanitize_text_async(request.instruction)
-        sanitized_selected_text = await sanitize_text_async(request.selected_text)
+        # Both inputs go into the prompt RAW (audit F1 cluster): bleaching them
+        # mangled code-bearing selections/instructions (`List<String>` → "List")
+        # while the same bytes already reached the model unbleached via the
+        # current_document fence — no security value, real fidelity loss. The
+        # controls on this path are the scan_async injection gate above, the
+        # keyed-nonce untrusted-content fences below, and validate_async on the
+        # model output.
         _assert_refine_instruction_meaningful(
-            sanitized_instruction, sanitized_selected_text
+            request.instruction, request.selected_text
         )
         _assert_visible_credit_balance(user, CREDIT_COSTS["refine"])
 
@@ -4715,9 +4715,9 @@ class StageManager:
             f"Current document:\n"
             f"{wrap_untrusted_content('current_document', content)}\n\n"
             f"Selected text:\n"
-            f"{wrap_untrusted_content('selected_text', sanitized_selected_text)}\n\n"
+            f"{wrap_untrusted_content('selected_text', request.selected_text)}\n\n"
             f"Instruction:\n"
-            f"{wrap_untrusted_content('instruction', sanitized_instruction)}\n\n"
+            f"{wrap_untrusted_content('instruction', request.instruction)}\n\n"
             f"Refine mode: {request.mode}\n"
             "Provide the replacement text only. Do not rewrite surrounding content."
         )
@@ -5062,6 +5062,10 @@ class StageManager:
             and stage.quality_gate_status == "advisory"
             and stage.quality_gate_version == version_number
         )
+        # Invariant (audit F3): StageVersion.content and Stage.content store
+        # identical bytes for a given version — sanitization happens at
+        # consumption boundaries only — so restoring a version is a plain byte
+        # copy with no re-sanitize.
         stage.content = version.content
         stage.current_version = version_number
         stage.status = "draft"
@@ -5103,7 +5107,19 @@ class StageManager:
         workspace = await self._load_workspace(stage.workspace_id, db)
         was_finalised = stage.status == "finalised"
 
-        stage.content = await sanitize_text_async(new_content)
+        # Store exactly what the user submitted. Sanitization happens at each
+        # consumption boundary, never at rest: bleaching markdown *source* here
+        # silently destroyed code-bearing content (`List<String>`, JSX, HTML
+        # mentions) on every edit and made stage.content diverge from both the
+        # editor and StageVersion.content, permanently breaking refine's
+        # raw-match (audit F1/F2/F3). Readers each carry their own guard:
+        # in-app + public render (rehype-sanitize), PDF (allowlist clean of the
+        # *rendered* HTML in pdf_export_service), downstream-agent exports
+        # (sanitize_downstream_agent_content + command guard), storyboard
+        # (renderer-side sanitize_text), and LLM prompts (keyed-nonce
+        # untrusted-content fences — which is also why no prompt-injection scan
+        # runs here: edited content only ever reaches a prompt fenced).
+        stage.content = new_content
         stage.current_version += 1
         stage.status = "draft" if not was_finalised else "stale"
         stage.updated_at = datetime.now(UTC)

@@ -1465,8 +1465,10 @@ export default function Workspace() {
       setDiffResult(result)
       setLargeSelectionWarning(result.large_selection)
       setShowRefineInput(false)
-    } catch {
-      setGenericError("Refine failed. Check your selection and try again.")
+    } catch (error) {
+      setGenericError(
+        getApiErrorMessage(error, "Refine failed. Check your selection and try again."),
+      )
     } finally {
       refineInFlightRef.current = false
       setIsRefining(false)

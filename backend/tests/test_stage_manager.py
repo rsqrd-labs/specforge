@@ -3334,6 +3334,134 @@ async def test_handle_content_edit_schedules_eval_for_new_version() -> None:
     )
 
 
+# Code-bearing document for the content-integrity regressions (audit F1/F2/F3).
+# Every construct here was destroyed or HTML-escaped by the retired at-rest
+# bleach pass: generic types, JSX, bare comparisons/ampersands, and fences.
+_CODE_BEARING_CONTENT = (
+    "# Spec\n\n"
+    "Store items in `List<String>` and render <Button onClick={fn} /> nodes.\n\n"
+    "```ts\n"
+    "const el = <div a={1 < 2 && (3 & 4)}>ok</div>\n"
+    "```\n\n"
+    "Check a < b and c & d in prose, mention <html> and <body> tags.\n"
+)
+
+
+@pytest.mark.asyncio
+async def test_handle_content_edit_stores_bytes_verbatim() -> None:
+    # F1 regression: a manual edit must persist exactly the submitted bytes in
+    # BOTH stage.content and the StageVersion row — no bleach at rest. The old
+    # sanitize pass turned `List<String>` into "List" and erased JSX silently.
+    workspace_id = uuid4()
+    stage = _make_stage(workspace_id, "spec", status="draft", content="old", version=1)
+    workspace = _make_workspace([stage])
+    user = _make_user()
+    svc = StageManager(redis_client=_FakeRedis())
+    db = _MultiQueryDB([stage, workspace])
+
+    with patch(
+        "services.pipeline.stage_manager.run_eval_background",
+        new_callable=AsyncMock,
+        return_value=None,
+    ):
+        updated = await svc.handle_content_edit(
+            stage.id, _CODE_BEARING_CONTENT, user, db
+        )
+        await asyncio.sleep(0)
+
+    version = next(item for item in db.added if isinstance(item, StageVersion))
+    assert updated.content == _CODE_BEARING_CONTENT
+    assert version.content == _CODE_BEARING_CONTENT
+    # The invariant F3 pins: the stage row and its version row are identical
+    # bytes, so a later rollback is a plain byte copy.
+    assert updated.content == version.content
+
+
+@pytest.mark.asyncio
+async def test_rollback_restores_version_bytes_verbatim() -> None:
+    # F3 regression: restoring a version copies its bytes untouched — no
+    # re-sanitize on the way back into stage.content.
+    workspace_id = uuid4()
+    stage = _make_stage(
+        workspace_id, "spec", status="draft", content="current text", version=3
+    )
+    version = StageVersion(
+        id=uuid4(),
+        stage_id=stage.id,
+        version=2,
+        content=_CODE_BEARING_CONTENT,
+        created_by="user",
+        created_at=datetime.now(UTC),
+    )
+    svc = StageManager(redis_client=_FakeRedis())
+    db = _MultiQueryDB([version, stage])
+    user = _make_user()
+
+    updated = await svc.rollback(stage.id, 2, user, db)
+
+    assert updated.content == _CODE_BEARING_CONTENT
+    assert updated.current_version == 2
+
+
+@pytest.mark.asyncio
+async def test_refine_selection_matches_after_code_bearing_edit() -> None:
+    # F2 regression chain: edit code-bearing content, then refine with offsets
+    # computed against that same string. Under the at-rest bleach the stored
+    # document drifted from the editor's, so this raw-match raised
+    # RefineSelectionError on every code-bearing document. Also pins the
+    # prompt-fidelity half of the fix: the model must see the raw selection and
+    # raw instruction, not a bleached ghost of them.
+    from schemas.stage import RefineRequest
+
+    workspace_id = uuid4()
+    stage = _make_stage(workspace_id, "spec", status="draft", content="old", version=1)
+    workspace = _make_workspace([stage])
+    user = _make_user()
+    svc = StageManager(redis_client=_FakeRedis())
+
+    with patch(
+        "services.pipeline.stage_manager.run_eval_background",
+        new_callable=AsyncMock,
+        return_value=None,
+    ):
+        await svc.handle_content_edit(
+            stage.id, _CODE_BEARING_CONTENT, user, _MultiQueryDB([stage, workspace])
+        )
+        await asyncio.sleep(0)
+
+    selected = "`List<String>` and render <Button onClick={fn} />"
+    start = _CODE_BEARING_CONTENT.index(selected)
+    instruction = "Rename List<String> to List<Item> and keep a < b intact"
+    request = RefineRequest(
+        instruction=instruction,
+        selection_start=start,
+        selection_end=start + len(selected),
+        selected_text=selected,
+    )
+    deduction = CreditLedger(id=uuid4(), user_id=user.id, amount=-3, reason="refine")
+
+    with (
+        patch(
+            "services.pipeline.stage_manager.credit_service.deduct",
+            new_callable=AsyncMock,
+            return_value=deduction,
+        ),
+        patch("services.pipeline.stage_manager.get_llm") as mock_get_llm,
+    ):
+        mock_adapter = MagicMock()
+        mock_adapter.complete = AsyncMock(return_value="replacement text")
+        mock_get_llm.return_value = mock_adapter
+
+        result = await svc.refine(
+            stage.id, request, user, _MultiQueryDB([stage, workspace])
+        )
+
+    assert result.proposed  # no RefineSelectionError — raw match held
+    user_prompt = mock_adapter.complete.await_args.args[1]
+    assert selected in user_prompt
+    assert instruction in user_prompt
+
+
 @pytest.mark.asyncio
 async def test_refine_large_selection_85_percent_returns_true() -> None:
     """Selection covering 85% of document sets large_selection=True."""
@@ -3470,7 +3598,15 @@ async def test_refine_rejects_stale_selected_text_before_llm_call() -> None:
 
 
 @pytest.mark.asyncio
-async def test_refine_matches_raw_selection_but_sanitizes_prompt_fields() -> None:
+async def test_refine_feeds_raw_selection_and_instruction_into_fences() -> None:
+    # Stage screens audit F1: the refine path used to bleach `selected_text` and
+    # `instruction` before building the prompt. That mangled every code-bearing
+    # selection (`<b>world</b>` -> `world`, `List<String>` -> `List`) for zero
+    # security benefit — the identical raw bytes already reached the model inside
+    # the `current_document` fence. The bleach is gone; both inputs now reach the
+    # keyed-nonce fences verbatim. Injection defence rests on the scan_async gate,
+    # the untrusted-content fences, and output validation — not on destroying the
+    # user's own markup.
     from schemas.stage import RefineRequest
 
     workspace_id = uuid4()
@@ -3504,24 +3640,26 @@ async def test_refine_matches_raw_selection_but_sanitizes_prompt_fields() -> Non
 
         result = await svc.refine(stage.id, request, user, db)
 
+    # The raw selection still matches the stored document, so the replacement
+    # lands exactly (this is the match that F1's over-sanitisation broke).
     assert result.proposed == "hello earth"
     system_prompt, user_prompt = mock_adapter.complete.await_args.args[:2]
     assert "Non-negotiable security and privacy rules:" in system_prompt
     assert '<untrusted_content source="current_document" nonce="' in user_prompt
     assert '<untrusted_content source="selected_text" nonce="' in user_prompt
     assert '<untrusted_content source="instruction" nonce="' in user_prompt
-    # The closing tag now carries a keyed, content-bound nonce
+    # The closing tag carries a keyed, content-bound nonce
     # (`</selected_text:{nonce}>` — finding #2's delimiter-spoofing fix), so
-    # split on the nonce-agnostic prefix rather than the old bare
-    # `</selected_text>` string.
+    # split on the nonce-agnostic prefix rather than a bare `</selected_text>`.
     selected_prompt = user_prompt.split("<selected_text>\n", 1)[1].split(
         "\n</selected_text:", 1
     )[0]
     instruction_prompt = user_prompt.split("<instruction>\n", 1)[1].split(
         "\n</instruction:", 1
     )[0]
-    assert selected_prompt == "world"
-    assert instruction_prompt == "tighten"
+    # Verbatim — the raw markup survives to the fenced prompt, no bleach ghost.
+    assert selected_prompt == "<b>world</b>"
+    assert instruction_prompt == "<i>tighten</i>"
 
 
 def test_refine_system_prompt_contains_worked_example() -> None:
@@ -3628,7 +3766,10 @@ async def test_focused_refine_uses_small_budget_and_context_window() -> None:
 
     system_prompt, user_prompt = mock_adapter.complete.await_args.args[:2]
     assert mock_adapter.complete.await_args.kwargs["max_tokens"] == 768
-    assert "keep the replacement tightly scoped" in system_prompt
+    # Match the distinctive phrase, not a leading verb whose casing shifts when
+    # the sentence is reflowed (the f264269 prompt rewrite made "Keep" a sentence
+    # start; asserting the case-sensitive full clause is what broke this).
+    assert "tightly scoped" in system_prompt
     assert "Refine mode: focused" in user_prompt
     assert "Do not rewrite surrounding content" in user_prompt
     assert content not in user_prompt

@@ -58,4 +58,35 @@ describe("getApiErrorMessage", () => {
       "fallback copy",
     )
   })
+
+  it("surfaces a refine selection_mismatch 409 message (stage screens audit F2)", () => {
+    // `runRefine`'s catch now routes through getApiErrorMessage instead of a
+    // fixed string, so a genuine race (another tab edited the stage) shows the
+    // backend's honest reason. Shape mirrors routers/stage.py refine_stage:
+    // `{"error": "selection_mismatch", "message": str(exc)}`.
+    const error = axiosErrorWithDetail({
+      error: "selection_mismatch",
+      message:
+        "The selected text no longer matches the current document. " +
+        "It may have changed since you selected it — reselect and try again.",
+    })
+
+    expect(
+      getApiErrorMessage(error, "Refine failed. Check your selection and try again."),
+    ).toBe(
+      "The selected text no longer matches the current document. " +
+        "It may have changed since you selected it — reselect and try again.",
+    )
+  })
+
+  it("uses the refine fallback for a 402 credit shape that carries no message", () => {
+    // The refine 402 detail is `{"code": "insufficient_credits", "required": 3}`
+    // — no `message` field — so the honest fallback copy is what the user sees.
+    // (Dedicated refine-cost UX is F12 / Phase 6.)
+    const error = axiosErrorWithDetail({ code: "insufficient_credits", required: 3 })
+
+    expect(
+      getApiErrorMessage(error, "Refine failed. Check your selection and try again."),
+    ).toBe("Refine failed. Check your selection and try again.")
+  })
 })

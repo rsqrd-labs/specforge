@@ -23,13 +23,16 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 import logging
+import re
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from uuid import UUID
 
+import bleach
 import markdown as md
+from bleach.css_sanitizer import CSSSanitizer
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -137,11 +140,102 @@ def no_network_url_fetcher(url: str, **_: Any) -> dict[str, Any]:
     raise _NoNetworkFetch(f"Network fetch blocked: {url[:120]}")
 
 
+# Boundary-local sanitization of the *rendered* HTML (audit F1 / plan §1.0).
+# Stage content is stored raw — python-markdown passes inline HTML through
+# verbatim, so without this pass a `<script>`/`<style>`/arbitrary tag typed
+# into a stage edit lands in the document WeasyPrint renders. WeasyPrint
+# executes no JS and the no_network_url_fetcher blocks outbound fetches, so
+# the residual risk is layout/content injection into the user's own PDF —
+# closed here by allowlisting exactly what the markdown converter emits.
+# Never sanitize the markdown *source*: that is the at-rest bleach this phase
+# removed (it destroys code like `List<String>`); by the time this runs, code
+# spans/fences are already HTML-escaped by the converter and survive intact.
+_PDF_ALLOWED_TAGS = frozenset(
+    {
+        "a",
+        "blockquote",
+        "br",
+        "code",
+        "div",
+        "em",
+        "h1",
+        "h2",
+        "h3",
+        "h4",
+        "h5",
+        "h6",
+        "hr",
+        "img",
+        "li",
+        "ol",
+        "p",
+        "pre",
+        "span",
+        "strong",
+        "table",
+        "tbody",
+        "td",
+        "th",
+        "thead",
+        "tr",
+        "ul",
+    }
+)
+_PDF_ALLOWED_ATTRIBUTES = {
+    "a": ["href", "title"],
+    # Remote img URLs are refused by no_network_url_fetcher at render time;
+    # src stays allowed so data-URI images survive.
+    "img": ["src", "alt", "title"],
+    # class carries the codehilite syntax-highlighting hooks.
+    "code": ["class"],
+    "div": ["class"],
+    "pre": ["class"],
+    "span": ["class"],
+    # The toc extension stamps ids on headings.
+    "h1": ["id"],
+    "h2": ["id"],
+    "h3": ["id"],
+    "h4": ["id"],
+    "h5": ["id"],
+    "h6": ["id"],
+    # The tables extension expresses column alignment as inline text-align.
+    "td": ["style"],
+    "th": ["style"],
+    "ol": ["start"],
+    "li": ["value"],
+}
+_PDF_ALLOWED_PROTOCOLS = frozenset({"http", "https", "mailto", "data"})
+_PDF_CSS_SANITIZER = CSSSanitizer(allowed_css_properties=["text-align"])
+
+# bleach's strip=True removes a disallowed element but keeps its text children;
+# for script/style that would leak the payload as visible PDF text. Drop those
+# elements with their content first — same policy as
+# services.security.sanitizer.
+_PDF_SCRIPT_OR_STYLE_BLOCK = re.compile(
+    r"<\s*(script|style)\b[^>]*>.*?<\s*/\s*\1\s*>",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _sanitize_rendered_html(html_text: str) -> str:
+    """Allowlist-clean converter output before it reaches WeasyPrint."""
+    without_executable_blocks = _PDF_SCRIPT_OR_STYLE_BLOCK.sub("", html_text)
+    return bleach.clean(
+        without_executable_blocks,
+        tags=_PDF_ALLOWED_TAGS,
+        attributes=_PDF_ALLOWED_ATTRIBUTES,
+        protocols=_PDF_ALLOWED_PROTOCOLS,
+        css_sanitizer=_PDF_CSS_SANITIZER,
+        strip=True,
+        strip_comments=True,
+    )
+
+
 def _render_markdown_to_html(markdown_text: str) -> str:
-    """Convert a Markdown string to HTML with codehilite syntax classes."""
+    """Convert a Markdown string to sanitized HTML with codehilite classes."""
     if not markdown_text:
         return ""
-    return md.markdown(
+    rendered = md.markdown(
         markdown_text,
         extensions=[
             "fenced_code",
@@ -159,6 +253,7 @@ def _render_markdown_to_html(markdown_text: str) -> str:
         },
         output_format="html5",
     )
+    return _sanitize_rendered_html(rendered)
 
 
 def _build_sections(stages: dict[str, Stage]) -> list[dict[str, str]]:

@@ -377,8 +377,10 @@ async def refine_stage(
     user: User = Depends(get_current_user),
     _: None = Depends(require_credits(3)),
 ) -> DiffResponse:
-    # StageManager raw-matches selected_text before its prompt layer sanitises
-    # both inputs (sanitize_text_async — offloaded off the event loop, F7).
+    # StageManager raw-matches selected_text against the stored document, then
+    # feeds both inputs to the prompt raw inside keyed-nonce fences after the
+    # scan_async injection gate (audit F1: no bleach on this path — it mangled
+    # code-bearing selections with zero security value).
     await _load_stage(id, db, user.id)
     trace_id = str(uuid4())
     try:
