@@ -432,6 +432,27 @@ describe("StalenessWarning", () => {
     await user.click(screen.getByRole("button", { name: /^keep$/i }))
     expect(onDismiss).toHaveBeenCalledOnce()
   })
+
+  it("blocks both actions with an accessible reason while generation is locked", () => {
+    render(
+      <StalenessWarning
+        stage={makeStage({ status: "stale" })}
+        upstreamStageType="SPEC.md"
+        onRegenerate={vi.fn()}
+        onDismiss={vi.fn()}
+        disabled
+        disabledReason="Another generation is active"
+      />,
+    )
+    for (const button of [
+      screen.getByRole("button", { name: /^keep$/i }),
+      screen.getByRole("button", { name: /regenerate/i }),
+    ]) {
+      expect(button).toBeDisabled()
+      expect(button).toHaveAttribute("title", "Another generation is active")
+      expect(button).toHaveAccessibleDescription("Another generation is active")
+    }
+  })
 })
 
 describe("HumanReviewGate", () => {
@@ -475,6 +496,26 @@ describe("HumanReviewGate", () => {
       />,
     )
     await user.click(screen.getByRole("button", { name: /^back$/i }))
+    expect(onClose).toHaveBeenCalledOnce()
+  })
+
+  it("closes from the backdrop and disables generation with a reason", async () => {
+    const user = userEvent.setup()
+    const onClose = vi.fn()
+    const { container } = render(
+      <HumanReviewGate
+        fromStageType="SPEC.md"
+        toStageType="PLAN.md"
+        onProceed={vi.fn()}
+        onClose={onClose}
+        disabled
+        disabledReason="Finish the active request first"
+      />,
+    )
+    const generate = screen.getByRole("button", { name: /^generate$/i })
+    expect(generate).toBeDisabled()
+    expect(generate).toHaveAccessibleDescription("Finish the active request first")
+    await user.click(container.querySelector(".create-modal-backdrop") as HTMLElement)
     expect(onClose).toHaveBeenCalledOnce()
   })
 })

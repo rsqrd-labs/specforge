@@ -52,12 +52,28 @@ export default defineConfig({
       include: ["src/**/*.{ts,tsx}"],
       exclude: ["src/**/*.test.{ts,tsx}", "src/__tests__/**", "src/main.tsx", "src/vite-env.d.ts"],
       thresholds: {
-        // Issue #30 baseline ratchet. Raise these monotonically as the
-        // risk-focused coverage remediation lands; never lower them.
-        statements: 60,
-        branches: 60,
-        functions: 60,
-        lines: 60,
+        // Issue #48 release policy. Keep the aggregate floor and the
+        // risk-critical per-file boundaries explicit so broad low-risk tests
+        // cannot mask a regression in auth, streaming, or state management.
+        statements: 80,
+        branches: 80,
+        functions: 80,
+        lines: 80,
+        // Vitest 4.1 applies a glob threshold to the matching aggregate. Keep
+        // these as exact-file patterns so each boundary is independently
+        // enforced without relying on a second policy parser.
+        "src/services/api.ts": { statements: 90, branches: 90 },
+        "src/services/sseService.ts": { statements: 90, branches: 90 },
+        "src/store/generationEstimatesStore.ts": { statements: 90, branches: 90 },
+        "src/store/stageStore.ts": { statements: 90, branches: 90 },
+        "src/store/userStore.ts": { statements: 90, branches: 90 },
+        "src/store/workspaceStore.ts": { statements: 90, branches: 90 },
+        "src/hooks/useStream.ts": { statements: 90, branches: 90 },
+        "src/hooks/useGitHubSync.ts": { statements: 90, branches: 90 },
+        "src/hooks/useReconnectPoll.ts": { statements: 90, branches: 90 },
+        "src/pages/AuthCallback.tsx": { statements: 90, branches: 90 },
+        "src/components/shared/ProtectedRoute.tsx": { statements: 90, branches: 90 },
+        "src/components/shared/SessionExpiryWatcher.tsx": { statements: 90, branches: 90 },
       },
     },
   },

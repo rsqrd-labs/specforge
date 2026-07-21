@@ -70,6 +70,17 @@ describe("stageStore stream_reset (deferred reset)", () => {
     expect(useStageStore.getState().streamingContent["s1"]).toBe("ab")
   })
 
+  it("accepts the first token even when no stream buffer has been seeded", () => {
+    useStageStore.getState().appendToken("s1", "first")
+    expect(useStageStore.getState().streamingContent.s1).toBe("first")
+  })
+
+  it("accepts an active-stream token when the buffer was restored without content", () => {
+    useStageStore.setState({ activeStream: "s1", streamingContent: {} })
+    useStageStore.getState().appendStreamToken("restored")
+    expect(useStageStore.getState().streamingContent.s1).toBe("restored")
+  })
+
   it("clears the pending-reset flag on a fresh stream and on finalise", () => {
     const store = useStageStore.getState()
     store.startStream("s1")
@@ -258,5 +269,15 @@ describe("stageStore stage and gate lifecycle", () => {
     expect(useStageStore.getState().stages.plan.status).toBe("draft")
     expect(useStageStore.getState().stages.harness.status).toBe("stale")
     expect(useStageStore.getState().stages.tasks.status).toBe("locked")
+  })
+
+  it("ignores an unknown stage type without mutating existing stages", () => {
+    const stage = makeStage({ status: "finalised" })
+    useStageStore.getState().setStage(stage)
+    const before = useStageStore.getState().stages
+
+    useStageStore.getState().markStale("unknown" as never)
+
+    expect(useStageStore.getState().stages).toBe(before)
   })
 })

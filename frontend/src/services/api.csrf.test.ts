@@ -60,6 +60,14 @@ vi.mock("axios", () => {
 })
 
 describe("CSRF token handling", () => {
+  it("does not request a CSRF token without an authenticated access token", async () => {
+    const { getCsrfToken, setAccessToken } = await import("./api")
+    setAccessToken(null)
+    axiosMock.refreshInstance.get.mockClear()
+    await expect(getCsrfToken()).resolves.toBeNull()
+    expect(axiosMock.refreshInstance.get).not.toHaveBeenCalled()
+  })
+
   it("fetches a new one-time CSRF token for each call", async () => {
     const { getCsrfToken, setAccessToken } = await import("./api")
 

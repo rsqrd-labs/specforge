@@ -131,6 +131,22 @@ describe("CreditConfirmModal", () => {
     expect(onCancel).toHaveBeenCalledOnce()
   })
 
+  it("uses action defaults and dismisses only from the backdrop itself", async () => {
+    const user = userEvent.setup()
+    const onCancel = vi.fn()
+    const { container } = renderModal({
+      action: "refine",
+      creditCost: undefined,
+      currentBalance: undefined,
+      onCancel,
+    })
+    expect(screen.getByText(/needs 3 credits/i)).toBeInTheDocument()
+    await user.click(screen.getByRole("dialog"))
+    expect(onCancel).not.toHaveBeenCalled()
+    await user.click(container.querySelector(".create-modal-backdrop") as HTMLElement)
+    expect(onCancel).toHaveBeenCalledOnce()
+  })
+
   describe("when the balance is insufficient", () => {
     const broke = { currentBalance: 0 }
 

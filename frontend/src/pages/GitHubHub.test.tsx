@@ -1,11 +1,11 @@
-import { render, screen, waitFor } from "@testing-library/react"
+import { fireEvent, render, screen, waitFor } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { MemoryRouter } from "react-router-dom"
 import { beforeEach, describe, expect, it, vi } from "vitest"
 
 import { listGitHubExports } from "../services/api"
 import type { ExportSummary } from "../types/github"
-import GitHubHub from "./GitHubHub"
+import GitHubHub, { formatWhen } from "./GitHubHub"
 
 vi.mock("../services/api", () => ({
   listGitHubExports: vi.fn(),
@@ -62,6 +62,19 @@ beforeEach(() => {
 })
 
 describe("GitHubHub", () => {
+  it("formats activity timestamps across freshness bands and rejects invalid input", () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date("2026-07-20T12:00:00Z"))
+    expect(formatWhen(null)).toBeNull()
+    expect(formatWhen("not-a-date")).toBeNull()
+    expect(formatWhen("2026-07-20T11:59:45Z")).toBe("just now")
+    expect(formatWhen("2026-07-20T11:40:00Z")).toBe("20m ago")
+    expect(formatWhen("2026-07-20T09:00:00Z")).toBe("3h ago")
+    expect(formatWhen("2026-07-18T12:00:00Z")).toBe("2d ago")
+    expect(formatWhen("2026-07-01T12:00:00Z")).toMatch(/Jul/)
+    vi.useRealTimers()
+  })
+
   it("renders accurate status language, activity, and safe repository actions", async () => {
     renderHub()
 
@@ -122,5 +135,74 @@ describe("GitHubHub", () => {
     await waitFor(() => expect(listGitHubExportsMock).toHaveBeenCalledTimes(2))
     expect(await screen.findByText("Atlas launch v2")).toBeInTheDocument()
     expect(screen.queryByText("Atlas launch")).not.toBeInTheDocument()
+  })
+
+  it("renders the empty state and navigates back to the dashboard", async () => {
+    listGitHubExportsMock.mockResolvedValueOnce([])
+    renderHub()
+    expect(await screen.findByRole("heading", { name: "No repository exports yet" })).toBeInTheDocument()
+    expect(screen.getByRole("link", { name: "Choose a workspace" })).toHaveAttribute("href", "/dashboard")
+  })
+
+  it("keeps an initial failure recoverable and replaces it after retry", async () => {
+    listGitHubExportsMock
+      .mockRejectedValueOnce(new Error("offline"))
+      .mockResolvedValueOnce([row()])
+    renderHub()
+    expect(await screen.findByRole("alert")).toHaveTextContent("Could not load your GitHub exports")
+    await userEvent.click(screen.getByRole("button", { name: "Try again" }))
+    expect(await screen.findByText("Atlas launch")).toBeInTheDocument()
+    expect(screen.queryByRole("alert")).toBeNull()
+  })
+
+  it("covers queued and untracked export activity and clears an empty filter", async () => {
+    listGitHubExportsMock.mockResolvedValueOnce([
+      row({
+        push_id: "pending",
+        status: "pending",
+        repo_full_name: null,
+        repo_url: null,
+        shipped: 3,
+        total: 0,
+        pushed_at: null,
+        last_inbound_sync_at: null,
+      }),
+    ])
+    renderHub()
+    expect(await screen.findByText("Sync queued")).toBeInTheDocument()
+    expect(screen.getByText("No tracked issues")).toBeInTheDocument()
+    expect(screen.getByText("Repository")).toBeInTheDocument()
+
+    fireEvent.change(screen.getByRole("searchbox", { name: "Search repositories" }), {
+      target: { value: "does-not-exist" },
+    })
+    expect(screen.getByRole("heading", { name: "No matching repositories" })).toBeInTheDocument()
+    fireEvent.click(screen.getByRole("button", { name: "Clear search and filters" }))
+    expect(screen.getByText("Sync queued")).toBeInTheDocument()
+  })
+
+  it("refreshes a pending export when the visible document changes state", async () => {
+    const visibility = vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible")
+    listGitHubExportsMock.mockResolvedValue([row({ status: "pending" })])
+    renderHub()
+    await screen.findByText("Atlas launch")
+    fireEvent(document, new Event("visibilitychange"))
+    await waitFor(() => expect(listGitHubExportsMock).toHaveBeenCalledTimes(2))
+    visibility.mockRestore()
+  })
+
+  it("switches syncing filters and all supported sort orders", async () => {
+    const user = userEvent.setup()
+    listGitHubExportsMock.mockResolvedValueOnce([
+      row({ status: "pending" }),
+      row({ push_id: "second", workspace_id: "second", workspace_name: "Zulu", repo_full_name: "acme/zulu" }),
+    ])
+    renderHub()
+    await screen.findByText("Atlas launch")
+    await user.click(screen.getByRole("button", { name: /Syncing 1/ }))
+    expect(screen.queryByText("Zulu")).toBeNull()
+    await user.selectOptions(screen.getByRole("combobox", { name: /Sort/ }), "name")
+    await user.selectOptions(screen.getByRole("combobox", { name: /Sort/ }), "progress")
+    expect(screen.getByText("Atlas launch")).toBeInTheDocument()
   })
 })

@@ -102,6 +102,14 @@ describe("refreshAccessToken session-death circuit breaker", () => {
     expect(axiosMock.refreshInstance.post).toHaveBeenCalledTimes(2)
   })
 
+  it("accepts the legacy camel-case refresh token response", async () => {
+    const { refreshAccessToken } = await import("./api")
+    axiosMock.refreshInstance.post.mockResolvedValueOnce({
+      data: { accessToken: "legacy-token" },
+    })
+    await expect(refreshAccessToken()).resolves.toBe("legacy-token")
+  })
+
   it("clears the latch once a fresh token proves the session is alive again", async () => {
     const { refreshAccessToken, setAccessToken, isSessionExpired } = await import(
       "./api"
@@ -149,6 +157,22 @@ describe("refreshAccessToken session-death circuit breaker", () => {
     expect(listener).toHaveBeenCalledTimes(1)
     expect(axiosMock.refreshInstance.post).toHaveBeenCalledTimes(1)
     unsubscribe()
+  })
+
+  it("isolates a throwing expiry listener from the remaining subscribers", async () => {
+    const { refreshAccessToken, onSessionExpired } = await import("./api")
+    const survivor = vi.fn()
+    const unsubscribeThrower = onSessionExpired(() => { throw new Error("listener failed") })
+    const unsubscribeSurvivor = onSessionExpired(survivor)
+    axiosMock.refreshInstance.post.mockRejectedValueOnce({
+      isAxiosError: true,
+      response: { status: 401 },
+    })
+
+    await expect(refreshAccessToken()).resolves.toBeNull()
+    expect(survivor).toHaveBeenCalledTimes(1)
+    unsubscribeThrower()
+    unsubscribeSurvivor()
   })
 
   it("re-probes after the cooldown window lapses instead of staying latched forever", async () => {

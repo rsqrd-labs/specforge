@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react"
+import { act, render, screen } from "@testing-library/react"
 import { beforeEach, describe, expect, it, vi } from "vitest"
 import { MemoryRouter, Route, Routes } from "react-router-dom"
 
@@ -86,5 +86,14 @@ describe("LegalRetention", () => {
       "href",
       "/",
     )
+  })
+
+  it("ignores policy data that arrives after the legal page unmounts", async () => {
+    let resolve!: (value: RetentionPolicy) => void
+    vi.mocked(getRetentionPolicy).mockReturnValueOnce(new Promise((done) => { resolve = done }))
+    const view = renderPage()
+    view.unmount()
+    await act(async () => resolve({ ...POLICY, policy_version: "late-policy" }))
+    expect(document.body).not.toHaveTextContent("late-policy")
   })
 })
