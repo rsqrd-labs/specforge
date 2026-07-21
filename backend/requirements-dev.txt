@@ -3,7 +3,7 @@ pip-audit==2.*
 safety==3.*
 pytest==9.*
 pytest-asyncio==1.*
-pytest-cov==6.*
+pytest-cov>=6,<8
 black==26.*
 ruff==0.8.*
 pytest-mock
