@@ -32,10 +32,21 @@ def _artifact(stage: str) -> str:
         "This deterministic browser-test artifact describes observable behavior, "
         "ownership, failure recovery, validation, and concrete verification evidence. "
         "It is intentionally detailed enough to exercise the real persistence and "
-        "quality-validation pipeline without contacting an external provider. "
+        "quality-validation pipeline without contacting an external provider.\n"
+        "Evidence: Verified by the deterministic authenticated browser contract.\n"
+        "FR-001 FR-002 FR-003 FR-004 FR-005\n"
+        "NFR-001 NFR-002 NFR-003 SEC-001\n"
+        "AC-001 AC-002 AC-003 "
     )
     sections = []
-    for heading in artifact_validator.DEMO_DAY_SECTION_CONTRACTS[stage]:
+    # Keep the deterministic provider valid even when a test workspace is
+    # normalised to standard mode by an older database/API path. The fixture is
+    # intentionally a superset; production validators permit extra sections.
+    headings = dict.fromkeys(
+        artifact_validator.SECTION_CONTRACTS[stage]
+        + artifact_validator.DEMO_DAY_SECTION_CONTRACTS[stage]
+    )
+    for heading in headings:
         sections.extend((heading, "", body + body, ""))
     if stage == "spec":
         sections.extend(
