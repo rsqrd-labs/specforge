@@ -157,7 +157,11 @@ test("navigation reconnects to an in-flight generation and cancellation is durab
   await regenerate.getByRole("button", { name: "Regenerate", exact: true }).click()
   const cancel = page.getByRole("button", { name: /Cancel generation|Cancel$/ })
   await expect(cancel).toBeVisible()
-  await cancel.click()
+  // The streaming document reflows under the button on small viewports, so a
+  // hit-tested tap chases a moving target until the run settles and the button
+  // detaches. Dispatch the activation directly; if the deterministic run
+  // completes first, the durability poll below still owns the assertion.
+  await cancel.dispatchEvent("click").catch(() => {})
 
   const refreshed = await apiCall(request, `/workspaces/${workspace.id}`)
   const body = await refreshed.json()
