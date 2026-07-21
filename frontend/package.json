@@ -20,7 +20,7 @@
   },
   "dependencies": {
     "@codemirror/lang-markdown": "^6.3",
-    "@codemirror/view": "^6.35",
+    "@codemirror/view": "^6.43",
     "axios": "^1.18.1",
     "qrcode.react": "^4.2.0",
     "react": "^18.3",
