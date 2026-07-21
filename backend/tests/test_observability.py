@@ -217,6 +217,7 @@ def test_production_app_accepts_langfuse_host_with_https() -> None:
             observability.settings, "langfuse_host", "https://cloud.langfuse.com"
         ),
         patch.object(observability.settings, "langfuse_content_capture_ack", True),
+        patch.object(observability.settings, "allowed_hosts", "app.example.com"),
     ):
         # Must not raise — every Langfuse production requirement is satisfied.
         create_app(redis_client=_NoopRedis())

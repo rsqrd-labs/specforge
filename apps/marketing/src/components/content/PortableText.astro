@@ -10,13 +10,26 @@
 // serializer here. Text/heading/list/mark content renders fully today.
 import { toHTML } from "@portabletext/to-html"
 import type { PortableTextBlock } from "../../lib/sanity"
+import { safeUrl, escapeAttr } from "../../lib/sanitize"
 
 interface Props {
   blocks?: PortableTextBlock[]
 }
 
+// Override the default `link` mark serializer so annotation hrefs are passed
+// through the protocol allowlist (a javascript:/data: href from a compromised
+// CMS editor would otherwise be stored XSS). F5 — issue #42.
+const components = {
+  marks: {
+    link: ({ children, value }: { children: string; value?: { href?: string } }) => {
+      const href = escapeAttr(safeUrl(value?.href))
+      return `<a href="${href}" rel="nofollow noopener">${children}</a>`
+    },
+  },
+}
+
 const { blocks } = Astro.props
-const html = blocks && blocks.length ? toHTML(blocks) : ""
+const html = blocks && blocks.length ? toHTML(blocks, { components }) : ""
 ---
 
 {html && <div class="prose-body" set:html={html} />}

@@ -115,7 +115,14 @@ async def test_create_checkout_jsonapi_request_shape() -> None:
         captured["body"] = json.loads(request.content)
         return httpx.Response(
             201,
-            json={"data": {"id": "co_999", "attributes": {"url": "https://pay/x"}}},
+            json={
+                "data": {
+                    "id": "co_999",
+                    "attributes": {
+                        "url": "https://specforge.lemonsqueezy.com/checkout/x"
+                    },
+                }
+            },
         )
 
     attempt = _attempt()
@@ -124,7 +131,7 @@ async def test_create_checkout_jsonapi_request_shape() -> None:
             attempt, _user(), checkout_nonce="raw-nonce", client=client
         )
 
-    assert (cid, url) == ("co_999", "https://pay/x")
+    assert (cid, url) == ("co_999", "https://specforge.lemonsqueezy.com/checkout/x")
     assert captured["url"].endswith("/v1/checkouts")
 
     headers = captured["headers"]
@@ -176,7 +183,14 @@ async def test_create_checkout_environment_live_when_not_test_mode(
         captured["body"] = json.loads(request.content)
         return httpx.Response(
             201,
-            json={"data": {"id": "co_1", "attributes": {"url": "https://pay/y"}}},
+            json={
+                "data": {
+                    "id": "co_1",
+                    "attributes": {
+                        "url": "https://specforge.lemonsqueezy.com/checkout/y"
+                    },
+                }
+            },
         )
 
     async with _client(handler) as client:
@@ -194,14 +208,21 @@ async def test_create_checkout_accepts_200() -> None:
     def handler(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(
             200,
-            json={"data": {"id": "co_200", "attributes": {"url": "https://pay/z"}}},
+            json={
+                "data": {
+                    "id": "co_200",
+                    "attributes": {
+                        "url": "https://specforge.lemonsqueezy.com/checkout/z"
+                    },
+                }
+            },
         )
 
     async with _client(handler) as client:
         cid, url = await LemonSqueezyService().create_checkout(
             _attempt(), _user(), checkout_nonce="n", client=client
         )
-    assert (cid, url) == ("co_200", "https://pay/z")
+    assert (cid, url) == ("co_200", "https://specforge.lemonsqueezy.com/checkout/z")
 
 
 @pytest.mark.asyncio
@@ -231,7 +252,14 @@ async def test_create_checkout_retries_then_succeeds_on_429() -> None:
             return httpx.Response(429, json={"errors": []})
         return httpx.Response(
             201,
-            json={"data": {"id": "co_ok", "attributes": {"url": "https://pay/ok"}}},
+            json={
+                "data": {
+                    "id": "co_ok",
+                    "attributes": {
+                        "url": "https://specforge.lemonsqueezy.com/checkout/ok"
+                    },
+                }
+            },
         )
 
     async with _client(handler) as client:
@@ -252,7 +280,14 @@ async def test_create_checkout_retries_then_succeeds_on_5xx() -> None:
             return httpx.Response(503, json={"errors": []})
         return httpx.Response(
             201,
-            json={"data": {"id": "co_ok", "attributes": {"url": "https://pay/ok"}}},
+            json={
+                "data": {
+                    "id": "co_ok",
+                    "attributes": {
+                        "url": "https://specforge.lemonsqueezy.com/checkout/ok"
+                    },
+                }
+            },
         )
 
     async with _client(handler) as client:
@@ -322,7 +357,14 @@ async def test_create_checkout_network_error_then_succeeds() -> None:
             raise httpx.ReadTimeout("slow", request=request)
         return httpx.Response(
             201,
-            json={"data": {"id": "co_net", "attributes": {"url": "https://pay/n"}}},
+            json={
+                "data": {
+                    "id": "co_net",
+                    "attributes": {
+                        "url": "https://specforge.lemonsqueezy.com/checkout/n"
+                    },
+                }
+            },
         )
 
     async with _client(handler) as client:

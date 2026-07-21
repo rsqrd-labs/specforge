@@ -17,6 +17,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import Response
 
+from config import settings
 from services.auth_service import decode_access_token_claims
 from services.security.csrf import verify_csrf_token
 
@@ -40,6 +41,13 @@ class CsrfMiddleware(BaseHTTPMiddleware):
 
         session_id = _session_id_from_authorization(request)
         csrf_token = request.headers.get("X-CSRF-Token")
+        # INVARIANT: CSRF enforcement here keys off the Bearer token (session_id
+        # derived from the JWT `sub`). A mutating request with no Bearer token is
+        # let through because this app authenticates state-changing calls with a
+        # header token, not a cookie session — there is nothing for an attacker
+        # to ride via a forged cross-site form. If a cookie-authenticated
+        # mutating endpoint is ever added, THIS skip becomes a CSRF hole: revisit
+        # before doing so. A pinning test asserts this behavior (F7 — issue #42).
         if session_id is None:
             return await call_next(request)
 
@@ -52,8 +60,18 @@ class CsrfMiddleware(BaseHTTPMiddleware):
         # HF-5 — T-202.  HF-6 — T-203.
         redis = getattr(request.app.state, "redis", None)
 
+        # Sensitive prefixes (/billing, /auth) fail CLOSED on a Redis outage so a
+        # replayed billing/auth mutation cannot slip through; everything else
+        # keeps the documented fail-open so a Redis blip does not take down all
+        # mutations. F2 — issue #42.
+        fail_closed = request.url.path.startswith(
+            settings.csrf_fail_closed_prefix_tuple
+        )
+
         try:
-            valid = await verify_csrf_token(csrf_token, session_id, redis)
+            valid = await verify_csrf_token(
+                csrf_token, session_id, redis, fail_closed=fail_closed
+            )
         except HTTPException as exc:
             # verify_csrf_token() raises HTTPException(403) when it detects a
             # replayed nonce (SETNX returned None).  BaseHTTPMiddleware runs

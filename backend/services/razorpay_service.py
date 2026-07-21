@@ -45,7 +45,7 @@ import random
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, AsyncIterator
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse
 
 import httpx
 
@@ -77,6 +77,26 @@ _RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 504})
 
 class RazorpayError(Exception):
     """A Razorpay API call failed (non-2xx after retries, or a parse error)."""
+
+
+# Hosted Payment-Link hosts we will hand to the browser. The short_url comes
+# from the authenticated Razorpay API, but we still refuse anything off-domain
+# so a compromised/misconfigured response cannot become an open redirect
+# (F6 — issue #42). The frontend also validates (safeCheckoutUrl).
+_RAZORPAY_CHECKOUT_HOST_SUFFIXES = (".razorpay.com", ".rzp.io")
+
+
+def _assert_allowed_checkout_url(url: str) -> None:
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").lower()
+    allowed = host.endswith(_RAZORPAY_CHECKOUT_HOST_SUFFIXES) or host in (
+        "razorpay.com",
+        "rzp.io",
+    )
+    if parsed.scheme != "https" or not allowed:
+        raise RazorpayError(
+            "Razorpay returned a payment-link URL off the expected domain"
+        )
 
 
 class RazorpayRateLimitError(RazorpayError):
@@ -384,6 +404,7 @@ class RazorpayService:
             raise RazorpayError(
                 "Razorpay returned a malformed payment link response"
             ) from exc
+        _assert_allowed_checkout_url(checkout_url)
         return provider_checkout_id, checkout_url
 
     @staticmethod

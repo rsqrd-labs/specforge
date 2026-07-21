@@ -37,6 +37,7 @@ def _valid_production(**overrides: object):
     """
     base: dict[str, object] = {
         "environment": "production",
+        "allowed_hosts": "app.example.com",
         "metrics_token": "metrics-token",
         "frontend_url": "https://app.specforge.dev",
         "jwt_private_key": _FAKE_PEM,

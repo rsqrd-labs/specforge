@@ -73,6 +73,20 @@ class Settings(BaseSettings):
     # Empty string disables token auth; fall back to localhost-only IP check
     metrics_token: str = ""
     trusted_proxy_ips: str = ""
+    # Comma-separated Host allowlist enforced by TrustedHostMiddleware in
+    # production only (dev/CI leave it empty and the middleware is not added, so
+    # local/compose flows on arbitrary hosts keep working). Defends against
+    # Host-header injection / cache poisoning if the edge ever forwards an
+    # unvalidated Host. Include the app host and the Railway internal
+    # healthcheck host. A wildcard entry ("*.example.com", Starlette's
+    # TrustedHostMiddleware syntax) matches subdomains.
+    allowed_hosts: str = ""
+    # CSRF replay protection normally fails OPEN on a Redis outage so a transient
+    # blip cannot take down every authenticated mutation. For these path
+    # prefixes it fails CLOSED instead (403 when Redis is unavailable): a
+    # replayed billing/auth mutation is worse than a brief checkout failure
+    # during an outage. Comma-separated; empty disables the fail-closed override.
+    csrf_fail_closed_prefixes: str = "/billing,/auth"
     max_active_workspaces_per_user: int = 50
     auth_login_burst_limit: int = 5
     auth_login_burst_window_seconds: int = 300
@@ -865,6 +879,18 @@ class Settings(BaseSettings):
         }
 
     @property
+    def allowed_hosts_list(self) -> list[str]:
+        """Parsed Host allowlist for TrustedHostMiddleware (empty when unset)."""
+        return [h.strip() for h in self.allowed_hosts.split(",") if h.strip()]
+
+    @property
+    def csrf_fail_closed_prefix_tuple(self) -> tuple[str, ...]:
+        """Path prefixes where CSRF replay protection fails closed on Redis loss."""
+        return tuple(
+            p.strip() for p in self.csrf_fail_closed_prefixes.split(",") if p.strip()
+        )
+
+    @property
     def brave_search_enabled(self) -> bool:
         """True only when Brave research is fully configured AND switched on.
 
@@ -907,6 +933,13 @@ def validate_production_settings() -> None:
         errors.append("METRICS_TOKEN must be set in production")
     if not settings.frontend_url.startswith("https://"):
         errors.append("FRONTEND_URL must use HTTPS in production")
+    if not settings.allowed_hosts_list:
+        errors.append(
+            "ALLOWED_HOSTS must be set in production (comma-separated Host "
+            "allowlist enforced by TrustedHostMiddleware). Include the app's "
+            "public host and the Railway internal healthcheck host; a "
+            "leading-dot entry matches subdomains."
+        )
     # Marketing zone canonical origin (issue #18, Phase 7). HTTPS-when-set: an
     # http:// SITE_URL would emit insecure canonical/OG/sitemap URLs and leak the
     # marketing origin over plaintext. Empty is allowed (the backend has no

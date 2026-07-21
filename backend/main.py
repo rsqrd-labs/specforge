@@ -7,6 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from redis.asyncio import Redis
 from sqlalchemy import text
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.requests import Request
 from starlette.responses import Response
 
@@ -169,12 +170,27 @@ def create_app(redis_client: Redis | None = None) -> FastAPI:
     )
     app.add_middleware(RateLimitMiddleware)
     app.add_middleware(CsrfMiddleware)
+    # Host-header validation, production only. Dev/CI leave ALLOWED_HOSTS empty
+    # so the middleware is not added and local/compose flows on arbitrary hosts
+    # keep working; validate_production_settings() requires a non-empty list in
+    # prod. Guards against Host-header injection / cache poisoning at the app
+    # layer even if the edge forwards an unvalidated Host.
+    if _production and settings.allowed_hosts_list:
+        app.add_middleware(
+            TrustedHostMiddleware,
+            allowed_hosts=settings.allowed_hosts_list,
+        )
     app.add_middleware(
         CORSMiddleware,
         allow_origins=[settings.frontend_url],
         allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
+        # Enumerated rather than "*": the origin allowlist above is the real
+        # control, but with allow_credentials=True there is no reason to widen
+        # preflight approval to every method/header. These are exactly what the
+        # SPA sends (Authorization + X-CSRF-Token on mutations, Content-Type on
+        # JSON bodies). Add here if a new client header is introduced.
+        allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+        allow_headers=["Authorization", "Content-Type", "X-CSRF-Token"],
     )
 
     @app.middleware("http")

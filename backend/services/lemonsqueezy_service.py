@@ -38,11 +38,31 @@ import random
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, AsyncIterator
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse
 
 import httpx
 
 from config import settings
+
+# Hosted-checkout hosts we will hand to the browser. The URL comes from the
+# authenticated Lemon Squeezy API, but we still refuse anything off-domain so a
+# compromised/misconfigured API response cannot turn our checkout into an open
+# redirect (F6 — issue #42). The frontend also validates (safeCheckoutUrl); this
+# is the server-side half.
+_LEMON_CHECKOUT_HOST_SUFFIXES = (".lemonsqueezy.com",)
+
+
+def _assert_allowed_checkout_url(url: str) -> None:
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").lower()
+    allowed = host.endswith(_LEMON_CHECKOUT_HOST_SUFFIXES) or host in (
+        "lemonsqueezy.com",
+    )
+    if parsed.scheme != "https" or not allowed:
+        raise LemonSqueezyError(
+            "Lemon Squeezy returned a checkout URL off the expected domain"
+        )
+
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from models import User
@@ -379,6 +399,7 @@ class LemonSqueezyService:
             raise LemonSqueezyError(
                 "Lemon Squeezy returned a malformed checkout response"
             ) from exc
+        _assert_allowed_checkout_url(checkout_url)
         return provider_checkout_id, checkout_url
 
     @staticmethod

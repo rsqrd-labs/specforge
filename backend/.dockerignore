@@ -1,5 +1,9 @@
 .coverage
 .env
+.env.*
+!.env.example
+*.pem
+*.key
 .pytest_cache
 .ruff_cache
 .venv

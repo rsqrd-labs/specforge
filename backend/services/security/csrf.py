@@ -56,6 +56,8 @@ async def verify_csrf_token(
     session_id: str,
     redis: object,
     max_age_seconds: int = 3600,
+    *,
+    fail_closed: bool = False,
 ) -> bool:
     """Verify a CSRF token and atomically consume its nonce via Redis SETNX.
 
@@ -66,13 +68,18 @@ async def verify_csrf_token(
     4. Atomically claim the nonce in Redis (SETNX) with the token's remaining
        TTL.  A second call with the same token finds the nonce already stored
        and raises HTTPException(403, "CSRF token already used").
-    5. If Redis is unavailable, log a WARNING and fail **open** so a transient
-       Redis outage does not take the service down.
+    5. If Redis is unavailable, replay protection cannot be enforced.  By
+       default this fails **open** (log a WARNING, allow the request) so a
+       transient Redis outage does not take the service down.  When
+       ``fail_closed`` is True (sensitive prefixes such as ``/billing`` and
+       ``/auth`` — issue #42 F2), it fails **closed** instead: a 403 is raised
+       so a replayed billing/auth mutation cannot slip through during an outage.
 
     Returns True on success; False for structurally invalid or expired tokens;
-    raises HTTPException(403) only for detected replay attacks.
+    raises HTTPException(403) for detected replay attacks, and — when
+    ``fail_closed`` — for Redis-unavailable on a protected path.
 
-    HF-6 — T-203.
+    HF-6 — T-203.  F2 — issue #42.
     """
     try:
         timestamp, nonce, signature = token.split(".", 2)
@@ -99,6 +106,16 @@ async def verify_csrf_token(
     nonce_key = f"csrf:nonce:{nonce}"
 
     if redis is None:
+        if fail_closed:
+            logger.warning(
+                "csrf.nonce_tracking.redis_not_available nonce_key=%s "
+                "— fail-closed path, rejecting request",
+                nonce_key,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="CSRF replay protection unavailable",
+            )
         logger.warning(
             "csrf.nonce_tracking.redis_not_available nonce_key=%s "
             "— replay protection bypassed (fail-open)",
@@ -111,6 +128,17 @@ async def verify_csrf_token(
         # None when the key already exists, which we treat as replay detection.
         stored = await redis.set(nonce_key, "1", nx=True, ex=remaining_ttl)
     except Exception:
+        if fail_closed:
+            logger.warning(
+                "csrf.nonce_tracking.redis_error nonce_key=%s "
+                "— fail-closed path, rejecting request",
+                nonce_key,
+                exc_info=True,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="CSRF replay protection unavailable",
+            )
         logger.warning(
             "csrf.nonce_tracking.redis_error nonce_key=%s "
             "— replay protection bypassed (fail-open)",

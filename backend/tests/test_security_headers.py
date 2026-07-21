@@ -14,6 +14,9 @@ _REAL_ENCRYPTION_KEY = "cmVhbC1rZXktZm9yLXRlc3RpbmctbXVzdC1iZS1sb25n"
 
 _PRODUCTION_PATCHES = {
     "environment": "production",
+    # Includes the TestClient default Host so requests reach the app through
+    # TrustedHostMiddleware (F3), plus a representative real host.
+    "allowed_hosts": "testserver,app.example.com",
     "metrics_token": "metrics-token",
     "frontend_url": "https://app.example.com",
     "jwt_private_key": _FAKE_PEM,
@@ -92,6 +95,11 @@ def test_hsts_is_set_in_production() -> None:
             settings,
             "encryption_master_key",
             _PRODUCTION_PATCHES["encryption_master_key"],
+        ),
+        patch.object(
+            settings,
+            "allowed_hosts",
+            _PRODUCTION_PATCHES["allowed_hosts"],
         ),
     ):
         client = TestClient(create_app(redis_client=_NoopRedis()))
@@ -198,6 +206,11 @@ def test_docs_are_disabled_in_production() -> None:
             "encryption_master_key",
             _PRODUCTION_PATCHES["encryption_master_key"],
         ),
+        patch.object(
+            settings,
+            "allowed_hosts",
+            _PRODUCTION_PATCHES["allowed_hosts"],
+        ),
     ):
         client = TestClient(create_app(redis_client=_NoopRedis()))
         assert client.get("/docs").status_code == 404
@@ -225,6 +238,11 @@ def test_health_hides_dependency_detail_in_production() -> None:
             settings,
             "encryption_master_key",
             _PRODUCTION_PATCHES["encryption_master_key"],
+        ),
+        patch.object(
+            settings,
+            "allowed_hosts",
+            _PRODUCTION_PATCHES["allowed_hosts"],
         ),
         patch("main.check_database", return_value="ok"),
         patch("main.check_redis", return_value="ok"),

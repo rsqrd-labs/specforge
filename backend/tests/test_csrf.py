@@ -454,6 +454,10 @@ async def test_logout_with_bearer_token_and_valid_csrf_succeeds(
     monkeypatch.setattr(_auth_service_instance, "revoke", lambda t: None)
 
     app = create_app(redis_client=_NoopRedis())
+    # /auth is a CSRF fail-closed prefix (F2): a healthy Redis must be present or
+    # the middleware 403s. ASGITransport does not run lifespan, so populate
+    # app.state.redis explicitly to model a live-Redis production request.
+    app.state.redis = _NoopRedis()
     app.dependency_overrides[get_db] = _fake_get_db
     app.dependency_overrides[get_current_user] = lambda: user
 
@@ -471,6 +475,114 @@ async def test_logout_with_bearer_token_and_valid_csrf_succeeds(
     app.dependency_overrides.clear()
 
     assert response.status_code != 403
+
+
+# ---------------------------------------------------------------------------
+# F2 (issue #42): fail-closed override on sensitive prefixes
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_verify_csrf_fail_closed_redis_none_raises_403() -> None:
+    """F2 — fail_closed=True + redis=None must raise 403, not fail open.
+
+    On a Redis outage a replayed billing/auth mutation must be refused rather
+    than silently allowed. issue #42.
+    """
+    token = generate_csrf_token("session-fc-none")
+    with pytest.raises(HTTPException) as exc_info:
+        await verify_csrf_token(token, "session-fc-none", None, fail_closed=True)
+    assert exc_info.value.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_verify_csrf_fail_closed_redis_error_raises_403() -> None:
+    """F2 — fail_closed=True + Redis ConnectionError must raise 403. issue #42."""
+    token = generate_csrf_token("session-fc-err")
+    with pytest.raises(HTTPException) as exc_info:
+        await verify_csrf_token(
+            token, "session-fc-err", _FailingRedis(), fail_closed=True
+        )
+    assert exc_info.value.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_verify_csrf_fail_closed_healthy_redis_still_passes() -> None:
+    """F2 — fail_closed must NOT change the happy path (healthy Redis). issue #42."""
+    redis = _TrackingRedis()
+    token = generate_csrf_token("session-fc-ok")
+    assert (
+        await verify_csrf_token(token, "session-fc-ok", redis, fail_closed=True) is True
+    )
+
+
+@pytest.mark.asyncio
+async def test_verify_csrf_default_still_fails_open_on_ungated_path() -> None:
+    """F2 — the default (fail_closed=False) keeps failing open. issue #42."""
+    token = generate_csrf_token("session-open")
+    assert await verify_csrf_token(token, "session-open", None) is True
+    assert await verify_csrf_token(token, "session-open", _FailingRedis()) is True
+
+
+@pytest.mark.asyncio
+async def test_billing_prefix_is_fail_closed_by_default_config() -> None:
+    """F2 — /billing and /auth are in the default fail-closed prefix set. issue #42."""
+    from config import settings
+
+    prefixes = settings.csrf_fail_closed_prefix_tuple
+    assert "/billing".startswith(prefixes)
+    assert "/auth".startswith(prefixes)
+    # A non-sensitive path must NOT match the fail-closed set.
+    assert not "/workspaces".startswith(prefixes)
+
+
+# ---------------------------------------------------------------------------
+# F7 (issue #42): CSRF is skipped for requests with no Bearer token
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_mutating_request_without_bearer_skips_csrf(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """F7 — a mutating request carrying no Bearer token is not blocked by CSRF.
+
+    INVARIANT (pinned): this app authenticates state-changing calls with a
+    header token, not a cookie session, so there is no cross-site request to
+    forge when no Bearer is present. If a cookie-authenticated mutating endpoint
+    is ever added, this skip becomes a CSRF hole — this test then documents the
+    behavior that must be revisited. issue #42.
+    """
+    user = _make_user()
+    # No Authorization header ⇒ _session_id_from_authorization returns None.
+    monkeypatch.setattr(csrf_module, "decode_access_token_claims", lambda t: None)
+    app = create_app(redis_client=_NoopRedis())
+    app.dependency_overrides[get_db] = _fake_get_db
+    # Override auth so the route is reachable and we isolate the CSRF decision:
+    # if CSRF blocked it we'd see 403; anything else means CSRF let it through.
+    app.dependency_overrides[get_current_user] = lambda: user
+
+    transport = ASGITransport(app=app, raise_app_exceptions=False)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            "/workspaces",
+            json={
+                "name": "Test",
+                "problem_statement": (
+                    "I want to build a task management web app for teams to "
+                    "create projects, assign tasks, track status, notify users."
+                ),
+                "provider": "anthropic",
+                "model": "claude-sonnet-4-6",
+            },
+        )
+
+    app.dependency_overrides.clear()
+
+    assert response.status_code != 403, (
+        "CSRF middleware must skip requests with no Bearer token — the app is "
+        "header-token authenticated, so there is no forgeable session. issue #42."
+    )
 
 
 # ---------------------------------------------------------------------------
