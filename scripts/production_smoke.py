@@ -14,8 +14,8 @@ import time
 from dataclasses import dataclass
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.parse import urljoin
-from urllib.request import Request, urlopen
+from urllib.parse import urljoin, urlsplit
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 TIMEOUT_SECONDS = 20
 PROBLEM_STATEMENT = (
@@ -26,6 +26,36 @@ PROBLEM_STATEMENT = (
 
 class SmokeFailure(Exception):
     pass
+
+
+def _origin(url: str) -> tuple[str, str, int | None]:
+    parsed = urlsplit(url)
+    return parsed.scheme.lower(), (parsed.hostname or "").lower(), parsed.port
+
+
+def validate_api_url(url: str) -> str:
+    parsed = urlsplit(url)
+    if parsed.username or parsed.password:
+        raise SmokeFailure("SPECFORGE_API_URL must not contain userinfo")
+    if not parsed.hostname or parsed.query or parsed.fragment:
+        raise SmokeFailure("SPECFORGE_API_URL must be an origin without query/fragment")
+    if parsed.scheme != "https" and not (
+        parsed.scheme == "http" and parsed.hostname in {"localhost", "127.0.0.1", "::1"}
+    ):
+        raise SmokeFailure("SPECFORGE_API_URL must use HTTPS (except loopback testing)")
+    return url.rstrip("/")
+
+
+class SameOriginRedirectHandler(HTTPRedirectHandler):
+    """Reject redirects that could forward smoke credentials cross-origin."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[no-untyped-def]
+        if _origin(req.full_url) != _origin(newurl):
+            raise SmokeFailure(f"Refusing cross-origin redirect to {newurl!r}")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+_URL_OPENER = build_opener(SameOriginRedirectHandler())
 
 
 @dataclass
@@ -77,7 +107,7 @@ class SmokeClient:
         )
 
         try:
-            with urlopen(request, timeout=TIMEOUT_SECONDS) as response:
+            with _URL_OPENER.open(request, timeout=TIMEOUT_SECONDS) as response:
                 status = response.status
                 raw = response.read()
                 content_type = response.headers.get("Content-Type", "")
@@ -131,7 +161,7 @@ class SmokeClient:
         started = time.monotonic()
         saw_token = False
         try:
-            with urlopen(request, timeout=120) as response:
+            with _URL_OPENER.open(request, timeout=120) as response:
                 if response.status != 200:
                     raise SmokeFailure(
                         f"POST /stages/{stage_id}/generate returned "
@@ -176,7 +206,7 @@ def load_config() -> SmokeConfig:
         raise SmokeFailure("SPECFORGE_API_URL is required")
 
     return SmokeConfig(
-        api_url=api_url,
+        api_url=validate_api_url(api_url),
         access_token=os.getenv("SPECFORGE_ACCESS_TOKEN"),
         metrics_token=os.getenv("SPECFORGE_METRICS_TOKEN"),
         provider=os.getenv("SPECFORGE_SMOKE_PROVIDER"),

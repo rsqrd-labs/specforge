@@ -1946,6 +1946,20 @@ Deploy **both** worker process types in every environment:
 - **Procfile (Railway/etc.):** the `worker` and `worker_fast` process types
   (`arq worker.WorkerSettings` / `arq worker.FastWorkerSettings`).
 
+For Railway, provision three services named `backend`, `worker`, and
+`worker-fast`, all rooted at `/backend`. Set each service's **Config File Path**
+explicitly (Railway config paths are repository-absolute):
+
+| Service | Config File Path |
+|---|---|
+| `backend` | `/backend/railway.json` |
+| `worker` | `/backend/railway.worker.json` |
+| `worker-fast` | `/backend/railway.worker-fast.json` |
+
+The production GitHub Actions deploy job targets all three services. The API
+config calls `entrypoint.sh`, preserving migrate → seed templates → Gunicorn;
+worker configs intentionally run neither migrations nor template seeding.
+
 A missing/stalled fast worker surfaces as:
 `specforge_worker_queue_oldest_age_seconds{queue="arq:queue:fast"}` climbing, and
 `specforge_billing_webhook_pending_age_seconds > 300` (the existing

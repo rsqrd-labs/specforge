@@ -169,7 +169,7 @@ Frontend:
 
 - React 18
 - TypeScript
-- Vite 6
+- Vite 8
 - Tailwind CSS
 - Zustand
 - Axios
@@ -205,7 +205,7 @@ Install these locally:
 - Python 3.12
 - `uv`
 - Node.js 22
-- `pnpm` 9.x through Corepack
+- Corepack (the frontend pins pnpm 11.13; marketing and Sanity pin pnpm 9.15)
 
 Useful setup commands:
 
@@ -501,15 +501,17 @@ SpecForge can be deployed as two application services plus managed PostgreSQL an
 ```text
 Frontend static site/CDN
 Backend API container service
-Worker container service (arq, shares the backend image)
+Bulk worker container service (arq, shares the backend image)
+Fast worker container service (billing grants and PR checks)
 Managed PostgreSQL
 Managed Redis
 Optional observability: Sentry + OTLP/Grafana
 ```
 
-The worker is a separate long-running process (`arq worker.WorkerSettings`), not just
-a compose convenience. It must run alongside the API in production for GitHub sync and
-billing-webhook processing; the Railway `Procfile` declares it as a `worker` process.
+Both workers are separate long-running processes, not just compose conveniences.
+They must run alongside the API in production: the bulk lane handles GitHub/eval
+work, while the fast lane handles billing grants and PR checks. Railway service
+config paths and verification steps are documented in `docs/RUNBOOK.md` §16.
 
 Recommended production shape:
 

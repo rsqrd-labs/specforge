@@ -1,0 +1,8 @@
+# Default review ownership. More-specific entries keep high-risk surfaces clear.
+* @Arv-ind-s
+/.github/ @Arv-ind-s
+/backend/services/security/ @Arv-ind-s
+/backend/services/billing_service.py @Arv-ind-s
+/backend/services/integrations/ @Arv-ind-s
+/backend/migrations/ @Arv-ind-s
+/deploy/ @Arv-ind-s

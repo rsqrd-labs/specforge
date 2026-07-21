@@ -1,0 +1,36 @@
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: docker
+    directory: "/backend"
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: docker
+    directory: "/deploy/smee"
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: pip
+    directory: "/backend"
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: npm
+    directory: "/frontend"
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: npm
+    directory: "/apps/marketing"
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: npm
+    directory: "/apps/marketing/sanity"
+    schedule:
+      interval: weekly
