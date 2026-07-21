@@ -34,8 +34,8 @@ importers:
         specifier: ^7.1.0
         version: 7.1.0(@emnapi/core@1.11.1)(@emnapi/runtime@1.11.1)(@types/node@24.13.2)(jiti@1.21.7)(rollup@4.62.2)(tsx@4.22.4)(yaml@2.9.0)
       marked:
-        specifier: ^15
-        version: 15.0.12
+        specifier: ^18
+        version: 18.0.7
       react:
         specifier: ^18.3.1
         version: 18.3.1
@@ -2042,9 +2042,9 @@ packages:
   magicast@0.5.3:
     resolution: {integrity: sha512-pVKE4UdSQ7DvHzivsCIFx2BJn1mHG6KsyrFcaxFx6tONdneEuThrDx0Cj3AMg58KyN4pzYT+LHOotxDQDjNvkw==}
 
-  marked@15.0.12:
-    resolution: {integrity: sha512-8dD6FusOQSrpv9Z1rdNMdlSgQOIP880DHqnohobOmYLElGEqAL/JvxvuxZO16r4HtjTlfPRDC1hbvxC9dPN2nA==}
-    engines: {node: '>= 18'}
+  marked@18.0.7:
+    resolution: {integrity: sha512-iDVQ5ldaiKXn6b2JroX5kgRfmwgqolW7NpaEzTl1k/2Zh1njIEN9yniyLV/mOvWwtsE8OGgkjsCYvijuPk1dtA==}
+    engines: {node: '>= 20'}
     hasBin: true
 
   mdast-util-to-hast@13.2.1:
@@ -4954,7 +4954,7 @@ snapshots:
       '@babel/types': 7.29.7
       source-map-js: 1.2.1
 
-  marked@15.0.12: {}
+  marked@18.0.7: {}
 
   mdast-util-to-hast@13.2.1:
     dependencies:
