@@ -147,22 +147,12 @@ def deterministic_get_llm(
     return DeterministicAdapter(model, operation)
 
 
-stage_manager_module.get_llm = deterministic_get_llm
-spec_clarifier_module.get_llm = deterministic_get_llm
-
-
 async def no_clarification(*_args: object, **_kwargs: object) -> list[object]:
     return []
 
 
-spec_clarifier_module.request_clarifying_questions = no_clarification
-
-
 async def deterministic_judge(**_kwargs: object) -> str:
     return '{"passed": true, "findings": []}'
-
-
-critic_module.call_judge_model = deterministic_judge
 
 
 async def bypass_rate_limits(self: object, request: object, call_next: object):
@@ -171,9 +161,17 @@ async def bypass_rate_limits(self: object, request: object, call_next: object):
     return await call_next(request)
 
 
-RateLimitMiddleware.dispatch = bypass_rate_limits
+def install_deterministic_overrides() -> None:
+    """Install fakes only in the dedicated E2E server process."""
+    stage_manager_module.get_llm = deterministic_get_llm
+    spec_clarifier_module.get_llm = deterministic_get_llm
+    spec_clarifier_module.request_clarifying_questions = no_clarification
+    critic_module.call_judge_model = deterministic_judge
+    RateLimitMiddleware.dispatch = bypass_rate_limits
 
-from main import app  # noqa: E402, I001
 
 if __name__ == "__main__":
+    install_deterministic_overrides()
+    from main import app
+
     uvicorn.run(app, host="127.0.0.1", port=8000, log_level="warning")
