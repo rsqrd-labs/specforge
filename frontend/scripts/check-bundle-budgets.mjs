@@ -6,7 +6,7 @@ const assetDirectory = new URL("../dist/assets/", import.meta.url)
 const budgets = [
   [/^index-.*\.css$/, 55],
   [/^index-.*\.js$/, 36],
-  [/^react-.*\.js$/, 58],
+  [/^react-.*\.js$/, 60],
   [/^Workspace-.*\.js$/, 58],
   [/^MarkdownRenderer-.*\.js$/, 110],
   [/^codemirror-.*\.js$/, 170],

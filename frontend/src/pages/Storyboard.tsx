@@ -99,11 +99,11 @@ export default function Storyboard() {
   const goBackToOrigin = useCallback(
     (fallbackTarget: string) => {
       if (shouldUseHistoryBack) {
-        navigate(-1)
+        void navigate(-1)
         return
       }
 
-      navigate(fallbackTarget, { replace: true })
+      void navigate(fallbackTarget, { replace: true })
     },
     [navigate, shouldUseHistoryBack],
   )

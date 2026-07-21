@@ -482,7 +482,7 @@ export function ExportGitHubModal({
 
   function handleGoToSettings() {
     onClose()
-    navigate("/settings")
+    void navigate("/settings")
   }
 
   function handleOpenRepo() {

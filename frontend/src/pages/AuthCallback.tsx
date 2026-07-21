@@ -48,7 +48,7 @@ export default function AuthCallback() {
       .then(async ({ access_token }) => {
         setAccessToken(access_token)
         await fetchMe()
-        navigate("/dashboard", { replace: true })
+        void navigate("/dashboard", { replace: true })
       })
       .catch(() => {
         const alert = authCallbackAlert("exchange-failed")

@@ -116,7 +116,7 @@ export function CreateWorkspaceModal({
         payload.mode = "demo_day"
       }
       const ws = await createWorkspace(payload)
-      navigate(`/workspace/${ws.id}`)
+      void navigate(`/workspace/${ws.id}`)
     } catch (error) {
       setErrors({
         submit: getApiErrorMessage(
