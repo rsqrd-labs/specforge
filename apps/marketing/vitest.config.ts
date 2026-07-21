@@ -7,9 +7,11 @@
 // class outright (the build is ~1.4s). The CI job (Phase 7) builds explicitly
 // too; the always-build here keeps `pnpm test` correct standalone.
 import { getViteConfig } from "astro/config"
-import type { UserConfig as VitestUserConfig } from "vitest/config"
 
 const config = {
+  // Keep one shared Vite key so Astro's weak UserConfig type accepts this
+  // Vitest-extended config when Astro and Vitest resolve different Vite majors.
+  plugins: [],
   test: {
     globals: true,
     environment: "node",
@@ -19,6 +21,6 @@ const config = {
     // globalSetup; tests must not race it, so keep them serial-friendly.
     fileParallelism: true,
   },
-} satisfies Parameters<typeof getViteConfig>[0] & VitestUserConfig
+}
 
 export default getViteConfig(config)
