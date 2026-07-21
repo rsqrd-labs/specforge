@@ -17,13 +17,25 @@ export default defineConfig({
     // Harness files live outside `frontend/`, so bare imports otherwise walk
     // toward the repository root and miss frontend's isolated pnpm install on
     // clean CI runners. Vite 8 removed the old `resolve.modules` escape hatch;
-    // pin the one harness-owned bare import to this package explicitly.
-    alias: {
-      "@testing-library/react": resolve(
-        __dirname,
-        "node_modules/@testing-library/react",
-      ),
-    },
+    // pin harness-owned bare imports to this package explicitly. React's
+    // regex entry also covers the JSX runtime injected by the React plugin.
+    alias: [
+      {
+        find: /^react(\/.*)?$/,
+        replacement: `${resolve(__dirname, "node_modules/react")}$1`,
+      },
+      {
+        find: "react-router-dom",
+        replacement: resolve(__dirname, "node_modules/react-router-dom"),
+      },
+      {
+        find: "@testing-library/react",
+        replacement: resolve(
+          __dirname,
+          "node_modules/@testing-library/react",
+        ),
+      },
+    ],
   },
   server: {
     fs: { allow: [__dirname, resolve(__dirname, "..")] },
