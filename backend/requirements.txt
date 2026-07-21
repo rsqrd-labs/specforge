@@ -26,7 +26,7 @@ openai==1.57.*
 google-genai==1.*
 
 # Security
-cryptography==48.*
+cryptography>=48,<50
 bleach==6.*
 
 # Payments and Email
