@@ -1,4 +1,3 @@
-/// <reference types="vitest/config" />
 // Phase 6 validation suite (issue #18). Uses Astro's `getViteConfig` so tests
 // can import `.astro` components (the Container API in geo-content.test.ts) and
 // the site's TypeScript libs with the same resolution the build uses.
@@ -8,8 +7,9 @@
 // class outright (the build is ~1.4s). The CI job (Phase 7) builds explicitly
 // too; the always-build here keeps `pnpm test` correct standalone.
 import { getViteConfig } from "astro/config"
+import type { UserConfig as VitestUserConfig } from "vitest/config"
 
-export default getViteConfig({
+const config = {
   test: {
     globals: true,
     environment: "node",
@@ -19,4 +19,6 @@ export default getViteConfig({
     // globalSetup; tests must not race it, so keep them serial-friendly.
     fileParallelism: true,
   },
-})
+} satisfies Parameters<typeof getViteConfig>[0] & VitestUserConfig
+
+export default getViteConfig(config)
