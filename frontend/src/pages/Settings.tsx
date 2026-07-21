@@ -48,7 +48,7 @@ export default function Settings() {
 
   function handleBack() {
     sessionStorage.removeItem(RETURN_TO_KEY)
-    navigate(returnTo)
+    void navigate(returnTo)
   }
 
   const backLabel = backLabelFor(returnTo)

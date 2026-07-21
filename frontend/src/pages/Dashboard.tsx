@@ -364,7 +364,7 @@ export default function Dashboard() {
       // Local auth state still needs to be cleared if the server session is gone.
     } finally {
       clearUser()
-      navigate("/", { replace: true })
+      void navigate("/", { replace: true })
     }
   }
 

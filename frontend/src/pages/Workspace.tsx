@@ -964,7 +964,7 @@ export default function Workspace() {
           })
           if (storyboardAutoOpenRef.current === fresh.id) {
             storyboardAutoOpenRef.current = null
-            navigate(`/storyboards/${fresh.id}`, { state: { workspaceId: id } })
+            void navigate(`/storyboards/${fresh.id}`, { state: { workspaceId: id } })
           }
           return
         }
@@ -1888,7 +1888,7 @@ export default function Workspace() {
           kind: "success",
           text: "Storyboard is ready to present.",
         })
-        navigate(`/storyboards/${created.id}`, { state: { workspaceId: id } })
+        void navigate(`/storyboards/${created.id}`, { state: { workspaceId: id } })
       } else if (created.status === "failed") {
         setStoryboardGenerationFailure("Storyboard generation failed.")
         showAlert(
@@ -1943,7 +1943,7 @@ export default function Workspace() {
 
   const handleOpenStoryboard = useCallback(() => {
     if (!latestStoryboard || latestStoryboard.status === "failed") return
-    navigate(`/storyboards/${latestStoryboard.id}`, { state: { workspaceId: id } })
+    void navigate(`/storyboards/${latestStoryboard.id}`, { state: { workspaceId: id } })
   }, [latestStoryboard, navigate, id])
 
   const handlePresentStoryboard = useCallback(() => {
@@ -1953,7 +1953,7 @@ export default function Workspace() {
     ) {
       return
     }
-    navigate(`/storyboards/${latestStoryboard.id}?present=1`, {
+    void navigate(`/storyboards/${latestStoryboard.id}?present=1`, {
       state: { workspaceId: id },
     })
   }, [latestStoryboard, navigate, id])
@@ -1975,7 +1975,7 @@ export default function Workspace() {
           kind: "success",
           text: "Storyboard regeneration finished.",
         })
-        navigate(`/storyboards/${regenerating.id}`, { state: { workspaceId: id } })
+        void navigate(`/storyboards/${regenerating.id}`, { state: { workspaceId: id } })
       } else if (regenerating.status === "failed") {
         setStoryboardGenerationFailure("Storyboard regeneration failed.")
         showAlert(
