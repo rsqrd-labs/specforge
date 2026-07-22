@@ -248,6 +248,29 @@ jobs:
           CSRF_SECRET: "ci-test-csrf-secret-value-long-enough"
           ENVIRONMENT: "test"
 
+      # Dedicated step for the schema-owning finalise concurrency suite
+      # (issue #83 / BE29-003): it runs OUTSIDE the shared pytest process so
+      # its Base.metadata.drop_all cannot clobber other modules. Its engine
+      # fixture resets its own tables at setup (so leftover rows from the
+      # main suite above never leak in), and the "Reset database after full
+      # pytest" step below restores the Alembic schema for the harness step.
+      - name: Finalise PostgreSQL concurrency integration (issue #83)
+        run: uv run pytest tests/test_finalise_integration.py -q
+        env:
+          DATABASE_URL: "postgresql+asyncpg://postgres:postgres@localhost:5432/test"
+          REDIS_URL: "redis://localhost:6379/0"
+          TEST_DATABASE_URL: "postgresql+asyncpg://postgres:postgres@localhost:5432/test"
+          TEST_REDIS_URL: "redis://localhost:6379/0"
+          GOOGLE_CLIENT_ID: "ci-test-client-id"
+          GOOGLE_CLIENT_SECRET: "ci-test-client-secret"
+          FRONTEND_URL: "http://localhost:5173"
+          ANTHROPIC_API_KEY: "ci-test-anthropic-key"
+          OPENAI_API_KEY: "ci-test-openai-key"
+          GOOGLE_API_KEY: "ci-test-google-key"
+          ENCRYPTION_MASTER_KEY: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+          CSRF_SECRET: "ci-test-csrf-secret-value-long-enough"
+          ENVIRONMENT: "test"
+
       - name: Reset database after full pytest
         run: |
           echo "::group::Reset test database"

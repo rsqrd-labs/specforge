@@ -1,11 +1,23 @@
-"""PostgreSQL integration test for T-196 — finalise() SELECT FOR UPDATE.
+"""PostgreSQL integration tests for finalise() — locking, ownership, conflicts.
 
 Requires TEST_DATABASE_URL env var pointing to a live PostgreSQL instance.
-Skip if not set (CI injects via T-204 services block).
+Skip if not set (CI injects it and runs this module in its own dedicated step,
+outside the shared backend suite — issue #83 / BE29-003).
 
 Run with (set TEST_DATABASE_URL first)::
 
     uv run pytest tests/test_finalise_integration.py -v
+
+Event-loop safety (BE29-003)
+----------------------------
+Every fixture here is function-scoped and the engine uses ``NullPool``,
+mirroring the other schema-owning integration suites: pytest-asyncio gives each
+test its own event loop, so a module-scoped engine would hand asyncpg
+connections created on one loop to tests running on another ("future attached
+to a different event loop" / "another operation is in progress"). A per-test
+engine with no pooled connections cannot cross loops. The engine fixture also
+resets the disposable database's public schema at setup so leftover state from
+a prior suite run in the same database can never leak in.
 
 Isolation-level note
 --------------------
@@ -14,12 +26,6 @@ A commits and re-reads the row, seeing status='finalised'.  The SELECT FOR
 UPDATE (with_for_update) row-level lock in _load_stage() serialises the two
 concurrent sessions: only one succeeds; the other blocks at the DB level until
 the winner commits, then reads the committed status and raises ValueError.
-
-Without lock=True (the CF-1 bug): both sessions issue SELECT without FOR UPDATE,
-both read status='draft' before either commits, both pass the guard, and both
-succeed — len(results)==2.
-With lock=True: session B blocks at SELECT FOR UPDATE until A commits, then
-reads status='finalised' and raises ValueError — len(results)==1.
 """
 
 from __future__ import annotations
@@ -27,21 +33,24 @@ from __future__ import annotations
 import asyncio
 import os
 import uuid
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import delete
-from sqlalchemy.ext.asyncio import (
-    async_sessionmaker,
-    create_async_engine,
-)
+from fastapi import HTTPException
+from sqlalchemy import select, text, update
+from sqlalchemy.engine import make_url
+from sqlalchemy.exc import DBAPIError
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.pool import NullPool
 
 from models import Base
 from models.stage import Stage
 from models.user import User
 from models.workspace import Workspace
-from services.pipeline.stage_manager import StageManager
+from routers.stage import _load_stage as router_load_stage
+from services.pipeline.stage_manager import QualityGateBlockedError, StageManager
 
 TEST_DATABASE_URL = os.environ.get("TEST_DATABASE_URL")
 
@@ -55,11 +64,42 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-@pytest_asyncio.fixture(scope="module")
+class _FakeUser:
+    def __init__(self, user_id: uuid.UUID) -> None:
+        self.id = user_id
+
+
+def _manager() -> StageManager:
+    # Inject a mock Redis so the tests stay focused on DB behavior.
+    return StageManager(redis_client=AsyncMock())
+
+
+def _assert_disposable_database(url: str) -> None:
+    # Same guard as scripts/reset_test_database.py: this fixture drops the
+    # whole public schema, so refuse anything but a test-named database.
+    database = make_url(url).database or ""
+    if database != "test" and not database.endswith("_test"):
+        raise RuntimeError(
+            f"Refusing to reset non-test database {database!r}; expected 'test' "
+            "or a name ending in '_test'."
+        )
+
+
+@pytest_asyncio.fixture
 async def db_engine():
-    """Create engine + all tables; drop everything after the module's tests finish."""
-    engine = create_async_engine(TEST_DATABASE_URL, echo=False)
+    """Per-test engine on the test's own event loop; resets the schema first.
+
+    Reset via DROP SCHEMA ... CASCADE (mirroring scripts/reset_test_database.py)
+    rather than Base.metadata.drop_all: an Alembic-migrated database contains
+    audit tables with no ORM model (e.g. stripe_credit_packs) whose foreign
+    keys make drop_all fail on the tables they reference.
+    """
+    _assert_disposable_database(TEST_DATABASE_URL)
+    engine = create_async_engine(TEST_DATABASE_URL, echo=False, poolclass=NullPool)
     async with engine.begin() as conn:
+        await conn.execute(text("DROP SCHEMA IF EXISTS public CASCADE"))
+        await conn.execute(text("CREATE SCHEMA public"))
+        await conn.execute(text("GRANT ALL ON SCHEMA public TO public"))
         await conn.run_sync(Base.metadata.create_all)
     yield engine
     async with engine.begin() as conn:
@@ -69,7 +109,7 @@ async def db_engine():
 
 @pytest_asyncio.fixture
 async def seed_data(db_engine):
-    """Insert a User, Workspace, and draft Stage; clean up after the test."""
+    """Insert a User, Workspace, and draft tasks Stage; return their ids."""
     factory = async_sessionmaker(db_engine, expire_on_commit=False)
     user_id = uuid.uuid4()
     workspace_id = uuid.uuid4()
@@ -96,7 +136,7 @@ async def seed_data(db_engine):
             status="active",
         )
         # Use type="tasks" (last in STAGE_ORDER) so _get_next_stage returns None
-        # immediately, keeping the test focused on the DB locking path.
+        # immediately, keeping the tests focused on the DB locking path.
         stage = Stage(
             id=stage_id,
             workspace_id=workspace_id,
@@ -108,16 +148,9 @@ async def seed_data(db_engine):
         session.add_all([user, workspace, stage])
         await session.commit()
 
-    yield user_id, workspace_id, stage_id
-
-    async with factory() as session:
-        await session.execute(delete(Stage).where(Stage.id == stage_id))
-        await session.execute(delete(Workspace).where(Workspace.id == workspace_id))
-        await session.execute(delete(User).where(User.id == user_id))
-        await session.commit()
+    return user_id, workspace_id, stage_id
 
 
-@pytest.mark.asyncio
 async def test_concurrent_finalise_serialised_by_select_for_update(
     db_engine, seed_data
 ):
@@ -137,14 +170,8 @@ async def test_concurrent_finalise_serialised_by_select_for_update(
     user_id, workspace_id, stage_id = seed_data
     factory = async_sessionmaker(db_engine, expire_on_commit=False)
 
-    # Inject a mock Redis so the test stays focused on DB locking.
-    fake_redis = AsyncMock()
-    manager = StageManager(redis_client=fake_redis)
-
-    class _FakeUser:
-        id = user_id
-
-    user = _FakeUser()
+    manager = _manager()
+    user = _FakeUser(user_id)
     results: list[str] = []
     errors: list[str] = []
 
@@ -180,3 +207,284 @@ async def test_concurrent_finalise_serialised_by_select_for_update(
         f"ValueError message must indicate the stage cannot be finalised, "
         f"got: {errors[0]!r}"
     )
+
+
+async def test_ownership_denial(db_engine, seed_data):
+    """The router's owner-scoped load 404s for a non-owner against real SQL.
+
+    finalise_stage() guards every call with _load_stage(id, db, user.id), a
+    JOIN on workspaces.user_id.  Prove the actual join denies another user and
+    admits the owner.
+    """
+    user_id, workspace_id, stage_id = seed_data
+    factory = async_sessionmaker(db_engine, expire_on_commit=False)
+
+    async with factory() as session:
+        # Owner resolves the stage.
+        stage = await router_load_stage(stage_id, session, user_id)
+        assert stage.id == stage_id
+
+        # A different (even existing) user gets a 404, not someone else's row.
+        intruder = User(
+            id=uuid.uuid4(),
+            email=f"intruder-{uuid.uuid4()}@example.com",
+            google_id=str(uuid.uuid4()),
+            name="Intruder",
+            credit_balance=100,
+        )
+        session.add(intruder)
+        await session.commit()
+
+        with pytest.raises(HTTPException) as exc_info:
+            await router_load_stage(stage_id, session, intruder.id)
+        assert exc_info.value.status_code == 404
+
+
+async def test_finalise_non_draft_status_conflict(db_engine, seed_data):
+    """A stage whose committed status is not 'draft' cannot be finalised again."""
+    user_id, workspace_id, stage_id = seed_data
+    factory = async_sessionmaker(db_engine, expire_on_commit=False)
+    manager = _manager()
+    user = _FakeUser(user_id)
+
+    async with factory() as session:
+        stage = await manager.finalise(stage_id, user, session)
+        assert stage.status == "finalised"
+
+    for status in ("finalised", "stale"):
+        async with factory() as session:
+            await session.execute(
+                update(Stage).where(Stage.id == stage_id).values(status=status)
+            )
+            await session.commit()
+        async with factory() as session:
+            with pytest.raises(ValueError, match="cannot be finalised"):
+                await manager.finalise(stage_id, user, session)
+
+
+async def test_finalise_blocked_gate_conflict_and_stale_gate_version(
+    db_engine, seed_data
+):
+    """A blocked gate on the CURRENT version 409s; on a stale version it doesn't.
+
+    finalise() refuses only when quality_gate_status == 'blocked' AND
+    quality_gate_version == current_version.  A gate row left over from an
+    older version (stale-version conflict resolved by a newer draft) must not
+    block the newer version's finalise.
+    """
+    user_id, workspace_id, stage_id = seed_data
+    factory = async_sessionmaker(db_engine, expire_on_commit=False)
+    manager = _manager()
+    user = _FakeUser(user_id)
+
+    async with factory() as session:
+        await session.execute(
+            update(Stage)
+            .where(Stage.id == stage_id)
+            .values(
+                quality_gate_status="blocked",
+                quality_gate_kind="missing_sections",
+                quality_gate_payload={},
+                quality_gate_version=1,
+                quality_gate_failed_at=datetime.now(UTC),
+            )
+        )
+        await session.commit()
+
+    # Blocked on the current version: structured conflict, row stays draft.
+    async with factory() as session:
+        with pytest.raises(QualityGateBlockedError):
+            await manager.finalise(stage_id, user, session)
+        await session.rollback()
+
+    async with factory() as session:
+        row = (
+            await session.execute(select(Stage).where(Stage.id == stage_id))
+        ).scalar_one()
+        assert row.status == "draft"
+
+    # Same gate row, but the stage has since moved to version 2: the stale
+    # gate no longer applies and finalise succeeds.
+    async with factory() as session:
+        await session.execute(
+            update(Stage).where(Stage.id == stage_id).values(current_version=2)
+        )
+        await session.commit()
+
+    async with factory() as session:
+        stage = await manager.finalise(stage_id, user, session)
+        assert stage.status == "finalised"
+
+
+async def test_row_lock_released_by_rollback_after_failed_finalise(
+    db_engine, seed_data
+):
+    """A failed finalise holds its FOR UPDATE lock only until rollback.
+
+    Session A's finalise raises (blocked quality gate) AFTER acquiring the row
+    lock; the raise alone must not leak the lock past the session's rollback.
+    Prove the lock is really held (NOWAIT fails), then really released
+    (NOWAIT succeeds), then that the stage remains finalisable once the gate
+    is overridden.
+    """
+    user_id, workspace_id, stage_id = seed_data
+    factory = async_sessionmaker(db_engine, expire_on_commit=False)
+    manager = _manager()
+    user = _FakeUser(user_id)
+
+    async with factory() as session:
+        await session.execute(
+            update(Stage)
+            .where(Stage.id == stage_id)
+            .values(
+                quality_gate_status="blocked",
+                quality_gate_kind="missing_sections",
+                quality_gate_payload={},
+                quality_gate_version=1,
+                quality_gate_failed_at=datetime.now(UTC),
+            )
+        )
+        await session.commit()
+
+    session_a = factory()
+    session_b = factory()
+    try:
+        with pytest.raises(QualityGateBlockedError):
+            await manager.finalise(stage_id, user, session_a)
+
+        # A's transaction is still open and still holds the row lock.
+        with pytest.raises(DBAPIError, match="(?i)lock"):
+            await session_b.execute(
+                select(Stage).where(Stage.id == stage_id).with_for_update(nowait=True)
+            )
+        await session_b.rollback()
+
+        # Rolling back A releases the lock immediately.
+        await session_a.rollback()
+        locked = await session_b.execute(
+            select(Stage).where(Stage.id == stage_id).with_for_update(nowait=True)
+        )
+        assert locked.scalar_one().id == stage_id
+        await session_b.rollback()
+    finally:
+        await session_a.close()
+        await session_b.close()
+
+    # The failure left no poisoned state: override the gate and finalise.
+    async with factory() as session:
+        await session.execute(
+            update(Stage)
+            .where(Stage.id == stage_id)
+            .values(quality_gate_status="overridden")
+        )
+        await session.commit()
+    async with factory() as session:
+        stage = await manager.finalise(stage_id, user, session)
+        assert stage.status == "finalised"
+
+
+async def test_finalise_retry_after_deadlock(db_engine, seed_data):
+    """After a PostgreSQL deadlock abort, a fresh-transaction retry succeeds.
+
+    Two sessions lock two stage rows in opposite order to force a real
+    DeadlockDetected abort.  The aborted transaction's rollback must leave the
+    rows unlocked and unpoisoned so an application-level retry of finalise()
+    on a new transaction completes normally.
+    """
+    user_id, workspace_id, stage_id = seed_data
+    factory = async_sessionmaker(db_engine, expire_on_commit=False)
+    manager = _manager()
+    user = _FakeUser(user_id)
+
+    other_stage_id = uuid.uuid4()
+    async with factory() as session:
+        session.add(
+            Stage(
+                id=other_stage_id,
+                workspace_id=workspace_id,
+                type="harness",
+                content="# Harness content",
+                status="draft",
+                current_version=1,
+            )
+        )
+        await session.commit()
+
+    session_a = factory()
+    session_b = factory()
+    a_ready = asyncio.Event()
+    b_ready = asyncio.Event()
+    deadlocks: list[DBAPIError] = []
+
+    async def lock_pair(session, first, second, mine: asyncio.Event, other) -> None:
+        await session.execute(select(Stage).where(Stage.id == first).with_for_update())
+        mine.set()
+        await other.wait()
+        try:
+            await session.execute(
+                select(Stage).where(Stage.id == second).with_for_update()
+            )
+        except DBAPIError as exc:
+            deadlocks.append(exc)
+
+    try:
+        await asyncio.gather(
+            lock_pair(session_a, stage_id, other_stage_id, a_ready, b_ready),
+            lock_pair(session_b, other_stage_id, stage_id, b_ready, a_ready),
+        )
+        assert len(deadlocks) == 1, (
+            f"Expected PostgreSQL to abort exactly one of the two transactions, "
+            f"got {len(deadlocks)} aborts: {deadlocks}"
+        )
+        assert "deadlock" in str(deadlocks[0]).lower()
+        await session_a.rollback()
+        await session_b.rollback()
+    finally:
+        await session_a.close()
+        await session_b.close()
+
+    # The retry (a fresh transaction) proceeds as if the deadlock never happened.
+    async with factory() as session:
+        stage = await manager.finalise(stage_id, user, session)
+        assert stage.status == "finalised"
+
+
+async def test_finalise_retry_after_serialization_failure(db_engine, seed_data):
+    """After a SERIALIZABLE write-write abort, a fresh-transaction retry succeeds.
+
+    Two SERIALIZABLE transactions update the same stage row; the second commit
+    attempt fails with 'could not serialize access'.  A retry on a new
+    (default READ COMMITTED) transaction — the application's actual finalise
+    path — must succeed.
+    """
+    user_id, workspace_id, stage_id = seed_data
+    factory = async_sessionmaker(db_engine, expire_on_commit=False)
+    manager = _manager()
+    user = _FakeUser(user_id)
+
+    async with db_engine.connect() as conn_a, db_engine.connect() as conn_b:
+        await conn_a.execution_options(isolation_level="SERIALIZABLE")
+        await conn_b.execution_options(isolation_level="SERIALIZABLE")
+
+        # Both transactions take their snapshot of the row.
+        await conn_a.execute(select(Stage).where(Stage.id == stage_id))
+        await conn_b.execute(select(Stage).where(Stage.id == stage_id))
+
+        await conn_a.execute(
+            update(Stage)
+            .where(Stage.id == stage_id)
+            .values(updated_at=datetime.now(UTC))
+        )
+        await conn_a.commit()
+
+        with pytest.raises(DBAPIError, match="could not serialize"):
+            await conn_b.execute(
+                update(Stage)
+                .where(Stage.id == stage_id)
+                .values(updated_at=datetime.now(UTC))
+            )
+        await conn_b.rollback()
+
+    async with factory() as session:
+        stage = await manager.finalise(stage_id, user, session)
+        assert stage.status == "finalised"
