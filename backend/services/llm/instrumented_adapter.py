@@ -359,6 +359,7 @@ class InstrumentedAdapter(BaseLLMAdapter):
             "operation": self._operation,
             "input_tokens": usage.input_tokens,
             "cached_input_tokens": usage.cached_input_tokens,
+            "cache_write_input_tokens": usage.cache_write_input_tokens,
             "output_tokens": usage.output_tokens,
             "reasoning_tokens": usage.reasoning_tokens,
             "provider_usage_raw": usage.provider_usage_raw,

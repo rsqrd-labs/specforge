@@ -316,6 +316,7 @@ async def _record_batch_cost_event(row: LLMBatchJob, raw_usage: dict | None) -> 
         "stage_type": _PRODUCT_SURFACE,
         "input_tokens": usage.input_tokens,
         "cached_input_tokens": usage.cached_input_tokens,
+        "cache_write_input_tokens": usage.cache_write_input_tokens,
         "output_tokens": usage.output_tokens,
         "reasoning_tokens": usage.reasoning_tokens,
         "usage_estimation_method": usage.usage_estimation_method,

@@ -77,6 +77,7 @@ _EVENT_FIELDS = frozenset(
         "stage_type",
         "input_tokens",
         "cached_input_tokens",
+        "cache_write_input_tokens",
         "output_tokens",
         "reasoning_tokens",
         "usage_estimation_method",
@@ -187,8 +188,9 @@ async def cost_rollup(
     """Aggregate cost/tokens/calls grouped by one ledger dimension.
 
     Returns rows of ``{dimension, calls, input_tokens, cached_input_tokens,
-    output_tokens, reasoning_tokens, estimated_cost_usd}`` ordered by spend
-    descending. Read-only; the caller supplies the session.
+    cache_write_input_tokens, output_tokens, reasoning_tokens,
+    estimated_cost_usd}`` ordered by spend descending. Read-only; the caller
+    supplies the session.
     """
     if group_by not in _ROLLUP_DIMENSIONS:
         raise ValueError(f"Unsupported rollup dimension: {group_by!r}")
@@ -205,6 +207,9 @@ async def cost_rollup(
             func.coalesce(func.sum(LLMCostEvent.input_tokens), 0).label("input_tokens"),
             func.coalesce(func.sum(LLMCostEvent.cached_input_tokens), 0).label(
                 "cached_input_tokens"
+            ),
+            func.coalesce(func.sum(LLMCostEvent.cache_write_input_tokens), 0).label(
+                "cache_write_input_tokens"
             ),
             func.coalesce(func.sum(LLMCostEvent.output_tokens), 0).label(
                 "output_tokens"
@@ -233,6 +238,7 @@ async def cost_rollup(
             "calls": int(row.calls),
             "input_tokens": int(row.input_tokens),
             "cached_input_tokens": int(row.cached_input_tokens),
+            "cache_write_input_tokens": int(row.cache_write_input_tokens),
             "output_tokens": int(row.output_tokens),
             "reasoning_tokens": int(row.reasoning_tokens),
             "estimated_cost_usd": float(row.estimated_cost_usd or 0),

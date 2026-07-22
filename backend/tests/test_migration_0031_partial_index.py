@@ -37,12 +37,12 @@ def test_0031_revises_0030_and_history_is_linear() -> None:
 
     revised = {m.down_revision for m in modules if m.down_revision}
     heads = [m.revision for m in modules if m.revision not in revised]
-    # The single head advances as migrations are added (0041 adds the generation
-    # reconnect lookup index). The guard is that there
+    # The single head advances as migrations are added (0042 adds the
+    # llm_cost_events cache-write token column). The guard is that there
     # is exactly ONE head — a branched history breaks `alembic upgrade head` on
     # deploy.
-    assert heads == ["0041"], (
-        f"Expected a single migration head (0041), got {heads!r} — a branched "
+    assert heads == ["0042"], (
+        f"Expected a single migration head (0042), got {heads!r} — a branched "
         "history breaks `alembic upgrade head` on deploy."
     )
 

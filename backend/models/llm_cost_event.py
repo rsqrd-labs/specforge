@@ -50,9 +50,13 @@ class LLMCostEvent(Base):
 
     # Token usage. reasoning_tokens is an observability breakout that is ALREADY
     # included in output_tokens and billed at the output rate — it is never
-    # added to estimated_cost_usd.
+    # added to estimated_cost_usd. cached_input_tokens is cache READS
+    # (discount-priced); cache_write_input_tokens is cache WRITES
+    # (premium-priced for Anthropic — issue #82); both are subsets of
+    # input_tokens.
     input_tokens: Mapped[int | None] = mapped_column(Integer)
     cached_input_tokens: Mapped[int | None] = mapped_column(Integer)
+    cache_write_input_tokens: Mapped[int | None] = mapped_column(Integer)
     output_tokens: Mapped[int | None] = mapped_column(Integer)
     reasoning_tokens: Mapped[int | None] = mapped_column(Integer)
     usage_estimation_method: Mapped[str | None] = mapped_column(Text)

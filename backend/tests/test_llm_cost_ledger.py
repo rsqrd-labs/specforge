@@ -170,6 +170,7 @@ async def test_cost_rollup_aggregation_shape() -> None:
         calls = 3
         input_tokens = 100
         cached_input_tokens = 10
+        cache_write_input_tokens = 20
         output_tokens = 50
         reasoning_tokens = 5
         estimated_cost_usd = Decimal("0.5")
@@ -185,6 +186,7 @@ async def test_cost_rollup_aggregation_shape() -> None:
             "calls": 3,
             "input_tokens": 100,
             "cached_input_tokens": 10,
+            "cache_write_input_tokens": 20,
             "output_tokens": 50,
             "reasoning_tokens": 5,
             "estimated_cost_usd": 0.5,

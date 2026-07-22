@@ -129,6 +129,12 @@ class ModelCatalogEntry:
     supports_thinking: bool = False
     reasoning_effort: str | None = None
     thinking_level: str | None = None
+    # Prompt-cache WRITE rates by TTL (issue #82). Anthropic prices cache
+    # creation at a premium over base input (5m TTL 1.25x, 1h TTL 2x) while
+    # only reads get the cached_input discount. None for providers whose
+    # caching has no write premium (OpenAI/Google automatic prefix caching).
+    cache_write_5m_cost_per_million: float | None = None
+    cache_write_1h_cost_per_million: float | None = None
     rollout_notes: str = ""
     routing_priority: int = 100
     automatic_prompt_caching: bool = False
@@ -145,6 +151,8 @@ class ModelCatalogEntry:
             "adapter_api": self.adapter_api,
             "input_cost_per_million": self.input_cost_per_million,
             "cached_input_cost_per_million": self.cached_input_cost_per_million,
+            "cache_write_5m_cost_per_million": self.cache_write_5m_cost_per_million,
+            "cache_write_1h_cost_per_million": self.cache_write_1h_cost_per_million,
             "output_cost_per_million": self.output_cost_per_million,
             "max_context_tokens": self.max_context_tokens,
             "default_max_output_tokens": self.default_max_output_tokens,
@@ -174,6 +182,8 @@ MODEL_CATALOG: tuple[ModelCatalogEntry, ...] = (
         adapter_api="messages",
         input_cost_per_million=5.0,
         cached_input_cost_per_million=0.5,
+        cache_write_5m_cost_per_million=6.25,
+        cache_write_1h_cost_per_million=10.0,
         output_cost_per_million=25.0,
         max_context_tokens=1_000_000,
         default_max_output_tokens=64000,
@@ -203,6 +213,8 @@ MODEL_CATALOG: tuple[ModelCatalogEntry, ...] = (
         adapter_api="messages",
         input_cost_per_million=3.0,
         cached_input_cost_per_million=0.3,
+        cache_write_5m_cost_per_million=3.75,
+        cache_write_1h_cost_per_million=6.0,
         output_cost_per_million=15.0,
         max_context_tokens=1_000_000,
         default_max_output_tokens=64000,
@@ -232,6 +244,8 @@ MODEL_CATALOG: tuple[ModelCatalogEntry, ...] = (
         adapter_api="messages",
         input_cost_per_million=1.0,
         cached_input_cost_per_million=0.1,
+        cache_write_5m_cost_per_million=1.25,
+        cache_write_1h_cost_per_million=2.0,
         output_cost_per_million=5.0,
         max_context_tokens=200_000,
         # This model's true output ceiling is 64K. It was previously capped at
@@ -281,6 +295,8 @@ MODEL_CATALOG: tuple[ModelCatalogEntry, ...] = (
         adapter_api="messages",
         input_cost_per_million=5.0,
         cached_input_cost_per_million=0.5,
+        cache_write_5m_cost_per_million=6.25,
+        cache_write_1h_cost_per_million=10.0,
         output_cost_per_million=25.0,
         max_context_tokens=1_000_000,
         default_max_output_tokens=8192,

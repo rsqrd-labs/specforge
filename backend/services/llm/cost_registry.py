@@ -30,6 +30,8 @@ REQUIRED_MODEL_FIELDS = frozenset(
         "tier",
         "input_cost_per_million",
         "cached_input_cost_per_million",
+        "cache_write_5m_cost_per_million",
+        "cache_write_1h_cost_per_million",
         "output_cost_per_million",
         "max_context_tokens",
         "default_max_output_tokens",
@@ -133,6 +135,8 @@ def _validate_model(provider: str, model: str, config: dict[str, Any]) -> None:
     for field in (
         "input_cost_per_million",
         "cached_input_cost_per_million",
+        "cache_write_5m_cost_per_million",
+        "cache_write_1h_cost_per_million",
         "output_cost_per_million",
     ):
         value = config[field]

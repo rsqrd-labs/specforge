@@ -443,9 +443,11 @@ async def test_complete_with_timeout_forwards_cache_system(
 
 
 def test_anthropic_cache_tokens_normalised() -> None:
-    """cache_read_input_tokens + cache_creation_input_tokens both surface as
-    cached_input_tokens in NormalizedUsage so the cost estimator can apply
-    the cheaper cache-read rate."""
+    """cache_read_input_tokens surfaces as cached_input_tokens (read-discount
+    rate) while cache_creation_input_tokens surfaces separately as
+    cache_write_input_tokens (premium write rate) — writes must never receive
+    the read discount (issue #82). input_tokens is normalised to the full
+    prompt total (base + read + write)."""
     raw = {
         "input_tokens": 500,
         "cache_read_input_tokens": 400,
@@ -453,7 +455,9 @@ def test_anthropic_cache_tokens_normalised() -> None:
         "output_tokens": 100,
     }
     usage = normalize_provider_usage("anthropic", raw)
+    assert usage.input_tokens == 900
     assert usage.cached_input_tokens == 400
+    assert usage.cache_write_input_tokens is None
 
     raw_write = {
         "input_tokens": 500,
@@ -462,7 +466,9 @@ def test_anthropic_cache_tokens_normalised() -> None:
         "output_tokens": 80,
     }
     usage_write = normalize_provider_usage("anthropic", raw_write)
-    assert usage_write.cached_input_tokens == 300
+    assert usage_write.input_tokens == 800
+    assert usage_write.cached_input_tokens is None
+    assert usage_write.cache_write_input_tokens == 300
 
 
 # ---------------------------------------------------------------------------

@@ -17,6 +17,10 @@ UsageEstimationMethod = Literal["provider_reported", "tokenizer_estimated", "unk
 
 @dataclass(frozen=True)
 class NormalizedUsage:
+    # Cross-provider contract: input_tokens is the TOTAL prompt the model saw,
+    # cache activity included; cached_input_tokens (cache READS, priced at the
+    # read-discount rate) and cache_write_input_tokens (cache WRITES, priced at
+    # the write-premium rate) are both subsets of it.
     input_tokens: int | None
     cached_input_tokens: int | None
     output_tokens: int | None
@@ -26,6 +30,11 @@ class NormalizedUsage:
     # included in output_tokens and billed at the output rate, so this value is
     # never added to estimate_cost_usd (that would double-count).
     reasoning_tokens: int | None = None
+    # Prompt-cache WRITE tokens (issue #82). Anthropic charges cache creation
+    # at a premium over the base input rate (5m TTL 1.25x, 1h TTL 2x) while
+    # only cache reads get the discount, so writes must never be folded into
+    # cached_input_tokens. None for providers without a write premium.
+    cache_write_input_tokens: int | None = None
 
 
 def normalize_provider_usage(provider: str, raw_usage: Any) -> NormalizedUsage:
@@ -53,6 +62,7 @@ def normalize_provider_usage(provider: str, raw_usage: Any) -> NormalizedUsage:
         provider_usage_raw=usage,
         usage_estimation_method="provider_reported",
         reasoning_tokens=_int_or_none(usage.get("reasoning_tokens")),
+        cache_write_input_tokens=_int_or_none(usage.get("cache_write_input_tokens")),
     )
 
 
@@ -83,15 +93,32 @@ def estimate_cost_usd(
     cost = get_model_cost(provider, model)
     input_tokens = usage.input_tokens
     cached_input_tokens = usage.cached_input_tokens or 0
+    cache_write_tokens = usage.cache_write_input_tokens or 0
     output_tokens = usage.output_tokens
 
-    if input_tokens is None and cached_input_tokens == 0 and output_tokens is None:
+    if (
+        input_tokens is None
+        and cached_input_tokens == 0
+        and cache_write_tokens == 0
+        and output_tokens is None
+    ):
         return None
 
-    uncached_input_tokens = max((input_tokens or 0) - cached_input_tokens, 0)
+    uncached_input_tokens = max(
+        (input_tokens or 0) - cached_input_tokens - cache_write_tokens, 0
+    )
+    # Cache writes are priced per TTL (issue #82): the provider's
+    # ``cache_creation`` breakdown in the raw usage splits 5m/1h write tokens;
+    # without a consistent breakdown all writes are priced at the default 5m
+    # rate (the only TTL our adapters request).
+    write_5m_tokens, write_1h_tokens = _cache_write_ttl_split(
+        cache_write_tokens, usage.provider_usage_raw
+    )
     if (
         (uncached_input_tokens and cost["input_cost_per_million"] is None)
         or (cached_input_tokens and cost["cached_input_cost_per_million"] is None)
+        or (write_5m_tokens and cost.get("cache_write_5m_cost_per_million") is None)
+        or (write_1h_tokens and cost.get("cache_write_1h_cost_per_million") is None)
         or ((output_tokens or 0) and cost["output_cost_per_million"] is None)
     ):
         return None
@@ -104,6 +131,14 @@ def estimate_cost_usd(
     total += _token_cost(
         cached_input_tokens,
         cost["cached_input_cost_per_million"],
+    )
+    total += _token_cost(
+        write_5m_tokens,
+        cost.get("cache_write_5m_cost_per_million"),
+    )
+    total += _token_cost(
+        write_1h_tokens,
+        cost.get("cache_write_1h_cost_per_million"),
     )
     total += _token_cost(
         output_tokens or 0,
@@ -164,19 +199,26 @@ def _normalize_openai_usage(usage: dict) -> NormalizedUsage:
 
 
 def _normalize_anthropic_usage(usage: dict) -> NormalizedUsage:
-    cached_tokens = sum(
-        value or 0
-        for value in (
-            _first_int(usage, "cache_read_input_tokens"),
-            _first_int(usage, "cache_creation_input_tokens"),
-        )
-    )
+    # Anthropic reports three DISJOINT input components (issue #82): base
+    # ``input_tokens`` (excludes all cache activity, unlike OpenAI/Google whose
+    # prompt counts include cached tokens), ``cache_read_input_tokens``
+    # (discounted), and ``cache_creation_input_tokens`` (premium-priced
+    # writes). Normalise to the cross-provider contract: input_tokens = the
+    # full prompt (base + read + write), with reads and writes broken out
+    # separately so each is priced at its own rate.
+    base_input = _first_int(usage, "input_tokens")
+    cache_read = _first_int(usage, "cache_read_input_tokens")
+    cache_write = _first_int(usage, "cache_creation_input_tokens")
+    components = [
+        value for value in (base_input, cache_read, cache_write) if value is not None
+    ]
     return NormalizedUsage(
-        input_tokens=_first_int(usage, "input_tokens"),
-        cached_input_tokens=cached_tokens or None,
+        input_tokens=sum(components) if components else None,
+        cached_input_tokens=cache_read or None,
         output_tokens=_first_int(usage, "output_tokens"),
         provider_usage_raw=usage,
         usage_estimation_method="provider_reported",
+        cache_write_input_tokens=cache_write or None,
     )
 
 
@@ -196,6 +238,25 @@ def _normalize_google_usage(usage: dict) -> NormalizedUsage:
         # thoughtsTokenCount is already folded into output_tokens above.
         reasoning_tokens=(thoughts or None),
     )
+
+
+def _cache_write_ttl_split(total: int, raw_usage: dict | None) -> tuple[int, int]:
+    """Split cache-write tokens into ``(5m, 1h)`` for TTL-specific pricing.
+
+    Anthropic's ``cache_creation`` usage object breaks the write total down by
+    TTL (``ephemeral_5m_input_tokens`` / ``ephemeral_1h_input_tokens``). The
+    breakdown is only trusted when it reconciles with the total; otherwise
+    every write token is priced at the 5m rate — the default TTL, and the only
+    one our adapters request (``cache_control: {"type": "ephemeral"}``).
+    """
+    if total <= 0:
+        return 0, 0
+    breakdown = _to_dict((raw_usage or {}).get("cache_creation"))
+    write_5m = _int_or_none(breakdown.get("ephemeral_5m_input_tokens")) or 0
+    write_1h = _int_or_none(breakdown.get("ephemeral_1h_input_tokens")) or 0
+    if write_5m >= 0 and write_1h >= 0 and write_5m + write_1h == total:
+        return write_5m, write_1h
+    return total, 0
 
 
 def _token_cost(tokens: int, cost_per_million: float | int | None) -> Decimal:

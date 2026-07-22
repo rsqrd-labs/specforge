@@ -65,7 +65,12 @@ LLM_OUTPUT_TOKENS = Counter(
 )
 LLM_CACHED_INPUT_TOKENS = Counter(
     "llm_cached_input_tokens_total",
-    "LLM cached input tokens",
+    "LLM cached input tokens (prompt-cache reads)",
+    ["provider", "model_tier", "operation", "stage_type"],
+)
+LLM_CACHE_WRITE_INPUT_TOKENS = Counter(
+    "llm_cache_write_input_tokens_total",
+    "LLM prompt-cache write (creation) tokens — premium-priced for Anthropic",
     ["provider", "model_tier", "operation", "stage_type"],
 )
 LLM_LATENCY_SECONDS = Histogram(
@@ -1572,6 +1577,10 @@ def record_llm_cost_event(metadata: dict[str, Any]) -> None:
     _inc_counter(
         LLM_CACHED_INPUT_TOKENS.labels(*labels),
         metadata.get("cached_input_tokens"),
+    )
+    _inc_counter(
+        LLM_CACHE_WRITE_INPUT_TOKENS.labels(*labels),
+        metadata.get("cache_write_input_tokens"),
     )
     latency_ms = _as_float(metadata.get("latency_ms"))
     if latency_ms is not None and latency_ms >= 0:
