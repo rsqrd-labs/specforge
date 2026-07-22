@@ -4,13 +4,18 @@ from conftest import import_backend, read_backend_file
 
 
 def test_stage_manager_encodes_canonical_order_and_dependencies() -> None:
+    # STAGE_DEPENDENCIES moved to module scope (STAGE_ORDER is still mirrored
+    # on the class), and the spec stage's dependency list became [] — the
+    # problem statement is workspace input, not an upstream *stage*, and every
+    # consumer of this dict iterates it to load stage rows (issue #84).
     module = import_backend("services.pipeline.stage_manager")
     manager = getattr(module, "StageManager", None)
 
     assert manager is not None
-    assert manager.STAGE_ORDER == ["spec", "plan", "harness", "tasks"]
-    assert manager.STAGE_DEPENDENCIES == {
-        "spec": ["problem_statement"],
+    assert module.STAGE_ORDER == ["spec", "plan", "harness", "tasks"]
+    assert manager.STAGE_ORDER == module.STAGE_ORDER
+    assert module.STAGE_DEPENDENCIES == {
+        "spec": [],
         "plan": ["spec"],
         "harness": ["spec", "plan"],
         "tasks": ["spec", "plan", "harness"],
@@ -38,13 +43,16 @@ def test_progress_heartbeat_exposes_additive_phase_field() -> None:
     legacy keys stay) and cover the four declared phases."""
     module = import_backend("services.pipeline.stage_manager")
 
-    assert module.PIPELINE_PHASE_STREAMING == "streaming"
-    assert module.PIPELINE_PHASE_QUALITY_GATE == "quality_gate"
-    assert module.PIPELINE_PHASE_CRITIC == "critic"
-    assert module.PIPELINE_PHASE_PERSISTING == "persisting"
+    # The wire values were renamed to user-facing words (drafting/validating/
+    # saving) when the loading UI started displaying them verbatim; the
+    # constants and the additive-field contract are unchanged (issue #84).
+    assert module.PIPELINE_PHASE_STREAMING == "drafting"
+    assert module.PIPELINE_PHASE_QUALITY_GATE == "validating"
+    assert module.PIPELINE_PHASE_CRITIC == "validating"
+    assert module.PIPELINE_PHASE_PERSISTING == "saving"
 
     source = read_backend_file("services", "pipeline", "stage_manager.py")
     # The heartbeat payload keeps the legacy contract and adds `phase`.
     assert '"state": "generating"' in source
     assert '"elapsed_seconds"' in source
-    assert '"phase": phase_tracker.phase' in source
+    assert '"phase": phase.phase' in source

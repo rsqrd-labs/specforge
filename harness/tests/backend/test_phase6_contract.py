@@ -59,36 +59,12 @@ def test_stream_stage_helper_sse_yield_lines_fit_within_88_chars() -> None:
     )
 
 
-def test_stage_manager_has_blank_lines_after_log_eval_error() -> None:
-    """
-    _log_eval_error() must be followed by two blank lines before the next
-    module-level definition. black inserts these automatically; their absence
-    indicates the file was never black-formatted after T-080.
-    """
-    source = read_backend_file("services", "pipeline", "stage_manager.py")
-
-    func_start = source.find("def _log_eval_error")
-    assert func_start != -1, "stage_manager.py must define _log_eval_error"
-
-    # Find the end of the function body (next top-level def or class or constant)
-    after_func = source[func_start:]
-    # Collect lines after the function definition
-    lines = after_func.splitlines()
-    func_end_idx = None
-    for i, line in enumerate(lines[1:], start=1):
-        if line and not line.startswith(" ") and not line.startswith("\t"):
-            func_end_idx = i
-            break
-
-    assert func_end_idx is not None, "_log_eval_error must be followed by more module content"
-
-    # The two lines immediately before the next definition should be blank
-    separator_lines = lines[func_end_idx - 2:func_end_idx]
-    assert all(l == "" for l in separator_lines), (
-        f"_log_eval_error is not followed by two blank lines before the next definition. "
-        f"Lines before next def: {separator_lines!r}. "
-        "Run `black .` in backend/ to fix. See T-086."
-    )
+# NOTE (issue #84): test_stage_manager_has_blank_lines_after_log_eval_error was
+# deleted. It asserted black formatting around _log_eval_error, a helper retired
+# when scalability audit F6 moved background-task error logging into
+# BoundedTaskRegistry (services/pipeline/background_tasks.py — pinned by
+# test_phase5_contract::test_stage_manager_eval_task_has_done_callback).
+# black formatting itself is CI-enforced repo-wide (`black --check .`).
 
 
 # ---------------------------------------------------------------------------

@@ -500,48 +500,42 @@ def test_database_engine_configures_connection_pool() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_workspace_create_schema_validates_model_against_provider() -> None:
-    """
-    WorkspaceCreate.model must be checked against VALID_MODELS[provider].
-    An invalid model string silently persists and only errors at generation time.
+def test_workspace_create_strips_legacy_llm_selection_fields() -> None:
+    """WorkspaceCreate must strip the retired per-workspace provider/model fields.
+
+    History: T-078 originally required a field_validator rejecting unknown
+    models against VALID_MODELS[provider]. Model selection has since moved
+    off the workspace entirely — routing is tier-policy driven (issue #17 /
+    #26, services/llm/tier_policy.py) — so the schema now *removes* the
+    legacy fields before validation (``_strip_legacy_llm_selection``). The
+    original invariant (a hallucinated model string can never persist or
+    reach generation) is preserved by stripping rather than rejecting.
     """
     source = read_backend_file("schemas", "workspace.py")
-
-    has_validator = (
-        "@field_validator" in source or
-        "@validator" in source or
-        "VALID_MODELS" in source or
-        "valid_models" in source.lower()
-    )
-    assert has_validator, (
-        "WorkspaceCreate has no model validator against VALID_MODELS. "
-        "Add @field_validator('model') that checks provider_config.VALID_MODELS[provider]. "
-        "See docs/CODE_REVIEW.md [I3] and T-078."
+    assert "_strip_legacy_llm_selection" in source, (
+        "WorkspaceCreate must strip retired provider/model inputs before "
+        "validation so old clients keep working without reintroducing "
+        "per-workspace model selection."
     )
 
 
-@pytest.mark.asyncio
-async def test_workspace_create_rejects_invalid_model_for_provider() -> None:
-    """Creating a workspace with an unknown model must raise a ValidationError."""
-    from pydantic import ValidationError
-
+def test_workspace_create_ignores_client_supplied_model() -> None:
+    """A client-supplied (possibly hallucinated) model must not survive validation."""
     module = import_backend("schemas.workspace")
     WorkspaceCreate = module.WorkspaceCreate
 
-    try:
-        WorkspaceCreate(
-            name="Test",
-            problem_statement="A" * 60,
-            provider="anthropic",
-            model="gpt-99-hallucinated",
-        )
-        pytest.fail(
-            "WorkspaceCreate accepted an invalid model 'gpt-99-hallucinated' for provider 'anthropic'. "
-            "The field_validator must reject unknown models. "
-            "See docs/CODE_REVIEW.md [I3] and T-078."
-        )
-    except (ValidationError, ValueError):
-        pass  # expected
+    workspace = WorkspaceCreate(
+        name="Test",
+        problem_statement="A" * 60,
+        provider="anthropic",
+        model="gpt-99-hallucinated",
+    )
+    dumped = workspace.model_dump()
+    assert "provider" not in dumped and "model" not in dumped, (
+        "WorkspaceCreate must drop legacy provider/model inputs — model "
+        "routing is owned by the tier policy, and a hallucinated model "
+        "string must never persist on a workspace. See issue #17/#26."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -601,64 +595,41 @@ def test_apply_diff_correctness_with_duplicate_text() -> None:
 
 
 def test_stage_manager_eval_task_has_done_callback() -> None:
-    """
-    asyncio.create_task(run_eval_background(...)) must have a done_callback
-    attached to log exceptions. Silent task failures are invisible in production.
+    """Background eval tasks must log their exceptions instead of dying silently.
 
-    Implementation note: this used to be a fixed-width text scan (look for
-    ``add_done_callback`` within 400 chars after ``asyncio.create_task(``).
-    That broke as soon as Phase 11 added the ``content_generation_id`` kwarg
-    to the ``run_eval_background(...)`` call, even though the callback was
-    still attached on the very next statement. We now walk the AST so the
-    invariant ("the create_task is followed in the same function body by an
-    add_done_callback call") is enforced regardless of formatting, kwargs,
-    or line count.
+    History: T-080 required every ``asyncio.create_task(run_eval_background(...))``
+    call to attach its own ``add_done_callback``. Scalability audit F6 unified
+    all detached-task spawning behind ``BoundedTaskRegistry``
+    (services/pipeline/background_tasks.py): eval work is now spawned via
+    ``_schedule_stage_eval`` → ``_BACKGROUND_EVAL_TASKS.spawn(...)``, and the
+    registry attaches the error-logging done-callback centrally. The invariant
+    is unchanged — no fire-and-forget eval task may swallow its exception.
     """
-    import ast
-
     source = read_backend_file("services", "pipeline", "stage_manager.py")
-    tree = ast.parse(source)
 
-    # Find every async function in stage_manager.py that issues
-    # asyncio.create_task(run_eval_background(...)). For each such function,
-    # the same body must contain a call to <something>.add_done_callback(...).
-    found_callbacks: list[bool] = []
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.AsyncFunctionDef):
-            continue
-        creates_eval_task = False
-        attaches_callback = False
-        for inner in ast.walk(node):
-            if not isinstance(inner, ast.Call):
-                continue
-            func = inner.func
-            # Match: asyncio.create_task(run_eval_background(...))
-            if (
-                isinstance(func, ast.Attribute)
-                and func.attr == "create_task"
-                and isinstance(func.value, ast.Name)
-                and func.value.id == "asyncio"
-                and inner.args
-                and isinstance(inner.args[0], ast.Call)
-                and isinstance(inner.args[0].func, ast.Name)
-                and inner.args[0].func.id == "run_eval_background"
-            ):
-                creates_eval_task = True
-            # Match: <anything>.add_done_callback(<anything>)
-            if isinstance(func, ast.Attribute) and func.attr == "add_done_callback":
-                attaches_callback = True
-        if creates_eval_task:
-            found_callbacks.append(attaches_callback)
-
-    assert found_callbacks, (
-        "stage_manager.py must call asyncio.create_task(run_eval_background(...)) "
-        "from at least one async function. See T-080."
+    assert "asyncio.create_task(run_eval_background" not in source, (
+        "Eval tasks must not be spawned with a bare asyncio.create_task — "
+        "route them through _BACKGROUND_EVAL_TASKS.spawn so the registry's "
+        "error-logging done-callback and advisory semaphore apply. F6."
     )
-    assert all(found_callbacks), (
-        "asyncio.create_task(run_eval_background(...)) has no done_callback. "
-        "Exceptions from background eval tasks are silently swallowed. "
-        "Add task.add_done_callback(...) to log failures. "
-        "See docs/CODE_REVIEW.md [I5] and T-080."
+    assert "_BACKGROUND_EVAL_TASKS = BoundedTaskRegistry(" in source, (
+        "stage_manager.py must register eval work in a BoundedTaskRegistry. "
+        "See T-080 (original invariant) and scalability audit F6."
+    )
+    assert 'error_event="eval_background_failed"' in source, (
+        "The eval registry must carry an error_event so failed eval tasks are "
+        "logged. See docs/CODE_REVIEW.md [I5] and T-080."
+    )
+
+    registry_source = read_backend_file("services", "pipeline", "background_tasks.py")
+    assert "task.add_done_callback(self._on_done)" in registry_source, (
+        "BoundedTaskRegistry.spawn must attach its done-callback to every task. "
+        "T-080 / F6."
+    )
+    assert "task.exception()" in registry_source and "logger.error" in registry_source, (
+        "BoundedTaskRegistry._on_done must surface task exceptions via "
+        "logger.error — silent background failures are invisible in production. "
+        "docs/CODE_REVIEW.md [I5], T-080."
     )
 
 
@@ -809,38 +780,47 @@ def test_workspace_service_get_includes_user_id_in_db_query() -> None:
 
 
 # ---------------------------------------------------------------------------
-# T-083 [I10] — Refine router must sanitize selected_text, not just instruction
+# T-083 [I10] — Refine inputs must pass the injection gate before reaching the LLM
 # ---------------------------------------------------------------------------
 
 
-def test_refine_router_sanitizes_selected_text() -> None:
+def test_refine_guards_selected_text_before_llm() -> None:
+    """Both refine inputs (instruction AND selected_text) must be security-gated.
+
+    History: T-083 required the refine *router* to bleach-sanitize
+    selected_text. The stage-screens audit (F1) deliberately removed bleach
+    from this path — it mangled code-bearing selections with zero security
+    value, and StageManager must raw-match selected_text against the stored
+    document anyway. The controls that replaced it live in
+    StageManager.refine(): the scan_async prompt-injection gate over both
+    fields, and keyed-nonce untrusted-content fences around selected_text in
+    the prompt. This test pins those replacements so neither input can reach
+    the LLM unguarded.
     """
-    The refine endpoint sanitizes request.instruction but not request.selected_text.
-    Both fields are passed to the LLM and both must be sanitized.
-    """
-    source = read_backend_file("routers", "stage.py")
+    source = read_backend_file("services", "pipeline", "stage_manager.py")
 
-    refine_start = source.find("async def refine_stage")
-    assert refine_start != -1, "routers/stage.py must define refine_stage"
+    refine_start = source.find("    async def refine(")
+    assert refine_start != -1, "stage_manager.py must define StageManager.refine"
+    next_method = source.find("\n    async def ", refine_start + 1)
+    refine_body = source[refine_start:next_method] if next_method != -1 else source[refine_start:]
 
-    next_endpoint = source.find("\n@router.", refine_start + 1)
-    refine_body = source[refine_start:next_endpoint] if next_endpoint != -1 else source[refine_start:]
-
-    assert "selected_text" in refine_body and "sanitize" in refine_body, (
-        "refine_stage() sanitizes instruction but not selected_text. "
-        "Both are passed to the LLM. Add selected_text to the sanitized_request.model_copy(). "
-        "See docs/CODE_REVIEW.md [I10] and T-083."
+    # Both user-controlled fields go through the prompt-injection scan.
+    assert '("selected_text", request.selected_text)' in refine_body, (
+        "StageManager.refine() must run selected_text through the scan_async "
+        "injection gate alongside instruction. Audit F1 replaced router-side "
+        "bleach with this gate. See docs/CODE_REVIEW.md [I10] and T-083."
     )
-
-    # Verify selected_text is explicitly passed through sanitize_text
-    has_selected_text_sanitized = re.search(
-        r"selected_text.*sanitize|sanitize.*selected_text",
+    assert "scan_async" in refine_body, (
+        "StageManager.refine() must call the scan_async prompt-injection gate "
+        "on refine inputs before building the LLM prompt. T-083 / audit F1."
+    )
+    # selected_text is fenced as untrusted content inside the prompt.
+    assert re.search(
+        r"wrap_untrusted_content\(\s*['\"]selected_text['\"],\s*request\.selected_text\s*\)",
         refine_body,
-        re.DOTALL,
-    )
-    assert has_selected_text_sanitized, (
-        "selected_text does not appear to be passed through sanitize_text() in refine_stage(). "
-        "See docs/CODE_REVIEW.md [I10] and T-083."
+    ), (
+        "StageManager.refine() must wrap selected_text in keyed-nonce "
+        "untrusted-content fences before it reaches the prompt. T-083 / audit F1."
     )
 
 

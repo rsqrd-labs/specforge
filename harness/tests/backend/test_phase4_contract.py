@@ -5,9 +5,28 @@ and GREEN after. Do not edit unless the spec or plan has changed.
 """
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
-from conftest import import_backend, read_backend_file
+from conftest import import_backend, read_backend_file, route_paths
+
+
+class _FakeRedis:
+    """Minimal async Redis stand-in for the CSRF nonce SETNX consumption.
+
+    verify_csrf_token (HF-6 — T-203) atomically claims each token's nonce via
+    ``redis.set(key, "1", nx=True, ex=ttl)``; returning None on a duplicate is
+    how replay is detected. This fake mirrors exactly that contract.
+    """
+
+    def __init__(self) -> None:
+        self._store: dict[str, str] = {}
+
+    async def set(self, key: str, value: str, nx: bool = False, ex: int | None = None):
+        if nx and key in self._store:
+            return None
+        self._store[key] = value
+        return True
 
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -31,13 +50,39 @@ def test_csrf_module_exists_with_generate_and_verify_functions() -> None:
 
 
 def test_csrf_token_roundtrip_passes_verification() -> None:
-    """A freshly generated token must verify successfully against the same session_id."""
+    """A freshly generated token must verify successfully against the same session_id.
+
+    verify_csrf_token became async and Redis-backed when nonce replay protection
+    landed (HF-6 — T-203); the roundtrip contract itself is unchanged.
+    """
     module = import_backend("services.security.csrf")
     generate = module.generate_csrf_token
     verify = module.verify_csrf_token
 
     token = generate("user-session-abc")
-    assert verify(token, "user-session-abc") is True
+    assert asyncio.run(verify(token, "user-session-abc", _FakeRedis())) is True
+
+
+def test_csrf_token_replay_is_rejected() -> None:
+    """The same token must not verify twice — the nonce is consumed on first use.
+
+    HF-6 — T-203: replay raises HTTPException(403, "CSRF token already used").
+    """
+    import pytest
+    from fastapi import HTTPException
+
+    module = import_backend("services.security.csrf")
+    generate = module.generate_csrf_token
+    verify = module.verify_csrf_token
+
+    async def _roundtrip_then_replay() -> None:
+        redis = _FakeRedis()
+        token = generate("replay-session")
+        assert await verify(token, "replay-session", redis) is True
+        with pytest.raises(HTTPException):
+            await verify(token, "replay-session", redis)
+
+    asyncio.run(_roundtrip_then_replay())
 
 
 def test_csrf_token_fails_verification_with_different_session() -> None:
@@ -47,7 +92,7 @@ def test_csrf_token_fails_verification_with_different_session() -> None:
     verify = module.verify_csrf_token
 
     token = generate("session-alpha")
-    assert verify(token, "session-beta") is False
+    assert asyncio.run(verify(token, "session-beta", _FakeRedis())) is False
 
 
 def test_csrf_token_fails_verification_when_hmac_is_tampered() -> None:
@@ -59,13 +104,13 @@ def test_csrf_token_fails_verification_when_hmac_is_tampered() -> None:
     token = generate("legit-session")
     # Flip the last character of the token to tamper with the HMAC
     tampered = token[:-1] + ("X" if token[-1] != "X" else "Y")
-    assert verify(tampered, "legit-session") is False
+    assert asyncio.run(verify(tampered, "legit-session", _FakeRedis())) is False
 
 
 def test_csrf_route_registered_in_app() -> None:
     """GET /auth/csrf-token must be present in the FastAPI app's route table."""
     main = import_backend("main")
-    paths = {route.path for route in main.create_app().routes}
+    paths = route_paths(main.create_app())
     assert "/auth/csrf-token" in paths, (
         "GET /auth/csrf-token must be registered so the frontend can fetch a CSRF token"
     )

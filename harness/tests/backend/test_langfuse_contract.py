@@ -744,13 +744,21 @@ def test_docker_compose_langfuse_is_under_optional_profile() -> None:
 
 
 def test_ci_runs_langfuse_contract_tests() -> None:
-    """T-130: .github/workflows/ci.yml must execute test_langfuse_contract.py."""
+    """T-130: CI must execute this module.
+
+    Issue #84 folded the per-file harness steps into one authoritative step
+    that runs the complete harness/tests/backend directory, which includes
+    this module — so the T-130 enforcement is the full-directory run.
+    """
     ci_path = REPO_ROOT / ".github" / "workflows" / "ci.yml"
     source = ci_path.read_text(encoding="utf-8")
-    assert "test_langfuse_contract" in source, (
+    assert (
+        "test_langfuse_contract" in source
+        or "pytest ../harness/tests/backend -q" in source
+    ), (
         ".github/workflows/ci.yml must run harness/tests/backend/"
-        "test_langfuse_contract.py to enforce the Phase 11 invariants. "
-        "See T-130."
+        "test_langfuse_contract.py — either directly or via the authoritative "
+        "full-directory harness step (issue #84). See T-130."
     )
 
 

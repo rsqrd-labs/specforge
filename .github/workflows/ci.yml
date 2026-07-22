@@ -270,16 +270,15 @@ jobs:
           CSRF_SECRET: "ci-test-csrf-secret-value-long-enough"
           ENVIRONMENT: "test"
 
-      - name: Security harness contracts
-        run: >-
-          uv run pytest
-          ../harness/tests/backend/test_security_audit_contract.py
-          ../harness/tests/backend/test_second_pass_security_contract.py
-          ../harness/tests/backend/test_final_hardening_contract.py
-          ../harness/tests/backend/test_production_readiness_contract.py
-          ../harness/tests/backend/test_langfuse_contract.py
-          ../harness/tests/backend/test_langfuse_live_traffic_contract.py
-          -q
+      # The COMPLETE backend harness directory is the authoritative contract
+      # target (issue #84): every harness/tests/backend module runs here, so a
+      # new or drifted contract test can never silently rot outside CI. The
+      # documented local command (`pytest tests/backend/ -q` from harness/) is
+      # therefore exactly what CI enforces; the whole directory runs in under
+      # ten seconds. test_harness_inventory.py (inside the directory) fails if
+      # this step is ever narrowed back to a subset.
+      - name: Complete backend harness contracts (authoritative — issue #84)
+        run: uv run pytest ../harness/tests/backend -q
         env:
           DATABASE_URL: "postgresql+asyncpg://postgres:postgres@localhost:5432/test"
           REDIS_URL: "redis://localhost:6379/0"
@@ -295,118 +294,19 @@ jobs:
           CSRF_SECRET: "ci-test-csrf-secret-value-long-enough"
           ENVIRONMENT: "test"
 
-      - name: Phase 12 provider-agnostic cost harness
-        run: uv run pytest ../harness/tests/backend/test_phase12_llm_cost_contract.py -q
-        env:
-          DATABASE_URL: "postgresql+asyncpg://postgres:postgres@localhost:5432/test"
-          REDIS_URL: "redis://localhost:6379/0"
-          TEST_DATABASE_URL: "postgresql+asyncpg://postgres:postgres@localhost:5432/test"
-          TEST_REDIS_URL: "redis://localhost:6379/0"
-          GOOGLE_CLIENT_ID: "ci-test-client-id"
-          GOOGLE_CLIENT_SECRET: "ci-test-client-secret"
-          FRONTEND_URL: "http://localhost:5173"
-          ANTHROPIC_API_KEY: "ci-test-anthropic-key"
-          OPENAI_API_KEY: "ci-test-openai-key"
-          GOOGLE_API_KEY: "ci-test-google-key"
-          ENCRYPTION_MASTER_KEY: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
-          CSRF_SECRET: "ci-test-csrf-secret-value-long-enough"
-          ENVIRONMENT: "test"
-
-      - name: Phase 12 cost event schema
-        run: python3 -m json.tool ../harness/schemas/llm-cost-event.schema.json >/dev/null
-
-      # NOTE: tests/test_github_integration.py, test_github_api_client.py and
-      # test_task_parser.py already run inside the main Pytest step above (they
-      # are not in its --ignore list, and the empty GITHUB_CLIENT_* they used
-      # are the config defaults). The dedicated re-run step was dropped to save
-      # CI minutes; re-add a one-module step here only when triaging a failure.
-
-      - name: Phase 13 GitHub integration harness contracts
-        run: uv run pytest ../harness/tests/backend/test_phase13_github_integration_contract.py -q
-        env:
-          DATABASE_URL: "postgresql+asyncpg://postgres:postgres@localhost:5432/test"
-          REDIS_URL: "redis://localhost:6379/0"
-          GOOGLE_CLIENT_ID: "ci-test-client-id"
-          GOOGLE_CLIENT_SECRET: "ci-test-client-secret"
-          FRONTEND_URL: "http://localhost:5173"
-          ANTHROPIC_API_KEY: "ci-test-anthropic-key"
-          OPENAI_API_KEY: "ci-test-openai-key"
-          GOOGLE_API_KEY: "ci-test-google-key"
-          ENCRYPTION_MASTER_KEY: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
-          CSRF_SECRET: "ci-test-csrf-secret-value-long-enough"
-          ENVIRONMENT: "test"
-
-      - name: Phase 13 integration push schema
-        run: python3 -m json.tool ../harness/schemas/integration-push.schema.json >/dev/null
-
-      - name: Phase 14 V1.3 usefulness backend contracts
-        run: uv run pytest ../harness/tests/backend/test_phase14_v13_usefulness_contract.py -q
-        env:
-          DATABASE_URL: "postgresql+asyncpg://postgres:postgres@localhost:5432/test"
-          REDIS_URL: "redis://localhost:6379/0"
-          GOOGLE_CLIENT_ID: "ci-test-client-id"
-          GOOGLE_CLIENT_SECRET: "ci-test-client-secret"
-          FRONTEND_URL: "http://localhost:5173"
-          ANTHROPIC_API_KEY: "ci-test-anthropic-key"
-          OPENAI_API_KEY: "ci-test-openai-key"
-          GOOGLE_API_KEY: "ci-test-google-key"
-          ENCRYPTION_MASTER_KEY: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
-          CSRF_SECRET: "ci-test-csrf-secret-value-long-enough"
-          ENVIRONMENT: "test"
-
-      # NOTE: the per-feature V1.3 unit modules (test_spec_clarifier,
-      # test_pdf_export_service, test_public_share_service,
-      # test_online_eval_task_fields, test_seed_templates) already run inside
-      # the main Pytest step above. The dedicated re-run step (kept only for
-      # per-feature failure attribution) was dropped to save CI minutes.
-
-      - name: Phase 14 public-workspace + template schemas
+      - name: Harness JSON schemas are well-formed
         run: |
+          python3 -m json.tool ../harness/schemas/llm-cost-event.schema.json >/dev/null
+          python3 -m json.tool ../harness/schemas/integration-push.schema.json >/dev/null
           python3 -m json.tool ../harness/schemas/public-workspace.schema.json >/dev/null
           python3 -m json.tool ../harness/schemas/template.schema.json >/dev/null
 
-      - name: Phase 16 final remediation harness contracts
-        run: >-
-          uv run pytest
-          ../harness/tests/backend/test_phase16_final_remediation_contract.py
-          -q
-        env:
-          DATABASE_URL: "postgresql+asyncpg://postgres:postgres@localhost:5432/test"
-          REDIS_URL: "redis://localhost:6379/0"
-          TEST_DATABASE_URL: "postgresql+asyncpg://postgres:postgres@localhost:5432/test"
-          TEST_REDIS_URL: "redis://localhost:6379/0"
-          GOOGLE_CLIENT_ID: "ci-test-client-id"
-          GOOGLE_CLIENT_SECRET: "ci-test-client-secret"
-          FRONTEND_URL: "http://localhost:5173"
-          ANTHROPIC_API_KEY: "ci-test-anthropic-key"
-          OPENAI_API_KEY: "ci-test-openai-key"
-          GOOGLE_API_KEY: "ci-test-google-key"
-          ENCRYPTION_MASTER_KEY: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
-          CSRF_SECRET: "ci-test-csrf-secret-value-long-enough"
-          ENVIRONMENT: "test"
-
-      # Phase 21 — GitHub Living System of Record (T-265–T-286). The structural
-      # contract + the T-285 behavioral suite (the latter runs in the main
-      # Pytest step above via tests/test_phase24_behavioral.py).
-      - name: Phase 24 GitHub living harness contracts
-        run: >-
-          uv run pytest
-          ../harness/tests/backend/test_phase24_github_living_contract.py
-          -q
-        env:
-          DATABASE_URL: "postgresql+asyncpg://postgres:postgres@localhost:5432/test"
-          REDIS_URL: "redis://localhost:6379/0"
-          TEST_DATABASE_URL: "postgresql+asyncpg://postgres:postgres@localhost:5432/test"
-          TEST_REDIS_URL: "redis://localhost:6379/0"
-          GOOGLE_CLIENT_ID: "ci-test-client-id"
-          GOOGLE_CLIENT_SECRET: "ci-test-client-secret"
-          FRONTEND_URL: "http://localhost:5173"
-          ANTHROPIC_API_KEY: "ci-test-anthropic-key"
-          OPENAI_API_KEY: "ci-test-openai-key"
-          GOOGLE_API_KEY: "ci-test-google-key"
-          ENCRYPTION_MASTER_KEY: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
-          CSRF_SECRET: "ci-test-csrf-secret-value-long-enough"
-          ENVIRONMENT: "test"
+      # NOTE: tests/test_github_integration.py, test_github_api_client.py and
+      # test_task_parser.py, plus the per-feature V1.3 unit modules
+      # (test_spec_clarifier, test_pdf_export_service, test_public_share_service,
+      # test_online_eval_task_fields, test_seed_templates), all run inside the
+      # main Pytest step above. The per-phase harness re-run steps that used to
+      # live here were folded into the single authoritative step (issue #84).
 
   worker-image:
     name: Worker Image Build

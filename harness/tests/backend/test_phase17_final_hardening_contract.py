@@ -43,7 +43,11 @@ Every test maps to one or more findings from the third-pass enterprise code revi
         → T-224 — RUNBOOK §8 Secret Rotation Procedures
 
 Design invariants enforced here:
-  * generate()'s inner except (ProviderError, TimeoutError) calls record_provider_failure.
+  * Stream timeouts feed the circuit breaker exactly once. (C-1/T-217 put the
+    record_provider_failure call in generate()'s except block; the issue #19/#47
+    stream-watchdog rework moved that single recording point into
+    _watchdog_stream, which synthesizes the timeout and records it before
+    surfacing — the tests below pin the relocated invariant.)
   * tasks.build_user_prompt() output contains "For each plan section or contract".
   * credit_service.CreditService has a public invalidate() method.
   * stage_manager.py calls credit_service.invalidate after db.commit().
@@ -63,99 +67,91 @@ from conftest import REPO_ROOT, read_backend_file
 
 
 # ---------------------------------------------------------------------------
-# T-217 (C-1): generate()'s except block MUST call record_provider_failure
+# T-217 (C-1): stream timeouts MUST feed the circuit breaker — exactly once
 # ---------------------------------------------------------------------------
+#
+# History (issue #84): C-1/T-217 originally required generate()'s
+# except (ProviderError, TimeoutError) block to call record_provider_failure
+# under an isinstance(exc, TimeoutError) guard, because the flat
+# asyncio.timeout() fired via CancelledError and bypassed
+# InstrumentedAdapter.stream()'s `except Exception`. The issue #19/#47 stream
+# watchdog replaced the flat timeout: _watchdog_stream cancels the pending
+# `anext` itself and synthesizes StreamWatchdogTimeout, so InstrumentedAdapter
+# still cannot observe it — and the single recording point moved into the
+# watchdog. The invariant is unchanged: a stream timeout is recorded exactly
+# once, and non-timeout ProviderErrors are recorded only by
+# InstrumentedAdapter (no double count, circuit trips at the documented 3).
 
 
-def test_phase17_generate_except_block_calls_record_provider_failure() -> None:
-    """C-1 — generate() stream timeouts must update the circuit breaker.
+def _watchdog_body() -> str:
+    source = read_backend_file("services", "pipeline", "stage_manager.py")
+    fn_start = source.find("async def _watchdog_stream(")
+    assert fn_start != -1, (
+        "stage_manager.py must define the _watchdog_stream supervisor. "
+        "C-1 — T-217 / #47."
+    )
+    fn_end = source.find("\nasync def ", fn_start + 1)
+    return source[fn_start:fn_end] if fn_end != -1 else source[fn_start:]
 
-    asyncio.timeout() fires via CancelledError (BaseException), which bypasses
-    InstrumentedAdapter.stream()'s `except Exception` block.  The outer
-    `except (ProviderError, TimeoutError)` in generate() is the only place
-    that can call record_provider_failure() for the timeout path.  Without it,
-    three consecutive stream timeouts never trip the circuit breaker.
 
-    This test verifies that the generate() except block now calls
-    record_provider_failure(), mirroring the pattern already in refine() and
-    generate_harness_patch() at lines 1324–1328.  C-1 — T-217.
+def test_phase17_watchdog_timeout_calls_record_provider_failure() -> None:
+    """C-1 — a watchdog-killed stream must update the circuit breaker.
+
+    The watchdog synthesizes StreamWatchdogTimeout after cancelling the pending
+    anext task, so InstrumentedAdapter cannot observe the failure and update
+    provider health itself. Without recording here, three consecutive stream
+    timeouts never trip the circuit breaker and users grind through full
+    timeout windows against a hung provider. C-1 — T-217, relocated by #47.
+    """
+    body = _watchdog_body()
+    assert "record_provider_failure" in body, (
+        "_watchdog_stream must call record_provider_failure() before raising "
+        "StreamWatchdogTimeout — the watchdog is the only component that can "
+        "observe a stream it killed. C-1 — T-217 / #47."
+    )
+    # The recording must happen before the timeout is surfaced.
+    assert body.find("record_provider_failure(provider, timeout)") < body.rfind(
+        "raise timeout"
+    ), (
+        "_watchdog_stream must record the provider failure BEFORE raising the "
+        "synthesized StreamWatchdogTimeout. C-1 — T-217 / #47."
+    )
+
+
+def test_phase17_watchdog_record_call_is_traceable() -> None:
+    """C-1 — the watchdog's record_provider_failure call must cite #47.
+
+    Convention: every significant call site references its finding for
+    traceability. The relocated circuit-breaker recording cites the watchdog
+    fix (#47) that superseded the original T-217 call site.
+    """
+    body = _watchdog_body()
+    assert "#47" in body, (
+        "_watchdog_stream's record_provider_failure call must carry a #47 "
+        "reference explaining why the watchdog (not InstrumentedAdapter or "
+        "generate()) records stream timeouts. C-1 — T-217 / #47."
+    )
+
+
+def test_phase17_no_double_counting_of_provider_failures() -> None:
+    """C-1 — provider failures must be recorded exactly once per failure.
+
+    InstrumentedAdapter.stream() records non-timeout ProviderErrors; the
+    watchdog records the timeouts it synthesizes. If generate()'s pipeline
+    ALSO recorded failures, a single ProviderError would count twice and trip
+    the circuit after 2 failures instead of the documented 3. C-1 — T-217.
     """
     source = read_backend_file("services", "pipeline", "stage_manager.py")
 
-    assert "async def generate" in source or "def generate" in source, (
-        "stage_manager.py must define a generate() function.  C-1 — T-217."
+    # StreamWatchdogTimeout must remain a TimeoutError so the runtime
+    # mid-tier fallback path (except (ProviderError, TimeoutError)) still
+    # catches watchdog kills.
+    assert re.search(
+        r"class StreamWatchdogTimeout\(TimeoutError\)", source
+    ), (
+        "StreamWatchdogTimeout must subclass TimeoutError so existing "
+        "fallback/except paths keep handling watchdog kills. #47."
     )
-
-    # Extract only the body of generate() to avoid false positives from other
-    # methods (refine, generate_harness_patch) that already call record_provider_failure.
-    fn_match = re.search(
-        r"(async\s+def\s+generate\s*\([^)]*\)[^:]*:)(.*?)(?=\n\s{0,4}(?:async\s+)?def\s+\w|\Z)",
-        source,
-        re.DOTALL,
-    )
-    assert fn_match, (
-        "Could not extract generate() body from stage_manager.py.  C-1 — T-217."
-    )
-    generate_body = fn_match.group(2)
-
-    assert "record_provider_failure" in generate_body, (
-        "generate() must call record_provider_failure() in its "
-        "except (ProviderError, TimeoutError) block.  asyncio.timeout() fires "
-        "via CancelledError which bypasses InstrumentedAdapter.stream()'s "
-        "except Exception guard, so record_provider_failure is NEVER called on "
-        "stream timeouts unless explicitly added here.  Without this call, "
-        "three consecutive stream timeouts will never trip the circuit breaker "
-        "and users will experience indefinite 360-second timeouts per request "
-        "on a hung provider.  C-1 — T-217."
-    )
-
-
-def test_phase17_generate_except_block_references_circuit_task() -> None:
-    """C-1 — The record_provider_failure call in generate() must reference T-217.
-
-    Convention: every significant call site references its task ID in a comment.
-    This ensures future developers understand why record_provider_failure is
-    called here and can trace it back to the finding.  C-1 — T-217.
-    """
-    source = read_backend_file("services", "pipeline", "stage_manager.py")
-
-    fn_match = re.search(
-        r"(async\s+def\s+generate\s*\([^)]*\)[^:]*:)(.*?)(?=\n\s{0,4}(?:async\s+)?def\s+\w|\Z)",
-        source,
-        re.DOTALL,
-    )
-    assert fn_match, "Could not extract generate() body.  C-1 — T-217."
-    generate_body = fn_match.group(2)
-
-    # Must contain the task reference in the generate() body near the call.
-    assert "T-217" in generate_body, (
-        "generate()'s record_provider_failure call must include a T-217 comment "
-        "for traceability.  C-1 — T-217."
-    )
-
-
-def test_phase17_generate_except_block_guards_against_double_counting() -> None:
-    """C-1 — generate()'s record_provider_failure call MUST be inside a
-    `if isinstance(exc, TimeoutError)` guard — NOT unconditional.
-
-    Background on the double-counting bug this test prevents:
-    InstrumentedAdapter.stream() already calls record_provider_failure() in its
-    `except Exception` block for non-timeout ProviderErrors (e.g., HTTP 401).
-    If generate()'s except (ProviderError, TimeoutError) block also calls
-    record_provider_failure() unconditionally, a non-timeout ProviderError is
-    recorded TWICE — once in InstrumentedAdapter, once in generate().  This trips
-    the circuit after 2 failures instead of the documented 3.
-
-    The isinstance(exc, TimeoutError) guard is the correct fix:
-    - For TimeoutError: InstrumentedAdapter.stream()'s `except Exception` was bypassed
-      by CancelledError (a BaseException), so record_provider_failure was NOT called.
-      The guard allows the call to happen here — exactly once.
-    - For ProviderError: InstrumentedAdapter.stream()'s `except Exception` already
-      called record_provider_failure.  The guard prevents the second call — no double-count.
-
-    C-1 — T-217.
-    """
-    source = read_backend_file("services", "pipeline", "stage_manager.py")
 
     fn_match = re.search(
         r"(async\s+def\s+generate\s*\([^)]*\)[^:]*:)(.*?)(?=\n\s{0,4}(?:async\s+)?def\s+\w|\Z)",
@@ -163,28 +159,14 @@ def test_phase17_generate_except_block_guards_against_double_counting() -> None:
         re.DOTALL,
     )
     assert fn_match, (
-        "Could not extract generate() body from stage_manager.py.  C-1 — T-217."
+        "Could not extract generate() body from stage_manager.py. C-1 — T-217."
     )
     generate_body = fn_match.group(2)
-
-    # The record_provider_failure call must be conditional on isinstance(exc, TimeoutError).
-    # This prevents double-counting: InstrumentedAdapter.stream() already handles
-    # non-timeout ProviderErrors in its except Exception block.
-    has_isinstance_guard = re.search(
-        r"if\s+isinstance\s*\(\s*exc\s*,\s*TimeoutError\s*\)[^:]*:.*?record_provider_failure",
-        generate_body,
-        re.DOTALL,
-    )
-    assert has_isinstance_guard, (
-        "generate()'s record_provider_failure call must be inside an "
-        "`if isinstance(exc, TimeoutError):` guard.  An unconditional call would "
-        "double-count non-timeout ProviderErrors (already recorded by "
-        "InstrumentedAdapter.stream()'s except Exception block), tripping the "
-        "circuit after 2 failures instead of the documented 3.  "
-        "The correct pattern is:\n"
-        "    if isinstance(exc, TimeoutError):\n"
-        "        record_provider_failure(route.provider, exc)\n"
-        "C-1 — T-217."
+    assert "record_provider_failure(" not in generate_body, (
+        "generate() must NOT call record_provider_failure — the watchdog and "
+        "InstrumentedAdapter are the two exclusive recording points. A call "
+        "here would double-count failures and trip the circuit after 2 "
+        "failures instead of the documented 3. C-1 — T-217 / #47."
     )
 
 

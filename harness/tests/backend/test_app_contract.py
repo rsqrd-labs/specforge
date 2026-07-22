@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from fastapi.testclient import TestClient
 
-from conftest import import_backend
+from conftest import import_backend, route_paths
 
 
 def test_create_app_factory_returns_fastapi_app() -> None:
@@ -30,7 +30,7 @@ def test_health_endpoint_shape() -> None:
 
 def test_public_routes_include_auth_workspace_stage_credit_and_provider_contracts() -> None:
     main = import_backend("main")
-    paths = {route.path for route in main.create_app().routes}
+    paths = route_paths(main.create_app())
 
     expected = {
         "/auth/google",

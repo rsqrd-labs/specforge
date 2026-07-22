@@ -30,3 +30,25 @@ def read_backend_file(*parts: str) -> str:
     path = backend_path(*parts)
     assert path.exists(), f"Missing backend file: {path.relative_to(REPO_ROOT)}"
     return path.read_text(encoding="utf-8")
+
+
+def route_paths(app: Any) -> set[str]:
+    """Return every registered route path, flattening nested routers.
+
+    FastAPI 0.139+ registers ``app.include_router(...)`` as ``_IncludedRouter``
+    entries that carry no ``.path`` themselves; the real ``APIRoute`` objects
+    (whose ``.path`` already includes the router prefix) live on the wrapped
+    ``original_router``. Older FastAPI exposed the flattened routes directly,
+    so both shapes are handled.
+    """
+    paths: set[str] = set()
+    stack = list(app.routes)
+    while stack:
+        route = stack.pop()
+        path = getattr(route, "path", None)
+        if path is not None:
+            paths.add(path)
+        nested = getattr(route, "original_router", None)
+        if nested is not None:
+            stack.extend(nested.routes)
+    return paths

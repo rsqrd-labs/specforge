@@ -6,6 +6,7 @@ from harness_utils import (
     backend_path,
     import_backend,
     read_backend_file,
+    route_paths,
 )
 
 __all__ = [
@@ -14,4 +15,5 @@ __all__ = [
     "backend_path",
     "import_backend",
     "read_backend_file",
+    "route_paths",
 ]

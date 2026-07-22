@@ -960,22 +960,54 @@ def test_t245_base_prompt_drops_when_they_materially_affect_phrase() -> None:
 
 
 def test_t245_base_prompt_makes_security_privacy_a11y_mandatory() -> None:
-    """T-245 — base.py must promote security/privacy/a11y/observability/reliability to MUST."""
+    """T-245 — base.py must mandate security/privacy/a11y/observability/reliability/abuse.
+
+    The prompt-quality remediation (2nd audit, f264269) rephrased the rule from
+    "Every artifact MUST include ..." to "Every artifact MUST cover ... WITHIN
+    its required structure" (the categories land in mandated sections instead
+    of invented extra headings). The T-245 invariant — all six categories are
+    mandatory, no silent omission — is unchanged.
+    """
     src = _read_base_prompt()
-    assert "Every artifact MUST include" in src or "MUST include security" in src, (
-        "base.py PROFESSIONAL_OUTPUT_RULES must mandate (MUST include) security, "
-        "privacy, accessibility, observability, reliability, and abuse content.  "
-        "T-245."
+    assert "Every artifact MUST cover" in src or "Every artifact MUST include" in src, (
+        "base.py PROFESSIONAL_OUTPUT_RULES must mandate coverage of the "
+        "professional categories in every artifact.  T-245."
+    )
+    missing = _phrases_present(
+        src,
+        [
+            "security",
+            "privacy",
+            "accessibility",
+            "observability",
+            "reliability",
+            "abuse",
+        ],
+    )
+    assert not missing, (
+        f"base.py PROFESSIONAL_OUTPUT_RULES no longer names {missing} as "
+        "mandatory artifact content.  T-245."
     )
 
 
 def test_t245_base_prompt_has_not_applicable_exception_protocol() -> None:
-    """T-245 — base.py must define the 'Not applicable because <reason>' exception protocol."""
+    """T-245 — base.py must keep an explicit, audit-visible not-applicable protocol.
+
+    Originally the literal 'Not applicable because <reason>' sentence; the
+    prompt-quality remediation rephrased it to the in-place one-liner rule
+    ("If a category is genuinely not applicable ... say so in one line ...
+    never silently drop a category"). Either way, silent omission of a
+    category heading must remain forbidden.
+    """
     src = _read_base_prompt()
-    assert "Not applicable because" in src, (
-        "base.py must define an explicit 'Not applicable because <reason>' "
-        "exception protocol so the model writes an audit-visible exemption "
-        "instead of silently omitting the heading.  T-245."
+    assert "Not applicable because" in src or "genuinely not applicable" in src, (
+        "base.py must define an explicit not-applicable exception protocol so "
+        "the model writes an audit-visible exemption instead of silently "
+        "omitting the category.  T-245."
+    )
+    assert "never silently drop" in src or "Not applicable because" in src, (
+        "base.py must explicitly forbid silently dropping a mandatory "
+        "category.  T-245."
     )
 
 
@@ -1504,11 +1536,23 @@ def test_issue7_provider_completion_diagnostics_are_wired() -> None:
 
 
 def test_issue7_incomplete_output_gate_and_no_partial_disconnect_persistence() -> None:
-    """Issue #7 — incomplete outputs are blocked; interrupted partials are discarded."""
+    """Issue #7 — incomplete outputs are blocked; interrupted partials are discarded.
+
+    Issue #34 update: every blocking gate kind (incomplete_output included) is
+    now user-overridable, so the override flag moved from a stage_manager
+    constant into the quality-gate payload schema (schemas/stage.py
+    ``override_allowed``). The gate itself still blocks until regenerated or
+    explicitly overridden.
+    """
     src = read_backend_file("services", "pipeline", "stage_manager.py")
-    assert "incomplete_output" in src and "override_allowed" in src, (
-        "StageManager must persist incomplete generations as a regenerate-only "
+    gate_schema = read_backend_file("schemas", "stage.py")
+    assert "incomplete_output" in src, (
+        "StageManager must persist incomplete generations as a blocking "
         "quality gate. Issue #7."
+    )
+    assert "override_allowed" in gate_schema, (
+        "The quality-gate payload schema must carry override_allowed so the "
+        "frontend can render the override action. Issue #7 / #34."
     )
     assert (
         "PIPELINE_INTERRUPTED_STREAMS" in src
@@ -1562,26 +1606,44 @@ def test_issue9_technology_safety_policy_and_validator_are_wired() -> None:
 
 
 def test_issue9_stage_manager_blocks_before_cache_and_finalise() -> None:
-    """Issue #9 — unsafe technology is gated before cache + revalidated at finalise.
+    """Issue #9 — technology safety is a real gate on every generation + finalise.
 
-    Issue #34 update: a technology_safety block is now OVERRIDABLE (the user owns
-    the artifact and may finalise it as-is), so the previous "cannot be
-    overridden" guard is gone.  The gate still runs before cache writes and
-    finalise still revalidates an un-overridden draft.
+    Issue #34 update: a technology_safety block is now OVERRIDABLE (the user
+    owns the artifact and may finalise it as-is).  The check itself moved off
+    the critical path: instead of an inline await before the cache write, the
+    generation/patch paths schedule a detached background check
+    (_schedule_technology_check → _dispatch_technology_check) whose result
+    lands on the stage's quality gate — "checking" while pending, "blocked"
+    on findings.  Finalise remains the enforcement point: a still-"blocked"
+    or still-"checking" current version cannot be finalised (blocked requires
+    regenerate/override; checking must settle first).
     """
     src = read_backend_file("services", "pipeline", "stage_manager.py")
-    validation_pos = src.find("await self._ensure_technology_safe")
-    cache_pos = src.rfind("set_cached_generation(redis, cache_key")
     assert "TECH_SAFETY_GATE_KIND" in src and "technology_safety" in src, (
         "StageManager must reuse the quality gate with kind=technology_safety. "
         "Issue #9."
     )
-    assert (
-        validation_pos >= 0 and cache_pos >= 0 and validation_pos < cache_pos
-    ), "Technology safety validation must run before cache writes. Issue #9."
-    assert (
-        "Current stage version has unsafe technology choices" in src
-    ), "Finalise must revalidate and reject unsafe technology choices. Issue #9."
+    assert "def _schedule_technology_check(" in src and (
+        "async def _dispatch_technology_check(" in src
+    ), (
+        "StageManager must run the deterministic technology check as a "
+        "supervised background task after each generation. Issue #9 / #34."
+    )
+    assert src.count("self._schedule_technology_check(") >= 2, (
+        "Both the core generation path and the harness gap-patch path must "
+        "schedule the technology check. Issue #9."
+    )
+    finalise_pos = src.find("async def finalise(")
+    assert finalise_pos != -1, "StageManager must define finalise(). Issue #9."
+    finalise_region = src[finalise_pos : src.find("\n    async def ", finalise_pos + 1)]
+    assert 'quality_gate_status == "blocked"' in finalise_region, (
+        "Finalise must reject a current version whose quality gate (any kind, "
+        "technology_safety included) is still blocked. Issue #9 / #34."
+    )
+    assert 'quality_gate_status == "checking"' in finalise_region, (
+        "Finalise must not race the in-flight technology check — a "
+        "still-'checking' current version cannot be finalised. Issue #9 / #34."
+    )
 
 
 def test_issue9_prompt_eval_uses_shared_policy_data() -> None:

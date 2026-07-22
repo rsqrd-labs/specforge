@@ -1632,6 +1632,18 @@ def test_t238_billing_types_stripe_credit_pack_has_status_union() -> None:
     )
 
 
+# NOTE (issue #84): the three T-238 Billing.tsx endpoint tests below originally
+# scanned Billing.tsx for raw endpoint strings. The billing calls have since
+# moved behind the shared axios layer (frontend/src/services/api.ts exposes
+# fetchBillingStatus / fetchBillingPackage / fetchBillingHistory), so the tests
+# now pin the full chain: the page calls the service helper AND the helper hits
+# the contract endpoint. The user-facing invariants are unchanged.
+
+
+def _read_frontend_file(*parts: str) -> str:
+    return (REPO_ROOT / "frontend" / "src").joinpath(*parts).read_text(encoding="utf-8")
+
+
 def test_t238_billing_page_polls_billing_status() -> None:
     """T-238 — Billing.tsx must poll GET /billing/status for checkout completion.
 
@@ -1639,37 +1651,43 @@ def test_t238_billing_page_polls_billing_status() -> None:
     'completed' or a timeout is reached.  Without polling, users are shown a
     success page that does not reflect whether credits were actually granted.
     """
-    source = (REPO_ROOT / "frontend" / "src" / "pages" / "Billing.tsx").read_text(
-        encoding="utf-8"
+    page = _read_frontend_file("pages", "Billing.tsx")
+    api = _read_frontend_file("services", "api.ts")
+    assert "fetchBillingStatus" in page, (
+        "Billing.tsx must call fetchBillingStatus (services/api.ts) to confirm "
+        "credits were granted after the checkout redirect.  The success page "
+        "must poll until status is 'completed'.  T-238."
     )
-    assert "billing/status" in source or "/status" in source, (
-        "Billing.tsx must call GET /billing/status to confirm credits were granted "
-        "after the Stripe redirect.  The success page must poll until status is "
-        "'completed'.  T-238."
+    assert "/billing/status" in api, (
+        "services/api.ts fetchBillingStatus must call GET /billing/status.  T-238."
     )
 
 
 def test_t238_billing_page_calls_billing_package_endpoint() -> None:
     """T-238 — Billing.tsx must fetch GET /billing/package to display the offer dynamically."""
-    source = (REPO_ROOT / "frontend" / "src" / "pages" / "Billing.tsx").read_text(
-        encoding="utf-8"
+    page = _read_frontend_file("pages", "Billing.tsx")
+    api = _read_frontend_file("services", "api.ts")
+    assert "fetchBillingPackage" in page, (
+        "Billing.tsx must fetch the current offer (price, credits, validity) via "
+        "fetchBillingPackage.  Hard-coding prices in the component means a price "
+        "change requires a frontend deploy.  T-238."
     )
-    assert "billing/package" in source or "/package" in source, (
-        "Billing.tsx must fetch GET /billing/package to display the current offer "
-        "(price, credits, validity).  Hard-coding prices in the component means "
-        "a price change requires a frontend deploy.  T-238."
+    assert "/billing/package" in api, (
+        "services/api.ts fetchBillingPackage must call GET /billing/package.  T-238."
     )
 
 
 def test_t238_billing_page_calls_billing_history_endpoint() -> None:
     """T-238 — Billing.tsx must fetch GET /billing/history for the purchase history table."""
-    source = (REPO_ROOT / "frontend" / "src" / "pages" / "Billing.tsx").read_text(
-        encoding="utf-8"
+    page = _read_frontend_file("pages", "Billing.tsx")
+    api = _read_frontend_file("services", "api.ts")
+    assert "fetchBillingHistory" in page, (
+        "Billing.tsx must populate the purchase history table via "
+        "fetchBillingHistory.  Users need visibility into past purchases for "
+        "support and reconciliation.  T-238."
     )
-    assert "billing/history" in source or "/history" in source, (
-        "Billing.tsx must fetch GET /billing/history to populate the purchase history "
-        "table.  Users need visibility into past purchases for support and reconciliation.  "
-        "T-238."
+    assert "/billing/history" in api, (
+        "services/api.ts fetchBillingHistory must call GET /billing/history.  T-238."
     )
 
 

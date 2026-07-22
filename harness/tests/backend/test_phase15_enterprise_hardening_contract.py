@@ -92,33 +92,23 @@ def test_phase15_generate_harness_patch_status_allowlist() -> None:
     # so it follows generate()'s rule. Allowlist must be ("draft", "stale").
     source = read_backend_file("services", "pipeline", "stage_manager.py")
 
-    assert "generate_harness_patch" in source, (
+    # Extract the full function body (fixed-width windows kept falling behind
+    # as the docstring/preamble grew — issue #84). The guard tuple is the
+    # authoritative allowlist assertion; it structurally excludes in_progress,
+    # the dead "final" alias, and "finalised" itself. (A bare substring ban on
+    # "in_progress" is wrong here: the 409 error detail legitimately names it.)
+    fn_start = source.find("    async def generate_harness_patch(")
+    assert fn_start != -1, (
         "stage_manager.py must define generate_harness_patch. T-174."
     )
+    next_method = source.find("\n    async def ", fn_start + 1)
+    region = source[fn_start:next_method] if next_method != -1 else source[fn_start:]
 
-    # Extract the region around generate_harness_patch to scope the check.
-    fn_start = source.find("generate_harness_patch")
-    region = source[fn_start : fn_start + 2000]
-
-    assert '"in_progress"' not in region and "'in_progress'" not in region, (
-        "generate_harness_patch status allowlist must NOT contain 'in_progress'. "
-        "Allowing in_progress lets a new generation start on a running stage — "
-        "double credits + corrupt generation state. C-2 — T-174."
-    )
-    # "final" as a standalone status (not as part of "finalised") must be gone.
-    # We check for the quoted standalone form.
-    assert '"final"' not in region and "'final'" not in region, (
-        "generate_harness_patch status allowlist must NOT contain 'final' "
-        "(dead alias; real status is 'finalised'). C-2 — T-174."
-    )
-    # The guard tuple itself must be exactly ("draft", "stale") — a finalised
-    # (locked) harness is no longer patchable. Asserted against the guard
-    # expression (not a bare "finalised" substring sweep, which the rationale
-    # comment legitimately mentions). C-2 — T-174.
     assert re.search(r'status not in \(\s*"draft",\s*"stale"\s*\)', region), (
         "generate_harness_patch status allowlist must be exactly "
-        '("draft", "stale") — finalised stages are locked against regeneration '
-        "and must be unlocked (restore a version) before patching. C-2 — T-174."
+        '("draft", "stale") — in_progress (double generation) and the dead '
+        "'final' alias stay excluded, and finalised stages are locked against "
+        "regeneration until a version is restored. C-2 — T-174."
     )
 
 
@@ -359,13 +349,15 @@ def test_phase15_llm_adapters_have_httpx_timeout() -> None:
     llm_dir = BACKEND_ROOT / "services" / "llm"
     assert llm_dir.exists(), "backend/services/llm/ must exist. H-6 — T-182."
 
-    adapter_files = [
-        f
-        for f in llm_dir.iterdir()
-        if f.suffix == ".py" and f.name not in ("__init__.py", "gateway.py")
-    ]
+    # Only provider adapters own an HTTP client. services/llm/ has since grown
+    # pure-policy modules (tier_policy, model_catalog, output_budget, …) that
+    # legitimately configure no timeout, so "every .py except __init__/gateway"
+    # over-selects (issue #84). The *_adapter.py naming convention is the
+    # adapter contract.
+    adapter_files = sorted(llm_dir.glob("*_adapter.py"))
     assert adapter_files, (
-        "backend/services/llm/ must contain at least one adapter file. H-6 — T-182."
+        "backend/services/llm/ must contain at least one *_adapter.py file. "
+        "H-6 — T-182."
     )
 
     missing_timeout: list[str] = []
