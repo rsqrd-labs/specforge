@@ -614,7 +614,7 @@ class Settings(BaseSettings):
     lemonsqueezy_webhook_secret_prev: str = ""
     lemonsqueezy_store_id: str = ""
     lemonsqueezy_variant_id: str = ""
-    lemonsqueezy_price_cents: int = 900  # $9.00 — 200 credits per purchase
+    lemonsqueezy_price_cents: int = 1500  # $15.00 — 200 credits per purchase
     lemonsqueezy_currency: str = "USD"
     lemonsqueezy_credits_per_purchase: int = 200
     lemonsqueezy_credit_validity_days: int = 30
@@ -656,9 +656,15 @@ class Settings(BaseSettings):
     # accepted so a secret rotation does not drop in-flight deliveries.
     razorpay_webhook_secret: str = ""
     razorpay_webhook_secret_prev: str = ""
-    # Amounts are integer minor units (paise for INR): ₹799.00 = 79900. The
+    # Amounts are integer minor units (paise for INR): ₹1549.00 = 154900. The
     # existing price_cents columns carry these unchanged (plan D8).
-    razorpay_price_cents: int = 79900
+    #
+    # This is NOT a naive currency conversion of lemonsqueezy_price_cents.
+    # Razorpay is not a Merchant of Record, so 18% GST comes out of this gross
+    # amount on our side (Lemon absorbs tax on the USD path). ₹1549 gross nets
+    # ~₹1313 ≈ $14.9 after GST — actual parity with the $15.00 Lemon price.
+    # Re-derive the gross, not the net, if the USD price changes.
+    razorpay_price_cents: int = 154900
     razorpay_currency: str = "INR"
     razorpay_credits_per_purchase: int = 200
     razorpay_credit_validity_days: int = 30

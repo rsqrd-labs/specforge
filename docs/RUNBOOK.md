@@ -945,7 +945,7 @@ same `billing_process_webhook` job on the same worker, `billing:deadletter`
   visibility — they hit the acknowledged-ignored path, zero grant impact).
 - Config: `RAZORPAY_KEY_ID` / `_KEY_SECRET`, `RAZORPAY_WEBHOOK_SECRET`,
   HTTPS `RAZORPAY_SUCCESS_URL`, and the economics
-  (`RAZORPAY_PRICE_CENTS` in **paise** — 79900 = ₹799 — `_CURRENCY`,
+  (`RAZORPAY_PRICE_CENTS` in **paise** — 154900 = ₹1549 — `_CURRENCY`,
   `_CREDITS_PER_PURCHASE`, `_CREDIT_VALIDITY_DAYS`). In production
   `validate_production_settings()` requires the webhook secret, an HTTPS success
   URL, positive economics, `RAZORPAY_CHECKOUT_TTL_MINUTES >= 16` (Razorpay rejects

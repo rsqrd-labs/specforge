@@ -37,7 +37,7 @@ class PackageResponse(BaseModel):
 
     credits: int = Field(ge=1, description="Credits granted per purchase")
     price_cents: int = Field(
-        ge=1, description="Price in minor units (900 = $9.00, 79900 = ₹799.00)"
+        ge=1, description="Price in minor units (1500 = $15.00, 154900 = ₹1549.00)"
     )
     validity_days: int = Field(
         ge=1, description="Days until the purchased pack expires"

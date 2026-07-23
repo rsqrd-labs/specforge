@@ -2727,7 +2727,7 @@ export interface components {
             enabled: boolean;
             /**
              * Price Cents
-             * @description Price in minor units (900 = $9.00, 79900 = ₹799.00)
+             * @description Price in minor units (1500 = $15.00, 154900 = ₹1549.00)
              */
             price_cents: number;
             /**
