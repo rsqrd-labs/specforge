@@ -23,7 +23,7 @@ Core capabilities:
 - Human review gates between stages.
 - Stage refinement with diff preview and accept/reject flow.
 - Credit accounting for generation and accepted refinements.
-- Paid credit packs through Lemon Squeezy hosted checkout (Phase 22), with signed webhooks, idempotent grants, and refund/dispute handling. See `docs/INTEGRATION_API_SETUP_HANDBOOK.md` for setup and `docs/RUNBOOK.md` §9 for billing ops. Leave the `LEMONSQUEEZY_*` keys blank to disable checkout.
+- Paid credit packs through a flag-gated, provider-neutral checkout: Lemon Squeezy or Razorpay hosted checkout, with signed webhooks, idempotent grants, and refund/dispute handling. See `docs/INTEGRATION_API_SETUP_HANDBOOK.md` for setup and `docs/RUNBOOK.md` §9 for billing ops. `PAYMENTS_ENABLED` defaults to off.
 - Provider-aware LLM routing for Anthropic, OpenAI, and Google.
 - User-supplied provider API keys, encrypted at rest, with platform key fallback.
 - Online evaluation and quality indicators for generated stages.
@@ -106,18 +106,20 @@ The `templates` table is populated automatically on every container start by `ba
 
 ### Quality Gate
 
-After a stage streams and passes output validation, but before it is persisted, two
-gates run. First a zero-LLM validator checks that every required section is present
-and meets minimum depth (per-stage section contracts, requirement-identifier floors,
-and a task-count floor). Then a cheap LLM critic does a second-pass review and, on a
-failing verdict, triggers one platform-funded regenerate with the findings injected.
+After a stage streams and passes output validation, but before it is persisted, a
+zero-LLM validator checks that every required section is present and meets minimum
+depth (per-stage section contracts, requirement-identifier floors, and a task-count
+floor). This gate, plus a technology-safety check, is **blocking** — a failure resets
+the stage to draft and surfaces Regenerate and Override actions in the UI. Every
+blocking gate is overridable by the workspace owner.
 
-The critic is **advisory**: if the artifact still fails after that regenerate, the
-draft is still delivered and finalisable, with the remaining findings attached as
-non-blocking suggestions. The blocking gates are the zero-LLM section/depth checks
-and a technology-safety check; every blocking gate is **overridable** by the
-workspace owner, who can also disable the critic entirely per workspace. A blocking
-gate resets the stage to draft and surfaces Regenerate and Override actions in the UI.
+A cheap LLM critic then reviews the artifact for a set of "before returning, verify"
+invariants, but it runs **off the critical path**: the draft is delivered as soon as
+the blocking gates pass, and the critic's judgment happens afterward in a detached
+background task. A failing verdict never blocks or regenerates — its findings are
+attached to the already-delivered draft as non-blocking suggestions in the UI. The
+critic is fail-open (a judge error never blocks a generation) and can be disabled
+entirely per workspace by the owner.
 
 ### GitHub Living System of Record
 
@@ -139,14 +141,21 @@ backfill, and increment-push operations.
 
 ### Billing
 
-Paid credit packs use **Lemon Squeezy** hosted checkout (Lemon is the Merchant of
-Record, so it absorbs tax, chargebacks, and disputes). Checkout is attempt-first:
-`POST /billing/checkout` records an attempt before calling Lemon and returns a
-reference the frontend polls. `POST /billing/webhook` verifies the `X-Signature` HMAC
-before any DB work, commits the event to a durable inbox, then enqueues processing on
-the arq worker — the HTTP path never grants credits inline. Grants and refunds are
-idempotent, and reconciliation crons keep the ledger honest without ever auto-granting.
-See `docs/RUNBOOK.md` §9 for billing ops.
+Payments are flag-gated: `PAYMENTS_ENABLED` is the master kill switch (default off),
+and `PAYMENT_PROVIDER` selects **one** active gateway — **Lemon Squeezy** hosted
+checkout (Lemon is the Merchant of Record, so it absorbs tax, chargebacks, and
+disputes) or **Razorpay** hosted Payment Links (an INR alternative; the account
+holder retains tax/dispute liability, not Razorpay). Checkout is attempt-first for
+both: `POST /billing/checkout` records an attempt before calling the provider and
+returns a reference the frontend polls. `POST /billing/webhook` (Lemon) and
+`POST /billing/webhook/razorpay` verify their HMAC signature before any DB work,
+commit the event to a durable inbox, then enqueue processing on the arq worker — the
+HTTP path never grants credits inline. Grants and refunds are idempotent, both
+providers' webhooks keep processing regardless of which one is currently active (so
+switching providers doesn't strand old refunds/disputes), and reconciliation crons
+keep the ledger honest without ever auto-granting. An allowlisted admin-correction
+endpoint covers cases reconciliation can't, such as a Razorpay chargeback. See
+`docs/RUNBOOK.md` §9 for billing ops.
 
 ## Tech Stack
 
@@ -256,15 +265,22 @@ See `docs/LOCAL_TESTING_HANDBOOK.md` for a step-by-step guide to generating secr
 | `GITHUB_APP_SLUG` | Public GitHub App slug, used to build the install URL. |
 | `GITHUB_APP_PRIVATE_KEY` | RS256 PEM that signs the App JWT. A secret-manager value, never stored in the DB. Required in production when the App is enabled. |
 | `GITHUB_APP_WEBHOOK_SECRET` | HMAC secret for verifying inbound webhooks. Required in production when the App is enabled. `GITHUB_APP_WEBHOOK_SECRET_PREV` is also accepted during a rotation window. |
-| `LEMONSQUEEZY_API_KEY` | Lemon Squeezy API key. Set with `LEMONSQUEEZY_STORE_ID` and `LEMONSQUEEZY_VARIANT_ID` to enable checkout; leave any blank to disable it (`POST /billing/checkout` returns 503). |
-| `LEMONSQUEEZY_WEBHOOK_SECRET` | HMAC secret for verifying `X-Signature` on billing webhooks. `LEMONSQUEEZY_WEBHOOK_SECRET_PREV` is accepted during rotation. |
-| `LEMONSQUEEZY_PRICE_CENTS` / `_CURRENCY` / `_CREDITS_PER_PURCHASE` / `_CREDIT_VALIDITY_DAYS` | Credit-pack pricing and validity. |
+| `GITHUB_APP_CLIENT_ID` / `GITHUB_APP_CLIENT_SECRET` | The App's user-to-server OAuth credentials, used only to verify that an installer can access the installation before binding it. Required in production when the App is enabled; the App's Callback URL must point at `/integrations/github/setup`. |
+| `PAYMENTS_ENABLED` | Master kill switch for paid checkout. Defaults to `false`; the frontend hides the Buy button and `POST /billing/checkout` is inert until it's on. |
+| `PAYMENT_PROVIDER` | Selects the single active gateway: `lemonsqueezy` (default) or `razorpay`. Both providers' webhooks always process regardless of which is active. |
+| `LEMONSQUEEZY_API_KEY` | Lemon Squeezy API key. Set with `LEMONSQUEEZY_STORE_ID` and `LEMONSQUEEZY_VARIANT_ID` to configure the provider; leave any blank to leave it unconfigured. |
+| `LEMONSQUEEZY_WEBHOOK_SECRET` | HMAC secret for verifying `X-Signature` on Lemon Squeezy webhooks. `LEMONSQUEEZY_WEBHOOK_SECRET_PREV` is accepted during rotation. |
+| `LEMONSQUEEZY_PRICE_CENTS` / `_CURRENCY` / `_CREDITS_PER_PURCHASE` / `_CREDIT_VALIDITY_DAYS` | Lemon Squeezy credit-pack pricing and validity. |
 | `LEMONSQUEEZY_SUCCESS_URL` | Post-checkout redirect (HTTPS in production). |
 | `LEMONSQUEEZY_TEST_MODE` | Must be `false` in production. |
+| `RAZORPAY_KEY_ID` / `RAZORPAY_KEY_SECRET` | Razorpay API credentials. Set both to configure the provider. |
+| `RAZORPAY_WEBHOOK_SECRET` | HMAC secret for verifying `X-Razorpay-Signature` on Razorpay webhooks. `RAZORPAY_WEBHOOK_SECRET_PREV` is accepted during rotation; required in production when Razorpay is configured. |
+| `RAZORPAY_PRICE_CENTS` / `_CURRENCY` / `_CREDITS_PER_PURCHASE` / `_CREDIT_VALIDITY_DAYS` | Razorpay credit-pack pricing and validity. |
+| `RAZORPAY_SUCCESS_URL` | Post-checkout redirect (HTTPS in production). |
 | `ADMIN_USER_EMAILS` | Comma-separated allowlist for the manual billing-correction endpoint. |
 | `LLM_STREAM_IDLE_TIMEOUT_SECONDS` | Stream watchdog idle bound — a stream is killed only if no provider event arrives within this window. Defaults to 180. |
 | `LLM_STREAM_HARD_CAP_SECONDS` | Absolute upper bound on a single stream. Defaults to 900. |
-| `CORE_CHEAP_PRIMARY` | Optional feature flag. Defaults to off (core generation is mid-tier first with strong-tier escalation); set true to route to the cheapest viable tier first. |
+| `CORE_CHEAP_PRIMARY` | Optional feature flag, defaults to **true** (core generation routes to each provider's cheapest viable tier first, with mid-tier escalation). Set false to revert to the previous mid-tier-first policy. |
 | `CORE_COMPLEXITY_ROUTING` | Optional feature flag, defaults to off. Enables a deterministic classifier that raises (never lowers) the starting tier for predictably hard requests. |
 | `SENTRY_DSN` | Optional backend Sentry DSN. |
 | `GRAFANA_OTLP_ENDPOINT` | Optional OTLP trace endpoint. |
@@ -443,12 +459,14 @@ tier (`strong`, `mid`, `mini`, `small`) via `resolve_llm_route()` instead of
 hard-coding provider model names, and output budgets are sized per operation and
 clamped to each model's catalog ceiling (`services.llm.output_budget`).
 
-Core generation defaults to each provider's **mid tier** with strong-tier
-escalation on a quality-gate or runtime failure. An optional `CORE_CHEAP_PRIMARY`
-flag flips every artifact-generation feature to a cheapest-viable-tier-first policy
-(with mid-tier escalation), and `CORE_COMPLEXITY_ROUTING` can raise the starting
-tier for predictably hard requests. Both ship off and are promoted only after the
-golden-corpus route eval (`scripts/run_llm_route_eval.py`) and manual approval.
+Core generation defaults to each provider's **cheapest viable current-generation
+tier**, with mid-tier escalation on a quality-gate or runtime failure
+(`CORE_CHEAP_PRIMARY`, default **true**). Setting it `false` reverts every
+artifact-generation feature to the previous mid-tier-first policy (with strong-tier
+escalation). `CORE_COMPLEXITY_ROUTING` (default off) can raise — never lower — the
+starting tier for predictably hard requests. Both flags are promoted or adjusted
+only after the golden-corpus route eval (`scripts/run_llm_route_eval.py`) and manual
+approval.
 
 Key invariants:
 
@@ -615,10 +633,16 @@ keep tasks in sync with issues and PRs. There are two paths:
 
 - **GitHub App (Phase 21, the living integration)** — bidirectional, worker-driven
   sync. Enable it by setting `GITHUB_APP_ID` and `GITHUB_APP_SLUG`, plus
-  `GITHUB_APP_PRIVATE_KEY` and `GITHUB_APP_WEBHOOK_SECRET` (both required in
-  production). Point the App's webhook at `POST /integrations/github/webhook`. See
-  `docs/INTEGRATION_API_SETUP_HANDBOOK.md` for the full App registration walkthrough
-  and `docs/RUNBOOK.md` §12 for rotation and recovery ops.
+  `GITHUB_APP_PRIVATE_KEY`, `GITHUB_APP_WEBHOOK_SECRET`, and
+  `GITHUB_APP_CLIENT_ID`/`GITHUB_APP_CLIENT_SECRET` (all required in production).
+  The install callback (`GET /integrations/github/setup`) never trusts the
+  installation id alone — it completes the App's user-to-server OAuth and only
+  binds the installation after confirming the installer can access it, which is
+  why the client id/secret are mandatory and the App's Callback URL must point at
+  `/integrations/github/setup`. Point the App's webhook at
+  `POST /integrations/github/webhook`. See `docs/INTEGRATION_API_SETUP_HANDBOOK.md`
+  for the full App registration walkthrough and `docs/RUNBOOK.md` §12 for rotation
+  and recovery ops.
 - **OAuth App (Phase 13, legacy one-shot export)** — retained behind a flag. To
   enable it, create a GitHub OAuth App with callback URL
   `{FRONTEND_URL}/integrations/github/callback` and set `GITHUB_CLIENT_ID` and
