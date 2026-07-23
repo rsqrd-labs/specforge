@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://specforge.local/schemas/llm-cost-event.schema.json",
+  "$id": "https://thought2build.local/schemas/llm-cost-event.schema.json",
   "title": "Provider-normalized LLM cost event",
   "type": "object",
   "additionalProperties": false,

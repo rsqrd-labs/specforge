@@ -1,6 +1,6 @@
 # Local Testing Handbook
 
-This guide walks you through running the complete SpecForge stack on your
+This guide walks you through running the complete Thought2Build stack on your
 laptop — frontend, backend, database, and cache — so you can test everything
 end-to-end before deploying to Vercel and Railway.
 
@@ -111,10 +111,10 @@ This powers the "Sign in with Google" button. Follow these steps:
 1. Go to [console.cloud.google.com](https://console.cloud.google.com/) and
    sign in with any Google account.
 2. Click the project selector at the top → **New Project**. Name it anything
-   (e.g. `specforge-local`). Click **Create**.
+   (e.g. `thought2build-local`). Click **Create**.
 3. In the left sidebar: **APIs & Services** → **OAuth consent screen**.
    - User type: **External**. Click **Create**.
-   - Fill in **App name** (e.g. `SpecForge`) and your email for both support
+   - Fill in **App name** (e.g. `Thought2Build`) and your email for both support
      and developer contact fields.
    - Click **Save and Continue** through the remaining steps (Scopes and Test
      users can be left at defaults for now).
@@ -259,7 +259,7 @@ Open `backend/.env` in a text editor and replace the placeholder values:
 
 ```env
 # Database — Docker Compose sets these automatically, leave as-is
-DATABASE_URL=postgresql+asyncpg://specforge:specforge@localhost:5432/specforge
+DATABASE_URL=postgresql+asyncpg://thought2build:thought2build@localhost:5432/thought2build
 REDIS_URL=redis://localhost:6379/0
 
 # Auth — paste the output from the JWT commands above
@@ -619,8 +619,8 @@ then restart the backend.
 - Confirm `LEMONSQUEEZY_WEBHOOK_SECRET` matches the secret on the Lemon webhook.
 - Check backend logs for `billing.webhook.*` failures and inspect the
   `billing_webhook_events` inbox row for the order.
-- Confirm you completed the checkout created by SpecForge (it carries the
-  `checkout_ref`/nonce), not a standalone test order without SpecForge metadata.
+- Confirm you completed the checkout created by Thought2Build (it carries the
+  `checkout_ref`/nonce), not a standalone test order without Thought2Build metadata.
 - If the enqueue was missed, the 60s pending-sweep and the 15-minute reconcile
   recover it automatically.
 
@@ -716,7 +716,7 @@ only local PostgreSQL and Redis:
 ```bash
 docker compose up -d db redis
 cd backend
-TEST_DATABASE_URL=postgresql+asyncpg://specforge:specforge@localhost:5432/specforge \
+TEST_DATABASE_URL=postgresql+asyncpg://thought2build:thought2build@localhost:5432/thought2build \
 TEST_REDIS_URL=redis://localhost:6379/1 \
 uv run pytest tests/test_storyboard_service.py -q
 ```
@@ -795,23 +795,23 @@ Owner downloads include HTML, PDF, speaker notes, demo script, and appendix:
 ```bash
 export OWNER_ACCESS_TOKEN=replace-with-owner-access-token
 export STORYBOARD_ID=replace-with-storyboard-uuid
-mkdir -p /tmp/specforge-storyboard
+mkdir -p /tmp/thought2build-storyboard
 curl -L -H "Authorization: Bearer $OWNER_ACCESS_TOKEN" \
-  -o /tmp/specforge-storyboard/deck.html \
+  -o /tmp/thought2build-storyboard/deck.html \
   "http://localhost:8000/storyboards/$STORYBOARD_ID/download/html"
 curl -L -H "Authorization: Bearer $OWNER_ACCESS_TOKEN" \
-  -o /tmp/specforge-storyboard/deck.pdf \
+  -o /tmp/thought2build-storyboard/deck.pdf \
   "http://localhost:8000/storyboards/$STORYBOARD_ID/download/pdf"
 curl -L -H "Authorization: Bearer $OWNER_ACCESS_TOKEN" \
-  -o /tmp/specforge-storyboard/speaker-notes.md \
+  -o /tmp/thought2build-storyboard/speaker-notes.md \
   "http://localhost:8000/storyboards/$STORYBOARD_ID/download/notes?format=md"
 curl -L -H "Authorization: Bearer $OWNER_ACCESS_TOKEN" \
-  -o /tmp/specforge-storyboard/demo-script.md \
+  -o /tmp/thought2build-storyboard/demo-script.md \
   "http://localhost:8000/storyboards/$STORYBOARD_ID/download/demo-script"
 curl -L -H "Authorization: Bearer $OWNER_ACCESS_TOKEN" \
-  -o /tmp/specforge-storyboard/technical-appendix.md \
+  -o /tmp/thought2build-storyboard/technical-appendix.md \
   "http://localhost:8000/storyboards/$STORYBOARD_ID/download/appendix"
-ls -lh /tmp/specforge-storyboard
+ls -lh /tmp/thought2build-storyboard
 ```
 
 Public downloads intentionally exclude the HTML package. With default

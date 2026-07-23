@@ -116,8 +116,8 @@ def test_build_scaffold_emits_ci_workflow_and_per_task_stubs() -> None:
 
     # One stub per task per stack, tagged with the stable task_ref.
     ref_001 = compute_task_ref("First task")
-    py_stub = f"tests/specforge/test_{ref_001.replace('-', '_')}.py"
-    ts_stub = f"tests/specforge/{ref_001}.test.ts"
+    py_stub = f"tests/thought2build/test_{ref_001.replace('-', '_')}.py"
+    ts_stub = f"tests/thought2build/{ref_001}.test.ts"
     assert py_stub in scaffold and ts_stub in scaffold
     assert ref_001 in scaffold[py_stub]
     # The stub is RED on purpose.
@@ -152,7 +152,7 @@ def test_stub_neutralises_untrusted_title() -> None:
         harness_files={}, tasks=tasks, stacks=["python"]
     )
     ref = compute_task_ref('Evil " title')
-    stub = scaffold[f"tests/specforge/test_{ref.replace('-', '_')}.py"]
+    stub = scaffold[f"tests/thought2build/test_{ref.replace('-', '_')}.py"]
     assert "Evil ' title" in stub
     assert 'Evil " title' not in stub
 
@@ -189,11 +189,11 @@ async def test_pr_mode_workflows_write_403_surfaces_clear_error() -> None:
     with pytest.raises(GitHubWorkflowsPermissionError) as caught:
         await client.upsert_file(
             "o/r",
-            ".github/workflows/specforge.yml",
+            ".github/workflows/thought2build.yml",
             "name: x",
             None,
             "ci",
-            branch="specforge/inc-1",
+            branch="thought2build/inc-1",
         )
     assert "Workflows: write" in str(caught.value)
     await http.aclose()
@@ -217,7 +217,7 @@ async def test_workflows_403_not_preempted_by_governor() -> None:
     client = make_app_github_client(_FakeTokenSource(), 1, http, governor=governor)
     with pytest.raises(GitHubWorkflowsPermissionError):
         await client.upsert_file(
-            "o/r", ".github/workflows/specforge.yml", "x", None, "ci", branch="b"
+            "o/r", ".github/workflows/thought2build.yml", "x", None, "ci", branch="b"
         )
     await http.aclose()
 
@@ -240,13 +240,20 @@ async def test_pr_mode_content_409_refetches_sha_and_retries() -> None:
 
     client, http = _client(handler)
     await client.upsert_file(
-        "o/r", "src/app.py", "print(1)", "stale-sha", "msg", branch="specforge/inc-1"
+        "o/r",
+        "src/app.py",
+        "print(1)",
+        "stale-sha",
+        "msg",
+        branch="thought2build/inc-1",
     )
 
     # Exactly one refetch GET happened, and it carried ?ref=<branch>.
     gets = [url for (m, url) in seen if m == "GET"]
     assert len(gets) == 1
-    assert "ref=specforge%2Finc-1" in gets[0] or "ref=specforge/inc-1" in gets[0]
+    assert (
+        "ref=thought2build%2Finc-1" in gets[0] or "ref=thought2build/inc-1" in gets[0]
+    )
     assert state["puts"] == 2  # stale → retry → success
     await http.aclose()
 
@@ -266,9 +273,9 @@ async def test_get_ref_and_create_branch_and_pr_plumbing() -> None:
     client, http = _client(handler)
     sha = await client.get_ref("o/r", "heads/main")
     assert sha == "base-sha"
-    await client.create_branch("o/r", "specforge/inc-1", sha)
+    await client.create_branch("o/r", "thought2build/inc-1", sha)
     number = await client.create_pull_request(
-        "o/r", head="specforge/inc-1", base="main", title="t", body="b"
+        "o/r", head="thought2build/inc-1", base="main", title="t", body="b"
     )
     assert number == 42
     await http.aclose()
@@ -284,13 +291,13 @@ async def test_create_pull_request_recovers_existing_pr_on_422() -> None:
             )
         if request.method == "GET" and "/pulls?" in url:
             return httpx.Response(
-                200, json=[{"number": 7, "head": {"ref": "specforge/inc-1"}}]
+                200, json=[{"number": 7, "head": {"ref": "thought2build/inc-1"}}]
             )
         return httpx.Response(500, json={"message": "unexpected"})
 
     client, http = _client(handler)
     number = await client.create_pull_request(
-        "o/r", head="specforge/inc-1", base="main", title="t", body="b"
+        "o/r", head="thought2build/inc-1", base="main", title="t", body="b"
     )
     assert number == 7  # recovered, not duplicated
     await http.aclose()
@@ -303,7 +310,7 @@ async def test_create_branch_is_idempotent_on_422_already_exists() -> None:
 
     client, http = _client(handler)
     # Must not raise — a resumed export reuses the same branch.
-    await client.create_branch("o/r", "specforge/inc-1", "base-sha")
+    await client.create_branch("o/r", "thought2build/inc-1", "base-sha")
     await http.aclose()
 
 
@@ -483,17 +490,17 @@ async def test_pr_mode_opens_branch_and_pr_and_links_closes_n(
 
     assert result is not None and result.status == "completed"
     # One branch, one PR.
-    assert stub.branches == [("specforge/inc-1", "base-sha")]
-    assert stub.pulls_created == [("specforge/inc-1", "main")]
-    assert result.branch_name == "specforge/inc-1"
+    assert stub.branches == [("thought2build/inc-1", "base-sha")]
+    assert stub.pulls_created == [("thought2build/inc-1", "main")]
+    assert result.branch_name == "thought2build/inc-1"
     assert result.pr_number == 4201
 
     # Docs went to the default branch (branch=None); scaffold went to the branch.
     docs_on_default = {p for (p, b) in stub.upserts if b is None}
-    on_branch = {p for (p, b) in stub.upserts if b == "specforge/inc-1"}
+    on_branch = {p for (p, b) in stub.upserts if b == "thought2build/inc-1"}
     assert {"SPEC.md", "PLAN.md", "TASKS.md"} <= docs_on_default
     assert pr_export_builder.CI_WORKFLOW_PATH in on_branch
-    assert any(p.startswith("tests/specforge/") for p in on_branch)
+    assert any(p.startswith("tests/thought2build/") for p in on_branch)
     # Harness contracts are NOT on the default branch (disjoint set).
     assert not any(p.startswith("harness/") for p in docs_on_default)
     # Two issues created for the PR's Closes #N links.
@@ -516,7 +523,7 @@ async def test_pr_mode_reexport_reuses_branch_and_pr(
     )
     first = _PRStubClient()
     await run_export_push(push.id, "proj", "private", db=session, client=first)
-    assert first.pulls_created == [("specforge/inc-1", "main")]
+    assert first.pulls_created == [("thought2build/inc-1", "main")]
 
     # Simulate a re-export (at-least-once / resync): reset to pending and re-run.
     push.status = "pending"

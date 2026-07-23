@@ -17,7 +17,7 @@ import DataRetentionPanel from "../components/settings/DataRetentionPanel"
 import GitHubConnection from "../components/settings/GitHubConnection"
 import { getGitHubIntegration } from "../services/api"
 
-const RETURN_TO_KEY = "specforge:settings_return_to"
+const RETURN_TO_KEY = "thought2build:settings_return_to"
 
 function resolveReturnTo(stateFrom: string | undefined): string {
   if (stateFrom && stateFrom !== "/settings") {

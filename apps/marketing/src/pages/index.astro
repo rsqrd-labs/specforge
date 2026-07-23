@@ -11,20 +11,20 @@ import { siteJsonLd, faqPageSchema } from "../lib/seo"
 import "../styles/content.css"
 
 const title =
-  "SpecForge — AI Spec-to-Build Workspace for Specs, Plans & Tasks"
+  "Thought2Build — AI Spec-to-Build Workspace for Specs, Plans & Tasks"
 const description =
-  "SpecForge turns rough product ideas into build-ready SPEC, PLAN, HARNESS, and TASKS artifacts — structured requirements, validation, and traceable tasks for clean engineer and AI-agent handoffs."
+  "Thought2Build turns rough product ideas into build-ready SPEC, PLAN, HARNESS, and TASKS artifacts — structured requirements, validation, and traceable tasks for clean engineer and AI-agent handoffs."
 
 // Answer-ready Q&A for the entity anchor (issue #18, GEO). The homepage is the
 // highest-authority page and the one answer engines are most likely to cite for
-// "what is SpecForge", so it carries an explicit FAQ. The SAME array feeds both
+// "what is Thought2Build", so it carries an explicit FAQ. The SAME array feeds both
 // the visible <FaqSection> and the FAQPage JSON-LD, so the on-page answer and
 // the structured-data answer are byte-identical (the geo-content invariant).
 const homeFaqs = [
   {
-    question: "What is SpecForge?",
+    question: "What is Thought2Build?",
     answer:
-      "SpecForge is an AI spec-to-build workspace that turns a rough product idea into four structured, build-ready artifacts — SPEC, PLAN, HARNESS, and TASKS — so founders, product teams, engineers, and AI coding agents start from explicit requirements, early validation, and traceable tasks instead of a vague brief.",
+      "Thought2Build is an AI spec-to-build workspace that turns a rough product idea into four structured, build-ready artifacts — SPEC, PLAN, HARNESS, and TASKS — so founders, product teams, engineers, and AI coding agents start from explicit requirements, early validation, and traceable tasks instead of a vague brief.",
   },
   {
     question: "What are the four stages — Spec, Plan, Harness, and Tasks?",
@@ -32,19 +32,19 @@ const homeFaqs = [
       "Spec captures requirements, users, and acceptance criteria. Plan sets the architecture, risks, and implementation path. Harness generates validation assets before coding begins. Tasks breaks the work into traceable items linked back to requirements. Each stage has a human review gate before the next one starts.",
   },
   {
-    question: "How much does SpecForge cost?",
+    question: "How much does Thought2Build cost?",
     answer:
       "You can start free with 50 starter credits — no setup or payment required. Generations consume credits, and you can connect your own LLM provider API keys (Anthropic, OpenAI, or Google) to run on your own account.",
   },
   {
-    question: "Who is SpecForge for?",
+    question: "Who is Thought2Build for?",
     answer:
       "Founders, product teams, engineers, and AI-agent teams who need the next step to be clearer than the idea — turning messy intent into requirements, plans, tests, and traceable tasks that a person or a coding agent can act on.",
   },
 ]
 
 // Site-wide structured data: the Organization + SoftwareApplication entities,
-// `@id`-anchored so answer engines resolve a single, consistent SpecForge
+// `@id`-anchored so answer engines resolve a single, consistent Thought2Build
 // entity across every page (issue #18, Phase 2 — see src/lib/seo.ts). The
 // homepage additionally carries a FAQPage built from the same `homeFaqs`.
 const jsonLd = [...siteJsonLd, faqPageSchema(homeFaqs)]
@@ -93,11 +93,11 @@ const audiences = [
     </div>
     <section class="landing-hero" aria-labelledby="landing-title">
       <header class="landing-nav">
-        <span class="brand-lockup" role="img" aria-label="SpecForge">
+        <span class="brand-lockup" role="img" aria-label="Thought2Build">
           <span class="brand-logo brand-logo--default" aria-hidden="true">
             <img class="brand-logo-image" src="/brand/squirrel-mark.png" alt="" />
           </span>
-          <span class="brand-wordmark" aria-hidden="true">SpecForge</span>
+          <span class="brand-wordmark" aria-hidden="true">Thought2Build</span>
         </span>
         <span class="landing-status">AI spec-to-build workspace</span>
       </header>
@@ -108,14 +108,14 @@ const audiences = [
             Turn rough product ideas into build-ready specs, tests, and tasks.
           </h1>
           <p class="hero-lede">
-            SpecForge is an AI spec-to-build workspace that turns rough product
+            Thought2Build is an AI spec-to-build workspace that turns rough product
             ideas into four structured, build-ready artifacts &mdash; SPEC,
             PLAN, HARNESS, and TASKS &mdash; so founders, product teams,
             engineers, and AI coding agents start from explicit requirements,
             early validation, and traceable work instead of a vague brief.
           </p>
 
-          <div class="hero-value-row" aria-label="SpecForge outcomes">
+          <div class="hero-value-row" aria-label="Thought2Build outcomes">
             <span>Less ambiguity</span>
             <span>Earlier validation</span>
             <span>Cleaner AI handoffs</span>
@@ -151,7 +151,7 @@ const audiences = [
             </div>
           </div>
 
-          <div class="workflow-showcase" aria-label="SpecForge workflow">
+          <div class="workflow-showcase" aria-label="Thought2Build workflow">
             <div class="workflow-heading">
               <span>Delivery pipeline</span>
               <strong>Spec - Plan - Harness - Tasks</strong>
@@ -179,7 +179,7 @@ const audiences = [
           </div>
         </div>
 
-        <div class="product-panel" aria-label="SpecForge product preview">
+        <div class="product-panel" aria-label="Thought2Build product preview">
           <div class="panel-topbar">
             <span></span><span></span><span></span>
             <strong>Workspace</strong>
@@ -194,7 +194,7 @@ const audiences = [
             ))}
           </div>
 
-          <div class="before-after-panel" aria-label="Before and after SpecForge">
+          <div class="before-after-panel" aria-label="Before and after Thought2Build">
             <div>
               <span>Rough input</span>
               <p>&ldquo;Build an onboarding assistant for new SaaS users.&rdquo;</p>
@@ -271,7 +271,7 @@ const audiences = [
         </div>
       </section>
 
-      <div class="landing-proof-panel" aria-label="SpecForge platform highlights">
+      <div class="landing-proof-panel" aria-label="Thought2Build platform highlights">
         {proof.map(([number, tileTitle, copy]) => (
           <div class="proof-tile">
             <span>{number}</span>
@@ -322,7 +322,7 @@ const audiences = [
           <h2 id="final-cta-title">Leave with a build plan your team can act on.</h2>
           <p>
             Start with Google, use your starter credits, and turn the first
-            product thought into a structured SpecForge workspace.
+            product thought into a structured Thought2Build workspace.
           </p>
         </div>
         <a href={SIGN_IN_URL} class="final-cta-button">Start your first workspace</a>

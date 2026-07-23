@@ -155,7 +155,7 @@ def _notes(
     environment: str | None = "test",
     extra: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """The seven-key notes block a SpecForge payment link round-trips."""
+    """The seven-key notes block a Thought2Build payment link round-trips."""
     notes: dict[str, Any] = {
         "user_id": str(uuid4()),
         "checkout_ref": "ref_abc",
@@ -483,7 +483,7 @@ async def test_link_paid_environment_mismatch_rejected() -> None:
 
 @pytest.mark.asyncio
 async def test_link_paid_environment_missing_rejected() -> None:
-    # The grant authority requires the round-tripped marker — a link SpecForge
+    # The grant authority requires the round-tripped marker — a link Thought2Build
     # minted always carries it (hard requirement, unlike refunds).
     session = _InboxSession()
     app = _make_app(session)

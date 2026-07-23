@@ -258,7 +258,7 @@ async def test_get_prompt_returns_template_body(
     fake_sdk.get_prompt.return_value = fake_prompt
     with patch("langfuse.Langfuse", return_value=fake_sdk):
         client = langfuse_service.get_langfuse_client()
-        body = await client.get_prompt(name="specforge.spec.system", version=3)
+        body = await client.get_prompt(name="thought2build.spec.system", version=3)
         assert body == "REMOTE TEMPLATE BODY"
         fake_sdk.get_prompt.assert_called_once()
         kwargs = fake_sdk.get_prompt.call_args.kwargs
@@ -330,7 +330,7 @@ async def test_get_prompt_does_not_block_event_loop(
                 await asyncio.sleep(0.05)
 
         body, _ = await asyncio.gather(
-            client.get_prompt(name="specforge.spec.system"),
+            client.get_prompt(name="thought2build.spec.system"),
             heartbeat(),
         )
 
@@ -376,7 +376,7 @@ async def test_get_prompt_times_out_when_sdk_hangs(
 
         loop = asyncio.get_running_loop()
         start = loop.time()
-        body = await client.get_prompt(name="specforge.spec.system")
+        body = await client.get_prompt(name="thought2build.spec.system")
         elapsed = loop.time() - start
 
         assert body is None

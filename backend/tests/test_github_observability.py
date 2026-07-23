@@ -35,9 +35,9 @@ def test_new_github_counters_exposed_on_metrics_after_observation() -> None:
     observability.GITHUB_CHECK_TOTAL.labels(verdict="success").inc()
 
     body = generate_latest().decode()
-    assert "specforge_github_export_total" in body
-    assert "specforge_github_pr_total" in body
-    assert "specforge_github_check_total" in body
+    assert "thought2build_github_export_total" in body
+    assert "thought2build_github_pr_total" in body
+    assert "thought2build_github_check_total" in body
 
 
 # ---------------------------------------------------------------------------

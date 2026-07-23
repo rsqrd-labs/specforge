@@ -36,8 +36,8 @@ from services.pipeline.storyboard_source import (
     StoryboardSourcePackage,
 )
 
-_ESCALATION_METRIC = "specforge_storyboard_escalations_total"
-_TRUNCATION_METRIC = "specforge_storyboard_truncation_retries_total"
+_ESCALATION_METRIC = "thought2build_storyboard_escalations_total"
+_TRUNCATION_METRIC = "thought2build_storyboard_truncation_retries_total"
 
 
 # ---------------------------------------------------------------------------

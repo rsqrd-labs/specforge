@@ -6,7 +6,7 @@ prefill. Templates are deploy-time-seeded via scripts/seed_templates.py
 and rendered by the unauthenticated GET /templates endpoint.
 
 Intentional design choice: this model has no foreign key to the users
-table. Templates are owned by the SpecForge platform itself, not by
+table. Templates are owned by the Thought2Build platform itself, not by
 any individual account. End-user-authored templates are explicitly
 out of scope for V1 (see Spec §14) — they belong to V2.
 """

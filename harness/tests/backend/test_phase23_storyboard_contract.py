@@ -438,7 +438,7 @@ def test_t252_source_builder_prioritises_architecture_security_reliability_secti
         assert section.lower() in src.lower(), (
             f"Source builder must prioritize PLAN {section} evidence. T-252."
         )
-    assert "missing_source_section" in src or "specforge_storyboard_source_missing" in src, (
+    assert "missing_source_section" in src or "thought2build_storyboard_source_missing" in src, (
         "Missing source sections must be represented explicitly, not invented. T-252/T-262."
     )
 
@@ -763,7 +763,7 @@ def test_t255_pdf_rendering_uses_no_network_fetcher_or_equivalent() -> None:
 def test_t255_download_filenames_are_stable_and_product_specific() -> None:
     src = read_backend_file("services", "pipeline", "storyboard_renderer.py")
     for filename in [
-        "specforge-storyboard-",
+        "thought2build-storyboard-",
         "speaker-notes",
         "demo-script",
         "technical-appendix",
@@ -910,16 +910,16 @@ def test_t261_renderer_schema_rejects_script_injection_from_source_artifacts() -
 def test_t262_observability_defines_all_storyboard_metrics() -> None:
     src = read_backend_file("services", "observability.py")
     for metric in [
-        "specforge_storyboard_generation_started_total",
-        "specforge_storyboard_generation_completed_total",
-        "specforge_storyboard_generation_failed_total",
-        "specforge_storyboard_section_regenerated_total",
-        "specforge_storyboard_generation_duration_seconds",
-        "specforge_storyboard_credits_deducted_total",
-        "specforge_storyboard_credits_refunded_total",
-        "specforge_storyboard_public_view_total",
-        "specforge_storyboard_download_total",
-        "specforge_storyboard_source_missing_total",
+        "thought2build_storyboard_generation_started_total",
+        "thought2build_storyboard_generation_completed_total",
+        "thought2build_storyboard_generation_failed_total",
+        "thought2build_storyboard_section_regenerated_total",
+        "thought2build_storyboard_generation_duration_seconds",
+        "thought2build_storyboard_credits_deducted_total",
+        "thought2build_storyboard_credits_refunded_total",
+        "thought2build_storyboard_public_view_total",
+        "thought2build_storyboard_download_total",
+        "thought2build_storyboard_source_missing_total",
     ]:
         assert metric in src, f"services/observability.py missing metric {metric}. T-262."
 
@@ -972,7 +972,7 @@ def test_t264_storyboard_documentation_is_updated_before_release() -> None:
     docs = {
         "docs/RUNBOOK.md": ["Storyboard", "refund", "stale", "slug", "disable"],
         "docs/LOCAL_TESTING_HANDBOOK.md": ["Storyboard", "/sb/", "download"],
-        "docs/OBSERVABILITY_RUNBOOK.md": ["specforge_storyboard", "generation_failed", "refund"],
+        "docs/OBSERVABILITY_RUNBOOK.md": ["thought2build_storyboard", "generation_failed", "refund"],
         "docs/PRODUCTION_RELEASE_GATE.md": ["Storyboard", "migration", "rate limit", "CSP", "sanitizer"],
         "docs/SMOKE_TEST_CHECKLIST.md": ["Storyboard", "incognito", "speaker notes", "appendix"],
     }

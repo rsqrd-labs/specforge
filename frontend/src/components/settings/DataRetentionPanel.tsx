@@ -75,7 +75,7 @@ export default function DataRetentionPanel() {
         <div className="settings-panel-heading">
           <h2 className="settings-section-title">Data retention</h2>
           <p className="settings-section-copy">
-            How long SpecForge keeps your data. Nothing here is billed or
+            How long Thought2Build keeps your data. Nothing here is billed or
             configurable — it's shown so you always know what's stored and for
             how long.
           </p>

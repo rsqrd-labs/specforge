@@ -46,7 +46,7 @@ export function ExportPDFButton({
       const url = URL.createObjectURL(blob)
       const anchor = document.createElement("a")
       anchor.href = url
-      anchor.download = `specforge-${slugify(workspaceName)}.pdf`
+      anchor.download = `thought2build-${slugify(workspaceName)}.pdf`
       // Programmatically click so the browser's native download UI fires.
       // The anchor is not part of the document (when we built it inline)
       // but click() works regardless.

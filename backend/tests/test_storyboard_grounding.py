@@ -23,7 +23,7 @@ from services.pipeline.storyboard_source import SourceExcerpt, StoryboardSourceP
 def _source_package() -> StoryboardSourcePackage:
     return StoryboardSourcePackage(
         workspace_id=uuid4(),
-        workspace_name="SpecForge",
+        workspace_name="Thought2Build",
         problem_statement="Build a spec generator.",
         stage_versions={},
         artifacts={},
@@ -32,7 +32,9 @@ def _source_package() -> StoryboardSourcePackage:
                 source_id="SPEC:overview",
                 stage="spec",
                 heading="Overview",
-                excerpt="SpecForge turns an idea into a structured engineering spec.",
+                excerpt=(
+                    "Thought2Build turns an idea into a structured engineering spec."
+                ),
             ),
             "PLAN:architecture": SourceExcerpt(
                 source_id="PLAN:architecture",
@@ -112,7 +114,7 @@ def _payload() -> dict:
         "excerpt": "FastAPI, PostgreSQL, Redis, and a React SPA.",
     }
     return {
-        "title": "SpecForge Launch Keynote",
+        "title": "Thought2Build Launch Keynote",
         "theme": {
             # 5 colours: fresh-generation palette floor (audit L16).
             "palette": ["#101418", "#1FB6FF", "#F5A623", "#F5F5F5", "#22CC88"],
@@ -144,7 +146,8 @@ def _payload() -> dict:
                     "source": "SPEC",
                     "source_id": "SPEC:overview",
                     "excerpt": (
-                        "SpecForge turns an idea into a structured engineering spec."
+                        "Thought2Build turns an idea into a structured "
+                        "engineering spec."
                     ),
                 }
             ]
@@ -184,7 +187,7 @@ def test_grounding_accepts_paraphrased_excerpt_when_citation_id_is_valid() -> No
     payload = _payload()
     payload["source_map"]["s0"][0][
         "excerpt"
-    ] = "SpecForge turns an idea into a structured engineering spec..."
+    ] = "Thought2Build turns an idea into a structured engineering spec..."
 
     _validate_payload_against_source(
         StoryboardPayload.model_validate(payload), _source_package()

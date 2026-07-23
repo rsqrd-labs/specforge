@@ -214,7 +214,7 @@ def test_langfuse_client_actually_reaches_the_network(
         )
         await client.end_span(span_id)
 
-        body = await client.get_prompt(name="specforge.spec.system")
+        body = await client.get_prompt(name="thought2build.spec.system")
         await client.flush()
         return body
 

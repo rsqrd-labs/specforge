@@ -1,6 +1,6 @@
-# Contributing to SpecForge
+# Contributing to Thought2Build
 
-Thank you for improving SpecForge. Open an issue before a large architectural
+Thank you for improving Thought2Build. Open an issue before a large architectural
 change so its scope and migration impact can be agreed before implementation.
 
 ## Development setup

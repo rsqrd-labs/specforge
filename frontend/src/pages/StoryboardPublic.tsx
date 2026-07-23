@@ -17,7 +17,7 @@ import type { StoryboardPublicResponse } from "../types/storyboard"
 // page reads exclusively from the unauthenticated /storyboards/public/{slug}
 // endpoint via the bare axios path in api.ts.
 
-const NOINDEX_META_ID = "specforge-storyboard-public-noindex"
+const NOINDEX_META_ID = "thought2build-storyboard-public-noindex"
 
 // Inject `<meta name="robots" content="noindex, nofollow">` for the lifetime of
 // the public view — belt-and-suspenders with the backend's X-Robots-Tag header.
@@ -82,9 +82,9 @@ export default function StoryboardPublic() {
     document.title =
       state.kind === "ready"
         ? `${state.storyboard.title} — Storyboard`
-        : "Storyboard — SpecForge"
+        : "Storyboard — Thought2Build"
     return () => {
-      document.title = "SpecForge"
+      document.title = "Thought2Build"
     }
   }, [state])
 

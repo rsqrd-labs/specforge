@@ -67,27 +67,27 @@ class _FakeLogger:
 
 def test_storyboard_metric_helpers_increment_bounded_series() -> None:
     started_before = _sample(
-        "specforge_storyboard_generation_started_total", {"action": "generate"}
+        "thought2build_storyboard_generation_started_total", {"action": "generate"}
     )
     credits_before = _sample(
-        "specforge_storyboard_credits_deducted_total",
+        "thought2build_storyboard_credits_deducted_total",
         {"action": "regenerate_section"},
     )
     refunded_before = _sample(
-        "specforge_storyboard_credits_refunded_total",
+        "thought2build_storyboard_credits_refunded_total",
         {"action": "regenerate_section", "reason": "generation_failed"},
     )
     failed_before = _sample(
-        "specforge_storyboard_generation_failed_total",
+        "thought2build_storyboard_generation_failed_total",
         {"action": "regenerate", "error_type": "timeout"},
     )
-    public_before = _sample("specforge_storyboard_public_view_total")
+    public_before = _sample("thought2build_storyboard_public_view_total")
     download_before = _sample(
-        "specforge_storyboard_download_total",
+        "thought2build_storyboard_download_total",
         {"kind": "notes-md", "public": "true"},
     )
     missing_before = _sample(
-        "specforge_storyboard_source_missing_total",
+        "thought2build_storyboard_source_missing_total",
         {"source": "plan", "section": "stride"},
     )
 
@@ -102,29 +102,29 @@ def test_storyboard_metric_helpers_increment_bounded_series() -> None:
     observability.record_storyboard_source_missing("plan", "PLAN:stride")
 
     assert _sample(
-        "specforge_storyboard_generation_started_total", {"action": "generate"}
+        "thought2build_storyboard_generation_started_total", {"action": "generate"}
     ) == pytest.approx(started_before + 1)
     assert _sample(
-        "specforge_storyboard_credits_deducted_total",
+        "thought2build_storyboard_credits_deducted_total",
         {"action": "regenerate_section"},
     ) == pytest.approx(credits_before + 5)
     assert _sample(
-        "specforge_storyboard_credits_refunded_total",
+        "thought2build_storyboard_credits_refunded_total",
         {"action": "regenerate_section", "reason": "generation_failed"},
     ) == pytest.approx(refunded_before + 5)
     assert _sample(
-        "specforge_storyboard_generation_failed_total",
+        "thought2build_storyboard_generation_failed_total",
         {"action": "regenerate", "error_type": "timeout"},
     ) == pytest.approx(failed_before + 1)
-    assert _sample("specforge_storyboard_public_view_total") == pytest.approx(
+    assert _sample("thought2build_storyboard_public_view_total") == pytest.approx(
         public_before + 1
     )
     assert _sample(
-        "specforge_storyboard_download_total",
+        "thought2build_storyboard_download_total",
         {"kind": "notes-md", "public": "true"},
     ) == pytest.approx(download_before + 1)
     assert _sample(
-        "specforge_storyboard_source_missing_total",
+        "thought2build_storyboard_source_missing_total",
         {"source": "plan", "section": "stride"},
     ) == pytest.approx(missing_before + 1)
 
@@ -291,7 +291,7 @@ async def test_source_builder_emits_missing_section_metrics(
     workspace = Workspace(
         id=_WORKSPACE_ID,
         user_id=_USER_ID,
-        name="SpecForge",
+        name="Thought2Build",
         problem_statement="Build a spec generator.",
         provider="anthropic",
         model="claude-sonnet-4-6",

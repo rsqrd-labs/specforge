@@ -25,7 +25,7 @@ Design guarantees:
   idempotent generation retries produce an identical source package.
 * **Honest about gaps.** When an expected section cannot be located we record a
   structured ``MissingSourceSection`` finding instead of inventing content; T-262
-  increments ``specforge_storyboard_source_missing_total`` from these findings.
+  increments ``thought2build_storyboard_source_missing_total`` from these findings.
 """
 
 from __future__ import annotations
@@ -117,7 +117,7 @@ class MissingSourceSection:
     """A section the Storyboard wanted but could not extract.
 
     Recorded instead of inventing content. T-262 emits
-    ``specforge_storyboard_source_missing_total`` from these findings.
+    ``thought2build_storyboard_source_missing_total`` from these findings.
     """
 
     source_id: str

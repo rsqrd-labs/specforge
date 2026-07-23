@@ -8,7 +8,7 @@ describe("BrandLogo", () => {
     const { container } = render(<BrandLogo />)
 
     expect(
-      screen.getByRole("img", { name: "SpecForge squirrel logo" }),
+      screen.getByRole("img", { name: "Thought2Build squirrel logo" }),
     ).toBeInTheDocument()
     const mark = container.querySelector(".brand-logo-image")
     expect(mark).not.toBeNull()
@@ -25,23 +25,23 @@ describe("BrandLogo", () => {
 })
 
 describe("BrandLockup", () => {
-  it("renders the squirrel mark with the SpecForge wordmark", () => {
+  it("renders the squirrel mark with the Thought2Build wordmark", () => {
     const { container } = render(<BrandLockup />)
 
-    expect(screen.getByRole("img", { name: "SpecForge" })).toBeInTheDocument()
-    expect(screen.getByText("SpecForge")).toBeInTheDocument()
+    expect(screen.getByRole("img", { name: "Thought2Build" })).toBeInTheDocument()
+    expect(screen.getByText("Thought2Build")).toBeInTheDocument()
     expect(container.querySelector(".brand-logo-image")).not.toBeNull()
     expect(screen.queryByText("SF")).toBeNull()
   })
 
   it("supports small and compact variants", () => {
     const { rerender } = render(<BrandLockup variant="small" />)
-    expect(screen.getByRole("img", { name: "SpecForge" })).toHaveClass(
+    expect(screen.getByRole("img", { name: "Thought2Build" })).toHaveClass(
       "brand-lockup--small",
     )
 
     rerender(<BrandLockup variant="compact" />)
-    expect(screen.getByRole("img", { name: "SpecForge" })).toHaveClass(
+    expect(screen.getByRole("img", { name: "Thought2Build" })).toHaveClass(
       "brand-lockup--compact",
     )
   })

@@ -39,7 +39,7 @@ def _valid_production(**overrides: object):
         "environment": "production",
         "allowed_hosts": "app.example.com",
         "metrics_token": "metrics-token",
-        "frontend_url": "https://app.specforge.dev",
+        "frontend_url": "https://app.thought2build.com",
         "jwt_private_key": _FAKE_PEM,
         "encryption_master_key": "a-real-non-ci-encryption-key",
         "langfuse_secret_key": "",
@@ -59,7 +59,7 @@ def _valid_production(**overrides: object):
         "lemonsqueezy_currency": "USD",
         "lemonsqueezy_credits_per_purchase": 200,
         "lemonsqueezy_credit_validity_days": 30,
-        "lemonsqueezy_success_url": "https://app.specforge.dev/billing",
+        "lemonsqueezy_success_url": "https://app.thought2build.com/billing",
         "lemonsqueezy_test_mode": False,
     }
     base.update(overrides)
@@ -123,9 +123,9 @@ def test_lemonsqueezy_webhook_secrets_current_first_non_empty() -> None:
 
 def test_admin_emails_parsed_lowercased_and_empty_default() -> None:
     with patch.object(
-        config.settings, "admin_user_emails", "  Ops@Specforge.DEV , founder@x.io ,"
+        config.settings, "admin_user_emails", "  Ops@Thought2Build.COM , founder@x.io ,"
     ):
-        assert config.settings.admin_emails == {"ops@specforge.dev", "founder@x.io"}
+        assert config.settings.admin_emails == {"ops@thought2build.com", "founder@x.io"}
     with patch.object(config.settings, "admin_user_emails", ""):
         assert config.settings.admin_emails == set()
 
@@ -183,7 +183,7 @@ def test_prod_guard_rejects_blank_webhook_secret() -> None:
 
 def test_prod_guard_rejects_non_https_success_url() -> None:
     patches = _valid_production(
-        lemonsqueezy_success_url="http://app.specforge.dev/billing"
+        lemonsqueezy_success_url="http://app.thought2build.com/billing"
     )
     _apply(patches)
     try:

@@ -209,7 +209,7 @@ class Settings(BaseSettings):
     #   registry is leaking tasks past the F1 cap). It NEVER drops a task —
     #   shedding advisory work would silently lose eval/critic findings and a
     #   dropped pipeline task would lose a paid generation. 0 disables the
-    #   warning. The live count is always exported as specforge_background_tasks.
+    #   warning. The live count is always exported as thought2build_background_tasks.
     max_concurrent_advisory_tasks: int = 12
     background_tasks_soft_max: int = 200
 
@@ -284,7 +284,7 @@ class Settings(BaseSettings):
     provider_rate_limit_max_retries: int = 3
     provider_rate_limit_backoff_base_seconds: float = 2.0
     provider_rate_limit_backoff_max_seconds: float = 30.0
-    # LLM circuit-breaker rejections emit specforge_llm_circuit_rejections_total.
+    # LLM circuit-breaker rejections emit thought2build_llm_circuit_rejections_total.
     #
     # Stream-watchdog policy: a generation stream is killed only when it is
     # actually unhealthy, never merely because the artifact is long.
@@ -618,7 +618,7 @@ class Settings(BaseSettings):
     lemonsqueezy_currency: str = "USD"
     lemonsqueezy_credits_per_purchase: int = 200
     lemonsqueezy_credit_validity_days: int = 30
-    lemonsqueezy_success_url: str = ""  # e.g. https://app.specforge.dev/billing
+    lemonsqueezy_success_url: str = ""  # e.g. https://app.thought2build.com/billing
     # test_mode gates whether checkouts are created against Lemon's test store.
     # Production must run with this False (the production guard enforces it).
     lemonsqueezy_test_mode: bool = True
@@ -662,7 +662,7 @@ class Settings(BaseSettings):
     razorpay_currency: str = "INR"
     razorpay_credits_per_purchase: int = 200
     razorpay_credit_validity_days: int = 30
-    razorpay_success_url: str = ""  # e.g. https://app.specforge.dev/billing
+    razorpay_success_url: str = ""  # e.g. https://app.thought2build.com/billing
     # Payment-link expire_by horizon. Razorpay rejects expiries under ~15
     # minutes, so the production guard enforces >= 16.
     razorpay_checkout_ttl_minutes: int = 30

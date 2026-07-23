@@ -4,9 +4,9 @@ FROM node:26-alpine@sha256:e88a35be04478413b7c71c455cd9865de9b9360e1f43456be5951
 # execute an unreviewed moving package version on every container start.
 RUN npm install --global smee-client@5.0.0
 
-COPY entrypoint.sh /usr/local/bin/specforge-smee
-RUN chmod 0755 /usr/local/bin/specforge-smee
+COPY entrypoint.sh /usr/local/bin/thought2build-smee
+RUN chmod 0755 /usr/local/bin/thought2build-smee
 
 USER node
 
-ENTRYPOINT ["/usr/local/bin/specforge-smee"]
+ENTRYPOINT ["/usr/local/bin/thought2build-smee"]

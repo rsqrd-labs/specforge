@@ -20,7 +20,7 @@ TargetAgent = Literal["claude_code", "codex", "both"]
 # at the boundary; the linter's default is 300 (5h) when unset.
 _TIME_BUDGET_MAX_MINUTES = 24 * 60
 _LEGACY_LLM_SELECTION_FIELDS = Counter(
-    "specforge_legacy_llm_selection_fields_total",
+    "thought2build_legacy_llm_selection_fields_total",
     "Deprecated workspace-create LLM selection fields received and ignored",
     ["field"],
 )

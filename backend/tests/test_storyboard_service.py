@@ -134,7 +134,7 @@ def _note(slide_id: str) -> dict:
 
 
 def _payload_dict(
-    *, title: str = "SpecForge Launch Keynote", first_headline: str | None = None
+    *, title: str = "Thought2Build Launch Keynote", first_headline: str | None = None
 ):
     """Build a strict-schema-valid, quality-gate-clean Storyboard payload.
 
@@ -412,7 +412,7 @@ async def test_storyboard_generation_deducts_25_credits(
     assert sb.status == "ready"
     assert sb.version == 1
     assert sb.credit_ledger_id is not None
-    assert sb.title == "SpecForge Launch Keynote"
+    assert sb.title == "Thought2Build Launch Keynote"
     # The full validated payload is persisted, plus the typed columns the router
     # and downloads read.
     assert sb.content_json["sections"][0]["title"] == REQUIRED_SECTION_TITLES[0]

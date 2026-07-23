@@ -8,9 +8,9 @@ without fetching anything else.
 **Never clobber.** The repo may already carry a hand-written ``AGENTS.md``. This
 module writes only inside a delimited *managed block*::
 
-    <!-- specforge:start -->
+    <!-- thought2build:start -->
     ...generated content...
-    <!-- specforge:end -->
+    <!-- thought2build:end -->
 
 Any pre-existing user content outside the markers is preserved byte-for-byte. A
 regenerate replaces only the managed block; a file with no markers gets the
@@ -36,8 +36,8 @@ from services.security.downstream_command_guard import (
 )
 from services.security.sanitizer import sanitize_downstream_agent_content
 
-MANAGED_START = "<!-- specforge:start -->"
-MANAGED_END = "<!-- specforge:end -->"
+MANAGED_START = "<!-- thought2build:start -->"
+MANAGED_END = "<!-- thought2build:end -->"
 
 # Matches a *complete* managed block (start … end) that contains no nested start
 # marker. Anchoring on a complete pair — rather than the first start + the first
@@ -73,7 +73,7 @@ def build_agents_md(
 
     ``stages`` maps ``spec``/``plan``/``harness``/``tasks`` → their markdown.
     ``existing`` is the current file contents (``None`` if the file does not
-    exist). The SpecForge-managed block is (re)written; everything outside the
+    exist). The Thought2Build-managed block is (re)written; everything outside the
     markers is round-tripped untouched.
     """
     managed = _render_managed_block(stages)
@@ -106,7 +106,7 @@ def _replace_or_append(existing: str, block: str) -> str:
 
 
 def managed_block(content: str) -> str | None:
-    """Return the complete SpecForge standard block from rendered content."""
+    """Return the complete Thought2Build standard block from rendered content."""
     match = _MANAGED_BLOCK_RE.search(content)
     return match.group(0) if match else None
 
@@ -133,7 +133,7 @@ def _render_managed_block(stages: dict[str, str]) -> str:
         "# Agent context",
         "",
         (
-            "_Renderer: standard-v2. Managed by SpecForge — edit outside the "
+            "_Renderer: standard-v2. Managed by Thought2Build — edit outside the "
             "markers; this block is regenerated on every sync._"
         ),
         "",

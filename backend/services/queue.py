@@ -1,6 +1,6 @@
 """Durable background job queue (Phase 21 — T-269).
 
-SpecForge's first durable background processing. The only prior mechanism
+Thought2Build's first durable background processing. The only prior mechanism
 (``asyncio.create_task``) dies on deploy and times out long exports, so all
 GitHub I/O moves onto an ``arq`` worker (planning decision, Plan §24.1). This
 module owns the *request-path* side of the queue:
@@ -69,8 +69,8 @@ logger = structlog.get_logger(__name__)
 #
 # DEPLOY INVARIANT: the FastWorkerSettings process MUST be running in every
 # environment, or fast-queue jobs (paid grants) never drain. The
-# specforge_worker_queue_oldest_age_seconds{queue="arq:queue:fast"} and
-# specforge_billing_webhook_pending_age_seconds alerts are the backstop signal
+# thought2build_worker_queue_oldest_age_seconds{queue="arq:queue:fast"} and
+# thought2build_billing_webhook_pending_age_seconds alerts are the backstop signal
 # for a missing/stalled fast worker (RUNBOOK §9.6 / §16).
 # ---------------------------------------------------------------------------
 BULK_QUEUE_NAME = "arq:queue"  # arq's built-in default queue name.

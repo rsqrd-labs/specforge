@@ -91,9 +91,9 @@ const REPO_NAME_PATTERN = /^[a-zA-Z0-9._-]+$/
 const REPO_NAME_MAX = 100
 
 // The increment branch name is a stable backend constant
-// (`_INCREMENT_BRANCH = "specforge/inc-1"`); we surface it client-side as a
+// (`_INCREMENT_BRANCH = "thought2build/inc-1"`); we surface it client-side as a
 // concrete preview so the PR choice feels real before submit.
-const PR_BRANCH_PREVIEW = "specforge/inc-1"
+const PR_BRANCH_PREVIEW = "thought2build/inc-1"
 
 /** Per-mode staged-progress lines. Each settles with a saffron tick as the
  *  async export advances; the labels advance on a gentle timer while the push is

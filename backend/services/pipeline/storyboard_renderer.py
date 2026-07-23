@@ -152,12 +152,12 @@ _NOTES_ALLOWED_PROTOCOLS = ["http", "https", "mailto"]
 # ---------------------------------------------------------------------------
 
 _FILENAME_TEMPLATES: dict[str, str] = {
-    "html": "specforge-storyboard-{slug}.html",
-    "pdf": "specforge-storyboard-{slug}.pdf",
-    "notes-md": "specforge-storyboard-speaker-notes-{slug}.md",
-    "notes-pdf": "specforge-storyboard-speaker-notes-{slug}.pdf",
-    "demo-script": "specforge-storyboard-demo-script-{slug}.md",
-    "appendix": "specforge-storyboard-technical-appendix-{slug}.md",
+    "html": "thought2build-storyboard-{slug}.html",
+    "pdf": "thought2build-storyboard-{slug}.pdf",
+    "notes-md": "thought2build-storyboard-speaker-notes-{slug}.md",
+    "notes-pdf": "thought2build-storyboard-speaker-notes-{slug}.pdf",
+    "demo-script": "thought2build-storyboard-demo-script-{slug}.md",
+    "appendix": "thought2build-storyboard-technical-appendix-{slug}.md",
 }
 
 # Sanitized generated markdown fields handled by this module: speaker_notes,

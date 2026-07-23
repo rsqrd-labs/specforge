@@ -10,7 +10,7 @@ Previously each of the four was an ad-hoc module-level ``set`` plus a hand-rolle
 ``add`` / ``add_done_callback(discard)`` / error-logger triple. This module DRYs
 that into one registry that additionally:
 
-  - exports the live task count as a gauge (``specforge_background_tasks``), so a
+  - exports the live task count as a gauge (``thought2build_background_tasks``), so a
     runaway fan-out is observable and alertable (audit §6/§8);
   - logs a high-water warning when the count crosses a soft ceiling — a
     back-pressure signal that something upstream of the F1 admission cap is

@@ -64,7 +64,7 @@ describe("Workspace decision helpers", () => {
     "builds a safe %s storyboard filename",
     (kind) => {
       const storyboard = { id: "id-7", title: " My Demo / Story! " } as StoryboardDetail
-      expect(storyboardFilename(storyboard, kind)).toMatch(/^specforge-my-demo-story-/)
+      expect(storyboardFilename(storyboard, kind)).toMatch(/^thought2build-my-demo-story-/)
     },
   )
 

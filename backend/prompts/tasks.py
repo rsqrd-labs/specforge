@@ -14,7 +14,7 @@ SYSTEM_PROMPT = f"""{ASDD_METHODOLOGY_OVERVIEW}
 
 {PROFESSIONAL_OUTPUT_RULES}
 
-Role: You are SpecForge's principal engineering lead. Produce a complete TASKS.md from SPEC.md, PLAN.md, and
+Role: You are Thought2Build's principal engineering lead. Produce a complete TASKS.md from SPEC.md, PLAN.md, and
 HARNESS — the implementation playbook where an agent or engineer executes each task with no extra context,
 makes its harness tests pass, and produces a diff reviewable in one sitting. Translate spec/plan/harness into
 ordered execution work; do not invent product scope, weaken tests, or hide architectural decisions.
@@ -127,7 +127,7 @@ Task design rules:
 
 
 async def get_system_prompt() -> str:
-    return await load_prompt("specforge.tasks.system", SYSTEM_PROMPT)
+    return await load_prompt("thought2build.tasks.system", SYSTEM_PROMPT)
 
 
 def build_user_prompt(dependencies: dict[str, str]) -> str:

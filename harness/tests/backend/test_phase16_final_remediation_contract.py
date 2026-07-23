@@ -45,7 +45,7 @@ Every test maps to one or more findings from docs/CODE_REVIEW_PASS_2.md:
   T-214  test_concurrency.py misleading mock test must be removed
         → T-214 — explicit contract that the false-confidence test is gone
   T-215  LLM circuit breaker Prometheus metrics
-        → T-215 — specforge_llm_circuit_rejections_total counter
+        → T-215 — thought2build_llm_circuit_rejections_total counter
   T-216  Production runbook for CF-1/CF-2 operational procedures
         → T-216 — RUNBOOK.md exists with required sections
 
@@ -65,7 +65,7 @@ Design invariants enforced here:
   * Langfuse image is pinned to a specific digest/tag (not :latest).
   * eval_results composite index exists in migration history.
   * The misleading mock concurrency test is DELETED.
-  * specforge_llm_circuit_rejections_total counter exists and is wired.
+  * thought2build_llm_circuit_rejections_total counter exists and is wired.
   * RUNBOOK.md documents CF-1 and CF-2 operational procedures.
 """
 
@@ -241,17 +241,17 @@ def test_phase16_circuit_breaker_rejection_counter_defined() -> None:
 
     Without instrumentation, circuit breaker activations are silent. Operators
     cannot distinguish 'no traffic' from 'circuit open'. The counter
-    specforge_llm_circuit_rejections_total must be defined and incremented
+    thought2build_llm_circuit_rejections_total must be defined and incremented
     when can_route() returns False.
     """
     all_backend = list(BACKEND_ROOT.rglob("*.py"))
     found = any(
-        "specforge_llm_circuit_rejections_total" in f.read_text(encoding="utf-8")
+        "thought2build_llm_circuit_rejections_total" in f.read_text(encoding="utf-8")
         for f in all_backend
     )
     assert found, (
         "backend/ must define a Prometheus Counter "
-        "'specforge_llm_circuit_rejections_total' and increment it every time "
+        "'thought2build_llm_circuit_rejections_total' and increment it every time "
         "a request is rejected because can_route() returns False. Without this "
         "metric, circuit breaker activations are invisible in dashboards. "
         "CF-2 / T-215."
@@ -1149,11 +1149,11 @@ def test_phase16_runbook_covers_circuit_breaker_procedure() -> None:
         "circuit breaker" in content.lower()
         or "circuit_breaker" in content.lower()
         or "can_route" in content
-        or "specforge_llm_circuit_rejections_total" in content
+        or "thought2build_llm_circuit_rejections_total" in content
     )
     assert has_circuit_breaker_section, (
         "docs/RUNBOOK.md must document the LLM circuit breaker: how to detect "
-        "activation (specforge_llm_circuit_rejections_total metric), how to "
+        "activation (thought2build_llm_circuit_rejections_total metric), how to "
         "reset a provider's failure count, and the expected user impact when the "
         "circuit opens. T-216."
     )
@@ -1217,7 +1217,7 @@ def test_phase16_runbook_has_required_sections() -> None:
 
 
 def test_phase16_circuit_rejection_counter_incremented_on_rejection() -> None:
-    """T-215 — specforge_llm_circuit_rejections_total must be incremented by can_route().
+    """T-215 — thought2build_llm_circuit_rejections_total must be incremented by can_route().
 
     Defining the counter is insufficient — it must be incremented at the point
     where can_route() returns False and the request is rejected. This ensures
@@ -1233,13 +1233,13 @@ def test_phase16_circuit_rejection_counter_incremented_on_rejection() -> None:
 
     # The counter must be incremented (not just defined)
     has_increment = bool(
-        re.search(r"specforge_llm_circuit_rejections_total.*\.inc\(\)", combined_source, re.DOTALL)
-        or re.search(r"\.inc\(\).*specforge_llm_circuit_rejections_total", combined_source, re.DOTALL)
+        re.search(r"thought2build_llm_circuit_rejections_total.*\.inc\(\)", combined_source, re.DOTALL)
+        or re.search(r"\.inc\(\).*thought2build_llm_circuit_rejections_total", combined_source, re.DOTALL)
         or re.search(r"circuit_rejections.*\.inc\(\)", combined_source)
         or re.search(r"CIRCUIT_REJECTIONS.*\.inc\(\)", combined_source)
     )
     assert has_increment, (
-        "specforge_llm_circuit_rejections_total.inc() must be called in "
+        "thought2build_llm_circuit_rejections_total.inc() must be called in "
         "provider_status.py (inside can_route()) or gateway.py (when can_route() "
         "returns False). The counter must be incremented at the rejection site, "
         "not just defined. T-215."

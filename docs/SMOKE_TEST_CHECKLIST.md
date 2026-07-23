@@ -1,4 +1,4 @@
-# SpecForge V1 — Smoke Test Checklist
+# Thought2Build V1 — Smoke Test Checklist
 
 Execute against the staging environment before each production deploy.
 Tester: ________________  Date: ________________  Environment URL: ________________
@@ -8,19 +8,19 @@ Legend: ✅ Pass  ❌ Fail  ⚠️ Pass with notes  🔲 Not tested
 Automated gate:
 
 ```bash
-SPECFORGE_API_URL=https://api.example.com \
-SPECFORGE_ACCESS_TOKEN=<short-lived smoke-user access token> \
-SPECFORGE_METRICS_TOKEN=<metrics token> \
-SPECFORGE_RUN_LLM_SMOKE=1 \
+THOUGHT2BUILD_API_URL=https://api.example.com \
+THOUGHT2BUILD_ACCESS_TOKEN=<short-lived smoke-user access token> \
+THOUGHT2BUILD_METRICS_TOKEN=<metrics token> \
+THOUGHT2BUILD_RUN_LLM_SMOKE=1 \
 python3 scripts/production_smoke.py
 ```
 
 Public-only smoke, useful before a smoke access token is available:
 
 ```bash
-SPECFORGE_API_URL=https://api.example.com \
-SPECFORGE_METRICS_TOKEN=<metrics token> \
-SPECFORGE_PUBLIC_ONLY_SMOKE=1 \
+THOUGHT2BUILD_API_URL=https://api.example.com \
+THOUGHT2BUILD_METRICS_TOKEN=<metrics token> \
+THOUGHT2BUILD_PUBLIC_ONLY_SMOKE=1 \
 python3 scripts/production_smoke.py
 ```
 
@@ -30,7 +30,7 @@ The same automated smoke can also be launched from GitHub Actions through the
 The automated smoke must pass against staging before production deploy. It checks
 health, provider catalog, metrics, authenticated user lookup, credits,
 workspace create/read/update/archive, and live SPEC streaming when
-`SPECFORGE_RUN_LLM_SMOKE=1`. Keep the manual checklist below for browser-only
+`THOUGHT2BUILD_RUN_LLM_SMOKE=1`. Keep the manual checklist below for browser-only
 OAuth and UI interaction coverage.
 
 For prompt changes, also run the Phase 19 prompt eval before deploy:
@@ -201,19 +201,19 @@ This flow ships A→D — verify each phase before enabling the next surface in 
 | P21-2 | A | Export a finalised workspace with **Files** mode. POST `/workspaces/{id}/export/github` returns **202** with a `push_id` (no inline block). The worker creates the repo, pushes `SPEC/PLAN/HARNESS/TASKS` + `harness/`, and opens one Issue per task. | 🔲 | |
 | P21-3 | A | Every GitHub call uses a **cached installation token** (no static user token in the write path); webhook **ack p99 < 300 ms** under the signed-fixture load. | 🔲 | |
 | P21-4 | A | Signed-fixture security smoke: send **invalid**, **replayed** (duplicate `X-GitHub-Delivery`), and **out-of-order** signed deliveries. Each is rejected/deduped **before** any DB/queue write (O(1)); no task state mutates. | 🔲 | |
-| P21-5 | B | **Close an issue** on GitHub → its task flips to **done** in SpecForge within SLO; `GET /workspaces/{id}/sync` shows shipped count rise and `done_via='manual'`. | 🔲 | |
+| P21-5 | B | **Close an issue** on GitHub → its task flips to **done** in Thought2Build within SLO; `GET /workspaces/{id}/sync` shows shipped count rise and `done_via='manual'`. | 🔲 | |
 | P21-6 | B | **Confused-deputy**: a delivery for install A cannot mutate a workspace exported under install B (proven by the authz contract; spot-check with two installs if available). | 🔲 | |
 | P21-7 | B | **Kill the worker mid-reconcile/export**, restart → the job resumes from the ledger with **no duplicate** repo/issues/PR. | 🔲 | |
 | P21-8 | B | **Backfill** recovers missed-while-down events: stop the worker, close an issue, restart, run `POST /workspaces/{id}/sync/backfill` (202) → the task flips done; a webhook-set `pr_merge` is never downgraded to `manual`. | 🔲 | |
-| P21-9 | C | Export **PR with tests** mode → exactly **one PR** opens on a `specforge/...` branch with a **red** harness CI run (`.github/workflows/specforge.yml` + failing per-stack tests). Re-export updates the same branch/PR **in place** (no duplicate). | 🔲 | T-288 surface |
+| P21-9 | C | Export **PR with tests** mode → exactly **one PR** opens on a `thought2build/...` branch with a **red** harness CI run (`.github/workflows/thought2build.yml` + failing per-stack tests). Re-export updates the same branch/PR **in place** (no duplicate). | 🔲 | T-288 surface |
 | P21-10 | C | Merge that PR → its linked tasks flip **done** via `done_via='pr_merge'`. A `Workflows: write` 403 surfaces a distinct actionable error; a content 409 refetches SHA and retries. | 🔲 | |
 | P21-11 | B/C′ | **Re-finalise Tasks** → the push shows **out-of-sync** (drift banner). **Re-sync** (`POST /sync/resync`, 202) updates **only changed** issues. | 🔲 | |
 | P21-12 | C′ | Create an **increment** ("add two features") → only **new issues** appear under a **new milestone** on top of shipped v1 work; unchanged tasks are not re-created (stable `task_ref`). | 🔲 | T-289 surface |
 | P21-13 | C′ | A GitHub issue labelled `idea`/`enhancement` flows into the **idea backlog** with `source='github'`. | 🔲 | T-289 surface |
 | P21-14 | D | Tasks appear on a **Projects v2 board** reflecting live state; merged/closed items move; milestones reflect the increment. | 🔲 | |
-| P21-15 | D | A PR carries a **SpecForge check** (the fail-open PR-diff evaluator, distinct from the critic). A judge error posts a **neutral** check (never blocks); the LLM-check cost is **capped per tenant/day**. | 🔲 | |
+| P21-15 | D | A PR carries a **Thought2Build check** (the fail-open PR-diff evaluator, distinct from the critic). A judge error posts a **neutral** check (never blocks); the LLM-check cost is **capped per tenant/day**. | 🔲 | |
 | P21-16 | A/B | **Suspend / uninstall** the App → the UI surfaces **"sync paused — reconnect GitHub"** (not an error); no push is marked failed. Re-install → backfill recovers and sync resumes. | 🔲 | |
-| P21-17 | X | Dead-letter path: force a job past its retry budget → `specforge_github_job_deadlettered_total` increments and the alert fires; manual replay (RUNBOOK §12.4) of the idempotent job recovers with no duplicates. | 🔲 | |
+| P21-17 | X | Dead-letter path: force a job past its retry budget → `thought2build_github_job_deadlettered_total` increments and the alert fires; manual replay (RUNBOOK §12.4) of the idempotent job recovers with no duplicates. | 🔲 | |
 
 ---
 
@@ -248,7 +248,7 @@ P22-1 through P22-7 as not applicable with release-owner approval.
 | P19-3 | Generate PLAN and confirm required architecture/security/reliability sections are present, including ADRs, capacity, STRIDE, SLOs, and FMEA where applicable. | 🔲 | |
 | P19-4 | Generate HARNESS and TASKS; mandatory section validation passes before critic repair. | 🔲 | |
 | P19-5 | `/metrics` shows no new `pipeline_validator_failures_total` increase during the smoke run. | 🔲 | |
-| P19-6 | Any `pipeline_upstream_section_skipped_total` or `specforge_billing_credits_critic_regen_total` increase is understood and accepted by release owner. | 🔲 | |
+| P19-6 | Any `pipeline_upstream_section_skipped_total` or `thought2build_billing_credits_critic_regen_total` increase is understood and accepted by release owner. | 🔲 | |
 
 ---
 

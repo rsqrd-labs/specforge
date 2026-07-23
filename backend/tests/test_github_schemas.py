@@ -114,7 +114,7 @@ def test_push_status_response_maps_from_orm_attributes() -> None:
         id = uuid4()
         status = "completed"
         export_mode = "pr_with_tests"
-        branch_name = "specforge/inc-1"
+        branch_name = "thought2build/inc-1"
         pr_number = 7
         repo_full_name = "octo-org/app"
         repo_url = "https://github.com/octo-org/app"

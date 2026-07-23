@@ -28,8 +28,8 @@ jobs:
         env:
           # Environment-scoped variable: callers choose a protected environment,
           # never an arbitrary token recipient.
-          SPECFORGE_API_URL: ${{ vars.SPECFORGE_SMOKE_API_URL }}
-          SPECFORGE_ACCESS_TOKEN: ${{ secrets.SPECFORGE_SMOKE_ACCESS_TOKEN }}
-          SPECFORGE_METRICS_TOKEN: ${{ secrets.SPECFORGE_METRICS_TOKEN }}
-          SPECFORGE_RUN_LLM_SMOKE: ${{ inputs.run_llm_smoke }}
+          THOUGHT2BUILD_API_URL: ${{ vars.THOUGHT2BUILD_SMOKE_API_URL }}
+          THOUGHT2BUILD_ACCESS_TOKEN: ${{ secrets.THOUGHT2BUILD_SMOKE_ACCESS_TOKEN }}
+          THOUGHT2BUILD_METRICS_TOKEN: ${{ secrets.THOUGHT2BUILD_METRICS_TOKEN }}
+          THOUGHT2BUILD_RUN_LLM_SMOKE: ${{ inputs.run_llm_smoke }}
         run: python3 scripts/production_smoke.py

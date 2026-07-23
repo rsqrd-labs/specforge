@@ -40,7 +40,7 @@ beforeEach(() => {
 
 afterEach(() => {
   document.head
-    .querySelectorAll("#specforge-public-noindex")
+    .querySelectorAll("#thought2build-public-noindex")
     .forEach((node) => node.remove())
   vi.clearAllMocks()
 })

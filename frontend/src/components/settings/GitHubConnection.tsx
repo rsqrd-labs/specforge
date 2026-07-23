@@ -299,7 +299,7 @@ function InstalledView({
         Installed on @{primary.account_login}.
       </h1>
       <p className="settings-install-scope">
-        SpecForge can open branches, issues, and pull requests in your chosen
+        Thought2Build can open branches, issues, and pull requests in your chosen
         repositories — and live-sync them back. Nothing else is touched.
       </p>
 

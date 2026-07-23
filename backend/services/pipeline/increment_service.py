@@ -628,7 +628,7 @@ INCREMENT_PROMPT_VERSION = "increment-prompt-v2"
 
 # Emitted as the response's final line; stripped before parsing. Versioned like
 # the core pipeline's sentinels so a format change is detectable.
-INCREMENT_COMPLETION_SENTINEL = "<!-- SPECFORGE_INCREMENT_COMPLETE:v1 -->"
+INCREMENT_COMPLETION_SENTINEL = "<!-- THOUGHT2BUILD_INCREMENT_COMPLETE:v1 -->"
 
 # Per-artifact bounds on the baseline context, summing to prompt_builder's
 # _MAX_UPSTREAM_CHARS (200K) total upstream budget (audit M9). TASKS gets the
@@ -647,7 +647,7 @@ _BASELINE_CONTEXT_LIMITS: dict[str, int] = {
 
 def _system_prompt() -> str:
     return (
-        "You are SpecForge generating an INCREMENT: a versioned delta on a "
+        "You are Thought2Build generating an INCREMENT: a versioned delta on a "
         "finalised workspace baseline.\n\n"
         "The baseline below — SPEC.md, PLAN.md, the test harness, and TASKS.md — "
         "is IMMUTABLE context. You MUST NOT rewrite it, renumber its tasks, "
@@ -967,7 +967,7 @@ async def _drive_increment_push(
         milestone = await client.ensure_milestone(
             repo,
             _milestone_title(increment),
-            description=f"SpecForge increment {increment.sequence}.",
+            description=f"Thought2Build increment {increment.sequence}.",
         )
         issue_numbers = await _sync_increment_issues(
             db, client, push, increment, tasks, milestone
@@ -1113,7 +1113,7 @@ async def _open_increment_pr(
     if not new_tasks:
         return
 
-    branch = f"specforge/increment-{increment.sequence}"
+    branch = f"thought2build/increment-{increment.sequence}"
     base_sha = await client.get_ref(repo, f"heads/{_DEFAULT_BRANCH}")
     await client.create_branch(repo, branch, base_sha)
 
@@ -1124,7 +1124,7 @@ async def _open_increment_pr(
     scaffold = pr_export_builder.build_scaffold(
         harness_files=harness_files, tasks=new_tasks, stacks=stacks
     )
-    message = f"test: SpecForge increment {increment.sequence}"
+    message = f"test: Thought2Build increment {increment.sequence}"
     for path, content in scaffold.items():
         sha = await client.get_file_sha(repo, path, ref=branch)
         await client.upsert_file(repo, path, content, sha, message, branch=branch)
@@ -1133,7 +1133,7 @@ async def _open_increment_pr(
         body = pr_export_builder.build_pr_body(
             tasks=new_tasks, issue_numbers=issue_numbers, stacks=stacks
         )
-        title = f"SpecForge increment {increment.sequence}: {increment.title}"
+        title = f"Thought2Build increment {increment.sequence}: {increment.title}"
         await client.create_pull_request(
             repo, head=branch, base=_DEFAULT_BRANCH, title=title, body=body
         )

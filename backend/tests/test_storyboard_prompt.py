@@ -130,7 +130,7 @@ def _valid_payload() -> dict[str, Any]:
         )
     notes = {f"s{idx}": _note(f"s{idx}") for idx in range(6)}
     return {
-        "title": "SpecForge Launch Keynote",
+        "title": "Thought2Build Launch Keynote",
         "theme": {
             # 5 colours: fresh generations must meet the prompt's 5–8 palette
             # floor (audit L16); only grandfathered legacy payloads may carry 3.
@@ -540,7 +540,7 @@ async def test_parse_succeeds_without_repair() -> None:
         return raw
 
     payload = await parse_and_validate_payload(raw, repair=_repair)
-    assert payload.title == "SpecForge Launch Keynote"
+    assert payload.title == "Thought2Build Launch Keynote"
     assert calls == 0  # no repair needed
 
 
@@ -548,7 +548,7 @@ async def test_parse_succeeds_without_repair() -> None:
 async def test_parse_strips_markdown_fences() -> None:
     raw = "```json\n" + json.dumps(_valid_payload()) + "\n```"
     payload = await parse_and_validate_payload(raw)
-    assert payload.title == "SpecForge Launch Keynote"
+    assert payload.title == "Thought2Build Launch Keynote"
 
 
 @pytest.mark.asyncio
@@ -564,7 +564,7 @@ async def test_one_repair_attempt_then_success() -> None:
         return good
 
     payload = await parse_and_validate_payload(bad, repair=_repair)
-    assert payload.title == "SpecForge Launch Keynote"
+    assert payload.title == "Thought2Build Launch Keynote"
     assert calls == 1
 
 
@@ -614,7 +614,7 @@ def test_error_summary_excludes_raw_input_values() -> None:
 def test_build_user_prompt_wraps_sources_and_problem() -> None:
     source = StoryboardSourcePackage(
         workspace_id=__import__("uuid").uuid4(),
-        workspace_name="SpecForge",
+        workspace_name="Thought2Build",
         problem_statement="Build a spec generator.",
         stage_versions={},
         artifacts={},
@@ -629,7 +629,7 @@ def test_build_user_prompt_wraps_sources_and_problem() -> None:
         missing_source_sections=[],
     )
     prompt = build_user_prompt(source)
-    assert "SpecForge" in prompt
+    assert "Thought2Build" in prompt
     assert "PLAN:architecture" in prompt
     assert "untrusted_content" in prompt  # injection fence applied
     assert "FastAPI + Postgres + Redis." in prompt

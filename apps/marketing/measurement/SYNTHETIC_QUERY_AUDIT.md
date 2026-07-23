@@ -1,7 +1,7 @@
 # Synthetic-query audit (GEO visibility monitoring)
 
 > Issue #18, Phase 5.3. A **repeatable launch-monitoring checklist**, not an
-> automated gate. It tracks whether answer engines cite SpecForge for the
+> automated gate. It tracks whether answer engines cite Thought2Build for the
 > queries our content hubs target, so we can see GEO visibility move over time.
 
 ## What this is (and isn't)
@@ -25,7 +25,7 @@ keyword clusters the hubs target:
 | `templates` | `/templates` | PRD / spec / plan / test-harness templates |
 | `comparisons` | `/compare` | "Best tool for X" / alternatives |
 
-A **hit** = an engine names SpecForge and/or links a `specforge.app` URL in its
+A **hit** = an engine names Thought2Build and/or links a `thought2build.com` URL in its
 answer.
 
 ## How to run

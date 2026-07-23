@@ -43,7 +43,7 @@ _FAILURES: dict[str, "ProviderFailureState"] = {}
 # detect and alert on unexpected or sustained circuit trips via dashboards.
 # T-215 / CF-2 — T-197.
 CIRCUIT_REJECTIONS = Counter(
-    "specforge_llm_circuit_rejections_total",
+    "thought2build_llm_circuit_rejections_total",
     "Number of requests rejected because the LLM provider circuit is open",
     ["provider"],
 )
@@ -54,7 +54,7 @@ CIRCUIT_REJECTIONS = Counter(
 # count (audit F2 — otherwise the in-place backoff retry would hit an open
 # circuit). A rising rate is the signal the shared provider key is at its ceiling.
 PROVIDER_RATE_LIMITED = Counter(
-    "specforge_llm_provider_rate_limited_total",
+    "thought2build_llm_provider_rate_limited_total",
     "LLM provider responses that throttled or overloaded the call (HTTP 429/529/503)",
     ["provider"],
 )
@@ -62,9 +62,9 @@ PROVIDER_RATE_LIMITED = Counter(
 # Gauge for current circuit breaker state per provider.  0 = closed (healthy),
 # 1 = open (rejecting requests).  Updated synchronously in record_provider_failure()
 # and record_provider_success().  Per-process; under multi-worker deployment,
-# use max(specforge_llm_circuit_state) by provider in Grafana.  M-2 — T-220.
+# use max(thought2build_llm_circuit_state) by provider in Grafana.  M-2 — T-220.
 CIRCUIT_STATE = Gauge(
-    "specforge_llm_circuit_state",
+    "thought2build_llm_circuit_state",
     "Current circuit breaker state per LLM provider (0=closed, 1=open)",
     ["provider"],
 )
@@ -132,7 +132,7 @@ def can_route(provider: str) -> bool:
 
     Called by gateway.get_llm() before returning an adapter to enforce the
     circuit breaker.  A False result causes get_llm() to raise
-    HTTPException(503) and increment specforge_llm_circuit_rejections_total
+    HTTPException(503) and increment thought2build_llm_circuit_rejections_total
     so that operators can detect circuit activations in dashboards.
 
     NOTE: _FAILURES is per-worker-process.  In multi-worker deployments each

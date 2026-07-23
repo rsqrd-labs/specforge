@@ -15,5 +15,5 @@ had a reasonable opportunity to update.
 
 ## Supported versions
 
-Security fixes are applied to the latest commit on `main`. SpecForge does not
+Security fixes are applied to the latest commit on `main`. Thought2Build does not
 currently maintain older release branches.

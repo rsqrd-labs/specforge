@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://specforge.local/schemas/stage-version.schema.json",
+  "$id": "https://thought2build.local/schemas/stage-version.schema.json",
   "title": "StageVersion",
   "type": "object",
   "required": ["id", "stage_id", "version", "content", "created_by", "created_at"],

@@ -50,7 +50,7 @@ export function makeStoryboardPayload(
   overrides: Partial<StoryboardPayload> = {},
 ): StoryboardPayload {
   const payload: StoryboardPayload = {
-    title: "SpecForge Launch",
+    title: "Thought2Build Launch",
     theme: {
       palette: ["#8f4e00", "#a1385f", "#565e74"],
       typography: "Confident product sans",
@@ -216,7 +216,7 @@ export function makePublicStoryboard(
   overrides: Partial<StoryboardPublicResponse> = {},
 ): StoryboardPublicResponse {
   return {
-    title: "SpecForge Launch",
+    title: "Thought2Build Launch",
     presentation: makeStoryboardPayload(),
     permissions: DEFAULT_TEST_PERMISSIONS,
     downloads: ["pdf"],

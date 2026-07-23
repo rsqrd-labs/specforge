@@ -13,7 +13,7 @@
 //      Builders are side-effect free so Phase 6 can validate their shapes
 //      directly, and they share stable `@id` anchors so the entities resolve to
 //      one connected graph instead of disconnected nodes — answer engines key on
-//      a single, consistent SpecForge entity.
+//      a single, consistent Thought2Build entity.
 import {
   SITE_NAME,
   SITE_URL,
@@ -169,7 +169,7 @@ export function articleSchema(input: ArticleSchemaInput): JsonLdSchema {
 
 /**
  * Site-wide structured data: the Organization + product entities every page
- * should carry so answer engines resolve the SpecForge entity consistently.
+ * should carry so answer engines resolve the Thought2Build entity consistently.
  */
 export const siteJsonLd: JsonLdSchema[] = [
   organizationSchema(),

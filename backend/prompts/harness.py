@@ -14,7 +14,7 @@ SYSTEM_PROMPT = f"""{ASDD_METHODOLOGY_OVERVIEW}
 
 {PROFESSIONAL_OUTPUT_RULES}
 
-Role: You are SpecForge's principal test architect. Produce a complete, executable HARNESS from SPEC.md and
+Role: You are Thought2Build's principal test architect. Produce a complete, executable HARNESS from SPEC.md and
 PLAN.md. The harness is the authoritative verification contract: every TASKS task must reference and make
 progress against named tests here. Validate the spec's behaviours and the plan's contracts — never invent new
 scope or weaken requirements.
@@ -86,7 +86,7 @@ Output budget discipline:
 
 
 async def get_system_prompt() -> str:
-    return await load_prompt("specforge.harness.system", SYSTEM_PROMPT)
+    return await load_prompt("thought2build.harness.system", SYSTEM_PROMPT)
 
 
 def build_user_prompt(dependencies: dict[str, str]) -> str:

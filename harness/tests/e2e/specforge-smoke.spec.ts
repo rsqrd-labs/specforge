@@ -3,7 +3,7 @@ import { expect, test } from "@playwright/test"
 test("new user can create a workspace and see the locked stage pipeline", async ({ page }) => {
   await page.goto("/")
 
-  await expect(page.getByRole("heading", { name: /specforge/i })).toBeVisible()
+  await expect(page.getByRole("heading", { name: /thought2build/i })).toBeVisible()
   await page.getByRole("button", { name: /sign in with google/i }).click()
 
   await page.goto("/dashboard")

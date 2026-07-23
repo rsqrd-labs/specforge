@@ -18,7 +18,7 @@ Surfaces a real project-management layer on GitHub for a pushed workspace:
   phase/milestone grouping *is* the structure — the documented task-list fallback
   from spec §4.14.6. No synthetic dependency edges are invented.
 
-Bidirectional sync (T-272) keeps SpecForge aligned with the board; this job keeps
+Bidirectional sync (T-272) keeps Thought2Build aligned with the board; this job keeps
 the board aligned with task state.
 
 Design mirrors ``increment_service.run_increment_push`` (T-280):
@@ -68,7 +68,7 @@ _PHASE_HEADING = re.compile(r"^##\s+(Phase\b[^\n]*?)\s*$", re.MULTILINE)
 _STATE_TO_COLUMN = {"done": "Done", "open": "Todo"}
 
 # The board's title is derived from the repo so one repo maps to one board.
-_BOARD_TITLE_PREFIX = "SpecForge"
+_BOARD_TITLE_PREFIX = "Thought2Build"
 
 
 async def trigger_board_sync(push_id: Any) -> None:
@@ -233,7 +233,7 @@ async def _sync_milestones(
         if phase_title is None:
             continue  # tasks outside any phase get no milestone
         number = await client.ensure_milestone(
-            repo, phase_title, description="SpecForge Plan phase."
+            repo, phase_title, description="Thought2Build Plan phase."
         )
         if number is None:
             continue
@@ -293,7 +293,7 @@ async def _sync_project_board(
 
 
 def _board_title(repo: str) -> str:
-    """One board per repo: ``SpecForge — owner/name``."""
+    """One board per repo: ``Thought2Build — owner/name``."""
     return f"{_BOARD_TITLE_PREFIX} — {repo}"
 
 

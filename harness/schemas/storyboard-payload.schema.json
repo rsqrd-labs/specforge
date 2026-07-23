@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://specforge.local/schemas/storyboard-payload.schema.json",
+  "$id": "https://thought2build.local/schemas/storyboard-payload.schema.json",
   "title": "StoryboardPayload",
   "description": "Structured JSON contract for a generated Storyboard keynote. The LLM produces this payload; trusted backend/frontend renderers turn it into browser slides, PDFs, notes, scripts, and appendices.",
   "type": "object",

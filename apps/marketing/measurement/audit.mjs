@@ -3,7 +3,7 @@
 // synthetic-queries.json and emits a dated, fill-in results log (Markdown table)
 // to stdout. This is a MONITORING aid, not an automated gate — it doesn't call
 // any answer engine itself (most have no audit API); a human runs each query on
-// each engine and records whether SpecForge was cited. Where an engine exposes
+// each engine and records whether Thought2Build was cited. Where an engine exposes
 // an API (e.g. Perplexity), wire it in later; the JSON's `method` flags which.
 //
 // Usage:
@@ -35,7 +35,7 @@ lines.push(`Brand: **${data.target.brand}** · Hit = ${data.target.what_counts_a
 lines.push("")
 lines.push(`Engines: ${engines.join(", ")}`)
 lines.push("")
-lines.push("For each row, mark `Y` (SpecForge cited/linked), `N` (not), or `~` (mentioned but not linked). Note the cited URL where relevant.")
+lines.push("For each row, mark `Y` (Thought2Build cited/linked), `N` (not), or `~` (mentioned but not linked). Note the cited URL where relevant.")
 lines.push("")
 
 for (const c of clusters) {

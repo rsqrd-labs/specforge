@@ -56,7 +56,7 @@ razorpay_price_cents: int = 79900       # paise — ₹799 (pick final price at 
 razorpay_currency: str = "INR"
 razorpay_credits_per_purchase: int = 200
 razorpay_credit_validity_days: int = 30
-razorpay_success_url: str = ""          # e.g. https://app.specforge.dev/billing
+razorpay_success_url: str = ""          # e.g. https://app.thought2build.com/billing
 razorpay_checkout_ttl_minutes: int = 30 # payment-link expire_by; Razorpay minimum ~15m
 razorpay_api_base: str = "https://api.razorpay.com"
 razorpay_reconcile_max_calls_per_run: int = 200
@@ -129,7 +129,7 @@ full jitter, no logging of keys/URLs/nonce, pure — no DB session):
     - `currency`: `attempt.currency` (`INR`)
     - `accept_partial`: `false` (grant validation compares the full amount)
     - `reference_id`: `str(attempt.id)` (D9 — 40-char cap)
-    - `description`: `"SpecForge — {credits} credits"`
+    - `description`: `"Thought2Build — {credits} credits"`
     - `customer`: `{"email": user.email}` (prefill only — never trusted for user resolution)
     - `notify`: `{"sms": false, "email": false}`, `reminder_enable: false`
     - `expire_by`: `int(attempt.expires_at.timestamp())`

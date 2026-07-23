@@ -335,7 +335,7 @@ a separate issue (billing settlement ops already exist, RUNBOOK §9).
 - Postgres-only (dialect-guarded, like 0031): samples
   `pg_total_relation_size(quote_ident(t))` and `pg_stat_user_tables.n_live_tup`
   for a **fixed allowlist** (the §2 tables) → gauges
-  `specforge_db_table_bytes{table}`, `specforge_db_table_live_tuples{table}`
+  `thought2build_db_table_bytes{table}`, `thought2build_db_table_live_tuples{table}`
   in `services/observability.py`.
 - This is the baseline every later "size stabilized" claim is judged against,
   and the evidence for tuning the §2 windows before anything deletes.
@@ -346,10 +346,10 @@ a separate issue (billing settlement ops already exist, RUNBOOK §9).
 
 Metrics (`services/observability.py`, existing naming conventions):
 
-- `specforge_retention_candidates{job}` (gauge — set every run incl. dry-run)
-- `specforge_retention_purged_rows_total{job,table}` (counter)
-- `specforge_retention_run_seconds{job}` (histogram)
-- `specforge_retention_last_success_timestamp{job}` (gauge — missed-run alert)
+- `thought2build_retention_candidates{job}` (gauge — set every run incl. dry-run)
+- `thought2build_retention_purged_rows_total{job,table}` (counter)
+- `thought2build_retention_run_seconds{job}` (histogram)
+- `thought2build_retention_last_success_timestamp{job}` (gauge — missed-run alert)
 
 Alerts:
 
@@ -357,7 +357,7 @@ Alerts:
   the diagnostic, the gauge is the pager).
 - Backlog: `retention_candidates` rising for 7 d while the tier's purge flag is
   on ⇒ per-run cap undersized (raise `retention_max_rows_per_run`).
-- `specforge_db_table_bytes` slope still positive 4 weeks after a tier enables.
+- `thought2build_db_table_bytes` slope still positive 4 weeks after a tier enables.
 - Run-duration regression (index rot / lock contention).
 
 RUNBOOK **§18**: enable order, dry-run interpretation, pause procedure (flip the
@@ -370,7 +370,7 @@ reclamation is `pg_repack` in a maintenance window, ops-optional.
 
 ## 8. Rollout (each step independently reversible by flag)
 
-SpecForge is **pre-production**: there is no accumulated prod corpus to drain and
+Thought2Build is **pre-production**: there is no accumulated prod corpus to drain and
 no weeks-long prod soak to sit through. Retention can ship at (or before) GA so
 steady-state holds from the first real row. Validation moves to **dev/staging
 with short windows** — set the `*_days` knobs to `1` so candidates actually
@@ -413,7 +413,7 @@ everything, sampler included). Nothing in Phases 0–2 changes any API surface.
 
 ## 10. Success criteria
 
-- [ ] `specforge_db_table_bytes` slope ~flat at steady state for every Tier-1/2
+- [ ] `thought2build_db_table_bytes` slope ~flat at steady state for every Tier-1/2
       table (plateau, not shrink)
 - [ ] Dry-run parity at each tier enable
 - [ ] All purge predicates index-backed (EXPLAIN on staging, no seq scan on hot

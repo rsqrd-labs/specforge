@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run a live SpecForge production/staging smoke test.
+"""Run a live Thought2Build production/staging smoke test.
 
 The script intentionally uses only the Python standard library so it can run
 from CI runners, release laptops, or a bastion without installing project deps.
@@ -36,13 +36,13 @@ def _origin(url: str) -> tuple[str, str, int | None]:
 def validate_api_url(url: str) -> str:
     parsed = urlsplit(url)
     if parsed.username or parsed.password:
-        raise SmokeFailure("SPECFORGE_API_URL must not contain userinfo")
+        raise SmokeFailure("THOUGHT2BUILD_API_URL must not contain userinfo")
     if not parsed.hostname or parsed.query or parsed.fragment:
-        raise SmokeFailure("SPECFORGE_API_URL must be an origin without query/fragment")
+        raise SmokeFailure("THOUGHT2BUILD_API_URL must be an origin without query/fragment")
     if parsed.scheme != "https" and not (
         parsed.scheme == "http" and parsed.hostname in {"localhost", "127.0.0.1", "::1"}
     ):
-        raise SmokeFailure("SPECFORGE_API_URL must use HTTPS (except loopback testing)")
+        raise SmokeFailure("THOUGHT2BUILD_API_URL must use HTTPS (except loopback testing)")
     return url.rstrip("/")
 
 
@@ -201,18 +201,18 @@ def _env_bool(name: str, default: bool = False) -> bool:
 
 
 def load_config() -> SmokeConfig:
-    api_url = os.getenv("SPECFORGE_API_URL")
+    api_url = os.getenv("THOUGHT2BUILD_API_URL")
     if not api_url:
-        raise SmokeFailure("SPECFORGE_API_URL is required")
+        raise SmokeFailure("THOUGHT2BUILD_API_URL is required")
 
     return SmokeConfig(
         api_url=validate_api_url(api_url),
-        access_token=os.getenv("SPECFORGE_ACCESS_TOKEN"),
-        metrics_token=os.getenv("SPECFORGE_METRICS_TOKEN"),
-        provider=os.getenv("SPECFORGE_SMOKE_PROVIDER"),
-        model=os.getenv("SPECFORGE_SMOKE_MODEL"),
-        run_llm_smoke=_env_bool("SPECFORGE_RUN_LLM_SMOKE"),
-        public_only=_env_bool("SPECFORGE_PUBLIC_ONLY_SMOKE"),
+        access_token=os.getenv("THOUGHT2BUILD_ACCESS_TOKEN"),
+        metrics_token=os.getenv("THOUGHT2BUILD_METRICS_TOKEN"),
+        provider=os.getenv("THOUGHT2BUILD_SMOKE_PROVIDER"),
+        model=os.getenv("THOUGHT2BUILD_SMOKE_MODEL"),
+        run_llm_smoke=_env_bool("THOUGHT2BUILD_RUN_LLM_SMOKE"),
+        public_only=_env_bool("THOUGHT2BUILD_PUBLIC_ONLY_SMOKE"),
     )
 
 
@@ -270,8 +270,8 @@ def run() -> None:
 
     if not config.access_token:
         raise SmokeFailure(
-            "SPECFORGE_ACCESS_TOKEN is required unless "
-            "SPECFORGE_PUBLIC_ONLY_SMOKE=1 is set"
+            "THOUGHT2BUILD_ACCESS_TOKEN is required unless "
+            "THOUGHT2BUILD_PUBLIC_ONLY_SMOKE=1 is set"
         )
 
     check("authenticated user")

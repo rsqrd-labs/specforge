@@ -177,7 +177,7 @@ def _order_event(
             "product_id": 88,
             "variant_id": 99,
             "price": 900,
-            "product_name": "SpecForge Credits",  # PII-ish name — excluded
+            "product_name": "Thought2Build Credits",  # PII-ish name — excluded
         },
         "urls": {"receipt": "https://app.lemonsqueezy.com/my-orders/abc"},  # excluded
         "created_at": "2026-06-05T12:00:00.000000Z",
@@ -437,7 +437,7 @@ async def test_sanitisation_excludes_pii_and_unknown_custom() -> None:
     for forbidden in (
         "jane@example.com",
         "Jane Buyer",
-        "SpecForge Credits",
+        "Thought2Build Credits",
         "lemonsqueezy.com/my-orders",
         "raw-nonce-xyz",
     ):

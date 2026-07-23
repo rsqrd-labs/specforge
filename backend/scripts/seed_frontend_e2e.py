@@ -16,7 +16,7 @@ from models.user import User
 from models.workspace import Workspace
 from services.auth_service import auth_service
 
-E2E_EMAIL = "browser-e2e@specforge.test"
+E2E_EMAIL = "browser-e2e@thought2build.test"
 E2E_GOOGLE_ID = "browser-e2e-google-id"
 
 

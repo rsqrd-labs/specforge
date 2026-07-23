@@ -58,7 +58,7 @@ export const seoPage = defineType({
       rows: 3,
       group: "geo",
       description:
-        "The up-top, quotable answer. Lead with the standardized SpecForge entity language for consistent framing across answer engines.",
+        "The up-top, quotable answer. Lead with the standardized Thought2Build entity language for consistent framing across answer engines.",
       validation: (rule) => rule.required().min(40),
     }),
     defineField({

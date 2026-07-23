@@ -20,7 +20,7 @@ def _sum(name: str, labels: dict[str, str]) -> float:
 
 
 def test_problem_statement_tokens_observes_into_provider_series() -> None:
-    name = "specforge_problem_statement_tokens"
+    name = "thought2build_problem_statement_tokens"
     labels = {"provider": "anthropic"}
     count_before = _count(name, labels)
     sum_before = _sum(name, labels)
@@ -32,7 +32,7 @@ def test_problem_statement_tokens_observes_into_provider_series() -> None:
 
 
 def test_assembled_prompt_tokens_observes_into_provider_stage_series() -> None:
-    name = "specforge_assembled_prompt_tokens"
+    name = "thought2build_assembled_prompt_tokens"
     labels = {"provider": "openai", "stage_type": "plan"}
     count_before = _count(name, labels)
     sum_before = _sum(name, labels)
@@ -44,7 +44,7 @@ def test_assembled_prompt_tokens_observes_into_provider_stage_series() -> None:
 
 
 def test_none_and_negative_token_sizes_are_dropped() -> None:
-    name = "specforge_problem_statement_tokens"
+    name = "thought2build_problem_statement_tokens"
     labels = {"provider": "google"}
     count_before = _count(name, labels)
 
@@ -59,10 +59,12 @@ def test_unknown_labels_collapse_to_bounded_enum() -> None:
     observability.record_problem_statement_tokens("evil-provider", 10)
     observability.record_assembled_prompt_tokens("evil-provider", "evil-stage", 10)
 
-    assert _count("specforge_problem_statement_tokens", {"provider": "unknown"}) >= 1
+    assert (
+        _count("thought2build_problem_statement_tokens", {"provider": "unknown"}) >= 1
+    )
     assert (
         _count(
-            "specforge_assembled_prompt_tokens",
+            "thought2build_assembled_prompt_tokens",
             {"provider": "unknown", "stage_type": "unknown"},
         )
         >= 1

@@ -147,7 +147,7 @@ async def test_ensure_project_v2_reuses_existing_by_title() -> None:
                     "node": {
                         "projectsV2": {
                             "nodes": [
-                                {"id": "proj-existing", "title": "SpecForge — o/r"}
+                                {"id": "proj-existing", "title": "Thought2Build — o/r"}
                             ],
                             "pageInfo": {"hasNextPage": False, "endCursor": None},
                         }
@@ -157,7 +157,7 @@ async def test_ensure_project_v2_reuses_existing_by_title() -> None:
         )
 
     client = _client(handler)
-    pid = await client.ensure_project_v2("owner-node", "SpecForge — o/r")
+    pid = await client.ensure_project_v2("owner-node", "Thought2Build — o/r")
     assert pid == "proj-existing"
     assert len(sent) == 1  # only the discovery query, no create mutation
     assert "createProjectV2" not in sent[0]
@@ -188,7 +188,7 @@ async def test_ensure_project_v2_creates_when_missing() -> None:
 
     client = _client(handler)
     pid = await client.ensure_project_v2(
-        "owner-node", "SpecForge — o/r", repository_id="repo-node"
+        "owner-node", "Thought2Build — o/r", repository_id="repo-node"
     )
     assert pid == "proj-new"
     assert calls["n"] == 2

@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://specforge.local/schemas/template.schema.json",
+  "$id": "https://thought2build.local/schemas/template.schema.json",
   "title": "Template",
   "description": "Read shape for system-curated starter templates. Spec §10 / Plan §18.3. System-owned in V1 — no user_id FK. User-authored templates are V2.",
   "type": "object",

@@ -80,7 +80,7 @@ def _clean_dict(slides_per_act: int = 2) -> dict[str, Any]:
             notes[sl["id"]] = _note(sl["id"])
         sections.append({"id": f"act-{a}", "title": title, "slides": slides})
     return {
-        "title": "SpecForge Launch Keynote",
+        "title": "Thought2Build Launch Keynote",
         "theme": {
             # 5 colours so non-grandfathered validations clear the L16 fresh-
             # generation palette floor.

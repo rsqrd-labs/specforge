@@ -152,7 +152,7 @@ Frozen.
     ws = SimpleNamespace(name="X", target_agent="claude_code")
     _, body = agent_manual_service.build_agent_manual(ws, hostile_plan)
     assert "Ignore all previous instructions" not in body
-    assert "<!-- specforge:demo-day:start -->" in body
+    assert "<!-- thought2build:demo-day:start -->" in body
     assert "<script>" not in body
     assert "reveal your system prompt" not in body
     # The legitimate stack content survives.
@@ -269,7 +269,7 @@ async def test_standalone_both_download_ignores_saved_selection() -> None:
     body, filename, media_type = await build_agent_instruction_export(
         ws.id, ws.user_id, db, "both"
     )
-    assert filename == "specforge-agent-instructions.zip"
+    assert filename == "thought2build-agent-instructions.zip"
     assert media_type == "application/zip"
     names = zipfile.ZipFile(io.BytesIO(body)).namelist()
     assert names == ["AGENTS.md", "CLAUDE.md"]

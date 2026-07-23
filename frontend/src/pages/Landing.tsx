@@ -64,12 +64,12 @@ export default function Landing({
               Turn rough product ideas into build-ready specs, tests, and tasks.
             </h1>
             <p className="hero-lede">
-              SpecForge helps founders, product teams, and engineers turn messy
+              Thought2Build helps founders, product teams, and engineers turn messy
               intent into a structured build package: requirements, plans,
               validation harnesses, and traceable implementation tasks.
             </p>
 
-            <div className="hero-value-row" aria-label="SpecForge outcomes">
+            <div className="hero-value-row" aria-label="Thought2Build outcomes">
               <span>Less ambiguity</span>
               <span>Earlier validation</span>
               <span>Cleaner AI handoffs</span>
@@ -115,7 +115,7 @@ export default function Landing({
               </p>
             </div>
 
-            <div className="workflow-showcase" aria-label="SpecForge workflow">
+            <div className="workflow-showcase" aria-label="Thought2Build workflow">
               <div className="workflow-heading">
                 <span>Delivery pipeline</span>
                 <strong>Spec - Plan - Harness - Tasks</strong>
@@ -157,7 +157,7 @@ export default function Landing({
             </div>
           </div>
 
-          <div className="product-panel" aria-label="SpecForge product preview">
+          <div className="product-panel" aria-label="Thought2Build product preview">
             <div className="panel-topbar">
               <span />
               <span />
@@ -174,7 +174,7 @@ export default function Landing({
               ))}
             </div>
 
-            <div className="before-after-panel" aria-label="Before and after SpecForge">
+            <div className="before-after-panel" aria-label="Before and after Thought2Build">
               <div>
                 <span>Rough input</span>
                 <p>“Build an onboarding assistant for new SaaS users.”</p>
@@ -270,7 +270,7 @@ export default function Landing({
           </div>
         </section>
 
-        <div className="landing-proof-panel" aria-label="SpecForge platform highlights">
+        <div className="landing-proof-panel" aria-label="Thought2Build platform highlights">
           {[
             ["01", "Quality gates", "Every stage includes review checkpoints before the build moves forward."],
             ["02", "Harness-first coverage", "Validation assets are generated alongside the plan, not after delivery."],
@@ -311,7 +311,7 @@ export default function Landing({
             <h2 id="final-cta-title">Leave with a build plan your team can act on.</h2>
             <p>
               Start with Google, use your starter credits, and turn the first
-              product thought into a structured SpecForge workspace.
+              product thought into a structured Thought2Build workspace.
             </p>
           </div>
           <button

@@ -1,4 +1,4 @@
-"""Razorpay integration service for SpecForge credit purchases.
+"""Razorpay integration service for Thought2Build credit purchases.
 
 Issue #44 — Step 3 (Plan §4). The INR gateway alternative to Lemon Squeezy,
 selected by the ``PAYMENT_PROVIDER`` flag. This module is a thin, pure wrapper
@@ -8,12 +8,12 @@ operations:
 
   * :meth:`RazorpayService.create_payment_link` — mint a hosted Payment Link
     (D2) for an already-committed ``billing_checkout_attempts`` row (the
-    attempt-first flow). SpecForge is the authority for the attempt; the link
+    attempt-first flow). Thought2Build is the authority for the attempt; the link
     is created against the attempt's economics **snapshot** (``amount`` =
     ``attempt.price_cents``, integer paise — D8) so an in-flight config price
     change can never alter what the user is charged, and ``accept_partial`` is
     off so grant validation can compare the full amount (D10).
-  * :meth:`RazorpayService.get_payment` — re-read a single payment SpecForge
+  * :meth:`RazorpayService.get_payment` — re-read a single payment Thought2Build
     already has by id, for reconcile lane 2. It is **never** used to discover
     or prove a payment — the signed ``payment_link.paid`` webhook is the sole
     grant authority (D4). It surfaces a 429 / ``Retry-After`` to the caller so
@@ -155,7 +155,7 @@ def _retry_after_seconds(response: httpx.Response) -> float:
 
 
 class RazorpayService:
-    """All Razorpay API interactions for SpecForge credit purchases.
+    """All Razorpay API interactions for Thought2Build credit purchases.
 
     Follows the service-singleton pattern: one instance is created at module
     level and imported by name in the billing router and the reconcile worker::
@@ -300,7 +300,7 @@ class RazorpayService:
         *,
         client: httpx.AsyncClient | None = None,
     ) -> RazorpayPayment:
-        """Re-read one payment SpecForge already has by id (reconcile lane 2).
+        """Re-read one payment Thought2Build already has by id (reconcile lane 2).
 
         This is a single GET — it is **never** used to discover or prove a
         payment (the signed webhook is the grant authority). A 429 is surfaced
@@ -361,11 +361,11 @@ class RazorpayService:
             # str(attempt.id) is 36 chars; Razorpay caps reference_id at 40
             # (checkout_ref is 43 — D9). notes.checkout_ref is the authority.
             "reference_id": str(attempt.id),
-            "description": f"SpecForge — {attempt.credits} credits",
+            "description": f"Thought2Build — {attempt.credits} credits",
             # Pre-fills the hosted form for UX only — never trusted for user
             # resolution (that is the signed notes block below).
             "customer": {"email": user.email},
-            # SpecForge owns all communication with the buyer.
+            # Thought2Build owns all communication with the buyer.
             "notify": {"sms": False, "email": False},
             "reminder_enable": False,
             # Attempt TTL — the hosted page expires with the attempt.

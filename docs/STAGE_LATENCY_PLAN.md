@@ -22,7 +22,7 @@
   safe blocked partial, and refunded without another LLM call.
 - Non-limit depth and traceability issues remain advisory findings.
 - `llm_cost_events` metadata now includes populated `retry_count` and `repair_count`.
-- Prometheus includes `specforge_pipeline_stage_end_to_end_duration_seconds{stage_type,provider,outcome}` for end-to-end stage wall time.
+- Prometheus includes `thought2build_pipeline_stage_end_to_end_duration_seconds{stage_type,provider,outcome}` for end-to-end stage wall time.
 
 ## Development Rollout
 
@@ -63,7 +63,7 @@ Acceptance:
 - Lower reasoning/output-token tail.
 - No increase in `stopped_by_limit`.
 - No quality-outcome regression in local/golden validation.
-- `specforge_pipeline_completion_repairs_total{outcome="skipped_at_ceiling"}` only rises on ceiling-bound provider limit stops.
+- `thought2build_pipeline_completion_repairs_total{outcome="skipped_at_ceiling"}` only rises on ceiling-bound provider limit stops.
 
 ## Deferred
 

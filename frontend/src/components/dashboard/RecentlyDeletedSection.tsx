@@ -63,7 +63,7 @@ export function RecentlyDeletedSection() {
       const url = URL.createObjectURL(blob)
       const link = document.createElement("a")
       link.href = url
-      link.download = `specforge-${slugFor(workspace.name, workspace.id)}.zip`
+      link.download = `thought2build-${slugFor(workspace.name, workspace.id)}.zip`
       link.click()
       window.setTimeout(() => URL.revokeObjectURL(url), 1_500)
     } catch (exc) {

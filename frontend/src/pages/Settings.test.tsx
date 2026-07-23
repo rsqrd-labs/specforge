@@ -57,14 +57,14 @@ describe("Settings", () => {
 
   it("returns to the originating workspace and clears the stored destination", () => {
     renderSettings({ pathname: "/settings", state: { from: "/workspace/ws-1" } })
-    expect(sessionStorage.getItem("specforge:settings_return_to")).toBe("/workspace/ws-1")
+    expect(sessionStorage.getItem("thought2build:settings_return_to")).toBe("/workspace/ws-1")
     fireEvent.click(screen.getByRole("button", { name: "Back to Workspace" }))
     expect(screen.getByText("Workspace destination")).toBeInTheDocument()
-    expect(sessionStorage.getItem("specforge:settings_return_to")).toBeNull()
+    expect(sessionStorage.getItem("thought2build:settings_return_to")).toBeNull()
   })
 
   it("ignores a self-referential origin and uses the persisted fallback", () => {
-    sessionStorage.setItem("specforge:settings_return_to", "/github")
+    sessionStorage.setItem("thought2build:settings_return_to", "/github")
     renderSettings({ pathname: "/settings", state: { from: "/settings" } })
     fireEvent.click(screen.getByRole("button", { name: "Back to Back" }))
     expect(screen.getByText("GitHub destination")).toBeInTheDocument()

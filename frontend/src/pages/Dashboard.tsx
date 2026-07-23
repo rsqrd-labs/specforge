@@ -638,7 +638,7 @@ export default function Dashboard() {
             </div>
             <p className="workspace-empty-heading">Your first great brief starts here</p>
             <p className="workspace-empty-body">
-              Bring the messy version of the idea. SpecForge will help you
+              Bring the messy version of the idea. Thought2Build will help you
               sharpen it into a path your team can actually build.
             </p>
 

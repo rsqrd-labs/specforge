@@ -326,7 +326,7 @@ export function IncrementTimeline({
             Build the next version
           </h2>
           <p>
-            Describe one focused change. SpecForge will turn it into new tasks
+            Describe one focused change. Thought2Build will turn it into new tasks
             without rewriting your completed baseline.
           </p>
         </div>

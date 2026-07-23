@@ -1,8 +1,8 @@
-# SpecForge Data Retention Policy
+# Thought2Build Data Retention Policy
 
 _Policy version: **trash-v1**_
 
-This page explains how long SpecForge keeps your data and how you stay in control
+This page explains how long Thought2Build keeps your data and how you stay in control
 of it. It is the user-facing companion to the operational runbook (`RUNBOOK.md`
 §18) and must be published — alongside the Terms of Service / Privacy updates
 that reference it — **before** workspace hard-deletion is enabled in production.
@@ -13,7 +13,7 @@ links to), served by the marketing zone from
 of this document — keep the two in sync and bump the policy version on any
 semantic change.
 
-The guiding principle: SpecForge keeps your **active** work indefinitely, prunes
+The guiding principle: Thought2Build keeps your **active** work indefinitely, prunes
 only redundant history and internal telemetry on a schedule, and **never**
 hard-deletes a workspace without either your recorded acknowledgment plus a
 restore/export window, or a long conservative fallback window.
@@ -54,7 +54,7 @@ pruned:
 
 ## Internal telemetry
 
-SpecForge keeps internal operational logs (LLM cost/quality events, evaluation
+Thought2Build keeps internal operational logs (LLM cost/quality events, evaluation
 results, failed background-job records) for **up to 180 days** to run and improve
 the service. These contain no shareable artifact content beyond what is needed
 for cost and quality accounting, and are never surfaced in the product.

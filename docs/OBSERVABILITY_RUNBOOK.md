@@ -1,6 +1,6 @@
-# SpecForge Observability Runbook
+# Thought2Build Observability Runbook
 
-Use this runbook when validating, operating, or troubleshooting SpecForge
+Use this runbook when validating, operating, or troubleshooting Thought2Build
 observability. It covers the observability paths used by the application:
 Prometheus metrics, Sentry, Langfuse, Lemon Squeezy billing counters, and prompt
 pipeline quality counters.
@@ -74,21 +74,21 @@ and dashboard scrape targets are healthy.
 
 Important metric families:
 
-- `specforge_billing_*` for Lemon Squeezy checkout, webhook, credit
+- `thought2build_billing_*` for Lemon Squeezy checkout, webhook, credit
   grant/revoke, debt created/recovered, reconcile mismatch, admin correction,
   expiry, consumption, the `webhook_pending_age_seconds` gauge, and checkout
   rate-limit signals. Most are labelled `{provider}` (`lemonsqueezy` is the only
   runtime emitter; `provider="stripe"` series persist only as historical audit
   data after the T-308 decommission).
-- `specforge_storyboard_*` for Storyboard generation, public views, downloads,
+- `thought2build_storyboard_*` for Storyboard generation, public views, downloads,
   missing source sections, credit deduction, and refund behavior. Watch
-  `specforge_storyboard_generation_failed_total` for failure spikes and alert
+  `thought2build_storyboard_generation_failed_total` for failure spikes and alert
   on refund anomalies through
-  `specforge_storyboard_credits_refunded_total{reason="generation_failed"}`.
+  `thought2build_storyboard_credits_refunded_total{reason="generation_failed"}`.
 - `pipeline_validator_failures_total` for mandatory section contract failures.
 - `pipeline_upstream_section_skipped_total` for upstream context sections the
   prompt builder could not find.
-- `specforge_billing_credits_critic_regen_total` for critic-triggered
+- `thought2build_billing_credits_critic_regen_total` for critic-triggered
   regeneration credit consumption.
 
 ### Storyboard Metrics
@@ -99,61 +99,61 @@ appear in Prometheus labels.
 
 | Metric | Type | Labels | Use |
 |---|---|---|---|
-| `specforge_storyboard_generation_started_total` | Counter | `action` | Paid Storyboard attempts that acquired a placeholder row and debited credits |
-| `specforge_storyboard_generation_completed_total` | Counter | `action` | Attempts that validated and reached `ready` |
-| `specforge_storyboard_generation_failed_total` | Counter | `action`, `error_type` | Provider, timeout, parser, schema, row-missing, or unexpected failures |
-| `specforge_storyboard_section_regenerated_total` | Counter | none | Successful single-section regenerations |
-| `specforge_storyboard_generation_duration_seconds` | Histogram | `action` | LLM generation plus payload validation latency |
-| `specforge_storyboard_credits_deducted_total` | Counter | `action` | Credits charged for generation/regeneration |
-| `specforge_storyboard_credits_refunded_total` | Counter | `action`, `reason` | Credits refunded for failed or recovered generations |
-| `specforge_storyboard_public_view_total` | Counter | none | Successful unauthenticated `/sb/` views |
-| `specforge_storyboard_download_total` | Counter | `kind`, `public` | Successful owner/public downloads by artifact kind |
-| `specforge_storyboard_source_missing_total` | Counter | `source`, `section` | Expected source sections absent during source extraction |
-| `specforge_pdf_export_duration_seconds` | Histogram | none | PDF render latency, including Storyboard PDF and notes PDF downloads |
+| `thought2build_storyboard_generation_started_total` | Counter | `action` | Paid Storyboard attempts that acquired a placeholder row and debited credits |
+| `thought2build_storyboard_generation_completed_total` | Counter | `action` | Attempts that validated and reached `ready` |
+| `thought2build_storyboard_generation_failed_total` | Counter | `action`, `error_type` | Provider, timeout, parser, schema, row-missing, or unexpected failures |
+| `thought2build_storyboard_section_regenerated_total` | Counter | none | Successful single-section regenerations |
+| `thought2build_storyboard_generation_duration_seconds` | Histogram | `action` | LLM generation plus payload validation latency |
+| `thought2build_storyboard_credits_deducted_total` | Counter | `action` | Credits charged for generation/regeneration |
+| `thought2build_storyboard_credits_refunded_total` | Counter | `action`, `reason` | Credits refunded for failed or recovered generations |
+| `thought2build_storyboard_public_view_total` | Counter | none | Successful unauthenticated `/sb/` views |
+| `thought2build_storyboard_download_total` | Counter | `kind`, `public` | Successful owner/public downloads by artifact kind |
+| `thought2build_storyboard_source_missing_total` | Counter | `source`, `section` | Expected source sections absent during source extraction |
+| `thought2build_pdf_export_duration_seconds` | Histogram | none | PDF render latency, including Storyboard PDF and notes PDF downloads |
 
 Recommended dashboard panels:
 
 ```promql
 # Generation failure rate by action over 15 minutes
-sum by (action) (rate(specforge_storyboard_generation_failed_total[15m]))
+sum by (action) (rate(thought2build_storyboard_generation_failed_total[15m]))
 /
-clamp_min(sum by (action) (rate(specforge_storyboard_generation_started_total[15m])), 1)
+clamp_min(sum by (action) (rate(thought2build_storyboard_generation_started_total[15m])), 1)
 
 # Refund credits issued over the last hour
-sum by (action, reason) (increase(specforge_storyboard_credits_refunded_total[1h]))
+sum by (action, reason) (increase(thought2build_storyboard_credits_refunded_total[1h]))
 
 # Public view volume
-increase(specforge_storyboard_public_view_total[5m])
+increase(thought2build_storyboard_public_view_total[5m])
 
 # Download volume by artifact and surface
-sum by (kind, public) (increase(specforge_storyboard_download_total[15m]))
+sum by (kind, public) (increase(thought2build_storyboard_download_total[15m]))
 
 # Storyboard generation p95 latency by action
 histogram_quantile(
   0.95,
-  sum by (le, action) (rate(specforge_storyboard_generation_duration_seconds_bucket[15m]))
+  sum by (le, action) (rate(thought2build_storyboard_generation_duration_seconds_bucket[15m]))
 )
 
 # PDF render p95 latency
 histogram_quantile(
   0.95,
-  sum by (le) (rate(specforge_pdf_export_duration_seconds_bucket[15m]))
+  sum by (le) (rate(thought2build_pdf_export_duration_seconds_bucket[15m]))
 )
 
 # Missing source sections
-sum by (source, section) (increase(specforge_storyboard_source_missing_total[1h]))
+sum by (source, section) (increase(thought2build_storyboard_source_missing_total[1h]))
 ```
 
 Recommended alerts:
 
 | Alert | PromQL starter | Response |
 |---|---|---|
-| Storyboard generation failure rate high | `sum(rate(specforge_storyboard_generation_failed_total[15m])) / clamp_min(sum(rate(specforge_storyboard_generation_started_total[15m])), 1) > 0.05` | Check provider health, schema failures, and refund exactness |
-| Refund spike | `sum(increase(specforge_storyboard_credits_refunded_total[1h])) > 100` | Verify every refund maps to one failed Storyboard and one original debit |
-| Public view surge | `increase(specforge_storyboard_public_view_total[5m]) > 1000` | Check abuse/rate-limit dashboards and CDN/referrer context |
+| Storyboard generation failure rate high | `sum(rate(thought2build_storyboard_generation_failed_total[15m])) / clamp_min(sum(rate(thought2build_storyboard_generation_started_total[15m])), 1) > 0.05` | Check provider health, schema failures, and refund exactness |
+| Refund spike | `sum(increase(thought2build_storyboard_credits_refunded_total[1h])) > 100` | Verify every refund maps to one failed Storyboard and one original debit |
+| Public view surge | `increase(thought2build_storyboard_public_view_total[5m]) > 1000` | Check abuse/rate-limit dashboards and CDN/referrer context |
 | Download failures | `sum(rate(http_requests_total{path=~".*/storyboards/.*/download.*",status_code=~"5.."}[10m])) > 0` | Inspect renderer and storage-free download paths |
-| Render latency high | `histogram_quantile(0.95, sum by (le) (rate(specforge_pdf_export_duration_seconds_bucket[15m]))) > 10` | Inspect PDF worker saturation and renderer exceptions |
-| Source-missing count increased | `sum(increase(specforge_storyboard_source_missing_total[1h])) > 0` | Inspect finalised SPEC/PLAN/HARNESS/TASKS structure before releasing prompt changes |
+| Render latency high | `histogram_quantile(0.95, sum by (le) (rate(thought2build_pdf_export_duration_seconds_bucket[15m]))) > 10` | Inspect PDF worker saturation and renderer exceptions |
+| Source-missing count increased | `sum(increase(thought2build_storyboard_source_missing_total[1h])) > 0` | Inspect finalised SPEC/PLAN/HARNESS/TASKS structure before releasing prompt changes |
 
 ### Sentry
 
@@ -202,11 +202,11 @@ not depend on Langfuse availability.
    is committed before Lemon is called).
 3. Complete checkout and let the Lemon `order_created` webhook reach
    `/billing/webhook`.
-4. Confirm `specforge_billing_checkout_created_total{provider="lemonsqueezy"}`,
-   `specforge_billing_checkout_completed_total{provider="lemonsqueezy"}`, and
-   `specforge_billing_credits_granted_total{provider="lemonsqueezy"}` increment.
+4. Confirm `thought2build_billing_checkout_created_total{provider="lemonsqueezy"}`,
+   `thought2build_billing_checkout_completed_total{provider="lemonsqueezy"}`, and
+   `thought2build_billing_credits_granted_total{provider="lemonsqueezy"}` increment.
 5. Replay the same Lemon event and confirm
-   `specforge_billing_webhook_duplicate_total{provider="lemonsqueezy"}`
+   `thought2build_billing_webhook_duplicate_total{provider="lemonsqueezy"}`
    increments without granting credits twice.
 
 Expected result: checkout and webhook counters reflect the Lemon dashboard, and
@@ -218,7 +218,7 @@ duplicate delivery is visible but harmless.
 2. Confirm `pipeline_validator_failures_total` remains at zero.
 3. Confirm any `pipeline_upstream_section_skipped_total` labels correspond to
    genuinely absent optional upstream context, not renamed mandatory headings.
-4. Confirm `specforge_billing_credits_critic_regen_total` does not spike above
+4. Confirm `thought2build_billing_credits_critic_regen_total` does not spike above
    the normal baseline after prompt changes.
 
 Expected result: prompt gates are quiet during normal generation. Any increase
@@ -227,7 +227,7 @@ after a prompt deploy is treated as a release investigation signal.
 ### GitHub Integration Metrics
 
 The Phase 21 living GitHub integration (App identity + durable `arq` worker)
-emits the `specforge_github_*` family. The webhook receiver runs on the API
+emits the `thought2build_github_*` family. The webhook receiver runs on the API
 process; export / increment / PR-check / reconcile metrics are emitted by the
 **worker** process, so `/metrics` reflects them only where the worker shares the
 registry scrape (operate the worker behind its own scrape target if deployed
@@ -235,18 +235,18 @@ separately). A labelled counter has no series until its first observation.
 
 | Metric | Type | Labels | Use |
 |---|---|---|---|
-| `specforge_github_webhook_received_total` | Counter | `event_type` | Deliveries that passed the HMAC gate |
-| `specforge_github_webhook_verified_total` | Counter | none | Signatures verified (current or rotation secret) |
-| `specforge_github_webhook_deduped_total` | Counter | `event_type` | Retried deliveries skipped idempotently |
-| `specforge_github_webhook_failed_total` | Counter | `error_type` | Deliveries rejected before dispatch (`bad_signature`, `missing_headers`, `enqueue_unavailable`) |
-| `specforge_github_reconcile_lag_seconds` | Histogram | none | Webhook-receipt → reconcile-completion latency (sync SLO) |
-| `specforge_github_export_total` | Counter | `export_mode`, `outcome` | Worker exports by mode and `completed`/`failed` |
-| `specforge_github_pr_total` | Counter | `outcome` | Pull requests opened by SpecForge |
-| `specforge_github_check_total` | Counter | `verdict` | PR acceptance checks posted (`success`/`failure`/`neutral`) |
-| `specforge_github_token_mint_total` | Counter | `source` | Installation-token resolutions (`mint` vs `cache`) |
-| `specforge_github_job_retries_total` | Counter | `job` | Worker jobs retried with backoff |
-| `specforge_github_job_deadlettered_total` | Counter | `job` | Worker jobs dead-lettered after the try budget |
-| `specforge_github_queue_depth` | Gauge | none | Approximate queued-job depth (backpressure) |
+| `thought2build_github_webhook_received_total` | Counter | `event_type` | Deliveries that passed the HMAC gate |
+| `thought2build_github_webhook_verified_total` | Counter | none | Signatures verified (current or rotation secret) |
+| `thought2build_github_webhook_deduped_total` | Counter | `event_type` | Retried deliveries skipped idempotently |
+| `thought2build_github_webhook_failed_total` | Counter | `error_type` | Deliveries rejected before dispatch (`bad_signature`, `missing_headers`, `enqueue_unavailable`) |
+| `thought2build_github_reconcile_lag_seconds` | Histogram | none | Webhook-receipt → reconcile-completion latency (sync SLO) |
+| `thought2build_github_export_total` | Counter | `export_mode`, `outcome` | Worker exports by mode and `completed`/`failed` |
+| `thought2build_github_pr_total` | Counter | `outcome` | Pull requests opened by Thought2Build |
+| `thought2build_github_check_total` | Counter | `verdict` | PR acceptance checks posted (`success`/`failure`/`neutral`) |
+| `thought2build_github_token_mint_total` | Counter | `source` | Installation-token resolutions (`mint` vs `cache`) |
+| `thought2build_github_job_retries_total` | Counter | `job` | Worker jobs retried with backoff |
+| `thought2build_github_job_deadlettered_total` | Counter | `job` | Worker jobs dead-lettered after the try budget |
+| `thought2build_github_queue_depth` | Gauge | none | Approximate queued-job depth (backpressure) |
 
 Structured audit events (`github.installed`, `github.uninstalled`,
 `github.webhook.received`, `github.webhook.duplicate_skipped`,
@@ -262,12 +262,12 @@ redaction filter as the API.
 
 | Alert | PromQL starter | Response |
 |---|---|---|
-| Webhook failure rate high | `sum(rate(specforge_github_webhook_failed_total[15m])) / clamp_min(sum(rate(specforge_github_webhook_received_total[15m])), 1) > 0.05` | Inspect signature/rotation config and queue health; `bad_signature` spikes can mean a stale `GITHUB_APP_WEBHOOK_SECRET` after rotation |
-| Reconcile lag high | `histogram_quantile(0.95, sum by (le) (rate(specforge_github_reconcile_lag_seconds_bucket[15m]))) > 60` | Worker saturation or GitHub API throttling — check queue depth and the per-installation governor throttle counter |
-| Dead-letter rate elevated | `sum(rate(specforge_github_job_deadlettered_total[1h])) > 0` | A job exhausted its retry budget; inspect the dead-letter records and the failing `job` label |
-| Queue depth growing | `max_over_time(specforge_github_queue_depth[10m]) > 500` | Worker throughput cannot keep up; scale workers or check for a stuck job |
-| Token cache-hit ratio low | `sum(rate(specforge_github_token_mint_total{source="mint"}[15m])) / clamp_min(sum(rate(specforge_github_token_mint_total[15m])), 1) > 0.5` | The installation-token cache is missing too often — check Redis health and the cache TTL/namespace |
-| Check verdict neutral surge | `sum(rate(specforge_github_check_total{verdict="neutral"}[15m])) / clamp_min(sum(rate(specforge_github_check_total[15m])), 1) > 0.5` | The fail-open evaluator is degraded (judge model / budget / no linked task), not that PRs are failing — check the judge provider and the per-tenant budget |
+| Webhook failure rate high | `sum(rate(thought2build_github_webhook_failed_total[15m])) / clamp_min(sum(rate(thought2build_github_webhook_received_total[15m])), 1) > 0.05` | Inspect signature/rotation config and queue health; `bad_signature` spikes can mean a stale `GITHUB_APP_WEBHOOK_SECRET` after rotation |
+| Reconcile lag high | `histogram_quantile(0.95, sum by (le) (rate(thought2build_github_reconcile_lag_seconds_bucket[15m]))) > 60` | Worker saturation or GitHub API throttling — check queue depth and the per-installation governor throttle counter |
+| Dead-letter rate elevated | `sum(rate(thought2build_github_job_deadlettered_total[1h])) > 0` | A job exhausted its retry budget; inspect the dead-letter records and the failing `job` label |
+| Queue depth growing | `max_over_time(thought2build_github_queue_depth[10m]) > 500` | Worker throughput cannot keep up; scale workers or check for a stuck job |
+| Token cache-hit ratio low | `sum(rate(thought2build_github_token_mint_total{source="mint"}[15m])) / clamp_min(sum(rate(thought2build_github_token_mint_total[15m])), 1) > 0.5` | The installation-token cache is missing too often — check Redis health and the cache TTL/namespace |
+| Check verdict neutral surge | `sum(rate(thought2build_github_check_total{verdict="neutral"}[15m])) / clamp_min(sum(rate(thought2build_github_check_total[15m])), 1) > 0.5` | The fail-open evaluator is degraded (judge model / budget / no linked task), not that PRs are failing — check the judge provider and the per-tenant budget |
 
 ## Incident Response
 
@@ -339,8 +339,8 @@ Checks:
 - Check logs for `billing.webhook.*` failures and `billing.job.*` worker errors.
 - Confirm the `billing_webhook_events` inbox has one row per Lemon event id and
   duplicate deliveries return `already_processed`
-  (`specforge_billing_webhook_duplicate_total`).
-- Watch `specforge_billing_webhook_pending_age_seconds` — a value `> 300` means
+  (`thought2build_billing_webhook_duplicate_total`).
+- Watch `thought2build_billing_webhook_pending_age_seconds` — a value `> 300` means
   the inbox is not draining (queue outage or crashed worker). The 60s sweep
   re-enqueues stale rows; the 15-minute reconcile is the backstop.
 - Confirm `LEMONSQUEEZY_TEST_MODE` is `false` in production and `true` in
@@ -365,7 +365,7 @@ off the request path.
 
 Checks:
 
-- Inspect the `specforge_github_*` family and the alerts above:
+- Inspect the `thought2build_github_*` family and the alerts above:
   `webhook_failed_total{error_type}`, `reconcile_lag_seconds` p95,
   `job_deadlettered_total{job}`, `queue_depth`, and the
   `token_mint_total{source}` cache-hit ratio.
@@ -418,7 +418,7 @@ repair attempts.
 
 Checks:
 
-- Inspect `specforge_billing_credits_critic_regen_total{stage=...}`.
+- Inspect `thought2build_billing_credits_critic_regen_total{stage=...}`.
 - Check whether validator failures increased at the same time.
 - Check provider latency/error rates; low-quality partial responses can cause
   repair loops.
@@ -437,10 +437,10 @@ Impact: prompt template updates may not be reflected immediately.
 Checks:
 
 - Verify prompt names:
-  - `specforge.spec.system`
-  - `specforge.plan.system`
-  - `specforge.harness.system`
-  - `specforge.tasks.system`
+  - `thought2build.spec.system`
+  - `thought2build.plan.system`
+  - `thought2build.harness.system`
+  - `thought2build.tasks.system`
 - Verify `LANGFUSE_PROMPT_CACHE_TTL`.
 - Wait for the TTL to expire or restart the backend in staging.
 - Confirm local prompt fallbacks are still valid.

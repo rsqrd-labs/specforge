@@ -210,7 +210,7 @@ def _notes(
     nonce_hash: str,
     **overrides: Any,
 ) -> dict[str, Any]:
-    """The seven allow-listed SpecForge notes (router ``_razorpay_notes_block``)."""
+    """The seven allow-listed Thought2Build notes (router ``_razorpay_notes_block``)."""
     block = {
         "user_id": str(attempt.user_id),
         "checkout_ref": attempt.checkout_ref,
@@ -1086,7 +1086,7 @@ async def test_missing_pack_without_proof_audited_no_unrelated_revoke(
 
     status, last_error = await _wh_status(db_maker, wh.id)
     assert status == "processed"
-    assert last_error == "refund_could_not_link_to_specforge"
+    assert last_error == "refund_could_not_link_to_thought2build"
     assert await _balance(db_maker, user_id) == 200  # untouched
     b = await _pack(db_maker, bystander_id)
     assert b.credits_revoked == 0

@@ -175,9 +175,9 @@ jobs:
               ("JWT_PRIVATE_KEY", private_pem),
               ("JWT_PUBLIC_KEY", public_pem),
           ):
-              print(f"{name}<<__SPECFORGE_CI_JWT_KEY__")
+              print(f"{name}<<__THOUGHT2BUILD_CI_JWT_KEY__")
               print(value, end="")
-              print("__SPECFORGE_CI_JWT_KEY__")
+              print("__THOUGHT2BUILD_CI_JWT_KEY__")
           PY
 
       - name: Apply database migrations
@@ -347,7 +347,7 @@ jobs:
       # + `worker-fast`). Building it here proves the worker image is deployable
       # before main is allowed to ship.
       - name: Build backend / worker image
-        run: docker build -t specforge-worker:ci ./backend
+        run: docker build -t thought2build-worker:ci ./backend
 
   frontend:
     name: Frontend
@@ -451,14 +451,14 @@ jobs:
         run: |
           uv run alembic upgrade head
           echo "E2E_ACCESS_TOKEN=$(uv run python -m scripts.seed_frontend_e2e)" >> "$GITHUB_ENV"
-          nohup uv run python -m scripts.run_frontend_e2e_server > /tmp/specforge-e2e-api.log 2>&1 &
+          nohup uv run python -m scripts.run_frontend_e2e_server > /tmp/thought2build-e2e-api.log 2>&1 &
           for attempt in $(seq 1 30); do
             if curl --fail --silent http://127.0.0.1:8000/health >/dev/null; then
               exit 0
             fi
             sleep 1
           done
-          cat /tmp/specforge-e2e-api.log
+          cat /tmp/thought2build-e2e-api.log
           exit 1
 
       - name: Audit

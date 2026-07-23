@@ -4562,7 +4562,7 @@ async def test_refine_output_validation_failure_refunds_credits() -> None:
         patch("services.pipeline.stage_manager.get_llm") as mock_get_llm,
     ):
         mock_adapter = MagicMock()
-        mock_adapter.complete = AsyncMock(return_value="You are SpecForge")
+        mock_adapter.complete = AsyncMock(return_value="You are Thought2Build")
         mock_get_llm.return_value = mock_adapter
 
         with pytest.raises(SecurityError):
@@ -5134,7 +5134,7 @@ async def test_generate_streams_tokens_live_before_canonical_replay() -> None:
         token for token in tokens[: reset_indexes[0]] if not token.startswith("{")
     ]
     assert live_tokens, "expected live-streamed tokens before the stream_reset"
-    assert "SPECFORGE_CHUNK_COMPLETE" not in "".join(live_tokens)
+    assert "THOUGHT2BUILD_CHUNK_COMPLETE" not in "".join(live_tokens)
     done_events = [
         _json.loads(token) for token in tokens if token.startswith('{"done"')
     ]

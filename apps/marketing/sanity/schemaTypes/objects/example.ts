@@ -1,7 +1,7 @@
 import { defineType, defineField } from "sanity"
 
 // A concrete input→output example (GEO answer-readiness — examples ground the
-// abstract claim in something specific). For SpecForge: a rough idea in, a
+// abstract claim in something specific). For Thought2Build: a rough idea in, a
 // shaped artifact out.
 export const example = defineType({
   name: "example",

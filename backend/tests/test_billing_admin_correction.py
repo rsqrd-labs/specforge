@@ -75,7 +75,7 @@ async def session(db_maker: async_sessionmaker) -> AsyncSession:
 @pytest.fixture(autouse=True)
 def admin_allowlist(monkeypatch):
     """Default: a single allowlisted admin email. Tests override as needed."""
-    monkeypatch.setattr(settings, "admin_user_emails", "admin@specforge.dev")
+    monkeypatch.setattr(settings, "admin_user_emails", "admin@thought2build.com")
     yield
 
 
@@ -152,7 +152,7 @@ def _request(
         price_cents=900,
         currency="USD",
         reason="paid order, webhook never arrived (ticket #123)",
-        evidence_url="https://support.specforge.dev/tickets/123",
+        evidence_url="https://support.thought2build.com/tickets/123",
     )
 
 
@@ -228,7 +228,7 @@ async def _ledger(maker, reason: str) -> list:
 
 
 async def test_require_admin_allows_allowlisted(session, cleanup) -> None:
-    admin = await _make_user(session, cleanup, email="admin@specforge.dev")
+    admin = await _make_user(session, cleanup, email="admin@thought2build.com")
     result = await require_admin(current_user=admin)
     assert result is admin
 
@@ -244,14 +244,14 @@ async def test_require_admin_empty_allowlist_denies_everyone(
     session, cleanup, monkeypatch
 ) -> None:
     monkeypatch.setattr(settings, "admin_user_emails", "")
-    admin = await _make_user(session, cleanup, email="admin@specforge.dev")
+    admin = await _make_user(session, cleanup, email="admin@thought2build.com")
     with pytest.raises(HTTPException) as exc:
         await require_admin(current_user=admin)
     assert exc.value.status_code == 403  # no implicit admin
 
 
 async def test_require_admin_is_case_insensitive(session, cleanup) -> None:
-    user = await _make_user(session, cleanup, email="Admin@SpecForge.dev")
+    user = await _make_user(session, cleanup, email="Admin@thought2build.com")
     assert await require_admin(current_user=user) is user
 
 
@@ -263,7 +263,7 @@ async def test_require_admin_is_case_insensitive(session, cleanup) -> None:
 async def test_correction_creates_pack_ledger_and_audit_atomically(
     session, db_maker, cleanup
 ) -> None:
-    admin = await _make_user(session, cleanup, email="admin@specforge.dev")
+    admin = await _make_user(session, cleanup, email="admin@thought2build.com")
     target = await _make_user(session, cleanup, email="payer@example.com", balance=0)
     order_id = f"ord_{uuid4().hex[:10]}"
 
@@ -291,13 +291,13 @@ async def test_correction_creates_pack_ledger_and_audit_atomically(
     assert c.target_user_id == target.id
     assert c.billing_credit_pack_id == packs[0].id
     assert c.credits == 200
-    assert c.evidence_url == "https://support.specforge.dev/tickets/123"
+    assert c.evidence_url == "https://support.thought2build.com/tickets/123"
 
 
 async def test_correction_applies_debt_recovery_before_usable_credit(
     session, db_maker, cleanup
 ) -> None:
-    admin = await _make_user(session, cleanup, email="admin@specforge.dev")
+    admin = await _make_user(session, cleanup, email="admin@thought2build.com")
     target = await _make_user(session, cleanup, email="indebted@example.com", balance=0)
     await _seed_debt(session, target.id, owed=50)
     order_id = f"ord_{uuid4().hex[:10]}"
@@ -326,7 +326,7 @@ async def test_correction_applies_debt_recovery_before_usable_credit(
 
 
 async def test_duplicate_correction_is_noop(session, db_maker, cleanup) -> None:
-    admin = await _make_user(session, cleanup, email="admin@specforge.dev")
+    admin = await _make_user(session, cleanup, email="admin@thought2build.com")
     target = await _make_user(session, cleanup, email="dup@example.com", balance=0)
     order_id = f"ord_{uuid4().hex[:10]}"
 
@@ -354,7 +354,7 @@ async def test_duplicate_correction_is_noop(session, db_maker, cleanup) -> None:
 async def test_correction_noop_when_pack_already_exists(
     session, db_maker, cleanup
 ) -> None:
-    admin = await _make_user(session, cleanup, email="admin@specforge.dev")
+    admin = await _make_user(session, cleanup, email="admin@thought2build.com")
     target = await _make_user(
         session, cleanup, email="haspack@example.com", balance=200
     )
@@ -386,7 +386,7 @@ async def test_correction_noop_when_pack_already_exists(
 
 
 async def test_correction_target_user_not_found(session, db_maker, cleanup) -> None:
-    admin = await _make_user(session, cleanup, email="admin@specforge.dev")
+    admin = await _make_user(session, cleanup, email="admin@thought2build.com")
     order_id = f"ord_{uuid4().hex[:10]}"
     async with db_maker() as db:
         with pytest.raises(HTTPException) as exc:
@@ -400,7 +400,7 @@ async def test_ledger_collision_rolls_back_atomically(
     # Pre-seed ONLY a ledger row with the correction's reason (no pack, no audit) so
     # the pre-check passes but grant() collides on the admin_billing_correction:%
     # index and returns None. Nothing of ours must commit (the flushed pack included).
-    admin = await _make_user(session, cleanup, email="admin@specforge.dev")
+    admin = await _make_user(session, cleanup, email="admin@thought2build.com")
     target = await _make_user(session, cleanup, email="collide@example.com", balance=0)
     order_id = f"ord_{uuid4().hex[:10]}"
     reason = f"admin_billing_correction:lemonsqueezy:{order_id}"
@@ -429,7 +429,7 @@ async def test_late_webhook_after_correction_does_not_double_grant(
     monkeypatch.setattr(settings, "lemonsqueezy_variant_id", "99999")
     monkeypatch.setattr(settings, "lemonsqueezy_test_mode", True)
 
-    admin = await _make_user(session, cleanup, email="admin@specforge.dev")
+    admin = await _make_user(session, cleanup, email="admin@thought2build.com")
     target = await _make_user(session, cleanup, email="late@example.com", balance=0)
     order_id = f"ord_{uuid4().hex[:10]}"
 

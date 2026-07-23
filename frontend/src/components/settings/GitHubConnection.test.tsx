@@ -155,10 +155,10 @@ describe("GitHubConnection", () => {
       await screen.findByRole("button", { name: /opening github…/i }),
     ).toBeInTheDocument()
 
-    resolveUrl("https://github.com/apps/specforge/installations/new")
+    resolveUrl("https://github.com/apps/thought2build/installations/new")
     await waitFor(() =>
       expect(window.location.href).toBe(
-        "https://github.com/apps/specforge/installations/new",
+        "https://github.com/apps/thought2build/installations/new",
       ),
     )
   })

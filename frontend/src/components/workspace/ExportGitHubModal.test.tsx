@@ -165,11 +165,11 @@ describe("ExportGitHubModal", () => {
     renderModal()
 
     const pr = await screen.findByRole("radio", { name: /pr with tests/i })
-    expect(screen.queryByText(/specforge\/inc-1/i)).not.toBeInTheDocument()
+    expect(screen.queryByText(/thought2build\/inc-1/i)).not.toBeInTheDocument()
 
     fireEvent.click(pr)
 
-    expect(await screen.findByText(/specforge\/inc-1/i)).toBeInTheDocument()
+    expect(await screen.findByText(/thought2build\/inc-1/i)).toBeInTheDocument()
   })
 
   it("submits with the installation_id + export_mode, then polls to a success state", async () => {

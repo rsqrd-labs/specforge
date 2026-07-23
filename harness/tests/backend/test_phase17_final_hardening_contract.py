@@ -22,7 +22,7 @@ Every test maps to one or more findings from the third-pass enterprise code revi
         app.state.redis is None during the startup window
         → T-225 — fallback to _local_fallback_check instead of call_next()
 
-  M-2   No specforge_llm_circuit_state Gauge — operators cannot tell whether a
+  M-2   No thought2build_llm_circuit_state Gauge — operators cannot tell whether a
         provider circuit is currently open from dashboards
         → T-220 — Gauge added; updated in record_provider_failure/success
 
@@ -52,7 +52,7 @@ Design invariants enforced here:
   * credit_service.CreditService has a public invalidate() method.
   * stage_manager.py calls credit_service.invalidate after db.commit().
   * RateLimitMiddleware does NOT have a bare return call_next in the redis is None branch.
-  * specforge_llm_circuit_state Gauge is defined and updated on failure + success.
+  * thought2build_llm_circuit_state Gauge is defined and updated on failure + success.
   * LangfuseClient has a startup_check() method.
   * gateway._INSTANCE_CACHE_TTL_SECONDS constant exists; _INSTANCES stores tuples.
   * sliding_window_check calls in stage_manager are wrapped in RedisError handler.
@@ -286,12 +286,12 @@ def test_phase17_credit_service_invalidate_references_finding() -> None:
 
 
 # ---------------------------------------------------------------------------
-# T-220 (M-2): specforge_llm_circuit_state Gauge must be defined and updated
+# T-220 (M-2): thought2build_llm_circuit_state Gauge must be defined and updated
 # ---------------------------------------------------------------------------
 
 
 def test_phase17_circuit_state_gauge_defined() -> None:
-    """M-2 — specforge_llm_circuit_state Gauge must be defined in provider_status.py.
+    """M-2 — thought2build_llm_circuit_state Gauge must be defined in provider_status.py.
 
     CIRCUIT_REJECTIONS (T-215) counts rejections but cannot tell operators
     whether a circuit is currently open.  The Gauge provides real-time
@@ -300,17 +300,17 @@ def test_phase17_circuit_state_gauge_defined() -> None:
     """
     source = read_backend_file("services", "llm", "provider_status.py")
 
-    assert "specforge_llm_circuit_state" in source, (
+    assert "thought2build_llm_circuit_state" in source, (
         "provider_status.py must define a Gauge named "
-        "'specforge_llm_circuit_state' for real-time circuit breaker state.  "
-        "This allows operators to query `max by (provider) (specforge_llm_circuit_state) "
+        "'thought2build_llm_circuit_state' for real-time circuit breaker state.  "
+        "This allows operators to query `max by (provider) (thought2build_llm_circuit_state) "
         "== 1` to detect open circuits without waiting for rejection counters.  "
         "M-2 — T-220."
     )
 
     assert "Gauge" in source, (
         "provider_status.py must import and use prometheus_client.Gauge for "
-        "specforge_llm_circuit_state.  M-2 — T-220."
+        "thought2build_llm_circuit_state.  M-2 — T-220."
     )
 
 
@@ -349,7 +349,7 @@ def test_phase17_circuit_state_updated_on_failure_and_success() -> None:
 
 
 def test_phase17_runbook_documents_circuit_state_gauge() -> None:
-    """M-2 — RUNBOOK.md §1 must include specforge_llm_circuit_state PromQL.
+    """M-2 — RUNBOOK.md §1 must include thought2build_llm_circuit_state PromQL.
 
     Operators need a documented query to create alerts on open circuits.
     M-2 — T-220.
@@ -360,9 +360,9 @@ def test_phase17_runbook_documents_circuit_state_gauge() -> None:
     )
     content = runbook_path.read_text(encoding="utf-8")
 
-    assert "specforge_llm_circuit_state" in content, (
-        "RUNBOOK.md must document specforge_llm_circuit_state with a PromQL "
-        "example.  Suggested: `max by (provider) (specforge_llm_circuit_state) == 1` "
+    assert "thought2build_llm_circuit_state" in content, (
+        "RUNBOOK.md must document thought2build_llm_circuit_state with a PromQL "
+        "example.  Suggested: `max by (provider) (thought2build_llm_circuit_state) == 1` "
         "to alert when any provider circuit is open.  M-2 — T-220."
     )
 

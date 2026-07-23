@@ -481,7 +481,7 @@ async def test_checkout_lemon_failure_marks_attempt_failed_502() -> None:
 @pytest.mark.asyncio
 async def test_checkout_orphaned_commit_failure_502_no_url() -> None:
     # Fail the SECOND commit (the provider_created transition) — Lemon already
-    # minted the checkout, but SpecForge cannot record it.
+    # minted the checkout, but Thought2Build cannot record it.
     session = _FakeSession(fail_commit_on=2)
     app = _make_app(session)
 
@@ -821,7 +821,7 @@ _ADMIN_CORRECTION_BODY = {
     "price_cents": 900,
     "currency": "USD",
     "reason": "paid order, webhook never arrived",
-    "evidence_url": "https://support.specforge.dev/tickets/1",
+    "evidence_url": "https://support.thought2build.com/tickets/1",
 }
 
 
@@ -829,7 +829,9 @@ _ADMIN_CORRECTION_BODY = {
 async def test_admin_correction_forbidden_for_non_admin() -> None:
     session = _FakeSession()
     app = _make_app(session)  # _USER (buyer@example.com) is the authenticated user
-    with _Patches([patch.object(settings, "admin_user_emails", "admin@specforge.dev")]):
+    with _Patches(
+        [patch.object(settings, "admin_user_emails", "admin@thought2build.com")]
+    ):
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:
             resp = await client.post(
@@ -868,7 +870,7 @@ def test_admin_correction_request_accepts_razorpay_provider() -> None:
         price_cents=79900,
         currency="INR",
         reason="paid order, webhook never arrived",
-        evidence_url="https://support.specforge.dev/tickets/2",
+        evidence_url="https://support.thought2build.com/tickets/2",
     )
     assert body.provider == "razorpay"
 

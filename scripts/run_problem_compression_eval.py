@@ -36,7 +36,7 @@ if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
 _DRY_RUN_ENV_DEFAULTS = {
-    "DATABASE_URL": "postgresql+asyncpg://dry-run:dry-run@localhost/specforge",
+    "DATABASE_URL": "postgresql+asyncpg://dry-run:dry-run@localhost/thought2build",
     "REDIS_URL": "redis://localhost:6379/0",
     "JWT_PRIVATE_KEY": "dry-run",
     "JWT_PUBLIC_KEY": "dry-run",

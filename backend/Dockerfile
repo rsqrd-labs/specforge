@@ -31,9 +31,9 @@ RUN chmod +x entrypoint.sh
 
 # Runtime processes do not need root. Ownership is explicit because Railway,
 # the API, migrations, PDF rendering, and both arq workers share this image.
-RUN useradd --create-home --uid 10001 specforge \
-    && chown -R specforge:specforge /app
-USER specforge
+RUN useradd --create-home --uid 10001 thought2build \
+    && chown -R thought2build:thought2build /app
+USER thought2build
 
 EXPOSE 8000
 

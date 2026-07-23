@@ -117,9 +117,9 @@ the load-bearing case for P2.
 | 11 | Both decks generated **without error** on the configured provider(s) | — | ☐ |
 
 **Observability to sanity-check during QA** (Prometheus `/metrics`):
-- `specforge_storyboard_escalations_total` — should stay near its baseline; a spike
+- `thought2build_storyboard_escalations_total` — should stay near its baseline; a spike
   means the cheap tier keeps failing the quality gate.
-- `specforge_storyboard_truncation_retries_total` — a nonzero-but-small value is
+- `thought2build_storyboard_truncation_retries_total` — a nonzero-but-small value is
   healthy (the doubling repair firing occasionally); a large value means the base
   budget is too tight.
 

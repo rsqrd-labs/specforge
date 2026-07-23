@@ -30,7 +30,7 @@ def _valid_production(**overrides: object):
         "environment": "production",
         "allowed_hosts": "app.example.com",
         "metrics_token": "metrics-token",
-        "frontend_url": "https://app.specforge.dev",
+        "frontend_url": "https://app.thought2build.com",
         "jwt_private_key": _FAKE_PEM,
         "encryption_master_key": "a-real-non-ci-encryption-key",
         "langfuse_secret_key": "",
@@ -68,7 +68,7 @@ def test_prod_guard_passes_when_site_url_unset() -> None:
 
 
 def test_prod_guard_passes_on_https_site_url() -> None:
-    patches = _valid_production(site_url="https://specforge.dev")
+    patches = _valid_production(site_url="https://thought2build.com")
     _apply(patches)
     try:
         config.validate_production_settings()  # must not raise
@@ -79,7 +79,7 @@ def test_prod_guard_passes_on_https_site_url() -> None:
 def test_prod_guard_fails_on_http_site_url() -> None:
     """A configured-but-plaintext SITE_URL fails startup, and the error names
     SITE_URL (not some unrelated check)."""
-    patches = _valid_production(site_url="http://specforge.dev")
+    patches = _valid_production(site_url="http://thought2build.com")
     _apply(patches)
     try:
         with pytest.raises(RuntimeError) as exc:

@@ -27,7 +27,7 @@ describe("StoryboardDownloadMenu", () => {
     render(
       <StoryboardDownloadMenu
         mode="owner"
-        title="SpecForge Launch"
+        title="Thought2Build Launch"
         storyboardId="storyboard-1"
       />,
     )
@@ -48,7 +48,7 @@ describe("StoryboardDownloadMenu", () => {
     const { rerender } = render(
       <StoryboardDownloadMenu
         mode="public"
-        title="SpecForge Launch"
+        title="Thought2Build Launch"
         slug="public123"
         permissions={DEFAULT_TEST_PERMISSIONS}
         downloads={["pdf", "notes", "demo-script", "appendix"]}
@@ -66,7 +66,7 @@ describe("StoryboardDownloadMenu", () => {
     rerender(
       <StoryboardDownloadMenu
         mode="public"
-        title="SpecForge Launch"
+        title="Thought2Build Launch"
         slug="public123"
         permissions={{
           ...DEFAULT_TEST_PERMISSIONS,

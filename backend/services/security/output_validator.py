@@ -5,7 +5,7 @@ from dataclasses import dataclass
 
 _LEAK_PATTERNS: list[re.Pattern] = [
     re.compile(r"ASDD_METHODOLOGY_OVERVIEW", re.I),
-    re.compile(r"You are SpecForge", re.I),
+    re.compile(r"You are Thought2Build", re.I),
     re.compile(r"ASDD \(AI-Spec-Driven Development\)", re.I),
     re.compile(r"Output format requirements:", re.I),
     re.compile(r"Non-negotiable security and privacy rules:", re.I),

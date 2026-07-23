@@ -294,9 +294,9 @@ fraction of real inputs exceed `THRESHOLD` — i.e. how often compression will e
 > length, before the content checks. **Instruments are Histograms, not gauges** — a gauge
 > holds only the last value and cannot express a distribution; precedent is
 > `BRAVE_CONTEXT_CHARS`. Two were added (`services/observability.py`):
-> `specforge_problem_statement_tokens{provider}` (emitted in the spec branch *before* the
+> `thought2build_problem_statement_tokens{provider}` (emitted in the spec branch *before* the
 > generation-cache check, so cache hits count) and
-> `specforge_assembled_prompt_tokens{provider,stage_type}` (emitted on cache-miss after
+> `thought2build_assembled_prompt_tokens{provider,stage_type}` (emitted on cache-miss after
 > `build_prompt`); both reuse `estimate_tokens` (no new tokenizer). The analysis script is
 > `scripts/analyze_problem_statement_sizes.py`: problem-statement sizes come from
 > `workspaces` (the ledger lacks the statement-only size; `octet_length` matches
@@ -340,7 +340,7 @@ yet "meaning-preserving" for prose.**
 > (2) the ladder always terminates `est_tokens ≤ budget` for any input up to
 > `INPUT_HARD_CAP` (the fail-open path *also* truncates — never raw); (3) Rung 1 never
 > drops a normative line and never touches fenced code/tables. Telemetry:
-> `specforge_problem_compression_rung_total{rung}` (1/3/error; Rung-0 no-ops are not
+> `thought2build_problem_compression_rung_total{rung}` (1/3/error; Rung-0 no-ops are not
 > counted). Tests: `tests/test_problem_compressor.py` (unit), the offline golden
 > corpus `docs/evals/golden_prompts/problem_compression_golden.json` consumed by
 > `tests/test_problem_compression_golden.py`, and flag-on/off integration assertions
@@ -383,7 +383,7 @@ in `docs/evals/ROUTE_PROMOTION.md`.
 > Redis cache, whose key now carries the mode (`a1`/`a0`) so flipping the sub-gate never
 > cross-serves a deterministic vs. abstractive value; a *degraded* result (abstractive
 > requested, fell to the floor) is cached only 5 min so a transient judge outage
-> self-heals. Telemetry: `specforge_problem_compression_rung_total{rung="2"}`. Gate &
+> self-heals. Telemetry: `thought2build_problem_compression_rung_total{rung="2"}`. Gate &
 > tests: the deterministic normative-retention invariant is the automated CI gate
 > (`scripts/run_problem_compression_eval.py` dry-run over
 > `golden_prompts/problem_compression_rung2_golden.json`, pinned by

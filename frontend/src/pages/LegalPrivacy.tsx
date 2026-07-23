@@ -26,7 +26,7 @@ import {
 const PRIVACY_MARKDOWN = `
 **Last updated: ${LEGAL_LAST_UPDATED}**
 
-This Privacy Policy explains what personal data SpecForge collects, how it is
+This Privacy Policy explains what personal data Thought2Build collects, how it is
 used, and with whom it is shared. ${LEGAL_ENTITY_DESCRIPTION}
 
 ## 1. Information We Collect
@@ -49,7 +49,7 @@ Information With**, below).
 
 ## 2. How We Use Your Information
 
-We use this information to operate SpecForge's generation pipeline, process
+We use this information to operate Thought2Build's generation pipeline, process
 credit purchases, synchronize content with GitHub when connected, maintain
 the security and reliability of the Service, and respond to your inquiries.
 
@@ -77,7 +77,7 @@ the Service, with the following categories of recipients:
 
 - **AI model providers.** To generate the artifacts you request, we transmit
   your idea, clarification answers, and prior stage content to the AI
-  providers selected by SpecForge — Anthropic, OpenAI, or Google — as context
+  providers selected by Thought2Build — Anthropic, OpenAI, or Google — as context
   for generation. Provider selection is an internal service operation.
 - **Payment processors.** To process credit purchases, we share your email
   address, and no other billing information, with our payment processor.
@@ -144,7 +144,7 @@ You may, at any time:
 
 ## 9. Children's Privacy
 
-SpecForge is not directed at, and is not intended for use by, individuals
+Thought2Build is not directed at, and is not intended for use by, individuals
 under 18 years of age. We do not knowingly collect personal data from anyone
 under 18.
 
@@ -176,9 +176,9 @@ above, contact us at ${LEGAL_CONTACT_EMAIL}.
 
 export default function LegalPrivacy() {
   useEffect(() => {
-    document.title = "Privacy Policy — SpecForge"
+    document.title = "Privacy Policy — Thought2Build"
     return () => {
-      document.title = "SpecForge"
+      document.title = "Thought2Build"
     }
   }, [])
 
@@ -204,7 +204,7 @@ export default function LegalPrivacy() {
           </Link>
           {" · "}
           <Link to="/" className="public-view-footer-link">
-            ← Back to SpecForge
+            ← Back to Thought2Build
           </Link>
         </p>
       </footer>

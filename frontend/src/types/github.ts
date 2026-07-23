@@ -194,7 +194,7 @@ export type IncrementIdeaSource = "user" | "github"
 export type IncrementIdeaStatus = "open" | "planned" | "done" | "dismissed"
 
 /** A lightweight backlog item — a feature captured mid-build, batched into an
- *  increment when ready (mirrors backend `IdeaRead`). May originate in SpecForge
+ *  increment when ready (mirrors backend `IdeaRead`). May originate in Thought2Build
  *  (`source: "user"`) or flow back from a GitHub issue labelled
  *  `idea`/`enhancement` (`source: "github"`, carrying its `external_ref`). */
 export interface IncrementIdea {

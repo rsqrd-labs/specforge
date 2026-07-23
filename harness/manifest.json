@@ -1,8 +1,8 @@
 {
-  "name": "specforge-v1-harness",
+  "name": "thought2build-v1-harness",
   "version": "1.0.0",
   "pipeline_order": ["spec", "plan", "harness", "tasks"],
-  "purpose": "Executable red/green contract for building SpecForge V1 with agentic coding tasks.",
+  "purpose": "Executable red/green contract for building Thought2Build V1 with agentic coding tasks.",
   "commands": {
     "backend": "cd backend && uv run pytest ../harness/tests/backend",
     "frontend": "cd frontend && pnpm vitest run --root .. harness/tests/frontend",
@@ -87,7 +87,7 @@
     },
     {
       "id": "e2e-smoke",
-      "path": "harness/tests/e2e/specforge-smoke.spec.ts",
+      "path": "harness/tests/e2e/thought2build-smoke.spec.ts",
       "proves": "The core workspace pipeline can be completed through the browser once services are running."
     }
   ],

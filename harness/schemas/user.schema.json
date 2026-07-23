@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://specforge.local/schemas/user.schema.json",
+  "$id": "https://thought2build.local/schemas/user.schema.json",
   "title": "User",
   "type": "object",
   "required": ["id", "email", "google_id", "name", "avatar_url", "created_at", "credit_balance"],

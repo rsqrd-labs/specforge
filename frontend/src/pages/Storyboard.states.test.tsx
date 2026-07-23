@@ -114,7 +114,7 @@ describe("Storyboard owner states", () => {
   beforeEach(() => {
     api.getStoryboard.mockReset()
     api.getApiErrorMessage.mockClear()
-    document.title = "SpecForge"
+    document.title = "Thought2Build"
   })
 
   afterEach(() => {
@@ -150,7 +150,7 @@ describe("Storyboard owner states", () => {
     api.getStoryboard.mockResolvedValue(storyboard())
     renderPage()
     expect(await screen.findByRole("button", { name: "Present deck" })).toBeInTheDocument()
-    expect(document.title).toBe("Launch Storyboard — SpecForge Storyboard")
+    expect(document.title).toBe("Launch Storyboard — Thought2Build Storyboard")
 
     fireEvent.click(screen.getByRole("button", { name: "Toggle downloads" }))
     expect(screen.getByText("Download menu")).toBeInTheDocument()
@@ -202,6 +202,6 @@ describe("Storyboard owner states", () => {
     const view = renderPage()
     view.unmount()
     await act(async () => resolve(storyboard()))
-    expect(document.title).toBe("SpecForge")
+    expect(document.title).toBe("Thought2Build")
   })
 })

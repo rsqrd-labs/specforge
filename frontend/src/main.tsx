@@ -14,6 +14,6 @@ if (import.meta.env.VITE_SENTRY_DSN) {
 
 const root = document.getElementById("root")
 if (!root) {
-  throw new Error("SpecForge root element is missing")
+  throw new Error("Thought2Build root element is missing")
 }
 ReactDOM.createRoot(root).render(<App />)

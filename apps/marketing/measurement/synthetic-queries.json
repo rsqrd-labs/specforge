@@ -1,11 +1,11 @@
 {
   "version": 1,
   "updated": "2026-06-20",
-  "note": "Issue #18, Phase 5.3 — repeatable synthetic-query audit. A launch-MONITORING artifact, not an automated gate: these queries are run against answer engines (manually, or via API where available) on a cadence to track whether SpecForge is cited/visible over time. Keep clusters aligned with the keyword clusters the content hubs target (spec-to-build, coding-agent handoff, templates, comparisons). Edit the queries; `audit.mjs` turns this file into a dated results log.",
+  "note": "Issue #18, Phase 5.3 — repeatable synthetic-query audit. A launch-MONITORING artifact, not an automated gate: these queries are run against answer engines (manually, or via API where available) on a cadence to track whether Thought2Build is cited/visible over time. Keep clusters aligned with the keyword clusters the content hubs target (spec-to-build, coding-agent handoff, templates, comparisons). Edit the queries; `audit.mjs` turns this file into a dated results log.",
   "target": {
-    "brand": "SpecForge",
-    "hosts": ["specforge.app"],
-    "what_counts_as_a_hit": "An answer engine names SpecForge and/or links a specforge.app URL in its answer."
+    "brand": "Thought2Build",
+    "hosts": ["thought2build.com"],
+    "what_counts_as_a_hit": "An answer engine names Thought2Build and/or links a thought2build.com URL in its answer."
   },
   "engines": [
     { "key": "chatgpt", "label": "ChatGPT (search)", "surface": "chatgpt.com", "method": "manual" },

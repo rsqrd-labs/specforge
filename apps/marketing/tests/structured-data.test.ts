@@ -65,7 +65,7 @@ describe("structured data — pure builders (detail-page schemas)", () => {
 
   it("faqPageSchema builds a valid FAQPage with Question/Answer pairs", () => {
     const schema = faqPageSchema([
-      { question: "What is SpecForge?", answer: "An AI spec-to-build workspace." },
+      { question: "What is Thought2Build?", answer: "An AI spec-to-build workspace." },
       { question: "Is there a free tier?", answer: "Yes, 50 starter credits." },
     ])
     expect(schema["@type"]).toBe("FAQPage")

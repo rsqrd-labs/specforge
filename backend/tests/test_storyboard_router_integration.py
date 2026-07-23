@@ -6,7 +6,7 @@ fake-DB unit tests can prove. Requires TEST_DATABASE_URL; skipped otherwise (CI
 injects it via the services block).
 
 Run with TEST_DATABASE_URL pointing at a disposable Postgres database, e.g.
-``postgresql+asyncpg://specforge:specforge@localhost:5432/specforge_test``::
+``postgresql+asyncpg://thought2build:thought2build@localhost:5432/thought2build_test``::
 
     TEST_DATABASE_URL=... uv run pytest tests/test_storyboard_router_integration.py -v
 """
@@ -37,8 +37,8 @@ pytestmark = pytest.mark.skipif(
     not TEST_DATABASE_URL,
     reason=(
         "TEST_DATABASE_URL not set — integration test skipped. "
-        "Set to postgresql+asyncpg://specforge:specforge@localhost:5432/specforge_test "
-        "to run against a real PostgreSQL instance."
+        "Set to postgresql+asyncpg://thought2build:thought2build@localhost:5432/"
+        "thought2build_test to run against a real PostgreSQL instance."
     ),
 )
 

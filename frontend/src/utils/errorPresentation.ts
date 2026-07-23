@@ -103,7 +103,7 @@ export function actionAlertFromStreamError(
       return actionAlertFromMessage({
         title: "Generation is busy",
         message:
-          "SpecForge is receiving too many generation requests right now. Wait a moment, then try again.",
+          "Thought2Build is receiving too many generation requests right now. Wait a moment, then try again.",
         recovery: "You do not need to change your input.",
         source: "Generation",
         primaryAction: options.primaryAction,
@@ -157,7 +157,7 @@ export function actionAlertFromStreamError(
     case "security_check_failed":
       return actionAlertFromMessage({
         title: "Generation stopped by safety checks",
-        message: "The generated output did not pass SpecForge safety checks.",
+        message: "The generated output did not pass Thought2Build safety checks.",
         recovery: "Regenerate the stage or adjust the input before trying again.",
         source: "Generation",
         primaryAction: options.primaryAction,
@@ -233,7 +233,7 @@ export function billingAlert(
   if (kind === "payment-error") {
     return actionAlertFromMessage({
       title: "Payment status could not be verified",
-      message: "SpecForge could not confirm the checkout status right now.",
+      message: "Thought2Build could not confirm the checkout status right now.",
       recovery: "Refresh Billing. If credits do not appear, contact support with your checkout reference.",
       source: "Billing",
       primaryAction: options.primaryAction,
@@ -244,7 +244,7 @@ export function billingAlert(
 
   return actionAlertFromMessage({
     title: "Billing could not load",
-    message: "SpecForge could not fetch your balance, package, or purchase history.",
+    message: "Thought2Build could not fetch your balance, package, or purchase history.",
     recovery: "Try again. Your existing credits and purchases are not changed by this display error.",
     source: "Billing",
     primaryAction: options.primaryAction,
@@ -261,8 +261,8 @@ export function githubConnectionAlert(
     return actionAlertFromMessage({
       title: "GitHub App is not configured",
       message:
-        "This environment is missing the SpecForge GitHub App configuration.",
-      recovery: "Ask an admin to enable the SpecForge GitHub App, then try again.",
+        "This environment is missing the Thought2Build GitHub App configuration.",
+      recovery: "Ask an admin to enable the Thought2Build GitHub App, then try again.",
       source: "GitHub",
       primaryAction: options.primaryAction,
       secondaryAction: options.secondaryAction,
@@ -273,7 +273,7 @@ export function githubConnectionAlert(
   if (kind === "install") {
     return actionAlertFromMessage({
       title: "GitHub could not open",
-      message: "SpecForge could not open the GitHub App installation flow.",
+      message: "Thought2Build could not open the GitHub App installation flow.",
       recovery: "Try again. Your workspaces are safe.",
       source: "GitHub",
       primaryAction: options.primaryAction,
@@ -285,7 +285,7 @@ export function githubConnectionAlert(
   if (kind === "disconnect") {
     return actionAlertFromMessage({
       title: "GitHub disconnect failed",
-      message: "SpecForge could not remove this GitHub installation.",
+      message: "Thought2Build could not remove this GitHub installation.",
       recovery: "Try again, or manage the installation directly on GitHub.",
       source: "GitHub",
       primaryAction: options.primaryAction,
@@ -320,7 +320,7 @@ export function authCallbackAlert(
   if (reason === "missing-code") {
     return actionAlertFromMessage({
       title: "Google did not return a sign-in code",
-      message: "SpecForge could not complete sign-in because the callback was incomplete.",
+      message: "Thought2Build could not complete sign-in because the callback was incomplete.",
       recovery: "Start sign-in again from the home page.",
       source: "Sign-in",
     })
@@ -328,7 +328,7 @@ export function authCallbackAlert(
 
   return actionAlertFromMessage({
     title: "Google sign-in failed",
-    message: "SpecForge could not exchange the Google response for a session.",
+    message: "Thought2Build could not exchange the Google response for a session.",
     recovery: "Check the OAuth configuration if this keeps happening.",
     source: "Sign-in",
   })

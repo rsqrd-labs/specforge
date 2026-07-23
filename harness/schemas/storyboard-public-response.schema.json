@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://specforge.local/schemas/storyboard-public-response.schema.json",
+  "$id": "https://thought2build.local/schemas/storyboard-public-response.schema.json",
   "title": "StoryboardPublicResponse",
   "description": "Allow-list response contract for public Storyboard launch/deck pages at GET /storyboards/public/{slug}. Anything not listed here is private and must not appear in unauthenticated responses.",
   "type": "object",

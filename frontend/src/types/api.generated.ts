@@ -207,7 +207,7 @@ export interface paths {
          *        ``checkout_nonce``; persist only ``sha256(checkout_nonce)``.
          *     2. **Commit** the ``billing_checkout_attempts`` row (``status='created'``)
          *        snapshotting the **active provider's** ``credits/price_cents/currency/
-         *        validity_days`` from config — SpecForge is the authority for the attempt
+         *        validity_days`` from config — Thought2Build is the authority for the attempt
          *        before any provider call.
          *     3. Dispatch to the active provider (D6): Lemon ``create_checkout`` or
          *        Razorpay ``create_payment_link`` (the charged amount is the attempt's
@@ -2587,7 +2587,7 @@ export interface components {
          * InstallationOption
          * @description One installation a user may target when exporting.
          *
-         *     ``id`` is the SpecForge ``github_installations`` row id and is what
+         *     ``id`` is the Thought2Build ``github_installations`` row id and is what
          *     :class:`GitHubExportRequest` references; ``installation_id`` is GitHub's
          *     numeric id, exposed for display/debugging only.
          */

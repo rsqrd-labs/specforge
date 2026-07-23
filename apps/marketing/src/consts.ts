@@ -1,5 +1,5 @@
 // Shared marketing-zone constants. Single source of truth for site identity,
-// canonical base, the OAuth entry point, and the standardized SpecForge entity
+// canonical base, the OAuth entry point, and the standardized Thought2Build entity
 // description used across SEO/GEO surfaces (issue #18).
 
 /** Canonical origin for the marketing zone. No trailing slash. */
@@ -19,19 +19,19 @@ export const API_URL = (
 /** Where the Google sign-in CTA points. */
 export const SIGN_IN_URL = `${API_URL}/auth/google`
 
-export const SITE_NAME = "SpecForge"
+export const SITE_NAME = "Thought2Build"
 
 /**
  * Standardized entity language (issue #18, Phase 4). Use this one snippet
  * everywhere the product is defined so answer engines see consistent framing.
  */
 export const ENTITY_DESCRIPTION =
-  "SpecForge is an AI spec-to-build workspace that turns rough product ideas into structured SPEC, PLAN, HARNESS, and TASKS artifacts."
+  "Thought2Build is an AI spec-to-build workspace that turns rough product ideas into structured SPEC, PLAN, HARNESS, and TASKS artifacts."
 
 /**
- * Public profiles that verify the SpecForge entity (schema.org `sameAs` on the
+ * Public profiles that verify the Thought2Build entity (schema.org `sameAs` on the
  * Organization node — issue #18, GEO). Answer engines use these to disambiguate
- * "SpecForge" from other uses of the name and to ground the entity, so every URL
+ * "Thought2Build" from other uses of the name and to ground the entity, so every URL
  * MUST be a real, live profile the org controls — a dead or wrong link is worse
  * than none. Left empty, no `sameAs` is emitted (see organizationSchema()).
  *
@@ -75,7 +75,7 @@ export const CONTENT_HUBS: ReadonlyArray<{
   {
     label: "Comparisons",
     path: "/compare",
-    blurb: "How SpecForge compares to other spec, PRD, and planning tools.",
+    blurb: "How Thought2Build compares to other spec, PRD, and planning tools.",
   },
   {
     label: "Demos",

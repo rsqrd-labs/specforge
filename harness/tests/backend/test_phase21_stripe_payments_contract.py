@@ -62,7 +62,7 @@ Design invariants enforced here:
   * _expire_user_packs uses SELECT FOR UPDATE on both user row and pack rows.
   * /billing/webhook is in CSRF _EXEMPT_PATHS and rate limit _BYPASS_PATHS.
   * sk_live_*/sk_test_* regex and whsec_* regex in _SECRET_PATTERNS.
-  * 10 specforge_billing_* Prometheus counters defined.
+  * 10 thought2build_billing_* Prometheus counters defined.
   * billing router registered in main.py.
   * No email field used in webhook user resolution.
 """
@@ -1252,49 +1252,49 @@ def test_t236_stripe_secret_patterns_removed_by_t308() -> None:
 
 
 def test_t236_billing_checkout_created_counter_defined() -> None:
-    """T-236 — specforge_billing_checkout_created_total Counter must be defined."""
+    """T-236 — thought2build_billing_checkout_created_total Counter must be defined."""
     source = read_backend_file("services", "observability.py")
-    assert "specforge_billing_checkout_created_total" in source, (
+    assert "thought2build_billing_checkout_created_total" in source, (
         "services/observability.py must define the Prometheus Counter "
-        "'specforge_billing_checkout_created_total'.  This tracks the number of "
+        "'thought2build_billing_checkout_created_total'.  This tracks the number of "
         "Stripe checkout sessions created (top-of-funnel billing metric).  T-236."
     )
 
 
 def test_t236_billing_checkout_completed_counter_defined() -> None:
-    """T-236 — specforge_billing_checkout_completed_total Counter must be defined."""
+    """T-236 — thought2build_billing_checkout_completed_total Counter must be defined."""
     source = read_backend_file("services", "observability.py")
-    assert "specforge_billing_checkout_completed_total" in source, (
-        "services/observability.py must define 'specforge_billing_checkout_completed_total'.  "
+    assert "thought2build_billing_checkout_completed_total" in source, (
+        "services/observability.py must define 'thought2build_billing_checkout_completed_total'.  "
         "This tracks successful webhook receipts.  Divergence between created and "
         "completed indicates failed webhooks or abandoned checkouts.  T-236."
     )
 
 
 def test_t236_billing_credits_granted_counter_defined() -> None:
-    """T-236 — specforge_billing_credits_granted_total Counter must be defined."""
+    """T-236 — thought2build_billing_credits_granted_total Counter must be defined."""
     source = read_backend_file("services", "observability.py")
-    assert "specforge_billing_credits_granted_total" in source, (
-        "services/observability.py must define 'specforge_billing_credits_granted_total'.  "
+    assert "thought2build_billing_credits_granted_total" in source, (
+        "services/observability.py must define 'thought2build_billing_credits_granted_total'.  "
         "T-236."
     )
 
 
 def test_t236_billing_credits_expired_counter_defined() -> None:
-    """T-236 — specforge_billing_credits_expired_total Counter must be defined."""
+    """T-236 — thought2build_billing_credits_expired_total Counter must be defined."""
     source = read_backend_file("services", "observability.py")
-    assert "specforge_billing_credits_expired_total" in source, (
-        "services/observability.py must define 'specforge_billing_credits_expired_total'.  "
+    assert "thought2build_billing_credits_expired_total" in source, (
+        "services/observability.py must define 'thought2build_billing_credits_expired_total'.  "
         "This tracks the waste metric (credits bought but expired unused).  "
         "Alert if this exceeds 20% of credits granted.  T-236."
     )
 
 
 def test_t236_billing_credits_consumed_counter_defined() -> None:
-    """T-236 — specforge_billing_credits_consumed_total Counter must be defined."""
+    """T-236 — thought2build_billing_credits_consumed_total Counter must be defined."""
     source = read_backend_file("services", "observability.py")
-    assert "specforge_billing_credits_consumed_total" in source, (
-        "services/observability.py must define 'specforge_billing_credits_consumed_total'.  "
+    assert "thought2build_billing_credits_consumed_total" in source, (
+        "services/observability.py must define 'thought2build_billing_credits_consumed_total'.  "
         "T-236."
     )
 
@@ -1302,37 +1302,37 @@ def test_t236_billing_credits_consumed_counter_defined() -> None:
 def test_t236_billing_pack_disputed_counter_defined() -> None:
     """T-236 → SUPERSEDED by Phase 22 (T-304): pack_disputed_total is RETIRED.
 
-    The Phase-18 ``specforge_billing_pack_disputed_total`` is folded into the
-    provider-neutral ``specforge_billing_credits_revoked_total{provider,reason}``
+    The Phase-18 ``thought2build_billing_pack_disputed_total`` is folded into the
+    provider-neutral ``thought2build_billing_credits_revoked_total{provider,reason}``
     (a dispute is ``reason='disputed'``) per Plan §25.6 / tasks.md T-304. The
     high-priority dispute signal is preserved under the successor counter, so this
     contract now asserts the fold rather than the retired name.
     """
     source = read_backend_file("services", "observability.py")
-    assert "specforge_billing_pack_disputed_total" not in source, (
-        "specforge_billing_pack_disputed_total is retired in Phase 22 (T-304) — it "
+    assert "thought2build_billing_pack_disputed_total" not in source, (
+        "thought2build_billing_pack_disputed_total is retired in Phase 22 (T-304) — it "
         "must NOT remain defined (no dangling refs)."
     )
-    assert "specforge_billing_credits_revoked_total" in source, (
+    assert "thought2build_billing_credits_revoked_total" in source, (
         "Dispute reversals must be counted by the provider-neutral successor "
-        "specforge_billing_credits_revoked_total{provider,reason='disputed'}. T-304."
+        "thought2build_billing_credits_revoked_total{provider,reason='disputed'}. T-304."
     )
 
 
 def test_t236_billing_webhook_received_counter_defined() -> None:
-    """T-236 — specforge_billing_webhook_received_total Counter must be defined."""
+    """T-236 — thought2build_billing_webhook_received_total Counter must be defined."""
     source = read_backend_file("services", "observability.py")
-    assert "specforge_billing_webhook_received_total" in source, (
-        "services/observability.py must define 'specforge_billing_webhook_received_total'.  "
+    assert "thought2build_billing_webhook_received_total" in source, (
+        "services/observability.py must define 'thought2build_billing_webhook_received_total'.  "
         "T-236."
     )
 
 
 def test_t236_billing_webhook_duplicate_counter_defined() -> None:
-    """T-236 — specforge_billing_webhook_duplicate_total Counter must be defined."""
+    """T-236 — thought2build_billing_webhook_duplicate_total Counter must be defined."""
     source = read_backend_file("services", "observability.py")
-    assert "specforge_billing_webhook_duplicate_total" in source, (
-        "services/observability.py must define 'specforge_billing_webhook_duplicate_total'.  "
+    assert "thought2build_billing_webhook_duplicate_total" in source, (
+        "services/observability.py must define 'thought2build_billing_webhook_duplicate_total'.  "
         "High duplicate rates indicate Stripe retrying events — a signal that "
         "the webhook endpoint may be returning non-2xx responses intermittently.  "
         "T-236."
@@ -1340,20 +1340,20 @@ def test_t236_billing_webhook_duplicate_counter_defined() -> None:
 
 
 def test_t236_billing_webhook_error_counter_defined() -> None:
-    """T-236 — specforge_billing_webhook_error_total Counter must be defined."""
+    """T-236 — thought2build_billing_webhook_error_total Counter must be defined."""
     source = read_backend_file("services", "observability.py")
-    assert "specforge_billing_webhook_error_total" in source, (
-        "services/observability.py must define 'specforge_billing_webhook_error_total'.  "
+    assert "thought2build_billing_webhook_error_total" in source, (
+        "services/observability.py must define 'thought2build_billing_webhook_error_total'.  "
         "Alert on any non-zero rate to catch webhook processing failures before "
         "they accumulate.  T-236."
     )
 
 
 def test_t236_billing_checkout_rate_limited_counter_defined() -> None:
-    """T-236 — specforge_billing_checkout_rate_limited_total Counter must be defined."""
+    """T-236 — thought2build_billing_checkout_rate_limited_total Counter must be defined."""
     source = read_backend_file("services", "observability.py")
-    assert "specforge_billing_checkout_rate_limited_total" in source, (
-        "services/observability.py must define 'specforge_billing_checkout_rate_limited_total'.  "
+    assert "thought2build_billing_checkout_rate_limited_total" in source, (
+        "services/observability.py must define 'thought2build_billing_checkout_rate_limited_total'.  "
         "This signals abuse attempts (scripts creating checkout sessions).  T-236."
     )
 
@@ -1371,16 +1371,16 @@ def test_t236_all_10_billing_counters_are_defined() -> None:
     source = read_backend_file("services", "observability.py")
 
     expected_counters = [
-        "specforge_billing_checkout_created_total",
-        "specforge_billing_checkout_completed_total",
-        "specforge_billing_credits_granted_total",
-        "specforge_billing_credits_expired_total",
-        "specforge_billing_credits_consumed_total",
-        "specforge_billing_credits_revoked_total",  # successor to pack_disputed
-        "specforge_billing_webhook_received_total",
-        "specforge_billing_webhook_duplicate_total",
-        "specforge_billing_webhook_error_total",
-        "specforge_billing_checkout_rate_limited_total",
+        "thought2build_billing_checkout_created_total",
+        "thought2build_billing_checkout_completed_total",
+        "thought2build_billing_credits_granted_total",
+        "thought2build_billing_credits_expired_total",
+        "thought2build_billing_credits_consumed_total",
+        "thought2build_billing_credits_revoked_total",  # successor to pack_disputed
+        "thought2build_billing_webhook_received_total",
+        "thought2build_billing_webhook_duplicate_total",
+        "thought2build_billing_webhook_error_total",
+        "thought2build_billing_checkout_rate_limited_total",
     ]
 
     missing = [c for c in expected_counters if c not in source]

@@ -1,4 +1,4 @@
-# SpecForge Scalability Audit & Remediation Plan
+# Thought2Build Scalability Audit & Remediation Plan
 
 **Date:** 2026-06-28
 **Scope:** End-to-end audit of the ability to serve **many concurrent users and their
@@ -405,7 +405,7 @@ Per the brief ("no feature breaks under load"), one explicit pass per feature:
 >   against a real PgBouncer (`deploy/pgbouncer/`, compose `pgbouncer` profile).
 >   Server-side guards (`statement_timeout`/idle) are stripped by the pooler as
 >   startup params, so in pooler mode they move to the Postgres ROLE (RUNBOOK §15).
->   SQLAlchemy **pool metrics** (`specforge_db_pool_total_open` etc.) are exported
+>   SQLAlchemy **pool metrics** (`thought2build_db_pool_total_open` etc.) are exported
 >   for the capacity gate. `max_connections` remains a must-confirm deploy fact.
 > - **F4** — worker count comes from `WEB_CONCURRENCY` via `gunicorn.conf.py`
 >   (default **2**, no footprint change until the pooler lands); **no** worker
@@ -454,7 +454,7 @@ Per the brief ("no feature breaks under load"), one explicit pass per feature:
 >   stopped double-bleaching its inputs (sanitise once, reuse). Deliberately
 >   inline: bounded-small inputs (≤1–4K schema caps) and arq-worker-side paths.
 >   **Validation:** a per-process sampler exports
->   `specforge_event_loop_lag_seconds` — the audit §8 "loop stays responsive"
+>   `thought2build_event_loop_lag_seconds` — the audit §8 "loop stays responsive"
 >   gate is now observable (alert on sustained p99 > 250ms).
 > - **Public-payload cache** — `GET /public/{slug}` read-through cache in Redis
 >   (`public_share_cache_ttl_seconds`, default 60s = the advertised

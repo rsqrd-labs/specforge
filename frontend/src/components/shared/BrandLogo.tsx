@@ -27,7 +27,7 @@ export function BrandLogo({
     <span
       className={classNames("brand-logo", `brand-logo--${size}`, className)}
       role={decorative ? undefined : "img"}
-      aria-label={decorative ? undefined : "SpecForge squirrel logo"}
+      aria-label={decorative ? undefined : "Thought2Build squirrel logo"}
       aria-hidden={decorative ? true : undefined}
     >
       <SquirrelMark className="brand-logo-image" />
@@ -43,14 +43,14 @@ export function BrandLockup({
     <span
       className={classNames("brand-lockup", `brand-lockup--${variant}`, className)}
       role="img"
-      aria-label="SpecForge"
+      aria-label="Thought2Build"
     >
       <BrandLogo
         size={variant === "default" ? "default" : "small"}
         decorative
       />
       <span className="brand-wordmark" aria-hidden="true">
-        SpecForge
+        Thought2Build
       </span>
     </span>
   )

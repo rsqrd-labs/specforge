@@ -540,13 +540,13 @@ def test_judge_call_metrics_exposed_on_endpoint() -> None:
             "/metrics", headers={"Authorization": "Bearer test-metrics-token"}
         )
     assert response.status_code == 200
-    assert "specforge_judge_calls_total" in response.text
+    assert "thought2build_judge_calls_total" in response.text
 
 
 # ---------------------------------------------------------------------------
 # F7 (scalability audit P2): event-loop lag sampler. The acceptance gate for
 # offloading inline CPU work is "the loop stays responsive under load"; this
-# sampler is what makes that observable (specforge_event_loop_lag_seconds).
+# sampler is what makes that observable (thought2build_event_loop_lag_seconds).
 # ---------------------------------------------------------------------------
 
 

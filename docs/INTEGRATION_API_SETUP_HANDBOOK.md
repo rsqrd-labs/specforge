@@ -1,13 +1,13 @@
 # Integration & API Setup Handbook
 
-This handbook walks you through everything needed to run SpecForge — both
+This handbook walks you through everything needed to run Thought2Build — both
 locally and live on the internet. No prior deployment experience is assumed.
 
 ---
 
-## How SpecForge is structured
+## How Thought2Build is structured
 
-SpecForge has three application pieces plus two data stores. The third piece —
+Thought2Build has three application pieces plus two data stores. The third piece —
 the **marketing zone** — is the SEO/GEO content site (issue #18); it is optional
 for running the product but required for organic and answer-engine acquisition.
 
@@ -17,19 +17,19 @@ User's browser
   | (lands on a marketing/content page, or opens the app, signs in, generates stages)
   v
 Marketing zone — Astro static site (SEO + GEO content)   [optional]
-  Hosted on Vercel, on the APEX domain  (e.g. https://specforge.app)
+  Hosted on Vercel, on the APEX domain  (e.g. https://thought2build.com)
   Source: apps/marketing/.  Content authored in Sanity (a hosted CMS).
   |
   | Vercel multi-zone "rewrites" forward app/artifact paths to the SPA below.
   | (/dashboard, /workspace/*, /settings, /billing, /auth/*, /p/*, /sb/*, /assets/*)
   v
 Frontend — React app, static files (the SPA)
-  Hosted on Vercel, on its OWN project/subdomain  (e.g. https://specforge-app.vercel.app)
+  Hosted on Vercel, on its OWN project/subdomain  (e.g. https://thought2build-app.vercel.app)
   |
   | API calls
   v
 Backend — FastAPI Python server
-  Hosted on Railway  (e.g. https://specforge-api.up.railway.app)
+  Hosted on Railway  (e.g. https://thought2build-api.up.railway.app)
   |
   +-- PostgreSQL  database, hosted on Railway
   +-- Redis       cache/sessions, hosted on Railway
@@ -58,7 +58,7 @@ log.
 **What is Railway?**
 Railway is a platform that runs your backend server and databases in the cloud.
 You give it your code and some configuration, and it gives you a public URL
-like `https://specforge-api.up.railway.app`. You do not manage any servers —
+like `https://thought2build-api.up.railway.app`. You do not manage any servers —
 Railway handles that. It also provides managed PostgreSQL and Redis databases,
 meaning you get a database URL without having to install or maintain the
 database software yourself.
@@ -67,7 +67,7 @@ database software yourself.
 Vercel is a platform that hosts frontend web apps. You run `pnpm build` to
 turn your React code into plain HTML, CSS, and JavaScript files, and Vercel
 serves those files from a global CDN. You get a public URL like
-`https://specforge.vercel.app`. No servers to manage.
+`https://thought2build.vercel.app`. No servers to manage.
 
 **What are environment variables?**
 Environment variables are configuration values that your app reads at runtime.
@@ -79,7 +79,7 @@ and secrets to a running service.
 **What is GitHub Actions?**
 GitHub Actions is an automation system built into GitHub. You define workflows
 as YAML files in `.github/workflows/` and GitHub runs them automatically in
-response to events — for example, every time you push code. SpecForge's
+response to events — for example, every time you push code. Thought2Build's
 workflow (`.github/workflows/ci.yml`) runs the test suite, lints the code, and
 then deploys the backend to Railway and the frontend to Vercel, all without
 you doing anything manually. You can watch it run in real time under the
@@ -150,7 +150,7 @@ setup needed.
 5. Click the PostgreSQL service, go to the **Connect** tab.
 6. Copy the **Private URL** — it looks like:
    `postgresql://postgres:PASSWORD@HOST.railway.internal:5432/railway`
-7. You will need to prefix this with `+asyncpg` for SpecForge. Change
+7. You will need to prefix this with `+asyncpg` for Thought2Build. Change
    `postgresql://` to `postgresql+asyncpg://`. The final value goes into the
    backend service's `DATABASE_URL` variable (covered in the Railway section
    below).
@@ -164,7 +164,7 @@ DATABASE_URL=postgresql+asyncpg://USER:PASSWORD@HOST:PORT/DB_NAME
 **Local Docker value** (set automatically by `docker-compose.yml`):
 
 ```env
-DATABASE_URL=postgresql+asyncpg://specforge:specforge@db:5432/specforge
+DATABASE_URL=postgresql+asyncpg://thought2build:thought2build@db:5432/thought2build
 ```
 
 Common errors:
@@ -221,7 +221,7 @@ Common errors:
 ### Google OAuth
 
 **What it is:** the "Sign in with Google" button. Google handles the password
-check and tells SpecForge who the user is. SpecForge never sees or stores
+check and tells Thought2Build who the user is. Thought2Build never sees or stores
 passwords.
 
 **How the flow works:**
@@ -230,19 +230,19 @@ passwords.
 2. They are redirected to Google's consent page.
 3. After approving, Google redirects back to `{FRONTEND_URL}/auth/callback`
    with a one-time code.
-4. The frontend sends that code to the SpecForge backend, which exchanges it
+4. The frontend sends that code to the Thought2Build backend, which exchanges it
    with Google for the user's identity.
-5. SpecForge issues its own login tokens and sets a session cookie.
+5. Thought2Build issues its own login tokens and sets a session cookie.
 
 **How to set up credentials:**
 
 1. Go to [Google Cloud Console](https://console.cloud.google.com/) and sign in
    with your Google account.
 2. Click the project selector at the top → **New Project**. Give it any name
-   (e.g. `specforge`).
+   (e.g. `thought2build`).
 3. In the left sidebar, go to **APIs & Services** → **OAuth consent screen**.
    - Choose **External** as the user type.
-   - Fill in the app name (e.g. `SpecForge`) and your email for the support
+   - Fill in the app name (e.g. `Thought2Build`) and your email for the support
      and developer contact fields.
    - Click through the remaining steps and save.
 4. Go to **APIs & Services** → **Credentials** → **Create Credentials** →
@@ -287,7 +287,7 @@ Common errors:
 
 ### LLM Providers
 
-SpecForge needs at least one LLM provider key to generate stages. You can
+Thought2Build needs at least one LLM provider key to generate stages. You can
 enable one or all three; users pick their provider in the UI.
 
 #### Anthropic (Claude)
@@ -346,7 +346,7 @@ auth endpoints and the frontend hides the export button.
    and sign in.
 2. Click **New OAuth App**.
 3. Fill in:
-   - **Application name**: `SpecForge` (or any name)
+   - **Application name**: `Thought2Build` (or any name)
    - **Homepage URL**: your Vercel URL (or `http://localhost:5173` for local)
    - **Authorization callback URL**: `{FRONTEND_URL}/auth/github/callback`
      — for local use `http://localhost:5173/auth/github/callback`
@@ -387,7 +387,7 @@ blank to disable checkout: `GET /billing/package` still returns the configured
 package, but `POST /billing/checkout` returns a safe `503` and the frontend
 surfaces a calm disabled state.
 
-Checkout is **attempt-first**: SpecForge commits a `billing_checkout_attempts`
+Checkout is **attempt-first**: Thought2Build commits a `billing_checkout_attempts`
 row (snapshotting credits/price/currency/validity) *before* calling Lemon, then
 returns a `checkout_ref` the frontend polls. The webhook proves the order back
 with a one-time `checkout_nonce` (only its `sha256` is ever stored).
@@ -404,7 +404,7 @@ with a one-time `checkout_nonce` (only its `sha256` is ever stored).
    Subscribe it to:
    - `order_created`
    - `order_refunded`
-   (Chargebacks/disputes surface to SpecForge through `order_refunded`/fraud
+   (Chargebacks/disputes surface to Thought2Build through `order_refunded`/fraud
    revocation inputs because Lemon is the Merchant of Record — confirm against
    Lemon's **current** webhook catalog before go-live and record the list in the
    release gate. Reconcile lane 2 backstops anything the catalog adds.)
@@ -487,7 +487,7 @@ nothing to configure — do not set any `STRIPE_*` variables.
 ### Sentry (optional — skip for first deploy)
 
 Sentry catches and reports errors from the running app. Useful once you have
-real users. Skip it on your first deployment — SpecForge works without it.
+real users. Skip it on your first deployment — Thought2Build works without it.
 
 If you want to set it up later:
 
@@ -569,7 +569,7 @@ when `ENVIRONMENT=production`.
 
 ## 3. Production Deployment
 
-This section walks you through putting SpecForge live on the internet for the
+This section walks you through putting Thought2Build live on the internet for the
 first time. Work through these steps in order.
 
 ### What you need before starting
@@ -588,7 +588,7 @@ Railway will host the FastAPI server, PostgreSQL, and Redis.
 **Create a project:**
 
 1. Log into [railway.app](https://railway.app).
-2. Click **New Project** → **Empty Project**. Name it `specforge`.
+2. Click **New Project** → **Empty Project**. Name it `thought2build`.
 
 **Add PostgreSQL:**
 
@@ -683,7 +683,7 @@ python3 -c "import secrets; print(secrets.token_urlsafe(32))"
 
 14. Once all variables are set, go to the backend service → **Settings** →
     **Networking** → **Generate Domain**. Railway gives you a public URL like
-    `https://specforge-backend-production.up.railway.app`. Copy it — you need
+    `https://thought2build-backend-production.up.railway.app`. Copy it — you need
     it for Vercel.
 
 15. Check the **Deployments** tab and confirm the backend started successfully.
@@ -712,11 +712,11 @@ Vercel will build and host the React frontend.
 
    | Variable | Value |
    | --- | --- |
-   | `VITE_API_URL` | Your Railway backend URL from step 1 (e.g. `https://specforge-backend-production.up.railway.app`) |
+   | `VITE_API_URL` | Your Railway backend URL from step 1 (e.g. `https://thought2build-backend-production.up.railway.app`) |
    | `VITE_SENTRY_DSN` | Leave blank unless you set up Sentry |
 
 6. Click **Deploy**. Vercel builds the frontend and gives you a URL like
-   `https://specforge-abc123.vercel.app`.
+   `https://thought2build-abc123.vercel.app`.
 
 7. Copy your Vercel URL. Go back to Railway and set `FRONTEND_URL` on the
    backend service to this URL (it must start with `https://`).
@@ -810,10 +810,10 @@ at the bottom of this document covers the most common issues.
 After each deploy you can run an automated check that hits the live app:
 
 ```bash
-SPECFORGE_API_URL=https://your-railway-url \
-SPECFORGE_ACCESS_TOKEN=<your access token — see below> \
-SPECFORGE_METRICS_TOKEN=<your METRICS_TOKEN value> \
-SPECFORGE_RUN_LLM_SMOKE=1 \
+THOUGHT2BUILD_API_URL=https://your-railway-url \
+THOUGHT2BUILD_ACCESS_TOKEN=<your access token — see below> \
+THOUGHT2BUILD_METRICS_TOKEN=<your METRICS_TOKEN value> \
+THOUGHT2BUILD_RUN_LLM_SMOKE=1 \
 python3 scripts/production_smoke.py
 ```
 
@@ -823,12 +823,12 @@ To get a temporary access token for the smoke test:
 2. Open browser DevTools → **Network** tab.
 3. Look for the request to `/auth/callback` on the backend.
 4. In the response JSON, copy the `access_token` value.
-5. Use it as `SPECFORGE_ACCESS_TOKEN` above. The token expires quickly so run
+5. Use it as `THOUGHT2BUILD_ACCESS_TOKEN` above. The token expires quickly so run
    the smoke test immediately after copying it.
 
 You can also run this from GitHub Actions via the **Production Smoke** workflow
-(`.github/workflows/production-smoke.yml`). Add `SPECFORGE_SMOKE_ACCESS_TOKEN`
-and `SPECFORGE_METRICS_TOKEN` as GitHub Secrets to enable it.
+(`.github/workflows/production-smoke.yml`). Add `THOUGHT2BUILD_SMOKE_ACCESS_TOKEN`
+and `THOUGHT2BUILD_METRICS_TOKEN` as GitHub Secrets to enable it.
 
 ---
 
@@ -846,7 +846,7 @@ cp frontend/.env.example frontend/.env
 Minimum `backend/.env` for local development:
 
 ```env
-DATABASE_URL=postgresql+asyncpg://specforge:specforge@localhost:5432/specforge
+DATABASE_URL=postgresql+asyncpg://thought2build:thought2build@localhost:5432/thought2build
 REDIS_URL=redis://localhost:6379/0
 
 JWT_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n"
@@ -1203,7 +1203,7 @@ This is a **second** Vercel project, separate from the SPA project you created i
 
    | Variable | Value |
    | --- | --- |
-   | `PUBLIC_SITE_URL` | The HTTPS **apex** origin this project serves, e.g. `https://specforge.app`. Drives canonical URLs, OG absolute URLs, and the sitemap base. |
+   | `PUBLIC_SITE_URL` | The HTTPS **apex** origin this project serves, e.g. `https://thought2build.com`. Drives canonical URLs, OG absolute URLs, and the sitemap base. |
    | `PUBLIC_API_URL` | Your Railway backend URL. The "Sign in with Google" CTA links to `${PUBLIC_API_URL}/auth/google`, mirroring the SPA. |
    | `PUBLIC_SANITY_PROJECT_ID` | Your Sanity Project ID. Leave blank to build homepage + hubs only (no detail pages). |
    | `PUBLIC_SANITY_DATASET` | `production` (or your dataset name). |
@@ -1218,7 +1218,7 @@ This is a **second** Vercel project, separate from the SPA project you created i
 ### Step C — Point the rewrites at the real SPA host
 
 `apps/marketing/vercel.json` ships with a **placeholder** SPA host
-(`https://specforge-app.vercel.app`) in every rewrite `destination`. Once the SPA
+(`https://thought2build-app.vercel.app`) in every rewrite `destination`. Once the SPA
 project's production domain is assigned, replace that placeholder with the real
 SPA host so the app/artifact paths resolve. (Until this is correct, `/dashboard`,
 `/p/*`, etc. on the apex domain will 404 or loop.)
@@ -1258,8 +1258,8 @@ For building the zone locally, copy `apps/marketing/.env.example` to
 `apps/marketing/.env`:
 
 ```env
-PUBLIC_SITE_URL=https://specforge.app
-PUBLIC_API_URL=https://api.specforge.app
+PUBLIC_SITE_URL=https://thought2build.com
+PUBLIC_API_URL=https://api.thought2build.com
 
 PUBLIC_SANITY_PROJECT_ID=your_project_id   # blank ⇒ homepage + hubs only
 PUBLIC_SANITY_DATASET=production

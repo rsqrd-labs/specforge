@@ -74,7 +74,7 @@ def _razorpay_settings(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         rzp_mod.settings,
         "razorpay_success_url",
-        "https://app.specforge.dev/billing",
+        "https://app.thought2build.com/billing",
         False,
     )
     monkeypatch.setattr(
@@ -156,10 +156,10 @@ async def test_create_payment_link_request_shape() -> None:
     assert body["accept_partial"] is False
     # reference_id is the attempt UUID (36 chars — Razorpay caps at 40, D9).
     assert body["reference_id"] == str(attempt.id)
-    assert body["description"] == "SpecForge — 200 credits"
+    assert body["description"] == "Thought2Build — 200 credits"
     # Email is UX prefill only; the signed notes block is the trusted channel.
     assert body["customer"] == {"email": "buyer@example.com"}
-    # SpecForge owns buyer communication.
+    # Thought2Build owns buyer communication.
     assert body["notify"] == {"sms": False, "email": False}
     assert body["reminder_enable"] is False
     # Link expiry rides the attempt TTL.
@@ -167,7 +167,7 @@ async def test_create_payment_link_request_shape() -> None:
     # Browser return carries the polling ref; Razorpay appends razorpay_* with &.
     assert (
         body["callback_url"]
-        == "https://app.specforge.dev/billing?checkout_ref=ref_abc123"
+        == "https://app.thought2build.com/billing?checkout_ref=ref_abc123"
     )
     assert body["callback_method"] == "get"
     # The seven allow-listed notes, all strings (Lemon custom-data parity).
@@ -508,7 +508,13 @@ async def test_failure_logs_never_carry_secrets(
                     )
 
     assert caplog.records, "expected failure log lines"
-    for secret in (_KEY_ID, _KEY_SECRET, "raw-nonce", "rzp.io", "app.specforge.dev"):
+    for secret in (
+        _KEY_ID,
+        _KEY_SECRET,
+        "raw-nonce",
+        "rzp.io",
+        "app.thought2build.com",
+    ):
         assert secret not in caplog.text
 
 

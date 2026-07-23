@@ -1,9 +1,9 @@
 {
-  "name": "specforge-studio",
+  "name": "thought2build-studio",
   "private": true,
   "version": "0.1.0",
   "packageManager": "pnpm@9.15.9",
-  "description": "Sanity Studio for the SpecForge marketing zone (issue #18, Phase 3). Standalone editor surface — deployed separately (sanity deploy), never embedded on the public marketing origin.",
+  "description": "Sanity Studio for the Thought2Build marketing zone (issue #18, Phase 3). Standalone editor surface — deployed separately (sanity deploy), never embedded on the public marketing origin.",
   "type": "module",
   "scripts": {
     "dev": "sanity dev",

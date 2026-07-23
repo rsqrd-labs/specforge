@@ -82,7 +82,7 @@ class IntegrationPush(Base):
         nullable=False,
         server_default=text("'files_to_default'"),
     )
-    # Set in pr_with_tests mode, e.g. specforge/inc-1.
+    # Set in pr_with_tests mode, e.g. thought2build/inc-1.
     branch_name: Mapped[str | None] = mapped_column(Text)
     pr_number: Mapped[int | None] = mapped_column(Integer)
     # The Tasks stage version that produced this push (drift detection).

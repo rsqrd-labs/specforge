@@ -1388,7 +1388,7 @@ async def _refund_without_pack(
     (b) the proven attempt has expired and 24h have elapsed since first receipt → give
         up as a ``processed`` audited no-op (no balance change).
     (c) no ownership proof → ``processed`` audited no-op ("could not link"); a forged or
-        unrelated order can never revoke SpecForge credits.
+        unrelated order can never revoke Thought2Build credits.
     """
     checkout_ref = custom.get("checkout_ref")
     nonce_hash = custom.get("checkout_nonce_hash_from_webhook")
@@ -1413,7 +1413,7 @@ async def _refund_without_pack(
         # (c) no proof — audited no-op, never touch unrelated credits.
         webhook.status = "processed"
         webhook.processed_at = _now()
-        webhook.last_error = "refund_could_not_link_to_specforge"
+        webhook.last_error = "refund_could_not_link_to_thought2build"
         await db.commit()
         logger.warning(
             "billing.order_refunded.unlinked",
@@ -1463,7 +1463,7 @@ async def _refund_without_pack(
 # an in-flight price change must not break or mis-price a purchase. Ownership is
 # proven ONLY by notes.checkout_ref + the stored nonce hash + notes.user_id — never
 # inferred from the payment id. The money authority is the PAYMENT entity (D10): the
-# link's amount is a value SpecForge set at creation, so it is corroboration only.
+# link's amount is a value Thought2Build set at creation, so it is corroboration only.
 # The normalized inbox payload uses the ``notes`` block (not Lemon's ``custom``) and
 # a top-level ``payment_id`` (the pay_… id → provider_order_id, D7).
 

@@ -96,7 +96,7 @@ that window or pair the flip with a generation-cache flush.
 
 ## Telemetry
 
-`specforge_problem_compression_rung_total{rung}` now counts `rung="2"` for a
+`thought2build_problem_compression_rung_total{rung}` now counts `rung="2"` for a
 successful abstractive pass. A spike in `rung="3"` while the sub-flag is on means
 the judge is failing open (outage, over-cap input, or no narrative room) — the
 artifact is still safe (normative-first floor), but it is not getting the

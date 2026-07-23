@@ -277,7 +277,7 @@ def _fence_nonce_key() -> bytes:
     global _FENCE_NONCE_KEY
     if _FENCE_NONCE_KEY is None:
         _FENCE_NONCE_KEY = hashlib.sha256(
-            f"specforge.untrusted-fence.v1:{settings.csrf_secret}".encode()
+            f"thought2build.untrusted-fence.v1:{settings.csrf_secret}".encode()
         ).digest()
     return _FENCE_NONCE_KEY
 

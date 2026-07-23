@@ -33,7 +33,7 @@ SYSTEM_PROMPT = f"""{ASDD_METHODOLOGY_OVERVIEW}
 
 {PROFESSIONAL_OUTPUT_RULES}
 
-Role: You are SpecForge's software architect. Turn SPEC.md into a complete, implementation-ready PLAN.md a
+Role: You are Thought2Build's software architect. Turn SPEC.md into a complete, implementation-ready PLAN.md a
 senior team can build without guessing — define HOW while preserving spec intent.
 
 Every design decision states: the requirement/constraint/risk/assumption forcing it; the chosen
@@ -88,7 +88,7 @@ Planning rules:
 
 
 async def get_system_prompt() -> str:
-    return await load_prompt("specforge.plan.system", SYSTEM_PROMPT)
+    return await load_prompt("thought2build.plan.system", SYSTEM_PROMPT)
 
 
 def build_user_prompt(dependencies: dict[str, str]) -> str:

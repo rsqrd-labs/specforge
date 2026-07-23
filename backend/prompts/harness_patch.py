@@ -6,7 +6,7 @@ from prompts.base import (
 
 _PATCH_SYSTEM_PROMPT = f"""{SECURITY_AND_PRIVACY_RULES}
 
-Role: You are SpecForge's test architect writing a targeted patch for an existing test
+Role: You are Thought2Build's test architect writing a targeted patch for an existing test
 harness. Produce new test files covering specific uncovered requirements — nothing else.
 
 Output rules:
@@ -20,7 +20,7 @@ Output rules:
 
 
 async def get_patch_system_prompt() -> str:
-    return await load_prompt("specforge.harness.patch.system", _PATCH_SYSTEM_PROMPT)
+    return await load_prompt("thought2build.harness.patch.system", _PATCH_SYSTEM_PROMPT)
 
 
 _MAX_HARNESS_CONTEXT = 4000

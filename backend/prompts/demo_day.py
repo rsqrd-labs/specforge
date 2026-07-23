@@ -127,7 +127,7 @@ def _demo_day_system_prompt(role_and_structure: str) -> str:
 {role_and_structure}"""
 
 
-_SPEC_ROLE = """Role: You are SpecForge's Demo Day spec architect. Produce a SPEC.md that defines
+_SPEC_ROLE = """Role: You are Thought2Build's Demo Day spec architect. Produce a SPEC.md that defines
 the single working prototype the user will build and demo in ~5 hours, plus the three
 rubric sections judges ask about. Narrow the scope to one happy path, but make that path
 unambiguous: name concrete behaviours, inputs, and observable outcomes. Stay
@@ -167,7 +167,7 @@ Required SPEC.md structure (every section mandatory, in this order):
   with a concrete one-line mitigation or decision owner — not generic project risks."""
 
 
-_PLAN_ROLE = """Role: You are SpecForge's Demo Day architect. Turn the Demo Day SPEC into an
+_PLAN_ROLE = """Role: You are Thought2Build's Demo Day architect. Turn the Demo Day SPEC into an
 implementation-ready PLAN.md a coding agent can build in ~5 hours WITHOUT guessing. The
 plan is narrow (one happy path) but must be deep: every interface, schema, file, and
 command the build needs is specified here, concretely. If a task would have to invent a
@@ -209,7 +209,7 @@ Required PLAN.md structure (every section mandatory, in this order):
   their concrete mitigations."""
 
 
-_HARNESS_ROLE = """Role: You are SpecForge's Demo Day test architect. Produce an executable HARNESS that
+_HARNESS_ROLE = """Role: You are Thought2Build's Demo Day test architect. Produce an executable HARNESS that
 is the FROZEN contract store and the test oracle. The end-to-end smoke test is the
 guarantee-bearing test — it must be unmockable, exercise the Success Demo journey, and be
 green from the first slice. Every `FR-NNN`/`AC-NNN` gets a named test; tests are
@@ -239,7 +239,7 @@ Required HARNESS structure (every section mandatory, in this order):
   elided bodies, no omitted files — if it is in the File Tree, its full content is here."""
 
 
-_TASKS_ROLE = """Role: You are SpecForge's Demo Day engineering lead. Produce a TASKS.md a coding agent
+_TASKS_ROLE = """Role: You are Thought2Build's Demo Day engineering lead. Produce a TASKS.md a coding agent
 executes one task at a time to reach a working prototype: walking skeleton first, the app
 runnable and the end-to-end smoke test GREEN after every task. Tasks are atomic,
 topologically ordered, and small — but each task's Steps must be concrete enough to
@@ -296,10 +296,10 @@ _STAGE_ROLES: dict[str, str] = {
 # fallback is the assembled prompt above. `_enforce_security_rules` (load_prompt)
 # guarantees the security rules survive a remote override.
 _REMOTE_PROMPT_NAMES: dict[str, str] = {
-    "spec": "specforge.spec.demo_day.system",
-    "plan": "specforge.plan.demo_day.system",
-    "harness": "specforge.harness.demo_day.system",
-    "tasks": "specforge.tasks.demo_day.system",
+    "spec": "thought2build.spec.demo_day.system",
+    "plan": "thought2build.plan.demo_day.system",
+    "harness": "thought2build.harness.demo_day.system",
+    "tasks": "thought2build.tasks.demo_day.system",
 }
 
 

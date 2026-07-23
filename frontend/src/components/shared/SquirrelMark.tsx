@@ -5,7 +5,7 @@ interface SquirrelMarkProps {
 }
 
 /**
- * The SpecForge squirrel as a self-hosted, dependency-free SVG. This is the
+ * The Thought2Build squirrel as a self-hosted, dependency-free SVG. This is the
  * single source of the mark's geometry: the product logo ({@link BrandLogo}) and
  * the loader ({@link BrandLoader}) both render it. The compositor-only animation
  * (tail flick, body bob, blink) lives in CSS on the `.squirrel` classes, so it

@@ -40,7 +40,7 @@ Do **not** write code from this doc until the open decisions in §11 are confirm
 
 **Demo Day mode** is a generation *profile* on top of the existing four-stage
 pipeline (Spec → Plan → Harness → Tasks). The user gives a problem statement, selects
-**Demo Day mode** (and their coding agent), and SpecForge produces a Spec/Plan/Harness/Tasks
+**Demo Day mode** (and their coding agent), and Thought2Build produces a Spec/Plan/Harness/Tasks
 package tuned so that the user can hand the package to their own coding agent
 (Claude Code / Codex), implement the tasks one by one, and arrive at a **working
 prototype** — with the architecture choices documented well enough to answer the
@@ -83,7 +83,7 @@ ships with the gaps named.
 
 It is also **anchored to consent**: "working" means the scope the user approved at the
 `HumanReviewGate` (including the explicit *Out of Scope* / "NOT in this build" list),
-never a scope SpecForge invented unilaterally.
+never a scope Thought2Build invented unilaterally.
 
 ### 2.2 The 5-hour budget (soft, calibration only)
 
@@ -679,7 +679,7 @@ These have defaults so implementation is not blocked; confirm them when convenie
 
 - Mid-flow mode switching (changing mode after stages exist).
 - Agents beyond Claude Code / Codex.
-- SpecForge *orchestrating* the coding agent (v1 is hand-off only — the user runs their
+- Thought2Build *orchestrating* the coding agent (v1 is hand-off only — the user runs their
   own agent).
 - A hard, blocking guarantee (the verifier is advisory by decision §3.1).
 - Certifying the time budget (it is advisory metadata by decision §2.2).

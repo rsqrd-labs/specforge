@@ -36,7 +36,7 @@ _WORKSPACE_ID = uuid4()
 _SPEC_MD = """# Product Spec
 
 ## Overview
-SpecForge turns an idea into a structured engineering spec. The product helps
+Thought2Build turns an idea into a structured engineering spec. The product helps
 teams move from a problem statement to a shippable plan.
 
 ## Requirements
@@ -143,7 +143,7 @@ def _workspace() -> Workspace:
     return Workspace(
         id=_WORKSPACE_ID,
         user_id=_USER_ID,
-        name="SpecForge",
+        name="Thought2Build",
         problem_statement="Build a spec generator. Contact me at owner@example.com.",
         provider="anthropic",
         model="claude-sonnet-4-6",
@@ -205,7 +205,7 @@ def test_bound_honors_custom_cap() -> None:
 def test_product_substance_sections_carry_larger_caps() -> None:
     # A long product Overview is kept up to the 2800-char product-substance cap,
     # not the 1200-char default the security/ops sections use (P3.1 rebalancing).
-    big_overview = "SpecForge overview sentence. " * 200  # ~5800 chars
+    big_overview = "Thought2Build overview sentence. " * 200  # ~5800 chars
     artifacts = dict(_ARTIFACTS)
     artifacts["spec"] = (
         f"# Spec\n\n## Overview\n{big_overview}\n\n## Requirements\n- R1 must do X\n"

@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://specforge.local/schemas/api-error.schema.json",
+  "$id": "https://thought2build.local/schemas/api-error.schema.json",
   "title": "ApiError",
   "type": "object",
   "required": ["error", "message", "request_id"],

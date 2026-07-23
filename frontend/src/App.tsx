@@ -46,7 +46,7 @@ const LegalPrivacy = lazy(() => import("./pages/LegalPrivacy"))
 // keep the prior blank fallback; with it on, every route shows the branded
 // loader instead of a flash of nothing.
 const routeFallback: ReactNode = featureFlags.brandedLoaders ? (
-  <BrandLoader variant="block" label="Loading SpecForge…" />
+  <BrandLoader variant="block" label="Loading Thought2Build…" />
 ) : null
 
 export default function App() {

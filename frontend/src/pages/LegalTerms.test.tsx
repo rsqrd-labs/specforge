@@ -68,7 +68,7 @@ describe("LegalTerms", () => {
 
   it("links back to the app root", () => {
     renderPage()
-    expect(screen.getByRole("link", { name: /back to specforge/i })).toHaveAttribute(
+    expect(screen.getByRole("link", { name: /back to thought2build/i })).toHaveAttribute(
       "href",
       "/",
     )

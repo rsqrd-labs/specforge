@@ -1,7 +1,7 @@
 import { defineType, defineField, defineArrayMember } from "sanity"
 
 // A structured comparison table (GEO answer-readiness — answer engines quote
-// "X vs Y" tables directly). One row per feature, with the SpecForge cell and
+// "X vs Y" tables directly). One row per feature, with the Thought2Build cell and
 // the alternative's cell. The alternative is named once at the table level.
 export const comparisonRow = defineType({
   name: "comparisonRow",
@@ -15,8 +15,8 @@ export const comparisonRow = defineType({
       validation: (rule) => rule.required(),
     }),
     defineField({
-      name: "specforge",
-      title: "SpecForge",
+      name: "thought2build",
+      title: "Thought2Build",
       type: "string",
       validation: (rule) => rule.required(),
     }),
@@ -28,7 +28,7 @@ export const comparisonRow = defineType({
     }),
   ],
   preview: {
-    select: { title: "feature", subtitle: "specforge" },
+    select: { title: "feature", subtitle: "thought2build" },
   },
 })
 
@@ -41,7 +41,7 @@ export const comparison = defineType({
       name: "alternativeName",
       title: "Alternative name",
       type: "string",
-      description: "The thing SpecForge is compared against (column header).",
+      description: "The thing Thought2Build is compared against (column header).",
       validation: (rule) => rule.required(),
     }),
     defineField({

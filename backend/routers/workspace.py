@@ -403,7 +403,9 @@ async def export_workspace(
     return Response(
         content=zip_bytes,
         media_type="application/zip",
-        headers={"Content-Disposition": (f'attachment; filename="specforge-{id}.zip"')},
+        headers={
+            "Content-Disposition": (f'attachment; filename="thought2build-{id}.zip"')
+        },
     )
 
 
@@ -452,7 +454,7 @@ async def export_workspace_pdf(
         content=pdf_bytes,
         media_type="application/pdf",
         headers={
-            "Content-Disposition": f'attachment; filename="specforge-{slug}.pdf"',
+            "Content-Disposition": f'attachment; filename="thought2build-{slug}.pdf"',
         },
     )
 

@@ -10,23 +10,23 @@ controls behind each claim are enumerated in `docs/PAYMENT_THREAT_MODEL.md`.
 
 ## 1. PCI-DSS — SAQ-A
 
-**Determination: SAQ-A applies.** SpecForge qualifies for the shortest
+**Determination: SAQ-A applies.** Thought2Build qualifies for the shortest
 self-assessment questionnaire because it fully outsources cardholder-data handling.
 
 - **Lemon Squeezy is the Merchant of Record (MoR).** It owns the card flow, tax,
   chargebacks, and disputes (Phase-22 design).
 - **Redirect-only checkout.** The browser is sent to a Lemon-hosted checkout URL;
-  **no card fields are rendered or collected by SpecForge**
+  **no card fields are rendered or collected by Thought2Build**
   ([Billing.tsx:282](../frontend/src/pages/Billing.tsx#L282),
   `window.location.href = response.checkout_url`). The server mints the hosted URL
   and never proxies card input
   ([billing.py:139–253](../backend/routers/billing.py#L139-L253)).
-- **No PAN at rest or in transit.** SpecForge never sees, stores, tokenizes, or
+- **No PAN at rest or in transit.** Thought2Build never sees, stores, tokenizes, or
   transmits a primary account number. The webhook inbox is an explicit allow-list
   that carries order economics and IDs only — no card data
   ([billing.py:753–809](../backend/routers/billing.py#L753-L809)).
 
-**SAQ-A obligations SpecForge still owns** (the redirect integration's surface):
+**SAQ-A obligations Thought2Build still owns** (the redirect integration's surface):
 
 | Obligation | How met |
 |---|---|
@@ -42,7 +42,7 @@ Level-1 audit — all N/A under MoR + redirect (audit plan §5).
 
 ## 2. GDPR — data flow
 
-SpecForge processes payment-related **personal data**, so this is stated precisely
+Thought2Build processes payment-related **personal data**, so this is stated precisely
 rather than claiming a "PII-free" system.
 
 ### 2.1 What the webhook inbox deliberately **excludes**
@@ -55,7 +55,7 @@ dropped, never persisted ([billing.py:753–809](../backend/routers/billing.py#L
 - The webhook **signature** and any provider **API key** — never in the payload.
 - The raw **checkout nonce** — replaced by its `sha256` and the raw value dropped
   ([billing.py:659–672](../backend/routers/billing.py#L659-L672)).
-- Any unrecognised `custom_data` field — only the seven SpecForge-set keys survive.
+- Any unrecognised `custom_data` field — only the seven Thought2Build-set keys survive.
 
 ### 2.2 What it **does** retain (named honestly)
 
@@ -63,7 +63,7 @@ The inbox and pack rows are **not** anonymous. They retain:
 
 - **Provider-side pseudonymous identifiers** — `customer_id`, `store_id`, order/item
   IDs ([billing.py:779–781](../backend/routers/billing.py#L779-L781)).
-- **Linkage to the SpecForge user** — `custom.user_id`
+- **Linkage to the Thought2Build user** — `custom.user_id`
   ([billing.py:801](../backend/routers/billing.py#L801)), and the credit pack's
   `user_id` resolves to `User.email`.
 
@@ -94,7 +94,7 @@ requires — the audit trail is never `CASCADE`-deleted to force the removal.
 
 ## 3. Summary
 
-- **PCI-DSS:** SAQ-A — MoR + redirect-only, no PAN touches SpecForge.
+- **PCI-DSS:** SAQ-A — MoR + redirect-only, no PAN touches Thought2Build.
 - **GDPR:** direct identifiers excluded by allow-list; provider-side pseudonymous
   IDs + user linkage retained for reconciliation; inbox/attempts purged at 30 days;
   financial audit retained indefinitely with a manual, RESTRICT-guarded erasure

@@ -1,6 +1,6 @@
 """Durable background worker (Phase 21 — T-269; F5 live-queue split).
 
-SpecForge's background-job processes that run work *outside* FastAPI. Since the
+Thought2Build's background-job processes that run work *outside* FastAPI. Since the
 F5 scalability remediation there are **two lanes**, each a separate process:
 
   - ``arq worker.WorkerSettings``      — the BULK lane (arq's default queue):
@@ -24,7 +24,7 @@ Job roster (registered here as the single source of truth):
   - ``increment_push``   — push an increment delta (T-279/T-280).    [bulk]
   - ``projects_sync``    — sync the Projects v2 board (T-281).       [bulk]
   - ``llm_batch_*``      — deferred eval batch submit/collect.       [bulk]
-  - ``pr_check``         — post the SpecForge status check (T-282).  [fast]
+  - ``pr_check``         — post the Thought2Build status check (T-282).  [fast]
   - ``billing_process_webhook`` — grant credits from a Lemon event.  [fast]
 
 Every job carries the shared base contract from ``services.queue`` (idempotency
@@ -220,7 +220,7 @@ async def projects_sync(ctx: dict[str, Any], push_id: str) -> None:
 async def pr_check(
     ctx: dict[str, Any], push_id: str, pr_number: int, trigger: str = "auto"
 ) -> None:
-    """Post the SpecForge PR status check (implemented in T-282).
+    """Post the Thought2Build PR status check (implemented in T-282).
 
     ``trigger`` (``auto``/``manual``, default ``auto``) is supplied by the
     reconcile router (issue #27 Phase 4); the default keeps an older in-flight
@@ -454,7 +454,7 @@ async def sample_queue_stats(ctx: dict[str, Any]) -> None:
     when the alert must fire. Each worker samples only the queue it consumes
     (``ctx['redis'].default_queue_name``), so the fast and bulk lanes are
     independently visible and a missing fast worker shows as a climbing
-    ``specforge_worker_queue_oldest_age_seconds{queue="arq:queue:fast"}``.
+    ``thought2build_worker_queue_oldest_age_seconds{queue="arq:queue:fast"}``.
 
     Reads the queue's Redis sorted-set directly (zcard for depth, the lowest
     score for the oldest ready job) rather than fetching every job definition, so

@@ -35,7 +35,7 @@ What this tool deliberately does NOT do (no hacks, honest boundaries):
   prompt-injection guard, and char bound) with none of the billing side effects.
 * It never persists a StageVersion, charges a credit, or writes a COGS row. A
   live run spends real Brave API budget (the only way to measure real grounding)
-  but touches no SpecForge billing state.
+  but touches no Thought2Build billing state.
 * It does not use the LLM critic. The critic is a non-deterministic judge model;
   the comparison is built only on the two deterministic structural gates so the
   side-by-side is reproducible.
@@ -69,7 +69,7 @@ if str(BACKEND_ROOT) not in sys.path:
 # CI-safe path imports without real secrets. ``setdefault`` never clobbers a real
 # value an operator exported for a live run.
 _DRY_RUN_ENV_DEFAULTS = {
-    "DATABASE_URL": "postgresql+asyncpg://dry-run:dry-run@localhost/specforge",
+    "DATABASE_URL": "postgresql+asyncpg://dry-run:dry-run@localhost/thought2build",
     "REDIS_URL": "redis://localhost:6379/0",
     "JWT_PRIVATE_KEY": "dry-run",
     "JWT_PUBLIC_KEY": "dry-run",

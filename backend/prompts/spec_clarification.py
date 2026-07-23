@@ -28,7 +28,7 @@ SPEC_CLARIFICATION_PROMPT_VERSION = "spec-clarification-v2"
 #   1. Strict shape: JSON array, no prose, no Markdown fences.
 #   2. Bounded count: 3–5 items so the modal stays a conversation, not a survey.
 #   3. Concrete questions: each must drive a downstream decision in the spec.
-SYSTEM_PROMPT = f"""You are SpecForge's senior product clarification agent.
+SYSTEM_PROMPT = f"""You are Thought2Build's senior product clarification agent.
 
 A user has written a problem statement and is about to generate a full product spec.
 Surface the 3–5 *most decision-shaping* questions whose answers would meaningfully change

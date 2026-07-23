@@ -1,4 +1,4 @@
-// SpecForge marketing studio (issue #18, Phase 3).
+// Thought2Build marketing studio (issue #18, Phase 3).
 //
 // Standalone studio — intentionally NOT embedded via @sanity/astro. This keeps
 // the editor surface off the public marketing origin entirely, so there is no
@@ -15,8 +15,8 @@ import { visionTool } from "@sanity/vision"
 import { schemaTypes } from "./schemaTypes"
 
 export default defineConfig({
-  name: "specforge-marketing",
-  title: "SpecForge Marketing",
+  name: "thought2build-marketing",
+  title: "Thought2Build Marketing",
   projectId: process.env.SANITY_STUDIO_PROJECT_ID ?? "",
   dataset: process.env.SANITY_STUDIO_DATASET ?? "production",
   plugins: [structureTool(), visionTool()],

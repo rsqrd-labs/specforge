@@ -45,7 +45,7 @@ export const guide = defineType({
       type: "string",
       group: "content",
       description:
-        "Named human author. Blank ⇒ the article is attributed to the SpecForge organization.",
+        "Named human author. Blank ⇒ the article is attributed to the Thought2Build organization.",
     }),
     defineField({
       name: "heroImage",

@@ -117,7 +117,7 @@ _HTTP_TIMEOUT_SECONDS = 30.0
 # deterministic so a resumed export reuses the same branch (create → 422 no-op)
 # instead of opening a second PR.
 _DEFAULT_BRANCH = "main"
-_INCREMENT_BRANCH = "specforge/inc-1"
+_INCREMENT_BRANCH = "thought2build/inc-1"
 
 # Errors where retrying the identical job cannot change the outcome — the
 # repo name is taken, the App is missing a permission, the token is invalid
@@ -271,7 +271,7 @@ async def get_push(
 
 
 def installation_can_create_repos(installation: GitHubInstallation) -> bool:
-    """True when SpecForge can auto-create a repo under this installation.
+    """True when Thought2Build can auto-create a repo under this installation.
 
     GitHub gives GitHub Apps no way to create a repo in a personal (User)
     account, and no App-compatible way to add a freshly-created repo to a
@@ -616,7 +616,7 @@ async def _run_app_export(
             )
         else:
             raise GitHubRepoCreationUnsupportedError(
-                f"SpecForge can't auto-create {owner_repo!r}. Create it on "
+                f"Thought2Build can't auto-create {owner_repo!r}. Create it on "
                 "GitHub yourself, make sure this installation can access it, "
                 "then export again."
             )
@@ -701,7 +701,7 @@ async def _write_files_to_default(
     assert push.repo_full_name is not None  # nosec B101
     repo = push.repo_full_name
     files_to_push = _build_file_map(stages, workspace)
-    commit_message = f"chore: SpecForge export — {workspace.name}"
+    commit_message = f"chore: Thought2Build export — {workspace.name}"
     for path, content in files_to_push.items():
         sha = await client.get_file_sha(repo, path)
         await client.upsert_file(repo, path, content, sha, commit_message)
@@ -737,7 +737,7 @@ async def _write_pr_with_tests(
         filename: stages[stage_type].content or ""
         for stage_type, filename in _STAGE_FILES.items()
     }
-    docs_message = f"docs: SpecForge spec — {workspace.name}"
+    docs_message = f"docs: Thought2Build spec — {workspace.name}"
     for path, content in docs.items():
         sha = await client.get_file_sha(repo, path)
         await client.upsert_file(repo, path, content, sha, docs_message)
@@ -766,7 +766,7 @@ async def _write_pr_with_tests(
     scaffold = pr_export_builder.build_scaffold(
         harness_files=harness_files, tasks=tasks, stacks=stacks
     )
-    scaffold_message = f"test: SpecForge harness — {workspace.name}"
+    scaffold_message = f"test: Thought2Build harness — {workspace.name}"
     for path, content in scaffold.items():
         sha = await client.get_file_sha(repo, path, ref=push.branch_name)
         await client.upsert_file(
@@ -778,7 +778,7 @@ async def _write_pr_with_tests(
         body = pr_export_builder.build_pr_body(
             tasks=tasks, issue_numbers=issue_numbers, stacks=stacks
         )
-        title = f"SpecForge harness — {workspace.name}"
+        title = f"Thought2Build harness — {workspace.name}"
         push.pr_number = await client.create_pull_request(
             repo, head=push.branch_name, base=_DEFAULT_BRANCH, title=title, body=body
         )
@@ -876,7 +876,7 @@ async def _push_demo_day_report(
         filename,
         content,
         existing_sha,
-        "docs: SpecForge construction report",
+        "docs: Thought2Build construction report",
         branch=branch,
     )
 
@@ -898,7 +898,7 @@ def _merge_instruction_file(existing: str | None, generated: str) -> str:
         match = _DEMO_MANAGED_RE.search(existing)
         if match:
             return existing[: match.start()] + block + existing[match.end() :]
-        # Conservative migration of the old unmarked SpecForge manual. Its full
+        # Conservative migration of the old unmarked Thought2Build manual. Its full
         # fixed structure is distinctive; ambiguous files are preserved.
         legacy_markers = (
             existing.startswith("# Build Protocol — "),
@@ -930,7 +930,7 @@ def _remove_managed_instructions(existing: str) -> tuple[str, bool]:
     if not generic_changed and not demo_count:
         return existing, False
     # Preserve user bytes outside the managed block. Whitespace-only residue is
-    # considered empty so a SpecForge-only file can be deleted.
+    # considered empty so a Thought2Build-only file can be deleted.
     return (updated if updated.strip() else ""), True
 
 
@@ -958,7 +958,7 @@ async def _sync_agent_instruction_files(
                 filename,
                 content,
                 existing_sha,
-                "docs: SpecForge agent instructions",
+                "docs: Thought2Build agent instructions",
                 branch=branch,
             )
             logger.info(
@@ -991,7 +991,7 @@ async def _sync_agent_instruction_files(
                 filename,
                 cleaned,
                 existing[1],
-                "docs: remove stale SpecForge agent instructions",
+                "docs: remove stale Thought2Build agent instructions",
                 branch=branch,
             )
         else:
@@ -999,7 +999,7 @@ async def _sync_agent_instruction_files(
                 repo,
                 filename,
                 existing[1],
-                "docs: remove stale SpecForge agent instructions",
+                "docs: remove stale Thought2Build agent instructions",
                 branch=branch,
             )
         logger.info("agent instruction file cleaned: repo=%s path=%s", repo, filename)
@@ -1044,7 +1044,7 @@ async def _run_export(
 
     # Step 5 — push files
     files_to_push = _build_file_map(stages, workspace)
-    commit_message = f"chore: SpecForge export — {workspace.name}"
+    commit_message = f"chore: Thought2Build export — {workspace.name}"
     for path, content in files_to_push.items():
         sha = await client.get_file_sha(push.repo_full_name, path)
         await client.upsert_file(
@@ -1123,7 +1123,7 @@ async def _handle_token_expired(
     """Delete the invalidated UserIntegration row and mark the push as error.
 
     The two updates run as separate commits so a failure in the second
-    cannot leave a known-invalid token in place. SpecForge never retries
+    cannot leave a known-invalid token in place. Thought2Build never retries
     with a known-bad token; the user is prompted to reconnect.
     """
     try:

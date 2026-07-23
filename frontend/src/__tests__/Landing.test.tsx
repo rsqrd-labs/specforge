@@ -17,7 +17,7 @@ describe("Landing", () => {
   it("renders the squirrel brand lockup instead of the old SF mark", () => {
     renderLanding()
 
-    expect(screen.getByRole("img", { name: "SpecForge" })).toBeInTheDocument()
+    expect(screen.getByRole("img", { name: "Thought2Build" })).toBeInTheDocument()
     expect(screen.queryByText("SF")).toBeNull()
   })
 

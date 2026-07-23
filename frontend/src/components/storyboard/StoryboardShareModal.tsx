@@ -208,7 +208,7 @@ export function StoryboardShareModal({
             <p className="sb-share__eyebrow">Share</p>
             <h2 id="sb-share-title">Share this storyboard</h2>
             <p className="sb-share__sub">
-              Publish a link anyone can open in their browser — no SpecForge account
+              Publish a link anyone can open in their browser — no Thought2Build account
               needed.
             </p>
           </div>

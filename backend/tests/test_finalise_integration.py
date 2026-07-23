@@ -58,8 +58,8 @@ pytestmark = pytest.mark.skipif(
     not TEST_DATABASE_URL,
     reason=(
         "TEST_DATABASE_URL not set — integration test skipped. "
-        "Set to postgresql+asyncpg://postgres:postgres@localhost:5432/specforge_test "
-        "to run against a real PostgreSQL instance."
+        "Set to postgresql+asyncpg://postgres:postgres@localhost:5432/"
+        "thought2build_test to run against a real PostgreSQL instance."
     ),
 )
 

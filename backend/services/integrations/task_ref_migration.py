@@ -12,7 +12,7 @@ renumber (it hashes the normalised title, never the number).
 This module migrates pre-existing rows onto that stable key **in place,
 idempotently, before any matching runs**. The renumber-invariant source of truth
 for a row's title is its live GitHub issue title (a renumber keeps the title;
-SpecForge issue titles are the bare task title — exactly ``compute_task_ref``'s
+Thought2Build issue titles are the bare task title — exactly ``compute_task_ref``'s
 input). One bulk ``list_issues(state="all")`` recovers them; the call is skipped
 entirely once no legacy-shaped refs remain, so steady-state resyncs never pay for
 it.

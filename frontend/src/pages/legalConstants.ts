@@ -7,7 +7,7 @@
 // reflects the app's actual data practices as of 2026-07-11, drafted to be
 // accurate to the code, not to be a substitute for counsel review.
 export const LEGAL_ENTITY_DESCRIPTION =
-  "SpecForge is operated by an individual, not a registered company, based in India."
+  "Thought2Build is operated by an individual, not a registered company, based in India."
 
 export const LEGAL_JURISDICTION = "India"
 
@@ -18,6 +18,6 @@ export const LEGAL_VENUE_CITY = "[CITY]"
 // PLACEHOLDER — RFC 2606 reserved example domain, chosen so it reads as an
 // obvious placeholder rather than a broken or accidentally-real address.
 // Replace with a real support/legal contact before any production launch.
-export const LEGAL_CONTACT_EMAIL = "legal@specforge.example"
+export const LEGAL_CONTACT_EMAIL = "legal@thought2build.example"
 
 export const LEGAL_LAST_UPDATED = "2026-07-11"

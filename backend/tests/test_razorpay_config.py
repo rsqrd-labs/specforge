@@ -46,7 +46,7 @@ def _valid_production(**overrides: object):
         "environment": "production",
         "allowed_hosts": "app.example.com",
         "metrics_token": "metrics-token",
-        "frontend_url": "https://app.specforge.dev",
+        "frontend_url": "https://app.thought2build.com",
         "jwt_private_key": _FAKE_PEM,
         "encryption_master_key": "a-real-non-ci-encryption-key",
         "langfuse_secret_key": "",
@@ -66,7 +66,7 @@ def _valid_production(**overrides: object):
         "lemonsqueezy_currency": "USD",
         "lemonsqueezy_credits_per_purchase": 200,
         "lemonsqueezy_credit_validity_days": 30,
-        "lemonsqueezy_success_url": "https://app.specforge.dev/billing",
+        "lemonsqueezy_success_url": "https://app.thought2build.com/billing",
         "lemonsqueezy_test_mode": False,
         # Payment flags at their shipping defaults.
         "payments_enabled": False,
@@ -80,7 +80,7 @@ def _valid_production(**overrides: object):
         "razorpay_currency": "INR",
         "razorpay_credits_per_purchase": 200,
         "razorpay_credit_validity_days": 30,
-        "razorpay_success_url": "https://app.specforge.dev/billing",
+        "razorpay_success_url": "https://app.thought2build.com/billing",
         "razorpay_checkout_ttl_minutes": 30,
     }
     base.update(overrides)
@@ -348,7 +348,9 @@ def test_prod_guard_rejects_blank_razorpay_webhook_secret() -> None:
 
 
 def test_prod_guard_rejects_non_https_razorpay_success_url() -> None:
-    patches = _valid_production(razorpay_success_url="http://app.specforge.dev/billing")
+    patches = _valid_production(
+        razorpay_success_url="http://app.thought2build.com/billing"
+    )
     _apply(patches)
     try:
         with pytest.raises(RuntimeError) as exc:

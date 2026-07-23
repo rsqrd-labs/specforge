@@ -30,7 +30,7 @@ of them.  Right-sizing is therefore gated, never guessed:
 
 `max_tokens` is a per-request parameter, not part of the cached prompt prefix,
 so changing a budget does not shatter provider prompt caching; it invalidates
-the SpecForge output cache once (like a prompt-version bump) and restabilizes.
+the Thought2Build output cache once (like a prompt-version bump) and restabilizes.
 """
 
 from __future__ import annotations

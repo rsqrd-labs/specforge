@@ -17,8 +17,8 @@ _SPEC.loader.exec_module(production_smoke)
 @pytest.mark.parametrize(
     "url",
     [
-        "https://api.specforge.example",
-        "https://api.specforge.example/base",
+        "https://api.thought2build.example",
+        "https://api.thought2build.example/base",
         "http://localhost:8000",
         "http://127.0.0.1:8000",
     ],
@@ -30,10 +30,10 @@ def test_validate_api_url_accepts_https_and_loopback(url: str) -> None:
 @pytest.mark.parametrize(
     "url",
     [
-        "http://api.specforge.example",
-        "https://user:pass@api.specforge.example",
-        "https://api.specforge.example?target=evil",
-        "https://api.specforge.example/#fragment",
+        "http://api.thought2build.example",
+        "https://user:pass@api.thought2build.example",
+        "https://api.thought2build.example?target=evil",
+        "https://api.thought2build.example/#fragment",
     ],
 )
 def test_validate_api_url_rejects_unsafe_origins(url: str) -> None:
@@ -42,7 +42,7 @@ def test_validate_api_url_rejects_unsafe_origins(url: str) -> None:
 
 
 def test_redirect_handler_rejects_cross_origin() -> None:
-    request = production_smoke.Request("https://api.specforge.example/health")
+    request = production_smoke.Request("https://api.thought2build.example/health")
     handler = production_smoke.SameOriginRedirectHandler()
 
     with pytest.raises(production_smoke.SmokeFailure):

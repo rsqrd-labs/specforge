@@ -24,17 +24,17 @@ beforeAll(async () => {
 
 const FIXTURE = {
   definition:
-    "SpecForge is an AI spec-to-build workspace that turns a rough idea into SPEC, PLAN, HARNESS, and TASKS.",
+    "Thought2Build is an AI spec-to-build workspace that turns a rough idea into SPEC, PLAN, HARNESS, and TASKS.",
   workflowSteps: [
     { name: "Describe the idea", description: "Paste a rough product idea." },
-    { name: "Generate the spec", description: "SpecForge drafts structured requirements." },
+    { name: "Generate the spec", description: "Thought2Build drafts structured requirements." },
     { name: "Hand off to build", description: "Export tasks for engineers or coding agents." },
   ],
   comparison: {
     alternativeName: "A blank doc",
     rows: [
-      { feature: "Structured artifacts", specforge: "Yes", alternative: "No" },
-      { feature: "Coding-agent handoff", specforge: "Yes", alternative: "Manual" },
+      { feature: "Structured artifacts", thought2build: "Yes", alternative: "No" },
+      { feature: "Coding-agent handoff", thought2build: "Yes", alternative: "Manual" },
     ],
   },
   examples: [
@@ -43,7 +43,7 @@ const FIXTURE = {
 }
 
 const FAQS = [
-  { question: "What is SpecForge?", answer: "An AI spec-to-build workspace." },
+  { question: "What is Thought2Build?", answer: "An AI spec-to-build workspace." },
   { question: "Is there a free tier?", answer: "Yes — 50 starter credits to begin." },
 ]
 
@@ -54,14 +54,14 @@ describe("GEO answer-ready structure renders in answer-engine order", () => {
     // All four answer-ready blocks present.
     expect(html).toContain("answer-definition")
     expect(html).toMatch(/How it works/)
-    expect(html).toMatch(/SpecForge vs\./)
+    expect(html).toMatch(/Thought2Build vs\./)
     expect(html).toMatch(/Examples/)
 
     // Order matters for answer engines: direct answer first, then how, then
     // comparison, then examples.
     const iDef = html.indexOf("answer-definition")
     const iWorkflow = html.indexOf("How it works")
-    const iComparison = html.indexOf("SpecForge vs.")
+    const iComparison = html.indexOf("Thought2Build vs.")
     const iExamples = html.indexOf(">Examples<")
     expect(iDef).toBeGreaterThanOrEqual(0)
     expect(iWorkflow).toBeGreaterThan(iDef)

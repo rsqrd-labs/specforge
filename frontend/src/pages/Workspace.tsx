@@ -230,7 +230,7 @@ export function storyboardFilename(
     "demo-script": "md",
     appendix: "md",
   }
-  return `specforge-${storyboardFileStem(storyboard.title, storyboard.id)}-${kind}.${extensionByKind[kind]}`
+  return `thought2build-${storyboardFileStem(storyboard.title, storyboard.id)}-${kind}.${extensionByKind[kind]}`
 }
 
 function saveBlob(blob: Blob, filename: string): void {
@@ -1735,10 +1735,10 @@ export default function Workspace() {
       let filename: string
       if (allFinalised) {
         blob = await exportWorkspace(id)
-        filename = `specforge-${id}.zip`
+        filename = `thought2build-${id}.zip`
       } else {
         const content = [
-          `# ${currentWorkspace?.name ?? "SpecForge Workspace"}`,
+          `# ${currentWorkspace?.name ?? "Thought2Build Workspace"}`,
           "",
           "## Problem Statement",
           "",
@@ -1754,7 +1754,7 @@ export default function Workspace() {
             ]),
         ].join("\n")
         blob = new Blob([content], { type: "text/markdown;charset=utf-8" })
-        filename = `specforge-${id}-draft.md`
+        filename = `thought2build-${id}-draft.md`
       }
       const url = URL.createObjectURL(blob)
       const link = document.createElement("a")
@@ -1778,7 +1778,7 @@ export default function Workspace() {
       const url = URL.createObjectURL(blob)
       const a = document.createElement("a")
       a.href = url
-      a.download = `specforge-${(currentWorkspace?.name ?? id).toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 60) || "workspace"}.pdf`
+      a.download = `thought2build-${(currentWorkspace?.name ?? id).toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 60) || "workspace"}.pdf`
       a.click()
       window.setTimeout(() => URL.revokeObjectURL(url), 1_500)
     } catch (exc) {
@@ -1821,7 +1821,7 @@ export default function Workspace() {
         ? "AGENTS.md"
         : target === "claude_code"
           ? "CLAUDE.md"
-          : "specforge-agent-instructions.zip"
+          : "thought2build-agent-instructions.zip"
       saveBlob(blob, filename)
     } catch (error) {
       setGenericError(getApiErrorMessage(error, "Agent-instruction download failed."))
@@ -1844,7 +1844,7 @@ export default function Workspace() {
       const url = URL.createObjectURL(blob)
       const link = document.createElement("a")
       link.href = url
-      link.download = `specforge-${id}-demo-day.zip`
+      link.download = `thought2build-${id}-demo-day.zip`
       link.click()
       URL.revokeObjectURL(url)
       // Pull the server-refreshed verdict so a stale badge turns fresh.

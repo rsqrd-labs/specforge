@@ -53,13 +53,13 @@ const hasExamples = examples && examples.length > 0
 
 {hasComparison && (
   <section class="answer-section" aria-labelledby="comparison-heading">
-    <h2 id="comparison-heading">SpecForge vs. {comparison!.alternativeName}</h2>
+    <h2 id="comparison-heading">Thought2Build vs. {comparison!.alternativeName}</h2>
     <div class="comparison-scroll">
       <table class="comparison-table">
         <thead>
           <tr>
             <th scope="col">Capability</th>
-            <th scope="col">SpecForge</th>
+            <th scope="col">Thought2Build</th>
             <th scope="col">{comparison!.alternativeName}</th>
           </tr>
         </thead>
@@ -67,7 +67,7 @@ const hasExamples = examples && examples.length > 0
           {comparison!.rows.map((row) => (
             <tr>
               <th scope="row">{row.feature}</th>
-              <td>{row.specforge}</td>
+              <td>{row.thought2build}</td>
               <td>{row.alternative}</td>
             </tr>
           ))}

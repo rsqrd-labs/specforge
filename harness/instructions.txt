@@ -1,4 +1,4 @@
-SpecForge V1 harness
+Thought2Build V1 harness
 ====================
 
 This directory is the executable contract for implementation agents. It is not

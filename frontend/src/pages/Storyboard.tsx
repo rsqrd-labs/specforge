@@ -137,10 +137,10 @@ export default function Storyboard() {
   useEffect(() => {
     document.title =
       state.kind === "ready"
-        ? `${state.storyboard.title} — SpecForge Storyboard`
-        : "Storyboard — SpecForge"
+        ? `${state.storyboard.title} — Thought2Build Storyboard`
+        : "Storyboard — Thought2Build"
     return () => {
-      document.title = "SpecForge"
+      document.title = "Thought2Build"
     }
   }, [state])
 

@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://specforge.local/schemas/eval-result.schema.json",
+  "$id": "https://thought2build.local/schemas/eval-result.schema.json",
   "title": "EvalResult",
   "type": "object",
   "required": [

@@ -177,13 +177,13 @@ async def test_build_install_url_requires_app_configured(
 async def test_build_and_consume_state_roundtrip(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(settings, "github_app_slug", "specforge-dev")
+    monkeypatch.setattr(settings, "github_app_slug", "thought2build-dev")
     monkeypatch.setattr(settings, "github_app_id", "123")
     redis = _FakeRedis()
     user_id = uuid4()
 
     url = await svc.build_install_url(user_id, redis)
-    assert "github.com/apps/specforge-dev/installations/new?state=" in url
+    assert "github.com/apps/thought2build-dev/installations/new?state=" in url
     state = url.split("state=", 1)[1]
 
     # Valid state resolves to the bound user and is single-use.
@@ -553,13 +553,13 @@ async def test_install_route_503_when_unconfigured(
 async def test_install_route_returns_url_when_configured(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(settings, "github_app_slug", "specforge-dev")
+    monkeypatch.setattr(settings, "github_app_slug", "thought2build-dev")
     monkeypatch.setattr(settings, "github_app_id", "123")
     app, _ = _app(monkeypatch)
     async with _client(app) as client:
         resp = await client.get("/integrations/github/install")
     assert resp.status_code == 200
-    assert "specforge-dev/installations/new" in resp.json()["url"]
+    assert "thought2build-dev/installations/new" in resp.json()["url"]
 
 
 async def test_setup_invalid_state_redirects_without_error(

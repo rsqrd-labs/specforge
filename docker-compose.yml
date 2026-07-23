@@ -2,9 +2,9 @@ services:
   db:
     image: postgres:16-alpine
     environment:
-      POSTGRES_DB: specforge
-      POSTGRES_USER: specforge
-      POSTGRES_PASSWORD: specforge
+      POSTGRES_DB: thought2build
+      POSTGRES_USER: thought2build
+      POSTGRES_PASSWORD: thought2build
     ports:
       # Long-form syntax binds to 127.0.0.1 only — not exposed to LAN.  L-7 — T-189c.
       - target: 5432
@@ -14,7 +14,7 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U specforge -d specforge"]
+      test: ["CMD-SHELL", "pg_isready -U thought2build -d thought2build"]
       interval: 5s
       timeout: 5s
       retries: 5
@@ -42,7 +42,7 @@ services:
     env_file:
       - backend/.env
     environment:
-      DATABASE_URL: postgresql+asyncpg://specforge:specforge@db:5432/specforge
+      DATABASE_URL: postgresql+asyncpg://thought2build:thought2build@db:5432/thought2build
       REDIS_URL: redis://redis:6379/0
       FRONTEND_URL: http://localhost:5173
       AUTH_LOGIN_BURST_LIMIT: 60  # Local dev only — do not copy to staging/production
@@ -74,7 +74,7 @@ services:
     env_file:
       - backend/.env
     environment:
-      DATABASE_URL: postgresql+asyncpg://specforge:specforge@db:5432/specforge
+      DATABASE_URL: postgresql+asyncpg://thought2build:thought2build@db:5432/thought2build
       REDIS_URL: redis://redis:6379/0
       FRONTEND_URL: http://localhost:5173
     depends_on:
@@ -98,7 +98,7 @@ services:
     env_file:
       - backend/.env
     environment:
-      DATABASE_URL: postgresql+asyncpg://specforge:specforge@db:5432/specforge
+      DATABASE_URL: postgresql+asyncpg://thought2build:thought2build@db:5432/thought2build
       REDIS_URL: redis://redis:6379/0
       FRONTEND_URL: http://localhost:5173
     depends_on:
@@ -133,7 +133,7 @@ services:
     # `pgbouncer` profile so the default stack is unchanged:
     #   docker compose --profile pgbouncer up -d pgbouncer
     # then point the app at it and flip the flag:
-    #   DATABASE_URL=postgresql+asyncpg://specforge:specforge@pgbouncer:6432/specforge
+    #   DATABASE_URL=postgresql+asyncpg://thought2build:thought2build@pgbouncer:6432/thought2build
     #   DB_TRANSACTION_POOLER_MODE=1
     # Env vars mirror deploy/pgbouncer/pgbouncer.ini (the production reference).
     image: edoburu/pgbouncer:v1.23.1-p2
@@ -156,7 +156,7 @@ services:
       db:
         condition: service_healthy
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -p 6432 -U specforge -d specforge || exit 1"]
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -p 6432 -U thought2build -d thought2build || exit 1"]
       interval: 5s
       timeout: 5s
       retries: 5

@@ -31,10 +31,10 @@ const DEFAULT_POLICY: RetentionPolicy = {
 
 export function policyMarkdown(p: RetentionPolicy): string {
   return `
-This page explains how long SpecForge keeps your data and how you stay in
+This page explains how long Thought2Build keeps your data and how you stay in
 control of it.
 
-The guiding principle: SpecForge keeps your **active** work indefinitely, prunes
+The guiding principle: Thought2Build keeps your **active** work indefinitely, prunes
 only redundant history and internal telemetry on a schedule, and **never**
 permanently deletes a workspace without either your recorded acknowledgment plus
 a restore/export window, or a long conservative fallback window.
@@ -51,7 +51,7 @@ but is not destroyed:
 - After **${p.trash_days} days** it is permanently deleted along with its
   versions, keynotes, and GitHub-sync records. Your credit history and account
   remain untouched, and anything already pushed to your GitHub repository stays
-  in your repository — SpecForge only removes its own sync records.
+  in your repository — Thought2Build only removes its own sync records.
 
 Restoring, then deleting again, restarts the ${p.trash_days}-day clock.
 
@@ -79,7 +79,7 @@ is pruned:
 
 ## Internal telemetry
 
-SpecForge keeps internal operational logs (LLM cost and quality events,
+Thought2Build keeps internal operational logs (LLM cost and quality events,
 evaluation results, failed background-job records) for up to
 **${p.cost_events_days} days** to run and improve the service. These contain no
 shareable artifact content beyond what is needed for cost and quality
@@ -123,9 +123,9 @@ export default function LegalRetention() {
   }, [])
 
   useEffect(() => {
-    document.title = "Data Retention Policy — SpecForge"
+    document.title = "Data Retention Policy — Thought2Build"
     return () => {
-      document.title = "SpecForge"
+      document.title = "Thought2Build"
     }
   }, [])
 
@@ -154,7 +154,7 @@ export default function LegalRetention() {
           </Link>
           {" · "}
           <Link to="/" className="public-view-footer-link">
-            ← Back to SpecForge
+            ← Back to Thought2Build
           </Link>
         </p>
       </footer>

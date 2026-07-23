@@ -172,9 +172,9 @@ _CONDITIONAL_SECTIONS: dict[str, list[tuple[re.Pattern[str], str]]] = {
 }
 
 COMPLETION_CONTRACT_VERSION = "v2"
-FINAL_COMPLETION_SENTINEL_TEMPLATE = "<!-- SPECFORGE_COMPLETE:{stage}:v2 -->"
+FINAL_COMPLETION_SENTINEL_TEMPLATE = "<!-- THOUGHT2BUILD_COMPLETE:{stage}:v2 -->"
 CHUNK_COMPLETION_SENTINEL_TEMPLATE = (
-    "<!-- SPECFORGE_CHUNK_COMPLETE:{stage}:{chunk}:v2 -->"
+    "<!-- THOUGHT2BUILD_CHUNK_COMPLETE:{stage}:{chunk}:v2 -->"
 )
 _REQUIREMENT_ID_RE = re.compile(r"\b(?:FR|NFR|SEC)-\d{3}\b")
 _AC_ID_RE = re.compile(r"\bAC-\d{3}\b")

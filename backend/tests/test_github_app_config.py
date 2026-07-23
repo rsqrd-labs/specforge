@@ -31,7 +31,7 @@ def _valid_production(**overrides: object):
         "environment": "production",
         "allowed_hosts": "app.example.com",
         "metrics_token": "metrics-token",
-        "frontend_url": "https://app.specforge.dev",
+        "frontend_url": "https://app.thought2build.com",
         "jwt_private_key": _FAKE_PEM,
         "encryption_master_key": "a-real-non-ci-encryption-key",
         "langfuse_secret_key": "",
@@ -67,7 +67,7 @@ def _undo(patches: list):
 def test_github_app_enabled_requires_id_and_slug() -> None:
     with (
         patch.object(config.settings, "github_app_id", "12345"),
-        patch.object(config.settings, "github_app_slug", "specforge"),
+        patch.object(config.settings, "github_app_slug", "thought2build"),
     ):
         assert config.settings.github_app_enabled is True
     with (
@@ -77,7 +77,7 @@ def test_github_app_enabled_requires_id_and_slug() -> None:
         assert config.settings.github_app_enabled is False
     with (
         patch.object(config.settings, "github_app_id", ""),
-        patch.object(config.settings, "github_app_slug", "specforge"),
+        patch.object(config.settings, "github_app_slug", "thought2build"),
     ):
         assert config.settings.github_app_enabled is False
 
@@ -120,7 +120,7 @@ def test_prod_guard_fails_on_empty_private_key_when_app_enabled() -> None:
     names the private key, not some unrelated check."""
     patches = _valid_production(
         github_app_id="12345",
-        github_app_slug="specforge",
+        github_app_slug="thought2build",
         github_app_webhook_secret="whsec-value",
         github_app_private_key="",
     )
@@ -136,7 +136,7 @@ def test_prod_guard_fails_on_empty_private_key_when_app_enabled() -> None:
 def test_prod_guard_fails_on_empty_webhook_secret_when_app_enabled() -> None:
     patches = _valid_production(
         github_app_id="12345",
-        github_app_slug="specforge",
+        github_app_slug="thought2build",
         github_app_private_key=_FAKE_PEM,
         github_app_webhook_secret="",
     )
@@ -155,7 +155,7 @@ def test_prod_guard_fails_on_missing_identity_oauth_when_app_enabled() -> None:
     silently refuse every install."""
     patches = _valid_production(
         github_app_id="12345",
-        github_app_slug="specforge",
+        github_app_slug="thought2build",
         github_app_private_key=_FAKE_PEM,
         github_app_webhook_secret="whsec-value",
         github_app_client_id="",
@@ -173,7 +173,7 @@ def test_prod_guard_fails_on_missing_identity_oauth_when_app_enabled() -> None:
 def test_prod_guard_passes_when_app_fully_configured() -> None:
     patches = _valid_production(
         github_app_id="12345",
-        github_app_slug="specforge",
+        github_app_slug="thought2build",
         github_app_private_key=_FAKE_PEM,
         github_app_webhook_secret="whsec-value",
         github_app_client_id="iv1.appclient",
@@ -191,7 +191,7 @@ def test_dev_environment_ignores_app_guard() -> None:
     patches = _valid_production(
         environment="development",
         github_app_id="12345",
-        github_app_slug="specforge",
+        github_app_slug="thought2build",
         github_app_private_key="",
         github_app_webhook_secret="",
     )

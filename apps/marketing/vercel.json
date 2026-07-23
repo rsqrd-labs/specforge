@@ -1,16 +1,16 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "rewrites": [
-    { "source": "/dashboard", "destination": "https://specforge-app.vercel.app/dashboard" },
-    { "source": "/dashboard/:path*", "destination": "https://specforge-app.vercel.app/dashboard/:path*" },
-    { "source": "/workspace/:path*", "destination": "https://specforge-app.vercel.app/workspace/:path*" },
-    { "source": "/settings", "destination": "https://specforge-app.vercel.app/settings" },
-    { "source": "/settings/:path*", "destination": "https://specforge-app.vercel.app/settings/:path*" },
-    { "source": "/billing", "destination": "https://specforge-app.vercel.app/billing" },
-    { "source": "/billing/:path*", "destination": "https://specforge-app.vercel.app/billing/:path*" },
-    { "source": "/auth/:path*", "destination": "https://specforge-app.vercel.app/auth/:path*" },
-    { "source": "/p/:path*", "destination": "https://specforge-app.vercel.app/p/:path*" },
-    { "source": "/sb/:path*", "destination": "https://specforge-app.vercel.app/sb/:path*" },
-    { "source": "/assets/:path*", "destination": "https://specforge-app.vercel.app/assets/:path*" }
+    { "source": "/dashboard", "destination": "https://thought2build-app.vercel.app/dashboard" },
+    { "source": "/dashboard/:path*", "destination": "https://thought2build-app.vercel.app/dashboard/:path*" },
+    { "source": "/workspace/:path*", "destination": "https://thought2build-app.vercel.app/workspace/:path*" },
+    { "source": "/settings", "destination": "https://thought2build-app.vercel.app/settings" },
+    { "source": "/settings/:path*", "destination": "https://thought2build-app.vercel.app/settings/:path*" },
+    { "source": "/billing", "destination": "https://thought2build-app.vercel.app/billing" },
+    { "source": "/billing/:path*", "destination": "https://thought2build-app.vercel.app/billing/:path*" },
+    { "source": "/auth/:path*", "destination": "https://thought2build-app.vercel.app/auth/:path*" },
+    { "source": "/p/:path*", "destination": "https://thought2build-app.vercel.app/p/:path*" },
+    { "source": "/sb/:path*", "destination": "https://thought2build-app.vercel.app/sb/:path*" },
+    { "source": "/assets/:path*", "destination": "https://thought2build-app.vercel.app/assets/:path*" }
   ]
 }

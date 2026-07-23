@@ -109,7 +109,7 @@ export function ResearchConsentToggle({
             </div>
             <div className="create-modal-body">
               <p className="workspace-credit-value-copy">
-                To ground your spec in current tools and best practices, SpecForge
+                To ground your spec in current tools and best practices, Thought2Build
                 will send this workspace's idea text to{" "}
                 <strong>Brave Search (a third-party service)</strong> to fetch
                 relevant, up-to-date web context. <strong>This is off by default

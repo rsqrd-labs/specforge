@@ -1,6 +1,6 @@
-# SpecForge
+# Thought2Build
 
-SpecForge turns a product idea into an implementation-ready delivery package.
+Thought2Build turns a product idea into an implementation-ready delivery package.
 
 It guides a workspace through four stages:
 
@@ -8,11 +8,11 @@ It guides a workspace through four stages:
 Problem statement -> Spec -> Plan -> Harness -> Tasks
 ```
 
-The output is designed for teams and AI-assisted engineering workflows that need more than a generic prompt response. SpecForge produces structured product specifications, implementation plans, validation harnesses, and execution tasks with review gates, credit accounting, provider selection, and exportable artifacts.
+The output is designed for teams and AI-assisted engineering workflows that need more than a generic prompt response. Thought2Build produces structured product specifications, implementation plans, validation harnesses, and execution tasks with review gates, credit accounting, provider selection, and exportable artifacts.
 
 ## What The Product Does
 
-SpecForge helps users move from vague product intent to a buildable software plan.
+Thought2Build helps users move from vague product intent to a buildable software plan.
 
 Core capabilities:
 
@@ -38,8 +38,8 @@ Core capabilities:
 
 1. User signs in with Google.
 2. User creates a workspace from a problem statement, optionally selecting a starter template.
-3. SpecForge may ask clarifying questions to sharpen the Spec before generation begins.
-4. SpecForge generates the stages in order:
+3. Thought2Build may ask clarifying questions to sharpen the Spec before generation begins.
+4. Thought2Build generates the stages in order:
    - `Spec`: requirements, users, journeys, constraints, and acceptance criteria.
    - `Plan`: architecture, implementation strategy, risks, and sequencing.
    - `Harness`: validation assets and coverage expectations.
@@ -49,7 +49,7 @@ Core capabilities:
 
 ## Architecture
 
-SpecForge is a full-stack web application with a React frontend, FastAPI backend, PostgreSQL persistence, Redis-backed session/rate-limit state, a durable background worker, and pluggable LLM providers.
+Thought2Build is a full-stack web application with a React frontend, FastAPI backend, PostgreSQL persistence, Redis-backed session/rate-limit state, a durable background worker, and pluggable LLM providers.
 
 ```text
 Browser
@@ -121,14 +121,14 @@ gate resets the stage to draft and surfaces Regenerate and Override actions in t
 
 ### GitHub Living System of Record
 
-The GitHub integration is a bidirectional, worker-driven sync built on the SpecForge
+The GitHub integration is a bidirectional, worker-driven sync built on the Thought2Build
 **GitHub App** (the earlier OAuth export path is retained behind a flag). All GitHub
 I/O runs on the arq worker, never inline in the API:
 
 - `POST /workspaces/{id}/export/github` enqueues a push and returns `202` immediately.
 - Inbound webhooks arrive at `POST /integrations/github/webhook`, HMAC-verified before
   any DB or queue work. Closing a task's issue or merging its PR flips that task to
-  done inside SpecForge.
+  done inside Thought2Build.
 - Jobs are idempotent and checkpointed, with bounded retries, backoff, and a
   dead-letter queue. A periodic cron reconciles drift.
 - Sync state is `GET /workspaces/{id}/sync`; recovery is `POST .../sync/resync` and
@@ -435,7 +435,7 @@ docs/SMOKE_TEST_CHECKLIST.md
 
 ## Provider-Agnostic LLM Cost Optimization
 
-SpecForge keeps cost optimization provider-neutral. `services.llm.model_catalog`
+Thought2Build keeps cost optimization provider-neutral. `services.llm.model_catalog`
 is the single source of truth for provider model IDs and per-provider tiers; the
 capability/cost registry (`services.llm.cost_registry`) and routing policy derive
 from it, so model swaps happen in one place. Stage logic routes by operation and
@@ -469,7 +469,7 @@ Key invariants:
 
 ## Security Model
 
-SpecForge includes several controls intended for AI-assisted workflows:
+Thought2Build includes several controls intended for AI-assisted workflows:
 
 - Access tokens are kept in frontend memory only.
 - Refresh tokens are stored in secure, scoped HTTP-only cookies.
@@ -496,7 +496,7 @@ restart all API workers so cached clients are recreated with the new secret.
 
 ## Deployment Overview
 
-SpecForge can be deployed as two application services plus managed PostgreSQL and Redis:
+Thought2Build can be deployed as two application services plus managed PostgreSQL and Redis:
 
 ```text
 Frontend static site/CDN
@@ -531,7 +531,7 @@ See `docs/INTEGRATION_API_SETUP_HANDBOOK.md` for full deployment configuration i
 Build:
 
 ```bash
-docker build -t specforge-api ./backend
+docker build -t thought2build-api ./backend
 ```
 
 Run API:
@@ -540,7 +540,7 @@ Run API:
 docker run --rm \
   --env-file backend/.env \
   -p 8000:8000 \
-  specforge-api
+  thought2build-api
 ```
 
 `entrypoint.sh` runs `alembic upgrade head` and the starter-template seed automatically before starting Gunicorn, so migrations and template data are applied on every container start. To run migrations separately without starting the server, override the entrypoint:
@@ -549,7 +549,7 @@ docker run --rm \
 docker run --rm \
   --env-file backend/.env \
   --entrypoint uv \
-  specforge-api \
+  thought2build-api \
   run --no-sync alembic upgrade head
 ```
 

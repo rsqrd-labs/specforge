@@ -56,7 +56,7 @@ describe("AuthCallback", () => {
       </MemoryRouter>,
     )
 
-    expect(screen.getByRole("img", { name: "SpecForge" })).toBeInTheDocument()
+    expect(screen.getByRole("img", { name: "Thought2Build" })).toBeInTheDocument()
     expect(screen.queryByText("SF")).toBeNull()
     expect(await screen.findByText(/google did not return/i)).toBeInTheDocument()
   })

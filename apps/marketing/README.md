@@ -1,6 +1,6 @@
-# SpecForge marketing zone (Astro)
+# Thought2Build marketing zone (Astro)
 
-Statically-generated marketing + content layer for SpecForge (issue #18). Ships
+Statically-generated marketing + content layer for Thought2Build (issue #18). Ships
 real, crawlable HTML with complete SEO metadata and structured data, served on
 the **same origin** as the SPA via Vercel multi-zone rewrites. The SPA
 (`frontend/`) is untouched and keeps owning all app + public-artifact routes.
@@ -29,7 +29,7 @@ Copy `.env.example` → `.env` and set `PUBLIC_SITE_URL` / `PUBLIC_API_URL`.
 `vercel.json` rewrites SPA-owned paths (`/dashboard`, `/workspace/*`,
 `/settings`, `/billing`, `/auth/*`, `/p/*`, `/sb/*`, `/assets/*`) to the SPA
 deployment. **The SPA deployment host in `vercel.json` is a placeholder
-(`specforge-app.vercel.app`)** — set it to the real SPA zone URL when the
+(`thought2build-app.vercel.app`)** — set it to the real SPA zone URL when the
 marketing project is added to Vercel (Phase 7).
 
 ## Crawler policy / noindex integrity

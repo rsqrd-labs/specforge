@@ -131,7 +131,7 @@ def create_app(redis_client: Redis | None = None) -> FastAPI:
             await langfuse_client.startup_check()
         task = asyncio.create_task(run_recovery_loop())
         # Event-loop lag sampler (F7 — scalability audit P2). One lightweight task
-        # per process publishing specforge_event_loop_lag_seconds so the "loop
+        # per process publishing thought2build_event_loop_lag_seconds so the "loop
         # stays responsive under a generation storm" acceptance gate is observable.
         lag_sampler = asyncio.create_task(run_event_loop_lag_sampler())
         yield
@@ -155,7 +155,7 @@ def create_app(redis_client: Redis | None = None) -> FastAPI:
             await redis.aclose()
 
     app = FastAPI(
-        title="SpecForge API",
+        title="Thought2Build API",
         version="1.0.0",
         lifespan=lifespan,
         docs_url=None if _production else "/docs",

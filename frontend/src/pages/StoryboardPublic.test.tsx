@@ -36,7 +36,7 @@ beforeEach(() => {
 
 afterEach(() => {
   document.head
-    .querySelectorAll("#specforge-storyboard-public-noindex")
+    .querySelectorAll("#thought2build-storyboard-public-noindex")
     .forEach((node) => node.remove())
 })
 
@@ -46,7 +46,7 @@ describe("StoryboardPublic", () => {
 
     renderPublicRoute()
 
-    expect(await screen.findByRole("heading", { name: /specforge launch/i })).toBeInTheDocument()
+    expect(await screen.findByRole("heading", { name: /thought2build launch/i })).toBeInTheDocument()
     expect(
       document.head.querySelector('meta[name="robots"]')?.getAttribute("content"),
     ).toBe("noindex, nofollow")
@@ -60,7 +60,7 @@ describe("StoryboardPublic", () => {
 
     renderPublicRoute()
 
-    await screen.findByRole("heading", { name: /specforge launch/i })
+    await screen.findByRole("heading", { name: /thought2build launch/i })
     expect(screen.getByRole("button", { name: /speaker notes/i })).toBeDisabled()
 
     await user.click(screen.getByRole("button", { name: /present/i }))

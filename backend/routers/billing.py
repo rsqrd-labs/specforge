@@ -17,7 +17,7 @@ and keep processing regardless (D3), so refunds/disputes for the inactive
 provider's old orders still settle after a switch. A provider with no webhook
 secret configured fails closed (400) on its webhook path.
 
-Checkout is **attempt-first** (Plan §25.6 T-296): SpecForge commits the local
+Checkout is **attempt-first** (Plan §25.6 T-296): Thought2Build commits the local
 ``billing_checkout_attempts`` row — carrying the active provider's economics
 snapshot and only the ``sha256(checkout_nonce)`` — **before** calling the
 provider, then mints the hosted checkout (Lemon checkout / Razorpay Payment
@@ -255,7 +255,7 @@ async def create_checkout(
        ``checkout_nonce``; persist only ``sha256(checkout_nonce)``.
     2. **Commit** the ``billing_checkout_attempts`` row (``status='created'``)
        snapshotting the **active provider's** ``credits/price_cents/currency/
-       validity_days`` from config — SpecForge is the authority for the attempt
+       validity_days`` from config — Thought2Build is the authority for the attempt
        before any provider call.
     3. Dispatch to the active provider (D6): Lemon ``create_checkout`` or
        Razorpay ``create_payment_link`` (the charged amount is the attempt's
@@ -335,7 +335,7 @@ async def create_checkout(
         ) from exc
 
     # 4. Commit the provider_created transition. If THIS commit fails the checkout
-    #    exists at the provider but SpecForge could not record it — never expose
+    #    exists at the provider but Thought2Build could not record it — never expose
     #    the URL (the client would pay against an attempt we cannot poll); the
     #    order will be reconciled from the signed webhook. Emit
     #    billing.checkout.orphaned.
@@ -879,7 +879,7 @@ def _build_normalized_payload(
     copied by name, so provider PII (``user_email``/``user_name``), URLs
     (``urls.receipt``), the signature, the API key, the raw nonce, and any
     unrecognised ``custom_data`` field are inherently excluded. The custom block
-    is exactly the seven keys SpecForge itself set on the checkout.
+    is exactly the seven keys Thought2Build itself set on the checkout.
     """
     first_item = (
         attributes.get("first_order_item")
@@ -909,7 +909,7 @@ def _build_normalized_payload(
         "refunded_amount_cents": attributes.get("refunded_amount"),
         "created_at": attributes.get("created_at"),
         "updated_at": attributes.get("updated_at"),
-        # SpecForge-set custom data — exactly the allow-listed keys. The raw nonce
+        # Thought2Build-set custom data — exactly the allow-listed keys. The raw nonce
         # is replaced by its sha256; everything else the provider echoed is dropped.
         "custom": {
             "user_id": custom_data.get("user_id"),
@@ -1125,7 +1125,7 @@ def _razorpay_entity(entities: dict[str, Any], key: str) -> dict[str, Any]:
 def _razorpay_notes_block(
     notes: dict[str, Any], nonce_hash: str | None
 ) -> dict[str, Any]:
-    """The seven allow-listed SpecForge ``notes`` keys, raw nonce → sha256.
+    """The seven allow-listed Thought2Build ``notes`` keys, raw nonce → sha256.
 
     The Razorpay analogue of the Lemon ``custom`` block: every field is copied by
     name, so anything else the provider echoed is inherently excluded, and the
@@ -1166,10 +1166,10 @@ def _normalize_razorpay_link_paid(entities: dict[str, Any]) -> dict[str, Any]:
 
     Requires the payment entity's id (the inbox identity and future
     ``provider_order_id``, D7), the link ``notes.checkout_nonce`` (proof of the
-    SpecForge checkout attempt — hashed, never stored raw), and a
+    Thought2Build checkout attempt — hashed, never stored raw), and a
     ``notes.environment`` matching this server's key environment (Razorpay
     events carry no test-mode flag, so the round-tripped marker is the test/live
-    guard; a link SpecForge minted always carries it — hard requirement here).
+    guard; a link Thought2Build minted always carries it — hard requirement here).
     """
     link = _razorpay_entity(entities, "payment_link")
     payment = _razorpay_entity(entities, "payment")
@@ -1204,7 +1204,7 @@ def _normalize_razorpay_link_paid(entities: dict[str, Any]) -> dict[str, Any]:
         "event_name": "payment_link.paid",
         "payment_id": str(payment_id),
         # The checkout object — corroboration only; the link amount is a value
-        # SpecForge set at creation, so the grant anchors on the payment (D10).
+        # Thought2Build set at creation, so the grant anchors on the payment (D10).
         "payment_link": {
             "payment_link_id": link.get("id"),
             "reference_id": link.get("reference_id"),

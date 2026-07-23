@@ -95,18 +95,18 @@ WORKER_JOBS = [
 ]
 
 GITHUB_METRICS = [
-    "specforge_github_webhook_received_total",
-    "specforge_github_webhook_verified_total",
-    "specforge_github_webhook_deduped_total",
-    "specforge_github_webhook_failed_total",
-    "specforge_github_reconcile_lag_seconds",
-    "specforge_github_export_total",
-    "specforge_github_pr_total",
-    "specforge_github_check_total",
-    "specforge_github_token_mint_total",
-    "specforge_github_job_retries_total",
-    "specforge_github_job_deadlettered_total",
-    "specforge_github_queue_depth",
+    "thought2build_github_webhook_received_total",
+    "thought2build_github_webhook_verified_total",
+    "thought2build_github_webhook_deduped_total",
+    "thought2build_github_webhook_failed_total",
+    "thought2build_github_reconcile_lag_seconds",
+    "thought2build_github_export_total",
+    "thought2build_github_pr_total",
+    "thought2build_github_check_total",
+    "thought2build_github_token_mint_total",
+    "thought2build_github_job_retries_total",
+    "thought2build_github_job_deadlettered_total",
+    "thought2build_github_queue_depth",
 ]
 
 GITHUB_APP_CONFIG = [
@@ -124,7 +124,7 @@ REQUIRED_ISSUE_SECTIONS = [
     "Spec links",
 ]
 
-AGENT_LABELS = ["specforge", "stage:tasks", "ready-for-agent"]
+AGENT_LABELS = ["thought2build", "stage:tasks", "ready-for-agent"]
 
 
 # ---------------------------------------------------------------------------
@@ -472,8 +472,8 @@ def test_t267_token_cache_is_namespaced_and_refresh_ahead() -> None:
     assert re.search(r"refresh|ttl|expire", src, re.I), (
         "Token cache must be TTL'd / refresh-ahead so minting stays off the hot path. T-267."
     )
-    assert "specforge_github_token_mint_total" in src, (
-        "Token mint vs cache hit must increment specforge_github_token_mint_total. T-267/T-284."
+    assert "thought2build_github_token_mint_total" in src, (
+        "Token mint vs cache hit must increment thought2build_github_token_mint_total. T-267/T-284."
     )
 
 
@@ -805,8 +805,8 @@ def test_t274_per_repo_write_serialization() -> None:
     assert re.search(r"lock", src, re.I) and "repo" in src, (
         "Content writes must be serialized per repo (per-repo_id lock). T-274."
     )
-    assert "specforge_github_queue_depth" in (src + _combined_github_services()), (
-        "Backpressure must be observable via specforge_github_queue_depth. T-274/T-284."
+    assert "thought2build_github_queue_depth" in (src + _combined_github_services()), (
+        "Backpressure must be observable via thought2build_github_queue_depth. T-274/T-284."
     )
 
 
@@ -829,7 +829,7 @@ def test_t276_pr_builder_adds_branch_and_pr_plumbing() -> None:
 
 def test_t276_pr_mode_emits_ci_workflow_and_stack_scaffold() -> None:
     src = read_backend_file("services", "integrations", "pr_export_builder.py")
-    assert "specforge.yml" in src or ".github/workflows" in src, (
+    assert "thought2build.yml" in src or ".github/workflows" in src, (
         "PR mode must emit a CI workflow under .github/workflows. T-276."
     )
     _assert_any(src, ["pytest", "vitest"], "PR mode per-stack scaffold (start pytest/vitest)")
@@ -881,7 +881,7 @@ def test_t277_agents_md_builder_never_clobbers_existing_content() -> None:
     """Edge: AGENTS.md/CLAUDE.md may already exist — write only inside markers."""
     src = read_backend_file("services", "integrations", "agents_md_builder.py")
     assert "AGENTS.md" in src or "CLAUDE.md" in src, "agents_md_builder must generate AGENTS.md/CLAUDE.md. T-277."
-    assert re.search(r"specforge:start|specforge:end|managed|marker|delimit", src, re.I), (
+    assert re.search(r"thought2build:start|thought2build:end|managed|marker|delimit", src, re.I), (
         "AGENTS.md generation must write only inside delimited managed markers (never clobber). T-277."
     )
     assert re.search(r"clobber|preserve|existing", src, re.I), (

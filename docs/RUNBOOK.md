@@ -1,6 +1,6 @@
-# SpecForge Operations Runbook
+# Thought2Build Operations Runbook
 
-Operational procedures for SpecForge V1 on-call engineers and SREs.  
+Operational procedures for Thought2Build V1 on-call engineers and SREs.  
 Covers: circuit breaker, finalise race incident response, credit refund
 procedures, auth cache limitations, dependency version management, Lemon Squeezy
 billing alerts and ops, and prompt pipeline quality gates.
@@ -39,25 +39,25 @@ The LLM circuit breaker tracks consecutive failures per provider using `_FAILURE
 
 ### Detecting a Circuit Activation
 
-**Prometheus metric:** `specforge_llm_circuit_rejections_total{provider="<provider>"}`
+**Prometheus metric:** `thought2build_llm_circuit_rejections_total{provider="<provider>"}`
 
-> **Alert:** if `specforge_llm_circuit_rejections_total > 0` — a circuit breaker has
+> **Alert:** if `thought2build_llm_circuit_rejections_total > 0` — a circuit breaker has
 > activated. Check provider health via `GET /providers/health` while signed in.
 
 ```promql
 # Alert: circuit breaker tripped in the last 5 minutes
-increase(specforge_llm_circuit_rejections_total[5m]) > 0
+increase(thought2build_llm_circuit_rejections_total[5m]) > 0
 
 # Grafana dashboard: rejection rate per provider (T-215)
-rate(specforge_llm_circuit_rejections_total[5m])
+rate(thought2build_llm_circuit_rejections_total[5m])
 # — or grouped to sum across all labels:
-sum by (provider) (rate(specforge_llm_circuit_rejections_total[5m]))
+sum by (provider) (rate(thought2build_llm_circuit_rejections_total[5m]))
 
 # Current open/closed state per provider (0=closed, 1=open): (T-220)
-specforge_llm_circuit_state
+thought2build_llm_circuit_state
 
 # Alert when any provider circuit is open:
-max by (provider) (specforge_llm_circuit_state) == 1
+max by (provider) (thought2build_llm_circuit_state) == 1
 ```
 
 **Log signal:**
@@ -66,7 +66,7 @@ max by (provider) (specforge_llm_circuit_state) == 1
 level=WARNING event="llm.circuit_open" provider="anthropic" model="..."
 ```
 
-Search Grafana / Loki: `{app="specforge"} |= "llm.circuit_open"`.
+Search Grafana / Loki: `{app="thought2build"} |= "llm.circuit_open"`.
 
 ### User Impact When the Circuit Is Open
 
@@ -106,7 +106,7 @@ In `provider_status.py`, temporarily raise `_UNHEALTHY_FAILURE_THRESHOLD` or set
 
 ### Multi-Worker Note
 
-`_FAILURES` is **per-worker-process**. In multi-worker deployments (Gunicorn + multiple uvicorn workers) each process maintains an independent failure count. A provider may be circuit-open in one worker and healthy in another. This is an accepted trade-off — a distributed circuit would require a shared Redis counter. Monitor `specforge_llm_circuit_rejections_total` across all instances to detect partial activation.
+`_FAILURES` is **per-worker-process**. In multi-worker deployments (Gunicorn + multiple uvicorn workers) each process maintains an independent failure count. A provider may be circuit-open in one worker and healthy in another. This is an accepted trade-off — a distributed circuit would require a shared Redis counter. Monitor `thought2build_llm_circuit_rejections_total` across all instances to detect partial activation.
 
 ---
 
@@ -286,18 +286,18 @@ Key metrics to monitor:
 
 | Metric | Alert Condition |
 |---|---|
-| `specforge_llm_circuit_rejections_total` | Any increase → circuit tripped |
+| `thought2build_llm_circuit_rejections_total` | Any increase → circuit tripped |
 | `llm_request_total` | Drop in successful requests |
 | `http_request_duration_seconds` | P95 > 30s → LLM latency spike |
 | `sse_stream_duration_seconds` | P95 > 120s → streaming hung |
 | `pdf_export_duration_seconds` | P95 > 10s → PDF rendering slow |
 | `eval_failure_total` | Sustained increase → eval service degraded |
-| `specforge_billing_webhook_error_total` | Any increase → billing webhook processing error |
-| `specforge_billing_webhook_pending_age_seconds` | `> 300` → billing inbox not draining (queue outage / crashed worker) |
-| `specforge_billing_checkout_rate_limited_total` | Sustained increase → checkout abuse or broken retry loop |
+| `thought2build_billing_webhook_error_total` | Any increase → billing webhook processing error |
+| `thought2build_billing_webhook_pending_age_seconds` | `> 300` → billing inbox not draining (queue outage / crashed worker) |
+| `thought2build_billing_checkout_rate_limited_total` | Sustained increase → checkout abuse or broken retry loop |
 | `pipeline_validator_failures_total` | Any increase → prompt output missing mandatory sections |
 | `pipeline_upstream_section_skipped_total` | Sustained increase → upstream stage lacks required context |
-| `specforge_billing_credits_critic_regen_total` | Spike → critic loop is burning extra regeneration credits |
+| `thought2build_billing_credits_critic_regen_total` | Spike → critic loop is burning extra regeneration credits |
 
 ---
 
@@ -326,7 +326,7 @@ code change in this repository.
      container starts.
    - **Environment variable renames** — check `docker-compose.yml` env block
      against the new release's required vars.
-3. If SpecForge integrates with the Langfuse API (`LANGFUSE_PUBLIC_KEY`,
+3. If Thought2Build integrates with the Langfuse API (`LANGFUSE_PUBLIC_KEY`,
    `LANGFUSE_SECRET_KEY`, `LANGFUSE_HOST`), verify the SDK version in
    `backend/pyproject.toml` is compatible with the new Langfuse server version.
 
@@ -346,7 +346,7 @@ docker compose --profile langfuse up -d langfuse langfuse-db
 # 4. Verify Langfuse UI is reachable:
 curl -s http://localhost:3000/api/public/health | jq .
 
-# 5. Send a test generation request through SpecForge and confirm prompts are
+# 5. Send a test generation request through Thought2Build and confirm prompts are
 #    fetched from Langfuse (check backend logs for "langfuse.prompt_fetched"):
 #    docker compose logs -f backend | grep langfuse
 
@@ -498,7 +498,7 @@ bucket or local machine) before triggering the deploy.
 
 ## 8. Secret Rotation Procedures
 
-SpecForge manages three categories of critical secrets, each with a distinct
+Thought2Build manages three categories of critical secrets, each with a distinct
 rotation impact and procedure.  Rotate proactively on a scheduled cadence or
 immediately when a compromise is suspected.
 
@@ -676,7 +676,7 @@ Billing runs on **one flag-gated payment provider at a time** (issue #44):
 Checkout is live only when `billing_checkout_enabled` =
 `payments_enabled and (active provider fully configured)`. **Lemon Squeezy**
 (Phase 22) is the Merchant of Record, so it owns tax, chargebacks, and disputes;
-chargebacks/disputes surface to SpecForge through `order_refunded`/fraud
+chargebacks/disputes surface to Thought2Build through `order_refunded`/fraud
 revocation inputs. **Razorpay** (issue #44) is the INR alternative via hosted
 Payment Links — it is **not** a Merchant of Record (tax/dispute liability sits
 with the account holder), and its ops deltas are in §9.9. **Webhook endpoints for
@@ -718,34 +718,34 @@ identically for Razorpay traffic (drill into the `provider` label to disambiguat
 
 | Alert | Condition | Severity | Action |
 |---|---|---|---|
-| BillingWebhookErrorRate | `rate(specforge_billing_webhook_error_total[5m]) > 0` | Warning | Check logs for `billing.webhook.*` / `billing.job.*`; inspect Lemon dashboard delivery logs. Webhook retries are safe — the inbox dedupes on the event id. Delete a `billing_webhook_events` row only with incident-lead approval and only after confirming credits were not granted |
-| BillingWebhookPendingAge | `specforge_billing_webhook_pending_age_seconds > 300` | Warning | The inbox is not draining (queue outage or crashed worker). Confirm the worker process is up and Redis is reachable; the 60s sweep re-enqueues stale rows. A sustained breach is the trigger to scale the billing worker out (§9.6) |
-| BillingCheckoutDropped | `rate(specforge_billing_checkout_completed_total[30m]) == 0` while `checkout_created` rising; **or** zero `checkout_completed` over 72h | Warning | Verify `/billing/webhook` is reachable and returning 200; check Lemon webhook delivery logs and the inbox; inspect CSRF/rate-limit exemptions |
-| BillingCheckoutApiError | `rate(specforge_billing_checkout_api_error_total[15m]) > 0` | Warning | A `POST /billing/checkout` failed. `error_type="provider_error"` → Lemon's checkout API failed (users get a 502 and **cannot pay**); check Lemon status and the `_API_KEY`/`_STORE_ID`/`_VARIANT_ID` config. `error_type="orphaned_commit"` → the post-Lemon local commit failed so the URL was never exposed; the attempt is recovered by reconcile (lane 3 hygiene + lane 1), but a sustained rate signals a DB/commit fault — inspect `billing.checkout.*` logs |
-| BillingReversalSpike | `rate(specforge_billing_credits_revoked_total[1h])` above baseline | Warning | A burst of `order_refunded`/fraud revocations. Review the Lemon dashboard; confirm reversals are legitimate and debt was created where expected |
-| BillingUnprovablePaidCheckout | `increase(specforge_billing_unrecoverable_checkout_total[1h]) > 0` | Warning | An `order_created` was rejected while the provider reports the order **paid**. Reconcile cannot auto-grant this — settle via the admin-correction path (§9.5) with evidence |
-| BillingDebtCreated | `increase(specforge_billing_credit_debt_created_total[1h]) > 0` | Info | A reversal exceeded remaining balance and created recoverable debt. Expected after refunds on spent credits; investigate if the rate is abnormal |
-| BillingReconcileMismatch | `increase(specforge_billing_reconcile_mismatch_total[1h]) > 0` | Warning | Reconcile lane 2 applied a reversal the webhook path missed. Investigate why the webhook was lost (delivery, signature, inbox) |
-| BillingExpirySpike | `rate(specforge_billing_credits_expired_total[1h])` above baseline | Info | Unusual volume of credits lazily expiring; correlate with a past purchase cohort, not a fault |
-| BillingJobDeadlettered | `increase(specforge_billing_job_deadlettered_total[15m]) > 0` | Critical | A billing job exhausted retries and landed in `billing:deadletter`. Inspect and replay (§9.3) |
-| BillingWebhookDuplicate | `rate(specforge_billing_webhook_duplicate_total[1h]) > 100` | Info | Normal if Lemon is retrying; investigate above 100/hour — the endpoint may be failing silently after the `already_processed` return |
-| BillingAdminCorrection | `increase(specforge_billing_admin_correction_total[1h]) > 0` | Info | **Control-visibility, not a failure.** A privileged manual credit grant landed via `POST /billing/admin/correction` (§9.5). Expected only to settle a `BillingUnprovablePaidCheckout`. Confirm the caller is an authorised `ADMIN_USER_EMAILS` operator and that the `billing_admin_corrections` audit row carries an `evidence_url`; investigate any correction with no corresponding unrecoverable-checkout signal |
+| BillingWebhookErrorRate | `rate(thought2build_billing_webhook_error_total[5m]) > 0` | Warning | Check logs for `billing.webhook.*` / `billing.job.*`; inspect Lemon dashboard delivery logs. Webhook retries are safe — the inbox dedupes on the event id. Delete a `billing_webhook_events` row only with incident-lead approval and only after confirming credits were not granted |
+| BillingWebhookPendingAge | `thought2build_billing_webhook_pending_age_seconds > 300` | Warning | The inbox is not draining (queue outage or crashed worker). Confirm the worker process is up and Redis is reachable; the 60s sweep re-enqueues stale rows. A sustained breach is the trigger to scale the billing worker out (§9.6) |
+| BillingCheckoutDropped | `rate(thought2build_billing_checkout_completed_total[30m]) == 0` while `checkout_created` rising; **or** zero `checkout_completed` over 72h | Warning | Verify `/billing/webhook` is reachable and returning 200; check Lemon webhook delivery logs and the inbox; inspect CSRF/rate-limit exemptions |
+| BillingCheckoutApiError | `rate(thought2build_billing_checkout_api_error_total[15m]) > 0` | Warning | A `POST /billing/checkout` failed. `error_type="provider_error"` → Lemon's checkout API failed (users get a 502 and **cannot pay**); check Lemon status and the `_API_KEY`/`_STORE_ID`/`_VARIANT_ID` config. `error_type="orphaned_commit"` → the post-Lemon local commit failed so the URL was never exposed; the attempt is recovered by reconcile (lane 3 hygiene + lane 1), but a sustained rate signals a DB/commit fault — inspect `billing.checkout.*` logs |
+| BillingReversalSpike | `rate(thought2build_billing_credits_revoked_total[1h])` above baseline | Warning | A burst of `order_refunded`/fraud revocations. Review the Lemon dashboard; confirm reversals are legitimate and debt was created where expected |
+| BillingUnprovablePaidCheckout | `increase(thought2build_billing_unrecoverable_checkout_total[1h]) > 0` | Warning | An `order_created` was rejected while the provider reports the order **paid**. Reconcile cannot auto-grant this — settle via the admin-correction path (§9.5) with evidence |
+| BillingDebtCreated | `increase(thought2build_billing_credit_debt_created_total[1h]) > 0` | Info | A reversal exceeded remaining balance and created recoverable debt. Expected after refunds on spent credits; investigate if the rate is abnormal |
+| BillingReconcileMismatch | `increase(thought2build_billing_reconcile_mismatch_total[1h]) > 0` | Warning | Reconcile lane 2 applied a reversal the webhook path missed. Investigate why the webhook was lost (delivery, signature, inbox) |
+| BillingExpirySpike | `rate(thought2build_billing_credits_expired_total[1h])` above baseline | Info | Unusual volume of credits lazily expiring; correlate with a past purchase cohort, not a fault |
+| BillingJobDeadlettered | `increase(thought2build_billing_job_deadlettered_total[15m]) > 0` | Critical | A billing job exhausted retries and landed in `billing:deadletter`. Inspect and replay (§9.3) |
+| BillingWebhookDuplicate | `rate(thought2build_billing_webhook_duplicate_total[1h]) > 100` | Info | Normal if Lemon is retrying; investigate above 100/hour — the endpoint may be failing silently after the `already_processed` return |
+| BillingAdminCorrection | `increase(thought2build_billing_admin_correction_total[1h]) > 0` | Info | **Control-visibility, not a failure.** A privileged manual credit grant landed via `POST /billing/admin/correction` (§9.5). Expected only to settle a `BillingUnprovablePaidCheckout`. Confirm the caller is an authorised `ADMIN_USER_EMAILS` operator and that the `billing_admin_corrections` audit row carries an `evidence_url`; investigate any correction with no corresponding unrecoverable-checkout signal |
 
 **Counters with deliberately no standalone alert** (so the "every failure mode has
 an alert" sign-off is met without padding the runbook). These are
 dashboard/business/context metrics, not failure modes:
-`specforge_billing_credits_granted_total`,
-`specforge_billing_purchase_revenue_cents_total`,
-`specforge_billing_credits_consumed_total`,
-`specforge_billing_credit_debt_recovered_total`,
-`specforge_billing_webhook_received_total`,
-`specforge_billing_checkout_created_total` (consumed inside `BillingCheckoutDropped`),
-`specforge_billing_checkout_expired_total` (lane-3 hygiene churn), and
-`specforge_billing_checkout_rate_limited_total`. `specforge_billing_job_retries_total`
+`thought2build_billing_credits_granted_total`,
+`thought2build_billing_purchase_revenue_cents_total`,
+`thought2build_billing_credits_consumed_total`,
+`thought2build_billing_credit_debt_recovered_total`,
+`thought2build_billing_webhook_received_total`,
+`thought2build_billing_checkout_created_total` (consumed inside `BillingCheckoutDropped`),
+`thought2build_billing_checkout_expired_total` (lane-3 hygiene churn), and
+`thought2build_billing_checkout_rate_limited_total`. `thought2build_billing_job_retries_total`
 is intentionally **not** alerted on its own — retries are transient by design and
 the dead-letter is the actionable signal (`BillingJobDeadlettered`, Critical),
-matching the GitHub queue pattern in §12. `specforge_billing_credits_critic_regen_total`
-and `specforge_billing_credits_brave_research_total` are platform-funded
+matching the GitHub queue pattern in §12. `thought2build_billing_credits_critic_regen_total`
+and `thought2build_billing_credits_brave_research_total` are platform-funded
 quality/research credits, not payment-flow metrics, and are out of scope here.
 
 ### 9.2 Billing Endpoint Recovery
@@ -797,7 +797,7 @@ mix them). The constants are `BILLING_DEAD_LETTER_KEY` in
 
 - **Pending sweep (60s):** `billing_process_pending_webhooks` reclaims inbox rows
   stuck in `received`/`failed`/stale `processing` (e.g. after a queue outage or a
-  crashed worker) and refreshes `specforge_billing_webhook_pending_age_seconds`
+  crashed worker) and refreshes `thought2build_billing_webhook_pending_age_seconds`
   to the age of the oldest non-`processed` row. A rising gauge is the primary
   "lost webhook" signal.
 - **Reconcile (15-minute backstop):** `billing_reconcile` claims **every
@@ -844,7 +844,7 @@ could not settle (e.g. `BillingUnprovablePaidCheckout`).
 - **Idempotency:** the write is append-only and unique on
   `(provider, provider_order_id)`. A repeat call returns `applied: false`,
   `credits_granted: 0` — never a second grant. Every call is audited
-  (`billing_admin_corrections` row + `specforge_billing_admin_correction_total`).
+  (`billing_admin_corrections` row + `thought2build_billing_admin_correction_total`).
 - **Procedure:** confirm the order is genuinely paid in the active provider's
   dashboard (Lemon order, or the Razorpay payment `pay_…`) and that no pack
   already exists for the order id; capture the evidence URL; issue the
@@ -899,7 +899,7 @@ ignored), so rotation is zero-downtime:
    Redeploy. Both secrets now verify.
 3. Update the **Lemon webhook** to sign with `<new_secret>`. Deliveries now sign
    with the new secret and still verify against `LEMONSQUEEZY_WEBHOOK_SECRET`.
-4. Watch `specforge_billing_webhook_error_total` and the inbox for one delivery
+4. Watch `thought2build_billing_webhook_error_total` and the inbox for one delivery
    cycle. If `bad_signature`/error spikes, set `LEMONSQUEEZY_WEBHOOK_SECRET` back
    to the old value and investigate.
 5. Close the window: clear `LEMONSQUEEZY_WEBHOOK_SECRET_PREV=` and redeploy. The
@@ -960,7 +960,7 @@ same `billing_process_webhook` job on the same worker, `billing:deadletter`
 §9.8 but with `RAZORPAY_WEBHOOK_SECRET` / `RAZORPAY_WEBHOOK_SECRET_PREV` (the
 handler verifies `X-Razorpay-Signature` against both): stage both in env and
 redeploy → update the Razorpay webhook (for the mode you are rotating) to sign
-with the new secret → watch `specforge_billing_webhook_error_total` for one
+with the new secret → watch `thought2build_billing_webhook_error_total` for one
 delivery cycle → clear `_PREV` and redeploy. Because Razorpay webhooks are
 per-mode, rotate the **live** webhook's secret against the live env; a test-mode
 secret change never touches production traffic.
@@ -1000,7 +1000,7 @@ offline prompt eval suite for prompt changes. The relevant files are:
 - `backend/services/pipeline/prompt_builder.py` for upstream section extraction
   and `pipeline_upstream_section_skipped_total`.
 - `backend/services/pipeline/critic.py` for the inline critic repair prompt and
-  `specforge_billing_credits_critic_regen_total`.
+  `thought2build_billing_credits_critic_regen_total`.
 - `harness/prompt_eval/` for golden workspaces, deterministic graders, and the
   local CLI.
 - `.github/workflows/prompt-eval.yml` for the PR gate on prompt changes.
@@ -1066,7 +1066,7 @@ Once per quarter, refresh the eval suite so it reflects the current product:
 | Signal | Meaning | Action |
 |---|---|---|
 | `pipeline_validator_failures_total` increases | A stage output is missing a mandatory contract section before critic repair | Inspect the affected stage output and prompt version; pause prompt promotion if new |
-| `specforge_billing_credits_critic_regen_total` spikes | Critic repair loops are consuming extra regeneration credits | Compare provider latency/errors, recent prompt changes, and validator failures |
+| `thought2build_billing_credits_critic_regen_total` spikes | Critic repair loops are consuming extra regeneration credits | Compare provider latency/errors, recent prompt changes, and validator failures |
 | `pipeline_upstream_section_skipped_total` increases | The prompt builder could not find expected upstream context | Inspect the upstream stage for renamed/missing headings; check whether a prompt or parser change caused drift |
 | Prompt eval CI fails | New prompt behavior regressed against baseline | Do not merge until the prompt is fixed or the regression has explicit release-owner acceptance |
 
@@ -1091,8 +1091,8 @@ failed paid attempt must refund exactly once.
 |---|---|---|
 | `storyboard.generate_failed` log | Generation failed after a credit debit | Verify the refund ledger entry exists exactly once |
 | Storyboard row stuck in `generating` | Worker died or provider call hung after reservation | Run stuck-job recovery checks below |
-| `specforge_storyboard_generation_failed_total` spike | Provider, timeout, parser, or schema failures increased | Split by `action` and `error_type`; inspect provider health |
-| `specforge_storyboard_credits_refunded_total` spike | Failures are refunding credits | Confirm refunds match failed Storyboard rows one-for-one |
+| `thought2build_storyboard_generation_failed_total` spike | Provider, timeout, parser, or schema failures increased | Split by `action` and `error_type`; inspect provider health |
+| `thought2build_storyboard_credits_refunded_total` spike | Failures are refunding credits | Confirm refunds match failed Storyboard rows one-for-one |
 | Ready Storyboard becomes `stale` | A source stage was refinalised | Ask owner to regenerate when they need the latest source versions |
 | Public leakage report | A `/sb/` link may expose gated content | Disable, rotate, preserve evidence, and verify default privacy |
 
@@ -1115,7 +1115,7 @@ Use this when a paid Storyboard attempt fails or a user reports missing credits.
 2. Confirm the failure metric and content-free log exist.
 
    ```promql
-   increase(specforge_storyboard_generation_failed_total[30m])
+   increase(thought2build_storyboard_generation_failed_total[30m])
    ```
 
    Search logs for `storyboard.generate_failed` and the `storyboard_id`. Logs
@@ -1155,7 +1155,7 @@ Use this when a paid Storyboard attempt fails or a user reports missing credits.
 4. Confirm the refund metric moved by the same credit amount.
 
    ```promql
-   increase(specforge_storyboard_credits_refunded_total[30m])
+   increase(thought2build_storyboard_credits_refunded_total[30m])
    ```
 
    The `reason` label is `generation_failed` for direct LLM/schema/provider
@@ -1325,9 +1325,9 @@ and source excerpts are hidden until the owner enables the matching permission.
 ## 12. GitHub Living Integration — App, Worker & Webhook Ops
 
 Operational procedures for the Phase 21 GitHub Living System of Record: the
-SpecForge **GitHub App** identity, the durable **arq worker** that runs all
+Thought2Build **GitHub App** identity, the durable **arq worker** that runs all
 GitHub I/O off the request path, and the signature-verified **webhook** that
-flows repository events back into SpecForge.
+flows repository events back into Thought2Build.
 
 **Architecture recap (where things run):**
 
@@ -1379,10 +1379,10 @@ you generate it on GitHub.
    succeed:
 
    ```bash
-   # specforge_github_token_mint_total should keep incrementing with no rise in
+   # thought2build_github_token_mint_total should keep incrementing with no rise in
    # webhook_failed / 401-driven re-mints.
    curl -s -H "Authorization: Bearer $METRICS_TOKEN" "$API_URL/metrics" \
-     | grep -E 'specforge_github_token_mint_total'
+     | grep -E 'thought2build_github_token_mint_total'
    ```
 
 4. Once mints are healthy, **delete the old key** in the GitHub App settings.
@@ -1424,13 +1424,13 @@ ignored). This is the two-secret window.
    ```
 
 3. Update the **GitHub App's** webhook secret to `<new_secret>`. From this
-   moment GitHub signs with the new secret; SpecForge accepts both, so no
+   moment GitHub signs with the new secret; Thought2Build accepts both, so no
    delivery is rejected.
 4. Watch the verify/fail metrics through at least one delivery cycle:
 
    ```bash
    curl -s -H "Authorization: Bearer $METRICS_TOKEN" "$API_URL/metrics" \
-     | grep -E 'specforge_github_webhook_(verified|failed)_total'
+     | grep -E 'thought2build_github_webhook_(verified|failed)_total'
    ```
 
    `verified` should keep climbing; `failed` must stay flat. A spike in
@@ -1466,7 +1466,7 @@ permission change):
 redis-cli --scan --pattern 'gh:inst_token:*' | xargs -r redis-cli del
 ```
 
-Then trigger any sync; confirm `specforge_github_token_mint_total` increments
+Then trigger any sync; confirm `thought2build_github_token_mint_total` increments
 (its `source` label distinguishes a cache hit from a fresh mint) and the job
 succeeds. A persistent re-mint storm (many mints per
 minute, rising `webhook_failed`/job retries) points at a **revoked installation
@@ -1478,11 +1478,11 @@ or an invalid App private key** — check §12.1 and the install's status on Git
 
 Every GitHub job runs with bounded retries + exponential backoff + jitter. After
 the max-attempt cap it is **dead-lettered** (counted by
-`specforge_github_job_deadlettered_total`) and alerts fire. Jobs are idempotent
+`thought2build_github_job_deadlettered_total`) and alerts fire. Jobs are idempotent
 and checkpointed (inbound keyed by `X-GitHub-Delivery`, outbound by
 `push_id`/`increment_id`), so a replay never duplicates side effects.
 
-**Alert trigger:** `increase(specforge_github_job_deadlettered_total[15m]) > 0`.
+**Alert trigger:** `increase(thought2build_github_job_deadlettered_total[15m]) > 0`.
 
 **Inspect the dead-letter queue (arq stores results/failures in Redis):**
 
@@ -1530,7 +1530,7 @@ marked `failed` and no credit is lost.
 ```bash
 # Throttle/breaker pressure shows up here:
 curl -s -H "Authorization: Bearer $METRICS_TOKEN" "$API_URL/metrics" \
-  | grep -E 'specforge_github_throttled_total|specforge_github_queue_depth'
+  | grep -E 'thought2build_github_throttled_total|thought2build_github_queue_depth'
 
 # Worker logs the breaker-open event:
 #   github.sync.paused  (and the LLM-style breaker open/close transitions)
@@ -1581,7 +1581,7 @@ asyncio.run(enqueue('reconcile_drift', job_id='reconcile_drift:manual'))
 ```
 
 **Verify:** `GET /workspaces/{id}/sync` reflects the corrected task states and
-`specforge_github_reconcile_lag_seconds` returns to baseline.
+`thought2build_github_reconcile_lag_seconds` returns to baseline.
 
 ---
 
@@ -1757,7 +1757,7 @@ limit, which is account-specific. Before enabling them:
 
 1. Get the **per-org RPM / TPM / concurrent-request** limits for each provider
    account (Anthropic/OpenAI/Google dashboards or support).
-2. Watch `specforge_llm_provider_rate_limited_total` under real load — a non-zero,
+2. Watch `thought2build_llm_provider_rate_limited_total` under real load — a non-zero,
    rising rate means the shared key is already at its ceiling.
 3. Set `PROVIDER_MAX_GENERATIONS_PER_MINUTE` / `_INFLIGHT_GENERATIONS` a margin
    **below** the measured org limit (account for the per-generation fan-out: each
@@ -1770,16 +1770,16 @@ limit, which is account-specific. Before enabling them:
 
 ```promql
 # Admission rejections by the budget that tripped (process/user/provider_*):
-sum by (reason) (rate(specforge_generation_admission_rejected_total[5m]))
+sum by (reason) (rate(thought2build_generation_admission_rejected_total[5m]))
 
 # Per-process in-flight generations on a worker (a non-zero idle floor = slot leak):
-specforge_generation_inflight_process
+thought2build_generation_inflight_process
 
 # Provider throttling — the binding-constraint signal (the shared key is at its ceiling):
-sum by (provider) (rate(specforge_llm_provider_rate_limited_total[5m]))
+sum by (provider) (rate(thought2build_llm_provider_rate_limited_total[5m]))
 
 # 429-aware in-place retries; "exhausted" = bounded retries used up, failure surfaced:
-sum by (provider, outcome) (rate(specforge_pipeline_provider_rate_limit_retries_total[5m]))
+sum by (provider, outcome) (rate(thought2build_pipeline_provider_rate_limit_retries_total[5m]))
 ```
 
 **Alert ideas:** sustained `provider_rate_limited` rate > 0 (key at ceiling →
@@ -1859,7 +1859,7 @@ fleet will hit `FATAL: too many connections`:
    (`pool_mode = transaction`, `ignore_startup_parameters` for asyncpg, and
    `server_reset_query = DISCARD ALL` with `server_reset_query_always = 1`).
 2. Point the app at it and flip the flag:
-   `DATABASE_URL=…@<pooler-host>:6432/specforge` and
+   `DATABASE_URL=…@<pooler-host>:6432/thought2build` and
    `DB_TRANSACTION_POOLER_MODE=1`. The flag disables SQLAlchemy's **and**
    asyncpg's prepared-statement caches and assigns each prepared statement a
    unique name, so statements routed across pooled backends never collide.
@@ -1869,8 +1869,8 @@ fleet will hit `FATAL: too many connections`:
    but does **not** apply to the backend session. Set them at the Postgres role
    instead so the runaway-query / idle-txn protection survives the pooler:
    ```sql
-   ALTER ROLE specforge SET statement_timeout = '30s';
-   ALTER ROLE specforge SET idle_in_transaction_session_timeout = '5min';
+   ALTER ROLE thought2build SET statement_timeout = '30s';
+   ALTER ROLE thought2build SET idle_in_transaction_session_timeout = '5min';
    ```
 4. **Rollback:** set `DB_TRANSACTION_POOLER_MODE=0` and point `DATABASE_URL`
    back at Postgres directly. No migration; effective on next process start.
@@ -1894,17 +1894,17 @@ The `/metrics` endpoint now exposes the SQLAlchemy pool per instance (F3):
 
 | Metric | Meaning |
 |---|---|
-| `specforge_db_pool_checked_out` | connections in use right now |
-| `specforge_db_pool_checked_in` | idle pooled connections |
-| `specforge_db_pool_overflow` | overflow beyond `pool_size` (negative = not full) |
-| `specforge_db_pool_total_open` | **total open Postgres connections from this instance** |
-| `specforge_db_pool_max` | this instance's peak ceiling (`pool_size`+`max_overflow`) |
-| `specforge_background_tasks{registry}` | live detached tasks (pipeline/eval/critic/verifier) — F6 |
+| `thought2build_db_pool_checked_out` | connections in use right now |
+| `thought2build_db_pool_checked_in` | idle pooled connections |
+| `thought2build_db_pool_overflow` | overflow beyond `pool_size` (negative = not full) |
+| `thought2build_db_pool_total_open` | **total open Postgres connections from this instance** |
+| `thought2build_db_pool_max` | this instance's peak ceiling (`pool_size`+`max_overflow`) |
+| `thought2build_background_tasks{registry}` | live detached tasks (pipeline/eval/critic/verifier) — F6 |
 
-**Acceptance gate / alert:** `sum(specforge_db_pool_total_open)` across instances
+**Acceptance gate / alert:** `sum(thought2build_db_pool_total_open)` across instances
 must stay under the confirmed `max_connections` with margin. With the pooler in
 front, watch the pooler's own server-connection count instead — it should be flat
-as you add app instances. Alert on `specforge_background_tasks` climbing without
+as you add app instances. Alert on `thought2build_background_tasks` climbing without
 bound (a fan-out leak past the F1 admission cap).
 
 ---
@@ -1961,8 +1961,8 @@ config calls `entrypoint.sh`, preserving migrate → seed templates → Gunicorn
 worker configs intentionally run neither migrations nor template seeding.
 
 A missing/stalled fast worker surfaces as:
-`specforge_worker_queue_oldest_age_seconds{queue="arq:queue:fast"}` climbing, and
-`specforge_billing_webhook_pending_age_seconds > 300` (the existing
+`thought2build_worker_queue_oldest_age_seconds{queue="arq:queue:fast"}` climbing, and
+`thought2build_billing_webhook_pending_age_seconds > 300` (the existing
 `BillingWebhookPendingAge` alert, §9.1). **Recovery:** start the fast worker — the
 queued jobs and the next sweep drain it; grants are idempotent so nothing
 double-grants.
@@ -1975,11 +1975,11 @@ stalled queue (which starts no jobs) still reports:
 
 | Metric | Meaning |
 |---|---|
-| `specforge_worker_queue_depth{queue}` | pending jobs in the queue |
-| `specforge_worker_queue_oldest_age_seconds{queue}` | age of the oldest ready job |
-| `specforge_github_queue_depth` | back-compat alias for the bulk queue depth |
+| `thought2build_worker_queue_depth{queue}` | pending jobs in the queue |
+| `thought2build_worker_queue_oldest_age_seconds{queue}` | age of the oldest ready job |
+| `thought2build_github_queue_depth` | back-compat alias for the bulk queue depth |
 
-**Alert ideas:** `specforge_worker_queue_oldest_age_seconds{queue="arq:queue:fast"}
+**Alert ideas:** `thought2build_worker_queue_oldest_age_seconds{queue="arq:queue:fast"}
 > 120` (fast lane starved / no consumer — paid grants delayed); the bulk lane the
 same at a looser threshold (export backlog).
 
@@ -1988,7 +1988,7 @@ same at a looser threshold (export backlog).
 The post-`done` advisory work (eval score + critic judge + Demo-Day verifier)
 shares a concurrency ceiling (`MAX_CONCURRENT_ADVISORY_TASKS`, default 12; 0
 disables) so it can't starve live generation streams; each registry's live size
-is `specforge_background_tasks{registry}` and crossing
+is `thought2build_background_tasks{registry}` and crossing
 `BACKGROUND_TASKS_SOFT_MAX` logs a one-shot high-water warning (it never drops a
 task). The detached generation pipeline is **not** gated — it is bounded upstream
 by F1 admission (§14).
@@ -2030,7 +2030,7 @@ long-running by design). The post-`done` eval/verifier internals stay inline
 too — they are advisory, F6-gated, and the lag metric below is the tool that
 says if they ever matter.
 
-**Validation metric:** `specforge_event_loop_lag_seconds` (histogram) — a
+**Validation metric:** `thought2build_event_loop_lag_seconds` (histogram) — a
 per-process sampler measures how late a fixed 5s timer fires; the excess is
 loop starvation. **Alert idea:** sustained p99 > 250ms means CPU work is
 stalling the loop again (F7 regressed or a new inline hot spot appeared).
@@ -2124,7 +2124,7 @@ Each job caps at `retention_max_rows_per_run` (default 50 000) rows/run in
 `retention_purge_batch_size` (default 1000) batches, committing per batch — a
 backlog drains over several days rather than in one lock storm.
 
-### Enable order (dev/staging first — SpecForge is pre-production)
+### Enable order (dev/staging first — Thought2Build is pre-production)
 
 Validate with **short windows** (set the `*_days` knobs to `1` so candidates
 materialise) + `tests/test_retention.py`, not calendar time.
@@ -2171,25 +2171,25 @@ ack_version).
 
 ### Metrics & alerts
 
-- `specforge_db_table_bytes{table}` / `_live_tuples{table}` — the size baseline.
-- `specforge_retention_candidates{job}` — set every run (incl. dry-run/flag-off).
-- `specforge_retention_purged_rows_total{job,table}` — rows deleted.
-- `specforge_retention_run_seconds{job}` — duration (index-rot / lock signal).
-- `specforge_retention_last_success_timestamp{job}` — missed-run pager.
+- `thought2build_db_table_bytes{table}` / `_live_tuples{table}` — the size baseline.
+- `thought2build_retention_candidates{job}` — set every run (incl. dry-run/flag-off).
+- `thought2build_retention_purged_rows_total{job,table}` — rows deleted.
+- `thought2build_retention_run_seconds{job}` — duration (index-rot / lock signal).
+- `thought2build_retention_last_success_timestamp{job}` — missed-run pager.
 
 Alerts:
 
-- **Job failed / stalled:** `time() - specforge_retention_last_success_timestamp
+- **Job failed / stalled:** `time() - thought2build_retention_last_success_timestamp
   > 26h` per job (the structlog `retention.*_failed` exception is the diagnostic).
 - **Backlog:** `retention_candidates{job}` rising for 7 d while that tier's purge
   flag is on ⇒ per-run cap undersized — raise `retention_max_rows_per_run`.
-- **Not stabilising:** `specforge_db_table_bytes` slope still positive 4 weeks
+- **Not stabilising:** `thought2build_db_table_bytes` slope still positive 4 weeks
   after a tier enabled.
 
 ### `DELETE` does not shrink files
 
 Autovacuum makes dead space **reusable**, so the success criterion is a
-**plateau, not a shrink** — a flat `specforge_db_table_bytes` slope at steady
+**plateau, not a shrink** — a flat `thought2build_db_table_bytes` slope at steady
 state. Actual disk reclamation needs `pg_repack` (or `VACUUM FULL`, which takes
 an `ACCESS EXCLUSIVE` lock) in a maintenance window — ops-optional, only if the
 files must physically shrink.

@@ -76,7 +76,7 @@ class GitHubInstallation(Base):
         nullable=False,
         server_default=text("'manual'"),
     )
-    # The SpecForge user who installed, if known. SET NULL on user delete: the
+    # The Thought2Build user who installed, if known. SET NULL on user delete: the
     # installation outlives the linking account.
     user_id: Mapped[PythonUUID | None] = mapped_column(
         UUID(as_uuid=True),

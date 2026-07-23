@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://specforge.local/schemas/public-workspace.schema.json",
+  "$id": "https://thought2build.local/schemas/public-workspace.schema.json",
   "title": "PublicWorkspaceResponse",
   "description": "Response shape for GET /public/{slug} (Spec §4.8 / §11, Plan §18.3 / §18.4). Allow-list contract: every field listed here is intentionally public; anything not listed is considered private and MUST NOT appear in the response.",
   "type": "object",

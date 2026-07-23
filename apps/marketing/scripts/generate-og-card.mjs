@@ -63,7 +63,7 @@ const svg = `
   <circle cx="1030" cy="120" r="360" fill="#f59e0b" opacity="0.06"/>
   <g font-family="Helvetica Neue, Helvetica, Arial, sans-serif">
     <text x="248" y="168" font-size="30" font-weight="600" fill="#f59e0b" letter-spacing="3">AI SPEC-TO-BUILD WORKSPACE</text>
-    <text x="80" y="330" font-size="104" font-weight="800" fill="#f8fafc">SpecForge</text>
+    <text x="80" y="330" font-size="104" font-weight="800" fill="#f8fafc">Thought2Build</text>
     <text x="80" y="410" font-size="40" font-weight="600" fill="#cbd5e1">Turn rough product ideas into build-ready</text>
     <text x="80" y="462" font-size="40" font-weight="600" fill="#cbd5e1">specs, tests, and tasks.</text>
     <text x="80" y="556" font-size="32" font-weight="700" fill="#f8fafc">Spec</text>
@@ -73,7 +73,7 @@ const svg = `
     <text x="396" y="556" font-size="32" font-weight="700" fill="#f8fafc">Harness</text>
     <text x="576" y="556" font-size="32" font-weight="400" fill="#64748b">→</text>
     <text x="620" y="556" font-size="32" font-weight="700" fill="#f8fafc">Tasks</text>
-    <text x="${W - 80}" y="556" font-size="28" font-weight="600" fill="#94a3b8" text-anchor="end">specforge.app</text>
+    <text x="${W - 80}" y="556" font-size="28" font-weight="600" fill="#94a3b8" text-anchor="end">thought2build.com</text>
   </g>
 </svg>`
 

@@ -60,13 +60,13 @@ _RETRY_AFTER = {
 }
 
 GENERATION_ADMISSION_REJECTED = Counter(
-    "specforge_generation_admission_rejected_total",
+    "thought2build_generation_admission_rejected_total",
     "Stage generations rejected by admission control before any provider call, "
     "by the budget that tripped (process / user / provider_inflight / provider_rpm).",
     ["reason"],
 )
 GENERATION_INFLIGHT_PROCESS = Gauge(
-    "specforge_generation_inflight_process",
+    "thought2build_generation_inflight_process",
     "In-flight stage generations admitted on this worker process (per-process "
     "admission counter). A persistent non-zero floor at idle indicates a slot leak.",
 )

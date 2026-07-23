@@ -1,4 +1,4 @@
-# SpecForge Marketing Studio
+# Thought2Build Marketing Studio
 
 Sanity Studio for the marketing zone (issue #18, Phase 3). This is a **standalone
 studio** — it is *not* embedded in the Astro site. That is deliberate: embedding

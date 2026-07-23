@@ -1,7 +1,7 @@
 [project]
-name = "specforge-backend"
+name = "thought2build-backend"
 version = "0.1.0"
-description = "FastAPI backend for SpecForge V1."
+description = "FastAPI backend for Thought2Build V1."
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "fastapi>=0.136,<0.140",

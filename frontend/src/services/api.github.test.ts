@@ -72,7 +72,7 @@ describe("GitHub living-integration api client", () => {
 
   it("getGitHubInstallUrl returns the install URL on success", async () => {
     vi.spyOn(api, "get").mockResolvedValueOnce({
-      data: { url: "https://github.com/apps/specforge/installations/new" },
+      data: { url: "https://github.com/apps/thought2build/installations/new" },
     })
     await expect(getGitHubInstallUrl()).resolves.toContain("/installations/new")
   })

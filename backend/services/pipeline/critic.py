@@ -126,7 +126,7 @@ class StageQualityGateError(RuntimeError):
 
 # Inline critic prompt template — Phase 19 Security Directive: held in code, never
 # sourced from Langfuse.  Plain (non-f) string: braces are literal JSON examples.
-_CRITIC_SYSTEM_PROMPT = """You are SpecForge's quality critic.  You receive a \
+_CRITIC_SYSTEM_PROMPT = """You are Thought2Build's quality critic.  You receive a \
 generated stage artifact (SPEC.md, PLAN.md, a test HARNESS, or TASKS.md) and its \
 upstream dependency artifacts.  Your job is to enforce the stage's "Before \
 returning, verify" invariants programmatically — the generator marks them as \

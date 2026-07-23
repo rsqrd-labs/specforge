@@ -965,7 +965,7 @@ async def test_uncondensed_clean_generation_stays_clear() -> None:
 # Async-advisory critic (docs/CRITIC_ASYNC_ADVISORY_PLAN.md) — the default path:
 # the judge runs OFF the critical path after `done`.
 # ---------------------------------------------------------------------------
-_ADVISORY_METRIC = "specforge_pipeline_critic_advisory_findings_total"
+_ADVISORY_METRIC = "thought2build_pipeline_critic_advisory_findings_total"
 
 
 @pytest.mark.asyncio

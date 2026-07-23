@@ -1,4 +1,4 @@
-# SpecForge Production Release Gate
+# Thought2Build Production Release Gate
 
 Use this checklist before promoting a staging build to production. It is a
 release decision document, not a setup guide. For setup details, use
@@ -74,10 +74,10 @@ pnpm tsc --noEmit
 Production smoke against staging:
 
 ```bash
-SPECFORGE_API_URL=https://api.example.com \
-SPECFORGE_ACCESS_TOKEN=<short-lived smoke-user access token> \
-SPECFORGE_METRICS_TOKEN=<metrics token> \
-SPECFORGE_RUN_LLM_SMOKE=1 \
+THOUGHT2BUILD_API_URL=https://api.example.com \
+THOUGHT2BUILD_ACCESS_TOKEN=<short-lived smoke-user access token> \
+THOUGHT2BUILD_METRICS_TOKEN=<metrics token> \
+THOUGHT2BUILD_RUN_LLM_SMOKE=1 \
 python3 scripts/production_smoke.py
 ```
 
@@ -185,7 +185,7 @@ the Stripe runtime has since been **fully decommissioned** (T-308):
    them.
 4. **Operational-gate prerequisite for T-308 (record before relying on this).**
    T-308 may only be deployed once: ≥7 days since the production checkout cutover
-   **and** zero `specforge_billing_webhook_received_total{provider="stripe"}`
+   **and** zero `thought2build_billing_webhook_received_total{provider="stripe"}`
    increments over the preceding 72h **and** the grace flag disabled. Confirm and
    attach this evidence in the deploy record before shipping the decommission to
    production — it cannot be reconstructed after the fact.
@@ -277,7 +277,7 @@ the **final checkpoint** of Phase 21 and **must be re-run after T-287–T-289**
 | **B — The loop ("now it's core")** | Closing an issue flips its task to **done within SLO**; **backfill** recovers missed-while-down events; the confused-deputy authz test proves install A cannot touch workspace B; **kill-worker-mid-reconcile** resumes without dupes | A close does not reach SLO, backfill loses events, cross-tenant mutation is possible, or a restart duplicates side effects |
 | **C — Executable** | A finalized workspace opens **one PR** with a **red** harness CI run; re-export updates it **in place**; `Workflows: write` 403 and content 409 retry are both handled | A duplicate PR/branch appears, re-export forks state, or a 403/409 surfaces as an opaque failure |
 | **C′ — Living** | "Add two features" pushes **only new issues** under a **new milestone** on top of shipped v1 work (no duplicate issues for unchanged tasks) | An increment re-creates existing issues or pushes outside its milestone |
-| **D — Team-grade** | Tasks appear on a board reflecting **live** state; PRs carry a **SpecForge check**; the LLM-check cost is **capped per tenant/day** | The board drifts from live state, the check is absent, or the evaluator has no per-tenant cost cap |
+| **D — Team-grade** | Tasks appear on a board reflecting **live** state; PRs carry a **Thought2Build check**; the LLM-check cost is **capped per tenant/day** | The board drifts from live state, the check is absent, or the evaluator has no per-tenant cost cap |
 
 Pass criteria:
 
@@ -295,34 +295,34 @@ Metrics:
 - Staging scrape target is healthy.
 - Production scrape target is ready before deploy.
 - Billing counters are present (provider-labelled):
-  `specforge_billing_checkout_created_total`,
-  `specforge_billing_checkout_completed_total`,
-  `specforge_billing_credits_granted_total`,
-  `specforge_billing_credits_revoked_total`,
-  `specforge_billing_webhook_error_total`, the
-  `specforge_billing_webhook_pending_age_seconds` gauge, and
+  `thought2build_billing_checkout_created_total`,
+  `thought2build_billing_checkout_completed_total`,
+  `thought2build_billing_credits_granted_total`,
+  `thought2build_billing_credits_revoked_total`,
+  `thought2build_billing_webhook_error_total`, the
+  `thought2build_billing_webhook_pending_age_seconds` gauge, and
   duplicate/rate-limit counters.
 - Prompt quality counters are present: `pipeline_validator_failures_total`,
   `pipeline_upstream_section_skipped_total`, and
-  `specforge_billing_credits_critic_regen_total`.
-- Storyboard counters are present: `specforge_storyboard_generation_started_total`,
-  `specforge_storyboard_generation_failed_total`,
-  `specforge_storyboard_credits_refunded_total`,
-  `specforge_storyboard_public_view_total`,
-  `specforge_storyboard_download_total`, and
-  `specforge_storyboard_source_missing_total`.
+  `thought2build_billing_credits_critic_regen_total`.
+- Storyboard counters are present: `thought2build_storyboard_generation_started_total`,
+  `thought2build_storyboard_generation_failed_total`,
+  `thought2build_storyboard_credits_refunded_total`,
+  `thought2build_storyboard_public_view_total`,
+  `thought2build_storyboard_download_total`, and
+  `thought2build_storyboard_source_missing_total`.
 - Storyboard dashboards include generation failure rate, refund spike detection,
   public view volume, download failures, PDF render latency, and source-missing
   counts.
 - GitHub counters are present when the App is enabled:
-  `specforge_github_webhook_received_total`,
-  `specforge_github_webhook_verified_total`,
-  `specforge_github_webhook_failed_total`,
-  `specforge_github_reconcile_lag_seconds`, `specforge_github_export_total`,
-  `specforge_github_pr_total`, `specforge_github_check_total`,
-  `specforge_github_token_mint_total`, `specforge_github_job_retries_total`,
-  `specforge_github_job_deadlettered_total`, and
-  `specforge_github_queue_depth`.
+  `thought2build_github_webhook_received_total`,
+  `thought2build_github_webhook_verified_total`,
+  `thought2build_github_webhook_failed_total`,
+  `thought2build_github_reconcile_lag_seconds`, `thought2build_github_export_total`,
+  `thought2build_github_pr_total`, `thought2build_github_check_total`,
+  `thought2build_github_token_mint_total`, `thought2build_github_job_retries_total`,
+  `thought2build_github_job_deadlettered_total`, and
+  `thought2build_github_queue_depth`.
 - GitHub dashboards/alerts cover webhook failure rate, reconcile lag p95,
   dead-letter rate, queue depth, token-mint cache-hit ratio, and check verdicts
   (see `docs/OBSERVABILITY_RUNBOOK.md`).

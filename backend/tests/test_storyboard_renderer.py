@@ -20,7 +20,7 @@ def _payload() -> dict:
     """A minimal, structurally complete Storyboard content payload."""
 
     return {
-        "title": "SpecForge Launch Keynote",
+        "title": "Thought2Build Launch Keynote",
         "theme": {
             "palette": ["#101418", "#1FB6FF", "#F5A623"],
             "typography": "Geometric sans",
@@ -147,30 +147,37 @@ def _legacy_full_payload() -> dict:
 def test_filename_slug_for_each_kind() -> None:
     name = "Acme Rocket"
     assert (
-        renderer.filename_for("html", name) == "specforge-storyboard-Acme-Rocket.html"
+        renderer.filename_for("html", name)
+        == "thought2build-storyboard-Acme-Rocket.html"
     )
-    assert renderer.filename_for("pdf", name) == "specforge-storyboard-Acme-Rocket.pdf"
+    assert (
+        renderer.filename_for("pdf", name) == "thought2build-storyboard-Acme-Rocket.pdf"
+    )
     assert (
         renderer.filename_for("notes-md", name)
-        == "specforge-storyboard-speaker-notes-Acme-Rocket.md"
+        == "thought2build-storyboard-speaker-notes-Acme-Rocket.md"
     )
     assert (
         renderer.filename_for("notes-pdf", name)
-        == "specforge-storyboard-speaker-notes-Acme-Rocket.pdf"
+        == "thought2build-storyboard-speaker-notes-Acme-Rocket.pdf"
     )
     assert (
         renderer.filename_for("demo-script", name)
-        == "specforge-storyboard-demo-script-Acme-Rocket.md"
+        == "thought2build-storyboard-demo-script-Acme-Rocket.md"
     )
     assert (
         renderer.filename_for("appendix", name)
-        == "specforge-storyboard-technical-appendix-Acme-Rocket.md"
+        == "thought2build-storyboard-technical-appendix-Acme-Rocket.md"
     )
 
 
 def test_filename_empty_name_falls_back_to_workspace() -> None:
-    assert renderer.filename_for("html", "") == "specforge-storyboard-workspace.html"
-    assert renderer.filename_for("pdf", "***") == "specforge-storyboard-workspace.pdf"
+    assert (
+        renderer.filename_for("html", "") == "thought2build-storyboard-workspace.html"
+    )
+    assert (
+        renderer.filename_for("pdf", "***") == "thought2build-storyboard-workspace.pdf"
+    )
 
 
 def test_filename_unknown_kind_raises() -> None:
@@ -185,7 +192,7 @@ def test_filename_unknown_kind_raises() -> None:
 
 def test_render_deck_html_includes_content_and_csp() -> None:
     html = renderer.render_deck_html(_payload(), "Acme")
-    assert "SpecForge Launch Keynote" in html
+    assert "Thought2Build Launch Keynote" in html
     assert "squirrel-brand-mark" in html
     assert "Opening Thesis" in html
     assert "From idea to engineered spec" in html

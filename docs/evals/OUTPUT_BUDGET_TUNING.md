@@ -63,7 +63,7 @@ change — the correct behavior when there is no evidence.
    providers keep the generous budget until they clear the gate independently.
 4. Bump the prompt version is **not** required — `max_tokens` is a request
    parameter, not part of the cached prompt prefix, so caching is unaffected;
-   the SpecForge output cache invalidates once, like any budget change.
+   the Thought2Build output cache invalidates once, like any budget change.
 
 ## Monitoring after a change
 

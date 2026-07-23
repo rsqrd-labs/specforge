@@ -734,12 +734,12 @@ def test_phase15_sse_failure_counter_defined() -> None:
     # be defined and incremented when a stream terminates on error.
     all_backend = list(BACKEND_ROOT.rglob("*.py"))
     found = any(
-        "specforge_sse_stream_failures_total" in f.read_text(encoding="utf-8")
+        "thought2build_sse_stream_failures_total" in f.read_text(encoding="utf-8")
         for f in all_backend
     )
     assert found, (
         "backend/ must define a Prometheus Counter "
-        "'specforge_sse_stream_failures_total' and increment it on SSE "
+        "'thought2build_sse_stream_failures_total' and increment it on SSE "
         "streaming failure. T-194."
     )
 
@@ -749,12 +749,12 @@ def test_phase15_pdf_export_histogram_defined() -> None:
     # event-loop blocking issue (C-4) visible in production dashboards.
     all_backend = list(BACKEND_ROOT.rglob("*.py"))
     found = any(
-        "specforge_pdf_export_duration_seconds" in f.read_text(encoding="utf-8")
+        "thought2build_pdf_export_duration_seconds" in f.read_text(encoding="utf-8")
         for f in all_backend
     )
     assert found, (
         "backend/ must define a Prometheus Histogram "
-        "'specforge_pdf_export_duration_seconds' and observe it on every "
+        "'thought2build_pdf_export_duration_seconds' and observe it on every "
         "PDF export call. T-194."
     )
 
@@ -764,12 +764,12 @@ def test_phase15_eval_failure_counter_defined() -> None:
     # 12 retries is invisible in metrics without an explicit counter.
     all_backend = list(BACKEND_ROOT.rglob("*.py"))
     found = any(
-        "specforge_eval_poll_failures_total" in f.read_text(encoding="utf-8")
+        "thought2build_eval_poll_failures_total" in f.read_text(encoding="utf-8")
         for f in all_backend
     )
     assert found, (
         "backend/ must define a Prometheus Counter "
-        "'specforge_eval_poll_failures_total' and increment it when eval "
+        "'thought2build_eval_poll_failures_total' and increment it when eval "
         "polling gives up after max retries. T-194."
     )
 

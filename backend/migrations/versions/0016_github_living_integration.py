@@ -67,7 +67,7 @@ def upgrade() -> None:
         sa.Column("account_type", sa.Text(), nullable=False),
         # all | selected
         sa.Column("repository_selection", sa.Text(), nullable=False),
-        # The SpecForge user who installed, if known via identity OAuth. SET NULL
+        # The Thought2Build user who installed, if known via identity OAuth. SET NULL
         # on user delete: the installation outlives the user account that linked it.
         sa.Column("user_id", postgresql.UUID(as_uuid=True), nullable=True),
         sa.Column(

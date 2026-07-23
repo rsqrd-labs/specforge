@@ -68,7 +68,7 @@ class InstallationStatus(BaseModel):
 class InstallationOption(BaseModel):
     """One installation a user may target when exporting.
 
-    ``id`` is the SpecForge ``github_installations`` row id and is what
+    ``id`` is the Thought2Build ``github_installations`` row id and is what
     :class:`GitHubExportRequest` references; ``installation_id`` is GitHub's
     numeric id, exposed for display/debugging only.
     """

@@ -1,6 +1,6 @@
 # GitHub Integration Testing Guide
 
-This guide walks you through setting up **both** of SpecForge's GitHub
+This guide walks you through setting up **both** of Thought2Build's GitHub
 integrations on your local machine so you can actually click through and test
 them. It assumes no prior experience with GitHub Apps, OAuth Apps, or
 webhooks — every concept is explained before you're asked to use it.
@@ -12,14 +12,14 @@ This guide is about **local testing only**. For production deployment, see
 
 ## 1. The two integrations, in plain language
 
-SpecForge actually has **two separate** GitHub features, built in different
+Thought2Build actually has **two separate** GitHub features, built in different
 phases. They don't replace each other — both can be on at the same time.
 
 | | Phase 13 — "GitHub Export" | Phase 21 — "GitHub Living System of Record" |
 |---|---|---|
-| What it does | One-shot: pushes your Spec/Plan/Tasks/Harness as files to a **new** GitHub repo, and creates one GitHub Issue per task. | Keeps SpecForge and GitHub **in sync over time**: closing an issue on GitHub marks the task done in SpecForge, PRs merge and close tasks, a Projects board tracks progress, increments add new issues later, etc. |
+| What it does | One-shot: pushes your Spec/Plan/Tasks/Harness as files to a **new** GitHub repo, and creates one GitHub Issue per task. | Keeps Thought2Build and GitHub **in sync over time**: closing an issue on GitHub marks the task done in Thought2Build, PRs merge and close tasks, a Projects board tracks progress, increments add new issues later, etc. |
 | How the user connects | Classic "Connect GitHub" **OAuth App** login (like "Sign in with GitHub") | **Install** a GitHub App on specific repos (like installing a bot) |
-| Talks to GitHub | Directly from the request, using the user's OAuth token | Through a background **worker** process, using a per-installation token, and GitHub calls **back** into SpecForge via a **webhook** |
+| Talks to GitHub | Directly from the request, using the user's OAuth token | Through a background **worker** process, using a per-installation token, and GitHub calls **back** into Thought2Build via a **webhook** |
 | Env vars | `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET` | `GITHUB_APP_ID`, `GITHUB_APP_SLUG`, `GITHUB_APP_PRIVATE_KEY`, `GITHUB_APP_WEBHOOK_SECRET`(`_PREV`), `GITHUB_APP_CLIENT_ID`, `GITHUB_APP_CLIENT_SECRET` |
 | Status in this repo | Already configured in your `backend/.env` | Blank — this is the one you need to set up |
 
@@ -59,7 +59,7 @@ may already have it configured.
    and sign in.
 2. Click **New OAuth App**.
 3. Fill in:
-   - **Application name**: `SpecForge Local` (anything works)
+   - **Application name**: `Thought2Build Local` (anything works)
    - **Homepage URL**: `http://localhost:5173`
    - **Authorization callback URL**: `http://localhost:5173/auth/github/callback`
      — this must match exactly, including the path.
@@ -130,7 +130,7 @@ production App if you have one).
    [github.com/settings/apps/new](https://github.com/settings/apps/new) and
    sign in.
 2. Fill in the top fields:
-   - **GitHub App name**: something unique, e.g. `specforge-dev-yourname`
+   - **GitHub App name**: something unique, e.g. `thought2build-dev-yourname`
      (this becomes the App's public **slug** — note it, you'll need it later)
    - **Homepage URL**: `http://localhost:5173`
 3. **Callback URL**: `http://localhost:8000/integrations/github/setup`
@@ -138,7 +138,7 @@ production App if you have one).
    finishes the App installation, not a login callback.
 4. Check the box **"Request user authorization (OAuth) during
    installation"**. This makes GitHub also hand back an OAuth code when
-   someone installs the App, which SpecForge uses to verify the installer
+   someone installs the App, which Thought2Build uses to verify the installer
    actually has access to that installation (a security check — without it,
    the install step is rejected).
 5. **Webhook** section:
@@ -181,8 +181,8 @@ production App if you have one).
 On the App's settings page (you're redirected there after creating it):
 
 1. Near the top, note the **App ID** (a number) and the **App slug** (in the
-   URL, e.g. `github.com/settings/apps/specforge-dev-yourname` → slug is
-   `specforge-dev-yourname`).
+   URL, e.g. `github.com/settings/apps/thought2build-dev-yourname` → slug is
+   `thought2build-dev-yourname`).
 2. Scroll to **"Client secrets"** → click **Generate a new client secret**.
    Copy it immediately. Also copy the **Client ID** shown just above it.
 3. Scroll to **"Private keys"** → click **Generate a private key**. Your
@@ -203,7 +203,7 @@ file:
 
 ```env
 GITHUB_APP_ID=123456
-GITHUB_APP_SLUG=specforge-dev-yourname
+GITHUB_APP_SLUG=thought2build-dev-yourname
 GITHUB_APP_PRIVATE_KEY="-----BEGIN RSA PRIVATE KEY-----
 MIIEow...(the rest of your downloaded .pem, unchanged)...
 -----END RSA PRIVATE KEY-----"
@@ -239,7 +239,7 @@ Watch the logs for a moment to make sure nothing errors on startup:
 docker compose logs -f api worker
 ```
 
-### B.6 — Install the App from inside SpecForge
+### B.6 — Install the App from inside Thought2Build
 
 1. Open `http://localhost:5173`, log in, and go to **Settings**.
 2. Click **Install GitHub App**. You're sent to GitHub's install screen.
@@ -274,7 +274,7 @@ through and verify are already written down in
   grouped into sub-phases:
   - **A** — install, export (files mode), installation-token usage, signed
     webhook security (invalid/replayed/out-of-order deliveries rejected).
-  - **B** — closing an issue on GitHub flips the task to done in SpecForge,
+  - **B** — closing an issue on GitHub flips the task to done in Thought2Build,
     confused-deputy isolation between two installs, worker-kill mid-job
     recovers with no duplicates, backfill recovers missed events.
   - **C** — export in "PR with tests" mode, merging the PR flips tasks done,
@@ -282,7 +282,7 @@ through and verify are already written down in
   - **C′** — increments only create new issues/milestones on top of existing
     ones, GitHub issues labelled `idea`/`enhancement` flow into the idea
     backlog.
-  - **D** — Projects v2 board reflects live state, PR gets a SpecForge check
+  - **D** — Projects v2 board reflects live state, PR gets a Thought2Build check
     (the fail-open PR evaluator).
   - Plus: suspend/uninstall shows "sync paused" (not an error), and the
     dead-letter + manual-replay path.

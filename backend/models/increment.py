@@ -92,7 +92,7 @@ class IncrementIdea(Base):
     """A lightweight backlog item — a feature captured mid-build, batched into an
     increment when ready (spec §10).
 
-    May originate in SpecForge (``source='user'``) or flow back from a GitHub
+    May originate in Thought2Build (``source='user'``) or flow back from a GitHub
     issue labelled ``idea``/``enhancement`` (``source='github'``,
     ``external_ref='gh-issue:123'``) via the §4.14.3 webhook (T-280).
     ``increment_id`` is set when the idea is pulled into an increment.

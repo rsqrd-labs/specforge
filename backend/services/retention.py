@@ -653,9 +653,10 @@ async def sample_table_stats(
 
     Postgres-only (``pg_stat_user_tables`` / ``pg_total_relation_size``); a
     non-postgres backend returns ``{}`` cleanly. Publishes the
-    ``specforge_db_table_bytes`` / ``specforge_db_table_live_tuples`` gauges — the
-    size baseline every later "size stabilized" claim is judged against, and the
-    evidence for tuning the §2 windows before anything deletes. Read-only; no
+    ``thought2build_db_table_bytes`` / ``thought2build_db_table_live_tuples``
+    gauges — the size baseline every later "size stabilized" claim is judged
+    against, and the evidence for tuning the §2 windows before anything
+    deletes. Read-only; no
     commit. Returns the sampled ``{table: (bytes, live_tuples)}`` for tests.
     """
     bind = db.bind

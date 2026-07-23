@@ -223,4 +223,4 @@ async def build_agent_instruction_export(
     with zipfile.ZipFile(buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
         for filename in ("AGENTS.md", "CLAUDE.md"):
             zf.writestr(filename, files[filename])
-    return buf.getvalue(), "specforge-agent-instructions.zip", "application/zip"
+    return buf.getvalue(), "thought2build-agent-instructions.zip", "application/zip"

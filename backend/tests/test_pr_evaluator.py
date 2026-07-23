@@ -1,4 +1,4 @@
-"""Tests for the SpecForge PR-diff evaluator + status checks (Phase 21 — T-282).
+"""Tests for the Thought2Build PR-diff evaluator + status checks (Phase 21 — T-282).
 
 Two layers:
 
@@ -102,7 +102,7 @@ async def test_post_check_run_403_raises_checks_permission() -> None:
     with pytest.raises(GitHubChecksPermissionError):
         await client.post_check_run(
             "o/r",
-            name="SpecForge / acceptance",
+            name="Thought2Build / acceptance",
             head_sha="sha",
             status="completed",
             conclusion="success",
@@ -124,7 +124,7 @@ async def test_post_commit_status_posts() -> None:
         "o/r",
         "abc123",
         state="success",
-        context="specforge/acceptance",
+        context="thought2build/acceptance",
         description="ok",
     )
     assert seen["method"] == "POST"
@@ -416,7 +416,7 @@ async def test_pr_with_no_linked_task_is_neutral_and_skips_judge(
         await pr_evaluator.run_pr_check(
             {}, str(seeded["push"].id), 7, db=session, client=stub, redis=redis
         )
-        assert not calls  # no judge call for a PR with no SpecForge task
+        assert not calls  # no judge call for a PR with no Thought2Build task
         # A completed neutral check is posted directly (no pending/update).
         assert stub.final_conclusion == "neutral"
     finally:
@@ -741,7 +741,7 @@ async def test_adversarial_diff_hides_malicious_tail_past_truncation_boundary(
     session, monkeypatch
 ) -> None:
     """End-to-end: a PR author front-loads a compliant change and appends a
-    non-compliant one past SpecForge's char bound. The judge — which only ever
+    non-compliant one past Thought2Build's char bound. The judge — which only ever
     sees the bounded prompt — legitimately returns passed=true for what it was
     shown. Before the fix this posted a clean 'success' check on a diff whose
     tail was never evaluated; after the fix it must post 'neutral', not

@@ -93,7 +93,7 @@ def _artifact(stage: str) -> str:
                     "",
                 ]
             )
-    sections.append(f"<!-- SPECFORGE_COMPLETE:{stage}:v2 -->")
+    sections.append(f"<!-- THOUGHT2BUILD_COMPLETE:{stage}:v2 -->")
     return "\n".join(sections)
 
 

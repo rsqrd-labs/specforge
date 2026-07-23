@@ -68,7 +68,7 @@ def _lemon_settings(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         lemon_mod.settings,
         "lemonsqueezy_success_url",
-        "https://app.specforge.dev/billing",
+        "https://app.thought2build.com/billing",
         False,
     )
     monkeypatch.setattr(lemon_mod.settings, "lemonsqueezy_test_mode", True, False)
@@ -119,7 +119,7 @@ async def test_create_checkout_jsonapi_request_shape() -> None:
                 "data": {
                     "id": "co_999",
                     "attributes": {
-                        "url": "https://specforge.lemonsqueezy.com/checkout/x"
+                        "url": "https://thought2build.lemonsqueezy.com/checkout/x"
                     },
                 }
             },
@@ -131,7 +131,7 @@ async def test_create_checkout_jsonapi_request_shape() -> None:
             attempt, _user(), checkout_nonce="raw-nonce", client=client
         )
 
-    assert (cid, url) == ("co_999", "https://specforge.lemonsqueezy.com/checkout/x")
+    assert (cid, url) == ("co_999", "https://thought2build.lemonsqueezy.com/checkout/x")
     assert captured["url"].endswith("/v1/checkouts")
 
     headers = captured["headers"]
@@ -150,7 +150,7 @@ async def test_create_checkout_jsonapi_request_shape() -> None:
     assert attrs["product_options"]["enabled_variants"] == ["67890"]
     assert (
         attrs["product_options"]["redirect_url"]
-        == "https://app.specforge.dev/billing?checkout_ref=ref_abc123"
+        == "https://app.thought2build.com/billing?checkout_ref=ref_abc123"
     )
     # Discount UI off — a coupon cannot change the paid amount.
     assert attrs["checkout_options"]["discount"] is False
@@ -187,7 +187,7 @@ async def test_create_checkout_environment_live_when_not_test_mode(
                 "data": {
                     "id": "co_1",
                     "attributes": {
-                        "url": "https://specforge.lemonsqueezy.com/checkout/y"
+                        "url": "https://thought2build.lemonsqueezy.com/checkout/y"
                     },
                 }
             },
@@ -212,7 +212,7 @@ async def test_create_checkout_accepts_200() -> None:
                 "data": {
                     "id": "co_200",
                     "attributes": {
-                        "url": "https://specforge.lemonsqueezy.com/checkout/z"
+                        "url": "https://thought2build.lemonsqueezy.com/checkout/z"
                     },
                 }
             },
@@ -222,7 +222,7 @@ async def test_create_checkout_accepts_200() -> None:
         cid, url = await LemonSqueezyService().create_checkout(
             _attempt(), _user(), checkout_nonce="n", client=client
         )
-    assert (cid, url) == ("co_200", "https://specforge.lemonsqueezy.com/checkout/z")
+    assert (cid, url) == ("co_200", "https://thought2build.lemonsqueezy.com/checkout/z")
 
 
 @pytest.mark.asyncio
@@ -256,7 +256,7 @@ async def test_create_checkout_retries_then_succeeds_on_429() -> None:
                 "data": {
                     "id": "co_ok",
                     "attributes": {
-                        "url": "https://specforge.lemonsqueezy.com/checkout/ok"
+                        "url": "https://thought2build.lemonsqueezy.com/checkout/ok"
                     },
                 }
             },
@@ -284,7 +284,7 @@ async def test_create_checkout_retries_then_succeeds_on_5xx() -> None:
                 "data": {
                     "id": "co_ok",
                     "attributes": {
-                        "url": "https://specforge.lemonsqueezy.com/checkout/ok"
+                        "url": "https://thought2build.lemonsqueezy.com/checkout/ok"
                     },
                 }
             },
@@ -361,7 +361,7 @@ async def test_create_checkout_network_error_then_succeeds() -> None:
                 "data": {
                     "id": "co_net",
                     "attributes": {
-                        "url": "https://specforge.lemonsqueezy.com/checkout/n"
+                        "url": "https://thought2build.lemonsqueezy.com/checkout/n"
                     },
                 }
             },

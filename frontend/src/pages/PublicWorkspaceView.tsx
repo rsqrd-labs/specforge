@@ -27,7 +27,7 @@ const STAGE_LABELS: Record<PublicStageType, string> = {
 }
 const STAGE_ORDER: PublicStageType[] = ["spec", "plan", "harness", "tasks"]
 
-const NOINDEX_META_ID = "specforge-public-noindex"
+const NOINDEX_META_ID = "thought2build-public-noindex"
 
 /**
  * Inject `<meta name="robots" content="noindex, nofollow">` into <head>
@@ -73,10 +73,10 @@ function Footer() {
         Made with{" "}
         <a
           className="public-view-footer-link"
-          href="https://specforge.app"
+          href="https://thought2build.com"
           rel="noopener noreferrer"
         >
-          SpecForge
+          Thought2Build
         </a>
         {" "}— turn your idea into a spec, plan, harness, and ready-to-ship
         tasks in 10 minutes →
@@ -106,7 +106,7 @@ function NotFound() {
       </p>
       <p>
         <Link to="/" className="public-view-footer-link">
-          ← Back to specforge.app
+          ← Back to thought2build.com
         </Link>
       </p>
     </div>
@@ -142,10 +142,10 @@ export default function PublicWorkspaceView() {
 
   useEffect(() => {
     if (data) {
-      document.title = `${data.name} — SpecForge`
+      document.title = `${data.name} — Thought2Build`
     }
     return () => {
-      document.title = "SpecForge"
+      document.title = "Thought2Build"
     }
   }, [data])
 
@@ -161,7 +161,7 @@ export default function PublicWorkspaceView() {
       <header className="public-view-cover">
         <BrandLockup variant="compact" className="public-view-brand" />
         <h1 className="public-view-title">{data.name}</h1>
-        <p className="public-view-attribution">Generated with SpecForge</p>
+        <p className="public-view-attribution">Generated with Thought2Build</p>
         <CoverChip coverage={data.coverage_summary} />
       </header>
 

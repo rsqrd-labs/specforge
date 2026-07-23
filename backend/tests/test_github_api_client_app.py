@@ -112,7 +112,7 @@ async def test_second_401_raises_token_expired() -> None:
     with pytest.raises(GitHubTokenExpiredError):
         await client.create_issue("o/r", "t", "b")
 
-    # Exactly one re-mint attempt — SpecForge never loops on an invalid token.
+    # Exactly one re-mint attempt — Thought2Build never loops on an invalid token.
     assert source.refresh_calls == 1
 
 

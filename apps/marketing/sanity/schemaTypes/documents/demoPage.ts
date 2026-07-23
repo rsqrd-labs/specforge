@@ -1,7 +1,7 @@
 import { defineType, defineField, defineArrayMember } from "sanity"
 
 // Curated, FIRST-PARTY demo page (route: /demos/*). Walks a rough idea through
-// the four SpecForge artifacts as authored content.
+// the four Thought2Build artifacts as authored content.
 //
 // HARD RULE (issue #18, Phase 4 + Phase-6 demo-sanitization gate): demos are
 // authored here, never sourced from live user workspaces or storyboards. They

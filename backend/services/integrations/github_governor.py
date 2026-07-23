@@ -1,6 +1,6 @@
 """Per-installation rate governor + per-repo write serialization (Phase 21 — T-274).
 
-A global, multi-tenant SpecForge fleet writes to GitHub on behalf of many
+A global, multi-tenant Thought2Build fleet writes to GitHub on behalf of many
 installations at once. Two failure modes have to be engineered out:
 
 1. **Rate-limit exhaustion.** GitHub enforces a *primary* limit (~5,000
@@ -34,7 +34,7 @@ Reliability invariants:
 - **Locks release on failure.** The repo lock is context-managed and released
   via a compare-and-delete (token-guarded), so a crashing job can never deadlock
   a repo, and a job can never delete a *different* holder's lock.
-- **Backpressure is observable** via ``specforge_github_queue_depth`` (set by the
+- **Backpressure is observable** via ``thought2build_github_queue_depth`` (set by the
   worker on each job start) — operators shed/defer when the queue saturates.
 
 The throttle→requeue conversion itself lives in the worker job base contract

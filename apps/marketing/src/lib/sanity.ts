@@ -95,7 +95,7 @@ export interface SanityWorkflowStep {
 
 export interface SanityComparisonRow {
   feature: string
-  specforge: string
+  thought2build: string
   alternative: string
 }
 
@@ -206,7 +206,7 @@ const SEO_PROJECTION = `
 const FAQ_PROJECTION = `faqs[]{ question, answer }`
 const WORKFLOW_PROJECTION = `workflowSteps[]{ name, description }`
 const EXAMPLE_PROJECTION = `examples[]{ title, input, output }`
-const COMPARISON_PROJECTION = `comparison{ alternativeName, rows[]{ feature, specforge, alternative } }`
+const COMPARISON_PROJECTION = `comparison{ alternativeName, rows[]{ feature, thought2build, alternative } }`
 const META = `_id, _createdAt, _updatedAt, "slug": slug.current`
 
 const SEO_PAGE_FIELDS = `

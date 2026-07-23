@@ -39,7 +39,7 @@ async def test_load_prompt_uses_remote_prompt_when_available() -> None:
     with patch.object(
         prompt_base.langfuse_service, "get_langfuse_client", return_value=client
     ):
-        result = await prompt_base.load_prompt("specforge.spec.system", "LOCAL")
+        result = await prompt_base.load_prompt("thought2build.spec.system", "LOCAL")
 
     # Body unchanged — rules are already present, so no append.
     assert result == remote_body
@@ -62,7 +62,7 @@ async def test_load_prompt_appends_security_rules_to_remote_without_them() -> No
     with patch.object(
         prompt_base.langfuse_service, "get_langfuse_client", return_value=client
     ):
-        result = await prompt_base.load_prompt("specforge.spec.system", "LOCAL")
+        result = await prompt_base.load_prompt("thought2build.spec.system", "LOCAL")
 
     assert remote_body in result
     assert prompt_base.SECURITY_AND_PRIVACY_RULES in result
@@ -85,9 +85,9 @@ async def test_load_prompt_does_not_double_append_security_rules() -> None:
     with patch.object(
         prompt_base.langfuse_service, "get_langfuse_client", return_value=client
     ):
-        first = await prompt_base.load_prompt("specforge.spec.system", "LOCAL")
+        first = await prompt_base.load_prompt("thought2build.spec.system", "LOCAL")
         prompt_base._PROMPT_CACHE.clear()
-        second = await prompt_base.load_prompt("specforge.spec.system", "LOCAL")
+        second = await prompt_base.load_prompt("thought2build.spec.system", "LOCAL")
 
     assert first == second
     assert first.count(prompt_base.SECURITY_AND_PRIVACY_RULES) == 1
@@ -102,7 +102,8 @@ async def test_load_prompt_falls_back_silently_on_langfuse_error() -> None:
         prompt_base.langfuse_service, "get_langfuse_client", return_value=client
     ):
         assert (
-            await prompt_base.load_prompt("specforge.spec.system", "LOCAL") == "LOCAL"
+            await prompt_base.load_prompt("thought2build.spec.system", "LOCAL")
+            == "LOCAL"
         )
 
 
@@ -118,9 +119,9 @@ async def test_load_prompt_uses_ttl_cache(monkeypatch: pytest.MonkeyPatch) -> No
     with patch.object(
         prompt_base.langfuse_service, "get_langfuse_client", return_value=client
     ):
-        first = await prompt_base.load_prompt("specforge.spec.system", "LOCAL")
-        second = await prompt_base.load_prompt("specforge.spec.system", "LOCAL")
+        first = await prompt_base.load_prompt("thought2build.spec.system", "LOCAL")
+        second = await prompt_base.load_prompt("thought2build.spec.system", "LOCAL")
 
     assert first == remote
     assert second == remote
-    client.get_prompt.assert_awaited_once_with("specforge.spec.system")
+    client.get_prompt.assert_awaited_once_with("thought2build.spec.system")

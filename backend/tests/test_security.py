@@ -71,7 +71,7 @@ def test_scan_rejects_encoded_prompt_injection_variants() -> None:
 
 
 def test_validate_output_with_system_prompt_leak_returns_unsafe() -> None:
-    result = validate("You are SpecForge, an expert software specification writer.")
+    result = validate("You are Thought2Build, an expert software specification writer.")
     assert result.is_safe is False
     assert result.reason is not None
 
@@ -136,8 +136,10 @@ async def test_validate_async_flags_leak_on_pool_path(monkeypatch) -> None:
     from services.security.output_validator import validate_async
 
     monkeypatch.setattr(settings, "cpu_offload_min_chars", 0)
-    sync_result = validate("You are SpecForge, an expert product engineer")
-    async_result = await validate_async("You are SpecForge, an expert product engineer")
+    sync_result = validate("You are Thought2Build, an expert product engineer")
+    async_result = await validate_async(
+        "You are Thought2Build, an expert product engineer"
+    )
     assert async_result == sync_result
     assert async_result.is_safe is False
 

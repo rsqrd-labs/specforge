@@ -395,7 +395,7 @@ def _strip_code_fence(text: str) -> str:
 # Detached fire-and-forget background tasks, held in bounded registries so the
 # event loop's weak reference cannot garbage-collect them mid-flight (the
 # registry adds a strong ref synchronously at spawn). Each registry exports its
-# live size as specforge_background_tasks{registry=...} and warns at a soft
+# live size as thought2build_background_tasks{registry=...} and warns at a soft
 # high-water mark (F6 — scalability audit; see background_tasks.py).
 #
 # The three ADVISORY registries (eval score, off-critical-path critic judge,
@@ -4360,8 +4360,8 @@ class StageManager:
 
         stage_refine_rules = _REFINE_STAGE_RULES.get(stage.type, "")
         system_prompt = (
-            "You are SpecForge. Rewrite only the selected text per the instruction. "
-            "Return ONLY the replacement text, nothing else.\n\n"
+            "You are Thought2Build. Rewrite only the selected text per the "
+            "instruction. Return ONLY the replacement text, nothing else.\n\n"
             "Refine modes:\n"
             "- focused: a small targeted edit; the document context is a window "
             "around the selection. Keep the replacement tightly scoped and close "

@@ -584,11 +584,11 @@ def test_t293_record_dead_letter_is_key_parametrised() -> None:
 def test_t293_billing_job_metrics_defined() -> None:
     """T-293 — billing job retry/dead-letter counters exist."""
     src = read_backend_file("services", "observability.py")
-    assert "specforge_billing_job_retries_total" in src, (
-        "observability.py must define specforge_billing_job_retries_total{job}. T-293 / T-304."
+    assert "thought2build_billing_job_retries_total" in src, (
+        "observability.py must define thought2build_billing_job_retries_total{job}. T-293 / T-304."
     )
-    assert "specforge_billing_job_deadlettered_total" in src, (
-        "observability.py must define specforge_billing_job_deadlettered_total{job}. T-293 / T-304."
+    assert "thought2build_billing_job_deadlettered_total" in src, (
+        "observability.py must define thought2build_billing_job_deadlettered_total{job}. T-293 / T-304."
     )
 
 
@@ -664,7 +664,7 @@ def test_t295_service_file_and_methods_exist() -> None:
     )
     assert re.search(r"def\s+get_order", src), (
         "lemonsqueezy_service.py must define get_order() for reconcile lane 2 "
-        "(re-read an order SpecForge already has by id). T-295 / T-301."
+        "(re-read an order Thought2Build already has by id). T-295 / T-301."
     )
     assert "httpx" in src, (
         "LemonSqueezyService must use the existing httpx dependency — no Lemon SDK. T-295."
@@ -732,7 +732,7 @@ def test_t296_checkout_commits_attempt_before_lemon() -> None:
     src = read_backend_file("routers", "billing.py")
     assert "billing_checkout_attempts" in src or "BillingCheckoutAttempt" in src, (
         "POST /checkout must create+commit a billing_checkout_attempts row before "
-        "calling Lemon (SpecForge is the authority for the attempt). T-296."
+        "calling Lemon (Thought2Build is the authority for the attempt). T-296."
     )
 
 
@@ -1160,24 +1160,24 @@ def test_t303_stripe_dependency_removed_by_t308() -> None:
 # ===========================================================================
 
 _REQUIRED_METRICS = (
-    "specforge_billing_checkout_created_total",
-    "specforge_billing_checkout_completed_total",
-    "specforge_billing_checkout_api_error_total",
-    "specforge_billing_checkout_expired_total",
-    "specforge_billing_unrecoverable_checkout_total",
-    "specforge_billing_webhook_received_total",
-    "specforge_billing_webhook_duplicate_total",
-    "specforge_billing_webhook_error_total",
-    "specforge_billing_webhook_pending_age_seconds",
-    "specforge_billing_credits_granted_total",
-    "specforge_billing_credits_revoked_total",
-    "specforge_billing_credit_debt_created_total",
-    "specforge_billing_credit_debt_recovered_total",
-    "specforge_billing_credits_expired_total",
-    "specforge_billing_admin_correction_total",
-    "specforge_billing_reconcile_mismatch_total",
-    "specforge_billing_job_retries_total",
-    "specforge_billing_job_deadlettered_total",
+    "thought2build_billing_checkout_created_total",
+    "thought2build_billing_checkout_completed_total",
+    "thought2build_billing_checkout_api_error_total",
+    "thought2build_billing_checkout_expired_total",
+    "thought2build_billing_unrecoverable_checkout_total",
+    "thought2build_billing_webhook_received_total",
+    "thought2build_billing_webhook_duplicate_total",
+    "thought2build_billing_webhook_error_total",
+    "thought2build_billing_webhook_pending_age_seconds",
+    "thought2build_billing_credits_granted_total",
+    "thought2build_billing_credits_revoked_total",
+    "thought2build_billing_credit_debt_created_total",
+    "thought2build_billing_credit_debt_recovered_total",
+    "thought2build_billing_credits_expired_total",
+    "thought2build_billing_admin_correction_total",
+    "thought2build_billing_reconcile_mismatch_total",
+    "thought2build_billing_job_retries_total",
+    "thought2build_billing_job_deadlettered_total",
 )
 
 
@@ -1193,8 +1193,8 @@ def test_t304_required_billing_metrics_defined() -> None:
 def test_t304_credits_revoked_replaces_pack_disputed() -> None:
     """T-304 — reversals are credits_revoked_total{reason} (pack_disputed retired)."""
     src = read_backend_file("services", "observability.py")
-    assert "specforge_billing_credits_revoked_total" in src, (
-        "Reversals must be counted by specforge_billing_credits_revoked_total{provider,"
+    assert "thought2build_billing_credits_revoked_total" in src, (
+        "Reversals must be counted by thought2build_billing_credits_revoked_total{provider,"
         "reason} — the Phase-21 pack_disputed_total is retired/folded in. T-304."
     )
 

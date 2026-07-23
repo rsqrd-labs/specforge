@@ -155,6 +155,6 @@ framed against those two paths.
   (checkout created at Lemon but the local `provider_created` commit failed) never
   exposes the URL and is settled later from the signed webhook / lane 2; it is
   correct but not instantaneous ([billing.py:226–253](../backend/routers/billing.py#L226-L253)).
-- **No card data anywhere.** Lemon is Merchant of Record; SpecForge never sees,
+- **No card data anywhere.** Lemon is Merchant of Record; Thought2Build never sees,
   stores, or transmits a PAN — so the entire on-prem cardholder-data attack class is
   out of scope (see `docs/PAYMENT_COMPLIANCE.md`).

@@ -26,7 +26,7 @@ def _valid_production(**overrides: object):
         "environment": "production",
         "allowed_hosts": "app.example.com",
         "metrics_token": "metrics-token",
-        "frontend_url": "https://app.specforge.dev",
+        "frontend_url": "https://app.thought2build.com",
         "jwt_private_key": _FAKE_PEM,
         "encryption_master_key": "a-real-non-ci-encryption-key",
         "langfuse_secret_key": "",

@@ -27,7 +27,7 @@ Security invariants:
     hot path. This makes the cache mandatory, not optional.
 
 Observability: every resolution increments
-``specforge_github_token_mint_total{source="mint"|"cache"}``.
+``thought2build_github_token_mint_total{source="mint"|"cache"}``.
 """
 
 from __future__ import annotations
@@ -220,12 +220,12 @@ class TokenProvider:
 
         cached = await self._read_cache(key)
         if cached is not None:
-            # specforge_github_token_mint_total{source="cache"}
+            # thought2build_github_token_mint_total{source="cache"}
             GITHUB_TOKEN_MINT_TOTAL.labels(source="cache").inc()
             return cached
 
         token, expires_at = await self._auth.mint_installation_token(installation_id)
-        # specforge_github_token_mint_total{source="mint"}
+        # thought2build_github_token_mint_total{source="mint"}
         GITHUB_TOKEN_MINT_TOTAL.labels(source="mint").inc()
 
         ttl = self._cache_ttl(expires_at)
@@ -239,7 +239,7 @@ class TokenProvider:
         Used by the API client after a 401: GitHub may have rotated the
         installation token out from under a still-cached value, so the cache
         entry is invalidated and :meth:`get` re-mints. Bounded to one retry by
-        the caller — SpecForge never loops on a known-invalid token.
+        the caller — Thought2Build never loops on a known-invalid token.
         """
         await self._invalidate(installation_id)
         return await self.get(installation_id)

@@ -42,7 +42,7 @@ function slideId(title: StoryboardSectionTitle): string {
 
 function makePayload(): StoryboardPayload {
   return {
-    title: "SpecForge Launch",
+    title: "Thought2Build Launch",
     theme: {
       palette: ["#8f4e00", "#a1385f", "#565e74"],
       typography: "Confident product sans",
@@ -240,7 +240,7 @@ describe("StoryboardDeck", () => {
     expect(slide?.className).toContain("storyboard-slide--cover")
     expect(slide?.className).toContain("storyboard-slide--layout-feature")
     expect(container.querySelector(".storyboard-slide-cover-mark")?.textContent).toBe(
-      "SpecForge Launch",
+      "Thought2Build Launch",
     )
   })
 

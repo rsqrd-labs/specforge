@@ -439,7 +439,7 @@ Escape hatch (optional, recommended): settings flag
 escalation-rate metrics show the cheap tier keeps failing the gate.
 
 **P3 acceptance:** generation with the enriched sources succeeds end-to-end on
-all three providers in dev; `specforge_storyboard_escalations_total` and
+all three providers in dev; `thought2build_storyboard_escalations_total` and
 failure-rate metrics do not regress; a synthetic truncated response consumes
 one doubling retry, not three repair calls; fresh decks carry substance
 descriptors on all interior product slides; section-regeneration of a

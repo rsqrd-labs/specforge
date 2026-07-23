@@ -34,7 +34,7 @@ describe("StoryboardShareModal", () => {
     const user = userEvent.setup()
     vi.mocked(shareStoryboard).mockResolvedValue({
       slug: "abc123",
-      url: "https://specforge.test/sb/abc123",
+      url: "https://thought2build.test/sb/abc123",
       enabled: true,
       permissions: DEFAULT_TEST_PERMISSIONS,
     })
@@ -71,7 +71,7 @@ describe("StoryboardShareModal", () => {
     const onShareChanged = vi.fn()
     vi.mocked(rotateStoryboardShare).mockResolvedValue({
       slug: "new789",
-      url: "https://specforge.test/sb/new789",
+      url: "https://thought2build.test/sb/new789",
       enabled: true,
       permissions: { ...DEFAULT_TEST_PERMISSIONS, allow_source_layer: true },
     })

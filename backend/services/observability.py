@@ -115,18 +115,18 @@ LLM_PROVIDER_HEALTH = Gauge(
 # stream terminates with an error before the client receives a completion
 # event. This makes streaming failure rate visible in dashboards.
 SSE_STREAM_FAILURES = Counter(
-    "specforge_sse_stream_failures_total",
+    "thought2build_sse_stream_failures_total",
     "SSE stage-generation streams that terminated on error",
     ["stage_type"],
 )
 
 PIPELINE_INCOMPLETE_OUTPUTS = Counter(
-    "specforge_pipeline_incomplete_outputs_total",
+    "thought2build_pipeline_incomplete_outputs_total",
     "Stage generations blocked because the provider output was incomplete",
     ["stage_type", "provider", "reason"],
 )
 PIPELINE_COMPLETION_REPAIRS = Counter(
-    "specforge_pipeline_completion_repairs_total",
+    "thought2build_pipeline_completion_repairs_total",
     # outcome: attempted / succeeded / failed for a funded repair, plus
     # skipped_at_ceiling (Phase 4, issue #28) when a chunk limit-stop repair is
     # skipped because the budget is already maxed and the retry is provably doomed.
@@ -134,12 +134,12 @@ PIPELINE_COMPLETION_REPAIRS = Counter(
     ["stage_type", "provider", "outcome"],
 )
 PIPELINE_PROVIDER_LIMIT_STOPS = Counter(
-    "specforge_pipeline_provider_limit_stops_total",
+    "thought2build_pipeline_provider_limit_stops_total",
     "Provider generations that stopped because max output tokens were reached",
     ["stage_type", "provider", "model", "operation"],
 )
 PIPELINE_SECTION_DEDUP = Counter(
-    "specforge_pipeline_section_dedup_total",
+    "thought2build_pipeline_section_dedup_total",
     # Duplicate contract-section bodies deterministically removed from an
     # assembled artifact before any gate (prompt-quality audit H1 backstop):
     # parallel chunks have no cross-visibility, so a chunk-scope regression can
@@ -151,7 +151,7 @@ PIPELINE_SECTION_DEDUP = Counter(
 )
 
 PIPELINE_HARNESS_FILE_DEDUP = Counter(
-    "specforge_pipeline_harness_file_dedup_total",
+    "thought2build_pipeline_harness_file_dedup_total",
     # Duplicate `### File:` blocks deterministically removed from a harness
     # artifact before persistence — a self-heal for the cheap-tier model (or a
     # chunk merge) emitting the whole Files section more than once. A non-zero
@@ -160,7 +160,7 @@ PIPELINE_HARNESS_FILE_DEDUP = Counter(
     ["provider"],
 )
 PIPELINE_INTERRUPTED_STREAMS = Counter(
-    "specforge_pipeline_interrupted_streams_total",
+    "thought2build_pipeline_interrupted_streams_total",
     "Stage generation streams interrupted before a usable completed artifact existed",
     ["stage_type"],
 )
@@ -168,7 +168,7 @@ PIPELINE_INTERRUPTED_STREAMS = Counter(
 # their code fence was unbalanced (truncated mid-file). Additive merge makes the
 # drop always safe; a non-zero rate flags a too-small patch budget.
 HARNESS_PATCH_BLOCK_REJECTED = Counter(
-    "specforge_harness_patch_block_rejected_total",
+    "thought2build_harness_patch_block_rejected_total",
     "Incomplete trailing harness file blocks dropped before merge",
     ["source"],
 )
@@ -177,7 +177,7 @@ HARNESS_PATCH_BLOCK_REJECTED = Counter(
 # (an unsupported language / fence style) to fix — the point is that these stay
 # measurable instead of being silently swallowed or shown as scary false gaps.
 UNVERIFIED_COVERAGE_FINDINGS = Counter(
-    "specforge_unverified_coverage_findings_total",
+    "thought2build_unverified_coverage_findings_total",
     "TASKS refs downgraded to UNVERIFIED_COVERAGE (file present, tests unparsed)",
 )
 # Paid harness gap-patches that merged NOTHING new (the model re-emitted only
@@ -185,7 +185,7 @@ UNVERIFIED_COVERAGE_FINDINGS = Counter(
 # back with no charge and surface a "no new coverage" signal instead of
 # committing a byte-identical version; a rising rate flags a weak patch prompt.
 HARNESS_PATCH_NOOP = Counter(
-    "specforge_harness_patch_noop_total",
+    "thought2build_harness_patch_noop_total",
     "Paid harness gap-patches that produced no new files (rolled back, no charge)",
 )
 
@@ -193,7 +193,7 @@ HARNESS_PATCH_NOOP = Counter(
 # a stalled provider stream) or "hard_cap" (the absolute per-stream bound hit —
 # a runaway generation). Alert on idle-rate: it is the provider-health signal.
 PIPELINE_STREAM_WATCHDOG_TIMEOUTS = Counter(
-    "specforge_pipeline_stream_watchdog_timeouts_total",
+    "thought2build_pipeline_stream_watchdog_timeouts_total",
     "Stage generation streams killed by the idle/hard-cap stream watchdog",
     ["stage_type", "provider", "kind"],
 )
@@ -202,7 +202,7 @@ PIPELINE_STREAM_WATCHDOG_TIMEOUTS = Counter(
 # timeout or provider error and the stage was retried once on the fallback
 # tier. A rising rate means the frontier route is degraded.
 PIPELINE_GENERATION_FALLBACKS = Counter(
-    "specforge_pipeline_generation_fallbacks_total",
+    "thought2build_pipeline_generation_fallbacks_total",
     "Stage generations retried on the fallback model tier after a primary failure",
     ["stage_type", "provider", "outcome"],
 )
@@ -215,45 +215,45 @@ PIPELINE_GENERATION_FALLBACKS = Counter(
 # failure surfaces). A rising rate is the binding-constraint signal: the shared
 # provider key is hitting its account rate ceiling.
 PIPELINE_PROVIDER_RATE_LIMIT_RETRIES = Counter(
-    "specforge_pipeline_provider_rate_limit_retries_total",
+    "thought2build_pipeline_provider_rate_limit_retries_total",
     "Stage generation stream retries triggered by a provider 429/overload, "
     "retried in place on the same tier (no tier escalation), by outcome.",
     ["stage_type", "provider", "outcome"],
 )
 
 PIPELINE_GENERATION_DURATION = Histogram(
-    "specforge_pipeline_generation_duration_seconds",
+    "thought2build_pipeline_generation_duration_seconds",
     "Wall-clock duration of a full stage artifact generation (all chunks)",
     ["stage_type", "provider"],
     buckets=(15, 30, 60, 120, 180, 300, 450, 600, 900, float("inf")),
 )
 PIPELINE_STAGE_END_TO_END_DURATION = Histogram(
-    "specforge_pipeline_stage_end_to_end_duration_seconds",
+    "thought2build_pipeline_stage_end_to_end_duration_seconds",
     "End-to-end wall-clock duration of a stage generation pipeline",
     ["stage_type", "provider", "outcome"],
     buckets=(15, 30, 60, 120, 180, 300, 450, 600, 900, float("inf")),
 )
 
 PIPELINE_TECH_SAFETY_FAILURES = Counter(
-    "specforge_pipeline_technology_safety_failures_total",
+    "thought2build_pipeline_technology_safety_failures_total",
     "Stage artifacts blocked by the deterministic technology safety gate",
     ["stage_type", "code", "severity"],
 )
 
 PIPELINE_TECH_SAFETY_REPAIRS = Counter(
-    "specforge_pipeline_technology_safety_repairs_total",
+    "thought2build_pipeline_technology_safety_repairs_total",
     "Platform-funded repair attempts for unsafe generated technology choices",
     ["stage_type", "provider", "outcome"],
 )
 
 PIPELINE_TECH_SAFETY_LOOKUP_FAILURES = Counter(
-    "specforge_pipeline_technology_safety_lookup_failures_total",
+    "thought2build_pipeline_technology_safety_lookup_failures_total",
     "External technology safety lookup failures",
     ["source", "reason"],
 )
 
 PIPELINE_TECH_SAFETY_FINALISE_BLOCKS = Counter(
-    "specforge_pipeline_technology_safety_finalise_blocks_total",
+    "thought2build_pipeline_technology_safety_finalise_blocks_total",
     "Finalise attempts blocked by deterministic technology safety validation",
     ["stage_type", "code"],
 )
@@ -271,7 +271,7 @@ PIPELINE_TECH_SAFETY_FINALISE_BLOCKS = Counter(
 #     (disabled|cache hit/miss|quota|insufficient_credits) and the injected
 #     context-size histogram.
 BRAVE_REQUESTS_TOTAL = Counter(
-    "specforge_brave_requests_total",
+    "thought2build_brave_requests_total",
     "Brave LLM Context research fetch outcomes",
     # hit|empty|timeout|error|rate_limited (HTTP client) +
     # disabled|quota|insufficient_credits (research service, Phase 2)
@@ -279,19 +279,19 @@ BRAVE_REQUESTS_TOTAL = Counter(
 )
 
 BRAVE_REQUEST_LATENCY = Histogram(
-    "specforge_brave_request_latency_seconds",
+    "thought2build_brave_request_latency_seconds",
     "Wall-clock latency of a Brave LLM Context API fetch (incl. one retry)",
     buckets=(0.1, 0.25, 0.5, 1.0, 2.0, 4.0, 8.0, float("inf")),
 )
 
 BRAVE_CACHE_TOTAL = Counter(
-    "specforge_brave_cache_total",
+    "thought2build_brave_cache_total",
     "Brave research Redis cache lookups (emitted by the research service)",
     ["result"],  # hit|miss
 )
 
 BRAVE_CONTEXT_CHARS = Histogram(
-    "specforge_brave_context_chars",
+    "thought2build_brave_context_chars",
     "Size in characters of the research context block injected into a prompt",
     buckets=(0, 500, 1000, 2000, 4000, 6000, 8000, 12000, float("inf")),
 )
@@ -311,7 +311,7 @@ BRAVE_CONTEXT_CHARS = Histogram(
 # Labels are bounded enums (provider / stage_type) normalised through the helpers
 # below so a stray value can never explode Prometheus cardinality.
 PROBLEM_STATEMENT_TOKENS = Histogram(
-    "specforge_problem_statement_tokens",
+    "thought2build_problem_statement_tokens",
     "Estimated token size of a workspace problem statement entering generation "
     "(emitted once per spec generation, including generation-cache hits).",
     labelnames=["provider"],
@@ -319,7 +319,7 @@ PROBLEM_STATEMENT_TOKENS = Histogram(
 )
 
 ASSEMBLED_PROMPT_TOKENS = Histogram(
-    "specforge_assembled_prompt_tokens",
+    "thought2build_assembled_prompt_tokens",
     "Estimated token size of the fully assembled stage prompt (system + user, "
     "incl. problem statement, research, and upstream artifacts) actually sent to "
     "the model. Emitted once per cache-miss generation.",
@@ -388,7 +388,7 @@ def record_assembled_prompt_tokens(
 # ladder engages, so counting it would swamp the signal with the common case.
 # `rung` is a bounded enum normalised through the helper below.
 PROBLEM_COMPRESSION_RUNGS = Counter(
-    "specforge_problem_compression_rung_total",
+    "thought2build_problem_compression_rung_total",
     "Count of problem-statement compressions by the ladder rung that produced "
     "the result (1=lossless structural cleanup, 2=abstractive map-reduce, "
     "3=deterministic clamp, error=fail-open bounded truncate). Rung 0 no-ops "
@@ -413,7 +413,7 @@ def record_problem_compression(rung: str) -> None:
 # thread-pool executor thread for 0.5–3 s per render. Observing duration
 # makes event-loop-blocking outliers (C-4) visible.
 PDF_EXPORT_DURATION = Histogram(
-    "specforge_pdf_export_duration_seconds",
+    "thought2build_pdf_export_duration_seconds",
     "Wall-clock duration of PDF export render calls",
     buckets=(0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0),
 )
@@ -421,7 +421,7 @@ PDF_EXPORT_DURATION = Histogram(
 # Eval polling failure counter — incremented when the eval poller gives up
 # after max retries. Without this counter, silent eval drops are invisible.
 EVAL_POLL_FAILURES = Counter(
-    "specforge_eval_poll_failures_total",
+    "thought2build_eval_poll_failures_total",
     "Eval polling attempts that exhausted max retries and silently dropped",
     ["stage_type"],
 )
@@ -430,7 +430,7 @@ EVAL_POLL_FAILURES = Counter(
 # a nonce that has already been claimed in Redis (i.e., the token was replayed).
 # Distinguishes active replay attacks from token generation bugs.  HF-6 — T-203.
 CSRF_REPLAY_REJECTIONS = Counter(
-    "specforge_csrf_replay_rejections_total",
+    "thought2build_csrf_replay_rejections_total",
     "CSRF tokens rejected because the nonce was already consumed in Redis",
 )
 
@@ -444,108 +444,108 @@ CSRF_REPLAY_REJECTIONS = Counter(
 # counters REQUIRE ``.labels(...).inc()`` at every call site. ``credits_expired``
 # stays label-less — lazy expiry is provider-agnostic.
 BILLING_CHECKOUT_CREATED = Counter(
-    "specforge_billing_checkout_created_total",
+    "thought2build_billing_checkout_created_total",
     "Hosted checkouts created via POST /billing/checkout",
     ["provider"],
 )
 BILLING_CHECKOUT_COMPLETED = Counter(
-    "specforge_billing_checkout_completed_total",
+    "thought2build_billing_checkout_completed_total",
     "Paid-order webhook events received and turned into a credit grant",
     ["provider"],
 )
 BILLING_CREDITS_GRANTED = Counter(
-    "specforge_billing_credits_granted_total",
+    "thought2build_billing_credits_granted_total",
     "Total credits granted to users via a verified purchase",
     ["provider"],
 )
 BILLING_PURCHASE_REVENUE_CENTS = Counter(
-    "specforge_billing_purchase_revenue_cents_total",
+    "thought2build_billing_purchase_revenue_cents_total",
     "Gross paid-item revenue (cents) recognised when a verified order grant lands, "
     "anchored to the checkout-attempt snapshot price (Phase 22 — T-299).",
     ["provider"],
 )
 BILLING_CHECKOUT_API_ERROR = Counter(
-    "specforge_billing_checkout_api_error_total",
+    "thought2build_billing_checkout_api_error_total",
     "POST /billing/checkout failures, by error_type: 'provider_error' (the provider "
     "checkout API failed) or 'orphaned_commit' (the post-provider commit failed so "
     "the URL was never exposed — reconciled later). Phase 22 — T-304.",
     ["provider", "error_type"],
 )
 BILLING_CHECKOUT_EXPIRED = Counter(
-    "specforge_billing_checkout_expired_total",
+    "thought2build_billing_checkout_expired_total",
     "Local checkout attempts expired past their TTL by reconcile lane 3 "
     "(Phase 22 — T-301/T-304).",
     ["provider"],
 )
 BILLING_UNRECOVERABLE_CHECKOUT = Counter(
-    "specforge_billing_unrecoverable_checkout_total",
+    "thought2build_billing_unrecoverable_checkout_total",
     "Paid order webhooks the automatic pipeline could not turn into a grant "
     "(the unprovable-paid-checkout path → admin correction T-302). Phase 22 — T-304.",
     ["provider"],
 )
 BILLING_CREDITS_EXPIRED = Counter(
-    "specforge_billing_credits_expired_total",
+    "thought2build_billing_credits_expired_total",
     "Credits swept by lazy expiry in _expire_user_packs() (provider-agnostic)",
 )
 BILLING_CREDITS_CONSUMED = Counter(
-    "specforge_billing_credits_consumed_total",
+    "thought2build_billing_credits_consumed_total",
     "Credits drained by FIFO pack drain in _drain_packs()",
 )
 BILLING_CREDIT_DEBT_RECOVERED = Counter(
-    "specforge_billing_credit_debt_recovered_total",
+    "thought2build_billing_credit_debt_recovered_total",
     "Credits from a new grant applied to repay pending billing_credit_debts "
     "(debt-first recovery) before any usable surplus is added (Phase 22 — T-294).",
     ["provider"],
 )
 BILLING_CREDITS_REVOKED = Counter(
-    "specforge_billing_credits_revoked_total",
+    "thought2build_billing_credits_revoked_total",
     "Credits revoked by a refund / fraud / dispute reversal (Phase 22 — T-300). The "
     "provider-neutral successor to the retired pack_disputed_total — a dispute folds "
     "in as reason='disputed'.",
     ["provider", "reason"],
 )
 BILLING_CREDIT_DEBT_CREATED = Counter(
-    "specforge_billing_credit_debt_created_total",
+    "thought2build_billing_credit_debt_created_total",
     "Credits a reversal could not immediately recover (the user had already spent "
     "them) and which became recoverable billing_credit_debts (Phase 22 — T-300).",
     ["provider", "reason"],
 )
 BILLING_ADMIN_CORRECTION = Counter(
-    "specforge_billing_admin_correction_total",
+    "thought2build_billing_admin_correction_total",
     "Evidence-backed admin credit corrections applied for an order the automatic "
     "webhook pipeline could not settle (Phase 22 — T-302). Incremented only on a "
     "real grant — the idempotent duplicate no-op does not count.",
     ["provider"],
 )
 BILLING_RECONCILE_MISMATCH = Counter(
-    "specforge_billing_reconcile_mismatch_total",
+    "thought2build_billing_reconcile_mismatch_total",
     "Reversals the reconcile backstop applied because the webhook path missed them "
     "(a local pack out of sync with the provider's order). Phase 22 — T-301/T-304.",
     ["provider"],
 )
 BILLING_WEBHOOK_RECEIVED = Counter(
-    "specforge_billing_webhook_received_total",
+    "thought2build_billing_webhook_received_total",
     "All webhook events received (before idempotency check)",
     ["provider", "event_type"],
 )
 BILLING_WEBHOOK_DUPLICATE = Counter(
-    "specforge_billing_webhook_duplicate_total",
+    "thought2build_billing_webhook_duplicate_total",
     "Webhook events rejected as duplicates by the idempotency guard",
     ["provider"],
 )
 BILLING_WEBHOOK_ERROR = Counter(
-    "specforge_billing_webhook_error_total",
+    "thought2build_billing_webhook_error_total",
     "Webhook events that failed during processing",
     ["provider", "error_type"],
 )
 BILLING_WEBHOOK_PENDING_AGE_SECONDS = Gauge(
-    "specforge_billing_webhook_pending_age_seconds",
+    "thought2build_billing_webhook_pending_age_seconds",
     "Age (seconds) of the oldest not-yet-processed billing_webhook_events row, "
     "refreshed by the 60s recovery sweep. The lost-webhook alert (>300s) and the "
     "trigger to scale out a dedicated billing worker (Phase 22 — T-304).",
 )
 BILLING_CHECKOUT_RATE_LIMITED = Counter(
-    "specforge_billing_checkout_rate_limited_total",
+    "thought2build_billing_checkout_rate_limited_total",
     "POST /billing/checkout requests rejected by the 5/hour rate limit",
 )
 
@@ -553,7 +553,7 @@ BILLING_CHECKOUT_RATE_LIMITED = Counter(
 # minting off the hot path (GitHub rate-limits token minting), so the ratio of
 # source="mint" to source="cache" is the cache-hit signal.
 GITHUB_TOKEN_MINT_TOTAL = Counter(
-    "specforge_github_token_mint_total",
+    "thought2build_github_token_mint_total",
     "GitHub installation token resolutions, by source: 'mint' = a new token "
     "minted from GitHub, 'cache' = served from the Redis token cache.",
     labelnames=["source"],
@@ -563,13 +563,13 @@ GITHUB_TOKEN_MINT_TOTAL = Counter(
 # reliability signal for the GitHub job queue; queue depth is the backpressure
 # signal operators alert on.
 GITHUB_JOB_RETRIES_TOTAL = Counter(
-    "specforge_github_job_retries_total",
+    "thought2build_github_job_retries_total",
     "GitHub worker job attempts that failed transiently and were retried "
     "(exponential backoff + jitter), labelled by job name.",
     labelnames=["job"],
 )
 GITHUB_JOB_DEADLETTERED_TOTAL = Counter(
-    "specforge_github_job_deadlettered_total",
+    "thought2build_github_job_deadlettered_total",
     "GitHub worker jobs that exhausted max_tries and were moved to the "
     "dead-letter record for manual replay, labelled by job name.",
     labelnames=["job"],
@@ -580,19 +580,19 @@ GITHUB_JOB_DEADLETTERED_TOTAL = Counter(
 # (its own ``billing:deadletter`` Redis list) so a credit grant is never starved
 # or confused with a GitHub export. Surfaced/alerted on in T-304.
 BILLING_JOB_RETRIES_TOTAL = Counter(
-    "specforge_billing_job_retries_total",
+    "thought2build_billing_job_retries_total",
     "Billing worker job attempts that failed transiently and were retried "
     "(exponential backoff + jitter), labelled by job name.",
     labelnames=["job"],
 )
 BILLING_JOB_DEADLETTERED_TOTAL = Counter(
-    "specforge_billing_job_deadlettered_total",
+    "thought2build_billing_job_deadlettered_total",
     "Billing worker jobs that exhausted max_tries and were moved to the "
     "'billing:deadletter' record for manual replay, labelled by job name.",
     labelnames=["job"],
 )
 GITHUB_QUEUE_DEPTH = Gauge(
-    "specforge_github_queue_depth",
+    "thought2build_github_queue_depth",
     "Approximate number of GitHub worker jobs currently queued/in-flight.",
 )
 
@@ -604,12 +604,12 @@ GITHUB_QUEUE_DEPTH = Gauge(
 # cron (not on_job_start): a stalled queue starts no jobs, so an on-job-start
 # gauge would read stale exactly when the alert must fire.
 WORKER_QUEUE_DEPTH = Gauge(
-    "specforge_worker_queue_depth",
+    "thought2build_worker_queue_depth",
     "Approximate number of worker jobs queued/in-flight, labelled by arq queue.",
     labelnames=["queue"],
 )
 WORKER_QUEUE_OLDEST_AGE_SECONDS = Gauge(
-    "specforge_worker_queue_oldest_age_seconds",
+    "thought2build_worker_queue_oldest_age_seconds",
     "Age of the oldest queued job (seconds since enqueue), labelled by arq "
     "queue. 0 when the queue is empty. A sustained climb on the `fast` queue "
     "means its dedicated worker is down/starved (paid grants not draining).",
@@ -633,7 +633,7 @@ def record_worker_queue_stats(
 
 
 BACKGROUND_TASKS = Gauge(
-    "specforge_background_tasks",
+    "thought2build_background_tasks",
     "Live detached background tasks held in a strong-ref registry, labelled by "
     "registry (pipeline / eval / critic / verifier). A runaway count signals a "
     "fan-out leaking past the F1 admission cap (audit §6/§8).",
@@ -655,14 +655,14 @@ def set_background_task_count(registry: str, count: int) -> None:
 # over a FIXED table allowlist, so the ``table`` label is bounded and can never
 # explode Prometheus cardinality. Postgres-only (the sampler no-ops elsewhere).
 DB_TABLE_BYTES = Gauge(
-    "specforge_db_table_bytes",
+    "thought2build_db_table_bytes",
     "Total on-disk size (pg_total_relation_size, incl. indexes + TOAST) of a "
     "retention-tracked table, sampled hourly. The plateau-not-shrink success "
     "metric: DELETE frees no files, so a flat slope at steady state is the win.",
     labelnames=["table"],
 )
 DB_TABLE_LIVE_TUPLES = Gauge(
-    "specforge_db_table_live_tuples",
+    "thought2build_db_table_live_tuples",
     "Estimated live row count (pg_stat_user_tables.n_live_tup) of a "
     "retention-tracked table, sampled hourly.",
     labelnames=["table"],
@@ -691,25 +691,25 @@ def record_table_stats(
 # it stale so ``time() - last_success > 26h`` fires). ``job``/``table`` labels are
 # fixed internal strings (one per purge job), so both label sets are bounded.
 RETENTION_CANDIDATES = Gauge(
-    "specforge_retention_candidates",
+    "thought2build_retention_candidates",
     "Rows a retention job found eligible for purge at the start of its run "
     "(set even in dry-run / flag-off counting mode), labelled by job.",
     labelnames=["job"],
 )
 RETENTION_PURGED_ROWS = Counter(
-    "specforge_retention_purged_rows_total",
+    "thought2build_retention_purged_rows_total",
     "Rows actually deleted by a retention job, labelled by job and the primary "
     "table it targets (cascade-deleted child rows are not separately counted).",
     labelnames=["job", "table"],
 )
 RETENTION_RUN_SECONDS = Histogram(
-    "specforge_retention_run_seconds",
+    "thought2build_retention_run_seconds",
     "Wall-clock duration of one retention job run, labelled by job.",
     labelnames=["job"],
     buckets=(0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0),
 )
 RETENTION_LAST_SUCCESS_TIMESTAMP = Gauge(
-    "specforge_retention_last_success_timestamp",
+    "thought2build_retention_last_success_timestamp",
     "Unix timestamp of a retention job's last successful completion, labelled by "
     "job. Alert when time() - this > 26h (a missed daily run / persistent error).",
     labelnames=["job"],
@@ -725,7 +725,7 @@ RETENTION_LAST_SUCCESS_TIMESTAMP = Gauge(
 # in the high buckets means CPU work is still blocking the loop (F7 regressed or a
 # new inline hot spot appeared).
 EVENT_LOOP_LAG_SECONDS = Histogram(
-    "specforge_event_loop_lag_seconds",
+    "thought2build_event_loop_lag_seconds",
     "Sampled asyncio event-loop scheduling delay: time a fixed-interval timer ran "
     "LATE beyond its interval because the loop was busy. High buckets mean "
     "CPU-bound work is starving the loop (audit §8 / F7).",
@@ -800,32 +800,32 @@ class _DbPoolCollector:
 
         if checked_out is not None:
             yield GaugeMetricFamily(
-                "specforge_db_pool_checked_out",
+                "thought2build_db_pool_checked_out",
                 "Connections currently checked out of the SQLAlchemy pool (in use).",
                 value=checked_out,
             )
         if checked_in is not None:
             yield GaugeMetricFamily(
-                "specforge_db_pool_checked_in",
+                "thought2build_db_pool_checked_in",
                 "Idle connections currently held in the SQLAlchemy pool.",
                 value=checked_in,
             )
         if overflow is not None:
             yield GaugeMetricFamily(
-                "specforge_db_pool_overflow",
+                "thought2build_db_pool_overflow",
                 "Current overflow connections open beyond the configured pool_size "
                 "(negative means the pool is not yet full).",
                 value=overflow,
             )
         if size is not None:
             yield GaugeMetricFamily(
-                "specforge_db_pool_size",
+                "thought2build_db_pool_size",
                 "Configured SQLAlchemy pool_size (steady-state pooled connections).",
                 value=size,
             )
         if checked_out is not None and checked_in is not None:
             yield GaugeMetricFamily(
-                "specforge_db_pool_total_open",
+                "thought2build_db_pool_total_open",
                 "Total open Postgres connections from this process "
                 "(checked_in + checked_out) — compare against max_connections.",
                 value=checked_in + checked_out,
@@ -834,7 +834,7 @@ class _DbPoolCollector:
         # peak (pool_size + max_overflow). An alert compares total_open × the
         # instance count against the confirmed Postgres max_connections.
         yield GaugeMetricFamily(
-            "specforge_db_pool_max",
+            "thought2build_db_pool_max",
             "Maximum Postgres connections this process can open at peak "
             "(db_pool_size + db_max_overflow).",
             value=settings.db_pool_size + settings.db_max_overflow,
@@ -855,25 +855,25 @@ except ValueError:  # pragma: no cover — already registered (re-import in test
 # the provider; ``collected`` counts batches whose results were persisted; the
 # retry/dead-letter pair is the reliability signal for the lane.
 LLM_BATCH_SUBMITTED_TOTAL = Counter(
-    "specforge_llm_batch_submitted_total",
+    "thought2build_llm_batch_submitted_total",
     "Provider Message Batches created for non-interactive judge/eval work, "
     "labelled by operation and provider.",
     labelnames=["operation", "provider"],
 )
 LLM_BATCH_COLLECTED_TOTAL = Counter(
-    "specforge_llm_batch_collected_total",
+    "thought2build_llm_batch_collected_total",
     "Deferred batches whose results were collected and persisted, labelled by "
     "operation, provider, and outcome (succeeded / fallback / failed).",
     labelnames=["operation", "provider", "outcome"],
 )
 LLM_BATCH_JOB_RETRIES_TOTAL = Counter(
-    "specforge_llm_batch_job_retries_total",
+    "thought2build_llm_batch_job_retries_total",
     "LLM batch worker job attempts that failed transiently and were retried "
     "(exponential backoff + jitter), labelled by job name.",
     labelnames=["job"],
 )
 LLM_BATCH_JOB_DEADLETTERED_TOTAL = Counter(
-    "specforge_llm_batch_job_deadlettered_total",
+    "thought2build_llm_batch_job_deadlettered_total",
     "LLM batch worker jobs that exhausted max_tries and were moved to the "
     "'llm:batch:deadletter' record for manual replay, labelled by job name.",
     labelnames=["job"],
@@ -884,7 +884,7 @@ LLM_BATCH_JOB_DEADLETTERED_TOTAL = Counter(
 # throttles by reason is the signal that an installation is pushing GitHub's
 # limits and may need write batching.
 GITHUB_THROTTLED_TOTAL = Counter(
-    "specforge_github_throttled_total",
+    "thought2build_github_throttled_total",
     "GitHub worker jobs requeued by the per-installation rate governor "
     "(backpressure, not failure), labelled by job name and throttle reason "
     "(primary_limit, secondary_limit, repo_contended).",
@@ -895,32 +895,32 @@ GITHUB_THROTTLED_TOTAL = Counter(
 # HMAC gate; deduped counts retried deliveries skipped idempotently; failed is
 # labelled by error_type (bad_signature, missing_headers, enqueue_unavailable).
 GITHUB_WEBHOOK_RECEIVED_TOTAL = Counter(
-    "specforge_github_webhook_received_total",
+    "thought2build_github_webhook_received_total",
     "GitHub webhook deliveries that passed the HMAC gate, by event type.",
     labelnames=["event_type"],
 )
 GITHUB_WEBHOOK_VERIFIED_TOTAL = Counter(
-    "specforge_github_webhook_verified_total",
+    "thought2build_github_webhook_verified_total",
     "GitHub webhook deliveries whose signature verified against a current or "
     "previous (rotation) secret.",
 )
 GITHUB_WEBHOOK_DEDUPED_TOTAL = Counter(
-    "specforge_github_webhook_deduped_total",
+    "thought2build_github_webhook_deduped_total",
     "Retried GitHub webhook deliveries (same X-GitHub-Delivery) skipped as "
     "duplicates, by event type.",
     labelnames=["event_type"],
 )
 GITHUB_WEBHOOK_FAILED_TOTAL = Counter(
-    "specforge_github_webhook_failed_total",
+    "thought2build_github_webhook_failed_total",
     "GitHub webhook deliveries rejected before dispatch, by error_type.",
     labelnames=["error_type"],
 )
 
 # Bidirectional-sync reconcile lag (Phase 21 — T-272): seconds from a webhook
 # delivery being received to the worker finishing its reconciliation. This is
-# the headline SLO for "closing an issue flips the task done in SpecForge".
+# the headline SLO for "closing an issue flips the task done in Thought2Build".
 GITHUB_RECONCILE_LAG_SECONDS = Histogram(
-    "specforge_github_reconcile_lag_seconds",
+    "thought2build_github_reconcile_lag_seconds",
     "Seconds from webhook receipt to reconcile completion.",
     buckets=(0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 300.0),
 )
@@ -929,25 +929,25 @@ GITHUB_RECONCILE_LAG_SECONDS = Histogram(
 # (files_to_default / pr_with_tests) and outcome (completed / failed). Tracks
 # export volume + failure rate per mode.
 GITHUB_EXPORT_TOTAL = Counter(
-    "specforge_github_export_total",
+    "thought2build_github_export_total",
     "GitHub exports run by the worker, by export_mode and outcome.",
     labelnames=["export_mode", "outcome"],
 )
-# Pull requests opened by SpecForge (Phase 21 — T-284): the pr_with_tests export
+# Pull requests opened by Thought2Build (Phase 21 — T-284): the pr_with_tests export
 # and per-increment PRs. ``outcome`` is ``opened`` (reserved for future
 # failure attribution).
 GITHUB_PR_TOTAL = Counter(
-    "specforge_github_pr_total",
-    "Pull requests opened by SpecForge, by outcome.",
+    "thought2build_github_pr_total",
+    "Pull requests opened by Thought2Build, by outcome.",
     labelnames=["outcome"],
 )
-# SpecForge PR-acceptance checks posted (Phase 21 — T-284), by verdict
+# Thought2Build PR-acceptance checks posted (Phase 21 — T-284), by verdict
 # (success / failure / neutral). ``neutral`` is the fail-open verdict (judge
 # unavailable / no linked task / budget reached), so a rising neutral rate is
 # the signal the evaluator is degraded, not that PRs are failing.
 GITHUB_CHECK_TOTAL = Counter(
-    "specforge_github_check_total",
-    "SpecForge PR acceptance checks posted, by verdict.",
+    "thought2build_github_check_total",
+    "Thought2Build PR acceptance checks posted, by verdict.",
     labelnames=["verdict"],
 )
 
@@ -1018,7 +1018,7 @@ PIPELINE_UPSTREAM_SECTION_SKIPPED = Counter(
 )
 
 BILLING_CREDITS_CRITIC_REGEN = Counter(
-    "specforge_billing_credits_critic_regen_total",
+    "thought2build_billing_credits_critic_regen_total",
     "Number of platform-funded stage regenerations triggered by the critic. "
     "Used to attribute the cost of the quality gate against operational P&L. "
     "T-247 (Phase 19).",
@@ -1026,7 +1026,7 @@ BILLING_CREDITS_CRITIC_REGEN = Counter(
 )
 
 BILLING_CREDITS_BRAVE_RESEARCH = Counter(
-    "specforge_billing_credits_brave_research_total",
+    "thought2build_billing_credits_brave_research_total",
     "User-metered Brave web-research charges — incremented once per successful, "
     "content-bearing (post-sanitisation) paid Brave fetch that debited the user's "
     "credit ledger. Cache hits, empty/all-dropped results, failures, quota skips, "
@@ -1045,7 +1045,7 @@ PIPELINE_VALIDATOR_FAILURES = Counter(
 )
 
 PIPELINE_QUALITY_ESCALATIONS = Counter(
-    "specforge_pipeline_quality_escalations_total",
+    "thought2build_pipeline_quality_escalations_total",
     "Stage generations where a quality-gate failure (critic findings) on the "
     "cheap primary tier triggered an escalation to the mid tier for the "
     "platform-funded regenerate.  A rising rate indicates the cheap primary "
@@ -1054,7 +1054,7 @@ PIPELINE_QUALITY_ESCALATIONS = Counter(
 )
 
 PIPELINE_CRITIC_ADVISORY_FINDINGS = Counter(
-    "specforge_pipeline_critic_advisory_findings_total",
+    "thought2build_pipeline_critic_advisory_findings_total",
     "Background (off-critical-path) critic reviews whose verdict FAILED, attaching "
     "non-blocking advisory findings to an already-delivered draft. With the async "
     "advisory critic this is exactly the population that previously triggered the "
@@ -1064,7 +1064,7 @@ PIPELINE_CRITIC_ADVISORY_FINDINGS = Counter(
 )
 
 PIPELINE_COMPLEXITY_TIER_FLOORS = Counter(
-    "specforge_pipeline_complexity_tier_floors_total",
+    "thought2build_pipeline_complexity_tier_floors_total",
     "Core generations where the deterministic complexity classifier raised the "
     "starting tier above the cheap primary (e.g. regulated domain, large upstream "
     "chain, prior quality-gate failure), labelled by the assessed complexity "
@@ -1079,7 +1079,7 @@ PIPELINE_COMPLEXITY_TIER_FLOORS = Counter(
 # unbounded Prometheus series.  T-262 owns the complete Storyboard metric set.
 # ---------------------------------------------------------------------------
 STORYBOARD_GENERATION_STARTED = Counter(
-    "specforge_storyboard_generation_started_total",
+    "thought2build_storyboard_generation_started_total",
     "Storyboard generations that acquired a placeholder row and debited credits. "
     "Labelled by action so full generation, full regeneration, and single-section "
     "regeneration can be told apart.  T-254 (Phase 20).",
@@ -1087,14 +1087,14 @@ STORYBOARD_GENERATION_STARTED = Counter(
 )
 
 STORYBOARD_GENERATION_COMPLETED = Counter(
-    "specforge_storyboard_generation_completed_total",
+    "thought2build_storyboard_generation_completed_total",
     "Storyboard generations that validated their LLM payload and reached the "
     "'ready' state.  T-254 (Phase 20).",
     labelnames=["action"],
 )
 
 STORYBOARD_GENERATION_FAILED = Counter(
-    "specforge_storyboard_generation_failed_total",
+    "thought2build_storyboard_generation_failed_total",
     "Storyboard generations that failed after debiting and were refunded and "
     "marked 'failed'.  ``error_type`` is a coarse, content-free reason (e.g. "
     "'payload_parse', 'payload_schema', 'provider', 'timeout') — never raw "
@@ -1103,26 +1103,26 @@ STORYBOARD_GENERATION_FAILED = Counter(
 )
 
 STORYBOARD_SECTION_REGENERATED = Counter(
-    "specforge_storyboard_section_regenerated_total",
+    "thought2build_storyboard_section_regenerated_total",
     "Single-section Storyboard regenerations that reached the 'ready' state.  "
     "T-254 (Phase 20).",
 )
 
 STORYBOARD_GENERATION_DURATION = Histogram(
-    "specforge_storyboard_generation_duration_seconds",
+    "thought2build_storyboard_generation_duration_seconds",
     "Wall-clock duration of the Storyboard LLM generation + validation phase "
     "(excludes the credit/placeholder transaction).  T-254 (Phase 20).",
     labelnames=["action"],
 )
 
 STORYBOARD_CREDITS_DEDUCTED = Counter(
-    "specforge_storyboard_credits_deducted_total",
+    "thought2build_storyboard_credits_deducted_total",
     "Total credits debited for Storyboard generation, by action.  T-254.",
     labelnames=["action"],
 )
 
 STORYBOARD_CREDITS_REFUNDED = Counter(
-    "specforge_storyboard_credits_refunded_total",
+    "thought2build_storyboard_credits_refunded_total",
     "Total credits refunded for failed/recovered Storyboard generations.  "
     "``reason`` is content-free (e.g. 'generation_failed', 'stuck_recovery').  "
     "T-254 (Phase 20).",
@@ -1130,7 +1130,7 @@ STORYBOARD_CREDITS_REFUNDED = Counter(
 )
 
 STORYBOARD_DOWNLOAD = Counter(
-    "specforge_storyboard_download_total",
+    "thought2build_storyboard_download_total",
     "Storyboard artifact downloads.  ``kind`` is the artifact (html, pdf, "
     "notes-md, notes-pdf, demo-script, appendix); ``public`` is 'true' for the "
     "unauthenticated share surface and 'false' for owner downloads.  T-255.",
@@ -1138,13 +1138,13 @@ STORYBOARD_DOWNLOAD = Counter(
 )
 
 STORYBOARD_PUBLIC_VIEW = Counter(
-    "specforge_storyboard_public_view_total",
+    "thought2build_storyboard_public_view_total",
     "Unauthenticated public Storyboard views served successfully. 404s and "
     "permission denials are intentionally not counted.  T-262 (Phase 20).",
 )
 
 STORYBOARD_SOURCE_MISSING = Counter(
-    "specforge_storyboard_source_missing_total",
+    "thought2build_storyboard_source_missing_total",
     "Expected finalised source sections absent during deterministic Storyboard "
     "source extraction. Labels are bounded source/section enums and never carry "
     "source excerpts.  T-262 (Phase 20).",
@@ -1152,7 +1152,7 @@ STORYBOARD_SOURCE_MISSING = Counter(
 )
 
 STORYBOARD_ESCALATIONS = Counter(
-    "specforge_storyboard_escalations_total",
+    "thought2build_storyboard_escalations_total",
     "Storyboard generations where a quality-gate failure on the cheap primary "
     "tier (schema/parse/grounding error, incl. truncation) triggered a one-shot "
     "escalation to the next tier (``mid`` while cheap-primary is live; ``strong`` "
@@ -1167,7 +1167,7 @@ STORYBOARD_ESCALATIONS = Counter(
 )
 
 STORYBOARD_TRUNCATION_RETRIES = Counter(
-    "specforge_storyboard_truncation_retries_total",
+    "thought2build_storyboard_truncation_retries_total",
     "Storyboard completions detected as truncated (cut off at the model's output "
     "token ceiling, the dominant parse-failure mode) that triggered a single "
     "budget-doubling retry BEFORE the repair loop — repairing a truncated body "
@@ -1243,14 +1243,14 @@ _STORYBOARD_SECTION_LABELS = frozenset(
 # so an unexpected value collapses to ``unknown`` and can never explode Prometheus
 # cardinality.
 JUDGE_CALLS_TOTAL = Counter(
-    "specforge_judge_calls_total",
+    "thought2build_judge_calls_total",
     "LLM judge-model calls actually issued to a provider (billed spend), by "
     "purpose: eval.score / critic / pr_check / clarify. Counts every real "
     "attempt, including compact retries and deferred-batch submits.",
     labelnames=["purpose"],
 )
 JUDGE_CALLS_SKIPPED_TOTAL = Counter(
-    "specforge_judge_calls_skipped_total",
+    "thought2build_judge_calls_skipped_total",
     "LLM judge-model calls deliberately not issued, by purpose and reason: "
     "sampled_out (below the eval-score sample rate), deterministic_gate (a "
     "deterministic check already decided), disabled (owner/setting opt-out), "
@@ -1472,7 +1472,7 @@ def setup_opentelemetry(app: FastAPI, engine: AsyncEngine) -> None:
 
     resource = Resource.create(
         {
-            "service.name": "specforge-api",
+            "service.name": "thought2build-api",
             "deployment.environment": settings.environment,
         }
     )

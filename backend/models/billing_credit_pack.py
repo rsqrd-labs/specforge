@@ -126,7 +126,7 @@ class BillingCreditPack(Base):
         Integer, nullable=False, server_default=text("0")
     )
 
-    # Economics. price_cents is the SpecForge-authoritative pack price;
+    # Economics. price_cents is the Thought2Build-authoritative pack price;
     # paid_item_amount_cents is the validated line-item amount; provider_order_total
     # is the order gross (NULL when unknown) used to cap refunds seen.
     price_cents: Mapped[int] = mapped_column(Integer, nullable=False)

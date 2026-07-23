@@ -26,8 +26,8 @@ from services.security.sanitizer import sanitize_downstream_agent_content
 _CLAUDE_FILENAME = "CLAUDE.md"
 _AGENTS_FILENAME = "AGENTS.md"
 CONSTRUCTION_REPORT_FILENAME = "CONSTRUCTION_REPORT.md"
-DEMO_MANAGED_START = "<!-- specforge:demo-day:start -->"
-DEMO_MANAGED_END = "<!-- specforge:demo-day:end -->"
+DEMO_MANAGED_START = "<!-- thought2build:demo-day:start -->"
+DEMO_MANAGED_END = "<!-- thought2build:demo-day:end -->"
 
 # The plan's ## Technology Stack section heading (Demo Day plan contract).
 _TECH_STACK_HEADING = "## Technology Stack"
@@ -115,7 +115,7 @@ def build_agent_manual(
     checklist = "\n".join(task_lines) or "- Follow the ordered tasks in `TASKS.md`."
     managed = f"""# Build Protocol — {name}
 
-_Renderer: demo-day-v2. Managed by SpecForge._
+_Renderer: demo-day-v2. Managed by Thought2Build._
 
 You are implementing this Demo Day build from SPEC.md, PLAN.md, the harness, and
 TASKS.md. Follow this protocol exactly. The four documents are the contract; this file

@@ -16,7 +16,7 @@ class PromptCachePolicy:
 
     ``routing_key`` deliberately excludes provider model/tier and tenant data.
     Providers remain responsible for isolating the underlying model-specific
-    cache entries; SpecForge only supplies a stable logical routing bucket.
+    cache entries; Thought2Build only supplies a stable logical routing bucket.
     """
 
     namespace: str
@@ -42,7 +42,7 @@ def build_prompt_cache_policy(
     )
     return PromptCachePolicy(
         namespace=namespace,
-        routing_key=f"specforge:{namespace}:{_sha256(logical_identity)[:32]}",
+        routing_key=f"thought2build:{namespace}:{_sha256(logical_identity)[:32]}",
         retention=retention,
         eligible_prefix_fingerprint=_sha256(f"{system_prompt}\0{base_user_prompt}"),
     )

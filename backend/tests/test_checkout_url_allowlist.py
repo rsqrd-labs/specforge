@@ -44,7 +44,7 @@ _ATTEMPT = SimpleNamespace(checkout_ref="ref-1", id="attempt-1")
 @pytest.mark.parametrize(
     "url",
     [
-        "https://specforge.lemonsqueezy.com/checkout/abc",
+        "https://thought2build.lemonsqueezy.com/checkout/abc",
         "https://store.lemonsqueezy.com/buy/xyz",
         "https://lemonsqueezy.com/checkout/abc",
     ],
@@ -58,7 +58,7 @@ def test_lemon_allows_provider_hosts(url: str) -> None:
     [
         "https://evil.example.com/checkout",
         "https://lemonsqueezy.com.evil.com/checkout",
-        "http://specforge.lemonsqueezy.com/checkout",  # non-HTTPS
+        "http://thought2build.lemonsqueezy.com/checkout",  # non-HTTPS
         "javascript:alert(1)",
         "https://phish-lemonsqueezy.com/checkout",
     ],
@@ -80,7 +80,7 @@ def test_lemon_parse_accepts_valid_url() -> None:
     payload = {
         "data": {
             "id": "co_1",
-            "attributes": {"url": "https://specforge.lemonsqueezy.com/checkout/ok"},
+            "attributes": {"url": "https://thought2build.lemonsqueezy.com/checkout/ok"},
         }
     }
     checkout_id, url = LemonSqueezyService._parse_checkout_response(

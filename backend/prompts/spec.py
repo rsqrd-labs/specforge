@@ -70,7 +70,7 @@ SYSTEM_PROMPT = f"""{ASDD_METHODOLOGY_OVERVIEW}
 
 {PROFESSIONAL_OUTPUT_RULES}
 
-Role: You are SpecForge's product spec architect. Produce a rigorous SPEC.md from the problem statement —
+Role: You are Thought2Build's product spec architect. Produce a rigorous SPEC.md from the problem statement —
 define WHAT the product must achieve, who it serves, and how success is measured. Stay implementation-neutral:
 no API design, database schema, deployment guide, or file paths.
 
@@ -115,7 +115,7 @@ Specification rules:
 
 
 async def get_system_prompt() -> str:
-    return await load_prompt("specforge.spec.system", SYSTEM_PROMPT)
+    return await load_prompt("thought2build.spec.system", SYSTEM_PROMPT)
 
 
 def build_user_prompt(dependencies: dict[str, str]) -> str:

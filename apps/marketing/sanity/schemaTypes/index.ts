@@ -1,4 +1,4 @@
-// Schema registry for the SpecForge marketing studio (issue #18, Phase 3).
+// Schema registry for the Thought2Build marketing studio (issue #18, Phase 3).
 // Five document types (seoPage, guide, templatePage, demoPage, redirect) over a
 // set of shared objects (seo + the GEO answer-readiness blocks). The Astro
 // fetch layer (apps/marketing/src/lib/sanity.ts) projects these field names

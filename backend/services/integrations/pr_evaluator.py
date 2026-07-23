@@ -1,6 +1,6 @@
-"""SpecForge PR-diff evaluator — the ``pr_check`` worker job (T-282).
+"""Thought2Build PR-diff evaluator — the ``pr_check`` worker job (T-282).
 
-Posts a SpecForge **check run** on each pull request that judges the PR's diff
+Posts a Thought2Build **check run** on each pull request that judges the PR's diff
 against the acceptance criteria of the task(s) the PR closes (spec §4.14.6).
 
 **This is a NEW evaluator, deliberately NOT the artifact critic** (spec
@@ -8,7 +8,7 @@ Assumption 25). It reuses the critic's *pattern* — an inline-held judge prompt
 (never sourced from Langfuse), a strict structured verdict that can carry no
 code/artifact bytes, and **fail-open** behaviour (a judge error must never
 red-light a PR) — but it is a distinct module judging *external PR code against
-per-task criteria*, a harder and less bounded problem than judging SpecForge's
+per-task criteria*, a harder and less bounded problem than judging Thought2Build's
 own artifacts against fixed invariants. It does not import ``critic.py``.
 
 Resolution + flow (per matched live push for the repo, resolved by the T-272
@@ -20,7 +20,7 @@ reconcile dispatcher which enqueues ``("pr_check", push_id, pr_number)``):
    ``pr_check``; skipping when this exact SHA was already checked breaks the loop.
 3. Resolve PR → task via the PR body's ``Closes #N`` links → ``external_issue_number``
    → :class:`IntegrationPushTask` → its ``task_ref`` + acceptance criteria. A PR
-   that closes no SpecForge task gets a **neutral** check and stops.
+   that closes no Thought2Build task gets a **neutral** check and stops.
 4. Cost controls (spec §12.2): a per-installation **daily budget** cap, a
    **debounce** window so rapid PR pushes don't each burn a judge call (post the
    prior verdict, skip the new judge), and a bounded **concurrency** semaphore on
@@ -83,8 +83,8 @@ logger = structlog.get_logger(__name__)
 PRCheckTrigger = Literal["auto", "manual"]
 
 # The check shown on the PR.
-CHECK_NAME = "SpecForge / acceptance"
-STATUS_CONTEXT = "specforge/acceptance"
+CHECK_NAME = "Thought2Build / acceptance"
+STATUS_CONTEXT = "thought2build/acceptance"
 
 # Cost controls (spec §12.2).
 # Per-installation daily cap on judge-backed checks; over it, the check posts
@@ -147,9 +147,9 @@ class _Verdict:
 # Inline judge prompt — held in code (Phase 19 security directive), never Langfuse
 # ---------------------------------------------------------------------------
 
-_PR_EVALUATOR_SYSTEM_PROMPT = """You are SpecForge's pull-request reviewer. You \
+_PR_EVALUATOR_SYSTEM_PROMPT = """You are Thought2Build's pull-request reviewer. You \
 receive a pull request's unified diff and the acceptance criteria of the \
-SpecForge task(s) the PR claims to implement. Judge ONLY whether the diff \
+Thought2Build task(s) the PR claims to implement. Judge ONLY whether the diff \
 plausibly satisfies those acceptance criteria.
 
 You produce a STRICT JSON object and nothing else — no prose, no markdown fences,
@@ -321,7 +321,7 @@ async def _drive_pr_check(
         await _redis_set(redis, done_key, head_sha, _DAY_SECONDS)
         return
 
-    # 4. Resolve PR → SpecForge task(s) via Closes #N. No task ⇒ neutral + stop.
+    # 4. Resolve PR → Thought2Build task(s) via Closes #N. No task ⇒ neutral + stop.
     criteria = await _resolve_acceptance_criteria(db, push, pr)
     if not criteria:
         await _post_verdict(
@@ -330,8 +330,8 @@ async def _drive_pr_check(
             head_sha,
             _Verdict(
                 "neutral",
-                "No SpecForge task linked",
-                "This PR does not close a SpecForge-tracked task issue, so there "
+                "No Thought2Build task linked",
+                "This PR does not close a Thought2Build-tracked task issue, so there "
                 "are no acceptance criteria to judge.",
             ),
             push,
@@ -357,8 +357,8 @@ async def _drive_pr_check(
             head_sha,
             _Verdict(
                 "neutral",
-                "SpecForge check budget reached",
-                "The daily SpecForge PR-check budget for this installation is "
+                "Thought2Build check budget reached",
+                "The daily Thought2Build PR-check budget for this installation is "
                 "reached; this check is neutral and does not block the PR.",
             ),
             push,
@@ -395,7 +395,7 @@ async def _resolve_acceptance_criteria(
 
     Matches the closed issue numbers against this push's :class:`IntegrationPushTask`
     rows (``external_issue_number``), then pulls each task's body from the Tasks
-    stage. An empty result means the PR closes no SpecForge task.
+    stage. An empty result means the PR closes no Thought2Build task.
     """
     body = pr.get("body") if isinstance(pr, dict) else None
     closed = {int(m) for m in _CLOSES_RE.findall(body or "")}
@@ -542,7 +542,9 @@ def _build_user_prompt(
         parts.append(wrap_untrusted_content(f"task_{ref}", text))
     bounded = diff
     if diff_truncated:
-        bounded += "\n... [diff truncated by SpecForge — one or more files omitted] ..."
+        bounded += (
+            "\n... [diff truncated by Thought2Build — one or more files omitted] ..."
+        )
     parts.append("")
     parts.append("Pull request diff to judge:")
     parts.append(wrap_untrusted_content("pr_diff", bounded))
@@ -566,8 +568,8 @@ def _verdict_for(outcome: _JudgeOutcome) -> _Verdict:
     if result is not None and outcome.diff_truncated and result.passed:
         return _Verdict(
             "neutral",
-            "SpecForge check inconclusive — diff truncated",
-            "This PR's diff exceeds SpecForge's per-check size bound, so one or "
+            "Thought2Build check inconclusive — diff truncated",
+            "This PR's diff exceeds Thought2Build's per-check size bound, so one or "
             "more files were not shown to the judge. A pass on the visible "
             "portion alone is not reported as a pass; this check is neutral and "
             "does not block the PR. Consider splitting the PR into smaller "
@@ -576,7 +578,7 @@ def _verdict_for(outcome: _JudgeOutcome) -> _Verdict:
     if result is None:
         return _Verdict(
             "neutral",
-            "SpecForge check skipped",
+            "Thought2Build check skipped",
             "The acceptance-criteria judge was unavailable; this check is neutral "
             "and does not block the PR.",
         )
@@ -584,11 +586,11 @@ def _verdict_for(outcome: _JudgeOutcome) -> _Verdict:
         return _Verdict(
             "success",
             "Acceptance criteria met",
-            "SpecForge judged the diff to plausibly satisfy the linked task's "
+            "Thought2Build judged the diff to plausibly satisfy the linked task's "
             "acceptance criteria.",
         )
     lines = [
-        "SpecForge judged the diff to not yet satisfy the acceptance criteria:",
+        "Thought2Build judged the diff to not yet satisfy the acceptance criteria:",
         "",
     ]
     for finding in result.findings:
@@ -610,7 +612,7 @@ async def _post_pending(client: Any, repo: str, head_sha: str) -> int | None:
             name=CHECK_NAME,
             head_sha=head_sha,
             status="in_progress",
-            title="SpecForge is reviewing this PR",
+            title="Thought2Build is reviewing this PR",
             summary="Judging the diff against the linked task's acceptance criteria.",
         )
     except GitHubChecksPermissionError:
@@ -619,7 +621,7 @@ async def _post_pending(client: Any, repo: str, head_sha: str) -> int | None:
             head_sha,
             state="pending",
             context=STATUS_CONTEXT,
-            description="SpecForge is reviewing this PR.",
+            description="Thought2Build is reviewing this PR.",
         )
         return None
 
@@ -780,16 +782,16 @@ def _mode_skip_verdict(mode: str, trigger: PRCheckTrigger) -> _Verdict | None:
     if mode == "off":
         return _Verdict(
             "neutral",
-            "SpecForge PR review disabled",
-            "SpecForge acceptance-criteria review is turned off for this "
+            "Thought2Build PR review disabled",
+            "Thought2Build acceptance-criteria review is turned off for this "
             "installation, so this PR was not judged. This check does not block "
             "the PR.",
         )
     if mode == "manual" and trigger != "manual":
         return _Verdict(
             "neutral",
-            "SpecForge PR review is manual",
-            "SpecForge acceptance-criteria review is in manual mode for this "
+            "Thought2Build PR review is manual",
+            "Thought2Build acceptance-criteria review is in manual mode for this "
             "installation. Re-run this check to judge the PR against its linked "
             "task's acceptance criteria. This check does not block the PR.",
         )

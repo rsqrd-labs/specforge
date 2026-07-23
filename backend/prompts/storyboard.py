@@ -523,7 +523,7 @@ _MINIMAL_PAYLOAD_SHAPE = """FIELD SHAPE EXAMPLE — expand this structure to six
 sections and the architecture layers your product actually has (the three core
 planes plus any optional planes the sources describe), but do not rename keys:
 {
-  "title": "SpecForge Launch Keynote",
+  "title": "Thought2Build Launch Keynote",
   "theme": {
     "palette": ["#0B1020", "#6D28D9", "#1FB6FF", "#F5A623", "#10B981", "#EC4899"],
     "typography": "Modern geometric sans",
@@ -609,7 +609,7 @@ required core kinds — client, api, data — plus any of the optional kinds
 these exact kind values; never rename them, and never fabricate an optional
 plane the sources do not describe. Omitting an absent plane is correct."""
 
-SYSTEM_PROMPT = f"""You are SpecForge's Storyboard keynote director. Turn a finalised
+SYSTEM_PROMPT = f"""You are Thought2Build's Storyboard keynote director. Turn a finalised
 SPEC + PLAN + HARNESS + TASKS into a polished, product-specific launch keynote — never a
 generic deck. Ground every claim in the provided sources; never invent capabilities,
 metrics, pricing, commercial claims, timelines, customer promises, or components.

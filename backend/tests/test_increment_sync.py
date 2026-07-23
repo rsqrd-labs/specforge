@@ -666,13 +666,13 @@ async def test_increment_push_pr_mode_opens_one_pr(session: AsyncSession) -> Non
         await increment_service.run_increment_push(
             {}, str(inc.id), db=session, client=stub
         )
-        branch = f"specforge/increment-{inc.sequence}"
+        branch = f"thought2build/increment-{inc.sequence}"
         assert branch in stub.branches
         assert stub.open_prs.get(branch) is not None
         first_pr = stub.open_prs[branch]
         # Only the increment's own new task is scaffolded onto the branch.
         assert any(
-            "T-003".lower() in path.lower() or "specforge" in path
+            "T-003".lower() in path.lower() or "thought2build" in path
             for path, _ in stub.upserts
         )
 

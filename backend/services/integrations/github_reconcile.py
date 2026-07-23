@@ -3,7 +3,7 @@
 Runs on the worker as ``reconcile_event(delivery_id, event_type, raw)`` — the
 single delivery dispatcher the webhook enqueues (T-271). It re-parses the stored
 raw payload and routes by ``(event_type, action)``; closing a task's issue (or
-merging the PR that closes it) flips that task to ``done`` in SpecForge, so the
+merging the PR that closes it) flips that task to ``done`` in Thought2Build, so the
 workspace becomes a live dashboard.
 
 Security (confused-deputy, spec §12): payload identity is never trusted to widen
@@ -164,7 +164,7 @@ async def _reconcile_issue(
         # A title/body edit is not a state transition. It must NOT advance the
         # out-of-order high-water mark (synced_at) — doing so could make a
         # later-arriving but earlier-timestamped 'closed' look stale and be
-        # dropped. SpecForge does not sync issue titles back, so ignore it.
+        # dropped. Thought2Build does not sync issue titles back, so ignore it.
         return
 
     tasks = await _matched_tasks(db, repo_id, installation_id, issue_number)

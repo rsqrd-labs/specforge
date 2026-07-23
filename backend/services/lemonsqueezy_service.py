@@ -1,4 +1,4 @@
-"""Lemon Squeezy integration service for SpecForge credit purchases.
+"""Lemon Squeezy integration service for Thought2Build credit purchases.
 
 Phase 22 — T-295 (Plan §25.6). The provider-neutral checkout that supersedes
 Stripe at runtime. This module is a thin, pure wrapper over the existing
@@ -6,11 +6,11 @@ Stripe at runtime. This module is a thin, pure wrapper over the existing
 
   * :meth:`LemonSqueezyService.create_checkout` — mint a hosted checkout for an
     already-committed ``billing_checkout_attempts`` row (the attempt-first flow,
-    T-296). SpecForge is the authority for the attempt; the checkout is created
+    T-296). Thought2Build is the authority for the attempt; the checkout is created
     against the attempt's economics **snapshot** (``custom_price`` =
     ``attempt.price_cents``) so an in-flight config price change can never alter
     what the user is charged, and a coupon cannot either (``discount`` UI off).
-  * :meth:`LemonSqueezyService.get_order` — re-read a single order SpecForge
+  * :meth:`LemonSqueezyService.get_order` — re-read a single order Thought2Build
     already has by id, for reconcile lane 2 (T-301). It is **never** used to
     discover or prove an order — the signed ``order_created`` webhook is the sole
     grant authority. It surfaces a 429 / ``Retry-After`` to the caller so lane 2
@@ -142,7 +142,7 @@ def _retry_after_seconds(response: httpx.Response) -> float:
 
 
 class LemonSqueezyService:
-    """All Lemon Squeezy API interactions for SpecForge credit purchases.
+    """All Lemon Squeezy API interactions for Thought2Build credit purchases.
 
     Follows the service-singleton pattern: one instance is created at module level
     and imported by name in the billing router and the reconcile worker::
@@ -283,7 +283,7 @@ class LemonSqueezyService:
         *,
         client: httpx.AsyncClient | None = None,
     ) -> LemonOrder:
-        """Re-read one order SpecForge already has by id (reconcile lane 2, T-301).
+        """Re-read one order Thought2Build already has by id (reconcile lane 2, T-301).
 
         This is a single GET — it is **never** used to discover or prove an order
         (the signed webhook is the grant authority). A 429 is surfaced as

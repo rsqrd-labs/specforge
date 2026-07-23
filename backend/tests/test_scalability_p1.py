@@ -69,8 +69,8 @@ def test_db_pool_collector_emits_max_and_total() -> None:
 
     families = {m.name: m for m in _DbPoolCollector().collect()}
     # db_pool_max is always emitted (size + overflow ceiling).
-    assert "specforge_db_pool_max" in families
-    max_family = families["specforge_db_pool_max"]
+    assert "thought2build_db_pool_max" in families
+    max_family = families["thought2build_db_pool_max"]
     assert max_family.samples[0].value == (
         settings.db_pool_size + settings.db_max_overflow
     )

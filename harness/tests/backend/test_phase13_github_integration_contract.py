@@ -503,7 +503,7 @@ def test_phase13_github_export_service_handles_token_expiry_by_deleting_integrat
         assert False, (
             "github_export_service.py must delete the UserIntegration row when "
             "GitHubTokenExpiredError is raised. The user must be prompted to "
-            "reconnect — SpecForge must never retry with a known-invalid token."
+            "reconnect — Thought2Build must never retry with a known-invalid token."
         )
 
 

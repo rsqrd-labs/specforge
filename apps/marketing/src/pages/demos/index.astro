@@ -1,16 +1,16 @@
 ---
 // Demos hub (issue #18, Phase 4). Indexable "show, don't tell" surface — each
 // demo is a curated, first-party example of one rough idea expanded into the
-// four SpecForge artifacts. Lists every demo; cards link the detail routes.
+// four Thought2Build artifacts. Lists every demo; cards link the detail routes.
 import ContentLayout from "../../layouts/ContentLayout.astro"
 import { getDemoPages, demoPath } from "../../lib/sanity"
 import { breadcrumbListSchema, type BreadcrumbItem } from "../../lib/seo"
 
 const docs = await getDemoPages()
 
-const title = "SpecForge Demos — One Idea, Four Build-Ready Artifacts"
+const title = "Thought2Build Demos — One Idea, Four Build-Ready Artifacts"
 const description =
-  "Real, first-party examples of SpecForge in action: watch a rough product idea become a structured SPEC, PLAN, HARNESS, and TASKS package you could hand to a team or coding agent."
+  "Real, first-party examples of Thought2Build in action: watch a rough product idea become a structured SPEC, PLAN, HARNESS, and TASKS package you could hand to a team or coding agent."
 
 const crumbs: BreadcrumbItem[] = [
   { name: "Home", path: "/" },
@@ -26,7 +26,7 @@ const jsonLd = breadcrumbListSchema(crumbs)
       <h1>See one idea become four build-ready artifacts</h1>
       <p class="content-lede">
         Curated, first-party examples — each starts from a single rough product
-        idea and shows the full SpecForge output: SPEC, PLAN, HARNESS, and TASKS.
+        idea and shows the full Thought2Build output: SPEC, PLAN, HARNESS, and TASKS.
         No live user data, just real worked examples.
       </p>
     </header>
