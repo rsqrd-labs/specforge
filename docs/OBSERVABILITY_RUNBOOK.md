@@ -451,7 +451,48 @@ Decision:
 - Pause release if a required prompt fix depends on Langfuse and cannot be
   confirmed in staging.
 
+### Database Backup Failures (Phase B)
+
+Impact: a failing or silently-stopped off-platform backup erodes the disaster-
+recovery guarantee (Layer 2 of `docs/BACKUP_RESTORE.md`). Committed data is not
+lost by a backup failure, but the recovery window degrades.
+
+Signal path (backups run in GitHub Actions, not the app — they are **not**
+Prometheus-scraped):
+
+- **Loud failure** — the **DB Backup** workflow run fails and GitHub emails the
+  Actions failure notification. Causes surface with a `::error::` annotation:
+  a missing secret (precondition check), a dump error, a failed **integrity
+  gate** (`pg_restore --list` unparseable, dump below the size/TOC floor, or the
+  `users` table missing — i.e. a truncated / wrong-database / role-scoped dump),
+  or an upload error.
+- **Silent stop** — a schedule that stops firing raises no failure. This is
+  caught only by the optional **dead-man's-switch**: configure
+  `BACKUP_HEARTBEAT_URL` (healthchecks.io or equivalent) and alert when the
+  monitor misses a daily ping (grace ~26h).
+
+Checks:
+
+- Actions → **DB Backup** → latest run; read the failing step's annotation.
+- Confirm the backup Actions secrets are present and unexpired
+  (`BACKUP_DATABASE_URL` reachable via Railway's public proxy, bucket creds valid).
+- List the bucket: a fresh `daily/` object should exist for today (and a
+  `weekly/` object on Sundays).
+
+Decision:
+
+- Re-run via *Run workflow* once the cause is fixed; an integrity-gate rejection
+  means the dump itself is bad — do **not** bypass the gate, investigate the DB.
+- Escalate to a manual `pg_dump` (RUNBOOK §"Backup & Restore") if the pipeline is
+  wedged and a risky migration is imminent.
+
 ## Data Handling Notes
+
+Off-platform database backups (`docs/BACKUP_RESTORE.md`) contain user PII. They
+are encrypted at rest with an asymmetric `age` recipient key (only the private
+key, held in the password manager, can decrypt), stored in a different vendor
+than Railway, and bounded to ~56 days by a bucket lifecycle rule so a hard-
+deleted account's data ages out of backups — see `docs/RETENTION_POLICY.md`.
 
 Langfuse can receive full system prompts, user prompts, model outputs, eval
 metadata, and dataset items after secret-shaped redaction. The redaction layer is
@@ -480,6 +521,9 @@ Go:
 - Prompt validator and critic-regeneration metrics are at expected baseline.
 - Prompt/output telemetry export has been approved before enabling Langfuse in
   production.
+- Off-platform backups are green: the latest **DB Backup** run succeeded, a
+  fresh `daily/` object is in the bucket, and (if configured) the dead-man's-
+  switch heartbeat is current. One restore drill has been completed.
 
 No-go:
 
