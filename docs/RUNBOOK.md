@@ -484,15 +484,28 @@ uv run alembic stamp 0012
 3. Test locally: `uv run alembic upgrade head` against a fresh database.
 4. Commit the file and let CI/Railway apply it on the next deploy.
 
-### Schema Backup Before a Major Migration
+### Backup & Restore
+
+The full disaster-recovery design (two layers, retention, RPO/RTO, restore and
+drill procedures) is in [BACKUP_RESTORE.md](BACKUP_RESTORE.md). In short:
+
+- **Layer 1** — Railway managed Postgres backups (fast, single-vendor).
+- **Layer 2** — an encrypted off-platform logical dump, run daily by the
+  **DB Backup** GitHub Action (`.github/workflows/db-backup.yml`) and restorable
+  with `scripts/backup/restore_backup.sh`.
+
+**On-demand backup before a risky/major migration:** trigger the workflow
+manually (Actions → *DB Backup* → *Run workflow*), which produces a verified,
+encrypted full dump off-platform. For a quick schema-only snapshot without the
+pipeline:
 
 ```bash
-# Snapshot the schema (not data) before a risky migration:
+# Schema only (structure, not data):
 pg_dump --schema-only $DATABASE_URL > schema_backup_$(date +%Y%m%d).sql
 ```
 
-Store the backup outside the Railway ephemeral filesystem (e.g. in an S3
-bucket or local machine) before triggering the deploy.
+Store any manual snapshot outside the Railway ephemeral filesystem before
+triggering the deploy.
 
 ---
 

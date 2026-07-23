@@ -1,0 +1,161 @@
+name: DB Backup
+
+# Layer 2 of the disaster-recovery design (docs/BACKUP_RESTORE.md): an encrypted,
+# off-platform logical backup of the production PostgreSQL database.
+#
+# Runs on a schedule (independent of the app runtime — a wedged app cannot stop
+# backups) and can be triggered on demand before a risky migration. The dump is
+# integrity-checked, encrypted with an asymmetric `age` recipient key (this job
+# only ever holds the PUBLIC key, so a compromised runner cannot decrypt existing
+# backups), and uploaded to object storage in a different vendor than Railway.
+#
+# Required repo/environment secrets (see the implementation checklist in
+# docs/BACKUP_RESTORE.md):
+#   BACKUP_DATABASE_URL   plain postgresql:// DSN to the prod DB (a read-capable,
+#                         backup-scoped role via Railway's public TCP proxy)
+#   BACKUP_AGE_PUBLIC_KEY age recipient public key (age1...)
+#   BACKUP_S3_BUCKET      destination bucket name
+#   BACKUP_S3_ENDPOINT    S3-compatible endpoint URL (R2/B2); omit for AWS S3
+#   BACKUP_S3_KEY_ID / BACKUP_S3_SECRET  bucket credentials
+# Optional:
+#   BACKUP_S3_REGION      region (default "auto" for R2)
+#   BACKUP_HEARTBEAT_URL  dead-man's-switch ping (healthchecks.io etc.) hit only
+#                         on success; without it a schedule that silently stops
+#                         firing is invisible
+
+on:
+  schedule:
+    - cron: "17 3 * * *" # daily 03:17 UTC, off-peak
+  workflow_dispatch: {}
+
+# Least privilege: the job reads nothing from the repo and writes nothing to it.
+permissions:
+  contents: read
+
+# Never let two backup runs overlap (a manual dispatch during the nightly run
+# would race on the same object keys). Do not cancel an in-flight backup.
+concurrency:
+  group: db-backup
+  cancel-in-progress: false
+
+env:
+  PG_MAJOR: "16" # must be >= the Railway server major (currently postgres:16)
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Install postgresql-client and age
+        run: |
+          set -euo pipefail
+          # Pin the client major to the server major from PGDG so pg_dump is
+          # guaranteed compatible regardless of what ubuntu-latest ships.
+          curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+            | sudo gpg --dearmor -o /etc/apt/trusted.gpg.d/pgdg.gpg
+          echo "deb http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
+            | sudo tee /etc/apt/sources.list.d/pgdg.list >/dev/null
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends "postgresql-client-${PG_MAJOR}" age
+          pg_dump --version
+          age --version
+
+      - name: Dump, verify, encrypt, and upload
+        env:
+          BACKUP_DATABASE_URL: ${{ secrets.BACKUP_DATABASE_URL }}
+          AGE_PUBLIC_KEY: ${{ secrets.BACKUP_AGE_PUBLIC_KEY }}
+          S3_BUCKET: ${{ secrets.BACKUP_S3_BUCKET }}
+          S3_ENDPOINT: ${{ secrets.BACKUP_S3_ENDPOINT }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.BACKUP_S3_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.BACKUP_S3_SECRET }}
+          AWS_DEFAULT_REGION: ${{ secrets.BACKUP_S3_REGION }}
+        run: |
+          set -euo pipefail
+
+          # ---- Preconditions: fail loudly if any required secret is missing.
+          for var in BACKUP_DATABASE_URL AGE_PUBLIC_KEY S3_BUCKET \
+                     AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY; do
+            if [ -z "${!var:-}" ]; then
+              echo "::error::required secret $var is not set" >&2
+              exit 1
+            fi
+          done
+          # R2 uses the sentinel region "auto"; AWS S3 ignores it when an
+          # explicit endpoint is absent.
+          export AWS_DEFAULT_REGION="${AWS_DEFAULT_REGION:-auto}"
+          ENDPOINT_ARG=()
+          if [ -n "${S3_ENDPOINT:-}" ]; then
+            ENDPOINT_ARG=(--endpoint-url "$S3_ENDPOINT")
+          fi
+
+          # The app stores DATABASE_URL with the +asyncpg driver marker; pg_dump
+          # needs a plain libpq DSN. Strip it defensively so either form works.
+          DSN="${BACKUP_DATABASE_URL/+asyncpg/}"
+
+          STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+          DUMP="t2b-${STAMP}.dump"
+
+          # ---- Dump: custom format = compressed and supports selective restore.
+          # --no-owner/--no-privileges keep it portable across roles at restore.
+          echo "Dumping database..."
+          pg_dump --format=custom --no-owner --no-privileges --dbname "$DSN" --file "$DUMP"
+
+          # ---- Integrity gate: a dump that pg_restore cannot even list is not a
+          # backup. Reject a truncated/corrupt archive and a suspiciously tiny one
+          # (a schema-only accident, an empty DB, a partial write) BEFORE it can
+          # overwrite a good object in storage.
+          echo "Verifying archive integrity..."
+          pg_restore --list "$DUMP" > toc.txt
+          TOC_ENTRIES="$(wc -l < toc.txt)"
+          DUMP_BYTES="$(stat -c %s "$DUMP")"
+          echo "archive: ${DUMP_BYTES} bytes, ${TOC_ENTRIES} TOC entries"
+          if [ "$DUMP_BYTES" -lt 4096 ] || [ "$TOC_ENTRIES" -lt 10 ]; then
+            echo "::error::dump failed sanity check (bytes=$DUMP_BYTES entries=$TOC_ENTRIES)" >&2
+            exit 1
+          fi
+          # Assert a core table is present so a wrong-database or role-scoped
+          # partial dump cannot pass as a full backup.
+          if ! grep -qiE 'TABLE (DATA )?(public )?users' toc.txt; then
+            echo "::error::expected 'users' table missing from dump TOC" >&2
+            exit 1
+          fi
+
+          # ---- Encrypt at rest (asymmetric: recipient public key only).
+          echo "Encrypting..."
+          age -r "$AGE_PUBLIC_KEY" -o "${DUMP}.age" "$DUMP"
+          # Drop the plaintext dump immediately (runner is ephemeral, but do not
+          # leave PII in plaintext any longer than necessary).
+          rm -f "$DUMP" toc.txt
+
+          # ---- Checksum the ciphertext so restore can detect storage corruption.
+          sha256sum "${DUMP}.age" > "${DUMP}.age.sha256"
+
+          # ---- Upload daily; promote Sunday's dump to the weekly tier. Retention
+          # (expire daily/ at 14d, weekly/ at 56d) is enforced by a bucket
+          # lifecycle rule, not here — see docs/BACKUP_RESTORE.md.
+          echo "Uploading to s3://${S3_BUCKET}/daily/${DUMP}.age"
+          aws s3 cp "${DUMP}.age"        "s3://${S3_BUCKET}/daily/${DUMP}.age"        "${ENDPOINT_ARG[@]}" --only-show-errors
+          aws s3 cp "${DUMP}.age.sha256" "s3://${S3_BUCKET}/daily/${DUMP}.age.sha256" "${ENDPOINT_ARG[@]}" --only-show-errors
+
+          if [ "$(date -u +%u)" = "7" ]; then
+            echo "Sunday: promoting to weekly tier"
+            aws s3 cp "${DUMP}.age"        "s3://${S3_BUCKET}/weekly/${DUMP}.age"        "${ENDPOINT_ARG[@]}" --only-show-errors
+            aws s3 cp "${DUMP}.age.sha256" "s3://${S3_BUCKET}/weekly/${DUMP}.age.sha256" "${ENDPOINT_ARG[@]}" --only-show-errors
+          fi
+
+          echo "Backup complete: ${DUMP}.age (${DUMP_BYTES} bytes plaintext)"
+
+      - name: Heartbeat (dead-man's-switch)
+        # Fires only on a fully successful backup. If the schedule silently stops
+        # firing, the external monitor stops receiving pings and alerts. No-op
+        # when the URL secret is unset.
+        if: success()
+        env:
+          BACKUP_HEARTBEAT_URL: ${{ secrets.BACKUP_HEARTBEAT_URL }}
+        run: |
+          set -euo pipefail
+          if [ -n "${BACKUP_HEARTBEAT_URL:-}" ]; then
+            curl -fsS --retry 3 --max-time 15 "$BACKUP_HEARTBEAT_URL" >/dev/null && echo "heartbeat sent"
+          else
+            echo "no heartbeat URL configured; skipping"
+          fi

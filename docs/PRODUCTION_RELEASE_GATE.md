@@ -390,7 +390,11 @@ Before deploy:
   uv run alembic current
   ```
 
-- Confirm backup/restore procedure is available.
+- Confirm backup/restore procedure is available — see
+  [BACKUP_RESTORE.md](BACKUP_RESTORE.md). The off-platform backup workflow
+  (`.github/workflows/db-backup.yml`) and restore helper
+  (`scripts/backup/restore_backup.sh`) ship in-repo; before public launch, complete the
+  ops-config checklist in that doc (bucket + secrets + one restore drill).
 - Confirm rollback target commit/build is known.
 
 Rollback triggers:

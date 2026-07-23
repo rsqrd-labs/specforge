@@ -380,6 +380,16 @@ If you have time, it's also worth skimming the **Environment Gate** and
 won't apply (Razorpay, Langfuse, Storyboard-specific items) since
 those are off, but the general env-var hygiene items still do.
 
+**Your data is backed up**
+- [ ] Railway's managed Postgres backups are enabled (Layer 1) — one click in
+      the database service, confirm the retention shown.
+- [ ] The off-platform encrypted backup is live (Layer 2): the **DB Backup**
+      GitHub Action (`.github/workflows/db-backup.yml`) has run once via
+      *Run workflow* and uploaded an artifact to your bucket. Full setup (bucket,
+      `age` keypair, Actions secrets) and one restore drill are in
+      `docs/BACKUP_RESTORE.md` — do the drill at least once so you know a restore
+      actually works before you need it.
+
 ---
 
 ## Phase 10 — Go-live smoke test (do this in your actual browser)
