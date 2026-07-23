@@ -67,6 +67,42 @@ places below and typos here cause the most confusing errors (Google
 
 ---
 
+## What this will cost on Railway (and how this runbook keeps it low)
+
+Railway's **Hobby plan** is $5/month, and that $5 is also your first $5 of
+usage — it's not an extra fee on top. Everything above $5 is billed on
+**actual usage**, and the biggest driver by far is **resident memory** (~$10
+per GB-month), *not* CPU — an idle async app burns almost no CPU between
+requests, so CPU is a small slice of the bill.
+
+For this launch (backend + `worker` + `worker-fast` + Postgres + Redis, no
+real traffic yet) expect roughly **$22–28/month** left alone, dropping to
+**~$18–23/month** with the three no-downside levers this runbook already bakes
+in:
+
+| Lever | Where it's applied | Saves |
+|---|---|---|
+| `WEB_CONCURRENCY=1` on `backend` | Phase 1, step 3 | ~$3–4/mo |
+| Postgres volume provisioned at 1 GB (not padded) | Phase 1, step 7 | ~$0.60/mo + headroom later |
+| Postgres memory config trimmed for a tiny DB | Phase 1, step 7 | ~$1–2/mo |
+
+All three are **reversible with zero reliability cost at pre-launch scale** —
+that's why they're the default here. Two bigger levers (merging the two worker
+processes; lazy-loading heavy libs in the workers) are deliberately **not**
+taken: the first reverts the `worker`/`worker-fast` split that protects paid
+credit grants (a documented deploy invariant), and the second is a code change
+worth doing only after real memory numbers justify it.
+
+**These are modeled estimates, not a quote.** Railway shows real per-service
+memory within a day of running — watch it (Phase 12) and let the actual graph,
+not this table, drive any further tuning.
+
+> Note: the LLM provider bill (Anthropic/OpenAI/Google, per Phase 7) is
+> **separate** and usage-based per token. At real generation volume it can
+> exceed the Railway hosting cost — it is not included in the numbers above.
+
+---
+
 ## Phase 0 — Generate production secrets (on your own laptop)
 
 Do this first, before touching Railway. These are one-time values you'll
@@ -143,6 +179,20 @@ A few things specific to **this** launch, on top of the handbook:
    ```
    You'll come back and add your real domain in Phase 5.
 
+   **Cost lever — set `WEB_CONCURRENCY=1` on the `backend` service.** Railway
+   bills mostly on **resident memory**, and each API worker is a full copy of
+   the app in RAM. At pre-launch traffic one async worker is plenty (it serves
+   many concurrent requests on one event loop), so this roughly halves the
+   `backend` service's memory bill for free. Set on `backend` only (workers
+   ignore it):
+   ```
+   WEB_CONCURRENCY=1
+   ```
+   Trade-off to know: with one worker there's no in-process redundancy — a
+   crash is a brief outage until it respawns, and a deploy restart has no second
+   worker to cover the swap. That's fine solo/pre-launch. **Bump it back to `2`
+   the day real traffic arrives** (see Phase 12).
+
 4. **`FRONTEND_URL`** — same story, set a placeholder for now
    (`https://placeholder.example.com` is fine), you'll fix it in Phase 5.
 
@@ -174,8 +224,22 @@ A few things specific to **this** launch, on top of the handbook:
    nothing processes billing webhooks or PR checks later, even though the app
    otherwise looks fine.
 
+7. **Cost levers on the Postgres database** (both safe, do them now while the
+   DB is empty):
+   - **Volume size:** when you add the PostgreSQL plugin, provision its volume
+     at **1 GB**, not a padded size. Railway bills the *provisioned* volume,
+     not just the bytes used, and you can grow it later with **zero downtime** —
+     so there's no reason to reserve space you don't need yet.
+   - **Memory config:** the DB defaults are tuned for a much larger dataset
+     than a fresh launch has. If Railway's Postgres lets you set config (or via
+     a one-off `ALTER SYSTEM`), trimming `shared_buffers` / `work_mem` toward a
+     small footprint shaves resident memory. This is optional and marginal
+     (~$1–2/mo) — skip it if the plugin doesn't expose tuning; **never** trim it
+     so far the DB can't serve the smoke test in Phase 10.
+
 **✅ You should now have:** three Railway services (`backend`, `worker`,
-`worker-fast`) all deployed successfully, and
+`worker-fast`) all deployed successfully, `WEB_CONCURRENCY=1` set on `backend`,
+the Postgres volume at 1 GB, and
 `https://<your-railway-backend-url>/health` returning
 `{"status":"ok",...}` in your browser.
 
@@ -356,6 +420,9 @@ equivalent. Go through it right before you announce the site is live:
       placeholder
 - [ ] `PAYMENTS_ENABLED=false` (confirmed off, per plan)
 - [ ] `METRICS_TOKEN` is set to a real random value
+- [ ] `WEB_CONCURRENCY=1` is set on `backend` (launch cost lever, Phase 1) —
+      workers don't need it. Remember to raise it to `2` when traffic arrives
+      (Phase 12)
 
 **It actually boots correctly**
 - [ ] `https://api.yourdomain.com/health` returns `{"status":"ok",...}`
@@ -473,6 +540,17 @@ all optional and skipped for this launch), your visibility is:
 - **Vercel → Deployments** — shows build/runtime status for the frontend.
 - **Your own product usage** — the best smoke test each day is generating one
   spec yourself.
+- **Railway → Usage / each service → Metrics** — glance at the **memory** graph
+  and the running month-to-date cost. This is what confirms (or corrects) the
+  ~$18–23/month estimate in the cost section above; the modeled numbers are a
+  starting point, the graph is the truth. Two things to act on:
+  - If real traffic starts arriving and the `backend` service is busy, **set
+    `WEB_CONCURRENCY=2`** again (you dropped it to 1 for launch in Phase 1) so
+    you have in-process redundancy — the small memory increase is worth it once
+    people depend on the site.
+  - If a service's memory is far above the estimate, that's the one to
+    investigate first (it's the cost driver), before considering the bigger
+    levers noted in the cost section.
 
 If you want a lightweight early-warning system without full observability
 setup, Sentry's free tier (`SENTRY_DSN` in both Railway and Vercel) is the
