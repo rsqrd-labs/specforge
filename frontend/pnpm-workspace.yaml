@@ -1,3 +1,14 @@
 overrides:
   "js-yaml@>=4.0.0 <4.3.0": "4.3.0"
   "undici@>=7.23.0 <7.28.0": "^7.28.0"
+
+auditConfig:
+  ignoreGhsas:
+    # GHSA-qwww-vcr4-c8h2 — "React Router: RSC Mode CSRF Bypass". The advisory
+    # only affects apps using react-router's *unstable RSC* APIs; we are a Vite
+    # client SPA (BrowserRouter, no RSC, no server) so it is not exploitable
+    # here. There is no patched drop-in: the fix lands in react-router@8.3.0,
+    # and v8 both drops the react-router-dom package and requires React >=19.2
+    # (we are on React 18.3). Suppressed until a React 19 + react-router 8
+    # migration is done on its own timeline (tracked in issue #87).
+    - "GHSA-qwww-vcr4-c8h2"
