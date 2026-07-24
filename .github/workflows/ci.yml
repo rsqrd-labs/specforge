@@ -521,11 +521,16 @@ jobs:
         if: steps.playwright-cache.outputs.cache-hit == 'true'
         run: pnpm exec playwright install-deps chromium webkit
 
+      # Invoke playwright directly (not via the `pnpm test:e2e` script): pnpm
+      # forwards the `--` separator into the command, so `playwright test --
+      # --project=x` treats the flags as positional test-file filters and the
+      # project selection is silently ignored (all 5 projects run, incl. the
+      # firefox binary we no longer install → hard fail).
       - name: Browser, mobile, and accessibility gates
-        run: E2E_ACCESS_TOKEN= pnpm test:e2e -- --project=chromium --project=webkit --project=iphone
+        run: E2E_ACCESS_TOKEN= pnpm exec playwright test --project=chromium --project=webkit --project=iphone
 
       - name: Docker-backed authenticated browser journeys
-        run: pnpm test:e2e:backend -- --project=chromium --project=webkit --project=iphone
+        run: pnpm exec playwright test e2e/authenticated-backend.spec.ts --workers=1 --project=chromium --project=webkit --project=iphone
 
   marketing:
     name: Marketing
