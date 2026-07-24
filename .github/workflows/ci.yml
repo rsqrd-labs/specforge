@@ -25,6 +25,7 @@ jobs:
   changes:
     name: Detect changes
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     outputs:
       backend: ${{ steps.filter.outputs.backend }}
       frontend: ${{ steps.filter.outputs.frontend }}
@@ -51,6 +52,7 @@ jobs:
   secrets:
     name: Secret Scan
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -85,6 +87,7 @@ jobs:
   backend:
     name: Backend
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     needs: changes
     if: ${{ github.event_name == 'push' || needs.changes.outputs.backend == 'true' }}
     services:
@@ -334,6 +337,7 @@ jobs:
   worker-image:
     name: Worker Image Build
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     # The Dockerfile rarely changes and the build is uncached (slow). PRs skip
     # it; main still builds + validates the image before `deploy` consumes it.
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
@@ -352,6 +356,7 @@ jobs:
   frontend:
     name: Frontend
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     needs: changes
     if: ${{ github.event_name == 'push' || needs.changes.outputs.frontend == 'true' }}
     services:
@@ -470,10 +475,9 @@ jobs:
       - name: Typecheck
         run: pnpm tsc --noEmit
 
-      - name: Vitest
-        run: pnpm test -- --passWithNoTests
-
-      - name: Coverage ratchet
+      # Coverage runs the full vitest suite with the coverage ratchet, so a
+      # separate plain `vitest run` would just execute the same tests twice.
+      - name: Vitest (with coverage ratchet)
         run: pnpm test:coverage -- --passWithNoTests
 
       - name: Complete frontend harness
@@ -497,18 +501,36 @@ jobs:
       - name: Build
         run: pnpm build
 
-      - name: Install Playwright browsers
-        run: pnpm exec playwright install --with-deps chromium firefox webkit
+      # CI runs the 3 core e2e projects (chromium, webkit, iphone). iphone is an
+      # iPhone-13 device profile on the webkit engine, so only chromium + webkit
+      # binaries are needed — firefox (desktop Gecko) and android (Pixel 7 on the
+      # chromium engine, redundant with chromium+iphone) are dropped from CI.
+      # The full 5-project matrix in playwright.config.ts still runs locally.
+      - name: Cache Playwright browsers
+        id: playwright-cache
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-chromium-webkit-${{ hashFiles('frontend/pnpm-lock.yaml') }}
+
+      - name: Install Playwright browsers + system deps
+        if: steps.playwright-cache.outputs.cache-hit != 'true'
+        run: pnpm exec playwright install --with-deps chromium webkit
+
+      - name: Install Playwright system deps (cached browsers)
+        if: steps.playwright-cache.outputs.cache-hit == 'true'
+        run: pnpm exec playwright install-deps chromium webkit
 
       - name: Browser, mobile, and accessibility gates
-        run: E2E_ACCESS_TOKEN= pnpm test:e2e
+        run: E2E_ACCESS_TOKEN= pnpm test:e2e -- --project=chromium --project=webkit --project=iphone
 
       - name: Docker-backed authenticated browser journeys
-        run: pnpm test:e2e:backend
+        run: pnpm test:e2e:backend -- --project=chromium --project=webkit --project=iphone
 
   marketing:
     name: Marketing
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     needs: changes
     if: ${{ github.event_name == 'push' || needs.changes.outputs.marketing == 'true' }}
     defaults:
@@ -574,6 +596,7 @@ jobs:
     name: Deploy
     needs: [secrets, backend, worker-image, frontend, marketing]
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     environment: production
     # Keep production deploys opt-in while the project is still in testing.
     # Set the repository variable PRODUCTION_DEPLOY_ENABLED=true after Railway
