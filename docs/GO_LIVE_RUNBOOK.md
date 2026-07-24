@@ -106,28 +106,38 @@ paste into Railway's environment variables in Phase 1.
 **⚠️ Important:** this repo has `jwt_private.pem` / `jwt_public.pem` files at
 the repo root and a `backend/.env.example` full of `placeholder-*` values —
 those are for **local development only**. Never paste those into Railway.
-Generate fresh ones now:
+Generate fresh ones now, one command at a time:
 
+**1. A new JWT signing key pair** (used to sign login tokens):
 ```bash
-# 1. A new JWT signing key pair (used to sign login tokens)
 openssl genrsa -out /tmp/jwt_private.pem 2048
+```
+```bash
 openssl rsa -in /tmp/jwt_private.pem -pubout -out /tmp/jwt_public.pem
+```
 
-# 2. Convert both to single-line strings you can paste into Railway
+**2. Convert both keys to single-line strings** you can paste into Railway:
+```bash
 python3 - <<'PY'
 from pathlib import Path
 for name, file in [("JWT_PRIVATE_KEY", "/tmp/jwt_private.pem"), ("JWT_PUBLIC_KEY", "/tmp/jwt_public.pem")]:
     value = Path(file).read_text().replace("\n", "\\n")
     print(f'{name}="{value}"')
 PY
+```
 
-# 3. ENCRYPTION_MASTER_KEY (encrypts stored user API keys)
+**3. `ENCRYPTION_MASTER_KEY`** (encrypts stored user API keys):
+```bash
 cd backend && uv run python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+```
 
-# 4. CSRF_SECRET
+**4. `CSRF_SECRET`:**
+```bash
 python3 -c "import secrets; print(secrets.token_urlsafe(32))"
+```
 
-# 5. METRICS_TOKEN (protects the /metrics endpoint)
+**5. `METRICS_TOKEN`** (protects the `/metrics` endpoint):
+```bash
 python3 -c "import secrets; print(secrets.token_urlsafe(32))"
 ```
 
