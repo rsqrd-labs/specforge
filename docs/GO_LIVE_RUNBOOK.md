@@ -2,8 +2,8 @@
 
 You've never taken an app live before — this doc assumes that and explains
 each step, not just the command. It is written for **this exact launch**:
-backend on **Railway**, frontend on **Vercel**, domain bought at
-**Hostinger**, and payments **turned off for the first week**.
+backend on **Railway**, frontend on **Vercel**, domain **thought2build.com**
+bought at **Hostinger**, and payments **turned off for the first week**.
 
 This is a companion to two docs that already exist — don't duplicate work,
 use all three together:
@@ -44,26 +44,21 @@ without downtime. Leave their env vars blank.
 
 ---
 
-## Decide your domain layout now
+## Your domain layout
 
-Thought2Build is two separate deployments that need two separate hostnames under
-your one domain. Pick your domain (call it `yourdomain.com` below — swap in
-the real one everywhere you see it) and plan to use:
+Thought2Build is two separate deployments that need two separate hostnames
+under your domain, `thought2build.com` (bought at Hostinger):
 
 | Hostname | Points to | Serves |
 |---|---|---|
-| `yourdomain.com` and `www.yourdomain.com` | Vercel | The React app (frontend) |
-| `api.yourdomain.com` | Railway | The backend API |
+| `thought2build.com` and `www.thought2build.com` | Vercel | The React app (frontend) |
+| `api.thought2build.com` | Railway | The backend API |
 
 You are **not** setting up the separate marketing/SEO site
 (`apps/marketing`) for this launch — the frontend app itself lives on the
-apex domain (`yourdomain.com`). That keeps this launch to two moving parts
+apex domain (`thought2build.com`). That keeps this launch to two moving parts
 instead of three. You can add the marketing zone later; it's a separate
 Vercel project and doesn't touch this setup.
-
-Write your two hostnames down somewhere — you'll paste them into several
-places below and typos here cause the most confusing errors (Google
-"redirect_uri_mismatch", CORS failures, etc.).
 
 ---
 
@@ -245,10 +240,10 @@ the Postgres volume at 1 GB, and
 
 ---
 
-## Phase 2 — Point `api.yourdomain.com` at Railway
+## Phase 2 — Point `api.thought2build.com` at Railway
 
 1. In Railway, open the `backend` service → **Settings** → **Networking** →
-   **Custom Domain** → enter `api.yourdomain.com` → **Add Domain**. Railway
+   **Custom Domain** → enter `api.thought2build.com` → **Add Domain**. Railway
    shows you a **CNAME target** (something like
    `xxxxx.up.railway.app` or similar — copy exactly what Railway shows you).
 2. Log into **Hostinger** → **Domains** → your domain → **DNS / Name
@@ -268,11 +263,11 @@ the Postgres volume at 1 GB, and
 
 **Check propagation** from your terminal while you wait:
 ```bash
-dig api.yourdomain.com CNAME +short
+dig api.thought2build.com CNAME +short
 ```
 Once that prints Railway's target, it's live.
 
-**✅ You should now have:** `https://api.yourdomain.com/health` returning
+**✅ You should now have:** `https://api.thought2build.com/health` returning
 `{"status":"ok",...}` with a valid HTTPS padlock.
 
 ---
@@ -283,7 +278,7 @@ Follow **Step 2 ("Set up Vercel")** in the handbook, with one change: set
 `VITE_API_URL` to your **new custom domain**, not the raw Railway URL:
 
 ```
-VITE_API_URL=https://api.yourdomain.com
+VITE_API_URL=https://api.thought2build.com
 ```
 
 Deploy. Vercel gives you a temporary `*.vercel.app` URL — that's expected,
@@ -295,16 +290,16 @@ Phase 6).
 
 ---
 
-## Phase 4 — Point `yourdomain.com` at Vercel
+## Phase 4 — Point `thought2build.com` at Vercel
 
 1. In Vercel, open your frontend project → **Settings** → **Domains** → type
-   `yourdomain.com` → **Add**.
+   `thought2build.com` → **Add**.
 2. Vercel will show you DNS instructions. For an apex domain it's usually:
    - **Type:** `A`, **Name:** `@`, **Value:** `76.76.21.21`
 
      (Vercel occasionally changes this IP — always use the exact value shown
      in your Vercel dashboard, not this document, in case it's changed.)
-   - Also add `www.yourdomain.com` in the same Vercel dialog, and Vercel will
+   - Also add `www.thought2build.com` in the same Vercel dialog, and Vercel will
      show a `CNAME` record for it (usually pointing to
      `cname.vercel-dns.com`).
 3. In Hostinger's DNS Zone Editor, add both records Vercel showed you:
@@ -318,8 +313,8 @@ Phase 6).
    (green). This is usually faster than Railway's check but can still take a
    while depending on Hostinger's propagation.
 
-**✅ You should now have:** `https://yourdomain.com` loading the app over
-HTTPS with a valid certificate, and `https://www.yourdomain.com` redirecting
+**✅ You should now have:** `https://thought2build.com` loading the app over
+HTTPS with a valid certificate, and `https://www.thought2build.com` redirecting
 to it.
 
 ---
@@ -331,8 +326,8 @@ Phase 1:
 
 1. Railway → `backend` service → **Variables**:
    ```
-   FRONTEND_URL=https://yourdomain.com
-   ALLOWED_HOSTS=api.yourdomain.com,*.up.railway.app
+   FRONTEND_URL=https://thought2build.com
+   ALLOWED_HOSTS=api.thought2build.com,*.up.railway.app
    ```
    (Keep the `*.up.railway.app` entry — Railway's own internal health checks
    use that hostname even after you attach a custom domain.)
@@ -341,7 +336,7 @@ Phase 1:
 3. Redeploy the `backend` service so it picks up the change (Railway →
    **Deployments** → **Deploy**, or just push any commit).
 4. Vercel: no change needed here, `VITE_API_URL` is already
-   `https://api.yourdomain.com` from Phase 3.
+   `https://api.thought2build.com` from Phase 3.
 
 **✅ You should now have:** frontend and backend both on their final domains,
 backend aware of the frontend's real URL (needed for CORS and OAuth
@@ -355,8 +350,8 @@ Sign-in won't work until Google knows about your real domain. Follow the
 **"Google OAuth" → "How to set up credentials"** section of the handbook,
 using your real domain this time:
 
-- **Authorized JavaScript origins:** `https://yourdomain.com`
-- **Authorized redirect URIs:** `https://yourdomain.com/auth/callback`
+- **Authorized JavaScript origins:** `https://thought2build.com`
+- **Authorized redirect URIs:** `https://thought2build.com/auth/callback`
 
 Then in Railway, set:
 ```
@@ -366,12 +361,12 @@ GOOGLE_CLIENT_SECRET=<from Google Cloud Console>
 Redeploy the backend.
 
 > Common mistake (called out in the handbook too): the redirect URI must be
-> the **frontend** domain (`yourdomain.com/auth/callback`), not
-> `api.yourdomain.com`. Google sends the user back to the frontend page,
+> the **frontend** domain (`thought2build.com/auth/callback`), not
+> `api.thought2build.com`. Google sends the user back to the frontend page,
 > which then talks to the backend itself.
 
 **✅ You should now have:** clicking "Sign in with Google" on
-`https://yourdomain.com` completes a real login and lands you on the
+`https://thought2build.com` completes a real login and lands you on the
 dashboard.
 
 ---
@@ -413,7 +408,7 @@ equivalent. Go through it right before you announce the site is live:
 - [ ] `ENVIRONMENT=production` is set on `backend`, `worker`, `worker-fast`
 - [ ] `FRONTEND_URL` starts with `https://` and matches your real domain
       exactly (no trailing slash)
-- [ ] `ALLOWED_HOSTS` includes `api.yourdomain.com`
+- [ ] `ALLOWED_HOSTS` includes `api.thought2build.com`
 - [ ] `JWT_PRIVATE_KEY` / `JWT_PUBLIC_KEY` are the ones you generated in
       Phase 0, **not** the placeholder or the repo's local `.pem` files
 - [ ] `ENCRYPTION_MASTER_KEY` is the Fernet key you generated, not a
@@ -425,7 +420,7 @@ equivalent. Go through it right before you announce the site is live:
       (Phase 12)
 
 **It actually boots correctly**
-- [ ] `https://api.yourdomain.com/health` returns `{"status":"ok",...}`
+- [ ] `https://api.thought2build.com/health` returns `{"status":"ok",...}`
 - [ ] Railway's **Deployments** tab shows `backend`, `worker`, and
       `worker-fast` all green/running, not just `backend`
 - [ ] Database migrations ran without error — this happens automatically on
@@ -436,9 +431,9 @@ equivalent. Go through it right before you announce the site is live:
 **Security basics**
 - [ ] No `.env` files were committed or deployed as build artifacts — Railway
       and Vercel only use what's typed into their dashboards
-- [ ] `https://api.yourdomain.com/metrics` requires the `METRICS_TOKEN` (try
+- [ ] `https://api.thought2build.com/metrics` requires the `METRICS_TOKEN` (try
       it without one — it should reject you, not show data)
-- [ ] `curl -i https://api.yourdomain.com` from any origin other than your
+- [ ] `curl -i https://api.thought2build.com` from any origin other than your
       frontend gets blocked by CORS if you try a cross-origin fetch from the
       browser console at another site (optional spot-check, not required)
 
@@ -461,11 +456,11 @@ those are off, but the general env-var hygiene items still do.
 
 ## Phase 10 — Go-live smoke test (do this in your actual browser)
 
-Walk this golden path end to end on `https://yourdomain.com` — this is the
+Walk this golden path end to end on `https://thought2build.com` — this is the
 minimum from `docs/SMOKE_TEST_CHECKLIST.md` that proves the whole pipeline
 works for a real user:
 
-1. [ ] Load `https://yourdomain.com` — no console errors (open DevTools →
+1. [ ] Load `https://thought2build.com` — no console errors (open DevTools →
        Console)
 2. [ ] Click "Sign in with Google" → complete login → land on the dashboard
 3. [ ] Confirm you received starting credits (shown in the UI)
@@ -474,7 +469,7 @@ works for a real user:
        text in real time and a credit is deducted
 6. [ ] Approve/finalise the Spec stage — confirm the Plan stage unlocks
 7. [ ] Sign out, sign back in — confirm the session persists correctly
-8. [ ] `https://api.yourdomain.com/health` still returns `ok`
+8. [ ] `https://api.thought2build.com/health` still returns `ok`
 
 If all 8 pass, the core product works end to end in production. Don't chase
 every item in the full smoke checklist tonight — do that over the next few
@@ -499,12 +494,12 @@ indefinitely with no side effects.
 
 1. Set up Razorpay per the "Razorpay" section of the handbook (Payment
    Links product, webhook pointed at
-   `https://api.yourdomain.com/billing/webhook/razorpay` — note this is a
+   `https://api.thought2build.com/billing/webhook/razorpay` — note this is a
    **different path** from Lemon Squeezy's; Razorpay has its own webhook
    route).
 2. In Railway, fill in `RAZORPAY_KEY_ID`, `RAZORPAY_KEY_SECRET`,
    `RAZORPAY_WEBHOOK_SECRET`,
-   `RAZORPAY_SUCCESS_URL=https://yourdomain.com/billing`, and confirm
+   `RAZORPAY_SUCCESS_URL=https://thought2build.com/billing`, and confirm
    `RAZORPAY_CURRENCY`/`RAZORPAY_PRICE_CENTS`/`RAZORPAY_CREDITS_PER_PURCHASE`/
    `RAZORPAY_CREDIT_VALIDITY_DAYS` match the pack you want to sell (defaults
    in `.env.example` are `INR`/`154900`/`200`/`30`, i.e. ₹1549 for 200
@@ -536,8 +531,8 @@ all optional and skipped for this launch), your visibility is:
 
 - **Railway → each service → Logs tab** — glance at this daily. Errors show
   up here first.
-- **`https://api.yourdomain.com/health`** — bookmark it, check when in doubt.
-- **`https://api.yourdomain.com/metrics`** (with your `METRICS_TOKEN`) — has
+- **`https://api.thought2build.com/health`** — bookmark it, check when in doubt.
+- **`https://api.thought2build.com/metrics`** (with your `METRICS_TOKEN`) — has
   request counts, error rates, and generation counters if you want to look
   closer; not required daily.
 - **Vercel → Deployments** — shows build/runtime status for the frontend.
@@ -603,9 +598,9 @@ reconciliation) once you're past the first-week basics covered here.
 - [ ] Phase 0 — secrets generated
 - [ ] Phase 1 — Railway: Postgres + Redis + `backend`/`worker`/`worker-fast`
       deployed, `/health` OK
-- [ ] Phase 2 — `api.yourdomain.com` → Railway, HTTPS valid
+- [ ] Phase 2 — `api.thought2build.com` → Railway, HTTPS valid
 - [ ] Phase 3 — Vercel frontend deployed with `VITE_API_URL` set
-- [ ] Phase 4 — `yourdomain.com` + `www` → Vercel, HTTPS valid
+- [ ] Phase 4 — `thought2build.com` + `www` → Vercel, HTTPS valid
 - [ ] Phase 5 — `FRONTEND_URL` / `ALLOWED_HOSTS` updated to real domains,
       backend redeployed
 - [ ] Phase 6 — Google OAuth updated for real domain, sign-in works
