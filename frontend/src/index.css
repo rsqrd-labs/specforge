@@ -2002,6 +2002,12 @@ button:disabled {
 
   .landing-nav {
     align-items: flex-start;
+    flex-wrap: wrap;
+    row-gap: 14px;
+  }
+
+  .landing-status {
+    flex: 0 0 auto;
   }
 
   .brand-lockup--default .brand-wordmark {
@@ -18385,6 +18391,15 @@ button.ghx-hub-stat {
   }
   .dashboard-nav-link {
     padding: 0 10px;
+  }
+
+  /* Phones can't fit the wordmark alongside all four action pills — the
+     actions overflow and overlap the wordmark. Collapse to the logo mark. */
+  .dashboard-nav .brand-lockup--small .brand-wordmark {
+    display: none;
+  }
+  .dashboard-nav .brand-lockup--small {
+    gap: 0;
   }
 }
 
