@@ -111,23 +111,25 @@ you merge to `main`.
 | Redis | Yes | Stores login sessions, rate-limit counters, and stage cache |
 | Google OAuth | Yes | User sign-in ("Sign in with Google") |
 | Anthropic / OpenAI / Google Gemini | At least one | LLM generation — you need a key for whichever provider(s) you want to offer |
-| Railway | Production | Hosts the backend server, PostgreSQL, and Redis in the cloud |
+| Railway | Production | Hosts the backend `backend` web service **plus the `worker` and `worker-fast` arq worker services**, PostgreSQL, and Redis in the cloud — see [Step 1](#step-1--set-up-railway-backend--databases), all three services are required, not just `backend` |
 | Vercel | Production | Hosts the frontend website (the SPA) — and, separately, the marketing zone |
 | GitHub Actions secrets | Production | Lets the automated pipeline deploy to Railway and Vercel |
 | Marketing Vercel project | Optional | Second Vercel project rooted at `apps/marketing` — the SEO/GEO content site on the apex domain (issue #18). Skip until you launch organic/answer-engine acquisition. |
 | Sanity | Optional | Hosted CMS that holds the marketing content (guides, use-cases, comparisons, templates, demos). Fetched at build time. Required only if you run the marketing zone with real content. |
-| GitHub OAuth App | Optional | GitHub export integration — lets users push spec/plan/tasks to a GitHub repo as files + issues. Leave blank to disable. |
-| Lemon Squeezy | Optional | Paid credit packs through Lemon Squeezy hosted checkout and signed webhooks (Phase 22). Leave blank to disable billing checkout. |
+| GitHub OAuth App | Optional | Legacy (Phase 13) GitHub export integration — lets users push spec/plan/tasks to a GitHub repo as files + issues, one-shot. Leave blank to disable. |
+| GitHub App | Optional | Phase 21 bidirectional "living system of record" — issues sync back to task status, PRs, webhooks, Projects board. Supersedes the OAuth App above when configured; requires the `worker`/`worker-fast` services. Leave blank to disable. |
+| Payments (Lemon Squeezy or Razorpay) | Optional | Paid credit packs, gated by the `PAYMENTS_ENABLED` master switch + `PAYMENT_PROVIDER` selector (issue #44). Leave `PAYMENTS_ENABLED=false` to launch with checkout off. |
 | Sentry | Optional | Error reporting if something breaks in production |
 | Grafana OTLP | Optional | Distributed tracing (advanced observability) |
 | Langfuse | Optional | LLM call logging and prompt management |
 | Prometheus metrics | Built in | `/metrics` endpoint — no setup needed |
 
 Dependencies installed but not currently required for runtime setup:
-`resend` and `supabase`. Lemon Squeezy is the runtime billing provider (Phase 22)
-and is documented below. The Stripe runtime was fully decommissioned (T-308) —
-there is no Stripe SDK, config, or webhook path anymore; only the read-only Stripe
-audit tables remain (see "Stripe (decommissioned)" below).
+`resend` and `supabase`. Lemon Squeezy and Razorpay are the two supported runtime
+billing providers (Phase 22 / issue #44), selected by `PAYMENT_PROVIDER` and gated
+by `PAYMENTS_ENABLED` — both documented below. The Stripe runtime was fully
+decommissioned (T-308) — there is no Stripe SDK, config, or webhook path anymore;
+only the read-only Stripe audit tables remain (see "Stripe (decommissioned)" below).
 
 ---
 
@@ -377,15 +379,133 @@ Common errors:
 
 ---
 
-### Lemon Squeezy Billing (Phase 22 — optional, skip if you do not sell credit packs)
+### GitHub App (Phase 21 — optional, the bidirectional "living system of record")
 
-Lemon Squeezy is the runtime billing provider. It powers the `/billing` page,
-hosted checkout, and the signed webhook that grants purchased credits. Lemon is
-the **Merchant of Record**, so it absorbs sales tax, chargebacks, and disputes.
+This supersedes the OAuth App above: instead of a one-shot export, closing a
+task's GitHub issue (or merging its PR) flips that task to **done** inside
+Thought2Build, and pushes/reconciliation/backfill all run as durable background
+jobs. It requires the `worker` and `worker-fast` Railway services from
+[Step 1](#step-1--set-up-railway-backend--databases) — nothing processes GitHub
+webhooks or PR checks without them.
+
+**How to set up the GitHub App:**
+
+1. Go to [github.com/settings/apps](https://github.com/settings/apps) and click
+   **New GitHub App**.
+2. Fill in:
+   - **GitHub App name**: `Thought2Build` (or any unique name — this becomes the
+     app's public slug)
+   - **Homepage URL**: your frontend URL
+   - **Callback URL**: `{BACKEND_URL}/integrations/github/setup` — this **must**
+     be the backend, not the frontend (unlike the OAuth App above)
+   - **Webhook URL**: `{BACKEND_URL}/integrations/github/webhook`
+   - **Webhook secret**: generate one (`python3 -c "import secrets;
+     print(secrets.token_urlsafe(32))"`) and copy it into
+     `GITHUB_APP_WEBHOOK_SECRET`
+   - Under **Identifying and authorizing users**, check **Request user
+     authorization (OAuth) during installation** — this makes the install
+     callback a single hop and is what lets the backend verify the installer
+     actually administers the installation (it's a required security check, not
+     just a convenience: without it the setup callback has no way to prove the
+     caller controls the installation they're binding).
+   - Under **Permissions**, grant repository **Contents** (read/write),
+     **Issues** (read/write), **Pull requests** (read/write), and organization
+     **Members** (read) if you want the identity-verification access check to
+     work for org installations.
+   - Subscribe to webhook events: **Push**, **Issues**, **Pull request**.
+3. Click **Create GitHub App**. On the app's page, note the numeric **App ID**
+   (top of the page) and generate a **private key** (scroll to **Private
+   keys** → **Generate a private key** — downloads a `.pem` file).
+4. Still on the app's page, note the **Client ID** and generate a **Client
+   secret** (this is the identity OAuth pair, separate from the webhook
+   secret).
+5. Convert the private key to a single-line string the same way as the JWT key
+   in [Step 1](#step-1--set-up-railway-backend--databases):
+   ```bash
+   python3 -c "print(open('/path/to/downloaded-key.pem').read().replace(chr(10), '\\\\n'))"
+   ```
+
+```env
+GITHUB_APP_ID=123456
+GITHUB_APP_SLUG=thought2build
+GITHUB_APP_PRIVATE_KEY="-----BEGIN RSA PRIVATE KEY-----\n...\n-----END RSA PRIVATE KEY-----\n"
+GITHUB_APP_WEBHOOK_SECRET=
+GITHUB_APP_WEBHOOK_SECRET_PREV=          # set during a secret-rotation window only
+GITHUB_APP_CLIENT_ID=
+GITHUB_APP_CLIENT_SECRET=
+```
+
+Leave all six blank to keep the App off (the Phase-13 OAuth path above remains
+available on its own).
+
+Production guardrails (`validate_production_settings()`): the App is
+"enabled" once `GITHUB_APP_ID` + `GITHUB_APP_SLUG` are both set. Once enabled
+in production, the backend refuses to start unless `GITHUB_APP_PRIVATE_KEY`,
+`GITHUB_APP_WEBHOOK_SECRET`, and **both** `GITHUB_APP_CLIENT_ID` /
+`GITHUB_APP_CLIENT_SECRET` are also set — the identity OAuth pair is what closes
+a cross-tenant IDOR in the install callback, so it's mandatory, not optional,
+whenever the App itself is on.
+
+Common errors:
+
+- Install callback rejects with `github.install.rejected`: the caller doesn't
+  administer the installation being bound — this is the intended security
+  behavior, not a bug; the person completing setup must be an admin of the
+  GitHub org/account that installed the app.
+- Webhooks never arrive / `worker-fast` looks idle: confirm the Callback and
+  Webhook URLs point at the **backend** domain, not the frontend, and that
+  both `worker` and `worker-fast` services are deployed and green in Railway.
+- Backend refuses to start in production: one of `GITHUB_APP_PRIVATE_KEY`,
+  `GITHUB_APP_WEBHOOK_SECRET`, `GITHUB_APP_CLIENT_ID`, or
+  `GITHUB_APP_CLIENT_SECRET` is blank while `GITHUB_APP_ID`/`GITHUB_APP_SLUG`
+  are set.
+
+See `docs/RUNBOOK.md` §12 for ongoing ops: webhook-secret rotation,
+installation-token re-mint, dead-letter replay, backfill, and increment-push.
+
+---
+
+### Payments — two providers behind one flag (issue #44)
+
+Paid credit packs are gated by a master switch plus a provider selector, kept
+deliberately separate from "is a provider configured":
+
+```env
+PAYMENTS_ENABLED=false          # master kill switch — default off
+PAYMENT_PROVIDER=lemonsqueezy   # "lemonsqueezy" | "razorpay" — must be set even while disabled
+```
+
+Checkout is only reachable when **both** are true: `PAYMENTS_ENABLED=true` AND
+the active `PAYMENT_PROVIDER` is fully configured (its required variables all
+set). `GET /billing/package` surfaces this as `enabled` / `provider` fields that
+gate the frontend's Buy button. `PAYMENT_PROVIDER` must always be a valid value
+— the backend refuses to start in production if it's blank or misspelled, even
+with payments off.
+
+Pick one provider per deployment:
+
+- **Lemon Squeezy** — the default, and the Merchant of Record (it absorbs sales
+  tax, chargebacks, and disputes for you). Documented in full below.
+- **Razorpay** — an INR-focused alternative via hosted Payment Links.
+  **Not** a Merchant of Record — tax and dispute liability sit with your
+  account, and lost disputes settle manually via admin-correction. Documented
+  in full below.
+
+Both providers' webhooks are always processed regardless of which one is
+currently active, so switching `PAYMENT_PROVIDER` and redeploying never breaks
+settlement of a still-open order/refund on the provider you just switched away
+from.
+
+#### Lemon Squeezy Billing (Phase 22)
+
+Lemon Squeezy powers the `/billing` page, hosted checkout, and the signed
+webhook that grants purchased credits. Lemon is the **Merchant of Record**, so
+it absorbs sales tax, chargebacks, and disputes.
 Leave `LEMONSQUEEZY_API_KEY` / `LEMONSQUEEZY_STORE_ID` / `LEMONSQUEEZY_VARIANT_ID`
-blank to disable checkout: `GET /billing/package` still returns the configured
-package, but `POST /billing/checkout` returns a safe `503` and the frontend
-surfaces a calm disabled state.
+blank to leave this provider unconfigured (fine if `PAYMENT_PROVIDER=razorpay`
+instead): `GET /billing/package` still returns the configured package, but
+`POST /billing/checkout` returns a safe `503` and the frontend surfaces a calm
+disabled state.
 
 Checkout is **attempt-first**: Thought2Build commits a `billing_checkout_attempts`
 row (snapshotting credits/price/currency/validity) *before* calling Lemon, then
@@ -468,6 +588,73 @@ Common errors:
   dashboard, confirm the signing secret, and check logs for
   `billing.webhook.*` and the `billing_webhook_events` inbox row. The 60s
   pending-sweep and the 15-minute reconcile recover a missed enqueue.
+
+#### Razorpay Billing (issue #44 — INR alternative)
+
+Razorpay is a hosted **Payment Links** integration — no SDK, no CSP change.
+Unlike Lemon Squeezy, Razorpay is **not** a Merchant of Record: sales tax (GST)
+and dispute/chargeback liability sit with your account, not Razorpay's, and a
+Razorpay chargeback cannot be auto-detected by reconcile — settle it manually
+via `POST /billing/admin/correction`.
+
+**How to set up Razorpay:**
+
+1. Create a Razorpay account and complete KYC (required before you can generate
+   **live** keys — test keys work immediately for staging).
+2. Go to **Settings → API Keys** and generate a key pair. Copy the **Key ID**
+   and **Key Secret** into `RAZORPAY_KEY_ID` / `RAZORPAY_KEY_SECRET`.
+3. Go to **Settings → Webhooks** and add a webhook pointing at
+   `{BACKEND_URL}/billing/webhook/razorpay` — note this is a **different path**
+   from Lemon Squeezy's `{BACKEND_URL}/billing/webhook`. Subscribe to
+   `payment_link.paid` and `refund.processed`.
+4. Copy the webhook secret into `RAZORPAY_WEBHOOK_SECRET`. As with Lemon, a
+   `_PREV` variable exists for a rotation window.
+5. Set the success URL and pack economics to match what you want to sell:
+
+```env
+RAZORPAY_KEY_ID=rzp_test_...        # MUST be rzp_live_... in production
+RAZORPAY_KEY_SECRET=
+RAZORPAY_WEBHOOK_SECRET=
+RAZORPAY_WEBHOOK_SECRET_PREV=        # set during a secret-rotation window only
+RAZORPAY_PRICE_CENTS=154900          # minor units — this is paise for INR (₹1549.00)
+RAZORPAY_CURRENCY=INR
+RAZORPAY_CREDITS_PER_PURCHASE=200
+RAZORPAY_CREDIT_VALIDITY_DAYS=30
+RAZORPAY_SUCCESS_URL=http://localhost:5173/billing   # MUST be https:// in production
+RAZORPAY_CHECKOUT_TTL_MINUTES=30     # must be >= 16, Razorpay rejects shorter link expiries
+RAZORPAY_API_BASE=https://api.razorpay.com
+RAZORPAY_RECONCILE_MAX_CALLS_PER_RUN=200
+```
+
+> `RAZORPAY_PRICE_CENTS=154900` (₹1549) is not a currency conversion of the
+> Lemon $15 price — since Razorpay isn't a Merchant of Record, ~18% GST comes
+> off this gross on your side, netting roughly ₹1313 ≈ $14.9. Re-derive the
+> INR gross if you change the USD-equivalent price you're targeting.
+
+6. Send a **test webhook delivery** from Razorpay's dashboard and confirm it
+   returns `200` before flipping `PAYMENTS_ENABLED=true` for real users.
+
+Production guardrails (`validate_production_settings()`): when
+`PAYMENT_PROVIDER=razorpay` and `PAYMENTS_ENABLED=true`, the backend refuses to
+start unless `RAZORPAY_WEBHOOK_SECRET` is set, `RAZORPAY_SUCCESS_URL` is HTTPS,
+price/credits/validity are positive, currency is non-empty,
+`RAZORPAY_KEY_ID` starts with `rzp_live_` (not `rzp_test_`), and
+`RAZORPAY_CHECKOUT_TTL_MINUTES >= 16`.
+
+Common errors:
+
+- Backend refuses to start in production: `RAZORPAY_KEY_ID` still has the
+  `rzp_test_` prefix — Razorpay has no separate test-mode flag like Lemon
+  Squeezy, the key prefix *is* the environment.
+- Checkout returns 503: `PAYMENTS_ENABLED` is false, or `PAYMENT_PROVIDER` is
+  not `razorpay`, or a required Razorpay variable is blank.
+- Credits do not appear after payment: verify the webhook delivery in the
+  Razorpay dashboard, confirm `RAZORPAY_WEBHOOK_SECRET`, and check logs for
+  `billing.webhook.*`. Chargebacks/disputes are not auto-reconciled for
+  Razorpay — settle via `POST /billing/admin/correction`.
+
+See `docs/RAZORPAY_INTEGRATION_PLAN.md` and `docs/RUNBOOK.md` §9.9 for deeper
+Razorpay ops.
 
 #### Stripe (decommissioned — T-308)
 
@@ -579,11 +766,16 @@ first time. Work through these steps in order.
 - A Vercel account ([vercel.com](https://vercel.com)) — free to sign up.
 - Your Google OAuth credentials (from section 2 above).
 - At least one LLM provider API key.
-- Lemon Squeezy test/live store credentials if you plan to enable paid credit packs.
+- Lemon Squeezy or Razorpay credentials only if you plan to enable paid credit
+  packs at launch — otherwise leave `PAYMENTS_ENABLED=false` and add a provider
+  later with zero downtime.
 
 ### Step 1 — Set up Railway (backend + databases)
 
-Railway will host the FastAPI server, PostgreSQL, and Redis.
+Railway will host the FastAPI server, **two arq worker processes**, PostgreSQL,
+and Redis. All three application services (`backend`, `worker`, `worker-fast`)
+are required — not just `backend` — or GitHub jobs and billing webhooks never
+process even though the app otherwise looks fine.
 
 **Create a project:**
 
@@ -602,18 +794,30 @@ Railway will host the FastAPI server, PostgreSQL, and Redis.
 6. Click **Add a service** → **Database** → **Add Redis**.
 7. Click the Redis tile → **Connect** tab → copy the **Private URL**.
 
-**Add the backend service:**
+**Add the three backend services (`backend`, `worker`, `worker-fast`):**
 
-8. Click **Add a service** → **GitHub Repo**.
-9. Connect Railway to your GitHub account if prompted, then select this
-   repository.
-10. Railway detects the `Dockerfile` inside `backend/`. Set the **Root
-    directory** to `backend`.
-11. Railway may start a first build automatically — that is fine.
+8. Click **Add a service** → **GitHub Repo**, connect Railway to your GitHub
+   account if prompted, then select this repository. Name this service
+   `backend`.
+9. Repeat step 8 **two more times** — once for `worker`, once for
+   `worker-fast` — each pointing at the same GitHub repository.
+10. On **all three** services, set **Settings → Config-as-code → Config File
+    Path** explicitly (this is what tells Railway which process each service
+    runs — the `startCommand` differs per service):
+
+    | Service name | Config File Path |
+    | --- | --- |
+    | `backend` | `/backend/railway.json` |
+    | `worker` | `/backend/railway.worker.json` |
+    | `worker-fast` | `/backend/railway.worker-fast.json` |
+
+    (You do **not** need to set a Root Directory separately — each config file
+    already points at `backend/`.)
+11. Railway may start a first build on each automatically — that is fine.
 
 **Set environment variables on the backend service:**
 
-12. Click your backend service tile → go to the **Variables** tab.
+12. Click the `backend` service tile → go to the **Variables** tab.
 13. Add each variable listed below. Click **Add Variable** for each one.
 
     | Variable | Value |
@@ -622,6 +826,7 @@ Railway will host the FastAPI server, PostgreSQL, and Redis.
     | `DATABASE_URL` | The PostgreSQL Private URL from step 5, with `postgresql://` changed to `postgresql+asyncpg://` |
     | `REDIS_URL` | The Redis Private URL from step 7 |
     | `FRONTEND_URL` | Your Vercel URL — come back and fill this in after step 2. For now leave it blank or use a placeholder. |
+    | `ALLOWED_HOSTS` | Comma-separated allowed `Host` headers, e.g. `api.thought2build.com,*.up.railway.app`. **Required in production** — the backend refuses to start without it. Keep the `*.up.railway.app` entry even after attaching a custom domain (Railway's own healthcheck uses it). |
     | `JWT_PRIVATE_KEY` | Generated below |
     | `JWT_PUBLIC_KEY` | Generated below |
     | `GOOGLE_CLIENT_ID` | From Google Cloud Console |
@@ -629,9 +834,12 @@ Railway will host the FastAPI server, PostgreSQL, and Redis.
     | `ANTHROPIC_API_KEY` | Your Anthropic key (or leave blank if not using Anthropic) |
     | `OPENAI_API_KEY` | Your OpenAI key (or leave blank if not using OpenAI) |
     | `GOOGLE_API_KEY` | Your Gemini key (or leave blank if not using Gemini) |
-    | `GITHUB_CLIENT_ID` | Your GitHub OAuth App client ID (or leave blank to disable GitHub export) |
+    | `GITHUB_CLIENT_ID` | Your GitHub OAuth App client ID (legacy Phase-13 export, or leave blank) |
     | `GITHUB_CLIENT_SECRET` | Your GitHub OAuth App client secret (or leave blank) |
-    | `LEMONSQUEEZY_API_KEY` | Blank to disable billing; the Lemon Squeezy API key for production billing |
+    | `GITHUB_APP_ID` / `GITHUB_APP_SLUG` / `GITHUB_APP_PRIVATE_KEY` / `GITHUB_APP_WEBHOOK_SECRET` / `GITHUB_APP_CLIENT_ID` / `GITHUB_APP_CLIENT_SECRET` | Phase-21 GitHub App (optional) — see the [GitHub App section](#github-app-phase-21--optional-the-bidirectional-living-system-of-record) above. Leave all blank to skip. |
+    | `PAYMENTS_ENABLED` | `false` to launch with checkout off (recommended for a first launch); `true` once a provider below is fully configured and tested |
+    | `PAYMENT_PROVIDER` | `lemonsqueezy` or `razorpay` — **must be a valid value even while `PAYMENTS_ENABLED=false`**, production refuses to boot on a blank/misspelled value |
+    | `LEMONSQUEEZY_API_KEY` | Blank to leave this provider unconfigured; the Lemon Squeezy API key for production billing |
     | `LEMONSQUEEZY_STORE_ID` | Lemon store id (required to enable checkout) |
     | `LEMONSQUEEZY_VARIANT_ID` | Lemon product-variant id for the credit pack |
     | `LEMONSQUEEZY_WEBHOOK_SECRET` | Lemon webhook signing secret when billing is enabled |
@@ -642,10 +850,18 @@ Railway will host the FastAPI server, PostgreSQL, and Redis.
     | `LEMONSQUEEZY_CREDIT_VALIDITY_DAYS` | Credit expiry window, e.g. `30` |
     | `LEMONSQUEEZY_SUCCESS_URL` | Your frontend billing URL, e.g. `https://your-vercel-url.vercel.app/billing` |
     | `LEMONSQUEEZY_TEST_MODE` | `true` for staging; **must be `false`** in production |
+    | `RAZORPAY_KEY_ID` / `RAZORPAY_KEY_SECRET` / `RAZORPAY_WEBHOOK_SECRET` / `RAZORPAY_PRICE_CENTS` / `RAZORPAY_CURRENCY` / `RAZORPAY_CREDITS_PER_PURCHASE` / `RAZORPAY_CREDIT_VALIDITY_DAYS` / `RAZORPAY_SUCCESS_URL` / `RAZORPAY_CHECKOUT_TTL_MINUTES` | Only if `PAYMENT_PROVIDER=razorpay` — see the [Razorpay Billing section](#razorpay-billing-issue-44--inr-alternative) above |
     | `ADMIN_USER_EMAILS` | Comma-separated emails allowed to issue billing admin corrections (empty = nobody) |
     | `ENCRYPTION_MASTER_KEY` | Generated below |
     | `CSRF_SECRET` | Generated below |
     | `METRICS_TOKEN` | Generated below |
+    | `WEB_CONCURRENCY` | Optional cost lever — `1` keeps `backend` to a single async worker (roughly halves its memory bill) at pre-launch traffic; bump to `2` once real traffic arrives. Workers ignore this variable. |
+
+14. Copy the **same environment variables** onto the `worker` and
+    `worker-fast` services (Railway's "Variable References" / "Shared
+    Variables" feature can do this in one place — use it if offered instead of
+    keeping three copies in sync by hand). Only `backend` needs
+    `WEB_CONCURRENCY`; the other two ignore it either way.
 
 **Generate the JWT key pair** (run this on your local machine):
 
@@ -681,18 +897,22 @@ python3 -c "import secrets; print(secrets.token_urlsafe(32))"
 python3 -c "import secrets; print(secrets.token_urlsafe(32))"
 ```
 
-14. Once all variables are set, go to the backend service → **Settings** →
+15. Once all variables are set, go to the `backend` service → **Settings** →
     **Networking** → **Generate Domain**. Railway gives you a public URL like
     `https://thought2build-backend-production.up.railway.app`. Copy it — you need
-    it for Vercel.
+    it for Vercel. `worker` and `worker-fast` don't serve HTTP traffic, so skip
+    this for them.
 
-15. Check the **Deployments** tab and confirm the backend started successfully.
-    Visit `https://your-railway-url/health` — you should see
+16. Check the **Deployments** tab and confirm **all three services** —
+    `backend`, `worker`, and `worker-fast` — started successfully, not just
+    `backend`. Visit `https://your-railway-url/health` — you should see
     `{"status":"ok","version":"1.0.0"}`.
 
 > **If the deployment fails:** go to the **Deployments** tab, click the failed
 > deploy, and read the build/runtime logs. The most common issues are a missing
-> environment variable or a wrong `DATABASE_URL` format.
+> environment variable or a wrong `DATABASE_URL` format. A `worker`/`worker-fast`
+> deploy failing on the `Config File Path` step usually means step 10 above
+> wasn't set correctly for that service.
 
 ---
 
@@ -719,14 +939,17 @@ Vercel will build and host the React frontend.
    `https://thought2build-abc123.vercel.app`.
 
 7. Copy your Vercel URL. Go back to Railway and set `FRONTEND_URL` on the
-   backend service to this URL (it must start with `https://`).
+   `backend` service to this URL (it must start with `https://`). If you used
+   Railway's Variable References/Shared Variables in Step 1, this also updates
+   `worker` and `worker-fast` automatically — otherwise update it on those two
+   services by hand as well.
 
 8. Go back to Google Cloud Console and add your Vercel URL to **Authorized
    JavaScript origins** and `https://your-vercel-url.vercel.app/auth/callback`
    to **Authorized redirect URIs**.
 
-9. Redeploy the Railway backend so it picks up the updated `FRONTEND_URL` (in
-   Railway → your backend service → **Deployments** → **Deploy**).
+9. Redeploy the `backend` service so it picks up the updated `FRONTEND_URL` (in
+   Railway → the `backend` service → **Deployments** → **Deploy**).
 
 10. Visit your Vercel URL and try signing in.
 
@@ -866,6 +1089,17 @@ CSRF_SECRET=long-random-secret
 GITHUB_CLIENT_ID=
 GITHUB_CLIENT_SECRET=
 
+GITHUB_APP_ID=
+GITHUB_APP_SLUG=
+GITHUB_APP_PRIVATE_KEY=
+GITHUB_APP_WEBHOOK_SECRET=
+GITHUB_APP_WEBHOOK_SECRET_PREV=
+GITHUB_APP_CLIENT_ID=
+GITHUB_APP_CLIENT_SECRET=
+
+PAYMENTS_ENABLED=false
+PAYMENT_PROVIDER=lemonsqueezy
+
 LEMONSQUEEZY_API_KEY=
 LEMONSQUEEZY_WEBHOOK_SECRET=
 LEMONSQUEEZY_WEBHOOK_SECRET_PREV=
@@ -877,6 +1111,18 @@ LEMONSQUEEZY_CREDITS_PER_PURCHASE=200
 LEMONSQUEEZY_CREDIT_VALIDITY_DAYS=30
 LEMONSQUEEZY_SUCCESS_URL=http://localhost:5173/billing
 LEMONSQUEEZY_TEST_MODE=true
+
+RAZORPAY_KEY_ID=
+RAZORPAY_KEY_SECRET=
+RAZORPAY_WEBHOOK_SECRET=
+RAZORPAY_WEBHOOK_SECRET_PREV=
+RAZORPAY_PRICE_CENTS=154900
+RAZORPAY_CURRENCY=INR
+RAZORPAY_CREDITS_PER_PURCHASE=200
+RAZORPAY_CREDIT_VALIDITY_DAYS=30
+RAZORPAY_SUCCESS_URL=http://localhost:5173/billing
+RAZORPAY_CHECKOUT_TTL_MINUTES=30
+
 ADMIN_USER_EMAILS=
 
 METRICS_TOKEN=
@@ -891,6 +1137,9 @@ LANGFUSE_CONTENT_CAPTURE_ACK=false
 
 ENVIRONMENT=development
 MAX_ACTIVE_WORKSPACES_PER_USER=50
+# ALLOWED_HOSTS is deliberately left unset here — it's production-only (the
+# Host-header middleware isn't added when blank, so local/compose flows on
+# any host work). Never set it locally.
 ```
 
 Frontend `frontend/.env`:
@@ -937,17 +1186,29 @@ The backend enforces these rules at startup when `ENVIRONMENT=production`:
 
 - `METRICS_TOKEN` must be non-empty.
 - `FRONTEND_URL` must start with `https://`.
+- `ALLOWED_HOSTS` must be non-empty (comma-separated `Host` header allowlist).
 - `JWT_PRIVATE_KEY` must be a real PEM key (not the CI placeholder).
 - `ENCRYPTION_MASTER_KEY` must not be the CI placeholder value.
+- `PAYMENT_PROVIDER` must be exactly `lemonsqueezy` or `razorpay` — required
+  even when `PAYMENTS_ENABLED=false`.
 - `SITE_URL` is optional, but **if set it must start with `https://`** (it is the
   backend mirror of the marketing canonical origin used for canonical/OG/sitemap
   concerns; an `http://` value fails startup). Leave it blank if you are not
   running the marketing zone — no backend code reads it yet.
-- If Lemon billing is enabled in production (`LEMONSQUEEZY_API_KEY` +
+- If Lemon billing is enabled in production (`PAYMENTS_ENABLED=true`,
+  `PAYMENT_PROVIDER=lemonsqueezy`, and `LEMONSQUEEZY_API_KEY` +
   `LEMONSQUEEZY_STORE_ID` + `LEMONSQUEEZY_VARIANT_ID` all set),
   `LEMONSQUEEZY_WEBHOOK_SECRET` must be set, `LEMONSQUEEZY_SUCCESS_URL` must use
   `https://`, and `LEMONSQUEEZY_TEST_MODE` must be `false`. Leave the three core
   keys blank to intentionally disable billing checkout.
+- If Razorpay billing is enabled in production (`PAYMENTS_ENABLED=true`,
+  `PAYMENT_PROVIDER=razorpay`), `RAZORPAY_WEBHOOK_SECRET` must be set,
+  `RAZORPAY_SUCCESS_URL` must use `https://`, price/credits/validity must be
+  positive, `RAZORPAY_KEY_ID` must start with `rzp_live_`, and
+  `RAZORPAY_CHECKOUT_TTL_MINUTES` must be at least `16`.
+- If the GitHub App is enabled (`GITHUB_APP_ID` + `GITHUB_APP_SLUG` both set),
+  `GITHUB_APP_PRIVATE_KEY`, `GITHUB_APP_WEBHOOK_SECRET`, and both
+  `GITHUB_APP_CLIENT_ID` / `GITHUB_APP_CLIENT_SECRET` must all be set.
 - If `LANGFUSE_SECRET_KEY` is set, `LANGFUSE_PUBLIC_KEY` must also be set,
   `LANGFUSE_HOST` must use `https://`, and `LANGFUSE_CONTENT_CAPTURE_ACK`
   must be `true`.
@@ -965,8 +1226,10 @@ message describing what is wrong.
 docker compose up --build
 ```
 
-This starts PostgreSQL, Redis, the FastAPI backend, and the Vite frontend
-together. Wait until you see `Uvicorn running on http://0.0.0.0:8000`.
+This starts PostgreSQL, Redis, the FastAPI backend, the Vite frontend, and the
+two arq worker containers (`worker` and `worker-fast`, which drain GitHub jobs
+and billing webhooks respectively). Wait until you see
+`Uvicorn running on http://0.0.0.0:8000`.
 
 ### Check backend health
 
@@ -1063,10 +1326,17 @@ Check:
 
 ### Billing checkout does not work
 
-Check:
+Check first, regardless of provider:
+
+- `PAYMENTS_ENABLED=true` — checkout is inert with it `false`, by design.
+- `PAYMENT_PROVIDER` matches the provider you actually configured
+  (`lemonsqueezy` or `razorpay`) — a mismatch means `GET /billing/package`
+  reports the wrong/unconfigured provider as active.
+
+If `PAYMENT_PROVIDER=lemonsqueezy`:
 
 - `LEMONSQUEEZY_API_KEY`, `LEMONSQUEEZY_STORE_ID`, and `LEMONSQUEEZY_VARIANT_ID`
-  are all set only when billing checkout should be enabled.
+  are all set.
 - In production, `LEMONSQUEEZY_TEST_MODE` is `false` and
   `LEMONSQUEEZY_SUCCESS_URL` uses `https://`; otherwise startup validation fails.
 - `LEMONSQUEEZY_SUCCESS_URL` points to `{FRONTEND_URL}/billing` (there is no
@@ -1076,6 +1346,19 @@ Check:
   `order_created` / `order_refunded`.
 - Backend logs for `billing.webhook.*` failures and the `billing_webhook_events`
   inbox row for the order.
+
+If `PAYMENT_PROVIDER=razorpay`:
+
+- `RAZORPAY_KEY_ID`, `RAZORPAY_KEY_SECRET`, and `RAZORPAY_WEBHOOK_SECRET` are
+  all set, and in production `RAZORPAY_KEY_ID` starts with `rzp_live_` (not
+  `rzp_test_`) — Razorpay's key prefix is the environment, there's no separate
+  test-mode flag.
+- The Razorpay webhook endpoint is `{BACKEND_URL}/billing/webhook/razorpay`
+  (a **different path** from Lemon's) and is subscribed to
+  `payment_link.paid` / `refund.processed`.
+- `RAZORPAY_CHECKOUT_TTL_MINUTES` is at least `16`.
+- Backend logs for `billing.webhook.*` failures. Razorpay chargebacks aren't
+  auto-reconciled — settle via `POST /billing/admin/correction`.
 
 ### CSRF failures (requests return 403)
 
