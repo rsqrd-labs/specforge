@@ -627,8 +627,12 @@ jobs:
       # re-add a `railway up` step; it would also double-build every push
       # alongside the GitHub trigger. Ops (manual redeploy, rollback) is the
       # Railway dashboard — see docs/RUNBOOK.md.
+      # No `working-directory: frontend` here: the Vercel project's own Root
+      # Directory setting is already "frontend", resolved relative to cwd. CI
+      # previously set both, so the CLI looked for frontend/frontend and
+      # failed with "provided path does not exist" (run 30168097349). Deploy
+      # from the repo root and let the project setting apply the subfolder.
       - name: Deploy frontend to Vercel
-        working-directory: frontend
         run: |
           npm install -g vercel@56.4.1
           vercel --prod --token ${{ secrets.VERCEL_TOKEN }} \
@@ -671,9 +675,11 @@ jobs:
       # when the id is unset, but that state is no longer silent: the "Assert
       # marketing deploy is configured" preflight above already hard-failed the
       # job unless MARKETING_DEPLOY_OPTIONAL=true was explicitly set (T-2.1).
+      # No `working-directory: apps/marketing` here, same reasoning as the
+      # frontend deploy step above: avoid double-applying the Vercel
+      # project's own Root Directory setting on top of the shell cwd.
       - name: Deploy marketing to Vercel
         if: ${{ env.VERCEL_MARKETING_PROJECT_ID != '' }}
-        working-directory: apps/marketing
         run: |
           npm install -g vercel@56.4.1
           vercel --prod --token ${{ secrets.VERCEL_TOKEN }} \
