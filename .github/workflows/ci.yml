@@ -16,7 +16,6 @@ concurrency:
 permissions:
   contents: read
   pull-requests: read
-  security-events: write
 
 jobs:
   # Detect which areas a PR touches so we can skip whole jobs that aren't
@@ -480,23 +479,16 @@ jobs:
       - name: Vitest (with coverage ratchet)
         run: pnpm test:coverage -- --passWithNoTests
 
+      # `vitest.harness.config.ts` includes every file under
+      # harness/tests/frontend/**, so this one step is already authoritative
+      # for all phase contract suites (13, 14, 15, 23, 24, 25, ...) — mirrors
+      # the backend's issue #84 consolidation. Do not re-add a per-phase step;
+      # that would just re-run a file this step already covers.
       - name: Complete frontend harness
         run: pnpm test:harness
 
       - name: OpenAPI contract drift
         run: pnpm check:api
-
-      - name: Phase 13 frontend harness contracts
-        run: pnpm vitest run --config vitest.harness.config.ts ../harness/tests/frontend/phase13-github-integration.contract.test.ts
-
-      - name: Phase 14 V1.3 usefulness frontend contracts
-        run: pnpm vitest run --config vitest.harness.config.ts ../harness/tests/frontend/phase14-v13-usefulness.contract.test.ts
-
-      # Phase 24 (GitHub living) frontend harness — all blocks are green now that
-      # the install (T-287), export-mode (T-288), and increments/ideas (T-289)
-      # surfaces have landed. Tracked in docs/PRODUCTION_RELEASE_GATE.md (Phase 21).
-      - name: Phase 24 GitHub living frontend harness contracts
-        run: pnpm vitest run --config vitest.harness.config.ts ../harness/tests/frontend/phase24-github-living.contract.test.ts
 
       - name: Build
         run: pnpm build
@@ -622,6 +614,20 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      # SEO remediation plan T-2.1 (issue #18 follow-up): the marketing deploy
+      # step below silently skips when VERCEL_MARKETING_PROJECT_ID is unset —
+      # that fail-open let the marketing zone (apex, every SEO/GEO surface) go
+      # undeployed for the entire period since go-live while CI stayed green.
+      # Hard-fail here unless the opt-out is *explicitly* set, so an
+      # unconfigured marketing deploy is loud, not silent.
+      - name: Assert marketing deploy is configured
+        if: ${{ vars.MARKETING_DEPLOY_OPTIONAL != 'true' }}
+        run: |
+          if [ -z "${VERCEL_MARKETING_PROJECT_ID}" ]; then
+            echo "::error::VERCEL_MARKETING_PROJECT_ID is unset — the marketing zone (apex, all SEO surfaces) would not deploy. Set the secret, or set the repo variable MARKETING_DEPLOY_OPTIONAL=true to explicitly skip it." >&2
+            exit 1
+          fi
+
       # Railway (backend + worker + worker-fast) is NOT deployed from here.
       # All three services are connected to this repo's `main` branch with
       # "Auto deploys when pushed to GitHub" + "Wait for CI" enabled, so Railway
@@ -642,7 +648,7 @@ jobs:
           vercel --prod --token ${{ secrets.VERCEL_TOKEN }} \
             --yes \
             --scope ${{ secrets.VERCEL_ORG_ID }} \
-            --project-id ${{ secrets.VERCEL_PROJECT_ID }}
+            --project ${{ secrets.VERCEL_PROJECT_ID }}
         env:
           VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
           VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
@@ -651,9 +657,10 @@ jobs:
       # Marketing zone — the primary (apex) Vercel project (issue #18, Phase 7).
       # Separate Vercel project from the SPA, so it uses its own project id
       # (VERCEL_MARKETING_PROJECT_ID). PUBLIC_SITE_URL must be set as a project
-      # env var in Vercel (canonical/OG/sitemap base). The step is skipped (not
-      # failed) until that secret exists, so enabling production deploys before
-      # the marketing project is provisioned does not break the deploy job.
+      # env var in Vercel (canonical/OG/sitemap base). This step still skips
+      # when the id is unset, but that state is no longer silent: the "Assert
+      # marketing deploy is configured" preflight above already hard-failed the
+      # job unless MARKETING_DEPLOY_OPTIONAL=true was explicitly set (T-2.1).
       - name: Deploy marketing to Vercel
         if: ${{ env.VERCEL_MARKETING_PROJECT_ID != '' }}
         working-directory: apps/marketing
@@ -662,7 +669,7 @@ jobs:
           vercel --prod --token ${{ secrets.VERCEL_TOKEN }} \
             --yes \
             --scope ${{ secrets.VERCEL_ORG_ID }} \
-            --project-id ${{ secrets.VERCEL_MARKETING_PROJECT_ID }}
+            --project ${{ secrets.VERCEL_MARKETING_PROJECT_ID }}
         env:
           VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
           VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
