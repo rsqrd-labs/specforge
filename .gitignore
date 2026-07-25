@@ -151,6 +151,11 @@ activemq-data/
 # Environments
 .env
 .envrc
+
+# Generated plaintext secrets (go-live handoff artifacts). These hold live
+# JWT/encryption keys and must never be committed — see the file's own
+# "do not commit" header.
+GO_LIVE_PHASE0_SECRETS.md
 .venv
 env/
 venv/

@@ -6,7 +6,21 @@ import sitemap from "@astrojs/sitemap"
 
 // Canonical/OG/sitemap base. `PUBLIC_SITE_URL` is the single source of truth for
 // the marketing origin; default keeps local builds working without env wiring.
-const site = process.env.PUBLIC_SITE_URL ?? "http://localhost:4321"
+// Vercel sets VERCEL_ENV=production for production builds only (preview
+// deploys get "preview") — a production build with the var unset or pointed
+// at localhost would silently ship localhost canonicals/OG tags/sitemap
+// entries (issue #18 defect 2), so fail loudly instead (T-2.2).
+const rawSiteUrl = process.env.PUBLIC_SITE_URL
+if (
+  process.env.VERCEL_ENV === "production" &&
+  (!rawSiteUrl || /localhost|127\.0\.0\.1/.test(rawSiteUrl))
+) {
+  throw new Error(
+    `PUBLIC_SITE_URL must be an absolute production origin; got ${rawSiteUrl ?? "<unset>"}. ` +
+      "Canonicals, OG tags, and the sitemap would ship localhost URLs.",
+  )
+}
+const site = rawSiteUrl ?? "http://localhost:4321"
 
 // SPA-owned + public-artifact route prefixes that must NEVER appear in the
 // marketing sitemap (issue #18, Phase 2). These aren't Astro pages, so they

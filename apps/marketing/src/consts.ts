@@ -2,10 +2,30 @@
 // canonical base, the OAuth entry point, and the standardized Thought2Build entity
 // description used across SEO/GEO surfaces (issue #18).
 
+// Defense-in-depth mirror of the astro.config.mjs production guard (T-2.2).
+// In today's build order, Astro always loads and evaluates astro.config.mjs
+// before any page module reaches consts.ts, so that guard's identical check
+// throws first in practice — verified in origin.test.ts, whose two failing
+// cases both stack-trace back to astro.config.mjs, never here. This copy
+// exists so SITE_URL can never silently compute to a localhost value if the
+// config-level guard is ever weakened, removed, or bypassed by a future
+// Astro/Vite build-order change — not because it is independently reachable
+// today. Reading `process.env` directly is safe only because this module has
+// no client-side consumers (no React island imports consts.ts) — it is
+// evaluated exclusively during Astro's server-side static build.
+const rawSiteUrl = import.meta.env.PUBLIC_SITE_URL
+if (
+  process.env.VERCEL_ENV === "production" &&
+  (!rawSiteUrl || /localhost|127\.0\.0\.1/.test(rawSiteUrl))
+) {
+  throw new Error(
+    `PUBLIC_SITE_URL must be an absolute production origin; got ${rawSiteUrl ?? "<unset>"}. ` +
+      "Canonicals, OG tags, and the sitemap would ship localhost URLs.",
+  )
+}
+
 /** Canonical origin for the marketing zone. No trailing slash. */
-export const SITE_URL = (
-  import.meta.env.PUBLIC_SITE_URL ?? "http://localhost:4321"
-).replace(/\/+$/, "")
+export const SITE_URL = (rawSiteUrl ?? "http://localhost:4321").replace(/\/+$/, "")
 
 /**
  * Backend origin that owns the OAuth start endpoint. The "Sign in with Google"

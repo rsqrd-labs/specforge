@@ -14,7 +14,7 @@
 //
 // If any layer regresses, this fails — by design.
 import { describe, it, expect } from "vitest"
-import { readRepo } from "./helpers"
+import { readRepo, readDist } from "./helpers"
 
 function blockFor(headers: string, route: string): string {
   // _headers blocks: a path line in column 0, followed by indented directives
@@ -43,9 +43,16 @@ describe("noindex regression — public artifact routes stay non-indexable", () 
   })
 
   describe("robots.txt disallows the artifact routes in BOTH zones", () => {
-    for (const file of ["apps/marketing/public/robots.txt", "frontend/public/robots.txt"]) {
-      it(`${file} disallows /p/ and /sb/`, () => {
-        const robots = readRepo(file)
+    // Marketing zone: templated (src/pages/robots.txt.ts, T-2.3), not a
+    // static file — assert on the built dist output, which is what actually
+    // ships. `frontend/public/robots.txt` is still a plain static file.
+    const cases: Array<{ label: string; robots: string }> = [
+      { label: "apps/marketing/dist/robots.txt (built)", robots: readDist("robots.txt") },
+      { label: "frontend/public/robots.txt", robots: readRepo("frontend/public/robots.txt") },
+    ]
+
+    for (const { label, robots } of cases) {
+      it(`${label} disallows /p/ and /sb/`, () => {
         expect(robots).toMatch(/^Disallow:\s*\/p\/\s*$/im)
         expect(robots).toMatch(/^Disallow:\s*\/sb\/\s*$/im)
       })

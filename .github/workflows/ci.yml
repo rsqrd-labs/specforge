@@ -614,20 +614,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      # SEO remediation plan T-2.1 (issue #18 follow-up): the marketing deploy
-      # step below silently skips when VERCEL_MARKETING_PROJECT_ID is unset —
-      # that fail-open let the marketing zone (apex, every SEO/GEO surface) go
-      # undeployed for the entire period since go-live while CI stayed green.
-      # Hard-fail here unless the opt-out is *explicitly* set, so an
-      # unconfigured marketing deploy is loud, not silent.
-      - name: Assert marketing deploy is configured
-        if: ${{ vars.MARKETING_DEPLOY_OPTIONAL != 'true' }}
-        run: |
-          if [ -z "${VERCEL_MARKETING_PROJECT_ID}" ]; then
-            echo "::error::VERCEL_MARKETING_PROJECT_ID is unset — the marketing zone (apex, all SEO surfaces) would not deploy. Set the secret, or set the repo variable MARKETING_DEPLOY_OPTIONAL=true to explicitly skip it." >&2
-            exit 1
-          fi
-
       # Railway (backend + worker + worker-fast) is NOT deployed from here.
       # All three services are connected to this repo's `main` branch with
       # "Auto deploys when pushed to GitHub" + "Wait for CI" enabled, so Railway
@@ -653,6 +639,30 @@ jobs:
           VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
           VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
           VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+
+      # SEO remediation plan T-2.1 (issue #18 follow-up): this used to be an
+      # `if:` on the deploy step below that silently skipped when
+      # VERCEL_MARKETING_PROJECT_ID was unset — that fail-open let the
+      # marketing zone (apex, every SEO/GEO surface) go undeployed for the
+      # entire period since go-live while CI stayed green. Hard-fail instead,
+      # unless the opt-out is *explicitly* set. Placed AFTER "Deploy frontend
+      # to Vercel", not before: an earlier version of this preflight ran first
+      # in the job and, being a hard failure, aborted the whole step sequence
+      # before the unrelated frontend/SPA deploy step ever ran — so a marketing
+      # misconfiguration also blocked shipping the main app. Confirmed live on
+      # `main` (run 30168097349): the frontend still deployed only because
+      # Vercel's own Git integration deploys `thought2build` independently of
+      # this workflow; the CI-driven deploy step itself never ran. This
+      # ordering removes that coupling — a marketing config problem can no
+      # longer take down the frontend deploy step even if that independent
+      # safety net were ever disabled.
+      - name: Assert marketing deploy is configured
+        if: ${{ vars.MARKETING_DEPLOY_OPTIONAL != 'true' }}
+        run: |
+          if [ -z "${VERCEL_MARKETING_PROJECT_ID}" ]; then
+            echo "::error::VERCEL_MARKETING_PROJECT_ID is unset — the marketing zone (apex, all SEO surfaces) would not deploy. Set the secret, or set the repo variable MARKETING_DEPLOY_OPTIONAL=true to explicitly skip it." >&2
+            exit 1
+          fi
 
       # Marketing zone — the primary (apex) Vercel project (issue #18, Phase 7).
       # Separate Vercel project from the SPA, so it uses its own project id
