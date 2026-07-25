@@ -18,9 +18,11 @@ permissions:
   pull-requests: read
 
 jobs:
-  # Detect which areas a PR touches so we can skip whole jobs that aren't
-  # affected. On a push to main this job still runs, but every downstream job
-  # gates on `github.event_name == 'push'` too, so main always runs everything.
+  # Detect which areas changed so unaffected jobs can be skipped — on PRs
+  # *and* on push to main. A docs-only (or otherwise backend/frontend/marketing
+  # untouched) push to main skips those suites entirely; `deploy` below only
+  # deploys the zones whose job actually ran. `.github/workflows/ci.yml` itself
+  # is listed in every filter, so a workflow change always re-runs everything.
   changes:
     name: Detect changes
     runs-on: ubuntu-latest
@@ -88,7 +90,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     needs: changes
-    if: ${{ github.event_name == 'push' || needs.changes.outputs.backend == 'true' }}
+    if: needs.changes.outputs.backend == 'true'
     services:
       postgres:
         image: postgres:16-alpine
@@ -337,9 +339,11 @@ jobs:
     name: Worker Image Build
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    needs: changes
     # The Dockerfile rarely changes and the build is uncached (slow). PRs skip
-    # it; main still builds + validates the image before `deploy` consumes it.
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    # it always; main only builds it when backend actually changed (same
+    # filter as the `backend` job — the image is built from `./backend`).
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.changes.outputs.backend == 'true'
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -357,7 +361,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 25
     needs: changes
-    if: ${{ github.event_name == 'push' || needs.changes.outputs.frontend == 'true' }}
+    if: needs.changes.outputs.frontend == 'true'
     services:
       postgres:
         image: postgres:16-alpine
@@ -529,7 +533,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     needs: changes
-    if: ${{ github.event_name == 'push' || needs.changes.outputs.marketing == 'true' }}
+    if: needs.changes.outputs.marketing == 'true'
     defaults:
       run:
         working-directory: apps/marketing
@@ -597,14 +601,31 @@ jobs:
 
   deploy:
     name: Deploy
-    needs: [secrets, backend, worker-image, frontend, marketing]
+    needs: [changes, secrets, backend, worker-image, frontend, marketing]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     environment: production
     # Keep production deploys opt-in while the project is still in testing.
     # Set the repository variable PRODUCTION_DEPLOY_ENABLED=true after Railway
     # and Vercel projects/secrets are ready.
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push' && vars.PRODUCTION_DEPLOY_ENABLED == 'true'
+    #
+    # backend/worker-image/frontend/marketing now each skip when their own
+    # area didn't change (see the `changes` job), so this job's default
+    # implicit `success()` gate — which treats a *skipped* need the same as a
+    # *failed* one — would otherwise skip `deploy` entirely for e.g. a
+    # marketing-only change (backend/frontend/worker-image all legitimately
+    # skipped). `always()` plus explicit success-or-skipped checks below
+    # restore the old "run unless something actually failed" behavior while
+    # still hard-stopping on a real failure in any of them. `secrets` has no
+    # path filter (always runs), so it stays a strict success requirement.
+    if: >-
+      always() &&
+      github.ref == 'refs/heads/main' && github.event_name == 'push' && vars.PRODUCTION_DEPLOY_ENABLED == 'true' &&
+      needs.secrets.result == 'success' &&
+      (needs.backend.result == 'success' || needs.backend.result == 'skipped') &&
+      (needs['worker-image'].result == 'success' || needs['worker-image'].result == 'skipped') &&
+      (needs.frontend.result == 'success' || needs.frontend.result == 'skipped') &&
+      (needs.marketing.result == 'success' || needs.marketing.result == 'skipped')
     # Map the optional marketing project id to a job-level env var so the
     # marketing deploy step can gate on it: the `secrets` context is NOT
     # available in step `if` conditions, but `env` is.
@@ -632,7 +653,14 @@ jobs:
       # previously set both, so the CLI looked for frontend/frontend and
       # failed with "provided path does not exist" (run 30168097349). Deploy
       # from the repo root and let the project setting apply the subfolder.
+      #
+      # Gated on the `frontend` job having actually run (i.e. frontend/**
+      # changed): the `deploy` job itself now runs even when frontend was
+      # skipped (see the job-level `if:` above), so without this the CLI
+      # would redeploy byte-identical frontend code on every marketing- or
+      # backend-only push.
       - name: Deploy frontend to Vercel
+        if: ${{ needs.changes.outputs.frontend == 'true' }}
         run: |
           npm install -g vercel@56.4.1
           vercel --prod --token ${{ secrets.VERCEL_TOKEN }} \
@@ -659,9 +687,12 @@ jobs:
       # this workflow; the CI-driven deploy step itself never ran. This
       # ordering removes that coupling — a marketing config problem can no
       # longer take down the frontend deploy step even if that independent
-      # safety net were ever disabled.
+      # safety net were ever disabled. Also gated on the `marketing` job
+      # having actually run (apps/marketing/** changed) — a backend- or
+      # frontend-only push must not hard-fail this job over an unrelated,
+      # unconfigured marketing secret.
       - name: Assert marketing deploy is configured
-        if: ${{ vars.MARKETING_DEPLOY_OPTIONAL != 'true' }}
+        if: ${{ needs.changes.outputs.marketing == 'true' && vars.MARKETING_DEPLOY_OPTIONAL != 'true' }}
         run: |
           if [ -z "${VERCEL_MARKETING_PROJECT_ID}" ]; then
             echo "::error::VERCEL_MARKETING_PROJECT_ID is unset — the marketing zone (apex, all SEO surfaces) would not deploy. Set the secret, or set the repo variable MARKETING_DEPLOY_OPTIONAL=true to explicitly skip it." >&2
@@ -677,9 +708,11 @@ jobs:
       # job unless MARKETING_DEPLOY_OPTIONAL=true was explicitly set (T-2.1).
       # No `working-directory: apps/marketing` here, same reasoning as the
       # frontend deploy step above: avoid double-applying the Vercel
-      # project's own Root Directory setting on top of the shell cwd.
+      # project's own Root Directory setting on top of the shell cwd. Also
+      # gated on `marketing` having actually run, same reasoning as the
+      # frontend deploy step's gate.
       - name: Deploy marketing to Vercel
-        if: ${{ env.VERCEL_MARKETING_PROJECT_ID != '' }}
+        if: ${{ needs.changes.outputs.marketing == 'true' && env.VERCEL_MARKETING_PROJECT_ID != '' }}
         run: |
           npm install -g vercel@56.4.1
           vercel --prod --token ${{ secrets.VERCEL_TOKEN }} \
