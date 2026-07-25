@@ -1,9 +1,29 @@
 overrides:
   "js-yaml@>=4.0.0 <4.3.0": "4.3.0"
   "undici@>=7.23.0 <7.28.0": "^7.28.0"
+  # GHSA-mh99-v99m-4gvg (brace-expansion DoS) — patch the one copy that can
+  # take it: minimatch@10 pulls 5.0.7, and 5.0.8 is a drop-in. Deliberately
+  # NOT a blanket `<5.0.8` override; see the ignoreGhsas note below.
+  "brace-expansion@5.0.7": "5.0.8"
 
 auditConfig:
   ignoreGhsas:
+    # GHSA-mh99-v99m-4gvg — "brace-expansion: DoS via unbounded expansion
+    # length", vulnerable <=5.0.7. Three copies exist, each pinned by its
+    # parent's semver range: minimatch@10 → 5.0.7 (bumped to 5.0.8 by the
+    # override above), minimatch@5 → 2.1.2, and minimatch@3 → 1.1.16. Only the
+    # 5.x line is patched — the 1.x/2.x maintenance tags (1.1.16 / 2.1.2) sit
+    # inside the vulnerable range with nowhere to go, and forcing those parents
+    # onto 5.x breaks them outright: brace-expansion 5 dropped the CJS function
+    # export, so minimatch@3.1.5 dies with `TypeError: expand is not a function`
+    # (verified locally — it takes ESLint down with it).
+    #
+    # Not exploitable here: brace-expansion is dev-tooling-only (eslint,
+    # vitest, playwright glob matching) and never enters the shipped Vite
+    # bundle, and the DoS needs attacker-controlled glob patterns — ours are
+    # static strings in our own config. Revisit when eslint/vitest ship parents
+    # on a patched line.
+    - "GHSA-mh99-v99m-4gvg"
     # GHSA-qwww-vcr4-c8h2 — "React Router: RSC Mode CSRF Bypass". The advisory
     # only affects apps using react-router's *unstable RSC* APIs; we are a Vite
     # client SPA (BrowserRouter, no RSC, no server) so it is not exploitable
