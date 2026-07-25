@@ -588,6 +588,12 @@ jobs:
       - name: Install Sanity Studio dependencies
         run: pnpm --dir sanity install --frozen-lockfile
 
+      # Studio suppressions live in `sanity/package.json` under
+      # `pnpm.auditConfig.ignoreGhsas` — JSON can't hold a comment, so the
+      # justification for each entry is in the commit that added it
+      # (currently GHSA-mh99-v99m-4gvg, brace-expansion: only the 5.x line is
+      # patched and forcing it breaks minimatch@5's CJS `expand` import; the
+      # package is Sanity-CLI dev tooling and never ships).
       - name: Audit Sanity Studio dependencies
         run: pnpm --dir sanity audit --audit-level moderate
 
