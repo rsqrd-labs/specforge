@@ -616,24 +616,19 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Install Railway CLI
-        run: npm install -g @railway/cli@5.5.0
-
-      - name: Deploy backend to Railway
-        run: railway up ./backend --path-as-root --service backend --ci
-        env:
-          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
-
-      - name: Deploy bulk worker to Railway
-        run: railway up ./backend --path-as-root --service worker --ci
-        env:
-          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
-
-      - name: Deploy fast worker to Railway
-        run: railway up ./backend --path-as-root --service worker-fast --ci
-        env:
-          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
-
+      # Railway (backend + worker + worker-fast) is NOT deployed from here.
+      # All three services are connected to this repo's `main` branch with
+      # "Auto deploys when pushed to GitHub" + "Wait for CI" enabled, so Railway
+      # builds each service itself once this workflow goes green. Each service
+      # also carries config-as-code (`/backend/railway.json`,
+      # `railway.worker.json`, `railway.worker-fast.json`) plus root directory
+      # `/backend`, all resolved *relative to the repo root* — which is exactly
+      # why the old `railway up ./backend --path-as-root` step could never work:
+      # it uploaded the backend folder AS the snapshot root, so Railway looked
+      # for `/backend/railway.json` inside it and failed initialization. Do not
+      # re-add a `railway up` step; it would also double-build every push
+      # alongside the GitHub trigger. Ops (manual redeploy, rollback) is the
+      # Railway dashboard — see docs/RUNBOOK.md.
       - name: Deploy frontend to Vercel
         working-directory: frontend
         run: |

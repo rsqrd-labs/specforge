@@ -963,31 +963,38 @@ Actions.
 
 **What you need:**
 
-- A Railway token
 - Three Vercel identifiers (token, org ID, project ID)
 
-**Get a Railway token:**
+**Railway needs no token — it deploys itself.** The `backend`, `worker`, and
+`worker-fast` services are each connected to this repo's `main` branch with
+**Auto deploys when pushed to GitHub** *and* **Wait for CI** enabled (service →
+**Settings** → **Source**), so Railway builds them once this workflow goes green.
+CI therefore contains **no** `railway up` step and no `RAILWAY_TOKEN`.
 
-1. In Railway, click your avatar (top right) → **Account Settings** →
-   **Tokens** → **New Token**. Name it `github-actions`. Copy the token.
+> Do not re-add a `railway up` step. Each service resolves its root directory
+> (`/backend`) and its config file (`/backend/railway.json`,
+> `railway.worker.json`, `railway.worker-fast.json`) *relative to the repo root*,
+> so `railway up ./backend --path-as-root` — which makes the backend folder the
+> snapshot root — fails initialization with
+> `service config at '/backend/railway.json' not found`. It would also
+> double-build every push alongside the GitHub trigger.
 
 **Get Vercel credentials:**
 
-2. In Vercel, go to **Account Settings** → **Tokens** → **Create Token**. Name
+1. In Vercel, go to **Account Settings** → **Tokens** → **Create Token**. Name
    it `github-actions`. Copy the token.
-3. Your **Vercel Org ID** is shown in **Account Settings** under your profile.
+2. Your **Vercel Org ID** is shown in **Account Settings** under your profile.
    It looks like `team_xxxxxxx` or just a string of characters.
-4. Your **Vercel Project ID** is shown in the project's **Settings** →
+3. Your **Vercel Project ID** is shown in the project's **Settings** →
    **General** at the top of the page.
 
 **Add the secrets to GitHub:**
 
-5. Go to your GitHub repository → **Settings** → **Secrets and variables** →
+4. Go to your GitHub repository → **Settings** → **Secrets and variables** →
    **Actions** → **New repository secret**. Add one at a time:
 
    | Secret name | Value |
    | --- | --- |
-   | `RAILWAY_TOKEN` | The Railway token |
    | `VERCEL_TOKEN` | The Vercel token |
    | `VERCEL_ORG_ID` | Your Vercel org/account ID |
    | `VERCEL_PROJECT_ID` | Your Vercel project ID (the SPA project) |
@@ -1006,9 +1013,10 @@ Actions.
    | `OPENAI_API_KEY` | OpenAI key for prompt/provider eval jobs |
    | `GOOGLE_API_KEY` | Gemini key for prompt/provider eval jobs |
 
-6. Push any small change to `main`. Watch the **Actions** tab in GitHub — you
-   should see a workflow run that ends with a deploy step pushing to both
-   Railway and Vercel.
+5. Push any small change to `main`. Watch the **Actions** tab in GitHub — the run
+   should end with the `Deploy` job pushing the SPA (and marketing) to Vercel.
+   Railway's three services pick the same commit up on their own once the run is
+   green; watch them in the Railway dashboard's **Deployments** tab.
 
 ---
 

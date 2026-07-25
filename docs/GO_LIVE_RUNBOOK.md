@@ -403,6 +403,13 @@ variables** → **Actions** → **Variables** tab) — the deploy job is
 intentionally gated off until you flip this, so it can't fire during earlier
 testing.
 
+Only the Vercel secrets are needed. Railway deploys itself: each of `backend`,
+`worker`, and `worker-fast` is connected to `main` with **Auto deploys when
+pushed to GitHub** + **Wait for CI** (service → **Settings** → **Source**), so it
+builds the commit once CI is green. CI has no `railway up` step and needs no
+`RAILWAY_TOKEN` — re-adding one would double-build every push and fail on the
+services' repo-root-relative config paths.
+
 This step can be skipped for launch day itself and done the next day once
 things are calm — manual deploys work fine in the meantime.
 
