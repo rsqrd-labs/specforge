@@ -81,6 +81,158 @@ side will fail loudly rather than silently regressing again.
 
 ---
 
+## Phase 3 — Vercel cutover
+
+**Landed:** 2026-07-25/26. Ends the outage: `thought2build.com` now serves the
+marketing zone's static Astro build instead of the SPA shell.
+
+### Pre-flight fixes found before touching any domain
+
+Two real bugs were found and fixed before T-3.3, both via live verification
+rather than trusting existing docs/config:
+
+1. **CI ordering (`.github/workflows/ci.yml`):** the T-2.1 "assert marketing
+   deploy configured" preflight ran *before* "Deploy frontend to Vercel" — a
+   hard-fail there aborted the whole step sequence and would have taken the
+   unrelated frontend/SPA deploy down with it. Confirmed live-broken on `main`
+   (run `30168097349`). Fixed by moving the assert to run only before the
+   marketing-only deploy step.
+2. **`apps/marketing/vercel.json` rewrote every app/artifact path
+   (`/dashboard`, `/workspace`, `/settings`, `/billing`, `/auth`, `/p/`,
+   `/sb/`, `/assets`) to `thought2build-app.vercel.app`, which does not exist**
+   (`curl` → 404). The SPA's real default domain is `thought2build.vercel.app`
+   (confirmed live, 200). Undetected, this would have 404'd the entire
+   logged-in app and every public share link on the first cutover. Fixed and
+   verified end-to-end (rewritten HTML, proxied JS bundle, `/p/*`) against the
+   marketing project's own preview URL before moving any domain.
+
+A separate, unrelated CI failure (`test_automatic_backfill_coalesces_requests_by_time_window`,
+a timing-bucket race in an existing GitHub-sync test) was hit and cleared by
+re-running the job — confirmed pre-existing and untouched by this diff.
+
+### T-3.1 / T-3.2 — Marketing Vercel project
+
+Created `thought2build-marketing` (team `rsqr`), Root Directory
+`apps/marketing`, framework Astro (auto-detected), Node 22. Production env
+vars: `PUBLIC_SITE_URL=https://thought2build.com`,
+`PUBLIC_API_URL=https://api.thought2build.com` (confirmed live via
+`api.thought2build.com/health` before use). Sanity vars left unset — matches
+Phase 2's credential-free degrade path; Sanity content is Phase 6.
+
+### T-3.5 — CI secret
+
+`VERCEL_MARKETING_PROJECT_ID` added as a GitHub secret from the new project's
+ID. A stray `MARKETING_DEPLOY_OPTIONAL=true` repo variable (a troubleshooting
+leftover, not set by this session) was found and removed afterward so T-2.1's
+hard-fail guard is genuinely active again.
+
+### T-3.3 — Domain move
+
+Per the Phase 1 decision: removed `thought2build.com` + `www.thought2build.com`
+from the `thought2build` (SPA) project (Vercel's own confirmation dialog
+correctly identified both as one unit, since apex was redirecting to www) and
+added them to `thought2build-marketing`: apex → Production, `www` → 308
+redirect → apex. Deliberately unchecked Vercel's "Redirect apex domains to
+www (recommended)" default, which would have silently recreated the reversed
+(pre-fix) redirect direction.
+
+### T-3.4 — First real deploy
+
+Happened automatically via the CI `Deploy` job's `vercel --prod` step once
+T-3.1/3.2/3.5 were in place (commits `4e2cd2f`, `02058ef`, `cd2591c`) — no
+separate manual trigger needed.
+
+### T-3.6 — Host-dependent config reconciliation
+
+Checked live Railway values rather than trusting the Phase 1 table's
+predictions:
+
+| Variable | Predicted (Phase 1) | Actual live value found | Action |
+| --- | --- | --- | --- |
+| `FRONTEND_URL` | "Already correct" (apex) | `https://www.thought2build.com` (www — **contradicted the prediction**) | Updated to `https://thought2build.com` (apex). Verified safe first: the pre-cutover apex→www redirect preserved OAuth query params (`curl` test with `?code=&state=`), so the change was safe to make ahead of T-3.3. Deployed via Railway (bundled with the user's own already-staged, unrelated "Wait for CI" setting change for backend/worker/worker-fast, which matches `CLAUDE.md`'s documented intended config). |
+| `ALLOWED_HOSTS` | "Not affected" | `*.up.railway.app,*.railway.internal,healthcheck.railway.app,api.thought2build.com` | Matches prediction — no change needed. |
+
+Google OAuth Console and GitHub App callback settings were not touched
+(outside agent credential access) — the blast-radius table already marked
+GitHub App callback unaffected, and the live OAuth redirect now correctly
+requests `redirect_uri=https://thought2build.com/auth/callback` (apex),
+confirmed via `curl` against `api.thought2build.com/auth/google`.
+
+---
+
+## Phase 4 — Verification (post-cutover)
+
+Captured 2026-07-26 against live production, immediately after T-3.3.
+
+### T-4.1 HTTP-layer assertions — all pass
+
+| Assertion | Result |
+| --- | --- |
+| Canonical host serves static HTML | `thought2build.com/` → 200, 17,637 bytes (was 1,113), real `<meta description>`/canonical/OG/JSON-LD |
+| Non-canonical host redirects | `www.thought2build.com` → 308 → `thought2build.com`, 1 redirect, same final content |
+| `robots.txt` is the marketing policy | `Allow: /`, `Disallow: /p/`, `Disallow: /sb/`, `Sitemap: https://thought2build.com/sitemap-index.xml` |
+| `sitemap-index.xml` | 200 (was 404) |
+| `sitemap-0.xml` | 200; 7 URLs, all on `https://thought2build.com`, zero `localhost` |
+| Each hub is distinct static HTML | `/compare` 4945B, `/guides` 4894B, `/templates` 4957B, `/use-cases` 4897B, `/demos` 4858B — all distinct, none 1,113 |
+| Artifact routes reachable | `/p/<slug>` → 200, `/sb/<slug>` → 200 |
+| App routes still proxy | `/dashboard` → 200 |
+
+**Finding (pre-existing, not introduced by this session): `X-Robots-Tag` is
+absent on `/p/*` and `/sb/*`.** `frontend/public/_headers` (Netlify-style)
+is never honored by Vercel — confirmed by testing `thought2build.vercel.app`
+(the SPA's own domain) directly, with identical results, before any cutover
+touched it. The only header source actually live is the single catch-all
+block in `frontend/vercel.json`, which does not special-case `/p/*`/`/sb/*`.
+Practical exposure is low: the JS-injected `<meta name="robots" content="noindex, nofollow">`
+layer *is* present and confirmed working (checked via rendered DOM), and
+`robots.txt` already blocks crawling of both prefixes, so a compliant crawler
+never reaches the point of needing the HTTP header. Independent of noindex,
+though, **the stricter `script-src 'none'` CSP that `_headers` intended for
+`/p/*`** (hardening against injection in LLM-rendered public markdown, issue
+T-193 per that file's own comment) **is also not live** — `/p/*` currently
+gets the general SPA CSP (`script-src 'self'`) instead. This is a real gap,
+independent of the outage this plan fixes, and is flagged to the user as a
+separate follow-up rather than patched inline, since it touches frontend
+security headers outside Phase 3's scope and deserves its own careful change.
+
+### T-4.2 Rendered-DOM assertions — pass
+
+Homepage: `title` non-empty, `description` non-empty, `canonical` =
+`https://thought2build.com/` (absolute, correct host, no localhost), `robots`
+= `index, follow`, `ogTitle` present, 1 JSON-LD block (`Organization` +
+`SoftwareApplication` + `FAQPage`, correctly cross-linked via `@id`), 1 `h1`,
+`textLength` = 3,991 (⋙ 500). Titles/descriptions differ across hubs (verified
+distinct byte sizes above imply distinct content — the Phase 2 test suite
+enforces the uniqueness contract at build time).
+
+### T-4.3 No-JavaScript crawl check — pass
+
+`/guides` returns real `<h1>` content and 4,894 bytes (⋙ 1,113) with zero
+client-side rendering required; homepage carries `application/ld+json` in the
+initial HTML payload, not injected post-hydration.
+
+### T-4.4 Auth/billing regression check — pass (stopped before real login, per plan)
+
+`api.thought2build.com/auth/google` → 307 → Google's consent screen with
+`redirect_uri=https://thought2build.com/auth/callback` (apex, matches the
+Phase 1 decision and the corrected `FRONTEND_URL`). Did not complete an actual
+Google sign-in, per the plan's explicit instruction not to authenticate with
+the user's credentials during this check.
+
+### T-4.5 Structured-data validation — schema verified, not run through Google's tool
+
+`Organization`, `SoftwareApplication`, and `FAQPage` JSON-LD all present and
+well-formed on the homepage, cross-linked via `@id` anchors as designed. Did
+not separately run Google's Rich Results Test (would require a Playwright
+round-trip to an external tool); the schema shape matches `src/lib/seo.ts`'s
+builders exactly.
+
+**Net effect:** Part I (Phases 0–5) is now functionally complete except T-5
+(index registration, which needs GSC/Bing account access) and the flagged
+`/p/*` CSP follow-up above.
+
+---
+
 ## Baseline (pre-fix)
 
 **Captured:** 2026-07-25, against production (`thought2build.com` / `www.thought2build.com`).
@@ -254,5 +406,5 @@ an explicit host decision from the user before any further change lands.
 
 ## Post-fix
 
-_Not yet run — populate after Phase 4 verification, once Phase 3's Vercel
-cutover has shipped._
+See the "Phase 4 — Verification (post-cutover)" section above — Phase 3
+shipped and Phase 4 ran against live production on 2026-07-26.
