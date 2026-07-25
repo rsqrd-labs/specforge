@@ -28,9 +28,11 @@ Copy `.env.example` → `.env` and set `PUBLIC_SITE_URL` / `PUBLIC_API_URL`.
 
 `vercel.json` rewrites SPA-owned paths (`/dashboard`, `/workspace/*`,
 `/settings`, `/billing`, `/auth/*`, `/p/*`, `/sb/*`, `/assets/*`) to the SPA
-deployment. **The SPA deployment host in `vercel.json` is a placeholder
-(`thought2build-app.vercel.app`)** — set it to the real SPA zone URL when the
-marketing project is added to Vercel (Phase 7).
+deployment's stable Vercel URL (`thought2build.vercel.app` — the `thought2build`
+project's own default domain, confirmed live; **not** `thought2build-app.vercel.app`,
+which does not exist). If that hostname is ever changed in the `thought2build`
+Vercel project, `vercel.json` must be updated in the same change or every rewrite
+target 404s.
 
 ## Crawler policy / noindex integrity
 

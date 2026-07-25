@@ -1508,11 +1508,13 @@ This is a **second** Vercel project, separate from the SPA project you created i
 
 ### Step C — Point the rewrites at the real SPA host
 
-`apps/marketing/vercel.json` ships with a **placeholder** SPA host
-(`https://thought2build-app.vercel.app`) in every rewrite `destination`. Once the SPA
-project's production domain is assigned, replace that placeholder with the real
-SPA host so the app/artifact paths resolve. (Until this is correct, `/dashboard`,
-`/p/*`, etc. on the apex domain will 404 or loop.)
+`apps/marketing/vercel.json` rewrites every `/dashboard`, `/workspace/*`,
+`/settings`, `/billing`, `/auth/*`, `/p/*`, `/sb/*`, `/assets/*` destination to
+the SPA project's stable Vercel URL — for thought2build.com this is
+`https://thought2build.vercel.app` (the SPA project's own default domain; not a
+`-app` suffixed variant, which does not exist). If the SPA project's default
+domain is ever renamed, `vercel.json` must be updated in the same change, or
+`/dashboard`, `/p/*`, etc. on the apex domain will 404.
 
 ### Step D — Set the backend `SITE_URL`
 
