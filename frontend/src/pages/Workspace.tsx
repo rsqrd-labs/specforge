@@ -563,6 +563,14 @@ export default function Workspace() {
   }, [generationTerminal, showGenerationTerminal])
   const handleReconnectTerminal = useCallback(
     (run: GenerationRun) => {
+      // A `blocked` run is a quality-gate hold, not a stopped/failed generation:
+      // the reconnect poll's `setStage(fresh)` (useReconnectPoll.ts) already
+      // populated `qualityGate` from the persisted stage, so the dedicated
+      // popup renders on its own. Firing the generic full-screen terminal alert
+      // here too stacks its `action-alert-backdrop` (z-index 120) on top of the
+      // quality-gate popup (z-index 70) and silently swallows every click aimed
+      // at Regenerate/Override/Dismiss underneath it.
+      if (run.status === "blocked") return
       if (generationTerminal?.generation_id === run.id) return
       showGenerationTerminal(run)
     },
