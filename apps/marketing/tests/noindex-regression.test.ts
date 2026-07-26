@@ -45,18 +45,27 @@ describe("noindex regression — public artifact routes stay non-indexable", () 
   describe("robots.txt disallows the artifact routes in BOTH zones", () => {
     // Marketing zone: templated (src/pages/robots.txt.ts, T-2.3), not a
     // static file — assert on the built dist output, which is what actually
-    // ships. `frontend/public/robots.txt` is still a plain static file.
-    const cases: Array<{ label: string; robots: string }> = [
-      { label: "apps/marketing/dist/robots.txt (built)", robots: readDist("robots.txt") },
-      { label: "frontend/public/robots.txt", robots: readRepo("frontend/public/robots.txt") },
-    ]
+    // ships. It stays selectively crawlable, so /p/ and /sb/ are called out
+    // by name.
+    it("apps/marketing/dist/robots.txt (built) disallows /p/ and /sb/", () => {
+      const robots = readDist("robots.txt")
+      expect(robots).toMatch(/^Disallow:\s*\/p\/\s*$/im)
+      expect(robots).toMatch(/^Disallow:\s*\/sb\/\s*$/im)
+    })
 
-    for (const { label, robots } of cases) {
-      it(`${label} disallows /p/ and /sb/`, () => {
-        expect(robots).toMatch(/^Disallow:\s*\/p\/\s*$/im)
-        expect(robots).toMatch(/^Disallow:\s*\/sb\/\s*$/im)
-      })
-    }
+    // frontend/public/robots.txt (T-2.5, post Phase-3 cutover): this file now
+    // only governs the raw SPA deployment host (thought2build.vercel.app),
+    // which the apex/www rewrites never expose to a crawler. Since nothing on
+    // that host should be indexed at all, it blanket-disallows every path
+    // rather than special-casing /p/ and /sb/ — a strict superset of the
+    // narrow disallow it replaced, so assert the stronger guarantee directly
+    // instead of pattern-matching for the two paths that no longer appear by
+    // name.
+    it("frontend/public/robots.txt blocks the entire raw deployment host", () => {
+      const robots = readRepo("frontend/public/robots.txt")
+      expect(robots).toMatch(/^User-agent:\s*\*\s*$/im)
+      expect(robots).toMatch(/^Disallow:\s*\/\s*$/im)
+    })
   })
 
   describe("apps/marketing/vercel.json", () => {

@@ -3,6 +3,7 @@
 // demo is a curated, first-party example of one rough idea expanded into the
 // four Thought2Build artifacts. Lists every demo; cards link the detail routes.
 import ContentLayout from "../../layouts/ContentLayout.astro"
+import HubCrossLinks from "../../components/content/HubCrossLinks.astro"
 import { getDemoPages, demoPath } from "../../lib/sanity"
 import { breadcrumbListSchema, type BreadcrumbItem } from "../../lib/seo"
 
@@ -31,6 +32,48 @@ const jsonLd = breadcrumbListSchema(crumbs)
       </p>
     </header>
 
+    <section class="hub-orientation">
+      <p>
+        Every product page makes claims about what its output looks like. Almost none
+        of them show you the actual output. That's usually not an accident — a real,
+        unedited generation reveals a lot more about a tool's ceiling and its rough
+        edges than a curated screenshot does. This hub exists to close that gap: real
+        first-party demos, not synthetic marketing copy dressed up as a product screenshot.
+      </p>
+      <h2>What's in a demo, and what isn't</h2>
+      <p>
+        Each demo starts from a single rough idea — the kind of one-line pitch you'd
+        actually type in, not a carefully pre-optimized prompt — and shows the full
+        artifact set Thought2Build produces from it: the SPEC with requirements and
+        constraints, the PLAN with architecture and sequencing, the HARNESS of
+        acceptance tests, and the TASKS breakdown ready for handoff. Nothing here is
+        sourced from a live user workspace or a private storyboard; demos are curated
+        and authored specifically to be public, so there's no risk of anyone's private
+        project data showing up as a marketing example.
+      </p>
+      <p>
+        Use these the way you'd use a worked example anywhere else: read the starting
+        idea, then judge the output on its own terms. Is the spec specific enough to
+        review? Does the plan make an actual architectural decision instead of hedging?
+        Do the acceptance tests define "done" in a way you could check? Would you want
+        to hand the tasks stage to an engineer, or a coding agent, as-is? That's a more
+        honest signal than any feature list, and it's the same output quality bar we
+        hold ourselves to internally before anything ships here.
+      </p>
+      <p>
+        We're deliberately picky about what earns a place on this hub. A demo that
+        looks impressive but is really just a restated feature list doesn't teach a
+        visitor anything they couldn't get from the homepage, so it doesn't get
+        published. Each one is chosen because the starting idea and the resulting
+        artifacts together show a real decision Thought2Build had to make — a
+        non-obvious architectural tradeoff, a constraint that reshaped the task
+        breakdown, an acceptance test that would have caught a bug a vaguer spec would
+        have missed. That's the bar: would this demo change your mind about whether the
+        output is good enough to build from, not just whether the tool can produce text
+        quickly.
+      </p>
+    </section>
+
     {docs.length > 0 ? (
       <div class="hub-grid">
         {docs.map((doc) => (
@@ -44,5 +87,7 @@ const jsonLd = breadcrumbListSchema(crumbs)
     ) : (
       <p class="hub-empty">New demos are on the way. Check back soon.</p>
     )}
+
+    <HubCrossLinks current="/demos" />
   </main>
 </ContentLayout>

@@ -723,3 +723,20 @@ jobs:
           VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
           VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
           VERCEL_PROJECT_ID: ${{ secrets.VERCEL_MARKETING_PROJECT_ID }}
+
+      # SEO remediation plan T-5.3 (issue #18): instant-submit the marketing
+      # sitemap's URLs to IndexNow (Bing/Yandex) right after a live marketing
+      # deploy, instead of waiting for the next crawl cycle. Gated identically
+      # to the deploy step above, with no `always()` — a failed "Deploy
+      # marketing to Vercel" step must skip this one too (default GitHub
+      # Actions behavior), since submitting URLs for a deploy that didn't
+      # actually ship would be worse than not submitting at all. Within that,
+      # the script itself is non-fatal by design (always exits 0, reports
+      # failures as `::warning::`) — a transient IndexNow/CDN-propagation
+      # hiccup must never fail a deploy job that otherwise succeeded.
+      - name: Notify IndexNow of updated marketing URLs
+        if: ${{ needs.changes.outputs.marketing == 'true' && env.VERCEL_MARKETING_PROJECT_ID != '' }}
+        run: node apps/marketing/scripts/submit-indexnow.mjs
+        env:
+          INDEXNOW_SITE_URL: https://thought2build.com
+          INDEXNOW_KEY: ef7228a2eede034338007049a8149ac2

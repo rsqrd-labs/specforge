@@ -1,10 +1,12 @@
-# NOTE: At the apex domain this file is shadowed by the marketing zone's
-# robots.txt (apps/marketing/public/robots.txt is authoritative). This copy is
-# kept consistent for direct hits on the SPA deployment URL.
+# SEO remediation plan T-2.5 / issue #18: as of the Phase 3 domain cutover
+# (2026-07-26), thought2build.com and www are owned by the marketing zone
+# (apps/marketing/public robots policy is authoritative there). This file only
+# governs direct hits on the SPA's raw deployment host
+# (thought2build.vercel.app) — apex/www never serve this file, since the
+# marketing zone's own root-level robots.txt.ts endpoint answers /robots.txt
+# on those hosts directly (it is not one of the proxied rewrite paths in
+# apps/marketing/vercel.json). The raw deployment host has no reason to be
+# crawled or indexed at all, so block it outright rather than special-casing
+# /p/ and /sb/ here.
 User-agent: *
-# T-USE-10 / issue #18: public shared specs (/p/) and storyboards (/sb/) are
-# intentionally noindex. This Disallow is the primary document-level guard for
-# compliant crawlers; the _headers X-Robots-Tag and JS-injected meta are the
-# secondary layers.
-Disallow: /p/
-Disallow: /sb/
+Disallow: /

@@ -5,6 +5,7 @@
 // framing in-repo (detail docs are Sanity-authored later); cards link the
 // detail pages so nothing is orphaned.
 import ContentLayout from "../../layouts/ContentLayout.astro"
+import HubCrossLinks from "../../components/content/HubCrossLinks.astro"
 import { getGuides, guidePath } from "../../lib/sanity"
 import { breadcrumbListSchema, type BreadcrumbItem } from "../../lib/seo"
 
@@ -33,6 +34,46 @@ const jsonLd = breadcrumbListSchema(crumbs)
       </p>
     </header>
 
+    <section class="hub-orientation">
+      <p>
+        Spec-driven development means writing down what you're building, why, and how
+        you'll know it's done — before any code exists. That used to be optional. It
+        stopped being optional the moment coding agents entered the loop. An engineer
+        reading a vague brief will ask a clarifying question in Slack; Claude Code,
+        Cursor, or Copilot will confidently fill the gap with an assumption you never
+        agreed to, then keep building on top of it for another twenty files.
+      </p>
+      <h2>Why a written spec still matters when an agent writes the code</h2>
+      <p>
+        The failure mode is almost always the same: a task that sounded clear in
+        conversation turns out to have three unstated requirements, no defined
+        acceptance criteria, and no plan for how the pieces fit together. A coding
+        agent doesn't push back on ambiguity the way a teammate does — it resolves it
+        silently, in whatever direction the training data leans, and the drift compounds
+        with every subsequent prompt. By the time a human reviews the output, the PR is
+        large, the intent is buried, and "is this actually what I asked for" is a hard
+        question to answer.
+      </p>
+      <p>
+        A structured spec closes that gap up front. Thought2Build's own pipeline —
+        SPEC, then PLAN, then a HARNESS of acceptance tests, then a TASKS breakdown —
+        exists because each stage catches a different class of ambiguity: the spec
+        pins down requirements and constraints, the plan pins down architecture and
+        sequencing, the harness pins down what "correct" means in a way a test can
+        check, and the tasks stage turns all of it into units of work small enough to
+        review and hand off individually.
+      </p>
+      <p>
+        These guides walk through that discipline in practice: how to write a spec an
+        agent can't misread, how to structure a handoff so a coding agent has
+        everything it needs and nothing it has to guess, and how to go from an approved
+        plan to a shipped feature without losing the acceptance criteria along the way.
+        They're written for the person doing the handoff, not for a specific tool — the
+        same discipline holds whether the agent on the other end is Claude Code, Cursor,
+        or a human engineer who'd also rather not guess.
+      </p>
+    </section>
+
     {guides.length > 0 ? (
       <div class="hub-grid">
         {guides.map((guide) => (
@@ -46,5 +87,7 @@ const jsonLd = breadcrumbListSchema(crumbs)
     ) : (
       <p class="hub-empty">New guides are on the way. Check back soon.</p>
     )}
+
+    <HubCrossLinks current="/guides" />
   </main>
 </ContentLayout>

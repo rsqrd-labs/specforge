@@ -3,6 +3,7 @@ import { defineConfig } from "astro/config"
 import tailwind from "@astrojs/tailwind"
 import react from "@astrojs/react"
 import sitemap from "@astrojs/sitemap"
+import { fetchLastmodMap } from "./src/lib/sitemap-lastmod"
 
 // Canonical/OG/sitemap base. `PUBLIC_SITE_URL` is the single source of truth for
 // the marketing origin; default keeps local builds working without env wiring.
@@ -45,6 +46,11 @@ function isSitemapExcluded(pathname) {
   )
 }
 
+// Per-page freshness signal (issue #18, Phase 7 T-7.5): look up each route's
+// real Sanity `_updatedAt` before falling back to build time below. Resolved
+// once per build, top-level, since `serialize` itself must stay synchronous.
+const lastmodByPath = await fetchLastmodMap()
+
 // https://astro.build/config
 export default defineConfig({
   site,
@@ -83,11 +89,12 @@ export default defineConfig({
         const url = isHome
           ? item.url.replace(/\/?$/, "/")
           : item.url.replace(/\/$/, "")
+        const sanityLastmod = lastmodByPath.get(new URL(url).pathname)
         return {
           ...item,
           url,
           priority: isHome ? 1.0 : 0.7,
-          lastmod: item.lastmod ?? new Date().toISOString(),
+          lastmod: sanityLastmod ?? item.lastmod ?? new Date().toISOString(),
         }
       },
     }),
