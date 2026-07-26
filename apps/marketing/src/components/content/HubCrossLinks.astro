@@ -1,0 +1,30 @@
+---
+// Shared "explore the other hubs" block for the five content hub index pages
+// (issue #18, Phase 6 / T-6.3). CONTENT_HUBS (consts.ts) is already the single
+// source of truth for hub nav + blurbs; this just renders it minus the hub
+// the visitor is already on, so every hub links to every sibling hub without
+// five copies of the same markup drifting independently.
+import { CONTENT_HUBS } from "../../consts"
+
+interface Props {
+  /** Path of the hub this component is rendered on, e.g. "/guides". */
+  current: string
+}
+
+const { current } = Astro.props
+const siblings = CONTENT_HUBS.filter((hub) => hub.path !== current)
+---
+
+<nav class="hub-crosslinks" aria-label="Other content hubs">
+  <h2>Explore the other hubs</h2>
+  <ul>
+    {siblings.map((hub) => (
+      <li>
+        <a href={hub.path}>
+          <span class="hub-crosslinks-label">{hub.label}</span>
+          <span class="hub-crosslinks-blurb">{hub.blurb}</span>
+        </a>
+      </li>
+    ))}
+  </ul>
+</nav>

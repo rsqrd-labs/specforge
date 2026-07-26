@@ -349,6 +349,12 @@ describe("phase14 public share frontend", () => {
   it("public robots.txt disallows /p/ crawl path", async () => {
     // Tests: T-USE-10, Plan §18.4: belt-and-suspenders — the response header
     // is the primary control, but robots.txt also disallows /p/.
+    // T-2.5 (post Phase-3 cutover): frontend/public/robots.txt now only
+    // governs the raw SPA deployment host, which nothing should crawl at
+    // all — it blanket-disallows every path ("Disallow: /") rather than
+    // naming /p/ specifically. That's a strict superset of the narrow
+    // disallow it replaced, so accept it here too (see the parallel
+    // reasoning in apps/marketing/tests/noindex-regression.test.ts).
     const candidates = [
       "frontend/public/robots.txt",
       "frontend/public/robots/robots.txt",
@@ -356,7 +362,7 @@ describe("phase14 public share frontend", () => {
     let foundDisallow = false
     for (const candidate of candidates) {
       const source = await tryRead(candidate)
-      if (source && /disallow:\s*\/p\//i.test(source)) {
+      if (source && (/disallow:\s*\/p\//i.test(source) || /^disallow:\s*\/\s*$/im.test(source))) {
         foundDisallow = true
         break
       }

@@ -3,6 +3,7 @@
 // cluster — "spec-to-build for <X>", "turn an idea into a build plan". Lists
 // every use-case page; cards link the detail routes.
 import ContentLayout from "../../layouts/ContentLayout.astro"
+import HubCrossLinks from "../../components/content/HubCrossLinks.astro"
 import { getSeoPages, seoPagePath } from "../../lib/sanity"
 import { breadcrumbListSchema, type BreadcrumbItem } from "../../lib/seo"
 
@@ -31,6 +32,49 @@ const jsonLd = breadcrumbListSchema(crumbs)
       </p>
     </header>
 
+    <section class="hub-orientation">
+      <p>
+        "Spec-to-build" isn't one workflow — it's the same underlying discipline
+        applied to different starting points and different people. A solo founder
+        scoping an MVP has a different problem than a product manager who needs a PRD
+        an engineering team will actually commit to, which is different again from an
+        engineering lead trying to get consistent output from a coding agent across a
+        dozen tickets a week. What they share is the same gap: an idea in someone's
+        head, and a need for that idea to become something structured enough to build
+        from, review, and hold someone accountable to.
+      </p>
+      <h2>The jobs this covers</h2>
+      <p>
+        Each use case on this hub starts from a real job, not a feature list: turning a
+        one-line pitch into a fundable-looking spec, writing a PRD that survives contact
+        with an engineering review, briefing a coding agent so it doesn't have to guess
+        at acceptance criteria, or standardizing how a team writes specs so two people's
+        output doesn't look like it came from two different companies. The common
+        thread across all of them is Thought2Build's four-stage pipeline — SPEC, PLAN,
+        HARNESS, TASKS — applied to that specific job's constraints and audience.
+      </p>
+      <p>
+        These aren't abstract capability descriptions. Each page walks through what the
+        input looks like, what the generated artifacts look like for that scenario, and
+        what changes about the review process once there's a structured plan and a set
+        of acceptance tests instead of a paragraph in a ticket. If you're trying to
+        figure out whether a spec-to-build workspace fits how your team actually works —
+        not just whether it can generate text — this is the fastest way to find the
+        scenario closest to yours.
+      </p>
+      <p>
+        A few patterns show up across nearly every use case here. Every workflow ends
+        with a human review gate — nothing is treated as final until someone approves
+        it, whether that's a founder sanity-checking scope or a tech lead signing off
+        on an architecture decision. Every workflow produces artifacts that version and
+        diff, so "what changed between draft two and draft three" is answerable instead
+        of a guess. And every workflow assumes the next step after the spec is real
+        work — handing a plan to an engineer, opening tasks as GitHub issues, or feeding
+        a tasks breakdown straight into a coding agent's context window — rather than
+        treating the document as the end product in itself.
+      </p>
+    </section>
+
     {docs.length > 0 ? (
       <div class="hub-grid">
         {docs.map((doc) => (
@@ -44,5 +88,7 @@ const jsonLd = breadcrumbListSchema(crumbs)
     ) : (
       <p class="hub-empty">New use cases are on the way. Check back soon.</p>
     )}
+
+    <HubCrossLinks current="/use-cases" />
   </main>
 </ContentLayout>

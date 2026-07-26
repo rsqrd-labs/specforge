@@ -3,6 +3,7 @@
 // Y" / "best tool for specs/PRDs" queries. Lists every comparison page; cards
 // link the detail routes.
 import ContentLayout from "../../layouts/ContentLayout.astro"
+import HubCrossLinks from "../../components/content/HubCrossLinks.astro"
 import { getSeoPages, seoPagePath } from "../../lib/sanity"
 import { breadcrumbListSchema, type BreadcrumbItem } from "../../lib/seo"
 
@@ -31,6 +32,47 @@ const jsonLd = breadcrumbListSchema(crumbs)
       </p>
     </header>
 
+    <section class="hub-orientation">
+      <p>
+        Most "best AI spec tool" roundups compare feature checklists — who has a Notion
+        integration, who has more templates — without addressing the question that
+        actually determines whether a tool is useful three months in: does the output
+        hold up under review, and does it survive being handed to someone else? A tool
+        that generates a plausible-looking document in ten seconds is not the same as a
+        tool that generates a document an engineer, or a coding agent, can build from
+        without a follow-up conversation.
+      </p>
+      <h2>What actually differs between spec and planning tools</h2>
+      <p>
+        The comparisons on this hub focus on the dimensions we think matter for that
+        outcome: how deep the generated structure actually goes (a single "requirements"
+        blob versus separate, cross-referenced spec/plan/validation/task stages), whether
+        there's a human review step before anything is treated as final, whether the
+        artifacts version and diff so you can see what changed between drafts, whether
+        the output is shaped for handoff to a coding agent specifically rather than just
+        for reading, and what the actual cost model is once you go past a free tier.
+      </p>
+      <p>
+        We hold these pages to the same bar we'd want applied to us: specific, checkable
+        claims about how a tool behaves, not vague superiority language. Where a
+        comparison names a feature we don't have, or a real limitation on our side, it
+        stays in — the goal is to help you pick the right tool for your workflow, which
+        is sometimes going to be Thought2Build and sometimes isn't. If you find a claim
+        here that's gone stale as a competitor ships an update, that's useful to know;
+        tell us and we'll fix it.
+      </p>
+      <p>
+        We'd also rather tell you when a competitor is the better fit than pretend
+        otherwise. A lightweight note-taking tool with an AI assistant bolted on is a
+        fine choice if all you need is a single document and don't care about versioned
+        drafts or a validation stage. A tool built specifically around agent handoff is
+        the better choice once the artifact needs to survive contact with an actual
+        build — reviewed, diffed, and traceable from requirement to task to shipped
+        code. Read the comparisons with that distinction in mind rather than looking for
+        a single universal winner, because for a category this new, there usually isn't one.
+      </p>
+    </section>
+
     {docs.length > 0 ? (
       <div class="hub-grid">
         {docs.map((doc) => (
@@ -44,5 +86,7 @@ const jsonLd = breadcrumbListSchema(crumbs)
     ) : (
       <p class="hub-empty">New comparisons are on the way. Check back soon.</p>
     )}
+
+    <HubCrossLinks current="/compare" />
   </main>
 </ContentLayout>
