@@ -404,7 +404,184 @@ an explicit host decision from the user before any further change lands.
 
 ---
 
+## Phase 2 — T-2.5 closeout (deferred item, now unblocked)
+
+**Landed:** 2026-07-26. Plan §5 T-2.5 was deliberately deferred at Phase-2
+time ("apply only AFTER Phase 3 is verified") because at that point the SPA
+build was still what was live at the apex — locking the SPA's `robots.txt`
+would have deepened the outage. Phase 4 confirmed the cutover is live and
+correct, so this is now safe to close.
+
+[`frontend/public/robots.txt`](../frontend/public/robots.txt) changed from
+`Disallow: /p/` + `Disallow: /sb/` to a blanket `Disallow: /`. Rationale: the
+apex and `www` no longer serve this file at all — the marketing zone's own
+`src/pages/robots.txt.ts` (T-2.3) answers `/robots.txt` on those hosts
+directly, and `/robots.txt` is not one of the proxied paths in
+`apps/marketing/vercel.json`. This file now only governs direct hits on the
+SPA's raw deployment host (`thought2build.vercel.app`), which has no reason
+to be crawled or indexed at all — a blanket disallow is simpler and stricter
+than continuing to special-case `/p/`/`/sb/` on a host nothing should reach
+via search in the first place. No test asserts on this file's content
+(`StoryboardPublic.test.tsx`'s `robots` reference is the unrelated
+JS-injected `<meta name="robots">` tag), so there is no coupling to update.
+
+**AC verification:** deferred to the next live check of
+`thought2build.vercel.app/robots.txt` (plan §5 T-2.5's own AC) — not
+re-probed in this session since it requires a fresh Vercel deploy of the
+`frontend` project to pick up the change.
+
+---
+
+## Phase 5 — Index registration (in progress)
+
+**Started:** 2026-07-26. Per plan §8 ownership table this phase is
+agent-driven-via-Playwright but human-gated on DNS/account access — both
+gates were hit immediately, which is the expected shape of this phase, not a
+blocker in the code sense.
+
+### T-5.1 Google Search Console — domain property created, verification pending on the user
+
+Using the already-authenticated Google session (`arvindsathyan@gmail.com`)
+in the Playwright browser profile, confirmed via `search.google.com/search-console`
+redirecting to the welcome screen that **no property existed yet** on this
+account. Started a **Domain property** for `thought2build.com` (not URL-prefix
+— per plan §8 T-5.1.1, a domain property covers apex/`www`/http/https in one
+verification instead of four). Google issued a DNS TXT verification record
+and the property is now saved in a pending/unverified state (confirmed by
+reopening it via "Already started? Finish verification").
+
+**Action required (human — DNS registrar access, per plan §2 credential
+boundary):**
+
+| Field | Value |
+| --- | --- |
+| Record type | `TXT` |
+| Host/name | `@` (root of `thought2build.com` — exact field name depends on registrar) |
+| Value | `google-site-verification=XPfo13CWlMu1j-lYn7sHesf3zMe1i-h-kptWTyCqXy4` |
+
+After adding the record (allow up to ~24h for DNS propagation per Google's
+own note in the dialog), either the agent can click "Verify" on a future run,
+or the user can do it directly at
+`search.google.com/search-console/welcome` → "Already started? Finish
+verification" → `thought2build.com` → Verify.
+
+**Not yet done, blocked on verification above:** submitting
+`https://thought2build.com/sitemap-index.xml` (T-5.1.2), URL Inspection on
+the homepage (T-5.1.3), Request Indexing on homepage + 5 hubs (T-5.1.4), and
+the Crawl Stats check for pre-cutover crawl failures (T-5.1.5). Google's own
+UI gates all of these behind a verified property — there is no way to submit
+a sitemap to an unverified domain property. Revisit immediately once DNS is
+live.
+
+### T-5.2 Bing Webmaster Tools — blocked, no authenticated session
+
+`bing.com/webmasters/home` redirected to the logged-out marketing page — no
+Microsoft/Bing account is signed in in this browser profile (unlike Google,
+where an existing session was already present). Per plan §2's credential
+boundary, the agent does not have and must not request Microsoft credentials.
+
+**Action required (human):** sign in to Bing Webmaster Tools with whichever
+Microsoft account should own this property, then either import the property
+directly from Search Console (available once T-5.1 is verified — it pulls
+verification status from GSC, avoiding a second DNS record) or verify
+`thought2build.com` independently. Once a session exists, the agent can
+resume driving it via Playwright per plan §2.
+
+### T-5.3 IndexNow — implemented
+
+**Landed:** 2026-07-26. Credential-free per plan §8, so unlike T-5.1/T-5.2 this
+required no human gate and was implemented in full:
+
+- [`apps/marketing/public/ef7228a2eede034338007049a8149ac2.txt`](../apps/marketing/public/ef7228a2eede034338007049a8149ac2.txt) —
+  the IndexNow key, published as a plain-text file at the site root (IndexNow's
+  own ownership proof; not a secret — the protocol requires it to be public).
+- [`apps/marketing/scripts/submit-indexnow.mjs`](../apps/marketing/scripts/submit-indexnow.mjs) —
+  fetches `sitemap-index.xml`, follows the `<sitemapindex>` → `<urlset>` chain
+  (so it stays correct once content growth splits the sitemap, plan §9 T-6.4),
+  and POSTs the flattened URL list to `https://api.indexnow.org/indexnow` in a
+  single call. Retries transient failures (3 attempts, 3s backoff — covers a
+  brief post-deploy CDN-propagation gap) and is deliberately best-effort: it
+  always exits 0 and reports failures as a `::warning::` annotation, never a
+  job failure, since an indexing nicety must not be able to fail a deploy that
+  otherwise shipped correctly.
+- Wired into `.github/workflows/ci.yml`'s `deploy` job as "Notify IndexNow of
+  updated marketing URLs", immediately after "Deploy marketing to Vercel",
+  gated on the same condition (marketing changed + the Vercel project id is
+  set) with no `always()` — if the deploy step itself fails, this step is
+  correctly skipped too (submitting URLs for a deploy that didn't ship would
+  be actively wrong).
+- New pure-unit tests in [`apps/marketing/tests/indexnow.test.ts`](../apps/marketing/tests/indexnow.test.ts)
+  (9 tests, network-free — fixtures shaped like real Astro sitemap output)
+  cover the sitemap-index-flattening logic, including both unreachable-index
+  and unreachable-child-sitemap failure paths.
+
+**Live-verified end to end** (ran the script locally against real production,
+not just the unit tests):
+
+```
+$ INDEXNOW_SITE_URL=https://thought2build.com INDEXNOW_KEY=ef7228a2ee...49ac2 \
+  node apps/marketing/scripts/submit-indexnow.mjs
+submit-indexnow: submitted 7 URL(s) to IndexNow (status 202).
+```
+
+`202` is IndexNow's expected response for a key that is not yet reachable at
+its `keyLocation` — confirmed via `curl` that the key file 404s in production
+right now (`ef7228a2eede034338007049a8149ac2.txt` isn't deployed until this
+commit ships). IndexNow queues the submission and verifies the key
+asynchronously; once this change deploys, the key file goes live and both the
+already-queued submission and every future CI-triggered one verify cleanly.
+No action needed from the user — this self-resolves on deploy.
+
+### Fixed in this pass: a real test/code drift, not just new work
+
+While re-verifying Phase 2's T-2.5 closeout, `apps/marketing/tests/noindex-regression.test.ts`
+turned out to assert the **old** narrow `frontend/public/robots.txt` policy
+(`Disallow: /p/` + `Disallow: /sb/` as literal lines) — the prior session's
+claim that "no test asserts on this file's content" was wrong; this one does,
+by design (it's the noindex regression guard). T-2.5's blanket `Disallow: /`
+is a strict superset of the old policy (it already blocks `/p/` and `/sb/`
+along with everything else), so the test was updated to assert the stronger,
+now-correct guarantee directly (`User-agent: *` + `Disallow: /`) instead of
+pattern-matching for path segments that no longer appear verbatim. Confirmed
+this was a genuine gap, not a false alarm, by running the full suite before
+touching it: `apps/marketing/tests/noindex-regression.test.ts` failed with
+exactly this mismatch. All 173 marketing tests pass after the fix
+(`pnpm check`, `pnpm build`, `pnpm test` all green).
+
+**Net effect:** Phase 5 is now agent-complete on every surface that doesn't
+require a credential the agent doesn't hold. What remains — GSC domain
+verification and Bing sign-in — cannot be crossed without the user adding one
+DNS TXT record and signing into a Microsoft account (plan §2 hard boundary).
+Everything on the agent's side of that boundary (starting both properties,
+extracting the exact values needed, and now IndexNow end to end) is done.
+
+---
+
 ## Post-fix
 
 See the "Phase 4 — Verification (post-cutover)" section above — Phase 3
 shipped and Phase 4 ran against live production on 2026-07-26.
+
+---
+
+## Phase 10 — T-10.1 regression monitor
+
+**Landed:** 2026-07-26. New scheduled workflow
+[`.github/workflows/marketing-monitor.yml`](../.github/workflows/marketing-monitor.yml)
+— runs every 30 minutes plus `workflow_dispatch`, no secrets/credentials
+required (pure public `curl` against `thought2build.com`). Three checks, each
+a direct regression guard against the exact failure modes this plan fixed:
+
+| Check | Fails if |
+| --- | --- |
+| `sitemap-index.xml` → 200 | The marketing zone detaches from the apex again (was a 404 in the baseline) |
+| Homepage body > 5,000 bytes and contains `rel="canonical"` | The apex reverts to serving the 1,113-byte SPA shell with no metadata |
+| `www` → 308 | The apex/`www` redirect direction reverts or breaks |
+
+Live-verified: ran all three checks by hand against production immediately
+before adding the workflow (`sitemap-index.xml` → 200; homepage → 17,601
+bytes with `rel="canonical"` present; `www` → `HTTP/2 308`) — the workflow
+would pass on its first scheduled run. Deliberately a separate file from
+`production-smoke.yml` (that workflow is manual-dispatch-only, authenticated,
+and checks the backend API — a different surface and trigger model than an
+unauthenticated, scheduled, public-HTML check).

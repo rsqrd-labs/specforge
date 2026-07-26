@@ -1,0 +1,61 @@
+name: Marketing Regression Monitor
+
+# SEO remediation plan T-10.1 (issue #18): the Phase 1-5 outage — the marketing
+# zone silently never attaching to the production domain — was invisible for
+# the entire period since go-live because nothing checked the public surface
+# on its own. This is that check: unauthenticated, credential-free, and
+# scheduled so a regression (sitemap 404, a redirect loop, the SPA shell
+# creeping back onto the apex) surfaces as a failed run within the hour
+# instead of being found by accident weeks later.
+#
+# Deliberately NOT folded into production-smoke.yml: that workflow is
+# workflow_dispatch-only (manual, authenticated, credit-consuming backend
+# checks). This one is scheduled, needs zero secrets, and checks a completely
+# different surface (public marketing HTML, not the authenticated API).
+
+on:
+  schedule:
+    - cron: "*/30 * * * *" # every 30 minutes
+  workflow_dispatch: {}
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Sitemap index is reachable
+        run: |
+          status=$(curl -sS -o /dev/null -w "%{http_code}" --max-time 20 \
+            https://thought2build.com/sitemap-index.xml)
+          echo "sitemap-index.xml -> $status"
+          if [ "$status" != "200" ]; then
+            echo "::error::sitemap-index.xml returned $status, expected 200 — the marketing zone may have detached from the apex again."
+            exit 1
+          fi
+
+      - name: Homepage serves the static marketing build, not the SPA shell
+        run: |
+          body=$(curl -sS -L --max-time 20 https://thought2build.com/)
+          size=${#body}
+          echo "homepage body size -> $size bytes"
+          # The pre-fix SPA shell was exactly 1113 bytes with no metadata; a
+          # healthy Astro build is tens of KB. 5000 leaves comfortable margin
+          # against both without being so tight that a minor content edit trips it.
+          if [ "$size" -le 5000 ]; then
+            echo "::error::Homepage is only $size bytes — looks like the empty SPA shell, not the marketing build."
+            exit 1
+          fi
+          if ! echo "$body" | grep -q 'rel="canonical"'; then
+            echo "::error::Homepage HTML has no <link rel=\"canonical\"> — metadata is missing again."
+            exit 1
+          fi
+
+      - name: Canonical host resolves correctly
+        run: |
+          # www must 308-redirect to the apex (Phase 1 decision) and land on
+          # identical content — catches a reversed or dropped domain redirect.
+          headers=$(curl -sS -o /dev/null -D - --max-time 20 https://www.thought2build.com/)
+          echo "$headers" | grep -qi "^HTTP/[0-9.]* 308" || {
+            echo "::error::www.thought2build.com no longer 308-redirects to the apex."
+            exit 1
+          }
