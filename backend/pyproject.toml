@@ -56,7 +56,7 @@ dev = [
     "pytest-asyncio==1.*",
     "pytest-cov>=6,<8",
     "black==26.*",
-    "ruff==0.8.*",
+    "ruff>=0.8,<0.17",
     "pytest-mock",
     "aiosqlite>=0.22.1",
 ]
