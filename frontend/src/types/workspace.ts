@@ -14,31 +14,37 @@ export interface CoverageSummary {
 }
 
 /**
- * One construction check's outcome (Demo Day mode). Mirrors the backend
- * `CheckResult.to_dict()` in `services/pipeline/demo_day_plan_linter.py`:
- * the human-readable check name (e.g. `dag_acyclic`), whether it passed, and
- * the specific gaps when it did not.
+ * One construction check's outcome. Mirrors the backend `CheckResult.to_dict()`
+ * in `services/pipeline/construction_checks.py`: the human-readable check name
+ * (e.g. `dag_acyclic`), whether it passed, and the specific gaps when it did not.
+ *
+ * `advisory` checks are computed and displayed but never flip `verified`. It is
+ * optional because verdicts persisted before the field existed do not carry it;
+ * `constructionVerdict.ts` falls back to the legacy id set for those.
  */
 export interface ConstructionCheck {
   name: string
   passed: boolean
   gaps: string[]
+  advisory?: boolean
 }
 
 /**
- * The persisted construction verdict for a Demo Day workspace (plan §7.2).
- * Shape mirrors `ConstructionVerdict.to_dict()`. `verified` is C1–C4 only
- * (C5/time-budget is advisory and never flips it). `checks` is keyed by the
- * check id (`C1`…`C5`). `stage_versions` stamps the version of each stage the
- * verdict ran against — comparing it to the live `Stage.current_version`s is the
- * staleness signal (plan §9.2). `estimated_minutes` is null when no per-task
- * estimate parsed (so the UI can say "no estimate" rather than imply a 0h build).
+ * The persisted construction verdict (plan §7.2). Shape mirrors
+ * `ConstructionVerdict.to_dict()` and is the same for both modes — Demo Day and
+ * standard mode run different check sets behind it. `verified` is every
+ * non-advisory check passing. `checks` is keyed by the check id (`C1`…).
+ * `stage_versions` stamps the version of each stage the verdict ran against —
+ * comparing it to the live `Stage.current_version`s is the staleness signal
+ * (plan §9.2). `estimated_minutes`/`time_budget_minutes` are Demo Day's advisory
+ * build-time calibration and are null in standard mode (and when no per-task
+ * estimate parsed, so the UI can say "no estimate" rather than imply a 0h build).
  */
 export interface ConstructionVerdict {
   verified: boolean
   checks: Record<string, ConstructionCheck>
   estimated_minutes: number | null
-  time_budget_minutes: number
+  time_budget_minutes: number | null
   stage_versions: Partial<Record<"spec" | "plan" | "harness" | "tasks", number>>
 }
 

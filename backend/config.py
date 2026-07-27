@@ -601,6 +601,24 @@ class Settings(BaseSettings):
     # frontend's VITE_DEMO_DAY_MODE flag) after the golden-corpus live gate.
     demo_day_mode_enabled: bool = False
 
+    # Construction-verifier enforcement. Both flags decide only whether a check
+    # can flip `verified` — the checks always run, and their gaps always render in
+    # CONSTRUCTION_REPORT.md and the UI. Shipping them un-enforced is what lets a
+    # new check be measured against real generations before it can turn an
+    # already-green package red: the checks assert `Plan refs`/`Harness refs`
+    # citations that the tasks prompts do not yet mandate, and those prompt edits
+    # ride a golden-corpus gate. Flip these (env-only, no redeploy) once the
+    # matching prompt release has cleared that gate.
+    #
+    # demo_day_plan_coverage_enforced — Demo Day C6 (plan_coverage): every
+    # load-bearing plan section (seed data, bootstrap/demo surface, external
+    # integrations, security architecture) is cited by ≥1 task's `Plan refs`.
+    demo_day_plan_coverage_enforced: bool = False
+    # standard_construction_verifier_enforced — the whole standard-mode verdict
+    # (requirement coverage, test coverage, acyclic DAG, plan coverage, e2e
+    # reachability). Off ⇒ computed, persisted and displayed with `verified` true.
+    standard_construction_verifier_enforced: bool = False
+
     # Increment generation (Phase 21 — T-279). The MVP ships the *additive* path
     # only: an increment appends new tasks with their existing content pinned by
     # stable, content-derived task_refs. Behaviour-changing increments (compute
