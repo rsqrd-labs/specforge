@@ -18,10 +18,13 @@ import {
   rejectStageDiff,
   updateStageContent,
 } from "../services/api"
+import { useReconnectPoll } from "../hooks/useReconnectPoll"
 import { useStageStore } from "../store/stageStore"
 import { useWorkspaceStore } from "../store/workspaceStore"
-import type { EvalResult, Stage, StageType } from "../types/stage"
+import type { EvalResult, GenerationRun, Stage, StageType } from "../types/stage"
 import type { WorkspaceWithStages } from "../types/workspace"
+
+const mockUseReconnectPoll = vi.mocked(useReconnectPoll)
 
 const uiMocks = vi.hoisted(() => ({
   cancelStream: vi.fn(),
@@ -611,5 +614,75 @@ describe("Workspace state matrix", () => {
     })
     await renderWorkspace([blocked])
     expect(screen.getByText("Review this blocked draft.")).toBeInTheDocument()
+  })
+
+  it("keeps the quality-gate popup's buttons clickable after a reconnected block (regression)", async () => {
+    // Simulates navigating away mid-generation and back: the stage mounts
+    // in_progress, useReconnectPoll (mocked here) detects the detached run
+    // settled with a quality-gate block, and delivers the fresh stage exactly
+    // as the real hook does. Firing the generic terminal alert on top of the
+    // popup for a `blocked` run stacks a full-viewport backdrop over it,
+    // silently eating every click on Regenerate/Override/Dismiss.
+    const inProgress = makeStage("tasks", {
+      status: "in_progress",
+      generation_action: "regenerate",
+      generation_started_at: NOW,
+    })
+    await renderWorkspace([inProgress])
+
+    const onTerminal = mockUseReconnectPoll.mock.calls.at(-1)?.[2] as
+      | ((run: GenerationRun) => void)
+      | undefined
+    expect(onTerminal).toBeTypeOf("function")
+
+    const blocked: Stage = {
+      ...inProgress,
+      status: "draft",
+      current_version: 2,
+      quality_gate: {
+        stage: "tasks",
+        kind: "missing_sections",
+        status: "blocked",
+        findings: [
+          { kind: "MissingSection", detail: "Acceptance criteria missing", reference: "AC" },
+        ],
+        recovery: {
+          action: "regenerate",
+          overridable: true,
+          credit_required: 10,
+          refunded_prior_attempt: false,
+          message: "Review this blocked draft.",
+        },
+      },
+    }
+
+    act(() => {
+      useStageStore.getState().setStage(blocked)
+      onTerminal?.({
+        id: "run-1",
+        stage_id: blocked.id,
+        action: "regenerate",
+        status: "blocked",
+        phase: "validating",
+        completed_parts: 1,
+        total_parts: 1,
+        started_at: NOW,
+        deadline_at: NOW,
+        heartbeat_at: NOW,
+        cancel_requested_at: null,
+        finished_at: NOW,
+        result_version: 2,
+        error_code: "missing_sections",
+        partial_saved: true,
+        refunded_credits: 0,
+        credit_was_deducted: true,
+      })
+    })
+
+    const regenerate = await screen.findByRole("button", { name: "Regenerate" })
+    expect(regenerate).toBeEnabled()
+    expect(screen.getByRole("button", { name: "Override and continue" })).toBeEnabled()
+    expect(screen.getByRole("button", { name: "Hide details" })).toBeEnabled()
+    expect(uiMocks.showAlert).not.toHaveBeenCalled()
   })
 })
