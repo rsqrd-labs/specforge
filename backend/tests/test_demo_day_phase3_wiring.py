@@ -18,7 +18,7 @@ from uuid import uuid4
 import pytest
 
 from schemas.workspace import WorkspaceResponse
-from services.pipeline import demo_day_verdict
+from services.pipeline import construction_verdict_service
 from services.pipeline.demo_day_plan_linter import (
     DEMO_DAY_DEFAULT_BUDGET_MINUTES,
     STAGE_TYPES,
@@ -143,33 +143,35 @@ def test_stale_when_stage_version_missing() -> None:
 
 
 # ---------------------------------------------------------------------------
-# demo_day_verdict.compute_verdict / current_versions / all_stages_present
+# construction_verdict_service.compute_verdict / current_versions / all_stages_present
 # ---------------------------------------------------------------------------
 
 
 def test_compute_verdict_stamps_versions_and_passes() -> None:
     stages = _stage_map(versions={"spec": 2, "plan": 1, "harness": 4, "tasks": 3})
-    verdict = demo_day_verdict.compute_verdict(_ws(), stages)
+    verdict = construction_verdict_service.compute_verdict(_ws(), stages)
     assert verdict.verified is True
     assert verdict.stage_versions == {"spec": 2, "plan": 1, "harness": 4, "tasks": 3}
     assert verdict.time_budget_minutes == DEMO_DAY_DEFAULT_BUDGET_MINUTES
 
 
 def test_compute_verdict_honours_workspace_budget() -> None:
-    verdict = demo_day_verdict.compute_verdict(_ws(budget=120), _stage_map())
+    verdict = construction_verdict_service.compute_verdict(
+        _ws(budget=120), _stage_map()
+    )
     assert verdict.time_budget_minutes == 120
 
 
 def test_all_stages_present_requires_content() -> None:
     stages = _stage_map()
-    assert demo_day_verdict.all_stages_present(stages) is True
+    assert construction_verdict_service.all_stages_present(stages) is True
     stages["harness"].content = ""
-    assert demo_day_verdict.all_stages_present(stages) is False
+    assert construction_verdict_service.all_stages_present(stages) is False
 
 
 def test_current_versions_reads_live() -> None:
     stages = _stage_map(versions={"spec": 5, "plan": 1, "harness": 1, "tasks": 2})
-    assert demo_day_verdict.current_versions(stages) == {
+    assert construction_verdict_service.current_versions(stages) == {
         "spec": 5,
         "plan": 1,
         "harness": 1,
@@ -178,18 +180,29 @@ def test_current_versions_reads_live() -> None:
 
 
 # ---------------------------------------------------------------------------
-# demo_day_verdict.ensure_fresh_verdict
+# construction_verdict_service.ensure_fresh_verdict
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_ensure_fresh_verdict_skips_standard_workspace() -> None:
+async def test_ensure_fresh_verdict_now_covers_standard_workspaces() -> None:
+    """Standard mode gets a verdict too — it used to be skipped entirely.
+
+    The mode decides WHICH linter runs, not WHETHER one runs: "if you implement
+    every task you get a working product" is the same claim in both modes.
+    """
     db = _FakeSession()
-    result = await demo_day_verdict.ensure_fresh_verdict(
-        db, _ws(mode="standard"), _stage_map()
+    ws = _ws(mode="standard")
+    result = await construction_verdict_service.ensure_fresh_verdict(
+        db, ws, _stage_map()
     )
-    assert result is None
-    assert db.commits == 0
+    assert result is not None
+    assert db.commits == 1
+    # The standard linter's own check set, not Demo Day's.
+    assert result["checks"]["C1"]["name"] == "requirement_coverage"
+    # Demo Day's build-time calibration is not a standard-mode concept.
+    assert result["estimated_minutes"] is None
+    assert result["time_budget_minutes"] is None
 
 
 @pytest.mark.asyncio
@@ -197,11 +210,11 @@ async def test_ensure_fresh_verdict_returns_existing_when_fresh() -> None:
     stages = _stage_map()
     fresh = {
         "verified": True,
-        "stage_versions": demo_day_verdict.current_versions(stages),
+        "stage_versions": construction_verdict_service.current_versions(stages),
     }
     ws = _ws(verdict=fresh)
     db = _FakeSession()
-    result = await demo_day_verdict.ensure_fresh_verdict(db, ws, stages)
+    result = await construction_verdict_service.ensure_fresh_verdict(db, ws, stages)
     assert result is fresh  # not recomputed
     assert db.commits == 0
 
@@ -215,7 +228,7 @@ async def test_ensure_fresh_verdict_recomputes_when_stale() -> None:
     }
     ws = _ws(verdict=stale)
     db = _FakeSession()
-    result = await demo_day_verdict.ensure_fresh_verdict(db, ws, stages)
+    result = await construction_verdict_service.ensure_fresh_verdict(db, ws, stages)
     assert db.commits == 1
     assert result is ws.construction_verdict
     assert result["verified"] is True  # the golden package verifies
@@ -228,7 +241,7 @@ async def test_ensure_fresh_verdict_skips_incomplete_package() -> None:
     stages["tasks"].content = ""  # tasks not generated yet
     ws = _ws(verdict=None)
     db = _FakeSession()
-    result = await demo_day_verdict.ensure_fresh_verdict(db, ws, stages)
+    result = await construction_verdict_service.ensure_fresh_verdict(db, ws, stages)
     assert result is None
     assert db.commits == 0
 
@@ -244,7 +257,9 @@ async def test_ensure_fresh_verdict_is_fail_open_on_error() -> None:
     prior = {"verified": False, "stage_versions": {"tasks": 0}}
     ws = _ws(verdict=prior)
     db = _BoomSession()
-    result = await demo_day_verdict.ensure_fresh_verdict(db, ws, _stage_map())
+    result = await construction_verdict_service.ensure_fresh_verdict(
+        db, ws, _stage_map()
+    )
     assert result is prior  # fell back to the persisted verdict
     assert db.rollbacks == 1
 
@@ -481,6 +496,8 @@ async def test_compute_verdict_async_matches_sync_on_pool_path(monkeypatch) -> N
 
     monkeypatch.setattr(settings, "cpu_offload_min_chars", 0)
     stages = _stage_map(versions={"spec": 2, "plan": 1, "harness": 4, "tasks": 3})
-    sync_verdict = demo_day_verdict.compute_verdict(_ws(), stages)
-    async_verdict = await demo_day_verdict.compute_verdict_async(_ws(), stages)
+    sync_verdict = construction_verdict_service.compute_verdict(_ws(), stages)
+    async_verdict = await construction_verdict_service.compute_verdict_async(
+        _ws(), stages
+    )
     assert async_verdict.to_dict() == sync_verdict.to_dict()

@@ -111,7 +111,7 @@ from services.observability import (
     record_judge_call_skipped,
     set_background_task_count,
 )
-from services.pipeline import demo_day_verdict
+from services.pipeline import construction_verdict_service
 from services.pipeline.admission import (
     GenerationAdmission,
     GenerationCapacityError,
@@ -3046,7 +3046,7 @@ class StageManager:
                         content_generation_id=None,
                         mode=gen_mode,
                     )
-                if gen_mode == "demo_day" and stage.type == "tasks":
+                if stage.type == "tasks":
                     self._schedule_construction_verifier(
                         workspace_id=workspace.id,
                         tasks_version=stage.current_version,
@@ -4130,7 +4130,7 @@ class StageManager:
                     content_generation_id=content_generation_id,
                     mode=mode,
                 )
-            if mode == "demo_day" and stage.type == "tasks":
+            if stage.type == "tasks":
                 self._schedule_construction_verifier(
                     workspace_id=workspace.id,
                     tasks_version=stage.current_version,
@@ -5562,7 +5562,7 @@ class StageManager:
             )
 
     # ------------------------------------------------------------------
-    # Demo Day construction verifier (plan §7.3)
+    # Construction verifier (plan §7.3) — both modes
     # ------------------------------------------------------------------
 
     def _schedule_construction_verifier(
@@ -5575,8 +5575,14 @@ class StageManager:
 
         Mirrors _schedule_critic_review: held in a module-level strong-ref set so
         the detached task is not garbage-collected mid-flight; removes itself on
-        completion and logs any unexpected error. Runs only for demo_day
-        workspaces (the caller guards on mode/stage).
+        completion and logs any unexpected error. Runs for BOTH modes after the
+        tasks stage (the caller guards on stage type); the mode decides which
+        linter runs, inside ``construction_verdict_service.compute_verdict``.
+
+        Detached by design: the tasks draft is already delivered and charged
+        before this is scheduled, so the verifier can never delay, block, or fail
+        a generation. It shares the advisory-task semaphore with the async critic
+        and eval, so it cannot starve a live stream either.
         """
         return _BACKGROUND_VERIFIER_TASKS.spawn(
             self._dispatch_construction_verifier(
@@ -5616,10 +5622,10 @@ class StageManager:
                 # verifier will (or did) run; never stamp a stale verdict.
                 if tasks_stage is None or tasks_stage.current_version != tasks_version:
                     return
-                if not demo_day_verdict.all_stages_present(stages):
+                if not construction_verdict_service.all_stages_present(stages):
                     return
 
-                verdict = await demo_day_verdict.compute_verdict_async(
+                verdict = await construction_verdict_service.compute_verdict_async(
                     workspace, stages
                 )
                 workspace.construction_verdict = verdict.to_dict()

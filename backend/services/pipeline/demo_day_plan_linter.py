@@ -14,9 +14,20 @@ guarantee by checking that the package is internally consistent:
   cited verbatim by the final task's ``Harness refs``.
 - C5 ``time_budget`` (advisory) — Σ ``Estimated minutes`` ≤ ``time_budget_minutes``
   (default 300).
+- C6 ``plan_coverage`` — every load-bearing plan section (seed data, bootstrap /
+  demo surface, external integrations, security architecture) is cited by ≥1
+  task's ``Plan refs``. Without this the plan→tasks join was empty: the plan
+  could specify the seed command, the run command, the REAL/MOCKED integration
+  stances and the auth stance, and the task list could implement none of them
+  while the verdict still read ``verified``.
+- C7 ``task_inventory`` (advisory) — the task count against the plan's own Build
+  Sequence steps and the spec's ``FR-NNN`` count.
 
-**Verdict:** ``verified = C1 and C2 and C3 and C4``. C5 is reported but never
-flips the verdict (the §2.2 separation of the two claims).
+**Verdict:** every non-advisory check must pass. C5 and C7 are reported but never
+flip the verdict (the §2.2 separation of the two claims). C6 is verdict-bearing
+only when ``enforce_plan_coverage`` is passed True — it ships False so the gaps
+are visible before any already-green package can turn red (the prompts that
+satisfy it land in a later, golden-corpus-gated release).
 
 Join-key parity is load-bearing (plan §7.1.1): this module deliberately reuses
 ``artifact_validator``'s regexes and section/path helpers so the linter joins on
@@ -28,7 +39,6 @@ if the token shape ever changes, both move together.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
 
 from services.pipeline.artifact_validator import (
     _AC_ID_RE,
@@ -40,15 +50,37 @@ from services.pipeline.artifact_validator import (
     _section_body,
 )
 
+# Verdict payload primitives are shared with the standard-mode linter so one
+# frontend renderer / report writer / JSONB column serves both modes. Re-exported
+# below for the existing import sites (`from ...demo_day_plan_linter import
+# ConstructionVerdict`), which must keep working unchanged.
+from services.pipeline.construction_checks import (
+    STAGE_TYPES,
+    CheckResult,
+    ConstructionVerdict,
+    is_verdict_stale,
+    plan_coverage_gaps,
+    resolve_verified,
+)
+from services.pipeline.construction_checks import (
+    field_value as _field_value,
+)
+
+__all__ = [
+    "DEMO_DAY_DEFAULT_BUDGET_MINUTES",
+    "STAGE_TYPES",
+    "CheckResult",
+    "ConstructionVerdict",
+    "is_verdict_stale",
+    "verify_construction",
+]
+
 # The linter's fallback build-time target when the workspace column is NULL. The
 # default lives here, not in the DB (plan §7.1.1 / §7.2).
 DEMO_DAY_DEFAULT_BUDGET_MINUTES = 300
 
-# The four stage types the verdict spans, in pipeline order. The verdict stamps a
-# version per type; a mismatch against the live versions is the staleness signal.
-STAGE_TYPES = ("spec", "plan", "harness", "tasks")
-
 _BACKTICK_TOKEN_RE = re.compile(r"`([^`]+)`")
+_FR_ID_RE = re.compile(r"\bFR-\d{3}\b")
 _ESTIMATED_MINUTES_RE = re.compile(r"\*\*Estimated minutes:\*\*\s*([0-9]+)")
 # The `_(none — <reason>)_` escape marks a setup-only task with no harness file;
 # we only need to detect the opener (em dash or hyphen, any reason).
@@ -61,40 +93,30 @@ _PRECONDITION_LABEL = "**Precondition:**"
 _HARNESS_REFS_LABEL = "**Harness refs:**"
 
 
-@dataclass
-class CheckResult:
-    """One construction check's outcome: pass/fail plus the specific gaps."""
+# The plan sections a Demo Day build cannot be "working" without, mapped to the
+# aliases that count as citing them in a task's `**Plan refs:**`. Deliberately
+# generous (see construction_checks.plan_coverage_gaps): a false negative would
+# mark every real package red and force the check off permanently.
+_DEMO_DAY_PLAN_COVERAGE: dict[str, tuple[str, ...]] = {
+    # Nothing seeds the demo ⇒ the third run of the demo differs from the first.
+    "## Data Model and Persistence": ("data model", "persistence", "schema", "seed"),
+    # Nothing makes the app run or deploy ⇒ there is no demo to give.
+    "## Environment and Bootstrap": ("environment", "bootstrap", "demo surface"),
+    # No task wires the boundary the harness mocks ⇒ the real call never happens.
+    "## External Integrations and Secrets": (
+        "external integration",
+        "integrations and secrets",
+        "integration",
+        "secrets",
+    ),
+    # The declared auth stance is designed and never implemented.
+    "## Security Architecture": ("security architecture", "security", "auth"),
+}
 
-    name: str
-    passed: bool
-    gaps: list[str] = field(default_factory=list)
-
-    def to_dict(self) -> dict:
-        return {"name": self.name, "passed": self.passed, "gaps": list(self.gaps)}
-
-
-@dataclass
-class ConstructionVerdict:
-    """The §7.2 verdict. ``to_dict`` is the persisted JSONB shape that
-    ``agent_manual_service.build_construction_report`` renders and the
-    ``construction_verdict`` workspace column stores."""
-
-    verified: bool
-    checks: dict[str, CheckResult]
-    # None — not 0 — when no per-task estimate parsed, so the report can say
-    # "no estimates available" rather than implying a 0-minute build.
-    estimated_minutes: int | None
-    time_budget_minutes: int
-    stage_versions: dict[str, int] = field(default_factory=dict)
-
-    def to_dict(self) -> dict:
-        return {
-            "verified": self.verified,
-            "checks": {cid: c.to_dict() for cid, c in self.checks.items()},
-            "estimated_minutes": self.estimated_minutes,
-            "time_budget_minutes": self.time_budget_minutes,
-            "stage_versions": dict(self.stage_versions),
-        }
+# The plan's own "nothing external is called" escape — the prompt mandates the
+# single line "None — <reason>". A build that calls nothing external needs no
+# integration task, so requiring one would be a guaranteed false positive.
+_PLAN_COVERAGE_NONE_ESCAPES = ("## External Integrations and Secrets",)
 
 
 # ---------------------------------------------------------------------------
@@ -119,22 +141,6 @@ def _task_blocks(tasks_md: str) -> list[tuple[int, str, str]]:
         header = match.group(0).rstrip(":")
         blocks.append((int(id_match.group(1)), header, block))
     return blocks
-
-
-def _field_value(block: str, label: str) -> str | None:
-    """Return the value following ``label`` (a ``**Field:**`` marker), or None if
-    the field is absent. Captures up to the next bold field, heading, or blank
-    line so a value that wraps onto an indented continuation line is preserved."""
-    idx = block.find(label)
-    if idx == -1:
-        return None
-    rest = block[idx + len(label) :]
-    stop = len(rest)
-    for pattern in (r"\n\s*\*\*[A-Za-z]", r"\n#{2,3}\s", r"\n\s*\n"):
-        match = re.search(pattern, rest)
-        if match is not None:
-            stop = min(stop, match.start())
-    return rest[:stop].strip()
 
 
 def _looks_like_file_token(token: str) -> bool:
@@ -302,6 +308,7 @@ def _check_time_budget(
                 "time_budget",
                 True,
                 ["no per-task **Estimated minutes:** values found (advisory only)"],
+                advisory=True,
             ),
             None,
         )
@@ -314,10 +321,65 @@ def _check_time_budget(
                     f"estimated build time {total} min exceeds the target budget "
                     f"{budget_minutes} min (advisory — does not affect the verdict)"
                 ],
+                advisory=True,
             ),
             total,
         )
-    return CheckResult("time_budget", True, []), total
+    return CheckResult("time_budget", True, [], advisory=True), total
+
+
+def _check_plan_coverage(plan_md: str, blocks: list[tuple[int, str, str]]) -> list[str]:
+    """C6 gaps: a load-bearing plan section no task implements.
+
+    The plan→tasks join was previously empty — C1–C4 join only on AC ids, harness
+    paths, the DAG and the e2e — so the seed command, the demo surface, the
+    REAL/MOCKED integration stances and the auth stance could all be specified in
+    the plan and dropped by the task list with the verdict still reading
+    ``verified``.
+    """
+    return plan_coverage_gaps(
+        plan_md=plan_md,
+        task_blocks=blocks,
+        required=_DEMO_DAY_PLAN_COVERAGE,
+        section_body=_section_body,
+        skip_if_body_starts_with_none=_PLAN_COVERAGE_NONE_ESCAPES,
+    )
+
+
+def _check_task_inventory(
+    spec_md: str, plan_md: str, blocks: list[tuple[int, str, str]]
+) -> CheckResult:
+    """C7 (advisory): is the task list plausibly complete for what was specified?
+
+    Purely a signal, never verdict-bearing — a genuinely tiny prototype can be
+    four tasks, and turning a heuristic count into a hard failure is exactly the
+    kind of false-positive that trains users to ignore the badge. Compares the
+    block count against the two things the package itself declares: the plan's own
+    Build Sequence steps and the spec's distinct FR count.
+    """
+    gaps: list[str] = []
+    count = len(blocks)
+    build_steps = len(
+        [
+            line
+            for line in _section_body(plan_md, "## Build Sequence").splitlines()
+            if re.match(r"\s*(?:[-*+]|\d+[.)])\s+\S", line)
+        ]
+    )
+    distinct_fr = len(set(_FR_ID_RE.findall(spec_md)))
+    if build_steps and count < build_steps:
+        gaps.append(
+            f"TASKS.md has {count} task blocks but the plan's ## Build Sequence "
+            f"names {build_steps} steps — at least one build step has no task "
+            "(advisory — does not affect the verdict)"
+        )
+    if distinct_fr and count < distinct_fr:
+        gaps.append(
+            f"TASKS.md has {count} task blocks for {distinct_fr} distinct FR-NNN "
+            "requirements — a task covering multiple requirements is usually "
+            "hiding several slices (advisory — does not affect the verdict)"
+        )
+    return CheckResult("task_inventory", not gaps, gaps, advisory=True)
 
 
 def _ordered_unique(values: list[str]) -> list[str]:
@@ -330,26 +392,6 @@ def _ordered_unique(values: list[str]) -> list[str]:
     return ordered
 
 
-def is_verdict_stale(verdict: dict | None, current_versions: dict[str, int]) -> bool:
-    """True when a persisted verdict was computed against older stage versions.
-
-    The verifier can only run once all four stages exist, but any stage can be
-    regenerated/refined afterward (plan §9.2). The verdict stamps each stage's
-    version; if any live version differs from the stamped one, the verdict is
-    stale and must be recomputed before it is trusted (on export, in the UI). A
-    missing/empty verdict is treated as stale so the first computation always
-    runs. A version absent from either side is treated as a mismatch (conservative
-    — recompute rather than serve a verdict that may not match the live package).
-    """
-    if not verdict:
-        return True
-    stamped = verdict.get("stage_versions") or {}
-    return any(
-        stamped.get(stage_type) != current_versions.get(stage_type)
-        for stage_type in STAGE_TYPES
-    )
-
-
 def verify_construction(
     *,
     spec: str,
@@ -358,12 +400,19 @@ def verify_construction(
     tasks: str,
     time_budget_minutes: int | None = None,
     stage_versions: dict[str, int] | None = None,
+    enforce_plan_coverage: bool = False,
 ) -> ConstructionVerdict:
-    """Run C1–C5 over the four finalised stage contents and return the verdict.
+    """Run C1–C7 over the four finalised stage contents and return the verdict.
 
-    ``plan`` is accepted for a uniform four-stage call site (and future checks);
-    C1–C5 currently join only spec/harness/tasks. ``time_budget_minutes`` falls
-    back to ``DEMO_DAY_DEFAULT_BUDGET_MINUTES`` when NULL/invalid.
+    ``time_budget_minutes`` falls back to ``DEMO_DAY_DEFAULT_BUDGET_MINUTES`` when
+    NULL/invalid.
+
+    ``enforce_plan_coverage`` decides whether C6 is verdict-bearing. It defaults
+    to False — the check's gaps are computed, persisted and rendered from day one,
+    but no already-verified package flips to red until the Demo Day tasks prompt
+    mandates the ``Plan refs`` citations C6 looks for (that prompt change ships in
+    a later, golden-corpus-gated release). The flag arrives as a parameter, never
+    a settings read, so this module stays pure.
     """
     budget = (
         time_budget_minutes
@@ -376,8 +425,16 @@ def verify_construction(
     c3 = _check_ac_to_test(spec or "", harness or "", tasks or "")
     c4 = _check_e2e(harness or "", blocks)
     c5, estimated = _check_time_budget(tasks or "", budget)
-    checks = {"C1": c1, "C2": c2, "C3": c3, "C4": c4, "C5": c5}
-    verified = c1.passed and c2.passed and c3.passed and c4.passed
+    plan_gaps = _check_plan_coverage(plan or "", blocks)
+    c6 = CheckResult(
+        "plan_coverage",
+        not plan_gaps,
+        plan_gaps,
+        advisory=not enforce_plan_coverage,
+    )
+    c7 = _check_task_inventory(spec or "", plan or "", blocks)
+    checks = {"C1": c1, "C2": c2, "C3": c3, "C4": c4, "C5": c5, "C6": c6, "C7": c7}
+    verified = resolve_verified(checks, enforced=True)
     return ConstructionVerdict(
         verified=verified,
         checks=checks,

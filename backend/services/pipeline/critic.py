@@ -273,8 +273,13 @@ def _demo_day_per_stage_focus(stage_type: str) -> str:
             "why, and how it scales/secures — NOT the standard 5-line ADR, so "
             "flag ADRIncomplete only against this shorter shape; Environment "
             "and Bootstrap gives real, copy-pasteable commands, not "
-            "descriptions; no deprecated/EOL technologies (flag "
-            "DeprecatedAPI)."
+            "descriptions, and names exactly one Demo surface; External "
+            "Integrations and Secrets gives every external service a REAL or "
+            "MOCKED stance and an env-var NAME as its credential source, with "
+            "a timeout and an on-stage fallback for each REAL call — a missing "
+            "stance, a literal credential value in place of an env var name, "
+            "or a REAL call with no fallback is a ShallowSection defect; no "
+            "deprecated/EOL technologies (flag DeprecatedAPI)."
         )
     if stage_type == "harness":
         return (

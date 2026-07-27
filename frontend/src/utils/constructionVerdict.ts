@@ -1,11 +1,12 @@
 import type { Stage } from "../types/stage"
-import type { ConstructionVerdict } from "../types/workspace"
+import type { ConstructionCheck, ConstructionVerdict } from "../types/workspace"
 
 /**
- * Derived display state for the Demo Day construction verdict
- * (docs/DEMO_DAY_MODE_IMPLEMENTATION_PLAN.md §7). Shared by
- * `ConstructionVerifiedBadge` and `DemoDayHandoffPanel` so the staleness logic
- * lives in exactly one place.
+ * Derived display state for the construction verdict
+ * (docs/DEMO_DAY_MODE_IMPLEMENTATION_PLAN.md §7). Both modes produce the same
+ * verdict shape — Demo Day and standard mode just run different check sets —
+ * so this module is mode-agnostic. Shared by `ConstructionVerifiedBadge` and
+ * `DemoDayHandoffPanel` so the staleness logic lives in exactly one place.
  *
  * - `pending`  — no verdict yet (the package is not whole / the verifier has not
  *   run). The verdict is computed off the tasks stage after all four exist.
@@ -13,7 +14,8 @@ import type { ConstructionVerdict } from "../types/workspace"
  *   so the verdict no longer describes the live package. **A stale verdict must
  *   never render as green "verified"** even if its `verified` flag is true —
  *   re-run (on export) before trusting it (plan §9.2).
- * - `verified` — C1–C4 passed and the verdict matches the live stage versions.
+ * - `verified` — every verdict-affecting check passed and the verdict matches
+ *   the live stage versions.
  * - `gaps`     — the verifier ran cleanly but found construction gaps.
  */
 export type ConstructionStatus = "pending" | "stale" | "verified" | "gaps"
@@ -36,17 +38,31 @@ export function isVerdictStale(
   )
 }
 
-/** The construction checks that flip the verdict (C1–C4). C5/time-budget is
- *  advisory-only and is excluded from the gap count by id, matching the backend
- *  `verified = C1 and C2 and C3 and C4`. */
-const VERDICT_AFFECTING_CHECKS = new Set(["C1", "C2", "C3", "C4"])
+/**
+ * Fallback for verdicts persisted before checks carried their own `advisory`
+ * flag: back then the verdict-affecting set was exactly C1–C4 (C5/time-budget
+ * was advisory), and there was only one mode.
+ *
+ * Kept for old rows only. New verdicts self-describe via `check.advisory`, which
+ * is what lets the two modes carry different check sets without this file
+ * knowing either of them — and what makes the frontend and backend deploys
+ * order-independent (an old backend simply omits the field, and an old frontend
+ * ignores a check id it has never heard of).
+ */
+const LEGACY_VERDICT_AFFECTING_CHECKS = new Set(["C1", "C2", "C3", "C4"])
 
-/** The list of failing verdict-affecting checks (C1–C4 only), in id order. */
+function affectsVerdict(id: string, check: ConstructionCheck): boolean {
+  return check.advisory === undefined
+    ? LEGACY_VERDICT_AFFECTING_CHECKS.has(id)
+    : !check.advisory
+}
+
+/** The list of failing verdict-affecting checks, in id order. */
 export function failingChecks(
   verdict: ConstructionVerdict,
 ): { id: string; name: string; gaps: string[] }[] {
   return Object.entries(verdict.checks)
-    .filter(([id, check]) => VERDICT_AFFECTING_CHECKS.has(id) && !check.passed)
+    .filter(([id, check]) => affectsVerdict(id, check) && !check.passed)
     .sort(([a], [b]) => a.localeCompare(b))
     .map(([id, check]) => ({ id, name: check.name, gaps: check.gaps }))
 }
@@ -63,6 +79,12 @@ export function deriveConstructionStatus(
 ): ConstructionStatus {
   if (!verdict) return "pending"
   if (isVerdictStale(verdict, stages)) return "stale"
+  // Named gaps always win over the `verified` flag. A check can be live but not
+  // yet *enforced* (its backend flag is off while the change is measured), which
+  // leaves `verified` true alongside real failures. Showing a green ✓ over a list
+  // of gaps would be the exact overclaim the verdict exists to prevent — so the
+  // badge reports what the checks found, not what the flag permits.
+  if (failingChecks(verdict).length > 0) return "gaps"
   return verdict.verified ? "verified" : "gaps"
 }
 

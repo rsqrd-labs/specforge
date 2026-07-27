@@ -73,7 +73,14 @@ STAGE_PROMPT_VERSIONS: dict[str, str] = {
 DEMO_DAY_PROMPT_VERSION = "demo-day-v2.2.0"
 DEMO_DAY_STAGE_PROMPT_VERSIONS: dict[str, str] = {
     "spec": f"{DEMO_DAY_PROMPT_VERSION}:spec-v2",
-    "plan": f"{DEMO_DAY_PROMPT_VERSION}:plan-v2",
+    # plan-v3: demo-readiness gaps — adds the mandatory ## External Integrations
+    # and Secrets section (per-service REAL/MOCKED stance, env-var credential
+    # source, on-stage failure fallback) and folds four demo-day stages into
+    # existing sections: a single Demo surface (Environment and Bootstrap), the
+    # seed dataset (Data Model), an explicit real/mocked/none auth stance
+    # (Security Architecture), and demo-visible failure fallbacks (Risks). Only
+    # the plan variant's bytes changed, so DEMO_DAY_PROMPT_VERSION is unmoved.
+    "plan": f"{DEMO_DAY_PROMPT_VERSION}:plan-v3",
     "harness": f"{DEMO_DAY_PROMPT_VERSION}:harness-v2",
     "tasks": f"{DEMO_DAY_PROMPT_VERSION}:tasks-v2",
 }

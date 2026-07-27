@@ -11,7 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models import Stage, Workspace
-from services.pipeline import agent_manual_service, demo_day_verdict
+from services.pipeline import agent_manual_service, construction_verdict_service
 from services.security.downstream_command_guard import redact_unsafe_lines
 
 logger = logging.getLogger(__name__)
@@ -235,7 +235,9 @@ async def build_export(workspace_id: UUID, user_id: UUID, db: AsyncSession) -> b
             # render it. ensure_fresh_verdict is fail-open, so a hiccup just ships
             # the last-known verdict (or omits the report) rather than failing the
             # download.
-            verdict = await demo_day_verdict.ensure_fresh_verdict(db, workspace, stages)
+            verdict = await construction_verdict_service.ensure_fresh_verdict(
+                db, workspace, stages
+            )
             if verdict:
                 report = agent_manual_service.build_construction_report(verdict)
                 zf.writestr(agent_manual_service.CONSTRUCTION_REPORT_FILENAME, report)

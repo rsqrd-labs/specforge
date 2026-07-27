@@ -132,10 +132,15 @@ export function DemoDayHandoffPanel({
           {verdict.estimated_minutes !== null
             ? `Estimated build time ${formatMinutes(verdict.estimated_minutes)}`
             : "No per-task estimate available"}
-          <span className="ws-handoff-estimate-target">
-            {" "}
-            (target ≤ {formatMinutes(verdict.time_budget_minutes)})
-          </span>
+          {/* The build-time budget is a Demo Day concept; standard-mode verdicts
+              carry null, and this panel is Demo-Day-only — but the guard keeps
+              the two independent rather than relying on that coupling. */}
+          {verdict.time_budget_minutes !== null && (
+            <span className="ws-handoff-estimate-target">
+              {" "}
+              (target ≤ {formatMinutes(verdict.time_budget_minutes)})
+            </span>
+          )}
         </p>
       )}
 

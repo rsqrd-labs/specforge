@@ -205,11 +205,16 @@ def test_verdict_to_dict_shape_round_trips_into_report():
         "time_budget_minutes",
         "stage_versions",
     }
+    # `advisory` travels IN the payload so the frontend does not have to hardcode
+    # which check ids flip the verdict (a hardcoded list silently swallows every
+    # check added later, and cannot express two modes with different check sets).
     assert payload["checks"]["C1"] == {
         "name": "dag_acyclic",
         "passed": True,
         "gaps": [],
+        "advisory": False,
     }
+    assert payload["checks"]["C5"]["advisory"] is True
     # The Phase 2 renderer consumes exactly this shape and must not raise.
     report = agent_manual_service.build_construction_report(payload)
     assert "Construction-verified" in report
