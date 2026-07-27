@@ -51,10 +51,50 @@ export function isVerdictStale(
  */
 const LEGACY_VERDICT_AFFECTING_CHECKS = new Set(["C1", "C2", "C3", "C4"])
 
+/**
+ * Whether a failing check counts as a named build gap.
+ *
+ * Deliberately keyed on `advisory` ALONE, never on `enforced`: a check whose
+ * rollout flag is still off has still found a real structural gap, and hiding it
+ * would put a green "Build-ready ✓" over a defect the backend already knows
+ * about. `enforced` governs only the backend's `verified` flag (whether the
+ * guarantee is withheld), not whether the user is told.
+ */
 function affectsVerdict(id: string, check: ConstructionCheck): boolean {
   return check.advisory === undefined
     ? LEGACY_VERDICT_AFFECTING_CHECKS.has(id)
     : !check.advisory
+}
+
+/** True when a failing check is real but its enforcement flag is still off. */
+export function isUnenforced(check: ConstructionCheck): boolean {
+  return check.enforced === false
+}
+
+/**
+ * Plain-language labels for both modes' check ids. The raw names
+ * (`dag_acyclic`, `ac_to_test`, `requirement_coverage`) read like internal
+ * tokens. Kept here rather than in one panel so the Demo Day handoff card and
+ * the standard construction card cannot drift — a missing entry silently falls
+ * back to the token, which is exactly how the standard check names went
+ * unlabelled when only the Demo Day set was mapped.
+ */
+export const CHECK_LABELS: Record<string, string> = {
+  // Demo Day
+  dag_acyclic: "Task build order is acyclic",
+  task_to_test: "Every task maps to a harness test",
+  ac_to_test: "Every acceptance criterion has a test",
+  e2e_reachable: "End-to-end smoke test is reachable",
+  time_budget: "Estimated build time vs target",
+  // Standard
+  requirement_coverage: "Every requirement is claimed by a task",
+  test_coverage: "Every harness test is built by a task",
+  plan_coverage: "Every load-bearing plan section is implemented",
+  task_inventory: "Task list is a plausible decomposition",
+}
+
+export function checkLabel(name: string): string {
+  return CHECK_LABELS[name] ?? name
 }
 
 /** The list of failing verdict-affecting checks, in id order. */

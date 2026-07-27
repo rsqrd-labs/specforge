@@ -11,7 +11,7 @@ surface.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 # Required section headings per stage.  Order is the order they appear in the
 # system prompt for each stage; the validator does NOT enforce order (just
@@ -577,10 +577,29 @@ def _section_body(artifact_md: str, heading: str) -> str:
     code block — so for the common H2 section this is byte-identical to the old
     "next ``##``" behaviour, and a deeper section additionally stops at the next
     same-or-shallower heading.
+
+    A trailing PARENTHETICAL is tolerated as a second pass. Several prompts name
+    their own sections with one — ``## Threat Model (STRIDE)``, ``## Failure Mode
+    and Effects Analysis (FMEA-lite)``, ``## Architecture Anti-Patterns
+    (explicitly avoid)``, ``## Frontend Architecture (if applicable)`` — while
+    the contract entry is the bare title. ``validate_sections`` gates on a plain
+    substring so both spellings pass presence, but the exact-line regex above
+    then returned ``""`` for the parenthesised form, which reads as an empty
+    section and fires a false ``shallow_required_section`` advisory on every plan
+    that copies the prompt's own heading (the same defect audit finding #1 fixed
+    for the Quality Attribute Matrix, four headings later). The fallback is
+    deliberately narrow — a single balanced ``(...)`` and nothing else — so it
+    cannot swallow a genuinely different section whose title merely starts with
+    the same words.
     """
     title = re.escape(heading.lstrip("#").strip())
     start = re.compile(rf"^(#{{2,6}})[ \t]+{title}[ \t]*$", re.MULTILINE)
     matches = list(start.finditer(artifact_md))
+    if not matches:
+        parenthesised = re.compile(
+            rf"^(#{{2,6}})[ \t]+{title}[ \t]*\([^)\n]*\)[ \t]*$", re.MULTILINE
+        )
+        matches = list(parenthesised.finditer(artifact_md))
     if not matches:
         return ""
     match = min(matches, key=lambda m: (len(m.group(1)), m.start()))
@@ -806,6 +825,314 @@ def _normalise_harness_path(path: str) -> str:
     if cleaned.startswith("harness/"):
         cleaned = cleaned[len("harness/") :]
     return cleaned
+
+
+# ---------------------------------------------------------------------------
+# Multi-language harness test index.
+#
+# ONE scanner, two consumers: the online-eval structural task validator and the
+# construction verifiers (``standard_plan_linter``). It used to live privately in
+# ``services/evals/online_eval.py`` while the verifier joined on the Python-only
+# ``_harness_test_refs`` below — so a Vitest/Go/RSpec harness parsed as ZERO
+# tests and C2 ``test_coverage`` hard-failed every non-Python package. Moving it
+# here (a pure, dependency-free module both can import) is what keeps the two
+# join keys from drifting again; ``online_eval`` now imports these names and
+# keeps its private aliases, so its behaviour is byte-identical.
+# ---------------------------------------------------------------------------
+_HARNESS_FILE_HEADING_RE = re.compile(r"^#{2,3}\s+File:\s+(.+)$")
+# H2 section heading (## Overview, ## Files, …). Ends the current ### File:
+# block's scope in the ref scanner. `## File:` is a file heading, matched by
+# _HARNESS_FILE_HEADING_RE first, so it never reaches this.
+_SECTION_H2_RE = re.compile(r"^##\s+\S")
+# CommonMark-ish fenced-code opener: >=3 backticks after <=3 leading spaces, then
+# an info string that (per spec) may not itself contain a backtick. The previous
+# `[a-zA-Z0-9]*$` rejected every real info string beyond a bare lang tag —
+# ```ts title="x.ts"```, ```python {.line-numbers}```, ```c++```, ```objective-c```
+# — so that file's tests went entirely unparsed and every TASKS ref into it
+# became a phantom GENUINE_GAP (issue: false task coverage gaps).
+# A fence opener is indented at most 3 SPACES (CommonMark). Spaces only, not
+# ``\s``: a leading tab is 4 columns (tab stop), so a tab-indented run of
+# backticks is content, never a fence delimiter — mirrors the tab guard on the
+# close path in `_harness_ref_index` (Fable verify #5).
+_HARNESS_FENCE_OPEN_RE = re.compile(r"^ {0,3}(`{3,})([^`]*)$")
+_CLASS_DEF_RE = re.compile(r"^\s*class\s+(Test\w+)")
+# Python test functions (sync or async).
+_TEST_FUNC_DEF_RE = re.compile(r"^\s*(?:async\s+)?def\s+(test_\w+)")
+# Go: `func TestXxx(t *testing.T)` — the harness prompt's stack table promises a
+# Go/`go test` layout, but the extractor had no Go support, so a Go harness was
+# ~100% false GENUINE_GAPs.
+_GO_TEST_FUNC_RE = re.compile(r"^\s*func\s+(Test[A-Za-z0-9_]*)\s*\(")
+# Go testify suites: `func (s *AuthSuite) TestRefresh(...)`. The receiver group
+# sits between `func` and the method name, so the plain `_GO_TEST_FUNC_RE` above
+# (which needs `func` immediately followed by `Test`) never matched it — a
+# testify-only Go file parsed as zero tests, so every ref into it read as a gap.
+_GO_RECEIVER_TEST_RE = re.compile(r"^\s*func\s+\([^)]*\)\s+(Test[A-Za-z0-9_]*)\s*\(")
+# TypeScript / JavaScript test runners (Vitest / Jest / Mocha). The harness
+# generator emits `it(...)` / `test(...)` blocks for any plan that declares a
+# frontend, and TASKS references those names — so they must be extracted as
+# matchable refs or every TS-test reference false-positives as a coverage gap.
+# `describe(...)` is the class analog used for `file::describe::test` refs.
+_TS_TEST_DEF_RE = re.compile(
+    r"""^\s*(?:it|test)(?:\.\w+)?\s*\(\s*['"`]([^'"`]+)['"`]"""
+)
+# Parametrised `it.each([...])("name", …)` / `test.each(...)("name")` — the data
+# array sits between two paren groups, so the plain runner regex above never
+# matched the name.
+_TS_EACH_RE = re.compile(r"""^\s*(?:it|test)\.each\b.*?\)\s*\(\s*['"`]([^'"`]+)['"`]""")
+_TS_DESCRIBE_DEF_RE = re.compile(
+    r"""^\s*describe(?:\.\w+)?\s*\(\s*['"`]([^'"`]+)['"`]"""
+)
+# RSpec / Cucumber-style `it "name" do` / `scenario "name" do` (no parentheses),
+# and the `describe "X" do` / `context "X" do` grouping analog. Also promised by
+# the harness prompt's stack table (Ruby / RSpec) but previously unmatched.
+_RSPEC_TEST_RE = re.compile(
+    r"""^\s*(?:it|specify|scenario|example)\s+['"]([^'"]+)['"]"""
+)
+_RSPEC_DESCRIBE_RE = re.compile(
+    r"""^\s*(?:describe|context|feature)\s+['"]([^'"]+)['"]"""
+)
+
+# Extensions whose test shapes we parse COMPLETELY, so "file exists, zero tests
+# parsed" is positive evidence of absence (a genuine gap), not parser blindness.
+# Python: `def test_*` / `async def test_*` / `class Test*` cover pytest AND
+# unittest, so a .py file with none of them genuinely has no test. Other
+# ecosystems (Go testify variants, RSpec vs Minitest, TS custom wrappers) have
+# common shapes we may miss, so a bodied non-.py file stays UNVERIFIED.
+RELIABLY_PARSED_TEST_EXTS: tuple[str, ...] = (".py",)
+
+
+@dataclass
+class HarnessTestIndex:
+    """Everything the ref scanner learns from a harness, in one pass.
+
+    * ``known_refs`` — matchable identifiers a TASKS ``Harness refs`` token can
+      resolve against: bare test names, ``file::test``, ``Class::method``,
+      ``file::Class::method``, and every ``### File:`` path.
+    * ``known_files`` — canonical path of every ``### File:`` heading. Authoritative
+      proof the file exists, independent of whether we could parse its tests.
+    * ``files_with_tests`` — canonical path of every file we extracted >=1 test
+      identifier from. The gap between ``known_files`` and this set is where the
+      parser is blind, so a ref into that gap is parser-uncertainty, not a hole.
+    * ``files_with_body`` — canonical path of every file that opened at least one
+      fenced code block. A ``### File:`` heading NOT in this set was promised but
+      left completely empty (no code at all) — the strongest, language-agnostic
+      evidence of a genuine gap, so it is never demoted to the quiet "unverified"
+      class.
+    """
+
+    known_refs: set[str] = field(default_factory=set)
+    known_files: set[str] = field(default_factory=set)
+    files_with_tests: set[str] = field(default_factory=set)
+    files_with_body: set[str] = field(default_factory=set)
+    test_names: set[str] = field(default_factory=set)
+    tests_in_file: dict[str, set[str]] = field(default_factory=dict)
+
+    def unparsed_test_files(self) -> set[str]:
+        """Files that carry real code but yielded no test we could name.
+
+        A file with a body and zero parsed tests is EITHER genuinely test-free
+        OR written in a shape this scanner does not model. Only ``.py`` is
+        parsed completely enough to call the first (``RELIABLY_PARSED_TEST_EXTS``),
+        so every other extension lands here and callers must degrade to
+        "unverified" rather than assert a gap.
+        """
+        return {
+            path
+            for path in self.files_with_body - self.files_with_tests
+            if not path.endswith(RELIABLY_PARSED_TEST_EXTS)
+        }
+
+
+def harness_test_index(harness_content: str) -> HarnessTestIndex:
+    """Scan a harness once into a :class:`HarnessTestIndex` (span-based).
+
+    Robust to the two markdown realities the old cursor-based scanner tripped on:
+      1. Any prose/comment line between a ``### File:`` heading and its fence
+         (the fence no longer has to *immediately* follow the heading), and
+      2. fenced code opened with an info string (```ts title="x"```), which the
+         old open-fence regex rejected.
+    Both made a whole file's tests unparsed, turning every TASKS ref into it into
+    a phantom GENUINE_GAP. Here a file's scope runs from its ``### File:`` heading
+    to the next file heading or ``## `` section; every fenced region inside that
+    scope is scanned, in Python/pytest, Go, TS/JS (Vitest/Jest/Mocha, incl.
+    ``.each``), and RSpec conventions.
+    """
+    index = HarnessTestIndex()
+    file_norm: str | None = None
+    file_canon: str | None = None
+    in_fence = False
+    fence_len = 0
+    current_class: str | None = None
+    current_describe: str | None = None
+
+    def _register(
+        name: str, scope: str | None, scope_qualified: bool, *, is_test: bool = True
+    ) -> None:
+        index.known_refs.add(name)
+        # ``is_test`` separates real test CASES from the grouping constructs
+        # (a ``class TestX`` / ``describe("…")`` name is registered as a
+        # matchable ref, but it is not itself a test). Only the former feed
+        # ``test_names``/``tests_in_file``, which the construction verifier
+        # uses as its coverage denominator — counting a describe() block as a
+        # test would demand a task cite the group AND each of its cases.
+        if is_test:
+            index.test_names.add(name)
+            if file_canon:
+                index.tests_in_file.setdefault(file_canon, set()).add(name)
+        if file_norm:
+            index.known_refs.add(f"{file_norm}::{name}")
+        if scope and scope_qualified:
+            index.known_refs.add(f"{scope}::{name}")
+            if file_norm:
+                index.known_refs.add(f"{file_norm}::{scope}::{name}")
+        if file_canon:
+            index.files_with_tests.add(file_canon)
+
+    for raw in harness_content.split("\n"):
+        line = raw.rstrip("\r")
+        heading_m = _HARNESS_FILE_HEADING_RE.match(line)
+        if heading_m:
+            # A ### File: heading at column 0 always starts a new file and closes
+            # any dangling (e.g. truncated, unbalanced) fence — this bounds a
+            # runaway scan to a single file instead of the rest of the document.
+            in_fence = False
+            fence_len = 0
+            file_norm = _normalise_harness_ref(heading_m.group(1))
+            file_canon = _canonical_test_path(file_norm) if file_norm else None
+            if file_norm:
+                index.known_refs.add(file_norm)
+            if file_canon:
+                index.known_files.add(file_canon)
+                # Register the CANONICAL path too so a file-only TASKS ref that
+                # differs only by a ./ prefix, a leading /, case, or a harness/
+                # prefix still resolves (via _ref_matches_harness's canonical
+                # fallback) instead of manufacturing a phantom GENUINE_GAP.
+                index.known_refs.add(file_canon)
+            current_class = None
+            current_describe = None
+            continue
+        if not in_fence:
+            if _SECTION_H2_RE.match(line):
+                file_norm = file_canon = None
+                current_class = current_describe = None
+                continue
+            fence_m = _HARNESS_FENCE_OPEN_RE.match(line)
+            if fence_m:
+                in_fence = True
+                fence_len = len(fence_m.group(1))
+                # NOTE: files_with_body is recorded on the first non-blank line
+                # INSIDE the fence (below), not here at the opener. An empty
+                # fenced block (```lang immediately followed by the closing ```)
+                # is positive evidence the promised file has no body — exactly
+                # the strongest gap signal `_classify_unmatched_ref` keys on — so
+                # it must stay OUT of files_with_body and classify GENUINE_GAP,
+                # not the reassuring UNVERIFIED (Fable verify #2).
+            continue
+        # Inside a fenced block. Close on a line of only backticks at least as
+        # long as the opener (CommonMark), not an exact-length match — AND
+        # indented no more than 3 spaces, the same bound `_HARNESS_FENCE_OPEN_RE`
+        # puts on the opener. A more-indented run of backticks is fence CONTENT,
+        # not a close (e.g. a ``` inside a triple-quoted string a test file
+        # embeds to assert markdown rendering): closing on it truncated the scan
+        # and turned every test defined after it into a phantom GENUINE_GAP.
+        lstripped = line.lstrip()
+        leading = len(line) - len(lstripped)
+        stripped = lstripped.rstrip()
+        is_close = (
+            leading <= 3
+            # A tab in the leading whitespace is 4 columns (CommonMark tab stop),
+            # so a tab-indented run of backticks is ≥4 cols of indent — fence
+            # CONTENT, never a closer. `leading` counts a tab as one char, so
+            # without this a tab-indented ``` (Go's convention inside a raw
+            # string embedding markdown) falsely closed the block and turned
+            # every test defined after it into a phantom GENUINE_GAP (Fable
+            # verify #5).
+            and "\t" not in line[:leading]
+            and bool(stripped)
+            and stripped.count("`") == len(stripped)
+            and len(stripped) >= fence_len
+        )
+        if is_close:
+            in_fence = False
+            fence_len = 0
+            continue
+        # First non-blank line inside the fence proves the promised file has a
+        # body (see the opener note above). Idempotent set add.
+        if file_canon and stripped:
+            index.files_with_body.add(file_canon)
+        if file_norm is None:
+            # A fence outside any ### File: block (e.g. the File Tree code block).
+            continue
+        indented = line[:1].isspace()
+        cls_m = _CLASS_DEF_RE.match(line)
+        if cls_m:
+            current_class = cls_m.group(1)
+            # Register the class name itself — a TASKS ref may point at the whole
+            # test class (`file::TestLogin`), not one method. Without this that
+            # ref would read as a phantom GENUINE_GAP even though the class exists.
+            _register(current_class, None, False, is_test=False)
+        elif line and not indented:
+            current_class = None
+        func_m = _TEST_FUNC_DEF_RE.match(line)
+        if func_m:
+            _register(func_m.group(1), current_class, bool(current_class) and indented)
+        go_m = _GO_TEST_FUNC_RE.match(line) or _GO_RECEIVER_TEST_RE.match(line)
+        if go_m:
+            _register(go_m.group(1), None, False)
+        # describe()/context "…" is the grouping (class) analog; individual cases
+        # are it()/test()/scenario. Brace/`do` nesting is not tracked, so describe
+        # attribution is best-effort — the bare and file-qualified names always
+        # match regardless.
+        desc_m = _TS_DESCRIBE_DEF_RE.match(line) or _RSPEC_DESCRIBE_RE.match(line)
+        if desc_m:
+            current_describe = desc_m.group(1)
+            # Register the group name too — a ref to the describe/context block
+            # itself (`file::AuthFlow`) must resolve, not read as a gap.
+            _register(current_describe, None, False, is_test=False)
+        ts_m = (
+            _TS_TEST_DEF_RE.match(line)
+            or _TS_EACH_RE.match(line)
+            or _RSPEC_TEST_RE.match(line)
+        )
+        if ts_m:
+            _register(ts_m.group(1), current_describe, bool(current_describe))
+
+    return index
+
+
+def _normalise_harness_ref(ref: str) -> str:
+    """Canonicalise a task/harness reference without weakening path identity."""
+    normalized = ref.strip().strip("`").replace("\\", "/")
+    if normalized.startswith("harness/"):
+        normalized = normalized[len("harness/") :]
+    # Generated traceability tables often render ``path :: test`` while task
+    # fields use ``path::test``. Whitespace around the structural delimiter has
+    # no semantic meaning and must not manufacture a gap.
+    return "::".join(part.strip() for part in normalized.split("::"))
+
+
+def ref_matches_harness(ref: str, known_refs: set[str]) -> bool:
+    """Match file-, test-, class-, and bare-name harness references."""
+    normalized = _normalise_harness_ref(ref)
+    if normalized in known_refs:
+        return True
+    parts = normalized.split("::")
+    if len(parts) >= 2 and "::".join(parts[-2:]) in known_refs:
+        return True
+    if bool(parts) and parts[-1] in known_refs:
+        return True
+    # File-ONLY canonical fallback: a whole-file ref (no `::`) that differs from
+    # its `### File:` heading only by a ./ prefix, a leading /, case, or a
+    # harness/ prefix still names a known file (the heading's canonical path was
+    # registered in known_refs). Guarded to the no-`::` case on purpose — a
+    # `file::test` ref must keep matching on the TEST identifier, never be waved
+    # through just because its file exists (that would hide a genuinely missing
+    # test inside a present file — the exact over-suppression we must avoid).
+    if "::" not in normalized:
+        canon = _canonical_test_path(normalized)
+        if canon and canon in known_refs:
+            return True
+    return False
 
 
 # Real source/test file extensions. A BARE token's extension must be one of

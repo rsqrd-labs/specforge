@@ -369,6 +369,59 @@ _REFINE_STAGE_RULES: dict[str, str] = {
         "header so dependency references stay valid."
     ),
 }
+
+# Demo Day artifacts carry DIFFERENT structural fields, so the standard rules
+# above name join keys that do not exist there and fail to protect the ones that
+# do: a Demo Day task orders itself with `Precondition:` (not `Dependencies`) and
+# carries `Estimated minutes:`, and both are joined on by the construction
+# verifier (C1 dag_acyclic, C5 time_budget). Refining a Demo Day task list under
+# the standard rules could silently drop or rename them and turn a verified
+# package red with no warning. Appended, not substituted — everything in the
+# standard rule still applies.
+_DEMO_DAY_REFINE_STAGE_RULES: dict[str, str] = {
+    "tasks": (
+        " This is a Demo Day task list: each task orders itself with a "
+        "**Precondition:** field listing only EARLIER T-NNN ids (there is no "
+        "Dependencies field), and carries **Estimated minutes:**. Preserve both "
+        "fields, their exact labels, and their values unless the instruction "
+        "explicitly asks to change them — the build-order and build-time checks "
+        "join on them."
+    ),
+    "plan": (
+        " This is a Demo Day plan: preserve the per-service REAL/MOCKED stances "
+        "and env-var names in External Integrations and Secrets, the single Demo "
+        "surface line and the copy-pasteable commands in Environment and "
+        "Bootstrap, the seed dataset in Data Model and Persistence, and the one "
+        "named auth stance in Security Architecture. Downstream tasks and the "
+        "construction check cite these by section."
+    ),
+}
+
+
+def _refine_stage_rules(stage_type: str, mode: str) -> str:
+    """Stage-boundary rules for refine, specialised by workspace mode."""
+    rules = _REFINE_STAGE_RULES.get(stage_type, "")
+    if mode == "demo_day":
+        rules += _DEMO_DAY_REFINE_STAGE_RULES.get(stage_type, "")
+    return rules
+
+
+def refine_prompt_version(mode: str) -> str:
+    """Cache-key version for the refine prompt, qualified by mode.
+
+    The generation cache key carries no `mode` field (generation gets it via
+    `stage_prompt_version(stage_type, mode)`), so a mode-dependent refine prompt
+    would let a Demo Day refine replay a standard one's cached output for the same
+    stage/selection/instruction. Qualifying only the demo_day branch keeps every
+    STANDARD refine key byte-identical — no cache invalidation on the 99% path.
+    """
+    return (
+        f"{REFINE_PROMPT_VERSION}:demo_day"
+        if mode == "demo_day"
+        else REFINE_PROMPT_VERSION
+    )
+
+
 _NOOP_REFINE_INSTRUCTIONS = {
     "no change",
     "no changes",
@@ -4375,7 +4428,8 @@ class StageManager:
         )
         _assert_visible_credit_balance(user, CREDIT_COSTS["refine"])
 
-        stage_refine_rules = _REFINE_STAGE_RULES.get(stage.type, "")
+        refine_mode = getattr(workspace, "mode", "standard") or "standard"
+        stage_refine_rules = _refine_stage_rules(stage.type, refine_mode)
         system_prompt = (
             "You are Thought2Build. Rewrite only the selected text per the "
             "instruction. Return ONLY the replacement text, nothing else.\n\n"
@@ -4452,7 +4506,10 @@ class StageManager:
             # or a refine-prompt edit is invisible to telemetry/cache
             # invalidation and an unrelated generation-prompt bump spuriously
             # invalidates every cached refine.
-            prompt_version=REFINE_PROMPT_VERSION,
+            #
+            # Mode-qualified because the cache key has no `mode` field and the
+            # Demo Day stage-boundary rules differ; standard keys are unchanged.
+            prompt_version=refine_prompt_version(refine_mode),
             stage_type=stage.type,
             operation=route.operation,
             provider=route.provider,
@@ -4545,7 +4602,7 @@ class StageManager:
                 stage_type=stage.type,
                 action="refine",
                 model_tier=route.model_tier,
-                prompt_version=REFINE_PROMPT_VERSION,
+                prompt_version=refine_prompt_version(refine_mode),
                 operation=route.operation,
                 cache_hit=False,
                 batch=False,

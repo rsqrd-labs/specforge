@@ -205,14 +205,18 @@ def test_verdict_to_dict_shape_round_trips_into_report():
         "time_budget_minutes",
         "stage_versions",
     }
-    # `advisory` travels IN the payload so the frontend does not have to hardcode
-    # which check ids flip the verdict (a hardcoded list silently swallows every
-    # check added later, and cannot express two modes with different check sets).
+    # `advisory` and `enforced` travel IN the payload so the frontend does not
+    # have to hardcode which check ids flip the verdict (a hardcoded list
+    # silently swallows every check added later, and cannot express two modes
+    # with different check sets). The two are orthogonal: `advisory` means "never
+    # verdict-bearing by nature", `enforced=False` means "a real gap whose
+    # rollout flag is still off".
     assert payload["checks"]["C1"] == {
         "name": "dag_acyclic",
         "passed": True,
         "gaps": [],
         "advisory": False,
+        "enforced": True,
     }
     assert payload["checks"]["C5"]["advisory"] is True
     # The Phase 2 renderer consumes exactly this shape and must not raise.

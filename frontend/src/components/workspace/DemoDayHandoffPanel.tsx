@@ -1,6 +1,7 @@
 import type { Stage } from "../../types/stage"
 import type { ConstructionVerdict, TargetAgent } from "../../types/workspace"
 import {
+  checkLabel,
   deriveConstructionStatus,
   failingChecks,
   gapCount,
@@ -20,15 +21,6 @@ interface DemoDayHandoffPanelProps {
   /** Export needs all four stages finalised; disable + explain if not yet. */
   downloadDisabled?: boolean
   downloadDisabledReason?: string
-}
-
-/** Plain-language labels for the verifier's check ids (plan §7.1). The raw
- *  names (`dag_acyclic`, `ac_to_test`) read like internal tokens. */
-const CHECK_LABELS: Record<string, string> = {
-  dag_acyclic: "Task build order is acyclic",
-  task_to_test: "Every task maps to a harness test",
-  ac_to_test: "Every acceptance criterion has a test",
-  e2e_reachable: "End-to-end smoke test is reachable",
 }
 
 const MANUAL_FILENAME: Record<TargetAgent, string> = {
@@ -113,9 +105,7 @@ export function DemoDayHandoffPanel({
         <ul className="ws-issue-list">
           {failing.map((check) => (
             <li key={check.id} className="ws-issue-item">
-              <div className="ws-issue-title">
-                {CHECK_LABELS[check.name] ?? check.name}
-              </div>
+              <div className="ws-issue-title">{checkLabel(check.name)}</div>
               {check.gaps.map((gap, i) => (
                 <div key={i} className="ws-issue-reason">
                   {gap}

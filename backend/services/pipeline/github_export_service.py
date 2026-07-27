@@ -710,9 +710,8 @@ async def _write_files_to_default(
         sha = await client.get_file_sha(repo, path)
         await client.upsert_file(repo, path, content, sha, commit_message)
     await _sync_agent_instruction_files(client, repo, workspace, stages)
-    # Demo Day construction report on the default branch (plan §8.2).
-    if getattr(workspace, "mode", "standard") == "demo_day":
-        await _push_demo_day_report(client, repo, db, workspace, stages)
+    # Construction report on the default branch (plan §8.2), both modes.
+    await _push_construction_report(client, repo, db, workspace, stages)
     await _sync_issues(db, client, repo, push, tasks)
 
 
@@ -751,9 +750,9 @@ async def _write_pr_with_tests(
         await client.upsert_file(repo, path, content, sha, docs_message)
     # Mode-aware agent instructions live on the default branch with the docs.
     await _sync_agent_instruction_files(client, repo, workspace, stages)
-    # Demo Day operating manual + construction report on the default branch (§8).
-    if getattr(workspace, "mode", "standard") == "demo_day":
-        await _push_demo_day_report(client, repo, db, workspace, stages)
+    # Operating manual (Demo Day, already in the file map) + the construction
+    # report on the default branch (§8). The report ships for both modes.
+    await _push_construction_report(client, repo, db, workspace, stages)
 
     # 2. Issues (records issue numbers used for the PR's Closes #N links).
     issue_numbers = await _sync_issues(db, client, repo, push, tasks)
@@ -854,7 +853,7 @@ async def _sync_issues(
     return issue_numbers
 
 
-async def _push_demo_day_report(
+async def _push_construction_report(
     client: GitHubAPIClient,
     repo: str,
     db: AsyncSession,
@@ -863,34 +862,50 @@ async def _push_demo_day_report(
     *,
     branch: str | None = None,
 ) -> None:
-    """Write CONSTRUCTION_REPORT.md to the repo for a Demo Day workspace (§8.2).
+    """Write CONSTRUCTION_REPORT.md to the repo — BOTH modes (§8.2).
+
+    Mode decides which linter produced the verdict, not whether one exists; the
+    report is the only place a standard-mode user can read what the badge's gap
+    count actually refers to.
 
     Refreshes the verdict if stale (zero-LLM, cheap) before rendering, then pushes
     it idempotently — reads the current file first and skips the write when the
-    content is unchanged so a re-export emits no spurious commit. Best-effort: a
-    missing/uncomputable verdict simply ships no report rather than failing the
-    push (the verdict refresh is itself fail-open).
+    content is unchanged so a re-export emits no spurious commit.
+
+    Best-effort END TO END, not just on the verdict: the report is a supplementary
+    document, and the export it rides on carries the artifacts the user actually
+    paid for. Now that it runs for every workspace rather than the Demo Day
+    minority, a transient GitHub error on this one optional file must not fail an
+    otherwise-complete push. Errors are logged, never raised.
     """
-    verdict = await construction_verdict_service.ensure_fresh_verdict(
-        db, workspace, stages
-    )
-    if not verdict:
-        return
-    content = agent_manual_service.build_construction_report(verdict)
-    filename = agent_manual_service.CONSTRUCTION_REPORT_FILENAME
-    existing = await client.get_file_content(repo, filename, ref=branch)
-    existing_text = existing[0] if existing else None
-    existing_sha = existing[1] if existing else None
-    if existing is not None and content == existing_text:
-        return
-    await client.upsert_file(
-        repo,
-        filename,
-        content,
-        existing_sha,
-        "docs: Thought2Build construction report",
-        branch=branch,
-    )
+    try:
+        verdict = await construction_verdict_service.ensure_fresh_verdict(
+            db, workspace, stages
+        )
+        if not verdict:
+            return
+        content = agent_manual_service.build_construction_report(verdict)
+        filename = agent_manual_service.CONSTRUCTION_REPORT_FILENAME
+        existing = await client.get_file_content(repo, filename, ref=branch)
+        existing_text = existing[0] if existing else None
+        existing_sha = existing[1] if existing else None
+        if existing is not None and content == existing_text:
+            return
+        await client.upsert_file(
+            repo,
+            filename,
+            content,
+            existing_sha,
+            "docs: Thought2Build construction report",
+            branch=branch,
+        )
+    except Exception:
+        logger.warning(
+            "github_export.construction_report_failed workspace_id=%s repo=%s",
+            getattr(workspace, "id", None),
+            repo,
+            exc_info=True,
+        )
 
 
 _DEMO_MANAGED_RE = re.compile(
@@ -1066,10 +1081,9 @@ async def _run_export(
             sha,
             commit_message,
         )
-    # Demo Day construction report (plan §8.2). The manual already rode the file
-    # map; the report needs the (refreshed) verdict.
-    if getattr(workspace, "mode", "standard") == "demo_day":
-        await _push_demo_day_report(client, push.repo_full_name, db, workspace, stages)
+    # Construction report (plan §8.2), both modes. The manual already rode the
+    # file map; the report needs the (refreshed) verdict.
+    await _push_construction_report(client, push.repo_full_name, db, workspace, stages)
 
     # Step 6 — create/update issues sequentially. GitHub has a secondary
     # rate limit on content creation; gathering these would trip it. Identity is

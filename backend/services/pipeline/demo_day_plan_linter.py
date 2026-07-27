@@ -23,11 +23,13 @@ guarantee by checking that the package is internally consistent:
 - C7 ``task_inventory`` (advisory) — the task count against the plan's own Build
   Sequence steps and the spec's ``FR-NNN`` count.
 
-**Verdict:** every non-advisory check must pass. C5 and C7 are reported but never
-flip the verdict (the §2.2 separation of the two claims). C6 is verdict-bearing
-only when ``enforce_plan_coverage`` is passed True — it ships False so the gaps
-are visible before any already-green package can turn red (the prompts that
-satisfy it land in a later, golden-corpus-gated release).
+**Verdict:** every check that is non-advisory AND enforced must pass. C5 and C7
+are advisory — reported but never verdict-bearing (the §2.2 separation of the two
+claims). C6 is verdict-bearing only when ``enforce_plan_coverage`` is True; it
+ships False, which means its gaps are still computed, persisted, and NAMED in the
+report and the badge — they simply cannot withhold ``verified`` before the prompts
+that satisfy it land in a later, golden-corpus-gated release. "Un-enforced" is not
+"hidden": see ``CheckResult`` for why the two axes are kept separate.
 
 Join-key parity is load-bearing (plan §7.1.1): this module deliberately reuses
 ``artifact_validator``'s regexes and section/path helpers so the linter joins on
@@ -430,11 +432,15 @@ def verify_construction(
         "plan_coverage",
         not plan_gaps,
         plan_gaps,
-        advisory=not enforce_plan_coverage,
+        # NOT `advisory` — an orphaned load-bearing plan section is a real
+        # construction gap that must stay visible in the report and the badge.
+        # `enforced` is the axis that decides whether it may withhold `verified`
+        # (see CheckResult's docstring for why conflating the two overclaims).
+        enforced=enforce_plan_coverage,
     )
     c7 = _check_task_inventory(spec or "", plan or "", blocks)
     checks = {"C1": c1, "C2": c2, "C3": c3, "C4": c4, "C5": c5, "C6": c6, "C7": c7}
-    verified = resolve_verified(checks, enforced=True)
+    verified = resolve_verified(checks)
     return ConstructionVerdict(
         verified=verified,
         checks=checks,

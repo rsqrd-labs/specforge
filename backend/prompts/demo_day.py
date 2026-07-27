@@ -277,9 +277,16 @@ Required TASKS.md structure (every section mandatory, in this order):
 ### T-NNN: Task Title
 
 **Spec refs:** FR-NNN, AC-NNN (the requirements this task satisfies)
-**Plan refs:** the Interface Contracts / Data Model / section names it implements
-**Harness refs:** `path/to/test_file` (literal harness file paths that must pass; for
-  setup-only tasks with no test use `_(none — <brief reason>)_`)
+**Plan refs:** the PLAN.md section name(s) this task implements, e.g. `Interface Contracts`,
+  `Data Model and Persistence`. Across the whole list every one of these MUST be cited by at
+  least one task: Data Model and Persistence (the seed dataset), Environment and Bootstrap
+  (the run/demo surface), External Integrations and Secrets (unless the plan wrote
+  "None — …"), Security Architecture (the auth stance). A section no task cites is designed
+  and never built — the demo then misses the seed data, the run command, the integration, or
+  the auth stance.
+**Harness refs:** `tests/e2e/test_smoke.py` — literal harness file paths WITH their file
+  extension, exactly as they appear in the harness ## Files / ## File Tree; for setup-only
+  tasks with no test use `_(none — <brief reason>)_`
 **Priority:** MUST / SHOULD / COULD
 **Estimate:** S / M / L
 **Estimated minutes:** <integer> (advisory; the sum feeds the ~5h budget)
@@ -298,7 +305,11 @@ Task rules:
 - The FIRST task stands up the walking skeleton and makes the end-to-end smoke test pass.
 - The FINAL task's `Harness refs:` cite the end-to-end smoke test path verbatim.
 - `Precondition:` lists only earlier `T-NNN` ids — the order must be acyclic.
-- Every `AC-NNN` is referenced by ≥1 task's `Spec refs`; every harness test by ≥1 task."""
+- Every `AC-NNN` is referenced by ≥1 task's `Spec refs`; every harness test by ≥1 task.
+- Between them, the tasks' `Plan refs:` cite the seed dataset (Data Model and Persistence),
+  the run/demo surface (Environment and Bootstrap), each external integration (External
+  Integrations and Secrets, unless the plan wrote "None — …"), and the auth stance (Security
+  Architecture)."""
 
 
 _STAGE_ROLES: dict[str, str] = {

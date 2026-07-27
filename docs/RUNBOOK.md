@@ -1695,6 +1695,14 @@ rendering `CONSTRUCTION_REPORT.md`, and the frontend re-fetches the workspace
 after a handoff-bundle download to pick up the refreshed verdict. To force a
 recompute operationally, trigger an export (ZIP) for the workspace.
 
+**This works for BOTH modes.** It briefly did not: when the verifier was extended
+to standard mode, the report write and its `ensure_fresh_verdict` call were left
+behind a `mode == "demo_day"` gate, so a standard workspace had no refresh path at
+all — a verdict went stale on the first refine and stayed "out of date" forever,
+and the ZIP carried no report to explain the badge's gap count. The gate is gone
+from both the ZIP export and all three GitHub push paths. If you ever see a
+standard verdict that will not refresh, check that gate first.
+
 ### §13.3 Advisory-only construction verification
 
 A failing verdict is persisted with each gap named. It never starts an LLM
@@ -1735,23 +1743,48 @@ linter runs, not *whether* one runs:
 | `standard` | `standard_plan_linter` | C1 requirement_coverage · C2 test_coverage · C3 dag_acyclic · C4 plan_coverage · C5 e2e_reachable · **C6 task_inventory (advisory)** |
 
 Both produce the same `ConstructionVerdict` payload, so one JSONB column, one
-`CONSTRUCTION_REPORT.md` writer, and one badge serve both. Each check now carries
-its own **`advisory`** flag in the payload; the frontend filters on that rather
-than a hardcoded id list (old verdicts without the field fall back to the legacy
-`C1`–`C4` set, which is what makes the frontend and backend deploys
-order-independent).
+`CONSTRUCTION_REPORT.md` writer, and one badge serve both.
+
+Each check carries **two independent flags** in the payload, and the difference
+is operationally important:
+
+| Flag | Meaning | Counted as a gap? | Can withhold `verified`? |
+|---|---|---|---|
+| `advisory: true` | never verdict-bearing *by nature* (`time_budget`, `task_inventory`) | no | no |
+| `enforced: false` | a REAL gap whose rollout flag is still off | **yes** | no |
+| neither | live and enforced | yes | yes |
+
+The frontend filters on `advisory` alone, so an un-enforced failure is still shown
+and still counted by the badge — the flags govern the `verified` boolean, **not**
+disclosure. Old verdicts carrying neither field fall back to the legacy `C1`–`C4`
+set, which is what makes the frontend and backend deploys order-independent.
+
+> Do not "fix" a red badge by setting `advisory` on a check. That demotes a real
+> structural failure to a calibration note and makes the report print
+> "✅ Construction-verified" above a list of FAILs — the exact overclaim the
+> verdict exists to prevent (pinned by
+> `test_unenforced_report_never_claims_a_guarantee_it_has_not_earned`).
 
 **Two enforcement flags** (`backend/config.py`, both default `false`):
 
 - `demo_day_plan_coverage_enforced` — lets Demo Day C6 flip `verified`.
-- `standard_construction_verifier_enforced` — lets the standard verdict flip
-  `verified`. While `false`, every check still runs and reports its gaps but
-  `verified` is forced true.
+- `standard_construction_verifier_enforced` — lets standard C1–C5 flip
+  `verified`. While `false` every check still runs, reports its gaps, and is
+  shown; it just cannot withhold the verdict.
 
-They ship off on purpose. The checks join on `Plan refs` / `Harness refs`
-citations that the tasks prompts **do not yet mandate** — those prompt edits ride
-the golden-corpus gate above. Flipping before that release lands would mark every
-package red. Flip after it clears: env-only, reversible, no redeploy.
+They ship off on purpose: the checks join on `Plan refs` / `Harness refs`
+citations, and the tasks-prompt edits that mandate them (`tasks-v7`,
+Demo Day `tasks-v3`) ride the golden-corpus gate above. Flip after that release
+clears: env-only, reversible, no redeploy.
+
+**Join-key note.** C2 `test_coverage` and C5 `e2e_reachable` read
+`artifact_validator.harness_test_index` — the multi-language scanner shared with
+the online-eval task validator (Python/pytest, Go, TS/JS Vitest-Jest-Mocha,
+RSpec). Before that it used the Python-only `_harness_test_refs`, so **every
+non-Python harness parsed as zero tests and C2 hard-failed**. A stack the scanner
+cannot parse now reports "unverified", never "failed". If C2 starts failing
+broadly after a harness-prompt change, check whether the emitted test shape is one
+the scanner models before assuming a construction regression.
 
 **Operational safety.** Neither flag can block, slow, or fail a generation. The
 verifier is scheduled *after* the tasks artifact is delivered and charged

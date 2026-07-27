@@ -191,6 +191,17 @@ class _StubClient:
     async def get_file_sha(self, repo: str, path: str) -> str | None:
         return self.shas.get(path)
 
+    async def get_file_content(
+        self, repo: str, path: str, *, ref: str | None = None
+    ) -> tuple[str, str] | None:
+        """Read-before-write used by the non-clobbering AGENTS.md and
+        CONSTRUCTION_REPORT.md writes. Returns what this stub last pushed, so a
+        re-export correctly no-ops instead of emitting a spurious commit."""
+        content = self.upserted_content.get(path)
+        if content is None:
+            return None
+        return content, self.shas.get(path) or "stub-sha"
+
     async def upsert_file(
         self,
         repo: str,
@@ -198,6 +209,8 @@ class _StubClient:
         content: str,
         sha: str | None,
         commit_message: str,
+        *,
+        branch: str | None = None,
     ) -> None:
         self.upserted_files.append((repo, path, sha))
         self.upserted_content[path] = content

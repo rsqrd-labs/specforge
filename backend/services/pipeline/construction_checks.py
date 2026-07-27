@@ -34,12 +34,28 @@ class CheckResult:
     any check added later (that was the pre-existing coupling in
     ``constructionVerdict.ts``). An advisory check is computed, persisted, and
     rendered, but never affects ``ConstructionVerdict.verified``.
+
+    ``enforced`` is a SECOND, orthogonal axis, and the distinction matters:
+
+    * ``advisory=True`` — never verdict-bearing *by nature*. The build-time
+      budget and the task-count heuristic are calibration signals; a genuinely
+      small product can fail them while being perfectly well constructed, so
+      they must never be counted as gaps anywhere.
+    * ``enforced=False`` — verdict-bearing in principle, but its rollout flag is
+      still off. The gap is REAL and is named everywhere a gap is named (report,
+      badge); it just cannot withhold ``verified`` yet.
+
+    Collapsing the second into the first (which is what ``advisory=not enforced``
+    did) makes a real structural failure indistinguishable from a calibration
+    note, and the report then prints "✅ Construction-verified" above a list of
+    FAILs — the exact overclaim the verdict exists to prevent.
     """
 
     name: str
     passed: bool
     gaps: list[str] = field(default_factory=list)
     advisory: bool = False
+    enforced: bool = True
 
     def to_dict(self) -> dict:
         return {
@@ -47,6 +63,7 @@ class CheckResult:
             "passed": self.passed,
             "gaps": list(self.gaps),
             "advisory": self.advisory,
+            "enforced": self.enforced,
         }
 
 
@@ -79,18 +96,21 @@ class ConstructionVerdict:
         }
 
 
-def resolve_verified(checks: dict[str, CheckResult], *, enforced: bool) -> bool:
-    """``verified`` = every non-advisory check passed — unless ``enforced`` is
-    False, in which case the verdict is computed and displayed but always reads
-    verified.
+def resolve_verified(checks: dict[str, CheckResult]) -> bool:
+    """``verified`` = every check that is both non-advisory AND enforced passed.
 
-    The un-enforced mode is how a new check ships: the gaps are visible in the
-    report and the UI from day one, but no already-green package flips to red
-    before the prompts that satisfy the check have landed and been measured.
+    The un-enforced mode is how a new check ships: the gaps are computed,
+    persisted, and named in the report and the UI from day one, but they cannot
+    withhold the verdict flag before the prompts that satisfy them have landed
+    and been measured. Note what this does NOT do — it does not hide the gaps.
+    Both renderers report what the checks found; ``verified`` is the narrower
+    claim "no enforced check withheld the guarantee".
     """
-    if not enforced:
-        return True
-    return all(check.passed for check in checks.values() if not check.advisory)
+    return all(
+        check.passed
+        for check in checks.values()
+        if not check.advisory and check.enforced
+    )
 
 
 def is_verdict_stale(verdict: dict | None, current_versions: dict[str, int]) -> bool:
@@ -184,11 +204,16 @@ def plan_coverage_gaps(
       Description prose, so a task that merely mentions "the data model" in a
       sentence does not count as implementing it.
     """
+    # Padded so containment is a WORD-boundary test: the normalised form is
+    # lowercase words joined by single spaces, so `" api " in " rapid api "`
+    # matches the real citation while `" api " in " rapids "` does not. Bare
+    # substring matching let short aliases ("api", "auth", "schema") resolve
+    # inside unrelated words and silently discharge a section no task implements.
     cited: list[str] = []
     for _tid, _header, block in task_blocks:
         value = field_value(block, PLAN_REFS_LABEL)
         if value:
-            cited.append(normalise_reference(value))
+            cited.append(f" {normalise_reference(value)} ")
 
     skip_none = {heading for heading in skip_if_body_starts_with_none}
     gaps: list[str] = []
@@ -199,8 +224,12 @@ def plan_coverage_gaps(
             continue
         if heading in skip_none and normalise_reference(body).startswith("none"):
             continue
-        needles = tuple(normalise_reference(alias) for alias in aliases)
-        if any(needle and needle in value for value in cited for needle in needles):
+        needles = tuple(
+            f" {normalised} "
+            for alias in aliases
+            if (normalised := normalise_reference(alias))
+        )
+        if any(needle in value for value in cited for needle in needles):
             continue
         gaps.append(
             f"no task's {PLAN_REFS_LABEL} cites `{heading}` — the plan specifies "

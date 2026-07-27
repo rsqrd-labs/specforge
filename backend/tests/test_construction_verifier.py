@@ -156,18 +156,27 @@ def test_c6_accepts_the_abbreviated_citation_shapes_prompts_actually_produce() -
     assert _dd_gaps(tasks_md=tasks) == []
 
 
-def test_c6_is_advisory_until_enforced_and_never_flips_a_green_package() -> None:
+def test_c6_is_unenforced_until_flipped_and_never_flips_a_green_package() -> None:
+    """Un-enforced means "cannot withhold `verified`", NOT "advisory".
+
+    C6 stays non-advisory in both states so a genuinely orphaned plan section is
+    still counted as a gap by the report and the badge. Demoting it to advisory
+    would make it indistinguishable from the time-budget calibration signal and
+    let the report print a green guarantee over a real FAIL.
+    """
     tasks = _DD_TASKS.replace(", Security Architecture", "")
     kwargs = dict(spec="", plan=_DD_PLAN, harness="", tasks=tasks)
 
     unenforced = demo_day_plan_linter.verify_construction(**kwargs)
     assert unenforced.checks["C6"].passed is False
-    assert unenforced.checks["C6"].advisory is True
+    assert unenforced.checks["C6"].advisory is False
+    assert unenforced.checks["C6"].enforced is False
 
     enforced = demo_day_plan_linter.verify_construction(
         **kwargs, enforce_plan_coverage=True
     )
     assert enforced.checks["C6"].advisory is False
+    assert enforced.checks["C6"].enforced is True
     assert enforced.verified is False
 
 
@@ -471,18 +480,32 @@ def test_invariant_linters_stay_pure(module) -> None:
 def test_invariant_unenforced_flags_never_withhold_the_guarantee() -> None:
     """Release-A behaviour: every check computes and reports its gaps, but a
     package that would fail cannot flip to red before the prompts that satisfy
-    the checks have landed."""
+    the checks have landed.
+
+    Both modes encode that the SAME way — ``enforced=False`` on the check, never
+    ``advisory=True`` — so one frontend rule and one report rule serve both.
+    """
     broken = standard_plan_linter.verify_construction(
         spec="", plan="", harness="", tasks="", enforced=False
     )
     assert broken.verified is True
     assert any(not c.passed for c in broken.checks.values())
+    # Un-enforced, but still a real (non-advisory) failure that gets named.
+    assert broken.checks["C1"].enforced is False
+    assert broken.checks["C1"].advisory is False
+
+    enforced = standard_plan_linter.verify_construction(
+        spec="", plan="", harness="", tasks="", enforced=True
+    )
+    assert enforced.verified is False
+    assert enforced.checks["C1"].enforced is True
 
     dd = demo_day_plan_linter.verify_construction(
         spec="", plan=_DD_PLAN, harness="", tasks="### T-001: x\n"
     )
     assert dd.checks["C6"].passed is False
-    assert dd.checks["C6"].advisory is True
+    assert dd.checks["C6"].enforced is False
+    assert dd.checks["C6"].advisory is False
 
 
 @pytest.mark.parametrize(
@@ -559,3 +582,210 @@ def test_legacy_verdicts_without_advisory_still_render_the_green_badge() -> None
     assert "✅ Construction-verified" in agent_manual_service.build_construction_report(
         legacy
     )
+
+
+# ---------------------------------------------------------------------------
+# Multi-language harness parsing (the C2/C5 join key).
+#
+# `_harness_test_refs` only ever matched Python `def test_*`, so a Vitest, Go, or
+# RSpec harness parsed as ZERO tests and C2 hard-failed EVERY non-Python package
+# on a parser limitation rather than a construction gap. The verifier now reads
+# the same `harness_test_index` the online-eval task validator does.
+# ---------------------------------------------------------------------------
+
+_TS_HARNESS = """## Requirement-to-Test Matrix
+| FR-001 | creates | `tests/things.test.ts` | creates a thing | integration |
+| FR-002 | journey | `tests/checkout.spec.ts` | completes checkout | e2e |
+
+### File: tests/things.test.ts
+```ts
+describe("things", () => {
+  it("creates a thing", () => { expect(1).toBe(1) })
+  it("lists things", () => { expect(1).toBe(1) })
+})
+```
+
+### File: tests/checkout.spec.ts
+```ts
+it("completes checkout", () => { expect(1).toBe(1) })
+```
+"""
+
+_TS_TASKS = """## Tasks
+
+### T-001: Things API
+
+**Spec refs:** FR-001, FR-002, NFR-001, SEC-001, AC-001
+**Plan refs:** API Design, Data Model and Persistence, Authentication and Authorization,
+  Security Architecture, Error Handling and Recovery, Observability and Audit Logging,
+  Deployment and Operations
+**Harness refs:** `tests/things.test.ts`
+
+**Dependencies**
+none
+
+### T-002: Checkout journey
+
+**Spec refs:** FR-001
+**Plan refs:** API Design
+**Harness refs:** `tests/checkout.spec.ts`
+
+**Dependencies**
+T-001
+"""
+
+
+def test_standard_c2_accepts_a_typescript_harness() -> None:
+    """The regression that made the whole standard verdict unusable off Python."""
+    verdict = _std(harness=_TS_HARNESS, tasks=_TS_TASKS)
+    assert verdict.checks["C2"].passed is True, verdict.checks["C2"].gaps
+    assert verdict.verified is True, {
+        cid: c.gaps for cid, c in verdict.checks.items() if not c.passed
+    }
+
+
+def test_standard_c2_still_flags_an_uncited_test_in_a_typescript_harness() -> None:
+    """Language support must not become blanket leniency: the check still has to
+    catch a real gap in the stacks it newly understands."""
+    tasks = _TS_TASKS.replace("**Harness refs:** `tests/things.test.ts`", "")
+    gaps = _std(harness=_TS_HARNESS, tasks=tasks).checks["C2"].gaps
+    assert any("creates a thing" in gap for gap in gaps)
+    assert any("lists things" in gap for gap in gaps)
+
+
+def test_standard_c2_reports_unverified_rather_than_failed_for_an_unparsed_stack() -> (
+    None
+):
+    """A harness whose language we cannot parse is UNVERIFIED, not broken.
+
+    Claiming "the harness defines no runnable tests" about a file full of Elixir
+    tests is a false accusation, and (once enforced) would withhold the guarantee
+    from a perfectly well-constructed package.
+    """
+    harness = """## Files
+### File: test/thing_test.exs
+```elixir
+defmodule ThingTest do
+  test "creates a thing" do
+    assert true
+  end
+end
+```
+"""
+    check = _std(harness=harness).checks["C2"]
+    assert check.passed is True
+    assert any("could not be parsed" in gap for gap in check.gaps)
+
+
+def test_standard_c2_still_fails_a_harness_with_no_files_at_all() -> None:
+    """The genuinely-empty case stays a hard failure — the unverified escape
+    must not swallow it."""
+    check = _std(harness="## Harness Overview\n\nWe will write tests later.\n").checks[
+        "C2"
+    ]
+    assert check.passed is False
+    assert any("no runnable tests" in gap for gap in check.gaps)
+
+
+def test_standard_c2_whole_file_ref_claims_every_test_in_that_file() -> None:
+    """A task whose contract is "this file goes green" discharges its tests."""
+    tasks = _STD_TASKS.replace(
+        "**Harness refs:** `tests/integration/test_things.py::test_create_thing`,\n"
+        "  `tests/integration/test_things.py::test_list_things`",
+        "**Harness refs:** `tests/integration/test_things.py`",
+    )
+    assert _std(tasks=tasks).checks["C2"].passed is True
+
+
+def test_standard_c2_qualified_ref_never_claims_its_siblings() -> None:
+    """The converse: citing ONE test in a file must not silently discharge the
+    others, or a task list could claim a whole suite by naming one test."""
+    tasks = _STD_TASKS.replace(
+        "  `tests/integration/test_things.py::test_list_things`", ""
+    )
+    gaps = _std(tasks=tasks).checks["C2"].gaps
+    assert any("test_list_things" in gap for gap in gaps)
+
+
+def test_standard_c5_accepts_an_e2e_declared_only_by_the_matrix_type_column() -> None:
+    """C5 keyed on filenames alone, but the standard harness prompt names `e2e`
+    exactly once — inside a *recommended* directory layout it never mandates. A
+    compliant harness whose journey test is `tests/journeys/signup.py` with an
+    `e2e` type cell has to resolve, or the check fails on a naming convention.
+    """
+    harness = """## Requirement-to-Test Matrix
+| FR-001 | signup journey | `tests/journeys/test_signup.py` | test_signup | e2e |
+
+### File: tests/journeys/test_signup.py
+```python
+def test_signup():
+    assert True
+```
+"""
+    tasks = """### T-001: Signup
+
+**Spec refs:** FR-001, FR-002, NFR-001, SEC-001, AC-001
+**Plan refs:** API Design, Data Model and Persistence, Authentication and Authorization,
+  Security Architecture, Error Handling and Recovery, Observability and Audit Logging,
+  Deployment and Operations
+**Harness refs:** `tests/journeys/test_signup.py`
+
+**Dependencies**
+none
+"""
+    assert _std(harness=harness, tasks=tasks).checks["C5"].passed is True
+
+
+def test_standard_c1_excludes_requirements_the_spec_itself_defers() -> None:
+    """ "FR-900 deferred to v2" under Out of Scope is correct scoping, not an
+    unimplemented requirement."""
+    spec = _STD_SPEC + "\n## Out of Scope\nFR-900 SSO is deferred to v2.\n"
+    verdict = _std(spec=spec)
+    assert verdict.checks["C1"].passed is True, verdict.checks["C1"].gaps
+    # …but an id that also appears in the requirements body is still in scope.
+    spec_still_in_scope = (
+        _STD_SPEC + "\n## Out of Scope\nUnlike FR-001, batch is out.\n"
+    )
+    assert (
+        _std(spec=spec_still_in_scope, tasks="### T-001: x\n").checks["C1"].passed
+        is False
+    )
+
+
+def test_standard_c4_alias_matching_is_word_boundaried() -> None:
+    """`api` must not match inside `rapids`, or a short alias silently discharges
+    a section no task implements."""
+    tasks = _STD_TASKS.replace(
+        "**Plan refs:** Data Model §things, API Design",
+        "**Plan refs:** Rapids pipeline, Datamodels",
+    )
+    gaps = _std(tasks=tasks).checks["C4"].gaps
+    assert any("API Design" in gap for gap in gaps)
+    assert any("Data Model and Persistence" in gap for gap in gaps)
+
+
+def test_standard_c2_fails_a_parsable_file_that_defines_no_test() -> None:
+    """The third branch: we parse `.py` completely, so a `.py` file with no test
+    is positive evidence of absence — a genuine gap, not parser blindness."""
+    harness = """## Files
+### File: tests/test_things.py
+```python
+import pytest
+
+BASE_URL = "http://localhost"
+```
+"""
+    check = _std(harness=harness).checks["C2"]
+    assert check.passed is False
+    assert any("none of them defines a runnable test" in gap for gap in check.gaps)
+
+
+def test_standard_harness_refs_without_backticks_still_resolve() -> None:
+    """A dropped pair of backticks is a formatting slip, not "this test is built
+    by no task" — the fallback keeps it from manufacturing a construction gap."""
+    tasks = _STD_TASKS.replace(
+        "**Harness refs:** `tests/integration/test_things.py::test_create_thing`,\n"
+        "  `tests/integration/test_things.py::test_list_things`",
+        "**Harness refs:** tests/integration/test_things.py",
+    )
+    assert _std(tasks=tasks).checks["C2"].passed is True

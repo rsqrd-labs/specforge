@@ -229,18 +229,21 @@ async def build_export(workspace_id: UUID, user_id: UUID, db: AsyncSession) -> b
         ) in agent_manual_service.build_instruction_files(workspace, stage_md).items():
             zf.writestr(instruction_path, instruction_body)
 
-        if getattr(workspace, "mode", "standard") == "demo_day":
-            # CONSTRUCTION_REPORT.md (plan §7.3/§8.2): refresh the verdict if a
-            # stage was refined after it was computed (zero-LLM, cheap), then
-            # render it. ensure_fresh_verdict is fail-open, so a hiccup just ships
-            # the last-known verdict (or omits the report) rather than failing the
-            # download.
-            verdict = await construction_verdict_service.ensure_fresh_verdict(
-                db, workspace, stages
-            )
-            if verdict:
-                report = agent_manual_service.build_construction_report(verdict)
-                zf.writestr(agent_manual_service.CONSTRUCTION_REPORT_FILENAME, report)
+        # CONSTRUCTION_REPORT.md (plan §7.3/§8.2), BOTH modes: the verifier now
+        # runs for standard workspaces too, so gating the report on demo_day left
+        # standard users with a badge reading "N gaps" and no surface anywhere
+        # that names them — and, worse, no way to refresh a stale verdict at all,
+        # because this is the only place `ensure_fresh_verdict` is called. Refresh
+        # if a stage was refined after the verdict was computed (zero-LLM, cheap),
+        # then render. ensure_fresh_verdict is fail-open, so a hiccup just ships
+        # the last-known verdict (or omits the report) rather than failing the
+        # download.
+        verdict = await construction_verdict_service.ensure_fresh_verdict(
+            db, workspace, stages
+        )
+        if verdict:
+            report = agent_manual_service.build_construction_report(verdict)
+            zf.writestr(agent_manual_service.CONSTRUCTION_REPORT_FILENAME, report)
 
     return buf.getvalue()
 

@@ -52,7 +52,13 @@ Each task uses this exact format:
 
 **Phase:** <phase name>
 **Spec refs:** FR-NNN, NFR-NNN, SEC-NNN, AC-NNN (all requirements and acceptance criteria this task addresses)
-**Plan refs:** Section names, API names, schema names, module names, migration names
+**Plan refs:** The PLAN.md section heading(s) this task implements, written by name, optionally narrowed
+  with the specific contract — e.g. `API Design §POST /sessions`, `Data Model and Persistence §users.email`,
+  `Deployment and Operations §rollback`. Name the section, not only the endpoint/schema: the section names are
+  how the plan and the task list are joined. Across the whole task list, every one of these load-bearing plan
+  sections MUST be cited by at least one task: API Design, Data Model and Persistence, Authentication and
+  Authorization, Security Architecture, Error Handling and Recovery, Observability and Audit Logging,
+  Deployment and Operations. A section with no task is a designed capability nothing builds.
 **Harness refs:** `path/to/test_file.py::TestClass::test_method` (all tests that must pass when this task is
   complete; for setup-only tasks with no harness test write `_(none — <brief reason>)_`)
 **Priority:** MUST / SHOULD / COULD — exactly one. MUST = cannot ship without it; SHOULD = strongly desired in V1
@@ -165,7 +171,8 @@ Example — a well-formed task (different product; do not copy into your output)
 
   **Phase:** API Layer
   **Spec refs:** FR-012, SEC-004, NFR-003
-  **Plan refs:** Subscriptions API §DELETE /subscriptions/{{id}}, Data Model §subscriptions.state
+  **Plan refs:** API Design §DELETE /subscriptions/{{id}}, Data Model and Persistence §subscriptions.state,
+    Security Architecture §subscription ownership check
   **Harness refs:** `tests/integration/test_subscriptions.py::TestCancellation::test_cancel_transitions_to_grace_period`,
     `tests/security/test_security.py::TestSubscriptionAuth::test_cancel_requires_auth`
   **Priority:** MUST
@@ -217,8 +224,10 @@ Example — a well-formed task (different product; do not copy into your output)
 {wrapped_harness}{research_block}
 
 Before returning, verify (internal — do not include a checklist in your output):
-- Every FR/NFR/SEC is referenced by ≥ 1 task's Spec refs; every AC-NNN appears in the Traceability Overview or a task's Spec refs.
-- Every harness test path appears in ≥ 1 task's Harness refs, using the exact path from the harness artifact.
+- Every FR/NFR/SEC/AC-NNN the spec commits to is referenced by ≥ 1 task's **Spec refs** field. Appearing only in the Traceability Overview is NOT sufficient — that table documents an ID, a Spec refs entry is what makes a task responsible for building it. (Requirements the spec itself defers under Out of Scope / Non-Goals are excluded.)
+- Every harness test path appears in ≥ 1 task's Harness refs, using the exact path from the harness artifact. Citing a whole test FILE claims every test in it; cite `file::test_name` when a task makes only one of them pass.
+- Every load-bearing plan section (API Design, Data Model and Persistence, Authentication and Authorization, Security Architecture, Error Handling and Recovery, Observability and Audit Logging, Deployment and Operations) is named in ≥ 1 task's Plan refs.
+- At least one task's Harness refs cites the end-to-end/journey test that exercises the product end to end.
 - The Effort Summary counts match the emitted task blocks exactly (N total, MUST/SHOULD/COULD, size/estimate buckets).
 - Every task has ≥ 1 Acceptance Criterion with an exact runnable command (pytest, curl, or named smoke step).
 - No task's Dependencies lists a higher T-NNN — the graph is acyclic; security control and data/migration tasks precede what depends on them.

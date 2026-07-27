@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react"
 import { useNavigate, useParams } from "react-router-dom"
 import { CoveragePanel } from "../components/workspace/CoveragePanel"
+import { ConstructionGapsPanel } from "../components/workspace/ConstructionGapsPanel"
 import { ConstructionVerifiedBadge } from "../components/workspace/ConstructionVerifiedBadge"
 import { DemoDayHandoffPanel } from "../components/workspace/DemoDayHandoffPanel"
 import {
@@ -2203,10 +2204,20 @@ export default function Workspace() {
   // verifier has run). Without this the rail would stay collapsed and the panel
   // would never render (the §9 silent-no-op integration point).
   const showDemoDayHandoff = isDemoDayWorkspace && activeStage.type === "tasks"
+  // Standard mode gets the same verdict from the same verifier, so it needs the
+  // same gap list. Gated on a verdict EXISTING (unlike the Demo Day card, which
+  // also carries the bundle download and is worth a column before the verifier
+  // has run) so it never opens an empty rail on a package it has not seen.
+  const showConstructionGaps =
+    !isDemoDayWorkspace &&
+    activeStage.type === "tasks" &&
+    constructionVerdict !== null &&
+    constructionVerdict !== undefined
   const hasVersionHistory = activeStage.current_version > 1
   const showRightPanel =
     Boolean(diffResult) ||
     showDemoDayHandoff ||
+    showConstructionGaps ||
     hasVersionHistory ||
     (activeStage.type === "harness" && harnessCoverageGaps > 0) ||
     (activeStage.type === "tasks" &&
@@ -2215,8 +2226,9 @@ export default function Workspace() {
         githubSync.data !== null))
   const showQualitySignal =
     evalResult !== null || isEvalError || activeStage.status === "in_progress"
+  // Both modes: the badge is mode-agnostic and the header row must make room for
+  // it wherever a verdict exists, or the badge renders into a collapsed summary.
   const showConstructionSignal =
-    isDemoDayWorkspace &&
     activeStage.type === "tasks" &&
     constructionVerdict !== null &&
     constructionVerdict !== undefined
@@ -3106,6 +3118,16 @@ export default function Workspace() {
                             ? undefined
                             : "Finalise all four stages to download the handoff bundle."
                         }
+                      />
+                    )}
+                    {/* Standard mode's counterpart: the verifier and the badge
+                        run for both modes, so the gap list has to exist for both
+                        too — otherwise the badge reads "N gaps" with nothing
+                        anywhere naming them. */}
+                    {showConstructionGaps && (
+                      <ConstructionGapsPanel
+                        verdict={constructionVerdict}
+                        stages={stages}
                       />
                     )}
                     <CoveragePanel

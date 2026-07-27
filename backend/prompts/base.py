@@ -53,7 +53,17 @@ STAGE_PROMPT_VERSIONS: dict[str, str] = {
     # redefined on the focused-session scale the split rule and session target
     # already used, and Estimated size is explicitly diff-scope, not time);
     # Spec refs' format line now admits AC-NNN, matching the verify checklist.
-    "tasks": f"{ASDD_PROMPT_VERSION}:tasks-v6",
+    # tasks-v7: closes the contract the standard construction verifier joins on.
+    # `Plan refs` now names PLAN.md SECTIONS (with the seven load-bearing ones
+    # enumerated) rather than "section names, API names, schema names…", so C4
+    # plan_coverage has something to match; the verify checklist stops accepting
+    # an AC that lives only in the Traceability Overview (C1 requirement_coverage
+    # joins on the Spec refs FIELD, and the old wording explicitly blessed the
+    # documented-but-unbuilt case); and it now asks for the e2e citation C5 and
+    # the file-vs-`file::test` distinction C2 read. Only tasks.py's bytes moved,
+    # so ASDD_PROMPT_VERSION is unchanged and the other three stages keep their
+    # prompt caches.
+    "tasks": f"{ASDD_PROMPT_VERSION}:tasks-v7",
 }
 
 # Demo Day mode (docs/DEMO_DAY_MODE_IMPLEMENTATION_PLAN.md). Separate version
@@ -82,7 +92,14 @@ DEMO_DAY_STAGE_PROMPT_VERSIONS: dict[str, str] = {
     # the plan variant's bytes changed, so DEMO_DAY_PROMPT_VERSION is unmoved.
     "plan": f"{DEMO_DAY_PROMPT_VERSION}:plan-v3",
     "harness": f"{DEMO_DAY_PROMPT_VERSION}:harness-v2",
-    "tasks": f"{DEMO_DAY_PROMPT_VERSION}:tasks-v2",
+    # tasks-v3: the C6 plan_coverage join — `Plan refs` now names PLAN.md
+    # sections and enumerates the four load-bearing ones (seed dataset, demo
+    # surface, external integrations, auth stance) that a task must cite, and
+    # the `Harness refs` example carries a real file EXTENSION (the old
+    # `path/to/test_file` sample did not, while C2 requires one to recognise a
+    # path token). Only the tasks variant's bytes changed, so
+    # DEMO_DAY_PROMPT_VERSION is unmoved.
+    "tasks": f"{DEMO_DAY_PROMPT_VERSION}:tasks-v3",
 }
 
 

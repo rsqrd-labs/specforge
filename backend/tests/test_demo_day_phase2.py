@@ -217,9 +217,15 @@ async def test_standard_export_defaults_to_agents_md() -> None:
     db = _FakeDB(ws, _stages_for(ws))
     result = await build_export(ws.id, ws.user_id, db)
     names = zipfile.ZipFile(io.BytesIO(result)).namelist()
+    # The Demo Day operating MANUAL stays Demo-Day-only...
     assert "CLAUDE.md" not in names
     assert "AGENTS.md" in names
-    assert "CONSTRUCTION_REPORT.md" not in names
+    # ...but the construction REPORT ships for both modes: the verifier runs for
+    # standard workspaces and the badge shows their gap count, so the document
+    # that names those gaps cannot be Demo-Day-only. (It is also the only caller
+    # of `ensure_fresh_verdict`, i.e. the only way a stale standard verdict is
+    # ever recomputed.)
+    assert "CONSTRUCTION_REPORT.md" in names
     # Standard files unchanged.
     assert {"SPEC.md", "PLAN.md", "TASKS.md"} <= set(names)
 
@@ -259,7 +265,9 @@ async def test_standard_both_export_contains_both_instruction_files() -> None:
     names = zipfile.ZipFile(io.BytesIO(result)).namelist()
     assert names.count("AGENTS.md") == 1
     assert names.count("CLAUDE.md") == 1
-    assert "CONSTRUCTION_REPORT.md" not in names
+    # Both instruction files are the Demo Day *manual*'s standard counterparts;
+    # the construction report is mode-agnostic and ships exactly once.
+    assert names.count("CONSTRUCTION_REPORT.md") == 1
 
 
 @pytest.mark.asyncio

@@ -51,6 +51,10 @@ _DEPENDENCIES: dict[str, list[str]] = {
 _STAGE_KEEP_SECTIONS: dict[str, list[str]] = {
     "spec": [
         "## In-Scope (MVP)",
+        # spec-v6 added ## User Stories alongside ## In-Scope (MVP); both carry
+        # FR-ID citations the plan's RTM traces, so both must survive the
+        # >200K section-aware injection verbatim rather than being summarised.
+        "## User Stories",
         "## Functional Requirements",
         "## Non-Functional Requirements",
         "## Security, Privacy, and Abuse Expectations",

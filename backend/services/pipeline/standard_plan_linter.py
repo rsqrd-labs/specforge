@@ -47,11 +47,12 @@ from services.pipeline.artifact_validator import (
     _REQUIREMENT_ID_RE,
     _TASK_DEP_RE,
     _TASK_HEADER_RE,
-    _harness_test_refs,
-    _normalise_harness_path,
-    _ref_matches,
+    HarnessTestIndex,
+    _canonical_test_path,
+    _normalise_harness_ref,
     _section_body,
     _task_dependency_cycle_issues,
+    harness_test_index,
 )
 from services.pipeline.construction_checks import (
     CheckResult,
@@ -129,6 +130,33 @@ def _task_blocks(tasks_md: str) -> list[tuple[int, str, str]]:
     return blocks
 
 
+# Spec sections that DECLINE work. An id whose only mention is here is out of
+# scope by construction, so no task should implement it.
+_DEFERRAL_SECTIONS = ("## Out of Scope", "## Non-Goals")
+
+
+def _spec_requirement_ids(spec_md: str) -> set[str]:
+    """Every FR/NFR/SEC/AC id the spec commits to building."""
+
+    def ids(text: str) -> set[str]:
+        return set(_REQUIREMENT_ID_RE.findall(text)) | set(_AC_ID_RE.findall(text))
+
+    everywhere = ids(spec_md)
+    if not everywhere:
+        return everywhere
+    remainder = spec_md
+    declined: set[str] = set()
+    for heading in _DEFERRAL_SECTIONS:
+        body = _section_body(spec_md, heading)
+        if not body:
+            continue
+        declined |= ids(body)
+        remainder = remainder.replace(body, "", 1)
+    # Declined only if it appears NOWHERE else — an id mentioned in Out of Scope
+    # for contrast ("unlike FR-003, this is deferred") is still in scope.
+    return everywhere - (declined - ids(remainder))
+
+
 def _check_requirement_coverage(
     spec_md: str, tasks_md: str, blocks: list[tuple[int, str, str]]
 ) -> CheckResult:
@@ -137,9 +165,13 @@ def _check_requirement_coverage(
     Joins on the FIELD VALUE, not the whole document — that is the entire point.
     An id that appears only in the Traceability Overview table is documented, not
     built.
+
+    Ids named ONLY under the spec's deferral sections are excluded: "FR-021 is
+    deferred to v2" in ## Out of Scope is the spec explicitly declining to build
+    something, and demanding a task for it would turn correct scoping into a
+    construction gap.
     """
-    upstream = set(_REQUIREMENT_ID_RE.findall(spec_md))
-    upstream.update(_AC_ID_RE.findall(spec_md))
+    upstream = _spec_requirement_ids(spec_md)
     if not upstream:
         return CheckResult(
             "requirement_coverage",
@@ -164,6 +196,54 @@ def _check_requirement_coverage(
     return CheckResult("requirement_coverage", not missing, gaps)
 
 
+def _ref_tokens(value: str) -> list[str]:
+    """The candidate harness references inside one ``**Harness refs:**`` value.
+
+    Backticked tokens are the mandated form and the only ones read when present.
+    The un-backticked fallback exists because a model that drops the backticks
+    has still named the test — treating that formatting slip as "this test is
+    referenced by no task" would manufacture a construction gap out of markdown.
+    The fallback is deliberately narrow (path- or ``::``-shaped tokens only) so
+    ordinary prose in the field cannot resolve to a test.
+    """
+    backticked = _BACKTICK_TOKEN_RE.findall(value)
+    if backticked:
+        return backticked
+    return [
+        token
+        for token in re.split(r"[\s,;]+", value)
+        if token and ("::" in token or _FILE_TOKEN_RE.search(token))
+    ]
+
+
+def _cited_tests(
+    index: HarnessTestIndex, blocks: list[tuple[int, str, str]]
+) -> set[str]:
+    """Bare test names some task's ``**Harness refs:**`` actually claims."""
+    cited: set[str] = set()
+    for _tid, _header, block in blocks:
+        value = field_value(block, _HARNESS_REFS_LABEL)
+        if not value or _NONE_ESCAPE_RE.search(value):
+            continue
+        for token in _ref_tokens(value):
+            normalised = _normalise_harness_ref(token)
+            if "::" in normalised:
+                # A qualified ref claims exactly its leaf test — never the rest of
+                # the file, or citing one test would silently discharge every
+                # sibling test in it.
+                leaf = normalised.rsplit("::", 1)[-1]
+                if leaf in index.test_names:
+                    cited.add(leaf)
+                continue
+            if normalised in index.test_names:
+                cited.add(normalised)
+                continue
+            # A whole-file ref legitimately claims every test in that file: the
+            # task's contract is "this file goes green".
+            cited |= index.tests_in_file.get(_canonical_test_path(normalised), set())
+    return cited
+
+
 def _check_test_coverage(
     harness_md: str, blocks: list[tuple[int, str, str]]
 ) -> CheckResult:
@@ -172,28 +252,48 @@ def _check_test_coverage(
     The forward direction of ``_task_harness_ref_issues`` (which only validates
     that the refs a task cites exist). A harness test no task references means a
     tested behaviour that never gets built.
+
+    Reads the SHARED multi-language index (``harness_test_index``), not the
+    Python-only ``_harness_test_refs``: with the latter a Vitest/Go/RSpec harness
+    parsed as zero tests and this check hard-failed every non-Python package on a
+    parser limitation rather than a construction gap.
+
+    When the harness carries real code the scanner cannot name tests in, the
+    honest answer is "unverified", not "failed" — this check reports the
+    limitation and passes, mirroring ``online_eval``'s UNVERIFIED_COVERAGE class.
+    A hard fail is reserved for the two cases that are genuinely the package's
+    fault: no harness files at all, or files we parse completely that define no
+    test.
     """
-    known = _harness_test_refs(harness_md)
-    if not known:
+    index = harness_test_index(harness_md)
+    if not index.test_names:
+        blind = index.unparsed_test_files()
+        if blind:
+            return CheckResult(
+                "test_coverage",
+                True,
+                [
+                    "harness tests could not be parsed for "
+                    f"{', '.join(f'`{path}`' for path in sorted(blind)[:5])} — "
+                    "task-to-test coverage is unverified for this stack, not "
+                    "failed"
+                ],
+            )
+        if not index.known_files:
+            return CheckResult(
+                "test_coverage",
+                False,
+                ["the HARNESS defines no runnable tests to trace tasks against"],
+            )
         return CheckResult(
             "test_coverage",
             False,
-            ["the HARNESS defines no runnable tests to trace tasks against"],
+            [
+                "the HARNESS names files but none of them defines a runnable test, "
+                "so no task can be traced to a verification"
+            ],
         )
-    # Only compare on bare test-function names: the harness helper emits each test
-    # under several key shapes (name, path::name, Class::name, path::Class::name)
-    # and a task legitimately cites any one of them.
-    bare = {ref for ref in known if "::" not in ref and "/" not in ref}
-    cited: set[str] = set()
-    for _tid, _header, block in blocks:
-        value = field_value(block, _HARNESS_REFS_LABEL)
-        if not value or _NONE_ESCAPE_RE.search(value):
-            continue
-        for token in _BACKTICK_TOKEN_RE.findall(value):
-            if not _ref_matches(token, known):
-                continue
-            cited.add(_normalise_harness_path(token).split("::")[-1])
-    missing = sorted(bare - cited)
+    missing = sorted(index.test_names - _cited_tests(index, blocks))
     gaps = [
         f"harness test `{name}` is referenced by no task's {_HARNESS_REFS_LABEL} — "
         "the behaviour it tests is never built"
@@ -240,9 +340,33 @@ def _check_plan_coverage(
     return CheckResult("plan_coverage", not gaps, gaps)
 
 
+# What the Requirement-to-Test Matrix's `test type` cell (or a test/file name)
+# has to say for a row to count as end-to-end evidence. Naming alone is NOT
+# sufficient as a join key: the standard harness prompt names `e2e` exactly once,
+# inside a *recommended* directory layout, and never mandates the convention — so
+# a compliant harness whose journey test is `tests/integration/test_signup_flow.py`
+# with an `e2e` type cell has to resolve, or the check fails on a filename style.
+_E2E_MARKERS = ("e2e", "end_to_end", "end-to-end", "end to end", "smoke", "journey")
+
+
 def _looks_like_e2e(token: str) -> bool:
     lowered = token.lower()
-    return "e2e" in lowered or "end_to_end" in lowered or "end-to-end" in lowered
+    return any(marker in lowered for marker in _E2E_MARKERS)
+
+
+def _matrix_e2e_refs(harness_md: str) -> set[str]:
+    """Normalised file/test tokens from Requirement-to-Test Matrix rows whose own
+    cells declare the row end-to-end."""
+    body = _section_body(harness_md, "## Requirement-to-Test Matrix")
+    refs: set[str] = set()
+    for line in body.splitlines():
+        if "|" not in line or not _looks_like_e2e(line):
+            continue
+        for token in _BACKTICK_TOKEN_RE.findall(line):
+            normalised = _normalise_harness_ref(token)
+            if "::" in normalised or _FILE_TOKEN_RE.search(normalised):
+                refs.add(normalised)
+    return refs
 
 
 def _check_e2e(harness_md: str, blocks: list[tuple[int, str, str]]) -> CheckResult:
@@ -252,18 +376,24 @@ def _check_e2e(harness_md: str, blocks: list[tuple[int, str, str]]) -> CheckResu
     required a task to land on it — so "working product" reduced to "the unit
     tests pass". Fail-open on shape: when the harness declares no E2E test at all
     this reports the harness gap rather than blaming the task list.
+
+    Evidence is drawn from the test/file NAMES *and* from the matrix rows that
+    declare themselves end-to-end, so a compliant harness that simply does not
+    use the word "e2e" in a filename still resolves.
     """
-    e2e_tests = {
-        ref
-        for ref in _harness_test_refs(harness_md)
-        if _looks_like_e2e(ref) and "::" not in ref and "/" not in ref
-    }
-    e2e_files = {
-        _normalise_harness_path(token)
-        for token in _BACKTICK_TOKEN_RE.findall(harness_md)
-        if _FILE_TOKEN_RE.search(token.strip()) and _looks_like_e2e(token)
-    }
-    if not e2e_tests and not e2e_files:
+    index = harness_test_index(harness_md)
+    e2e_tests = {name for name in index.test_names if _looks_like_e2e(name)}
+    e2e_files = {path for path in index.known_files if _looks_like_e2e(path)}
+    matrix_refs = _matrix_e2e_refs(harness_md)
+    for ref in matrix_refs:
+        head, _, leaf = ref.rpartition("::")
+        if leaf in index.test_names:
+            e2e_tests.add(leaf)
+        path = _canonical_test_path(head or ref)
+        if path in index.known_files:
+            e2e_files.add(path)
+            e2e_tests.update(index.tests_in_file.get(path, set()))
+    if not e2e_tests and not e2e_files and not matrix_refs:
         return CheckResult(
             "e2e_reachable",
             False,
@@ -274,11 +404,17 @@ def _check_e2e(harness_md: str, blocks: list[tuple[int, str, str]]) -> CheckResu
         )
     for _tid, _header, block in blocks:
         value = field_value(block, _HARNESS_REFS_LABEL)
-        if not value:
+        if not value or _NONE_ESCAPE_RE.search(value):
             continue
-        for token in _BACKTICK_TOKEN_RE.findall(value):
-            normalised = _normalise_harness_path(token)
-            if _looks_like_e2e(normalised) or normalised in e2e_files:
+        for token in _ref_tokens(value):
+            normalised = _normalise_harness_ref(token)
+            if _looks_like_e2e(normalised) or normalised in matrix_refs:
+                return CheckResult("e2e_reachable", True, [])
+            leaf = normalised.rsplit("::", 1)[-1]
+            if leaf in e2e_tests:
+                return CheckResult("e2e_reachable", True, [])
+            head = normalised.split("::", 1)[0]
+            if _canonical_test_path(head) in e2e_files:
                 return CheckResult("e2e_reachable", True, [])
     return CheckResult(
         "e2e_reachable",
@@ -303,7 +439,11 @@ def _check_task_inventory(
     a heuristic count into a hard failure trains users to ignore the badge.
     """
     count = len(blocks)
-    distinct = len(set(_REQUIREMENT_ID_RE.findall(spec_md)))
+    # Same in-scope id set C1 uses, so a spec that defers FR-021 in ## Out of
+    # Scope is not also counted against the task list here.
+    distinct = len(
+        {req for req in _spec_requirement_ids(spec_md) if _REQUIREMENT_ID_RE.match(req)}
+    )
     if distinct and count < distinct:
         return CheckResult(
             "task_inventory",
@@ -330,10 +470,19 @@ def verify_construction(
 ) -> ConstructionVerdict:
     """Run C1–C6 over the four finalised stage contents and return the verdict.
 
-    ``enforced`` decides whether the non-advisory checks flip ``verified``. It
-    defaults to False so the verdict can ship computed-and-visible before the
-    prompts that satisfy it land. The flag arrives as a parameter, never a
-    settings read, so this module stays pure and trivially unit-testable.
+    ``enforced`` decides whether C1–C5 are verdict-bearing. It defaults to False
+    so the verdict can ship computed-and-visible before the prompts that satisfy
+    it land. The flag arrives as a parameter, never a settings read, so this
+    module stays pure and trivially unit-testable.
+
+    While un-enforced the checks carry ``enforced=False`` IN THE PAYLOAD rather
+    than having the verdict overridden by a blanket ``verified=True`` computed
+    behind them. Same shape Demo Day uses, one definition across both modes, and
+    it keeps the gaps honest: an un-enforced failure is still a real structural
+    gap and is still named by the report and the badge — it just cannot withhold
+    ``verified``. (Marking them ``advisory`` instead would demote a genuine
+    failure to a calibration note and make the report print
+    "✅ Construction-verified" over a list of FAILs.)
 
     ``estimated_minutes``/``time_budget_minutes`` are Demo Day's build-time
     calibration and stay None here; the report writer and the frontend already
@@ -348,8 +497,10 @@ def verify_construction(
         "C5": _check_e2e(harness or "", blocks),
         "C6": _check_task_inventory(spec or "", blocks),
     }
+    for check_id in ("C1", "C2", "C3", "C4", "C5"):
+        checks[check_id].enforced = enforced
     return ConstructionVerdict(
-        verified=resolve_verified(checks, enforced=enforced),
+        verified=resolve_verified(checks),
         checks=checks,
         estimated_minutes=None,
         time_budget_minutes=None,

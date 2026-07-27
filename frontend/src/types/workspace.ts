@@ -22,11 +22,22 @@ export interface CoverageSummary {
  * optional because verdicts persisted before the field existed do not carry it;
  * `constructionVerdict.ts` falls back to the legacy id set for those.
  */
+/**
+ * One construction check's result. Two independent flags, both optional so a
+ * verdict persisted before either existed still deserialises:
+ *
+ * - `advisory` — never verdict-bearing *by nature* (build-time budget, task-count
+ *   heuristic). Not counted as a gap anywhere.
+ * - `enforced` — verdict-bearing in principle, but its backend rollout flag is
+ *   still off. The gap is REAL and is still counted and shown; it just cannot
+ *   withhold `verified`. Absent ⇒ treat as enforced.
+ */
 export interface ConstructionCheck {
   name: string
   passed: boolean
   gaps: string[]
   advisory?: boolean
+  enforced?: boolean
 }
 
 /**
