@@ -33,7 +33,7 @@ bleach==6.*
 resend==2.*
 
 # Cache
-redis[asyncio]==5.*
+redis[asyncio]>=5,<9
 
 # Background jobs / durable queue (Phase 21 — T-269)
 arq==0.28.*
