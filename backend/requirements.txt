@@ -22,7 +22,7 @@ passlib==1.*
 
 # LLM Providers
 anthropic>=0.40,<0.118
-openai==1.57.*
+openai>=1.57,<2.49
 google-genai>=1,<3
 
 # Security
