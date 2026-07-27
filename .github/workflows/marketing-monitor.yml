@@ -15,7 +15,14 @@ name: Marketing Regression Monitor
 
 on:
   schedule:
-    - cron: "*/30 * * * *" # every 30 minutes
+    # Hourly, which is exactly the detection SLO stated above ("within the
+    # hour"). This is a PRIVATE repo, so every run is billed and GitHub rounds
+    # each job UP to a full minute — the job itself is ~8s of curl, so the
+    # cadence, not the work, sets the cost. The previous */30 spent ~1,440
+    # billable minutes a month (48 runs/day) to beat a one-hour SLO by half an
+    # hour. Do not tighten this without a reason that justifies ~720 minutes
+    # per month per halving.
+    - cron: "0 * * * *"
   workflow_dispatch: {}
 
 jobs:

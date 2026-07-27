@@ -16,48 +16,44 @@ concurrency:
 permissions:
   contents: read
   pull-requests: read
+  # Needed by the `preflight` job to read the CI conclusion of the PR run that
+  # already validated this tree (see "Detect a tree already verified on its PR").
+  actions: read
 
 jobs:
-  # Detect which areas changed so unaffected jobs can be skipped — on PRs
-  # *and* on push to main. A docs-only (or otherwise backend/frontend/marketing
-  # untouched) push to main skips those suites entirely; `deploy` below only
-  # deploys the zones whose job actually ran. `.github/workflows/ci.yml` itself
-  # is listed in every filter, so a workflow change always re-runs everything.
-  changes:
-    name: Detect changes
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    outputs:
-      backend: ${{ steps.filter.outputs.backend }}
-      frontend: ${{ steps.filter.outputs.frontend }}
-      marketing: ${{ steps.filter.outputs.marketing }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: dorny/paths-filter@d1c1ffe0248fe513906c8e24db8ea791d46f8590 # v3.0.3
-        id: filter
-        with:
-          filters: |
-            backend:
-              - 'backend/**'
-              - 'harness/**'
-              - '.github/workflows/ci.yml'
-            frontend:
-              - 'frontend/**'
-              - 'harness/**'
-              - '.github/workflows/ci.yml'
-            marketing:
-              - 'apps/marketing/**'
-              - '.github/workflows/ci.yml'
-
-  secrets:
-    name: Secret Scan
+  # One cheap gate job for everything that must run on every single push: the
+  # secret scan, the immutable-action-ref check, the changed-path filter, and
+  # the already-verified short-circuit. These were previously two separate jobs
+  # (`changes` + `secrets`) doing ~7s and ~16s of real work; GitHub bills each
+  # job rounded UP to the minute, so splitting them cost a full extra billable
+  # minute on every run for no parallelism benefit. Keep them fused.
+  #
+  # Outputs come in two flavours, and the distinction matters:
+  #   backend/frontend/marketing        — did this area's SOURCE change? Used by
+  #                                       `deploy` to decide what to ship.
+  #   test_backend/_frontend/_marketing — should this area's SUITE run? Same as
+  #                                       above, except forced false when the
+  #                                       tree was already validated green.
+  # `.github/workflows/ci.yml` is listed in every filter, so a workflow change
+  # always re-runs everything.
+  preflight:
+    name: Preflight
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    outputs:
+      backend: ${{ steps.gate.outputs.backend }}
+      frontend: ${{ steps.gate.outputs.frontend }}
+      marketing: ${{ steps.gate.outputs.marketing }}
+      test_backend: ${{ steps.gate.outputs.test_backend }}
+      test_frontend: ${{ steps.gate.outputs.test_frontend }}
+      test_marketing: ${{ steps.gate.outputs.test_marketing }}
+      verified: ${{ steps.verified.outputs.verified }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # TruffleHog scans the base..head range, and the already-verified
+          # check below resolves the merged PR head's tree object.
           fetch-depth: 0
 
       - name: Run TruffleHog
@@ -85,12 +81,115 @@ jobs:
               raise SystemExit("Mutable action references:\n" + "\n".join(invalid))
           PY
 
+      - uses: dorny/paths-filter@d1c1ffe0248fe513906c8e24db8ea791d46f8590 # v3.0.3
+        id: filter
+        with:
+          filters: |
+            backend:
+              - 'backend/**'
+              - 'harness/**'
+              - '.github/workflows/ci.yml'
+            frontend:
+              - 'frontend/**'
+              - 'harness/**'
+              - '.github/workflows/ci.yml'
+            marketing:
+              - 'apps/marketing/**'
+              - '.github/workflows/ci.yml'
+
+      # Merging a PR ran the full suite twice: once on `pull_request`, then
+      # again on the resulting `push` to main against byte-identical code. This
+      # step kills the second run — but ONLY on proof, never on a heuristic:
+      # the merge commit's git TREE object must be identical to the tree of the
+      # PR head commit, AND that head SHA's own CI run must have concluded
+      # `success`. Identical trees mean the checkout the suites would see is
+      # bit-for-bit what already passed, so re-running cannot produce a
+      # different verdict. A stale branch, a squash that picked up new base
+      # commits, a conflict resolution, or a direct push to main all change the
+      # tree and fall through to a full run.
+      #
+      # Deliberately fail-safe: ANY uncertainty (no linked PR, unfetchable head,
+      # API hiccup, non-success conclusion) leaves verified=false and runs
+      # everything. `deploy` is NOT gated on this — a verified merge still
+      # deploys, it just doesn't re-test.
+      - name: Detect a tree already verified on its PR
+        id: verified
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ github.sha }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -uo pipefail
+          verdict=false
+          reason="no merged PR is associated with this commit"
+
+          pr=$(gh api "/repos/${REPO}/commits/${SHA}/pulls" \
+                 --jq '[.[] | select(.merged_at != null)] | first | .number // empty' 2>/dev/null || true)
+          if [ -n "${pr}" ]; then
+            head=$(gh api "/repos/${REPO}/pulls/${pr}" --jq '.head.sha // empty' 2>/dev/null || true)
+            git fetch --no-tags --quiet origin "+refs/pull/${pr}/head:refs/remotes/verified/pr" 2>/dev/null || true
+            if [ -n "${head}" ] && git cat-file -e "${head}^{commit}" 2>/dev/null; then
+              main_tree=$(git rev-parse "${SHA}^{tree}")
+              pr_tree=$(git rev-parse "${head}^{tree}")
+              if [ "${main_tree}" = "${pr_tree}" ]; then
+                concl=$(gh api "/repos/${REPO}/actions/runs?head_sha=${head}&event=pull_request&per_page=100" \
+                          --jq '[.workflow_runs[] | select(.name == "CI")] | first | .conclusion // empty' 2>/dev/null || true)
+                if [ "${concl}" = "success" ]; then
+                  verdict=true
+                  reason="tree ${main_tree} already passed CI on PR #${pr} (${head})"
+                else
+                  reason="PR #${pr} CI conclusion was '${concl:-unknown}', not success"
+                fi
+              else
+                reason="merge tree ${main_tree} differs from PR #${pr} head tree ${pr_tree}"
+              fi
+            else
+              reason="could not resolve the head commit of PR #${pr}"
+            fi
+          fi
+
+          echo "verified=${verdict}" >> "$GITHUB_OUTPUT"
+          if [ "${verdict}" = "true" ]; then
+            echo "::notice::Skipping re-test on main — ${reason}."
+          else
+            echo "Running the full suite — ${reason}."
+          fi
+
+      - name: Resolve job gates
+        id: gate
+        env:
+          CHANGED_BACKEND: ${{ steps.filter.outputs.backend }}
+          CHANGED_FRONTEND: ${{ steps.filter.outputs.frontend }}
+          CHANGED_MARKETING: ${{ steps.filter.outputs.marketing }}
+          VERIFIED: ${{ steps.verified.outputs.verified }}
+        run: |
+          set -euo pipefail
+          {
+            echo "backend=${CHANGED_BACKEND}"
+            echo "frontend=${CHANGED_FRONTEND}"
+            echo "marketing=${CHANGED_MARKETING}"
+          } >> "$GITHUB_OUTPUT"
+          if [ "${VERIFIED:-false}" = "true" ]; then
+            {
+              echo "test_backend=false"
+              echo "test_frontend=false"
+              echo "test_marketing=false"
+            } >> "$GITHUB_OUTPUT"
+          else
+            {
+              echo "test_backend=${CHANGED_BACKEND}"
+              echo "test_frontend=${CHANGED_FRONTEND}"
+              echo "test_marketing=${CHANGED_MARKETING}"
+            } >> "$GITHUB_OUTPUT"
+          fi
+
   backend:
     name: Backend
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    needs: changes
-    if: needs.changes.outputs.backend == 'true'
+    needs: preflight
+    if: needs.preflight.outputs.test_backend == 'true'
     services:
       postgres:
         image: postgres:16-alpine
@@ -339,11 +438,14 @@ jobs:
     name: Worker Image Build
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    needs: changes
+    needs: preflight
     # The Dockerfile rarely changes and the build is uncached (slow). PRs skip
     # it always; main only builds it when backend actually changed (same
     # filter as the `backend` job — the image is built from `./backend`).
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.changes.outputs.backend == 'true'
+    # Gated on the raw `backend` output, NOT `test_backend`: PR runs never build
+    # this image, so an already-verified merge has no prior image build to reuse
+    # and must still prove the worker image is deployable before main ships.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.preflight.outputs.backend == 'true'
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -360,8 +462,8 @@ jobs:
     name: Frontend
     runs-on: ubuntu-latest
     timeout-minutes: 25
-    needs: changes
-    if: needs.changes.outputs.frontend == 'true'
+    needs: preflight
+    if: needs.preflight.outputs.test_frontend == 'true'
     services:
       postgres:
         image: postgres:16-alpine
@@ -426,6 +528,9 @@ jobs:
         uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
         with:
           version: "0.11.8"
+          # This job also `uv sync`s the backend to boot the deterministic E2E
+          # API; without the cache that resolve+download runs cold every time.
+          enable-cache: true
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -502,6 +607,24 @@ jobs:
       # binaries are needed — firefox (desktop Gecko) and android (Pixel 7 on the
       # chromium engine, redundant with chromium+iphone) are dropped from CI.
       # The full 5-project matrix in playwright.config.ts still runs locally.
+      #
+      # PRs run a 2-project subset — chromium + iphone — which still covers BOTH
+      # rendering engines (iphone is the webkit engine) plus the mobile viewport
+      # that has historically broken. Desktop webkit only adds a third viewport
+      # on an engine already under test, and the authenticated journeys run
+      # `--workers=1` (the seeded user's admission ceiling is 3 concurrent
+      # generations, so the projects cannot safely run in parallel), which makes
+      # every extra project a straight ~2 minutes of serial wall-clock. Push to
+      # main restores the full 3-project matrix before anything ships.
+      - name: Select e2e project matrix
+        id: e2e-projects
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            echo "args=--project=chromium --project=webkit --project=iphone" >> "$GITHUB_OUTPUT"
+          else
+            echo "args=--project=chromium --project=iphone" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Cache Playwright browsers
         id: playwright-cache
         uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
@@ -523,17 +646,17 @@ jobs:
       # project selection is silently ignored (all 5 projects run, incl. the
       # firefox binary we no longer install → hard fail).
       - name: Browser, mobile, and accessibility gates
-        run: E2E_ACCESS_TOKEN= pnpm exec playwright test --project=chromium --project=webkit --project=iphone
+        run: E2E_ACCESS_TOKEN= pnpm exec playwright test ${{ steps.e2e-projects.outputs.args }}
 
       - name: Docker-backed authenticated browser journeys
-        run: pnpm exec playwright test e2e/authenticated-backend.spec.ts --workers=1 --project=chromium --project=webkit --project=iphone
+        run: pnpm exec playwright test e2e/authenticated-backend.spec.ts --workers=1 ${{ steps.e2e-projects.outputs.args }}
 
   marketing:
     name: Marketing
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    needs: changes
-    if: needs.changes.outputs.marketing == 'true'
+    needs: preflight
+    if: needs.preflight.outputs.test_marketing == 'true'
     defaults:
       run:
         working-directory: apps/marketing
@@ -601,7 +724,7 @@ jobs:
 
   deploy:
     name: Deploy
-    needs: [changes, secrets, backend, worker-image, frontend, marketing]
+    needs: [preflight, backend, worker-image, frontend, marketing]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     environment: production
@@ -610,18 +733,20 @@ jobs:
     # and Vercel projects/secrets are ready.
     #
     # backend/worker-image/frontend/marketing now each skip when their own
-    # area didn't change (see the `changes` job), so this job's default
-    # implicit `success()` gate — which treats a *skipped* need the same as a
-    # *failed* one — would otherwise skip `deploy` entirely for e.g. a
-    # marketing-only change (backend/frontend/worker-image all legitimately
+    # area didn't change (see the `preflight` job) — and also when preflight
+    # proved the tree already passed CI on its PR. Either way this job's
+    # default implicit `success()` gate — which treats a *skipped* need the
+    # same as a *failed* one — would otherwise skip `deploy` entirely for e.g.
+    # a marketing-only change (backend/frontend/worker-image all legitimately
     # skipped). `always()` plus explicit success-or-skipped checks below
     # restore the old "run unless something actually failed" behavior while
-    # still hard-stopping on a real failure in any of them. `secrets` has no
-    # path filter (always runs), so it stays a strict success requirement.
+    # still hard-stopping on a real failure in any of them. `preflight` has no
+    # path filter (always runs), so it stays a strict success requirement — and
+    # its secret scan therefore still gates every deploy.
     if: >-
       always() &&
       github.ref == 'refs/heads/main' && github.event_name == 'push' && vars.PRODUCTION_DEPLOY_ENABLED == 'true' &&
-      needs.secrets.result == 'success' &&
+      needs.preflight.result == 'success' &&
       (needs.backend.result == 'success' || needs.backend.result == 'skipped') &&
       (needs['worker-image'].result == 'success' || needs['worker-image'].result == 'skipped') &&
       (needs.frontend.result == 'success' || needs.frontend.result == 'skipped') &&
@@ -660,7 +785,7 @@ jobs:
       # would redeploy byte-identical frontend code on every marketing- or
       # backend-only push.
       - name: Deploy frontend to Vercel
-        if: ${{ needs.changes.outputs.frontend == 'true' }}
+        if: ${{ needs.preflight.outputs.frontend == 'true' }}
         run: |
           npm install -g vercel@56.4.1
           vercel --prod --token ${{ secrets.VERCEL_TOKEN }} \
@@ -692,7 +817,7 @@ jobs:
       # frontend-only push must not hard-fail this job over an unrelated,
       # unconfigured marketing secret.
       - name: Assert marketing deploy is configured
-        if: ${{ needs.changes.outputs.marketing == 'true' && vars.MARKETING_DEPLOY_OPTIONAL != 'true' }}
+        if: ${{ needs.preflight.outputs.marketing == 'true' && vars.MARKETING_DEPLOY_OPTIONAL != 'true' }}
         run: |
           if [ -z "${VERCEL_MARKETING_PROJECT_ID}" ]; then
             echo "::error::VERCEL_MARKETING_PROJECT_ID is unset — the marketing zone (apex, all SEO surfaces) would not deploy. Set the secret, or set the repo variable MARKETING_DEPLOY_OPTIONAL=true to explicitly skip it." >&2
@@ -712,7 +837,7 @@ jobs:
       # gated on `marketing` having actually run, same reasoning as the
       # frontend deploy step's gate.
       - name: Deploy marketing to Vercel
-        if: ${{ needs.changes.outputs.marketing == 'true' && env.VERCEL_MARKETING_PROJECT_ID != '' }}
+        if: ${{ needs.preflight.outputs.marketing == 'true' && env.VERCEL_MARKETING_PROJECT_ID != '' }}
         run: |
           npm install -g vercel@56.4.1
           vercel --prod --token ${{ secrets.VERCEL_TOKEN }} \
@@ -735,7 +860,7 @@ jobs:
       # failures as `::warning::`) — a transient IndexNow/CDN-propagation
       # hiccup must never fail a deploy job that otherwise succeeded.
       - name: Notify IndexNow of updated marketing URLs
-        if: ${{ needs.changes.outputs.marketing == 'true' && env.VERCEL_MARKETING_PROJECT_ID != '' }}
+        if: ${{ needs.preflight.outputs.marketing == 'true' && env.VERCEL_MARKETING_PROJECT_ID != '' }}
         run: node apps/marketing/scripts/submit-indexnow.mjs
         env:
           INDEXNOW_SITE_URL: https://thought2build.com
