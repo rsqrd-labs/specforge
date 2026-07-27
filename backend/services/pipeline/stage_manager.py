@@ -1581,8 +1581,10 @@ def _chunk_specs_for_stage(
                         "## Overview",
                         "## Product Goals",
                         "## User Problems",
+                        "## In-Scope (MVP)",
                         "## Non-Goals",
                         "## Users and Personas",
+                        "## User Stories",
                         "## User Journeys",
                         "## User Flow Diagrams",
                         "## Functional Requirements",
@@ -3029,6 +3031,7 @@ class StageManager:
                         critic_deps=deps,
                         provider=route.provider,
                         content_generation_id=None,
+                        mode=gen_mode,
                     )
                 if gen_mode == "demo_day" and stage.type == "tasks":
                     self._schedule_construction_verifier(
@@ -4112,6 +4115,7 @@ class StageManager:
                     critic_deps=critic_deps_for_async or {},
                     provider=route.provider,
                     content_generation_id=content_generation_id,
+                    mode=mode,
                 )
             if mode == "demo_day" and stage.type == "tasks":
                 self._schedule_construction_verifier(
@@ -5444,6 +5448,7 @@ class StageManager:
         critic_deps: dict[str, str],
         provider: str,
         content_generation_id: str | None,
+        mode: str = "standard",
     ) -> asyncio.Task[None]:
         """Fire-and-forget the off-critical-path critic (async advisory plan).
 
@@ -5461,6 +5466,7 @@ class StageManager:
                 critic_deps=critic_deps,
                 provider=provider,
                 content_generation_id=content_generation_id,
+                mode=mode,
             )
         )
 
@@ -5474,6 +5480,7 @@ class StageManager:
         critic_deps: dict[str, str],
         provider: str,
         content_generation_id: str | None,
+        mode: str = "standard",
     ) -> None:
         """Judge a delivered draft off the critical path; attach advisory findings.
 
@@ -5483,11 +5490,12 @@ class StageManager:
         task), so it survives client disconnect.  Judge ONLY — there is
         deliberately no regenerate.  Fully fail-open: the draft is already
         delivered and charged, so every error is logged and dropped without ever
-        touching the artifact.
+        touching the artifact. ``mode`` selects the section contract the judge
+        grades against (standard vs Demo Day — see critic._per_stage_focus).
         """
         try:
             result = await critic_review(
-                stage_type, content, critic_deps, provider=provider
+                stage_type, content, critic_deps, provider=provider, mode=mode
             )
         except Exception:
             # critic_review is itself fail-open, but guard the call site too: a

@@ -191,20 +191,33 @@ Grading rules:
 {"passed": true, "findings": []} is the correct answer."""
 
 
-def _per_stage_focus(stage_type: str) -> str:
+def _per_stage_focus(stage_type: str, mode: str = "standard") -> str:
     """Stage-specific emphasis appended to the critic user prompt.
 
     Every defect class named here maps to a ``CriticFindingKind`` the schema
     can express (audit M12): a focus ask the judge cannot report tempts it to
     invent a kind, which under ``extra="forbid"`` + fail-open used to void the
     entire verdict into a silent ``passed=True``.
+
+    ``mode="demo_day"`` selects a focus keyed to Demo Day's own leaner,
+    re-pointed section set (``DEMO_DAY_SECTION_CONTRACTS`` in
+    artifact_validator.py) instead of the standard contract. Demo Day artifacts
+    never carry the standard-only sections named in the default branch below
+    (e.g. "Security, Privacy, and Abuse Expectations", "In-Scope (MVP)",
+    "Architecture Anti-Patterns") — grading them against those names produced
+    confusing/incorrect advisory findings on every Demo Day artifact.
     """
+    if mode == "demo_day":
+        return _demo_day_per_stage_focus(stage_type)
     if stage_type == "spec":
         return (
             "Focus: every product requirement has a stable FR/NFR/SEC ID; the "
             "Security, Privacy, and Abuse Expectations and Acceptance Criteria "
             "sections are present and non-empty; no implementation leakage "
-            "(flag ImplementationLeak)."
+            "(flag ImplementationLeak). In-Scope (MVP) and User Stories are "
+            "present and non-empty, each In-Scope capability cites a real "
+            "FR-ID, and each User Story cites a persona and a realizing FR-ID "
+            "rather than merely restating a User Journey."
         )
     if stage_type == "plan":
         return (
@@ -233,6 +246,62 @@ def _per_stage_focus(stage_type: str) -> str:
     return "Focus: completeness, traceability, and absence of placeholder phrases."
 
 
+def _demo_day_per_stage_focus(stage_type: str) -> str:
+    """Focus text keyed to Demo Day's own section set (prompts/demo_day.py)."""
+    if stage_type == "spec":
+        return (
+            "Focus: every FR-NNN and AC-NNN is stable and reused verbatim "
+            "downstream (Demo Day specs carry no NFR/SEC IDs — do not ask for "
+            "them); Demo Day Scope describes ONE concrete happy path with real "
+            "inputs/outputs, not a vague summary, and Out of Scope itemises "
+            "explicit deferrals; every AC-NNN lives in Acceptance Criteria and "
+            "cites a real FR-NNN; the AI Usage, Security Posture, and "
+            "Scalability Story rubric sections are honest and specific (named "
+            "controls/choices, not adjectives) — a vague or generic rubric "
+            "answer is a ShallowSection defect; no implementation leakage "
+            "(flag ImplementationLeak) — the spec stays neutral on HOW."
+        )
+    if stage_type == "plan":
+        return (
+            "Focus: the Requirement Traceability Matrix covers every upstream "
+            "FR-NNN/AC-NNN (Demo Day plans carry no NFR/SEC IDs — do not ask "
+            "for them); Interface Contracts and Data Model give exact "
+            "signatures, paths, JSON shapes, field names, and types with "
+            "nothing left to interpretation (flag ShallowSection otherwise); "
+            "Architecture Decision Records follow the Demo "
+            "Day shape — decision, cheap-now choice, alternative rejected + "
+            "why, and how it scales/secures — NOT the standard 5-line ADR, so "
+            "flag ADRIncomplete only against this shorter shape; Environment "
+            "and Bootstrap gives real, copy-pasteable commands, not "
+            "descriptions; no deprecated/EOL technologies (flag "
+            "DeprecatedAPI)."
+        )
+    if stage_type == "harness":
+        return (
+            "Focus: every upstream FR-NNN/AC-NNN maps to a named test in the "
+            "Requirement-to-Test Matrix; the End-to-End Smoke Test names a "
+            "concrete, stable file path and is described driving the Success "
+            "Demo journey end to end (do not ask for the standard "
+            "integration/security/contract/migration_safety test categories — "
+            "Demo Day does not mandate them); every File Tree path has a "
+            "matching ### File: block with FULL runnable content — no "
+            "placeholder or pass-body tests (flag them as BannedPhrase)."
+        )
+    if stage_type == "tasks":
+        return (
+            "Focus: every AC-NNN is referenced by at least one task's Spec "
+            "refs, and every named harness test is referenced by at least one "
+            "task (flag CoverageGap); Harness refs cite literal file paths "
+            "that appear in the harness (or the explicit "
+            "'_(none — reason)_' escape for setup-only tasks); Precondition "
+            "lists only earlier T-NNN ids and the dependency graph is acyclic "
+            "(flag DependencyCycle); the first task stands up the walking "
+            "skeleton and makes the end-to-end smoke test pass, and the final "
+            "task's Harness refs cite that smoke test path verbatim."
+        )
+    return "Focus: completeness, traceability, and absence of placeholder phrases."
+
+
 # Keys the critic may grade against (audit L17): the problem statement and the
 # real upstream stage artifacts. The generation deps dict also carries advisory
 # context — research_context (third-party search snippets) and clarification_qa
@@ -247,6 +316,7 @@ def _build_critic_user_prompt(
     stage_type: str,
     artifact_text: str,
     deps: dict[str, str],
+    mode: str = "standard",
 ) -> str:
     """Assemble the critic user prompt: artifact + deps wrapped as untrusted.
 
@@ -254,13 +324,14 @@ def _build_critic_user_prompt(
     ``_DEP_LIMIT``) before wrapping — see the module-level comment on those
     constants for why (finding #4). Only contract deps (``_GRADABLE_DEP_KEYS``)
     are included; advisory context keys are dropped here, at the one chokepoint
-    every critic call flows through.
+    every critic call flows through. ``mode`` selects the section set the
+    per-stage focus grades against (standard vs Demo Day).
     """
     artifact_limit = _ARTIFACT_LIMITS.get(stage_type, _ARTIFACT_LIMITS["spec"])
     bounded_artifact = compact_text(artifact_text, artifact_limit)
     parts: list[str] = [
         f"Stage under review: {stage_type.upper()}",
-        _per_stage_focus(stage_type),
+        _per_stage_focus(stage_type, mode),
         "",
         "Generated artifact to grade:",
         wrap_untrusted_content(f"{stage_type}_artifact", bounded_artifact),
@@ -354,6 +425,7 @@ async def critic_review(
     *,
     provider: str | None = None,
     cost_context: "LLMCostContext | None" = None,
+    mode: str = "standard",
 ) -> StageCriticResult:
     """Run the critic over a generated artifact.
 
@@ -364,6 +436,10 @@ async def critic_review(
     paid generation.  On judge-call failure, timeout, or unparseable output the
     critic returns passed=True and logs.  disable_critic is the deliberate
     operator escape hatch; this is the accidental-failure equivalent.
+
+    ``mode`` selects the section contract the judge grades against — pass the
+    workspace's ``mode`` ("standard" or "demo_day") so a Demo Day artifact is
+    never graded against the standard section set it was never asked to carry.
     """
     if len(artifact_text) < _MIN_GRADABLE_CHARS:
         # Too short to grade meaningfully — pass through.
@@ -373,7 +449,9 @@ async def critic_review(
     try:
         result_json = await call_judge_model(
             system_prompt=_CRITIC_SYSTEM_PROMPT,
-            user_prompt=_build_critic_user_prompt(stage_type, artifact_text, deps),
+            user_prompt=_build_critic_user_prompt(
+                stage_type, artifact_text, deps, mode
+            ),
             provider=provider,
             operation="critic.review",
             stage_type=stage_type,

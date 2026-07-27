@@ -50,6 +50,7 @@ _DEPENDENCIES: dict[str, list[str]] = {
 # sections are concatenated in the order listed.
 _STAGE_KEEP_SECTIONS: dict[str, list[str]] = {
     "spec": [
+        "## In-Scope (MVP)",
         "## Functional Requirements",
         "## Non-Functional Requirements",
         "## Security, Privacy, and Abuse Expectations",

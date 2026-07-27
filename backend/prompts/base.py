@@ -24,12 +24,22 @@ logger = structlog.get_logger(__name__)
 # changed for every stage — explicit disjoint one-heading-per-line chunk
 # scopes (H1/M7/L19) and a chunk-scoped closing contract replacing the
 # embedded whole-document verify checklist (H2).
-ASDD_PROMPT_VERSION = "asdd-v2.4.0"
+# v2.5.0 — 2026-07-27: spec.py gains two mandatory sections closing a
+# checklist-coverage gap — ## In-Scope (MVP) (the positive complement to
+# Non-Goals/Out of Scope, each capability citing its realizing FR-IDs) and
+# ## User Stories (US-NNN, persona-linked atomic want/benefit statements
+# citing a realizing FR-ID). SECTION_CONTRACTS["spec"], the spec chunk-scope
+# list in stage_manager.py, and the spec keep-list in prompt_builder.py all
+# updated in lockstep. Demo Day's spec contract is untouched (pinned
+# separately per the §4 regression contract).
+ASDD_PROMPT_VERSION = "asdd-v2.5.0"
 STAGE_PROMPT_VERSIONS: dict[str, str] = {
     # spec-v5: audit M8 — the clarification Q&A block is now fenced with
     # wrap_untrusted_content instead of rendering user-typed answers raw in
     # the instruction region.
-    "spec": f"{ASDD_PROMPT_VERSION}:spec-v5",
+    # spec-v6: adds ## In-Scope (MVP) and ## User Stories to the required
+    # structure, the stable-ID contract, and the verify checklist (v2.5.0).
+    "spec": f"{ASDD_PROMPT_VERSION}:spec-v6",
     # plan-v5: finding #7 — the hard-denylist sentence is now generated from
     # tech_safety_policy.json (render_hard_denylist_prose()) instead of
     # hand-duplicated, changing plan.py's own prompt text specifically.
