@@ -659,15 +659,50 @@ async def test_new_finding_kinds_validate_strictly() -> None:
 def test_per_stage_focus_only_asks_for_expressible_kinds() -> None:
     """M12 root cause guard: every kind name a focus string tells the judge to
     flag must exist in the CriticFindingKind literal — an inexpressible ask
-    tempts the judge to invent a kind."""
+    tempts the judge to invent a kind. Covers both the standard and Demo Day
+    focus text, since each mode has its own branch."""
     import re
     from typing import get_args
 
     valid_kinds = set(get_args(critic_module.CriticFindingKind))
+    for mode in ("standard", "demo_day"):
+        for stage in ("spec", "plan", "harness", "tasks", "unknown"):
+            focus = critic_module._per_stage_focus(stage, mode)
+            for kind in re.findall(r"flag (?:them as )?([A-Z][A-Za-z]+)", focus):
+                assert (
+                    kind in valid_kinds
+                ), f"{mode}/{stage} focus asks for unknown kind {kind}"
+
+
+def test_per_stage_focus_demo_day_does_not_name_standard_only_sections() -> None:
+    """Gap fix: the critic used to grade every mode against the standard
+    section names regardless of workspace.mode, producing confusing findings
+    on Demo Day artifacts (e.g. "missing Security, Privacy, and Abuse
+    Expectations" on a spec that correctly has "Security Posture" instead).
+    The demo_day focus must reference Demo Day's own section names, not the
+    standard-only ones that never appear in a Demo Day artifact."""
+    standard_only_headings = (
+        "Security, Privacy, and Abuse Expectations",
+        "In-Scope (MVP)",
+        "User Stories",
+        "Architecture Anti-Patterns",
+        "Multi-tenancy Stance",
+        "API Design",
+    )
+    for stage in ("spec", "plan", "harness", "tasks"):
+        focus = critic_module._per_stage_focus(stage, "demo_day")
+        for heading in standard_only_headings:
+            assert heading not in focus, f"demo_day/{stage} focus names {heading!r}"
+
+
+def test_per_stage_focus_defaults_to_standard() -> None:
+    """Backward compatibility: omitting mode must be byte-identical to the
+    pre-fix standard-only behavior, since every existing caller (and the
+    default critic_review/_build_critic_user_prompt signature) relies on it."""
     for stage in ("spec", "plan", "harness", "tasks", "unknown"):
-        focus = critic_module._per_stage_focus(stage)
-        for kind in re.findall(r"flag (?:them as )?([A-Z][A-Za-z]+)", focus):
-            assert kind in valid_kinds, f"{stage} focus asks for unknown kind {kind}"
+        assert critic_module._per_stage_focus(stage) == critic_module._per_stage_focus(
+            stage, "standard"
+        )
 
 
 def test_build_critic_user_prompt_drops_advisory_deps() -> None:
@@ -1119,6 +1154,46 @@ async def test_dispatch_critic_review_failing_marks_advisory() -> None:
     after = REGISTRY.get_sample_value(_ADVISORY_METRIC, {"stage": "spec"}) or 0.0
     assert after - before == 1.0
     mock_cost.assert_awaited_once_with("gen-1", "critic_advisory")
+
+
+@pytest.mark.asyncio
+async def test_dispatch_critic_review_forwards_demo_day_mode() -> None:
+    """Gap fix wiring: _dispatch_critic_review must forward the caller's mode
+    to critic_review so a Demo Day artifact is graded by the Demo Day focus
+    text, not the standard one. Regression guard for the mode plumbing added
+    end to end from _schedule_critic_review's two call sites in
+    stage_manager.py through to critic._per_stage_focus."""
+    workspace_id = uuid4()
+    stage = _make_stage(workspace_id, "spec")
+    stage.current_version = 1
+    svc = StageManager(redis_client=_FakeRedis())
+    session_local, _ = _fake_session_local_for(stage)
+    with (
+        patch(
+            "services.pipeline.stage_manager.critic_review",
+            new_callable=AsyncMock,
+            return_value=StageCriticResult(passed=True),
+        ) as mock_review,
+        patch("database.AsyncSessionLocal", session_local),
+        patch(
+            "services.pipeline.stage_manager.update_cost_event_quality_outcome",
+            new_callable=AsyncMock,
+        ),
+    ):
+        await svc._dispatch_critic_review(
+            stage_id=stage.id,
+            version=1,
+            stage_type="spec",
+            content=_LONG_ARTIFACT,
+            critic_deps={},
+            provider="anthropic",
+            content_generation_id="gen-1",
+            mode="demo_day",
+        )
+
+    mock_review.assert_awaited_once_with(
+        "spec", _LONG_ARTIFACT, {}, provider="anthropic", mode="demo_day"
+    )
 
 
 @pytest.mark.asyncio
