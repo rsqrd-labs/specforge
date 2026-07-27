@@ -45,7 +45,7 @@ opentelemetry-instrumentation-fastapi==0.49.*
 opentelemetry-instrumentation-sqlalchemy==0.49.*
 opentelemetry-exporter-otlp==1.*
 prometheus-client==0.21.*
-structlog==24.*
+structlog>=24,<27
 sentry-sdk[fastapi]==2.*
 
 # Utilities
