@@ -50,7 +50,7 @@
     "eslint": "^9.39.5",
     "eslint-plugin-jsx-a11y": "^6.10.2",
     "eslint-plugin-react-hooks": "^7.1.1",
-    "jsdom": "^29.1.1",
+    "jsdom": "^30.0.0",
     "openapi-typescript": "^7.13.0",
     "postcss": "^8.5.20",
     "typescript": "^5.6",
